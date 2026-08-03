@@ -53,6 +53,15 @@ const REQUIRED_IDENTITY_IDS: &[&str] = &[
     "fs-dfo:bipop-callback-trace",
     "fs-dfo:bipop-full-study",
     "fs-dfo:bipop-root-inputs",
+    "fs-euler-disc-e2e:claim-evidence-packet",
+    "fs-euler-disc-e2e:claim-graph",
+    "fs-euler-disc-e2e:claim-policy-assessment",
+    "fs-euler-disc-e2e:claim-policy-assessment-log",
+    "fs-euler-disc-e2e:contract-check-receipt",
+    "fs-euler-disc-e2e:hypothesis-source",
+    "fs-euler-disc-e2e:owner-matrix",
+    "fs-euler-disc-e2e:prerequisite-assessment-receipt",
+    "fs-euler-disc-e2e:scientific-contract",
     "fs-evidence:observation-manifest",
     "fs-evidence:vv-artifact",
     "fs-evidence:vv-blind-holdout",
@@ -692,7 +701,7 @@ fn parse_schema_functions(value: &str) -> Result<Vec<SchemaFunction>, String> {
         let function = if let Some((path, symbol)) = item.split_once('#') {
             if path.contains('#') || symbol.contains('#') || !safe_relative(path) {
                 return Err(format!(
-                    "schema function {item:?} must be repo-relative path#function-or-Type::method"
+                    "schema authority {item:?} must be repo-relative path#function-or-Type::method-or-external-bare-macro_rules"
                 ));
             }
             SchemaFunction {
@@ -707,7 +716,7 @@ fn parse_schema_functions(value: &str) -> Result<Vec<SchemaFunction>, String> {
         };
         if !canonical_function_reference(&function.symbol) {
             return Err(format!(
-                "schema function {item:?} must name a canonical function or Type::method"
+                "schema authority {item:?} must name a canonical function or Type::method; only repo-relative references may instead name an external bare macro_rules symbol"
             ));
         }
         functions.push(function);
@@ -1330,6 +1339,8 @@ fn braced_bodies_limited<'a>(
     declaration: &str,
     direct_only: bool,
     limit: usize,
+    source_offset: usize,
+    signature_macro_scopes: &[(usize, usize)],
 ) -> Vec<&'a str> {
     #[derive(Clone, Copy)]
     enum State {
@@ -1357,6 +1368,22 @@ fn braced_bodies_limited<'a>(
         let byte = bytes[index];
         match state {
             State::Normal => {
+                if awaiting_brace {
+                    let absolute = source_offset + index;
+                    if let Ok(scope_index) =
+                        signature_macro_scopes.binary_search_by_key(&absolute, |(start, _)| *start)
+                    {
+                        let scope_end = signature_macro_scopes[scope_index].1;
+                        let Some(relative_end) = scope_end.checked_sub(source_offset) else {
+                            return bodies;
+                        };
+                        if relative_end <= index || relative_end > bytes.len() {
+                            return bodies;
+                        }
+                        index = relative_end;
+                        continue;
+                    }
+                }
                 if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
                     state = State::LineComment;
                     index += 2;
@@ -1533,7 +1560,7 @@ fn braced_bodies_limited<'a>(
 }
 
 fn braced_bodies<'a>(text: &'a str, declaration: &str, direct_only: bool) -> Vec<&'a str> {
-    braced_bodies_limited(text, declaration, direct_only, usize::MAX)
+    braced_bodies_limited(text, declaration, direct_only, usize::MAX, 0, &[])
 }
 
 fn braced_body<'a>(text: &'a str, declaration: &str) -> Option<&'a str> {
@@ -1546,7 +1573,18 @@ fn direct_braced_bodies<'a>(text: &'a str, declaration: &str) -> Vec<&'a str> {
 }
 
 fn first_direct_braced_body<'a>(text: &'a str, declaration: &str) -> Option<&'a str> {
-    braced_bodies_limited(text, declaration, true, 1)
+    braced_bodies_limited(text, declaration, true, 1, 0, &[])
+        .into_iter()
+        .next()
+}
+
+fn first_direct_braced_body_with_macro_scopes<'a>(
+    text: &'a str,
+    declaration: &str,
+    source_offset: usize,
+    macro_scopes: &[(usize, usize)],
+) -> Option<&'a str> {
+    braced_bodies_limited(text, declaration, true, 1, source_offset, macro_scopes)
         .into_iter()
         .next()
 }
@@ -1906,68 +1944,202 @@ fn module_scopes<'a>(text: &'a str, modules: &[&str]) -> Vec<&'a str> {
     scopes
 }
 
-fn leading_implementation_type(rest: &str) -> Option<String> {
-    let rest = rest.trim_start_matches(|character: char| {
-        character.is_ascii_whitespace() || matches!(character, '&' | '\'' | '!')
-    });
-    let self_type = rest
-        .split(|character: char| {
-            character.is_ascii_whitespace() || matches!(character, '<' | '{' | '(')
-        })
-        .next()?;
-    let owner = self_type.rsplit("::").next()?;
-    canonical_symbol(owner).then(|| owner.to_string())
+fn implementation_type_path(tokens: &[RustAuthorityToken<'_>], start: usize) -> Option<String> {
+    // Only a token-level source path has a stable authority name in this
+    // index. Bytewise trimming can turn `&'a Witness` into owner `a`, `dyn
+    // Trait` into owner `dyn`, or whitespace around `::` into a truncated
+    // owner. Reject non-path self types rather than manufacturing an item.
+    let reserved_non_path = [
+        "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern",
+        "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut",
+        "pub", "ref", "return", "static", "struct", "trait", "true", "type", "unsafe", "use",
+        "where", "while", "yield",
+    ];
+    let valid_segment = |segment: &str| {
+        canonical_symbol(segment)
+            && (matches!(segment, "crate" | "self" | "super" | "Self")
+                || !reserved_non_path.contains(&segment))
+    };
+    let raw_identifier_at = |index: usize| {
+        tokens.get(index).is_some_and(|token| token.text == "r")
+            && tokens.get(index + 1).is_some_and(|token| token.text == "#")
+            && tokens
+                .get(index + 2)
+                .is_some_and(|token| canonical_symbol(token.text))
+            && tokens[index].end == tokens[index + 1].start
+            && tokens[index + 1].end == tokens[index + 2].start
+    };
+    if raw_identifier_at(start) {
+        return None;
+    }
+    let first = tokens.get(start)?.text;
+    if !valid_segment(first) {
+        return None;
+    }
+    let mut parts = vec![first];
+    let mut cursor = start;
+    while tokens
+        .get(cursor + 1)
+        .is_some_and(|token| token.text == ":")
+        && tokens
+            .get(cursor + 2)
+            .is_some_and(|token| token.text == ":")
+    {
+        let segment_index = cursor + 3;
+        if raw_identifier_at(segment_index) {
+            return None;
+        }
+        let segment = tokens.get(segment_index)?.text;
+        if !valid_segment(segment) {
+            return None;
+        }
+        parts.push(segment);
+        cursor += 3;
+    }
+    let self_type = parts.join("::");
+    canonical_function_reference(&self_type).then_some(self_type)
+}
+
+fn implementation_owner_path(module: &str, owner: &str) -> Option<String> {
+    let parts = owner.split("::").collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["crate", rest @ ..] if !rest.is_empty() => Some(rest.join("::")),
+        ["self", rest @ ..] if !rest.is_empty() => {
+            Some(qualify_rust_name(module, &rest.join("::")))
+        }
+        ["super", ..] => {
+            let super_count = parts.iter().take_while(|part| **part == "super").count();
+            let rest = &parts[super_count..];
+            if rest.is_empty() {
+                return None;
+            }
+            let mut parent = module
+                .split("::")
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            if super_count > parent.len() {
+                return None;
+            }
+            parent.truncate(parent.len() - super_count);
+            Some(qualify_rust_name(&parent.join("::"), &rest.join("::")))
+        }
+        _ => Some(qualify_rust_name(module, owner)),
+    }
 }
 
 fn implementation_owner(header: &str) -> Option<String> {
-    let tokens = header
-        .split(|character: char| character != '_' && !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let impl_index = tokens.iter().position(|token| *token == "impl")?;
-    if let Some(for_index) = tokens.iter().rposition(|token| *token == "for") {
-        if for_index <= impl_index {
-            return None;
+    let tokens = rust_authority_tokens(header).ok()?;
+    let (_, delimiter_depth) = rust_authority_delimiters(&tokens).ok()?;
+    let implementation = tokens.iter().position(|token| token.text == "impl")?;
+    let mut angle_depth = 0usize;
+    let mut trait_separator = None;
+    for index in implementation + 1..tokens.len() {
+        if delimiter_depth[index] != 0 {
+            continue;
         }
-        let (at, _) = header
-            .match_indices("for")
-            .filter(|(at, _)| {
-                let before = at
-                    .checked_sub(1)
-                    .and_then(|index| header.as_bytes().get(index));
-                let after = header.as_bytes().get(at + "for".len());
-                before.is_none_or(
-                    |byte| !matches!(byte, b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'),
-                ) && after.is_none_or(
-                    |byte| !matches!(byte, b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'),
-                )
-            })
-            .last()?;
-        return leading_implementation_type(&header[at + "for".len()..]);
+        match tokens[index].text {
+            "where" if angle_depth == 0 => break,
+            "for" if angle_depth == 0 => trait_separator = Some(index),
+            "<" => angle_depth = angle_depth.checked_add(1)?,
+            ">" if angle_depth != 0
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+            }
+            _ => {}
+        }
     }
+    let owner = if let Some(separator) = trait_separator {
+        separator + 1
+    } else {
+        let mut owner = implementation + 1;
+        if tokens.get(owner).is_some_and(|token| token.text == "<") {
+            let mut depth = 0usize;
+            loop {
+                if delimiter_depth.get(owner).copied()? == 0 {
+                    match tokens.get(owner)?.text {
+                        "<" => depth = depth.checked_add(1)?,
+                        ">" if !tokens
+                            .get(owner.wrapping_sub(1))
+                            .is_some_and(|token| token.text == "-") =>
+                        {
+                            depth = depth.checked_sub(1)?;
+                            owner += 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                owner += 1;
+            }
+        }
+        owner
+    };
+    implementation_type_path(&tokens, owner)
+}
 
-    let mut rest = header
-        .get(header.find("impl")? + "impl".len()..)?
-        .trim_start();
-    if rest.starts_with('<') {
-        let mut depth = 0_usize;
-        let mut end = None;
-        for (index, character) in rest.char_indices() {
-            match character {
-                '<' => depth += 1,
-                '>' => {
+fn implementation_trait_path(header: &str) -> Option<String> {
+    let tokens = rust_authority_tokens(header).ok()?;
+    let (_, delimiter_depth) = rust_authority_delimiters(&tokens).ok()?;
+    let implementation = tokens.iter().position(|token| token.text == "impl")?;
+    let mut angle_depth = 0usize;
+    let mut separator = None;
+    for index in implementation + 1..tokens.len() {
+        if delimiter_depth[index] != 0 {
+            continue;
+        }
+        match tokens[index].text {
+            "<" => angle_depth += 1,
+            ">" if angle_depth != 0
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+            }
+            "for" if angle_depth == 0 => {
+                separator = Some(index);
+                break;
+            }
+            "where" if angle_depth == 0 => break,
+            _ => {}
+        }
+    }
+    let separator = separator?;
+    let mut trait_start = implementation + 1;
+    if tokens
+        .get(trait_start)
+        .is_some_and(|token| token.text == "<")
+    {
+        let mut depth = 0usize;
+        while trait_start < separator {
+            match tokens[trait_start].text {
+                "<" if delimiter_depth[trait_start] == 0 => depth += 1,
+                ">" if delimiter_depth[trait_start] == 0
+                    && !tokens
+                        .get(trait_start.wrapping_sub(1))
+                        .is_some_and(|token| token.text == "-") =>
+                {
                     depth = depth.checked_sub(1)?;
+                    trait_start += 1;
                     if depth == 0 {
-                        end = Some(index + character.len_utf8());
                         break;
                     }
+                    continue;
                 }
                 _ => {}
             }
+            trait_start += 1;
         }
-        rest = rest.get(end?..)?.trim_start();
     }
-    leading_implementation_type(rest)
+    (trait_start < separator)
+        .then(|| implementation_type_path(&tokens, trait_start))
+        .flatten()
 }
 
 #[cfg(test)]
@@ -2029,9 +2201,13 @@ fn function_body<'a>(text: &'a str, reference: &str) -> Option<&'a str> {
     Some(*body)
 }
 
-fn braced_declaration_fragments<'a>(text: &'a str, declaration: &str) -> Vec<&'a str> {
+fn braced_declaration_fragments_scoped<'a>(
+    text: &'a str,
+    declaration: &str,
+    direct_only: bool,
+) -> Vec<&'a str> {
     let mut fragments = Vec::new();
-    for body in braced_bodies(text, declaration, false) {
+    for body in braced_bodies(text, declaration, direct_only) {
         let body_start = body.as_ptr() as usize - text.as_ptr() as usize;
         let close = body_start + body.len();
         let start = text[..body_start]
@@ -2051,6 +2227,10 @@ fn braced_declaration_fragments<'a>(text: &'a str, declaration: &str) -> Vec<&'a
         }
     }
     fragments
+}
+
+fn braced_declaration_fragments<'a>(text: &'a str, declaration: &str) -> Vec<&'a str> {
+    braced_declaration_fragments_scoped(text, declaration, false)
 }
 
 fn runtime_braced_bodies_with_scopes<'a>(
@@ -2079,6 +2259,13 @@ struct RustOwnerScope {
     end: usize,
     name: String,
     cfg_attributes: Vec<String>,
+    semantic_header: Option<Vec<u8>>,
+    semantic_header_range: Option<(usize, usize)>,
+    trait_name: Option<String>,
+    header_has_conditional: bool,
+    generic_type_bindings: BTreeSet<String>,
+    generic_const_bindings: BTreeSet<String>,
+    generic_bindings_valid: bool,
 }
 
 fn rust_item_locator(
@@ -2088,6 +2275,16 @@ fn rust_item_locator(
     kind: &str,
     symbol: &str,
 ) -> String {
+    let module = rust_module_path(module_scopes, item_start);
+    let module = if module.is_empty() {
+        "<root>".to_string()
+    } else {
+        module
+    };
+    format!("{path}#{module}::{kind}:{symbol}")
+}
+
+fn rust_module_path(module_scopes: &[RustOwnerScope], item_start: usize) -> String {
     let mut scopes = module_scopes
         .iter()
         .filter(|scope| scope.start <= item_start && item_start < scope.end)
@@ -2095,16 +2292,12 @@ fn rust_item_locator(
     scopes.sort_by(|left, right| {
         (left.start, std::cmp::Reverse(left.end)).cmp(&(right.start, std::cmp::Reverse(right.end)))
     });
-    let module = if scopes.is_empty() {
-        "<root>".to_string()
-    } else {
-        scopes
-            .into_iter()
-            .map(|scope| scope.name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    };
-    format!("{path}#{module}::{kind}:{symbol}")
+    scopes
+        .into_iter()
+        .filter(|scope| !scope.name.is_empty())
+        .map(|scope| scope.name.as_str())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 fn attached_rust_attributes(text: &str, item_start: usize) -> Vec<String> {
@@ -2151,19 +2344,305 @@ fn attached_rust_attributes(text: &str, item_start: usize) -> Vec<String> {
 }
 
 fn cfg_attributes(text: &str, item_start: usize) -> Vec<String> {
-    attached_rust_attributes(text, item_start)
-        .into_iter()
-        .filter(|attribute| attribute.starts_with("#[cfg(") || attribute.starts_with("#[cfg_attr("))
-        .collect()
+    let lexical = RustSourceLexicalIndex::new(text);
+    cfg_attributes_with_lexical(text, item_start, lexical.as_ref().ok())
 }
 
+fn cfg_attributes_with_lexical(
+    text: &str,
+    item_start: usize,
+    lexical: Option<&RustSourceLexicalIndex<'_>>,
+) -> Vec<String> {
+    let tokenized = lexical.map_or_else(
+        || Err("Rust authority lexical index is unavailable".to_string()),
+        |lexical| tokenized_rust_item_cfg_attributes_with_lexical(text, item_start, lexical),
+    );
+    let mut attributes =
+        tokenized.unwrap_or_else(|_| vec!["#[cfg(identity_authority_parse_failed)]".to_string()]);
+    attributes.sort();
+    attributes.dedup();
+    attributes
+}
+
+/// Recover conditional outer attributes from the semantic item prefix rather
+/// than from the bytes immediately preceding the keyword. This matters for
+/// ordinary formatted Rust such as `#[cfg(...)]\npub const ...`: the `pub`
+/// line separates the keyword from the attribute, but it does not separate the
+/// attribute from the item. A malformed token stream is an authority failure,
+/// never permission to silently discard the condition.
+fn tokenized_rust_item_cfg_attributes_with_lexical(
+    text: &str,
+    item_start: usize,
+    lexical: &RustSourceLexicalIndex<'_>,
+) -> Result<Vec<String>, String> {
+    let keyword = lexical
+        .token_indexes_by_start
+        .get(&item_start)
+        .copied()
+        .ok_or_else(|| format!("no Rust item token starts at byte {item_start}"))?;
+    let leader = lexical.item_leaders[keyword];
+    let mut attributes = Vec::new();
+    let mut cursor = leader;
+    while cursor < keyword {
+        if lexical.tokens[cursor].text != "#" {
+            cursor += 1;
+            continue;
+        }
+        let mut open = cursor + 1;
+        if lexical
+            .tokens
+            .get(open)
+            .is_some_and(|token| token.text == "!")
+        {
+            open += 1;
+        }
+        if !lexical
+            .tokens
+            .get(open)
+            .is_some_and(|token| token.text == "[")
+        {
+            cursor += 1;
+            continue;
+        }
+        let close = lexical.pairs[open].ok_or_else(|| {
+            format!(
+                "unbalanced Rust item attribute beginning at byte {}",
+                lexical.tokens[cursor].start
+            )
+        })?;
+        if close >= keyword {
+            return Err(format!(
+                "Rust item attribute at byte {} crosses its keyword",
+                lexical.tokens[cursor].start
+            ));
+        }
+        if lexical
+            .tokens
+            .get(open + 1)
+            .is_some_and(|token| matches!(token.text, "cfg" | "cfg_attr"))
+        {
+            attributes.push(
+                text[lexical.tokens[cursor].start..lexical.tokens[close].end]
+                    .chars()
+                    .filter(|character| !character.is_ascii_whitespace())
+                    .collect(),
+            );
+        }
+        cursor = close + 1;
+    }
+    Ok(attributes)
+}
+
+fn rust_item_has_macro_use_attribute(text: &str, item_start: usize) -> bool {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return true;
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return true;
+    };
+    let Some(keyword) = tokens.iter().position(|token| token.start == item_start) else {
+        return true;
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let mut cursor = leaders[keyword];
+    while cursor < keyword {
+        if tokens[cursor].text != "#" {
+            cursor += 1;
+            continue;
+        }
+        let mut open = cursor + 1;
+        if tokens.get(open).is_some_and(|token| token.text == "!") {
+            open += 1;
+        }
+        if !tokens.get(open).is_some_and(|token| token.text == "[") {
+            cursor += 1;
+            continue;
+        }
+        let Some(close) = pairs[open] else {
+            return true;
+        };
+        let head = tokens.get(open + 1).map(|token| token.text);
+        let cfg_attr_macro_use = if head == Some("cfg_attr")
+            && tokens.get(open + 2).is_some_and(|token| token.text == "(")
+        {
+            let arguments_open = open + 2;
+            let Some(arguments_close) = pairs[arguments_open] else {
+                return true;
+            };
+            let comma = (arguments_open + 1..arguments_close).find(|candidate| {
+                tokens[*candidate].text == ","
+                    && outer_depth[*candidate] == outer_depth[arguments_open] + 1
+            });
+            comma.is_some_and(|comma| {
+                tokens[comma + 1..arguments_close]
+                    .iter()
+                    .any(|token| token.text == "macro_use")
+            })
+        } else {
+            false
+        };
+        if head == Some("macro_use") || cfg_attr_macro_use {
+            return true;
+        }
+        cursor = close + 1;
+    }
+    false
+}
+
+/// Return conditional inner attributes that govern one lexical Rust scope.
+///
+/// Inner attributes are not attached to the first item: `#![cfg(...)]` applies
+/// to the containing file or module. Treating it as ordinary prefix text would
+/// let later declarations escape the condition. A malformed token stream
+/// returns an error so callers can make the whole scope non-authoritative.
+fn rust_scope_inner_cfg_attributes(text: &str) -> Result<Vec<String>, String> {
+    let tokens = rust_authority_tokens(text)?;
+    let (pairs, outer_depth) = rust_authority_delimiters(&tokens)?;
+    let mut attributes = Vec::new();
+    let mut index = 0usize;
+    while index + 2 < tokens.len() {
+        if tokens[index].text != "#"
+            || tokens[index + 1].text != "!"
+            || tokens[index + 2].text != "["
+            || outer_depth[index] != 0
+            || outer_depth[index + 1] != 0
+            || outer_depth[index + 2] != 0
+        {
+            index += 1;
+            continue;
+        }
+        let Some(close) = pairs[index + 2] else {
+            return Err(format!(
+                "unbalanced lexical-scope inner attribute at byte {}",
+                tokens[index].start
+            ));
+        };
+        if tokens
+            .get(index + 3)
+            .is_some_and(|token| matches!(token.text, "cfg" | "cfg_attr"))
+        {
+            let fragment = &text[tokens[index].start..tokens[close].end];
+            let Some(without_bang) = fragment.strip_prefix("#!") else {
+                return Err("invalid lexical-scope inner attribute prefix".to_string());
+            };
+            attributes.push(
+                format!("#{without_bang}")
+                    .chars()
+                    .filter(|character| !character.is_ascii_whitespace())
+                    .collect(),
+            );
+        }
+        index = close + 1;
+    }
+    Ok(attributes)
+}
+
+fn fail_closed_scope_cfg_attributes(text: &str) -> Vec<String> {
+    rust_scope_inner_cfg_attributes(text)
+        .unwrap_or_else(|_| vec!["#[cfg(identity_authority_parse_failed)]".to_string()])
+}
+
+#[allow(clippy::too_many_lines)] // One nesting pass keeps owner bytes, cfg gates, and offsets aligned.
 fn rust_owner_scopes(
     text: &str,
     declaration: &str,
     owner: impl Fn(&str) -> Option<String>,
 ) -> Vec<RustOwnerScope> {
+    let lexical = RustSourceLexicalIndex::new(text);
+    rust_owner_scopes_with_lexical(text, declaration, owner, lexical.as_ref().ok(), None)
+}
+
+fn rust_owner_scopes_with_lexical(
+    text: &str,
+    declaration: &str,
+    owner: impl Fn(&str) -> Option<String>,
+    lexical: Option<&RustSourceLexicalIndex<'_>>,
+    known_module_scopes: Option<&[RustOwnerScope]>,
+) -> Vec<RustOwnerScope> {
     let mut scopes = Vec::new();
-    for fragment in braced_declaration_fragments(text, declaration) {
+    let mut fragments = Vec::new();
+    if declaration == "mod" {
+        scopes.push(RustOwnerScope {
+            start: 0,
+            end: text.len(),
+            name: String::new(),
+            cfg_attributes: fail_closed_scope_cfg_attributes(text),
+            semantic_header: None,
+            semantic_header_range: None,
+            trait_name: None,
+            header_has_conditional: false,
+            generic_type_bindings: BTreeSet::new(),
+            generic_const_bindings: BTreeSet::new(),
+            generic_bindings_valid: true,
+        });
+        // The body scanner consumes an outer inline module as one declaration,
+        // so a non-direct scan cannot also report modules nested inside it.
+        // Recursing through direct children preserves every lexical module
+        // path and every containing cfg condition without admitting block-local
+        // modules as file-addressable authority.
+        let mut pending = vec![text];
+        while let Some(scope) = pending.pop() {
+            for fragment in braced_declaration_fragments_scoped(scope, declaration, true) {
+                let Some(body) = braced_bodies(fragment, declaration, false)
+                    .into_iter()
+                    .next()
+                else {
+                    continue;
+                };
+                fragments.push(fragment);
+                pending.push(body);
+            }
+        }
+    } else {
+        fragments = braced_declaration_fragments(text, declaration);
+    }
+    let owned_implementation_modules = (declaration == "impl" && known_module_scopes.is_none())
+        .then(|| rust_owner_scopes_with_lexical(text, "mod", rust_module_owner, lexical, None));
+    let implementation_modules = (declaration == "impl").then(|| {
+        known_module_scopes.unwrap_or_else(|| {
+            owned_implementation_modules
+                .as_deref()
+                .expect("implementation fallback module scopes are present")
+        })
+    });
+    for fragment in fragments {
+        let fragment_start = fragment.as_ptr() as usize - text.as_ptr() as usize;
+        if declaration == "impl" {
+            let Some(module_scopes) = implementation_modules.as_ref() else {
+                continue;
+            };
+            let Some(lexical) = lexical else {
+                continue;
+            };
+            let Some(keyword) = lexical
+                .token_indexes_by_start
+                .get(&fragment_start)
+                .copied()
+                .filter(|keyword| lexical.tokens[*keyword].text == "impl")
+            else {
+                continue;
+            };
+            let module_depth = module_scopes
+                .iter()
+                .filter(|scope| {
+                    !scope.name.is_empty()
+                        && scope.start <= fragment_start
+                        && fragment_start < scope.end
+                })
+                .count();
+            if lexical.outer_depth[keyword] != module_depth
+                || !rust_implementation_item_prefix_is_supported(
+                    &lexical.tokens,
+                    &lexical.pairs,
+                    lexical.item_leaders[keyword],
+                    keyword,
+                )
+            {
+                // `impl Trait` in an argument/return type and block-local
+                // items are not file-addressable implementation authority.
+                continue;
+            }
+        }
         let Some(body) = braced_bodies(fragment, declaration, false)
             .into_iter()
             .next()
@@ -2174,16 +2653,81 @@ fn rust_owner_scopes(
         let Some(open) = body_start_in_fragment.checked_sub(1) else {
             continue;
         };
-        let Some(name) = fragment.get(..open).and_then(&owner) else {
+        let Some(header) = fragment.get(..open) else {
             continue;
         };
-        let fragment_start = fragment.as_ptr() as usize - text.as_ptr() as usize;
+        let Some(name) = owner(header) else {
+            continue;
+        };
         let start = body.as_ptr() as usize - text.as_ptr() as usize;
+        let mut scope_cfg_attributes = cfg_attributes_with_lexical(text, fragment_start, lexical);
+        scope_cfg_attributes.extend(fail_closed_scope_cfg_attributes(body));
+        let (
+            semantic_header,
+            semantic_header_range,
+            trait_name,
+            header_has_conditional,
+            generic_type_bindings,
+            generic_const_bindings,
+            generic_bindings_valid,
+        ) = if declaration == "impl" {
+            let semantic_header_start = lexical
+                .and_then(|lexical| {
+                    lexical
+                        .token_indexes_by_start
+                        .get(&fragment_start)
+                        .copied()
+                        .filter(|keyword| lexical.tokens[*keyword].text == "impl")
+                        .map(|keyword| lexical.tokens[lexical.item_leaders[keyword]].start)
+                })
+                .unwrap_or(fragment_start);
+            let absolute_open = start.saturating_sub(1);
+            let semantic_source = text.get(semantic_header_start..absolute_open);
+            let semantic_header =
+                semantic_source.and_then(|header| canonical_rust_authority_fragment(header).ok());
+            let semantic_header_range = semantic_source.map(|header| {
+                let start = header.as_ptr() as usize - text.as_ptr() as usize;
+                (start, start + header.len())
+            });
+            let generic_bindings = semantic_source
+                .and_then(|header| rust_implementation_generic_bindings(header).ok());
+            let generic_bindings_valid = generic_bindings.is_some();
+            let (generic_type_bindings, generic_const_bindings) =
+                generic_bindings.unwrap_or_default();
+            (
+                semantic_header,
+                semantic_header_range,
+                implementation_trait_path(header),
+                semantic_source
+                    .and_then(|header| rust_authority_has_conditional_attribute(header).ok())
+                    .unwrap_or(true),
+                generic_type_bindings,
+                generic_const_bindings,
+                generic_bindings_valid,
+            )
+        } else {
+            (
+                None,
+                None,
+                None,
+                false,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                true,
+            )
+        };
         scopes.push(RustOwnerScope {
             start,
             end: start + body.len(),
             name,
-            cfg_attributes: cfg_attributes(text, fragment_start),
+            cfg_attributes: scope_cfg_attributes,
+            semantic_header,
+            semantic_header_range,
+            trait_name,
+            header_has_conditional,
+            generic_type_bindings,
+            generic_const_bindings,
+            generic_bindings_valid,
         });
     }
     scopes.sort_by(|left, right| (left.start, left.end).cmp(&(right.start, right.end)));
@@ -2194,13 +2738,22 @@ fn rust_owner_scopes(
 }
 
 fn rust_module_owner(header: &str) -> Option<String> {
-    let tokens = header
-        .split(|character: char| character != '_' && !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let module = tokens.iter().position(|token| *token == "mod")?;
-    let name = *tokens.get(module + 1)?;
-    canonical_symbol(name).then(|| name.to_string())
+    let tokens = rust_authority_tokens(header).ok()?;
+    let module = tokens.iter().position(|token| token.text == "mod")?;
+    let name = tokens.get(module + 1)?;
+    if name.text == "r"
+        && tokens
+            .get(module + 2)
+            .is_some_and(|token| token.text == "#")
+        && tokens
+            .get(module + 3)
+            .is_some_and(|token| canonical_symbol(token.text))
+        && name.end == tokens[module + 2].start
+        && tokens[module + 2].end == tokens[module + 3].start
+    {
+        return None;
+    }
+    canonical_symbol(name.text).then(|| name.text.to_string())
 }
 
 fn rust_item_is_runtime_active_with_scopes(
@@ -2226,11 +2779,14 @@ fn rust_item_is_test_active_with_scopes(
         .all(|attribute| attribute == "#[cfg(test)]")
 }
 
+#[allow(clippy::too_many_lines)] // Function discovery and scope exclusions share one offset model.
 fn rust_function_fragment_index_with_scopes<'a>(
     text: &'a str,
     modules: &[RustOwnerScope],
     implementations: &[RustOwnerScope],
-) -> BTreeMap<String, Vec<&'a str>> {
+    macro_rules_scopes: &[(usize, usize)],
+    macro_invocation_scopes: &[(usize, usize)],
+) -> (BTreeMap<String, Vec<&'a str>>, BTreeMap<usize, usize>) {
     struct FunctionSpan<'a> {
         symbol: String,
         start: usize,
@@ -2239,11 +2795,37 @@ fn rust_function_fragment_index_with_scopes<'a>(
         fragment: &'a str,
     }
 
-    let starts = rust_function_starts(text);
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return (BTreeMap::new(), BTreeMap::new());
+    };
+    let Ok((_, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return (BTreeMap::new(), BTreeMap::new());
+    };
+    let function_depths = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.text == "fn")
+        .map(|(index, token)| (token.start, outer_depth[index]))
+        .collect::<BTreeMap<_, _>>();
+    let semantic_item_starts = rust_semantic_item_starts(text);
+    let starts = rust_function_starts(text)
+        .into_iter()
+        .filter(|(_, start)| {
+            !macro_rules_scopes
+                .iter()
+                .chain(macro_invocation_scopes)
+                .any(|(scope_start, scope_end)| scope_start <= start && start < scope_end)
+        })
+        .collect::<Vec<_>>();
     let mut spans = Vec::new();
     for (index, (symbol, start)) in starts.iter().enumerate() {
         let declaration = format!("fn {symbol}");
-        let Some(body) = first_direct_braced_body(&text[*start..], &declaration) else {
+        let Some(body) = first_direct_braced_body_with_macro_scopes(
+            &text[*start..],
+            &declaration,
+            *start,
+            macro_invocation_scopes,
+        ) else {
             continue;
         };
         let body_start = body.as_ptr() as usize - text.as_ptr() as usize;
@@ -2254,7 +2836,8 @@ fn rust_function_fragment_index_with_scopes<'a>(
             continue;
         }
         let body_end = body_start + body.len();
-        let Some(fragment) = text.get(*start..=body_end) else {
+        let fragment_start = semantic_item_starts.get(start).copied().unwrap_or(*start);
+        let Some(fragment) = text.get(fragment_start..=body_end) else {
             continue;
         };
         spans.push(FunctionSpan {
@@ -2267,39 +2850,61 @@ fn rust_function_fragment_index_with_scopes<'a>(
     }
 
     let mut index = BTreeMap::<String, Vec<&str>>::new();
+    let mut keyword_starts = BTreeMap::new();
     let mut active_function_ends = Vec::<usize>::new();
     for span in &spans {
         active_function_ends.retain(|end| span.start < *end);
         let nested_in_function = !active_function_ends.is_empty();
+        if nested_in_function {
+            // The enclosing function fragment already binds an inner item.
+            // An inner `fn` cannot be addressed as a file- or module-level
+            // schema authority and must not satisfy a bare reference.
+            continue;
+        }
         let mut module_scopes = modules
             .iter()
-            .filter(|scope| scope.start <= span.start && span.start < scope.end)
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= span.start && span.start < scope.end
+            })
             .collect::<Vec<_>>();
         module_scopes.sort_by(|left, right| {
             (left.start, std::cmp::Reverse(left.end))
                 .cmp(&(right.start, std::cmp::Reverse(right.end)))
         });
+        let module_depth = module_scopes.len();
         let modules = module_scopes
             .into_iter()
             .map(|scope| scope.name.as_str())
             .collect::<Vec<_>>();
-        let implementation = (!nested_in_function)
-            .then(|| {
-                implementations
-                    .iter()
-                    .filter(|scope| scope.start <= span.start && span.start < scope.end)
-                    .min_by_key(|scope| scope.end - scope.start)
-            })
-            .flatten();
-
-        let mut full = modules.clone();
-        if let Some(implementation) = implementation {
-            full.push(implementation.name.as_str());
+        let module = modules.join("::");
+        let implementation = implementations
+            .iter()
+            .filter(|scope| scope.start <= span.start && span.start < scope.end)
+            .min_by_key(|scope| scope.end - scope.start);
+        let expected_depth = module_depth + usize::from(implementation.is_some());
+        if function_depths.get(&span.start).copied() != Some(expected_depth) {
+            // Only a direct module item or a direct impl child can be named as
+            // an implementation authority. Trait defaults, const/static
+            // initializer items, and other expression-nested functions do not
+            // have a file-addressable Rust path even when their spelling is
+            // unique.
+            continue;
         }
-        full.push(span.symbol.as_str());
-        let full = full.join("::");
+
+        let full = if let Some(implementation) = implementation {
+            let Some(owner) = implementation_owner_path(&module, &implementation.name) else {
+                continue;
+            };
+            qualify_rust_name(&owner, &span.symbol)
+        } else {
+            qualify_rust_name(&module, &span.symbol)
+        };
         index.entry(full.clone()).or_default().push(span.fragment);
-        if let Some(implementation) = implementation {
+        let fragment_start = span.fragment.as_ptr() as usize - text.as_ptr() as usize;
+        keyword_starts.insert(fragment_start, span.start);
+        if let Some(implementation) = implementation
+            && module.is_empty()
+        {
             let alias = format!("{}::{}", implementation.name, span.symbol);
             if alias != full {
                 index.entry(alias).or_default().push(span.fragment);
@@ -2313,26 +2918,1288 @@ fn rust_function_fragment_index_with_scopes<'a>(
         fragments.sort_by_key(|fragment| fragment.as_ptr() as usize);
         fragments.dedup_by_key(|fragment| fragment.as_ptr() as usize);
     }
-    index
+    (index, keyword_starts)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RustValueKind {
+    Const,
+    Static,
+}
+
+#[derive(Clone, Copy)]
+struct RustValueDeclaration<'a> {
+    kind: RustValueKind,
+    fragment: &'a str,
+    keyword_start: usize,
+    associated: bool,
+}
+
+struct RustRootMacroDefinition<'a> {
+    fragment: &'a str,
+    inner_attributes: Vec<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct RustEnumVariantAuthority<'a> {
+    enum_fragment: &'a str,
+    variant_fragment: &'a str,
+    conditional: bool,
+    enum_closed: bool,
 }
 
 struct RustSourceIndex<'a> {
+    text: &'a str,
+    lexical: Result<RustSourceLexicalIndex<'a>, String>,
     functions: BTreeMap<String, Vec<&'a str>>,
+    function_keyword_starts: BTreeMap<usize, usize>,
+    values: BTreeMap<String, Vec<RustValueDeclaration<'a>>>,
+    use_aliases: BTreeMap<String, Vec<usize>>,
+    external_source_bindings: BTreeMap<String, Vec<usize>>,
+    type_aliases: BTreeSet<String>,
+    nominal_type_names: BTreeSet<String>,
+    trait_names: BTreeSet<String>,
+    direct_type_declarations: BTreeMap<String, Vec<usize>>,
+    enum_variants: BTreeMap<String, Vec<RustEnumVariantAuthority<'a>>>,
+    generated_item_macros: BTreeMap<String, BTreeSet<String>>,
+    generated_item_macro_invocations: Vec<RustItemMacroInvocation>,
+    source_macro_rules: BTreeSet<String>,
+    root_macro_rules: BTreeMap<String, Result<RustRootMacroDefinition<'a>, String>>,
     module_scopes: Vec<RustOwnerScope>,
+    implementation_scopes: Vec<RustOwnerScope>,
 }
 
 impl<'a> RustSourceIndex<'a> {
     fn new(text: &'a str) -> Self {
-        let module_scopes = rust_owner_scopes(text, "mod", rust_module_owner);
-        let implementations = rust_owner_scopes(text, "impl", implementation_owner);
-        Self {
-            functions: rust_function_fragment_index_with_scopes(
+        let lexical = RustSourceLexicalIndex::new(text);
+        let module_scopes = rust_owner_scopes_with_lexical(
+            text,
+            "mod",
+            rust_module_owner,
+            lexical.as_ref().ok(),
+            None,
+        );
+        let implementations = rust_owner_scopes_with_lexical(
+            text,
+            "impl",
+            implementation_owner,
+            lexical.as_ref().ok(),
+            Some(&module_scopes),
+        );
+        let macro_rules_scopes = rust_macro_rules_scopes(text);
+        let macro_invocation_scopes = rust_macro_invocation_scopes(text);
+        let (functions, function_keyword_starts) = rust_function_fragment_index_with_scopes(
+            text,
+            &module_scopes,
+            &implementations,
+            &macro_rules_scopes,
+            &macro_invocation_scopes,
+        );
+        let values = rust_value_declaration_index(
+            text,
+            &module_scopes,
+            &implementations,
+            &macro_rules_scopes,
+            &macro_invocation_scopes,
+        );
+        let use_aliases = rust_use_alias_index(
+            text,
+            &module_scopes,
+            &macro_rules_scopes,
+            &macro_invocation_scopes,
+        );
+        let external_source_bindings = rust_external_source_binding_index(
+            text,
+            &module_scopes,
+            &macro_rules_scopes,
+            &macro_invocation_scopes,
+        );
+        let mut type_aliases = BTreeSet::new();
+        let mut nominal_type_names = BTreeSet::new();
+        let mut trait_names = BTreeSet::new();
+        let mut direct_type_declarations = BTreeMap::<String, Vec<usize>>::new();
+        for keyword in ["type", "struct", "enum", "union", "trait"] {
+            let declarations = rust_direct_named_item_declaration_index(
                 text,
+                keyword,
                 &module_scopes,
-                &implementations,
-            ),
-            module_scopes,
+                &macro_rules_scopes,
+                &macro_invocation_scopes,
+            );
+            for name in declarations.keys() {
+                match keyword {
+                    "type" => {
+                        type_aliases.insert(name.clone());
+                    }
+                    "struct" | "enum" | "union" => {
+                        nominal_type_names.insert(name.clone());
+                    }
+                    "trait" => {
+                        trait_names.insert(name.clone());
+                    }
+                    _ => unreachable!("closed direct type declaration keyword set"),
+                }
+            }
+            for (name, declarations) in declarations {
+                direct_type_declarations
+                    .entry(name)
+                    .or_default()
+                    .extend(declarations);
+            }
         }
+        for declarations in direct_type_declarations.values_mut() {
+            declarations.sort_unstable();
+            declarations.dedup();
+        }
+        let enum_variants = rust_direct_enum_variant_index(
+            text,
+            &module_scopes,
+            &macro_rules_scopes,
+            &macro_invocation_scopes,
+            lexical.as_ref().ok(),
+        );
+        let generated_item_macro_invocations =
+            rust_direct_item_macro_invocations(text, &module_scopes, &macro_rules_scopes);
+        let generated_item_macros = rust_direct_item_macro_index(&generated_item_macro_invocations);
+        let macro_rules_definition_tokens = lexical
+            .as_ref()
+            .map(|lexical| rust_source_macro_rule_definition_tokens(&lexical.tokens))
+            .unwrap_or_default();
+        let source_macro_rules = macro_rules_definition_tokens
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let root_inner_attributes = lexical.as_ref().map_err(Clone::clone).and_then(|lexical| {
+            root_inner_attribute_fragments(
+                text,
+                &lexical.tokens,
+                &lexical.pairs,
+                &lexical.outer_depth,
+            )
+        });
+        let root_macro_rules = source_macro_rules
+            .iter()
+            .map(|name| {
+                let definition = lexical.as_ref().map_err(Clone::clone).and_then(|lexical| {
+                    let inner_attributes = root_inner_attributes.clone()?;
+                    exact_root_macro_rules_fragment_with_lexical(
+                        text,
+                        name,
+                        lexical,
+                        macro_rules_definition_tokens
+                            .get(name)
+                            .map_or(&[][..], Vec::as_slice),
+                        inner_attributes,
+                    )
+                    .map(|(fragment, inner_attributes)| {
+                        RustRootMacroDefinition {
+                            fragment,
+                            inner_attributes,
+                        }
+                    })
+                });
+                (name.clone(), definition)
+            })
+            .collect();
+        Self {
+            text,
+            lexical,
+            functions,
+            function_keyword_starts,
+            values,
+            use_aliases,
+            external_source_bindings,
+            type_aliases,
+            nominal_type_names,
+            trait_names,
+            direct_type_declarations,
+            enum_variants,
+            generated_item_macros,
+            generated_item_macro_invocations,
+            source_macro_rules,
+            root_macro_rules,
+            module_scopes,
+            implementation_scopes: implementations,
+        }
+    }
+}
+
+fn rust_visible_generated_item_macros(
+    index: &RustSourceIndex<'_>,
+    module: &str,
+) -> BTreeSet<String> {
+    // Items emitted in a parent module are not inherited into a descendant's
+    // unqualified namespace. Qualified `super::`/`crate::` resolution handles
+    // parent authority explicitly; bare-name poisoning must stay exact to the
+    // invocation module.
+    index
+        .generated_item_macros
+        .get(module)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn rust_module_is_same_or_descendant(module: &str, ancestor: &str) -> bool {
+    ancestor.is_empty()
+        || module == ancestor
+        || module
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with("::"))
+}
+
+fn rust_preceding_textual_macro_generator_paths(
+    index: &RustSourceIndex<'_>,
+    module: &str,
+    before: usize,
+) -> BTreeSet<String> {
+    let mut hazards = BTreeSet::new();
+    for invocation in &index.generated_item_macro_invocations {
+        if invocation.start >= before
+            || !rust_module_is_same_or_descendant(module, &invocation.module)
+        {
+            continue;
+        }
+        let provably_inert = rust_macro_identifier_tail(&invocation.path)
+            && !invocation.path.contains("::")
+            && exact_root_macro_rules_fragment_with_index(index, &invocation.path)
+                .ok()
+                .is_some_and(|(fragment, _)| {
+                    validate_local_item_macro_linkage(
+                        index,
+                        &invocation.module,
+                        &invocation.path,
+                        fragment,
+                    )
+                    .is_ok()
+                        && rust_macro_transcriber_primitive_type_names(fragment).is_ok()
+                });
+        if !provably_inert {
+            hazards.insert(format!(
+                "{}@{}:{}",
+                invocation.path,
+                if invocation.module.is_empty() {
+                    "<root>"
+                } else {
+                    &invocation.module
+                },
+                invocation.start
+            ));
+        }
+    }
+    hazards
+}
+
+/// Over-approximate primitive-named nominal items emitted by one exact local
+/// `macro_rules!` definition while ignoring matcher-only tokens.
+///
+/// This is intentionally not a general macro expander. It accepts only the
+/// subset whose arm transcribers make type-namespace effects explicit. A
+/// top-level capture is safe only when an `ident` capture names a generated
+/// value item (`fn`/`const`/`static`) or an `impl` target; every other
+/// top-level substitution, import, attribute, foreign item, or nested macro is
+/// unbounded authority and returns `Err(())`.
+#[allow(clippy::too_many_lines)] // Matcher exclusion and every fail-closed transcriber case form one audit boundary.
+fn rust_macro_transcriber_primitive_type_names(fragment: &str) -> Result<BTreeSet<String>, ()> {
+    let tokens = rust_authority_tokens(fragment).map_err(|_| ())?;
+    let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens).map_err(|_| ())?;
+    let definition = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(index, token)| {
+            (token.text == "macro_rules" && delimiter_depth[index] == 0).then_some(index)
+        })
+        .ok_or(())?;
+    if !tokens
+        .get(definition + 1)
+        .is_some_and(|token| token.text == "!")
+        || !tokens
+            .get(definition + 2)
+            .is_some_and(|token| rust_macro_identifier_tail(token.text))
+        || !tokens
+            .get(definition + 3)
+            .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+    {
+        return Err(());
+    }
+    let definition_open = definition + 3;
+    let definition_close = pairs[definition_open].ok_or(())?;
+    let arm_depth = delimiter_depth[definition_open] + 1;
+    let mut cursor = definition_open + 1;
+    let mut primitive_names = BTreeSet::new();
+    let mut arm_count = 0usize;
+    while cursor < definition_close {
+        while cursor < definition_close
+            && delimiter_depth[cursor] == arm_depth
+            && matches!(tokens[cursor].text, ";" | ",")
+        {
+            cursor += 1;
+        }
+        if cursor == definition_close {
+            break;
+        }
+        if delimiter_depth[cursor] != arm_depth || !matches!(tokens[cursor].text, "(" | "[" | "{") {
+            return Err(());
+        }
+        let matcher_open = cursor;
+        let matcher_close = pairs[matcher_open].ok_or(())?;
+        let arrow = matcher_close + 1;
+        if !tokens.get(arrow).is_some_and(|token| token.text == "=")
+            || !tokens.get(arrow + 1).is_some_and(|token| token.text == ">")
+        {
+            return Err(());
+        }
+        let transcriber_open = arrow + 2;
+        if delimiter_depth
+            .get(transcriber_open)
+            .copied()
+            .is_none_or(|depth| depth != arm_depth)
+            || !tokens
+                .get(transcriber_open)
+                .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            return Err(());
+        }
+        let transcriber_close = pairs[transcriber_open].ok_or(())?;
+
+        let mut matcher_kinds = BTreeMap::<String, String>::new();
+        for position in matcher_open + 1..matcher_close {
+            if tokens[position].text != "$" {
+                continue;
+            }
+            let Some(name) = tokens
+                .get(position + 1)
+                .map(|token| token.text)
+                .filter(|name| canonical_symbol(name))
+            else {
+                continue;
+            };
+            if !tokens
+                .get(position + 2)
+                .is_some_and(|token| token.text == ":")
+            {
+                continue;
+            }
+            let Some(kind) = tokens
+                .get(position + 3)
+                .map(|token| token.text)
+                .filter(|kind| canonical_symbol(kind))
+            else {
+                return Err(());
+            };
+            if matcher_kinds
+                .insert(name.to_string(), kind.to_string())
+                .is_some_and(|existing| existing != kind)
+            {
+                return Err(());
+            }
+        }
+
+        let output_depth = delimiter_depth[transcriber_open] + 1;
+        for position in transcriber_open + 1..transcriber_close {
+            if delimiter_depth[position] != output_depth {
+                continue;
+            }
+            let token = tokens[position].text;
+            if matches!(token, "#" | "use" | "extern") {
+                return Err(());
+            }
+            if rust_macro_identifier_tail(token)
+                && tokens
+                    .get(position + 1)
+                    .is_some_and(|next| next.text == "!")
+            {
+                return Err(());
+            }
+            if matches!(token, "struct" | "enum" | "union" | "trait" | "type") {
+                let Some(name) = tokens.get(position + 1).map(|token| token.text) else {
+                    return Err(());
+                };
+                if name == "$" {
+                    return Err(());
+                }
+                if rust_primitive_type_name(name) {
+                    primitive_names.insert(name.to_string());
+                }
+            }
+            if token != "$" {
+                continue;
+            }
+            let Some(name) = tokens
+                .get(position + 1)
+                .map(|token| token.text)
+                .filter(|name| canonical_symbol(name))
+            else {
+                return Err(());
+            };
+            let previous = position
+                .checked_sub(1)
+                .and_then(|position| tokens.get(position))
+                .map(|token| token.text);
+            let safe_ident_slot = matches!(previous, Some("impl" | "fn" | "const" | "static"))
+                && matcher_kinds.get(name).is_some_and(|kind| kind == "ident");
+            if !safe_ident_slot {
+                return Err(());
+            }
+        }
+        arm_count += 1;
+        cursor = transcriber_close + 1;
+    }
+    (arm_count != 0).then_some(primitive_names).ok_or(())
+}
+
+fn rust_macro_matcher_token_indexes(fragment: &str) -> Result<BTreeSet<usize>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let Some(definition) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.text == "macro_rules" && delimiter_depth[index] == 0).then_some(index)
+    }) else {
+        return Ok(BTreeSet::new());
+    };
+    if !tokens
+        .get(definition + 3)
+        .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+    {
+        return Err("macro_rules definition has no delimited arm body".to_string());
+    }
+    let definition_open = definition + 3;
+    let definition_close = pairs[definition_open]
+        .ok_or_else(|| "macro_rules definition body is unbalanced".to_string())?;
+    let arm_depth = delimiter_depth[definition_open] + 1;
+    let mut matcher_tokens = BTreeSet::new();
+    let mut cursor = definition_open + 1;
+    while cursor < definition_close {
+        while cursor < definition_close
+            && delimiter_depth[cursor] == arm_depth
+            && matches!(tokens[cursor].text, ";" | ",")
+        {
+            cursor += 1;
+        }
+        if cursor == definition_close {
+            break;
+        }
+        if delimiter_depth[cursor] != arm_depth || !matches!(tokens[cursor].text, "(" | "[" | "{") {
+            return Err(format!(
+                "macro_rules arm has no direct matcher delimiter: found token {:?} at delimiter depth {}, expected depth {arm_depth}",
+                tokens[cursor].text, delimiter_depth[cursor]
+            ));
+        }
+        let matcher_close =
+            pairs[cursor].ok_or_else(|| "macro_rules matcher is unbalanced".to_string())?;
+        matcher_tokens.extend(cursor..=matcher_close);
+        if !tokens
+            .get(matcher_close + 1)
+            .is_some_and(|token| token.text == "=")
+            || !tokens
+                .get(matcher_close + 2)
+                .is_some_and(|token| token.text == ">")
+            || !tokens
+                .get(matcher_close + 3)
+                .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            return Err("macro_rules arm has no delimited transcriber".to_string());
+        }
+        let transcriber_open = matcher_close + 3;
+        cursor = pairs[transcriber_open]
+            .ok_or_else(|| "macro_rules transcriber is unbalanced".to_string())?
+            + 1;
+    }
+    Ok(matcher_tokens)
+}
+
+fn rust_macro_has_one_whole_type_capture(fragment: &str) -> Result<bool, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let Some(definition) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.text == "macro_rules" && delimiter_depth[index] == 0).then_some(index)
+    }) else {
+        return Ok(false);
+    };
+    let Some(definition_open) = tokens
+        .get(definition + 3)
+        .filter(|token| matches!(token.text, "(" | "[" | "{"))
+        .map(|_| definition + 3)
+    else {
+        return Ok(false);
+    };
+    let Some(definition_close) = pairs[definition_open] else {
+        return Ok(false);
+    };
+    let arm_depth = delimiter_depth[definition_open] + 1;
+    let mut cursor = definition_open + 1;
+    while cursor < definition_close
+        && delimiter_depth[cursor] == arm_depth
+        && matches!(tokens[cursor].text, ";" | ",")
+    {
+        cursor += 1;
+    }
+    if cursor == definition_close
+        || delimiter_depth[cursor] != arm_depth
+        || !matches!(tokens[cursor].text, "(" | "[" | "{")
+    {
+        return Ok(false);
+    }
+    let matcher_open = cursor;
+    let Some(matcher_close) = pairs[matcher_open] else {
+        return Ok(false);
+    };
+    let matcher = &tokens[matcher_open + 1..matcher_close];
+    if matcher.len() != 4
+        || matcher[0].text != "$"
+        || !canonical_symbol(matcher[1].text)
+        || matcher[2].text != ":"
+        || matcher[3].text != "ty"
+    {
+        return Ok(false);
+    }
+    if !tokens
+        .get(matcher_close + 1)
+        .is_some_and(|token| token.text == "=")
+        || !tokens
+            .get(matcher_close + 2)
+            .is_some_and(|token| token.text == ">")
+        || !tokens
+            .get(matcher_close + 3)
+            .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+    {
+        return Ok(false);
+    }
+    let transcriber_open = matcher_close + 3;
+    let Some(transcriber_close) = pairs[transcriber_open] else {
+        return Ok(false);
+    };
+    cursor = transcriber_close + 1;
+    while cursor < definition_close
+        && delimiter_depth[cursor] == arm_depth
+        && matches!(tokens[cursor].text, ";" | ",")
+    {
+        cursor += 1;
+    }
+    Ok(cursor == definition_close)
+}
+
+/// Token positions proven to be a Type fragment by one exact, textually
+/// visible local macro with a single whole-matcher `$capture:ty` arm. Broader
+/// matcher shapes remain conservatively in Value dependency analysis until an
+/// ordered token-tree matcher can prove their invocation positions.
+fn rust_local_macro_type_argument_token_indexes(
+    index: &RustSourceIndex<'_>,
+    fragment: &str,
+) -> Result<BTreeSet<usize>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, _) = rust_authority_delimiters(&tokens)?;
+    let fragment_start = fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    let mut type_tokens = BTreeSet::new();
+    for name in 0..tokens.len().saturating_sub(2) {
+        if !canonical_symbol(tokens[name].text)
+            || tokens[name + 1].text != "!"
+            || !matches!(tokens[name + 2].text, "(" | "[" | "{")
+            || (name >= 2 && tokens[name - 2].text == ":" && tokens[name - 1].text == ":")
+        {
+            continue;
+        }
+        let macro_name = tokens[name].text;
+        let Ok((definition, _)) = exact_root_macro_rules_fragment_with_index(index, macro_name)
+        else {
+            continue;
+        };
+        let definition_start = definition.as_ptr() as usize - index.text.as_ptr() as usize;
+        if definition_start >= fragment_start || !rust_macro_has_one_whole_type_capture(definition)?
+        {
+            continue;
+        }
+        let open = name + 2;
+        let close = pairs[open]
+            .ok_or_else(|| format!("local macro invocation {macro_name:?} is unbalanced"))?;
+        type_tokens.extend(open + 1..close);
+    }
+    Ok(type_tokens)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RustMacroLiteralToken {
+    text: String,
+    adjacent_to_next: bool,
+}
+
+fn rust_macro_literal_signature(tokens: &[RustAuthorityToken<'_>]) -> Vec<RustMacroLiteralToken> {
+    tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| RustMacroLiteralToken {
+            text: token.text.to_string(),
+            // Preserve every adjacency boundary, not just punctuation
+            // jointness. The authority lexer intentionally remains smaller
+            // than rustc's lexer and emits decimal digits one at a time, so
+            // `1 2` and `12` would otherwise collapse to the same selector.
+            adjacent_to_next: tokens
+                .get(index + 1)
+                .is_some_and(|next| token.end == next.start),
+        })
+        .collect()
+}
+
+fn rust_macro_ordered_literal_matchers(
+    fragment: &str,
+) -> Result<Vec<Option<Vec<RustMacroLiteralToken>>>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let Some(definition) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.text == "macro_rules" && delimiter_depth[index] == 0).then_some(index)
+    }) else {
+        return Ok(Vec::new());
+    };
+    let Some(definition_open) = tokens
+        .get(definition + 3)
+        .filter(|token| matches!(token.text, "(" | "[" | "{"))
+        .map(|_| definition + 3)
+    else {
+        return Ok(Vec::new());
+    };
+    let definition_close = pairs[definition_open]
+        .ok_or_else(|| "macro_rules definition body is unbalanced".to_string())?;
+    let arm_depth = delimiter_depth[definition_open] + 1;
+    let mut cursor = definition_open + 1;
+    let mut matchers = Vec::new();
+    while cursor < definition_close {
+        while cursor < definition_close
+            && delimiter_depth[cursor] == arm_depth
+            && matches!(tokens[cursor].text, ";" | ",")
+        {
+            cursor += 1;
+        }
+        if cursor == definition_close {
+            break;
+        }
+        if delimiter_depth[cursor] != arm_depth || !matches!(tokens[cursor].text, "(" | "[" | "{") {
+            return Err("macro_rules arm has no direct matcher delimiter".to_string());
+        }
+        let matcher_open = cursor;
+        let matcher_close =
+            pairs[matcher_open].ok_or_else(|| "macro_rules matcher is unbalanced".to_string())?;
+        let matcher_tokens = &tokens[matcher_open + 1..matcher_close];
+        matchers.push(
+            (!matcher_tokens.iter().any(|token| token.text == "$"))
+                .then(|| rust_macro_literal_signature(matcher_tokens)),
+        );
+        if !tokens
+            .get(matcher_close + 1)
+            .is_some_and(|token| token.text == "=")
+            || !tokens
+                .get(matcher_close + 2)
+                .is_some_and(|token| token.text == ">")
+            || !tokens
+                .get(matcher_close + 3)
+                .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            return Err("macro_rules arm has no delimited transcriber".to_string());
+        }
+        let transcriber_open = matcher_close + 3;
+        cursor = pairs[transcriber_open]
+            .ok_or_else(|| "macro_rules transcriber is unbalanced".to_string())?
+            + 1;
+    }
+    Ok(matchers)
+}
+
+/// Invocation token positions proven to match a literal-only arm before any
+/// dynamic arm could match. A capture/repetition arm stops the proof: later
+/// same-spelled literal arms cannot override Rust's first-match semantics.
+fn rust_local_macro_literal_argument_token_indexes(
+    index: &RustSourceIndex<'_>,
+    fragment: &str,
+) -> Result<BTreeSet<usize>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, _) = rust_authority_delimiters(&tokens)?;
+    let fragment_start = fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    let mut literal_tokens = BTreeSet::new();
+    for name in 0..tokens.len().saturating_sub(2) {
+        if !canonical_symbol(tokens[name].text)
+            || tokens[name + 1].text != "!"
+            || !matches!(tokens[name + 2].text, "(" | "[" | "{")
+            || (name >= 2 && tokens[name - 2].text == ":" && tokens[name - 1].text == ":")
+        {
+            continue;
+        }
+        let macro_name = tokens[name].text;
+        let Ok((definition, _)) = exact_root_macro_rules_fragment_with_index(index, macro_name)
+        else {
+            continue;
+        };
+        let definition_start = definition.as_ptr() as usize - index.text.as_ptr() as usize;
+        if definition_start >= fragment_start {
+            continue;
+        }
+        let open = name + 2;
+        let close = pairs[open]
+            .ok_or_else(|| format!("local macro invocation {macro_name:?} is unbalanced"))?;
+        let arguments = rust_macro_literal_signature(&tokens[open + 1..close]);
+        for matcher in rust_macro_ordered_literal_matchers(definition)? {
+            let Some(matcher) = matcher else {
+                break;
+            };
+            if matcher == arguments {
+                literal_tokens.extend(open + 1..close);
+                break;
+            }
+        }
+    }
+    Ok(literal_tokens)
+}
+
+fn rust_builtin_stringify_argument_token_indexes(
+    index: &RustSourceIndex<'_>,
+    fragment: &str,
+) -> Result<BTreeSet<usize>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, _) = rust_authority_delimiters(&tokens)?;
+    let matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    let text_start = index.text.as_ptr() as usize;
+    let fragment_address = fragment.as_ptr() as usize;
+    let fragment_start = fragment_address
+        .checked_sub(text_start)
+        .filter(|start| *start <= index.text.len())
+        .ok_or_else(|| {
+            "Rust authority fragment is not borrowed from its source index".to_string()
+        })?;
+    let mut opaque = BTreeSet::new();
+    for name in 0..tokens.len().saturating_sub(2) {
+        if tokens[name].text != "stringify"
+            || matcher_tokens.contains(&name)
+            || tokens[name + 1].text != "!"
+            || !matches!(tokens[name + 2].text, "(" | "[" | "{")
+            || (name >= 2 && tokens[name - 2].text == ":" && tokens[name - 1].text == ":")
+        {
+            continue;
+        }
+        let invocation_start = fragment_start + tokens[name].start;
+        let source_resolution_is_builtin = if !index.source_macro_rules.contains("stringify") {
+            true
+        } else {
+            exact_root_macro_rules_fragment_with_index(index, "stringify")
+                .ok()
+                .is_some_and(|(definition, _)| {
+                    definition.as_ptr() as usize - index.text.as_ptr() as usize >= invocation_start
+                })
+        };
+        let preceding_macro_generator_hazard = (0..name.saturating_sub(2)).any(|candidate| {
+            canonical_symbol(tokens[candidate].text)
+                && tokens[candidate + 1].text == "!"
+                && matches!(tokens[candidate + 2].text, "(" | "[" | "{")
+                && !matcher_tokens.contains(&candidate)
+        });
+        if !source_resolution_is_builtin || preceding_macro_generator_hazard {
+            continue;
+        }
+        let open = name + 2;
+        let close = pairs[open]
+            .ok_or_else(|| "stringify! invocation has no closing delimiter".to_string())?;
+        opaque.extend(open + 1..close);
+    }
+    Ok(opaque)
+}
+
+fn rust_authority_opaque_token_indexes(
+    index: &RustSourceIndex<'_>,
+    fragment: &str,
+) -> Result<BTreeSet<usize>, String> {
+    if rust_authority_contains_doc_comment(fragment)? {
+        return Err(
+            "Rust authority contains a doc comment whose token expansion is unsupported"
+                .to_string(),
+        );
+    }
+    let tokens = rust_authority_tokens(fragment)?;
+    let mut opaque = rust_macro_matcher_token_indexes(fragment)?;
+    // Preserve matcher delimiters in the masked semantic view so downstream
+    // scanners can still recognize the macro_rules arm grammar. Everything
+    // inside those delimiters is non-executable matcher syntax.
+    opaque.retain(|token_index| {
+        !matches!(tokens[*token_index].text, "(" | ")" | "[" | "]" | "{" | "}")
+    });
+    opaque.extend(rust_local_macro_literal_argument_token_indexes(
+        index, fragment,
+    )?);
+    opaque.extend(rust_builtin_stringify_argument_token_indexes(
+        index, fragment,
+    )?);
+    Ok(opaque)
+}
+
+fn rust_authority_semantic_fragment(
+    index: &RustSourceIndex<'_>,
+    fragment: &str,
+) -> Result<String, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let opaque = rust_authority_opaque_token_indexes(index, fragment)?;
+    let mut bytes = fragment.as_bytes().to_vec();
+    for token_index in opaque {
+        let token = tokens
+            .get(token_index)
+            .ok_or_else(|| "opaque Rust authority token index is out of bounds".to_string())?;
+        bytes[token.start..token.end].fill(b' ');
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| "masked Rust authority fragment is not valid UTF-8".to_string())
+}
+
+fn rust_visible_generated_primitive_type_names(
+    index: &RustSourceIndex<'_>,
+    module: &str,
+) -> BTreeSet<String> {
+    const PRIMITIVES: &[&str] = &[
+        "bool", "char", "str", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
+        "u64", "u128", "usize", "f32", "f64",
+    ];
+    let all_primitives = || {
+        PRIMITIVES
+            .iter()
+            .map(|primitive| (*primitive).to_string())
+            .collect::<BTreeSet<_>>()
+    };
+    let mut shadowed = BTreeSet::new();
+    for macro_path in rust_visible_generated_item_macros(index, module) {
+        if !canonical_symbol(&macro_path) {
+            shadowed.extend(all_primitives());
+            continue;
+        }
+        let Ok((fragment, _)) = exact_root_macro_rules_fragment_with_index(index, &macro_path)
+        else {
+            // An external, qualified, raw-named, attributed, or otherwise
+            // unbound item macro can emit any nominal spelling.
+            shadowed.extend(all_primitives());
+            continue;
+        };
+        // A later same-named local definition must not launder an earlier
+        // imported or otherwise ambiguous item invocation. Expression/type
+        // invocations of the same macro are irrelevant to the generated-item
+        // namespace and must not make an otherwise exact binding ambiguous.
+        if validate_local_item_macro_linkage(index, module, &macro_path, fragment).is_err() {
+            shadowed.extend(all_primitives());
+            continue;
+        }
+        match rust_macro_transcriber_primitive_type_names(fragment) {
+            Ok(names) => shadowed.extend(names),
+            Err(()) => shadowed.extend(all_primitives()),
+        }
+    }
+    shadowed
+}
+
+fn rust_item_is_runtime_active_with_index(index: &RustSourceIndex<'_>, item_start: usize) -> bool {
+    cfg_attributes_with_lexical(index.text, item_start, index.lexical.as_ref().ok()).is_empty()
+        && index
+            .module_scopes
+            .iter()
+            .filter(|scope| scope.start <= item_start && item_start < scope.end)
+            .all(|scope| scope.cfg_attributes.is_empty())
+        && index
+            .implementation_scopes
+            .iter()
+            .filter(|scope| scope.start <= item_start && item_start < scope.end)
+            .all(|scope| scope.cfg_attributes.is_empty())
+}
+
+fn rust_implementation_owner_at(index: &RustSourceIndex<'_>, item_start: usize) -> Option<String> {
+    let implementation = index
+        .implementation_scopes
+        .iter()
+        .filter(|scope| scope.start <= item_start && item_start < scope.end)
+        .min_by_key(|scope| scope.end - scope.start)?;
+    let module = rust_module_path(&index.module_scopes, item_start);
+    implementation_owner_path(&module, &implementation.name)
+}
+
+fn rust_implementation_scope_at<'index>(
+    index: &'index RustSourceIndex<'_>,
+    item_start: usize,
+) -> Option<&'index RustOwnerScope> {
+    index
+        .implementation_scopes
+        .iter()
+        .filter(|scope| scope.start <= item_start && item_start < scope.end)
+        .min_by_key(|scope| scope.end - scope.start)
+}
+
+fn rust_primitive_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "char"
+            | "str"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Header, lexical, and already-validated roots are deliberately explicit.
+fn reject_unbound_implementation_header_dependencies(
+    index: &RustSourceIndex<'_>,
+    implementation: &RustOwnerScope,
+    module: &str,
+    owner: &str,
+    trait_name: Option<&str>,
+    header: &str,
+    authority: &str,
+) -> Result<(), String> {
+    if rust_authority_contains_non_ascii_identifier(header)?
+        || rust_authority_contains_raw_identifier(header)?
+    {
+        return Err(format!(
+            "{authority} implementation header contains an unsupported identifier"
+        ));
+    }
+    let macro_paths = rust_authority_macro_invocation_paths(header)?;
+    if !macro_paths.is_empty() {
+        return Err(format!(
+            "{authority} implementation header invokes macro(s) {macro_paths:?}; macro-expanded header authority is unsupported"
+        ));
+    }
+    let tokens = rust_authority_tokens(header)?;
+    let (pairs, _) = rust_authority_delimiters(&tokens)?;
+    let mut attribute_tokens = BTreeSet::new();
+    for hash in 0..tokens.len() {
+        if tokens[hash].text != "#" {
+            continue;
+        }
+        let mut open = hash + 1;
+        if tokens.get(open).is_some_and(|token| token.text == "!") {
+            open += 1;
+        }
+        if tokens.get(open).is_some_and(|token| token.text == "[")
+            && let Some(close) = pairs[open]
+        {
+            attribute_tokens.extend(hash..=close);
+        }
+    }
+
+    let allowed_paths = [Some(owner), trait_name]
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    for path in rust_authority_function_paths(header)? {
+        let candidates = rust_lexical_reference_candidates(module, None, &path)?;
+        if candidates
+            .iter()
+            .any(|candidate| allowed_paths.contains(candidate.as_str()))
+        {
+            continue;
+        }
+        return Err(format!(
+            "{authority} implementation header has additional qualified dependency {path:?}; direct, imported, and external header dependencies are unsupported until their definitions join the authority closure"
+        ));
+    }
+
+    let mut allowed_identifiers = implementation.generic_type_bindings.clone();
+    allowed_identifiers.extend(implementation.generic_const_bindings.iter().cloned());
+    for path in allowed_paths {
+        allowed_identifiers.extend(path.split("::").map(str::to_string));
+    }
+    for (position, token) in tokens.iter().enumerate() {
+        if attribute_tokens.contains(&position)
+            || !canonical_symbol(token.text)
+            || token.text == "_"
+            || rust_language_identifier(token.text)
+            || rust_primitive_type_name(token.text)
+            || allowed_identifiers.contains(token.text)
+        {
+            continue;
+        }
+        let previous = position
+            .checked_sub(1)
+            .and_then(|position| tokens.get(position));
+        let next = tokens.get(position + 1);
+        let follows_path_separator = previous.is_some_and(|token| token.text == ":")
+            && position >= 2
+            && tokens[position - 2].text == ":";
+        let precedes_path_separator = next.is_some_and(|token| token.text == ":")
+            && tokens
+                .get(position + 2)
+                .is_some_and(|token| token.text == ":");
+        if previous.is_some_and(|token| token.text == "'")
+            || next.is_some_and(|token| token.text == "'")
+            || follows_path_separator
+            || precedes_path_separator
+        {
+            continue;
+        }
+        let candidates = rust_lexical_reference_candidates(module, None, token.text)?;
+        for candidate in &candidates {
+            if let Some(binding) = rust_import_binding_for_candidate(index, candidate)
+                && (binding.kind == RustImportBindingKind::Exact
+                    || !rust_candidate_is_unique_runtime_direct_type(index, candidate))
+            {
+                return Err(format!(
+                    "{authority} implementation header dependency {:?} resolves through imported or external-source binding {:?}",
+                    token.text, binding.name
+                ));
+            }
+        }
+        if let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| index.direct_type_declarations.contains_key(*candidate))
+        {
+            let disposition = if rust_candidate_is_unique_runtime_direct_type(index, candidate) {
+                "direct local"
+            } else {
+                "conditional or ambiguous local"
+            };
+            return Err(format!(
+                "{authority} implementation header has {disposition} dependency {candidate:?}; its definition is not part of the authority closure"
+            ));
+        }
+        return Err(format!(
+            "{authority} implementation header has unresolved dependency {:?}; extern-prelude and implicit type authority are unsupported",
+            token.text
+        ));
+    }
+    Ok(())
+}
+
+struct RustImplementationAuthority {
+    owner: String,
+    trait_name: Option<String>,
+    header: Vec<u8>,
+}
+
+fn rust_implementation_authority_context(
+    index: &RustSourceIndex<'_>,
+    item_start: usize,
+    authority: &str,
+) -> Result<Option<RustImplementationAuthority>, String> {
+    let Some(implementation) = rust_implementation_scope_at(index, item_start) else {
+        return Ok(None);
+    };
+    if !implementation.generic_bindings_valid {
+        return Err(format!(
+            "{authority} has an implementation header whose generic bindings cannot be resolved canonically"
+        ));
+    }
+    let module = rust_module_path(&index.module_scopes, item_start);
+    let owner = implementation_owner_path(&module, &implementation.name).ok_or_else(|| {
+        format!("{authority} has an implementation owner that cannot be resolved canonically")
+    })?;
+    if index.type_aliases.contains(&owner) {
+        return Err(format!(
+            "{authority} implementation owner {owner:?} is a type alias whose target is not explicit authority"
+        ));
+    }
+    let owner_module = owner.rsplit_once("::").map_or("", |(module, _)| module);
+    let generated_primitive_types =
+        rust_visible_generated_primitive_type_names(index, owner_module);
+    if rust_primitive_type_name(rust_qualified_name_tail(&owner))
+        && generated_primitive_types.contains(rust_qualified_name_tail(&owner))
+    {
+        return Err(format!(
+            "{authority} implementation owner {owner:?} uses a primitive spelling that a visible item-position macro can generate as a nominal type; macro-generated nominal owner authority is unsupported"
+        ));
+    }
+    let direct_owner = (index.nominal_type_names.contains(&owner)
+        && rust_candidate_is_unique_runtime_direct_type(index, &owner))
+        || rust_primitive_type_name(&owner);
+    if let Some(binding) = rust_import_binding_for_candidate(index, &owner)
+        && (binding.kind == RustImportBindingKind::Exact || !direct_owner)
+    {
+        return Err(format!(
+            "{authority} implementation owner {owner:?} resolves through imported or external-source binding {:?}",
+            binding.name
+        ));
+    }
+    if !direct_owner {
+        return Err(format!(
+            "{authority} implementation owner {owner:?} does not resolve to a direct nominal source type"
+        ));
+    }
+    let header = implementation
+        .semantic_header
+        .clone()
+        .ok_or_else(|| format!("{authority} implementation header could not be canonicalized"))?;
+    if implementation.header_has_conditional {
+        return Err(format!(
+            "{authority} implementation header contains conditional authority"
+        ));
+    }
+    let trait_name = implementation
+        .trait_name
+        .as_deref()
+        .and_then(|name| implementation_owner_path(&module, name));
+    if let Some(trait_name) = &trait_name {
+        let direct_trait = index.trait_names.contains(trait_name)
+            && rust_candidate_is_unique_runtime_direct_type(index, trait_name);
+        if let Some(binding) = rust_import_binding_for_candidate(index, trait_name)
+            && (binding.kind == RustImportBindingKind::Exact || !direct_trait)
+        {
+            return Err(format!(
+                "{authority} implemented trait {trait_name:?} resolves through imported or external-source binding {:?}",
+                binding.name
+            ));
+        }
+        if !direct_trait {
+            return Err(format!(
+                "{authority} implemented trait {trait_name:?} does not resolve to a direct source trait"
+            ));
+        }
+    }
+    let (header_start, header_end) = implementation.semantic_header_range.ok_or_else(|| {
+        format!("{authority} implementation header source range could not be resolved")
+    })?;
+    let header_source = index
+        .text
+        .get(header_start..header_end)
+        .ok_or_else(|| format!("{authority} implementation header source range is invalid"))?;
+    reject_unbound_implementation_header_dependencies(
+        index,
+        implementation,
+        &module,
+        &owner,
+        trait_name.as_deref(),
+        header_source,
+        authority,
+    )?;
+    Ok(Some(RustImplementationAuthority {
+        owner,
+        trait_name,
+        header,
+    }))
+}
+
+fn rust_qualified_name_tail(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, tail)| tail)
+}
+
+/// Resolve only explicit, runtime-active source-level `const` items.
+///
+/// Identity declarations intentionally name a bare symbol within an exact
+/// source file. A same-named `static`, explicit `use ... as ...` binding, or
+/// second module-local declaration makes that file-level reference ambiguous;
+/// generated and nested expression-level declarations never enter the index.
+fn runtime_source_const_declarations_with_index<'a>(
+    _text: &'a str,
+    symbol: &str,
+    index: &RustSourceIndex<'a>,
+) -> Vec<&'a str> {
+    if !canonical_symbol(symbol)
+        || index
+            .use_aliases
+            .keys()
+            .any(|name| rust_qualified_name_tail(name) == symbol)
+    {
+        return Vec::new();
+    }
+
+    let declarations = index
+        .values
+        .iter()
+        .filter(|(name, _)| rust_qualified_name_tail(name) == symbol)
+        .flat_map(|(_, declarations)| declarations.iter())
+        .filter(|declaration| {
+            !declaration.associated
+                && rust_item_is_runtime_active_with_index(index, declaration.keyword_start)
+        })
+        .collect::<Vec<_>>();
+    if declarations
+        .iter()
+        .any(|declaration| declaration.kind != RustValueKind::Const)
+    {
+        return Vec::new();
+    }
+
+    let mut fragments = declarations
+        .into_iter()
+        .map(|declaration| declaration.fragment)
+        .collect::<Vec<_>>();
+    fragments.sort_by_key(|fragment| fragment.as_ptr() as usize);
+    fragments.dedup_by_key(|fragment| fragment.as_ptr() as usize);
+    fragments
+}
+
+fn function_keyword_start(text: &str, index: &RustSourceIndex<'_>, fragment: &str) -> usize {
+    let fragment_start = fragment.as_ptr() as usize - text.as_ptr() as usize;
+    index
+        .function_keyword_starts
+        .get(&fragment_start)
+        .copied()
+        .unwrap_or(fragment_start)
+}
+
+#[derive(Clone, Copy)]
+enum RustDirectImplementationMember {
+    Function,
+    Const,
+}
+
+fn rust_item_is_in_exact_implementation_scope(
+    index: &RustSourceIndex<'_>,
+    item_start: usize,
+    implementation_scope: (usize, usize),
+) -> bool {
+    rust_implementation_scope_at(index, item_start)
+        .is_some_and(|scope| (scope.start, scope.end) == implementation_scope)
+}
+
+fn rust_direct_implementation_member(
+    index: &RustSourceIndex<'_>,
+    owner_scope: &str,
+    member: &str,
+    implementation_scope: (usize, usize),
+    authority: &str,
+    reference: &str,
+) -> Result<Option<(String, RustDirectImplementationMember)>, String> {
+    let candidate = qualify_rust_name(owner_scope, member);
+    let functions = index
+        .functions
+        .get(&candidate)
+        .into_iter()
+        .flat_map(|fragments| fragments.iter().copied())
+        .filter(|fragment| {
+            rust_item_is_in_exact_implementation_scope(
+                index,
+                function_keyword_start(index.text, index, fragment),
+                implementation_scope,
+            )
+        })
+        .collect::<Vec<_>>();
+    let values = index
+        .values
+        .get(&candidate)
+        .into_iter()
+        .flat_map(|declarations| declarations.iter().copied())
+        .filter(|declaration| {
+            rust_item_is_in_exact_implementation_scope(
+                index,
+                declaration.keyword_start,
+                implementation_scope,
+            )
+        })
+        .collect::<Vec<_>>();
+    if values
+        .iter()
+        .any(|declaration| declaration.kind != RustValueKind::Const)
+    {
+        return Err(format!(
+            "{authority} direct implementation member {reference:?} resolves to address-bearing static state; static authority is unsupported"
+        ));
+    }
+    match (functions.as_slice(), values.as_slice()) {
+        ([], []) => Ok(None),
+        ([_], []) => Ok(Some((candidate, RustDirectImplementationMember::Function))),
+        ([], [_]) => Ok(Some((candidate, RustDirectImplementationMember::Const))),
+        _ => Err(format!(
+            "{authority} implementation member {reference:?} must resolve to exactly one function or const declared in the exact current impl; found {} functions and {} constants (trait defaults and declarations from other impls require explicit authority)",
+            functions.len(),
+            values.len()
+        )),
     }
 }
 
@@ -2343,8 +4210,9 @@ fn has_function_with_index(text: &str, index: &RustSourceIndex<'_>, reference: &
     let [fragment] = fragments.as_slice() else {
         return false;
     };
-    let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
-    rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+    let start = function_keyword_start(text, index, fragment);
+    rust_item_is_runtime_active_with_index(index, start)
+        && !rust_semantic_function_has_conditional_attribute(fragment).unwrap_or(true)
 }
 
 fn has_function(text: &str, reference: &str) -> bool {
@@ -2568,14 +4436,6 @@ fn normalized_rust_fragment(fragment: &str) -> Vec<u8> {
     out
 }
 
-fn identifier_tokens(fragment: &str) -> BTreeSet<String> {
-    fragment
-        .split(|character: char| character != '_' && !character.is_ascii_alphanumeric())
-        .filter(|token| canonical_symbol(token))
-        .map(str::to_string)
-        .collect()
-}
-
 fn append_schema_frame(out: &mut Vec<u8>, label: &str, bytes: &[u8]) {
     let label_len = u64::try_from(label.len()).expect("schema label length fits u64");
     let bytes_len = u64::try_from(bytes.len()).expect("schema fragment length fits u64");
@@ -2585,76 +4445,1103 @@ fn append_schema_frame(out: &mut Vec<u8>, label: &str, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn normalized_rust_function_closure_with_symbols_and_index(
-    text: &str,
-    index: &RustSourceIndex<'_>,
-    roots: impl IntoIterator<Item = String>,
-) -> Result<(Vec<u8>, BTreeSet<String>), String> {
-    let mut pending = roots.into_iter().collect::<BTreeSet<_>>();
-    let mut seen = BTreeSet::new();
-    let mut constants = BTreeSet::new();
-    let mut out = Vec::new();
-    while let Some(reference) = pending.pop_first() {
-        if !seen.insert(reference.clone()) {
+fn constant_style_identifier(identifier: &str) -> bool {
+    identifier
+        .bytes()
+        .all(|byte| byte == b'_' || byte.is_ascii_digit() || byte.is_ascii_uppercase())
+        && identifier.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+fn rust_macro_bound_identifiers(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let mut bound = BTreeSet::new();
+    for index in 0..tokens.len() {
+        if tokens[index].text == "$"
+            && let Some(identifier) = tokens.get(index + 1)
+            && canonical_symbol(identifier.text)
+        {
+            bound.insert(identifier.text.to_string());
+        }
+        if !matches!(
+            tokens[index].text,
+            "impl" | "fn" | "struct" | "enum" | "trait" | "type"
+        ) {
             continue;
         }
-        let fragments = index
-            .functions
-            .get(&reference)
-            .map_or(&[][..], Vec::as_slice);
-        let [fragment] = fragments else {
-            return Err(format!(
-                "function {reference:?} must resolve to exactly one item; found {}",
-                fragments.len()
-            ));
+        let Some(open) = (index + 1..tokens.len()).find(|candidate| {
+            tokens[*candidate].text == "<" || matches!(tokens[*candidate].text, "{" | ";" | "where")
+        }) else {
+            continue;
         };
-        let fragment_start = fragment.as_ptr() as usize - text.as_ptr() as usize;
-        if !rust_item_is_runtime_active_with_scopes(text, fragment_start, &index.module_scopes) {
-            return Err(format!(
-                "function {reference:?} is behind cfg/cfg_attr and cannot be a runtime identity schema authority"
-            ));
+        if tokens[open].text != "<" {
+            continue;
         }
-        append_schema_frame(
-            &mut out,
-            &format!("fn:{reference}"),
-            &normalized_rust_fragment(fragment),
-        );
-        let scope = reference.rsplit_once("::").map(|(scope, _)| scope);
-        for token in identifier_tokens(fragment) {
-            if token
-                .bytes()
-                .all(|byte| byte == b'_' || byte.is_ascii_digit() || byte.is_ascii_uppercase())
-                && runtime_const_declarations_with_scopes(text, &token, &index.module_scopes).len()
-                    == 1
-            {
-                constants.insert(token.clone());
-            }
-            let mut candidates = BTreeSet::from([token.clone()]);
-            if let Some(scope) = scope {
-                candidates.insert(format!("{scope}::{token}"));
-            }
-            for candidate in candidates {
-                if !seen.contains(&candidate)
-                    && index
-                        .functions
-                        .get(&candidate)
-                        .is_some_and(|fragments| fragments.len() == 1)
-                {
-                    pending.insert(candidate);
+        let mut angle_depth = 1usize;
+        for token in &tokens[open + 1..] {
+            match token.text {
+                "<" => angle_depth += 1,
+                ">" => {
+                    angle_depth -= 1;
+                    if angle_depth == 0 {
+                        break;
+                    }
                 }
+                identifier if canonical_symbol(identifier) => {
+                    bound.insert(identifier.to_string());
+                }
+                _ => {}
             }
         }
     }
-    for constant in constants {
-        let declarations =
-            runtime_const_declarations_with_scopes(text, &constant, &index.module_scopes);
-        let [declaration] = declarations.as_slice() else {
+    Ok(bound)
+}
+
+fn rust_macro_required_constant_candidates(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let bound = rust_macro_bound_identifiers(fragment)?;
+    let matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    Ok(tokens
+        .iter()
+        .enumerate()
+        .filter(|(index, token)| {
+            constant_style_identifier(token.text)
+                && !matcher_tokens.contains(index)
+                && !bound.contains(token.text)
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|previous| matches!(previous.text, "$" | ":"))
+                && !tokens.get(index + 1).is_some_and(|next| next.text == ":")
+        })
+        .map(|(_, token)| token.text.to_string())
+        .collect())
+}
+
+fn rust_lexical_reference_candidates(
+    module: &str,
+    owner_scope: Option<&str>,
+    reference: &str,
+) -> Result<Vec<String>, String> {
+    let parts = reference.split("::").collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    match parts.as_slice() {
+        [symbol] => {
+            candidates.push(qualify_rust_name(module, symbol));
+        }
+        ["crate", rest @ ..] if !rest.is_empty() => candidates.push(rest.join("::")),
+        ["self", rest @ ..] if !rest.is_empty() => {
+            candidates.push(qualify_rust_name(module, &rest.join("::")));
+        }
+        ["Self", rest @ ..] if !rest.is_empty() => {
+            let Some(owner_scope) = owner_scope else {
+                return Err(format!(
+                    "associated reference {reference:?} has no enclosing implementation owner"
+                ));
+            };
+            candidates.push(qualify_rust_name(owner_scope, &rest.join("::")));
+        }
+        ["super", ..] => {
+            let super_count = parts.iter().take_while(|part| **part == "super").count();
+            let rest = &parts[super_count..];
+            if rest.is_empty() {
+                return Err(format!(
+                    "parent reference {reference:?} has no referenced item"
+                ));
+            }
+            let mut parent = module
+                .split("::")
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            if super_count > parent.len() {
+                return Err(format!(
+                    "parent reference {reference:?} escapes above the lexical crate root from module {module:?}"
+                ));
+            }
+            parent.truncate(parent.len() - super_count);
+            candidates.push(qualify_rust_name(&parent.join("::"), &rest.join("::")));
+        }
+        _ => {
+            candidates.push(qualify_rust_name(module, reference));
+            candidates.push(reference.to_string());
+        }
+    }
+    candidates.dedup();
+    Ok(candidates)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RustImportBindingKind {
+    Exact,
+    Wildcard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RustImportBinding<'a> {
+    name: &'a str,
+    kind: RustImportBindingKind,
+}
+
+fn rust_import_binding_for_candidate<'a>(
+    index: &'a RustSourceIndex<'_>,
+    candidate: &str,
+) -> Option<RustImportBinding<'a>> {
+    let exact = index
+        .use_aliases
+        .keys()
+        .filter(|binding| *binding != "*" && !binding.ends_with("::*"))
+        .find(|binding| {
+            binding.as_str() == candidate
+                || candidate
+                    .strip_prefix(binding.as_str())
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+        })
+        .map(|binding| RustImportBinding {
+            name: binding,
+            kind: RustImportBindingKind::Exact,
+        });
+    if exact.is_some() {
+        return exact;
+    }
+    let external = index
+        .external_source_bindings
+        .keys()
+        .find(|binding| {
+            binding.as_str() == candidate
+                || candidate
+                    .strip_prefix(binding.as_str())
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+        })
+        .map(|binding| RustImportBinding {
+            name: binding,
+            kind: RustImportBindingKind::Exact,
+        });
+    if external.is_some() {
+        return external;
+    }
+    index
+        .external_source_bindings
+        .keys()
+        .chain(index.use_aliases.keys())
+        .find_map(|binding| {
+            let prefix = if binding == "*" {
+                ""
+            } else {
+                binding.strip_suffix("::*")?
+            };
+            (prefix.is_empty()
+                || candidate == prefix
+                || candidate
+                    .strip_prefix(prefix)
+                    .is_some_and(|suffix| suffix.starts_with("::")))
+            .then_some(RustImportBinding {
+                name: binding,
+                kind: RustImportBindingKind::Wildcard,
+            })
+        })
+}
+
+fn runtime_source_const_dependency<'a>(
+    index: &RustSourceIndex<'a>,
+    module: &str,
+    owner_scope: Option<&str>,
+    reference: &str,
+) -> Result<Option<(String, RustValueDeclaration<'a>)>, String> {
+    if !canonical_function_reference(reference) {
+        return Ok(None);
+    }
+    if owner_scope.is_none() && reference.strip_prefix("Self::").is_some() {
+        return Err(format!(
+            "explicit associated dependency {reference:?} has no enclosing implementation owner"
+        ));
+    }
+    let candidates = rust_lexical_reference_candidates(module, owner_scope, reference)?;
+    for candidate in &candidates {
+        let imported_binding = rust_import_binding_for_candidate(index, &candidate);
+        let declarations = index.values.get(candidate);
+        if let Some(imported_binding) = imported_binding
+            && (imported_binding.kind == RustImportBindingKind::Exact || declarations.is_none())
+        {
+            return Err(format!(
+                "constant dependency {reference:?} resolves through imported binding {:?}; imported constant authority must be declared explicitly",
+                imported_binding.name
+            ));
+        }
+        let Some(declarations) = declarations else {
             continue;
         };
+        let [declaration] = declarations.as_slice() else {
+            return Err(format!(
+                "constant dependency {reference:?} must resolve to exactly one runtime source item; {candidate:?} has {} declarations",
+                declarations.len()
+            ));
+        };
+        if declaration.kind != RustValueKind::Const {
+            return Err(format!(
+                "constant dependency {reference:?} resolves to static item {candidate:?}; mutable or address-bearing state cannot be inferred as schema authority"
+            ));
+        }
+        if !rust_item_is_runtime_active_with_index(index, declaration.keyword_start) {
+            return Err(format!(
+                "constant dependency {reference:?} resolves to cfg/cfg_attr-dependent item {candidate:?}; conditional source authority is unsupported"
+            ));
+        }
+        return Ok(Some((candidate.clone(), *declaration)));
+    }
+    if reference.starts_with("Self::")
+        && !candidates.iter().any(|candidate| {
+            index
+                .functions
+                .get(candidate)
+                .is_some_and(|fragments| fragments.len() == 1)
+        })
+    {
+        return Err(format!(
+            "explicit associated dependency {reference:?} does not resolve to a direct source item; inherited trait defaults require explicit authority"
+        ));
+    }
+    Ok(None)
+}
+
+fn runtime_source_const_closure<'a>(
+    index: &RustSourceIndex<'a>,
+    roots: impl IntoIterator<Item = (String, Option<String>, String)>,
+) -> Result<BTreeMap<String, RustValueDeclaration<'a>>, String> {
+    let mut pending = roots.into_iter().collect::<BTreeSet<_>>();
+    let mut seen_references = BTreeSet::new();
+    let mut declarations = BTreeMap::new();
+    while let Some((module, owner_scope, reference)) = pending.pop_first() {
+        if !seen_references.insert((module.clone(), owner_scope.clone(), reference.clone())) {
+            continue;
+        }
+        let Some((locator, declaration)) =
+            runtime_source_const_dependency(index, &module, owner_scope.as_deref(), &reference)?
+        else {
+            continue;
+        };
+        if declarations.contains_key(&locator) {
+            continue;
+        }
+        declarations.insert(locator.clone(), declaration);
+        let declaration_module = rust_module_path(&index.module_scopes, declaration.keyword_start);
+        let declaration_owner = declaration
+            .associated
+            .then(|| {
+                locator
+                    .rsplit_once("::")
+                    .map_or(locator.as_str(), |(owner, _)| owner)
+            })
+            .map(str::to_string);
+        let mut macro_nonvalue_tokens =
+            rust_local_macro_type_argument_token_indexes(index, declaration.fragment)?;
+        macro_nonvalue_tokens.extend(rust_authority_opaque_token_indexes(
+            index,
+            declaration.fragment,
+        )?);
+        let mut dependency_identifiers =
+            rust_authority_dependency_identifiers(declaration.fragment, &macro_nonvalue_tokens)?;
+        if let Some(implementation) = rust_implementation_scope_at(index, declaration.keyword_start)
+        {
+            if !implementation.generic_bindings_valid {
+                return Err(format!(
+                    "constant dependency {locator:?} has an implementation header whose generic bindings cannot be resolved canonically"
+                ));
+            }
+            dependency_identifiers
+                .retain(|identifier| !implementation.generic_const_bindings.contains(identifier));
+        }
+        for identifier in dependency_identifiers {
+            pending.insert((
+                declaration_module.clone(),
+                declaration_owner.clone(),
+                identifier,
+            ));
+        }
+        for identifier in rust_authority_embedded_value_dependency_identifiers(
+            declaration.fragment,
+            &declaration_module,
+            declaration_owner.as_deref(),
+            index,
+        )? {
+            pending.insert((
+                declaration_module.clone(),
+                declaration_owner.clone(),
+                identifier,
+            ));
+        }
+        let semantic_declaration = rust_authority_semantic_fragment(index, declaration.fragment)?;
+        let declaration_tokens = rust_authority_tokens(&semantic_declaration)?;
+        let declaration_type_tokens = rust_authority_type_token_indexes(&declaration_tokens)?;
+        for path in rust_authority_function_paths(&semantic_declaration)? {
+            let namespaces = rust_path_occurrence_namespaces(
+                &semantic_declaration,
+                &declaration_tokens,
+                &declaration_type_tokens,
+                &declaration_module,
+                declaration_owner.as_deref(),
+                index,
+                &path,
+            )?;
+            if namespaces.contains(&RustNameNamespace::Value) {
+                pending.insert((declaration_module.clone(), declaration_owner.clone(), path));
+            }
+        }
+    }
+    Ok(declarations)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Explicit closure state prevents hidden authority inputs.
+fn enqueue_rust_fragment_dependencies<'a>(
+    fragment: &str,
+    module: &str,
+    owner_scope: Option<&str>,
+    trait_scope: Option<&str>,
+    implementation_scope: Option<(usize, usize)>,
+    index: &RustSourceIndex<'a>,
+    authority: &str,
+    pending_functions: &mut BTreeSet<String>,
+    constant_roots: &mut BTreeSet<(String, Option<String>, String)>,
+    enum_authorities: &mut BTreeMap<String, &'a str>,
+) -> Result<(), String> {
+    reject_imported_function_dependencies(fragment, module, owner_scope, index, authority)?;
+    let opaque_tokens = rust_authority_opaque_token_indexes(index, fragment)?;
+    let semantic_fragment = rust_authority_semantic_fragment(index, fragment)?;
+    let mut macro_nonvalue_tokens = rust_local_macro_type_argument_token_indexes(index, fragment)?;
+    macro_nonvalue_tokens.extend(opaque_tokens.iter().copied());
+    let mut dependency_identifiers =
+        rust_authority_dependency_identifiers(fragment, &macro_nonvalue_tokens)?;
+    // Keep dynamic local-macro arguments conservative. Only positions proven
+    // by first-match ordered literal matching or a whole `$capture:ty` arm are
+    // excluded; subtracting by spelling can omit a genuinely reached helper.
+    let fragment_start = fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    if let Some(implementation) = rust_implementation_scope_at(index, fragment_start) {
+        if !implementation.generic_bindings_valid {
+            return Err(format!(
+                "{authority} has an implementation header whose generic bindings cannot be resolved canonically"
+            ));
+        }
+        dependency_identifiers
+            .retain(|identifier| !implementation.generic_const_bindings.contains(identifier));
+    }
+    for identifier in
+        rust_authority_embedded_value_dependency_identifiers(fragment, module, owner_scope, index)?
+    {
+        constant_roots.insert((
+            module.to_string(),
+            owner_scope.map(str::to_string),
+            identifier,
+        ));
+    }
+    let mut call_references = rust_authority_call_references(&semantic_fragment)?;
+    let mut function_paths = rust_authority_function_paths(&semantic_fragment)?;
+    let mut provable_trait_paths = rust_authority_trait_self_call_paths(&semantic_fragment)?;
+    let authority_tokens = rust_authority_tokens(fragment)?;
+    let authority_type_tokens = rust_authority_type_token_indexes(&authority_tokens)?;
+    let authority_embedded_value_tokens =
+        rust_authority_embedded_value_token_indexes(fragment, module, owner_scope, index)?;
+    let semantic_tokens = rust_authority_tokens(&semantic_fragment)?;
+    let semantic_type_tokens = rust_authority_type_token_indexes(&semantic_tokens)?;
+    let mut synthetic_ufcs_value_paths = BTreeSet::new();
+    for (path, is_call, member_index) in rust_authority_self_ufcs_paths(fragment)? {
+        if opaque_tokens.contains(&member_index) {
+            continue;
+        }
+        if !is_call
+            && authority_type_tokens.contains(&member_index)
+            && !authority_embedded_value_tokens.contains(&member_index)
+        {
+            continue;
+        }
+        if is_call {
+            call_references.insert(path.clone());
+        }
+        provable_trait_paths.insert(path.clone());
+        synthetic_ufcs_value_paths.insert(path.clone());
+        function_paths.insert(path);
+    }
+    let generated_item_macros = rust_visible_generated_item_macros(index, module);
+    if !generated_item_macros.is_empty() {
+        for call in &call_references {
+            let bare_lexical_binding =
+                !call.contains("::") && !dependency_identifiers.contains(call.as_str());
+            if bare_lexical_binding {
+                continue;
+            }
+            let resolves_directly = rust_lexical_reference_candidates(module, owner_scope, call)?
+                .into_iter()
+                .any(|candidate| index.functions.contains_key(&candidate));
+            if !resolves_directly {
+                return Err(format!(
+                    "{authority} has unresolved call {call:?} in a module containing visible item-position macro invocation(s) {generated_item_macros:?}; generated item authority is unsupported"
+                ));
+            }
+        }
+    }
+    for token in dependency_identifiers {
+        let candidates = rust_lexical_reference_candidates(module, owner_scope, &token)?;
+        // These identifiers come from executable initializers/bodies. A
+        // same-spelled type must not suppress poisoning of an unresolved
+        // macro-generated const or function in the separate value namespace.
+        // Struct-constructor classification remains deliberately unsupported
+        // here and therefore fails closed when an item macro is visible.
+        let resolves_to_direct_item = candidates.iter().any(|candidate| {
+            rust_candidate_is_direct_source_item(index, candidate, RustNameNamespace::Value)
+        });
+        let mut resolves_to_local_function = false;
+        for candidate in &candidates {
+            let Some(fragments) = index.functions.get(candidate) else {
+                continue;
+            };
+            resolves_to_local_function = true;
+            if fragments.len() != 1 {
+                return Err(format!(
+                    "{authority} helper {candidate:?} must resolve to exactly one source item; found {}",
+                    fragments.len()
+                ));
+            }
+            pending_functions.insert(candidate.clone());
+        }
+        if !call_references.contains(&token) && !resolves_to_local_function {
+            if !generated_item_macros.is_empty() && !resolves_to_direct_item {
+                return Err(format!(
+                    "{authority} has unresolved value dependency {token:?} in a module containing visible item-position macro invocation(s) {generated_item_macros:?}; generated item authority is unsupported"
+                ));
+            }
+            constant_roots.insert((module.to_string(), owner_scope.map(str::to_string), token));
+        }
+    }
+    for path in function_paths {
+        let has_value_occurrence = call_references.contains(&path)
+            || synthetic_ufcs_value_paths.contains(&path)
+            || rust_path_occurrence_namespaces(
+                &semantic_fragment,
+                &semantic_tokens,
+                &semantic_type_tokens,
+                module,
+                owner_scope,
+                index,
+                &path,
+            )?
+            .contains(&RustNameNamespace::Value);
+        if !has_value_occurrence {
+            continue;
+        }
+        let mut direct_enum_variants = Vec::new();
+        for candidate in rust_lexical_reference_candidates(module, owner_scope, &path)? {
+            if let Some(variant) = rust_direct_enum_variant_authority(index, &candidate)? {
+                direct_enum_variants.push((candidate, variant));
+            }
+        }
+        if direct_enum_variants.len() > 1 {
+            return Err(format!(
+                "{authority} enum variant path {path:?} resolves to multiple direct source candidates"
+            ));
+        }
+        if let Some((candidate, variant)) = direct_enum_variants.pop() {
+            let colliding_value = index
+                .values
+                .get(&candidate)
+                .is_some_and(|declarations| !declarations.is_empty());
+            let colliding_function = index
+                .functions
+                .get(&candidate)
+                .is_some_and(|declarations| !declarations.is_empty());
+            if colliding_value || colliding_function {
+                return Err(format!(
+                    "{authority} path {path:?} is ambiguous between an exact enum variant and another direct Value-namespace item"
+                ));
+            }
+            let owner = candidate
+                .rsplit_once("::")
+                .map_or(candidate.as_str(), |(owner, _)| owner);
+            enum_authorities.insert(owner.to_string(), variant.enum_fragment);
+            continue;
+        }
+        if let Some((parent, member)) = path.rsplit_once("::") {
+            let parent_candidates = rust_lexical_reference_candidates(module, None, parent)?;
+            let matches_current_trait = trait_scope.is_some_and(|trait_scope| {
+                parent_candidates.iter().any(|item| item == trait_scope)
+            });
+            let direct_self_member = parent == "Self";
+            if direct_self_member || (matches_current_trait && provable_trait_paths.contains(&path))
+            {
+                let Some(owner_scope) = owner_scope else {
+                    return Err(format!(
+                        "{authority} references direct implementation member {path:?} without a canonical self owner"
+                    ));
+                };
+                let Some(implementation_scope) = implementation_scope else {
+                    return Err(format!(
+                        "{authority} references direct implementation member {path:?} without an exact enclosing implementation scope"
+                    ));
+                };
+                let candidate = qualify_rust_name(owner_scope, member);
+                let direct_member = rust_direct_implementation_member(
+                    index,
+                    owner_scope,
+                    member,
+                    implementation_scope,
+                    authority,
+                    &path,
+                )?;
+                let enum_variant = direct_self_member
+                    .then(|| rust_direct_enum_variant_authority(index, &candidate))
+                    .transpose()?
+                    .flatten();
+                if direct_member.is_some() && enum_variant.is_some() {
+                    return Err(format!(
+                        "{authority} associated reference {path:?} is ambiguous between an exact implementation member and a direct enum variant"
+                    ));
+                }
+                if let Some(enum_variant) = enum_variant {
+                    enum_authorities.insert(owner_scope.to_string(), enum_variant.enum_fragment);
+                    continue;
+                }
+                let Some((candidate, direct_member)) = direct_member else {
+                    return Err(format!(
+                        "{authority} implementation member {path:?} must resolve to exactly one function or const declared in the exact current impl, or one unconditional direct enum variant; found none (trait defaults and declarations from other impls require explicit authority)"
+                    ));
+                };
+                match direct_member {
+                    RustDirectImplementationMember::Function => {
+                        let fragments = index
+                            .functions
+                            .get(&candidate)
+                            .map_or(&[][..], Vec::as_slice);
+                        if fragments.len() != 1 {
+                            return Err(format!(
+                                "{authority} direct implementation helper {path:?} is owner-flattened with {} declarations at {candidate:?}; colliding impl authority is unsupported",
+                                fragments.len()
+                            ));
+                        }
+                        pending_functions.insert(candidate);
+                    }
+                    RustDirectImplementationMember::Const => {
+                        let declarations =
+                            index.values.get(&candidate).map_or(&[][..], Vec::as_slice);
+                        if declarations.len() != 1 {
+                            return Err(format!(
+                                "{authority} direct implementation const {path:?} is owner-flattened with {} declarations at {candidate:?}; colliding impl authority is unsupported",
+                                declarations.len()
+                            ));
+                        }
+                        constant_roots.insert((
+                            module.to_string(),
+                            Some(owner_scope.to_string()),
+                            format!("Self::{member}"),
+                        ));
+                    }
+                }
+                continue;
+            }
+            if parent_candidates.iter().any(|candidate| {
+                index.trait_names.contains(candidate)
+                    && rust_candidate_is_unique_runtime_direct_type(index, candidate)
+            }) {
+                return Err(format!(
+                    "{authority} references local trait member {path:?} outside a provable direct implementation context"
+                ));
+            }
+        }
+        constant_roots.insert((
+            module.to_string(),
+            owner_scope.map(str::to_string),
+            path.clone(),
+        ));
+        for candidate in rust_lexical_reference_candidates(module, owner_scope, &path)? {
+            let Some(fragments) = index.functions.get(&candidate) else {
+                continue;
+            };
+            if fragments.len() != 1 {
+                return Err(format!(
+                    "{authority} helper {candidate:?} must resolve to exactly one source item; found {}",
+                    fragments.len()
+                ));
+            }
+            pending_functions.insert(candidate);
+        }
+    }
+    for method in rust_authority_self_method_calls(&semantic_fragment)? {
+        let Some(owner_scope) = owner_scope else {
+            return Err(format!(
+                "{authority} calls self.{method}() without an enclosing implementation owner"
+            ));
+        };
+        let Some(implementation_scope) = implementation_scope else {
+            return Err(format!(
+                "{authority} calls self.{method}() without an exact enclosing implementation scope"
+            ));
+        };
+        let reference = format!("Self::{method}");
+        let Some((candidate, direct_member)) = rust_direct_implementation_member(
+            index,
+            owner_scope,
+            &method,
+            implementation_scope,
+            authority,
+            &reference,
+        )?
+        else {
+            return Err(format!(
+                "{authority} self method {reference:?} must resolve to exactly one function declared in the exact current impl; found none (trait defaults and declarations from other impls require explicit authority)"
+            ));
+        };
+        if !matches!(direct_member, RustDirectImplementationMember::Function) {
+            return Err(format!(
+                "{authority} self method {reference:?} does not resolve to a function declared in the exact current impl"
+            ));
+        }
+        let fragments = index
+            .functions
+            .get(&candidate)
+            .map_or(&[][..], Vec::as_slice);
+        if fragments.len() != 1 {
+            return Err(format!(
+                "{authority} self method {candidate:?} is owner-flattened with {} declarations; colliding impl authority is unsupported",
+                fragments.len()
+            ));
+        }
+        pending_functions.insert(candidate);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Every lexical and authority context is deliberately explicit.
+fn bind_local_macro_dependencies<'a>(
+    text: &'a str,
+    index: &RustSourceIndex<'a>,
+    local_macros: &BTreeSet<String>,
+    roots: impl IntoIterator<Item = String>,
+    invocation_module: &str,
+    invocation_owner: Option<&str>,
+    visibility_cutoff: usize,
+    authority: &str,
+    local_macro_authorities: &mut BTreeMap<String, Vec<u8>>,
+    local_macro_contexts: &mut BTreeSet<(String, String, Option<String>, usize)>,
+) -> Result<Vec<&'a str>, String> {
+    let mut pending = roots
+        .into_iter()
+        .filter(|name| local_macros.contains(name))
+        .collect::<BTreeSet<_>>();
+    let mut fragments = Vec::new();
+    while let Some(macro_name) = pending.pop_first() {
+        let context = (
+            macro_name.clone(),
+            invocation_module.to_string(),
+            invocation_owner.map(str::to_string),
+            visibility_cutoff,
+        );
+        if !local_macro_contexts.insert(context) {
+            continue;
+        }
+        let (macro_fragment, inner_attributes) =
+            exact_root_macro_rules_fragment_with_index(index, &macro_name).map_err(|detail| {
+                format!("{authority} local macro dependency {macro_name:?} is invalid: {detail}")
+            })?;
+        let definition_start = macro_fragment.as_ptr() as usize - text.as_ptr() as usize;
+        if definition_start >= visibility_cutoff {
+            if rust_toolchain_authority_macro(&macro_name) {
+                // A later same-named local definition is outside textual
+                // scope; the invocation resolves to the explicitly admitted
+                // toolchain macro instead.
+                continue;
+            }
+            return Err(format!(
+                "{authority} invokes macro {macro_name:?} before its only local definition, and no toolchain-bound fallback is admitted"
+            ));
+        }
+        let semantic_macro_fragment = rust_authority_semantic_fragment(index, macro_fragment)?;
+        if rust_authority_contains_non_ascii_identifier(&semantic_macro_fragment)?
+            || rust_authority_contains_raw_identifier(&semantic_macro_fragment)?
+        {
+            return Err(format!(
+                "{authority} local macro dependency {macro_name:?} contains an unsupported identifier"
+            ));
+        }
+        if rust_authority_has_conditional_attribute(&semantic_macro_fragment)? {
+            return Err(format!(
+                "{authority} local macro dependency {macro_name:?} contains nested cfg/cfg_attr authority"
+            ));
+        }
+        reject_imported_function_dependencies(
+            macro_fragment,
+            invocation_module,
+            invocation_owner,
+            index,
+            &format!("{authority} local macro {macro_name:?}"),
+        )?;
+        let mut macro_authority = Vec::new();
+        for (ordinal, attribute) in inner_attributes.iter().enumerate() {
+            append_schema_frame(
+                &mut macro_authority,
+                &format!("root-inner-attribute:{ordinal}"),
+                attribute.as_bytes(),
+            );
+        }
+        append_schema_frame(
+            &mut macro_authority,
+            &format!("macro_rules!:{macro_name}"),
+            macro_fragment.as_bytes(),
+        );
+        local_macro_authorities
+            .entry(macro_name.clone())
+            .or_insert(macro_authority);
+        fragments.push(macro_fragment);
+        pending.extend(
+            rust_authority_invoked_macro_names(&semantic_macro_fragment)?
+                .into_iter()
+                .filter(|invoked| local_macros.contains(invoked)),
+        );
+    }
+    Ok(fragments)
+}
+
+fn textually_visible_local_macro_dependencies(
+    index: &RustSourceIndex<'_>,
+    invocation_fragment: &str,
+    macro_names: &BTreeSet<String>,
+    authority: &str,
+) -> Result<BTreeSet<String>, String> {
+    let invocation_start = invocation_fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    let mut visible = BTreeSet::new();
+    for macro_name in macro_names {
+        let (definition, _) = exact_root_macro_rules_fragment_with_index(index, macro_name)
+            .map_err(|detail| {
+                format!("{authority} local macro dependency {macro_name:?} is invalid: {detail}")
+            })?;
+        let definition_start = definition.as_ptr() as usize - index.text.as_ptr() as usize;
+        if definition_start >= invocation_start {
+            if !rust_toolchain_authority_macro(macro_name) {
+                return Err(format!(
+                    "{authority} invokes macro {macro_name:?} before its exact root definition, and no toolchain-bound fallback is admitted"
+                ));
+            }
+            continue;
+        }
+        visible.insert(macro_name.clone());
+    }
+    Ok(visible)
+}
+
+fn require_source_macro_constants(
+    fragment: &str,
+    module: &str,
+    owner_scope: Option<&str>,
+    index: &RustSourceIndex<'_>,
+    authority: &str,
+) -> Result<(), String> {
+    let semantic_fragment = rust_authority_semantic_fragment(index, fragment)?;
+    for constant in rust_macro_required_constant_candidates(&semantic_fragment)? {
+        if runtime_source_const_dependency(index, module, owner_scope, &constant)?.is_none() {
+            return Err(format!(
+                "{authority} local macro closure references constant-style token {constant:?}, which must resolve to exactly one source-level constant; found 0"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Graph traversal and canonical framing must use the same closure state.
+fn normalized_rust_function_closure_with_symbols_and_index(
+    text: &str,
+    index: &RustSourceIndex<'_>,
+    function_roots: impl IntoIterator<Item = String>,
+    source_constant_roots: impl IntoIterator<Item = (String, Option<String>, String)>,
+) -> Result<(Vec<u8>, BTreeSet<String>), String> {
+    let mut pending = function_roots.into_iter().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut constant_roots = source_constant_roots.into_iter().collect::<BTreeSet<_>>();
+    let mut constant_declarations = BTreeMap::<String, RustValueDeclaration<'_>>::new();
+    let local_macros = index.source_macro_rules.clone();
+    let mut local_macro_authorities = BTreeMap::<String, Vec<u8>>::new();
+    let mut local_macro_contexts = BTreeSet::<(String, String, Option<String>, usize)>::new();
+    let mut implementation_headers = BTreeSet::<(String, Option<String>, Vec<u8>)>::new();
+    let mut enum_authorities = BTreeMap::<String, &str>::new();
+    let mut out = Vec::new();
+    loop {
+        let state_before = (
+            seen.len(),
+            constant_roots.len(),
+            constant_declarations.len(),
+            local_macro_authorities.len(),
+            local_macro_contexts.len(),
+            implementation_headers.len(),
+            enum_authorities.len(),
+        );
+        while let Some(reference) = pending.pop_first() {
+            if !seen.insert(reference.clone()) {
+                continue;
+            }
+            let fragments = index
+                .functions
+                .get(&reference)
+                .map_or(&[][..], Vec::as_slice);
+            let [fragment] = fragments else {
+                return Err(format!(
+                    "function {reference:?} must resolve to exactly one item; found {}",
+                    fragments.len()
+                ));
+            };
+            let keyword_start = function_keyword_start(text, index, fragment);
+            if !rust_item_is_runtime_active_with_index(index, keyword_start)
+                || rust_semantic_function_has_conditional_attribute(fragment)?
+            {
+                return Err(format!(
+                    "function {reference:?} is behind cfg/cfg_attr and cannot be a runtime identity schema authority"
+                ));
+            }
+            let semantic_fragment = rust_authority_semantic_fragment(index, fragment)?;
+            if rust_authority_contains_non_ascii_identifier(&semantic_fragment)? {
+                return Err(format!(
+                    "function {reference:?} contains a non-ASCII identifier, which the source authority index does not support"
+                ));
+            }
+            if rust_authority_contains_raw_identifier(&semantic_fragment)? {
+                return Err(format!(
+                    "function {reference:?} contains a raw identifier, which the source authority index does not support"
+                ));
+            }
+            if rust_authority_has_conditional_attribute(&semantic_fragment)? {
+                return Err(format!(
+                    "function {reference:?} contains nested cfg/cfg_attr and cannot be runtime identity schema authority"
+                ));
+            }
+            append_schema_frame(
+                &mut out,
+                &format!("fn:{reference}"),
+                &canonical_rust_authority_fragment(fragment)?,
+            );
+            let module = rust_module_path(&index.module_scopes, keyword_start);
+            let owner_scope = rust_implementation_owner_at(index, keyword_start);
+            let implementation_scope = rust_implementation_scope_at(index, keyword_start)
+                .map(|scope| (scope.start, scope.end));
+            let authority = format!("function {reference:?}");
+            let trait_scope = if let Some(implementation_authority) =
+                rust_implementation_authority_context(index, keyword_start, &authority)?
+            {
+                implementation_headers.insert((
+                    implementation_authority.owner,
+                    implementation_authority.trait_name.clone(),
+                    implementation_authority.header,
+                ));
+                implementation_authority.trait_name
+            } else {
+                None
+            };
+            enqueue_rust_fragment_dependencies(
+                fragment,
+                &module,
+                owner_scope.as_deref(),
+                trait_scope.as_deref(),
+                implementation_scope,
+                index,
+                &authority,
+                &mut pending,
+                &mut constant_roots,
+                &mut enum_authorities,
+            )?;
+            let invoked_local_candidates = rust_authority_invoked_macro_names(&semantic_fragment)?
+                .into_iter()
+                .filter(|invoked| local_macros.contains(invoked))
+                .collect::<BTreeSet<_>>();
+            let invoked_local_macros = textually_visible_local_macro_dependencies(
+                index,
+                fragment,
+                &invoked_local_candidates,
+                &authority,
+            )?;
+            if !invoked_local_macros.is_empty() {
+                require_source_macro_constants(
+                    fragment,
+                    &module,
+                    owner_scope.as_deref(),
+                    index,
+                    &authority,
+                )?;
+            }
+            for macro_fragment in bind_local_macro_dependencies(
+                text,
+                index,
+                &local_macros,
+                invoked_local_macros,
+                &module,
+                owner_scope.as_deref(),
+                fragment.as_ptr() as usize - text.as_ptr() as usize,
+                &authority,
+                &mut local_macro_authorities,
+                &mut local_macro_contexts,
+            )? {
+                let macro_authority = format!("{authority} local macro closure");
+                require_source_macro_constants(
+                    macro_fragment,
+                    &module,
+                    owner_scope.as_deref(),
+                    index,
+                    &macro_authority,
+                )?;
+                enqueue_rust_fragment_dependencies(
+                    macro_fragment,
+                    &module,
+                    owner_scope.as_deref(),
+                    trait_scope.as_deref(),
+                    implementation_scope,
+                    index,
+                    &macro_authority,
+                    &mut pending,
+                    &mut constant_roots,
+                    &mut enum_authorities,
+                )?;
+            }
+        }
+
+        let discovered_constants =
+            runtime_source_const_closure(index, constant_roots.iter().cloned())?;
+        for (locator, declaration) in discovered_constants {
+            if constant_declarations.contains_key(&locator) {
+                continue;
+            }
+            let semantic_fragment = rust_authority_semantic_fragment(index, declaration.fragment)?;
+            if rust_authority_contains_non_ascii_identifier(&semantic_fragment)? {
+                return Err(format!(
+                    "constant dependency {locator:?} contains a non-ASCII identifier, which the source authority index does not support"
+                ));
+            }
+            if rust_authority_contains_raw_identifier(&semantic_fragment)? {
+                return Err(format!(
+                    "constant dependency {locator:?} contains a raw identifier, which the source authority index does not support"
+                ));
+            }
+            if rust_authority_has_conditional_attribute(&semantic_fragment)? {
+                return Err(format!(
+                    "constant dependency {locator:?} contains nested cfg/cfg_attr and cannot be runtime identity schema authority"
+                ));
+            }
+            let module = rust_module_path(&index.module_scopes, declaration.keyword_start);
+            let owner_scope = declaration.associated.then(|| {
+                locator
+                    .rsplit_once("::")
+                    .map_or(locator.as_str(), |(owner, _)| owner)
+                    .to_string()
+            });
+            let implementation_scope =
+                rust_implementation_scope_at(index, declaration.keyword_start)
+                    .map(|scope| (scope.start, scope.end));
+            let authority = format!("constant dependency {locator:?}");
+            let trait_scope = if let Some(implementation_authority) =
+                rust_implementation_authority_context(index, declaration.keyword_start, &authority)?
+            {
+                implementation_headers.insert((
+                    implementation_authority.owner,
+                    implementation_authority.trait_name.clone(),
+                    implementation_authority.header,
+                ));
+                implementation_authority.trait_name
+            } else {
+                None
+            };
+            enqueue_rust_fragment_dependencies(
+                declaration.fragment,
+                &module,
+                owner_scope.as_deref(),
+                trait_scope.as_deref(),
+                implementation_scope,
+                index,
+                &authority,
+                &mut pending,
+                &mut constant_roots,
+                &mut enum_authorities,
+            )?;
+            let invoked_local_candidates = rust_authority_invoked_macro_names(&semantic_fragment)?
+                .into_iter()
+                .filter(|invoked| local_macros.contains(invoked))
+                .collect::<BTreeSet<_>>();
+            let invoked_local_macros = textually_visible_local_macro_dependencies(
+                index,
+                declaration.fragment,
+                &invoked_local_candidates,
+                &authority,
+            )?;
+            if !invoked_local_macros.is_empty() {
+                require_source_macro_constants(
+                    declaration.fragment,
+                    &module,
+                    owner_scope.as_deref(),
+                    index,
+                    &authority,
+                )?;
+            }
+            for macro_fragment in bind_local_macro_dependencies(
+                text,
+                index,
+                &local_macros,
+                invoked_local_macros,
+                &module,
+                owner_scope.as_deref(),
+                declaration.fragment.as_ptr() as usize - text.as_ptr() as usize,
+                &authority,
+                &mut local_macro_authorities,
+                &mut local_macro_contexts,
+            )? {
+                let macro_authority = format!("{authority} local macro closure");
+                require_source_macro_constants(
+                    macro_fragment,
+                    &module,
+                    owner_scope.as_deref(),
+                    index,
+                    &macro_authority,
+                )?;
+                enqueue_rust_fragment_dependencies(
+                    macro_fragment,
+                    &module,
+                    owner_scope.as_deref(),
+                    trait_scope.as_deref(),
+                    implementation_scope,
+                    index,
+                    &macro_authority,
+                    &mut pending,
+                    &mut constant_roots,
+                    &mut enum_authorities,
+                )?;
+            }
+            constant_declarations.insert(locator, declaration);
+        }
+
+        let state_after = (
+            seen.len(),
+            constant_roots.len(),
+            constant_declarations.len(),
+            local_macro_authorities.len(),
+            local_macro_contexts.len(),
+            implementation_headers.len(),
+            enum_authorities.len(),
+        );
+        if pending.is_empty() && state_after == state_before {
+            break;
+        }
+    }
+    for (ordinal, (owner, trait_name, header)) in implementation_headers.into_iter().enumerate() {
+        append_schema_frame(
+            &mut out,
+            &format!(
+                "impl-header:{ordinal}:{owner}:{}",
+                trait_name.as_deref().unwrap_or("<inherent>")
+            ),
+            &header,
+        );
+    }
+    for (macro_name, authority) in local_macro_authorities {
+        append_schema_frame(&mut out, &format!("local-macro:{macro_name}"), &authority);
+    }
+    for (owner, declaration) in enum_authorities {
+        append_schema_frame(
+            &mut out,
+            &format!("enum-variant-owner:{owner}"),
+            &canonical_rust_authority_fragment(declaration)?,
+        );
+    }
+    for (constant, declaration) in constant_declarations {
         append_schema_frame(
             &mut out,
             &format!("const:{constant}"),
-            &normalized_rust_fragment(declaration),
+            &canonical_rust_authority_fragment(declaration.fragment)?,
         );
     }
     Ok((out, seen))
@@ -2665,7 +5552,7 @@ fn normalized_rust_function_closure_with_symbols(
     roots: impl IntoIterator<Item = String>,
 ) -> Result<(Vec<u8>, BTreeSet<String>), String> {
     let index = RustSourceIndex::new(text);
-    normalized_rust_function_closure_with_symbols_and_index(text, &index, roots)
+    normalized_rust_function_closure_with_symbols_and_index(text, &index, roots, std::iter::empty())
 }
 
 fn normalized_rust_function_closure_with_index(
@@ -2673,8 +5560,4727 @@ fn normalized_rust_function_closure_with_index(
     index: &RustSourceIndex<'_>,
     roots: impl IntoIterator<Item = String>,
 ) -> Result<Vec<u8>, String> {
-    normalized_rust_function_closure_with_symbols_and_index(text, index, roots)
+    normalized_rust_function_closure_with_symbols_and_index(text, index, roots, std::iter::empty())
         .map(|(bytes, _)| bytes)
+}
+
+#[derive(Clone, Copy)]
+struct RustAuthorityToken<'a> {
+    start: usize,
+    end: usize,
+    text: &'a str,
+}
+
+struct RustSourceLexicalIndex<'a> {
+    tokens: Vec<RustAuthorityToken<'a>>,
+    pairs: Vec<Option<usize>>,
+    outer_depth: Vec<usize>,
+    item_leaders: Vec<usize>,
+    token_indexes_by_start: BTreeMap<usize, usize>,
+}
+
+impl<'a> RustSourceLexicalIndex<'a> {
+    fn new(text: &'a str) -> Result<Self, String> {
+        let tokens = rust_authority_tokens(text)?;
+        let (pairs, outer_depth) = rust_authority_delimiters(&tokens)?;
+        let item_leaders = rust_item_leaders(&tokens, &outer_depth);
+        let token_indexes_by_start = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| (token.start, index))
+            .collect();
+        Ok(Self {
+            tokens,
+            pairs,
+            outer_depth,
+            item_leaders,
+            token_indexes_by_start,
+        })
+    }
+}
+
+const MAX_RUST_AUTHORITY_TOKENS: usize = 1_000_000;
+
+fn push_rust_authority_token<'a>(
+    tokens: &mut Vec<RustAuthorityToken<'a>>,
+    text: &'a str,
+    start: usize,
+    end: usize,
+) -> Result<(), String> {
+    if tokens.len() == MAX_RUST_AUTHORITY_TOKENS {
+        return Err(format!(
+            "Rust authority source exceeds the {MAX_RUST_AUTHORITY_TOKENS}-token scan cap"
+        ));
+    }
+    tokens.push(RustAuthorityToken {
+        start,
+        end,
+        text: &text[start..end],
+    });
+    Ok(())
+}
+
+fn rust_numeric_literal_end(bytes: &[u8], start: usize) -> usize {
+    let mut cursor = start;
+    if bytes.get(cursor) == Some(&b'0') && matches!(bytes.get(cursor + 1), Some(b'b' | b'o' | b'x'))
+    {
+        cursor += 2;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            cursor += 1;
+        }
+        return cursor;
+    }
+
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+    {
+        cursor += 1;
+    }
+    if bytes.get(cursor) == Some(&b'.')
+        && bytes.get(cursor + 1) != Some(&b'.')
+        && !bytes
+            .get(cursor + 1)
+            .is_some_and(|byte| matches!(*byte, b'_' | b'a'..=b'z' | b'A'..=b'Z'))
+    {
+        cursor += 1;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+        {
+            cursor += 1;
+        }
+    }
+    if matches!(bytes.get(cursor), Some(b'e' | b'E')) {
+        cursor += 1;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+        }
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+        {
+            cursor += 1;
+        }
+    }
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn rust_authority_contains_doc_comment(text: &str) -> Result<bool, String> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            if matches!(bytes.get(cursor + 2), Some(b'/' | b'!')) {
+                return Ok(true);
+            }
+            cursor = text[cursor..]
+                .find('\n')
+                .map_or(bytes.len(), |relative| cursor + relative + 1);
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            if matches!(bytes.get(cursor + 2), Some(b'*' | b'!')) {
+                return Ok(true);
+            }
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < bytes.len() && depth != 0 {
+                if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes.get(cursor..cursor + 2) == Some(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            if depth != 0 {
+                return Err("unterminated block comment in Rust authority".to_string());
+            }
+            continue;
+        }
+        if let Some((quote, hashes)) = super::raw_string_open(bytes, cursor) {
+            let mut search = quote + 1;
+            cursor = loop {
+                let Some(relative) = text[search..].find('"') else {
+                    return Err("unterminated raw string in Rust authority".to_string());
+                };
+                let close = search + relative;
+                let end = close + 1 + hashes;
+                if end <= bytes.len() && bytes[close + 1..end].iter().all(|byte| *byte == b'#') {
+                    break end;
+                }
+                search = close + 1;
+            };
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            let mut escaped = false;
+            cursor += 1;
+            loop {
+                let Some(byte) = bytes.get(cursor).copied() else {
+                    return Err("unterminated string in Rust authority".to_string());
+                };
+                cursor += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if bytes[cursor] == b'\''
+            && let Some(end) = char_literal_end(bytes, cursor)
+        {
+            cursor = end + 1;
+            continue;
+        }
+        let scalar = text[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a UTF-8 boundary");
+        cursor += scalar.len_utf8();
+    }
+    Ok(false)
+}
+
+/// A small fail-closed Rust lexer for macro authority. Unlike
+/// `normalized_rust_fragment`, it retains exact token-tree bytes so adjacent
+/// macro matcher tokens cannot collide after whitespace removal.
+#[allow(clippy::too_many_lines)] // One fail-closed lexer keeps every Rust byte boundary coherent.
+fn rust_authority_tokens(text: &str) -> Result<Vec<RustAuthorityToken<'_>>, String> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let scalar = text[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a UTF-8 boundary");
+        if scalar.is_whitespace() {
+            cursor += scalar.len_utf8();
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            cursor = text[cursor..]
+                .find('\n')
+                .map_or(bytes.len(), |relative| cursor + relative + 1);
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < bytes.len() && depth != 0 {
+                if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes.get(cursor..cursor + 2) == Some(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            if depth != 0 {
+                return Err("unterminated block comment in Rust macro authority".to_string());
+            }
+            continue;
+        }
+        if let Some((quote, hashes)) = super::raw_string_open(bytes, cursor) {
+            let mut search = quote + 1;
+            let end = loop {
+                let Some(relative) = text[search..].find('"') else {
+                    return Err("unterminated raw string in Rust macro authority".to_string());
+                };
+                let close = search + relative;
+                let end = close + 1 + hashes;
+                if end <= bytes.len() && bytes[close + 1..end].iter().all(|byte| *byte == b'#') {
+                    break end;
+                }
+                search = close + 1;
+            };
+            push_rust_authority_token(&mut tokens, text, cursor, end)?;
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            let mut escaped = false;
+            let mut end = None;
+            for (relative, byte) in bytes[cursor + 1..].iter().copied().enumerate() {
+                let index = cursor + 1 + relative;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    end = Some(index + 1);
+                    break;
+                }
+            }
+            let Some(end) = end else {
+                return Err("unterminated string in Rust macro authority".to_string());
+            };
+            push_rust_authority_token(&mut tokens, text, cursor, end)?;
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'\''
+            && let Some(end) = char_literal_end(bytes, cursor)
+        {
+            push_rust_authority_token(&mut tokens, text, cursor, end + 1)?;
+            cursor = end + 1;
+            continue;
+        }
+        if bytes[cursor].is_ascii_digit() {
+            let end = rust_numeric_literal_end(bytes, cursor);
+            push_rust_authority_token(&mut tokens, text, cursor, end)?;
+            cursor = end;
+            continue;
+        }
+        if matches!(bytes[cursor], b'_' | b'a'..=b'z' | b'A'..=b'Z') || !scalar.is_ascii() {
+            let start = cursor;
+            cursor += scalar.len_utf8();
+            while cursor < bytes.len() {
+                let next = text[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor remains on a UTF-8 boundary");
+                if next == '_'
+                    || next.is_ascii_alphanumeric()
+                    || (!next.is_ascii() && !next.is_whitespace())
+                {
+                    cursor += next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            push_rust_authority_token(&mut tokens, text, start, cursor)?;
+            continue;
+        }
+        let width = scalar.len_utf8();
+        push_rust_authority_token(&mut tokens, text, cursor, cursor + width)?;
+        cursor += width;
+    }
+    Ok(tokens)
+}
+
+/// Canonical, trivia-insensitive Rust authority bytes that retain lexical
+/// token boundaries. Concatenating normalized token text is not injective:
+/// `stringify!(foo bar)` and `stringify!(foobar)` have different expansions
+/// but collapse to the same bytes when whitespace is simply deleted.
+fn canonical_rust_authority_fragment(fragment: &str) -> Result<Vec<u8>, String> {
+    if rust_authority_contains_doc_comment(fragment)? {
+        return Err(
+            "Rust authority contains a doc comment whose token expansion is unsupported"
+                .to_string(),
+        );
+    }
+    let tokens = rust_authority_tokens(fragment)?;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"fs-rust-authority-tokens-v1\0");
+    for (index, token) in tokens.iter().enumerate() {
+        let length = u64::try_from(token.text.len())
+            .map_err(|_| "Rust authority token length does not fit u64".to_string())?;
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(token.text.as_bytes());
+
+        // Rust exposes joint punctuation to macros. Preserve adjacency only
+        // where it can change token identity (`::`, `=>`, lifetimes, `$name`,
+        // and similar forms); ordinary formatting around identifiers remains
+        // irrelevant.
+        out.push(u8::from(rust_authority_token_is_joint_to_next(
+            &tokens, index,
+        )));
+    }
+    Ok(out)
+}
+
+fn rust_authority_token_is_joint_to_next(tokens: &[RustAuthorityToken<'_>], index: usize) -> bool {
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    let Some(next) = tokens.get(index + 1) else {
+        return false;
+    };
+    if token.end != next.start {
+        return false;
+    }
+    let punctuation = token.text.len() == 1
+        && token.text.as_bytes().first().is_some_and(|byte| {
+            byte.is_ascii_punctuation() && !matches!(*byte, b'(' | b')' | b'[' | b']' | b'{' | b'}')
+        });
+    let next_is_punctuation = next.text.len() == 1
+        && next.text.as_bytes().first().is_some_and(|byte| {
+            byte.is_ascii_punctuation() && !matches!(*byte, b'(' | b')' | b'[' | b']' | b'{' | b'}')
+        });
+    let literal_prefix = matches!(token.text, "b" | "c")
+        && (next.text.starts_with('"') || next.text.starts_with('\''));
+    let raw_identifier_prefix = token.text == "r" && next.text == "#";
+    (punctuation && (next_is_punctuation || matches!(token.text, "'" | "$" | "#")))
+        || literal_prefix
+        || raw_identifier_prefix
+}
+
+fn rust_authority_delimiters(
+    tokens: &[RustAuthorityToken<'_>],
+) -> Result<(Vec<Option<usize>>, Vec<usize>), String> {
+    let mut pairs = vec![None; tokens.len()];
+    let mut outer_depth = vec![0usize; tokens.len()];
+    let mut stack = Vec::<(&str, usize)>::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(token.text, ")" | "]" | "}") {
+            let Some((open, open_index)) = stack.pop() else {
+                return Err(format!(
+                    "unmatched closing delimiter {} at byte {} in Rust macro authority",
+                    token.text, token.start
+                ));
+            };
+            let expected = match open {
+                "(" => ")",
+                "[" => "]",
+                "{" => "}",
+                _ => return Err("invalid delimiter stack in Rust macro authority".to_string()),
+            };
+            if token.text != expected {
+                return Err(format!(
+                    "mismatched delimiter {open} ... {} at byte {} in Rust macro authority",
+                    token.text, token.start
+                ));
+            }
+            outer_depth[index] = stack.len();
+            pairs[open_index] = Some(index);
+            pairs[index] = Some(open_index);
+        } else {
+            outer_depth[index] = stack.len();
+            if matches!(token.text, "(" | "[" | "{") {
+                stack.push((token.text, index));
+            }
+        }
+    }
+    if let Some((open, index)) = stack.pop() {
+        return Err(format!(
+            "unterminated delimiter {open} at byte {} in Rust macro authority",
+            tokens[index].start
+        ));
+    }
+    Ok((pairs, outer_depth))
+}
+
+fn rust_authority_has_conditional_attribute(fragment: &str) -> Result<bool, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, _) = rust_authority_delimiters(&tokens)?;
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if tokens[index].text != "#" {
+            index += 1;
+            continue;
+        }
+        let mut open = index + 1;
+        if tokens.get(open).is_some_and(|token| token.text == "!") {
+            open += 1;
+        }
+        if !tokens.get(open).is_some_and(|token| token.text == "[") {
+            index += 1;
+            continue;
+        }
+        let Some(close) = pairs[open] else {
+            return Err(format!(
+                "unbalanced conditional-attribute candidate at byte {}",
+                tokens[index].start
+            ));
+        };
+        if tokens
+            .get(open + 1)
+            .is_some_and(|token| matches!(token.text, "cfg" | "cfg_attr"))
+        {
+            return Ok(true);
+        }
+        index = close + 1;
+    }
+    Ok(false)
+}
+
+fn rust_item_leaders(tokens: &[RustAuthorityToken<'_>], outer_depth: &[usize]) -> Vec<usize> {
+    let mut active = Vec::<Option<usize>>::new();
+    let mut leaders = Vec::with_capacity(tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        let depth = outer_depth[index];
+        if active.len() <= depth + 1 {
+            active.resize(depth + 2, None);
+        }
+        let leader = *active[depth].get_or_insert(index);
+        leaders.push(leader);
+        if token.text == "{" {
+            active[depth + 1] = None;
+        }
+        if matches!(token.text, ";" | "}") {
+            active[depth] = None;
+        }
+    }
+    leaders
+}
+
+fn rust_item_prefix_is_supported(
+    tokens: &[RustAuthorityToken<'_>],
+    pairs: &[Option<usize>],
+    leader: usize,
+    keyword: usize,
+    semantic_function_prefix: bool,
+) -> bool {
+    let mut cursor = leader;
+    while cursor < keyword {
+        if tokens[cursor].text == "#" {
+            cursor += 1;
+            if tokens.get(cursor).is_some_and(|token| token.text == "!") {
+                cursor += 1;
+            }
+            if !tokens.get(cursor).is_some_and(|token| token.text == "[") {
+                return false;
+            }
+            let Some(close) = pairs[cursor] else {
+                return false;
+            };
+            cursor = close + 1;
+            continue;
+        }
+        if tokens[cursor].text == "pub" {
+            cursor += 1;
+            if tokens.get(cursor).is_some_and(|token| token.text == "(") {
+                let Some(close) = pairs[cursor] else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            continue;
+        }
+        if semantic_function_prefix
+            && matches!(
+                tokens[cursor].text,
+                "async" | "const" | "default" | "extern" | "unsafe"
+            )
+        {
+            let was_extern = tokens[cursor].text == "extern";
+            cursor += 1;
+            if was_extern
+                && tokens
+                    .get(cursor)
+                    .is_some_and(|token| token.text.starts_with('"'))
+            {
+                cursor += 1;
+            }
+            continue;
+        }
+        return false;
+    }
+    cursor == keyword
+}
+
+fn rust_implementation_item_prefix_is_supported(
+    tokens: &[RustAuthorityToken<'_>],
+    pairs: &[Option<usize>],
+    leader: usize,
+    keyword: usize,
+) -> bool {
+    let mut cursor = leader;
+    while cursor < keyword {
+        if tokens[cursor].text == "#" {
+            cursor += 1;
+            if tokens.get(cursor).is_some_and(|token| token.text == "!") {
+                cursor += 1;
+            }
+            if !tokens.get(cursor).is_some_and(|token| token.text == "[") {
+                return false;
+            }
+            let Some(close) = pairs[cursor] else {
+                return false;
+            };
+            cursor = close + 1;
+            continue;
+        }
+        if matches!(tokens[cursor].text, "default" | "unsafe") {
+            cursor += 1;
+            continue;
+        }
+        return false;
+    }
+    cursor == keyword
+}
+
+fn rust_tokens_have_conditional_attribute(
+    tokens: &[RustAuthorityToken<'_>],
+    leader: usize,
+    keyword: usize,
+) -> bool {
+    (leader..keyword).any(|index| {
+        if tokens[index].text != "#" {
+            return false;
+        }
+        let mut cursor = index + 1;
+        if tokens.get(cursor).is_some_and(|token| token.text == "!") {
+            cursor += 1;
+        }
+        tokens.get(cursor).is_some_and(|token| token.text == "[")
+            && tokens
+                .get(cursor + 1)
+                .is_some_and(|token| matches!(token.text, "cfg" | "cfg_attr"))
+    })
+}
+
+fn rust_semantic_item_starts(text: &str) -> BTreeMap<usize, usize> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return BTreeMap::new();
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return BTreeMap::new();
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.text == "fn")
+        .filter(|(index, _)| {
+            rust_item_prefix_is_supported(&tokens, &pairs, leaders[*index], *index, true)
+        })
+        .map(|(index, token)| (token.start, tokens[leaders[index]].start))
+        .collect()
+}
+
+fn rust_semantic_function_has_conditional_attribute(fragment: &str) -> Result<bool, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let Some(keyword) = tokens.iter().position(|token| token.text == "fn") else {
+        return Err("indexed Rust function fragment has no fn keyword".to_string());
+    };
+    Ok(rust_tokens_have_conditional_attribute(&tokens, 0, keyword))
+}
+
+fn byte_is_in_scopes(byte: usize, scopes: &[(usize, usize)]) -> bool {
+    scopes
+        .iter()
+        .any(|(start, end)| *start <= byte && byte < *end)
+}
+
+fn qualify_rust_name(module: &str, symbol: &str) -> String {
+    if module.is_empty() {
+        symbol.to_string()
+    } else {
+        format!("{module}::{symbol}")
+    }
+}
+
+fn rust_value_declaration_index<'a>(
+    text: &'a str,
+    module_scopes: &[RustOwnerScope],
+    implementations: &[RustOwnerScope],
+    macro_rules_scopes: &[(usize, usize)],
+    macro_invocation_scopes: &[(usize, usize)],
+) -> BTreeMap<String, Vec<RustValueDeclaration<'a>>> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return BTreeMap::new();
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return BTreeMap::new();
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let mut values = BTreeMap::<String, Vec<RustValueDeclaration<'a>>>::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let kind = match token.text {
+            "const" => RustValueKind::Const,
+            "static" => RustValueKind::Static,
+            _ => continue,
+        };
+        if byte_is_in_scopes(token.start, macro_rules_scopes)
+            || byte_is_in_scopes(token.start, macro_invocation_scopes)
+        {
+            continue;
+        }
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= token.start && token.start < scope.end
+            })
+            .count();
+        let implementation = implementations
+            .iter()
+            .filter(|scope| scope.start <= token.start && token.start < scope.end)
+            .min_by_key(|scope| scope.end - scope.start);
+        let expected_depth = module_depth + usize::from(implementation.is_some());
+        if outer_depth[index] != expected_depth
+            || !rust_item_prefix_is_supported(&tokens, &pairs, leaders[index], index, false)
+        {
+            continue;
+        }
+        let mut name = index + 1;
+        if kind == RustValueKind::Static
+            && tokens.get(name).is_some_and(|token| token.text == "mut")
+        {
+            name += 1;
+        }
+        let Some(symbol) = tokens.get(name).map(|token| token.text) else {
+            continue;
+        };
+        if symbol == "_"
+            || !canonical_symbol(symbol)
+            || !tokens.get(name + 1).is_some_and(|token| token.text == ":")
+        {
+            continue;
+        }
+        let Some(end) = const_item_end(text, token.start) else {
+            continue;
+        };
+        let fragment_start = tokens[leaders[index]].start;
+        let Some(fragment) = text.get(fragment_start..end) else {
+            continue;
+        };
+        let module = rust_module_path(module_scopes, token.start);
+        let declaration = RustValueDeclaration {
+            kind,
+            fragment,
+            keyword_start: token.start,
+            associated: implementation.is_some(),
+        };
+        let mut names = BTreeSet::new();
+        if let Some(implementation) = implementation {
+            let Some(owner) = implementation_owner_path(&module, &implementation.name) else {
+                continue;
+            };
+            names.insert(qualify_rust_name(&owner, symbol));
+            if module.is_empty() {
+                names.insert(format!("{}::{symbol}", implementation.name));
+            }
+        } else {
+            names.insert(qualify_rust_name(&module, symbol));
+        }
+        for name in names {
+            values.entry(name).or_default().push(declaration);
+        }
+    }
+    for declarations in values.values_mut() {
+        declarations.sort_by_key(|declaration| declaration.keyword_start);
+    }
+    values
+}
+
+#[allow(clippy::too_many_lines)] // Nested use-tree aliases share one deterministic token walk.
+fn rust_use_alias_index(
+    text: &str,
+    module_scopes: &[RustOwnerScope],
+    macro_rules_scopes: &[(usize, usize)],
+    macro_invocation_scopes: &[(usize, usize)],
+) -> BTreeMap<String, Vec<usize>> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return BTreeMap::new();
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return BTreeMap::new();
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let mut aliases = BTreeMap::<String, Vec<usize>>::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != "use"
+            || byte_is_in_scopes(token.start, macro_rules_scopes)
+            || byte_is_in_scopes(token.start, macro_invocation_scopes)
+        {
+            continue;
+        }
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= token.start && token.start < scope.end
+            })
+            .count();
+        if outer_depth[index] != module_depth
+            || !rust_item_prefix_is_supported(&tokens, &pairs, leaders[index], index, false)
+        {
+            continue;
+        }
+        let Some(end) = (index + 1..tokens.len()).find(|candidate| {
+            tokens[*candidate].text == ";" && outer_depth[*candidate] == outer_depth[index]
+        }) else {
+            continue;
+        };
+        let module = rust_module_path(module_scopes, token.start);
+        let mut saw_glob = false;
+        for alias in index + 1..end {
+            if tokens[alias].text == "*" {
+                saw_glob = true;
+            }
+            if tokens[alias].text == "self"
+                && tokens
+                    .get(alias + 1)
+                    .is_some_and(|next| matches!(next.text, "," | "}" | ";"))
+            {
+                let binding = (index + 1..alias)
+                    .rev()
+                    .find(|candidate| tokens[*candidate].text == "{")
+                    .and_then(|open| open.checked_sub(3))
+                    .filter(|binding| {
+                        tokens
+                            .get(*binding + 1)
+                            .is_some_and(|token| token.text == ":")
+                            && tokens
+                                .get(*binding + 2)
+                                .is_some_and(|token| token.text == ":")
+                    })
+                    .and_then(|binding| tokens.get(binding))
+                    .map(|binding| binding.text);
+                if let Some(binding) = binding.filter(|binding| {
+                    canonical_symbol(binding) && !matches!(*binding, "crate" | "self" | "super")
+                }) {
+                    aliases
+                        .entry(qualify_rust_name(&module, binding))
+                        .or_default()
+                        .push(tokens[alias].start);
+                }
+            }
+            if tokens[alias].text != "as" {
+                let symbol = tokens[alias].text;
+                let is_leaf = canonical_symbol(symbol)
+                    && !matches!(symbol, "crate" | "self" | "super")
+                    && tokens
+                        .get(alias + 1)
+                        .is_some_and(|next| matches!(next.text, "," | "}" | ";"));
+                if is_leaf {
+                    aliases
+                        .entry(qualify_rust_name(&module, symbol))
+                        .or_default()
+                        .push(tokens[alias].start);
+                }
+                continue;
+            }
+            let Some(symbol) = tokens.get(alias + 1).map(|token| token.text) else {
+                continue;
+            };
+            if symbol == "_" {
+                saw_glob = true;
+                continue;
+            }
+            if !canonical_symbol(symbol) {
+                continue;
+            }
+            aliases
+                .entry(qualify_rust_name(&module, symbol))
+                .or_default()
+                .push(tokens[alias + 1].start);
+        }
+        if saw_glob {
+            aliases
+                .entry(qualify_rust_name(&module, "*"))
+                .or_default()
+                .push(token.start);
+        }
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != "extern"
+            || !tokens
+                .get(index + 1)
+                .is_some_and(|next| next.text == "crate")
+            || byte_is_in_scopes(token.start, macro_rules_scopes)
+            || byte_is_in_scopes(token.start, macro_invocation_scopes)
+        {
+            continue;
+        }
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= token.start && token.start < scope.end
+            })
+            .count();
+        if outer_depth[index] != module_depth {
+            continue;
+        }
+        let Some(crate_name) = tokens.get(index + 2).map(|name| name.text) else {
+            continue;
+        };
+        let module = rust_module_path(module_scopes, token.start);
+        if rust_item_has_macro_use_attribute(text, token.start) {
+            aliases
+                .entry(qualify_rust_name(&module, "*"))
+                .or_default()
+                .push(token.start);
+        }
+        let alias = if tokens
+            .get(index + 3)
+            .is_some_and(|candidate| candidate.text == "as")
+        {
+            tokens.get(index + 4).map(|candidate| candidate.text)
+        } else {
+            Some(crate_name)
+        };
+        let Some(alias) = alias.filter(|alias| canonical_symbol(alias) && *alias != "_") else {
+            continue;
+        };
+        aliases
+            .entry(qualify_rust_name(&module, alias))
+            .or_default()
+            .push(token.start);
+    }
+    aliases
+}
+
+/// Index module declarations whose source lives in another file. The
+/// single-file authority scanner cannot observe that file's implementation,
+/// so a reached `mod helpers;` path must behave like an imported binding and
+/// fail closed rather than silently omitting `helpers.rs` from the digest.
+fn rust_external_source_binding_index(
+    text: &str,
+    module_scopes: &[RustOwnerScope],
+    macro_rules_scopes: &[(usize, usize)],
+    macro_invocation_scopes: &[(usize, usize)],
+) -> BTreeMap<String, Vec<usize>> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return BTreeMap::new();
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return BTreeMap::new();
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let mut modules = BTreeMap::<String, Vec<usize>>::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != "mod"
+            || byte_is_in_scopes(token.start, macro_rules_scopes)
+            || byte_is_in_scopes(token.start, macro_invocation_scopes)
+        {
+            continue;
+        }
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= token.start && token.start < scope.end
+            })
+            .count();
+        if outer_depth[index] != module_depth
+            || !rust_item_prefix_is_supported(&tokens, &pairs, leaders[index], index, false)
+        {
+            continue;
+        }
+        let Some(name) = tokens.get(index + 1).map(|candidate| candidate.text) else {
+            continue;
+        };
+        if !canonical_symbol(name)
+            || !tokens
+                .get(index + 2)
+                .is_some_and(|terminator| terminator.text == ";")
+        {
+            // Inline modules are already represented by module scopes.
+            continue;
+        }
+        let module = rust_module_path(module_scopes, token.start);
+        modules
+            .entry(qualify_rust_name(&module, name))
+            .or_default()
+            .push(token.start);
+        if rust_item_has_macro_use_attribute(text, token.start) {
+            modules
+                .entry(qualify_rust_name(&module, "*"))
+                .or_default()
+                .push(token.start);
+        }
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != "include"
+            || !tokens.get(index + 1).is_some_and(|bang| bang.text == "!")
+            || byte_is_in_scopes(token.start, macro_rules_scopes)
+            || byte_is_in_scopes(token.start, macro_invocation_scopes)
+        {
+            continue;
+        }
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= token.start && token.start < scope.end
+            })
+            .count();
+        if outer_depth[index] != module_depth
+            || !rust_item_prefix_is_supported(&tokens, &pairs, leaders[index], index, false)
+        {
+            continue;
+        }
+        let module = rust_module_path(module_scopes, token.start);
+        modules
+            .entry(qualify_rust_name(&module, "*"))
+            .or_default()
+            .push(token.start);
+    }
+    modules
+}
+
+fn rust_direct_named_item_declaration_index(
+    text: &str,
+    keyword: &str,
+    module_scopes: &[RustOwnerScope],
+    macro_rules_scopes: &[(usize, usize)],
+    macro_invocation_scopes: &[(usize, usize)],
+) -> BTreeMap<String, Vec<usize>> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return BTreeMap::new();
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return BTreeMap::new();
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let mut names = BTreeMap::<String, Vec<usize>>::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != keyword
+            || byte_is_in_scopes(token.start, macro_rules_scopes)
+            || byte_is_in_scopes(token.start, macro_invocation_scopes)
+        {
+            continue;
+        }
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty() && scope.start <= token.start && token.start < scope.end
+            })
+            .count();
+        if outer_depth[index] != module_depth
+            || !rust_item_prefix_is_supported(
+                &tokens,
+                &pairs,
+                leaders[index],
+                index,
+                keyword == "trait",
+            )
+        {
+            continue;
+        }
+        let Some(name) = tokens.get(index + 1) else {
+            continue;
+        };
+        if name.text == "r"
+            && tokens.get(index + 2).is_some_and(|token| token.text == "#")
+            && tokens
+                .get(index + 3)
+                .is_some_and(|token| canonical_symbol(token.text))
+            && name.end == tokens[index + 2].start
+            && tokens[index + 2].end == tokens[index + 3].start
+        {
+            continue;
+        }
+        if canonical_symbol(name.text) {
+            names
+                .entry(qualify_rust_name(
+                    &rust_module_path(module_scopes, token.start),
+                    name.text,
+                ))
+                .or_default()
+                .push(token.start);
+        }
+    }
+    for declarations in names.values_mut() {
+        declarations.sort_unstable();
+        declarations.dedup();
+    }
+    names
+}
+
+fn rust_direct_enum_variant_index<'a>(
+    text: &'a str,
+    module_scopes: &[RustOwnerScope],
+    macro_rules_scopes: &[(usize, usize)],
+    macro_invocation_scopes: &[(usize, usize)],
+    lexical: Option<&RustSourceLexicalIndex<'a>>,
+) -> BTreeMap<String, Vec<RustEnumVariantAuthority<'a>>> {
+    let Some(lexical) = lexical else {
+        return BTreeMap::new();
+    };
+    let declarations = rust_direct_named_item_declaration_index(
+        text,
+        "enum",
+        module_scopes,
+        macro_rules_scopes,
+        macro_invocation_scopes,
+    );
+    let mut variants = BTreeMap::new();
+    for (name, starts) in declarations {
+        for start in starts {
+            let Some(keyword) = lexical
+                .token_indexes_by_start
+                .get(&start)
+                .copied()
+                .filter(|keyword| lexical.tokens[*keyword].text == "enum")
+            else {
+                continue;
+            };
+            let keyword_depth = lexical.outer_depth[keyword];
+            let Some(open) = (keyword + 2..lexical.tokens.len()).find(|candidate| {
+                lexical.outer_depth[*candidate] == keyword_depth
+                    && lexical.tokens[*candidate].text == "{"
+            }) else {
+                continue;
+            };
+            let Some(close) = lexical.pairs[open] else {
+                continue;
+            };
+            let enum_start = lexical.tokens[lexical.item_leaders[keyword]].start;
+            let Some(enum_fragment) = text.get(enum_start..lexical.tokens[close].end) else {
+                continue;
+            };
+            let Some(body) = text.get(lexical.tokens[open].end..lexical.tokens[close].start) else {
+                continue;
+            };
+            let variant_fragments = split_rust_top_level(body, b',');
+            let enum_closed = variant_fragments.iter().all(|variant_fragment| {
+                let tokens = match rust_authority_tokens(variant_fragment) {
+                    Ok(tokens) => tokens,
+                    Err(_) => return false,
+                };
+                tokens.is_empty()
+                    || (exact_direct_enum_variant_name(variant_fragment).is_some()
+                        && !rust_authority_has_conditional_attribute(variant_fragment)
+                            .unwrap_or(true))
+            });
+            for variant_fragment in variant_fragments {
+                let Some(variant) = exact_direct_enum_variant_name(variant_fragment) else {
+                    continue;
+                };
+                variants
+                    .entry(qualify_rust_name(&name, variant))
+                    .or_insert_with(Vec::new)
+                    .push(RustEnumVariantAuthority {
+                        enum_fragment,
+                        variant_fragment,
+                        conditional: rust_authority_has_conditional_attribute(variant_fragment)
+                            .unwrap_or(true),
+                        enum_closed,
+                    });
+            }
+        }
+    }
+    variants
+}
+
+fn exact_direct_enum_variant_name(fragment: &str) -> Option<&str> {
+    let tokens = rust_authority_tokens(fragment).ok()?;
+    let (pairs, outer_depth) = rust_authority_delimiters(&tokens).ok()?;
+    let mut cursor = 0usize;
+    while tokens.get(cursor).is_some_and(|token| token.text == "#") {
+        let open = cursor + 1;
+        if !tokens.get(open).is_some_and(|token| token.text == "[") {
+            return None;
+        }
+        cursor = pairs[open]?.checked_add(1)?;
+    }
+    let name = tokens.get(cursor)?;
+    if outer_depth[cursor] != 0 || !canonical_symbol(name.text) {
+        return None;
+    }
+    if tokens
+        .iter()
+        .enumerate()
+        .any(|(index, token)| outer_depth[index] == 0 && token.text == "!")
+    {
+        return None;
+    }
+    match tokens.get(cursor + 1).map(|token| token.text) {
+        None => Some(name.text),
+        Some("=")
+            if tokens.len() == cursor + 3
+                && outer_depth[cursor + 1] == 0
+                && outer_depth[cursor + 2] == 0
+                && tokens[cursor + 2]
+                    .text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'_') =>
+        {
+            Some(name.text)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RustItemMacroInvocation {
+    module: String,
+    path: String,
+    start: usize,
+}
+
+fn rust_direct_item_macro_invocations(
+    text: &str,
+    module_scopes: &[RustOwnerScope],
+    macro_rules_scopes: &[(usize, usize)],
+) -> Vec<RustItemMacroInvocation> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return Vec::new();
+    };
+    let Ok((pairs, outer_depth)) = rust_authority_delimiters(&tokens) else {
+        return Vec::new();
+    };
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let mut invocations = Vec::new();
+    for open in 2..tokens.len() {
+        if !matches!(tokens[open].text, "(" | "[" | "{")
+            || tokens[open - 1].text != "!"
+            || !rust_macro_identifier_tail(tokens[open - 2].text)
+            || byte_is_in_scopes(tokens[open - 2].start, macro_rules_scopes)
+        {
+            continue;
+        }
+        let tail = open - 2;
+        let raw_identifier_ending_at = |tail: usize| {
+            (tail >= 2
+                && tokens[tail - 2].text == "r"
+                && tokens[tail - 1].text == "#"
+                && tokens[tail - 2].end == tokens[tail - 1].start
+                && tokens[tail - 1].end == tokens[tail].start)
+                .then(|| tail - 2)
+        };
+        let mut invocation = raw_identifier_ending_at(tail).unwrap_or(tail);
+        let mut path = vec![if invocation == tail {
+            tokens[tail].text.to_string()
+        } else {
+            format!("r#{}", tokens[tail].text)
+        }];
+        while invocation >= 3
+            && tokens[invocation - 2].text == ":"
+            && tokens[invocation - 1].text == ":"
+            && canonical_symbol(tokens[invocation - 3].text)
+        {
+            let segment_tail = invocation - 3;
+            if let Some(raw_start) = raw_identifier_ending_at(segment_tail) {
+                path.push(format!("r#{}", tokens[segment_tail].text));
+                invocation = raw_start;
+            } else {
+                path.push(tokens[segment_tail].text.to_string());
+                invocation = segment_tail;
+            }
+        }
+        path.reverse();
+        let module_depth = module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty()
+                    && scope.start <= tokens[invocation].start
+                    && tokens[invocation].start < scope.end
+            })
+            .count();
+        if outer_depth[invocation] != module_depth
+            || !rust_item_prefix_is_supported(
+                &tokens,
+                &pairs,
+                leaders[invocation],
+                invocation,
+                false,
+            )
+        {
+            continue;
+        }
+        invocations.push(RustItemMacroInvocation {
+            module: rust_module_path(module_scopes, tokens[invocation].start),
+            path: path.join("::"),
+            start: tokens[invocation].start,
+        });
+    }
+    invocations.sort_by(|left, right| {
+        (left.start, &left.module, &left.path).cmp(&(right.start, &right.module, &right.path))
+    });
+    invocations.dedup();
+    invocations
+}
+
+fn rust_direct_item_macro_index(
+    invocations: &[RustItemMacroInvocation],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut index = BTreeMap::<String, BTreeSet<String>>::new();
+    for invocation in invocations {
+        index
+            .entry(invocation.module.clone())
+            .or_default()
+            .insert(invocation.path.clone());
+    }
+    index
+}
+
+fn rust_macro_identifier_tail(token: &str) -> bool {
+    canonical_symbol(token) || token.chars().any(|character| !character.is_ascii())
+}
+
+/// Token-tree ranges belonging to `macro_rules!` definitions, including the
+/// parenthesized and bracketed definition forms. Returning a whole-file
+/// sentinel on malformed input prevents generated declarations from becoming
+/// source authority through a partial scan.
+fn rust_macro_rules_scopes(text: &str) -> Vec<(usize, usize)> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return vec![(0, text.len())];
+    };
+    let Ok((pairs, _)) = rust_authority_delimiters(&tokens) else {
+        return vec![(0, text.len())];
+    };
+    let mut scopes = Vec::new();
+    for definition in 0..tokens.len().saturating_sub(2) {
+        if tokens[definition].text != "macro_rules" || tokens[definition + 1].text != "!" {
+            continue;
+        }
+        let mut open = definition + 2;
+        if tokens.get(open).is_some_and(|token| token.text == "r")
+            && tokens.get(open + 1).is_some_and(|token| token.text == "#")
+            && tokens
+                .get(open + 2)
+                .is_some_and(|token| rust_macro_identifier_tail(token.text))
+            && tokens[open].end == tokens[open + 1].start
+            && tokens[open + 1].end == tokens[open + 2].start
+        {
+            open += 3;
+        } else {
+            let Some(first) = tokens.get(open) else {
+                continue;
+            };
+            if !rust_macro_identifier_tail(first.text) {
+                continue;
+            }
+            open += 1;
+            while tokens.get(open).is_some_and(|token| {
+                rust_macro_identifier_tail(token.text) && tokens[open - 1].end == token.start
+            }) {
+                open += 1;
+            }
+        }
+        if !tokens
+            .get(open)
+            .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            continue;
+        }
+        let Some(close) = pairs[open] else {
+            return vec![(0, text.len())];
+        };
+        scopes.push((tokens[definition].start, tokens[close].end));
+    }
+    scopes
+}
+
+/// Token-tree ranges belonging to function-like macro invocations. Returning a
+/// whole-file sentinel on lexical failure makes the function index fail closed:
+/// generated `fn` tokens can never become authority merely because scanning an
+/// invalid source was incomplete. A non-ASCII tail is conservatively treated
+/// as an identifier because Rust permits Unicode macro names while operators
+/// remain ASCII.
+fn rust_macro_invocation_scopes(text: &str) -> Vec<(usize, usize)> {
+    let Ok(tokens) = rust_authority_tokens(text) else {
+        return vec![(0, text.len())];
+    };
+    let Ok((pairs, _)) = rust_authority_delimiters(&tokens) else {
+        return vec![(0, text.len())];
+    };
+    let mut scopes = Vec::new();
+    for open in 2..tokens.len() {
+        if !matches!(tokens[open].text, "(" | "[" | "{")
+            || tokens[open - 1].text != "!"
+            || !rust_macro_identifier_tail(tokens[open - 2].text)
+        {
+            continue;
+        }
+        let Some(close) = pairs[open] else {
+            return vec![(0, text.len())];
+        };
+        scopes.push((tokens[open].start, tokens[close].end));
+    }
+    scopes
+}
+
+fn previous_root_token(outer_depth: &[usize], before: usize) -> Option<usize> {
+    (0..before)
+        .rev()
+        .find(|candidate| outer_depth[*candidate] == 0)
+}
+
+/// Require an item to begin at a lexical-root boundary. Root inner attributes
+/// (`#![...]`) belong to the enclosing file and are skipped; outer attributes
+/// (`#[...]`) are rejected because they can change or remove the bound item.
+fn require_unattributed_root_item_prefix(
+    tokens: &[RustAuthorityToken<'_>],
+    pairs: &[Option<usize>],
+    outer_depth: &[usize],
+    item: usize,
+    authority: &str,
+) -> Result<(), String> {
+    let mut before = item;
+    loop {
+        let Some(previous) = previous_root_token(outer_depth, before) else {
+            return Ok(());
+        };
+        if matches!(tokens[previous].text, ";" | "}") {
+            return Ok(());
+        }
+        if tokens[previous].text != "]" {
+            return Err(format!(
+                "{authority} must start a standalone lexical-root item; preceding token {:?} at byte {} is not an item boundary",
+                tokens[previous].text, tokens[previous].start
+            ));
+        }
+        let Some(open) = pairs[previous] else {
+            return Err(format!(
+                "{authority} has an unmatched attribute delimiter before byte {}",
+                tokens[item].start
+            ));
+        };
+        let Some(attribute_marker) = previous_root_token(outer_depth, open) else {
+            return Err(format!(
+                "{authority} has an unbound root attribute before byte {}",
+                tokens[item].start
+            ));
+        };
+        if tokens[attribute_marker].text == "#" {
+            return Err(format!(
+                "{authority} must be attribute-free; found an outer attribute before byte {}",
+                tokens[item].start
+            ));
+        }
+        if tokens[attribute_marker].text == "!"
+            && let Some(hash) = previous_root_token(outer_depth, attribute_marker)
+            && tokens[hash].text == "#"
+        {
+            before = hash;
+            continue;
+        }
+        return Err(format!(
+            "{authority} has a noncanonical root prefix before byte {}",
+            tokens[item].start
+        ));
+    }
+}
+
+fn root_inner_attribute_fragments<'a>(
+    text: &'a str,
+    tokens: &[RustAuthorityToken<'a>],
+    pairs: &[Option<usize>],
+    outer_depth: &[usize],
+) -> Result<Vec<&'a str>, String> {
+    let mut attributes = Vec::new();
+    let mut index = 0usize;
+    while index + 2 < tokens.len() {
+        if tokens[index].text != "#"
+            || tokens[index + 1].text != "!"
+            || tokens[index + 2].text != "["
+            || outer_depth[index] != 0
+            || outer_depth[index + 1] != 0
+            || outer_depth[index + 2] != 0
+        {
+            index += 1;
+            continue;
+        }
+        let Some(close) = pairs[index + 2] else {
+            return Err(format!(
+                "unbalanced root inner attribute at byte {}",
+                tokens[index].start
+            ));
+        };
+        if tokens
+            .get(index + 3)
+            .is_some_and(|token| matches!(token.text, "cfg" | "cfg_attr"))
+        {
+            return Err(format!(
+                "conditional root inner attribute at byte {} cannot govern external identity authority",
+                tokens[index].start
+            ));
+        }
+        attributes.push(&text[tokens[index].start..tokens[close].end]);
+        index = close + 1;
+    }
+    Ok(attributes)
+}
+
+fn rust_authority_identifier_tokens(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    Ok(tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            (!matcher_tokens.contains(&index) && canonical_symbol(token.text))
+                .then(|| token.text.to_string())
+        })
+        .collect())
+}
+
+fn rust_language_identifier(token: &str) -> bool {
+    matches!(
+        token,
+        "Self"
+            | "abstract"
+            | "as"
+            | "async"
+            | "await"
+            | "become"
+            | "bool"
+            | "box"
+            | "break"
+            | "char"
+            | "const"
+            | "continue"
+            | "crate"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "f32"
+            | "f64"
+            | "false"
+            | "final"
+            | "fn"
+            | "for"
+            | "gen"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "if"
+            | "impl"
+            | "in"
+            | "isize"
+            | "let"
+            | "loop"
+            | "macro"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "override"
+            | "priv"
+            | "pub"
+            | "ref"
+            | "return"
+            | "safe"
+            | "self"
+            | "static"
+            | "str"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "union"
+            | "unsafe"
+            | "unsized"
+            | "use"
+            | "usize"
+            | "virtual"
+            | "where"
+            | "while"
+            | "yield"
+    )
+}
+
+fn rust_parameter_segment_end(
+    tokens: &[RustAuthorityToken<'_>],
+    delimiter_depth: &[usize],
+    start: usize,
+    close: usize,
+    parameter_depth: usize,
+) -> usize {
+    let mut angle_depth = 0usize;
+    for index in start..close {
+        if delimiter_depth[index] != parameter_depth {
+            continue;
+        }
+        match tokens[index].text {
+            "<" => angle_depth += 1,
+            ">" if angle_depth != 0
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+            }
+            "," if angle_depth == 0 => return index,
+            _ => {}
+        }
+    }
+    close
+}
+
+/// Return names for which every occurrence is covered by a lexical value
+/// binding whose bytes are already represented by the enclosing fragment.
+/// Tracking the binding's range (rather than subtracting a file-wide name set)
+/// preserves a real item reference before a `let` initializer or after a
+/// nested block. This intentionally covers function parameters and
+/// `let` patterns. Loop-pattern scope requires expression grammar to
+/// distinguish an iterator block from the loop body, so loop variables remain
+/// conservatively unfiltered until the authority index has a full parser.
+#[allow(clippy::too_many_lines)] // Pattern scopes and shadowing are resolved in one conservative pass.
+fn rust_authority_lexical_bindings(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, outer_depth) = rust_authority_delimiters(&tokens)?;
+    let leaders = rust_item_leaders(&tokens, &outer_depth);
+    let macro_scopes = rust_macro_rules_scopes(fragment)
+        .into_iter()
+        .chain(rust_macro_invocation_scopes(fragment))
+        .collect::<Vec<_>>();
+    let macro_opaque = |index: usize| byte_is_in_scopes(tokens[index].start, &macro_scopes);
+    let mut ranges = BTreeMap::<String, Vec<(usize, usize, usize)>>::new();
+    let is_binding = |index: usize| {
+        !macro_opaque(index)
+            && canonical_symbol(tokens[index].text)
+            && tokens[index]
+                .text
+                .chars()
+                .next()
+                .is_some_and(|first| first == '_' || first.is_ascii_lowercase())
+            && !matches!(
+                tokens[index].text,
+                "fn" | "let" | "for" | "in" | "mut" | "ref" | "self" | "Self" | "crate"
+            )
+            && !(tokens
+                .get(index.wrapping_sub(1))
+                .is_some_and(|token| token.text == ":")
+                && tokens
+                    .get(index.wrapping_sub(2))
+                    .is_some_and(|token| token.text == ":"))
+            && !(tokens.get(index + 1).is_some_and(|token| token.text == ":")
+                && tokens.get(index + 2).is_some_and(|token| token.text == ":"))
+    };
+    let is_pattern_binding = |index: usize, pattern_depth: usize| {
+        is_binding(index)
+            && !(outer_depth[index] > pattern_depth
+                && tokens.get(index + 1).is_some_and(|token| token.text == ":")
+                && !tokens.get(index + 2).is_some_and(|token| token.text == ":"))
+    };
+
+    if let Some(function) = tokens.iter().enumerate().position(|(index, token)| {
+        token.text == "fn"
+            && outer_depth[index] == 0
+            && rust_item_prefix_is_supported(&tokens, &pairs, leaders[index], index, true)
+    }) && let Some(open) = rust_function_parameter_open(&tokens, &outer_depth, function)
+        && let Some(close) = pairs[open]
+    {
+        let body_open =
+            rust_function_body_open(&tokens, &outer_depth, close + 1, outer_depth[function]);
+        let body_range = body_open
+            .and_then(|open| pairs[open].map(|close| (open + 1, close)))
+            .unwrap_or((close + 1, tokens.len()));
+        let parameter_depth = outer_depth[open] + 1;
+        let mut segment = open + 1;
+        while segment < close {
+            let end =
+                rust_parameter_segment_end(&tokens, &outer_depth, segment, close, parameter_depth);
+            let pattern_end = (segment..end)
+                .find(|index| {
+                    tokens[*index].text == ":"
+                        && outer_depth[*index] == parameter_depth
+                        && !tokens
+                            .get(index.wrapping_sub(1))
+                            .is_some_and(|token| token.text == ":")
+                        && !tokens
+                            .get(*index + 1)
+                            .is_some_and(|token| token.text == ":")
+                })
+                .unwrap_or(end);
+            for index in segment..pattern_end {
+                if is_pattern_binding(index, parameter_depth) {
+                    ranges
+                        .entry(tokens[index].text.to_string())
+                        .or_default()
+                        .push((index, body_range.0, body_range.1));
+                }
+            }
+            segment = end.saturating_add(1);
+        }
+    }
+
+    for start in tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (token.text == "let" && !macro_opaque(index)).then_some(index))
+    {
+        let depth = outer_depth[start];
+        let Some(end) = (start + 1..tokens.len())
+            .find(|index| outer_depth[*index] == depth && matches!(tokens[*index].text, "=" | ";"))
+        else {
+            continue;
+        };
+        let binding_end = (start + 1..end)
+            .find(|index| tokens[*index].text == ":" && outer_depth[*index] == depth)
+            .unwrap_or(end);
+        let range_start = (end..tokens.len())
+            .find(|index| tokens[*index].text == ";" && outer_depth[*index] == depth)
+            .map_or(tokens.len(), |semicolon| semicolon + 1);
+        let range_end = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(open, token)| {
+                (token.text == "{" && open < start)
+                    .then(|| pairs[open].map(|close| (open, close)))
+                    .flatten()
+            })
+            .filter(|(_, close)| start < *close)
+            .min_by_key(|(open, close)| close - open)
+            .map_or(tokens.len(), |(_, close)| close);
+        for index in start + 1..binding_end {
+            if is_pattern_binding(index, depth) {
+                ranges
+                    .entry(tokens[index].text.to_string())
+                    .or_default()
+                    .push((index, range_start, range_end));
+            }
+        }
+    }
+    Ok(ranges
+        .into_iter()
+        .filter_map(|(name, ranges)| {
+            tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| token.text == name)
+                .all(|(occurrence, _)| {
+                    ranges.iter().any(|(declaration, start, end)| {
+                        occurrence == *declaration || (*start <= occurrence && occurrence < *end)
+                    })
+                })
+                .then_some(name)
+        })
+        .collect())
+}
+
+/// Locate a function's parameter list without mistaking a generic bound such
+/// as `F: Fn()` for the parameters themselves. Angle brackets are not Rust
+/// delimiters, so the general delimiter depth cannot distinguish these two
+/// parentheses.
+fn rust_function_parameter_open(
+    tokens: &[RustAuthorityToken<'_>],
+    delimiter_depth: &[usize],
+    function: usize,
+) -> Option<usize> {
+    let mut angle_depth = 0usize;
+    let base_depth = *delimiter_depth.get(function)?;
+    for index in function + 1..tokens.len() {
+        if delimiter_depth.get(index).copied()? != base_depth {
+            continue;
+        }
+        match tokens[index].text {
+            "<" => angle_depth = angle_depth.checked_add(1)?,
+            ">" if angle_depth != 0
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+            }
+            "(" if angle_depth == 0 => return Some(index),
+            "{" | ";" if angle_depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rust_function_body_open(
+    tokens: &[RustAuthorityToken<'_>],
+    delimiter_depth: &[usize],
+    start: usize,
+    base_depth: usize,
+) -> Option<usize> {
+    let mut angle_depth = 0usize;
+    for index in start..tokens.len() {
+        if delimiter_depth.get(index).copied()? != base_depth {
+            continue;
+        }
+        match tokens[index].text {
+            "<" => angle_depth = angle_depth.checked_add(1)?,
+            ">" if angle_depth != 0
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+            }
+            "{" if angle_depth == 0
+                && !(index >= 2
+                    && tokens[index - 1].text == "!"
+                    && rust_macro_identifier_tail(tokens[index - 2].text)) =>
+            {
+                return Some(index);
+            }
+            ";" if angle_depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rust_authority_dependency_identifiers(
+    fragment: &str,
+    additional_type_token_indexes: &BTreeSet<usize>,
+) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let type_token_indexes = rust_authority_type_token_indexes(&tokens)?;
+    let macro_matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    let mut range = (0usize, tokens.len());
+    if let Some(function) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.text == "fn" && delimiter_depth[index] == 0).then_some(index)
+    }) {
+        let open = rust_function_body_open(&tokens, &delimiter_depth, function + 1, 0)
+            .ok_or_else(|| "function authority has no direct body".to_string())?;
+        let close = pairs[open]
+            .ok_or_else(|| "function authority body has no closing delimiter".to_string())?;
+        range = (open + 1, close);
+    } else if let Some(declaration) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (matches!(token.text, "const" | "static") && delimiter_depth[index] == 0).then_some(index)
+    }) && let Some(initializer) = (declaration + 1..tokens.len())
+        .find(|index| tokens[*index].text == "=" && delimiter_depth[*index] == 0)
+    {
+        let end = (initializer + 1..tokens.len())
+            .find(|index| tokens[*index].text == ";" && delimiter_depth[*index] == 0)
+            .unwrap_or(tokens.len());
+        range = (initializer + 1, end);
+    }
+    let mut identifiers = tokens[range.0..range.1]
+        .iter()
+        .enumerate()
+        .filter_map(|(relative, token)| {
+            let index = range.0 + relative;
+            if !canonical_symbol(token.text)
+                || rust_language_identifier(token.text)
+                || type_token_indexes.contains(&index)
+                || additional_type_token_indexes.contains(&index)
+                || macro_matcher_tokens.contains(&index)
+            {
+                return None;
+            }
+            let previous = index.checked_sub(1).and_then(|index| tokens.get(index));
+            let next = tokens.get(index + 1);
+            let path_segment = previous.is_some_and(|token| matches!(token.text, "." | ":"))
+                || next.is_some_and(|token| token.text == ":");
+            let label_or_lifetime = previous.is_some_and(|token| token.text == "'")
+                || next.is_some_and(|token| token.text == "'");
+            let macro_syntax = next.is_some_and(|token| token.text == "!")
+                || (previous.is_some_and(|token| token.text == "!")
+                    && tokens
+                        .get(index.wrapping_sub(2))
+                        .is_some_and(|token| token.text == "macro_rules"));
+            let declaration_name = previous.is_some_and(|token| {
+                matches!(
+                    token.text,
+                    "fn" | "const"
+                        | "static"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "type"
+                        | "trait"
+                        | "mod"
+                )
+            });
+            (!path_segment && !label_or_lifetime && !macro_syntax && !declaration_name)
+                .then(|| token.text.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    for binding in rust_authority_lexical_bindings(fragment)? {
+        identifiers.remove(&binding);
+    }
+    for binding in rust_function_generic_const_bindings(&tokens)? {
+        identifiers.remove(&binding);
+    }
+    Ok(identifiers)
+}
+
+fn rust_authority_contains_non_ascii_identifier(fragment: &str) -> Result<bool, String> {
+    Ok(rust_authority_tokens(fragment)?.into_iter().any(|token| {
+        token.text.chars().any(|character| !character.is_ascii())
+            && !token.text.contains('"')
+            && !token.text.starts_with('\'')
+    }))
+}
+
+fn rust_authority_contains_raw_identifier(fragment: &str) -> Result<bool, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    Ok((0..tokens.len().saturating_sub(2)).any(|index| {
+        tokens[index].text == "r"
+            && tokens[index + 1].text == "#"
+            && canonical_symbol(tokens[index + 2].text)
+            && tokens[index].end == tokens[index + 1].start
+            && tokens[index + 1].end == tokens[index + 2].start
+    }))
+}
+
+fn rust_authority_macro_invocation_paths(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    let mut paths = BTreeSet::new();
+    for index in 0..tokens.len().saturating_sub(2) {
+        if matcher_tokens.contains(&index)
+            || !canonical_symbol(tokens[index].text)
+            || tokens[index + 1].text != "!"
+            || !matches!(tokens[index + 2].text, "(" | "[" | "{")
+        {
+            continue;
+        }
+        let mut parts = vec![tokens[index].text];
+        let mut cursor = index;
+        while cursor >= 3
+            && tokens[cursor - 2].text == ":"
+            && tokens[cursor - 1].text == ":"
+            && canonical_symbol(tokens[cursor - 3].text)
+        {
+            parts.push(tokens[cursor - 3].text);
+            cursor -= 3;
+        }
+        parts.reverse();
+        paths.insert(parts.join("::"));
+    }
+    Ok(paths)
+}
+
+fn rust_authority_invoked_macro_names(fragment: &str) -> Result<BTreeSet<String>, String> {
+    Ok(rust_authority_macro_invocation_paths(fragment)?
+        .into_iter()
+        .filter(|path| !path.contains("::"))
+        .collect())
+}
+
+/// Function-like macros whose implementation authority is deliberately bound
+/// to the recorded Rust toolchain rather than to a source `macro_rules!` body.
+/// Keep this closed: an unknown bare macro may come from an external prelude or
+/// may have been generated by an item macro, neither of which is source-closed
+/// identity authority.
+fn rust_toolchain_authority_macro(name: &str) -> bool {
+    // Formatting, assertion, write, panic, debug, and collection macros can
+    // dispatch caller-local traits such as Display, Debug, PartialEq, Write,
+    // or Clone. Until their invocation shapes and receiver types are proven,
+    // admitting them would hide implementation authority. `concat!` accepts
+    // literals and `stringify!` returns the already-framed input token text;
+    // neither performs caller-local trait dispatch.
+    matches!(name, "concat" | "stringify")
+}
+
+fn rust_source_macro_rule_definition_tokens(
+    tokens: &[RustAuthorityToken<'_>],
+) -> BTreeMap<String, Vec<usize>> {
+    let mut definitions = BTreeMap::<String, Vec<usize>>::new();
+    for index in 0..tokens.len().saturating_sub(3) {
+        if tokens[index].text == "macro_rules"
+            && tokens[index + 1].text == "!"
+            && rust_macro_identifier_tail(tokens[index + 2].text)
+            && matches!(tokens[index + 3].text, "(" | "[" | "{")
+        {
+            definitions
+                .entry(tokens[index + 2].text.to_string())
+                .or_default()
+                .push(index);
+        }
+    }
+    definitions
+}
+
+fn rust_authority_function_paths(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    let mut paths = BTreeSet::new();
+    for start in 0..tokens.len() {
+        if matcher_tokens.contains(&start)
+            || !canonical_symbol(tokens[start].text)
+            || (start >= 2 && tokens[start - 2].text == ":" && tokens[start - 1].text == ":")
+        {
+            continue;
+        }
+        let mut parts = vec![tokens[start].text];
+        let mut cursor = start;
+        while cursor + 3 < tokens.len()
+            && tokens[cursor + 1].text == ":"
+            && tokens[cursor + 2].text == ":"
+            && canonical_symbol(tokens[cursor + 3].text)
+        {
+            parts.push(tokens[cursor + 3].text);
+            cursor += 3;
+        }
+        if parts.len() < 2 {
+            continue;
+        }
+        paths.insert(parts.join("::"));
+    }
+    Ok(paths)
+}
+
+fn rust_authority_call_open_after_member(
+    tokens: &[RustAuthorityToken<'_>],
+    delimiter_depth: &[usize],
+    member: usize,
+) -> Option<usize> {
+    if tokens
+        .get(member + 1)
+        .is_some_and(|token| token.text == "(")
+    {
+        return Some(member + 1);
+    }
+    if !tokens
+        .get(member + 1)
+        .is_some_and(|token| token.text == ":")
+        || !tokens
+            .get(member + 2)
+            .is_some_and(|token| token.text == ":")
+        || !tokens
+            .get(member + 3)
+            .is_some_and(|token| token.text == "<")
+    {
+        return None;
+    }
+    let base_depth = *delimiter_depth.get(member + 3)?;
+    let mut angle_depth = 0usize;
+    for cursor in member + 3..tokens.len() {
+        if delimiter_depth.get(cursor).copied()? != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => angle_depth = angle_depth.checked_add(1)?,
+            ">" if angle_depth != 0
+                && !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+                if angle_depth == 0 {
+                    return tokens
+                        .get(cursor + 1)
+                        .is_some_and(|token| token.text == "(")
+                        .then_some(cursor + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rust_authority_trait_self_call_paths(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (_, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let mut calls = BTreeSet::new();
+    for start in 0..tokens.len() {
+        if !canonical_symbol(tokens[start].text) {
+            continue;
+        }
+        let mut parts = vec![tokens[start].text];
+        let mut cursor = start;
+        while cursor + 3 < tokens.len()
+            && tokens[cursor + 1].text == ":"
+            && tokens[cursor + 2].text == ":"
+            && canonical_symbol(tokens[cursor + 3].text)
+        {
+            parts.push(tokens[cursor + 3].text);
+            cursor += 3;
+        }
+        if parts.len() < 2 {
+            continue;
+        }
+        let Some(call_open) =
+            rust_authority_call_open_after_member(&tokens, &delimiter_depth, cursor)
+        else {
+            continue;
+        };
+        if tokens
+            .get(call_open + 1)
+            .is_some_and(|token| token.text == "self")
+            && tokens
+                .get(call_open + 2)
+                .is_some_and(|token| matches!(token.text, ")" | ","))
+        {
+            calls.insert(parts.join("::"));
+        }
+    }
+    Ok(calls)
+}
+
+fn rust_authority_self_ufcs_paths(
+    fragment: &str,
+) -> Result<BTreeSet<(String, bool, usize)>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (_, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let mut paths = BTreeSet::new();
+    for open in 0..tokens.len() {
+        if tokens[open].text != "<"
+            || !tokens
+                .get(open + 1)
+                .is_some_and(|token| token.text == "Self")
+            || !tokens.get(open + 2).is_some_and(|token| token.text == "as")
+        {
+            continue;
+        }
+        let base_depth = delimiter_depth[open];
+        let mut angle_depth = 1usize;
+        let mut close = None;
+        for cursor in open + 3..tokens.len() {
+            if delimiter_depth[cursor] != base_depth {
+                continue;
+            }
+            match tokens[cursor].text {
+                "<" => angle_depth += 1,
+                ">" if !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+                {
+                    angle_depth = angle_depth.checked_sub(1).ok_or_else(|| {
+                        "invalid UFCS angle-bracket depth in Rust authority".to_string()
+                    })?;
+                    if angle_depth == 0 {
+                        close = Some(cursor);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            continue;
+        };
+        if !tokens.get(close + 1).is_some_and(|token| token.text == ":")
+            || !tokens.get(close + 2).is_some_and(|token| token.text == ":")
+        {
+            continue;
+        }
+        let Some(member) = tokens
+            .get(close + 3)
+            .map(|token| token.text)
+            .filter(|member| canonical_symbol(member))
+        else {
+            continue;
+        };
+        let Some(trait_path) = implementation_type_path(&tokens, open + 3) else {
+            continue;
+        };
+        let is_call =
+            rust_authority_call_open_after_member(&tokens, &delimiter_depth, close + 3).is_some();
+        paths.insert((format!("{trait_path}::{member}"), is_call, close + 3));
+    }
+    Ok(paths)
+}
+
+fn rust_authority_call_references(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (_, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let matcher_tokens = rust_macro_matcher_token_indexes(fragment)?;
+    let mut calls = BTreeSet::new();
+    for start in 0..tokens.len() {
+        if matcher_tokens.contains(&start)
+            || !canonical_symbol(tokens[start].text)
+            || matches!(
+                tokens[start].text,
+                "if" | "while" | "for" | "match" | "loop" | "return" | "break" | "continue"
+            )
+            || tokens
+                .get(start.wrapping_sub(1))
+                .is_some_and(|previous| matches!(previous.text, "." | ":" | "fn"))
+        {
+            continue;
+        }
+        let mut parts = vec![tokens[start].text];
+        let mut cursor = start;
+        while cursor + 3 < tokens.len()
+            && tokens[cursor + 1].text == ":"
+            && tokens[cursor + 2].text == ":"
+            && canonical_symbol(tokens[cursor + 3].text)
+        {
+            parts.push(tokens[cursor + 3].text);
+            cursor += 3;
+        }
+        if rust_authority_call_open_after_member(&tokens, &delimiter_depth, cursor).is_some() {
+            calls.insert(parts.join("::"));
+        }
+    }
+    Ok(calls)
+}
+
+fn rust_method_call_after<'text>(
+    tokens: &[RustAuthorityToken<'text>],
+    delimiter_depth: &[usize],
+    dot: usize,
+) -> Option<&'text str> {
+    if tokens.get(dot)?.text != "." {
+        return None;
+    }
+    let method = tokens.get(dot + 1)?.text;
+    if !canonical_symbol(method) {
+        return None;
+    }
+    if tokens.get(dot + 2).is_some_and(|token| token.text == "(") {
+        return Some(method);
+    }
+    if !tokens.get(dot + 2).is_some_and(|token| token.text == ":")
+        || !tokens.get(dot + 3).is_some_and(|token| token.text == ":")
+        || !tokens.get(dot + 4).is_some_and(|token| token.text == "<")
+    {
+        return None;
+    }
+    let mut angle_depth = 0usize;
+    let base_depth = *delimiter_depth.get(dot)?;
+    for cursor in dot + 4..tokens.len() {
+        if delimiter_depth.get(cursor).copied()? != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => angle_depth = angle_depth.checked_add(1)?,
+            ">" if !tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth = angle_depth.checked_sub(1)?;
+                if angle_depth == 0 {
+                    return tokens
+                        .get(cursor + 1)
+                        .is_some_and(|token| token.text == "(")
+                        .then_some(method);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rust_fragment_macro_token_scopes(fragment: &str) -> Vec<(usize, usize)> {
+    rust_macro_rules_scopes(fragment)
+        .into_iter()
+        .chain(rust_macro_invocation_scopes(fragment))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RustKnownReceiverType {
+    Bool,
+    Char,
+    Str,
+    Slice,
+    SignedInteger,
+    U8,
+    UnsignedInteger,
+    Float,
+}
+
+fn rust_known_receiver_type(
+    type_tokens: &[RustAuthorityToken<'_>],
+    shadowed_primitive_names: &BTreeSet<String>,
+) -> Option<RustKnownReceiverType> {
+    let mut cursor = 0usize;
+    let mut reference_depth = 0usize;
+    let mut mutable_reference = false;
+    while type_tokens
+        .get(cursor)
+        .is_some_and(|token| token.text == "&")
+    {
+        reference_depth = reference_depth.checked_add(1)?;
+        cursor += 1;
+        if type_tokens
+            .get(cursor)
+            .is_some_and(|token| token.text == "'")
+        {
+            if !type_tokens
+                .get(cursor + 1)
+                .is_some_and(|token| canonical_symbol(token.text))
+            {
+                return None;
+            }
+            cursor += 2;
+        }
+        if type_tokens
+            .get(cursor)
+            .is_some_and(|token| token.text == "mut")
+        {
+            mutable_reference = true;
+            cursor += 1;
+        }
+    }
+    if reference_depth == 1
+        && !mutable_reference
+        && type_tokens
+            .get(cursor)
+            .is_some_and(|token| token.text == "[")
+    {
+        let (pairs, _) = rust_authority_delimiters(type_tokens).ok()?;
+        let close = pairs.get(cursor).copied().flatten()?;
+        if close + 1 == type_tokens.len()
+            && !type_tokens[cursor + 1..close]
+                .iter()
+                .any(|token| token.text == ";")
+        {
+            return Some(RustKnownReceiverType::Slice);
+        }
+        return None;
+    }
+    let name = type_tokens.get(cursor)?.text;
+    if cursor + 1 != type_tokens.len()
+        || !canonical_symbol(name)
+        || matches!(name, "const" | "mut" | "impl" | "dyn")
+        || shadowed_primitive_names.contains(name)
+    {
+        return None;
+    }
+    if reference_depth == 1 && !mutable_reference && name == "str" {
+        return Some(RustKnownReceiverType::Str);
+    }
+    if reference_depth != 0 {
+        return None;
+    }
+    match name {
+        "bool" => Some(RustKnownReceiverType::Bool),
+        "char" => Some(RustKnownReceiverType::Char),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
+            Some(RustKnownReceiverType::SignedInteger)
+        }
+        "u8" => Some(RustKnownReceiverType::U8),
+        "u16" | "u32" | "u64" | "u128" | "usize" => Some(RustKnownReceiverType::UnsignedInteger),
+        "f32" | "f64" => Some(RustKnownReceiverType::Float),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // The closed builtin whitelist is intentionally visible and exhaustive.
+fn rust_known_inherent_method(receiver: RustKnownReceiverType, method: &str) -> bool {
+    match receiver {
+        RustKnownReceiverType::Bool => matches!(method, "then" | "then_some"),
+        RustKnownReceiverType::Char => matches!(
+            method,
+            "encode_utf16"
+                | "encode_utf8"
+                | "escape_debug"
+                | "escape_default"
+                | "escape_unicode"
+                | "is_alphabetic"
+                | "is_alphanumeric"
+                | "is_ascii"
+                | "is_ascii_alphabetic"
+                | "is_ascii_alphanumeric"
+                | "is_ascii_control"
+                | "is_ascii_digit"
+                | "is_ascii_graphic"
+                | "is_ascii_hexdigit"
+                | "is_ascii_lowercase"
+                | "is_ascii_punctuation"
+                | "is_ascii_uppercase"
+                | "is_ascii_whitespace"
+                | "is_control"
+                | "is_digit"
+                | "is_lowercase"
+                | "is_numeric"
+                | "is_uppercase"
+                | "is_whitespace"
+                | "len_utf16"
+                | "len_utf8"
+                | "to_ascii_lowercase"
+                | "to_ascii_uppercase"
+                | "to_digit"
+                | "to_lowercase"
+                | "to_uppercase"
+        ),
+        RustKnownReceiverType::Str => matches!(
+            method,
+            "as_bytes"
+                | "bytes"
+                | "char_indices"
+                | "chars"
+                | "contains"
+                | "encode_utf16"
+                | "ends_with"
+                | "eq_ignore_ascii_case"
+                | "escape_debug"
+                | "escape_default"
+                | "escape_unicode"
+                | "find"
+                | "get"
+                | "is_ascii"
+                | "is_char_boundary"
+                | "is_empty"
+                | "len"
+                | "lines"
+                | "match_indices"
+                | "matches"
+                | "repeat"
+                | "replace"
+                | "replacen"
+                | "rfind"
+                | "rmatch_indices"
+                | "rmatches"
+                | "rsplit"
+                | "rsplit_once"
+                | "rsplit_terminator"
+                | "split"
+                | "split_ascii_whitespace"
+                | "split_at"
+                | "split_inclusive"
+                | "split_once"
+                | "split_terminator"
+                | "split_whitespace"
+                | "starts_with"
+                | "strip_prefix"
+                | "strip_suffix"
+                | "to_ascii_lowercase"
+                | "to_ascii_uppercase"
+                | "to_lowercase"
+                | "to_uppercase"
+                | "trim"
+                | "trim_end"
+                | "trim_end_matches"
+                | "trim_matches"
+                | "trim_start"
+                | "trim_start_matches"
+        ),
+        RustKnownReceiverType::Slice => matches!(
+            method,
+            "chunks"
+                | "chunks_exact"
+                | "first"
+                | "get"
+                | "is_empty"
+                | "iter"
+                | "last"
+                | "len"
+                | "split"
+                | "split_at"
+                | "split_first"
+                | "split_inclusive"
+                | "split_last"
+                | "windows"
+        ),
+        RustKnownReceiverType::SignedInteger
+        | RustKnownReceiverType::U8
+        | RustKnownReceiverType::UnsignedInteger => {
+            matches!(
+                method,
+                "checked_add"
+                    | "checked_div"
+                    | "checked_div_euclid"
+                    | "checked_ilog"
+                    | "checked_ilog10"
+                    | "checked_ilog2"
+                    | "checked_mul"
+                    | "checked_next_multiple_of"
+                    | "checked_pow"
+                    | "checked_rem"
+                    | "checked_rem_euclid"
+                    | "checked_shl"
+                    | "checked_shr"
+                    | "checked_sub"
+                    | "count_ones"
+                    | "count_zeros"
+                    | "ilog"
+                    | "ilog10"
+                    | "ilog2"
+                    | "leading_ones"
+                    | "leading_zeros"
+                    | "next_multiple_of"
+                    | "overflowing_add"
+                    | "overflowing_div"
+                    | "overflowing_div_euclid"
+                    | "overflowing_mul"
+                    | "overflowing_pow"
+                    | "overflowing_rem"
+                    | "overflowing_rem_euclid"
+                    | "overflowing_shl"
+                    | "overflowing_shr"
+                    | "overflowing_sub"
+                    | "pow"
+                    | "reverse_bits"
+                    | "rotate_left"
+                    | "rotate_right"
+                    | "saturating_add"
+                    | "saturating_mul"
+                    | "saturating_pow"
+                    | "saturating_sub"
+                    | "swap_bytes"
+                    | "to_be"
+                    | "to_be_bytes"
+                    | "to_le"
+                    | "to_le_bytes"
+                    | "to_ne_bytes"
+                    | "trailing_ones"
+                    | "trailing_zeros"
+                    | "wrapping_add"
+                    | "wrapping_div"
+                    | "wrapping_div_euclid"
+                    | "wrapping_mul"
+                    | "wrapping_neg"
+                    | "wrapping_pow"
+                    | "wrapping_rem"
+                    | "wrapping_rem_euclid"
+                    | "wrapping_shl"
+                    | "wrapping_shr"
+                    | "wrapping_sub"
+            ) || match receiver {
+                RustKnownReceiverType::SignedInteger => matches!(
+                    method,
+                    "abs"
+                        | "checked_abs"
+                        | "checked_add_unsigned"
+                        | "checked_neg"
+                        | "checked_sub_unsigned"
+                        | "is_negative"
+                        | "is_positive"
+                        | "overflowing_add_unsigned"
+                        | "overflowing_sub_unsigned"
+                        | "saturating_abs"
+                        | "saturating_add_unsigned"
+                        | "saturating_neg"
+                        | "saturating_sub_unsigned"
+                        | "signum"
+                        | "unsigned_abs"
+                        | "wrapping_add_unsigned"
+                        | "wrapping_sub_unsigned"
+                ),
+                RustKnownReceiverType::U8 => matches!(
+                    method,
+                    "checked_add_signed"
+                        | "checked_sub_signed"
+                        | "eq_ignore_ascii_case"
+                        | "is_ascii"
+                        | "overflowing_add_signed"
+                        | "overflowing_sub_signed"
+                        | "saturating_add_signed"
+                        | "saturating_sub_signed"
+                        | "to_ascii_lowercase"
+                        | "to_ascii_uppercase"
+                        | "wrapping_add_signed"
+                        | "wrapping_sub_signed"
+                ),
+                RustKnownReceiverType::UnsignedInteger => matches!(
+                    method,
+                    "checked_add_signed"
+                        | "checked_sub_signed"
+                        | "overflowing_add_signed"
+                        | "overflowing_sub_signed"
+                        | "saturating_add_signed"
+                        | "saturating_sub_signed"
+                        | "wrapping_add_signed"
+                        | "wrapping_sub_signed"
+                ),
+                _ => false,
+            }
+        }
+        RustKnownReceiverType::Float => matches!(
+            method,
+            "abs"
+                | "acos"
+                | "acosh"
+                | "asin"
+                | "asinh"
+                | "atan"
+                | "atan2"
+                | "atanh"
+                | "cbrt"
+                | "ceil"
+                | "classify"
+                | "clamp"
+                | "copysign"
+                | "cos"
+                | "cosh"
+                | "div_euclid"
+                | "exp"
+                | "exp2"
+                | "exp_m1"
+                | "floor"
+                | "fract"
+                | "hypot"
+                | "is_finite"
+                | "is_infinite"
+                | "is_nan"
+                | "is_normal"
+                | "is_sign_negative"
+                | "is_sign_positive"
+                | "is_subnormal"
+                | "ln"
+                | "ln_1p"
+                | "log"
+                | "log10"
+                | "log2"
+                | "max"
+                | "min"
+                | "mul_add"
+                | "powf"
+                | "powi"
+                | "recip"
+                | "rem_euclid"
+                | "round"
+                | "round_ties_even"
+                | "signum"
+                | "sin"
+                | "sin_cos"
+                | "sinh"
+                | "sqrt"
+                | "tan"
+                | "tanh"
+                | "to_be_bytes"
+                | "to_bits"
+                | "to_degrees"
+                | "to_le_bytes"
+                | "to_ne_bytes"
+                | "to_radians"
+                | "total_cmp"
+                | "trunc"
+        ),
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Parameter grammar and later shadowing share one fail-closed proof pass.
+fn rust_explicit_primitive_parameter_receivers(
+    fragment: &str,
+    tokens: &[RustAuthorityToken<'_>],
+    shadowed_primitive_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, RustKnownReceiverType>, String> {
+    let (pairs, delimiter_depth) = rust_authority_delimiters(tokens)?;
+    let leaders = rust_item_leaders(tokens, &delimiter_depth);
+    let Some(function) = tokens.iter().enumerate().position(|(index, token)| {
+        token.text == "fn"
+            && delimiter_depth[index] == 0
+            && rust_item_prefix_is_supported(tokens, &pairs, leaders[index], index, true)
+    }) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(open) = rust_function_parameter_open(tokens, &delimiter_depth, function) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(close) = pairs[open] else {
+        return Err("function parameter list has no closing delimiter".to_string());
+    };
+    let parameter_depth = delimiter_depth[open] + 1;
+    let mut receivers = BTreeMap::new();
+    let mut segment = open + 1;
+    while segment < close {
+        let end =
+            rust_parameter_segment_end(tokens, &delimiter_depth, segment, close, parameter_depth);
+        let Some(colon) = (segment..end).find(|index| {
+            tokens[*index].text == ":"
+                && delimiter_depth[*index] == parameter_depth
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == ":")
+                && !tokens
+                    .get(*index + 1)
+                    .is_some_and(|token| token.text == ":")
+        }) else {
+            segment = end.saturating_add(1);
+            continue;
+        };
+        let pattern = &tokens[segment..colon];
+        if pattern.iter().any(|token| token.text == "ref")
+            || pattern.iter().any(|token| token.text == "@")
+            || pattern
+                .iter()
+                .any(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            segment = end.saturating_add(1);
+            continue;
+        }
+        let bindings = pattern
+            .iter()
+            .filter(|token| {
+                canonical_symbol(token.text)
+                    && !matches!(token.text, "mut" | "ref" | "self" | "Self")
+                    && token
+                        .text
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first == '_' || first.is_ascii_lowercase())
+            })
+            .map(|token| token.text)
+            .collect::<Vec<_>>();
+        let [binding] = bindings.as_slice() else {
+            segment = end.saturating_add(1);
+            continue;
+        };
+        if let Some(receiver_type) =
+            rust_known_receiver_type(&tokens[colon + 1..end], shadowed_primitive_names)
+        {
+            receivers.insert((*binding).to_string(), receiver_type);
+        }
+        segment = end.saturating_add(1);
+    }
+
+    let Some(body_open) = rust_function_body_open(
+        tokens,
+        &delimiter_depth,
+        close + 1,
+        delimiter_depth[function],
+    ) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(body_close) = pairs[body_open] else {
+        return Err("function body has no closing delimiter".to_string());
+    };
+    let macro_scopes = rust_fragment_macro_token_scopes(fragment);
+    let macro_opaque = |index: usize| byte_is_in_scopes(tokens[index].start, &macro_scopes);
+
+    if rust_macro_invocation_scopes(fragment)
+        .iter()
+        .any(|(start, end)| tokens[body_open].start < *end && *start < tokens[body_close].end)
+    {
+        return Ok(BTreeMap::new());
+    }
+
+    // Without a complete expression/pattern parser, a closure, `for` pattern,
+    // or `match` arm can rebind a parameter name in a nested scope. Refusing all
+    // primitive exemptions in those functions is conservative but prevents an
+    // imported extension trait from being mistaken for an inherent primitive
+    // method after shadowing.
+    if (body_open + 1..body_close).any(|index| {
+        !macro_opaque(index)
+            && matches!(
+                tokens[index].text,
+                "for" | "match" | "|" | "fn" | "const" | "static" | "struct" | "enum" | "union"
+            )
+    }) {
+        return Ok(BTreeMap::new());
+    }
+
+    for start in body_open + 1..body_close {
+        if tokens[start].text != "let" || macro_opaque(start) {
+            continue;
+        }
+        let depth = delimiter_depth[start];
+        let Some(end) = (start + 1..body_close).find(|index| {
+            delimiter_depth[*index] == depth && matches!(tokens[*index].text, "=" | ";")
+        }) else {
+            receivers.clear();
+            return Ok(receivers);
+        };
+        let pattern_end = (start + 1..end)
+            .find(|index| tokens[*index].text == ":" && delimiter_depth[*index] == depth)
+            .unwrap_or(end);
+        for binding in start + 1..pattern_end {
+            receivers.remove(tokens[binding].text);
+        }
+    }
+    Ok(receivers)
+}
+
+fn rust_primitive_comparison_operand(
+    tokens: &[RustAuthorityToken<'_>],
+    index: usize,
+    primitive_bindings: &BTreeMap<String, RustKnownReceiverType>,
+) -> Option<(usize, usize)> {
+    let Some(token) = tokens.get(index) else {
+        return None;
+    };
+    let projected = tokens
+        .get(index.wrapping_sub(1))
+        .is_some_and(|previous| matches!(previous.text, "." | ":"))
+        || tokens
+            .get(index + 1)
+            .is_some_and(|next| matches!(next.text, "." | ":"));
+    if projected {
+        return None;
+    }
+    if matches!(token.text, "true" | "false") || token.text.starts_with('\'') {
+        return Some((index, index + 1));
+    }
+    if token.text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let mut first = index;
+        while first != 0
+            && tokens[first - 1]
+                .text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+            && tokens[first - 1].end == tokens[first].start
+        {
+            first -= 1;
+        }
+        if tokens
+            .get(first.wrapping_sub(1))
+            .is_some_and(|previous| previous.text == "." && previous.end == tokens[first].start)
+        {
+            return None;
+        }
+        let mut end = index + 1;
+        while end < tokens.len()
+            && tokens[end].text.bytes().all(|byte| byte.is_ascii_digit())
+            && tokens[end - 1].end == tokens[end].start
+        {
+            end += 1;
+        }
+        return Some((first, end));
+    }
+    primitive_bindings
+        .get(token.text)
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                RustKnownReceiverType::Bool
+                    | RustKnownReceiverType::Char
+                    | RustKnownReceiverType::SignedInteger
+                    | RustKnownReceiverType::U8
+                    | RustKnownReceiverType::UnsignedInteger
+                    | RustKnownReceiverType::Float
+            )
+        })
+        .then_some((index, index + 1))
+}
+
+fn rust_comparison_atom_has_left_boundary(
+    tokens: &[RustAuthorityToken<'_>],
+    atom_start: usize,
+    range_start: usize,
+) -> bool {
+    atom_start == range_start
+        || tokens
+            .get(atom_start.wrapping_sub(1))
+            .is_some_and(|previous| {
+                matches!(
+                    previous.text,
+                    "(" | "[" | "{" | "," | ";" | "=" | "return" | "if" | "while"
+                )
+            })
+}
+
+fn rust_comparison_atom_has_right_boundary(
+    tokens: &[RustAuthorityToken<'_>],
+    atom_end: usize,
+    range_end: usize,
+) -> bool {
+    atom_end == range_end
+        || tokens
+            .get(atom_end)
+            .is_some_and(|next| matches!(next.text, ")" | "]" | "}" | "," | ";" | "{"))
+}
+
+fn rust_turbofish_angle_tokens(
+    tokens: &[RustAuthorityToken<'_>],
+    delimiter_depth: &[usize],
+    start: usize,
+    end: usize,
+) -> BTreeSet<usize> {
+    let mut angles = BTreeSet::new();
+    for open in start..end {
+        let turbofish = open >= 2 && tokens[open - 2].text == ":" && tokens[open - 1].text == ":";
+        let qualified_self = tokens
+            .get(open + 1)
+            .is_some_and(|token| token.text == "Self")
+            && tokens.get(open + 2).is_some_and(|token| token.text == "as");
+        if tokens[open].text != "<" || (!turbofish && !qualified_self) {
+            continue;
+        }
+        let base_depth = delimiter_depth[open];
+        let mut depth = 0usize;
+        let mut candidate = Vec::new();
+        for cursor in open..end {
+            if delimiter_depth[cursor] != base_depth {
+                continue;
+            }
+            match tokens[cursor].text {
+                "<" => {
+                    depth += 1;
+                    candidate.push(cursor);
+                }
+                ">" if !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+                {
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = next_depth;
+                    candidate.push(cursor);
+                    if depth == 0 {
+                        angles.extend(candidate);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    angles
+}
+
+fn rust_fragment_has_unproven_comparison(
+    tokens: &[RustAuthorityToken<'_>],
+    primitive_bindings: &BTreeMap<String, RustKnownReceiverType>,
+) -> Result<bool, String> {
+    let (pairs, delimiter_depth) = rust_authority_delimiters(tokens)?;
+    let leaders = rust_item_leaders(tokens, &delimiter_depth);
+    let function = tokens.iter().enumerate().position(|(index, token)| {
+        token.text == "fn"
+            && delimiter_depth[index] == 0
+            && rust_item_prefix_is_supported(tokens, &pairs, leaders[index], index, true)
+    });
+    let (range_start, range_end, primitive_bindings) = if let Some(function) = function {
+        let Some(body_open) = rust_function_body_open(tokens, &delimiter_depth, function + 1, 0)
+        else {
+            return Ok(false);
+        };
+        let Some(body_close) = pairs[body_open] else {
+            return Err("function body has no closing delimiter".to_string());
+        };
+        (body_open + 1, body_close, primitive_bindings.clone())
+    } else if let Some(declaration) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (matches!(token.text, "const" | "static") && delimiter_depth[index] == 0).then_some(index)
+    }) {
+        let Some(initializer) = (declaration + 1..tokens.len())
+            .find(|index| tokens[*index].text == "=" && delimiter_depth[*index] == 0)
+        else {
+            return Ok(false);
+        };
+        let end = (initializer + 1..tokens.len())
+            .find(|index| tokens[*index].text == ";" && delimiter_depth[*index] == 0)
+            .unwrap_or(tokens.len());
+        (initializer + 1, end, BTreeMap::new())
+    } else {
+        return Ok(false);
+    };
+    let type_token_indexes = rust_authority_type_token_indexes(tokens)?;
+    let turbofish_angles =
+        rust_turbofish_angle_tokens(tokens, &delimiter_depth, range_start, range_end);
+
+    let mut operator = range_start;
+    while operator < range_end {
+        if type_token_indexes.contains(&operator) || turbofish_angles.contains(&operator) {
+            operator += 1;
+            continue;
+        }
+        let joint_next = tokens.get(operator + 1).is_some_and(|next| {
+            tokens[operator].end == next.start
+                && matches!(
+                    (tokens[operator].text, next.text),
+                    ("=" | "!" | "<" | ">", "=")
+                )
+        });
+        let comparison_end = if joint_next {
+            operator + 2
+        } else if matches!(tokens[operator].text, "<" | ">")
+            && !tokens
+                .get(operator.wrapping_sub(1))
+                .is_some_and(|previous| {
+                    previous.end == tokens[operator].start
+                        && matches!(previous.text, "-" | "=" | "<" | ">")
+                })
+            && !tokens.get(operator + 1).is_some_and(|next| {
+                tokens[operator].end == next.start && matches!(next.text, "<" | ">")
+            })
+        {
+            operator + 1
+        } else {
+            operator += 1;
+            continue;
+        };
+        let Some(left) = operator.checked_sub(1) else {
+            return Ok(true);
+        };
+        let right = comparison_end;
+        let Some((left_start, left_end)) =
+            rust_primitive_comparison_operand(tokens, left, &primitive_bindings)
+        else {
+            return Ok(true);
+        };
+        let Some((right_start, right_end)) =
+            rust_primitive_comparison_operand(tokens, right, &primitive_bindings)
+        else {
+            return Ok(true);
+        };
+        if left_end != operator
+            || right_start != comparison_end
+            || !rust_comparison_atom_has_left_boundary(tokens, left_start, range_start)
+            || !rust_comparison_atom_has_right_boundary(tokens, right_end, range_end)
+        {
+            return Ok(true);
+        }
+        operator = comparison_end;
+    }
+    Ok(false)
+}
+
+fn rust_fragment_has_unresolved_receiver_method_call(
+    tokens: &[RustAuthorityToken<'_>],
+    primitive_receivers: &BTreeMap<String, RustKnownReceiverType>,
+) -> bool {
+    let Ok((_, delimiter_depth)) = rust_authority_delimiters(tokens) else {
+        return true;
+    };
+    (0..tokens.len()).any(|dot| {
+        rust_method_call_after(tokens, &delimiter_depth, dot).is_some_and(|method| {
+            let receiver_index = dot.wrapping_sub(1);
+            !tokens.get(receiver_index).is_some_and(|receiver| {
+                let bare_binding = !tokens
+                    .get(receiver_index.wrapping_sub(1))
+                    .is_some_and(|previous| matches!(previous.text, "." | ":"));
+                receiver.text == "self"
+                    || (bare_binding
+                        && primitive_receivers
+                            .get(receiver.text)
+                            .is_some_and(|receiver_type| {
+                                rust_known_inherent_method(*receiver_type, method)
+                            }))
+            })
+        })
+    })
+}
+
+fn rust_authority_self_method_calls(fragment: &str) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let (_, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    Ok((0..tokens.len().saturating_sub(1))
+        .filter(|index| tokens[*index].text == "self")
+        .filter_map(|index| rust_method_call_after(&tokens, &delimiter_depth, index + 1))
+        .map(str::to_string)
+        .collect())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RustNameNamespace {
+    Value,
+    Type,
+}
+
+fn rust_function_generic_type_bindings(
+    tokens: &[RustAuthorityToken<'_>],
+) -> Result<BTreeSet<String>, String> {
+    let (pairs, delimiter_depth) = rust_authority_delimiters(tokens)?;
+    let Some(function) = tokens
+        .iter()
+        .enumerate()
+        .position(|(index, token)| token.text == "fn" && delimiter_depth[index] == 0)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(parameters) = rust_function_parameter_open(tokens, &delimiter_depth, function) else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(open) = (function + 2..parameters).find(|index| tokens[*index].text == "<") else {
+        return Ok(BTreeSet::new());
+    };
+    let base_depth = delimiter_depth[open];
+    let mut angle_depth = 1usize;
+    let mut close = None;
+    for cursor in open + 1..parameters {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => angle_depth += 1,
+            ">" if !tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth = angle_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "invalid generic parameter angle depth".to_string())?;
+                if angle_depth == 0 {
+                    close = Some(cursor);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return Err("generic parameter list has no closing angle bracket".to_string());
+    };
+    let mut bindings = BTreeSet::new();
+    let mut segment = open + 1;
+    let mut depth = 1usize;
+    for cursor in open + 1..=close {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => depth += 1,
+            ">" if tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") => {}
+            ">" if depth > 1 => depth -= 1,
+            "," | ">" if depth == 1 => {
+                let mut candidate = segment;
+                while tokens.get(candidate).is_some_and(|token| token.text == "#")
+                    && tokens
+                        .get(candidate + 1)
+                        .is_some_and(|token| token.text == "[")
+                {
+                    let Some(attribute_close) = pairs[candidate + 1] else {
+                        return Err(
+                            "generic parameter attribute has no closing delimiter".to_string()
+                        );
+                    };
+                    candidate = attribute_close + 1;
+                }
+                if !tokens
+                    .get(candidate)
+                    .is_some_and(|token| matches!(token.text, "const" | "'"))
+                    && tokens
+                        .get(candidate)
+                        .is_some_and(|token| canonical_symbol(token.text))
+                {
+                    bindings.insert(tokens[candidate].text.to_string());
+                }
+                segment = cursor + 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(bindings)
+}
+
+fn rust_function_generic_const_bindings(
+    tokens: &[RustAuthorityToken<'_>],
+) -> Result<BTreeSet<String>, String> {
+    let (pairs, delimiter_depth) = rust_authority_delimiters(tokens)?;
+    let Some(function) = tokens
+        .iter()
+        .enumerate()
+        .position(|(index, token)| token.text == "fn" && delimiter_depth[index] == 0)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(parameters) = rust_function_parameter_open(tokens, &delimiter_depth, function) else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(open) = (function + 2..parameters).find(|index| tokens[*index].text == "<") else {
+        return Ok(BTreeSet::new());
+    };
+    let base_depth = delimiter_depth[open];
+    let mut angle_depth = 1usize;
+    let mut close = None;
+    for cursor in open + 1..parameters {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => angle_depth += 1,
+            ">" if !tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth = angle_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "invalid generic parameter angle depth".to_string())?;
+                if angle_depth == 0 {
+                    close = Some(cursor);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return Err("generic parameter list has no closing angle bracket".to_string());
+    };
+    let mut bindings = BTreeSet::new();
+    let mut segment = open + 1;
+    let mut depth = 1usize;
+    for cursor in open + 1..=close {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => depth += 1,
+            ">" if tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") => {}
+            ">" if depth > 1 => depth -= 1,
+            "," | ">" if depth == 1 => {
+                let mut candidate = segment;
+                while tokens.get(candidate).is_some_and(|token| token.text == "#")
+                    && tokens
+                        .get(candidate + 1)
+                        .is_some_and(|token| token.text == "[")
+                {
+                    let Some(attribute_close) = pairs[candidate + 1] else {
+                        return Err(
+                            "generic parameter attribute has no closing delimiter".to_string()
+                        );
+                    };
+                    candidate = attribute_close + 1;
+                }
+                if tokens
+                    .get(candidate)
+                    .is_some_and(|token| token.text == "const")
+                    && let Some(name) = tokens
+                        .get(candidate + 1)
+                        .map(|token| token.text)
+                        .filter(|name| canonical_symbol(name))
+                {
+                    bindings.insert(name.to_string());
+                }
+                segment = cursor + 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(bindings)
+}
+
+fn rust_implementation_generic_bindings(
+    header: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let tokens = rust_authority_tokens(header)?;
+    let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens)?;
+    let Some(implementation) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.text == "impl" && delimiter_depth[index] == 0).then_some(index)
+    }) else {
+        return Err("implementation header has no direct impl keyword".to_string());
+    };
+    let Some(open) = tokens
+        .get(implementation + 1)
+        .is_some_and(|token| token.text == "<")
+        .then_some(implementation + 1)
+    else {
+        return Ok((BTreeSet::new(), BTreeSet::new()));
+    };
+    let base_depth = delimiter_depth[open];
+    let mut angle_depth = 1usize;
+    let mut close = None;
+    for cursor in open + 1..tokens.len() {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => angle_depth += 1,
+            ">" if !tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth = angle_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "invalid implementation generic angle depth".to_string())?;
+                if angle_depth == 0 {
+                    close = Some(cursor);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return Err("implementation generic list has no closing angle bracket".to_string());
+    };
+    let mut type_bindings = BTreeSet::new();
+    let mut const_bindings = BTreeSet::new();
+    let mut segment = open + 1;
+    let mut depth = 1usize;
+    for cursor in open + 1..=close {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => depth += 1,
+            ">" if tokens
+                .get(cursor.wrapping_sub(1))
+                .is_some_and(|token| token.text == "-") => {}
+            ">" if depth > 1 => depth -= 1,
+            "," | ">" if depth == 1 => {
+                let mut candidate = segment;
+                while tokens.get(candidate).is_some_and(|token| token.text == "#")
+                    && tokens
+                        .get(candidate + 1)
+                        .is_some_and(|token| token.text == "[")
+                {
+                    candidate = pairs[candidate + 1].ok_or_else(|| {
+                        "implementation generic attribute has no closing delimiter".to_string()
+                    })? + 1;
+                }
+                if tokens
+                    .get(candidate)
+                    .is_some_and(|token| token.text == "const")
+                {
+                    let name = tokens
+                        .get(candidate + 1)
+                        .map(|token| token.text)
+                        .filter(|name| canonical_symbol(name))
+                        .ok_or_else(|| {
+                            "implementation const generic has no canonical name".to_string()
+                        })?;
+                    const_bindings.insert(name.to_string());
+                } else if !tokens.get(candidate).is_some_and(|token| token.text == "'")
+                    && let Some(name) = tokens
+                        .get(candidate)
+                        .map(|token| token.text)
+                        .filter(|name| canonical_symbol(name))
+                {
+                    type_bindings.insert(name.to_string());
+                }
+                segment = cursor + 1;
+            }
+            _ => {}
+        }
+    }
+    Ok((type_bindings, const_bindings))
+}
+
+fn rust_candidate_is_direct_source_item(
+    index: &RustSourceIndex<'_>,
+    candidate: &str,
+    namespace: RustNameNamespace,
+) -> bool {
+    match namespace {
+        RustNameNamespace::Value => {
+            index.functions.get(candidate).is_some_and(|fragments| {
+                let [fragment] = fragments.as_slice() else {
+                    return false;
+                };
+                rust_item_is_runtime_active_with_index(
+                    index,
+                    function_keyword_start(index.text, index, fragment),
+                )
+            }) || index.values.get(candidate).is_some_and(|declarations| {
+                let [declaration] = declarations.as_slice() else {
+                    return false;
+                };
+                rust_item_is_runtime_active_with_index(index, declaration.keyword_start)
+            })
+        }
+        RustNameNamespace::Type => rust_candidate_is_unique_runtime_direct_type(index, candidate),
+    }
+}
+
+fn rust_candidate_is_unique_runtime_direct_type(
+    index: &RustSourceIndex<'_>,
+    candidate: &str,
+) -> bool {
+    index
+        .direct_type_declarations
+        .get(candidate)
+        .is_some_and(|declarations| {
+            let [declaration] = declarations.as_slice() else {
+                return false;
+            };
+            rust_item_is_runtime_active_with_index(index, *declaration)
+        })
+}
+
+fn rust_direct_enum_variant_authority<'index, 'source>(
+    index: &'index RustSourceIndex<'source>,
+    candidate: &str,
+) -> Result<Option<&'index RustEnumVariantAuthority<'source>>, String> {
+    let Some((owner, variant)) = candidate.rsplit_once("::") else {
+        return Ok(None);
+    };
+    let Some(authorities) = index.enum_variants.get(candidate) else {
+        return Ok(None);
+    };
+    if !rust_candidate_is_unique_runtime_direct_type(index, owner) {
+        return Err(format!(
+            "enum variant {candidate:?} has a conditional or ambiguous owner declaration"
+        ));
+    }
+    let [authority] = authorities.as_slice() else {
+        return Err(format!(
+            "enum variant {candidate:?} must resolve to exactly one direct declaration; found {}",
+            authorities.len()
+        ));
+    };
+    if authority.conditional {
+        return Err(format!(
+            "enum variant {candidate:?} is behind cfg/cfg_attr and cannot be runtime identity schema authority"
+        ));
+    }
+    if !authority.enum_closed {
+        return Err(format!(
+            "enum variant {candidate:?} belongs to an enum whose full variant/discriminant authority is not closed"
+        ));
+    }
+    let parsed = exact_direct_enum_variant_name(authority.variant_fragment);
+    if parsed != Some(variant) {
+        return Err(format!(
+            "enum variant {candidate:?} does not retain an exact direct source declaration"
+        ));
+    }
+    Ok(Some(authority))
+}
+
+fn rust_candidate_is_direct_enum_variant(index: &RustSourceIndex<'_>, candidate: &str) -> bool {
+    rust_direct_enum_variant_authority(index, candidate)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn rust_candidate_outranks_wildcard(
+    index: &RustSourceIndex<'_>,
+    candidate: &str,
+    namespace: RustNameNamespace,
+) -> bool {
+    match namespace {
+        RustNameNamespace::Value => {
+            rust_candidate_is_direct_source_item(index, candidate, namespace)
+        }
+        RustNameNamespace::Type => {
+            rust_candidate_is_direct_source_item(index, candidate, namespace)
+        }
+    }
+}
+
+fn rust_path_candidate_is_direct_source(
+    index: &RustSourceIndex<'_>,
+    candidate: &str,
+    namespace: RustNameNamespace,
+) -> bool {
+    rust_candidate_is_direct_source_item(index, candidate, namespace)
+        || (matches!(namespace, RustNameNamespace::Value)
+            && rust_candidate_is_direct_enum_variant(index, candidate))
+        || candidate.rsplit_once("::").is_some_and(|(parent, _)| {
+            matches!(namespace, RustNameNamespace::Value)
+                && index.trait_names.contains(parent)
+                && rust_candidate_is_unique_runtime_direct_type(index, parent)
+        })
+}
+
+#[allow(clippy::too_many_lines)] // Namespace classification must retain one delimiter-depth model.
+fn rust_authority_type_token_indexes(
+    tokens: &[RustAuthorityToken<'_>],
+) -> Result<BTreeSet<usize>, String> {
+    let (pairs, delimiter_depth) = rust_authority_delimiters(tokens)?;
+    let leaders = rust_item_leaders(tokens, &delimiter_depth);
+    let mut type_tokens = BTreeSet::new();
+    if let Some(function) = tokens.iter().enumerate().position(|(index, token)| {
+        token.text == "fn"
+            && delimiter_depth[index] == 0
+            && rust_item_prefix_is_supported(tokens, &pairs, leaders[index], index, true)
+    }) && let Some(open) = rust_function_parameter_open(tokens, &delimiter_depth, function)
+        && let Some(close) = pairs[open]
+    {
+        type_tokens.extend(function + 2..open);
+        let parameter_depth = delimiter_depth[open] + 1;
+        let mut segment = open + 1;
+        while segment < close {
+            let end = rust_parameter_segment_end(
+                tokens,
+                &delimiter_depth,
+                segment,
+                close,
+                parameter_depth,
+            );
+            if let Some(colon) = (segment..end).find(|index| {
+                tokens[*index].text == ":"
+                    && delimiter_depth[*index] == parameter_depth
+                    && !tokens
+                        .get(index.wrapping_sub(1))
+                        .is_some_and(|token| token.text == ":")
+                    && !tokens
+                        .get(*index + 1)
+                        .is_some_and(|token| token.text == ":")
+            }) {
+                type_tokens.extend(colon + 1..end);
+            }
+            segment = end.saturating_add(1);
+        }
+        let signature_end = rust_function_body_open(
+            tokens,
+            &delimiter_depth,
+            close + 1,
+            delimiter_depth[function],
+        )
+        .unwrap_or(tokens.len());
+        type_tokens.extend(close + 1..signature_end);
+    }
+
+    for declaration in tokens.iter().enumerate().filter_map(|(index, token)| {
+        (matches!(token.text, "const" | "static") && delimiter_depth[index] == 0).then_some(index)
+    }) {
+        let Some(initializer) = (declaration + 1..tokens.len())
+            .find(|index| tokens[*index].text == "=" && delimiter_depth[*index] == 0)
+        else {
+            continue;
+        };
+        if let Some(colon) = (declaration + 1..initializer)
+            .find(|index| tokens[*index].text == ":" && delimiter_depth[*index] == 0)
+        {
+            type_tokens.extend(colon + 1..initializer);
+        }
+    }
+
+    for start in tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (token.text == "let").then_some(index))
+    {
+        let depth = delimiter_depth[start];
+        let Some(end) = (start + 1..tokens.len()).find(|index| {
+            delimiter_depth[*index] == depth && matches!(tokens[*index].text, "=" | ";")
+        }) else {
+            continue;
+        };
+        if let Some(colon) = (start + 1..end).find(|index| {
+            tokens[*index].text == ":"
+                && delimiter_depth[*index] == depth
+                && !tokens
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|token| token.text == ":")
+                && !tokens
+                    .get(*index + 1)
+                    .is_some_and(|token| token.text == ":")
+        }) {
+            type_tokens.extend(colon + 1..end);
+        }
+    }
+
+    for cast in tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (token.text == "as").then_some(index))
+    {
+        let mut cursor = cast + 1;
+        let mut angle_depth = 0usize;
+        while cursor < tokens.len()
+            && (canonical_symbol(tokens[cursor].text)
+                || matches!(tokens[cursor].text, ":" | "<" | ">" | "[" | "]" | "(" | ")"))
+        {
+            if tokens[cursor].text == ">" && angle_depth == 0 {
+                // In `<Self as Trait>::member`, this `as` belongs to a UFCS
+                // qualifier, not a cast whose type extends through `member`.
+                // The same boundary prevents a comparison following a cast
+                // from consuming its RHS as Type syntax.
+                break;
+            }
+            type_tokens.insert(cursor);
+            match tokens[cursor].text {
+                "<" => angle_depth += 1,
+                ">" => angle_depth = angle_depth.saturating_sub(1),
+                _ => {}
+            }
+            cursor += 1;
+        }
+    }
+    let angle_tokens = rust_turbofish_angle_tokens(tokens, &delimiter_depth, 0, tokens.len());
+    let mut open = None;
+    let mut depth = 0usize;
+    for index in 0..tokens.len() {
+        if !angle_tokens.contains(&index) {
+            continue;
+        }
+        match tokens[index].text {
+            "<" => {
+                if depth == 0 {
+                    open = Some(index);
+                }
+                depth += 1;
+            }
+            ">" => {
+                depth = depth.saturating_sub(1);
+                if depth == 0
+                    && let Some(start) = open.take()
+                {
+                    type_tokens.extend(start..=index);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(type_tokens)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RustEmbeddedSyntax {
+    DefiniteConst,
+    DefiniteType,
+    GenericArgument,
+}
+
+fn extend_rust_generic_argument_intervals(
+    intervals: &mut Vec<(usize, usize, RustEmbeddedSyntax)>,
+    tokens: &[RustAuthorityToken<'_>],
+    delimiter_depth: &[usize],
+    open: usize,
+    close: usize,
+) {
+    intervals.push((open + 1, close, RustEmbeddedSyntax::GenericArgument));
+    let base_depth = delimiter_depth[open];
+    let mut angle_depth = 1usize;
+    let mut segment = open + 1;
+    let mut associated_type_binding = false;
+    for cursor in open + 1..=close {
+        if delimiter_depth[cursor] != base_depth {
+            continue;
+        }
+        match tokens[cursor].text {
+            "<" => angle_depth += 1,
+            ">" if angle_depth > 1
+                && !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                angle_depth -= 1;
+            }
+            "," if angle_depth == 1 => {
+                if associated_type_binding && segment < cursor {
+                    // `Trait<Item = Ty>` and `Trait<Item: Bound>` are
+                    // associated-type constraints. Both the label and RHS are
+                    // Type namespace, even if same-spelled values exist.
+                    intervals.push((segment, cursor, RustEmbeddedSyntax::DefiniteType));
+                }
+                segment = cursor + 1;
+                associated_type_binding = false;
+            }
+            ">" if angle_depth == 1
+                && !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+            {
+                if associated_type_binding && segment < cursor {
+                    intervals.push((segment, cursor, RustEmbeddedSyntax::DefiniteType));
+                }
+            }
+            "=" if angle_depth == 1 => associated_type_binding = true,
+            ":" if angle_depth == 1
+                && !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == ":")
+                && !tokens
+                    .get(cursor + 1)
+                    .is_some_and(|token| token.text == ":") =>
+            {
+                associated_type_binding = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Array, const-block, and generic intervals share one precedence model.
+fn rust_embedded_syntax_by_token(
+    fragment: &str,
+    tokens: &[RustAuthorityToken<'_>],
+    type_token_indexes: &BTreeSet<usize>,
+) -> Result<BTreeMap<usize, RustEmbeddedSyntax>, String> {
+    let (pairs, delimiter_depth) = rust_authority_delimiters(tokens)?;
+    let mut intervals = Vec::<(usize, usize, RustEmbeddedSyntax)>::new();
+    let opaque = rust_fragment_macro_token_scopes(fragment);
+
+    for open in 0..tokens.len() {
+        if !type_token_indexes.contains(&open) {
+            continue;
+        }
+        let Some(close) = pairs[open] else {
+            continue;
+        };
+        match tokens[open].text {
+            "[" => {
+                let item_depth = delimiter_depth[open] + 1;
+                if let Some(separator) = (open + 1..close).find(|position| {
+                    tokens[*position].text == ";" && delimiter_depth[*position] == item_depth
+                }) {
+                    intervals.push((separator + 1, close, RustEmbeddedSyntax::DefiniteConst));
+                }
+            }
+            "{" => intervals.push((open + 1, close, RustEmbeddedSyntax::DefiniteConst)),
+            _ => {}
+        }
+    }
+
+    for open in 0..tokens.len() {
+        let turbofish = open >= 2 && tokens[open - 2].text == ":" && tokens[open - 1].text == ":";
+        let qualified_self = tokens
+            .get(open + 1)
+            .is_some_and(|token| token.text == "Self")
+            && tokens.get(open + 2).is_some_and(|token| token.text == "as");
+        if tokens[open].text != "<"
+            || (!turbofish && !qualified_self)
+            || !type_token_indexes.contains(&open)
+        {
+            continue;
+        }
+        let base_depth = delimiter_depth[open];
+        let mut angle_depth = 1usize;
+        for close in open + 1..tokens.len() {
+            if delimiter_depth[close] != base_depth {
+                continue;
+            }
+            match tokens[close].text {
+                "<" => angle_depth += 1,
+                ">" if !tokens
+                    .get(close.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+                {
+                    angle_depth = angle_depth
+                        .checked_sub(1)
+                        .ok_or_else(|| "invalid generic argument angle depth".to_string())?;
+                    if angle_depth == 0 {
+                        extend_rust_generic_argument_intervals(
+                            &mut intervals,
+                            tokens,
+                            &delimiter_depth,
+                            open,
+                            close,
+                        );
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // A default on a const generic parameter is unambiguously a value
+    // expression even though the surrounding generic header is type syntax.
+    let mut function_generic_declaration_open = None;
+    if let Some(function) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.text == "fn" && delimiter_depth[index] == 0).then_some(index)
+    }) && let Some(parameters) = rust_function_parameter_open(tokens, &delimiter_depth, function)
+        && let Some(open) = (function + 2..parameters).find(|index| tokens[*index].text == "<")
+    {
+        function_generic_declaration_open = Some(open);
+        let base_depth = delimiter_depth[open];
+        let mut angle_depth = 1usize;
+        let mut close = None;
+        for cursor in open + 1..parameters {
+            if delimiter_depth[cursor] != base_depth {
+                continue;
+            }
+            match tokens[cursor].text {
+                "<" => angle_depth += 1,
+                ">" if !tokens
+                    .get(cursor.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+                {
+                    angle_depth = angle_depth
+                        .checked_sub(1)
+                        .ok_or_else(|| "invalid generic parameter angle depth".to_string())?;
+                    if angle_depth == 0 {
+                        close = Some(cursor);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(close) = close {
+            let mut segment = open + 1;
+            let mut depth = 1usize;
+            for cursor in open + 1..=close {
+                if delimiter_depth[cursor] != base_depth {
+                    continue;
+                }
+                match tokens[cursor].text {
+                    "<" => depth += 1,
+                    ">" if tokens
+                        .get(cursor.wrapping_sub(1))
+                        .is_some_and(|token| token.text == "-") => {}
+                    ">" if depth > 1 => depth -= 1,
+                    "," | ">" if depth == 1 => {
+                        let mut declaration = segment;
+                        while tokens
+                            .get(declaration)
+                            .is_some_and(|token| token.text == "#")
+                            && tokens
+                                .get(declaration + 1)
+                                .is_some_and(|token| token.text == "[")
+                        {
+                            declaration = pairs[declaration + 1].ok_or_else(|| {
+                                "generic parameter attribute has no closing delimiter".to_string()
+                            })? + 1;
+                        }
+                        if tokens
+                            .get(declaration)
+                            .is_some_and(|token| token.text == "const")
+                            && let Some(equal) = (declaration + 1..cursor).find(|position| {
+                                tokens[*position].text == "="
+                                    && delimiter_depth[*position] == base_depth
+                            })
+                        {
+                            intervals.push((equal + 1, cursor, RustEmbeddedSyntax::DefiniteConst));
+                        }
+                        segment = cursor + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Unlike expression turbofish syntax, type applications ordinarily use a
+    // bare `Carrier<ARG>` spelling. Their argument list is still a mixed
+    // Type/Value namespace: a const generic argument must join the authority
+    // closure, while an ordinary type argument must not bind a same-spelled
+    // value. The function's own generic declaration opener is not an
+    // application; nested applications in its bounds remain eligible.
+    for open in 1..tokens.len() {
+        let turbofish = open >= 2 && tokens[open - 2].text == ":" && tokens[open - 1].text == ":";
+        let qualified_self = tokens
+            .get(open + 1)
+            .is_some_and(|token| token.text == "Self")
+            && tokens.get(open + 2).is_some_and(|token| token.text == "as");
+        let previous_is_type_head = canonical_symbol(tokens[open - 1].text)
+            || matches!(tokens[open - 1].text, ">" | "]" | ")");
+        if tokens[open].text != "<"
+            || !type_token_indexes.contains(&open)
+            || function_generic_declaration_open == Some(open)
+            || turbofish
+            || qualified_self
+            || !previous_is_type_head
+            || tokens[open - 1].text == "for"
+            || byte_is_in_scopes(tokens[open].start, &opaque)
+            || intervals.iter().any(|(start, end, kind)| {
+                matches!(kind, RustEmbeddedSyntax::DefiniteConst) && *start <= open && open < *end
+            })
+        {
+            continue;
+        }
+        let base_depth = delimiter_depth[open];
+        let mut angle_depth = 1usize;
+        let mut matched = false;
+        for close in open + 1..tokens.len() {
+            if delimiter_depth[close] != base_depth {
+                continue;
+            }
+            match tokens[close].text {
+                "<" => angle_depth += 1,
+                ">" if !tokens
+                    .get(close.wrapping_sub(1))
+                    .is_some_and(|token| token.text == "-") =>
+                {
+                    angle_depth = angle_depth
+                        .checked_sub(1)
+                        .ok_or_else(|| "invalid type-application angle depth".to_string())?;
+                    if angle_depth == 0 {
+                        extend_rust_generic_argument_intervals(
+                            &mut intervals,
+                            tokens,
+                            &delimiter_depth,
+                            open,
+                            close,
+                        );
+                        matched = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !matched {
+            return Err("type application has no closing angle bracket".to_string());
+        }
+    }
+
+    let mut syntax = BTreeMap::new();
+    for token_index in 0..tokens.len() {
+        if byte_is_in_scopes(tokens[token_index].start, &opaque) {
+            continue;
+        }
+        let selected = intervals
+            .iter()
+            .filter(|(start, end, _)| *start <= token_index && token_index < *end)
+            .min_by_key(|(start, end, kind)| {
+                (
+                    end - start,
+                    usize::from(matches!(kind, RustEmbeddedSyntax::GenericArgument)),
+                )
+            })
+            .map(|(_, _, kind)| *kind);
+        if let Some(selected) = selected {
+            syntax.insert(token_index, selected);
+        }
+    }
+    Ok(syntax)
+}
+
+/// Find direct source constants embedded in syntactically value-bearing parts
+/// of Rust type syntax. Ordinary nominal type occurrences remain Type
+/// namespace even when a same-spelled const or static exists.
+fn rust_authority_embedded_value_token_indexes(
+    fragment: &str,
+    module: &str,
+    owner_scope: Option<&str>,
+    index: &RustSourceIndex<'_>,
+) -> Result<BTreeSet<usize>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let type_token_indexes = rust_authority_type_token_indexes(&tokens)?;
+    let embedded_syntax = rust_embedded_syntax_by_token(fragment, &tokens, &type_token_indexes)?;
+    let mut generic_const_bindings = rust_function_generic_const_bindings(&tokens)?;
+    let mut generic_type_bindings = rust_function_generic_type_bindings(&tokens)?;
+    let fragment_start = fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    if let Some(implementation) = rust_implementation_scope_at(index, fragment_start) {
+        if !implementation.generic_bindings_valid {
+            return Err(
+                "implementation generic bindings cannot be resolved for embedded const authority"
+                    .to_string(),
+            );
+        }
+        generic_const_bindings.extend(implementation.generic_const_bindings.iter().cloned());
+        generic_type_bindings.extend(implementation.generic_type_bindings.iter().cloned());
+    }
+    let mut value_tokens = BTreeSet::new();
+    for (token_index, syntax) in embedded_syntax {
+        let token = &tokens[token_index];
+        if !canonical_symbol(token.text)
+            || rust_language_identifier(token.text)
+            || generic_const_bindings.contains(token.text)
+        {
+            continue;
+        }
+        let previous = token_index
+            .checked_sub(1)
+            .and_then(|position| tokens.get(position));
+        let next = tokens.get(token_index + 1);
+        if previous.is_some_and(|token| matches!(token.text, "." | ":"))
+            || next.is_some_and(|token| token.text == ":")
+            || previous.is_some_and(|token| token.text == "'")
+            || next.is_some_and(|token| token.text == "'")
+            || previous.is_some_and(|token| {
+                matches!(
+                    token.text,
+                    "fn" | "const"
+                        | "static"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "type"
+                        | "trait"
+                        | "mod"
+                )
+            })
+            || next.is_some_and(|token| token.text == "!")
+        {
+            continue;
+        }
+        let candidates = rust_lexical_reference_candidates(module, owner_scope, token.text)?;
+        let has_value = candidates
+            .iter()
+            .any(|candidate| index.values.contains_key(candidate));
+        if !has_value {
+            continue;
+        }
+        let has_type = generic_type_bindings.contains(token.text)
+            || candidates
+                .iter()
+                .any(|candidate| rust_candidate_is_unique_runtime_direct_type(index, candidate));
+        if syntax == RustEmbeddedSyntax::DefiniteType {
+            continue;
+        }
+        if syntax == RustEmbeddedSyntax::GenericArgument && has_type {
+            return Err(format!(
+                "generic argument {:?} resolves in both Type and Value namespaces; unbraced const-generic authority is ambiguous",
+                token.text
+            ));
+        }
+        if syntax == RustEmbeddedSyntax::DefiniteConst || !has_type {
+            value_tokens.insert(token_index);
+        }
+    }
+    Ok(value_tokens)
+}
+
+fn rust_authority_embedded_value_dependency_identifiers(
+    fragment: &str,
+    module: &str,
+    owner_scope: Option<&str>,
+    index: &RustSourceIndex<'_>,
+) -> Result<BTreeSet<String>, String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    Ok(
+        rust_authority_embedded_value_token_indexes(fragment, module, owner_scope, index)?
+            .into_iter()
+            .map(|token_index| tokens[token_index].text.to_string())
+            .collect(),
+    )
+}
+
+fn rust_path_occurrence_namespaces(
+    fragment: &str,
+    tokens: &[RustAuthorityToken<'_>],
+    type_token_indexes: &BTreeSet<usize>,
+    module: &str,
+    owner_scope: Option<&str>,
+    index: &RustSourceIndex<'_>,
+    path: &str,
+) -> Result<BTreeSet<RustNameNamespace>, String> {
+    let embedded_syntax = rust_embedded_syntax_by_token(fragment, tokens, type_token_indexes)?;
+    let mut namespaces = BTreeSet::new();
+    for start in 0..tokens.len() {
+        if !canonical_symbol(tokens[start].text)
+            || (start >= 2 && tokens[start - 2].text == ":" && tokens[start - 1].text == ":")
+        {
+            continue;
+        }
+        let mut parts = vec![tokens[start].text];
+        let mut cursor = start;
+        while cursor + 3 < tokens.len()
+            && tokens[cursor + 1].text == ":"
+            && tokens[cursor + 2].text == ":"
+            && canonical_symbol(tokens[cursor + 3].text)
+        {
+            parts.push(tokens[cursor + 3].text);
+            cursor += 3;
+        }
+        if parts.len() < 2 || parts.join("::") != path {
+            continue;
+        }
+        let namespace = match embedded_syntax.get(&start) {
+            Some(RustEmbeddedSyntax::DefiniteConst) => RustNameNamespace::Value,
+            Some(RustEmbeddedSyntax::DefiniteType) => RustNameNamespace::Type,
+            Some(RustEmbeddedSyntax::GenericArgument) => {
+                let candidates = rust_lexical_reference_candidates(module, owner_scope, path)?;
+                let has_value = candidates
+                    .iter()
+                    .any(|candidate| index.values.contains_key(candidate));
+                let has_type = candidates.iter().any(|candidate| {
+                    rust_candidate_is_unique_runtime_direct_type(index, candidate)
+                });
+                if has_value && has_type {
+                    return Err(format!(
+                        "generic argument path {path:?} resolves in both Type and Value namespaces; unbraced const-generic authority is ambiguous"
+                    ));
+                }
+                if has_value {
+                    RustNameNamespace::Value
+                } else {
+                    RustNameNamespace::Type
+                }
+            }
+            None if type_token_indexes.contains(&start) => RustNameNamespace::Type,
+            None => RustNameNamespace::Value,
+        };
+        namespaces.insert(namespace);
+    }
+    Ok(namespaces)
+}
+
+fn rust_shadowed_primitive_type_names(
+    tokens: &[RustAuthorityToken<'_>],
+    module: &str,
+    owner_scope: Option<&str>,
+    index: &RustSourceIndex<'_>,
+) -> Result<BTreeSet<String>, String> {
+    const PRIMITIVES: &[&str] = &[
+        "bool", "char", "str", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
+        "u64", "u128", "usize", "f32", "f64",
+    ];
+    let mut shadowed = BTreeSet::new();
+    // An item macro can legally emit a same-named nominal item (including a
+    // lint-allowed `struct u64`). Bind direct local macro definitions tightly;
+    // unknown or nested generators conservatively poison every primitive.
+    shadowed.extend(rust_visible_generated_primitive_type_names(index, module));
+    for primitive in PRIMITIVES {
+        let candidates = rust_lexical_reference_candidates(module, owner_scope, primitive)?;
+        if candidates.iter().any(|candidate| {
+            rust_import_binding_for_candidate(index, candidate).is_some()
+                || rust_candidate_is_unique_runtime_direct_type(index, candidate)
+        }) {
+            shadowed.insert((*primitive).to_string());
+        }
+    }
+
+    for binding in rust_function_generic_type_bindings(tokens)? {
+        if rust_primitive_type_name(&binding) {
+            shadowed.insert(binding);
+        }
+    }
+    Ok(shadowed)
+}
+
+#[allow(clippy::too_many_lines)] // This is the single fail-closed authority-admission chokepoint.
+fn reject_imported_function_dependencies(
+    fragment: &str,
+    module: &str,
+    owner_scope: Option<&str>,
+    index: &RustSourceIndex<'_>,
+    authority: &str,
+) -> Result<(), String> {
+    let tokens = rust_authority_tokens(fragment)?;
+    let opaque_tokens = rust_authority_opaque_token_indexes(index, fragment)?;
+    let semantic_fragment = rust_authority_semantic_fragment(index, fragment)?;
+    let semantic_tokens = rust_authority_tokens(&semantic_fragment)?;
+    let semantic_type_token_indexes = rust_authority_type_token_indexes(&semantic_tokens)?;
+    let lexical_bindings = rust_authority_lexical_bindings(fragment)?;
+    let generated_item_macros = rust_visible_generated_item_macros(index, module);
+    if tokens
+        .iter()
+        .enumerate()
+        .any(|(index, token)| token.text == "use" && !opaque_tokens.contains(&index))
+    {
+        return Err(format!(
+            "{authority} contains a function-local use item; imported helper authority must be declared explicitly"
+        ));
+    }
+    let shadowed_primitive_names =
+        rust_shadowed_primitive_type_names(&tokens, module, owner_scope, index)?;
+    let primitive_bindings =
+        rust_explicit_primitive_parameter_receivers(fragment, &tokens, &shadowed_primitive_names)?;
+    let mut type_token_indexes = rust_authority_type_token_indexes(&tokens)?;
+    type_token_indexes.extend(rust_local_macro_type_argument_token_indexes(
+        index, fragment,
+    )?);
+    let embedded_value_token_indexes =
+        rust_authority_embedded_value_token_indexes(fragment, module, owner_scope, index)?;
+    let mut generic_type_bindings = rust_function_generic_type_bindings(&tokens)?;
+    let mut generic_const_bindings = rust_function_generic_const_bindings(&tokens)?;
+    let fragment_start = fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    if let Some(implementation) = rust_implementation_scope_at(index, fragment_start) {
+        if !implementation.generic_bindings_valid {
+            return Err(format!(
+                "{authority} has an implementation header whose generic bindings cannot be resolved canonically"
+            ));
+        }
+        generic_type_bindings.extend(implementation.generic_type_bindings.iter().cloned());
+        generic_const_bindings.extend(implementation.generic_const_bindings.iter().cloned());
+    }
+    for (token_index, token) in tokens.iter().enumerate() {
+        if opaque_tokens.contains(&token_index) {
+            continue;
+        }
+        if type_token_indexes.contains(&token_index)
+            && !embedded_value_token_indexes.contains(&token_index)
+            && rust_primitive_type_name(token.text)
+            && shadowed_primitive_names.contains(token.text)
+        {
+            return Err(format!(
+                "{authority} uses shadowable primitive spelling {:?} in type position; imported or generic nominal authority must be declared explicitly",
+                token.text
+            ));
+        }
+        if type_token_indexes.contains(&token_index)
+            && !embedded_value_token_indexes.contains(&token_index)
+            && generic_type_bindings.contains(token.text)
+        {
+            continue;
+        }
+        if generic_const_bindings.contains(token.text) {
+            continue;
+        }
+        if !canonical_symbol(token.text) || rust_language_identifier(token.text) {
+            continue;
+        }
+        if lexical_bindings.contains(token.text) && !type_token_indexes.contains(&token_index) {
+            continue;
+        }
+        let previous = token_index
+            .checked_sub(1)
+            .and_then(|index| tokens.get(index));
+        let next = tokens.get(token_index + 1);
+        let is_function_declaration_name = previous.is_some_and(|token| token.text == "fn");
+        let follows_path_separator = previous.is_some_and(|token| token.text == ":")
+            && token_index >= 2
+            && tokens[token_index - 2].text == ":";
+        if previous.is_some_and(|token| token.text == ".")
+            || follows_path_separator
+            || is_function_declaration_name
+            || next.is_some_and(|token| matches!(token.text, ":" | "!"))
+        {
+            continue;
+        }
+        let namespace = if embedded_value_token_indexes.contains(&token_index) {
+            RustNameNamespace::Value
+        } else if type_token_indexes.contains(&token_index) {
+            RustNameNamespace::Type
+        } else {
+            RustNameNamespace::Value
+        };
+        let candidates = rust_lexical_reference_candidates(module, owner_scope, token.text)?;
+        if matches!(namespace, RustNameNamespace::Type)
+            && let Some(candidate) = candidates
+                .iter()
+                .find(|candidate| index.direct_type_declarations.contains_key(*candidate))
+            && !rust_candidate_is_unique_runtime_direct_type(index, candidate)
+        {
+            return Err(format!(
+                "{authority} references type dependency {:?} whose direct source declaration is conditional or ambiguous",
+                token.text
+            ));
+        }
+        if !generated_item_macros.is_empty()
+            && matches!(namespace, RustNameNamespace::Type)
+            && !candidates.iter().any(|candidate| {
+                rust_candidate_is_direct_source_item(index, candidate, RustNameNamespace::Type)
+            })
+        {
+            return Err(format!(
+                "{authority} has unresolved type dependency {:?} in a module containing visible item-position macro invocation(s) {generated_item_macros:?}; generated item authority is unsupported",
+                token.text
+            ));
+        }
+        for candidate in candidates {
+            if let Some(binding) = rust_import_binding_for_candidate(index, &candidate)
+                && (binding.kind == RustImportBindingKind::Exact
+                    || !rust_candidate_outranks_wildcard(index, &candidate, namespace))
+            {
+                return Err(format!(
+                    "{authority} references imported identifier {:?} through binding {:?}; imported helper authority and imported type/trait/operator authority must be declared explicitly",
+                    token.text, binding.name
+                ));
+            }
+        }
+    }
+    let call_references = rust_authority_call_references(&semantic_fragment)?;
+    let macro_invocation_paths = rust_authority_macro_invocation_paths(&semantic_fragment)?;
+    for path in rust_authority_function_paths(&semantic_fragment)? {
+        if macro_invocation_paths.contains(&path) {
+            continue;
+        }
+        let namespaces = rust_path_occurrence_namespaces(
+            &semantic_fragment,
+            &semantic_tokens,
+            &semantic_type_token_indexes,
+            module,
+            owner_scope,
+            index,
+            &path,
+        )?;
+        let mut direct_source_item = false;
+        for namespace in namespaces {
+            for candidate in rust_lexical_reference_candidates(module, owner_scope, &path)? {
+                direct_source_item |=
+                    rust_path_candidate_is_direct_source(index, &candidate, namespace);
+                if let Some(binding) = rust_import_binding_for_candidate(index, &candidate)
+                    && (binding.kind == RustImportBindingKind::Exact
+                        || !rust_candidate_outranks_wildcard(index, &candidate, namespace))
+                {
+                    return Err(format!(
+                        "{authority} references imported path {path:?} through binding {:?}; imported helper authority and imported type/trait/operator authority must be declared explicitly",
+                        binding.name
+                    ));
+                }
+            }
+        }
+        let deferred_self_dependency = owner_scope.is_some() && path.starts_with("Self::");
+        if !direct_source_item && !deferred_self_dependency {
+            return Err(format!(
+                "{authority} references qualified path {path:?} whose root is not direct source authority; extern-prelude authority must be declared explicitly"
+            ));
+        }
+    }
+    if rust_fragment_has_unproven_comparison(&semantic_tokens, &primitive_bindings)? {
+        return Err(format!(
+            "{authority} uses an overloadable comparison whose operands are not both syntactically proven builtin scalars; imported type/trait/operator authority must be declared explicitly"
+        ));
+    }
+    if rust_fragment_has_unresolved_receiver_method_call(&semantic_tokens, &primitive_bindings) {
+        return Err(format!(
+            "{authority} uses method-call syntax on a receiver whose source type cannot be inferred; declare the helper as explicit authority"
+        ));
+    }
+    let source_macro_rules = &index.source_macro_rules;
+    let fragment_start = fragment.as_ptr() as usize - index.text.as_ptr() as usize;
+    let textual_generator_hazards =
+        rust_preceding_textual_macro_generator_paths(index, module, fragment_start);
+    for path in macro_invocation_paths {
+        if path.split("::").next().is_some_and(|root| {
+            matches!(
+                root,
+                "include"
+                    | "include_str"
+                    | "include_bytes"
+                    | "env"
+                    | "option_env"
+                    | "cfg"
+                    | "file"
+                    | "line"
+                    | "column"
+                    | "module_path"
+            )
+        }) {
+            return Err(format!(
+                "{authority} invokes external-input macro {path:?}; included files and environment values must be declared as explicit authority"
+            ));
+        }
+        if path.contains("::") {
+            return Err(format!(
+                "{authority} invokes qualified macro {path:?}; imported helper authority must be declared explicitly"
+            ));
+        }
+        if !textual_generator_hazards.is_empty() {
+            return Err(format!(
+                "{authority} invokes bare macro {path:?} after ancestor/current-module item macro generator hazard(s) {textual_generator_hazards:?}; textual macro resolution is not exact source authority"
+            ));
+        }
+        let candidates = rust_lexical_reference_candidates(module, owner_scope, &path)?;
+        for candidate in candidates {
+            if let Some(binding) = rust_import_binding_for_candidate(index, &candidate) {
+                return Err(format!(
+                    "{authority} invokes macro {path:?} through imported binding {:?}; imported helper authority must be declared explicitly",
+                    binding.name
+                ));
+            }
+        }
+        if !source_macro_rules.contains(&path) && !rust_toolchain_authority_macro(&path) {
+            return Err(format!(
+                "{authority} invokes unresolved bare macro {path:?}; identity authority requires an exact source macro_rules definition or an explicitly toolchain-bound standard macro"
+            ));
+        }
+    }
+    for call in call_references {
+        let candidates = rust_lexical_reference_candidates(module, owner_scope, &call)?;
+        for candidate in candidates {
+            let local_function = index
+                .functions
+                .get(&candidate)
+                .is_some_and(|fragments| fragments.len() == 1);
+            if let Some(binding) = rust_import_binding_for_candidate(index, &candidate)
+                && (binding.kind == RustImportBindingKind::Exact || !local_function)
+            {
+                return Err(format!(
+                    "{authority} calls {call:?} through imported binding {:?}; imported helper authority must be declared explicitly",
+                    binding.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn exact_root_macro_rules_fragment_with_lexical<'a>(
+    text: &'a str,
+    symbol: &str,
+    lexical: &RustSourceLexicalIndex<'a>,
+    definition_items: &[usize],
+    inner_attributes: Vec<&'a str>,
+) -> Result<(&'a str, Vec<&'a str>), String> {
+    if !rust_macro_identifier_tail(symbol) || symbol.contains("::") {
+        return Err(format!(
+            "macro authority symbol {symbol:?} is not a bare Rust macro identifier"
+        ));
+    }
+    let tokens = &lexical.tokens;
+    let pairs = &lexical.pairs;
+    let outer_depth = &lexical.outer_depth;
+    let mut definitions = Vec::<(usize, &'a str)>::new();
+    for item in definition_items.iter().copied() {
+        let open = item + 3;
+        let Some(close) = pairs[open] else {
+            return Err(format!(
+                "external macro authority {symbol:?} has an unbalanced definition at byte {}",
+                tokens[item].start
+            ));
+        };
+        let mut end = tokens[close].end;
+        if matches!(tokens[open].text, "(" | "[") {
+            let Some(terminator) = tokens.get(close + 1) else {
+                return Err(format!(
+                    "external macro authority {symbol:?} uses a parenthesized or bracketed definition without its required trailing semicolon"
+                ));
+            };
+            if terminator.text != ";" || outer_depth[close + 1] != outer_depth[item] {
+                return Err(format!(
+                    "external macro authority {symbol:?} uses a parenthesized or bracketed definition without a trailing semicolon at the definition depth"
+                ));
+            }
+            end = terminator.end;
+        } else if tokens
+            .get(close + 1)
+            .is_some_and(|token| token.text == ";" && outer_depth[close + 1] == outer_depth[item])
+        {
+            end = tokens[close + 1].end;
+        }
+        definitions.push((item, &text[tokens[item].start..end]));
+    }
+    let [(item, fragment)] = definitions.as_slice() else {
+        return Err(format!(
+            "external macro authority {symbol:?} must have exactly one source definition; found {}",
+            definitions.len()
+        ));
+    };
+    if outer_depth[*item] != 0 {
+        return Err(format!(
+            "external macro authority {symbol:?} must be a unique lexical-root macro_rules definition"
+        ));
+    }
+    require_unattributed_root_item_prefix(
+        tokens,
+        pairs,
+        outer_depth,
+        *item,
+        &format!("external macro authority {symbol:?}"),
+    )?;
+    let attributes = attached_rust_attributes(text, tokens[*item].start);
+    if !attributes.is_empty() {
+        return Err(format!(
+            "external macro authority {symbol:?} must be unconditional and attribute-free; found {attributes:?}"
+        ));
+    }
+    Ok((*fragment, inner_attributes))
+}
+
+fn exact_root_macro_rules_fragment_with_index<'a>(
+    index: &RustSourceIndex<'a>,
+    symbol: &str,
+) -> Result<(&'a str, Vec<&'a str>), String> {
+    match index.root_macro_rules.get(symbol) {
+        Some(Ok(definition)) => Ok((definition.fragment, definition.inner_attributes.clone())),
+        Some(Err(detail)) => Err(detail.clone()),
+        None => Err(format!(
+            "external macro authority {symbol:?} must have exactly one source definition; found 0"
+        )),
+    }
+}
+
+fn exact_root_macro_invocation_fragments<'a>(
+    text: &'a str,
+    symbol: &str,
+    definition: &str,
+) -> Result<Vec<&'a str>, String> {
+    let tokens = rust_authority_tokens(text)?;
+    let (pairs, outer_depth) = rust_authority_delimiters(&tokens)?;
+    let definition_end = definition.as_ptr() as usize - text.as_ptr() as usize + definition.len();
+    let mut invocations = Vec::new();
+    for index in 0..tokens.len().saturating_sub(2) {
+        if tokens[index].text != symbol
+            || tokens[index + 1].text != "!"
+            || !matches!(tokens[index + 2].text, "(" | "[" | "{")
+        {
+            continue;
+        }
+        let open = index + 2;
+        let Some(close) = pairs[open] else {
+            return Err(format!(
+                "external macro authority {symbol:?} has an unbalanced invocation at byte {}",
+                tokens[index].start
+            ));
+        };
+        if tokens[index].start < definition_end {
+            return Err(format!(
+                "external macro authority {symbol:?} has an invocation before its local definition at byte {}; lexical linkage is ambiguous",
+                tokens[index].start
+            ));
+        }
+        if index >= 2
+            && tokens[index - 2].text == ":"
+            && tokens[index - 1].text == ":"
+            && tokens[index - 2].end == tokens[index - 1].start
+        {
+            return Err(format!(
+                "external macro authority {symbol:?} has a qualified invocation at byte {}; bare authority cannot prove that path resolves to the local definition",
+                tokens[index].start
+            ));
+        }
+        if outer_depth[index] != 0 || outer_depth[open] != 0 {
+            return Err(format!(
+                "external macro authority {symbol:?} has a non-root invocation at byte {}; all bound invocations must remain lexical-root items",
+                tokens[index].start
+            ));
+        }
+        let attributes = attached_rust_attributes(text, tokens[index].start);
+        if !attributes.is_empty() {
+            return Err(format!(
+                "external macro authority {symbol:?} has an attributed or cfg-dependent invocation at byte {}: {attributes:?}",
+                tokens[index].start
+            ));
+        }
+        require_unattributed_root_item_prefix(
+            &tokens,
+            &pairs,
+            &outer_depth,
+            index,
+            &format!(
+                "external macro authority {symbol:?} invocation at byte {}",
+                tokens[index].start
+            ),
+        )
+        .map_err(|detail| {
+            format!(
+                "external macro authority {symbol:?} has a root expression-position or attributed invocation: {detail}"
+            )
+        })?;
+        let mut invocation_end = tokens[close].end;
+        if matches!(tokens[open].text, "(" | "[") {
+            let Some(terminator) = tokens.get(close + 1) else {
+                return Err(format!(
+                    "external macro authority {symbol:?} has an unterminated item invocation at byte {}; parenthesized and bracketed item macros require a trailing semicolon",
+                    tokens[index].start
+                ));
+            };
+            if terminator.text != ";" || outer_depth[close + 1] != 0 {
+                return Err(format!(
+                    "external macro authority {symbol:?} has a non-item invocation at byte {}; parenthesized and bracketed item macros require a trailing root semicolon",
+                    tokens[index].start
+                ));
+            }
+            invocation_end = terminator.end;
+        } else if tokens.get(close + 1).is_some_and(|token| token.text == ";") {
+            invocation_end = tokens[close + 1].end;
+        }
+        invocations.push(&text[tokens[index].start..invocation_end]);
+    }
+    if invocations.is_empty() {
+        return Err(format!(
+            "external macro authority {symbol:?} must have at least one unconditional lexical-root invocation"
+        ));
+    }
+    Ok(invocations)
+}
+
+/// Prove that at least one standalone item invocation in the analyzed module
+/// is lexically bound to an exact local `macro_rules!` definition.
+///
+/// Unlike [`exact_root_macro_invocation_fragments`], this check deliberately
+/// ignores expression- and type-position invocations of the same macro, plus
+/// item invocations in other modules. Those invocations cannot emit items into
+/// this exact namespace. Standalone module-item invocations retain strict
+/// ordering, qualification, attribute, and terminator checks so a later local
+/// definition cannot launder an earlier imported item macro.
+fn validate_local_item_macro_linkage(
+    source: &RustSourceIndex<'_>,
+    module: &str,
+    symbol: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let text = source.text;
+    let lexical = source.lexical.as_ref().map_err(Clone::clone)?;
+    let tokens = &lexical.tokens;
+    let pairs = &lexical.pairs;
+    let outer_depth = &lexical.outer_depth;
+    let leaders = &lexical.item_leaders;
+    let definition_end = definition.as_ptr() as usize - text.as_ptr() as usize + definition.len();
+    let mut item_invocations = 0usize;
+    for index in 0..tokens.len().saturating_sub(2) {
+        if tokens[index].text != symbol
+            || tokens[index + 1].text != "!"
+            || !matches!(tokens[index + 2].text, "(" | "[" | "{")
+        {
+            continue;
+        }
+        let invocation_module = rust_module_path(&source.module_scopes, tokens[index].start);
+        let module_depth = source
+            .module_scopes
+            .iter()
+            .filter(|scope| {
+                !scope.name.is_empty()
+                    && scope.start <= tokens[index].start
+                    && tokens[index].start < scope.end
+            })
+            .count();
+        if invocation_module != module
+            || outer_depth[index] != module_depth
+            || !rust_item_prefix_is_supported(&tokens, &pairs, leaders[index], index, false)
+        {
+            // Expression/type invocations and invocations in other modules do
+            // not populate this exact module's item namespace.
+            continue;
+        }
+        let open = index + 2;
+        let Some(close) = pairs[open] else {
+            return Err(format!(
+                "generated-item macro {symbol:?} has an unbalanced root invocation at byte {}",
+                tokens[index].start
+            ));
+        };
+        let attributes = attached_rust_attributes(text, tokens[index].start);
+        if !attributes.is_empty() {
+            return Err(format!(
+                "generated-item macro {symbol:?} has an attributed or cfg-dependent root invocation at byte {}: {attributes:?}",
+                tokens[index].start
+            ));
+        }
+        if tokens[index].start < definition_end {
+            return Err(format!(
+                "generated-item macro {symbol:?} has an item invocation before its local definition at byte {}; lexical linkage is ambiguous",
+                tokens[index].start
+            ));
+        }
+        if index >= 2
+            && tokens[index - 2].text == ":"
+            && tokens[index - 1].text == ":"
+            && tokens[index - 2].end == tokens[index - 1].start
+        {
+            return Err(format!(
+                "generated-item macro {symbol:?} has a qualified item invocation at byte {}; bare linkage cannot prove that path resolves to the local definition",
+                tokens[index].start
+            ));
+        }
+        if matches!(tokens[open].text, "(" | "[") {
+            let Some(terminator) = tokens.get(close + 1) else {
+                return Err(format!(
+                    "generated-item macro {symbol:?} has an unterminated item invocation at byte {}; parenthesized and bracketed item macros require a trailing semicolon",
+                    tokens[index].start
+                ));
+            };
+            if terminator.text != ";" || outer_depth[close + 1] != module_depth {
+                return Err(format!(
+                    "generated-item macro {symbol:?} has a non-item invocation at byte {}; parenthesized and bracketed item macros require a trailing semicolon at the module-item depth",
+                    tokens[index].start
+                ));
+            }
+        }
+        item_invocations += 1;
+    }
+    if item_invocations == 0 {
+        return Err(format!(
+            "generated-item macro {symbol:?} must have at least one unconditional lexical-root item invocation"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves an external implementation authority without pretending that a
+/// macro-generated method exists as a source-level `Type::method` item.
+///
+/// An exact source-level function or method always wins. External macro
+/// fallback is permitted only when no function item has the requested bare
+/// symbol. It binds one attribute-free root definition, every attribute-free
+/// root invocation, and the uniquely resolvable file-local helper/constant
+/// closure. Exact macro bytes are retained deliberately: whitespace can
+/// separate semantically distinct tokens inside a macro matcher.
+#[allow(clippy::too_many_lines)] // Macro selection, dependency closure, and framing form one proof boundary.
+fn normalized_rust_schema_authority_with_index(
+    text: &str,
+    index: &RustSourceIndex<'_>,
+    symbol: &str,
+) -> Result<Vec<u8>, String> {
+    let function_count = index.functions.get(symbol).map_or(0, Vec::len);
+    if function_count != 0 || symbol.contains("::") {
+        return normalized_rust_function_closure_with_index(text, index, [symbol.to_string()]);
+    }
+
+    let (fragment, inner_attributes) = exact_root_macro_rules_fragment_with_index(index, symbol)?;
+    let invocations = exact_root_macro_invocation_fragments(text, symbol, fragment)?;
+    let semantic_fragment = rust_authority_semantic_fragment(index, fragment)?;
+    let semantic_invocations = invocations
+        .iter()
+        .map(|invocation| rust_authority_semantic_fragment(index, invocation))
+        .collect::<Result<Vec<_>, _>>()?;
+    if rust_authority_contains_non_ascii_identifier(&semantic_fragment)?
+        || semantic_invocations
+            .iter()
+            .try_fold(false, |found, invocation| {
+                rust_authority_contains_non_ascii_identifier(invocation)
+                    .map(|contains| found || contains)
+            })?
+    {
+        return Err(format!(
+            "external macro authority {symbol:?} contains a non-ASCII identifier, which the source authority index does not support"
+        ));
+    }
+    if rust_authority_contains_raw_identifier(&semantic_fragment)?
+        || semantic_invocations
+            .iter()
+            .try_fold(false, |found, invocation| {
+                rust_authority_contains_raw_identifier(invocation).map(|contains| found || contains)
+            })?
+    {
+        return Err(format!(
+            "external macro authority {symbol:?} contains a raw identifier, which the source authority index does not support"
+        ));
+    }
+    if rust_authority_has_conditional_attribute(&semantic_fragment)?
+        || semantic_invocations
+            .iter()
+            .try_fold(false, |found, invocation| {
+                rust_authority_has_conditional_attribute(invocation)
+                    .map(|contains| found || contains)
+            })?
+    {
+        return Err(format!(
+            "external macro authority {symbol:?} contains nested cfg/cfg_attr authority"
+        ));
+    }
+    reject_imported_function_dependencies(
+        fragment,
+        "",
+        None,
+        index,
+        &format!("external macro authority {symbol:?}"),
+    )?;
+    for invocation in &invocations {
+        reject_imported_function_dependencies(
+            invocation,
+            "",
+            None,
+            index,
+            &format!("external macro authority {symbol:?} invocation"),
+        )?;
+    }
+    let local_macros = &index.source_macro_rules;
+    let mut invoked_macros = rust_authority_invoked_macro_names(&semantic_fragment)?;
+    for semantic_invocation in &semantic_invocations {
+        invoked_macros.extend(rust_authority_invoked_macro_names(semantic_invocation)?);
+    }
+    invoked_macros.remove(symbol);
+    if invoked_macros
+        .iter()
+        .any(|invoked| local_macros.contains(invoked))
+    {
+        return Err(format!(
+            "external macro authority {symbol:?} composes with another file-local macro_rules definition; nested macro authority is unsupported"
+        ));
+    }
+    let mut out = Vec::new();
+    for (ordinal, attribute) in inner_attributes.iter().enumerate() {
+        append_schema_frame(
+            &mut out,
+            &format!("root-inner-attribute:{ordinal}"),
+            attribute.as_bytes(),
+        );
+    }
+    append_schema_frame(
+        &mut out,
+        &format!("macro_rules!:{symbol}"),
+        fragment.as_bytes(),
+    );
+    for (ordinal, invocation) in invocations.iter().enumerate() {
+        append_schema_frame(
+            &mut out,
+            &format!("macro_rules!:{symbol}:invocation:{ordinal}"),
+            invocation.as_bytes(),
+        );
+    }
+
+    let mut identifiers = rust_authority_identifier_tokens(&semantic_fragment)?;
+    let mut function_paths = rust_authority_function_paths(&semantic_fragment)?;
+    for semantic_invocation in &semantic_invocations {
+        identifiers.extend(rust_authority_identifier_tokens(semantic_invocation)?);
+        function_paths.extend(rust_authority_function_paths(semantic_invocation)?);
+    }
+    let mut helper_roots = BTreeSet::new();
+    for identifier in &identifiers {
+        let Some(fragments) = index.functions.get(identifier) else {
+            continue;
+        };
+        if fragments.len() != 1 {
+            return Err(format!(
+                "external macro authority {symbol:?} helper {identifier:?} must resolve to exactly one source item; found {}",
+                fragments.len()
+            ));
+        }
+        helper_roots.insert(identifier.clone());
+    }
+    for path in &function_paths {
+        let Some(fragments) = index.functions.get(path) else {
+            continue;
+        };
+        if fragments.len() != 1 {
+            return Err(format!(
+                "external macro authority {symbol:?} helper {path:?} must resolve to exactly one source item; found {}",
+                fragments.len()
+            ));
+        }
+        helper_roots.insert(path.clone());
+    }
+    let constant_roots = identifiers
+        .iter()
+        .cloned()
+        .map(|identifier| (String::new(), None, identifier))
+        .chain(
+            function_paths
+                .iter()
+                .cloned()
+                .map(|path| (String::new(), None, path)),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut required_constants = rust_macro_required_constant_candidates(&semantic_fragment)?;
+    for semantic_invocation in &semantic_invocations {
+        required_constants.extend(rust_macro_required_constant_candidates(
+            semantic_invocation,
+        )?);
+    }
+    for constant in required_constants {
+        if runtime_source_const_dependency(index, "", None, &constant)?.is_none() {
+            return Err(format!(
+                "external macro authority {symbol:?} references constant-style token {constant:?}, which must resolve to exactly one source-level constant; found 0"
+            ));
+        }
+    }
+    if !helper_roots.is_empty() || !constant_roots.is_empty() {
+        let (dependency_closure, _) = normalized_rust_function_closure_with_symbols_and_index(
+            text,
+            index,
+            helper_roots,
+            constant_roots,
+        )?;
+        append_schema_frame(&mut out, "macro-dependency-closure", &dependency_closure);
+    }
+    Ok(out)
 }
 
 fn normalized_rust_function_closure(
@@ -3083,8 +10689,10 @@ impl IdentityReferenceCache {
                 };
                 loaded.as_str()
             };
-            let index = (!requested.tests.is_empty() || !requested.functions.is_empty())
-                .then(|| RustSourceIndex::new(text));
+            let index = (!requested.tests.is_empty()
+                || !requested.functions.is_empty()
+                || !requested.constants.is_empty())
+            .then(|| RustSourceIndex::new(text));
             for symbol in requested.tests {
                 let result = identity_test_bytes_with_index(
                     text,
@@ -3098,20 +10706,19 @@ impl IdentityReferenceCache {
                 let index = index
                     .as_ref()
                     .expect("schema function requests build a Rust index");
-                let result =
-                    normalized_rust_function_closure_with_index(text, index, [symbol.clone()])
-                        .map_err(|detail| {
-                            format!("schema function {path}#{symbol} closure is invalid: {detail}")
-                        });
+                let result = normalized_rust_schema_authority_with_index(text, index, &symbol)
+                    .map_err(|detail| {
+                        format!("schema authority {path}#{symbol} is invalid: {detail}")
+                    });
                 cache.functions.insert((path.clone(), symbol), result);
             }
-            let module_scopes = index
+            let index = index
                 .as_ref()
-                .map(|index| index.module_scopes.clone())
-                .unwrap_or_else(|| rust_owner_scopes(text, "mod", rust_module_owner));
+                .expect("schema authority requests build a Rust index");
+            let module_scopes = index.module_scopes.clone();
             for symbol in requested.constants {
                 let declarations =
-                    runtime_const_declarations_with_scopes(text, &symbol, &module_scopes);
+                    runtime_source_const_declarations_with_index(text, &symbol, index);
                 let result = match declarations.as_slice() {
                     [declaration] => {
                         let normalized = normalized_rust_fragment(declaration);
@@ -3283,14 +10890,14 @@ fn identity_byte_schema_base_hash_with_references(
             .into_iter()
             .filter(|fragment| {
                 let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
-                rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+                rust_item_is_runtime_active_with_index(index, start)
             })
             .collect::<Vec<_>>();
         let enums = braced_declaration_fragments(text, &format!("enum {source}"))
             .into_iter()
             .filter(|fragment| {
                 let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
-                rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+                rust_item_is_runtime_active_with_index(index, start)
             })
             .collect::<Vec<_>>();
         let declaration = match (structs.as_slice(), enums.as_slice()) {
@@ -3409,14 +11016,14 @@ fn identity_schema_base_hash_with_index(
             .into_iter()
             .filter(|fragment| {
                 let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
-                rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+                rust_item_is_runtime_active_with_index(index, start)
             })
             .collect::<Vec<_>>();
         let enums = braced_declaration_fragments(text, &format!("enum {source}"))
             .into_iter()
             .filter(|fragment| {
                 let start = fragment.as_ptr() as usize - text.as_ptr() as usize;
-                rust_item_is_runtime_active_with_scopes(text, start, &index.module_scopes)
+                rust_item_is_runtime_active_with_index(index, start)
             })
             .collect::<Vec<_>>();
         let (kind, declaration) = match (structs.as_slice(), enums.as_slice()) {
@@ -11618,12 +19225,191 @@ const ID_VERSION: u32 = 8;
     }
 
     #[test]
-    fn schema_function_grammar_accepts_local_method_and_repo_relative_symbols() {
-        let functions = parse_schema_functions(
-            "local_helper,Codec::method,crates/shared/src/schema.rs#codec::helper",
+    fn indexed_constant_authority_is_source_level_unique_and_runtime_active() {
+        let source = r#"
+const ROOT_ONLY: u32 = 7;
+fn local_scope() { const ROOT_ONLY: u32 = 8; }
+struct Demo;
+impl Demo { const ROOT_ONLY: u32 = 9; }
+macro_rules! emit { ($($tokens:tt)*) => {}; }
+emit!(const ROOT_ONLY: u32 = 10;);
+
+#[cfg(any())]
+mod disabled { pub const DISABLED: u32 = 1; }
+
+const STATIC_COLLISION: u32 = 1;
+mod static_collision { pub static STATIC_COLLISION: u32 = 2; }
+
+const ALIAS_COLLISION: u32 = 1;
+mod alias_collision { use crate::ALIAS_COLLISION as ALIAS_COLLISION; }
+
+mod left { pub const DUPLICATE: u32 = 1; }
+mod right { pub const DUPLICATE: u32 = 2; }
+"#;
+        let index = RustSourceIndex::new(source);
+        assert_eq!(
+            runtime_source_const_declarations_with_index(source, "ROOT_ONLY", &index).len(),
+            1,
+            "local, associated, and macro-generated const tokens are not source authorities"
+        );
+        assert!(
+            runtime_source_const_declarations_with_index(source, "DISABLED", &index).is_empty(),
+            "a const inside a cfg-disabled module is not runtime authority"
+        );
+        assert!(
+            runtime_source_const_declarations_with_index(source, "STATIC_COLLISION", &index)
+                .is_empty(),
+            "a same-named static makes a bare file-level const reference ambiguous"
+        );
+        assert!(
+            runtime_source_const_declarations_with_index(source, "ALIAS_COLLISION", &index)
+                .is_empty(),
+            "an explicit same-named use alias makes a bare file-level const reference ambiguous"
+        );
+        assert_eq!(
+            runtime_source_const_declarations_with_index(source, "DUPLICATE", &index).len(),
+            2,
+            "two module-local consts must remain visibly ambiguous"
+        );
+
+        for gated_source in [
+            "#![cfg(any())]\nconst INNER_GATED: u32 = 1;\n",
+            "#![cfg_attr(not(any()), cfg(any()))]\nconst INNER_GATED: u32 = 1;\n",
+            "mod disabled { #![cfg(any())] pub const INNER_GATED: u32 = 1; }\n",
+        ] {
+            let gated_index = RustSourceIndex::new(gated_source);
+            assert!(
+                runtime_source_const_declarations_with_index(
+                    gated_source,
+                    "INNER_GATED",
+                    &gated_index,
+                )
+                .is_empty(),
+                "a file- or module-inner conditional attribute must govern every nested const"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One matrix compares every modifier and cfg refusal shape.
+    fn indexed_function_authority_binds_modifiers_and_refuses_conditional_items() {
+        let gated = "#[cfg(feature = \"optional\")]\npub fn semantic_tag() -> u64 { 7 }\n";
+        let gated_index = RustSourceIndex::new(gated);
+        let error =
+            normalized_rust_schema_authority_with_index(gated, &gated_index, "semantic_tag")
+                .expect_err("one cfg-gated function must not become identity authority");
+        assert!(error.contains("behind cfg/cfg_attr"), "{error}");
+
+        let baseline = "#[inline]\npub const unsafe extern \"C\" fn semantic_tag() -> u64 { 7 }\n";
+        let moved = "#[cold]\npub const unsafe extern \"C\" fn semantic_tag() -> u64 { 7 }\n";
+        let baseline_authority = normalized_rust_schema_authority_with_index(
+            baseline,
+            &RustSourceIndex::new(baseline),
+            "semantic_tag",
         )
-        .expect("local, method, and repo-relative function references are canonical");
-        assert_eq!(functions.len(), 3);
+        .expect("supported modifiers and a nonconditional attribute are authority");
+        let moved_authority = normalized_rust_schema_authority_with_index(
+            moved,
+            &RustSourceIndex::new(moved),
+            "semantic_tag",
+        )
+        .expect("moved nonconditional function attribute remains resolvable");
+        assert_ne!(
+            baseline_authority, moved_authority,
+            "function modifiers and semantic outer attributes belong to the implementation fingerprint"
+        );
+
+        let nested = "pub fn outer() -> u64 { fn hidden() -> u64 { 1 } hidden() }\n";
+        let nested_index = RustSourceIndex::new(nested);
+        let hidden = normalized_rust_schema_authority_with_index(nested, &nested_index, "hidden")
+            .expect_err("an inner function is not a file-level schema authority");
+        assert!(hidden.contains("found 0"), "{hidden}");
+
+        for (source, reference) in [
+            (
+                "#![cfg(any())]\npub fn semantic_tag() -> u64 { 7 }\n",
+                "semantic_tag",
+            ),
+            (
+                "#![cfg_attr(not(any()), cfg(any()))]\npub fn semantic_tag() -> u64 { 7 }\n",
+                "semantic_tag",
+            ),
+            (
+                "mod disabled { #![cfg(any())] pub fn semantic_tag() -> u64 { 7 } }\n",
+                "disabled::semantic_tag",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                reference,
+            )
+            .expect_err("file- and module-inner cfg must disable function authority");
+            assert!(error.contains("behind cfg/cfg_attr"), "{error}");
+        }
+
+        for source in [
+            "trait Demo { fn hidden() -> u64 { 1 } }\n",
+            "const _: () = { fn hidden() -> u64 { 1 } };\n",
+            "static HIDDEN: () = { fn hidden() -> u64 { 1 } };\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "hidden",
+            )
+            .expect_err("a non-addressable nested item must not become source authority");
+            assert!(error.contains("found 0"), "{error}");
+        }
+
+        let implementation = "struct Demo; impl Demo { fn semantic_tag() -> u64 { 7 } }\n";
+        normalized_rust_schema_authority_with_index(
+            implementation,
+            &RustSourceIndex::new(implementation),
+            "Demo::semantic_tag",
+        )
+        .expect("a direct implementation method remains addressable authority");
+
+        let nonconditional_inner = "#![allow(dead_code)]\npub fn semantic_tag() -> u64 { 7 }\n";
+        normalized_rust_schema_authority_with_index(
+            nonconditional_inner,
+            &RustSourceIndex::new(nonconditional_inner),
+            "semantic_tag",
+        )
+        .expect("a nonconditional file-inner attribute remains runtime authority");
+
+        let decoy_source = |helper_value: u64| {
+            format!(
+                "fn decoy_helper() -> u64 {{ {helper_value} }}\npub fn semantic_tag() -> &'static str {{ /* decoy_helper */ \"decoy_helper\" }}\n"
+            )
+        };
+        let decoy_baseline = decoy_source(1);
+        let decoy_moved = decoy_source(2);
+        let decoy_baseline_authority = normalized_rust_schema_authority_with_index(
+            &decoy_baseline,
+            &RustSourceIndex::new(&decoy_baseline),
+            "semantic_tag",
+        )
+        .expect("decoy baseline authority");
+        let decoy_moved_authority = normalized_rust_schema_authority_with_index(
+            &decoy_moved,
+            &RustSourceIndex::new(&decoy_moved),
+            "semantic_tag",
+        )
+        .expect("decoy moved authority");
+        assert_eq!(
+            decoy_baseline_authority, decoy_moved_authority,
+            "comments and string literals must not create transitive helper authority"
+        );
+    }
+
+    #[test]
+    fn schema_authority_grammar_accepts_functions_methods_and_bare_macros() {
+        let functions = parse_schema_functions(
+            "local_helper,Codec::method,crates/shared/src/schema.rs#codec::helper,crates/shared/src/schema.rs#stable_id",
+        )
+        .expect("function, method, and bare macro authority references are canonical");
+        assert_eq!(functions.len(), 4);
         assert!(
             functions
                 .iter()
@@ -11639,6 +19425,233 @@ const ID_VERSION: u32 = 8;
         );
         assert!(parse_schema_functions("../schema.rs#helper").is_err());
         assert!(parse_schema_functions("helper,helper").is_err());
+    }
+
+    #[test]
+    fn cross_file_schema_macro_body_movement_changes_implementation_fingerprint_only() {
+        let root = fixture_root("cross-file-macro-movement");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { ($name:ident) => { impl $name { pub fn as_str(&self) -> &str { &self.0 } } }; }\nstable_id!(DemoId);\n",
+        )
+        .expect("baseline macro authority");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { ($name:ident) => { impl $name { pub fn as_str(&self) -> &str { return &self.0; } } }; }\nstable_id!(DemoId);\n",
+        )
+        .expect("moved macro authority");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_eq!(baseline[0].version, moved[0].version);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "same-version macro authority movement must change the implementation fingerprint"
+        );
+        assert_eq!(
+            baseline[0].byte_schema_fingerprint, moved[0].byte_schema_fingerprint,
+            "external implementation authority must not invent a byte-schema migration"
+        );
+    }
+
+    #[test]
+    fn schema_macro_definition_accepts_token_equivalent_trivia_and_all_delimiters() {
+        let root = fixture_root("cross-file-macro-definition-forms");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-definition-forms",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        for (label, definition) in [
+            (
+                "trivia",
+                "macro_rules /* comment */ ! stable_id /* comment */ { ($name:ident) => { struct $name; }; }\n",
+            ),
+            (
+                "parenthesized",
+                "macro_rules! stable_id ( ($name:ident) => { struct $name; }; );\n",
+            ),
+            (
+                "bracketed",
+                "macro_rules! stable_id [ ($name:ident) => { struct $name; }; ];\n",
+            ),
+        ] {
+            std::fs::write(&helper_path, format!("{definition}stable_id!(Demo);\n"))
+                .expect("macro authority form");
+            let resolved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+            assert_eq!(resolved.len(), 1, "{label} definition must resolve");
+        }
+    }
+
+    #[test]
+    fn schema_macro_metavariables_are_not_misclassified_as_constants() {
+        let source = concat!(
+            "macro_rules! stable_id { ($D:ident, $C:ty) => { struct $D($C); }; }\n",
+            "stable_id!(DemoId, u8);\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            source,
+            &RustSourceIndex::new(source),
+            "stable_id",
+        )
+        .expect("uppercase macro metavariables and type fragments are not value dependencies");
+    }
+
+    #[test]
+    fn schema_macro_refuses_ownerless_self_helper_inference() {
+        let source = concat!(
+            "struct Codec; impl Codec { fn helper() -> u64 { 1 } }\n",
+            "macro_rules! stable_id { ($name:ident) => { impl $name { ",
+            "fn generated() -> u64 { Self::helper() } } }; }\n",
+            "stable_id!(Codec);\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            source,
+            &RustSourceIndex::new(source),
+            "stable_id",
+        )
+        .expect_err("token matching cannot prove the expansion owner of Self::helper");
+        assert!(
+            error.contains("no enclosing implementation owner"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn schema_macro_refuses_cross_invocation_self_helper_aliasing() {
+        let source = concat!(
+            "trait Defaults { fn helper() -> u64 { 2 } }\n",
+            "struct Codec; impl Codec { fn helper() -> u64 { 1 } }\n",
+            "struct Other; impl Defaults for Other {}\n",
+            "macro_rules! stable_id { ($name:ident) => { impl $name { ",
+            "fn generated() -> u64 { Self::helper() } } }; }\n",
+            "stable_id!(Codec); stable_id!(Other);\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            source,
+            &RustSourceIndex::new(source),
+            "stable_id",
+        )
+        .expect_err(
+            "one direct helper must not stand in for another expansion owner's trait default",
+        );
+        assert!(
+            error.contains("no enclosing implementation owner"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn exact_function_authority_takes_precedence_over_same_named_macro() {
+        let root = fixture_root("cross-file-function-before-macro");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:function-before-macro",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        std::fs::write(
+            &helper_path,
+            "const TOKENS: &str = stringify!(macro_rules!);\npub fn semantic_tag() -> u64 { 7 }\nmacro_rules! semantic_tag { () => { 1 }; }\n",
+        )
+        .expect("baseline function and macro");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(
+            &helper_path,
+            "const TOKENS: &str = stringify!(macro_rules!);\npub fn semantic_tag() -> u64 { 7 }\nmacro_rules! semantic_tag { () => { 2 }; }\n",
+        )
+        .expect("moved shadow macro");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_eq!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "a macro must not silently join an exact function authority closure"
+        );
+    }
+
+    #[test]
+    fn generated_function_tokens_in_signatures_do_not_hide_exact_authority() {
+        let root = fixture_root("cross-file-function-signature-token-tree");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:function-signature-token-tree",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        let source = |value: u64| {
+            format!(
+                "macro_rules! ty {{ ($($tokens:tt)*) => {{ u8 }}; }}\npub fn semantic_tag() -> ty!(fn decoy() {{}}) {{ {value} }}\nmacro_rules! semantic_tag {{ () => {{ 1 }}; }}\nsemantic_tag!();\n"
+            )
+        };
+        std::fs::write(&helper_path, source(7)).expect("baseline function authority");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(&helper_path, source(8)).expect("moved function authority");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "a generated fn token in a signature macro must not suppress the exact function"
+        );
+    }
+
+    #[test]
+    fn brace_delimited_type_macro_does_not_truncate_exact_function_authority() {
+        let root = fixture_root("cross-file-braced-type-macro");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:braced-type-macro",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        let source = |value: u64| {
+            format!(
+                "macro_rules! ty {{ ($value:ty) => {{ $value }}; }}\npub fn semantic_tag() -> ty!{{u8}} {{ {value} }}\n"
+            )
+        };
+        std::fs::write(&helper_path, source(7)).expect("baseline function authority");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(&helper_path, source(8)).expect("moved function authority");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "the function body after a brace-delimited signature macro must remain bound"
+        );
+    }
+
+    #[test]
+    fn unmatched_angle_tokens_inside_signature_macro_do_not_hide_the_function_body() {
+        let root = fixture_root("cross-file-signature-macro-unmatched-angle");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:signature-macro-unmatched-angle",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        for invocation in ["ty!(a < b)", "ty![a < b]", "ty!{a < b}"] {
+            let source = |value: u64| {
+                format!(
+                    "macro_rules! ty {{ ($($tokens:tt)*) => {{ u8 }}; }}\npub fn semantic_tag() -> {invocation} {{ {value} }}\n"
+                )
+            };
+            std::fs::write(&helper_path, source(7)).expect("baseline function authority");
+            let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+            std::fs::write(&helper_path, source(8)).expect("moved function authority");
+            let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+            assert_ne!(
+                baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+                "signature macro token trees must be skipped as whole units: {invocation}"
+            );
+        }
     }
 
     #[test]
@@ -11778,6 +19791,2957 @@ const ID_VERSION: u32 = 8;
     }
 
     #[test]
+    fn function_authority_binds_recursive_and_lowercase_source_constants() {
+        let source = |base: usize, lower: usize| {
+            format!(
+                "const BASE: usize = {base};\nconst LIMIT: usize = BASE;\nconst lower_limit: usize = {lower};\npub fn semantic_tag() -> usize {{ LIMIT + lower_limit }}\n"
+            )
+        };
+        let baseline_source = source(7, 3);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("baseline recursive constant closure");
+
+        let moved_base_source = source(8, 3);
+        let moved_base = normalized_rust_schema_authority_with_index(
+            &moved_base_source,
+            &RustSourceIndex::new(&moved_base_source),
+            "semantic_tag",
+        )
+        .expect("moved transitive constant closure");
+        assert_ne!(
+            baseline, moved_base,
+            "a constant reached through another constant must remain authority"
+        );
+
+        let moved_lower_source = source(7, 4);
+        let moved_lower = normalized_rust_schema_authority_with_index(
+            &moved_lower_source,
+            &RustSourceIndex::new(&moved_lower_source),
+            "semantic_tag",
+        )
+        .expect("moved lowercase constant closure");
+        assert_ne!(
+            baseline, moved_lower,
+            "constant authority cannot depend on uppercase naming style"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One matrix proves all supported value-in-type spellings and ambiguity refusals.
+    fn function_authority_binds_source_constants_embedded_in_type_syntax() {
+        let turbofish = |limit: usize| {
+            format!(
+                "const LIMIT: usize = {limit};\n\
+                 fn helper<const N: usize>() -> usize {{ N }}\n\
+                 pub fn semantic_tag() -> usize {{ helper::<LIMIT>() }}\n"
+            )
+        };
+        let baseline_source = turbofish(7);
+        let moved_source = turbofish(8);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a direct const-generic argument joins the authority closure");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("a moved direct const-generic argument remains authority");
+        assert_ne!(
+            baseline, moved,
+            "const-generic value authority must not be discarded as a type token"
+        );
+
+        for source in [
+            |limit| {
+                format!(
+                    "const LIMIT: usize = {limit};\n\
+                     pub fn semantic_tag(_: [u8; LIMIT]) -> usize {{ 0 }}\n"
+                )
+            },
+            |limit| {
+                format!(
+                    "const LIMIT: usize = {limit};\n\
+                     pub fn semantic_tag() -> usize {{ let _: [u8; LIMIT]; 0 }}\n"
+                )
+            },
+        ] {
+            let baseline_source = source(7);
+            let moved_source = source(8);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("an array-length constant in type syntax joins authority");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("a moved array-length type constant remains authority");
+            assert_ne!(baseline, moved);
+        }
+
+        let generic_binding = |unrelated: usize| {
+            format!(
+                "const N: usize = {unrelated};\n\
+                 pub fn semantic_tag<const N: usize>() -> usize {{ N }}\n"
+            )
+        };
+        let baseline_source = generic_binding(1);
+        let moved_source = generic_binding(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a const-generic binding is enclosed by the reached function");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("an unrelated same-named root const remains excluded");
+        assert_eq!(
+            baseline, moved,
+            "a function's const-generic parameter must shadow an unrelated value item"
+        );
+
+        let implementation_binding = |unrelated: usize| {
+            format!(
+                "const N: usize = {unrelated};\nstruct Witness<const N: usize>;\n\
+                 impl<const N: usize> Witness<N> {{ \
+                 pub fn semantic_tag() -> usize {{ let _: [u8; N]; N }} }}\n"
+            )
+        };
+        let baseline_source = implementation_binding(1);
+        let moved_source = implementation_binding(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("an enclosing implementation const generic is explicit header authority");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("an unrelated same-named root const remains excluded from impl authority");
+        assert_eq!(
+            baseline, moved,
+            "an impl const-generic binding must shadow an unrelated value item"
+        );
+
+        let type_value_coexistence = |unrelated: usize| {
+            format!(
+                "#![allow(non_camel_case_types, non_upper_case_globals)]\n\
+                 type LIMIT = u8;\nconst LIMIT: usize = {unrelated};\n\
+                 pub fn semantic_tag(_: LIMIT) -> usize {{ 0 }}\n"
+            )
+        };
+        let baseline_source = type_value_coexistence(7);
+        let moved_source = type_value_coexistence(8);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a plain type occurrence remains in the Type namespace");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("a same-spelled unrelated const remains outside authority");
+        assert_eq!(
+            baseline, moved,
+            "Type and Value namespaces must not be conflated by spelling"
+        );
+
+        let braced_const = |limit: usize| {
+            format!(
+                "#![allow(non_camel_case_types, non_upper_case_globals)]\n\
+                 type LIMIT = u8;\nconst LIMIT: usize = {limit};\n\
+                 fn helper<const N: usize>() -> usize {{ N }}\n\
+                 pub fn semantic_tag() -> usize {{ helper::<{{ LIMIT }}>() }}\n"
+            )
+        };
+        let baseline_source = braced_const(7);
+        let moved_source = braced_const(8);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("braces select the Value namespace for a const-generic argument");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("a moved braced const argument remains authority");
+        assert_ne!(baseline, moved);
+
+        let qualified_array_length = |limit: usize| {
+            format!(
+                "mod local {{ pub const LIMIT: usize = {limit}; }}\n\
+                 pub fn semantic_tag(_: [u8; local::LIMIT]) -> usize {{ 0 }}\n"
+            )
+        };
+        let baseline_source = qualified_array_length(7);
+        let moved_source = qualified_array_length(8);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a qualified array-length const resolves in the Value namespace");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("a moved qualified array-length const remains authority");
+        assert_ne!(baseline, moved);
+    }
+
+    #[test]
+    fn function_authority_refuses_ambiguous_helpers_and_binds_transitive_local_macros() {
+        let ambiguous = concat!(
+            "#[cfg(feature = \"left\")] fn helper() -> u64 { 1 }\n",
+            "#[cfg(not(feature = \"left\"))] fn helper() -> u64 { 2 }\n",
+            "pub fn semantic_tag() -> u64 { helper() }\n",
+        );
+        let ambiguity = normalized_rust_schema_authority_with_index(
+            ambiguous,
+            &RustSourceIndex::new(ambiguous),
+            "semantic_tag",
+        )
+        .expect_err("an ambiguous reachable helper cannot be silently omitted");
+        assert!(ambiguity.contains("found 2"), "{ambiguity}");
+
+        let local_macro_source = |value: u64| {
+            format!(
+                "macro_rules! local_value {{ () => {{ {value}_u64 }}; }}\nfn nested() -> u64 {{ local_value!() }}\npub fn semantic_tag() -> u64 {{ nested() }}\n"
+            )
+        };
+        let baseline_source = local_macro_source(7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a unique root local macro is bound through the helper closure");
+        let moved_source = local_macro_source(8);
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved root local macro remains bound through the helper closure");
+        assert_ne!(
+            baseline, moved,
+            "moving a macro reached only through a helper must move authority"
+        );
+    }
+
+    #[test]
+    fn function_authority_refuses_imported_helper_closures() {
+        for source in [
+            concat!(
+                "mod helpers { pub fn nested() {} }\n",
+                "use helpers::nested;\n",
+                "pub fn semantic_tag() { nested(); }\n",
+            ),
+            concat!(
+                "mod helpers { pub fn nested() {} }\n",
+                "use helpers::{nested as imported};\n",
+                "pub fn semantic_tag() { imported(); }\n",
+            ),
+            concat!(
+                "mod helpers { pub fn nested() {} }\n",
+                "use helpers::*;\n",
+                "pub fn semantic_tag() { nested(); }\n",
+            ),
+            concat!(
+                "mod helpers { pub fn nested() {} }\n",
+                "pub fn semantic_tag() { use helpers::nested; nested(); }\n",
+            ),
+            concat!(
+                "extern crate dependency as dep;\n",
+                "pub fn semantic_tag() { dep::nested(); }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("an imported helper cannot be inferred as file-local authority");
+            assert!(error.contains("imported helper authority"), "{error}");
+        }
+    }
+
+    #[test]
+    fn function_authority_refuses_implicit_imported_operator_authority() {
+        let carrier = concat!(
+            "mod dep { pub struct Token(pub u8); } use dep::Token; ",
+            "pub fn semantic_tag(_: &Token) -> usize { 7 }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            carrier,
+            &RustSourceIndex::new(carrier),
+            "semantic_tag",
+        )
+        .expect_err("an imported carrier type needs explicit nominal authority");
+        assert!(
+            error.contains("imported type/trait/operator authority"),
+            "{error}"
+        );
+
+        for operator in ["==", "!=", "<", "<=", ">", ">="] {
+            let source = format!(
+                "mod dep {{ #[derive(PartialEq, Eq, PartialOrd, Ord)] pub struct Token(pub u8); }} use dep::Token; \
+                 pub fn semantic_tag(left: &Token, right: &Token) -> bool {{ left {operator} right }}\n"
+            );
+            let error = normalized_rust_schema_authority_with_index(
+                &source,
+                &RustSourceIndex::new(&source),
+                "semantic_tag",
+            )
+            .expect_err("an imported comparison implementation is not owner-local authority");
+            assert!(
+                error.contains("imported type/trait/operator authority"),
+                "{operator}: {error}"
+            );
+        }
+
+        let glob = concat!(
+            "mod dep { #[derive(PartialEq)] pub struct Token(pub u8); } use dep::*; ",
+            "pub fn semantic_tag(left: &Token, right: &Token) { let _ = left == right; }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            glob,
+            &RustSourceIndex::new(glob),
+            "semantic_tag",
+        )
+        .expect_err("a glob-imported comparison implementation is not local authority");
+        assert!(error.contains("type/trait/operator authority"), "{error}");
+
+        let field_inference = concat!(
+            "mod dep { pub struct Token(pub u8); impl PartialEq<u64> for Token { ",
+            "fn eq(&self, _: &u64) -> bool { true } } } use dep::Token; ",
+            "struct Local(Token); impl Local { pub fn semantic_tag(&self, right: u64) -> bool { ",
+            "self.0 == right } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            field_inference,
+            &RustSourceIndex::new(field_inference),
+            "Local::semantic_tag",
+        )
+        .expect_err("tuple-field inference cannot hide imported comparison authority");
+        assert!(error.contains("type/trait/operator authority"), "{error}");
+
+        let builtin = "pub fn semantic_tag(left: u64, right: u64) -> bool { left <= right }\n";
+        normalized_rust_schema_authority_with_index(
+            builtin,
+            &RustSourceIndex::new(builtin),
+            "semantic_tag",
+        )
+        .expect("a comparison between unshadowed builtin scalar parameters is intrinsic authority");
+    }
+
+    #[test]
+    fn lexical_parameter_binding_outranks_an_exact_value_import_only() {
+        let value_shadow = concat!(
+            "mod dep { pub fn value() -> u64 { 99 } } use dep::value; ",
+            "pub fn semantic_tag(value: u64) -> u64 { value }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            value_shadow,
+            &RustSourceIndex::new(value_shadow),
+            "semantic_tag",
+        )
+        .expect("a value parameter occurrence is not a same-named exact value import");
+
+        let type_not_shadowed = concat!(
+            "#![allow(non_camel_case_types)] mod dep { pub type value = u8; } use dep::value; ",
+            "pub fn semantic_tag(value: u8) -> usize { let _: Option<value> = None; value as usize }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            type_not_shadowed,
+            &RustSourceIndex::new(type_not_shadowed),
+            "semantic_tag",
+        )
+        .expect_err("a value binding cannot shadow a same-named imported type");
+        assert!(error.contains("type/trait/operator authority"), "{error}");
+    }
+
+    #[test]
+    fn primitive_spellings_must_not_be_shadowed_authority() {
+        let imported_alias = concat!(
+            "mod dep { pub struct Foreign; } use dep::Foreign as u8; ",
+            "pub fn semantic_tag(_: u8) -> usize { 7 }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            imported_alias,
+            &RustSourceIndex::new(imported_alias),
+            "semantic_tag",
+        )
+        .expect_err("an imported type may shadow a primitive spelling");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        let generic_alias = concat!(
+            "pub fn semantic_tag<u64: PartialEq>(left: u64, right: u64) -> bool { ",
+            "left == right }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generic_alias,
+            &RustSourceIndex::new(generic_alias),
+            "semantic_tag",
+        )
+        .expect_err("a generic parameter may shadow a primitive spelling");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        let attributed_generic_alias = concat!(
+            "pub fn semantic_tag<#[allow(non_camel_case_types)] u64: PartialEq>(",
+            "left: u64, right: u64) -> bool { left == right }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            attributed_generic_alias,
+            &RustSourceIndex::new(attributed_generic_alias),
+            "semantic_tag",
+        )
+        .expect_err("an attributed generic may shadow a primitive spelling");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+    }
+
+    #[test]
+    fn function_authority_binds_cross_kind_dependencies_reached_through_constants() {
+        let const_fn_source = |value: usize| {
+            format!(
+                "const fn build_limit() -> usize {{ {value} }}\nconst LIMIT: usize = build_limit();\npub fn semantic_tag() -> usize {{ LIMIT }}\n"
+            )
+        };
+        let baseline_source = const_fn_source(7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a const-reachable const fn is source authority");
+        let moved_source = const_fn_source(8);
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("a moved const-reachable const fn remains source authority");
+        assert_ne!(baseline, moved);
+
+        let macro_source = |value: usize| {
+            format!(
+                "macro_rules! build_limit {{ () => {{ {value}_usize }}; }}\nconst LIMIT: usize = build_limit!();\npub fn semantic_tag() -> usize {{ LIMIT }}\n"
+            )
+        };
+        let baseline_source = macro_source(7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a const-reachable local macro is source authority");
+        let moved_source = macro_source(8);
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("a moved const-reachable local macro remains source authority");
+        assert_ne!(baseline, moved);
+
+        let imported = concat!(
+            "mod dependency { pub const LIMIT: usize = 7; }\n",
+            "const LIMIT: usize = { use dependency::LIMIT; LIMIT };\n",
+            "pub fn semantic_tag() -> usize { LIMIT }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            imported,
+            &RustSourceIndex::new(imported),
+            "semantic_tag",
+        )
+        .expect_err("a use inside a reached const initializer must fail closed");
+        assert!(error.contains("imported helper authority"), "{error}");
+    }
+
+    #[test]
+    fn function_authority_refuses_conditional_value_and_import_candidates() {
+        let conditional_constants = concat!(
+            "#[cfg(feature = \"left\")] const LIMIT: usize = 7;\n",
+            "#[cfg(not(feature = \"left\"))] const LIMIT: usize = 8;\n",
+            "pub fn semantic_tag() -> usize { LIMIT }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional_constants,
+            &RustSourceIndex::new(conditional_constants),
+            "semantic_tag",
+        )
+        .expect_err("cfg-alternative constants cannot disappear from authority inference");
+        assert!(error.contains("has 2 declarations"), "{error}");
+
+        let conditional_imports = concat!(
+            "mod left { pub fn helper() -> usize { 7 } }\n",
+            "mod right { pub fn helper() -> usize { 8 } }\n",
+            "#[cfg(feature = \"left\")] use left::helper;\n",
+            "#[cfg(not(feature = \"left\"))] use right::helper;\n",
+            "pub fn semantic_tag() -> usize { helper() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional_imports,
+            &RustSourceIndex::new(conditional_imports),
+            "semantic_tag",
+        )
+        .expect_err("cfg-alternative imports must poison inferred local helper authority");
+        assert!(error.contains("imported helper authority"), "{error}");
+
+        let conditional_extern = concat!(
+            "#[cfg(feature = \"dependency\")] extern crate dependency as dep;\n",
+            "pub fn semantic_tag() -> usize { dep::helper() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional_extern,
+            &RustSourceIndex::new(conditional_extern),
+            "semantic_tag",
+        )
+        .expect_err("a conditional extern binding must poison inferred local authority");
+        assert!(error.contains("imported helper authority"), "{error}");
+    }
+
+    #[test]
+    fn function_authority_resolves_parent_and_associated_dependencies() {
+        let parent_source = |helper: usize, limit: usize| {
+            format!(
+                "mod outer {{ const LIMIT: usize = {limit}; fn helper() -> usize {{ {helper} }} mod inner {{ pub fn semantic_tag() -> usize {{ super::helper() + super::LIMIT }} }} }}\n"
+            )
+        };
+        let baseline_source = parent_source(3, 7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "outer::inner::semantic_tag",
+        )
+        .expect("super references bind parent-module functions and constants");
+        for moved_source in [parent_source(4, 7), parent_source(3, 8)] {
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "outer::inner::semantic_tag",
+            )
+            .expect("moved parent dependency remains source authority");
+            assert_ne!(baseline, moved);
+        }
+
+        let associated_source = |helper: usize, limit: usize| {
+            format!(
+                "struct Witness; impl Witness {{ const LIMIT: usize = {limit}; fn helper() -> usize {{ {helper} }} pub fn semantic_tag() -> usize {{ Self::helper() + Self::LIMIT }} }}\n"
+            )
+        };
+        let baseline_source = associated_source(3, 7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("Self references bind implementation functions and associated constants");
+        for moved_source in [associated_source(4, 7), associated_source(3, 8)] {
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "Witness::semantic_tag",
+            )
+            .expect("moved associated dependency remains source authority");
+            assert_ne!(baseline, moved);
+        }
+
+        let above_root = "pub fn semantic_tag() -> usize { super::helper() }\n";
+        let error = normalized_rust_schema_authority_with_index(
+            above_root,
+            &RustSourceIndex::new(above_root),
+            "semantic_tag",
+        )
+        .expect_err("a super reference cannot escape the lexical crate root");
+        assert!(
+            error.contains("escapes above the lexical crate root"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn function_authority_binds_direct_self_methods_including_turbofish() {
+        let source = |helper: usize| {
+            format!(
+                "struct Witness; impl Witness {{ \
+                 fn helper<T>(&self) -> usize {{ {helper} }} \
+                 pub fn semantic_tag(&self) -> usize {{ self.helper::<usize>() }} }}\n"
+            )
+        };
+        let baseline_source = source(3);
+        let moved_source = source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a direct self method is part of source authority");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a moved turbofish self method remains authority");
+        assert_ne!(baseline, moved);
+
+        for source in [
+            |helper| {
+                format!(
+                    "struct Witness; impl Witness {{ \
+                     fn helper<const B: bool>(&self) -> usize {{ let _ = B; {helper} }} \
+                     pub fn semantic_tag(&self) -> usize {{ self.helper::<{{ 1 < 2 }}>() }} }}\n"
+                )
+            },
+            |helper| {
+                format!(
+                    "struct Witness; impl Witness {{ \
+                     fn helper<T>(&self) -> usize {{ {helper} }} \
+                     pub fn semantic_tag(&self) -> usize {{ self.helper::<fn() -> bool>() }} }}\n"
+                )
+            },
+        ] {
+            let baseline_source = source(3);
+            let moved_source = source(4);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "Witness::semantic_tag",
+            )
+            .expect("nested turbofish syntax preserves the direct self method");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "Witness::semantic_tag",
+            )
+            .expect("the moved nested-turbofish helper remains authority");
+            assert_ne!(baseline, moved);
+        }
+
+        let inherited = concat!(
+            "trait Defaults { fn helper(&self) -> usize { 7 } fn semantic_tag(&self) -> usize; } struct Witness; ",
+            "impl Defaults for Witness { pub fn semantic_tag(&self) -> usize { self.helper() } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            inherited,
+            &RustSourceIndex::new(inherited),
+            "Witness::semantic_tag",
+        )
+        .expect_err("an inherited self method needs explicit source authority");
+        assert!(error.contains("trait defaults"), "{error}");
+
+        let unresolved_receiver = concat!(
+            "struct Witness; impl Witness { fn helper(&self) -> usize { 7 } } ",
+            "pub fn semantic_tag(value: &Witness) -> usize { value.helper() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            unresolved_receiver,
+            &RustSourceIndex::new(unresolved_receiver),
+            "semantic_tag",
+        )
+        .expect_err("method receivers other than literal self require type resolution");
+        assert!(error.contains("source type cannot be inferred"), "{error}");
+    }
+
+    #[test]
+    fn unrelated_imports_and_glob_fallbacks_do_not_shadow_direct_local_authority() {
+        let self_method_source = |value: usize| {
+            format!(
+                "mod dep {{ pub struct Marker; }} use dep::Marker; \
+                 struct Witness; impl Witness {{ fn helper(&self) -> usize {{ {value} }} \
+                 pub fn semantic_tag(&self) -> usize {{ self.helper() }} }}\n"
+            )
+        };
+        let baseline_source = self_method_source(3);
+        let moved_source = self_method_source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("an unrelated named import does not poison a direct self method");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("the moved direct self helper remains authority");
+        assert_ne!(baseline, moved);
+
+        let glob_shadow_source = |value: usize| {
+            format!(
+                "mod dep {{ pub fn helper() {{}} }} use dep::*; \
+                 fn helper() {{ let _ = {value}; }} \
+                 pub fn semantic_tag() {{ helper() }}\n"
+            )
+        };
+        let baseline_source = glob_shadow_source(3);
+        let moved_source = glob_shadow_source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a direct local helper outranks a glob fallback");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("the moved glob-shadowing helper remains authority");
+        assert_ne!(baseline, moved);
+
+        let local_owner_under_glob = concat!(
+            "mod dep { pub struct Foreign; } use dep::*; struct Witness; ",
+            "impl Witness { pub fn semantic_tag(&self) {} }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            local_owner_under_glob,
+            &RustSourceIndex::new(local_owner_under_glob),
+            "Witness::semantic_tag",
+        )
+        .expect("a unique direct nominal owner outranks a glob fallback");
+    }
+
+    #[test]
+    fn direct_enum_variants_are_value_authority_not_implementation_members() {
+        let source = |code: usize, discriminant: usize| {
+            format!(
+                "enum Disposition {{ Accepted = {discriminant}, Refused }} impl Disposition {{ pub fn semantic_tag(self) -> usize {{ match self {{ Self::Accepted => {code}, Self::Refused => 0 }} }} }}\n"
+            )
+        };
+        let baseline_source = source(1, 1);
+        let moved_source = source(2, 1);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Disposition::semantic_tag",
+        )
+        .expect("direct enum variants are source-level value paths");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Disposition::semantic_tag",
+        )
+        .expect("moved variant mapping remains authority");
+        assert_ne!(baseline, moved);
+        let moved_enum_source = source(1, 2);
+        let moved_enum = normalized_rust_schema_authority_with_index(
+            &moved_enum_source,
+            &RustSourceIndex::new(&moved_enum_source),
+            "Disposition::semantic_tag",
+        )
+        .expect("the exact referenced enum declaration remains authority");
+        assert_ne!(baseline, moved_enum);
+
+        let missing = concat!(
+            "enum Disposition { Accepted } impl Disposition { ",
+            "pub fn semantic_tag(self) -> usize { match self { Self::Missing => 1, _ => 0 } } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            missing,
+            &RustSourceIndex::new(missing),
+            "Disposition::semantic_tag",
+        )
+        .expect_err("an undeclared variant must not be admitted as an implementation member");
+        assert!(error.contains("Self::Missing"), "{error}");
+
+        let conditional = concat!(
+            "enum Disposition { #[cfg(feature = \"accepted\")] Accepted, Refused } ",
+            "impl Disposition { pub fn semantic_tag(self) -> usize { match self { ",
+            "Self::Accepted => 1, Self::Refused => 0 } } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional,
+            &RustSourceIndex::new(conditional),
+            "Disposition::semantic_tag",
+        )
+        .expect_err("a conditional enum variant cannot become runtime identity authority");
+        assert!(error.contains("behind cfg/cfg_attr"), "{error}");
+
+        let ambiguous = concat!(
+            "enum Disposition { Accepted } impl Disposition { ",
+            "const Accepted: usize = 7; pub fn semantic_tag() -> usize { Self::Accepted } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            ambiguous,
+            &RustSourceIndex::new(ambiguous),
+            "Disposition::semantic_tag",
+        )
+        .expect_err("a same-named implementation const and enum variant is ambiguous authority");
+        assert!(error.contains("ambiguous"), "{error}");
+
+        let qualified = |discriminant: usize| {
+            format!(
+                "enum Disposition {{ Accepted = {discriminant}, Refused }} \
+                 pub fn semantic_tag() -> isize {{ Disposition::Accepted as isize }}\n"
+            )
+        };
+        let qualified_baseline_source = qualified(1);
+        let qualified_moved_source = qualified(2);
+        let qualified_baseline = normalized_rust_schema_authority_with_index(
+            &qualified_baseline_source,
+            &RustSourceIndex::new(&qualified_baseline_source),
+            "semantic_tag",
+        )
+        .expect("a qualified direct enum variant is framed");
+        let qualified_moved = normalized_rust_schema_authority_with_index(
+            &qualified_moved_source,
+            &RustSourceIndex::new(&qualified_moved_source),
+            "semantic_tag",
+        )
+        .expect("a moved qualified variant remains framed");
+        assert_ne!(qualified_baseline, qualified_moved);
+
+        for unsafe_enum in [
+            concat!(
+                "const TAG: isize = 3; enum Disposition { Offset = TAG, Accepted } ",
+                "impl Disposition { pub fn semantic_tag(self) -> usize { match self { ",
+                "Self::Accepted => 1, _ => 0 } } }\n",
+            ),
+            concat!(
+                "enum Disposition { #[cfg(feature = \"offset\")] Offset, Accepted } ",
+                "impl Disposition { pub fn semantic_tag(self) -> usize { match self { ",
+                "Self::Accepted => 1, _ => 0 } } }\n",
+            ),
+            concat!(
+                "type Payload = u8; enum Disposition { Offset(Payload), Accepted } ",
+                "impl Disposition { pub fn semantic_tag(self) -> usize { match self { ",
+                "Self::Accepted => 1, _ => 0 } } }\n",
+            ),
+            concat!(
+                "enum Disposition { Offset = line!() as isize, Accepted } ",
+                "impl Disposition { pub fn semantic_tag(self) -> usize { match self { ",
+                "Self::Accepted => 1, _ => 0 } } }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                unsafe_enum,
+                &RustSourceIndex::new(unsafe_enum),
+                "Disposition::semantic_tag",
+            )
+            .expect_err("every sibling variant must belong to the closed enum authority subset");
+            assert!(
+                error.contains("full variant/discriminant authority is not closed"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The adversarial receiver matrix is easiest to audit together.
+    fn primitive_receiver_acceptance_is_limited_to_known_inherent_methods() {
+        let inherent = concat!(
+            "mod dep { pub struct Marker; } use dep::Marker; ",
+            "pub fn semantic_tag(value: &str) -> usize { value.len() }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            inherent,
+            &RustSourceIndex::new(inherent),
+            "semantic_tag",
+        )
+        .expect("str::len is a known inherent method despite an unrelated import");
+
+        let lifetime_bound = "pub fn semantic_tag<'a>(value: &'a str) -> usize { value.len() }\n";
+        normalized_rust_schema_authority_with_index(
+            lifetime_bound,
+            &RustSourceIndex::new(lifetime_bound),
+            "semantic_tag",
+        )
+        .expect("a lifetime does not obscure the outer str receiver type");
+
+        let imported_extension = concat!(
+            "mod dep { pub trait Ext { fn semantic(&self) -> usize { 7 } } ",
+            "impl Ext for str {} } use dep::Ext; ",
+            "pub fn semantic_tag(value: &str) -> usize { value.semantic() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            imported_extension,
+            &RustSourceIndex::new(imported_extension),
+            "semantic_tag",
+        )
+        .expect_err("an imported extension method is not primitive inherent authority");
+        assert!(error.contains("source type cannot be inferred"), "{error}");
+
+        for imported_extension in [
+            concat!(
+                "mod dep { pub trait Ext { fn is_ascii(&self) -> bool { true } } ",
+                "impl Ext for u64 {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: u64) -> bool { value.is_ascii() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn checked_add_signed(&self) -> i64 { 7 } } ",
+                "impl Ext for i64 {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: i64) -> i64 { value.checked_add_signed() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn len(&self) -> usize { 7 } } ",
+                "impl Ext for Result<[u8; 32], ()> {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: Result<[u8; 32], ()>) -> usize { value.len() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn count_ones(&self) -> u32 { 7 } } ",
+                "impl Ext for &u64 {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: &u64) -> u32 { value.count_ones() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn len(&self) -> usize { 7 } } ",
+                "impl Ext for [u8; 32] {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: [u8; 32]) -> usize { value.len() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn len(&self) -> usize { 7 } } ",
+                "impl Ext for &&[u8] {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: &&[u8]) -> usize { value.len() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn make_ascii_lowercase(&self) -> u8 { 7 } } ",
+                "impl Ext for u8 {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: u8) -> u8 { value.make_ascii_lowercase() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn get_mut(&self) -> usize { 7 } } ",
+                "impl Ext for &str {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: &str) -> usize { value.get_mut() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn len(&self) -> bool { true } } ",
+                "impl Ext for &mut str {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: &mut str) -> bool { value.len() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Ext { fn len(&self) -> bool { true } } ",
+                "impl Ext for &mut [u8] {} } use dep::Ext; ",
+                "pub fn semantic_tag(value: &mut [u8]) -> bool { value.len() }\n",
+            ),
+            concat!(
+                "struct Foreign; trait Ext { fn count_ones(&self) -> bool { true } } ",
+                "impl Ext for Foreign {} ",
+                "pub fn semantic_tag(value: u64, foreign: Foreign) -> bool { ",
+                "let value = foreign; value.count_ones() }\n",
+            ),
+            concat!(
+                "struct Foreign; trait Ext { fn count_ones(&self) -> bool { true } } ",
+                "impl Ext for &u64 {} ",
+                "pub fn semantic_tag(ref value: u64) -> bool { value.count_ones() }\n",
+            ),
+            concat!(
+                "struct Foreign; trait Ext { fn count_ones(&self) -> bool { true } } ",
+                "impl Ext for Foreign {} struct Boxed { value: Foreign } ",
+                "pub fn semantic_tag(value: u64, foreign: Foreign) -> bool { ",
+                "Boxed { value: foreign }.value.count_ones() }\n",
+            ),
+            concat!(
+                "struct Foreign; trait Ext { fn count_ones(&self) -> bool { true } } ",
+                "impl Ext for Foreign {} macro_rules! shadow { () => { let value = Foreign; }; } ",
+                "pub fn semantic_tag(value: u64) -> bool { shadow!(); value.count_ones() }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                imported_extension,
+                &RustSourceIndex::new(imported_extension),
+                "semantic_tag",
+            )
+            .expect_err(
+                "method calls that cannot be proven to target the declared primitive receiver remain unresolved",
+            );
+            assert!(error.contains("source type cannot be inferred"), "{error}");
+        }
+    }
+
+    #[test]
+    fn function_authority_refuses_structural_import_escape_shapes() {
+        for source in [
+            concat!(
+                "mod dep { pub mod codec { pub fn helper() -> usize { 7 } } }\n",
+                "use dep::codec::{self};\n",
+                "pub fn semantic_tag() -> usize { codec::helper() }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Trait { fn semantic(&self) -> usize; } }\n",
+                "struct Value; impl dep::Trait for Value { fn semantic(&self) -> usize { 7 } }\n",
+                "use dep::Trait as _;\n",
+                "pub fn semantic_tag(value: &Value) -> usize { value.semantic() }\n",
+            ),
+            concat!(
+                "mod dep { pub const LIMIT: usize = 7; }\n",
+                "use dep::*;\n",
+                "pub fn semantic_tag() -> usize { LIMIT }\n",
+            ),
+            concat!(
+                "#[macro_use] extern crate dependency;\n",
+                "pub fn semantic_tag() -> usize { helper!() }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("structural import forms must poison inferred local authority");
+            assert!(
+                error.contains("imported") || error.contains("source type cannot be inferred"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_authority_refuses_unobserved_external_source_injection() {
+        for source in [
+            concat!(
+                "mod helpers;\n",
+                "pub fn semantic_tag() { helpers::helper(); }\n",
+            ),
+            concat!(
+                "#[path = \"generated.rs\"] mod helpers;\n",
+                "pub fn semantic_tag() { helpers::helper(); }\n",
+            ),
+            concat!(
+                "#[macro_use] mod helpers;\n",
+                "pub fn semantic_tag() { helper!(); }\n",
+            ),
+            concat!(
+                "include!(\"generated_items.rs\");\n",
+                "pub fn semantic_tag() { helper(); }\n",
+            ),
+            concat!(
+                "#[cfg(feature = \"generated\")] include!(\"generated_items.rs\");\n",
+                "pub fn semantic_tag() { helper(); }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("unobserved external source cannot be omitted from authority");
+            assert!(error.contains("imported helper authority"), "{error}");
+        }
+
+        for source in [
+            "pub fn semantic_tag() -> u64 { dependency::helper() }\n",
+            "pub fn semantic_tag() -> Result<String, std::env::VarError> { std::env::var(\"SCHEMA\") }\n",
+            "pub fn semantic_tag() -> std::io::Result<Vec<u8>> { std::fs::read(\"schema.bin\") }\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("extern-prelude source and input authority cannot be inferred");
+            assert!(error.contains("extern-prelude authority"), "{error}");
+        }
+
+        for source in [
+            "pub fn semantic_tag() -> usize { include!(\"body.rs\") }\n",
+            "pub fn semantic_tag() -> &'static str { include_str!(\"value.txt\") }\n",
+            "pub fn semantic_tag() -> &'static str { env!(\"VALUE\") }\n",
+            "pub fn semantic_tag() -> bool { cfg!(feature = \"alternate-schema\") }\n",
+            "pub fn semantic_tag() -> u32 { line!() + column!() }\n",
+            "pub fn semantic_tag() -> &'static str { module_path!() }\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("reached external-input macros need explicit authority");
+            assert!(error.contains("external-input macro"), "{error}");
+        }
+    }
+
+    #[test]
+    fn qualified_macro_invocation_cannot_bind_a_same_named_local_macro() {
+        let source = concat!(
+            "macro_rules! helper { () => { 7usize }; }\n",
+            "pub fn semantic_tag() -> usize { external::helper!() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            source,
+            &RustSourceIndex::new(source),
+            "semantic_tag",
+        )
+        .expect_err("a qualified macro call cannot resolve to a bare local macro_rules item");
+        assert!(error.contains("qualified macro"), "{error}");
+    }
+
+    #[test]
+    fn bare_macro_authority_is_textually_resolved_or_fails_closed() {
+        let unknown = "pub fn semantic_tag() -> usize { generated!() }\n";
+        let error = normalized_rust_schema_authority_with_index(
+            unknown,
+            &RustSourceIndex::new(unknown),
+            "semantic_tag",
+        )
+        .expect_err("an unknown bare macro cannot be implicit external authority");
+        assert!(error.contains("unresolved bare macro"), "{error}");
+
+        for generated_name in ["generated", "format"] {
+            let source = format!(
+                "macro_rules! define {{ ($name:ident) => {{ macro_rules! $name {{ ($($tt:tt)*) => {{ 7usize }} }} }} }}\n\
+                 define!({generated_name});\nmod child {{ pub fn semantic_tag() -> usize {{ {generated_name}!(\"x\") }} }}\n"
+            );
+            let error = normalized_rust_schema_authority_with_index(
+                &source,
+                &RustSourceIndex::new(&source),
+                "child::semantic_tag",
+            )
+            .expect_err(
+                "an ancestor item macro may generate and shadow any captured bare macro name",
+            );
+            assert!(error.contains("generator hazard"), "{error}");
+        }
+
+        let later_decoy = concat!(
+            "macro_rules! define { ($name:ident) => { macro_rules! $name { () => { 7usize } } } }\n",
+            "define!(generated);\nmod child { pub fn semantic_tag() -> usize { generated!() } }\n",
+            "macro_rules! generated { () => { 0usize }; }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            later_decoy,
+            &RustSourceIndex::new(later_decoy),
+            "child::semantic_tag",
+        )
+        .expect_err("a later direct definition cannot launder an earlier generated binding");
+        assert!(
+            error.contains("before its exact root definition")
+                || error.contains("generator hazard"),
+            "{error}"
+        );
+
+        let later_generator = concat!(
+            "mod child { pub fn semantic_tag() -> &'static str { stringify!(stable) } }\n",
+            "macro_rules! define { ($name:ident) => { macro_rules! $name { () => { 7usize } } } }\n",
+            "define!(stringify);\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            later_generator,
+            &RustSourceIndex::new(later_generator),
+            "child::semantic_tag",
+        )
+        .expect("a generator after the reached invocation cannot alter earlier textual lookup");
+
+        let inert_ancestor = concat!(
+            "macro_rules! inert { () => { struct Marker; }; } inert!();\n",
+            "mod child { pub fn semantic_tag() -> &'static str { stringify!(stable) } }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            inert_ancestor,
+            &RustSourceIndex::new(inert_ancestor),
+            "child::semantic_tag",
+        )
+        .expect("a proven inert ancestor item macro cannot generate a textual macro");
+
+        let sibling_generator = concat!(
+            "mod left { macro_rules! define { ($name:ident) => { macro_rules! $name { () => { 7usize } } } } define!(stringify); }\n",
+            "mod right { pub fn semantic_tag() -> &'static str { stringify!(stable) } }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            sibling_generator,
+            &RustSourceIndex::new(sibling_generator),
+            "right::semantic_tag",
+        )
+        .expect("a sibling module's textual macro generator is not visible");
+    }
+
+    #[test]
+    fn function_authority_refuses_modifier_separated_cfg_items_and_impls() {
+        for (source, reference) in [
+            (
+                concat!(
+                    "#[cfg(feature = \"conditional\")]\n",
+                    "pub mod nested { pub fn semantic_tag() -> usize { 7 } }\n",
+                ),
+                "nested::semantic_tag",
+            ),
+            (
+                concat!(
+                    "#[cfg(feature = \"conditional\")]\n",
+                    "pub const LIMIT: usize = 7;\n",
+                    "pub fn semantic_tag() -> usize { LIMIT }\n",
+                ),
+                "semantic_tag",
+            ),
+            (
+                concat!(
+                    "struct Witness;\n",
+                    "#[cfg(feature = \"conditional\")]\n",
+                    "impl Witness { const LIMIT: usize = 7; ",
+                    "pub fn semantic_tag() -> usize { Self::LIMIT } }\n",
+                ),
+                "Witness::semantic_tag",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                reference,
+            )
+            .expect_err("modifier-separated cfg authority must fail closed");
+            assert!(error.contains("cfg/cfg_attr"), "{error}");
+        }
+    }
+
+    #[test]
+    fn local_macro_dependencies_resolve_in_each_invocation_context() {
+        let source = |left: usize, right: usize| {
+            format!(
+                "macro_rules! call_helper {{ () => {{ helper() }}; }}\n\
+                 mod left {{ fn helper() -> usize {{ {left} }} pub fn entry() -> usize {{ call_helper!() }} }}\n\
+                 mod right {{ fn helper() -> usize {{ {right} }} pub fn entry() -> usize {{ call_helper!() }} }}\n\
+                 pub fn semantic_tag() -> usize {{ left::entry() + right::entry() }}\n"
+            )
+        };
+        let baseline_source = source(3, 7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("each macro invocation binds helpers in its lexical module");
+        for moved_source in [source(4, 7), source(3, 8)] {
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("macro helper closure remains valid after movement");
+            assert_ne!(baseline, moved);
+        }
+
+        let associated_source = |limit: usize| {
+            format!(
+                "macro_rules! read_limit {{ () => {{ Self::LIMIT }}; }}\n\
+                 struct Witness; impl Witness {{ const LIMIT: usize = {limit}; \
+                 pub fn semantic_tag() -> usize {{ read_limit!() }} }}\n"
+            )
+        };
+        let baseline_source = associated_source(5);
+        let moved_source = associated_source(6);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("macro Self dependency retains invocation implementation context");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("moved macro Self dependency remains valid");
+        assert_ne!(baseline, moved);
+    }
+
+    #[test]
+    fn bare_impl_dependency_uses_module_scope_not_associated_scope() {
+        let source = |module_limit: usize, associated_limit: usize| {
+            format!(
+                "const LIMIT: usize = {module_limit}; struct Witness; \
+                 impl Witness {{ const LIMIT: usize = {associated_limit}; \
+                 pub fn semantic_tag() -> usize {{ LIMIT }} }}\n"
+            )
+        };
+        let baseline_source = source(3, 7);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("bare names in an impl resolve through lexical module scope");
+        let moved_module = source(4, 7);
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_module,
+            &RustSourceIndex::new(&moved_module),
+            "Witness::semantic_tag",
+        )
+        .expect("moved module dependency remains valid");
+        assert_ne!(baseline, moved);
+        let moved_associated = source(3, 8);
+        let unchanged = normalized_rust_schema_authority_with_index(
+            &moved_associated,
+            &RustSourceIndex::new(&moved_associated),
+            "Witness::semantic_tag",
+        )
+        .expect("unreferenced associated constant remains irrelevant");
+        assert_eq!(baseline, unchanged);
+    }
+
+    #[test]
+    fn function_authority_refuses_globs_on_resolved_candidate_prefixes() {
+        for (source, reference) in [
+            (
+                concat!(
+                    "mod dep { pub fn helper() -> usize { 7 } }\n",
+                    "mod adapters { pub use super::dep::*; }\n",
+                    "pub fn semantic_tag() -> usize { adapters::helper() }\n",
+                ),
+                "semantic_tag",
+            ),
+            (
+                concat!(
+                    "mod dep { pub const LIMIT: usize = 7; }\n",
+                    "mod outer { use super::dep::*; mod inner { ",
+                    "pub fn semantic_tag() -> usize { super::LIMIT } } }\n",
+                ),
+                "outer::inner::semantic_tag",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                reference,
+            )
+            .expect_err("a glob on the resolved candidate namespace must poison inference");
+            assert!(error.contains("imported"), "{error}");
+        }
+    }
+
+    #[test]
+    fn qualified_implementation_owner_and_trait_defaults_fail_closed() {
+        let source = |limit: usize| {
+            format!(
+                "mod model {{ pub struct Witness; }} impl model::Witness {{ \
+                 const LIMIT: usize = {limit}; pub fn semantic_tag() -> usize {{ Self::LIMIT }} }}\n"
+            )
+        };
+        let baseline_source = source(3);
+        let moved_source = source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "model::Witness::semantic_tag",
+        )
+        .expect("qualified implementation owner is indexed without tail collapse");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "model::Witness::semantic_tag",
+        )
+        .expect("qualified associated dependency remains valid");
+        assert_ne!(baseline, moved);
+
+        let inherited = concat!(
+            "trait Defaults { const LIMIT: usize = 7; } struct Witness; ",
+            "impl Defaults for Witness { pub fn semantic_tag() -> usize { Self::LIMIT } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            inherited,
+            &RustSourceIndex::new(inherited),
+            "Witness::semantic_tag",
+        )
+        .expect_err("an inherited trait default needs explicit source authority");
+        assert!(error.contains("trait defaults"), "{error}");
+    }
+
+    #[test]
+    fn macro_use_and_named_trait_imports_are_exactly_poisoned() {
+        for source in [
+            concat!(
+                "#[macro_use] extern crate dependency as _;\n",
+                "pub fn semantic_tag() { helper!(); }\n",
+            ),
+            concat!(
+                "#[macro_use]\npub extern crate dependency;\n",
+                "pub fn semantic_tag() { helper!(); }\n",
+            ),
+            concat!(
+                "mod dep { pub trait Trait { fn semantic(&self) -> usize { 7 } } ",
+                "pub struct Value; impl Trait for Value {} }\n",
+                "use dep::Trait;\n",
+                "pub fn semantic_tag(value: &dep::Value) -> usize { value.semantic() }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("macro-use and possible imported-trait authority must fail closed");
+            assert!(
+                error.contains("imported helper authority")
+                    || error.contains("source type cannot be inferred"),
+                "{error}"
+            );
+        }
+
+        for source in [
+            concat!(
+                "#[allow(macro_use_extern_crate)] extern crate dependency;\n",
+                "pub fn semantic_tag() -> usize { 7 }\n",
+            ),
+            concat!(
+                "#[doc = \"macro_use\"] extern crate dependency;\n",
+                "pub fn semantic_tag() -> usize { 7 }\n",
+            ),
+        ] {
+            normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect("unrelated attribute text must not invent macro-use authority");
+        }
+    }
+
+    #[test]
+    fn lexical_shadowing_does_not_bind_unrelated_file_items() {
+        let source = |global_helper: usize| {
+            format!(
+                "fn helper() -> usize {{ {global_helper} }} \
+                 const VALUE: usize = {{ let helper = 7; helper }}; \
+                 pub fn semantic_tag() -> usize {{ VALUE }}\n"
+            )
+        };
+        let baseline_source = source(3);
+        let moved_source = source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("local const binding is represented by its enclosing fragment");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("unrelated global helper movement remains valid");
+        assert_eq!(baseline, moved);
+
+        for source in [
+            |global_helper| {
+                format!(
+                    "fn helper() -> usize {{ {global_helper} }} \
+                     const VALUE: usize = {{ let before = helper(); let helper = 7; before + helper }}; \
+                     pub fn semantic_tag() -> usize {{ VALUE }}\n"
+                )
+            },
+            |global_helper| {
+                format!(
+                    "fn helper() -> usize {{ {global_helper} }} \
+                     const VALUE: usize = {{ {{ let helper = 7; let _ = helper; }} helper() }}; \
+                     pub fn semantic_tag() -> usize {{ VALUE }}\n"
+                )
+            },
+        ] {
+            let baseline_source = source(3);
+            let moved_source = source(4);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("an unshadowed global reference remains resolvable");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("moved global reference remains resolvable");
+            assert_ne!(baseline, moved);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One namespace matrix exposes precedence interactions explicitly.
+    fn lexical_binding_analysis_respects_generic_attributes_and_namespaces() {
+        let parameter_source = |global_helper: usize| {
+            format!(
+                "fn helper() -> usize {{ {global_helper} }} \
+                 pub fn semantic_tag<F: Fn() -> usize>(helper: F) -> usize {{ helper() }}\n"
+            )
+        };
+        let baseline_source = parameter_source(3);
+        let moved_source = parameter_source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a parameter after a Fn bound is a lexical binding");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moving an unrelated global helper remains valid");
+        assert_eq!(baseline, moved);
+
+        let attributed_source = |helper: usize| {
+            format!(
+                "fn helper() -> usize {{ {helper} }} \
+                 #[schema(fn(helper))] pub fn semantic_tag() -> usize {{ helper() }}\n"
+            )
+        };
+        let baseline_source = attributed_source(3);
+        let moved_source = attributed_source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("attribute tokens do not masquerade as the function parameter list");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("the attributed global helper remains source authority");
+        assert_ne!(baseline, moved);
+
+        let namespace_source = |helper: usize| {
+            format!(
+                "mod helper {{ pub fn build() -> usize {{ {helper} }} }} \
+                 pub fn semantic_tag() -> usize {{ let helper = 1; helper::build() }}\n"
+            )
+        };
+        let baseline_source = namespace_source(3);
+        let moved_source = namespace_source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("value bindings do not shadow a module path");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("the same-named module helper remains source authority");
+        assert_ne!(baseline, moved);
+
+        for pattern_source in [
+            |helper| {
+                format!(
+                    "struct Pair {{ helper: usize }} fn helper() -> usize {{ {helper} }} \
+                     pub fn semantic_tag(Pair {{ helper: local }}: Pair) -> usize {{ local + helper() }}\n"
+                )
+            },
+            |helper| {
+                format!(
+                    "struct Pair {{ helper: usize }} fn helper() -> usize {{ {helper} }} \
+                     pub fn semantic_tag(value: Pair) -> usize {{ \
+                     let Pair {{ helper: local }} = value; local + helper() }}\n"
+                )
+            },
+        ] {
+            let baseline_source = pattern_source(3);
+            let moved_source = pattern_source(4);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("a renamed pattern field is not itself a value binding");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("the global helper beside a renamed field remains authority");
+            assert_ne!(baseline, moved);
+        }
+
+        let const_return_source = |global_helper: usize| {
+            format!(
+                "type Out<const N: usize> = [usize; N]; fn helper() -> usize {{ {global_helper} }} \
+                 pub fn semantic_tag(helper: usize) -> Out<{{ 1 }}> {{ [helper] }}\n"
+            )
+        };
+        let baseline_source = const_return_source(3);
+        let moved_source = const_return_source(4);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a const-generic return brace is not the function body");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("an unrelated global helper remains excluded");
+        assert_eq!(baseline, moved);
+
+        for generic_source in [
+            |global_helper| {
+                format!(
+                    "fn helper() -> usize {{ {global_helper} }} \
+                     pub fn semantic_tag<F: Fn() -> fn()>(helper: usize) -> usize {{ helper }}\n"
+                )
+            },
+            |global_helper| {
+                format!(
+                    "trait Gate<const B: bool> {{}} fn helper() -> usize {{ {global_helper} }} \
+                     pub fn semantic_tag<F: Gate<{{ 1 < 2 }}>>(helper: usize) -> usize {{ helper }}\n"
+                )
+            },
+        ] {
+            let baseline_source = generic_source(3);
+            let moved_source = generic_source(4);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("generic operators do not hide the real parameter list");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("an unrelated same-named global remains excluded");
+            assert_eq!(baseline, moved);
+        }
+    }
+
+    #[test]
+    fn authority_token_frames_preserve_macro_token_boundaries() {
+        for (label, left, right) in [
+            ("identifier", "foo bar", "foobar"),
+            ("numeric", "1 2", "12"),
+            ("byte-string-prefix", "b \"value\"", "b\"value\""),
+        ] {
+            let baseline_source =
+                format!("pub fn semantic_tag() -> &'static str {{ stringify!({left}) }}\n");
+            let moved_source =
+                format!("pub fn semantic_tag() -> &'static str {{ stringify!({right}) }}\n");
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("separated macro tokens are valid authority");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("joined macro token remains valid authority");
+            assert_ne!(
+                baseline, moved,
+                "{label} token boundaries must not collapse during normalization"
+            );
+        }
+
+        for doc_source in [
+            "pub fn semantic_tag() -> &'static str { stringify!(/// marker\n stable) }\n",
+            "pub fn semantic_tag() -> &'static str { stringify!(/** marker */ stable) }\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                doc_source,
+                &RustSourceIndex::new(doc_source),
+                "semantic_tag",
+            )
+            .expect_err("doc-comment token expansion must not be erased from authority");
+            assert!(error.contains("doc comment"), "{error}");
+        }
+    }
+
+    #[test]
+    fn literal_macro_selector_matching_preserves_exact_token_identity() {
+        let punctuation_source = |value: usize| {
+            format!(
+                "fn helper() -> usize {{ {value} }} \
+                 macro_rules! dispatch {{ (+ = helper) => {{ 0usize }}; \
+                 ($operator:tt $callback:ident) => {{ $callback() }}; }} \
+                 pub fn semantic_tag() -> usize {{ dispatch!(+= helper) }}\n"
+            )
+        };
+        let digit_source = |value: usize| {
+            format!(
+                "fn helper() -> usize {{ {value} }} \
+                 macro_rules! dispatch {{ (1 2 helper) => {{ 0usize }}; \
+                 ($number:literal $callback:ident) => {{ $callback() }}; }} \
+                 pub fn semantic_tag() -> usize {{ dispatch!(12 helper) }}\n"
+            )
+        };
+        for source in [punctuation_source, digit_source] {
+            let baseline_source = source(1);
+            let moved_source = source(2);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("the dynamic fallback arm binds its callback");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("moved callback remains authority");
+            assert_ne!(baseline, moved);
+        }
+    }
+
+    #[test]
+    fn proven_opaque_macro_tokens_are_not_scanned_as_executable_authority() {
+        for selector in [
+            "marker!()",
+            "foo::bar",
+            "foo < bar",
+            "receiver.method()",
+            "LIMIT",
+        ] {
+            let source = format!(
+                "macro_rules! dispatch {{ ({selector}) => {{ 0usize }}; \
+                 ($($rest:tt)*) => {{ 1usize }}; }} \
+                 pub fn semantic_tag() -> usize {{ dispatch!({selector}) }}\n"
+            );
+            normalized_rust_schema_authority_with_index(
+                &source,
+                &RustSourceIndex::new(&source),
+                "semantic_tag",
+            )
+            .unwrap_or_else(|error| panic!("literal selector {selector:?}: {error}"));
+        }
+
+        for token_tree in ["foo::bar", "line!()", "receiver.method()", "foo < bar"] {
+            let source =
+                format!("pub fn semantic_tag() -> &'static str {{ stringify!({token_tree}) }}\n");
+            normalized_rust_schema_authority_with_index(
+                &source,
+                &RustSourceIndex::new(&source),
+                "semantic_tag",
+            )
+            .unwrap_or_else(|error| panic!("builtin stringify token tree {token_tree:?}: {error}"));
+        }
+
+        let baseline = "pub fn semantic_tag() -> &'static str { stringify!(foo::bar) }\n";
+        let moved = "pub fn semantic_tag() -> &'static str { stringify!(foo::baz) }\n";
+        let baseline_authority = normalized_rust_schema_authority_with_index(
+            baseline,
+            &RustSourceIndex::new(baseline),
+            "semantic_tag",
+        )
+        .expect("opaque baseline is framed");
+        let moved_authority = normalized_rust_schema_authority_with_index(
+            moved,
+            &RustSourceIndex::new(moved),
+            "semantic_tag",
+        )
+        .expect("opaque mutation is framed");
+        assert_ne!(baseline_authority, moved_authority);
+
+        let generated_shadow = concat!(
+            "macro_rules! define { () => { macro_rules! stringify { ($value:tt) => { 0usize }; } }; } ",
+            "pub fn semantic_tag() -> &'static str { define!(); stringify!(value.helper()) }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_shadow,
+            &RustSourceIndex::new(generated_shadow),
+            "semantic_tag",
+        )
+        .expect_err("a preceding macro generator prevents builtin stringify proof");
+        assert!(error.contains("source type cannot be inferred"), "{error}");
+    }
+
+    #[test]
+    fn macro_token_let_cannot_shadow_a_real_helper() {
+        let source = |value: usize| {
+            format!(
+                "fn helper() -> usize {{ {value} }} pub fn semantic_tag() -> usize {{ let _ = stringify!(let helper;); helper() }}\n"
+            )
+        };
+        let baseline_source = source(1);
+        let moved_source = source(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("token-tree let is not a lexical declaration");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved real helper remains authority");
+        assert_ne!(baseline, moved);
+    }
+
+    #[test]
+    fn macro_token_methods_are_opaque_only_when_expansion_semantics_prove_it() {
+        let primitive = "pub fn semantic_tag(value: &str) -> usize { value.len() }\n";
+        normalized_rust_schema_authority_with_index(
+            primitive,
+            &RustSourceIndex::new(primitive),
+            "semantic_tag",
+        )
+        .expect("an exact shared-str inherent receiver is authoritative");
+
+        let captured = "pub fn semantic_tag() -> &'static str { stringify!(value.helper()) }\n";
+        normalized_rust_schema_authority_with_index(
+            captured,
+            &RustSourceIndex::new(captured),
+            "semantic_tag",
+        )
+        .expect("builtin stringify returns framed token text without resolving method syntax");
+
+        let dynamic = concat!(
+            "macro_rules! evaluate { ($value:expr) => { 0usize }; } ",
+            "pub fn semantic_tag() -> usize { evaluate!(value.helper()) }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            dynamic,
+            &RustSourceIndex::new(dynamic),
+            "semantic_tag",
+        )
+        .expect_err("a dynamic macro argument remains conservative executable authority");
+        assert!(error.contains("source type cannot be inferred"), "{error}");
+    }
+
+    #[test]
+    fn generic_type_commas_cannot_create_parameter_bindings() {
+        let source = |value: usize| {
+            format!(
+                "#![allow(non_camel_case_types)] type helper = (); fn helper() -> usize {{ {value} }} pub fn semantic_tag(value: Result<(), helper>) -> usize {{ let _ = value; helper() }}\n"
+            )
+        };
+        let baseline_source = source(1);
+        let moved_source = source(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a type-argument name is not a value parameter");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved value-namespace helper remains authority");
+        assert_ne!(baseline, moved);
+    }
+
+    #[test]
+    fn implementation_headers_are_bound_and_owner_aliases_fail_closed() {
+        let specialized_source = |specialization: usize| {
+            format!(
+                "struct Witness<const N: usize>; impl Witness<{specialization}> {{ pub fn semantic_tag(&self) -> usize {{ 7 }} }}\n"
+            )
+        };
+        let baseline_source = specialized_source(1);
+        let moved_source = specialized_source(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a source-closed baseline impl header is authority");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a moved source-closed impl header remains authority");
+        assert_ne!(baseline, moved);
+
+        let unframed_bound = concat!(
+            "trait Bound {} struct Witness<T>(T); ",
+            "impl<T: Bound> Witness<T> { pub fn semantic_tag(&self) -> usize { 7 } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            unframed_bound,
+            &RustSourceIndex::new(unframed_bound),
+            "Witness::semantic_tag",
+        )
+        .expect_err("a local bound declaration that is outside the closure must fail closed");
+        assert!(
+            error.contains("direct local dependency \"Bound\""),
+            "{error}"
+        );
+
+        for owner_binding in [
+            "mod left { pub struct Witness; } mod right { pub struct Witness; } use left::Witness; impl Witness { pub fn semantic_tag() -> usize { 7 } }\n",
+            "mod left { pub struct Witness; } type Witness = left::Witness; impl Witness { pub fn semantic_tag() -> usize { 7 } }\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                owner_binding,
+                &RustSourceIndex::new(owner_binding),
+                "Witness::semantic_tag",
+            )
+            .expect_err("indirect implementation owners need explicit authority");
+            assert!(
+                error.contains("implementation owner")
+                    && (error.contains("imported") || error.contains("type alias")),
+                "{error}"
+            );
+        }
+
+        let generated_owner = concat!(
+            "macro_rules! declare { () => { struct Witness; }; } declare!(); ",
+            "impl Witness { pub fn semantic_tag() -> usize { 7 } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_owner,
+            &RustSourceIndex::new(generated_owner),
+            "Witness::semantic_tag",
+        )
+        .expect_err("a macro-generated implementation owner is not direct source authority");
+        assert!(error.contains("direct nominal source type"), "{error}");
+
+        let generated_trait = concat!(
+            "macro_rules! declare { () => { trait Policy { fn semantic_tag(&self) -> usize; } }; } declare!(); ",
+            "struct Witness; impl Policy for Witness { fn semantic_tag(&self) -> usize { 7 } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_trait,
+            &RustSourceIndex::new(generated_trait),
+            "Witness::semantic_tag",
+        )
+        .expect_err("a macro-generated implemented trait is not direct source authority");
+        assert!(error.contains("direct source trait"), "{error}");
+    }
+
+    #[test]
+    fn trait_qualified_helpers_bind_direct_owners_and_refuse_defaults() {
+        let source = |value: usize| {
+            format!(
+                "trait Policy {{ fn helper(&self) -> usize; fn semantic_tag(&self) -> usize; }} struct Witness; impl Policy for Witness {{ fn helper(&self) -> usize {{ {value} }} fn semantic_tag(&self) -> usize {{ Policy::helper(self) }} }}\n"
+            )
+        };
+        let baseline_source = source(1);
+        let moved_source = source(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("trait-qualified direct helper is bound");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("moved trait-qualified helper remains authority");
+        assert_ne!(baseline, moved);
+
+        let ufcs_source = |value: usize| {
+            format!(
+                "trait Policy {{ fn helper<T>(&self) -> usize; fn semantic_tag(&self) -> usize; }} struct Witness; impl Policy for Witness {{ fn helper<T>(&self) -> usize {{ {value} }} fn semantic_tag(&self) -> usize {{ <Self as Policy>::helper::<u8>(self) }} }}\n"
+            )
+        };
+        let baseline_source = ufcs_source(1);
+        let moved_source = ufcs_source(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("Self UFCS binds a direct owner helper");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("moved Self UFCS helper remains authority");
+        assert_ne!(baseline, moved);
+
+        let inherited = concat!(
+            "trait Policy { fn helper(&self) -> usize { 1 } fn semantic_tag(&self) -> usize; } ",
+            "struct Witness; impl Policy for Witness { fn semantic_tag(&self) -> usize { ",
+            "<Self as Policy>::helper(self) } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            inherited,
+            &RustSourceIndex::new(inherited),
+            "Witness::semantic_tag",
+        )
+        .expect_err("UFCS cannot bypass trait-default authority refusal");
+        assert!(error.contains("trait defaults"), "{error}");
+
+        let nonself_receiver = concat!(
+            "trait Policy { fn helper(self) -> usize; fn semantic_tag(self) -> usize; } ",
+            "struct Witness; struct Other; ",
+            "impl Policy for Other { fn helper(self) -> usize { 9 } fn semantic_tag(self) -> usize { 0 } } ",
+            "impl Policy for Witness { fn helper(self) -> usize { 1 } fn semantic_tag(self) -> usize { Policy::helper(Other) } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            nonself_receiver,
+            &RustSourceIndex::new(nonself_receiver),
+            "Witness::semantic_tag",
+        )
+        .expect_err("a trait call on another receiver cannot bind the current owner");
+        assert!(error.contains("outside a provable direct"), "{error}");
+    }
+
+    #[test]
+    fn trait_member_resolution_is_exact_to_the_current_impl_and_declaration_kind() {
+        let inherent_collision = concat!(
+            "trait Policy { fn helper(&self) -> usize { 1 } fn semantic_tag(&self) -> usize; } ",
+            "struct Witness; impl Witness { fn helper(&self) -> usize { 9 } } ",
+            "impl Policy for Witness { fn semantic_tag(&self) -> usize { ",
+            "<Self as Policy>::helper(self) } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            inherent_collision,
+            &RustSourceIndex::new(inherent_collision),
+            "Witness::semantic_tag",
+        )
+        .expect_err("an inherent collision cannot satisfy an inherited trait default");
+        assert!(error.contains("exact current impl"), "{error}");
+
+        let specialization_collision = concat!(
+            "trait Policy { fn helper(&self) -> usize { 1 } fn semantic_tag(&self) -> usize { 0 } } ",
+            "struct Witness<T>(T); ",
+            "impl Policy for Witness<u8> { fn helper(&self) -> usize { 8 } } ",
+            "impl Policy for Witness<u16> { fn semantic_tag(&self) -> usize { ",
+            "<Self as Policy>::helper(self) } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            specialization_collision,
+            &RustSourceIndex::new(specialization_collision),
+            "Witness::semantic_tag",
+        )
+        .expect_err("another specialization cannot satisfy the current impl's inherited default");
+        assert!(error.contains("exact current impl"), "{error}");
+
+        let direct_const = |value: usize| {
+            format!(
+                "#![allow(non_upper_case_globals)] trait Policy {{ const limit: usize; fn semantic_tag() -> usize; }} struct Witness; impl Policy for Witness {{ const limit: usize = {value}; fn semantic_tag() -> usize {{ <Self as Policy>::limit }} }}\n"
+            )
+        };
+        let baseline_source = direct_const(1);
+        let moved_source = direct_const(2);
+        let baseline_index = RustSourceIndex::new(&baseline_source);
+        let [semantic_fragment] = baseline_index
+            .functions
+            .get("Witness::semantic_tag")
+            .expect("associated-const authority function")
+            .as_slice()
+        else {
+            panic!("associated-const authority must have one function declaration");
+        };
+        let semantic_tokens = rust_authority_tokens(semantic_fragment).expect("authority tokens");
+        let semantic_type_tokens =
+            rust_authority_type_token_indexes(&semantic_tokens).expect("type tokens");
+        let ufcs_paths = rust_authority_self_ufcs_paths(semantic_fragment)
+            .expect("UFCS paths")
+            .into_iter()
+            .collect::<Vec<_>>();
+        let [(_, is_call, member_index)] = ufcs_paths.as_slice() else {
+            panic!("associated const must yield one synthetic UFCS path");
+        };
+        assert!(!is_call, "associated const is a value path, not a call");
+        assert!(
+            !semantic_type_tokens.contains(member_index),
+            "an associated const used in the function body is Value namespace"
+        );
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &baseline_index,
+            "Witness::semantic_tag",
+        )
+        .expect("a lowercase direct associated const is declaration-classified");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a moved lowercase direct associated const remains authority");
+        assert_ne!(baseline, moved);
+
+        let default_const = concat!(
+            "#![allow(non_upper_case_globals)] trait Policy { const limit: usize = 1; fn semantic_tag() -> usize; } ",
+            "struct Witness; impl Policy for Witness { fn semantic_tag() -> usize { ",
+            "<Self as Policy>::limit } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            default_const,
+            &RustSourceIndex::new(default_const),
+            "Witness::semantic_tag",
+        )
+        .expect_err("a lowercase inherited const requires explicit direct authority");
+        assert!(error.contains("exact current impl"), "{error}");
+
+        let direct_function_item = |value: usize| {
+            format!(
+                "trait Policy {{ fn helper() -> usize; fn semantic_tag() -> fn() -> usize; }} struct Witness; impl Policy for Witness {{ fn helper() -> usize {{ {value} }} fn semantic_tag() -> fn() -> usize {{ <Self as Policy>::helper }} }}\n"
+            )
+        };
+        let baseline_source = direct_function_item(1);
+        let moved_source = direct_function_item(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a UFCS function item is declaration-classified as a direct helper");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "Witness::semantic_tag",
+        )
+        .expect("a moved UFCS function item remains authority");
+        assert_ne!(baseline, moved);
+
+        for outside in [
+            "#![allow(non_upper_case_globals)] trait Policy { const limit: usize = 1; } fn semantic_tag() -> usize { Policy::limit }\n",
+            "trait Policy { fn HELPER() -> usize { 1 } } fn semantic_tag() -> fn() -> usize { Policy::HELPER }\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                outside,
+                &RustSourceIndex::new(outside),
+                "semantic_tag",
+            )
+            .expect_err("a local trait member outside a provable current impl must fail closed");
+            assert!(error.contains("outside a provable direct"), "{error}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The adversarial matrix keeps cfg and generated-namespace cases visibly co-located.
+    fn nested_cfg_authority_and_generated_item_namespaces_fail_closed() {
+        for conditional in [
+            concat!(
+                "pub fn semantic_tag() -> usize { ",
+                "#[cfg(feature = \"left\")] { 1 } ",
+                "#[cfg(not(feature = \"left\"))] { 2 } }\n",
+            ),
+            concat!(
+                "const VALUE: usize = { #[cfg_attr(feature = \"left\", allow(dead_code))] let value = 1; value }; ",
+                "pub fn semantic_tag() -> usize { VALUE }\n",
+            ),
+            concat!(
+                "macro_rules! helper { () => {{ #[cfg(feature = \"left\")] let value = 1; value }}; } ",
+                "pub fn semantic_tag() -> usize { helper!() }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                conditional,
+                &RustSourceIndex::new(conditional),
+                "semantic_tag",
+            )
+            .expect_err("nested cfg cannot select reached runtime authority");
+            assert!(error.contains("nested cfg/cfg_attr"), "{error}");
+        }
+
+        let generated = concat!(
+            "macro_rules! inject { () => { fn helper() -> usize { 1 } }; } inject!(); ",
+            "pub fn semantic_tag() -> usize { helper() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated,
+            &RustSourceIndex::new(generated),
+            "semantic_tag",
+        )
+        .expect_err("item macros cannot inject invisible helper authority");
+        assert!(error.contains("generated item authority"), "{error}");
+
+        for generated in [
+            "inject!(); pub fn semantic_tag() -> usize { helper() }\n",
+            concat!(
+                "#[macro_export] macro_rules! inject { () => { fn helper() -> usize { 1 } }; } ",
+                "crate::inject!(); pub fn semantic_tag() -> usize { helper() }\n",
+            ),
+            concat!(
+                "macro_rules! r#inject { () => { fn helper() -> usize { 1 } }; } ",
+                "r#inject!(); pub fn semantic_tag() -> usize { helper() }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                generated,
+                &RustSourceIndex::new(generated),
+                "semantic_tag",
+            )
+            .expect_err("qualified and raw item macros poison generated helper namespaces");
+            assert!(
+                error.contains("generated item authority")
+                    || error.contains("shadowable primitive spelling"),
+                "{error}"
+            );
+        }
+
+        let generated_const = concat!(
+            "macro_rules! inject { () => { const LIMIT: usize = 1; }; } inject!(); ",
+            "pub fn semantic_tag() -> usize { LIMIT }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_const,
+            &RustSourceIndex::new(generated_const),
+            "semantic_tag",
+        )
+        .expect_err("an item macro cannot inject an invisible constant dependency");
+        assert!(error.contains("generated item authority"), "{error}");
+
+        let declared_macro_item_names = concat!(
+            "macro_rules! expr { () => {{ fn helper() {} 1u64 }}; } ",
+            "macro_rules! inert { () => { struct Marker; }; } inert!(); ",
+            "pub fn semantic_tag() -> u64 { expr!() }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            declared_macro_item_names,
+            &RustSourceIndex::new(declared_macro_item_names),
+            "semantic_tag",
+        )
+        .expect("declaration names inside a bound local macro are not value dependencies");
+
+        let dual_context_macro = concat!(
+            "macro_rules! dual { (item) => { fn helper() {} }; (expr) => { 1u64 }; } ",
+            "dual!(item); pub fn semantic_tag() -> u64 { dual!(expr) }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            dual_context_macro,
+            &RustSourceIndex::new(dual_context_macro),
+            "semantic_tag",
+        )
+        .expect(
+            "a body expression invocation must not invalidate exact linkage of the same item macro",
+        );
+
+        let inert_macro_primitive_owner = concat!(
+            "trait Policy { fn semantic_tag(self) -> usize; } ",
+            "macro_rules! inert { () => { fn unrelated() {} }; } inert!(); ",
+            "impl Policy for u64 { fn semantic_tag(self) -> usize { 7 } }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            inert_macro_primitive_owner,
+            &RustSourceIndex::new(inert_macro_primitive_owner),
+            "u64::semantic_tag",
+        )
+        .expect(
+            "an item macro proven unable to generate a primitive-named type must not poison a builtin owner",
+        );
+
+        let direct_body_type = concat!(
+            "struct Local; ",
+            "macro_rules! inert { () => { fn unrelated() {} }; } inert!(); ",
+            "pub fn semantic_tag() { let _: Local; }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            direct_body_type,
+            &RustSourceIndex::new(direct_body_type),
+            "semantic_tag",
+        )
+        .expect("a direct body type annotation is resolved in the type namespace");
+
+        let generated_primitive = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "macro_rules! inject { () => { #[derive(PartialEq)] struct u64(u8); }; } inject!(); ",
+            "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_primitive,
+            &RustSourceIndex::new(generated_primitive),
+            "semantic_tag",
+        )
+        .expect_err("a generated nominal type cannot masquerade as a builtin primitive");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        for generated_primitive_escape in [
+            concat!(
+                "#![allow(non_camel_case_types)] ",
+                "macro_rules! inject { ($item:item) => { $item }; } ",
+                "inject!(#[derive(PartialEq)] struct u64(u8);); ",
+                "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+            ),
+            concat!(
+                "macro_rules! inject { () => { use dep::*; }; } inject!(); ",
+                "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+            ),
+            concat!(
+                "macro_rules! inject { () => { #[make_u64] struct Marker; }; } inject!(); ",
+                "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+            ),
+            concat!(
+                "macro_rules! inject { () => { extern crate dep as u64; }; } inject!(); ",
+                "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+            ),
+            concat!(
+                "use dep::inject; inject!(); ",
+                "macro_rules! inject { () => { struct Marker; }; } ",
+                "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+            ),
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                generated_primitive_escape,
+                &RustSourceIndex::new(generated_primitive_escape),
+                "semantic_tag",
+            )
+            .expect_err(
+                "forwarding, imports, attributes, foreign items, and ambiguous macro linkage can hide a generated primitive-named type",
+            );
+            assert!(error.contains("shadowable primitive spelling"), "{error}");
+        }
+
+        let nested_imported_item_macro_with_root_decoy = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "mod child { use dep::inject; inject!(); ",
+            "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right } } ",
+            "macro_rules! inject { () => { struct Marker; }; } inject!();\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            nested_imported_item_macro_with_root_decoy,
+            &RustSourceIndex::new(nested_imported_item_macro_with_root_decoy),
+            "child::semantic_tag",
+        )
+        .expect_err(
+            "a later harmless root macro must not launder an earlier imported nested item macro",
+        );
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        let generated_value_masked_by_type = concat!(
+            "#![allow(non_camel_case_types)] struct LIMIT { value: u8 } ",
+            "macro_rules! inject { () => { const LIMIT: usize = 7; }; } inject!(); ",
+            "pub fn semantic_tag() -> usize { LIMIT }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_value_masked_by_type,
+            &RustSourceIndex::new(generated_value_masked_by_type),
+            "semantic_tag",
+        )
+        .expect_err(
+            "a direct type must not mask an unresolved generated value with the same spelling",
+        );
+        assert!(error.contains("generated item authority"), "{error}");
+
+        for cfg_decoy in [
+            concat!(
+                "#[cfg(feature = \"direct\")]\nstruct Token;\n",
+                "macro_rules! inject { () => { struct Token; }; }\ninject!();\n",
+                "pub fn semantic_tag(_: Token) {}\n",
+            ),
+            concat!(
+                "#[cfg(feature = \"left\")]\nstruct Token;\n",
+                "#[cfg(not(feature = \"left\"))]\nstruct Token;\n",
+                "macro_rules! inject { () => { struct Token; }; }\ninject!();\n",
+                "pub fn semantic_tag(_: Token) {}\n",
+            ),
+        ] {
+            let index = RustSourceIndex::new(cfg_decoy);
+            assert!(
+                rust_visible_generated_item_macros(&index, "").contains("inject"),
+                "the item-position invocation must remain visible to authority admission"
+            );
+            assert!(
+                !rust_candidate_is_unique_runtime_direct_type(&index, "Token"),
+                "cfg-gated declarations are not unconditional direct type authority"
+            );
+            let [fragment] = index
+                .functions
+                .get("semantic_tag")
+                .expect("the authority function must be indexed")
+                .as_slice()
+            else {
+                panic!("the authority function must have one direct declaration");
+            };
+            let tokens = rust_authority_tokens(fragment).expect("authority tokenization");
+            let type_tokens =
+                rust_authority_type_token_indexes(&tokens).expect("type namespace classification");
+            assert!(
+                tokens
+                    .iter()
+                    .enumerate()
+                    .any(|(position, token)| token.text == "Token"
+                        && type_tokens.contains(&position)),
+                "the parameter type must be classified in the Type namespace"
+            );
+            let error = normalized_rust_schema_authority_with_index(
+                cfg_decoy,
+                &index,
+                "semantic_tag",
+            )
+            .expect_err(
+                "cfg-inactive or ambiguous nominal declarations cannot mask a generated type",
+            );
+            assert!(
+                error.contains("generated item authority")
+                    || error.contains("conditional or ambiguous"),
+                "{error}"
+            );
+        }
+
+        let cfg_owner_decoy = concat!(
+            "#[cfg(feature = \"direct\")]\nstruct Witness;\n",
+            "macro_rules! inject { () => { struct Witness; }; }\ninject!();\n",
+            "impl Witness { pub fn semantic_tag() {} }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            cfg_owner_decoy,
+            &RustSourceIndex::new(cfg_owner_decoy),
+            "Witness::semantic_tag",
+        )
+        .expect_err("a cfg-inactive owner declaration cannot authorize a generated impl owner");
+        assert!(error.contains("direct nominal source type"), "{error}");
+
+        let parent_generated_primitive = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "macro_rules! inject { () => { struct u64; }; } inject!(); ",
+            "mod child { pub fn semantic_tag(left: u64, right: u64) -> bool { left == right } }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            parent_generated_primitive,
+            &RustSourceIndex::new(parent_generated_primitive),
+            "child::semantic_tag",
+        )
+        .expect("a parent module's generated items are not in a child's unqualified namespace");
+
+        let generated_primitive_owner = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "macro_rules! inject { () => { pub struct u64; }; } inject!(); ",
+            "mod nested { impl super::u64 { pub fn semantic_tag() -> usize { 7 } } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            generated_primitive_owner,
+            &RustSourceIndex::new(generated_primitive_owner),
+            "u64::semantic_tag",
+        )
+        .expect_err("an ancestor item macro cannot manufacture a primitive-named impl owner");
+        assert!(error.contains("macro-generated nominal owner"), "{error}");
+    }
+
+    #[test]
+    fn bare_const_generic_arguments_join_the_authority_closure() {
+        let source = |limit: usize| {
+            format!(
+                "const LIMIT: usize = {limit}; struct Carrier<const N: usize>; \
+                 pub fn semantic_tag(_: Carrier<LIMIT>) {{}}\n"
+            )
+        };
+        let baseline_source = source(7);
+        let moved_source = source(8);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a bare const-generic argument is direct value authority");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved bare const-generic authority remains resolvable");
+        assert_ne!(baseline, moved);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One namespace matrix covers paths, lifetimes, and associated constraints.
+    fn type_only_occurrences_do_not_bind_same_spelled_values() {
+        let qualified_const = |value: usize| {
+            format!(
+                "mod local {{ pub type LIMIT = u8; pub const LIMIT: usize = {value}; }} \
+                 pub fn semantic_tag(_: local::LIMIT) {{}}\n"
+            )
+        };
+        let baseline_source = qualified_const(1);
+        let moved_source = qualified_const(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("qualified Type occurrence with same-spelled const");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved unrelated qualified const");
+        assert_eq!(baseline, moved);
+
+        let qualified_function = |value: usize| {
+            format!(
+                "#![allow(non_snake_case)] mod local {{ pub type LIMIT = u8; \
+                 pub fn LIMIT() -> usize {{ {value} }} }} \
+                 pub fn semantic_tag(_: local::LIMIT) {{}}\n"
+            )
+        };
+        let baseline_source = qualified_function(1);
+        let moved_source = qualified_function(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("qualified Type occurrence with same-spelled function");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved unrelated qualified function");
+        assert_eq!(baseline, moved);
+
+        let lifetime = |value: usize| {
+            format!(
+                "#![allow(non_upper_case_globals)] const a: usize = {value}; \
+                 struct Carrier<'a>(&'a ()); \
+                 pub fn semantic_tag<'a>(_: Carrier<'a>) -> usize {{ 0 }}\n"
+            )
+        };
+        let baseline_source = lifetime(1);
+        let moved_source = lifetime(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("a lifetime argument is not a same-spelled value");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved unrelated lifetime-spelled const");
+        assert_eq!(baseline, moved);
+
+        for associated_constraint in [
+            |value| {
+                format!(
+                    "#![allow(non_upper_case_globals)] const Item: usize = {value}; \
+                     trait Policy {{ type Item; }} \
+                     pub fn semantic_tag<T: Policy<Item = u8>>() -> usize {{ 0 }}\n"
+                )
+            },
+            |value| {
+                format!(
+                    "type LIMIT = u8; const LIMIT: usize = {value}; \
+                     trait Policy {{ type Item; }} \
+                     pub fn semantic_tag<T: Policy<Item = LIMIT>>() -> usize {{ 0 }}\n"
+                )
+            },
+            |value| {
+                format!(
+                    "type LIMIT = u8; const LIMIT: usize = {value}; \
+                     trait Policy {{ type Item; }} \
+                     pub fn semantic_tag<T: Policy<Item = fn() -> LIMIT>>() -> usize {{ 0 }}\n"
+                )
+            },
+        ] {
+            let baseline_source = associated_constraint(1);
+            let moved_source = associated_constraint(2);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("associated type constraint is Type namespace");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("moved same-spelled value beside associated type constraint");
+            assert_eq!(baseline, moved);
+        }
+    }
+
+    #[test]
+    fn conditional_type_and_trait_authority_is_refused_without_item_macros() {
+        let conditional_type = concat!(
+            "#[cfg(feature = \"left\")]\nstruct Token;\n",
+            "#[cfg(not(feature = \"left\"))]\nstruct Token;\n",
+            "pub fn semantic_tag(_: Token) {}\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional_type,
+            &RustSourceIndex::new(conditional_type),
+            "semantic_tag",
+        )
+        .expect_err("cfg-alternative types are not unique runtime authority");
+        assert!(error.contains("conditional or ambiguous"), "{error}");
+
+        let conditional_trait = concat!(
+            "#[cfg(feature = \"left\")]\ntrait Policy { const LIMIT: usize; }\n",
+            "#[cfg(not(feature = \"left\"))]\ntrait Policy { const LIMIT: usize; }\n",
+            "pub fn semantic_tag() -> usize { Policy::LIMIT }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional_trait,
+            &RustSourceIndex::new(conditional_trait),
+            "semantic_tag",
+        )
+        .expect_err("cfg-alternative trait parents cannot authorize associated values");
+        assert!(error.contains("not direct source authority"), "{error}");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Type captures, selector order, and textual visibility form one macro-resolution matrix.
+    fn local_macro_arguments_and_visibility_are_occurrence_exact() {
+        let type_argument = |value: usize| {
+            format!(
+                "const T: usize = {value}; \
+                 macro_rules! type_only {{ ($ty:ty) => {{ 0usize }}; }} \
+                 pub fn semantic_tag<T>() -> usize {{ type_only!(T) }}\n"
+            )
+        };
+        let baseline_source = type_argument(1);
+        let moved_source = type_argument(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("whole ty capture is Type namespace");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved unrelated same-spelled const");
+        assert_eq!(baseline, moved);
+
+        let impl_type_argument = |value: usize| {
+            format!(
+                "const T: usize = {value}; struct W<T>(T); \
+                 macro_rules! type_only {{ ($ty:ty) => {{ 0usize }}; }} \
+                 impl<T> W<T> {{ pub fn semantic_tag() -> usize {{ type_only!(T) }} }}\n"
+            )
+        };
+        let baseline_source = impl_type_argument(1);
+        let moved_source = impl_type_argument(2);
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "W::semantic_tag",
+        )
+        .expect("impl generic passed through whole ty capture");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "W::semantic_tag",
+        )
+        .expect("moved unrelated impl-generic-spelled const");
+        assert_eq!(baseline, moved);
+
+        for reached_helper in [
+            |value| {
+                format!(
+                    "fn helper() -> usize {{ {value} }} \
+                     macro_rules! dispatch {{ ($callback:ident) => {{ $callback() }}; (helper) => {{ 0 }}; }} \
+                     pub fn semantic_tag() -> usize {{ dispatch!(helper) }}\n"
+                )
+            },
+            |value| {
+                format!(
+                    "fn tag() -> usize {{ {value} }} \
+                     macro_rules! dispatch {{ (tag $callback:ident) => {{ $callback() }}; }} \
+                     pub fn semantic_tag() -> usize {{ dispatch!(tag tag) }}\n"
+                )
+            },
+        ] {
+            let baseline_source = reached_helper(1);
+            let moved_source = reached_helper(2);
+            let baseline = normalized_rust_schema_authority_with_index(
+                &baseline_source,
+                &RustSourceIndex::new(&baseline_source),
+                "semantic_tag",
+            )
+            .expect("dynamic macro argument reaches its helper");
+            let moved = normalized_rust_schema_authority_with_index(
+                &moved_source,
+                &RustSourceIndex::new(&moved_source),
+                "semantic_tag",
+            )
+            .expect("moved dynamically reached helper");
+            assert_ne!(baseline, moved);
+        }
+
+        let later_builtin_shadow = |body: &str| {
+            format!(
+                "macro_rules! call {{ () => {{ stringify!(stable) }}; }} \
+                 pub fn semantic_tag() -> &'static str {{ call!() }} \
+                 macro_rules! stringify {{ ($x:ident) => {{ \"{body}\" }}; }}\n"
+            )
+        };
+        let baseline_source = later_builtin_shadow("later-a");
+        let moved_source = later_builtin_shadow("later-b");
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("later local stringify does not shadow the builtin yet");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved later unused stringify definition");
+        assert_eq!(baseline, moved);
+
+        let visible_local_shadow = |body: &str| {
+            format!(
+                "macro_rules! stringify {{ ($x:ident) => {{ \"{body}\" }}; }} \
+                 macro_rules! call {{ () => {{ stringify!(stable) }}; }} \
+                 pub fn semantic_tag() -> &'static str {{ call!() }}\n"
+            )
+        };
+        let baseline_source = visible_local_shadow("before-a");
+        let moved_source = visible_local_shadow("before-b");
+        let baseline = normalized_rust_schema_authority_with_index(
+            &baseline_source,
+            &RustSourceIndex::new(&baseline_source),
+            "semantic_tag",
+        )
+        .expect("visible local stringify is source authority");
+        let moved = normalized_rust_schema_authority_with_index(
+            &moved_source,
+            &RustSourceIndex::new(&moved_source),
+            "semantic_tag",
+        )
+        .expect("moved visible local stringify");
+        assert_ne!(baseline, moved);
+    }
+
+    #[test]
+    fn trait_dispatching_toolchain_macros_are_not_blanket_authority() {
+        for source in [
+            "pub fn semantic_tag() -> String { format!(\"{}\", 1u64) }\n",
+            "pub fn semantic_tag() { assert_eq!(1u64, 1u64); }\n",
+            "pub fn semantic_tag() { let _ = vec![1u64; 2]; }\n",
+        ] {
+            let error = normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect_err("trait-dispatching macro requires shape-specific authority proof");
+            assert!(error.contains("unresolved bare macro"), "{error}");
+        }
+
+        for source in [
+            "pub fn semantic_tag() -> &'static str { stringify!(stable) }\n",
+            "pub fn semantic_tag() -> &'static str { concat!(\"sta\", \"ble\") }\n",
+        ] {
+            normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect("source-closed literal/token-text macro remains toolchain-bound");
+        }
+    }
+
+    #[test]
+    fn implementation_header_dependencies_fail_closed_until_they_join_authority() {
+        let imported_bound = concat!(
+            "mod dep { pub trait Bound {} } use dep::Bound; struct W<T>(T); ",
+            "impl<T: Bound> W<T> { pub fn semantic_tag(&self) -> usize { 0 } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            imported_bound,
+            &RustSourceIndex::new(imported_bound),
+            "W::semantic_tag",
+        )
+        .expect_err("an imported impl bound is not framed source authority");
+        assert!(error.contains("imported or external-source"), "{error}");
+
+        for source in [
+            concat!(
+                "mod dep { pub trait Bound {} } struct W<T>(T); ",
+                "impl<T: dep::Bound> W<T> { pub fn semantic_tag(&self) -> usize { 0 } }\n",
+            ),
+            concat!(
+                "trait Bound {} struct W<T>(T); ",
+                "impl<T> W<T> where T: Bound { pub fn semantic_tag(&self) -> usize { 0 } }\n",
+            ),
+            concat!(
+                "mod dep { pub struct Token; } struct W<T>(T); ",
+                "impl W<dep::Token> { pub fn semantic_tag(&self) -> usize { 0 } }\n",
+            ),
+            concat!(
+                "const LIMIT: usize = 7; struct W<const N: usize>; ",
+                "impl W<{ LIMIT }> { pub fn semantic_tag(&self) -> usize { 0 } }\n",
+            ),
+        ] {
+            normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "W::semantic_tag",
+            )
+            .expect_err("additional impl-header authority must move the closure or be refused");
+        }
+
+        let conditional_bound = concat!(
+            "#[cfg(feature = \"left\")]\ntrait Bound {}\n",
+            "#[cfg(not(feature = \"left\"))]\ntrait Bound {}\nstruct W<T>(T); ",
+            "impl<T: Bound> W<T> { pub fn semantic_tag(&self) -> usize { 0 } }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            conditional_bound,
+            &RustSourceIndex::new(conditional_bound),
+            "W::semantic_tag",
+        )
+        .expect_err("conditional local impl bound is not unique authority");
+        assert!(error.contains("conditional or ambiguous local"), "{error}");
+
+        let direct = "struct W<T>(T); impl<T> W<T> { pub fn semantic_tag(&self) -> usize { 0 } }\n";
+        normalized_rust_schema_authority_with_index(
+            direct,
+            &RustSourceIndex::new(direct),
+            "W::semantic_tag",
+        )
+        .expect("owner plus declared generic require no extra header authority");
+    }
+
+    #[test]
+    fn raw_module_and_implementation_owners_are_never_truncated() {
+        for source in [
+            "mod r#type { pub fn semantic_tag() -> usize { 7 } }\n",
+            "struct r#type; impl r#type { pub fn semantic_tag() -> usize { 7 } }\n",
+        ] {
+            let index = RustSourceIndex::new(source);
+            assert!(
+                !index.functions.contains_key("r::semantic_tag"),
+                "raw owners must not manufacture canonical owner r"
+            );
+            normalized_rust_schema_authority_with_index(source, &index, "r::semantic_tag")
+                .expect_err("false canonical path for a raw owner must be refused");
+        }
+    }
+
+    #[test]
+    fn implementation_index_rejects_non_item_and_non_path_owners() {
+        let type_position = concat!(
+            "trait Policy {}\n",
+            "fn argument(_: impl Policy) { const LIMIT: usize = 7; let _ = LIMIT; }\n",
+            "fn returned() -> impl Policy { const LIMIT: usize = 8; todo!() }\n",
+        );
+        let index = RustSourceIndex::new(type_position);
+        assert!(!index.values.contains_key("Policy::LIMIT"));
+        assert!(!index.functions.contains_key("Policy::returned"));
+
+        let reference_owner = concat!(
+            "trait Policy { fn semantic_tag(&self) -> usize; } struct Witness;\n",
+            "impl<'a> Policy for &'a Witness { fn semantic_tag(&self) -> usize { 7 } }\n",
+        );
+        let index = RustSourceIndex::new(reference_owner);
+        assert!(!index.functions.contains_key("a::semantic_tag"));
+        assert!(!index.functions.contains_key("Witness::semantic_tag"));
+
+        let dyn_owner = concat!(
+            "trait Policy { fn semantic_tag(&self) -> usize; } trait Other {}\n",
+            "impl Policy for dyn Other { fn semantic_tag(&self) -> usize { 7 } }\n",
+        );
+        let index = RustSourceIndex::new(dyn_owner);
+        assert!(!index.functions.contains_key("dyn::semantic_tag"));
+
+        let higher_ranked_where = concat!(
+            "trait Policy { fn semantic_tag(&self) -> usize; } struct Witness<T>(T);\n",
+            "impl<T> Policy for Witness<T> where T: for<'a> Fn(&'a str) { ",
+            "fn semantic_tag(&self) -> usize { 7 } }\n",
+        );
+        let index = RustSourceIndex::new(higher_ranked_where);
+        assert!(index.functions.contains_key("Witness::semantic_tag"));
+
+        for qualified_owner in [
+            "mod model { pub struct Witness; } impl model :: Witness { pub fn semantic_tag() -> usize { 7 } }\n",
+            "mod model { pub struct Witness; } impl model/*comment*/::Witness { pub fn semantic_tag() -> usize { 7 } }\n",
+        ] {
+            let index = RustSourceIndex::new(qualified_owner);
+            assert!(index.functions.contains_key("model::Witness::semantic_tag"));
+            assert!(!index.functions.contains_key("model::semantic_tag"));
+        }
+
+        let generic_operators = concat!(
+            "trait Gate<const B: bool> {} struct Witness<F>(F);\n",
+            "impl<F: Gate<{ 1 < 2 }> + Fn() -> bool> Witness<F> { ",
+            "fn semantic_tag(&self) -> usize { 7 } }\n",
+        );
+        let index = RustSourceIndex::new(generic_operators);
+        assert!(index.functions.contains_key("Witness::semantic_tag"));
+        assert!(!index.functions.contains_key("bool::semantic_tag"));
+    }
+
+    #[test]
+    fn cross_kind_dependency_cycles_terminate() {
+        let source = concat!(
+            "const ENTRY: fn() -> usize = helper;\n",
+            "fn helper() -> usize { ENTRY() }\n",
+            "macro_rules! first { () => { second!() }; }\n",
+            "macro_rules! second { () => { first!() }; }\n",
+            "pub fn semantic_tag() -> usize { let _never_expand = stringify!(first!()); ENTRY() }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            source,
+            &RustSourceIndex::new(source),
+            "semantic_tag",
+        )
+        .expect("finite cross-kind source cycles must converge without recursion");
+    }
+
+    #[test]
+    fn cross_file_qualified_schema_callee_movement_changes_fingerprint() {
+        let root = fixture_root("cross-file-qualified-function-movement");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:qualified-function",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        let source = |value: u64| {
+            format!(
+                "mod helpers {{ pub fn nested() -> u64 {{ {value} }} }}\npub fn semantic_tag() -> u64 {{ helpers::nested() }}\n"
+            )
+        };
+        std::fs::write(&helper_path, source(1)).expect("baseline qualified helper");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(&helper_path, source(2)).expect("moved qualified helper");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "a qualified file-local callee must remain in exact function authority"
+        );
+    }
+
+    #[test]
+    fn exact_function_authority_refuses_an_unindexed_unicode_helper() {
+        let root = fixture_root("cross-file-unicode-function-helper");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:unicode-function-helper",
+            "crates/shared/src/schema.rs#semantic_tag",
+        );
+        std::fs::write(
+            &helper_path,
+            "fn 验证() -> u64 { 1 }\npub fn semantic_tag() -> u64 { 验证() }\n",
+        )
+        .expect("Unicode helper source");
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let error = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("an unindexed Unicode helper must fail closed");
+        assert!(error.contains("non-ASCII identifier"), "{error}");
+    }
+
+    #[test]
     fn missing_and_ambiguous_schema_functions_are_refused() {
         let root = fixture_root("invalid-schema-functions");
         let helper_path = root.join("crates/shared/src/schema.rs");
@@ -11795,6 +22759,22 @@ const ID_VERSION: u32 = 8;
         let missing_error = identity_schema_base_hash(&root, &missing[0], &missing_source, &[])
             .expect_err("missing schema function must fail closed");
         assert!(missing_error.contains("found 0"), "{missing_error}");
+
+        let qualified_missing_source = identity_source_with_schema_functions(
+            "mini:missing-qualified-function",
+            "crates/shared/src/schema.rs#Missing::method",
+        );
+        let (qualified_missing, qualified_violations) =
+            declaration_blocks("crates/mini/src/lib.rs", &qualified_missing_source);
+        assert!(qualified_violations.is_empty());
+        let qualified_error =
+            identity_schema_base_hash(&root, &qualified_missing[0], &qualified_missing_source, &[])
+                .expect_err("missing qualified method must retain function diagnostics");
+        assert!(
+            qualified_error.contains("function \"Missing::method\"")
+                && qualified_error.contains("found 0"),
+            "{qualified_error}"
+        );
 
         std::fs::write(
             &helper_path,
@@ -11817,6 +22797,597 @@ const ID_VERSION: u32 = 8;
             identity_schema_base_hash(&root, &ambiguous[0], &ambiguous_source, &[])
                 .expect_err("cfg-alternative schema functions must be ambiguous");
         assert!(ambiguous_error.contains("found 2"), "{ambiguous_error}");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The macro refusal matrix shares one exact authority contract.
+    fn missing_attributed_nested_and_ambiguous_schema_macros_are_refused() {
+        let root = fixture_root("invalid-schema-macros");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:invalid-macro",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+
+        std::fs::write(&helper_path, "pub const UNRELATED: u8 = 1;\n")
+            .expect("missing macro source");
+        let (missing, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let missing_error = identity_schema_base_hash(&root, &missing[0], &owner, &[])
+            .expect_err("missing schema macro must fail closed");
+        assert!(
+            missing_error.contains("exactly one source definition; found 0"),
+            "{missing_error}"
+        );
+
+        std::fs::write(
+            &helper_path,
+            "#[cfg(feature = \"optional\")]\nmacro_rules! stable_id { () => { 1 }; }\n",
+        )
+        .expect("cfg-only macro source");
+        let cfg_error = identity_schema_base_hash(&root, &missing[0], &owner, &[])
+            .expect_err("cfg-only schema macro must fail closed");
+        assert!(cfg_error.contains("attribute-free"), "{cfg_error}");
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "#[cfg(feature = \"optional\")] /* same-line decoy */ ",
+                "macro_rules! stable_id { () => {}; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("same-line attributed macro source");
+        let same_line_cfg = identity_schema_base_hash(&root, &missing[0], &owner, &[])
+            .expect_err("same-line cfg plus comment must not hide the macro attribute");
+        assert!(same_line_cfg.contains("attribute-free"), "{same_line_cfg}");
+
+        std::fs::write(
+            &helper_path,
+            "mod nested { macro_rules! stable_id { () => {}; } stable_id!(); }\n",
+        )
+        .expect("nested-only macro source");
+        let nested_error = identity_schema_base_hash(&root, &missing[0], &owner, &[])
+            .expect_err("nested schema macro must not satisfy a bare external authority");
+        assert!(
+            nested_error.contains("lexical-root macro_rules definition"),
+            "{nested_error}"
+        );
+
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { () => {}; }\nstable_id!();\nmod nested { macro_rules! stable_id { () => {}; } }\n",
+        )
+        .expect("ambiguous macro source");
+        let ambiguous_error = identity_schema_base_hash(&root, &missing[0], &owner, &[])
+            .expect_err("ambiguous schema macros must fail closed");
+        assert!(
+            ambiguous_error.contains("exactly one source definition; found 2"),
+            "{ambiguous_error}"
+        );
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "emit!(macro_rules! stable_id { () => {}; });\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("macro-generated nested definition");
+        let generated_definition = identity_schema_base_hash(&root, &missing[0], &owner, &[])
+            .expect_err("a macro definition inside another token tree is not root authority");
+        assert!(
+            generated_definition.contains("lexical-root macro_rules definition"),
+            "{generated_definition}"
+        );
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "#![allow(dead_code)]\n",
+                "macro_rules! stable_id { () => {}; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("crate-inner attribute before root macro");
+        let inner_baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        assert_eq!(
+            inner_baseline.len(),
+            1,
+            "crate-inner attributes are not item cfg"
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "#![allow(unused_variables)]\n",
+                "macro_rules! stable_id { () => {}; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("moved nonconditional root inner attribute");
+        let inner_moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        assert_ne!(
+            inner_baseline[0].schema_fingerprint, inner_moved[0].schema_fingerprint,
+            "accepted root inner attributes must remain part of external authority"
+        );
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "#![cfg(feature = \"optional\")]\n",
+                "macro_rules! stable_id { () => {}; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("conditional root inner attribute");
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let conditional_inner = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("conditional root inner attribute must fail closed");
+        assert!(
+            conditional_inner.contains("conditional root inner attribute"),
+            "{conditional_inner}"
+        );
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "#![cfg_attr(feature = \"optional\", allow(dead_code))]\n",
+                "macro_rules! stable_id { () => {}; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("conditional cfg_attr root inner attribute");
+        let conditional_inner = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("conditional root cfg_attr must fail closed");
+        assert!(
+            conditional_inner.contains("conditional root inner attribute"),
+            "{conditional_inner}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Root completeness and byte mutations are one authority matrix.
+    fn schema_macro_invocations_are_root_complete_and_fingerprint_exact_bytes() {
+        let root = fixture_root("cross-file-macro-invocations");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-invocations",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\nstable_id!(First);\n",
+        )
+        .expect("baseline macro invocation");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\nstable_id!(Second);\n",
+        )
+        .expect("moved macro invocation");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "changing which generated type receives the implementation must move authority"
+        );
+
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+        )
+        .expect("missing macro invocation");
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let missing = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("an uninvoked macro cannot prove generated implementation authority");
+        assert!(missing.contains("at least one"), "{missing}");
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "stable_id!(Root);\n",
+                "mod nested { stable_id!(Nested); }\n",
+            ),
+        )
+        .expect("partially nested macro invocations");
+        let nested = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("one root invocation must not mask a moved nested invocation");
+        assert!(nested.contains("non-root invocation"), "{nested}");
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "#[cfg(feature = \"optional\")]\n",
+                "stable_id!(Conditional);\n",
+            ),
+        )
+        .expect("cfg-dependent macro invocation");
+        let cfg = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("cfg-dependent macro invocation must fail closed");
+        assert!(cfg.contains("cfg-dependent invocation"), "{cfg}");
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "other::stable_id!(Qualified);\n",
+            ),
+        )
+        .expect("qualified same-named macro invocation");
+        let qualified = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("bare authority must not absorb a same-named qualified macro");
+        assert!(qualified.contains("qualified invocation"), "{qualified}");
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "stable_id!(BeforeDefinition);\n",
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "stable_id!(AfterDefinition);\n",
+            ),
+        )
+        .expect("invocation before local macro definition");
+        let before_definition = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("pre-definition invocation cannot prove local macro linkage");
+        assert!(
+            before_definition.contains("before its local definition"),
+            "{before_definition}"
+        );
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! stable_id { () => { 1usize }; }\n",
+                "const VALUE: usize = stable_id!();\n",
+            ),
+        )
+        .expect("expression-position macro invocation");
+        let expression = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("expression-position call cannot prove item-generating authority");
+        assert!(expression.contains("expression-position"), "{expression}");
+
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "stable_id!(MissingTerminator)\n",
+            ),
+        )
+        .expect("unterminated parenthesized item macro");
+        let unterminated = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("parenthesized item macro must retain its terminator");
+        assert!(
+            unterminated.contains("trailing semicolon"),
+            "{unterminated}"
+        );
+    }
+
+    #[test]
+    fn schema_macro_helper_and_constant_movement_changes_fingerprint() {
+        let root = fixture_root("cross-file-macro-helper-closure");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-helper",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        let source = |limit: usize| {
+            format!(
+                "const ID_LIMIT: usize = {limit};\nfn validate_id(value: &str) -> usize {{ let _ = value; ID_LIMIT }}\nmacro_rules! stable_id {{ ($name:ident) => {{ impl $name {{ fn accepted_limit(value: &str) -> usize {{ validate_id(value) }} }} }}; }}\nstable_id!(DemoId);\n"
+            )
+        };
+        std::fs::write(&helper_path, source(8)).expect("baseline macro helper closure");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(&helper_path, source(9)).expect("moved macro helper constant");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "macro-reachable helper constants must remain implementation authority"
+        );
+        assert_eq!(
+            baseline[0].byte_schema_fingerprint, moved[0].byte_schema_fingerprint,
+            "external macro implementation movement must not invent a wire migration"
+        );
+    }
+
+    #[test]
+    fn schema_macro_invocation_helper_and_constant_arguments_join_the_closure() {
+        let root = fixture_root("cross-file-macro-invocation-helper-closure");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-invocation-helper",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        let source = |limit: usize, accepted: bool| {
+            format!(
+                "const ID_LIMIT: usize = {limit};\nfn validate_id(value: &str, limit: usize) -> bool {{ let _ = (value, limit); {accepted} }}\nmacro_rules! stable_id {{ ($validator:ident, $limit:ident, $name:ident) => {{ impl $name {{ fn accepts(value: &str) -> bool {{ $validator(value, $limit) }} }} }}; }}\nstable_id!(validate_id, ID_LIMIT, DemoId);\n"
+            )
+        };
+        std::fs::write(&helper_path, source(8, true)).expect("baseline invocation closure");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(&helper_path, source(8, false)).expect("moved invocation helper");
+        let moved_helper = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved_helper[0].schema_fingerprint,
+            "a helper supplied only at an invocation must remain authority"
+        );
+
+        std::fs::write(&helper_path, source(9, false)).expect("moved invocation constant");
+        let moved_constant = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            moved_helper[0].schema_fingerprint, moved_constant[0].schema_fingerprint,
+            "a constant supplied only at an invocation must remain authority"
+        );
+    }
+
+    #[test]
+    fn schema_macro_qualified_helper_argument_joins_the_closure() {
+        let root = fixture_root("cross-file-macro-qualified-helper-closure");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-qualified-helper",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        let source = |accepted: bool| {
+            format!(
+                "mod helpers {{ pub fn validate_id(value: &str) -> bool {{ let _ = value; {accepted} }} }}\nmacro_rules! stable_id {{ ($validator:path, $name:ident) => {{ impl $name {{ fn accepts(value: &str) -> bool {{ $validator(value) }} }} }}; }}\nstable_id!(helpers::validate_id, DemoId);\n"
+            )
+        };
+        std::fs::write(&helper_path, source(true)).expect("baseline qualified helper");
+        let baseline = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(&helper_path, source(false)).expect("moved qualified helper");
+        let moved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            baseline[0].schema_fingerprint, moved[0].schema_fingerprint,
+            "a qualified file-local helper passed to the macro must remain authority"
+        );
+    }
+
+    #[test]
+    fn schema_macro_refuses_unindexed_unicode_and_nested_macro_helpers() {
+        let root = fixture_root("cross-file-macro-unsupported-helper-closure");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-unsupported-helper",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+
+        std::fs::write(
+            &helper_path,
+            "fn 验证(value: &str) -> bool { let _ = value; true }\nmacro_rules! stable_id { ($name:ident) => { impl $name { fn accepts(value: &str) -> bool { 验证(value) } } }; }\nstable_id!(Demo);\n",
+        )
+        .expect("Unicode helper source");
+        let unicode = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("an unindexed Unicode helper must fail closed");
+        assert!(unicode.contains("non-ASCII identifier"), "{unicode}");
+
+        std::fs::write(
+            &helper_path,
+            "macro_rules! helper { ($name:ident) => { struct $name; }; }\nmacro_rules! stable_id { ($name:ident) => { helper!($name); }; }\nstable_id!(Demo);\n",
+        )
+        .expect("nested local helper macro source");
+        let nested = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("an unbound file-local helper macro must fail closed");
+        assert!(nested.contains("nested macro authority"), "{nested}");
+
+        std::fs::write(
+            &helper_path,
+            "macro_rules! r#type { ($name:ident) => { struct $name; }; }\nmacro_rules! stable_id { ($name:ident) => { r#type!($name); }; }\nstable_id!(Demo);\n",
+        )
+        .expect("raw-named nested local helper macro source");
+        let raw = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("a raw-identifier helper macro must fail closed");
+        assert!(raw.contains("raw identifier"), "{raw}");
+    }
+
+    #[test]
+    fn macro_matcher_token_boundaries_do_not_collide() {
+        let root = fixture_root("cross-file-macro-token-boundaries");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:macro-token-boundaries",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { (foo bar) => {}; }\nstable_id!(foo bar);\n",
+        )
+        .expect("separated matcher tokens");
+        let separated = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner.clone())]);
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { (foobar) => {}; }\nstable_id!(foo bar);\n",
+        )
+        .expect("joined matcher token");
+        let joined = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_ne!(
+            separated[0].schema_fingerprint, joined[0].schema_fingerprint,
+            "macro token streams separated only by trivia must not normalize to one authority"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Generated-token collision cases must stay visibly comparable.
+    fn generated_function_tokens_do_not_preempt_macro_authority() {
+        let root = fixture_root("cross-file-generated-function-token");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-function-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            "macro_rules! stable_id { ($name:ident) => { fn stable_id() { let _ = stringify!($name); } }; }\nstable_id!(Demo);\n",
+        )
+        .expect("macro containing same-named generated function");
+        let resolved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_eq!(resolved.len(), 1);
+
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-function-unicode-digit-invocation-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! 生成2 { ($($tokens:tt)*) => {}; }\n",
+                "生成2!(fn stable_id() {});\n",
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "stable_id!(Demo);\n",
+            ),
+        )
+        .expect("same-named generated function in a Unicode-plus-digit invocation");
+        let resolved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_eq!(resolved.len(), 1);
+
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-function-invocation-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! emit { ($($tokens:tt)*) => {}; }\n",
+                "emit!(fn stable_id() {});\n",
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "stable_id!(Demo);\n",
+            ),
+        )
+        .expect("same-named generated function in another macro invocation");
+        let resolved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_eq!(resolved.len(), 1);
+
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-function-unicode-invocation-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! 生成 { ($($tokens:tt)*) => {}; }\n",
+                "生成!(fn stable_id() {});\n",
+                "macro_rules! stable_id { ($name:ident) => { struct $name; }; }\n",
+                "stable_id!(Demo);\n",
+            ),
+        )
+        .expect("same-named generated function in a Unicode macro invocation");
+        let resolved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+        assert_eq!(resolved.len(), 1);
+
+        for (label, emitter) in [
+            (
+                "parenthesized",
+                "macro_rules! emit ( () => { fn stable_id() {} }; );\n",
+            ),
+            (
+                "bracketed",
+                "macro_rules! emit [ () => { fn stable_id() {} }; ];\n",
+            ),
+        ] {
+            let owner = identity_source_with_schema_functions(
+                &format!("mini:generated-function-{label}-definition"),
+                "crates/shared/src/schema.rs#stable_id",
+            );
+            std::fs::write(
+                &helper_path,
+                format!(
+                    "{emitter}macro_rules! stable_id {{ ($name:ident) => {{ struct $name; }}; }}\nstable_id!(Demo);\n"
+                ),
+            )
+            .expect("generated function in alternate-delimiter macro definition");
+            let resolved = resolved_fixture(&root, [("crates/mini/src/lib.rs", owner)]);
+            assert_eq!(resolved.len(), 1, "{label} emitter definition");
+        }
+
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-constant-invocation-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! emit { ($($tokens:tt)*) => {}; }\n",
+                "emit!(const ID_LIMIT: usize = 8);\n",
+                "macro_rules! stable_id { () => { const _: usize = ID_LIMIT; }; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("generated constant in another macro invocation");
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let generated_constant = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("generated constant cannot satisfy source authority");
+        assert!(
+            generated_constant.contains("source-level constant; found 0"),
+            "{generated_constant}"
+        );
+
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-constant-unicode-invocation-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! 生成 { ($($tokens:tt)*) => {}; }\n",
+                "生成!(const ID_LIMIT: usize = 8);\n",
+                "macro_rules! stable_id { () => { const _: usize = ID_LIMIT; }; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("generated constant in a Unicode macro invocation");
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let generated_constant = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("Unicode-generated constant cannot satisfy source authority");
+        assert!(
+            generated_constant.contains("source-level constant; found 0"),
+            "{generated_constant}"
+        );
+
+        let owner = identity_source_with_schema_functions(
+            "mini:generated-constant-unicode-digit-invocation-token",
+            "crates/shared/src/schema.rs#stable_id",
+        );
+        std::fs::write(
+            &helper_path,
+            concat!(
+                "macro_rules! 生成2 { ($($tokens:tt)*) => {}; }\n",
+                "生成2!(const ID_LIMIT: usize = 8);\n",
+                "macro_rules! stable_id { () => { const _: usize = ID_LIMIT; }; }\n",
+                "stable_id!();\n",
+            ),
+        )
+        .expect("generated constant in a Unicode-plus-digit macro invocation");
+        let (declarations, violations) = declaration_blocks("crates/mini/src/lib.rs", &owner);
+        assert!(violations.is_empty());
+        let generated_constant = identity_schema_base_hash(&root, &declarations[0], &owner, &[])
+            .expect_err("Unicode-plus-digit generated constant cannot satisfy source authority");
+        assert!(
+            generated_constant.contains("source-level constant; found 0"),
+            "{generated_constant}"
+        );
     }
 
     #[test]
