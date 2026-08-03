@@ -7,7 +7,9 @@ use fs_euler_disc_e2e::{
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
-use fs_rep_frep::{AxisymmetricChart, AxisymmetricMassError, SquatDiscEdgeTreatment};
+use fs_rep_frep::{
+    AxisymmetricChart, AxisymmetricMassError, AxisymmetricSupportError, SquatDiscEdgeTreatment,
+};
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn assert_close(actual: f64, expected: f64, tolerance: f64) {
@@ -367,7 +369,7 @@ fn fixed_horizon_refinement_is_deterministic_and_reports_endpoint_difference() {
 }
 
 #[test]
-fn sharp_and_one_millimetre_fillet_use_distinct_profile_support_and_mass_inputs() {
+fn sharp_and_one_millimetre_fillet_have_distinct_profile_contact_admission() {
     with_cx(false, |cx| {
         let sharp = AxisymmetricChart::squat_disc(0.038, 0.006, SquatDiscEdgeTreatment::Sharp)
             .expect("physical sharp disc");
@@ -387,17 +389,17 @@ fn sharp_and_one_millimetre_fillet_use_distinct_profile_support_and_mass_inputs(
         let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
             .expect("finite tilted orientation");
         let zero_pose = Pose::new(Vec3::ZERO, orientation).expect("finite support pose");
-        let sharp_contact = profile_contact_geometry(&sharp, sharp_mass, zero_pose, cx)
-            .expect("unique sharp support");
+        match profile_contact_geometry(&sharp, sharp_mass, zero_pose, cx) {
+            Err(ContactDynamicsError::ProfileSupportRefusal {
+                detail: AxisymmetricSupportError::NonUniqueFeatureSupport { .. },
+            }) => {}
+            other => panic!("sharp C0 rim must refuse invented point contact, got {other:?}"),
+        }
         let filleted_contact = profile_contact_geometry(&filleted, filleted_mass, zero_pose, cx)
             .expect("unique filleted support");
-        let support_delta = sharp_contact
-            .contact
-            .radius_world_m
-            .sub(filleted_contact.contact.radius_world_m);
         assert!(
-            support_delta.dot(support_delta).sqrt() > 1.0e-6,
-            "the actual fillet must change the support input"
+            filleted_contact.contact.radius_world_m.z < 0.0,
+            "the 1 mm fillet must publish its actual unique contact input"
         );
         assert!(
             (sharp_mass.mass - filleted_mass.mass).abs() > 1.0e-9,
@@ -409,8 +411,8 @@ fn sharp_and_one_millimetre_fillet_use_distinct_profile_support_and_mass_inputs(
             "the profile inertia must enter the rigid-body model"
         );
         assert_eq!(
-            sharp_contact.support_authority, filleted_contact.support_authority,
-            "both analytic support inputs retain the same explicit authority"
+            filleted_contact.mass_properties, filleted_mass,
+            "the admitted contact records the mass properties it actually uses"
         );
     });
 }
