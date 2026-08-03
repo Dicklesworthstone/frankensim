@@ -1,10 +1,11 @@
-//! Deterministic, spatial-only flat thin-plate assembly.
+//! Deterministic, spatial-only flat-plate surrogate assembly.
 //!
-//! This is deliberately a small, production-facing Kirchhoff--Love-style
-//! discrete plate operator: it assembles the translational membrane energy and
-//! the normal-slope/rotation bending energy of an oriented triangular panel
-//! mesh.  It is the spatial base used by the Euler-disc ladder; it does not
-//! integrate in time or claim curved, multi-patch IGA shell behavior.
+//! This fixture-scale operator assembles lumped inertia, edge-spring in-plane
+//! resistance, and normal-slope/rotation bending penalties on one coplanar,
+//! consistently oriented triangular patch. It is estimate-only: it is neither
+//! a CST plane-stress membrane nor a Kirchhoff--Love/isotropic continuum
+//! discretisation. It is the spatial base used by the Euler-disc ladder; it
+//! does not integrate in time or claim curved, multi-patch IGA shell behavior.
 
 use core::marker::PhantomData;
 
@@ -86,9 +87,8 @@ pub enum DampingModel {
 /// Three pointwise pinned supports on the plate's declared normal side.
 ///
 /// Each support removes its node's three translations while retaining all
-/// rotations. The normal identifies the supporting face and must align with
-/// the flat plate normal; it intentionally does not invent rotational clamps
-/// or tangential friction.
+/// rotations. The normal must point to the same side as the flat plate normal;
+/// it intentionally does not invent rotational clamps or tangential friction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShellSupport {
     /// Exactly three distinct node indices.
@@ -97,7 +97,7 @@ pub struct ShellSupport {
     pub normal: [f64; 3],
 }
 
-/// A flat, consistently oriented triangular thin plate.
+/// A flat, consistently oriented triangular estimate-only plate surrogate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellPlate {
     /// Mid-surface nodes in deterministic DOF order.
@@ -181,21 +181,24 @@ impl<K> ShellMatrix<K> {
     }
 }
 
-/// Exact diagnostics for a small operator, or an explicit bounded refusal.
+/// Raw algebraic diagnostics for a small mixed-unit operator, or a bounded refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OperatorDiagnostics {
-    /// Jacobi eigenvalue diagnostics were completed within the declared bound.
+    /// Jacobi algebraic diagnostics were completed within the declared bound.
     Computed {
-        /// Smallest mass eigenvalue; positive means the lumped inertia is PD.
-        mass_min_eigenvalue: f64,
-        /// Number of stiffness eigenvalues whose magnitude is within tolerance.
-        stiffness_nullity: usize,
-        /// `λ_max / λ_min_positive`; infinity if no positive stiffness exists.
-        stiffness_condition_number: f64,
+        /// Smallest raw mass-array eigenvalue; a positive value is a structural
+        /// check for the assembled lumped array, not a physical eigenvalue.
+        raw_mass_min_eigenvalue: f64,
+        /// Raw stiffness-array nullity under the deterministic tolerance.
+        raw_stiffness_nullity: usize,
+        /// `λ_max / λ_min_positive` of the raw mixed-unit stiffness array.
+        /// It is an algebraic spread only, not a dimensionless physical
+        /// condition number or continuum-quality certificate.
+        raw_stiffness_eigenvalue_spread: f64,
         /// Largest absolute antisymmetry residue before symmetrization.
         symmetry_residual: f64,
     },
-    /// Assembly remains valid, but exact conditioning was outside its budget.
+    /// Assembly remains valid, but raw algebraic diagnostics exceeded its budget.
     NotComputed {
         /// Why the declared conditioning budget intentionally skipped Jacobi.
         reason: String,
@@ -220,7 +223,7 @@ pub struct ShellAssembly {
     pub damping: Option<ShellMatrix<Damping>>,
     /// Full DOF indices retained in the reduced operators.
     pub free_dofs: Vec<usize>,
-    /// Exact/bounded numerical report for the full spatial operator.
+    /// Raw algebraic report for the full mixed-unit spatial operator.
     pub diagnostics: OperatorDiagnostics,
 }
 
@@ -289,6 +292,8 @@ impl ShellPlate {
 
         let full_mass = matrix::<Mass>(dofs, mass);
         let full_stiffness = matrix::<Stiffness>(dofs, stiffness);
+        validate_derived_matrix("mass", full_mass.values())?;
+        validate_derived_matrix("stiffness", full_stiffness.values())?;
         let full_damping = match self.damping {
             DampingModel::None => None,
             DampingModel::Rayleigh {
@@ -304,6 +309,9 @@ impl ShellPlate {
                     .collect(),
             )),
         };
+        if let Some(damping) = &full_damping {
+            validate_derived_matrix("damping", damping.values())?;
+        }
         let diagnostics = diagnostics(
             &full_mass,
             &full_stiffness,
@@ -404,6 +412,36 @@ impl ShellPlate {
                 });
             }
         }
+        let mut used_nodes = vec![false; self.nodes.len()];
+        for triangle in &self.triangles {
+            for &node in triangle {
+                used_nodes[node] = true;
+            }
+        }
+        if used_nodes.iter().any(|used| !used) {
+            return Err(ShellError::InvalidInput {
+                what: "every plate node must be used by a triangle".into(),
+            });
+        }
+        let (_, _, reference_normal) = triangle_geometry(self, self.triangles[0])?;
+        let reference_point = self.nodes[self.triangles[0][0]].position_m;
+        let geometric_scale = self
+            .nodes
+            .iter()
+            .map(|node| norm(sub(node.position_m, reference_point)))
+            .fold(1.0_f64, f64::max);
+        let coplanarity_tolerance = 1.0e-10 * geometric_scale;
+        if self.nodes.iter().any(|node| {
+            dot(sub(node.position_m, reference_point), reference_normal).abs()
+                > coplanarity_tolerance
+        }) {
+            return Err(ShellError::UnsupportedGeometry {
+                what: "all nodes must be coplanar for the flat plate surrogate".into(),
+            });
+        }
+        if let Some(support) = self.support {
+            validate_support_geometry(self, support, reference_normal, geometric_scale)?;
+        }
         if let DampingModel::Rayleigh {
             mass_proportional_per_s,
             stiffness_proportional_s,
@@ -455,6 +493,7 @@ impl ShellPlate {
                 );
             }
         }
+        // This is an edge-spring surrogate, not a CST plane-stress membrane.
         let membrane_scale = self.material.youngs_modulus_pa * thickness * area / 3.0;
         let bending = self.material.youngs_modulus_pa * thickness.powi(3)
             / (12.0 * (1.0 - self.material.poisson_ratio.powi(2)));
@@ -518,8 +557,8 @@ impl ShellPlate {
                 );
             }
         }
-        // A triangle-level Kirchhoff normal-compatibility term closes the
-        // edge-slope rank deficiency without penalizing a rigid motion:
+        // A triangle-level normal-compatibility term closes the edge-slope
+        // rank deficiency without penalizing a rigid motion:
         // grad(w) = n cross omega for w = n dot (omega cross x).
         let positions = triangle.map(|node| self.nodes[node].position_m);
         let gradients = [
@@ -540,7 +579,10 @@ impl ShellPlate {
         for direction in [tangent, cross(normal, tangent)] {
             let mut compatibility = Vec::with_capacity(12);
             for (node, gradient) in triangle.into_iter().zip(gradients) {
-                compatibility.push((dof(node, 2), dot(gradient, direction)));
+                let normal_gradient = dot(gradient, direction);
+                compatibility.push((dof(node, 0), normal[0] * normal_gradient));
+                compatibility.push((dof(node, 1), normal[1] * normal_gradient));
+                compatibility.push((dof(node, 2), normal[2] * normal_gradient));
                 let rotation = scale(cross(direction, normal), -1.0 / 3.0);
                 compatibility.push((dof(node, 3), rotation[0]));
                 compatibility.push((dof(node, 4), rotation[1]));
@@ -550,7 +592,7 @@ impl ShellPlate {
                 stiffness,
                 self.nodes.len() * 6,
                 &compatibility,
-                bending * area / 3.0,
+                bending * area / (3.0 * thickness.powi(2)),
             );
         }
         // Couple the drilling rotation to the in-plane displacement curl.
@@ -577,28 +619,6 @@ impl ShellPlate {
     fn free_dofs(&self, dofs: usize) -> Result<Vec<usize>, ShellError> {
         let mut constrained = vec![false; dofs];
         if let Some(support) = self.support {
-            if support
-                .node_indices
-                .iter()
-                .any(|&index| index >= self.nodes.len())
-                || support.node_indices[0] == support.node_indices[1]
-                || support.node_indices[1] == support.node_indices[2]
-                || support.node_indices[0] == support.node_indices[2]
-            {
-                return Err(ShellError::UnsupportedBoundary {
-                    what: "three-point support requires three distinct in-range nodes".into(),
-                });
-            }
-            let length = norm(support.normal);
-            if !length.is_finite() || (length - 1.0).abs() > 1e-10 {
-                return Err(ShellError::UnsupportedBoundary { what: "support normal must be unit length; oblique constraints need a multiplier formulation".into() });
-            }
-            let reference_normal = triangle_geometry(self, self.triangles[0])?.2;
-            if dot(support.normal, reference_normal).abs() < 1.0 - 1e-10 {
-                return Err(ShellError::UnsupportedBoundary {
-                    what: "support normal must align with the flat plate normal".into(),
-                });
-            }
             for node in support.node_indices {
                 constrained[dof(node, 0)] = true;
                 constrained[dof(node, 1)] = true;
@@ -651,6 +671,63 @@ fn reduce<K>(operator: &ShellMatrix<K>, free_dofs: &[usize]) -> ShellMatrix<K> {
             })
             .collect(),
     )
+}
+
+fn validate_derived_matrix(name: &str, values: &[f64]) -> Result<(), ShellError> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(ShellError::InvalidInput {
+            what: format!("derived {name} matrix is non-finite"),
+        })
+    }
+}
+
+fn validate_support_geometry(
+    plate: &ShellPlate,
+    support: ShellSupport,
+    reference_normal: [f64; 3],
+    geometric_scale: f64,
+) -> Result<(), ShellError> {
+    if support
+        .node_indices
+        .iter()
+        .any(|&index| index >= plate.nodes.len())
+        || support.node_indices[0] == support.node_indices[1]
+        || support.node_indices[1] == support.node_indices[2]
+        || support.node_indices[0] == support.node_indices[2]
+    {
+        return Err(ShellError::UnsupportedBoundary {
+            what: "three-point support requires three distinct in-range nodes".into(),
+        });
+    }
+    let length = norm(support.normal);
+    if !length.is_finite() || (length - 1.0).abs() > 1.0e-10 {
+        return Err(ShellError::UnsupportedBoundary {
+            what: "support normal must be unit length; oblique constraints need a multiplier formulation".into(),
+        });
+    }
+    if dot(support.normal, reference_normal) < 1.0 - 1.0e-10 {
+        return Err(ShellError::UnsupportedBoundary {
+            what: "support normal must point to the declared flat plate normal side".into(),
+        });
+    }
+    let [first, second, third] = support.node_indices;
+    let a = plate.nodes[first].position_m;
+    let b = plate.nodes[second].position_m;
+    let c = plate.nodes[third].position_m;
+    let distance_tolerance = 1.0e-12 * geometric_scale;
+    if norm(sub(b, a)) <= distance_tolerance
+        || norm(sub(c, b)) <= distance_tolerance
+        || norm(sub(a, c)) <= distance_tolerance
+        || norm(cross(sub(b, a), sub(c, a))) <= distance_tolerance * geometric_scale
+    {
+        return Err(ShellError::UnsupportedBoundary {
+            what: "three-point support positions must be geometrically distinct and non-collinear"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 fn triangle_geometry(
@@ -723,9 +800,9 @@ fn diagnostics(
         .collect();
     positive.sort_by(|left, right| left.total_cmp(right));
     OperatorDiagnostics::Computed {
-        mass_min_eigenvalue: mass_eigenvalues.into_iter().fold(f64::INFINITY, f64::min),
-        stiffness_nullity: stiffness.values.len() / stiffness.dimension - positive.len(),
-        stiffness_condition_number: positive.first().map_or(f64::INFINITY, |minimum| {
+        raw_mass_min_eigenvalue: mass_eigenvalues.into_iter().fold(f64::INFINITY, f64::min),
+        raw_stiffness_nullity: stiffness.values.len() / stiffness.dimension - positive.len(),
+        raw_stiffness_eigenvalue_spread: positive.first().map_or(f64::INFINITY, |minimum| {
             positive.last().copied().unwrap_or(*minimum) / minimum
         }),
         symmetry_residual,
