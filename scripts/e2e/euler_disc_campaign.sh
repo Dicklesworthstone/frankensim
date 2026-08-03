@@ -11,6 +11,7 @@ cd "$REPO_ROOT"
 
 readonly SCHEMA="euler-disc-campaign-jsonl-v1"
 readonly DIGEST_DOMAIN="org.frankensim.euler-disc-campaign-jsonl.v1"
+readonly DIGEST_SCOPE="preceding-data-records-LF-joined-no-trailing-LF"
 readonly -a EXPECTED_SCENARIOS=(
   "geometry-sharp-squat-disc"
   "geometry-filleted-squat-disc"
@@ -151,8 +152,8 @@ if [[ "$RUN_STATUS" -ne 0 ]]; then
   exit "$RUN_STATUS"
 fi
 
-stage validate-jsonl "schema=$SCHEMA digest_domain=$DIGEST_DOMAIN"
-python3 - "$OUTPUT" "$SCHEMA" "$DIGEST_DOMAIN" "${EXPECTED_SCENARIOS[@]}" <<'PY'
+stage validate-jsonl "schema=$SCHEMA digest_domain=$DIGEST_DOMAIN digest_scope=$DIGEST_SCOPE"
+python3 - "$OUTPUT" "$SCHEMA" "$DIGEST_DOMAIN" "$DIGEST_SCOPE" "${EXPECTED_SCENARIOS[@]}" <<'PY'
 import json
 import re
 import sys
@@ -165,7 +166,7 @@ except ImportError as error:
         f"blake3 module needed to verify the manifest digest: {error}"
     )
 
-output_path, schema, digest_domain, *expected_scenarios = sys.argv[1:]
+output_path, schema, digest_domain, digest_scope, *expected_scenarios = sys.argv[1:]
 raw = open(output_path, "rb").read()
 if not raw:
     raise SystemExit("JSONL refusal: output is empty")
@@ -221,6 +222,16 @@ if not isinstance(residual, dict) or residual.get("record_count") != record_coun
 digest = manifest.get("digest_blake3")
 if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
     raise SystemExit("JSONL refusal: manifest digest_blake3 must be 64 lowercase hexadecimal characters")
+if manifest.get("digest_domain") != digest_domain:
+    raise SystemExit(
+        "JSONL refusal: manifest digest_domain differs; "
+        f"expected={digest_domain!r} actual={manifest.get('digest_domain')!r}"
+    )
+if manifest.get("digest_scope") != digest_scope:
+    raise SystemExit(
+        "JSONL refusal: manifest digest_scope differs; "
+        f"expected={digest_scope!r} actual={manifest.get('digest_scope')!r}"
+    )
 payload = b"\n".join(raw.splitlines()[:-1])
 actual_digest = blake3.blake3(payload, derive_key_context=digest_domain).hexdigest()
 if digest != actual_digest:
