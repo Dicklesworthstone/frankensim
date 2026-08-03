@@ -64,6 +64,23 @@ patch, interface, and state data for deterministic replay; equality of those
 inputs is not external physical validation. Rolling-deformation loss remains
 a separate, zero channel in this rung.
 
+### Rolling and contour-deformation loss rungs
+
+`rolling_loss` provides three immutable, separately sourced candidates:
+the `Leine-style Coulomb contour-force rung` (`F_c = -sign(v_c)c_cN`), a
+viscous contour alternative (`F_v = -c_vv_c`, with `c_v` in N s/m), and a
+finite-patch hysteretic rolling moment (`M_h = -sign(omega_r)N l_h eta_h`).
+The last card declares its loss length `l_h` [m] and bounded loss factor
+`eta_h`; it is a model-form candidate, not a resolved deformation field.
+Every response retains a named patch/load/curvature receipt, ordered
+interface/history, temperature/frequency range, source-card authority, and a
+dedicated generalized-work key. Principal curvatures are retained directly;
+an equivalent-radius substitute requires explicit caller approximation
+authority. The rungs have no blend/preference operation, no numerical error
+certificate, and no torsional microslip or gross-slide contribution. Pure spin
+therefore produces no torque in this slice; a separately sourced torsional
+material-hysteresis rung would need a disjoint work channel.
+
 ## Invariants
 
 - All public construction and evaluation paths refuse missing identity,
@@ -84,6 +101,14 @@ a separate, zero channel in this rung.
   tangent frames/kinematics/work ownership, and checkpoint mismatches. It
   computes only its declared lumped return-map state and never creates a
   contact-solver or material-admission receipt.
+- Each rolling-loss card refuses non-dry interfaces, malformed patch/source
+  receipts, out-of-range temperature/frequency, nonfinite derived work, and a
+  wrong work channel. A rolling key conservatively refuses sharing the same
+  patch/interval pair with partial-slip because that module does not expose its
+  coordinate labels for a finer disjointness proof.
+- Rolling/contour candidates are passive: endpoint body power is non-positive,
+  heat is non-negative, reversible storage is zero, and the retained work
+  identity reconstructs heat over the caller interval.
 - No mutable material table, hidden state, or unordered material-pair lookup
   exists. Ordered interface and history identities remain explicit.
 
@@ -126,6 +151,10 @@ forged negative/non-finite work rejection; and rollback/deterministic replay
 for work and wear. Test coefficients are explicitly synthetic fixtures.
 The separately owned partial-slip tests cover its scalar return-map admission,
 reversal, checkpoint replay, and receipt-mutation refusals.
+Rolling-loss tests cover zero load/rate/factor, force and moment reversal,
+load scaling and SI dimensions, pure roll/spin/mixed motion, passivity with an
+independent work integral, temperature/frequency refusal, work-key overlap,
+source-card/patch replay mutation, and a no-target-field source scan.
 
 ## No-claim boundaries
 
@@ -138,3 +167,7 @@ or experimental/video correspondence. Its flash candidate is a declared
 semi-infinite uniform-flux model-form estimate, not a temperature measurement
 or validation result. A caller may record an estimated or synthetic result,
 but must not promote it based on this crate alone.
+
+The rolling and contour rungs likewise do not establish deformation-loss
+dominance, coupon calibration validity, normal-contact admission, an error
+bound, or any apparatus-specific selection between their rival model forms.
