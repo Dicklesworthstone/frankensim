@@ -7,8 +7,8 @@
 //! the current orientation rather than from a prescribed inclination curve.
 //!
 //! This is intentionally not a general contact engine.  It does not model a
-//! finite contact patch, compliance, restitution, sliding, rolling resistance,
-//! aerodynamic drag, or an asymptotic Euler-disc decay law.  A failure of the
+//! finite contact patch, compliance, restitutional impact law, sliding, rolling
+//! resistance, aerodynamic drag, or an asymptotic Euler-disc decay law. A failure of the
 //! sticking cone or a separating contact terminates the run; it is not silently
 //! replaced with a kinematic trajectory.
 
@@ -27,7 +27,7 @@ const GEOMETRY_EPSILON: f64 = 128.0 * f64::EPSILON;
 
 /// The explicit no-claim boundary of this mechanics rung.
 pub const NO_CLAIM_BOUNDARY: &str = "Point contact with a rigid horizontal plane; sticking only. \
-    No sliding, impact, finite-patch, aerodynamic, rolling-resistance, asymptotic Euler-disc, \
+    No sliding, restitutional-impact law, finite-patch, aerodynamic, rolling-resistance, asymptotic Euler-disc, \
     experimental-validation, or convergence-order claim is made.";
 
 /// Refusal from the bounded unilateral-contact model.
@@ -39,6 +39,8 @@ pub enum ContactDynamicsError {
     NonFiniteDerived { field: &'static str },
     /// The cylinder axis is too close to the plane normal for a unique rim point.
     UnsupportedFaceContact,
+    /// A horizontal cylinder has a lowest supporting line rather than a unique point.
+    UnsupportedLineContact,
     /// The point-contact effective mass is singular or numerically indefinite.
     SingularContactMass,
     /// The caller supplied an initial state with material penetration beyond the
@@ -46,6 +48,11 @@ pub enum ContactDynamicsError {
     InitialPenetrationExceeded { gap_m: f64, tolerance_m: f64 },
     /// A step's geometric drift exceeded the bounded position-projection tolerance.
     GeometricProjectionExceeded { gap_m: f64, tolerance_m: f64 },
+    /// The coupled sticking solve met neither the declared normal nor tangent residual bound.
+    ConstraintResidualExceeded {
+        residual_m_per_s: f64,
+        tolerance_m_per_s: f64,
+    },
     /// The retained fixed-step bound was exceeded.
     StepBudgetExceeded,
     /// A lower-level checked rigid-body operation refused the state.
@@ -192,14 +199,14 @@ pub struct ContactGeometry {
 /// Static-friction feasibility evaluated from the solved contact impulse.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StickFeasibility {
-    /// Required normal reaction over the step [N].
-    pub normal_reaction_n: f64,
-    /// Required tangent reaction magnitude over the step [N].
-    pub required_tangential_reaction_n: f64,
-    /// Coulomb static capacity from the real `fs-tribo` law [N].
-    pub static_capacity_n: f64,
-    /// `static_capacity_n - required_tangential_reaction_n` [N].
-    pub friction_cone_margin_n: f64,
+    /// Solved non-negative normal impulse [N s].
+    pub normal_impulse_ns: f64,
+    /// Required tangent impulse magnitude [N s].
+    pub required_tangential_impulse_ns: f64,
+    /// Coulomb static impulse capacity [N s].
+    pub static_capacity_impulse_ns: f64,
+    /// `static_capacity_impulse_ns - required_tangential_impulse_ns` [N s].
+    pub friction_cone_margin_ns: f64,
     /// Whether the demanded tangent impulse lies inside the static cone.
     pub feasible: bool,
     /// Authority retained by the dry-law response; never upgraded here.
@@ -273,6 +280,15 @@ pub enum ContactTermination {
         /// Free/present normal contact speed [m/s], positive away from the plane.
         normal_velocity_m_per_s: f64,
     },
+    /// The coupled sticking impulse demanded a negative normal reaction while
+    /// the configuration was not already separated.  The rung refuses to
+    /// relabel that infeasible constrained solve as a contact-loss trajectory.
+    UnilateralReactionInfeasible {
+        /// Zero-based attempted step index.
+        step_index: u32,
+        /// Coupled sticking normal impulse [N s].
+        required_normal_impulse_ns: f64,
+    },
     /// The required tangent impulse exceeded Coulomb static capacity.
     StickInfeasible {
         /// Zero-based attempted step index.
@@ -300,6 +316,8 @@ pub struct TimestepRefinement {
     pub coarse: ContactDynamicsRun,
     /// Result using half the caller timestep and twice the requested steps.
     pub fine: ContactDynamicsRun,
+    /// Same horizon at one quarter of the caller timestep, used as a deterministic reference.
+    pub reference: ContactDynamicsRun,
     /// Euclidean center-of-mass endpoint difference [m].
     pub final_position_difference_m: f64,
     /// Euclidean world linear-momentum endpoint difference [kg m/s].
@@ -308,6 +326,12 @@ pub struct TimestepRefinement {
     pub final_angular_momentum_difference_kg_m2_per_s: f64,
     /// Fine-minus-coarse final mechanical energy [J].
     pub final_mechanical_energy_difference_j: f64,
+    /// Coarse center-of-mass endpoint distance to the quarter-step reference [m].
+    pub coarse_reference_position_difference_m: f64,
+    /// Half-step center-of-mass endpoint distance to the quarter-step reference [m].
+    pub fine_reference_position_difference_m: f64,
+    /// Whether the half-step endpoint was no farther from the retained reference.
+    pub refinement_improved: bool,
 }
 
 /// Returns the unique lowest rim contact of a tilted finite cylinder.
@@ -329,6 +353,9 @@ pub fn contact_geometry(
     let projection_norm = stable_norm(plane_projection, "axis_plane_projection")?;
     if projection_norm <= GEOMETRY_EPSILON {
         return Err(ContactDynamicsError::UnsupportedFaceContact);
+    }
+    if axis_normal_component.abs() <= GEOMETRY_EPSILON {
+        return Err(ContactDynamicsError::UnsupportedLineContact);
     }
     let rim_down = checked_scale(
         plane_projection,
@@ -390,18 +417,14 @@ pub fn run_contact_dynamics(
                 tolerance_m: input.maximum_initial_penetration_m,
             });
         }
-        let contact_velocity = contact_velocity(mass_properties, state, geometry.radius_world_m)?;
-        if geometry.gap_m > input.contact_tolerance_m
-            || (geometry.gap_m >= -input.contact_tolerance_m
-                && contact_velocity.z > input.release_speed_tolerance_m_per_s)
-        {
+        if geometry.gap_m > input.contact_tolerance_m {
             return Ok(ContactDynamicsRun {
                 steps,
                 final_state: state,
                 termination: ContactTermination::ContactLost {
                     step_index,
                     gap_m: geometry.gap_m,
-                    normal_velocity_m_per_s: contact_velocity.z,
+                    normal_velocity_m_per_s: 0.0,
                 },
             });
         }
@@ -433,6 +456,18 @@ pub fn run_contact_dynamics(
                     termination: ContactTermination::StickInfeasible { step_index, stick },
                 });
             }
+            AttemptedStep::UnilateralReactionInfeasible {
+                required_normal_impulse_ns,
+            } => {
+                return Ok(ContactDynamicsRun {
+                    steps,
+                    final_state: state,
+                    termination: ContactTermination::UnilateralReactionInfeasible {
+                        step_index,
+                        required_normal_impulse_ns,
+                    },
+                });
+            }
         }
     }
 
@@ -443,7 +478,7 @@ pub fn run_contact_dynamics(
     })
 }
 
-/// Repeats a retained horizon at half the timestep and compares the endpoints.
+/// Repeats a retained horizon at half and quarter timesteps and compares endpoints.
 ///
 /// This is deterministic refinement evidence, not a claim of observed order.
 pub fn refine_timestep_by_two(
@@ -454,15 +489,24 @@ pub fn refine_timestep_by_two(
         .maximum_steps
         .checked_mul(2)
         .ok_or(ContactDynamicsError::StepBudgetExceeded)?;
-    if fine_steps > MAX_STEPS {
+    let reference_steps = fine_steps
+        .checked_mul(2)
+        .ok_or(ContactDynamicsError::StepBudgetExceeded)?;
+    if reference_steps > MAX_STEPS {
         return Err(ContactDynamicsError::StepBudgetExceeded);
     }
     let mut fine_input = input.clone();
     fine_input.timestep_s *= 0.5;
     fine_input.maximum_steps = fine_steps;
+    let mut reference_input = input.clone();
+    reference_input.timestep_s *= 0.25;
+    reference_input.maximum_steps = reference_steps;
     let coarse = run_contact_dynamics(input)?;
     let fine = run_contact_dynamics(&fine_input)?;
-    if terminal_class(&coarse.termination) != terminal_class(&fine.termination) {
+    let reference = run_contact_dynamics(&reference_input)?;
+    if terminal_class(&coarse.termination) != terminal_class(&fine.termination)
+        || terminal_class(&coarse.termination) != terminal_class(&reference.termination)
+    {
         return Err(ContactDynamicsError::IncomparableRefinement);
     }
     let final_position_difference_m = stable_norm(
@@ -503,13 +547,28 @@ pub fn refine_timestep_by_two(
     )?;
     let final_mechanical_energy_difference_j =
         checked_scalar_sub(fine_energy, coarse_energy, "refinement.energy_difference")?;
+    let coarse_reference_position_difference_m = endpoint_position_difference(
+        coarse.final_state,
+        reference.final_state,
+        "refinement.coarse_reference_position_difference",
+    )?;
+    let fine_reference_position_difference_m = endpoint_position_difference(
+        fine.final_state,
+        reference.final_state,
+        "refinement.fine_reference_position_difference",
+    )?;
     Ok(TimestepRefinement {
         coarse,
         fine,
+        reference,
         final_position_difference_m,
         final_linear_momentum_difference_kg_m_per_s,
         final_angular_momentum_difference_kg_m2_per_s,
         final_mechanical_energy_difference_j,
+        coarse_reference_position_difference_m,
+        fine_reference_position_difference_m,
+        refinement_improved: fine_reference_position_difference_m
+            <= coarse_reference_position_difference_m,
     })
 }
 
@@ -520,6 +579,9 @@ enum AttemptedStep {
         normal_velocity_m_per_s: f64,
     },
     StickInfeasible(StickFeasibility),
+    UnilateralReactionInfeasible {
+        required_normal_impulse_ns: f64,
+    },
 }
 
 fn sticking_step(
@@ -553,7 +615,9 @@ fn sticking_step(
         contact_velocity(mass_properties, free_state, contact_before.radius_world_m)?;
     let target_normal_velocity = (-contact_before.gap_m * 0.2 / duration).max(0.0);
     finite_scalar(target_normal_velocity, "target_normal_velocity")?;
-    if free_contact_velocity.z > input.release_speed_tolerance_m_per_s {
+    if free_contact_velocity.z > input.release_speed_tolerance_m_per_s
+        && contact_before.gap_m >= -input.maximum_initial_penetration_m
+    {
         return Ok(AttemptedStep::ContactLost {
             gap_m: contact_before.gap_m,
             normal_velocity_m_per_s: free_contact_velocity.z,
@@ -568,18 +632,13 @@ fn sticking_step(
         target_contact_velocity,
     )?;
     let normal_impulse_ns = total_impulse.z;
-    if normal_impulse_ns <= 0.0 {
-        return Ok(AttemptedStep::ContactLost {
-            gap_m: contact_before.gap_m,
-            normal_velocity_m_per_s: free_contact_velocity.z,
+    if normal_impulse_ns < 0.0 {
+        return Ok(AttemptedStep::UnilateralReactionInfeasible {
+            required_normal_impulse_ns: normal_impulse_ns,
         });
     }
     let tangent_impulse = Vec3::new(total_impulse.x, total_impulse.y, 0.0);
-    let required_tangential_reaction_n = checked_div(
-        stable_norm(tangent_impulse, "tangent_impulse")?,
-        duration,
-        "required_tangential_reaction_n",
-    )?;
+    let required_tangential_impulse_ns = stable_norm(tangent_impulse, "tangent_impulse")?;
     let normal_reaction_n = checked_div(normal_impulse_ns, duration, "normal_reaction_n")?;
     let frame = ContactFrame::new([0.0, 0.0, 1.0]).map_err(tribo_refusal)?;
     let zero_slip = TangentialSlip::new(&frame, [0.0, 0.0, 0.0]).map_err(tribo_refusal)?;
@@ -594,18 +653,23 @@ fn sticking_step(
             detail: "zero-slip Coulomb query did not report sticking".to_owned(),
         });
     }
-    let friction_cone_margin_n = checked_scalar_sub(
+    let static_capacity_impulse_ns = checked_mul(
         friction.static_limit,
-        required_tangential_reaction_n,
-        "friction_cone_margin_n",
+        duration,
+        "static_capacity_impulse_ns",
     )?;
-    let feasible = friction_cone_margin_n
-        >= -contact_force_tolerance(friction.static_limit, required_tangential_reaction_n);
+    let friction_cone_margin_ns = checked_scalar_sub(
+        static_capacity_impulse_ns,
+        required_tangential_impulse_ns,
+        "friction_cone_margin_ns",
+    )?;
+    let feasible = friction_cone_margin_ns
+        >= -contact_impulse_tolerance(static_capacity_impulse_ns, required_tangential_impulse_ns);
     let stick = StickFeasibility {
-        normal_reaction_n,
-        required_tangential_reaction_n,
-        static_capacity_n: friction.static_limit,
-        friction_cone_margin_n,
+        normal_impulse_ns,
+        required_tangential_impulse_ns,
+        static_capacity_impulse_ns,
+        friction_cone_margin_ns,
         feasible,
         input_authority: friction.provenance().authority(),
     };
@@ -625,13 +689,15 @@ fn sticking_step(
         target_contact_velocity,
         "post_impulse_contact_velocity_residual",
     )?;
-    if stable_norm(
+    let residual_norm = stable_norm(
         post_impulse_contact_velocity_residual,
         "post_impulse_contact_velocity_residual",
-    )? > contact_velocity_tolerance(target_contact_velocity)?
-    {
-        return Err(ContactDynamicsError::NonFiniteDerived {
-            field: "post_impulse_contact_velocity_residual",
+    )?;
+    let residual_tolerance = contact_velocity_tolerance(target_contact_velocity)?;
+    if residual_norm > residual_tolerance {
+        return Err(ContactDynamicsError::ConstraintResidualExceeded {
+            residual_m_per_s: residual_norm,
+            tolerance_m_per_s: residual_tolerance,
         });
     }
     let post_angular_velocity =
@@ -753,7 +819,7 @@ fn coupled_sticking_impulse(
 fn solve_3x3(mut system: [[f64; 4]; 3]) -> Result<[f64; 3], ContactDynamicsError> {
     let mut scale: f64 = 0.0;
     for row in system {
-        for value in row {
+        for value in row.into_iter().take(3) {
             finite_scalar(value, "coupled_contact_mass")?;
             scale = scale.max(value.abs());
         }
@@ -904,8 +970,8 @@ fn mechanical_energy(
         state.pose().position_world().z,
         "gravitational_potential",
     )?;
-    checked_add(
-        checked_add(translational, rotational, "mechanical_energy")?,
+    checked_scalar_add(
+        checked_scalar_add(translational, rotational, "mechanical_energy")?,
         potential,
         "mechanical_energy",
     )
@@ -1024,11 +1090,27 @@ fn terminal_class(termination: &ContactTermination) -> u8 {
         ContactTermination::HorizonReached => 0,
         ContactTermination::ContactLost { .. } => 1,
         ContactTermination::StickInfeasible { .. } => 2,
+        ContactTermination::UnilateralReactionInfeasible { .. } => 3,
     }
 }
 
-fn contact_force_tolerance(capacity: f64, required: f64) -> f64 {
-    256.0 * f64::EPSILON * capacity.abs().max(required.abs()).max(1.0)
+fn endpoint_position_difference(
+    left: RigidBodyState,
+    right: RigidBodyState,
+    field: &'static str,
+) -> Result<f64, ContactDynamicsError> {
+    stable_norm(
+        checked_sub(
+            left.pose().position_world(),
+            right.pose().position_world(),
+            field,
+        )?,
+        field,
+    )
+}
+
+fn contact_impulse_tolerance(capacity: f64, required: f64) -> f64 {
+    256.0 * f64::EPSILON * capacity.abs().max(required.abs())
 }
 
 fn contact_velocity_tolerance(target: Vec3) -> Result<f64, ContactDynamicsError> {
@@ -1097,6 +1179,16 @@ fn checked_scalar_sub(
     field: &'static str,
 ) -> Result<f64, ContactDynamicsError> {
     let value = left - right;
+    finite_scalar(value, field)?;
+    Ok(value)
+}
+
+fn checked_scalar_add(
+    left: f64,
+    right: f64,
+    field: &'static str,
+) -> Result<f64, ContactDynamicsError> {
+    let value = left + right;
     finite_scalar(value, field)?;
     Ok(value)
 }

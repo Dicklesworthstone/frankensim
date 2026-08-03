@@ -1,10 +1,7 @@
-#[path = "../src/contact_dynamics.rs"]
-mod contact_dynamics;
-
-use contact_dynamics::{
-    ContactDynamicsError, ContactDynamicsInput, ContactTermination, DiscGeometry,
-    NO_CLAIM_BOUNDARY, contact_geometry, refine_timestep_by_two, run_contact_dynamics,
-    state_at_ground_contact,
+use fs_euler_disc_e2e::{
+    CONTACT_NO_CLAIM_BOUNDARY, ContactDiscGeometry as DiscGeometry, ContactDynamicsError,
+    ContactDynamicsInput, ContactTermination, contact_geometry, refine_timestep_by_two,
+    run_contact_dynamics, state_at_ground_contact,
 };
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
@@ -92,8 +89,8 @@ fn gravity_reaction_and_static_cone_evolve_full_rigid_body_state() {
     let first = run.steps.first().expect("completed first dynamic step");
     assert!(first.normal_impulse_ns > 0.0);
     assert!(first.stick.feasible);
-    assert!(first.stick.normal_reaction_n > 0.0);
-    assert!(first.stick.static_capacity_n >= first.stick.required_tangential_reaction_n);
+    assert!(first.stick.normal_impulse_ns > 0.0);
+    assert!(first.stick.static_capacity_impulse_ns >= first.stick.required_tangential_impulse_ns);
     assert_eq!(
         first.stick.input_authority,
         InputAuthority::SyntheticFixture
@@ -119,6 +116,16 @@ fn gravity_reaction_and_static_cone_evolve_full_rigid_body_state() {
     );
     assert_close(
         first.post_impulse_contact_velocity_residual_world_m_per_s.z,
+        0.0,
+        1.0e-10,
+    );
+    assert_close(
+        first.post_impulse_contact_velocity_world_m_per_s.x,
+        0.0,
+        1.0e-10,
+    );
+    assert_close(
+        first.post_impulse_contact_velocity_world_m_per_s.y,
         0.0,
         1.0e-10,
     );
@@ -158,6 +165,21 @@ fn hostile_initial_penetration_is_refused_instead_of_projected_away() {
             assert_eq!(tolerance_m, input.maximum_initial_penetration_m);
         }
         other => panic!("expected penetration refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn horizontal_cylinder_line_contact_is_refused() {
+    let input = tilted_input(4.0, Vec3::ZERO, 0.0, 1.0e-4, 1);
+    let horizontal =
+        UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), core::f64::consts::FRAC_PI_2)
+            .expect("finite horizontal orientation");
+    match contact_geometry(
+        input.geometry,
+        Pose::new(Vec3::ZERO, horizontal).expect("finite pose"),
+    ) {
+        Err(ContactDynamicsError::UnsupportedLineContact) => {}
+        other => panic!("expected line-contact refusal, got {other:?}"),
     }
 }
 
@@ -213,8 +235,8 @@ fn infeasible_static_friction_terminates_instead_of_prescribing_no_slip() {
         ContactTermination::StickInfeasible { step_index, stick } => {
             assert_eq!(step_index, 0);
             assert!(!stick.feasible);
-            assert!(stick.required_tangential_reaction_n > stick.static_capacity_n);
-            assert!(stick.friction_cone_margin_n < 0.0);
+            assert!(stick.required_tangential_impulse_ns > stick.static_capacity_impulse_ns);
+            assert!(stick.friction_cone_margin_ns < 0.0);
         }
         other => panic!("expected stick infeasibility, got {other:?}"),
     }
@@ -236,6 +258,10 @@ fn fixed_horizon_refinement_is_deterministic_and_reports_endpoint_difference() {
         refinement.fine.termination,
         ContactTermination::HorizonReached
     );
+    assert_eq!(
+        refinement.reference.termination,
+        ContactTermination::HorizonReached
+    );
     assert!(refinement.final_position_difference_m.is_finite());
     assert!(
         refinement
@@ -248,6 +274,13 @@ fn fixed_horizon_refinement_is_deterministic_and_reports_endpoint_difference() {
             .is_finite()
     );
     assert!(refinement.final_mechanical_energy_difference_j.is_finite());
-    assert!(NO_CLAIM_BOUNDARY.contains("No sliding"));
-    assert!(NO_CLAIM_BOUNDARY.contains("convergence-order claim"));
+    assert!(
+        refinement
+            .coarse_reference_position_difference_m
+            .is_finite()
+    );
+    assert!(refinement.fine_reference_position_difference_m.is_finite());
+    assert!(refinement.refinement_improved);
+    assert!(CONTACT_NO_CLAIM_BOUNDARY.contains("No sliding"));
+    assert!(CONTACT_NO_CLAIM_BOUNDARY.contains("convergence-order claim"));
 }
