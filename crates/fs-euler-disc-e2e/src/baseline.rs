@@ -84,12 +84,12 @@ impl SquatDiscInput {
     /// all physical fields before running the production baseline.
     #[must_use]
     pub fn nominal() -> Self {
-        let radius_m = 0.038;
-        let thickness_m = 0.000_01;
-        let mass_kg = 0.120;
+        let radius_m: f64 = 0.038;
+        let thickness_m: f64 = 0.000_01;
+        let mass_kg: f64 = 0.120;
         let transverse = mass_kg * (3.0 * radius_m * radius_m + thickness_m * thickness_m) / 12.0;
         let axial = 0.5 * mass_kg * radius_m * radius_m;
-        let inclination_from_vertical_rad = 0.08;
+        let inclination_from_vertical_rad: f64 = 0.08;
         let precession_rad_s =
             (4.0 * STANDARD_GRAVITY_MPS2 / (radius_m * inclination_from_vertical_rad.sin())).sqrt();
         let orientation_body_to_world = [
@@ -363,10 +363,10 @@ impl BaselineRunOutput {
                     .expect("completed trajectory has initial sample");
                 format!(
                     concat!(
-                        "{\"model\":\"{}\",\"disposition\":\"{}\",",
+                        "{{\"model\":\"{}\",\"disposition\":\"{}\",",
                         "\"terminal\":\"{}\",\"samples\":{},",
                         "\"time_seconds\":{:.17e},\"energy_residual_j\":{:.17e},",
-                        "\"precession_balance_residual_s_inv2\":{:.17e}}"
+                        "\"precession_balance_residual_s_inv2\":{:.17e}}}"
                     ),
                     trajectory.model_id,
                     trajectory.terminal.disposition(),
@@ -532,7 +532,7 @@ fn validate_input(input: &SquatDiscInput) -> Option<BaselineRefusalReason> {
         return Some(BaselineRefusalReason::DynamicOracleViolation);
     }
     let normal = disc_normal(input.initial_state.orientation_body_to_world);
-    if (normal[2] - input.inclination_from_vertical_rad.cos()).abs() > 1.0e-10 {
+    if (normal.z - input.inclination_from_vertical_rad.cos()).abs() > 1.0e-10 {
         return Some(BaselineRefusalReason::InitialStateViolatesSupportConstraint);
     }
     let expected = supported_state(
@@ -684,7 +684,7 @@ fn supported_state(
     let omega_world = world_angular_velocity(input, orientation_body_to_world);
     BaselineState {
         time_seconds,
-        position_m: [previous_position_m[0], previous_position_m[1], -offset[2]],
+        position_m: [previous_position_m[0], previous_position_m[1], -offset.z],
         linear_velocity_mps: vec3_array(omega_world.cross(offset).scale(-1.0)),
         orientation_body_to_world,
         angular_velocity_body_rad_s: world_to_body(orientation_body_to_world, omega_world),
@@ -698,7 +698,7 @@ fn support_diagnostic(
 ) -> BaselineSupportDiagnostic {
     let normal = disc_normal(state.orientation_body_to_world);
     let contact_offset = rim_contact_offset(input.radius_m, input.thickness_m, normal);
-    let contact_point_m = add3(state.position_m, contact_offset);
+    let contact_point_m = add3(state.position_m, vec3_array(contact_offset));
     let omega_world = world_angular_velocity(input, state.orientation_body_to_world);
     let no_slip_residual_mps = norm3(add3(
         state.linear_velocity_mps,

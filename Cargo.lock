@@ -1198,11 +1198,17 @@ dependencies = [
 name = "fs-euler-disc-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
+ "fs-flux",
+ "fs-geom",
  "fs-govern",
  "fs-ir",
  "fs-mbd",
+ "fs-rep-frep",
+ "fs-solid",
  "fs-time",
  "fs-tribo",
 ]

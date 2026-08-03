@@ -1,0 +1,478 @@
+use std::collections::BTreeMap;
+use std::process::Command;
+
+use fs_blake3::hash_domain;
+
+#[derive(Debug)]
+enum JsonValue {
+    Number(f64),
+    String(String),
+    Object(BTreeMap<String, JsonValue>),
+}
+
+/// Strict JSON subset parser for this ASCII-only numeric producer; it is not a
+/// general JSON implementation.
+struct JsonParser<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> JsonParser<'a> {
+    fn parse(input: &'a str) -> Result<JsonValue, String> {
+        let mut parser = Self {
+            bytes: input.as_bytes(),
+            position: 0,
+        };
+        let value = parser.value()?;
+        parser.whitespace();
+        if parser.position != parser.bytes.len() {
+            return Err("trailing JSON bytes".to_owned());
+        }
+        Ok(value)
+    }
+
+    fn value(&mut self) -> Result<JsonValue, String> {
+        self.whitespace();
+        match self.peek() {
+            Some(b'{') => self.object(),
+            Some(b'"') => self.string().map(JsonValue::String),
+            Some(b'-' | b'0'..=b'9') => self.number().map(JsonValue::Number),
+            _ => Err("expected JSON object, string, or number".to_owned()),
+        }
+    }
+
+    fn object(&mut self) -> Result<JsonValue, String> {
+        self.expect(b'{')?;
+        self.whitespace();
+        let mut fields = BTreeMap::new();
+        if self.consume(b'}') {
+            return Ok(JsonValue::Object(fields));
+        }
+        loop {
+            self.whitespace();
+            let key = self.string()?;
+            self.whitespace();
+            self.expect(b':')?;
+            let value = self.value()?;
+            if fields.insert(key, value).is_some() {
+                return Err("duplicate JSON key".to_owned());
+            }
+            self.whitespace();
+            if self.consume(b'}') {
+                return Ok(JsonValue::Object(fields));
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        self.expect(b'"')?;
+        let mut output = String::new();
+        while let Some(byte) = self.next() {
+            match byte {
+                b'"' => return Ok(output),
+                b'\\' => match self.next() {
+                    Some(b'"') => output.push('"'),
+                    Some(b'\\') => output.push('\\'),
+                    Some(b'/') => output.push('/'),
+                    Some(b'b') => output.push('\u{0008}'),
+                    Some(b'f') => output.push('\u{000c}'),
+                    Some(b'n') => output.push('\n'),
+                    Some(b'r') => output.push('\r'),
+                    Some(b't') => output.push('\t'),
+                    _ => return Err("unsupported JSON escape".to_owned()),
+                },
+                0..=0x1f => return Err("unescaped control character".to_owned()),
+                byte => output.push(byte as char),
+            }
+        }
+        Err("unterminated JSON string".to_owned())
+    }
+
+    fn number(&mut self) -> Result<f64, String> {
+        let start = self.position;
+        while matches!(
+            self.peek(),
+            Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+        ) {
+            self.position += 1;
+        }
+        std::str::from_utf8(&self.bytes[start..self.position])
+            .map_err(|_| "non-UTF8 JSON number".to_owned())?
+            .parse()
+            .map_err(|_| "invalid JSON number".to_owned())
+    }
+
+    fn whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.position += 1;
+        }
+    }
+
+    fn expect(&mut self, expected: u8) -> Result<(), String> {
+        if self.next() == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!("expected JSON byte {}", expected as char))
+        }
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.position).copied()
+    }
+
+    fn next(&mut self) -> Option<u8> {
+        let byte = self.peek()?;
+        self.position += 1;
+        Some(byte)
+    }
+}
+
+fn object(value: &JsonValue) -> &BTreeMap<String, JsonValue> {
+    let JsonValue::Object(fields) = value else {
+        panic!("expected JSON object");
+    };
+    fields
+}
+
+fn string<'a>(fields: &'a BTreeMap<String, JsonValue>, key: &str) -> &'a str {
+    let Some(JsonValue::String(value)) = fields.get(key) else {
+        panic!("expected JSON string {key}");
+    };
+    value
+}
+
+fn number(fields: &BTreeMap<String, JsonValue>, key: &str) -> f64 {
+    let Some(JsonValue::Number(value)) = fields.get(key) else {
+        panic!("expected JSON number {key}");
+    };
+    *value
+}
+
+#[test]
+fn campaign_executable_emits_deterministic_substantive_production_records() {
+    let binary = env!("CARGO_BIN_EXE_euler_disc_campaign");
+    let first = Command::new(binary).output().expect("campaign launches");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = Command::new(binary).output().expect("campaign relaunches");
+    assert!(second.status.success());
+    assert_eq!(
+        first.stdout, second.stdout,
+        "campaign output is deterministic"
+    );
+
+    let stdout = String::from_utf8(first.stdout).expect("JSONL is UTF-8");
+    let lines: Vec<_> = stdout.lines().collect();
+    let records: Vec<_> = lines
+        .iter()
+        .map(|line| JsonParser::parse(line).expect("record is valid JSON"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        10,
+        "geometry, oracle, contact snapshot chain, decay ablations, exterior probe, and manifest"
+    );
+    let roots: Vec<_> = records.iter().map(object).collect();
+    let scenarios: Vec<_> = roots
+        .iter()
+        .map(|fields| string(fields, "scenario"))
+        .collect();
+    assert_eq!(
+        scenarios,
+        [
+            "geometry-sharp-squat-disc",
+            "geometry-filleted-squat-disc",
+            "conservative-steady-oracle",
+            "dynamic-unilateral-contact",
+            "reduced-flexible-base",
+            "contour-only-decay",
+            "boundary-layer-only-decay",
+            "combined-decay",
+            "reduced-exterior-wrench-passivity",
+            "campaign-complete",
+        ]
+    );
+    for fields in &roots {
+        assert_eq!(string(fields, "schema"), "euler-disc-campaign-jsonl-v1");
+        for key in [
+            "model",
+            "source",
+            "authority",
+            "units",
+            "budget",
+            "terminal",
+            "residual",
+            "no_claim",
+        ] {
+            assert!(fields.contains_key(key), "missing {key}");
+        }
+        assert!(string(fields, "no_claim").contains("no-physical-validation"));
+        if string(fields, "scenario") == "campaign-complete" {
+            assert_eq!(
+                string(fields, "campaign_seed_u64_dec"),
+                "4995983222254027085"
+            );
+        } else {
+            assert_eq!(
+                string(fields, "campaign_seed_manifest_ref"),
+                "campaign-complete"
+            );
+        }
+    }
+
+    let sharp_inputs = object(roots[0].get("inputs").expect("sharp inputs"));
+    let filleted_inputs = object(roots[1].get("inputs").expect("filleted inputs"));
+    assert_eq!(number(sharp_inputs, "radius_m"), 0.038);
+    assert_eq!(number(sharp_inputs, "thickness_m"), 0.006);
+    assert_eq!(number(sharp_inputs, "edge_radius_m"), 0.0);
+    assert_eq!(number(filleted_inputs, "edge_radius_m"), 0.001);
+    let sharp_budget = object(roots[0].get("budget").expect("sharp budget"));
+    assert_eq!(string(sharp_budget, "seed_u64_dec"), "4995983222254027085");
+    assert!(
+        number(roots[0], "mass_kg") > number(roots[1], "mass_kg"),
+        "the actual fillet changes the geometry-derived mass"
+    );
+
+    let oracle_inputs = object(roots[2].get("inputs").expect("oracle inputs"));
+    assert!(number(oracle_inputs, "thickness_m") < 0.01 * number(oracle_inputs, "radius_m"));
+    assert_ne!(
+        number(oracle_inputs, "thickness_m"),
+        number(sharp_inputs, "thickness_m")
+    );
+    let oracle_residual = object(roots[2].get("residual").expect("oracle residual"));
+    assert!(number(oracle_residual, "precession_s_inv2").abs() < 1.0e-6);
+
+    let contact_inputs = object(roots[3].get("inputs").expect("contact inputs"));
+    let contact_residual = object(roots[3].get("residual").expect("contact residual"));
+    assert_eq!(
+        string(contact_inputs, "primary_case"),
+        "fillet-fixed-density"
+    );
+    assert_eq!(number(contact_inputs, "static_friction_coefficient"), 100.0);
+    assert_eq!(
+        string(contact_inputs, "interface_system_id"),
+        "campaign/squat-disc->plane"
+    );
+    assert_eq!(
+        string(contact_inputs, "interface_history_id"),
+        "campaign/shared-matched-profile-contact-history-v1"
+    );
+    let contact_normal_reaction_n = number(contact_inputs, "normal_reaction_mean_n");
+    assert!(contact_normal_reaction_n > 0.0);
+    assert!(number(contact_residual, "refinement_position_m").is_finite());
+    let cases = object(roots[3].get("cases").expect("contact cases"));
+    let sharp_case = object(cases.get("sharp_fixed_density").expect("sharp case"));
+    let fillet_case = object(cases.get("fillet_fixed_density").expect("fillet case"));
+    let equal_mass_case = object(cases.get("fillet_equal_mass").expect("equal mass case"));
+    for case_fields in [sharp_case, fillet_case, equal_mass_case] {
+        assert_eq!(string(case_fields, "terminal"), "horizon-reached");
+        assert!(number(case_fields, "mean_reaction_n") > 0.0);
+        assert!(number(case_fields, "final_reaction_n") > 0.0);
+        assert!(number(case_fields, "peak_reaction_n") > 0.0);
+        assert!(number(case_fields, "max_required_static_mu") >= 0.0);
+        assert!(number(case_fields, "initial_material_contact_speed_m_per_s") < 1.0e-9);
+        assert!(number(case_fields, "inertia_transverse_kg_m2") > 0.0);
+        assert!(number(case_fields, "inertia_axial_kg_m2") > 0.0);
+        assert!(number(case_fields, "center_height_m") > 0.0);
+    }
+    assert!(number(sharp_case, "mass_kg") > number(fillet_case, "mass_kg"));
+    assert!((number(sharp_case, "mass_kg") - number(equal_mass_case, "mass_kg")).abs() < 1.0e-12);
+    assert!(number(equal_mass_case, "density_kg_m3") > number(fillet_case, "density_kg_m3"));
+    let sharp_support = object(
+        sharp_case
+            .get("support_vector_world_m")
+            .expect("sharp support vector"),
+    );
+    let fillet_support = object(
+        fillet_case
+            .get("support_vector_world_m")
+            .expect("fillet support vector"),
+    );
+    let support_difference = ["x", "y", "z"]
+        .into_iter()
+        .map(|axis| (number(sharp_support, axis) - number(fillet_support, axis)).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        support_difference > 1.0e-9,
+        "sharp and fillet supports differ"
+    );
+    let contact_deltas = object(roots[3].get("deltas").expect("contact deltas"));
+    for (delta, left, right) in [
+        (
+            object(
+                contact_deltas
+                    .get("fillet_fixed_density_minus_sharp_fixed_density")
+                    .expect("fixed density delta"),
+            ),
+            fillet_case,
+            sharp_case,
+        ),
+        (
+            object(
+                contact_deltas
+                    .get("fillet_equal_mass_minus_sharp_fixed_density")
+                    .expect("equal mass delta"),
+            ),
+            equal_mass_case,
+            sharp_case,
+        ),
+    ] {
+        for key in [
+            "mean_reaction_n",
+            "final_reaction_n",
+            "peak_reaction_n",
+            "max_required_static_mu",
+            "summed_mechanical_balance_j",
+            "refinement_position_m",
+            "refinement_energy_j",
+        ] {
+            assert!(number(delta, key).is_finite());
+            assert!(
+                (number(delta, key) - (number(left, key) - number(right, key))).abs() < 1.0e-12,
+                "delta {key} did not match its two retained cases"
+            );
+        }
+    }
+    let contact_no_claim = string(roots[3], "no_claim");
+    assert!(contact_no_claim.contains("one-way-not-closed-coupling"));
+    assert!(contact_no_claim.contains("not-outcome-ranking"));
+    assert_eq!(
+        string(roots[3], "source"),
+        "frep/matched-profile-contact-comparison"
+    );
+
+    let base_inputs = object(roots[4].get("inputs").expect("base inputs"));
+    let base_residual = object(roots[4].get("residual").expect("base residual"));
+    let base_loads = object(roots[4].get("loads_n").expect("base loads"));
+    let base_powers = object(roots[4].get("powers_w").expect("base powers"));
+    assert_eq!(
+        number(base_inputs, "normal_force_n"),
+        contact_normal_reaction_n
+    );
+    assert!(number(base_residual, "energy_j").abs() < 2.0e-6);
+    assert!(number(base_residual, "refinement_displacement_m") < 1.0e-6);
+    assert!(number(base_loads, "modal_force_n").is_finite());
+    assert!(base_powers.is_empty(), "a force is not a power channel");
+
+    let contour_work = object(roots[5].get("work_j").expect("contour work"));
+    let boundary_work = object(roots[6].get("work_j").expect("boundary work"));
+    let combined_work = object(roots[7].get("work_j").expect("combined work"));
+    assert!(number(contour_work, "dry_contour") > 0.0);
+    assert_eq!(number(contour_work, "bildsten_boundary_layer"), 0.0);
+    assert_eq!(number(boundary_work, "dry_contour"), 0.0);
+    assert!(number(boundary_work, "bildsten_boundary_layer") > 0.0);
+    assert!(number(combined_work, "dry_contour") > 0.0);
+    assert!(number(combined_work, "bildsten_boundary_layer") > 0.0);
+
+    for record in &roots[5..8] {
+        let inputs = object(record.get("inputs").expect("decay inputs"));
+        let final_state = object(record.get("final").expect("decay final state"));
+        let crossover = object(record.get("crossover").expect("decay crossover"));
+        assert_eq!(string(record, "terminal"), "validity-cutoff");
+        assert!(number(final_state, "time_s") > 0.0);
+        assert!(number(final_state, "theta_rad") > 0.0);
+        assert!(number(final_state, "omega_rad_s") > 0.0);
+        assert!(number(final_state, "energy_j") > 0.0);
+        match string(crossover, "class") {
+            "encoded-power-law-crossover" => {
+                assert!(number(crossover, "theta_rad") > 0.0);
+                if crossover.contains_key("time_s") {
+                    assert!(number(crossover, "time_s") >= 0.0);
+                } else {
+                    assert_eq!(
+                        string(crossover, "time_status"),
+                        "outside-retained-trajectory"
+                    );
+                }
+            }
+            "none" | "not-comparable" => {
+                assert!(!crossover.contains_key("theta_rad"));
+                assert!(!crossover.contains_key("time_s"));
+                assert!(crossover.contains_key("theta_status"));
+                assert!(crossover.contains_key("time_status"));
+            }
+            other => panic!("unexpected crossover class {other}"),
+        }
+        assert_eq!(number(inputs, "mass_kg"), number(roots[1], "mass_kg"));
+    }
+    let contour_inputs = object(roots[5].get("inputs").expect("contour inputs"));
+    let combined_inputs = object(roots[7].get("inputs").expect("combined inputs"));
+    assert_eq!(
+        number(contour_inputs, "dry_normal_force_n"),
+        contact_normal_reaction_n
+    );
+    assert_eq!(
+        number(combined_inputs, "dry_normal_force_n"),
+        contact_normal_reaction_n
+    );
+    assert_eq!(
+        number(contour_inputs, "contour_force_n"),
+        contact_normal_reaction_n * number(contour_inputs, "contour_force_per_normal_force")
+    );
+    assert_eq!(
+        number(combined_inputs, "contour_force_n"),
+        contact_normal_reaction_n * number(combined_inputs, "contour_force_per_normal_force")
+    );
+
+    let combined_sources = object(roots[7].get("sources").expect("combined sources"));
+    assert_ne!(string(combined_sources, "dry"), "none");
+    assert_ne!(string(combined_sources, "bildsten"), "none");
+    let flux_powers = object(roots[8].get("powers_w").expect("flux powers"));
+    let flux_residual = object(roots[8].get("residual").expect("flux residual"));
+    assert!(number(flux_powers, "relative_dissipation") > 0.0);
+    assert!(number(flux_residual, "passivity_w") <= 1.0e-10);
+    let flux_inputs = object(roots[8].get("inputs").expect("flux inputs"));
+    assert_eq!(number(flux_inputs, "radius_m"), 0.038);
+    assert_eq!(number(flux_inputs, "thickness_m"), 0.006);
+    assert!(number(flux_inputs, "snapshot_angular_speed_rad_s") > 0.0);
+    assert_eq!(string(flux_inputs, "gas_source_id"), "campaign/air-card-v1");
+    assert_eq!(
+        string(flux_inputs, "roughness_source_id"),
+        "campaign/exterior-roughness-card-v1"
+    );
+    assert_eq!(
+        string(flux_inputs, "correlation_authority"),
+        "caller-declared-screening"
+    );
+    assert_eq!(
+        string(roots[8], "source"),
+        "campaign/caller-declared-screening-correlation-v1"
+    );
+
+    let manifest_budget = object(roots[9].get("budget").expect("manifest budget"));
+    assert_eq!(number(manifest_budget, "record_count"), 9.0);
+    assert_eq!(number(manifest_budget, "declared_cx_poll_quota"), 10_000.0);
+    assert_eq!(number(manifest_budget, "declared_cx_cost_quota"), 100_000.0);
+    assert_eq!(
+        string(roots[9], "digest_domain"),
+        "org.frankensim.euler-disc-campaign-jsonl.v1"
+    );
+    assert_eq!(
+        string(roots[9], "digest_scope"),
+        "preceding-data-records-LF-joined-no-trailing-LF"
+    );
+    assert_eq!(string(roots[9], "digest_blake3").len(), 64);
+    let exact_payload = lines[..9].join("\n");
+    assert_eq!(
+        string(roots[9], "digest_blake3"),
+        hash_domain(
+            "org.frankensim.euler-disc-campaign-jsonl.v1",
+            exact_payload.as_bytes()
+        )
+        .to_hex()
+    );
+}

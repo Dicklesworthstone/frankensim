@@ -1,22 +1,41 @@
 //! Euler-disc flagship integration boundary.
 //!
 //! The crate freezes the scientific Context of Use, claim taxonomy, evidence
-//! ceilings, and binding no-claims. Its only executable physics slice is a
-//! bounded ideal no-slip rolling baseline with an explicit thin-disc
-//! small-angle oracle; it does not implement compliant contact, base, gas,
-//! experiment, or target-outcome prediction.
+//! ceilings, and binding no-claims. Its bounded executable rungs compose
+//! geometry-derived specimen properties, ideal rolling, and a reduced flexible
+//! base response. They do not establish compliant contact, gas-film, experiment,
+//! or target-outcome prediction.
 
 #![forbid(unsafe_code)]
 
+pub mod base_response;
 pub mod baseline;
+pub mod contact_dynamics;
 pub mod contract;
 pub mod protocol;
+pub mod reduced_decay;
 
+pub use base_response::{
+    BaseGeometryScope, BaseResponseDiagnostics, BaseResponseError, BaseResponseInput,
+    BaseResponseRefinement, BaseResponseRun, BaseResponseSample, ContactLoadScope,
+    LevelSupportInput, MAX_BASE_RESPONSE_STEPS, MovingContactLoad, refine_reduced_base_response,
+    run_reduced_base_response,
+};
 pub use baseline::{
     BaselineDynamicsClass, BaselineEnergyLedger, BaselineEquilibriumReceipt, BaselineRefusal,
     BaselineRefusalReason, BaselineRunOutput, BaselineSample, BaselineState,
     BaselineSupportDiagnostic, BaselineTerminal, BaselineTrajectory, SquatDiscInput,
     run_ideal_conservative_baseline,
+};
+pub use contact_dynamics::{
+    ContactDynamicsError, ContactDynamicsInput, ContactDynamicsRun, ContactGeometry,
+    ContactStepReceipt, ContactTermination, DiscGeometry as ContactDiscGeometry, EnergyLedger,
+    NO_CLAIM_BOUNDARY as CONTACT_NO_CLAIM_BOUNDARY, ProfileContactDynamicsInput,
+    ProfileContactGeometry, ProfileRollingInitializer, StickFeasibility, TimestepRefinement,
+    contact_geometry, profile_contact_geometry, profile_state_at_ground_contact,
+    refine_profile_timestep_by_two, refine_timestep_by_two, run_contact_dynamics,
+    run_profile_contact_dynamics, small_angle_rolling_profile_initializer, state_at_ground_contact,
+    state_at_profile_ground_contact,
 };
 
 pub use contract::{
@@ -41,4 +60,13 @@ pub use protocol::{
     MAX_VALIDITY_DOMAIN_CANONICAL_BYTES, PrerequisiteAssessmentReceipt, ProtocolBudget,
     ProtocolSeed, ReportedScientificDisposition, StructurallyAdmittedEulerContract,
     admit_frozen_contract, build_frozen_contract, check_frozen_contract,
+};
+pub use reduced_decay::{
+    BILDSTEN_PUBLISHED_POWER_COEFFICIENT, BildstenBoundaryLayerChannel,
+    CHANNEL_CROSSOVER_BISECTION_STEPS, ChannelCrossoverDiagnostic, ChannelCrossoverNotComparable,
+    ChannelPowers, ChannelWork, DryContourChannel, MAX_REDUCED_DECAY_STEPS,
+    MAX_SMALL_ANGLE_THETA_RAD, REDUCED_DECAY_MODEL_ID, ReducedDecayError, ReducedDecayInput,
+    ReducedDecayProvenance, ReducedDecayRun, ReducedDecaySample, ReducedDecayTerminal,
+    RefinementEvidence, STANDARD_GRAVITY_M_PER_S2, channel_crossover_diagnostic,
+    refinement_evidence, run_reduced_decay, structured_runner_output,
 };
