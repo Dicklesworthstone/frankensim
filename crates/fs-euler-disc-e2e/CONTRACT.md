@@ -66,8 +66,16 @@ scripts/e2e/euler_disc_campaign.sh \
 
 The wrapper requires committed, clean `Cargo.toml`, `Cargo.lock`, and `crates/`
 inputs, runs the binary through strict remote RCH, refuses output or stderr
-paths that already exist, and rejects partial or malformed JSONL. It emits, in
-order: sharp and 1-mm-filleted squat-disc line/arc geometry-plus-mass records;
+paths that already exist, and rejects partial or malformed JSONL. Output and
+log paths are exclusively created and identity-bound for the run. A narrowly
+handled `RCH-E309` may recover exact LF-framed producer records only when one
+ordered, worker-consistent receipt chain proves that the submitted remote
+campaign command exited zero before retrieval of its separately built artifact
+failed. The retained receipt still marks artifact retrieval incomplete and its
+local transcript authority as non-cryptographic. Other nonzero exits refuse;
+ordinary RCH success with empty direct stdout also refuses rather than inferring
+records from diagnostics. The wrapper emits, in order: sharp and
+1-mm-filleted squat-disc line/arc geometry-plus-mass records;
 a conservative steady oracle; a profile unilateral-sticking micro-trajectory;
 a one-way reduced flexible-base record; contour-only, boundary-layer-only, and
 combined reduced-decay records; a one-way reduced exterior-wrench passivity

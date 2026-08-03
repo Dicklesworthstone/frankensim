@@ -81,8 +81,14 @@ the conservative steady oracle, a profile unilateral-sticking contact
 micro-trajectory, a one-way flexible-base response, contour-only,
 boundary-layer-only, and combined reduced-decay ablations, a one-way exterior
 passivity probe, and a final campaign manifest. The JSONL and stderr log are
-the retained software receipts; their actual paths, digests, and values are
-intentionally not recorded here until root retains an actual run.
+the retained software receipts. If the remote command exits zero but RCH then
+returns `RCH-E309` while retrieving the separately built executable, the
+wrapper recovers only exact LF-framed campaign records after checking the
+ordered job, worker, executable, remote-exit, retrieval, and terminal receipt
+chain. Its retained final receipt marks executable retrieval incomplete and
+the local transcript non-cryptographic; every other nonzero result, and empty
+stdout under an ordinary zero result, refuses. Host-local output paths and
+observed values are run evidence rather than frozen documentation.
 
 This executable composition is one-way and snapshot-based, not closed
 multiphysics. Its reduced decay exponents and channel laws are encoded model
