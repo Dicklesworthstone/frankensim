@@ -1,3 +1,5 @@
+//! End-to-end contract checks for deterministic Euler-disc campaign records.
+
 use std::collections::BTreeMap;
 use std::process::Command;
 
@@ -7,6 +9,7 @@ use fs_blake3::hash_domain;
 enum JsonValue {
     Number(f64),
     String(String),
+    Boolean(bool),
     Object(BTreeMap<String, JsonValue>),
 }
 
@@ -37,6 +40,8 @@ impl<'a> JsonParser<'a> {
             Some(b'{') => self.object(),
             Some(b'"') => self.string().map(JsonValue::String),
             Some(b'-' | b'0'..=b'9') => self.number().map(JsonValue::Number),
+            Some(b't') => self.literal(b"true", JsonValue::Boolean(true)),
+            Some(b'f') => self.literal(b"false", JsonValue::Boolean(false)),
             _ => Err("expected JSON object, string, or number".to_owned()),
         }
     }
@@ -103,6 +108,16 @@ impl<'a> JsonParser<'a> {
             .map_err(|_| "invalid JSON number".to_owned())
     }
 
+    fn literal(&mut self, expected: &[u8], value: JsonValue) -> Result<JsonValue, String> {
+        let end = self.position.saturating_add(expected.len());
+        if self.bytes.get(self.position..end) == Some(expected) {
+            self.position = end;
+            Ok(value)
+        } else {
+            Err("invalid JSON literal".to_owned())
+        }
+    }
+
     fn whitespace(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
             self.position += 1;
@@ -154,6 +169,13 @@ fn string<'a>(fields: &'a BTreeMap<String, JsonValue>, key: &str) -> &'a str {
 fn number(fields: &BTreeMap<String, JsonValue>, key: &str) -> f64 {
     let Some(JsonValue::Number(value)) = fields.get(key) else {
         panic!("expected JSON number {key}");
+    };
+    *value
+}
+
+fn boolean(fields: &BTreeMap<String, JsonValue>, key: &str) -> bool {
+    let Some(JsonValue::Boolean(value)) = fields.get(key) else {
+        panic!("expected JSON boolean {key}");
     };
     *value
 }
@@ -257,6 +279,7 @@ fn campaign_executable_emits_deterministic_substantive_production_records() {
 
     let contact_inputs = object(roots[3].get("inputs").expect("contact inputs"));
     let contact_residual = object(roots[3].get("residual").expect("contact residual"));
+    let contact_loads = object(roots[3].get("loads_n").expect("contact loads"));
     assert_eq!(
         string(contact_inputs, "primary_case"),
         "fillet-fixed-density"
@@ -270,13 +293,79 @@ fn campaign_executable_emits_deterministic_substantive_production_records() {
         string(contact_inputs, "interface_history_id"),
         "campaign/shared-matched-profile-contact-history-v1"
     );
-    let contact_normal_reaction_n = number(contact_inputs, "normal_reaction_mean_n");
+    assert_eq!(
+        string(contact_inputs, "dry_interface_authority"),
+        "caller-declared-dry-interface"
+    );
+    assert_eq!(string(roots[3], "authority"), "numerical-reference-only");
+    let contact_normal_reaction_n = number(contact_loads, "normal_reaction_mean_n");
     assert!(contact_normal_reaction_n > 0.0);
-    assert!(number(contact_residual, "refinement_position_m").is_finite());
+    assert!(
+        number(contact_residual, "energy_j").abs()
+            <= number(contact_residual, "energy_residual_limit_j")
+    );
+    assert!(
+        number(contact_residual, "sum_abs_energy_j")
+            <= number(contact_residual, "sum_abs_energy_limit_j")
+    );
+    assert!(
+        number(contact_residual, "max_abs_energy_j")
+            <= number(contact_residual, "max_abs_energy_limit_j")
+    );
+    assert!(
+        number(contact_residual, "refinement_position_m").abs()
+            <= number(contact_residual, "refinement_position_limit_m")
+    );
+    assert!(
+        number(contact_residual, "refinement_energy_j").abs()
+            <= number(contact_residual, "refinement_energy_limit_j")
+    );
+    let top_energy_scale_j = number(contact_residual, "energy_scale_j");
+    assert_eq!(
+        number(contact_residual, "energy_residual_limit_j"),
+        top_energy_scale_j * 1.0e-4
+    );
+    assert_eq!(
+        number(contact_residual, "sum_abs_energy_limit_j"),
+        top_energy_scale_j * 1.0e-3
+    );
+    assert_eq!(
+        number(contact_residual, "max_abs_energy_limit_j"),
+        top_energy_scale_j * 1.0e-4
+    );
+    assert_eq!(
+        number(contact_residual, "refinement_position_limit_m"),
+        number(contact_inputs, "radius_m") * 1.0e-1
+    );
+    assert_eq!(
+        number(contact_residual, "refinement_energy_limit_j"),
+        top_energy_scale_j * 1.0e-1
+    );
     let cases = object(roots[3].get("cases").expect("contact cases"));
     let sharp_case = object(cases.get("sharp_fixed_density").expect("sharp case"));
     let fillet_case = object(cases.get("fillet_fixed_density").expect("fillet case"));
     let equal_mass_case = object(cases.get("fillet_equal_mass").expect("equal mass case"));
+    assert_eq!(
+        contact_normal_reaction_n,
+        number(fillet_case, "mean_reaction_n"),
+        "the propagated contact load is the primary case mean reaction"
+    );
+    assert_eq!(
+        number(contact_residual, "energy_j"),
+        number(fillet_case, "summed_mechanical_balance_residual_j")
+    );
+    assert_eq!(
+        number(contact_residual, "sum_abs_energy_j"),
+        number(fillet_case, "sum_abs_mechanical_balance_residual_j")
+    );
+    assert_eq!(
+        number(contact_residual, "max_abs_energy_j"),
+        number(fillet_case, "max_abs_mechanical_balance_residual_j")
+    );
+    assert_eq!(
+        number(contact_residual, "energy_scale_j"),
+        number(fillet_case, "mechanical_energy_scale_j")
+    );
     for case_fields in [sharp_case, fillet_case, equal_mass_case] {
         assert_eq!(string(case_fields, "terminal"), "horizon-reached");
         assert!(number(case_fields, "mean_reaction_n") > 0.0);
@@ -287,6 +376,77 @@ fn campaign_executable_emits_deterministic_substantive_production_records() {
         assert!(number(case_fields, "inertia_transverse_kg_m2") > 0.0);
         assert!(number(case_fields, "inertia_axial_kg_m2") > 0.0);
         assert!(number(case_fields, "center_height_m") > 0.0);
+        assert!(number(case_fields, "mechanical_energy_scale_j") > 0.0);
+        assert!(number(case_fields, "sum_abs_mechanical_balance_residual_j") >= 0.0);
+        assert!(number(case_fields, "max_abs_mechanical_balance_residual_j") >= 0.0);
+        let energy_scale_j = number(case_fields, "mechanical_energy_scale_j");
+        assert!(
+            number(case_fields, "summed_mechanical_balance_residual_j").abs()
+                <= number(case_fields, "energy_residual_limit_j")
+        );
+        assert!(
+            number(case_fields, "sum_abs_mechanical_balance_residual_j")
+                <= number(case_fields, "sum_abs_energy_limit_j")
+        );
+        assert!(
+            number(case_fields, "max_abs_mechanical_balance_residual_j")
+                <= number(case_fields, "max_abs_energy_limit_j")
+        );
+        assert_eq!(
+            number(case_fields, "energy_residual_limit_j"),
+            energy_scale_j * 1.0e-4
+        );
+        assert_eq!(
+            number(case_fields, "sum_abs_energy_limit_j"),
+            energy_scale_j * 1.0e-3
+        );
+        assert_eq!(
+            number(case_fields, "max_abs_energy_limit_j"),
+            energy_scale_j * 1.0e-4
+        );
+        let refinement = object(
+            case_fields
+                .get("quarter_step_refinement")
+                .expect("quarter-step refinement receipt"),
+        );
+        for (coarse, fine, flag) in [
+            (
+                "coarse_position_error_m",
+                "fine_position_error_m",
+                "position_refinement_improved",
+            ),
+            (
+                "coarse_linear_momentum_error_kg_m_per_s",
+                "fine_linear_momentum_error_kg_m_per_s",
+                "linear_momentum_refinement_improved",
+            ),
+            (
+                "coarse_angular_momentum_error_kg_m2_per_s",
+                "fine_angular_momentum_error_kg_m2_per_s",
+                "angular_momentum_refinement_improved",
+            ),
+            (
+                "coarse_orientation_error_rad",
+                "fine_orientation_error_rad",
+                "orientation_refinement_improved",
+            ),
+            (
+                "coarse_energy_error_j",
+                "fine_energy_error_j",
+                "energy_refinement_improved",
+            ),
+        ] {
+            assert!(number(refinement, coarse).is_finite());
+            assert!(number(refinement, fine).is_finite());
+            assert_eq!(
+                boolean(refinement, flag),
+                number(refinement, fine) <= number(refinement, coarse)
+            );
+            assert!(
+                boolean(refinement, flag),
+                "quarter-step {flag} did not improve"
+            );
+        }
     }
     assert!(number(sharp_case, "mass_kg") > number(fillet_case, "mass_kg"));
     assert!((number(sharp_case, "mass_kg") - number(equal_mass_case, "mass_kg")).abs() < 1.0e-12);
@@ -336,7 +496,10 @@ fn campaign_executable_emits_deterministic_substantive_production_records() {
             "final_reaction_n",
             "peak_reaction_n",
             "max_required_static_mu",
-            "summed_mechanical_balance_j",
+            "summed_mechanical_balance_residual_j",
+            "sum_abs_mechanical_balance_residual_j",
+            "max_abs_mechanical_balance_residual_j",
+            "mechanical_energy_scale_j",
             "refinement_position_m",
             "refinement_energy_j",
         ] {
@@ -408,6 +571,17 @@ fn campaign_executable_emits_deterministic_substantive_production_records() {
             other => panic!("unexpected crossover class {other}"),
         }
         assert_eq!(number(inputs, "mass_kg"), number(roots[1], "mass_kg"));
+        let residual = object(record.get("residual").expect("decay residual"));
+        assert!(number(residual, "energy_scale_j") > 0.0);
+        assert!(number(residual, "energy_j").abs() <= number(residual, "energy_residual_limit_j"));
+        assert!(
+            number(residual, "refinement_time_s").abs()
+                <= number(residual, "refinement_time_limit_s")
+        );
+        assert!(
+            number(residual, "refinement_work_j").abs()
+                <= number(residual, "refinement_work_limit_j")
+        );
     }
     let contour_inputs = object(roots[5].get("inputs").expect("contour inputs"));
     let combined_inputs = object(roots[7].get("inputs").expect("combined inputs"));

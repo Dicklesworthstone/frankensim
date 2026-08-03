@@ -148,6 +148,12 @@ fn run_campaign() -> Result<(), String> {
         base.normalized_energy_closure_residual,
         base.diagnostics.reduced_solve_scaled_residual,
         base.diagnostics.reduced_solve_scaled_residual_limit,
+        SCHEMA = SCHEMA,
+        SI_UNITS = SI_UNITS,
+        EXECUTION_POLL_QUOTA = EXECUTION_POLL_QUOTA,
+        EXECUTION_COST_QUOTA = EXECUTION_COST_QUOTA,
+        NO_PHYSICAL_VALIDATION = NO_PHYSICAL_VALIDATION,
+        DECLARED_CX_BUDGET_NO_CLAIM = DECLARED_CX_BUDGET_NO_CLAIM,
     ));
 
     records.push(reduced_decay_record(
@@ -285,6 +291,13 @@ fn geometry_record(
         properties.mass,
         properties.principal_inertia.transverse,
         properties.principal_inertia.axial,
+        SCHEMA = SCHEMA,
+        SI_UNITS = SI_UNITS,
+        CAMPAIGN_SEED_DEC = CAMPAIGN_SEED_DEC,
+        EXECUTION_POLL_QUOTA = EXECUTION_POLL_QUOTA,
+        EXECUTION_COST_QUOTA = EXECUTION_COST_QUOTA,
+        NO_PHYSICAL_VALIDATION = NO_PHYSICAL_VALIDATION,
+        DECLARED_CX_BUDGET_NO_CLAIM = DECLARED_CX_BUDGET_NO_CLAIM,
     ))
 }
 
@@ -321,6 +334,9 @@ fn baseline_record(output: BaselineRunOutput) -> Result<String, String> {
         sample.energy.residual_from_initial_j,
         trajectory.equilibrium.precession_balance_residual_s_inv2,
         trajectory.equilibrium.small_angle_energy_residual_j,
+        SCHEMA = SCHEMA,
+        SI_UNITS = SI_UNITS,
+        NO_PHYSICAL_VALIDATION = NO_PHYSICAL_VALIDATION,
     ))
 }
 
@@ -343,7 +359,10 @@ struct ContactCase {
     final_reaction_n: f64,
     peak_reaction_n: f64,
     max_required_static_mu: f64,
-    summed_mechanical_balance_j: f64,
+    summed_mechanical_balance_residual_j: f64,
+    sum_abs_mechanical_balance_residual_j: f64,
+    max_abs_mechanical_balance_residual_j: f64,
+    mechanical_energy_scale_j: f64,
 }
 
 fn contact_snapshot(
@@ -367,32 +386,46 @@ fn contact_snapshot(
             "{{\"schema\":\"{SCHEMA}\",\"scenario\":\"dynamic-unilateral-contact\",",
             "\"model\":\"axisymmetric-profile-unilateral-sticking-contact\",",
             "\"source\":\"frep/matched-profile-contact-comparison\",",
-            "\"authority\":\"caller-declared-dry-interface\",\"units\":\"{SI_UNITS}\",\"campaign_seed_manifest_ref\":\"campaign-complete\",",
-            "\"inputs\":{{\"primary_case\":\"fillet-fixed-density\",\"radius_m\":{:.17e},\"thickness_m\":{:.17e},\"edge_radius_m\":1.0e-3,\"rolling_inclination_rad\":5.0e-2,\"static_friction_coefficient\":100.0,\"interface_system_id\":\"campaign/squat-disc->plane\",\"interface_history_id\":\"campaign/shared-matched-profile-contact-history-v1\",\"normal_reaction_mean_n\":{:.17e}}},",
+            "\"authority\":\"numerical-reference-only\",\"units\":\"{SI_UNITS}\",\"campaign_seed_manifest_ref\":\"campaign-complete\",",
+            "\"inputs\":{{\"primary_case\":\"fillet-fixed-density\",\"radius_m\":{:.17e},\"thickness_m\":{:.17e},\"edge_radius_m\":1.0e-3,\"rolling_inclination_rad\":5.0e-2,\"static_friction_coefficient\":100.0,\"interface_system_id\":\"campaign/squat-disc->plane\",\"interface_history_id\":\"campaign/shared-matched-profile-contact-history-v1\",\"dry_interface_authority\":\"caller-declared-dry-interface\"}},",
             "\"budget\":{{\"timestep_s\":1.0e-6,\"maximum_steps\":8,\"declared_cx_poll_quota\":{EXECUTION_POLL_QUOTA},\"declared_cx_cost_quota\":{EXECUTION_COST_QUOTA}}},\"terminal\":\"horizon-reached\",",
             "\"cases\":{{\"sharp_fixed_density\":{},\"fillet_fixed_density\":{},\"fillet_equal_mass\":{}}},",
             "\"deltas\":{{\"fillet_fixed_density_minus_sharp_fixed_density\":{},\"fillet_equal_mass_minus_sharp_fixed_density\":{}}},",
+            "\"loads_n\":{{\"normal_reaction_mean_n\":{:.17e}}},",
             "\"powers_w\":{{\"gravity\":{:.17e},\"contact_impulse\":{:.17e}}},",
-            "\"work_j\":{{\"mechanical_balance\":{:.17e}}},",
-            "\"residual\":{{\"energy_j\":{:.17e},\"refinement_position_m\":{:.17e},\"refinement_energy_j\":{:.17e}}},",
+            "\"work_j\":{{}},",
+            "\"residual\":{{\"energy_j\":{:.17e},\"sum_abs_energy_j\":{:.17e},\"max_abs_energy_j\":{:.17e},\"energy_scale_j\":{:.17e},\"energy_residual_limit_j\":{:.17e},\"sum_abs_energy_limit_j\":{:.17e},\"max_abs_energy_limit_j\":{:.17e},\"refinement_position_m\":{:.17e},\"refinement_position_limit_m\":{:.17e},\"refinement_energy_j\":{:.17e},\"refinement_energy_limit_j\":{:.17e}}},",
             "\"no_claim\":\"{NO_PHYSICAL_VALIDATION};one-way-not-closed-coupling;mu-100-branch-isolation-control;matched-geometry-comparison-not-outcome-ranking-or-physical-validation;{DECLARED_CX_BUDGET_NO_CLAIM}\"}}"
         ),
         radius_m,
         thickness_m,
-        normal_reaction_n,
-        contact_case_json(&sharp_case),
-        contact_case_json(&filleted_case),
-        contact_case_json(&equal_mass_case),
+        contact_case_json(&sharp_case)?,
+        contact_case_json(&filleted_case)?,
+        contact_case_json(&equal_mass_case)?,
         contact_case_delta_json(&filleted_case, &sharp_case),
         contact_case_delta_json(&equal_mass_case, &sharp_case),
+        normal_reaction_n,
         average_gravity_power(&filleted_case),
         average_contact_power(&filleted_case),
-        filleted_case.summed_mechanical_balance_j,
-        filleted_case.summed_mechanical_balance_j,
+        filleted_case.summed_mechanical_balance_residual_j,
+        filleted_case.sum_abs_mechanical_balance_residual_j,
+        filleted_case.max_abs_mechanical_balance_residual_j,
+        filleted_case.mechanical_energy_scale_j,
+        filleted_case.mechanical_energy_scale_j * 1.0e-4,
+        filleted_case.mechanical_energy_scale_j * 1.0e-3,
+        filleted_case.mechanical_energy_scale_j * 1.0e-4,
         filleted_case.refinement.final_position_difference_m,
+        radius_m * 1.0e-1,
         filleted_case
             .refinement
             .final_mechanical_energy_difference_j,
+        filleted_case.mechanical_energy_scale_j * 1.0e-1,
+        SCHEMA = SCHEMA,
+        SI_UNITS = SI_UNITS,
+        EXECUTION_POLL_QUOTA = EXECUTION_POLL_QUOTA,
+        EXECUTION_COST_QUOTA = EXECUTION_COST_QUOTA,
+        NO_PHYSICAL_VALIDATION = NO_PHYSICAL_VALIDATION,
+        DECLARED_CX_BUDGET_NO_CLAIM = DECLARED_CX_BUDGET_NO_CLAIM,
     );
     Ok(ContactSnapshot {
         normal_reaction_n,
@@ -461,9 +494,11 @@ fn run_contact_case(
             .map_err(|error| format!("{label} profile refinement: {error}"))
     })?;
     let mut impulse_sum = 0.0;
-    let mut peak_reaction_n = 0.0;
-    let mut max_required_static_mu = 0.0;
-    let mut summed_mechanical_balance_j = 0.0;
+    let mut peak_reaction_n = 0.0_f64;
+    let mut max_required_static_mu = 0.0_f64;
+    let mut summed_mechanical_balance_residual_j = 0.0;
+    let mut sum_abs_mechanical_balance_residual_j = 0.0;
+    let mut max_abs_mechanical_balance_residual_j = 0.0_f64;
     for step in &run.steps {
         if !(step.normal_impulse_ns.is_finite() && step.normal_impulse_ns > 0.0) {
             return Err(format!("{label} has zero or invalid normal impulse"));
@@ -472,7 +507,11 @@ fn run_contact_case(
         peak_reaction_n = peak_reaction_n.max(step.normal_impulse_ns / timestep_s);
         max_required_static_mu = max_required_static_mu
             .max(step.stick.required_tangential_impulse_ns / step.stick.normal_impulse_ns);
-        summed_mechanical_balance_j += step.energy.mechanical_balance_residual_j;
+        let residual_j = step.energy.mechanical_balance_residual_j;
+        summed_mechanical_balance_residual_j += residual_j;
+        sum_abs_mechanical_balance_residual_j += residual_j.abs();
+        max_abs_mechanical_balance_residual_j =
+            max_abs_mechanical_balance_residual_j.max(residual_j.abs());
     }
     let count = run.steps.len();
     if count == 0 {
@@ -481,7 +520,7 @@ fn run_contact_case(
     let final_reaction_n = run
         .steps
         .last()
-        .expect("nonempty checked above")
+        .ok_or_else(|| format!("{label} contact retained no terminal step"))?
         .normal_impulse_ns
         / timestep_s;
     Ok(ContactCase {
@@ -496,15 +535,19 @@ fn run_contact_case(
         final_reaction_n,
         peak_reaction_n,
         max_required_static_mu,
-        summed_mechanical_balance_j,
+        summed_mechanical_balance_residual_j,
+        sum_abs_mechanical_balance_residual_j,
+        max_abs_mechanical_balance_residual_j,
+        mechanical_energy_scale_j: (specimen.properties.mass * 9.806_65 * radius_m).max(1.0e-12),
     })
 }
 
-fn contact_case_json(case: &ContactCase) -> String {
+fn contact_case_json(case: &ContactCase) -> Result<String, String> {
+    validate_contact_case(case)?;
     let support = case.initializer.contact.contact.radius_world_m;
     let velocity = case.initializer.initial_contact_velocity_world_m_per_s;
-    format!(
-        "{{\"label\":\"{}\",\"density_kg_m3\":{:.17e},\"mass_kg\":{:.17e},\"inertia_transverse_kg_m2\":{:.17e},\"inertia_axial_kg_m2\":{:.17e},\"support_vector_world_m\":{{\"x\":{:.17e},\"y\":{:.17e},\"z\":{:.17e}}},\"center_height_m\":{:.17e},\"initial_material_contact_speed_m_per_s\":{:.17e},\"mean_reaction_n\":{:.17e},\"final_reaction_n\":{:.17e},\"peak_reaction_n\":{:.17e},\"max_required_static_mu\":{:.17e},\"summed_mechanical_balance_j\":{:.17e},\"refinement_position_m\":{:.17e},\"refinement_energy_j\":{:.17e},\"terminal\":\"horizon-reached\"}}",
+    Ok(format!(
+        "{{\"label\":\"{}\",\"density_kg_m3\":{:.17e},\"mass_kg\":{:.17e},\"inertia_transverse_kg_m2\":{:.17e},\"inertia_axial_kg_m2\":{:.17e},\"support_vector_world_m\":{{\"x\":{:.17e},\"y\":{:.17e},\"z\":{:.17e}}},\"center_height_m\":{:.17e},\"initial_material_contact_speed_m_per_s\":{:.17e},\"mean_reaction_n\":{:.17e},\"final_reaction_n\":{:.17e},\"peak_reaction_n\":{:.17e},\"max_required_static_mu\":{:.17e},\"summed_mechanical_balance_residual_j\":{:.17e},\"sum_abs_mechanical_balance_residual_j\":{:.17e},\"max_abs_mechanical_balance_residual_j\":{:.17e},\"mechanical_energy_scale_j\":{:.17e},\"energy_residual_limit_j\":{:.17e},\"sum_abs_energy_limit_j\":{:.17e},\"max_abs_energy_limit_j\":{:.17e},\"refinement_position_m\":{:.17e},\"refinement_energy_j\":{:.17e},\"quarter_step_refinement\":{},\"terminal\":\"horizon-reached\"}}",
         case.label,
         case.density_kg_m3,
         case.properties.mass,
@@ -523,20 +566,239 @@ fn contact_case_json(case: &ContactCase) -> String {
         case.final_reaction_n,
         case.peak_reaction_n,
         case.max_required_static_mu,
-        case.summed_mechanical_balance_j,
+        case.summed_mechanical_balance_residual_j,
+        case.sum_abs_mechanical_balance_residual_j,
+        case.max_abs_mechanical_balance_residual_j,
+        case.mechanical_energy_scale_j,
+        case.mechanical_energy_scale_j * 1.0e-4,
+        case.mechanical_energy_scale_j * 1.0e-3,
+        case.mechanical_energy_scale_j * 1.0e-4,
         case.refinement.final_position_difference_m,
         case.refinement.final_mechanical_energy_difference_j,
-    )
+        quarter_step_refinement_json(case)?,
+    ))
+}
+
+fn validate_contact_case(case: &ContactCase) -> Result<(), String> {
+    for (rung, run) in [
+        ("primary", &case.run),
+        ("coarse", &case.refinement.coarse),
+        ("half-step", &case.refinement.fine),
+        ("quarter-step", &case.refinement.reference),
+    ] {
+        if !matches!(run.termination, ContactTermination::HorizonReached) {
+            return Err(format!(
+                "{} {rung} contact did not reach its required horizon",
+                case.label
+            ));
+        }
+    }
+
+    let support = case.initializer.contact.contact.radius_world_m;
+    let velocity = case.initializer.initial_contact_velocity_world_m_per_s;
+    let refinement = &case.refinement;
+    let finite_values = [
+        ("density_kg_m3", case.density_kg_m3),
+        ("mass_kg", case.properties.mass),
+        (
+            "inertia_transverse_kg_m2",
+            case.properties.principal_inertia.transverse,
+        ),
+        (
+            "inertia_axial_kg_m2",
+            case.properties.principal_inertia.axial,
+        ),
+        ("support_x_m", support.x),
+        ("support_y_m", support.y),
+        ("support_z_m", support.z),
+        (
+            "center_height_m",
+            case.initializer.state.pose().position_world().z,
+        ),
+        ("initial_contact_velocity_x_m_per_s", velocity.x),
+        ("initial_contact_velocity_y_m_per_s", velocity.y),
+        ("initial_contact_velocity_z_m_per_s", velocity.z),
+        ("mean_reaction_n", case.mean_reaction_n),
+        ("final_reaction_n", case.final_reaction_n),
+        ("peak_reaction_n", case.peak_reaction_n),
+        ("max_required_static_mu", case.max_required_static_mu),
+        (
+            "summed_mechanical_balance_residual_j",
+            case.summed_mechanical_balance_residual_j,
+        ),
+        (
+            "sum_abs_mechanical_balance_residual_j",
+            case.sum_abs_mechanical_balance_residual_j,
+        ),
+        (
+            "max_abs_mechanical_balance_residual_j",
+            case.max_abs_mechanical_balance_residual_j,
+        ),
+        ("mechanical_energy_scale_j", case.mechanical_energy_scale_j),
+        (
+            "refinement_position_m",
+            refinement.final_position_difference_m,
+        ),
+        (
+            "refinement_energy_j",
+            refinement.final_mechanical_energy_difference_j,
+        ),
+        (
+            "coarse_reference_position_m",
+            refinement.coarse_reference_position_difference_m,
+        ),
+        (
+            "fine_reference_position_m",
+            refinement.fine_reference_position_difference_m,
+        ),
+        (
+            "coarse_reference_linear_momentum",
+            refinement.coarse_reference_linear_momentum_difference_kg_m_per_s,
+        ),
+        (
+            "fine_reference_linear_momentum",
+            refinement.fine_reference_linear_momentum_difference_kg_m_per_s,
+        ),
+        (
+            "coarse_reference_angular_momentum",
+            refinement.coarse_reference_angular_momentum_difference_kg_m2_per_s,
+        ),
+        (
+            "fine_reference_angular_momentum",
+            refinement.fine_reference_angular_momentum_difference_kg_m2_per_s,
+        ),
+        (
+            "coarse_reference_orientation_rad",
+            refinement.coarse_reference_orientation_angle_rad,
+        ),
+        (
+            "fine_reference_orientation_rad",
+            refinement.fine_reference_orientation_angle_rad,
+        ),
+    ];
+    for (field, value) in finite_values {
+        if !value.is_finite() {
+            return Err(format!("{} emitted non-finite {field}", case.label));
+        }
+    }
+
+    let energy_limit_j = case.mechanical_energy_scale_j * 1.0e-4;
+    let sum_abs_limit_j = case.mechanical_energy_scale_j * 1.0e-3;
+    let position_limit_m = case.input.controls.geometry.radius_m * 1.0e-1;
+    let refinement_energy_limit_j = case.mechanical_energy_scale_j * 1.0e-1;
+    if !(case.mechanical_energy_scale_j > 0.0
+        && case.mean_reaction_n > 0.0
+        && case.final_reaction_n > 0.0
+        && case.peak_reaction_n > 0.0
+        && case.max_required_static_mu >= 0.0)
+    {
+        return Err(format!(
+            "{} contact produced a non-positive scale or reaction",
+            case.label
+        ));
+    }
+    if case.summed_mechanical_balance_residual_j.abs() > energy_limit_j
+        || case.sum_abs_mechanical_balance_residual_j > sum_abs_limit_j
+        || case.max_abs_mechanical_balance_residual_j > energy_limit_j
+    {
+        return Err(format!(
+            "{} contact energy residual exceeded its declared bound",
+            case.label
+        ));
+    }
+    if refinement.final_position_difference_m > position_limit_m
+        || refinement.final_mechanical_energy_difference_j.abs() > refinement_energy_limit_j
+    {
+        return Err(format!(
+            "{} contact timestep refinement exceeded its declared bound",
+            case.label
+        ));
+    }
+    if !(refinement.position_refinement_improved
+        && refinement.linear_momentum_refinement_improved
+        && refinement.angular_momentum_refinement_improved
+        && refinement.orientation_refinement_improved)
+    {
+        return Err(format!(
+            "{} half-step contact endpoint did not improve against the quarter-step reference",
+            case.label
+        ));
+    }
+
+    let reference_energy_j = terminal_mechanical_energy_j(&refinement.reference, "quarter-step")?;
+    let coarse_energy_error_j =
+        (terminal_mechanical_energy_j(&refinement.coarse, "coarse")? - reference_energy_j).abs();
+    let fine_energy_error_j =
+        (terminal_mechanical_energy_j(&refinement.fine, "half-step")? - reference_energy_j).abs();
+    if !(reference_energy_j.is_finite()
+        && coarse_energy_error_j.is_finite()
+        && fine_energy_error_j.is_finite()
+        && fine_energy_error_j <= coarse_energy_error_j)
+    {
+        return Err(format!(
+            "{} half-step contact energy did not improve against the quarter-step reference",
+            case.label
+        ));
+    }
+    Ok(())
+}
+
+fn terminal_mechanical_energy_j(
+    run: &fs_euler_disc_e2e::ContactDynamicsRun,
+    rung: &str,
+) -> Result<f64, String> {
+    run.steps
+        .last()
+        .map(|step| step.energy.mechanical_energy_after_j)
+        .ok_or_else(|| format!("{rung} refinement retained no terminal energy step"))
+}
+
+fn quarter_step_refinement_json(case: &ContactCase) -> Result<String, String> {
+    let refinement = &case.refinement;
+    let reference_energy_j = terminal_mechanical_energy_j(&refinement.reference, "quarter-step")?;
+    let coarse_energy_error_j =
+        (terminal_mechanical_energy_j(&refinement.coarse, "coarse")? - reference_energy_j).abs();
+    let fine_energy_error_j =
+        (terminal_mechanical_energy_j(&refinement.fine, "half-step")? - reference_energy_j).abs();
+    Ok(format!(
+        concat!(
+            "{{\"coarse_position_error_m\":{:.17e},\"fine_position_error_m\":{:.17e},",
+            "\"coarse_linear_momentum_error_kg_m_per_s\":{:.17e},\"fine_linear_momentum_error_kg_m_per_s\":{:.17e},",
+            "\"coarse_angular_momentum_error_kg_m2_per_s\":{:.17e},\"fine_angular_momentum_error_kg_m2_per_s\":{:.17e},",
+            "\"coarse_orientation_error_rad\":{:.17e},\"fine_orientation_error_rad\":{:.17e},",
+            "\"coarse_energy_error_j\":{:.17e},\"fine_energy_error_j\":{:.17e},",
+            "\"position_refinement_improved\":{},\"linear_momentum_refinement_improved\":{},",
+            "\"angular_momentum_refinement_improved\":{},\"orientation_refinement_improved\":{},\"energy_refinement_improved\":{}}}"
+        ),
+        refinement.coarse_reference_position_difference_m,
+        refinement.fine_reference_position_difference_m,
+        refinement.coarse_reference_linear_momentum_difference_kg_m_per_s,
+        refinement.fine_reference_linear_momentum_difference_kg_m_per_s,
+        refinement.coarse_reference_angular_momentum_difference_kg_m2_per_s,
+        refinement.fine_reference_angular_momentum_difference_kg_m2_per_s,
+        refinement.coarse_reference_orientation_angle_rad,
+        refinement.fine_reference_orientation_angle_rad,
+        coarse_energy_error_j,
+        fine_energy_error_j,
+        refinement.position_refinement_improved,
+        refinement.linear_momentum_refinement_improved,
+        refinement.angular_momentum_refinement_improved,
+        refinement.orientation_refinement_improved,
+        fine_energy_error_j <= coarse_energy_error_j,
+    ))
 }
 
 fn contact_case_delta_json(lhs: &ContactCase, rhs: &ContactCase) -> String {
     format!(
-        "{{\"mean_reaction_n\":{:.17e},\"final_reaction_n\":{:.17e},\"peak_reaction_n\":{:.17e},\"max_required_static_mu\":{:.17e},\"summed_mechanical_balance_j\":{:.17e},\"refinement_position_m\":{:.17e},\"refinement_energy_j\":{:.17e}}}",
+        "{{\"mean_reaction_n\":{:.17e},\"final_reaction_n\":{:.17e},\"peak_reaction_n\":{:.17e},\"max_required_static_mu\":{:.17e},\"summed_mechanical_balance_residual_j\":{:.17e},\"sum_abs_mechanical_balance_residual_j\":{:.17e},\"max_abs_mechanical_balance_residual_j\":{:.17e},\"mechanical_energy_scale_j\":{:.17e},\"refinement_position_m\":{:.17e},\"refinement_energy_j\":{:.17e}}}",
         lhs.mean_reaction_n - rhs.mean_reaction_n,
         lhs.final_reaction_n - rhs.final_reaction_n,
         lhs.peak_reaction_n - rhs.peak_reaction_n,
         lhs.max_required_static_mu - rhs.max_required_static_mu,
-        lhs.summed_mechanical_balance_j - rhs.summed_mechanical_balance_j,
+        lhs.summed_mechanical_balance_residual_j - rhs.summed_mechanical_balance_residual_j,
+        lhs.sum_abs_mechanical_balance_residual_j - rhs.sum_abs_mechanical_balance_residual_j,
+        lhs.max_abs_mechanical_balance_residual_j - rhs.max_abs_mechanical_balance_residual_j,
+        lhs.mechanical_energy_scale_j - rhs.mechanical_energy_scale_j,
         lhs.refinement.final_position_difference_m - rhs.refinement.final_position_difference_m,
         lhs.refinement.final_mechanical_energy_difference_j
             - rhs.refinement.final_mechanical_energy_difference_j,
@@ -659,6 +921,57 @@ fn reduced_decay_record(
     let final_sample = run
         .final_sample()
         .map_err(|error| format!("reduced decay final sample: {error}"))?;
+    let energy_scale_j =
+        (input.mass_kg * input.gravity_m_per_s2 * input.radius_m * input.initial_theta_rad)
+            .max(1.0e-12);
+    let closure_limit_j = energy_scale_j * 1.0e-4;
+    let refinement_work_limit_j = energy_scale_j * 1.0e-1;
+    let refinement_time_limit_s = final_sample.time_s.max(input.timestep_s) * 1.0e-1;
+    if !matches!(
+        run.terminal,
+        fs_euler_disc_e2e::ReducedDecayTerminal::ValidityCutoff
+    ) {
+        return Err(format!(
+            "{scenario} exhausted its step budget before the validity cutoff"
+        ));
+    }
+    for (field, value) in [
+        ("final_time_s", final_sample.time_s),
+        ("final_theta_rad", final_sample.theta_rad),
+        ("final_omega_rad_s", final_sample.omega_rad_s),
+        ("final_energy_j", final_sample.energy_j),
+        ("dry_power_w", final_sample.powers.dry_contour_w),
+        (
+            "boundary_layer_power_w",
+            final_sample.powers.bildsten_boundary_layer_w,
+        ),
+        ("dry_work_j", final_sample.work.dry_contour_j),
+        (
+            "boundary_layer_work_j",
+            final_sample.work.bildsten_boundary_layer_j,
+        ),
+        ("energy_closure_residual_j", run.energy_closure_residual_j),
+        (
+            "refinement_terminal_time_difference_s",
+            refinement.terminal_time_difference_s,
+        ),
+        (
+            "refinement_total_work_difference_j",
+            refinement.total_work_difference_j,
+        ),
+    ] {
+        if !value.is_finite() {
+            return Err(format!("{scenario} emitted non-finite {field}"));
+        }
+    }
+    if run.energy_closure_residual_j.abs() > closure_limit_j
+        || refinement.terminal_time_difference_s > refinement_time_limit_s
+        || refinement.total_work_difference_j.abs() > refinement_work_limit_j
+    {
+        return Err(format!(
+            "{scenario} exceeded its declared closure or refinement bound"
+        ));
+    }
     let dry_source = run.provenance.dry_source_id.as_deref().unwrap_or("none");
     let bildsten_source = run
         .provenance
@@ -670,10 +983,7 @@ fn reduced_decay_record(
     } else {
         bildsten_source
     };
-    let terminal = match run.terminal {
-        fs_euler_disc_e2e::ReducedDecayTerminal::ValidityCutoff => "validity-cutoff",
-        fs_euler_disc_e2e::ReducedDecayTerminal::StepBudgetExhausted => "step-budget-exhausted",
-    };
+    let terminal = "validity-cutoff";
     let crossover = crossover_receipt(&input, &run)?;
     Ok(format!(
         concat!(
@@ -686,8 +996,8 @@ fn reduced_decay_record(
             "\"work_j\":{{\"dry_contour\":{:.17e},\"bildsten_boundary_layer\":{:.17e}}},",
             "\"final\":{{\"time_s\":{:.17e},\"theta_rad\":{:.17e},\"omega_rad_s\":{:.17e},\"energy_j\":{:.17e}}},",
             "\"crossover\":{},",
-            "\"residual\":{{\"energy_j\":{:.17e},\"refinement_time_s\":{:.17e},",
-            "\"refinement_work_j\":{:.17e}}},\"no_claim\":\"{};{};{};",
+            "\"residual\":{{\"energy_j\":{:.17e},\"energy_scale_j\":{:.17e},\"energy_residual_limit_j\":{:.17e},\"refinement_time_s\":{:.17e},\"refinement_time_limit_s\":{:.17e},",
+            "\"refinement_work_j\":{:.17e},\"refinement_work_limit_j\":{:.17e}}},\"no_claim\":\"{};{};{};",
             "numerical-self-consistency-only\"}}"
         ),
         scenario,
@@ -740,11 +1050,17 @@ fn reduced_decay_record(
         final_sample.energy_j,
         crossover,
         run.energy_closure_residual_j,
+        energy_scale_j,
+        closure_limit_j,
         refinement.terminal_time_difference_s,
+        refinement_time_limit_s,
         refinement.total_work_difference_j,
+        refinement_work_limit_j,
         NO_PHYSICAL_VALIDATION,
         run.provenance.physical_validation,
         run.provenance.cancellation_capability,
+        SCHEMA = SCHEMA,
+        SI_UNITS = SI_UNITS,
     ))
 }
 
@@ -934,5 +1250,8 @@ fn flux_probe_record(
         work.relative_dissipation_j,
         work.body_work_j,
         wrench.receipt.relative_power_w,
+        SCHEMA = SCHEMA,
+        SI_UNITS = SI_UNITS,
+        NO_PHYSICAL_VALIDATION = NO_PHYSICAL_VALIDATION,
     ))
 }
