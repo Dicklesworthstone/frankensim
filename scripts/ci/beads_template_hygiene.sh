@@ -63584,10 +63584,8 @@ def v2_fixture_callback_data_projection(value: Any) -> Any:
     """Project one selected-resource callback through the mature graph."""
     context = v2_new_refusal_projection_context(
         {
-            "scalar_bytes": V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP,
-            "projection_bytes": (
-                V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP
-            ),
+            "scalar_bytes": V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
+            "projection_bytes": V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
         },
         authorized_external_capabilities=(
             V2_FIXTURE_SELECTED_RESOURCE_CAPABILITY,
@@ -63607,7 +63605,7 @@ def v2_fixture_callback_data_projection(value: Any) -> Any:
         ) from error
     v2_require_fixture_resource_cap(
         len(payload),
-        V2_FIXTURE_RESOURCE_ADDITIONAL_STATE_BYTES_CAP,
+        V2_FIXTURE_RESOURCE_PROJECTION_BYTES_CAP,
         diagnostic="fixture callback data exceeds its projection byte cap",
     )
     return projection
