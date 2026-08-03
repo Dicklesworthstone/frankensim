@@ -63,6 +63,7 @@ fn fixture(cells: usize) -> GasFilmInput {
             gap_rate_m_per_s: 0.0,
         },
         initial_absolute_pressure_pa: pressure,
+        gauge_reference_absolute_pressure_pa: pressure,
         timestep_s: 1.0e-5,
         budget: GasFilmBudget {
             maximum_iterations: 2_000,
@@ -104,6 +105,21 @@ fn g1_planar_couette_is_uniform_and_has_analytic_shear_and_heat() {
     }
     for shear in step.receipt.upper_wall_shear_pa {
         assert!((shear.expect("active") - expected_shear).abs() < 1.0e-12);
+    }
+    for index in 0..input.grid.gap_m.len() {
+        let wall_on_gas = step.receipt.upper_wall_on_gas_tangential_traction_pa[index]
+            .expect("active upper-wall traction");
+        assert_eq!(
+            step.receipt.gas_on_upper_wall_tangential_traction_pa[index],
+            Some(-wall_on_gas)
+        );
+        let gas_on_wall = step.receipt.gas_on_upper_wall_normal_traction_pa[index]
+            .expect("active gas pressure traction");
+        assert_eq!(
+            step.receipt.upper_wall_on_gas_normal_traction_pa[index],
+            Some(-gas_on_wall)
+        );
+        assert_eq!(step.receipt.upper_wall_shear_pa[index], Some(wall_on_gas));
     }
     let expected_power = expected_shear * 2.0 * input.grid.length_m;
     assert!((step.receipt.wall_power_to_gas_w_per_m - expected_power).abs() < 1.0e-12);
@@ -363,4 +379,89 @@ fn checkpoint_replay_and_budget_refusal_are_deterministic() {
         first.checkpoint, checkpoint_before_refusal,
         "a refused solve cannot mutate a published checkpoint"
     );
+}
+
+#[test]
+fn checkpoint_fingerprint_rejects_each_semantic_mutation_group() {
+    let input = fixture(8);
+    let checkpoint = solve_isothermal_gas_film_1d(&input, None)
+        .expect("base checkpoint")
+        .checkpoint;
+    let mut variants = Vec::new();
+    let mut identity = input.clone();
+    identity.identity.frame_id = "other-fixture-line".to_owned();
+    variants.push(identity);
+    let mut gas = input.clone();
+    gas.gas.dynamic_viscosity_pa_s *= 1.1;
+    variants.push(gas);
+    let mut grid_and_mask = input.clone();
+    grid_and_mask.grid.gap_m[0] *= 1.1;
+    variants.push(grid_and_mask);
+    let mut topology = input.clone();
+    topology.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: 101_325.0,
+        right_absolute_pressure_pa: 101_325.0,
+    };
+    variants.push(topology);
+    let mut slip_and_roughness = input.clone();
+    slip_and_roughness.slip_policy = SlipPolicy::NoSlipContinuum {
+        source_id: "other-no-slip-source".to_owned(),
+    };
+    slip_and_roughness.roughness_policy = RoughnessPolicy::ResolvedSmooth {
+        source_id: "other-roughness-source".to_owned(),
+        maximum_roughness_m: 2.0e-8,
+    };
+    variants.push(slip_and_roughness);
+    let mut applicability = input.clone();
+    applicability.applicability.maximum_gap_slope = 0.2;
+    applicability.uncertainty.gap_relative_bound = 0.01;
+    variants.push(applicability);
+    let mut wall = input.clone();
+    wall.wall_motion.upper_tangential_velocity_m_per_s = 0.1;
+    variants.push(wall);
+    let mut initial_and_gauge = input.clone();
+    initial_and_gauge.initial_absolute_pressure_pa = 102_000.0;
+    initial_and_gauge.gauge_reference_absolute_pressure_pa = 99_000.0;
+    initial_and_gauge.gas.declared_density_kg_m3 = 102_000.0
+        / (initial_and_gauge.gas.specific_gas_constant_j_kg_k
+            * initial_and_gauge.gas.temperature_k);
+    variants.push(initial_and_gauge);
+    let mut timestep_and_budget = input.clone();
+    timestep_and_budget.timestep_s *= 2.0;
+    timestep_and_budget.budget.relaxation = 0.7;
+    variants.push(timestep_and_budget);
+    for changed in variants {
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&changed, Some(&checkpoint)),
+            Err(GasFilmError::CheckpointMismatch {
+                field: "configuration_fingerprint"
+            })
+        );
+    }
+}
+
+#[test]
+fn gauge_reference_and_mass_flux_sign_receipts_are_independent() {
+    let mut uniform = fixture(6);
+    uniform.gauge_reference_absolute_pressure_pa = 100_000.0;
+    let uniform_step = solve_isothermal_gas_film_1d(&uniform, None).expect("uniform gauge case");
+    assert!(
+        (uniform_step.receipt.gauge_pressure_load_n_per_m
+            - (101_325.0 - 100_000.0) * uniform.grid.length_m)
+            .abs()
+            < 1.0e-12
+    );
+
+    let mut vented = fixture(8);
+    vented.boundary = GasFilmBoundaryTopology::Vented {
+        cell_index: 3,
+        absolute_pressure_pa: 120_000.0,
+    };
+    let step = solve_isothermal_gas_film_1d(&vented, None).expect("vented sign case");
+    assert!(step.receipt.vent_outward_mass_flux_kg_per_m_s > 0.0);
+    let independently_summed = step.receipt.storage_rate_kg_per_m_s
+        + step.receipt.left_boundary_outward_mass_flux_kg_per_m_s
+        + step.receipt.right_boundary_outward_mass_flux_kg_per_m_s
+        + step.receipt.vent_outward_mass_flux_kg_per_m_s;
+    assert!((independently_summed - step.receipt.mass_closure_residual_kg_per_m_s).abs() < 1.0e-12);
 }

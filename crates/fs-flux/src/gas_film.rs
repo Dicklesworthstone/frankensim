@@ -8,6 +8,7 @@
 //! anonymous lower-gap floor.
 
 use core::fmt;
+use core::fmt::Write;
 
 const MODEL_ID: &str = "fs-flux/isothermal-compressible-reynolds-1d-v1";
 const MAX_GEOMETRIC_CELLS: usize = 4_096;
@@ -226,6 +227,12 @@ pub struct GasFilmInput {
     pub wall_motion: MovingWallInput,
     /// Initial absolute pressure for a fresh state [Pa].
     pub initial_absolute_pressure_pa: f64,
+    /// Absolute pressure used only as the named gauge-load reference [Pa].
+    ///
+    /// This is intentionally distinct from the initial condition, so a restart
+    /// or non-equilibrium initial field cannot silently redefine a reported
+    /// gauge load.
+    pub gauge_reference_absolute_pressure_pa: f64,
     /// Fixed physical step size [s].
     pub timestep_s: f64,
     /// Bounded numerical controls.
@@ -245,6 +252,8 @@ pub struct GasFilmCheckpoint {
     pub input_authority: GasFilmInputAuthority,
     /// Caller-declared input uncertainty retained without propagation.
     pub input_uncertainty: GasFilmUncertainty,
+    /// Complete deterministic input fingerprint required for restart.
+    pub configuration_fingerprint: String,
     /// Pressure at active cells only [Pa absolute].
     pub active_absolute_pressure_pa: Vec<f64>,
     /// Exact active-cell gaps at the accepted step [m].
@@ -284,9 +293,18 @@ pub struct GasFilmReceipt {
     pub mass_closure_residual_kg_per_m_s: f64,
     /// Integral of absolute pressure over active gas area [N m^-1].
     pub absolute_pressure_load_n_per_m: f64,
-    /// Integral of gauge pressure relative to initial pressure [N m^-1].
+    /// Integral of gauge pressure relative to the declared gauge reference [N m^-1].
     pub gauge_pressure_load_n_per_m: f64,
-    /// Per-cell tangential stress applied by the upper wall to the gas [Pa]; excluded cells are `None`.
+    /// Per-cell normal traction of gas on the upper wall [Pa]; positive is compressive.
+    pub gas_on_upper_wall_normal_traction_pa: Vec<Option<f64>>,
+    /// Per-cell normal traction of upper wall on gas [Pa]; exactly the negative of gas-on-wall.
+    pub upper_wall_on_gas_normal_traction_pa: Vec<Option<f64>>,
+    /// Per-cell tangential traction of gas on the upper wall [Pa].
+    pub gas_on_upper_wall_tangential_traction_pa: Vec<Option<f64>>,
+    /// Per-cell tangential traction of upper wall on gas [Pa]; exactly the negative of gas-on-wall.
+    pub upper_wall_on_gas_tangential_traction_pa: Vec<Option<f64>>,
+    /// Legacy-named alias for upper-wall-on-gas tangential traction [Pa].
+    /// Excluded cells are `None`; new callers should use the explicit field above.
     pub upper_wall_shear_pa: Vec<Option<f64>>,
     /// Normal moving-gap mechanical power into gas, `-integral(p dh/dt dx)` [W m^-1].
     pub normal_gap_power_to_gas_w_per_m: f64,
@@ -486,6 +504,10 @@ impl GasFilmInput {
             self.initial_absolute_pressure_pa,
             "initial_absolute_pressure_pa",
         )?;
+        positive(
+            self.gauge_reference_absolute_pressure_pa,
+            "gauge_reference_absolute_pressure_pa",
+        )?;
         positive(self.timestep_s, "timestep_s")?;
         positive(
             self.applicability.mean_free_path_m,
@@ -673,6 +695,11 @@ fn initial_state(
                     field: "input_authority",
                 });
             }
+            if state.configuration_fingerprint != configuration_fingerprint(input) {
+                return Err(GasFilmError::CheckpointMismatch {
+                    field: "configuration_fingerprint",
+                });
+            }
             if state.active_cells != active
                 || state.active_absolute_pressure_pa.len() != active
                 || state.active_gap_m.len() != active
@@ -694,6 +721,180 @@ fn initial_state(
             ))
         }
     }
+}
+
+/// Deterministic, complete restart identity for every semantic input.
+///
+/// Floats are represented by IEEE-754 bits after validation, preserving exact
+/// caller values without locale/formatting dependence.  This is an identity
+/// guard, not a cryptographic digest or physical-validation certificate.
+fn configuration_fingerprint(input: &GasFilmInput) -> String {
+    fn text(output: &mut String, label: &str, value: &str) {
+        let _ = write!(output, "{label}={value};");
+    }
+    fn number(output: &mut String, label: &str, value: f64) {
+        let _ = write!(output, "{label}={:016x};", value.to_bits());
+    }
+    fn count(output: &mut String, label: &str, value: usize) {
+        let _ = write!(output, "{label}={value};");
+    }
+    let mut output = String::new();
+    text(&mut output, "case", &input.identity.case_id);
+    text(&mut output, "model", &input.identity.model_id);
+    text(&mut output, "species", &input.identity.gas_species_id);
+    text(&mut output, "eos", &input.identity.eos_id);
+    text(
+        &mut output,
+        "viscosity_source",
+        &input.identity.viscosity_source_id,
+    );
+    text(&mut output, "thermal", &input.identity.thermal_model_id);
+    text(&mut output, "frame", &input.identity.frame_id);
+    let _ = write!(
+        output,
+        "seed={};authority={:?};",
+        input.identity.deterministic_seed, input.identity.authority
+    );
+    number(&mut output, "R", input.gas.specific_gas_constant_j_kg_k);
+    number(&mut output, "T", input.gas.temperature_k);
+    number(&mut output, "mu", input.gas.dynamic_viscosity_pa_s);
+    number(
+        &mut output,
+        "rho_declared",
+        input.gas.declared_density_kg_m3,
+    );
+    number(
+        &mut output,
+        "h_declared",
+        input.gas.declared_specific_enthalpy_j_kg,
+    );
+    number(&mut output, "length", input.grid.length_m);
+    count(&mut output, "gap_count", input.grid.gap_m.len());
+    for (index, gap) in input.grid.gap_m.iter().copied().enumerate() {
+        number(&mut output, &format!("gap_{index}"), gap);
+    }
+    count(
+        &mut output,
+        "mask_count",
+        input.grid.contact_exclusion.excluded.len(),
+    );
+    for (index, excluded) in input
+        .grid
+        .contact_exclusion
+        .excluded
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let _ = write!(output, "mask_{index}={excluded};");
+    }
+    match input.boundary {
+        GasFilmBoundaryTopology::Sealed => text(&mut output, "boundary", "sealed"),
+        GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa,
+            right_absolute_pressure_pa,
+        } => {
+            text(&mut output, "boundary", "open");
+            number(&mut output, "left_reservoir", left_absolute_pressure_pa);
+            number(&mut output, "right_reservoir", right_absolute_pressure_pa);
+        }
+        GasFilmBoundaryTopology::Vented {
+            cell_index,
+            absolute_pressure_pa,
+        } => {
+            text(&mut output, "boundary", "vented");
+            count(&mut output, "vent_cell", cell_index);
+            number(&mut output, "vent_reservoir", absolute_pressure_pa);
+        }
+    }
+    match &input.slip_policy {
+        SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
+        SlipPolicy::RarefiedSlipRequested { source_id } => {
+            text(&mut output, "rarefied_slip", source_id)
+        }
+    }
+    match &input.roughness_policy {
+        RoughnessPolicy::ResolvedSmooth {
+            source_id,
+            maximum_roughness_m,
+        } => {
+            text(&mut output, "roughness", source_id);
+            number(&mut output, "roughness_max", *maximum_roughness_m);
+        }
+        RoughnessPolicy::Unresolved { source_id } => {
+            text(&mut output, "roughness_unresolved", source_id)
+        }
+    }
+    number(
+        &mut output,
+        "mean_free_path",
+        input.applicability.mean_free_path_m,
+    );
+    number(
+        &mut output,
+        "knudsen_max",
+        input.applicability.maximum_knudsen_number,
+    );
+    number(
+        &mut output,
+        "slope_max",
+        input.applicability.maximum_gap_slope,
+    );
+    number(
+        &mut output,
+        "sound_speed",
+        input.applicability.speed_of_sound_m_per_s,
+    );
+    number(
+        &mut output,
+        "mach_max",
+        input.applicability.maximum_mach_number,
+    );
+    number(
+        &mut output,
+        "uncertainty_mu",
+        input.uncertainty.viscosity_relative_bound,
+    );
+    number(
+        &mut output,
+        "uncertainty_gap",
+        input.uncertainty.gap_relative_bound,
+    );
+    number(
+        &mut output,
+        "uncertainty_pressure",
+        input.uncertainty.pressure_relative_bound,
+    );
+    number(
+        &mut output,
+        "wall_lower",
+        input.wall_motion.lower_tangential_velocity_m_per_s,
+    );
+    number(
+        &mut output,
+        "wall_upper",
+        input.wall_motion.upper_tangential_velocity_m_per_s,
+    );
+    number(&mut output, "gap_rate", input.wall_motion.gap_rate_m_per_s);
+    number(
+        &mut output,
+        "initial_pressure",
+        input.initial_absolute_pressure_pa,
+    );
+    number(
+        &mut output,
+        "gauge_reference",
+        input.gauge_reference_absolute_pressure_pa,
+    );
+    number(&mut output, "timestep", input.timestep_s);
+    let _ = write!(output, "iterations={};", input.budget.maximum_iterations);
+    number(
+        &mut output,
+        "residual_tolerance",
+        input.budget.mass_residual_tolerance_kg_m2_s,
+    );
+    number(&mut output, "relaxation", input.budget.relaxation);
+    output
 }
 
 fn boundary_fluxes(
@@ -789,7 +990,7 @@ pub fn solve_isothermal_gas_film_1d(
             )
         })?;
     let mut iterations = 0;
-    let mut max_residual = 0.0;
+    let mut max_residual = 0.0_f64;
     while iterations < input.budget.maximum_iterations {
         let flux = face_fluxes(&pressure, gap, input, spacing)?;
         let mut next = pressure.clone();
@@ -903,7 +1104,7 @@ pub fn solve_isothermal_gas_film_1d(
     let right_outward = flux[active];
     let vent_outward = match input.boundary {
         GasFilmBoundaryTopology::Vented { cell_index, .. } => derived(
-            -final_cell_residual[cell_index] * spacing,
+            -cell_residual[cell_index] * spacing,
             "vent_outward_mass_flux",
         )?,
         _ => 0.0,
@@ -926,6 +1127,10 @@ pub fn solve_isothermal_gas_film_1d(
     )?;
     let mut absolute_load = 0.0;
     let mut gauge_load = 0.0;
+    let mut gas_on_upper_normal = Vec::with_capacity(input.grid.gap_m.len());
+    let mut upper_on_gas_normal = Vec::with_capacity(input.grid.gap_m.len());
+    let mut gas_on_upper_tangential = Vec::with_capacity(input.grid.gap_m.len());
+    let mut upper_on_gas_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut upper_shear = Vec::with_capacity(input.grid.gap_m.len());
     let mut viscous_power = 0.0;
     let mut normal_gap_power = 0.0;
@@ -933,6 +1138,10 @@ pub fn solve_isothermal_gas_film_1d(
         - input.wall_motion.lower_tangential_velocity_m_per_s;
     for (index, gap) in input.grid.gap_m.iter().enumerate() {
         if index >= active {
+            gas_on_upper_normal.push(None);
+            upper_on_gas_normal.push(None);
+            gas_on_upper_tangential.push(None);
+            upper_on_gas_tangential.push(None);
             upper_shear.push(None);
             continue;
         }
@@ -942,7 +1151,7 @@ pub fn solve_isothermal_gas_film_1d(
             "absolute_pressure_load_n_per_m",
         )?;
         gauge_load = derived(
-            gauge_load + (pressure_value - input.initial_absolute_pressure_pa) * spacing,
+            gauge_load + (pressure_value - input.gauge_reference_absolute_pressure_pa) * spacing,
             "gauge_pressure_load_n_per_m",
         )?;
         normal_gap_power = derived(
@@ -953,6 +1162,10 @@ pub fn solve_isothermal_gas_film_1d(
             input.gas.dynamic_viscosity_pa_s * relative_velocity / gap,
             "upper_wall_shear_pa",
         )?;
+        gas_on_upper_normal.push(Some(pressure_value));
+        upper_on_gas_normal.push(Some(-pressure_value));
+        gas_on_upper_tangential.push(Some(-shear));
+        upper_on_gas_tangential.push(Some(shear));
         upper_shear.push(Some(shear));
         viscous_power = derived(
             viscous_power + shear * relative_velocity * spacing,
@@ -991,6 +1204,10 @@ pub fn solve_isothermal_gas_film_1d(
             mass_closure_residual_kg_per_m_s: closure,
             absolute_pressure_load_n_per_m: absolute_load,
             gauge_pressure_load_n_per_m: gauge_load,
+            gas_on_upper_wall_normal_traction_pa: gas_on_upper_normal,
+            upper_wall_on_gas_normal_traction_pa: upper_on_gas_normal,
+            gas_on_upper_wall_tangential_traction_pa: gas_on_upper_tangential,
+            upper_wall_on_gas_tangential_traction_pa: upper_on_gas_tangential,
             upper_wall_shear_pa: upper_shear,
             normal_gap_power_to_gas_w_per_m: normal_gap_power,
             wall_power_to_gas_w_per_m: wall_power,
@@ -1007,6 +1224,8 @@ pub fn solve_isothermal_gas_film_1d(
             model_id: input.identity.model_id.clone(),
             case_id: input.identity.case_id.clone(),
             input_authority: input.identity.authority,
+            input_uncertainty: input.uncertainty,
+            configuration_fingerprint: configuration_fingerprint(input),
             active_absolute_pressure_pa: checkpoint_pressure,
             active_gap_m: gap.to_vec(),
             active_cells: active,

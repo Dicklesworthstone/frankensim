@@ -208,14 +208,22 @@ seed, and a bounded iteration budget.  The input checks a caller-declared
 density against the same ideal-gas EOS used in storage; density is not silently
 treated as an independent incompressible property.
 Caller-declared viscosity/gap/pressure uncertainty bounds are retained in the
-receipt but are deliberately not propagated, calibrated, or certified.
+receipt but are deliberately not propagated, calibrated, or certified.  A
+restart binds a deterministic full-configuration fingerprint over every
+identity, gas/card value, grid/mask/topology, slip/roughness/applicability,
+uncertainty, wall motion, initial and gauge-reference pressures, timestep, and
+budget field; a changed configuration refuses rather than reusing history.
 
 The discretization retains pressure-driven Poiseuille mass flux plus moving-wall
 Couette mass flux, implicit storage, uniform squeeze through exact old/new gap
 values, upper-wall Couette shear/relative dissipation heat, and signed normal
 moving-gap power `-integral(p dh/dt dx)`. It also carries
 signed boundary/vent enthalpy transport from a caller-declared specific
-enthalpy; this transport receipt is not a thermochemical calculation. `Sealed`,
+enthalpy; this transport receipt is not a thermochemical calculation. Gauge
+load is relative to a separately declared absolute pressure reference, never
+implicitly the initial condition. Per-cell receipts name both gas-on-upper-wall
+and upper-wall-on-gas normal/tangential tractions with opposite signs; the old
+`upper_wall_shear_pa` remains only as the upper-wall-on-gas alias. `Sealed`,
 two-reservoir `Open`, and one named-cell `Vented` topology are admitted.  The
 receipt retains gas storage, every boundary/vent mass flux, their global closure
 defect, pressure load, wall shear, wall work/heat, residual, iteration count,
