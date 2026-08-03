@@ -66,6 +66,65 @@ fn input(damping: DampingModel) -> BaseResponseInput {
     }
 }
 
+fn moving_input(damping: DampingModel) -> BaseResponseInput {
+    let support = ShellSupport {
+        node_indices: [0, 1, 2],
+        normal: [0.0, 0.0, 1.0],
+    };
+    BaseResponseInput {
+        plate: ShellPlate {
+            nodes: vec![
+                ShellNode {
+                    position_m: [-0.12, -0.10, 0.0],
+                },
+                ShellNode {
+                    position_m: [0.12, -0.10, 0.0],
+                },
+                ShellNode {
+                    position_m: [0.0, 0.14, 0.0],
+                },
+                ShellNode {
+                    position_m: [-0.025, -0.015, 0.0],
+                },
+                ShellNode {
+                    position_m: [0.035, 0.025, 0.0],
+                },
+            ],
+            triangles: vec![[0, 1, 3], [1, 4, 3], [1, 2, 4], [2, 0, 3], [2, 3, 4]],
+            thickness_m: 0.004,
+            material: ShellMaterial {
+                youngs_modulus_pa: 70.0e9,
+                poisson_ratio: 0.33,
+                density_kg_m3: 2_700.0,
+            },
+            identity: ShellIdentity {
+                model_id: "e2e/moving-base-response-v1".into(),
+                source_id: "synthetic/flat-tripod-two-free-nodes".into(),
+                state_id: "initial".into(),
+            },
+            support: Some(support),
+            damping,
+            budget: AssemblyBudget::default(),
+        },
+        level_support: LevelSupportInput {
+            support,
+            level_normal: [0.0, 0.0, 1.0],
+            maximum_tilt_rad: 1.0e-6,
+        },
+        geometry_scope: BaseGeometryScope::FlatSinglePatch,
+        contact_scope: ContactLoadScope::NodalNormalLoad,
+        load: MovingContactLoad {
+            start_node: 3,
+            end_node: 4,
+            normal_force_n: 1.0,
+        },
+        initial_modal_displacement_m: 0.0,
+        initial_modal_velocity_m_per_s: 0.0,
+        timestep_s: 1.0e-6,
+        steps: 200,
+    }
+}
+
 #[test]
 fn e2e_reduced_flexible_base_retains_modal_energy_damping_work_support_reaction_and_conditioning() {
     let run = run_reduced_base_response(&input(DampingModel::Rayleigh {
@@ -79,16 +138,16 @@ fn e2e_reduced_flexible_base_retains_modal_energy_damping_work_support_reaction_
     assert!(run.diagnostics.modal_damping_n_s_per_m > 0.0);
     assert_eq!(run.diagnostics.level_tilt_rad, 0.0);
     let OperatorDiagnostics::Computed {
-        mass_min_eigenvalue,
-        stiffness_condition_number,
+        raw_mass_min_eigenvalue,
+        raw_stiffness_eigenvalue_spread,
         symmetry_residual,
         ..
     } = &run.diagnostics.operator
     else {
         panic!("fixture remains below the production conditioning budget");
     };
-    assert!(*mass_min_eigenvalue > 0.0);
-    assert!(stiffness_condition_number.is_finite());
+    assert!(*raw_mass_min_eigenvalue > 0.0);
+    assert!(raw_stiffness_eigenvalue_spread.is_finite());
     assert!(*symmetry_residual <= f64::EPSILON);
     let terminal = run
         .final_sample()
@@ -97,6 +156,53 @@ fn e2e_reduced_flexible_base_retains_modal_energy_damping_work_support_reaction_
     assert!(terminal.damping_work_j > 0.0);
     assert!(terminal.support_reaction_norm_n > 0.0);
     assert!(run.energy_closure_residual_j.abs() < 2.0e-6);
+}
+
+#[test]
+fn e2e_reduced_flexible_base_moving_load_and_dimensioned_scaling_are_consistent() {
+    let unit = moving_input(DampingModel::None);
+    let run = run_reduced_base_response(&unit).expect("two-free-node moving response");
+    assert_ne!(
+        run.samples.first().expect("initial sample").modal_force_n,
+        run.samples.last().expect("terminal sample").modal_force_n,
+        "distinct free nodes exercise a moving projected load"
+    );
+    assert!(run.diagnostics.modal_shape_translation_scale_m > 0.0);
+    assert!(run.energy_closure_residual_j.abs() < 2.0e-6);
+
+    let mut doubled = unit.clone();
+    doubled.load.normal_force_n = 2.0;
+    let doubled_run = run_reduced_base_response(&doubled).expect("scaled moving response");
+    assert_eq!(
+        run.diagnostics.modal_mass_kg,
+        doubled_run.diagnostics.modal_mass_kg
+    );
+    assert_eq!(
+        run.diagnostics.modal_stiffness_n_per_m,
+        doubled_run.diagnostics.modal_stiffness_n_per_m
+    );
+    assert_eq!(
+        run.diagnostics.modal_damping_n_s_per_m,
+        doubled_run.diagnostics.modal_damping_n_s_per_m
+    );
+    assert!(
+        (doubled_run
+            .final_sample()
+            .expect("terminal")
+            .modal_displacement_m
+            - 2.0 * run.final_sample().expect("terminal").modal_displacement_m)
+            .abs()
+            < 1.0e-12
+    );
+    assert!(
+        (doubled_run
+            .final_sample()
+            .expect("terminal")
+            .elastic_energy_j
+            - 4.0 * run.final_sample().expect("terminal").elastic_energy_j)
+            .abs()
+            < 1.0e-16
+    );
 }
 
 #[test]

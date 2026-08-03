@@ -43,14 +43,15 @@ pub struct LevelSupportInput {
     pub maximum_tilt_rad: f64,
 }
 
-/// A normal force moving linearly from one node to another over the run.
+/// A compressive normal force moving linearly from one node to another.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MovingContactLoad {
     /// Start node in `ShellPlate::nodes`.
     pub start_node: usize,
     /// End node in `ShellPlate::nodes`.
     pub end_node: usize,
-    /// Compressive normal load magnitude in N; zero is useful for free decay.
+    /// Compressive load magnitude [N], applied into the base opposite its
+    /// declared upward level normal. Zero is useful for free decay.
     pub normal_force_n: f64,
 }
 
@@ -67,9 +68,9 @@ pub struct BaseResponseInput {
     pub contact_scope: ContactLoadScope,
     /// Moving nodal normal contact load.
     pub load: MovingContactLoad,
-    /// Initial modal displacement [m in the unit-load-shaped coordinate].
+    /// Initial generalized displacement [m].
     pub initial_modal_displacement_m: f64,
-    /// Initial modal velocity [m/s in the unit-load-shaped coordinate].
+    /// Initial generalized velocity [m/s].
     pub initial_modal_velocity_m_per_s: f64,
     /// Fixed timestep [s].
     pub timestep_s: f64,
@@ -113,7 +114,7 @@ pub struct BaseResponseSample {
     pub time_s: f64,
     /// Deterministic load progress from zero to one.
     pub load_progress: f64,
-    /// Projected moving-load force [N in the mass-normalized modal coordinate].
+    /// Generalized moving-load force [N].
     pub modal_force_n: f64,
     /// Modal displacement [m].
     pub modal_displacement_m: f64,
@@ -134,16 +135,22 @@ pub struct BaseResponseSample {
 /// Fixed operator and level diagnostics retained with the complete run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaseResponseDiagnostics {
-    /// `fs-solid` conditioning/nullity/symmetry report for the full plate.
+    /// `fs-solid` raw algebraic/nullity/symmetry report for the full plate.
     pub operator: OperatorDiagnostics,
     /// Actual angle between declared level normal and world +Z [rad].
     pub level_tilt_rad: f64,
-    /// Mass-normalized modal mass; it is one to roundoff.
+    /// Generalized modal mass [kg].
     pub modal_mass_kg: f64,
     /// Projected stiffness [N/m].
     pub modal_stiffness_n_per_m: f64,
     /// Projected Rayleigh damping [N s/m].
     pub modal_damping_n_s_per_m: f64,
+    /// Translation amplitude used to make the modal shape dimensionless [m].
+    ///
+    /// Translational shape entries are dimensionless and rotational entries are
+    /// in 1/m, so multiplying the shape by the generalized displacement gives
+    /// physical translations [m] and small rotations [rad].
+    pub modal_shape_translation_scale_m: f64,
     /// Undamped angular frequency [rad/s].
     pub modal_frequency_rad_s: f64,
 }
@@ -200,6 +207,7 @@ pub fn run_reduced_base_response(
         modal_mass_kg: mode.mass,
         modal_stiffness_n_per_m: mode.stiffness,
         modal_damping_n_s_per_m: mode.damping,
+        modal_shape_translation_scale_m: mode.translation_scale_m,
         modal_frequency_rad_s: (mode.stiffness / mode.mass).sqrt(),
     };
     let nondimensional_step = input.timestep_s * diagnostics.modal_frequency_rad_s;
@@ -324,6 +332,7 @@ pub fn refine_reduced_base_response(
 #[derive(Debug, Clone)]
 struct ReducedMode {
     full_shape: Vec<f64>,
+    translation_scale_m: f64,
     mass: f64,
     stiffness: f64,
     damping: f64,
@@ -435,17 +444,24 @@ fn load_shaped_mode(
     .ok_or(BaseResponseError::ModalReduction {
         detail: "reduced stiffness is singular",
     })?;
-    let mass_shape = assembly.mass.apply(&reduced_shape);
-    let raw_mass = dot(&reduced_shape, &mass_shape);
-    if !(raw_mass.is_finite() && raw_mass > 0.0) {
+    let translation_scale_m = reduced_shape
+        .iter()
+        .zip(&assembly.free_dofs)
+        .filter(|(_, &dof)| dof % 6 < 3)
+        .map(|(&value, _)| value.abs())
+        .fold(0.0_f64, f64::max);
+    if !(translation_scale_m.is_finite() && translation_scale_m > 0.0) {
         return Err(BaseResponseError::ModalReduction {
-            detail: "mode has non-positive mass",
+            detail: "mode has no translational displacement scale",
         });
     }
-    let scale = raw_mass.sqrt();
+    // `K^-1 f` has translations in metres and rotations in radians.  Dividing
+    // by a translational metre scale leaves a dimensionless displacement shape
+    // (and rotational entries in 1/m), preserving q[m], M[kg], K[N/m], C[Ns/m]
+    // and phi^T F[N].  Mass normalization would destroy those units.
     let reduced_shape: Vec<f64> = reduced_shape
         .into_iter()
-        .map(|value| value / scale)
+        .map(|value| value / translation_scale_m)
         .collect();
     let mut full_shape = vec![0.0; assembly.full_mass.dimension()];
     for (&index, &value) in assembly.free_dofs.iter().zip(&reduced_shape) {
@@ -469,6 +485,7 @@ fn load_shaped_mode(
     }
     Ok(ReducedMode {
         full_shape,
+        translation_scale_m,
         mass,
         stiffness,
         damping,
@@ -570,7 +587,7 @@ fn full_load_with_magnitude(
     ] {
         for component in 0..3 {
             force[node * 6 + component] +=
-                normal_force_n * weight * input.level_support.level_normal[component];
+                -normal_force_n * weight * input.level_support.level_normal[component];
         }
     }
     force
@@ -582,13 +599,21 @@ fn solve_dense(values: &[f64], dimension: usize, rhs: &[f64]) -> Option<Vec<f64>
     }
     let mut matrix = values.to_vec();
     let mut vector = rhs.to_vec();
+    let matrix_scale = matrix
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    if !(matrix_scale.is_finite() && matrix_scale > 0.0) {
+        return None;
+    }
+    let pivot_tolerance = f64::EPSILON * (dimension as f64).max(1.0) * matrix_scale;
     for column in 0..dimension {
         let pivot = (column..dimension).max_by(|&left, &right| {
             matrix[left * dimension + column]
                 .abs()
                 .total_cmp(&matrix[right * dimension + column].abs())
         })?;
-        if matrix[pivot * dimension + column].abs() <= 1.0e-14 {
+        if matrix[pivot * dimension + column].abs() <= pivot_tolerance {
             return None;
         }
         for index in column..dimension {
