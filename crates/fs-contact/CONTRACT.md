@@ -42,8 +42,11 @@ those consume adapters; reusable contact protocols live here.
 `normal_patch` is a solver-independent, SI-only finite-patch constitutive
 surface. Elastic Hertz sphere/plane and cylinder/plane rungs retain force,
 patch dimension, peak pressure, pressure second moment, reversible energy, and
-tangent. The Hunt--Crossley sphere rung adds explicitly passive rate-dependent
-work for a bounded loading/unloading step. Receipts carry canonical request and
+tangent. `PointNormalPatchReceipt` uses `N`, `J`, and `W`; the distinct
+`LineNormalPatchReceipt` uses `N/m`, `J/m`, and `W/m`, so zero-valued outputs
+cannot erase the dimension distinction. The Hunt--Crossley sphere rung adds
+explicitly passive rate-dependent work for a bounded loading/unloading step.
+Receipts carry canonical request and
 receipt identities, caller input-authority ceiling, uncertainty, and checked
 half-space, curvature, small-strain, layer, yield, rate, temperature, and
 nonadhesion applicability ratios. `ConstraintBarrierReceipt` is deliberately a
@@ -63,6 +66,9 @@ cannot masquerade as physical compliance.
   temperature requests rather than silently extrapolating. Solver
   complementarity, residual assembly, and resolved contact state remain
   consumer responsibilities.
+- The request declares a local geometry. A sphere law cannot be evaluated as a
+  cylinder, and toroidal or highly elliptical contact is a typed refusal rather
+  than an effective-radius approximation.
 
 ## Error model
 
@@ -101,9 +107,11 @@ analytic value.
 
 `tests/normal_patch_law.rs` supplies G0/G1/G3 independent reconstruction of
 Hertz resultants, pressure moments, reversible energy, and numerical tangent;
-cylinder scaling; Hunt--Crossley loading/unloading passivity; zero/grazing and
-adhesion/layer refusals; and deterministic identity/authority replay. Test
-cards are synthetic and do not admit materials or a contact configuration.
+cylinder approach, energy, tangent, and scaling; Hunt--Crossley
+loading/unloading passivity; zero/grazing and adhesion/layer/yield/rate/
+temperature refusals; typed point-versus-line receipts; and deterministic
+identity/authority replay. Test cards are synthetic and do not admit materials
+or a contact configuration.
 
 ## Certified CCD (bead tqag, increment 2)
 
@@ -182,7 +190,9 @@ through-shot's sphere-entry window survives as Retained).
   partitioning, lubrication/EHL, plasticity, adhesion, roughness, calibration,
   experimental validation, Euler-disc target fitting, or any one-millimetre
   optimum/ranking claim. Hunt--Crossley dissipation is a declared model rung,
-  not a measured loss mechanism.
+  not a measured loss mechanism. Toroidal and highly elliptical patches have
+  no physical-compliance claim in this module; they require a separately
+  validated two-curvature law.
 
 - Certified CCD verdicts remain ENCLOSURE verdicts: `PossibleContact` /
   `Retained` windows localize in time but never adjudicate contact;

@@ -9,8 +9,10 @@ use core::fmt;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_tribo::{InputAuthority, InterfaceSystemRef};
 
-/// Fixed unit declaration carried by every request and receipt.
-pub const SI_UNITS: &str = "SI:m,s,N,Pa,J";
+/// SI dimensions for point-contact receipts.
+pub const POINT_SI_UNITS: &str = "SI:m,s,N,N/m,Pa,J,W";
+/// SI dimensions for line-contact receipts, normalized per unit cylinder length.
+pub const LINE_SI_UNITS: &str = "SI:m,s,N/m,Pa,J/m,W/m";
 const DOMAIN: &str = "org.frankensim.fs-contact.normal-patch.v1";
 
 /// Explicit identity for a reproducible law request.
@@ -43,6 +45,18 @@ pub enum NormalPatchLaw {
         reduced_modulus_pa: f64,
         dissipation_s_per_m: f64,
     },
+}
+
+/// Declared local geometry. The analytic rungs deliberately do not approximate
+/// toroidal or highly elliptical patches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalPatchGeometry {
+    /// Axisymmetric sphere against a plane half space.
+    SpherePlane,
+    /// Cylinder against a plane half space, normalized per unit axial length.
+    CylinderPlane,
+    /// A two-curvature or strongly elliptical patch requiring another law.
+    ToroidalOrHighlyElliptical,
 }
 
 /// Inputs governing the validity envelope. All ratios are dimensionless.
@@ -83,6 +97,7 @@ pub struct NormalPatchRequest {
     pub identity: NormalPatchIdentity,
     pub interface: InterfaceSystemRef,
     pub law: NormalPatchLaw,
+    pub geometry: NormalPatchGeometry,
     pub indentation_m: f64,
     pub indentation_rate_m_per_s: f64,
     pub step_s: f64,
@@ -103,17 +118,25 @@ pub struct ApplicabilityRatios {
     pub rate_ratio: f64,
 }
 
-/// Pressure moments for axisymmetric area contact or line contact per unit length.
+/// Area-contact pressure moments, normalized by the point resultant.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PressureMoments {
+pub struct PointPressureMoments {
     pub peak_pressure_pa: f64,
-    pub resultant_n_or_n_per_m: f64,
+    pub resultant_n: f64,
     pub second_moment_m2: f64,
 }
 
-/// Physical compliant normal response; only this type carries force and energy.
+/// Line-contact pressure moments, normalized by the line resultant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinePressureMoments {
+    pub peak_pressure_pa: f64,
+    pub resultant_n_per_m: f64,
+    pub second_moment_m2: f64,
+}
+
+/// Point-contact physical compliant normal response.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NormalPatchReceipt {
+pub struct PointNormalPatchReceipt {
     pub request_id: ContentHash,
     pub receipt_id: ContentHash,
     pub units: &'static str,
@@ -122,15 +145,62 @@ pub struct NormalPatchReceipt {
     pub input_source_id: String,
     pub authority: InputAuthority,
     pub approach_m: f64,
-    pub normal_force_n_or_n_per_m: f64,
-    pub tangent_n_per_m_or_pa: f64,
-    pub patch_radius_or_half_width_m: f64,
-    pub pressure: PressureMoments,
-    pub reversible_energy_j_or_j_per_m: f64,
+    pub normal_force_n: f64,
+    pub tangent_n_per_m: f64,
+    pub patch_radius_m: f64,
+    pub pressure: PointPressureMoments,
+    pub reversible_energy_j: f64,
     pub irreversible_work_j: f64,
     pub dissipated_power_w: f64,
     pub ratios: ApplicabilityRatios,
     pub uncertainty: InputUncertainty,
+}
+
+/// Line-contact physical response. Every extensive quantity is per unit axial length.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineNormalPatchReceipt {
+    pub request_id: ContentHash,
+    pub receipt_id: ContentHash,
+    pub units: &'static str,
+    pub interface_system_id: String,
+    pub history_id: String,
+    pub input_source_id: String,
+    pub authority: InputAuthority,
+    pub approach_m: f64,
+    pub normal_line_load_n_per_m: f64,
+    pub tangent_pa: f64,
+    pub patch_half_width_m: f64,
+    pub pressure: LinePressureMoments,
+    pub reversible_energy_j_per_m: f64,
+    pub irreversible_work_j_per_m: f64,
+    pub dissipated_power_w_per_m: f64,
+    pub ratios: ApplicabilityRatios,
+    pub uncertainty: InputUncertainty,
+}
+
+/// Distinct physical receipts prevent point and line units from being mixed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NormalPatchReceipt {
+    Point(PointNormalPatchReceipt),
+    Line(LineNormalPatchReceipt),
+}
+
+impl NormalPatchReceipt {
+    /// Canonical identity of the request that produced this response.
+    pub const fn request_id(&self) -> ContentHash {
+        match self {
+            Self::Point(receipt) => receipt.request_id,
+            Self::Line(receipt) => receipt.request_id,
+        }
+    }
+
+    /// Canonical identity of this physical response.
+    pub const fn receipt_id(&self) -> ContentHash {
+        match self {
+            Self::Point(receipt) => receipt.receipt_id,
+            Self::Line(receipt) => receipt.receipt_id,
+        }
+    }
 }
 
 /// A nonphysical constraint/barrier marker. It has no force, patch, or energy fields.
@@ -157,6 +227,12 @@ pub enum NormalPatchError {
     AdhesionUnsupported {
         adhesion_energy_j_per_m2: f64,
     },
+    UnsupportedGeometry {
+        geometry: NormalPatchGeometry,
+    },
+    GeometryLawMismatch {
+        geometry: NormalPatchGeometry,
+    },
     Overflow {
         field: &'static str,
     },
@@ -177,6 +253,14 @@ impl fmt::Display for NormalPatchError {
             } => write!(
                 f,
                 "nonadhesive Hertz/Hunt-Crossley rung refuses adhesion energy {adhesion_energy_j_per_m2}"
+            ),
+            Self::UnsupportedGeometry { geometry } => write!(
+                f,
+                "normal-patch law has no toroidal/highly-elliptical rung: {geometry:?}"
+            ),
+            Self::GeometryLawMismatch { geometry } => write!(
+                f,
+                "normal-patch law does not match declared local geometry: {geometry:?}"
             ),
             Self::Overflow { field } => write!(f, "finite-patch derived value overflowed: {field}"),
         }
@@ -208,7 +292,19 @@ impl NormalPatchRequest {
                 Some(dissipation_s_per_m),
             ),
         };
-        self.sphere(request_id, radius, modulus, dissipative)
+        match self.geometry {
+            NormalPatchGeometry::SpherePlane => {
+                self.sphere(request_id, radius, modulus, dissipative)
+            }
+            NormalPatchGeometry::CylinderPlane => Err(NormalPatchError::GeometryLawMismatch {
+                geometry: self.geometry,
+            }),
+            NormalPatchGeometry::ToroidalOrHighlyElliptical => {
+                Err(NormalPatchError::UnsupportedGeometry {
+                    geometry: self.geometry,
+                })
+            }
+        }
     }
 
     fn sphere(
@@ -252,7 +348,7 @@ impl NormalPatchRequest {
         });
         let irreversible_work = checked(irreversible_power * self.step_s, "irreversible_work")?;
         let reversible = checked(0.4 * elastic_force * d, "reversible_energy")?;
-        self.receipt(
+        self.point_receipt(
             request_id,
             d,
             force,
@@ -276,7 +372,7 @@ impl NormalPatchRequest {
         let q = self.line_load_n_per_m;
         if q == 0.0 {
             let ratios = self.ratios(0.0, radius, 0.0, 0.0)?;
-            return self.receipt(
+            return self.line_receipt(
                 request_id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ratios,
             );
         }
@@ -306,7 +402,7 @@ impl NormalPatchRequest {
             q * q * (log + 0.75) / (2.0 * core::f64::consts::PI * modulus),
             "cylinder_energy",
         )?;
-        self.receipt(
+        self.line_receipt(
             request_id,
             approach,
             q,
@@ -321,7 +417,7 @@ impl NormalPatchRequest {
         )
     }
 
-    fn receipt(
+    fn point_receipt(
         &self,
         request_id: ContentHash,
         approach: f64,
@@ -335,6 +431,130 @@ impl NormalPatchRequest {
         power: f64,
         ratios: ApplicabilityRatios,
     ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        self.validate_response(
+            approach,
+            force,
+            tangent,
+            patch,
+            peak,
+            reversible,
+            irreversible,
+            power,
+        )?;
+        let authority = self.interface.provenance().authority();
+        let receipt_id = self.receipt_id(
+            "point",
+            request_id,
+            approach,
+            force,
+            tangent,
+            patch,
+            peak,
+            moment,
+            reversible,
+            irreversible,
+            power,
+            ratios,
+        );
+        Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
+            request_id,
+            receipt_id,
+            units: POINT_SI_UNITS,
+            interface_system_id: self.interface.ordered_system_id().to_owned(),
+            history_id: self.interface.history_id().to_owned(),
+            input_source_id: self.interface.provenance().source_id().to_owned(),
+            authority,
+            approach_m: approach,
+            normal_force_n: force,
+            tangent_n_per_m: tangent,
+            patch_radius_m: patch,
+            pressure: PointPressureMoments {
+                peak_pressure_pa: peak,
+                resultant_n: force,
+                second_moment_m2: moment,
+            },
+            reversible_energy_j: reversible,
+            irreversible_work_j: irreversible,
+            dissipated_power_w: power,
+            ratios,
+            uncertainty: self.uncertainty,
+        }))
+    }
+
+    fn line_receipt(
+        &self,
+        request_id: ContentHash,
+        approach: f64,
+        line_load: f64,
+        tangent: f64,
+        half_width: f64,
+        peak: f64,
+        moment: f64,
+        reversible: f64,
+        irreversible: f64,
+        power: f64,
+        ratios: ApplicabilityRatios,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        self.validate_response(
+            approach,
+            line_load,
+            tangent,
+            half_width,
+            peak,
+            reversible,
+            irreversible,
+            power,
+        )?;
+        let receipt_id = self.receipt_id(
+            "line",
+            request_id,
+            approach,
+            line_load,
+            tangent,
+            half_width,
+            peak,
+            moment,
+            reversible,
+            irreversible,
+            power,
+            ratios,
+        );
+        Ok(NormalPatchReceipt::Line(LineNormalPatchReceipt {
+            request_id,
+            receipt_id,
+            units: LINE_SI_UNITS,
+            interface_system_id: self.interface.ordered_system_id().to_owned(),
+            history_id: self.interface.history_id().to_owned(),
+            input_source_id: self.interface.provenance().source_id().to_owned(),
+            authority: self.interface.provenance().authority(),
+            approach_m: approach,
+            normal_line_load_n_per_m: line_load,
+            tangent_pa: tangent,
+            patch_half_width_m: half_width,
+            pressure: LinePressureMoments {
+                peak_pressure_pa: peak,
+                resultant_n_per_m: line_load,
+                second_moment_m2: moment,
+            },
+            reversible_energy_j_per_m: reversible,
+            irreversible_work_j_per_m: irreversible,
+            dissipated_power_w_per_m: power,
+            ratios,
+            uncertainty: self.uncertainty,
+        }))
+    }
+
+    fn validate_response(
+        &self,
+        approach: f64,
+        force: f64,
+        tangent: f64,
+        patch: f64,
+        peak: f64,
+        reversible: f64,
+        irreversible: f64,
+        power: f64,
+    ) -> Result<(), NormalPatchError> {
         for (value, field) in [
             (approach, "approach"),
             (force, "force"),
@@ -349,12 +569,30 @@ impl NormalPatchRequest {
                 return Err(NormalPatchError::Overflow { field });
             }
         }
-        let authority = self.interface.provenance().authority();
-        let receipt_id = hash_domain(
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn receipt_id(
+        &self,
+        kind: &str,
+        request_id: ContentHash,
+        approach: f64,
+        force: f64,
+        tangent: f64,
+        patch: f64,
+        peak: f64,
+        moment: f64,
+        reversible: f64,
+        irreversible: f64,
+        power: f64,
+        ratios: ApplicabilityRatios,
+    ) -> ContentHash {
+        hash_domain(
             DOMAIN,
             format!(
                 concat!(
-                    "{}|{}|{approach:.17e}|{force:.17e}|{tangent:.17e}|",
+                    "{kind}|{}|{}|{approach:.17e}|{force:.17e}|{tangent:.17e}|",
                     "{patch:.17e}|{peak:.17e}|{moment:.17e}|{reversible:.17e}|",
                     "{irreversible:.17e}|{power:.17e}|{:?}|{:.17e}|{:.17e}|",
                     "{:.17e}|{:?}|{}|{}|{}"
@@ -371,30 +609,7 @@ impl NormalPatchRequest {
                 self.interface.provenance().source_id(),
             )
             .as_bytes(),
-        );
-        Ok(NormalPatchReceipt {
-            request_id,
-            receipt_id,
-            units: SI_UNITS,
-            interface_system_id: self.interface.ordered_system_id().to_owned(),
-            history_id: self.interface.history_id().to_owned(),
-            input_source_id: self.interface.provenance().source_id().to_owned(),
-            authority,
-            approach_m: approach,
-            normal_force_n_or_n_per_m: force,
-            tangent_n_per_m_or_pa: tangent,
-            patch_radius_or_half_width_m: patch,
-            pressure: PressureMoments {
-                peak_pressure_pa: peak,
-                resultant_n_or_n_per_m: force,
-                second_moment_m2: moment,
-            },
-            reversible_energy_j_or_j_per_m: reversible,
-            irreversible_work_j: irreversible,
-            dissipated_power_w: power,
-            ratios,
-            uncertainty: self.uncertainty,
-        })
+        )
     }
 
     fn ratios(
@@ -570,13 +785,30 @@ impl NormalPatchRequest {
                 });
             }
         }
+        match (self.law, self.geometry) {
+            (_, NormalPatchGeometry::ToroidalOrHighlyElliptical) => {
+                return Err(NormalPatchError::UnsupportedGeometry {
+                    geometry: self.geometry,
+                });
+            }
+            (NormalPatchLaw::HertzCylinderPlane { .. }, NormalPatchGeometry::CylinderPlane)
+            | (
+                NormalPatchLaw::HertzSpherePlane { .. } | NormalPatchLaw::HuntCrossleySphere { .. },
+                NormalPatchGeometry::SpherePlane,
+            ) => {}
+            _ => {
+                return Err(NormalPatchError::GeometryLawMismatch {
+                    geometry: self.geometry,
+                });
+            }
+        }
         Ok(())
     }
 
     fn canonical(&self) -> String {
         format!(
             concat!(
-                "v1|{}|{}|{}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "v1|{}|{}|{}|{:?}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                 "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                 "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                 "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{}|{}|{:?}"
@@ -585,6 +817,7 @@ impl NormalPatchRequest {
             self.identity.source_id,
             self.identity.state_id,
             self.law,
+            self.geometry,
             self.indentation_m,
             self.indentation_rate_m_per_s,
             self.step_s,
