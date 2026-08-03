@@ -290,7 +290,7 @@ pub fn run_reduced_base_response(
 
     let mut displacement = input.initial_modal_displacement_m;
     let mut velocity = input.initial_modal_velocity_m_per_s;
-    let mut acceleration = modal_acceleration(mode, input, 0.0, displacement, velocity);
+    let mut acceleration = modal_acceleration(&mode, input, 0.0, displacement, velocity);
     finite(acceleration, "initial_acceleration")?;
     let mut damping_work = 0.0;
     let mut external_work = 0.0;
@@ -320,7 +320,7 @@ pub fn run_reduced_base_response(
         let next_velocity = 2.0 * midpoint_velocity - velocity;
         let progress = step as f64 / input.steps as f64;
         let next_acceleration =
-            modal_acceleration(mode, input, progress, next_displacement, next_velocity);
+            modal_acceleration(&mode, input, progress, next_displacement, next_velocity);
         finite(next_displacement, "modal_displacement")?;
         finite(next_velocity, "modal_velocity")?;
         finite(next_acceleration, "modal_acceleration")?;
@@ -560,7 +560,7 @@ fn validate_level_support(input: &BaseResponseInput) -> Result<f64, BaseResponse
             field: "level_normal",
         });
     }
-    let support_alignment = dot(normal, input.level_support.support.normal);
+    let support_alignment = dot(&normal, &input.level_support.support.normal);
     if support_alignment < 1.0 - 1.0e-10 {
         return Err(BaseResponseError::SupportMismatch);
     }
