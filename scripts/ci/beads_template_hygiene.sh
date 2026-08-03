@@ -479,6 +479,7 @@ V2_SEMANTIC_ROOT_PATTERN = re.compile(r"sha256-v1:[0-9a-f]{64}")
 V2_SHA256_CONSTRUCTOR = hashlib.sha256
 V2_EXACT_JSON_ISFINITE = math.isfinite
 V2_BR_HASH_FULLMATCH = re.fullmatch
+V2_CANONICAL_JSON_ENCODER_TYPE = json.JSONEncoder
 V2_SHA256_OBJECT_TYPE = type(V2_SHA256_CONSTRUCTOR())
 V2_SHA256_UPDATE = V2_SHA256_OBJECT_TYPE.update
 V2_SHA256_HEXDIGEST = V2_SHA256_OBJECT_TYPE.hexdigest
@@ -2023,10 +2024,12 @@ def v2_offline_replay_scope() -> Iterator[None]:
 
 
 def canonical_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
-    ).encode("utf-8")
+    encoder = V2_CANONICAL_JSON_ENCODER_TYPE(
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return (encoder.encode(value) + "\n").encode("utf-8")
 
 
 def strict_json_loads(
@@ -2116,11 +2119,13 @@ def strict_json_loads(
 
 
 def semantic_root(value: Any) -> str:
-    return "sha256-v1:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
+    digest = V2_SHA256_CONSTRUCTOR(canonical_bytes(value))
+    return "sha256-v1:" + V2_SHA256_HEXDIGEST(digest)
 
 
 def text_root(value: str) -> str:
-    return "sha256-v1:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    digest = V2_SHA256_CONSTRUCTOR(value.encode("utf-8"))
+    return "sha256-v1:" + V2_SHA256_HEXDIGEST(digest)
 
 
 def json_stdout(value: Any) -> None:
@@ -14188,7 +14193,7 @@ def read_json_artifact(path: Path) -> Any:
     return document
 
 
-def verify_semantic_root(document: Mapping[str, Any], *, label: str) -> None:
+def verify_semantic_root(document: Mapping[str, Any], *, label: str) -> str:
     if type(label) is not str or not label:
         raise EvidenceFailed("semantic-root validation label is malformed")
     document = v2_released_json_snapshot(
@@ -14214,13 +14219,14 @@ def verify_semantic_root(document: Mapping[str, Any], *, label: str) -> None:
         raise EvidenceFailed(
             f"artifact replay first divergence: {label}.semantic_root"
         )
+    return retained
 
 
 def v2_is_semantic_root(value: Any) -> bool:
     return (
         type(value) is str
         and len(value) == len("sha256-v1:") + 64
-        and re.fullmatch(r"sha256-v1:[0-9a-f]{64}", value) is not None
+        and V2_SEMANTIC_ROOT_PATTERN.fullmatch(value) is not None
     )
 
 
@@ -29201,20 +29207,19 @@ def v2_exact_partition(
     count = len(ordered)
     if count > V2_EXACT_OPTIMALITY_MAX_TARGETS:
         raise EvidenceFailed("exact partition called above its frozen target cutoff")
-    feasible_masks: dict[int, tuple[int, ...]] = {}
+    feasible_masks: list[list[int]] = [[] for _ in range(count)]
     for mask in range(1, 1 << count):
         selected = [ordered[index] for index in range(count) if mask & (1 << index)]
         if v2_bin_feasible(selected, max_targets=max_targets):
             pivot = (mask & -mask).bit_length() - 1
-            prior_masks = dict.get(feasible_masks, pivot, ())
-            feasible_masks[pivot] = (*prior_masks, mask)
+            feasible_masks[pivot].append(mask)
     memo: dict[int, list[list[tuple[Mapping[str, Any], Mapping[str, Any]]]]] = {
         0: []
     }
     for mask in range(1, 1 << count):
         pivot = (mask & -mask).bit_length() - 1
         best: list[list[tuple[Mapping[str, Any], Mapping[str, Any]]]] | None = None
-        for subset in dict.get(feasible_masks, pivot, ()):
+        for subset in feasible_masks[pivot]:
             if subset & mask != subset:
                 continue
             selected = [
@@ -30460,13 +30465,12 @@ def v2_child_oversize_reference(
     return True, relative_path, semantic_root_value
 
 
-def v2_make_child(
+def _v2_make_child_unchecked(
     rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
     *,
     packing_witness: Mapping[str, Any],
     oversize: bool = False,
     oversize_artifact: Mapping[str, Any] | None = None,
-    _validate_payload: bool = True,
 ) -> dict[str, Any]:
     v2_child_row_identity(rows)
     (
@@ -30824,7 +30828,23 @@ def v2_make_child(
         ),
         "no_claim": V2_PLANNED_CHILD_NO_CLAIM,
     }
-    rooted = v2_rooted(child)
+    return v2_rooted(child)
+
+
+def v2_make_child(
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    *,
+    packing_witness: Mapping[str, Any],
+    oversize: bool = False,
+    oversize_artifact: Mapping[str, Any] | None = None,
+    _validate_payload: bool = True,
+) -> dict[str, Any]:
+    rooted = _v2_make_child_unchecked(
+        rows,
+        packing_witness=packing_witness,
+        oversize=oversize,
+        oversize_artifact=oversize_artifact,
+    )
     if _validate_payload:
         v2_validate_child_payload(rooted)
     return rooted
@@ -30836,6 +30856,7 @@ def v2_child_render_cache_contract() -> tuple[
 ]:
     code_objects = (
         v2_make_child.__code__,
+        _v2_make_child_unchecked.__code__,
         v2_child_text.__code__,
         v2_markdown_inline_code.__code__,
         v2_child_render_policy.__code__,
@@ -30898,14 +30919,13 @@ def _v2_child_transport_observations_locked(
     ):
         _v2_child_transport_cache.move_to_end(cache_key)
         return dict(cached[2])
-    candidate = v2_make_child(
+    candidate = _v2_make_child_unchecked(
         rows,
         packing_witness={
             "semantic_root": V2_PACKING_PREFLIGHT_WITNESS_ROOT,
         },
         oversize=oversize,
         oversize_artifact=oversize_artifact,
-        _validate_payload=False,
     )
     description = candidate["description_file_artifact"]["content"].encode(
         "utf-8"
@@ -31145,7 +31165,7 @@ def v2_independent_exact_optimum(
     max_targets: int,
 ) -> list[list[str]]:
     count = len(expected_ids)
-    feasible_masks: dict[int, tuple[int, ...]] = {}
+    feasible_masks: list[list[int]] = [[] for _ in range(count)]
     for mask in range(1, 1 << count):
         membership = [
             expected_ids[index]
@@ -31166,15 +31186,14 @@ def v2_independent_exact_optimum(
             )
         ):
             pivot = (mask & -mask).bit_length() - 1
-            prior_masks = dict.get(feasible_masks, pivot, ())
-            feasible_masks[pivot] = (*prior_masks, mask)
+            feasible_masks[pivot].append(mask)
 
     memo: dict[int, list[list[str]]] = {0: []}
     for mask in range(1, 1 << count):
         pivot = (mask & -mask).bit_length() - 1
         best: list[list[str]] | None = None
         best_key: tuple[Any, ...] | None = None
-        for subset in dict.get(feasible_masks, pivot, ()):
+        for subset in feasible_masks[pivot]:
             if subset & mask != subset:
                 continue
             membership = [
@@ -31786,18 +31805,6 @@ def v2_validate_review_plan(
     verify_semantic_root(review_plan, label="v2 review plan")
     counts = review_plan["counts"]
     work = review_plan["work"]
-    if type(counts) is not dict or type(work) is not dict:
-        raise EvidenceFailed("v2 review-plan counts or work projection is malformed")
-    v2_exact_keys(
-        counts,
-        V2_REVIEW_PLAN_COUNT_FIELDS,
-        label="v2 review-plan counts",
-    )
-    v2_exact_keys(
-        work,
-        V2_REVIEW_PLAN_WORK_FIELDS,
-        label="v2 review-plan work",
-    )
     if (
         type(inventory) is not dict
         or type(authority) is not dict
@@ -31973,23 +31980,15 @@ def v2_validate_review_plan(
         != len(expected_remediation)
     ):
         raise EvidenceFailed("v2 review-plan target counts disagree with membership")
-    children_by_witness: dict[
-        str,
-        tuple[Mapping[str, Any], ...],
-    ] = {}
+    referenced_witness_roots: dict[str, None] = {}
     for child in children:
         witness_root = str(child["packing_witness_root"])
         if witness_root not in witness_by_root:
             raise EvidenceFailed(
                 "v2 review-plan child references an unknown packing witness"
             )
-        prior_children = (
-            children_by_witness[witness_root]
-            if dict.__contains__(children_by_witness, witness_root)
-            else ()
-        )
-        children_by_witness[witness_root] = (*prior_children, child)
-    if set(children_by_witness) != set(witness_by_root):
+        referenced_witness_roots[witness_root] = None
+    if set(referenced_witness_roots) != set(witness_by_root):
         raise EvidenceFailed("v2 review-plan retains an unused packing witness")
     max_targets = review_plan["max_targets_per_child"]
     if (
@@ -32102,8 +32101,13 @@ def v2_validate_review_plan(
         raise EvidenceFailed(
             "v2 review-plan child, witness, or oversize ordering is noncanonical"
         )
-    for witness_root, grouped_children in children_by_witness.items():
-        witness = witness_by_root[witness_root]
+    for witness in witnesses:
+        witness_root = str(witness["semantic_root"])
+        grouped_children = [
+            child
+            for child in children
+            if str(child["packing_witness_root"]) == witness_root
+        ]
         if (
             type(witness) is not dict
             or not dict.__contains__(witness, "algorithm")
@@ -32167,10 +32171,8 @@ def v2_validate_review_plan(
                 != expected_exceeded_caps
                 or witness["reason"]
                 != (
-                    "single target exceeds "
-                    + ", ".join(
-                        row["cap"] for row in expected_exceeded_caps
-                    )
+                    f"single target exceeds "
+                    f"{', '.join(row['cap'] for row in expected_exceeded_caps)}"
                 )
             ):
                 raise EvidenceFailed(
@@ -32205,14 +32207,14 @@ def v2_validate_review_plan(
                 raise EvidenceFailed(
                     "v2 oversize child lacks its registered artifact"
                 )
-            expected_child = v2_make_child(
+            expected_child = _v2_make_child_unchecked(
                 child_rows,
                 packing_witness=witness,
                 oversize=True,
                 oversize_artifact=oversize_by_target[target_root],
             )
         else:
-            expected_child = v2_make_child(
+            expected_child = _v2_make_child_unchecked(
                 child_rows,
                 packing_witness=witness,
             )
@@ -32231,19 +32233,25 @@ def v2_validate_review_plan(
         decision = authority_by_id[target_id]
         readiness_value = decision["readiness"]
         route_value = decision["remediation_route"]
-        expected_readiness_counts[readiness_value] = (
-            expected_readiness_counts[readiness_value]
-            if dict.__contains__(
-                expected_readiness_counts,
-                readiness_value,
-            )
-            else 0
-        ) + 1
-        expected_route_counts[route_value] = (
-            expected_route_counts[route_value]
-            if dict.__contains__(expected_route_counts, route_value)
-            else 0
-        ) + 1
+        expected_readiness_counts[readiness_value] = v2_exact_int_add(
+            (
+                expected_readiness_counts[readiness_value]
+                if dict.__contains__(
+                    expected_readiness_counts,
+                    readiness_value,
+                )
+                else 0
+            ),
+            1,
+        )
+        expected_route_counts[route_value] = v2_exact_int_add(
+            (
+                expected_route_counts[route_value]
+                if dict.__contains__(expected_route_counts, route_value)
+                else 0
+            ),
+            1,
+        )
     expected_counts = {
         "targets": len(target_by_id),
         "scheduled_targets": len(expected_ids),
@@ -36207,13 +36215,13 @@ def v2_validate_canonical_byte_size(
     if type(cap) is not int or cap < 0:
         raise error_type(f"{label} uses an invalid canonical byte cap")
     byte_length = 1  # canonical_bytes appends one terminal newline.
-    encoder = json.JSONEncoder(
+    encoder = V2_CANONICAL_JSON_ENCODER_TYPE(
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     )
     try:
-        for chunk in json.JSONEncoder.iterencode(encoder, value):
+        for chunk in encoder.iterencode(value):
             byte_length += len(str.encode(chunk, "utf-8"))
             if byte_length > cap:
                 raise error_type(
@@ -42712,6 +42720,7 @@ V2_REFUSAL_EXTERNAL_TYPE_PATHS = {
             "utcnow",
         }
     ),
+    V2_CANONICAL_JSON_ENCODER_TYPE: frozenset({"encode", "iterencode"}),
 }
 V2_REFUSAL_TRUSTED_MODULES = (
     argparse,
@@ -42779,6 +42788,12 @@ V2_REFUSAL_AUDITED_CONSTRUCTOR_TYPES = tuple(
 V2_AUDITED_CONSTRUCTOR_NATIVE_RESULT_PATHS = {
     Counter: frozenset({"<derived-call-result>", "items"}),
     groupby: frozenset({"<derived-call-result>", "<iter-item>"}),
+    V2_CANONICAL_JSON_ENCODER_TYPE: frozenset({
+        "<derived-call-result>",
+        "<iter-item>",
+        "encode",
+        "iterencode",
+    }),
     PurePosixPath: frozenset({"<derived-call-result>", "parent"}),
 }
 V2_REFUSAL_EXECUTABLE_CLOSURE_EXEMPT_TYPES = tuple(
@@ -45987,6 +46002,18 @@ V2_AUDITED_LOCAL_FAST_RESULT_CONTRACTS = (
         "exact-json-dict",
     ),
     (
+        "v2_validate_canonical_byte_size",
+        v2_validate_canonical_byte_size,
+        v2_validate_canonical_byte_size.__code__,
+        "exact-int",
+    ),
+    (
+        "verify_semantic_root",
+        verify_semantic_root,
+        verify_semantic_root.__code__,
+        "exact-str",
+    ),
+    (
         "_v2_normalize_br_witness_actions_exact",
         _v2_normalize_br_witness_actions_exact,
         _v2_normalize_br_witness_actions_exact.__code__,
@@ -46246,6 +46273,10 @@ V2_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS = (
         frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
     ),
     (canonical_bytes, frozenset({V2_DERIVED_CALL_RESULT_PATH[0]})),
+    (
+        v2_validate_canonical_byte_size,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
     # This wrapper delegates to the exact-wire validator and returns only its
     # recursively detached JSON tree, translating every harness refusal to the
     # caller-selected terminal type.
@@ -46739,6 +46770,10 @@ V2_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS = (
     (
         v2_objective_document,
         frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
+    (
+        _v2_make_child_unchecked,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0], "encode"}),
     ),
     (
         v2_make_child,
@@ -49576,6 +49611,7 @@ def v2_fast_local_origin_dataflow(
         seen_binding_names: set[str] = set()
         seen_candidate_ids: set[int] = set()
         seen_code_ids: set[int] = set()
+        registry_globals: dict[str, Any] | None = None
         for contract in tuple.__iter__(contracts):
             if type(contract) is not tuple or len(contract) != 4:
                 raise EvidenceFailed(
@@ -49587,6 +49623,11 @@ def v2_fast_local_origin_dataflow(
                 pinned_code,
                 result_kind,
             ) = contract
+            candidate_globals = (
+                v2_raw_function_attribute(candidate, "__globals__")
+                if type(candidate) is types.FunctionType
+                else None
+            )
             if (
                 type(binding_name) is not str
                 or not binding_name
@@ -49599,9 +49640,12 @@ def v2_fast_local_origin_dataflow(
                 is not pinned_code
                 or type(result_kind) is not str
                 or result_kind not in result_kinds
-                or v2_raw_function_attribute(candidate, "__globals__")
-                is not function_globals
-                or dict.get(function_globals, binding_name) is not candidate
+                or type(candidate_globals) is not dict
+                or (
+                    registry_globals is not None
+                    and candidate_globals is not registry_globals
+                )
+                or dict.get(candidate_globals, binding_name) is not candidate
                 or sum(
                     pure_candidate is candidate
                     for pure_candidate, _allowed_paths
@@ -49619,11 +49663,14 @@ def v2_fast_local_origin_dataflow(
                 raise EvidenceFailed(
                     "refusal-state audited fast-result row identity drifted"
                 )
+            if registry_globals is None:
+                registry_globals = candidate_globals
             seen_binding_names.add(binding_name)
             seen_candidate_ids.add(id(candidate))
             seen_code_ids.add(id(pinned_code))
             if (
                 binding_name == binding[2]
+                and function_globals is registry_globals
                 and bound_candidate is candidate
             ):
                 matched_contracts.append((
@@ -50656,14 +50703,37 @@ def v2_fast_local_origin_dataflow(
     generator_consumers = frozenset({
         "all",
         "any",
+        "bytearray",
+        "bytes",
+        "dict",
         "frozenset",
         "list",
         "max",
         "min",
         "next",
         "set",
+        "sorted",
         "sum",
         "tuple",
+    })
+    mapping_key_only_protocol_callables = frozenset({
+        "all",
+        "any",
+        "dict",
+        "enumerate",
+        "frozenset",
+        "iter",
+        "len",
+        "list",
+        "max",
+        "min",
+        "next",
+        "reversed",
+        "set",
+        "sorted",
+        "sum",
+        "tuple",
+        "zip",
     })
     keyword_names_key = ("meta", "keyword-names")
 
@@ -51875,7 +51945,12 @@ def v2_fast_local_origin_dataflow(
                 )
                 if protocol_bound_receivers:
                     for receiver in protocol_bound_receivers:
-                        dynamic_uses[index].add(("call-protocol", receiver))
+                        if v2_fast_origin_may_dispatch_receiver_members(
+                            receiver
+                        ):
+                            dynamic_uses[index].add(
+                                ("call-protocol", receiver)
+                            )
                     for argument in arguments:
                         dynamic_uses[index].add(("call-protocol", argument))
             nested_positional_arity = max(
@@ -51977,7 +52052,75 @@ def v2_fast_local_origin_dataflow(
                         # would reject an identity-pinned class-info value.
                         continue
                     if argument_index not in key_argument_indices:
-                        dynamic_uses[index].add(("call-protocol", argument))
+                        receiver_only_operation = next(
+                            (
+                                mode
+                                for callable_names, mode in (
+                                    (frozenset({"len"}), "length"),
+                                    (frozenset({"bool"}), "truth"),
+                                    (
+                                        frozenset({
+                                            "list",
+                                            "reversed",
+                                            "tuple",
+                                            "zip",
+                                        }),
+                                        "iterate",
+                                    ),
+                                )
+                                if all(
+                                    candidate[2] in callable_names
+                                    for candidate in callable_options
+                                )
+                            ),
+                            None,
+                        )
+                        if (
+                            receiver_only_operation is None
+                            and all(
+                                candidate[2] == "iter"
+                                for candidate in callable_options
+                            )
+                            and len(arguments) == 1
+                        ):
+                            receiver_only_operation = "iterate"
+                        if (
+                            receiver_only_operation is None
+                            and argument_index == 0
+                            and all(
+                                candidate[2] == "enumerate"
+                                for candidate in callable_options
+                            )
+                        ):
+                            receiver_only_operation = "iterate"
+                        if receiver_only_operation is not None:
+                            dynamic_uses[index].add((
+                                receiver_only_operation,
+                                argument,
+                            ))
+                            continue
+                        argument_options = origin_options(argument)
+                        mapping_key_only = (
+                            argument_options
+                            and all(
+                                candidate[2]
+                                in mapping_key_only_protocol_callables
+                                for candidate in callable_options
+                            )
+                            and all(
+                                v2_fast_aggregate_mapping_entries(option)
+                                is not None
+                                for option in argument_options
+                            )
+                        )
+                        dynamic_uses[index].add((
+                            (
+                                "mapping-key-protocol"
+                                if mapping_key_only
+                                else "call-protocol"
+                            ),
+                            argument,
+                        ))
                         continue
                     key_options = origin_options(argument)
                     if key_options and all(
@@ -52619,7 +52762,13 @@ def v2_fast_local_origin_dataflow(
                     stack[target_index] = V2_FAST_ORIGIN_UNKNOWN
         if opname == "LIST_EXTEND":
             source = pop_origin()
-            dynamic_uses[index].add(("call-protocol", source))
+            # LIST_EXTEND invokes only the source's iteration protocol; it
+            # appends yielded members without formatting, comparing, hashing,
+            # or coercing them. Keep receiver-protocol validation separate
+            # from member-protocol validation so an owned recursive plain list
+            # is not rejected merely because its bounded summary references
+            # its allocation site.
+            dynamic_uses[index].add(("iterate", source))
             depth = instruction.arg
             if type(depth) is int and 0 < depth <= len(stack):
                 target_index = -depth
@@ -53790,6 +53939,50 @@ def v2_fast_origin_requires_unmodeled_bound_protocol(
     )
 
 
+def v2_fast_origin_may_dispatch_receiver_members(
+    expression: tuple[Any, ...],
+) -> bool:
+    """Return whether a base receiver protocol can reach stored members.
+
+    Every unmodeled admitted bound call still audits all call arguments. The
+    receiver itself needs recursive member auditing only when its origin can
+    retain values whose representation, comparison, or coercion hooks a base
+    container method may invoke. This keeps exact scalar methods such as
+    ``int.bit_length`` from inheriting unrelated aggregate summaries while
+    still covering direct, retained, derived, copied, and view containers.
+    """
+    if not expression or v2_fast_origin_is_exact_json(expression):
+        return False
+    kind = expression[0]
+    if kind in {
+        "aggregate",
+        "aggregate-map-values",
+        "aggregate-reference",
+        "dict-copy",
+        "dict-view",
+    }:
+        return True
+    if kind not in {"choice", "derived", "protocol-result"}:
+        return False
+    for part in expression[1:]:
+        if type(part) is not tuple or not part:
+            continue
+        if type(part[0]) is tuple:
+            if any(
+                v2_fast_origin_may_dispatch_receiver_members(nested)
+                for nested in part
+                if type(nested) is tuple
+            ):
+                return True
+            continue
+        if (
+            type(part[0]) is str
+            and v2_fast_origin_may_dispatch_receiver_members(part)
+        ):
+            return True
+    return False
+
+
 def v2_code_access_analysis(
     code: types.CodeType,
     *,
@@ -54829,8 +55022,12 @@ def v2_code_access_analysis(
                 visit(origin[1])
                 return
             if kind == "suspended-nested":
-                for argument in origin[2]:
-                    visit(argument)
+                # A locally constructed generator/coroutine object has an
+                # exact built-in iteration protocol. Immediate consumers bind
+                # and audit its nested code and supplied arguments through
+                # ``invoked_nested_calls``; non-consuming operations cannot
+                # reach the suspended body. Do not reinterpret its captured
+                # exact containers as protocol-bearing receiver objects here.
                 return
             if kind in {"call-result", "result-access"}:
                 # record_dynamic_result_use below attaches the explicit
@@ -55084,6 +55281,29 @@ def v2_code_access_analysis(
                     )
                 return
             if (
+                kind == "aggregate-reference"
+                and len(origin) == 3
+                and type(origin[2]) is bool
+            ):
+                # This is a reference to an exact locally allocated built-in
+                # container. Receiver-only operations (iteration, length,
+                # truth, and slicing) cannot invoke stored-member protocols.
+                # Member-sensitive operations route through the generic
+                # protocol walker instead and retain the stricter alias gate.
+                return
+            if (
+                kind == "aggregate-map-values"
+                and len(origin) == 3
+                and type(origin[2]) is tuple
+                and origin[2]
+                and origin[2][0] == "aggregate"
+            ):
+                # Map-value flow retained a summary of exact local aggregate
+                # values. The outer value container is exact even when its
+                # yielded members are opaque; receiver-only iteration remains
+                # hook-free at this boundary.
+                return
+            if (
                 kind == "derived"
                 and mode == "truth"
                 and origin[1] in {"COMPARE_OP", "CONTAINS_OP", "IS_OP"}
@@ -55097,6 +55317,7 @@ def v2_code_access_analysis(
                 "constant",
                 "constant-tuple",
                 "dict-copy",
+                "dict-view",
                 "protocol-result",
                 "static",
             }:
@@ -71177,6 +71398,8 @@ def v2_execute_schema_cli_ux(
             "sha-hexdigest-binding",
             "finite-predicate-binding",
             "hash-matcher-binding",
+            "semantic-root-pattern-binding",
+            "canonical-encoder-type-binding",
             "semver-cap-widening",
             "fast-registry-deletion",
             "helper-binding-deletion",
@@ -71198,7 +71421,9 @@ def v2_execute_schema_cli_ux(
                 "V2_AUDITED_LOCAL_FAST_RESULT_CONTRACTS",
                 "V2_BR_HASH_FULLMATCH",
                 "V2_BR_SEMVER_BYTES_CAP",
+                "V2_CANONICAL_JSON_ENCODER_TYPE",
                 "V2_EXACT_JSON_ISFINITE",
+                "V2_SEMANTIC_ROOT_PATTERN",
                 "V2_SHA256_CONSTRUCTOR",
                 "V2_SHA256_HEXDIGEST",
                 "V2_SHA256_UPDATE",
@@ -71265,13 +71490,15 @@ def v2_execute_schema_cli_ux(
             transitive_authority_hook_calls["evidence_new"] += 1
             return BaseException.__new__(candidate)
 
-        def forged_publication_error_init(
-            instance: Any,
-            _message: str,
-            *,
-            bytes_committed: int | None,
-        ) -> None:
-            instance.bytes_committed = bytes_committed
+        class ForgedPublicationErrorInitCode(Exception):
+            def __init__(
+                self,
+                message: str,
+                *,
+                bytes_committed: int | None,
+            ) -> None:
+                super().__init__(message)
+                self.bytes_committed = bytes_committed
 
         def restore_transitive_authority_fixture() -> None:
             for name, pinned_value in (
@@ -71334,6 +71561,10 @@ def v2_execute_schema_cli_ux(
                     )
                 elif mutation_name == "hash-matcher-binding":
                     globals()["V2_BR_HASH_FULLMATCH"] = forged_hash_matcher
+                elif mutation_name == "semantic-root-pattern-binding":
+                    globals()["V2_SEMANTIC_ROOT_PATTERN"] = re.compile(".*")
+                elif mutation_name == "canonical-encoder-type-binding":
+                    globals()["V2_CANONICAL_JSON_ENCODER_TYPE"] = dict
                 elif mutation_name == "semver-cap-widening":
                     globals()["V2_BR_SEMVER_BYTES_CAP"] = (
                         V2_BR_SEMVER_BYTES_CAP + 1
@@ -71372,7 +71603,10 @@ def v2_execute_schema_cli_ux(
                     )
                 elif mutation_name == "publication-error-init-code":
                     original_publication_error_init.__code__ = (
-                        forged_publication_error_init.__code__
+                        type.__getattribute__(
+                            ForgedPublicationErrorInitCode,
+                            "__dict__",
+                        )["__init__"].__code__
                     )
                 else:
                     raise AssertionError(
@@ -71448,7 +71682,7 @@ def v2_execute_schema_cli_ux(
                 ),
             ).terminal,
             "nan_terminal": expect_error(
-                EvidenceFailed,
+                InputRefused,
                 lambda: v2_validate_exact_json_wire(
                     float("nan"),
                     label="post-restoration exact JSON",
@@ -71821,7 +72055,7 @@ def v2_execute_schema_cli_ux(
                     "cc7f2c335964221fe6e85d9766c1c138"
                 ),
                 "invalid_hash_terminal": "EvidenceFailed",
-                "nan_terminal": "EvidenceFailed",
+                "nan_terminal": "InputRefused",
                 "oversized_semver_terminal": "EvidenceFailed",
             }
             and registry_raise_error is not None
@@ -71890,7 +72124,14 @@ def v2_execute_schema_cli_ux(
                 "descriptor_restoration_observed": True,
                 "validator_contract_mutation_executor_calls": 0,
                 "validator_contract_restoration_observed": True,
-                "validator_contract_row_counts": [5, 4],
+                "validator_contract_row_counts": [
+                    len(original_exact_container_validator_result_contracts),
+                    len(
+                        original_exact_container_validator_result_contracts[
+                            :-1
+                        ]
+                    ),
+                ],
                 "preflight_tuple_mutation_executor_calls": 0,
                 "preflight_tuple_restoration_observed": True,
                 "fast_result_registry_mutation_executor_calls": 0,
@@ -71918,7 +72159,7 @@ def v2_execute_schema_cli_ux(
                         "cc7f2c335964221fe6e85d9766c1c138"
                     ),
                     "invalid_hash_terminal": "EvidenceFailed",
-                    "nan_terminal": "EvidenceFailed",
+                    "nan_terminal": "InputRefused",
                     "oversized_semver_terminal": "EvidenceFailed",
                 },
                 "registry_raise_forged_sink_calls": 0,
@@ -102045,18 +102286,45 @@ def v2_execute_artifact_cases(
                         lambda callback=callback: (
                             v2_fixture_callback_data_projection(callback)
                         ),
-                        contains="exact container mutation is not modeled",
+                        contains=diagnostic,
                     ).terminal
-                    for callback in (
-                        external_holder_exact_json_alias_launder,
-                        iterator_exact_json_alias_launder,
-                        joined_nested_list_exact_json_alias_launder,
-                        list_constructor_exact_json_alias_launder,
-                        nested_list_exact_json_alias_launder,
-                        recursive_exact_json_alias_launder,
-                        slice_exact_json_alias_launder,
-                        stale_binding_exact_json_alias_launder,
-                        sum_exact_json_alias_launder,
+                    for callback, diagnostic in (
+                        (
+                            external_holder_exact_json_alias_launder,
+                            "protocol reaches an opaque aggregate reference",
+                        ),
+                        (
+                            iterator_exact_json_alias_launder,
+                            "exact container mutation is not modeled",
+                        ),
+                        (
+                            joined_nested_list_exact_json_alias_launder,
+                            "protocol reaches an opaque aggregate reference",
+                        ),
+                        (
+                            list_constructor_exact_json_alias_launder,
+                            "exact container mutation is not modeled",
+                        ),
+                        (
+                            nested_list_exact_json_alias_launder,
+                            "protocol reaches an opaque aggregate reference",
+                        ),
+                        (
+                            recursive_exact_json_alias_launder,
+                            "protocol reaches an opaque aggregate reference",
+                        ),
+                        (
+                            slice_exact_json_alias_launder,
+                            "exact container mutation is not modeled",
+                        ),
+                        (
+                            stale_binding_exact_json_alias_launder,
+                            "protocol reaches an opaque aggregate reference",
+                        ),
+                        (
+                            sum_exact_json_alias_launder,
+                            "exact container mutation is not modeled",
+                        ),
                     )
                 },
                 "store-slice-refusal": expect_error(
@@ -132159,6 +132427,15 @@ V2_AUDITED_LOCAL_PURE_CALL_CODE_CONTRACTS += tuple(
     in V2_LATE_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS
 )
 V2_EXACT_CONTAINER_VALIDATOR_RESULT_CONTRACTS = (
+    # The descriptor-slot closer exact-gates ``slot`` as a plain one-element
+    # list before every base-descriptor read. The selected value is used only
+    # as a descriptor scalar and is never invoked as a callable.
+    (
+        v2_collect_owned_descriptor_slot_close_failure,
+        v2_collect_owned_descriptor_slot_close_failure.__code__,
+        list.__getitem__,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
     # Both helpers detach caller-owned JSON through an exact-wire snapshot
     # before using base dict descriptors. Their selected values are copied
     # into exact containers or exact-type validated; no returned callable is
@@ -133712,6 +133989,7 @@ V2_RUNNER_AUTHORITY_GLOBAL_NAMES = tuple(dict.fromkeys((
     "semantic_root",
     "text_root",
     "v2_rooted",
+    "v2_validate_canonical_byte_size",
     "v2_attach_cleanup_note",
     "v2_validate_assertion_result",
     "v2_test_log_event",
@@ -133820,6 +134098,11 @@ V2_RUNNER_AUTHORITY_VALUE_CONTRACTS = (
     ),
     ("V2_EXACT_JSON_ISFINITE", V2_EXACT_JSON_ISFINITE),
     ("V2_INVENTORY_ROWS_CAP", V2_INVENTORY_ROWS_CAP),
+    ("V2_SEMANTIC_ROOT_PATTERN", V2_SEMANTIC_ROOT_PATTERN),
+    (
+        "V2_CANONICAL_JSON_ENCODER_TYPE",
+        V2_CANONICAL_JSON_ENCODER_TYPE,
+    ),
     ("V2_SHA256_CONSTRUCTOR", V2_SHA256_CONSTRUCTOR),
     ("V2_SHA256_UPDATE", V2_SHA256_UPDATE),
     ("V2_SHA256_HEXDIGEST", V2_SHA256_HEXDIGEST),
