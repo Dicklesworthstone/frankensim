@@ -170,6 +170,13 @@ pub enum AxisymmetricError {
         /// Index of the arc that crosses into negative radius.
         index: usize,
     },
+    /// A proper arc has an interior radial minimum tangent to the revolution
+    /// axis. Its revolution pinches, so neither of the v1 topology hints is
+    /// sound for the resulting singular set.
+    AxisTangentArc {
+        /// Index of the singular arc.
+        index: usize,
+    },
     /// The loop does not orient its material to the left (CCW).
     NonPositiveOrientation,
     /// Non-adjacent features meet, overlap, or cross.
@@ -215,6 +222,10 @@ impl core::fmt::Display for AxisymmetricError {
             Self::ArcLeavesHalfPlane { index } => {
                 write!(f, "arc {index} enters negative cylindrical radius")
             }
+            Self::AxisTangentArc { index } => write!(
+                f,
+                "arc {index} is tangent to the revolution axis in its interior; singular pinches are unsupported"
+            ),
             Self::NonPositiveOrientation => {
                 write!(f, "meridian loop must be simple and counter-clockwise")
             }
@@ -422,7 +433,10 @@ impl AxisymmetricChart {
             signed_distance: signed,
             gradient,
             lipschitz: Some(1.0),
-            error: rounded_enclosure(signed),
+            // ExactDistance is a geometric theorem. The current binary64
+            // evaluation has no directed-rounding proof, so publishing a
+            // one-ULP enclosure here would overclaim numerical authority.
+            error: NumericalCertificate::estimate(signed, signed),
         }
     }
 }
@@ -477,14 +491,6 @@ fn refused_sample() -> ChartSample {
         gradient: None,
         lipschitz: None,
         error: NumericalCertificate::no_claim(),
-    }
-}
-
-fn rounded_enclosure(value: f64) -> NumericalCertificate {
-    if value.is_finite() {
-        NumericalCertificate::enclosure(value.next_down(), value.next_up())
-    } else {
-        NumericalCertificate::no_claim()
     }
 }
 
@@ -630,7 +636,30 @@ fn validate_arc(index: usize, segment: MeridianSegment) -> Result<(), Axisymmetr
     if leftmost < -tolerance {
         return Err(AxisymmetricError::ArcLeavesHalfPlane { index });
     }
+    if arc_has_interior_axis_tangent(segment, tolerance) {
+        return Err(AxisymmetricError::AxisTangentArc { index });
+    }
     Ok(())
+}
+
+fn arc_has_interior_axis_tangent(segment: MeridianSegment, tolerance: f64) -> bool {
+    let MeridianSegment::Arc { center, .. } = segment else {
+        return false;
+    };
+    let radius = arc_radius(segment);
+    if (center.radius - radius).abs() > tolerance
+        || !arc_contains_angle(segment, core::f64::consts::PI)
+    {
+        return false;
+    }
+    let sweep = arc_sweep(segment);
+    let start = arc_start_angle(segment);
+    let travel = if sweep >= 0.0 {
+        (core::f64::consts::PI - start).rem_euclid(TAU)
+    } else {
+        (start - core::f64::consts::PI).rem_euclid(TAU)
+    };
+    travel > tolerance && travel < sweep.abs() - tolerance
 }
 
 fn arc_radius(segment: MeridianSegment) -> f64 {

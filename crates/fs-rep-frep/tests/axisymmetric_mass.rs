@@ -130,7 +130,13 @@ fn g0_cylinder_mass_center_and_principal_inertia_match_closed_forms() {
         mass * (3.0 * radius * radius + thickness * thickness) / 12.0,
     );
     assert_eq!(properties.principal_inertia, properties.origin_inertia);
-    assert!(properties.error.volume.lo <= volume && volume <= properties.error.volume.hi);
+    assert!(properties.roundoff_diagnostics.volume_term_scale >= properties.volume.abs());
+    assert!(
+        properties
+            .roundoff_diagnostics
+            .centroidal_transverse_term_scale
+            >= properties.principal_inertia.transverse.abs()
+    );
 }
 
 #[test]
@@ -230,6 +236,36 @@ fn g3_scale_and_axial_translation_obey_dimensional_and_parallel_axis_laws() {
     assert_close(
         translated.origin_inertia.axial,
         translated.principal_inertia.axial,
+    );
+}
+
+#[test]
+fn g3_huge_axial_translation_keeps_centroidal_inertia_out_of_parallel_axis_cancellation() {
+    let density = 4.0;
+    let base = with_cx(false, |cx| {
+        cylinder(1.25, 4.0, 0.0)
+            .mass_properties(density, cx)
+            .expect("base mass")
+    });
+    let axial_shift = 1.0e12;
+    let translated = with_cx(false, |cx| {
+        cylinder(1.25, 4.0, axial_shift)
+            .mass_properties(density, cx)
+            .expect("huge translated mass")
+    });
+
+    assert_close(translated.center_of_mass.z, axial_shift);
+    assert_close(
+        translated.principal_inertia.transverse,
+        base.principal_inertia.transverse,
+    );
+    assert_close(
+        translated.principal_inertia.axial,
+        base.principal_inertia.axial,
+    );
+    assert_close(
+        translated.origin_inertia.transverse,
+        translated.principal_inertia.transverse + translated.mass * axial_shift * axial_shift,
     );
 }
 

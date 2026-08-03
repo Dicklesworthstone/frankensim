@@ -59,7 +59,7 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
 }
 
 #[test]
-fn g0_cylinder_axis_inside_outside_and_exact_enclosure() {
+fn g0_cylinder_axis_inside_outside_and_non_authoritative_distance_estimate() {
     let chart = cylinder(2.0, 1.0, 0.0);
     with_cx(|cx| {
         let inside = chart.eval(Point3::new(1.0, 0.0, 0.0), cx);
@@ -76,7 +76,9 @@ fn g0_cylinder_axis_inside_outside_and_exact_enclosure() {
             seam.gradient.is_none(),
             "equal line-feature minima are set-valued"
         );
-        assert!(side.error.lo <= side.signed_distance && side.signed_distance <= side.error.hi);
+        assert_eq!(side.error.kind, fs_evidence::NumericalKind::Estimate);
+        assert_eq!(side.error.lo, side.signed_distance);
+        assert_eq!(side.error.hi, side.signed_distance);
     });
     assert_eq!(chart.trace_step_claim(), TraceStepClaim::ExactDistance);
     assert_eq!(chart.construction_certificate().surfaced_feature_count, 3);
@@ -273,6 +275,17 @@ fn g0_hostile_profiles_refuse_before_exact_distance_is_exposed() {
             | Err(AxisymmetricError::NonPositiveOrientation)
     ));
 
+    let reversed_cylinder = AxisymmetricChart::try_new(vec![
+        line(point(0.0, -1.0), point(0.0, 1.0)),
+        line(point(0.0, 1.0), point(1.0, 1.0)),
+        line(point(1.0, 1.0), point(1.0, -1.0)),
+        line(point(1.0, -1.0), point(0.0, -1.0)),
+    ]);
+    assert!(matches!(
+        reversed_cylinder,
+        Err(AxisymmetricError::NonPositiveOrientation)
+    ));
+
     let too_many = AxisymmetricChart::try_new(vec![
         line(point(0.0, 0.0), point(1.0, 0.0));
         MAX_AXISYMMETRIC_SEGMENTS + 1
@@ -280,6 +293,25 @@ fn g0_hostile_profiles_refuse_before_exact_distance_is_exposed() {
     assert!(matches!(
         too_many,
         Err(AxisymmetricError::SegmentCount { .. })
+    ));
+}
+
+#[test]
+fn g0_interior_arc_tangent_to_axis_refuses_singular_pinch_topology() {
+    let singular_pinch = AxisymmetricChart::try_new(vec![
+        MeridianSegment::Arc {
+            start: point(1.0, 1.0),
+            end: point(1.0, -1.0),
+            center: point(1.0, 0.0),
+            clockwise: false,
+        },
+        line(point(1.0, -1.0), point(3.0, -1.0)),
+        line(point(3.0, -1.0), point(3.0, 1.0)),
+        line(point(3.0, 1.0), point(1.0, 1.0)),
+    ]);
+    assert!(matches!(
+        singular_pinch,
+        Err(AxisymmetricError::AxisTangentArc { index: 0 })
     ));
 }
 

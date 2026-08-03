@@ -16,7 +16,6 @@
 //! admitted profile stays an exact geometric profile throughout mechanics
 //! admission; no chordal approximation is introduced here.
 
-use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
 use fs_geom::Point3;
 
@@ -25,7 +24,6 @@ use crate::{AxisymmetricChart, AxisymmetricError, MeridianSegment};
 const PI: f64 = core::f64::consts::PI;
 const TAU: f64 = core::f64::consts::TAU;
 const POLL_STRIDE: usize = 16;
-const CERTIFICATE_ULPS: usize = 4_096;
 
 /// Axisymmetric principal moments about either the center of mass or the
 /// world origin.  `transverse` is both `I_x` and `I_y`; `axial` is `I_z`.
@@ -37,28 +35,25 @@ pub struct AxisymmetricPrincipalInertia {
     pub axial: f64,
 }
 
-/// Explicit outward bands for the deterministic floating-point evaluation.
+/// Non-authoritative numerical telemetry for a mass-property evaluation.
 ///
-/// The analytic integration is exact over the represented real line/arc
-/// geometry.  These bands conservatively widen the fixed operation sequence,
-/// including the declared strict-trigonometry ULP budget used for arcs; they
-/// do not turn binary64 input coordinates into exact real measurements.
+/// These are absolute term-magnitude scales accumulated in deterministic
+/// feature order. They help a caller identify cancellation-prone inputs, but
+/// are **not error bounds, intervals, or certificates** and must not be used
+/// to admit a mechanics result. The analytic formulas are exact over the
+/// represented real line/arc geometry; floating-point certification needs a
+/// separate directed-rounding implementation.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AxisymmetricMassErrorBounds {
-    /// Enclosure for solid volume.
-    pub volume: NumericalCertificate,
-    /// Enclosure for mass after density multiplication.
-    pub mass: NumericalCertificate,
-    /// Enclosure for the axial center-of-mass coordinate.
-    pub center_axial: NumericalCertificate,
-    /// Enclosure for transverse inertia about the world origin.
-    pub origin_transverse: NumericalCertificate,
-    /// Enclosure for axial inertia about the world origin.
-    pub origin_axial: NumericalCertificate,
-    /// Enclosure for transverse centroidal principal inertia.
-    pub principal_transverse: NumericalCertificate,
-    /// Enclosure for axial centroidal principal inertia.
-    pub principal_axial: NumericalCertificate,
+pub struct AxisymmetricMassRoundoffDiagnostics {
+    /// Sum of absolute volume-boundary terms, after multiplication by pi.
+    pub volume_term_scale: f64,
+    /// Sum of absolute axial-first-moment boundary terms, after multiplication
+    /// by pi.
+    pub axial_first_moment_term_scale: f64,
+    /// Sum of absolute centroidal transverse-inertia boundary terms.
+    pub centroidal_transverse_term_scale: f64,
+    /// Sum of absolute axial-inertia boundary terms.
+    pub axial_inertia_term_scale: f64,
 }
 
 /// Production mass properties of a homogeneous solid of revolution.
@@ -74,8 +69,8 @@ pub struct AxisymmetricMassProperties {
     pub principal_inertia: AxisymmetricPrincipalInertia,
     /// Inertia about the world origin, retained for parallel-axis consumers.
     pub origin_inertia: AxisymmetricPrincipalInertia,
-    /// Explicit floating-point output bands for each reported quantity.
-    pub error: AxisymmetricMassErrorBounds,
+    /// Non-authoritative term-magnitude telemetry; never an error bound.
+    pub roundoff_diagnostics: AxisymmetricMassRoundoffDiagnostics,
 }
 
 /// Refusal from [`AxisymmetricChart::mass_properties`].
@@ -179,30 +174,49 @@ impl AxisymmetricChart {
         let volume = PI * moments.r2;
         let first_axial = PI * moments.r2_z;
         let origin_axial = density * (0.5 * PI * moments.r4);
-        let origin_transverse = density * PI * (0.25 * moments.r4 + moments.r2_z2);
         ensure_finite(volume, "volume")?;
         ensure_finite(first_axial, "axial first moment")?;
         ensure_finite(origin_axial, "origin axial inertia")?;
-        ensure_finite(origin_transverse, "origin transverse inertia")?;
         if volume <= 0.0 {
             return Err(AxisymmetricMassError::NonPositiveVolume { volume });
         }
 
         let mass = density * volume;
         let center_axial = first_axial / volume;
-        let mut principal_transverse = origin_transverse - mass * center_axial * center_axial;
+        let mut centered_r2_z2 = 0.0;
+        let mut centered_r2_z2_abs = 0.0;
+        for (index, segment) in self.segments().iter().copied().enumerate() {
+            if index % POLL_STRIDE == 0 && cx.checkpoint().is_err() {
+                return Err(AxisymmetricMassError::Cancelled);
+            }
+            let term = boundary_integral_centered_axial(segment, 2, 2, center_axial);
+            centered_r2_z2 += term;
+            centered_r2_z2_abs += term.abs();
+            ensure_finite(
+                centered_r2_z2,
+                "centered transverse inertia boundary moment",
+            )?;
+            ensure_finite(
+                centered_r2_z2_abs,
+                "centered transverse inertia absolute boundary moment",
+            )?;
+        }
+        if cx.checkpoint().is_err() {
+            return Err(AxisymmetricMassError::Cancelled);
+        }
+        let mut principal_transverse = density * PI * (0.25 * moments.r4 + centered_r2_z2);
         let principal_axial = origin_axial;
+        let origin_transverse = principal_transverse + mass * center_axial * center_axial;
         ensure_finite(mass, "mass")?;
         ensure_finite(center_axial, "center axial coordinate")?;
         ensure_finite(principal_transverse, "principal transverse inertia")?;
         ensure_finite(principal_axial, "principal axial inertia")?;
+        ensure_finite(origin_transverse, "origin transverse inertia")?;
 
-        // A centered subtraction can leave a few negative ulps for an
-        // otherwise valid solid.  Only canonicalize that representational
-        // residue; a material negative moment remains a hard refusal.
-        let inertia_scale = origin_transverse
-            .abs()
-            .max(mass * center_axial * center_axial);
+        // The centroidal moment is evaluated in a centered second boundary
+        // pass. Only the final boundary sum can leave a few negative ulps;
+        // a material negative moment remains a hard refusal.
+        let inertia_scale = density * PI * (0.25 * moments.r4_abs + centered_r2_z2_abs);
         let roundoff = inertia_scale * 64.0 * f64::EPSILON;
         if principal_transverse < 0.0 && principal_transverse >= -roundoff {
             principal_transverse = 0.0;
@@ -226,14 +240,13 @@ impl AxisymmetricChart {
                 transverse: origin_transverse,
                 axial: origin_axial,
             },
-            error: AxisymmetricMassErrorBounds {
-                volume: widened(volume),
-                mass: widened(mass),
-                center_axial: widened(center_axial),
-                origin_transverse: widened(origin_transverse),
-                origin_axial: widened(origin_axial),
-                principal_transverse: widened(principal_transverse),
-                principal_axial: widened(principal_axial),
+            roundoff_diagnostics: AxisymmetricMassRoundoffDiagnostics {
+                volume_term_scale: PI * moments.r2_abs,
+                axial_first_moment_term_scale: PI * moments.r2_z_abs,
+                centroidal_transverse_term_scale: density
+                    * PI
+                    * (0.25 * moments.r4_abs + centered_r2_z2_abs),
+                axial_inertia_term_scale: density * 0.5 * PI * moments.r4_abs,
             },
         })
     }
@@ -244,20 +257,66 @@ struct BoundaryMoments {
     r2: f64,
     r2_z: f64,
     r4: f64,
-    r2_z2: f64,
+    r2_abs: f64,
+    r2_z_abs: f64,
+    r4_abs: f64,
 }
 
 impl BoundaryMoments {
     fn add(&mut self, segment: MeridianSegment) -> Result<(), AxisymmetricMassError> {
-        self.r2 += boundary_integral(segment, 2, 0);
-        self.r2_z += boundary_integral(segment, 2, 1);
-        self.r4 += boundary_integral(segment, 4, 0);
-        self.r2_z2 += boundary_integral(segment, 2, 2);
+        let r2 = boundary_integral(segment, 2, 0);
+        let r2_z = boundary_integral(segment, 2, 1);
+        let r4 = boundary_integral(segment, 4, 0);
+        self.r2 += r2;
+        self.r2_z += r2_z;
+        self.r4 += r4;
+        self.r2_abs += r2.abs();
+        self.r2_z_abs += r2_z.abs();
+        self.r4_abs += r4.abs();
         ensure_finite(self.r2, "volume boundary moment")?;
         ensure_finite(self.r2_z, "axial first boundary moment")?;
         ensure_finite(self.r4, "axial inertia boundary moment")?;
-        ensure_finite(self.r2_z2, "transverse inertia boundary moment")?;
+        ensure_finite(self.r2_abs, "volume absolute boundary moment")?;
+        ensure_finite(self.r2_z_abs, "axial first absolute boundary moment")?;
+        ensure_finite(self.r4_abs, "axial inertia absolute boundary moment")?;
         Ok(())
+    }
+}
+
+/// Evaluate a boundary integral after translating the axial coordinate to the
+/// known center of mass. This is a second pass on the exact features rather
+/// than a parallel-axis subtraction of two large origin moments.
+fn boundary_integral_centered_axial(
+    segment: MeridianSegment,
+    radius_power: u32,
+    axial_power: u32,
+    axial_center: f64,
+) -> f64 {
+    match segment {
+        MeridianSegment::Line { start, end } => line_integral(
+            start.radius,
+            start.axial - axial_center,
+            end.radius - start.radius,
+            end.axial - start.axial,
+            radius_power,
+            axial_power,
+        ),
+        MeridianSegment::Arc {
+            start,
+            end,
+            center,
+            clockwise,
+        } => arc_integral(
+            start.radius,
+            start.axial - axial_center,
+            end.radius,
+            end.axial - axial_center,
+            center.radius,
+            center.axial - axial_center,
+            clockwise,
+            radius_power,
+            axial_power,
+        ),
     }
 }
 
@@ -412,14 +471,4 @@ fn ensure_finite(value: f64, quantity: &'static str) -> Result<(), AxisymmetricM
     } else {
         Err(AxisymmetricMassError::NonFinite { quantity })
     }
-}
-
-fn widened(value: f64) -> NumericalCertificate {
-    let mut lo = value;
-    let mut hi = value;
-    for _ in 0..CERTIFICATE_ULPS {
-        lo = lo.next_down();
-        hi = hi.next_up();
-    }
-    NumericalCertificate::enclosure(lo, hi)
 }

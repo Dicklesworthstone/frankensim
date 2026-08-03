@@ -44,7 +44,7 @@ pub use axisymmetric::{
     SquatDiscEdgeTreatment, squat_disc,
 };
 pub use axisymmetric_mass::{
-    AxisymmetricMassError, AxisymmetricMassErrorBounds, AxisymmetricMassProperties,
+    AxisymmetricMassError, AxisymmetricMassProperties, AxisymmetricMassRoundoffDiagnostics,
     AxisymmetricPrincipalInertia,
 };
 
