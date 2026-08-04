@@ -186,7 +186,7 @@ fn sphere_closing_maps_hertz_scale_force_and_application_point() {
     let EulerNormalContactOutcome::Active(active) = result else {
         panic!("active contact expected");
     };
-    close(active.curvature.effective_radius_m, 0.1);
+    close(active.curvature.reporting_radius_m, 0.1);
     close(active.application_point_world_m.x, 1.0);
     close(active.application_point_world_m.z, -1.0e-4);
     let expected_force = (4.0 / 3.0) * 2.0e9 * 0.1_f64.sqrt() * (1.0e-4_f64).powf(1.5);
@@ -327,6 +327,46 @@ fn line_contact_preserves_line_units_and_elastic_storage() {
             work_j_per_m: 0.0,
             power_w_per_m: 0.0
         }
+    ));
+}
+
+#[test]
+fn unequal_positive_curvatures_map_to_a_true_elliptic_patch() {
+    let result = evaluate_normal_contact(&input(
+        PatchContactStatus::Approaching,
+        (20.0, 10.0),
+        -1.0e-4,
+        -0.1,
+        EulerNormalGeometry::EllipticParaboloid,
+        None,
+    ))
+    .expect("admitted elliptic contact");
+    let EulerNormalContactOutcome::Active(active) = result else {
+        panic!("active elliptic contact expected");
+    };
+    match &active.generic.receipt {
+        NormalPatchReceipt::Point(receipt) => {
+            let axes = receipt
+                .elliptic_patch_axes
+                .expect("elliptic semiaxes retained");
+            assert!(axes.semi_major_axis_m > axes.semi_minor_axis_m);
+            assert!(receipt.normal_force_n > 0.0);
+        }
+        NormalPatchReceipt::Line(_) => panic!("point receipt expected"),
+    }
+    close(active.curvature.reporting_radius_m, 1.0 / 200.0_f64.sqrt());
+
+    let dissipative = evaluate_normal_contact(&input(
+        PatchContactStatus::Approaching,
+        (20.0, 10.0),
+        -1.0e-4,
+        -0.1,
+        EulerNormalGeometry::EllipticParaboloid,
+        Some(0.1),
+    ));
+    assert!(matches!(
+        dissipative,
+        Err(NormalContactError::DissipativeEllipticUnsupported)
     ));
 }
 

@@ -8,7 +8,12 @@
 
 use core::fmt;
 
-use crate::{ContactDiscGeometry, contact_geometry, state_at_ground_contact};
+use crate::specimen::ResolvedDiscProfile;
+use crate::{
+    ContactDiscGeometry, ContactGeometry, contact_geometry, profile_contact_geometry,
+    profile_state_at_ground_contact, state_at_ground_contact,
+};
+use fs_exec::Cx;
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
     Wrench,
@@ -36,6 +41,43 @@ pub struct CoupledFactors {
     pub base_damping_n_s_per_m: f64,
     pub gas_rotational_damping_n_m_s: f64,
     pub gas_translation_damping_n_s_per_m: f64,
+}
+
+/// Geometry-independent material and environment factors, in SI units.
+///
+/// Profile trajectories derive mass, center of mass, principal inertia, outer
+/// radius, and thickness from one [`ResolvedDiscProfile`]. Keeping those
+/// quantities out of this input prevents a caller from pairing one contact
+/// shape with hand-entered inertia from another shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoupledChannelFactors {
+    pub gravity_m_per_s2: f64,
+    pub sliding_friction_coefficient: f64,
+    pub rolling_resistance_m: f64,
+    pub contact_stiffness_n_per_m: f64,
+    pub contact_damping_n_s_per_m: f64,
+    pub base_effective_mass_kg: f64,
+    pub base_stiffness_n_per_m: f64,
+    pub base_damping_n_s_per_m: f64,
+    pub gas_rotational_damping_n_m_s: f64,
+    pub gas_translation_damping_n_s_per_m: f64,
+}
+
+impl CoupledFactors {
+    pub fn channel_factors(self) -> CoupledChannelFactors {
+        CoupledChannelFactors {
+            gravity_m_per_s2: self.gravity_m_per_s2,
+            sliding_friction_coefficient: self.sliding_friction_coefficient,
+            rolling_resistance_m: self.rolling_resistance_m,
+            contact_stiffness_n_per_m: self.contact_stiffness_n_per_m,
+            contact_damping_n_s_per_m: self.contact_damping_n_s_per_m,
+            base_effective_mass_kg: self.base_effective_mass_kg,
+            base_stiffness_n_per_m: self.base_stiffness_n_per_m,
+            base_damping_n_s_per_m: self.base_damping_n_s_per_m,
+            gas_rotational_damping_n_m_s: self.gas_rotational_damping_n_m_s,
+            gas_translation_damping_n_s_per_m: self.gas_translation_damping_n_s_per_m,
+        }
+    }
 }
 
 /// Fixed deterministic run controls.
@@ -87,6 +129,10 @@ pub struct CoupledSample {
     /// Unilateral normal force evaluated over the interval ending at `time_s` [N].
     pub interval_normal_force_n: f64,
     pub contact_active: bool,
+    /// Profile feature selected by the analytic support query at this
+    /// sample's retained post-step pose. Cylinder-only compatibility runs do
+    /// not expose a feature index.
+    pub support_source_feature: Option<usize>,
     pub reimpact_count: u32,
     pub channels: ChannelOwnership,
     pub mechanical_energy_j: f64,
@@ -141,6 +187,62 @@ impl fmt::Display for CoupledError {
 }
 impl std::error::Error for CoupledError {}
 
+enum CoupledGeometry<'profile, 'cx> {
+    Cylinder(ContactDiscGeometry),
+    Profile {
+        profile: &'profile ResolvedDiscProfile,
+        cx: &'profile Cx<'cx>,
+    },
+}
+
+impl CoupledGeometry<'_, '_> {
+    fn contact(&self, pose: Pose) -> Result<(ContactGeometry, Option<usize>), CoupledError> {
+        match self {
+            Self::Cylinder(geometry) => contact_geometry(*geometry, pose)
+                .map(|contact| (contact, None))
+                .map_err(|error| CoupledError::Dynamics(error.to_string())),
+            Self::Profile { profile, cx } => {
+                profile_contact_geometry(&profile.chart, profile.mass_properties, pose, cx)
+                    .map(|geometry| (geometry.contact, Some(geometry.support_source_feature)))
+                    .map_err(|error| CoupledError::Dynamics(error.to_string()))
+            }
+        }
+    }
+
+    fn state_at_ground_contact(
+        &self,
+        orientation: UnitQuaternion,
+        linear_momentum_world: Vec3,
+        angular_momentum_body: Vec3,
+    ) -> Result<RigidBodyState, CoupledError> {
+        match self {
+            Self::Cylinder(geometry) => state_at_ground_contact(
+                *geometry,
+                orientation,
+                linear_momentum_world,
+                angular_momentum_body,
+            )
+            .map_err(|error| CoupledError::Dynamics(error.to_string())),
+            Self::Profile { profile, cx } => profile_state_at_ground_contact(
+                &profile.chart,
+                profile.mass_properties,
+                orientation,
+                linear_momentum_world,
+                angular_momentum_body,
+                cx,
+            )
+            .map_err(|error| CoupledError::Dynamics(error.to_string())),
+        }
+    }
+
+    fn identity_word(&self) -> u64 {
+        match self {
+            Self::Cylinder(_) => 0,
+            Self::Profile { profile, .. } => profile.identity.0,
+        }
+    }
+}
+
 /// Starts or resumes a closed reduced trajectory.  Contact is unilateral and
 /// may separate/reimpact; rolling/base/gas are recomputed from each new state.
 pub fn run_closed_reduced(
@@ -148,6 +250,61 @@ pub fn run_closed_reduced(
     controls: CoupledControls,
     initial: CoupledInitialState,
     restart: Option<CoupledCheckpoint>,
+) -> Result<CoupledRun, CoupledError> {
+    let geometry = CoupledGeometry::Cylinder(ContactDiscGeometry {
+        radius_m: factors.radius_m,
+        thickness_m: factors.thickness_m,
+        mass_kg: factors.mass_kg,
+    });
+    run_closed_with_geometry(factors, controls, initial, restart, geometry)
+}
+
+/// Runs the same reduced channel model against a true resolved profile.
+///
+/// Geometry, support, mass, center of mass, and inertia all come from
+/// `profile`. This removes the former cone-inertia/cylinder-contact surrogate;
+/// it does not upgrade the reduced point-contact or loss laws to experimental
+/// validation.
+pub fn run_closed_profile_reduced(
+    profile: &ResolvedDiscProfile,
+    channels: CoupledChannelFactors,
+    controls: CoupledControls,
+    initial: CoupledInitialState,
+    restart: Option<CoupledCheckpoint>,
+    cx: &Cx<'_>,
+) -> Result<CoupledRun, CoupledError> {
+    let factors = CoupledFactors {
+        mass_kg: profile.mass_properties.mass,
+        radius_m: profile.dimensions.outer_radius_m,
+        thickness_m: profile.dimensions.thickness_m,
+        transverse_inertia_kg_m2: profile.mass_properties.principal_inertia.transverse,
+        axial_inertia_kg_m2: profile.mass_properties.principal_inertia.axial,
+        gravity_m_per_s2: channels.gravity_m_per_s2,
+        sliding_friction_coefficient: channels.sliding_friction_coefficient,
+        rolling_resistance_m: channels.rolling_resistance_m,
+        contact_stiffness_n_per_m: channels.contact_stiffness_n_per_m,
+        contact_damping_n_s_per_m: channels.contact_damping_n_s_per_m,
+        base_effective_mass_kg: channels.base_effective_mass_kg,
+        base_stiffness_n_per_m: channels.base_stiffness_n_per_m,
+        base_damping_n_s_per_m: channels.base_damping_n_s_per_m,
+        gas_rotational_damping_n_m_s: channels.gas_rotational_damping_n_m_s,
+        gas_translation_damping_n_s_per_m: channels.gas_translation_damping_n_s_per_m,
+    };
+    run_closed_with_geometry(
+        factors,
+        controls,
+        initial,
+        restart,
+        CoupledGeometry::Profile { profile, cx },
+    )
+}
+
+fn run_closed_with_geometry(
+    factors: CoupledFactors,
+    controls: CoupledControls,
+    initial: CoupledInitialState,
+    restart: Option<CoupledCheckpoint>,
+    geometry_model: CoupledGeometry<'_, '_>,
 ) -> Result<CoupledRun, CoupledError> {
     validate(factors, controls, initial)?;
     let mass = MassProperties::new(
@@ -163,13 +320,7 @@ pub fn run_closed_reduced(
     let gravity = Gravity::new(Vec3::new(0.0, 0.0, -factors.gravity_m_per_s2))
         .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
     let integrator = RigidBodyIntegrator::new(gravity);
-    let contact_geometry_input = ContactDiscGeometry {
-        radius_m: factors.radius_m,
-        thickness_m: factors.thickness_m,
-        mass_kg: factors.mass_kg,
-    };
-    let mut configured_checkpoint =
-        initial_checkpoint(factors, initial, mass, contact_geometry_input)?;
+    let mut configured_checkpoint = initial_checkpoint(factors, initial, mass, &geometry_model)?;
     let configured_initial_energy_j = total_energy(
         integrator
             .diagnostics(configured_checkpoint.state, mass)
@@ -178,10 +329,15 @@ pub fn run_closed_reduced(
         factors,
         configured_checkpoint.base_deflection_m,
         configured_checkpoint.base_velocity_m_per_s,
-        initial_penetration_m(contact_geometry_input, &configured_checkpoint)?,
+        initial_penetration_m(&geometry_model, &configured_checkpoint)?,
     );
-    let configured_fingerprint =
-        configuration_fingerprint(factors, controls, initial, configured_initial_energy_j);
+    let configured_fingerprint = configuration_fingerprint(
+        factors,
+        controls,
+        initial,
+        configured_initial_energy_j,
+        geometry_model.identity_word(),
+    );
     let mut checkpoint = match restart {
         Some(checkpoint)
             if checkpoint.initial_total_energy_j.to_bits()
@@ -223,8 +379,7 @@ pub fn run_closed_reduced(
             .angular_velocity_body_checked(state.angular_momentum_body())
             .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
         let omega_world = pose.orientation().rotate_body_to_world(omega_body);
-        let geometry = contact_geometry(contact_geometry_input, pose)
-            .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+        let (geometry, _) = geometry_model.contact(pose)?;
         let contact_arm = geometry.radius_world_m;
         let support_height = geometry.gap_m - checkpoint.base_deflection_m;
         let contact_velocity = velocity.add(omega_world.cross(contact_arm));
@@ -297,9 +452,7 @@ pub fn run_closed_reduced(
                     .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
             )
             .scale(0.5);
-        let midpoint_contact =
-            contact_geometry(contact_geometry_input, midpoint_state_for_rolling.pose())
-                .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+        let (midpoint_contact, _) = geometry_model.contact(midpoint_state_for_rolling.pose())?;
         let midpoint_contact_velocity = midpoint_velocity_for_rolling
             .add(midpoint_omega_for_rolling.cross(midpoint_contact.radius_world_m));
         let rolling_contour_speed = Vec3::new(
@@ -418,8 +571,8 @@ pub fn run_closed_reduced(
         checkpoint.accumulated_channel_work_j[2] += channels.rolling.work_j;
         checkpoint.accumulated_channel_work_j[3] += channels.base.work_j;
         checkpoint.accumulated_channel_work_j[4] += channels.gas.work_j;
-        let post_geometry = contact_geometry(contact_geometry_input, checkpoint.state.pose())
-            .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+        let (post_geometry, post_support_source_feature) =
+            geometry_model.contact(checkpoint.state.pose())?;
         let post_penetration = (checkpoint.base_deflection_m - post_geometry.gap_m).max(0.0);
         let total_energy = total_energy(
             receipt.diagnostics_after.mechanical_energy,
@@ -446,6 +599,7 @@ pub fn run_closed_reduced(
             interval_start_gap_m: support_height,
             interval_normal_force_n: normal_force,
             contact_active,
+            support_source_feature: post_support_source_feature,
             reimpact_count: checkpoint.reimpact_count,
             channels,
             mechanical_energy_j: total_energy,
@@ -456,6 +610,20 @@ pub fn run_closed_reduced(
                 samples,
                 checkpoint,
                 terminal: CoupledTerminal::NumericalRefusal,
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        }
+        // Classify an event reached on the final allowed step as physical,
+        // rather than incorrectly turning it into a horizon censor. The event
+        // time is still the first committed fixed-step boundary at or below
+        // the threshold; this reduced runner does not claim substep event
+        // interpolation.
+        if sample_inclination <= controls.terminal_inclination_rad {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::TerminalInclination,
                 applicability: applicability(),
                 model_disagreement: disagreement(),
             });
@@ -474,7 +642,7 @@ fn initial_checkpoint(
     factors: CoupledFactors,
     initial: CoupledInitialState,
     mass: MassProperties,
-    geometry: ContactDiscGeometry,
+    geometry: &CoupledGeometry<'_, '_>,
 ) -> Result<CoupledCheckpoint, CoupledError> {
     let orientation =
         UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), initial.inclination_rad)
@@ -488,13 +656,10 @@ fn initial_checkpoint(
         omega_body.y * mass.principal_inertia_body().y,
         omega_body.z * mass.principal_inertia_body().z,
     );
-    let ground_state = state_at_ground_contact(geometry, orientation, Vec3::ZERO, angular)
-        .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
-    let contact_arm = contact_geometry(geometry, ground_state.pose())
-        .map_err(|error| CoupledError::Dynamics(error.to_string()))?
-        .radius_world_m;
-    // This is the declared rolling initial condition: the finite-cylinder rim
-    // point has zero world velocity before the preload position offset.
+    let ground_state = geometry.state_at_ground_contact(orientation, Vec3::ZERO, angular)?;
+    let contact_arm = geometry.contact(ground_state.pose())?.0.radius_world_m;
+    // This is the declared rolling initial condition: the current analytic
+    // profile support point has zero world velocity before the preload offset.
     let center_of_mass_velocity = omega_world.cross(contact_arm).scale(-1.0);
     let preload_force_n = factors.mass_kg * factors.gravity_m_per_s2;
     let (base_deflection_m, contact_penetration_m) =
@@ -506,13 +671,11 @@ fn initial_checkpoint(
         } else {
             (0.0, 0.0)
         };
-    let grounded_state = state_at_ground_contact(
-        geometry,
+    let grounded_state = geometry.state_at_ground_contact(
         orientation,
         center_of_mass_velocity.scale(factors.mass_kg),
         angular,
-    )
-    .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+    )?;
     let shifted_position = grounded_state.pose().position_world().add(Vec3::new(
         0.0,
         0.0,
@@ -599,7 +762,7 @@ pub fn initial_qois(
         mass_kg: factors.mass_kg,
     };
     qois(
-        initial_checkpoint(factors, initial, mass, geometry)?.state,
+        initial_checkpoint(factors, initial, mass, &CoupledGeometry::Cylinder(geometry))?.state,
         mass,
     )
 }
@@ -636,9 +799,9 @@ pub fn initial_contact_point_velocity(
         thickness_m: factors.thickness_m,
         mass_kg: factors.mass_kg,
     };
-    let checkpoint = initial_checkpoint(factors, initial, mass, geometry)?;
-    let contact = contact_geometry(geometry, checkpoint.state.pose())
-        .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+    let geometry = CoupledGeometry::Cylinder(geometry);
+    let checkpoint = initial_checkpoint(factors, initial, mass, &geometry)?;
+    let contact = geometry.contact(checkpoint.state.pose())?.0;
     let velocity = checkpoint
         .state
         .center_of_mass_velocity_world(mass)
@@ -655,11 +818,10 @@ pub fn initial_contact_point_velocity(
 }
 
 fn initial_penetration_m(
-    geometry: ContactDiscGeometry,
+    geometry: &CoupledGeometry<'_, '_>,
     checkpoint: &CoupledCheckpoint,
 ) -> Result<f64, CoupledError> {
-    let contact = contact_geometry(geometry, checkpoint.state.pose())
-        .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+    let contact = geometry.contact(checkpoint.state.pose())?.0;
     Ok((checkpoint.base_deflection_m - contact.gap_m).max(0.0))
 }
 
@@ -714,10 +876,10 @@ mod tests {
 pub const ADAPTER_INTEGRATION_PLAN: &str = "after focused adapter compilation: mechanics=>contact/base;rolling_contact=>rolling;air=>gas;retain independent work ownership and energy closure";
 
 fn applicability() -> &'static str {
-    "reduced-rigid-Kelvin-Voigt-contact-and-one-mode-base;finite-cylinder support only;gross-sliding-Coulomb-without-static-stick-resolution;cone inertia requires a cylinder-contact surrogate label;not-finite-patch-or-resolved-gas-film"
+    "reduced-rigid-Kelvin-Voigt-contact-and-one-mode-base;profile path uses one analytic axisymmetric chart for support and mass properties;gross-sliding-Coulomb-without-static-stick-resolution;not-finite-patch-or-resolved-gas-film"
 }
 fn disagreement() -> &'static str {
-    "ring mass-properties represent an annular cylinder with finite-cylinder support;cone inertia uses a finite-cylinder-contact surrogate rather than physical cone contact;the runner uses reduced contact/rolling/base/gas channel laws and does not yet consume exported mechanics/rolling_contact/air receipt adapters"
+    "profile geometry is physical line/arc support but contact remains a reduced point Kelvin-Voigt law;rolling/base/gas are reduced channel laws and the runner does not yet consume the higher-fidelity transactional adapters"
 }
 
 fn configuration_fingerprint(
@@ -725,6 +887,7 @@ fn configuration_fingerprint(
     controls: CoupledControls,
     initial: CoupledInitialState,
     initial_energy_j: f64,
+    geometry_identity: u64,
 ) -> u64 {
     // A fixed FNV-1a mix of IEEE-754 encodings is portable and deterministic;
     // this is an identity binding, not a cryptographic digest.
@@ -752,6 +915,7 @@ fn configuration_fingerprint(
         initial.precession_rad_per_s.to_bits(),
         initial.spin_rad_per_s.to_bits(),
         initial_energy_j.to_bits(),
+        geometry_identity,
     ] {
         fingerprint ^= bits;
         fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);

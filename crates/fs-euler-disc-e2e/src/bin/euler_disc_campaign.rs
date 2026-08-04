@@ -5,9 +5,17 @@
 //! uncommitted source through a path inclusion.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_euler_disc_e2e::coupled_runner::{
-    CoupledControls, CoupledFactors, CoupledInitialState, CoupledTerminal, run_closed_reduced,
+use fs_euler_disc_e2e::convergence::{
+    CalibrationReadinessInput, CensorAwareDurationOrdering, ConvergenceScales, DeclaredEvidence,
+    HorizonContinuationPolicy, ObservedOrder, RefinementMode, RunOutcome, ThreeRungConvergence,
+    admit_calibration_readiness, analyse_three_rung_convergence, classify_outcome,
+    compare_censor_aware_durations,
 };
+use fs_euler_disc_e2e::coupled_runner::{
+    CoupledChannelFactors, CoupledControls, CoupledInitialState, CoupledRun,
+    run_closed_profile_reduced,
+};
+use fs_euler_disc_e2e::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseInput, BaselineRunOutput, ChannelCrossoverDiagnostic,
     ChannelCrossoverNotComparable, ContactDiscGeometry, ContactDynamicsInput, ContactLoadScope,
@@ -56,203 +64,214 @@ fn main() {
 }
 
 fn run_closed_campaign() -> Result<(), String> {
+    with_closed_context(run_closed_campaign_with_context)
+}
+
+#[derive(Clone, Copy)]
+struct ClosedCase {
+    name: &'static str,
+    profile_kind: &'static str,
+    profile: DiscProfileSpec,
+    density_kg_per_m3: f64,
+    base_stiffness_scale: f64,
+    rolling_resistance_m: f64,
+    gas_rotational_damping_n_m_s: f64,
+    gas_translation_damping_n_s_per_m: f64,
+}
+
+struct ContinuedRun {
+    run: CoupledRun,
+    last_sample: fs_euler_disc_e2e::coupled_runner::CoupledSample,
+    declared_horizon_s: f64,
+    continuation_count: u32,
+}
+
+fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
+    const RADIUS: f64 = 0.038;
+    const THICKNESS: f64 = 0.006;
+    const INNER_RATIO: f64 = 0.65;
+    const DENSITY: f64 = 2_680.0;
+    let sharp = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: RADIUS,
+        thickness_m: THICKNESS,
+        edge_treatment: SquatDiscEdgeTreatment::Sharp,
+    };
+    let cases = [
+        ClosedCase {
+            name: "solid",
+            profile_kind: "solid-cylinder-sharp",
+            profile: sharp,
+            density_kg_per_m3: DENSITY,
+            base_stiffness_scale: 1.0,
+            rolling_resistance_m: 4.0e-5,
+            gas_rotational_damping_n_m_s: 2.0e-7,
+            gas_translation_damping_n_s_per_m: 4.0e-4,
+        },
+        ClosedCase {
+            name: "solid-fillet-1mm",
+            profile_kind: "solid-cylinder-circular-fillet",
+            profile: DiscProfileSpec::SolidCylinder {
+                outer_radius_m: RADIUS,
+                thickness_m: THICKNESS,
+                edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+            },
+            density_kg_per_m3: DENSITY,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "solid-chamfer-1mm",
+            profile_kind: "solid-cylinder-linear-chamfer",
+            profile: DiscProfileSpec::ChamferedCylinder {
+                outer_radius_m: RADIUS,
+                thickness_m: THICKNESS,
+                chamfer_radial_m: 0.001,
+                chamfer_axial_m: 0.001,
+            },
+            density_kg_per_m3: DENSITY,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "ring-fixed-density",
+            profile_kind: "annular-cylinder",
+            profile: DiscProfileSpec::AnnularCylinder {
+                outer_radius_m: RADIUS,
+                inner_radius_m: INNER_RATIO * RADIUS,
+                thickness_m: THICKNESS,
+            },
+            density_kg_per_m3: DENSITY,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "ring-equal-mass",
+            profile_kind: "annular-cylinder-equal-mass-control",
+            profile: DiscProfileSpec::AnnularCylinder {
+                outer_radius_m: RADIUS,
+                inner_radius_m: INNER_RATIO * RADIUS,
+                thickness_m: THICKNESS,
+            },
+            density_kg_per_m3: DENSITY / (1.0 - INNER_RATIO * INNER_RATIO),
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "symmetric-tapered",
+            profile_kind: "symmetric-double-frustum",
+            profile: DiscProfileSpec::SymmetricTapered {
+                outer_radius_m: RADIUS,
+                face_radius_m: 0.012,
+                thickness_m: THICKNESS,
+            },
+            density_kg_per_m3: DENSITY,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "large-rim",
+            profile_kind: "solid-cylinder-sharp",
+            profile: DiscProfileSpec::SolidCylinder {
+                outer_radius_m: 0.052,
+                thickness_m: THICKNESS,
+                edge_treatment: SquatDiscEdgeTreatment::Sharp,
+            },
+            density_kg_per_m3: DENSITY,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "dense-material",
+            profile_kind: "solid-cylinder-sharp",
+            profile: sharp,
+            density_kg_per_m3: 7_850.0,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "compliant-base",
+            profile_kind: "solid-cylinder-sharp",
+            profile: sharp,
+            density_kg_per_m3: DENSITY,
+            base_stiffness_scale: 0.35,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "solid-no-gas",
+            profile_kind: "solid-cylinder-sharp",
+            profile: sharp,
+            density_kg_per_m3: DENSITY,
+            gas_rotational_damping_n_m_s: 0.0,
+            gas_translation_damping_n_s_per_m: 0.0,
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "solid-no-rolling",
+            profile_kind: "solid-cylinder-sharp",
+            profile: sharp,
+            density_kg_per_m3: DENSITY,
+            rolling_resistance_m: 0.0,
+            ..cases_defaults(sharp)
+        },
+    ];
     let controls = CoupledControls {
         timestep_s: 2.0e-5,
         maximum_steps: 100_000,
         terminal_inclination_rad: 0.002,
-        reimpact_limit: 32,
+        reimpact_limit: 128,
     };
     let initial = CoupledInitialState {
         inclination_rad: 0.08,
         precession_rad_per_s: 16.0,
         spin_rad_per_s: 120.0,
     };
-    let cases = [
-        (
-            "solid", 0.038, 0.006, 2_680.0, 0.0, false, 1.0, 4.0e-5, 2.0e-7, 4.0e-4,
-        ),
-        (
-            "ring-fixed-density",
-            0.038,
-            0.006,
-            2_680.0,
-            0.65,
-            false,
-            1.0,
-            4.0e-5,
-            2.0e-7,
-            4.0e-4,
-        ),
-        (
-            "ring-equal-mass",
-            0.038,
-            0.006,
-            2_680.0 / (1.0 - 0.65 * 0.65),
-            0.65,
-            false,
-            1.0,
-            4.0e-5,
-            2.0e-7,
-            4.0e-4,
-        ),
-        (
-            "cone-inertia-cylinder-contact-surrogate",
-            0.038,
-            0.006,
-            2_680.0,
-            0.0,
-            true,
-            1.0,
-            4.0e-5,
-            2.0e-7,
-            4.0e-4,
-        ),
-        (
-            "large-rim",
-            0.052,
-            0.006,
-            2_680.0,
-            0.0,
-            false,
-            1.0,
-            4.0e-5,
-            2.0e-7,
-            4.0e-4,
-        ),
-        (
-            "dense-material",
-            0.038,
-            0.006,
-            7_850.0,
-            0.0,
-            false,
-            1.0,
-            4.0e-5,
-            2.0e-7,
-            4.0e-4,
-        ),
-        (
-            "compliant-base",
-            0.038,
-            0.006,
-            2_680.0,
-            0.0,
-            false,
-            0.35,
-            4.0e-5,
-            2.0e-7,
-            4.0e-4,
-        ),
-        (
-            "solid-no-gas",
-            0.038,
-            0.006,
-            2_680.0,
-            0.0,
-            false,
-            1.0,
-            4.0e-5,
-            0.0,
-            0.0,
-        ),
-        (
-            "solid-no-rolling",
-            0.038,
-            0.006,
-            2_680.0,
-            0.0,
-            false,
-            1.0,
-            0.0,
-            2.0e-7,
-            4.0e-4,
-        ),
-    ];
+    let continuation = HorizonContinuationPolicy {
+        initial_horizon_s: 2.0,
+        maximum_horizon_s: 8.0,
+        multiplier: 2.0,
+        maximum_extensions: 2,
+    };
     let mut records = Vec::new();
-    for (
-        name,
-        radius,
-        thickness,
-        density,
-        inner_ratio,
-        conical,
-        base_scale,
-        rolling_resistance_m,
-        gas_rotational_damping_n_m_s,
-        gas_translation_damping_n_s_per_m,
-    ) in cases
-    {
-        let inner_radius = radius * inner_ratio;
-        let area_factor = radius * radius - inner_radius * inner_radius;
-        let volume = if conical {
-            std::f64::consts::PI * radius * radius * thickness / 3.0
-        } else {
-            std::f64::consts::PI * area_factor * thickness
-        };
-        let mass = volume * density;
-        let (transverse, axial) = if conical {
-            (
-                3.0 * mass * (4.0 * radius * radius + thickness * thickness) / 80.0,
-                0.3 * mass * radius * radius,
-            )
-        } else {
-            (
-                mass * (3.0 * (radius * radius + inner_radius * inner_radius)
-                    + thickness * thickness)
-                    / 12.0,
-                0.5 * mass * (radius * radius + inner_radius * inner_radius),
-            )
-        };
-        let run = run_closed_reduced(
-            CoupledFactors {
-                mass_kg: mass,
-                radius_m: radius,
-                thickness_m: thickness,
-                transverse_inertia_kg_m2: transverse,
-                axial_inertia_kg_m2: axial,
-                gravity_m_per_s2: 9.806_65,
-                sliding_friction_coefficient: 0.42,
-                rolling_resistance_m,
-                contact_stiffness_n_per_m: 8.0e4,
-                contact_damping_n_s_per_m: 3.0,
-                base_effective_mass_kg: 0.25,
-                base_stiffness_n_per_m: 4.0e4 * base_scale,
-                base_damping_n_s_per_m: 4.0,
-                gas_rotational_damping_n_m_s,
-                gas_translation_damping_n_s_per_m,
-            },
-            controls,
-            initial,
-            None,
-        )
-        .map_err(|e| format!("{name}: {e}"))?;
-        let last = run
-            .samples
-            .last()
-            .ok_or_else(|| format!("{name}: no committed samples"))?;
-        let terminal = match run.terminal {
-            CoupledTerminal::TerminalInclination => "terminal-inclination",
-            CoupledTerminal::HorizonReached => "horizon-reached",
-            CoupledTerminal::NumericalRefusal => "numerical-refusal",
-        };
-        let no_claim = if conical {
-            "no-physical-validation-or-video-ranking;cone-inertia-cylinder-contact-surrogate-not-physical-cone-contact"
-        } else {
-            "no-physical-validation-or-video-ranking"
-        };
-        records.push(format!(
-            "{{\"schema\":\"euler-disc-campaign-jsonl-v2\",\"scenario\":\"closed-reduced-{name}\",\"model\":\"fs-mbd-closed-rigid-body-with-independent-channel-wrenches\",\"authority\":\"numerical-slice-only\",\"units\":\"SI:m,kg,s,N,J,rad\",\"inputs\":{{\"input_units\":\"SI:kg,m,s,N,J,rad\",\"mass_kg\":{mass:.17e},\"radius_m\":{radius:.17e},\"thickness_m\":{thickness:.17e},\"density_kg_m3\":{density:.17e},\"gravity_m_per_s2\":{:.17e},\"transverse_inertia_kg_m2\":{transverse:.17e},\"axial_inertia_kg_m2\":{axial:.17e},\"ring_inner_radius_ratio\":{inner_ratio:.17e},\"conical\":{conical},\"timestep_s\":{:.17e},\"maximum_steps\":{},\"horizon_s\":{:.17e},\"terminal_inclination_rad\":{:.17e},\"reimpact_limit\":{},\"initial_inclination_rad\":{:.17e},\"initial_precession_rad_per_s\":{:.17e},\"initial_spin_rad_per_s\":{:.17e},\"sliding_friction_coefficient\":{:.17e},\"rolling_resistance_m\":{rolling_resistance_m:.17e},\"base_effective_mass_kg\":{:.17e},\"base_stiffness_n_per_m\":{:.17e},\"base_damping_n_s_per_m\":{:.17e},\"contact_stiffness_n_per_m\":{:.17e},\"contact_damping_n_s_per_m\":{:.17e},\"gas_rotational_damping_n_m_s\":{gas_rotational_damping_n_m_s:.17e},\"gas_translation_damping_n_s_per_m\":{gas_translation_damping_n_s_per_m:.17e}}},\"terminal\":\"{terminal}\",\"qoi\":{{\"duration_s\":{:.17e},\"inclination_rad\":{:.17e},\"precession_rad_per_s\":{:.17e},\"spin_rad_per_s\":{:.17e},\"precession_acceleration_rad_per_s2\":{:.17e},\"reimpact_count\":{}}},\"channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"last_step_channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"energy\":{{\"initial_total_j\":{:.17e},\"final_total_j\":{:.17e},\"defect_j\":{:.17e},\"relative_defect\":{:.17e}}},\"applicability\":\"{}\",\"model_disagreement\":\"{}\",\"no_claim\":\"{}\"}}",
-            9.806_65, controls.timestep_s, controls.maximum_steps, controls.timestep_s * f64::from(controls.maximum_steps), controls.terminal_inclination_rad, controls.reimpact_limit, initial.inclination_rad, initial.precession_rad_per_s, initial.spin_rad_per_s, 0.42, 0.25, 4.0e4 * base_scale, 4.0, 8.0e4, 3.0,
-            last.time_s, last.inclination_rad, last.precession_rad_per_s, last.spin_rad_per_s, last.precession_acceleration_rad_per_s2, run.checkpoint.reimpact_count,
-            run.checkpoint.accumulated_channel_work_j[0], run.checkpoint.accumulated_channel_work_j[1], run.checkpoint.accumulated_channel_work_j[2], run.checkpoint.accumulated_channel_work_j[3], run.checkpoint.accumulated_channel_work_j[4],
-            last.channels.gravity.work_j, last.channels.contact.work_j, last.channels.rolling.work_j, last.channels.base.work_j, last.channels.gas.work_j,
-            run.checkpoint.initial_total_energy_j, last.mechanical_energy_j, last.energy_defect_j,
-            last.energy_defect_j.abs() / run.checkpoint.initial_total_energy_j.abs().max(f64::MIN_POSITIVE),
-            run.applicability, run.model_disagreement, no_claim));
+    let mut resolved_solid = None;
+    let mut resolved_equal_mass_ring = None;
+    for case in cases {
+        let profile = case
+            .profile
+            .resolve(case.density_kg_per_m3, cx)
+            .map_err(|error| format!("{} profile: {error}", case.name))?;
+        let channels = channels_for(case);
+        let continued =
+            run_with_declared_continuation(&profile, channels, controls, initial, continuation, cx)
+                .map_err(|error| format!("{}: {error}", case.name))?;
+        let outcome = classify_outcome(&continued.run)
+            .map_err(|error| format!("{} outcome: {error}", case.name))?;
+        records.push(closed_case_record(
+            case, &profile, controls, initial, &continued, outcome,
+        )?);
+        if case.name == "solid" {
+            resolved_solid = Some((profile, channels));
+        } else if case.name == "ring-equal-mass" {
+            resolved_equal_mass_ring = Some((profile, channels));
+        }
     }
+    let (solid_profile, solid_channels) =
+        resolved_solid.ok_or_else(|| "solid convergence anchor missing".to_owned())?;
+    let (ring_profile, ring_channels) = resolved_equal_mass_ring
+        .ok_or_else(|| "equal-mass ring convergence anchor missing".to_owned())?;
+    records.push(convergence_record(
+        &solid_profile,
+        solid_channels,
+        initial,
+        cx,
+    )?);
+    records.push(ranking_convergence_record(
+        RankingRefinementInput {
+            solid_profile: &solid_profile,
+            solid_channels,
+            ring_profile: &ring_profile,
+            ring_channels,
+            initial,
+        },
+        cx,
+    )?);
+    records.push(calibration_readiness_record()?);
+
     let payload = records.join("\n");
     let digest = fs_blake3::hash_domain(
-        "org.frankensim.euler-disc-campaign-jsonl.v2",
+        "org.frankensim.euler-disc-campaign-jsonl.v3",
         payload.as_bytes(),
     );
     let record_count = records.len();
@@ -260,11 +279,461 @@ fn run_closed_campaign() -> Result<(), String> {
         println!("{record}");
     }
     println!(
-        "{{\"schema\":\"euler-disc-campaign-jsonl-v2\",\"scenario\":\"campaign-complete\",\"model\":\"closed-time-evolving-reduced-euler-disc\",\"authority\":\"integration-local\",\"units\":\"SI:m,kg,s,N,J,rad\",\"terminal\":\"completed\",\"record_count\":{},\"digest_blake3\":\"{}\",\"no_claim\":\"no-physical-validation-or-video-ranking\"}}",
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"campaign-complete\",\"model\":\"closed-time-evolving-profile-native-reduced-euler-disc\",\"authority\":\"integration-local\",\"units\":\"SI:m,kg,s,N,J,rad\",\"terminal\":\"completed\",\"record_count\":{},\"digest_blake3\":\"{}\",\"no_claim\":\"no-physical-validation-or-video-ranking;right-censored-cases-are-not-durations\"}}",
         record_count,
         digest.to_hex()
     );
     Ok(())
+}
+
+const fn cases_defaults(profile: DiscProfileSpec) -> ClosedCase {
+    ClosedCase {
+        name: "unused-default-name",
+        profile_kind: "unused-default-profile-kind",
+        profile,
+        density_kg_per_m3: 2_680.0,
+        base_stiffness_scale: 1.0,
+        rolling_resistance_m: 4.0e-5,
+        gas_rotational_damping_n_m_s: 2.0e-7,
+        gas_translation_damping_n_s_per_m: 4.0e-4,
+    }
+}
+
+fn channels_for(case: ClosedCase) -> CoupledChannelFactors {
+    CoupledChannelFactors {
+        gravity_m_per_s2: 9.806_65,
+        sliding_friction_coefficient: 0.42,
+        rolling_resistance_m: case.rolling_resistance_m,
+        contact_stiffness_n_per_m: 8.0e4,
+        contact_damping_n_s_per_m: 3.0,
+        base_effective_mass_kg: 0.25,
+        base_stiffness_n_per_m: 4.0e4 * case.base_stiffness_scale,
+        base_damping_n_s_per_m: 4.0,
+        gas_rotational_damping_n_m_s: case.gas_rotational_damping_n_m_s,
+        gas_translation_damping_n_s_per_m: case.gas_translation_damping_n_s_per_m,
+    }
+}
+
+fn run_with_declared_continuation(
+    profile: &ResolvedDiscProfile,
+    channels: CoupledChannelFactors,
+    controls: CoupledControls,
+    initial: CoupledInitialState,
+    policy: HorizonContinuationPolicy,
+    cx: &Cx<'_>,
+) -> Result<ContinuedRun, String> {
+    policy
+        .validate()
+        .map_err(|error| format!("invalid continuation policy: {error}"))?;
+    let mut declared_horizon_s = policy.initial_horizon_s;
+    let mut continuation_count = 0;
+    let mut restart = None;
+    let mut last_sample = None;
+    loop {
+        let completed_time_s = restart.as_ref().map_or(
+            0.0,
+            |checkpoint: &fs_euler_disc_e2e::coupled_runner::CoupledCheckpoint| checkpoint.time_s,
+        );
+        let remaining_s = declared_horizon_s - completed_time_s;
+        if !remaining_s.is_finite() || remaining_s <= 0.0 {
+            return Err("continuation horizon did not advance".to_owned());
+        }
+        let step_count_f64 = (remaining_s / controls.timestep_s).round();
+        if !(1.0..=f64::from(u32::MAX)).contains(&step_count_f64) {
+            return Err("continuation step count exceeded the runner budget".to_owned());
+        }
+        let segment_controls = CoupledControls {
+            maximum_steps: step_count_f64 as u32,
+            ..controls
+        };
+        let run =
+            run_closed_profile_reduced(profile, channels, segment_controls, initial, restart, cx)
+                .map_err(|error| error.to_string())?;
+        if let Some(sample) = run.samples.last() {
+            last_sample = Some(sample.clone());
+        }
+        let outcome = classify_outcome(&run).map_err(|error| error.to_string())?;
+        let next = policy
+            .next_horizon_s(outcome, declared_horizon_s, continuation_count)
+            .map_err(|error| error.to_string())?;
+        let Some(next_horizon_s) = next else {
+            return Ok(ContinuedRun {
+                run,
+                last_sample: last_sample
+                    .ok_or_else(|| "trajectory retained no committed sample".to_owned())?,
+                declared_horizon_s,
+                continuation_count,
+            });
+        };
+        restart = Some(run.checkpoint);
+        declared_horizon_s = next_horizon_s;
+        continuation_count += 1;
+    }
+}
+
+fn closed_case_record(
+    case: ClosedCase,
+    profile: &ResolvedDiscProfile,
+    controls: CoupledControls,
+    initial: CoupledInitialState,
+    continued: &ContinuedRun,
+    outcome: RunOutcome,
+) -> Result<String, String> {
+    let run = &continued.run;
+    let last = &continued.last_sample;
+    let (outcome_kind, observed_physical_terminal, retained_time_s) = match outcome {
+        RunOutcome::PhysicalTerminal { event_time_s, .. } => {
+            ("physical-terminal-inclination", true, event_time_s)
+        }
+        RunOutcome::RightCensored { censor_time_s } => ("right-censored", false, censor_time_s),
+        RunOutcome::NumericalRefusal { last_valid_time_s } => {
+            ("numerical-refusal", false, last_valid_time_s)
+        }
+    };
+    let properties = profile.mass_properties;
+    let channels = channels_for(case);
+    let support_feature = last
+        .support_source_feature
+        .ok_or_else(|| format!("{}: profile support feature was not retained", case.name))?;
+    Ok(format!(
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-{}\",\"model\":\"fs-mbd-profile-native-reduced-coupled-runner\",\"authority\":\"numerical-slice-only\",\"units\":\"SI:m,kg,s,N,J,rad\",\"profile\":{{\"kind\":\"{}\",\"identity_u64_dec\":\"{}\",\"support_source_feature\":{},\"mass_and_support_same_chart\":true}},\"inputs\":{{\"input_units\":\"SI:kg,m,s,N,J,rad\",\"mass_kg\":{:.17e},\"radius_m\":{:.17e},\"thickness_m\":{:.17e},\"density_kg_m3\":{:.17e},\"gravity_m_per_s2\":{:.17e},\"transverse_inertia_kg_m2\":{:.17e},\"axial_inertia_kg_m2\":{:.17e},\"timestep_s\":{:.17e},\"initial_segment_maximum_steps\":{},\"maximum_steps\":{},\"initial_horizon_s\":{:.17e},\"maximum_horizon_s\":{:.17e},\"declared_final_horizon_s\":{:.17e},\"continuation_count\":{},\"terminal_inclination_rad\":{:.17e},\"reimpact_limit\":{},\"initial_inclination_rad\":{:.17e},\"initial_precession_rad_per_s\":{:.17e},\"initial_spin_rad_per_s\":{:.17e},\"sliding_friction_coefficient\":{:.17e},\"rolling_resistance_m\":{:.17e},\"base_effective_mass_kg\":{:.17e},\"base_stiffness_n_per_m\":{:.17e},\"base_damping_n_s_per_m\":{:.17e},\"contact_stiffness_n_per_m\":{:.17e},\"contact_damping_n_s_per_m\":{:.17e},\"gas_rotational_damping_n_m_s\":{:.17e},\"gas_translation_damping_n_s_per_m\":{:.17e}}},\"terminal\":\"{}\",\"outcome\":{{\"kind\":\"{}\",\"observed_physical_terminal\":{},\"retained_time_s\":{:.17e}}},\"qoi\":{{\"retained_time_s\":{:.17e},\"inclination_rad\":{:.17e},\"precession_rad_per_s\":{:.17e},\"spin_rad_per_s\":{:.17e},\"precession_acceleration_rad_per_s2\":{:.17e},\"reimpact_count\":{}}},\"channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"last_step_channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"energy\":{{\"initial_total_j\":{:.17e},\"final_total_j\":{:.17e},\"defect_j\":{:.17e},\"relative_defect\":{:.17e}}},\"applicability\":\"{}\",\"model_disagreement\":\"{}\",\"no_claim\":\"no-physical-validation-or-video-ranking;right-censored-time-is-not-duration\"}}",
+        case.name,
+        case.profile_kind,
+        profile.identity.0,
+        support_feature,
+        properties.mass,
+        profile.dimensions.outer_radius_m,
+        profile.dimensions.thickness_m,
+        profile.density_kg_per_m3,
+        channels.gravity_m_per_s2,
+        properties.principal_inertia.transverse,
+        properties.principal_inertia.axial,
+        controls.timestep_s,
+        controls.maximum_steps,
+        (8.0 / controls.timestep_s).round() as u32,
+        2.0,
+        8.0,
+        continued.declared_horizon_s,
+        continued.continuation_count,
+        controls.terminal_inclination_rad,
+        controls.reimpact_limit,
+        initial.inclination_rad,
+        initial.precession_rad_per_s,
+        initial.spin_rad_per_s,
+        channels.sliding_friction_coefficient,
+        channels.rolling_resistance_m,
+        channels.base_effective_mass_kg,
+        channels.base_stiffness_n_per_m,
+        channels.base_damping_n_s_per_m,
+        channels.contact_stiffness_n_per_m,
+        channels.contact_damping_n_s_per_m,
+        channels.gas_rotational_damping_n_m_s,
+        channels.gas_translation_damping_n_s_per_m,
+        outcome_kind,
+        outcome_kind,
+        observed_physical_terminal,
+        retained_time_s,
+        last.time_s,
+        last.inclination_rad,
+        last.precession_rad_per_s,
+        last.spin_rad_per_s,
+        last.precession_acceleration_rad_per_s2,
+        run.checkpoint.reimpact_count,
+        run.checkpoint.accumulated_channel_work_j[0],
+        run.checkpoint.accumulated_channel_work_j[1],
+        run.checkpoint.accumulated_channel_work_j[2],
+        run.checkpoint.accumulated_channel_work_j[3],
+        run.checkpoint.accumulated_channel_work_j[4],
+        last.channels.gravity.work_j,
+        last.channels.contact.work_j,
+        last.channels.rolling.work_j,
+        last.channels.base.work_j,
+        last.channels.gas.work_j,
+        run.checkpoint.initial_total_energy_j,
+        last.mechanical_energy_j,
+        last.energy_defect_j,
+        last.energy_defect_j.abs()
+            / run
+                .checkpoint
+                .initial_total_energy_j
+                .abs()
+                .max(f64::MIN_POSITIVE),
+        run.applicability,
+        run.model_disagreement,
+    ))
+}
+
+fn convergence_record(
+    profile: &ResolvedDiscProfile,
+    channels: CoupledChannelFactors,
+    initial: CoupledInitialState,
+    cx: &Cx<'_>,
+) -> Result<String, String> {
+    const HORIZON_S: f64 = 0.2;
+    let run = |timestep_s: f64| {
+        let steps = (HORIZON_S / timestep_s).round() as u32;
+        run_closed_profile_reduced(
+            profile,
+            channels,
+            CoupledControls {
+                timestep_s,
+                maximum_steps: steps,
+                terminal_inclination_rad: 0.002,
+                reimpact_limit: 128,
+            },
+            initial,
+            None,
+            cx,
+        )
+        .map_err(|error| error.to_string())
+    };
+    let coarse = run(4.0e-5)?;
+    let fine = run(2.0e-5)?;
+    let reference = run(1.0e-5)?;
+    let energy_scale = reference
+        .checkpoint
+        .initial_total_energy_j
+        .abs()
+        .max(f64::MIN_POSITIVE);
+    let receipt = analyse_three_rung_convergence(ThreeRungConvergence {
+        coarse: &coarse,
+        fine: &fine,
+        reference: &reference,
+        coarse_timestep_s: 4.0e-5,
+        fine_timestep_s: 2.0e-5,
+        reference_timestep_s: 1.0e-5,
+        mode: RefinementMode::Eventful {
+            reason: "unilateral contact and support-feature switching".to_owned(),
+        },
+        scales: ConvergenceScales {
+            inclination_rad: initial.inclination_rad,
+            precession_rad_per_s: initial.precession_rad_per_s.abs().max(1.0),
+            spin_rad_per_s: initial.spin_rad_per_s.abs().max(1.0),
+            work_j: energy_scale,
+            energy_j: energy_scale,
+        },
+    })
+    .map_err(|error| error.to_string())?;
+    let fine_reference_qoi_linf = receipt
+        .fine_reference_qoi
+        .inclination
+        .max(receipt.fine_reference_qoi.precession)
+        .max(receipt.fine_reference_qoi.spin);
+    let fine_reference_work_linf = receipt
+        .fine_reference_work_energy
+        .channel_work
+        .into_iter()
+        .fold(0.0_f64, f64::max);
+    let declared_delta_limit = 5.0e-3;
+    let within_declared_delta_band = fine_reference_qoi_linf <= declared_delta_limit
+        && fine_reference_work_linf <= declared_delta_limit
+        && receipt.fine_reference_work_energy.energy_defect <= declared_delta_limit;
+    let order_status = match receipt.observed_order {
+        ObservedOrder::Available { .. } => "available",
+        ObservedOrder::NotApplicable { .. } => "withheld-eventful-mode",
+    };
+    Ok(format!(
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-solid-timestep-convergence\",\"model\":\"h-h2-h4-fixed-horizon-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"dimensionless-normalized-deltas\",\"terminal\":\"analysis-complete\",\"horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h\":{:.17e},\"h2\":{:.17e},\"h4\":{:.17e}}},\"terminal_class_agreement\":{},\"fine_reference_qoi\":{{\"inclination\":{:.17e},\"precession\":{:.17e},\"spin\":{:.17e}}},\"fine_reference_qoi_linf\":{fine_reference_qoi_linf:.17e},\"fine_reference_work_linf\":{fine_reference_work_linf:.17e},\"fine_reference_energy_defect\":{:.17e},\"declared_normalized_delta_limit\":{declared_delta_limit:.17e},\"within_declared_delta_band\":{},\"observed_order\":\"{}\",\"no_claim\":\"fixed-horizon-numerical-sensitivity-only;eventful-mode-withholds-smooth-order;not-terminal-time-or-physical-validation\"}}",
+        4.0e-5,
+        2.0e-5,
+        1.0e-5,
+        receipt.terminal_class_agreement,
+        receipt.fine_reference_qoi.inclination,
+        receipt.fine_reference_qoi.precession,
+        receipt.fine_reference_qoi.spin,
+        receipt.fine_reference_work_energy.energy_defect,
+        within_declared_delta_band,
+        order_status,
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct RankingRefinementInput<'profile> {
+    solid_profile: &'profile ResolvedDiscProfile,
+    solid_channels: CoupledChannelFactors,
+    ring_profile: &'profile ResolvedDiscProfile,
+    ring_channels: CoupledChannelFactors,
+    initial: CoupledInitialState,
+}
+
+#[derive(Clone, Copy)]
+struct RankingRung {
+    timestep_s: f64,
+    solid: RunOutcome,
+    ring: RunOutcome,
+    ordering: CensorAwareDurationOrdering,
+}
+
+/// Refines the actual ranking claim, rather than inferring it from a
+/// phase-sensitive endpoint state. Every rung uses the same two-second
+/// observation window. A ring event before the solid censor bound can prove a
+/// strict ordering without inventing a terminal time for the solid.
+fn ranking_convergence_record(
+    input: RankingRefinementInput<'_>,
+    cx: &Cx<'_>,
+) -> Result<String, String> {
+    const HORIZON_S: f64 = 2.0;
+    const TIMESTEPS_S: [f64; 3] = [8.0e-5, 4.0e-5, 2.0e-5];
+    const EVENT_TIME_RELATIVE_LIMIT: f64 = 5.0e-3;
+
+    let mut rungs = Vec::with_capacity(TIMESTEPS_S.len());
+    for timestep_s in TIMESTEPS_S {
+        let maximum_steps = (HORIZON_S / timestep_s).round() as u32;
+        let controls = CoupledControls {
+            timestep_s,
+            maximum_steps,
+            terminal_inclination_rad: 0.002,
+            reimpact_limit: 128,
+        };
+        let solid_run = run_closed_profile_reduced(
+            input.solid_profile,
+            input.solid_channels,
+            controls,
+            input.initial,
+            None,
+            cx,
+        )
+        .map_err(|error| format!("solid ranking refinement at dt={timestep_s}: {error}"))?;
+        let ring_run = run_closed_profile_reduced(
+            input.ring_profile,
+            input.ring_channels,
+            controls,
+            input.initial,
+            None,
+            cx,
+        )
+        .map_err(|error| format!("ring ranking refinement at dt={timestep_s}: {error}"))?;
+        let solid = classify_outcome(&solid_run)
+            .map_err(|error| format!("solid ranking outcome at dt={timestep_s}: {error}"))?;
+        let ring = classify_outcome(&ring_run)
+            .map_err(|error| format!("ring ranking outcome at dt={timestep_s}: {error}"))?;
+        let ordering = compare_censor_aware_durations(ring, solid)
+            .map_err(|error| format!("ranking comparison at dt={timestep_s}: {error:?}"))?;
+        rungs.push(RankingRung {
+            timestep_s,
+            solid,
+            ring,
+            ordering,
+        });
+    }
+    let [coarse, fine, reference] = rungs.as_slice() else {
+        return Err("ranking refinement did not retain exactly three rungs".to_owned());
+    };
+    let coarse_fine_event_delta = event_time_delta(coarse.ring, fine.ring);
+    let fine_reference_event_delta = event_time_delta(fine.ring, reference.ring);
+    let ordering_agreement = coarse.ordering == fine.ordering && fine.ordering == reference.ordering;
+    let ring_shorter_bound_proven = ordering_agreement
+        && reference.ordering == CensorAwareDurationOrdering::ProvenLeftShorter;
+    let event_time_within_declared_band = fine_reference_event_delta
+        .map(|(_, relative)| relative <= EVENT_TIME_RELATIVE_LIMIT)
+        .unwrap_or(false);
+    let ranking_numerically_supported =
+        ring_shorter_bound_proven && event_time_within_declared_band;
+
+    Ok(format!(
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"equal-mass-ring-vs-solid-ranking-convergence\",\"model\":\"three-rung-common-window-censor-aware-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"SI:s\",\"terminal\":\"analysis-complete\",\"common_horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h\":{:.17e},\"h2\":{:.17e},\"h4\":{:.17e}}},\"rungs\":{{\"h\":{},\"h2\":{},\"h4\":{}}},\"ordering_agreement\":{},\"ring_shorter_than_solid_bound_proven_at_all_rungs\":{},\"ring_event_time_coarse_fine\":{},\"ring_event_time_fine_reference\":{},\"declared_event_time_relative_limit\":{EVENT_TIME_RELATIVE_LIMIT:.17e},\"ring_event_time_within_declared_band\":{},\"ranking_numerically_supported\":{},\"no_claim\":\"numerical-ranking-of-declared-reduced-model-only;solid-censor-is-a-lower-bound-not-a-duration;not-experimental-calibration-or-video-validation\"}}",
+        coarse.timestep_s,
+        fine.timestep_s,
+        reference.timestep_s,
+        ranking_rung_json(*coarse),
+        ranking_rung_json(*fine),
+        ranking_rung_json(*reference),
+        ordering_agreement,
+        ring_shorter_bound_proven,
+        event_delta_json(coarse_fine_event_delta),
+        event_delta_json(fine_reference_event_delta),
+        event_time_within_declared_band,
+        ranking_numerically_supported,
+    ))
+}
+
+fn ranking_rung_json(rung: RankingRung) -> String {
+    let (ring_kind, ring_time_s) = outcome_kind_and_time(rung.ring);
+    let (solid_kind, solid_time_s) = outcome_kind_and_time(rung.solid);
+    format!(
+        "{{\"ring_outcome\":\"{ring_kind}\",\"ring_retained_time_s\":{ring_time_s:.17e},\"solid_outcome\":\"{solid_kind}\",\"solid_retained_time_s\":{solid_time_s:.17e},\"censor_aware_ordering\":\"{}\"}}",
+        censor_ordering_name(rung.ordering),
+    )
+}
+
+fn outcome_kind_and_time(outcome: RunOutcome) -> (&'static str, f64) {
+    match outcome {
+        RunOutcome::PhysicalTerminal { event_time_s, .. } =>
+            ("physical-terminal-inclination", event_time_s),
+        RunOutcome::RightCensored { censor_time_s } => ("right-censored", censor_time_s),
+        RunOutcome::NumericalRefusal { last_valid_time_s } =>
+            ("numerical-refusal", last_valid_time_s),
+    }
+}
+
+const fn censor_ordering_name(ordering: CensorAwareDurationOrdering) -> &'static str {
+    match ordering {
+        CensorAwareDurationOrdering::ProvenLeftShorter => "ring-proven-shorter",
+        CensorAwareDurationOrdering::EqualObserved => "equal-observed",
+        CensorAwareDurationOrdering::ProvenLeftLonger => "ring-proven-longer",
+        CensorAwareDurationOrdering::Indeterminate => "indeterminate",
+    }
+}
+
+fn event_time_delta(left: RunOutcome, right: RunOutcome) -> Option<(f64, f64)> {
+    let (Some(left_time_s), Some(right_time_s)) = (
+        left.observed_terminal_time_s(),
+        right.observed_terminal_time_s(),
+    ) else {
+        return None;
+    };
+    let absolute_s = (left_time_s - right_time_s).abs();
+    Some((
+        absolute_s,
+        absolute_s / right_time_s.abs().max(f64::MIN_POSITIVE),
+    ))
+}
+
+fn event_delta_json(delta: Option<(f64, f64)>) -> String {
+    match delta {
+        Some((absolute_s, relative)) => format!(
+            "{{\"available\":true,\"absolute_s\":{absolute_s:.17e},\"relative\":{relative:.17e}}}"
+        ),
+        None => "{\"available\":false}".to_owned(),
+    }
+}
+
+fn calibration_readiness_record() -> Result<String, String> {
+    let readiness = admit_calibration_readiness(CalibrationReadinessInput {
+        specimen: DeclaredEvidence::Missing,
+        rig: DeclaredEvidence::Missing,
+        instrument: DeclaredEvidence::Missing,
+        raw_observations: DeclaredEvidence::Missing,
+        observation_covariance: DeclaredEvidence::Missing,
+        calibration_partition: DeclaredEvidence::Missing,
+        blind_holdout: DeclaredEvidence::Missing,
+    });
+    if readiness.is_ok() {
+        return Err("calibration readiness unexpectedly admitted missing evidence".to_owned());
+    }
+    Ok("{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"physical-calibration-readiness\",\"model\":\"structural-evidence-admission\",\"authority\":\"no-data\",\"units\":\"not-applicable\",\"terminal\":\"no-data\",\"missing_evidence\":\"specimen,rig,instrument,raw-observations,observation-covariance,calibration-partition,blind-holdout\",\"synthetic_substitution\":false,\"target_ordering_fit\":false,\"no_claim\":\"no-calibration-or-physical-validation-without-retained-independent-evidence\"}".to_owned())
+}
+
+fn with_closed_context<R>(
+    operation: impl FnOnce(&Cx<'_>) -> Result<R, String>,
+) -> Result<R, String> {
+    let gate = CancelGate::new_clock_free();
+    let pool = ArenaPool::new(ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: CAMPAIGN_SEED,
+                kernel_id: 3,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        operation(&cx)
+    })
 }
 
 fn run_campaign() -> Result<(), String> {

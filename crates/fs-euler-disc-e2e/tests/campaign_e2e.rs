@@ -24,7 +24,7 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     assert_eq!(first.stdout, second.stdout);
     let output = String::from_utf8(first.stdout).expect("utf8");
     assert!(!output.contains("CONTOUR_FORCE_PER_NORMAL_FORCE"));
-    assert!(output.contains("closed-time-evolving-reduced-euler-disc"));
+    assert!(output.contains("closed-time-evolving-profile-native-reduced-euler-disc"));
     assert!(output.contains("channel_work_j"));
     assert!(output.contains("\"relative_defect\""));
     assert!(output.contains("\"reimpact_count\""));
@@ -32,20 +32,26 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     assert!(output.contains("precession_acceleration_rad_per_s2"));
     assert!(output.contains("\"defect_j\""));
     assert!(output.contains("model_disagreement"));
-    assert!(output.contains("does not yet consume exported mechanics/rolling_contact/air"));
+    assert!(output.contains("higher-fidelity transactional adapters"));
     assert!(!output.contains("shape_inertia_factor"));
-    let v2_records: Vec<_> = output
+    assert!(!output.contains("cone-inertia-cylinder-contact-surrogate"));
+    assert!(!output.contains("\"duration_s\""));
+    let v3_records: Vec<_> = output
         .lines()
-        .filter(|line| line.contains("euler-disc-campaign-jsonl-v2"))
-        .map(|line| JsonParser::parse(line).expect("v2 record is valid JSON"))
+        .filter(|line| line.contains("euler-disc-campaign-jsonl-v3"))
+        .map(|line| JsonParser::parse(line).expect("v3 record is valid JSON"))
         .collect();
-    let v2_roots: Vec<_> = v2_records.iter().map(object).collect();
-    let closed: Vec<_> = v2_roots
+    let v3_roots: Vec<_> = v3_records.iter().map(object).collect();
+    let closed: Vec<_> = v3_roots
         .iter()
         .copied()
-        .filter(|fields| string(fields, "scenario").starts_with("closed-reduced-"))
+        .filter(|fields| {
+            fields.get("model").is_some_and(|_| {
+                string(fields, "model") == "fs-mbd-profile-native-reduced-coupled-runner"
+            })
+        })
         .collect();
-    assert!(closed.len() >= 9);
+    assert_eq!(closed.len(), 11);
     assert!(
         closed
             .iter()
@@ -61,6 +67,16 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
             .iter()
             .any(|fields| { string(fields, "scenario") == "closed-reduced-solid-no-rolling" })
     );
+    assert!(
+        closed
+            .iter()
+            .any(|fields| { string(fields, "scenario") == "closed-reduced-symmetric-tapered" })
+    );
+    assert!(
+        closed
+            .iter()
+            .any(|fields| { string(fields, "scenario") == "closed-reduced-solid-fillet-1mm" })
+    );
     let inputs = object(closed[0].get("inputs").expect("closed inputs"));
     for key in [
         "mass_kg",
@@ -73,7 +89,10 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         "axial_inertia_kg_m2",
         "timestep_s",
         "maximum_steps",
-        "horizon_s",
+        "initial_horizon_s",
+        "maximum_horizon_s",
+        "declared_final_horizon_s",
+        "continuation_count",
         "terminal_inclination_rad",
         "reimpact_limit",
         "initial_inclination_rad",
@@ -89,7 +108,7 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         "gas_rotational_damping_n_m_s",
         "gas_translation_damping_n_s_per_m",
     ] {
-        assert!(inputs.contains_key(key), "missing v2 input {key}");
+        assert!(inputs.contains_key(key), "missing v3 input {key}");
     }
     let solid = closed
         .iter()
@@ -109,6 +128,18 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         number(ring_inputs, "axial_inertia_kg_m2")
     );
     for fields in &closed {
+        let profile = object(fields.get("profile").expect("resolved profile"));
+        assert!(boolean(profile, "mass_and_support_same_chart"));
+        let outcome = object(fields.get("outcome").expect("typed outcome"));
+        let outcome_kind = string(outcome, "kind");
+        assert!(matches!(
+            outcome_kind,
+            "physical-terminal-inclination" | "right-censored" | "numerical-refusal"
+        ));
+        assert_eq!(
+            boolean(outcome, "observed_physical_terminal"),
+            outcome_kind == "physical-terminal-inclination"
+        );
         let energy = object(fields.get("energy").expect("closed energy accounting"));
         assert!(number(energy, "initial_total_j") > 0.0);
         assert!(number(energy, "final_total_j") >= 0.0);
@@ -119,12 +150,26 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
             string(fields, "scenario")
         );
     }
-    let manifest = v2_roots
+    let convergence = v3_roots
+        .iter()
+        .find(|fields| string(fields, "scenario") == "closed-reduced-solid-timestep-convergence")
+        .expect("h/h2/h4 convergence record");
+    assert_eq!(
+        string(convergence, "observed_order"),
+        "withheld-eventful-mode"
+    );
+    assert!(convergence.contains_key("fine_reference_qoi_linf"));
+    let calibration = v3_roots
+        .iter()
+        .find(|fields| string(fields, "scenario") == "physical-calibration-readiness")
+        .expect("calibration readiness record");
+    assert_eq!(string(calibration, "terminal"), "no-data");
+    assert!(!boolean(calibration, "synthetic_substitution"));
+    let manifest = v3_roots
         .iter()
         .find(|fields| string(fields, "scenario") == "campaign-complete")
-        .expect("v2 manifest");
-    assert_eq!(number(manifest, "record_count"), closed.len() as f64);
-    assert!(output.contains("cone-inertia-cylinder-contact-surrogate"));
+        .expect("v3 manifest");
+    assert_eq!(number(manifest, "record_count"), (closed.len() + 2) as f64);
 }
 
 #[derive(Debug)]

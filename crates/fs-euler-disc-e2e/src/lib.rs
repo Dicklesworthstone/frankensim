@@ -14,6 +14,7 @@ pub mod baseline;
 pub mod contact_dynamics;
 #[cfg(feature = "scientific-contract")]
 pub mod contract;
+pub mod convergence;
 pub mod coupled_runner;
 pub mod external_air;
 pub mod mechanics;
@@ -24,6 +25,7 @@ pub mod ports;
 pub mod protocol;
 pub mod reduced_decay;
 pub mod rolling_contact;
+pub mod specimen;
 pub mod tangential_contact;
 
 pub use base_response::{

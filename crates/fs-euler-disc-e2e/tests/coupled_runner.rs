@@ -1,7 +1,32 @@
 use fs_euler_disc_e2e::coupled_runner::{
-    ADAPTER_INTEGRATION_PLAN, CoupledControls, CoupledError, CoupledFactors, CoupledInitialState,
-    initial_contact_point_velocity, initial_qois, run_closed_reduced,
+    ADAPTER_INTEGRATION_PLAN, CoupledChannelFactors, CoupledControls, CoupledError, CoupledFactors,
+    CoupledInitialState, initial_contact_point_velocity, initial_qois, run_closed_profile_reduced,
+    run_closed_reduced,
 };
+use fs_euler_disc_e2e::specimen::DiscProfileSpec;
+use fs_exec::Budget;
+use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
+use fs_rep_frep::SquatDiscEdgeTreatment;
+
+fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x4555_4c45_525f_434f,
+                kernel_id: 2,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        operation(&cx)
+    })
+}
 
 fn factors(radius_m: f64, density: f64) -> CoupledFactors {
     let mass = std::f64::consts::PI * radius_m * radius_m * 0.006 * density;
@@ -259,4 +284,61 @@ fn initializer_qoi_round_trip_and_gravity_only_energy_closure() {
     )
     .expect("gravity-only run");
     assert!(run.checkpoint.accumulated_energy_defect_j.abs() < 1.0e-10);
+}
+
+#[test]
+fn true_profile_run_uses_profile_support_and_binds_restart_to_chart_identity() {
+    with_cx(|cx| {
+        let cylinder = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            edge_treatment: SquatDiscEdgeTreatment::Sharp,
+        }
+        .resolve(2_680.0, cx)
+        .expect("cylinder profile");
+        let tapered = DiscProfileSpec::SymmetricTapered {
+            outer_radius_m: 0.038,
+            face_radius_m: 0.015,
+            thickness_m: 0.006,
+        }
+        .resolve(2_680.0, cx)
+        .expect("tapered profile");
+        let channels: CoupledChannelFactors = factors(0.038, 2_680.0).channel_factors();
+        let short_controls = CoupledControls {
+            maximum_steps: 20,
+            ..controls()
+        };
+        let cylinder_run =
+            run_closed_profile_reduced(&cylinder, channels, short_controls, initial(), None, cx)
+                .expect("profile cylinder run");
+        let tapered_run =
+            run_closed_profile_reduced(&tapered, channels, short_controls, initial(), None, cx)
+                .expect("profile tapered run");
+        assert!(
+            cylinder_run
+                .samples
+                .iter()
+                .all(|sample| sample.support_source_feature.is_some())
+        );
+        assert_ne!(
+            cylinder_run
+                .samples
+                .last()
+                .unwrap()
+                .spin_rad_per_s
+                .to_bits(),
+            tapered_run.samples.last().unwrap().spin_rad_per_s.to_bits()
+        );
+        assert_eq!(
+            run_closed_profile_reduced(
+                &tapered,
+                channels,
+                short_controls,
+                initial(),
+                Some(cylinder_run.checkpoint),
+                cx,
+            ),
+            Err(CoupledError::CheckpointMismatch)
+        );
+    });
 }

@@ -59,6 +59,12 @@ pub enum EulerNormalGeometry {
         /// Caller/outer-solver resolved line load in N/m.
         line_load_n_per_m: f64,
     },
+    /// Both retained principal curvatures must be strictly positive *relative
+    /// gap* curvatures, including the base contribution. The adapter cannot
+    /// derive that pair from a disc-surface curvature alone. Its full ordered
+    /// pair is passed to the elliptic Hertz law; no scalar effective-radius
+    /// constitutive approximation is made.
+    EllipticParaboloid,
 }
 
 /// Identities owned by the Euler caller for one smooth fixed-branch sample.
@@ -104,14 +110,15 @@ pub struct EulerNormalContactInput {
 pub struct CurvatureResolution {
     /// Geometry-owner curvature identity.
     pub curvature_identity: String,
-    /// First supplied principal curvature in 1/m.
+    /// First caller-supplied relative-gap principal curvature in 1/m.
     pub first_principal_m_inverse: f64,
-    /// Second supplied principal curvature in 1/m.
+    /// Second caller-supplied relative-gap principal curvature in 1/m.
     pub second_principal_m_inverse: f64,
     /// Retained absolute curvature uncertainty in 1/m.
     pub uncertainty_m_inverse: f64,
-    /// Effective radius used by the supported generic rung in metres.
-    pub effective_radius_m: f64,
+    /// Scalar radius retained for reporting and uncertainty normalization.
+    /// The elliptic constitutive law does not consume this value.
+    pub reporting_radius_m: f64,
 }
 
 /// Unit-typed elastic storage copied from a generic physical receipt.
@@ -202,6 +209,8 @@ pub enum NormalContactError {
     },
     /// Hunt--Crossley is not a line-contact law in the generic ladder.
     DissipativeLineUnsupported,
+    /// The current generic ladder has no dissipative elliptic Hertz variant.
+    DissipativeEllipticUnsupported,
     /// The generic finite-patch law or transactional embedding refused the request.
     GenericRefusal(NormalPatchEmbedError),
 }
@@ -400,6 +409,10 @@ fn resolve_curvature(
     kinematics: &PatchKinematics,
     geometry: EulerNormalGeometry,
 ) -> Result<CurvatureResolution, NormalContactError> {
+    // `PatchKinematics` is a geometry-owner boundary. For the elliptic law,
+    // its retained values must already be principal curvatures of the local
+    // *relative gap* (disc plus base); this adapter has neither a second
+    // surface chart nor authority to manufacture the missing base curvature.
     let CurvatureMetadata::Known {
         curvature_identity,
         first_principal_m_inverse,
@@ -417,7 +430,7 @@ fn resolve_curvature(
             field: "principal curvature",
         });
     }
-    let effective_radius_m = match geometry {
+    let reporting_radius_m = match geometry {
         EulerNormalGeometry::SpherePlane => {
             if first <= 0.0 || second <= 0.0 {
                 return Err(NormalContactError::UnsupportedTwoCurvature {
@@ -450,10 +463,19 @@ fn resolve_curvature(
             };
             1.0 / curved
         }
+        EulerNormalGeometry::EllipticParaboloid => {
+            if first <= 0.0 || second <= 0.0 {
+                return Err(NormalContactError::UnsupportedTwoCurvature {
+                    first_m_inverse: first,
+                    second_m_inverse: second,
+                });
+            }
+            1.0 / (first * second).sqrt()
+        }
     };
-    if !effective_radius_m.is_finite() || effective_radius_m <= 0.0 {
+    if !reporting_radius_m.is_finite() || reporting_radius_m <= 0.0 {
         return Err(NormalContactError::InvalidInput {
-            field: "effective_radius_m",
+            field: "reporting_radius_m",
         });
     }
     Ok(CurvatureResolution {
@@ -461,7 +483,7 @@ fn resolve_curvature(
         first_principal_m_inverse: first,
         second_principal_m_inverse: second,
         uncertainty_m_inverse: uncertainty,
-        effective_radius_m,
+        reporting_radius_m,
     })
 }
 
@@ -474,12 +496,12 @@ fn law_from_input(
         EulerNormalGeometry::SpherePlane => Ok((
             match material.hunt_crossley_dissipation_s_per_m {
                 Some(dissipation_s_per_m) => NormalPatchLaw::HuntCrossleySphere {
-                    effective_radius_m: curvature.effective_radius_m,
+                    effective_radius_m: curvature.reporting_radius_m,
                     reduced_modulus_pa: material.reduced_modulus_pa,
                     dissipation_s_per_m,
                 },
                 None => NormalPatchLaw::HertzSpherePlane {
-                    effective_radius_m: curvature.effective_radius_m,
+                    effective_radius_m: curvature.reporting_radius_m,
                     reduced_modulus_pa: material.reduced_modulus_pa,
                 },
             },
@@ -499,11 +521,31 @@ fn law_from_input(
             }
             Ok((
                 NormalPatchLaw::HertzCylinderPlane {
-                    effective_radius_m: curvature.effective_radius_m,
+                    effective_radius_m: curvature.reporting_radius_m,
                     reduced_modulus_pa: material.reduced_modulus_pa,
                 },
                 NormalPatchGeometry::CylinderPlane,
                 line_load_n_per_m,
+            ))
+        }
+        EulerNormalGeometry::EllipticParaboloid => {
+            if material.hunt_crossley_dissipation_s_per_m.is_some() {
+                return Err(NormalContactError::DissipativeEllipticUnsupported);
+            }
+            let maximum_principal_curvature_m_inverse = curvature
+                .first_principal_m_inverse
+                .max(curvature.second_principal_m_inverse);
+            let minimum_principal_curvature_m_inverse = curvature
+                .first_principal_m_inverse
+                .min(curvature.second_principal_m_inverse);
+            Ok((
+                NormalPatchLaw::HertzEllipticParaboloid {
+                    maximum_principal_curvature_m_inverse,
+                    minimum_principal_curvature_m_inverse,
+                    reduced_modulus_pa: material.reduced_modulus_pa,
+                },
+                NormalPatchGeometry::EllipticParaboloid,
+                0.0,
             ))
         }
     }
@@ -513,7 +555,14 @@ fn merged_uncertainty(
     material: InputUncertainty,
     curvature: &CurvatureResolution,
 ) -> Result<InputUncertainty, NormalContactError> {
-    let curvature_scale = (1.0 / curvature.effective_radius_m).max(f64::MIN_POSITIVE);
+    let positive_minimum = curvature
+        .first_principal_m_inverse
+        .min(curvature.second_principal_m_inverse);
+    let curvature_scale = if positive_minimum > 0.0 {
+        positive_minimum
+    } else {
+        (1.0 / curvature.reporting_radius_m).max(f64::MIN_POSITIVE)
+    };
     let curvature_relative = curvature.uncertainty_m_inverse / curvature_scale;
     if !curvature_relative.is_finite() {
         return Err(NormalContactError::InvalidInput {
