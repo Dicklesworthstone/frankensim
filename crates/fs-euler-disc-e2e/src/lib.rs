@@ -29,6 +29,7 @@ pub mod render_trajectory;
 pub mod rolling_contact;
 pub mod specimen;
 pub mod tangential_contact;
+pub mod timeline_resampling;
 
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
@@ -38,6 +39,12 @@ pub use render_trajectory::{
     RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
     RenderTrajectoryMetadata, RenderTrajectorySample, RenderTrajectorySampleInput,
     RenderUnitSystem, RenderWorldFrame,
+};
+pub use timeline_resampling::{
+    DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,
+    EventEvaluationSide, ExposureEventPolicy, ExposurePartition, ExposureSegment,
+    ResampledTimelineSample, TimelineEvent, TimelineInterpolationMethod, TimelineResampler,
+    TimelineResamplingError, TimelineSampleSource,
 };
 
 pub use base_response::{
