@@ -8,9 +8,9 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_euler_disc_e2e::convergence::{
     CalibrationEvidenceKind, CalibrationReadinessError, CalibrationReadinessInput,
     CensorAwareDurationOrdering, CensorAwareRankingRefusal, ConvergenceScales, DeclaredEvidence,
-    HorizonContinuationPolicy, ObservedOrder, RefinementMode, RunOutcome, ThreeRungConvergence,
-    admit_calibration_readiness, analyse_three_rung_convergence, classify_outcome,
-    compare_censor_aware_durations, missing_calibration_evidence,
+    HorizonContinuationPolicy, ObservedOrder, OutcomeClass, RefinementMode, RunOutcome,
+    ThreeRungConvergence, admit_calibration_readiness, analyse_three_rung_convergence,
+    classify_outcome, compare_censor_aware_durations, missing_calibration_evidence,
 };
 use fs_euler_disc_e2e::coupled_runner::{
     CoupledChannelFactors, CoupledControls, CoupledInitialState, CoupledNumericalRefusalReason,
@@ -51,6 +51,8 @@ const CAMPAIGN_SEED: u64 = 4_995_983_222_254_027_085;
 const CAMPAIGN_SEED_DEC: &str = "4995983222254027085";
 const EXECUTION_POLL_QUOTA: u32 = 10_000;
 const EXECUTION_COST_QUOTA: u64 = 100_000;
+const CLOSED_INITIAL_HORIZON_S: f64 = 2.0;
+const CLOSED_MAXIMUM_HORIZON_S: f64 = 32.0;
 
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
@@ -220,10 +222,10 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
         spin_rad_per_s: 120.0,
     };
     let continuation = HorizonContinuationPolicy {
-        initial_horizon_s: 2.0,
-        maximum_horizon_s: 8.0,
+        initial_horizon_s: CLOSED_INITIAL_HORIZON_S,
+        maximum_horizon_s: CLOSED_MAXIMUM_HORIZON_S,
         multiplier: 2.0,
-        maximum_extensions: 2,
+        maximum_extensions: 4,
     };
     let mut records = Vec::new();
     let mut resolved_solid = None;
@@ -420,9 +422,9 @@ fn closed_case_record(
         properties.principal_inertia.axial,
         controls.timestep_s,
         controls.maximum_steps,
-        (8.0 / controls.timestep_s).round() as u32,
-        2.0,
-        8.0,
+        (CLOSED_MAXIMUM_HORIZON_S / controls.timestep_s).round() as u32,
+        CLOSED_INITIAL_HORIZON_S,
+        CLOSED_MAXIMUM_HORIZON_S,
         continued.declared_horizon_s,
         continued.continuation_count,
         controls.terminal_inclination_rad,
@@ -498,9 +500,15 @@ fn convergence_record(
         )
         .map_err(|error| error.to_string())
     };
-    let coarse = run(4.0e-5)?;
-    let fine = run(2.0e-5)?;
-    let reference = run(1.0e-5)?;
+    // The earlier 40/20/10 us ladder was visibly pre-asymptotic for the
+    // eventful trajectory. Keep two coarser sentinels in the retained record,
+    // but assess the predeclared finest 20/10/5 us triplet. This is a bounded
+    // refinement policy, not a search for a desired physical outcome.
+    let sentinel_h16 = run(8.0e-5)?;
+    let sentinel_h8 = run(4.0e-5)?;
+    let coarse = run(2.0e-5)?;
+    let fine = run(1.0e-5)?;
+    let reference = run(5.0e-6)?;
     let energy_scale = reference
         .checkpoint
         .initial_total_energy_j
@@ -510,9 +518,9 @@ fn convergence_record(
         coarse: &coarse,
         fine: &fine,
         reference: &reference,
-        coarse_timestep_s: 4.0e-5,
-        fine_timestep_s: 2.0e-5,
-        reference_timestep_s: 1.0e-5,
+        coarse_timestep_s: 2.0e-5,
+        fine_timestep_s: 1.0e-5,
+        reference_timestep_s: 5.0e-6,
         mode: RefinementMode::Eventful {
             reason: "unilateral contact and support-feature switching".to_owned(),
         },
@@ -543,11 +551,21 @@ fn convergence_record(
         ObservedOrder::Available { .. } => "available",
         ObservedOrder::NotApplicable { .. } => "withheld-eventful-mode",
     };
+    let sentinel_classes = [
+        classify_outcome(&sentinel_h16)
+            .map_err(|error| error.to_string())?
+            .class(),
+        classify_outcome(&sentinel_h8)
+            .map_err(|error| error.to_string())?
+            .class(),
+    ];
     Ok(format!(
-        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-solid-timestep-convergence\",\"model\":\"h-h2-h4-fixed-horizon-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"dimensionless-normalized-deltas\",\"terminal\":\"analysis-complete\",\"horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h\":{:.17e},\"h2\":{:.17e},\"h4\":{:.17e}}},\"terminal_class_agreement\":{},\"fine_reference_qoi\":{{\"inclination\":{:.17e},\"precession\":{:.17e},\"spin\":{:.17e}}},\"fine_reference_qoi_linf\":{fine_reference_qoi_linf:.17e},\"fine_reference_work_linf\":{fine_reference_work_linf:.17e},\"fine_reference_energy_defect\":{:.17e},\"declared_normalized_delta_limit\":{declared_delta_limit:.17e},\"within_declared_delta_band\":{},\"observed_order\":\"{}\",\"no_claim\":\"fixed-horizon-numerical-sensitivity-only;eventful-mode-withholds-smooth-order;not-terminal-time-or-physical-validation\"}}",
-        4.0e-5,
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-solid-timestep-convergence\",\"model\":\"bounded-five-rung-fixed-horizon-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"dimensionless-normalized-deltas\",\"terminal\":\"analysis-complete\",\"horizon_s\":{HORIZON_S:.17e},\"sentinel_timesteps_s\":{{\"h16\":8.0e-5,\"h8\":4.0e-5}},\"sentinel_terminal_classes\":{{\"h16\":\"{}\",\"h8\":\"{}\"}},\"assessed_timesteps_s\":{{\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"terminal_class_agreement\":{},\"fine_reference_qoi\":{{\"inclination\":{:.17e},\"precession\":{:.17e},\"spin\":{:.17e}}},\"fine_reference_qoi_linf\":{fine_reference_qoi_linf:.17e},\"fine_reference_work_linf\":{fine_reference_work_linf:.17e},\"fine_reference_energy_defect\":{:.17e},\"declared_normalized_delta_limit\":{declared_delta_limit:.17e},\"within_declared_delta_band\":{},\"observed_order\":\"{}\",\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"fixed-horizon-numerical-sensitivity-only;eventful-mode-withholds-smooth-order;not-terminal-time-or-physical-validation\"}}",
+        outcome_class_name(sentinel_classes[0]),
+        outcome_class_name(sentinel_classes[1]),
         2.0e-5,
         1.0e-5,
+        5.0e-6,
         receipt.terminal_class_agreement,
         receipt.fine_reference_qoi.inclination,
         receipt.fine_reference_qoi.precession,
@@ -584,7 +602,7 @@ fn ranking_convergence_record(
     cx: &Cx<'_>,
 ) -> Result<String, String> {
     const HORIZON_S: f64 = 2.0;
-    const TIMESTEPS_S: [f64; 3] = [8.0e-5, 4.0e-5, 2.0e-5];
+    const TIMESTEPS_S: [f64; 5] = [8.0e-5, 4.0e-5, 2.0e-5, 1.0e-5, 5.0e-6];
     const EVENT_TIME_RELATIVE_LIMIT: f64 = 5.0e-3;
 
     let mut rungs = Vec::with_capacity(TIMESTEPS_S.len());
@@ -626,8 +644,8 @@ fn ranking_convergence_record(
             ordering,
         });
     }
-    let [coarse, fine, reference] = rungs.as_slice() else {
-        return Err("ranking refinement did not retain exactly three rungs".to_owned());
+    let [sentinel_h16, sentinel_h8, coarse, fine, reference] = rungs.as_slice() else {
+        return Err("ranking refinement did not retain exactly five rungs".to_owned());
     };
     let coarse_fine_event_delta = event_time_delta(coarse.ring, fine.ring);
     let fine_reference_event_delta = event_time_delta(fine.ring, reference.ring);
@@ -642,10 +660,14 @@ fn ranking_convergence_record(
         ring_shorter_bound_proven && event_time_within_declared_band;
 
     Ok(format!(
-        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"equal-mass-ring-vs-solid-ranking-convergence\",\"model\":\"three-rung-common-window-censor-aware-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"SI:s\",\"terminal\":\"analysis-complete\",\"common_horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h\":{:.17e},\"h2\":{:.17e},\"h4\":{:.17e}}},\"rungs\":{{\"h\":{},\"h2\":{},\"h4\":{}}},\"ordering_agreement\":{},\"ring_shorter_than_solid_bound_proven_at_all_rungs\":{},\"ring_event_time_coarse_fine\":{},\"ring_event_time_fine_reference\":{},\"declared_event_time_relative_limit\":{EVENT_TIME_RELATIVE_LIMIT:.17e},\"ring_event_time_within_declared_band\":{},\"ranking_numerically_supported\":{},\"no_claim\":\"numerical-ranking-of-declared-reduced-model-only;solid-censor-is-a-lower-bound-not-a-duration;not-experimental-calibration-or-video-validation\"}}",
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"equal-mass-ring-vs-solid-ranking-convergence\",\"model\":\"bounded-five-rung-common-window-censor-aware-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"SI:s\",\"terminal\":\"analysis-complete\",\"common_horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h16\":{:.17e},\"h8\":{:.17e},\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"rungs\":{{\"h16\":{},\"h8\":{},\"h4\":{},\"h2\":{},\"h\":{}}},\"assessed_triplet\":\"h4,h2,h\",\"ordering_agreement\":{},\"ring_shorter_than_solid_bound_proven_at_all_rungs\":{},\"ring_event_time_coarse_fine\":{},\"ring_event_time_fine_reference\":{},\"declared_event_time_relative_limit\":{EVENT_TIME_RELATIVE_LIMIT:.17e},\"ring_event_time_within_declared_band\":{},\"ranking_numerically_supported\":{},\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"numerical-ranking-of-declared-reduced-model-only;solid-censor-is-a-lower-bound-not-a-duration;not-experimental-calibration-or-video-validation\"}}",
+        sentinel_h16.timestep_s,
+        sentinel_h8.timestep_s,
         coarse.timestep_s,
         fine.timestep_s,
         reference.timestep_s,
+        ranking_rung_json(*sentinel_h16),
+        ranking_rung_json(*sentinel_h8),
         ranking_rung_json(*coarse),
         ranking_rung_json(*fine),
         ranking_rung_json(*reference),
@@ -684,9 +706,20 @@ fn outcome_kind_and_time(outcome: RunOutcome) -> (&'static str, f64, &'static st
     }
 }
 
+const fn outcome_class_name(class: OutcomeClass) -> &'static str {
+    match class {
+        OutcomeClass::PhysicalTerminal => "physical-terminal",
+        OutcomeClass::RightCensored => "right-censored",
+        OutcomeClass::NumericalRefusal => "numerical-refusal",
+    }
+}
+
 const fn numerical_refusal_reason_name(reason: CoupledNumericalRefusalReason) -> &'static str {
     match reason {
         CoupledNumericalRefusalReason::ReimpactLimitExceeded => "reimpact-limit-exceeded",
+        CoupledNumericalRefusalReason::ContactEventLocalizationFailed => {
+            "contact-event-localization-failed"
+        }
         CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState => {
             "non-finite-energy-or-base-state"
         }

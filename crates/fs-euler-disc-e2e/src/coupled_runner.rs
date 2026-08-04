@@ -138,6 +138,11 @@ pub struct CoupledSample {
     /// remained on the same branch; this reduced runner localizes endpoint
     /// crossings only and makes no sub-grid chatter claim.
     pub contact_transitions: Vec<LocalizedContactTransition>,
+    /// Bracket for the terminal-inclination crossing that ended this sample,
+    /// when one occurred. The locator re-evolves the reduced mechanics within
+    /// its bracket; it is a numerical event diagnostic, not a measurement or
+    /// a claim of calibrated terminal-time accuracy.
+    pub terminal_inclination_event: Option<LocalizedTerminalInclination>,
     /// Profile feature selected by the analytic support query at this
     /// sample's retained post-step pose. Cylinder-only compatibility runs do
     /// not expose a feature index.
@@ -162,6 +167,16 @@ pub enum ContactTransitionKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalizedContactTransition {
     pub kind: ContactTransitionKind,
+    pub time_s: f64,
+    pub bracket_start_s: f64,
+    pub bracket_end_s: f64,
+}
+
+/// A deterministic bracket for the inclination threshold that terminates an
+/// accepted macro step. It records only the reduced-model root localization;
+/// it does not certify the corresponding physical Euler-disc stopping time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalizedTerminalInclination {
     pub time_s: f64,
     pub bracket_start_s: f64,
     pub bracket_end_s: f64,
@@ -288,6 +303,8 @@ impl CoupledGeometry<'_, '_> {
 const CONTACT_EVENT_BISECTION_ITERATIONS: u32 = 48;
 const CONTACT_EVENT_GAP_TOLERANCE_M: f64 = 1.0e-12;
 const CONTACT_EVENT_ROOT_TOLERANCE_M: f64 = 1.0e-15;
+const TERMINAL_EVENT_BISECTION_ITERATIONS: u32 = 48;
+const TERMINAL_EVENT_ROOT_TOLERANCE_RAD: f64 = 1.0e-12;
 const CONTACT_EVENT_MIN_PROGRESS_FRACTION: f64 = 1.0e-12;
 const MAX_CONTACT_EVENTS_PER_MACRO_STEP: u32 = 4;
 
@@ -402,6 +419,74 @@ fn localize_endpoint_transition(
     }
     Ok(Some(LocalizedContactTransition {
         kind,
+        time_s,
+        bracket_start_s: interval_start_s + low_s,
+        bracket_end_s: interval_start_s + high_s,
+    }))
+}
+
+fn inclination_rad(state: RigidBodyState) -> f64 {
+    state
+        .pose()
+        .orientation()
+        .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0))
+        .z
+        .clamp(-1.0, 1.0)
+        .acos()
+}
+
+/// Localizes a descending terminal-inclination crossing using actual reduced
+/// segment evolution. It deliberately requires endpoint bracketing: just as
+/// with contact transitions, this reduced runner makes no claim to find an
+/// unbracketed sub-grid crossing that returns above the threshold.
+fn localize_terminal_inclination(
+    interval_start_s: f64,
+    duration_s: f64,
+    terminal_inclination_rad: f64,
+    start_inclination_rad: f64,
+    end_inclination_rad: f64,
+    mut inclination_after: impl FnMut(f64) -> Result<f64, CoupledError>,
+) -> Result<Option<LocalizedTerminalInclination>, CoupledError> {
+    if !(interval_start_s.is_finite()
+        && duration_s.is_finite()
+        && duration_s > 0.0
+        && terminal_inclination_rad.is_finite()
+        && start_inclination_rad.is_finite()
+        && end_inclination_rad.is_finite())
+    {
+        return Ok(None);
+    }
+    if !(start_inclination_rad > terminal_inclination_rad
+        && end_inclination_rad <= terminal_inclination_rad)
+    {
+        return Ok(None);
+    }
+    let mut low_s = 0.0;
+    let mut high_s = duration_s;
+    for _ in 0..TERMINAL_EVENT_BISECTION_ITERATIONS {
+        let midpoint_s = 0.5 * (low_s + high_s);
+        let midpoint_inclination_rad = inclination_after(midpoint_s)?;
+        if !midpoint_inclination_rad.is_finite() {
+            return Ok(None);
+        }
+        if (midpoint_inclination_rad - terminal_inclination_rad).abs()
+            <= TERMINAL_EVENT_ROOT_TOLERANCE_RAD
+        {
+            low_s = midpoint_s;
+            high_s = midpoint_s;
+            break;
+        }
+        if midpoint_inclination_rad > terminal_inclination_rad {
+            low_s = midpoint_s;
+        } else {
+            high_s = midpoint_s;
+        }
+    }
+    let time_s = interval_start_s + 0.5 * (low_s + high_s);
+    if !time_s.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some(LocalizedTerminalInclination {
         time_s,
         bracket_start_s: interval_start_s + low_s,
         bracket_end_s: interval_start_s + high_s,
@@ -771,11 +856,7 @@ fn run_closed_with_geometry(
 
     for _ in 0..controls.maximum_steps {
         let state = checkpoint.state;
-        let pose = state.pose();
-        let normal = pose
-            .orientation()
-            .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
-        let inclination = normal.z.clamp(-1.0, 1.0).acos();
+        let inclination = inclination_rad(state);
         if inclination <= controls.terminal_inclination_rad {
             return Ok(CoupledRun {
                 samples,
@@ -809,8 +890,19 @@ fn run_closed_with_geometry(
         let mut body_mechanical_energy_j = None;
         let mut post_support_gap_m = None;
         let mut post_support_source_feature = None;
+        let mut terminal_inclination_event = None;
 
         while remaining_s > 0.0 {
+            let start_inclination_rad = inclination_rad(state);
+            if start_inclination_rad <= controls.terminal_inclination_rad {
+                let time_s = checkpoint.time_s + elapsed_s;
+                terminal_inclination_event = Some(LocalizedTerminalInclination {
+                    time_s,
+                    bracket_start_s: time_s,
+                    bracket_end_s: time_s,
+                });
+                break;
+            }
             let trial = advance_segment(
                 state,
                 base_deflection_m,
@@ -822,6 +914,30 @@ fn run_closed_with_geometry(
                 gravity,
                 &integrator,
                 &geometry_model,
+            )?;
+            let terminal_event = localize_terminal_inclination(
+                checkpoint.time_s + elapsed_s,
+                remaining_s,
+                controls.terminal_inclination_rad,
+                start_inclination_rad,
+                inclination_rad(trial.state_after),
+                |candidate_duration_s| {
+                    Ok(inclination_rad(
+                        advance_segment(
+                            state,
+                            base_deflection_m,
+                            base_velocity_m_per_s,
+                            candidate_duration_s,
+                            branch,
+                            mass,
+                            factors,
+                            gravity,
+                            &integrator,
+                            &geometry_model,
+                        )?
+                        .state_after,
+                    ))
+                },
             )?;
             let event = localize_endpoint_transition(
                 checkpoint.time_s + elapsed_s,
@@ -845,7 +961,56 @@ fn run_closed_with_geometry(
                     .post_support_gap_m)
                 },
             )?;
-            let (accepted, accepted_duration_s, next_branch) = if let Some(event) = event {
+            let terminal_precedes_contact = terminal_event.is_some_and(|terminal| {
+                event
+                    .as_ref()
+                    .is_none_or(|contact| terminal.time_s <= contact.time_s)
+            });
+            let (accepted, accepted_duration_s, next_branch) = if terminal_precedes_contact {
+                let Some(terminal) = terminal_event else {
+                    return Ok(CoupledRun {
+                        samples,
+                        checkpoint,
+                        terminal: CoupledTerminal::NumericalRefusal {
+                            reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                        },
+                        applicability: applicability(),
+                        model_disagreement: disagreement(),
+                    });
+                };
+                let event_duration_s = terminal.time_s - (checkpoint.time_s + elapsed_s);
+                if !(event_duration_s.is_finite()
+                    && event_duration_s > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
+                    && event_duration_s <= remaining_s)
+                {
+                    return Ok(CoupledRun {
+                        samples,
+                        checkpoint,
+                        terminal: CoupledTerminal::NumericalRefusal {
+                            reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                        },
+                        applicability: applicability(),
+                        model_disagreement: disagreement(),
+                    });
+                }
+                terminal_inclination_event = Some(terminal);
+                (
+                    advance_segment(
+                        state,
+                        base_deflection_m,
+                        base_velocity_m_per_s,
+                        event_duration_s,
+                        branch,
+                        mass,
+                        factors,
+                        gravity,
+                        &integrator,
+                        &geometry_model,
+                    )?,
+                    event_duration_s,
+                    branch,
+                )
+            } else if let Some(event) = event {
                 if events_in_macro_step >= MAX_CONTACT_EVENTS_PER_MACRO_STEP {
                     return Ok(CoupledRun {
                         samples,
@@ -994,6 +1159,9 @@ fn run_closed_with_geometry(
             elapsed_s += accepted_duration_s;
             remaining_s -= accepted_duration_s;
             branch = next_branch;
+            if terminal_inclination_event.is_some() {
+                break;
+            }
         }
 
         let (Some(interval_start_gap_m), Some(interval_normal_force_n)) =
@@ -1022,8 +1190,9 @@ fn run_closed_with_geometry(
                 model_disagreement: disagreement(),
             });
         };
-        if (elapsed_s - controls.timestep_s).abs()
-            > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
+        if terminal_inclination_event.is_none()
+            && (elapsed_s - controls.timestep_s).abs()
+                > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
         {
             return Ok(CoupledRun {
                 samples,
@@ -1036,11 +1205,22 @@ fn run_closed_with_geometry(
             });
         }
 
-        average_channel_wrenches(&mut channels, controls.timestep_s);
+        if !(elapsed_s.is_finite() && elapsed_s > 0.0) {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                },
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        }
+        average_channel_wrenches(&mut channels, elapsed_s);
         checkpoint.state = state;
         checkpoint.base_deflection_m = base_deflection_m;
         checkpoint.base_velocity_m_per_s = base_velocity_m_per_s;
-        checkpoint.time_s += controls.timestep_s;
+        checkpoint.time_s += elapsed_s;
         checkpoint.was_in_contact = post_support_gap_m <= 0.0;
         let Some(updated_reimpact_count) = checkpoint.reimpact_count.checked_add(reimpact_events)
         else {
@@ -1074,7 +1254,7 @@ fn run_closed_with_geometry(
                 + checkpoint.accumulated_channel_work_j[4]);
         checkpoint.accumulated_energy_defect_j = defect;
         let (sample_inclination, precession, spin) = qois(checkpoint.state, mass)?;
-        let precession_acceleration = (precession - previous_precession) / controls.timestep_s;
+        let precession_acceleration = (precession - previous_precession) / elapsed_s;
         previous_precession = precession;
         samples.push(CoupledSample {
             time_s: checkpoint.time_s,
@@ -1086,6 +1266,7 @@ fn run_closed_with_geometry(
             interval_normal_force_n,
             contact_active,
             contact_transitions: localized_transitions,
+            terminal_inclination_event,
             support_source_feature: post_support_source_feature,
             reimpact_count: checkpoint.reimpact_count,
             channels,
@@ -1114,12 +1295,9 @@ fn run_closed_with_geometry(
                 model_disagreement: disagreement(),
             });
         }
-        // Classify an event reached on the final allowed step as physical,
-        // rather than incorrectly turning it into a horizon censor. The event
-        // time is still the first committed fixed-step boundary at or below
-        // the threshold; this reduced runner does not claim substep event
-        // interpolation.
-        if sample_inclination <= controls.terminal_inclination_rad {
+        if terminal_inclination_event.is_some()
+            || sample_inclination <= controls.terminal_inclination_rad
+        {
             return Ok(CoupledRun {
                 samples,
                 checkpoint,
@@ -1358,13 +1536,79 @@ fn unilateral_normal_force(
 
 #[cfg(test)]
 mod tests {
-    use fs_mbd::{Pose, RigidBodyState, Vec3};
+    use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
 
     use super::{
         CONTACT_EVENT_GAP_TOLERANCE_M, ContactBranch, ContactTransitionKind, CoupledControls,
-        CoupledError, CoupledFactors, CoupledInitialState, localize_endpoint_transition,
-        reimpact_budget_exceeded, run_closed_reduced, unilateral_normal_force,
+        CoupledError, CoupledFactors, CoupledInitialState, CoupledTerminal,
+        localize_endpoint_transition, reimpact_budget_exceeded, run_closed_reduced,
+        unilateral_normal_force,
     };
+
+    fn terminal_factors() -> CoupledFactors {
+        let radius_m = 0.038;
+        let thickness_m = 0.006;
+        let mass_kg = std::f64::consts::PI * radius_m * radius_m * thickness_m * 2680.0;
+        CoupledFactors {
+            mass_kg,
+            radius_m,
+            thickness_m,
+            transverse_inertia_kg_m2: mass_kg * (3.0 * radius_m * radius_m + thickness_m.powi(2))
+                / 12.0,
+            axial_inertia_kg_m2: 0.5 * mass_kg * radius_m * radius_m,
+            gravity_m_per_s2: 9.806_65,
+            sliding_friction_coefficient: 0.0,
+            rolling_resistance_m: 0.0,
+            contact_stiffness_n_per_m: 8.0e4,
+            contact_damping_n_s_per_m: 3.0,
+            base_effective_mass_kg: 0.25,
+            base_stiffness_n_per_m: 4.0e4,
+            base_damping_n_s_per_m: 4.0,
+            gas_rotational_damping_n_m_s: 0.0,
+            gas_translation_damping_n_s_per_m: 0.0,
+        }
+    }
+
+    fn terminal_initial() -> CoupledInitialState {
+        CoupledInitialState {
+            inclination_rad: 0.08,
+            precession_rad_per_s: 0.0,
+            spin_rad_per_s: 0.0,
+        }
+    }
+
+    fn declared_airborne_terminal_restart(
+        factors: CoupledFactors,
+        controls: CoupledControls,
+        initial: CoupledInitialState,
+    ) -> super::CoupledCheckpoint {
+        let seed = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 1,
+                ..controls
+            },
+            initial,
+            None,
+        )
+        .expect("seed checkpoint");
+        let orientation =
+            UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), initial.inclination_rad)
+                .expect("finite initial tilt");
+        let pose = Pose::new(Vec3::new(0.0, 0.0, 1.0), orientation).expect("finite pose");
+        let mut restart = seed.checkpoint;
+        restart.state = RigidBodyState::new(
+            pose,
+            Vec3::ZERO,
+            Vec3::new(0.0, -factors.transverse_inertia_kg_m2, 0.0),
+        )
+        .expect("finite torque-free terminal state");
+        restart.time_s = 0.0;
+        restart.base_deflection_m = 0.0;
+        restart.base_velocity_m_per_s = 0.0;
+        restart.was_in_contact = false;
+        restart
+    }
 
     #[test]
     fn kelvin_voigt_dashpot_is_inactive_across_an_open_gap() {
@@ -1544,6 +1788,121 @@ mod tests {
         )
         .expect("post-transition restart");
         assert_eq!(run.checkpoint, resumed.checkpoint);
+    }
+
+    #[test]
+    fn terminal_inclination_time_is_stable_across_coarse_and_fine_macrosteps() {
+        let factors = terminal_factors();
+        let initial = terminal_initial();
+        let coarse_controls = CoupledControls {
+            timestep_s: 0.05,
+            maximum_steps: 2,
+            terminal_inclination_rad: 0.04,
+            reimpact_limit: 8,
+        };
+        let fine_controls = CoupledControls {
+            timestep_s: 0.01,
+            maximum_steps: 8,
+            ..coarse_controls
+        };
+        let coarse = run_closed_reduced(
+            factors,
+            coarse_controls,
+            initial,
+            Some(declared_airborne_terminal_restart(
+                factors,
+                coarse_controls,
+                initial,
+            )),
+        )
+        .expect("coarse terminal run");
+        let fine = run_closed_reduced(
+            factors,
+            fine_controls,
+            initial,
+            Some(declared_airborne_terminal_restart(
+                factors,
+                fine_controls,
+                initial,
+            )),
+        )
+        .expect("fine terminal run");
+        assert_eq!(coarse.terminal, CoupledTerminal::TerminalInclination);
+        assert_eq!(fine.terminal, CoupledTerminal::TerminalInclination);
+        let coarse_event = coarse
+            .samples
+            .last()
+            .and_then(|sample| sample.terminal_inclination_event)
+            .expect("coarse terminal bracket");
+        let fine_event = fine
+            .samples
+            .last()
+            .and_then(|sample| sample.terminal_inclination_event)
+            .expect("fine terminal bracket");
+        assert!(coarse.checkpoint.time_s < coarse_controls.timestep_s);
+        assert_eq!(coarse.checkpoint.time_s, coarse_event.time_s);
+        assert_eq!(fine.checkpoint.time_s, fine_event.time_s);
+        assert!(coarse_event.bracket_start_s <= coarse_event.time_s);
+        assert!(coarse_event.time_s <= coarse_event.bracket_end_s);
+        assert!((coarse.checkpoint.time_s - fine.checkpoint.time_s).abs() <= 1.0e-8);
+        assert!(
+            (coarse
+                .samples
+                .last()
+                .expect("coarse sample")
+                .inclination_rad
+                - coarse_controls.terminal_inclination_rad)
+                .abs()
+                <= 2.0e-12
+        );
+    }
+
+    #[test]
+    fn terminal_checkpoint_restarts_equivalently_after_a_nonterminal_prefix() {
+        let factors = terminal_factors();
+        let initial = terminal_initial();
+        let controls = CoupledControls {
+            timestep_s: 0.03,
+            maximum_steps: 2,
+            terminal_inclination_rad: 0.04,
+            reimpact_limit: 8,
+        };
+        let restart = declared_airborne_terminal_restart(factors, controls, initial);
+        let full = run_closed_reduced(factors, controls, initial, Some(restart.clone()))
+            .expect("full terminal run");
+        let prefix = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 1,
+                ..controls
+            },
+            initial,
+            Some(restart),
+        )
+        .expect("nonterminal prefix");
+        assert_eq!(prefix.terminal, CoupledTerminal::HorizonReached);
+        assert!(
+            prefix
+                .samples
+                .iter()
+                .all(|sample| sample.terminal_inclination_event.is_none())
+        );
+        let resumed = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 1,
+                ..controls
+            },
+            initial,
+            Some(prefix.checkpoint.clone()),
+        )
+        .expect("restart through terminal event");
+        assert_eq!(resumed.terminal, CoupledTerminal::TerminalInclination);
+        let resumed_event = resumed.samples[0]
+            .terminal_inclination_event
+            .expect("resumed terminal bracket");
+        assert!(resumed_event.time_s > prefix.checkpoint.time_s);
+        assert_eq!(full.checkpoint, resumed.checkpoint);
     }
 }
 
