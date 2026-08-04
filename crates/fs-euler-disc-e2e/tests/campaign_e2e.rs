@@ -5,6 +5,112 @@ use std::process::Command;
 
 use fs_blake3::hash_domain;
 
+#[test]
+fn campaign_preserves_legacy_records_and_appends_deterministic_closed_trajectory_output() {
+    let binary = env!("CARGO_BIN_EXE_euler_disc_campaign");
+    let first = Command::new(binary).output().expect("campaign launches");
+    let second = Command::new(binary)
+        .output()
+        .expect("campaign replay launches");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    let output = String::from_utf8(first.stdout).expect("utf8");
+    assert!(output.contains("one-way-contact-state-snapshot"));
+    assert!(!output.contains("CONTOUR_FORCE_PER_NORMAL_FORCE"));
+    assert!(output.contains("closed-time-evolving-reduced-euler-disc"));
+    assert!(output.contains("channel_work_j"));
+    assert!(output.contains("last_step_channel_work_j"));
+    assert!(output.contains("precession_acceleration_rad_per_s2"));
+    assert!(output.contains("energy_defect_j"));
+    assert!(output.contains("model_disagreement"));
+    assert!(output.contains("does not yet consume exported mechanics/rolling_contact/air"));
+    assert!(!output.contains("shape_inertia_factor"));
+    let v2_records: Vec<_> = output
+        .lines()
+        .filter(|line| line.contains("euler-disc-campaign-jsonl-v2"))
+        .map(|line| JsonParser::parse(line).expect("v2 record is valid JSON"))
+        .collect();
+    let v2_roots: Vec<_> = v2_records.iter().map(object).collect();
+    let closed: Vec<_> = v2_roots
+        .iter()
+        .copied()
+        .filter(|fields| string(fields, "scenario").starts_with("closed-reduced-"))
+        .collect();
+    assert!(closed.len() >= 9);
+    assert!(
+        closed
+            .iter()
+            .any(|fields| { string(fields, "scenario") == "closed-reduced-ring-equal-mass" })
+    );
+    assert!(
+        closed
+            .iter()
+            .any(|fields| string(fields, "scenario") == "closed-reduced-solid-no-gas")
+    );
+    assert!(
+        closed
+            .iter()
+            .any(|fields| { string(fields, "scenario") == "closed-reduced-solid-no-rolling" })
+    );
+    let inputs = object(closed[0].get("inputs").expect("closed inputs"));
+    for key in [
+        "mass_kg",
+        "input_units",
+        "radius_m",
+        "thickness_m",
+        "density_kg_m3",
+        "gravity_m_per_s2",
+        "transverse_inertia_kg_m2",
+        "axial_inertia_kg_m2",
+        "timestep_s",
+        "maximum_steps",
+        "horizon_s",
+        "terminal_inclination_rad",
+        "reimpact_limit",
+        "initial_inclination_rad",
+        "initial_precession_rad_per_s",
+        "initial_spin_rad_per_s",
+        "sliding_friction_coefficient",
+        "rolling_resistance_m",
+        "base_effective_mass_kg",
+        "base_stiffness_n_per_m",
+        "base_damping_n_s_per_m",
+        "contact_stiffness_n_per_m",
+        "contact_damping_n_s_per_m",
+        "gas_rotational_damping_n_m_s",
+        "gas_translation_damping_n_s_per_m",
+    ] {
+        assert!(inputs.contains_key(key), "missing v2 input {key}");
+    }
+    let solid = closed
+        .iter()
+        .find(|fields| string(fields, "scenario") == "closed-reduced-solid")
+        .expect("solid controlled case");
+    let equal_mass_ring = closed
+        .iter()
+        .find(|fields| string(fields, "scenario") == "closed-reduced-ring-equal-mass")
+        .expect("equal-mass ring controlled case");
+    let solid_inputs = object(solid.get("inputs").expect("solid inputs"));
+    let ring_inputs = object(equal_mass_ring.get("inputs").expect("ring inputs"));
+    let solid_mass = number(solid_inputs, "mass_kg");
+    let ring_mass = number(ring_inputs, "mass_kg");
+    assert!((solid_mass - ring_mass).abs() / solid_mass < 1.0e-12);
+    assert_ne!(
+        number(solid_inputs, "axial_inertia_kg_m2"),
+        number(ring_inputs, "axial_inertia_kg_m2")
+    );
+    let manifest = v2_roots
+        .iter()
+        .find(|fields| string(fields, "scenario") == "campaign-complete")
+        .expect("v2 manifest");
+    assert_eq!(number(manifest, "record_count"), closed.len() as f64);
+    assert!(output.contains("cone-inertia-cylinder-contact-surrogate"));
+}
+
 #[derive(Debug)]
 enum JsonValue {
     Number(f64),
@@ -202,12 +308,11 @@ fn campaign_executable_emits_deterministic_substantive_production_records() {
         .iter()
         .map(|line| JsonParser::parse(line).expect("record is valid JSON"))
         .collect();
-    assert_eq!(
-        records.len(),
-        10,
-        "geometry, oracle, contact snapshot chain, decay ablations, exterior probe, and manifest"
+    assert!(
+        records.len() >= 17,
+        "legacy records plus closed trajectory records"
     );
-    let roots: Vec<_> = records.iter().map(object).collect();
+    let roots: Vec<_> = records[..10].iter().map(object).collect();
     let scenarios: Vec<_> = roots
         .iter()
         .map(|fields| string(fields, "scenario"))

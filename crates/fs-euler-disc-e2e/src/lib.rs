@@ -8,13 +8,21 @@
 
 #![forbid(unsafe_code)]
 
+pub mod air;
 pub mod base_response;
 pub mod baseline;
 pub mod contact_dynamics;
 pub mod contract;
+pub mod coupled_runner;
+pub mod external_air;
+pub mod mechanics;
+pub mod normal_contact;
+pub mod patch_kinematics;
 pub mod ports;
 pub mod protocol;
 pub mod reduced_decay;
+pub mod rolling_contact;
+pub mod tangential_contact;
 
 pub use base_response::{
     BaseGeometryScope, BaseResponseDiagnostics, BaseResponseError, BaseResponseInput,

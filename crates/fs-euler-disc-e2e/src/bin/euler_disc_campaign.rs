@@ -5,6 +5,9 @@
 //! uncommitted source through a path inclusion.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_euler_disc_e2e::coupled_runner::{
+    CoupledControls, CoupledFactors, CoupledInitialState, CoupledTerminal, run_closed_reduced,
+};
 use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseInput, BaselineRunOutput, ChannelCrossoverDiagnostic,
     ChannelCrossoverNotComparable, ContactDiscGeometry, ContactDynamicsInput, ContactLoadScope,
@@ -39,15 +42,222 @@ const CAMPAIGN_SEED: u64 = 4_995_983_222_254_027_085;
 const CAMPAIGN_SEED_DEC: &str = "4995983222254027085";
 const EXECUTION_POLL_QUOTA: u32 = 10_000;
 const EXECUTION_COST_QUOTA: u64 = 100_000;
-// This caller-declared mapping makes the measured profile-contact normal
-// reaction a real input to the generic contour-force law; it is not calibrated.
-const CONTOUR_FORCE_PER_NORMAL_FORCE: f64 = 0.002 / (0.12 * 9.806_65);
 
 fn main() {
-    if let Err(error) = run_campaign() {
+    if let Err(error) = run_campaign().and_then(|_| run_closed_campaign()) {
         eprintln!("euler-disc campaign refusal: {error}");
         std::process::exit(1);
     }
+}
+
+fn run_closed_campaign() -> Result<(), String> {
+    let controls = CoupledControls {
+        timestep_s: 2.0e-5,
+        maximum_steps: 100_000,
+        terminal_inclination_rad: 0.002,
+        reimpact_limit: 32,
+    };
+    let initial = CoupledInitialState {
+        inclination_rad: 0.08,
+        precession_rad_per_s: 16.0,
+        spin_rad_per_s: 120.0,
+    };
+    let cases = [
+        (
+            "solid", 0.038, 0.006, 2_680.0, 0.0, false, 1.0, 4.0e-5, 2.0e-7, 4.0e-4,
+        ),
+        (
+            "ring-fixed-density",
+            0.038,
+            0.006,
+            2_680.0,
+            0.65,
+            false,
+            1.0,
+            4.0e-5,
+            2.0e-7,
+            4.0e-4,
+        ),
+        (
+            "ring-equal-mass",
+            0.038,
+            0.006,
+            2_680.0 / (1.0 - 0.65 * 0.65),
+            0.65,
+            false,
+            1.0,
+            4.0e-5,
+            2.0e-7,
+            4.0e-4,
+        ),
+        (
+            "cone-inertia-cylinder-contact-surrogate",
+            0.038,
+            0.006,
+            2_680.0,
+            0.0,
+            true,
+            1.0,
+            4.0e-5,
+            2.0e-7,
+            4.0e-4,
+        ),
+        (
+            "large-rim",
+            0.052,
+            0.006,
+            2_680.0,
+            0.0,
+            false,
+            1.0,
+            4.0e-5,
+            2.0e-7,
+            4.0e-4,
+        ),
+        (
+            "dense-material",
+            0.038,
+            0.006,
+            7_850.0,
+            0.0,
+            false,
+            1.0,
+            4.0e-5,
+            2.0e-7,
+            4.0e-4,
+        ),
+        (
+            "compliant-base",
+            0.038,
+            0.006,
+            2_680.0,
+            0.0,
+            false,
+            0.35,
+            4.0e-5,
+            2.0e-7,
+            4.0e-4,
+        ),
+        (
+            "solid-no-gas",
+            0.038,
+            0.006,
+            2_680.0,
+            0.0,
+            false,
+            1.0,
+            4.0e-5,
+            0.0,
+            0.0,
+        ),
+        (
+            "solid-no-rolling",
+            0.038,
+            0.006,
+            2_680.0,
+            0.0,
+            false,
+            1.0,
+            0.0,
+            2.0e-7,
+            4.0e-4,
+        ),
+    ];
+    let mut records = Vec::new();
+    for (
+        name,
+        radius,
+        thickness,
+        density,
+        inner_ratio,
+        conical,
+        base_scale,
+        rolling_resistance_m,
+        gas_rotational_damping_n_m_s,
+        gas_translation_damping_n_s_per_m,
+    ) in cases
+    {
+        let inner_radius = radius * inner_ratio;
+        let area_factor = radius * radius - inner_radius * inner_radius;
+        let volume = if conical {
+            std::f64::consts::PI * radius * radius * thickness / 3.0
+        } else {
+            std::f64::consts::PI * area_factor * thickness
+        };
+        let mass = volume * density;
+        let (transverse, axial) = if conical {
+            (
+                3.0 * mass * (4.0 * radius * radius + thickness * thickness) / 80.0,
+                0.3 * mass * radius * radius,
+            )
+        } else {
+            (
+                mass * (3.0 * (radius * radius + inner_radius * inner_radius)
+                    + thickness * thickness)
+                    / 12.0,
+                0.5 * mass * (radius * radius + inner_radius * inner_radius),
+            )
+        };
+        let run = run_closed_reduced(
+            CoupledFactors {
+                mass_kg: mass,
+                radius_m: radius,
+                thickness_m: thickness,
+                transverse_inertia_kg_m2: transverse,
+                axial_inertia_kg_m2: axial,
+                gravity_m_per_s2: 9.806_65,
+                sliding_friction_coefficient: 0.42,
+                rolling_resistance_m,
+                contact_stiffness_n_per_m: 8.0e4,
+                contact_damping_n_s_per_m: 3.0,
+                base_effective_mass_kg: 0.25,
+                base_stiffness_n_per_m: 4.0e4 * base_scale,
+                base_damping_n_s_per_m: 4.0,
+                gas_rotational_damping_n_m_s,
+                gas_translation_damping_n_s_per_m,
+            },
+            controls,
+            initial,
+            None,
+        )
+        .map_err(|e| format!("{name}: {e}"))?;
+        let last = run
+            .samples
+            .last()
+            .ok_or_else(|| format!("{name}: no committed samples"))?;
+        let terminal = match run.terminal {
+            CoupledTerminal::TerminalInclination => "terminal-inclination",
+            CoupledTerminal::HorizonReached => "horizon-reached",
+            CoupledTerminal::NumericalRefusal => "numerical-refusal",
+        };
+        let no_claim = if conical {
+            "no-physical-validation-or-video-ranking;cone-inertia-cylinder-contact-surrogate-not-physical-cone-contact"
+        } else {
+            "no-physical-validation-or-video-ranking"
+        };
+        records.push(format!(
+            "{{\"schema\":\"euler-disc-campaign-jsonl-v2\",\"scenario\":\"closed-reduced-{name}\",\"model\":\"fs-mbd-closed-rigid-body-with-independent-channel-wrenches\",\"authority\":\"numerical-slice-only\",\"units\":\"SI:m,kg,s,N,J,rad\",\"inputs\":{{\"input_units\":\"SI:kg,m,s,N,J,rad\",\"mass_kg\":{mass:.17e},\"radius_m\":{radius:.17e},\"thickness_m\":{thickness:.17e},\"density_kg_m3\":{density:.17e},\"gravity_m_per_s2\":{:.17e},\"transverse_inertia_kg_m2\":{transverse:.17e},\"axial_inertia_kg_m2\":{axial:.17e},\"ring_inner_radius_ratio\":{inner_ratio:.17e},\"conical\":{conical},\"timestep_s\":{:.17e},\"maximum_steps\":{},\"horizon_s\":{:.17e},\"terminal_inclination_rad\":{:.17e},\"reimpact_limit\":{},\"initial_inclination_rad\":{:.17e},\"initial_precession_rad_per_s\":{:.17e},\"initial_spin_rad_per_s\":{:.17e},\"sliding_friction_coefficient\":{:.17e},\"rolling_resistance_m\":{rolling_resistance_m:.17e},\"base_effective_mass_kg\":{:.17e},\"base_stiffness_n_per_m\":{:.17e},\"base_damping_n_s_per_m\":{:.17e},\"contact_stiffness_n_per_m\":{:.17e},\"contact_damping_n_s_per_m\":{:.17e},\"gas_rotational_damping_n_m_s\":{gas_rotational_damping_n_m_s:.17e},\"gas_translation_damping_n_s_per_m\":{gas_translation_damping_n_s_per_m:.17e}}},\"terminal\":\"{terminal}\",\"qoi\":{{\"duration_s\":{:.17e},\"inclination_rad\":{:.17e},\"precession_rad_per_s\":{:.17e},\"spin_rad_per_s\":{:.17e},\"precession_acceleration_rad_per_s2\":{:.17e}}},\"channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"last_step_channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"energy_defect_j\":{:.17e},\"applicability\":\"{}\",\"model_disagreement\":\"{}\",\"no_claim\":\"{}\"}}",
+            9.806_65, controls.timestep_s, controls.maximum_steps, controls.timestep_s * f64::from(controls.maximum_steps), controls.terminal_inclination_rad, controls.reimpact_limit, initial.inclination_rad, initial.precession_rad_per_s, initial.spin_rad_per_s, 0.42, 0.25, 4.0e4 * base_scale, 4.0, 8.0e4, 3.0,
+            last.time_s, last.inclination_rad, last.precession_rad_per_s, last.spin_rad_per_s, last.precession_acceleration_rad_per_s2,
+            run.checkpoint.accumulated_channel_work_j[0], run.checkpoint.accumulated_channel_work_j[1], run.checkpoint.accumulated_channel_work_j[2], run.checkpoint.accumulated_channel_work_j[3], run.checkpoint.accumulated_channel_work_j[4],
+            last.channels.gravity.work_j, last.channels.contact.work_j, last.channels.rolling.work_j, last.channels.base.work_j, last.channels.gas.work_j,
+            last.energy_defect_j, run.applicability, run.model_disagreement, no_claim));
+    }
+    let payload = records.join("\n");
+    let digest = fs_blake3::hash_domain(
+        "org.frankensim.euler-disc-campaign-jsonl.v2",
+        payload.as_bytes(),
+    );
+    let record_count = records.len();
+    for record in records {
+        println!("{record}");
+    }
+    println!(
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v2\",\"scenario\":\"campaign-complete\",\"model\":\"closed-time-evolving-reduced-euler-disc\",\"authority\":\"integration-local\",\"units\":\"SI:m,kg,s,N,J,rad\",\"terminal\":\"completed\",\"record_count\":{},\"digest_blake3\":\"{}\",\"no_claim\":\"no-physical-validation-or-video-ranking\"}}",
+        record_count,
+        digest.to_hex()
+    );
+    Ok(())
 }
 
 fn run_campaign() -> Result<(), String> {
@@ -193,7 +403,7 @@ fn run_campaign() -> Result<(), String> {
     let digest_domain = "org.frankensim.euler-disc-campaign-jsonl.v1";
     let digest = fs_blake3::hash_domain(digest_domain, payload.as_bytes());
     let manifest = format!(
-        "{{\"schema\":\"{SCHEMA}\",\"scenario\":\"campaign-complete\",\"model\":\"one-way-snapshot-composition\",\"source\":\"campaign/committed-production-rungs\",\"authority\":\"integration-local\",\"units\":\"{SI_UNITS}\",\"campaign_seed_u64_dec\":\"{CAMPAIGN_SEED_DEC}\",\"budget\":{{\"record_count\":{},\"declared_cx_poll_quota\":{EXECUTION_POLL_QUOTA},\"declared_cx_cost_quota\":{EXECUTION_COST_QUOTA}}},\"terminal\":\"completed\",\"powers_w\":{{}},\"work_j\":{{}},\"residual\":{{\"record_count\":{}}},\"no_claim\":\"{NO_PHYSICAL_VALIDATION};one-way-not-closed-coupling;{DECLARED_CX_BUDGET_NO_CLAIM}\",\"digest_domain\":\"{}\",\"digest_scope\":\"preceding-data-records-LF-joined-no-trailing-LF\",\"digest_blake3\":\"{}\"}}",
+        "{\"schema\":\"{SCHEMA}\",\"scenario\":\"campaign-complete\",\"model\":\"committed-production-rungs\",\"source\":\"campaign/committed-production-rungs\",\"authority\":\"integration-local\",\"units\":\"{SI_UNITS}\",\"campaign_seed_u64_dec\":\"{CAMPAIGN_SEED_DEC}\",\"budget\":{{\"record_count\":{},\"declared_cx_poll_quota\":{EXECUTION_POLL_QUOTA},\"declared_cx_cost_quota\":{EXECUTION_COST_QUOTA}}},\"terminal\":\"completed\",\"powers_w\":{{}},\"work_j\":{{}},\"residual\":{{\"record_count\":{}}},\"no_claim\":\"{NO_PHYSICAL_VALIDATION};{DECLARED_CX_BUDGET_NO_CLAIM}\",\"digest_domain\":\"{}\",\"digest_scope\":\"preceding-data-records-LF-joined-no-trailing-LF\",\"digest_blake3\":\"{}\"}}",
         records.len(),
         records.len(),
         digest_domain,
@@ -913,7 +1123,7 @@ fn reduced_decay_record(
         .flatten();
     if let Some(channel) = input.dry_contour.as_mut() {
         channel.normal_force_n = normal_force_n;
-        channel.contour_force_n = normal_force_n * CONTOUR_FORCE_PER_NORMAL_FORCE;
+        channel.contour_force_n = 0.0;
     }
     let run = run_reduced_decay(&input).map_err(|error| format!("reduced decay: {error}"))?;
     let refinement = refinement_evidence(&input)
@@ -1024,7 +1234,7 @@ fn reduced_decay_record(
             .dry_contour
             .as_ref()
             .map_or(0.0, |channel| channel.contour_force_n),
-        CONTOUR_FORCE_PER_NORMAL_FORCE,
+        0.0,
         input
             .bildsten_boundary_layer
             .as_ref()
