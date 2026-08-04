@@ -119,6 +119,23 @@ pub struct ChannelOwnership {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoupledSample {
     pub time_s: f64,
+    /// Complete accepted rigid-body state at `time_s`.
+    pub state: RigidBodyState,
+    /// World-frame center-of-mass velocity derived from `state` and the exact
+    /// mass properties used by the runner [m/s].
+    pub center_of_mass_velocity_world_m_per_s: Vec3,
+    /// Complete accepted one-mode base displacement [m].
+    pub base_deflection_m: f64,
+    /// Complete accepted one-mode base velocity [m/s].
+    pub base_velocity_m_per_s: f64,
+    /// Unilateral branch immediately after the accepted interval.
+    pub contact_branch: CoupledContactBranch,
+    /// Contact/support geometry evaluated at the accepted endpoint pose. The
+    /// geometry is retained even on the open branch for diagnostics; public
+    /// render trajectories expose it only for closed contact.
+    pub endpoint_contact_geometry: ContactGeometry,
+    /// Signed endpoint gap relative to the moving base mode [m].
+    pub endpoint_signed_gap_m: f64,
     pub inclination_rad: f64,
     pub precession_rad_per_s: f64,
     pub spin_rad_per_s: f64,
@@ -151,6 +168,16 @@ pub struct CoupledSample {
     pub channels: ChannelOwnership,
     pub mechanical_energy_j: f64,
     pub energy_defect_j: f64,
+}
+
+/// Unilateral branch at one accepted runner state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoupledContactBranch {
+    /// The disc support point is separated from the base.
+    Open,
+    /// The signed-gap contact branch is active at the endpoint. A localized
+    /// root may have zero force.
+    Closed,
 }
 
 /// Which unilateral-contact branch begins immediately after a localized root.
@@ -338,6 +365,7 @@ struct SegmentAdvance {
     contact_damping_work_j: f64,
     body_mechanical_energy_j: f64,
     post_support_gap_m: f64,
+    post_contact_geometry: ContactGeometry,
     post_support_source_feature: Option<usize>,
 }
 
@@ -701,6 +729,7 @@ fn advance_segment(
         },
         body_mechanical_energy_j: receipt.diagnostics_after.mechanical_energy,
         post_support_gap_m: post_geometry.gap_m - base_deflection_m,
+        post_contact_geometry: post_geometry,
         post_support_source_feature,
     })
 }
@@ -989,6 +1018,7 @@ fn run_closed_with_geometry(
         let mut channel_work_j = [0.0; 5];
         let mut body_mechanical_energy_j = None;
         let mut post_support_gap_m = None;
+        let mut post_contact_geometry = None;
         let mut post_support_source_feature = None;
         let mut terminal_inclination_event = None;
 
@@ -1256,6 +1286,7 @@ fn run_closed_with_geometry(
             base_velocity_m_per_s = accepted.base_velocity_m_per_s;
             body_mechanical_energy_j = Some(accepted.body_mechanical_energy_j);
             post_support_gap_m = Some(accepted.post_support_gap_m);
+            post_contact_geometry = Some(accepted.post_contact_geometry);
             post_support_source_feature = accepted.post_support_source_feature;
             elapsed_s += accepted_duration_s;
             remaining_s -= accepted_duration_s;
@@ -1278,9 +1309,11 @@ fn run_closed_with_geometry(
                 model_disagreement: disagreement(),
             });
         };
-        let (Some(body_mechanical_energy_j), Some(post_support_gap_m)) =
-            (body_mechanical_energy_j, post_support_gap_m)
-        else {
+        let (Some(body_mechanical_energy_j), Some(post_support_gap_m), Some(post_contact_geometry)) = (
+            body_mechanical_energy_j,
+            post_support_gap_m,
+            post_contact_geometry,
+        ) else {
             return Ok(CoupledRun {
                 samples,
                 checkpoint,
@@ -1358,8 +1391,40 @@ fn run_closed_with_geometry(
         let (sample_inclination, precession, spin) = qois(checkpoint.state, mass)?;
         let precession_acceleration = (precession - previous_precession) / elapsed_s;
         previous_precession = precession;
+        let center_of_mass_velocity_world_m_per_s = checkpoint
+            .state
+            .center_of_mass_velocity_world(mass)
+            .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+        if !defect.is_finite()
+            || !total_energy.is_finite()
+            || !checkpoint.base_deflection_m.is_finite()
+            || !checkpoint.base_velocity_m_per_s.is_finite()
+            || !center_of_mass_velocity_world_m_per_s.is_finite()
+            || !post_support_gap_m.is_finite()
+        {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState,
+                },
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        }
         samples.push(CoupledSample {
             time_s: checkpoint.time_s,
+            state: checkpoint.state,
+            center_of_mass_velocity_world_m_per_s,
+            base_deflection_m: checkpoint.base_deflection_m,
+            base_velocity_m_per_s: checkpoint.base_velocity_m_per_s,
+            contact_branch: if checkpoint.was_in_contact {
+                CoupledContactBranch::Closed
+            } else {
+                CoupledContactBranch::Open
+            },
+            endpoint_contact_geometry: post_contact_geometry,
+            endpoint_signed_gap_m: post_support_gap_m,
             inclination_rad: sample_inclination,
             precession_rad_per_s: precession,
             spin_rad_per_s: spin,
@@ -1375,17 +1440,6 @@ fn run_closed_with_geometry(
             mechanical_energy_j: total_energy,
             energy_defect_j: defect,
         });
-        if !defect.is_finite() || !checkpoint.base_deflection_m.is_finite() {
-            return Ok(CoupledRun {
-                samples,
-                checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
-                    reason: CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState,
-                },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
-        }
         if checkpoint.reimpact_count > controls.reimpact_limit {
             return Ok(CoupledRun {
                 samples,

@@ -25,9 +25,20 @@ pub mod production_coupling;
 #[cfg(feature = "scientific-contract")]
 pub mod protocol;
 pub mod reduced_decay;
+pub mod render_trajectory;
 pub mod rolling_contact;
 pub mod specimen;
 pub mod tangential_contact;
+
+pub use render_trajectory::{
+    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
+    MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseModeState,
+    RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
+    RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature,
+    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
+    RenderTrajectoryMetadata, RenderTrajectorySample, RenderTrajectorySampleInput,
+    RenderUnitSystem, RenderWorldFrame,
+};
 
 pub use base_response::{
     BaseGeometryScope, BaseResponseDiagnostics, BaseResponseError, BaseResponseInput,

@@ -816,6 +816,44 @@ one-test checker smoke used to verify the log/receipt schema; it does not replay
 the recorded case, resolve its logical artifacts, or establish physical
 evidence.
 
+## Animation-grade Euler render trajectory v1
+
+`render_trajectory` defines the accepted public state boundary shared by later
+image and sound pipelines. It exists because `CoupledSample` alone cannot place
+or orient a disc: the complete `RigidBodyState` otherwise survives only in the
+restart checkpoint. The v1 trajectory retains, at every accepted time, the
+center-of-mass pose, canonical body-to-world unit quaternion, world linear
+momentum, principal-body angular momentum bound to exact mass properties,
+symmetry-axis diagnostic, contact branch and geometry, localized contact
+transitions, complete one-mode base displacement/velocity, channel
+wrenches/work, total energy/defect, redundant Euler QoIs, and an explicit final
+terminal, censor, or numerical-refusal disposition. A localized inclination
+event is required exactly for the corresponding terminal disposition.
+
+Top-level metadata binds the resolved specimen profile and chart, mass
+properties, initial state, base and physics models, full configuration,
+restart fingerprint, fixed timestep, producer version, applicability, and
+mandatory no-claims. V1 admits only right-handed Cartesian `+z`-up world
+coordinates and SI/radian units. Those declarations are repeated on each raw
+sample and must match. Quaternion inputs must already be finite unit
+quaternions; admission canonicalizes the `q/-q` double cover. Times are finite,
+non-negative, and strictly increasing. Contact geometry is present exactly on
+the closed branch, contact normals and redundant symmetry axes are unit vectors,
+localized transition times are ordered inside the retained interval and
+alternate branches, and redundant QoIs must agree with the authoritative state
+and bound mass properties.
+
+This schema retains accepted public state rather than every integrator stage.
+It performs no interpolation, hidden-state reconstruction, calibration, or
+physical-authority promotion. Its `f64` times are exact producer values whose
+bit patterns must be preserved by the later codec. Canonical encoding,
+content-addressed identity, decoding, migration, and replay are intentionally
+owned by the dependent trajectory-codec bead rather than being approximated in
+this semantic layer. The focused G0/G3 tests cover valid construction,
+quaternion double-cover canonicalization, quaternion/time/frame/unit/contact/
+base/terminal/QoI refusals, localized brackets, component identities, and
+rigid world translation plus `+z` rotation invariance of intrinsic QoIs.
+
 ## No-claim boundaries
 
 The binding v1 statements are:
