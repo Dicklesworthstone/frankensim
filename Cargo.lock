@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "fsqlite-core",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ast"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-types",
  "smallvec",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-btree"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "foldhash",
  "fsqlite-error",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "blake3",
@@ -2606,14 +2606,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-error"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fsqlite-ext-fts5"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2624,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-icu"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-json"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-misc"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-rtree"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-func"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fsqlite-error",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-mvcc"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "blake3",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-observability"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-types",
  "parking_lot",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "asupersync",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-parser"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-planner"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "fsqlite-ast",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-types"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "bitflags",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vdbe"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "crossbeam-deque",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vfs"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "advisory-lock",
  "asupersync",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-wal"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "blake3",
@@ -2867,7 +2867,7 @@ dependencies = [
  "libm",
  "matrixmultiply",
  "rayon",
- "wide 0.7.33",
+ "wide",
 ]
 
 [[package]]
@@ -3191,9 +3191,9 @@ dependencies = [
 
 [[package]]
 name = "matrixmultiply"
-version = "0.3.10"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
+checksum = "3f607c237553f086e7043417a51df26b2eb899d3caff94e6a67592ff992fedc7"
 dependencies = [
  "autocfg",
  "rawpointer",
@@ -3823,15 +3823,6 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "safe_arch"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
-name = "safe_arch"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a52ec151f024d703f9fd65abb7cbe81e7cdb39f18917a3a37e3014470dc7c59"
@@ -3857,9 +3848,9 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
@@ -3867,29 +3858,29 @@ dependencies = [
 
 [[package]]
 name = "serde_core"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.118",
+ "syn 3.0.3",
 ]
 
 [[package]]
 name = "serde_json"
-version = "1.0.150"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "indexmap",
  "itoa",
@@ -3998,7 +3989,7 @@ dependencies = [
  "approx",
  "num-complex",
  "num-traits",
- "wide 1.5.0",
+ "wide",
 ]
 
 [[package]]
@@ -4367,22 +4358,12 @@ dependencies = [
 
 [[package]]
 name = "wide"
-version = "0.7.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
-dependencies = [
- "bytemuck",
- "safe_arch 0.7.4",
-]
-
-[[package]]
-name = "wide"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfdfe6a32973f2d1b268b8895845a8a96cac2f0191e72c27cc929036060dbf89"
 dependencies = [
  "bytemuck",
- "safe_arch 1.1.0",
+ "safe_arch",
 ]
 
 [[package]]
