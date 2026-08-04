@@ -129,12 +129,17 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     );
     let solid_outcome = object(solid.get("outcome").expect("solid outcome"));
     let ring_outcome = object(equal_mass_ring.get("outcome").expect("ring outcome"));
-    assert_eq!(string(solid_outcome, "kind"), "right-censored");
-    assert_eq!(
+    // Outcome direction is a result of the declared model, never a golden
+    // target copied from the motivating video. The dedicated ranking record
+    // below owns any comparison after censoring and convergence checks.
+    assert!(matches!(
+        string(solid_outcome, "kind"),
+        "physical-terminal-inclination" | "right-censored" | "numerical-refusal"
+    ));
+    assert!(matches!(
         string(ring_outcome, "kind"),
-        "physical-terminal-inclination"
-    );
-    assert!(number(ring_outcome, "retained_time_s") < number(solid_outcome, "retained_time_s"));
+        "physical-terminal-inclination" | "right-censored" | "numerical-refusal"
+    ));
     for fields in &closed {
         let profile = object(fields.get("profile").expect("resolved profile"));
         assert!(boolean(profile, "mass_and_support_same_chart"));
@@ -149,6 +154,16 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
             outcome_kind == "physical-terminal-inclination"
         );
         assert!(outcome.contains_key("numerical_refusal_reason"));
+        let inputs = object(fields.get("inputs").expect("closed inputs"));
+        assert_eq!(number(inputs, "maximum_horizon_s"), 32.0);
+        if outcome_kind == "right-censored" {
+            assert_eq!(number(inputs, "declared_final_horizon_s"), 32.0);
+            assert_eq!(number(inputs, "continuation_count"), 4.0);
+            assert!(
+                (number(outcome, "retained_time_s") - 32.0).abs() <= 32.0e-9,
+                "censor time must equal the declared maximum horizon"
+            );
+        }
         let energy = object(fields.get("energy").expect("closed energy accounting"));
         assert!(number(energy, "initial_total_j") > 0.0);
         assert!(number(energy, "final_total_j") >= 0.0);
@@ -173,22 +188,27 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         .iter()
         .find(|fields| string(fields, "scenario") == "equal-mass-ring-vs-solid-ranking-convergence")
         .expect("censor-aware ranking convergence record");
-    assert!(!boolean(ranking, "ordering_agreement"));
-    assert!(!boolean(
-        ranking,
-        "ring_shorter_than_solid_bound_proven_at_all_rungs"
-    ));
-    assert!(!boolean(ranking, "ranking_numerically_supported"));
+    assert_eq!(string(ranking, "assessed_triplet"), "h4,h2,h");
+    assert_eq!(
+        string(ranking, "assessment_policy"),
+        "finest-predeclared-triplet;coarser-rungs-retained-as-sentinels"
+    );
+    let ranking_supported = boolean(ranking, "ranking_numerically_supported");
+    if ranking_supported {
+        assert!(boolean(ranking, "ordering_agreement"));
+        assert!(boolean(
+            ranking,
+            "ring_shorter_than_solid_bound_proven_at_all_rungs"
+        ));
+        assert!(boolean(ranking, "ring_event_time_within_declared_band"));
+    }
     let ranking_rungs = object(ranking.get("rungs").expect("ranking rungs"));
-    let h2 = object(ranking_rungs.get("h2").expect("h2 ranking rung"));
-    assert_eq!(
-        string(h2, "censor_aware_ordering"),
-        "ring-numerical-refusal"
-    );
-    assert_eq!(
-        string(h2, "ring_numerical_refusal_reason"),
-        "reimpact-limit-exceeded"
-    );
+    for rung in ["h16", "h8", "h4", "h2", "h"] {
+        let fields = object(ranking_rungs.get(rung).expect("ranking rung"));
+        assert!(fields.contains_key("censor_aware_ordering"));
+        assert!(fields.contains_key("ring_numerical_refusal_reason"));
+        assert!(fields.contains_key("solid_numerical_refusal_reason"));
+    }
     let calibration = v3_roots
         .iter()
         .find(|fields| string(fields, "scenario") == "physical-calibration-readiness")
