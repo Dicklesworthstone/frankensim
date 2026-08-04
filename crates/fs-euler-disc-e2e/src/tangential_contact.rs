@@ -283,11 +283,9 @@ impl EulerTangentialContactAdapter {
         let (force_on_disc_world_n, free_torsional_torque_on_disc_world_nm) =
             wrench_on_disc(step.wrench, request.patch_kinematics.surfaces.order());
         let application_arm_world_m = request.patch_kinematics.disc_point.arm_world;
-        let arm_torque = application_arm_world_m.cross(force_on_disc_world_n);
         let disc_endpoint_power_w = force_on_disc_world_n
             .dot(request.patch_kinematics.disc_point.point_velocity_world)
-            + arm_torque
-                .add(free_torsional_torque_on_disc_world_nm)
+            + free_torsional_torque_on_disc_world_nm
                 .dot(request.patch_kinematics.disc_point.angular_velocity_world);
         finite(disc_endpoint_power_w, "disc_endpoint_power_w")?;
         let disc_endpoint_work_j = disc_endpoint_power_w * request.dt_s;

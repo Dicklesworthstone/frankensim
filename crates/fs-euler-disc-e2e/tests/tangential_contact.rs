@@ -11,7 +11,7 @@ use fs_contact::tangential::smooth::{
     SmoothAuthorityPolicy, SmoothRegularization, SmoothTangentialAdapter,
 };
 use fs_couple::StableId;
-use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
+use fs_mbd::{MassProperties, PointKinematics, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_rep_frep::AxisymmetricSupportAuthority;
 use fs_tribo::partial_slip::{
     GeneralizedWorkOwnership, NormalPatchAuthority, NormalPatchView, PARTIAL_SLIP_MODEL_ID,
@@ -19,8 +19,8 @@ use fs_tribo::partial_slip::{
 };
 use patch_kinematics::{
     OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata, PatchKinematicThresholds,
-    PatchKinematicsInput, ProfileSupportKinematics, SurfaceOrder, TangentGaugeInput,
-    compute_patch_kinematics,
+    PatchKinematics, PatchKinematicsInput, ProfileSupportKinematics, SurfaceOrder,
+    TangentGaugeInput, compute_patch_kinematics,
 };
 use tangential_contact::{
     EulerTangentialContactAdapter, TangentialContactError, TangentialContactLane,
@@ -107,6 +107,33 @@ fn patch_kinematics(
         tangent_effort_probe_world_n: None,
     })
     .expect("admitted patch kinematics")
+}
+
+fn nonzero_arm_patch_kinematics() -> PatchKinematics {
+    let mut kinematics = patch_kinematics(SurfaceOrder::DiscThenBase, 0.2, 2.0, 0.0);
+    let arm_world_m = Vec3::new(0.0, 1.0, 0.0);
+    let angular_velocity_world = Vec3::new(0.0, 0.0, 2.0);
+    let point_velocity_world = Vec3::new(11.0, 0.0, 0.0);
+    kinematics.disc_point = PointKinematics {
+        arm_body: arm_world_m,
+        arm_world: arm_world_m,
+        point_world: arm_world_m,
+        center_of_mass_velocity_world: point_velocity_world
+            .sub(angular_velocity_world.cross(arm_world_m)),
+        angular_velocity_body: angular_velocity_world,
+        angular_velocity_world,
+        point_velocity_world,
+    };
+    kinematics.base_point = PointKinematics {
+        arm_body: Vec3::ZERO,
+        arm_world: Vec3::ZERO,
+        point_world: arm_world_m,
+        center_of_mass_velocity_world: Vec3::new(9.0, 0.0, 0.0),
+        angular_velocity_body: Vec3::ZERO,
+        angular_velocity_world: Vec3::ZERO,
+        point_velocity_world: Vec3::new(9.0, 0.0, 0.0),
+    };
+    kinematics
 }
 
 fn normal_patch() -> NormalPatchView {
@@ -295,6 +322,48 @@ fn pure_spin_has_free_torsion_and_nonnegative_loss_without_creepage() {
     assert!(receipt.free_torsional_torque_on_disc_world_nm.z.abs() > 0.0);
     assert!(receipt.irreversible_loss_j >= 0.0);
     assert!(receipt.heat_j >= 0.0);
+}
+
+#[test]
+fn nonzero_application_arm_counts_force_power_once() {
+    let adapter = direct_adapter();
+    let state = adapter
+        .initial_state(&normal_patch(), &interface(), 4)
+        .expect("initial state");
+    let mut request = request("nonzero-arm", 0, SurfaceOrder::DiscThenBase, 0.2, 2.0, 0.0);
+    request.patch_kinematics = nonzero_arm_patch_kinematics();
+    let receipt = adapter
+        .prepare(&state, &request)
+        .expect("manufactured nonzero-arm contact");
+
+    let endpoint_form = receipt
+        .force_on_disc_world_n
+        .dot(request.patch_kinematics.disc_point.point_velocity_world)
+        + receipt
+            .free_torsional_torque_on_disc_world_nm
+            .dot(request.patch_kinematics.disc_point.angular_velocity_world);
+    let centroidal_form = receipt.force_on_disc_world_n.dot(
+        request
+            .patch_kinematics
+            .disc_point
+            .center_of_mass_velocity_world,
+    ) + (request
+        .patch_kinematics
+        .disc_point
+        .arm_world
+        .cross(receipt.force_on_disc_world_n)
+        .add(receipt.free_torsional_torque_on_disc_world_nm))
+    .dot(request.patch_kinematics.disc_point.angular_velocity_world);
+    let application_arm_power = request
+        .patch_kinematics
+        .disc_point
+        .arm_world
+        .cross(receipt.force_on_disc_world_n)
+        .dot(request.patch_kinematics.disc_point.angular_velocity_world);
+
+    assert!(application_arm_power.abs() > 1.0e-9);
+    close(receipt.disc_endpoint_power_w, endpoint_form);
+    close(receipt.disc_endpoint_power_w, centroidal_form);
 }
 
 #[test]
