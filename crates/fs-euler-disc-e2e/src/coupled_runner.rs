@@ -128,7 +128,14 @@ pub struct CoupledSample {
     pub interval_start_gap_m: f64,
     /// Unilateral normal force evaluated over the interval ending at `time_s` [N].
     pub interval_normal_force_n: f64,
+    /// True when any accepted subinterval used the closed signed-gap branch.
+    /// This is intentionally not inferred from the normal-force magnitude:
+    /// a newly localized reimpact may begin at zero penetration.
     pub contact_active: bool,
+    /// Every bounded, mechanically split contact transition retained within
+    /// this interval, in chronological order. An empty list does not prove
+    /// that no substep event exists below the configured scan resolution.
+    pub contact_transitions: Vec<LocalizedContactTransition>,
     /// Profile feature selected by the analytic support query at this
     /// sample's retained post-step pose. Cylinder-only compatibility runs do
     /// not expose a feature index.
@@ -137,6 +144,25 @@ pub struct CoupledSample {
     pub channels: ChannelOwnership,
     pub mechanical_energy_j: f64,
     pub energy_defect_j: f64,
+}
+
+/// Which unilateral-contact branch begins immediately after a localized root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactTransitionKind {
+    Opening,
+    Reimpact,
+}
+
+/// A deterministic bracket for one contact transition inside an accepted macro
+/// step. The bracket is a numerical diagnostic, not an experimental event
+/// measurement or a claim that the reduced point-contact law resolves a finite
+/// contact patch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalizedContactTransition {
+    pub kind: ContactTransitionKind,
+    pub time_s: f64,
+    pub bracket_start_s: f64,
+    pub bracket_end_s: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +179,9 @@ pub enum CoupledTerminal {
 pub enum CoupledNumericalRefusalReason {
     /// The declared separation-to-contact transition budget was exceeded.
     ReimpactLimitExceeded,
+    /// A bracketed contact event could not be resolved into a positive-length
+    /// subinterval under the fixed deterministic localization budget.
+    ContactEventLocalizationFailed,
     /// Energy accounting or the reduced base state became non-finite.
     NonFiniteEnergyOrBaseState,
 }
@@ -251,6 +280,395 @@ impl CoupledGeometry<'_, '_> {
             Self::Cylinder(_) => 0,
             Self::Profile { profile, .. } => profile.identity.0,
         }
+    }
+}
+
+const CONTACT_EVENT_BISECTION_ITERATIONS: u32 = 48;
+const CONTACT_EVENT_BRACKET_SUBDIVISIONS: u32 = 8;
+const CONTACT_EVENT_GAP_TOLERANCE_M: f64 = 1.0e-12;
+const CONTACT_EVENT_ROOT_TOLERANCE_M: f64 = 1.0e-15;
+const CONTACT_EVENT_MIN_PROGRESS_FRACTION: f64 = 1.0e-12;
+const MAX_CONTACT_EVENTS_PER_MACRO_STEP: u32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContactBranch {
+    ForceOpen,
+    ForceClosed,
+}
+
+#[derive(Clone, Debug)]
+struct SegmentAdvance {
+    state_after: RigidBodyState,
+    base_deflection_m: f64,
+    base_velocity_m_per_s: f64,
+    interval_start_gap_m: f64,
+    interval_normal_force_n: f64,
+    contact_active: bool,
+    channels: ChannelOwnership,
+    tangential_work_j: f64,
+    contact_damping_work_j: f64,
+    body_mechanical_energy_j: f64,
+    post_support_gap_m: f64,
+    post_support_source_feature: Option<usize>,
+}
+
+fn transition_kind(
+    branch: ContactBranch,
+    start_gap_m: f64,
+    end_gap_m: f64,
+) -> Option<ContactTransitionKind> {
+    // The branch-specific tolerance is a deterministic hysteresis band. It
+    // avoids re-detecting an event at the same root on the next subinterval,
+    // and makes reimpact begin from a small but positive penetration rather
+    // than an exact zero-gap force evaluation.
+    match branch {
+        ContactBranch::ForceClosed
+            if start_gap_m <= CONTACT_EVENT_GAP_TOLERANCE_M
+                && end_gap_m > CONTACT_EVENT_GAP_TOLERANCE_M =>
+        {
+            Some(ContactTransitionKind::Opening)
+        }
+        ContactBranch::ForceOpen
+            if start_gap_m >= -CONTACT_EVENT_GAP_TOLERANCE_M
+                && end_gap_m < -CONTACT_EVENT_GAP_TOLERANCE_M =>
+        {
+            Some(ContactTransitionKind::Reimpact)
+        }
+        _ => None,
+    }
+}
+
+fn reimpact_budget_exceeded(base_count: u32, additional_events: u32, limit: u32) -> bool {
+    base_count
+        .checked_add(additional_events)
+        .map_or(true, |count| count > limit)
+}
+
+/// Finds the earliest scanned root by re-evaluating the actual reduced segment
+/// evolution, not by merely interpolating a post-hoc grid-point gap. A
+/// non-monotone/multi-contact interval is still only bounded by the fixed scan
+/// resolution and `MAX_CONTACT_EVENTS_PER_MACRO_STEP`; the runner deliberately
+/// refuses excess resolved events rather than silently treating chatter as one.
+fn localize_contact_transition(
+    interval_start_s: f64,
+    duration_s: f64,
+    branch: ContactBranch,
+    start_gap_m: f64,
+    mut gap_after: impl FnMut(f64) -> Result<f64, CoupledError>,
+) -> Result<Option<LocalizedContactTransition>, CoupledError> {
+    if !(interval_start_s.is_finite()
+        && duration_s.is_finite()
+        && duration_s > 0.0
+        && start_gap_m.is_finite())
+    {
+        return Ok(None);
+    }
+    // A fixed scan deliberately looks for the earliest sign change even when
+    // the two macro-step endpoints agree. This catches one open/reimpact pair
+    // on the chosen scan resolution; it is not a certificate against faster
+    // chatter below that resolution.
+    let mut low_s = 0.0;
+    let mut low_gap_m = start_gap_m;
+    let mut bracket = None;
+    for subdivision in 1..=CONTACT_EVENT_BRACKET_SUBDIVISIONS {
+        let high_s =
+            duration_s * f64::from(subdivision) / f64::from(CONTACT_EVENT_BRACKET_SUBDIVISIONS);
+        let high_gap_m = gap_after(high_s)?;
+        if !high_gap_m.is_finite() {
+            return Ok(None);
+        }
+        if let Some(kind) = transition_kind(branch, low_gap_m, high_gap_m) {
+            bracket = Some((kind, low_s, high_s));
+            break;
+        }
+        low_s = high_s;
+        low_gap_m = high_gap_m;
+    }
+    let Some((kind, mut low_s, mut high_s)) = bracket else {
+        return Ok(None);
+    };
+    for _ in 0..CONTACT_EVENT_BISECTION_ITERATIONS {
+        let midpoint_s = 0.5 * (low_s + high_s);
+        let midpoint_gap_m = gap_after(midpoint_s)?;
+        if !midpoint_gap_m.is_finite() {
+            return Ok(None);
+        }
+        let event_threshold_m = match kind {
+            ContactTransitionKind::Opening => CONTACT_EVENT_GAP_TOLERANCE_M,
+            ContactTransitionKind::Reimpact => -CONTACT_EVENT_GAP_TOLERANCE_M,
+        };
+        if (midpoint_gap_m - event_threshold_m).abs() <= CONTACT_EVENT_ROOT_TOLERANCE_M {
+            low_s = midpoint_s;
+            high_s = midpoint_s;
+            break;
+        }
+        let midpoint_is_start_side = match kind {
+            ContactTransitionKind::Opening => midpoint_gap_m <= event_threshold_m,
+            ContactTransitionKind::Reimpact => midpoint_gap_m >= event_threshold_m,
+        };
+        if midpoint_is_start_side {
+            low_s = midpoint_s;
+        } else {
+            high_s = midpoint_s;
+        }
+    }
+    let time_s = interval_start_s + 0.5 * (low_s + high_s);
+    if !time_s.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some(LocalizedContactTransition {
+        kind,
+        time_s,
+        bracket_start_s: interval_start_s + low_s,
+        bracket_end_s: interval_start_s + high_s,
+    }))
+}
+
+/// Advances one mechanically homogeneous contact branch. A caller that finds
+/// an opening/reimpact root composes two or more of these segments, so neither
+/// the contact force nor the base load is applied across the wrong side of a
+/// localized transition.
+fn advance_segment(
+    state: RigidBodyState,
+    base_deflection_m: f64,
+    base_velocity_m_per_s: f64,
+    duration_s: f64,
+    branch: ContactBranch,
+    mass: MassProperties,
+    factors: CoupledFactors,
+    gravity: Gravity,
+    integrator: &RigidBodyIntegrator,
+    geometry_model: &CoupledGeometry<'_, '_>,
+) -> Result<SegmentAdvance, CoupledError> {
+    let pose = state.pose();
+    let velocity = state
+        .center_of_mass_velocity_world(mass)
+        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
+    let omega_body = mass
+        .angular_velocity_body_checked(state.angular_momentum_body())
+        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
+    let omega_world = pose.orientation().rotate_body_to_world(omega_body);
+    let (geometry, _) = geometry_model.contact(pose)?;
+    let contact_arm = geometry.radius_world_m;
+    let interval_start_gap_m = geometry.gap_m - base_deflection_m;
+    let contact_velocity = velocity.add(omega_world.cross(contact_arm));
+    let relative_normal_speed = contact_velocity.z - base_velocity_m_per_s;
+    let penetration_m = (-interval_start_gap_m).max(0.0);
+    let automatic_normal_force = unilateral_normal_force(
+        penetration_m,
+        relative_normal_speed,
+        factors.contact_stiffness_n_per_m,
+        factors.contact_damping_n_s_per_m,
+    );
+    let interval_normal_force_n = match branch {
+        ContactBranch::ForceClosed => automatic_normal_force,
+        ContactBranch::ForceOpen => 0.0,
+    };
+    let contact_active = match branch {
+        ContactBranch::ForceOpen => false,
+        ContactBranch::ForceClosed => true,
+    };
+    let tangent_velocity = Vec3::new(contact_velocity.x, contact_velocity.y, 0.0);
+    let tangent_speed = tangent_velocity.norm_squared().sqrt();
+    let friction_force = if contact_active && tangent_speed > 1.0e-14 {
+        tangent_velocity
+            .scale(-factors.sliding_friction_coefficient * interval_normal_force_n / tangent_speed)
+    } else {
+        Vec3::ZERO
+    };
+    let contact_force = Vec3::new(friction_force.x, friction_force.y, interval_normal_force_n);
+    let contact_torque = contact_arm.cross(contact_force);
+    let gas_force = velocity.scale(-factors.gas_translation_damping_n_s_per_m);
+    let gas_torque = omega_world.scale(-factors.gas_rotational_damping_n_m_s);
+    let provisional = integrator
+        .step(
+            state,
+            mass,
+            Wrench {
+                force_world: contact_force.add(gas_force),
+                torque_body: pose
+                    .orientation()
+                    .rotate_world_to_body(contact_torque.add(gas_torque)),
+            },
+            duration_s,
+        )
+        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
+    let provisional_omega_body = mass
+        .angular_velocity_body_checked(provisional.state_after.angular_momentum_body())
+        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
+    let provisional_omega = provisional
+        .state_after
+        .pose()
+        .orientation()
+        .rotate_body_to_world(provisional_omega_body);
+    let midpoint_omega_for_rolling = omega_world.add(provisional_omega).scale(0.5);
+    let midpoint_state_for_rolling = provisional.state_after;
+    let midpoint_normal = midpoint_state_for_rolling
+        .pose()
+        .orientation()
+        .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+    let rolling_spin_speed = midpoint_omega_for_rolling.dot(midpoint_normal);
+    let midpoint_velocity_for_rolling = velocity
+        .add(
+            midpoint_state_for_rolling
+                .center_of_mass_velocity_world(mass)
+                .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
+        )
+        .scale(0.5);
+    let (midpoint_contact, _) = geometry_model.contact(midpoint_state_for_rolling.pose())?;
+    let midpoint_contact_velocity = midpoint_velocity_for_rolling
+        .add(midpoint_omega_for_rolling.cross(midpoint_contact.radius_world_m));
+    let rolling_contour_speed = Vec3::new(
+        midpoint_contact_velocity.x,
+        midpoint_contact_velocity.y,
+        0.0,
+    )
+    .norm_squared()
+    .sqrt();
+    let declared_rolling_power_w = factors.rolling_resistance_m
+        * interval_normal_force_n
+        * (rolling_spin_speed.abs() + rolling_contour_speed / factors.radius_m);
+    let omega_squared = omega_world.norm_squared();
+    let rolling_power_w = if omega_squared > 1.0e-28 {
+        declared_rolling_power_w
+    } else {
+        0.0
+    };
+    let rolling_torque = if rolling_power_w > 0.0 {
+        omega_world.scale(-rolling_power_w / omega_squared)
+    } else {
+        Vec3::ZERO
+    };
+    let total_force = contact_force.add(gas_force);
+    let total_torque_world = contact_torque.add(rolling_torque).add(gas_torque);
+    let receipt = integrator
+        .step(
+            state,
+            mass,
+            Wrench {
+                force_world: total_force,
+                torque_body: pose.orientation().rotate_world_to_body(total_torque_world),
+            },
+            duration_s,
+        )
+        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
+    let midpoint_velocity = velocity
+        .add(
+            receipt
+                .state_after
+                .center_of_mass_velocity_world(mass)
+                .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
+        )
+        .scale(0.5);
+    let midpoint_omega = omega_world
+        .add(
+            receipt
+                .state_after
+                .pose()
+                .orientation()
+                .rotate_body_to_world(
+                    mass.angular_velocity_body_checked(receipt.state_after.angular_momentum_body())
+                        .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
+                ),
+        )
+        .scale(0.5);
+    let work = |force: Vec3, torque: Vec3| {
+        (force.dot(midpoint_velocity) + torque.dot(midpoint_omega)) * duration_s
+    };
+    let channels = ChannelOwnership {
+        gravity: ChannelWrench {
+            force_world_n: gravity.acceleration_world().scale(factors.mass_kg),
+            torque_world_nm: Vec3::ZERO,
+            work_j: work(
+                gravity.acceleration_world().scale(factors.mass_kg),
+                Vec3::ZERO,
+            ),
+        },
+        contact: ChannelWrench {
+            force_world_n: contact_force,
+            torque_world_nm: contact_torque,
+            work_j: work(contact_force, contact_torque),
+        },
+        rolling: ChannelWrench {
+            force_world_n: Vec3::ZERO,
+            torque_world_nm: rolling_torque,
+            work_j: -rolling_power_w * duration_s,
+        },
+        base: ChannelWrench {
+            force_world_n: Vec3::ZERO,
+            torque_world_nm: Vec3::ZERO,
+            work_j: -factors.base_damping_n_s_per_m * base_velocity_m_per_s.powi(2) * duration_s,
+        },
+        gas: ChannelWrench {
+            force_world_n: gas_force,
+            torque_world_nm: gas_torque,
+            work_j: work(gas_force, gas_torque),
+        },
+    };
+    let new_base_acceleration = (-interval_normal_force_n
+        - factors.base_stiffness_n_per_m * base_deflection_m
+        - factors.base_damping_n_s_per_m * base_velocity_m_per_s)
+        / factors.base_effective_mass_kg;
+    let base_velocity_m_per_s = base_velocity_m_per_s + new_base_acceleration * duration_s;
+    let base_deflection_m = base_deflection_m + base_velocity_m_per_s * duration_s;
+    let (post_geometry, post_support_source_feature) =
+        geometry_model.contact(receipt.state_after.pose())?;
+    Ok(SegmentAdvance {
+        state_after: receipt.state_after,
+        base_deflection_m,
+        base_velocity_m_per_s,
+        interval_start_gap_m,
+        interval_normal_force_n,
+        contact_active,
+        channels,
+        tangential_work_j: work(friction_force, contact_arm.cross(friction_force)),
+        contact_damping_work_j: if penetration_m > 0.0 {
+            -factors.contact_damping_n_s_per_m * relative_normal_speed.min(0.0).powi(2) * duration_s
+        } else {
+            0.0
+        },
+        body_mechanical_energy_j: receipt.diagnostics_after.mechanical_energy,
+        post_support_gap_m: post_geometry.gap_m - base_deflection_m,
+        post_support_source_feature,
+    })
+}
+
+fn accumulate_channel_wrench(
+    total: &mut ChannelWrench,
+    contribution: ChannelWrench,
+    duration_s: f64,
+) {
+    total.force_world_n = total
+        .force_world_n
+        .add(contribution.force_world_n.scale(duration_s));
+    total.torque_world_nm = total
+        .torque_world_nm
+        .add(contribution.torque_world_nm.scale(duration_s));
+    total.work_j += contribution.work_j;
+}
+
+fn accumulate_channels(
+    total: &mut ChannelOwnership,
+    contribution: ChannelOwnership,
+    duration_s: f64,
+) {
+    accumulate_channel_wrench(&mut total.gravity, contribution.gravity, duration_s);
+    accumulate_channel_wrench(&mut total.contact, contribution.contact, duration_s);
+    accumulate_channel_wrench(&mut total.rolling, contribution.rolling, duration_s);
+    accumulate_channel_wrench(&mut total.base, contribution.base, duration_s);
+    accumulate_channel_wrench(&mut total.gas, contribution.gas, duration_s);
+}
+
+fn average_channel_wrenches(channels: &mut ChannelOwnership, duration_s: f64) {
+    for channel in [
+        &mut channels.gravity,
+        &mut channels.contact,
+        &mut channels.rolling,
+        &mut channels.base,
+        &mut channels.gas,
+    ] {
+        channel.force_world_n = channel.force_world_n.scale(1.0 / duration_s);
+        channel.torque_world_nm = channel.torque_world_nm.scale(1.0 / duration_s);
     }
 }
 
@@ -383,30 +801,268 @@ fn run_closed_with_geometry(
                 model_disagreement: disagreement(),
             });
         }
-        let velocity = state
-            .center_of_mass_velocity_world(mass)
-            .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-        let omega_body = mass
-            .angular_velocity_body_checked(state.angular_momentum_body())
-            .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-        let omega_world = pose.orientation().rotate_body_to_world(omega_body);
-        let (geometry, _) = geometry_model.contact(pose)?;
-        let contact_arm = geometry.radius_world_m;
-        let support_height = geometry.gap_m - checkpoint.base_deflection_m;
-        let contact_velocity = velocity.add(omega_world.cross(contact_arm));
-        let relative_normal_speed = contact_velocity.z - checkpoint.base_velocity_m_per_s;
-        let penetration = (-support_height).max(0.0);
-        let normal_force = unilateral_normal_force(
-            penetration,
-            relative_normal_speed,
-            factors.contact_stiffness_n_per_m,
-            factors.contact_damping_n_s_per_m,
-        );
-        let contact_active = normal_force > 0.0;
-        if contact_active && !checkpoint.was_in_contact {
-            checkpoint.reimpact_count += 1;
+        let mut state = checkpoint.state;
+        let mut base_deflection_m = checkpoint.base_deflection_m;
+        let mut base_velocity_m_per_s = checkpoint.base_velocity_m_per_s;
+        let mut remaining_s = controls.timestep_s;
+        let mut elapsed_s = 0.0;
+        // Restart carries the accepted branch state, so a resumed run cannot
+        // reinterpret a tolerance-band contact boundary as the opposite mode.
+        let mut branch = if checkpoint.was_in_contact {
+            ContactBranch::ForceClosed
+        } else {
+            ContactBranch::ForceOpen
+        };
+        let mut localized_transitions =
+            Vec::with_capacity(MAX_CONTACT_EVENTS_PER_MACRO_STEP as usize);
+        let mut events_in_macro_step = 0_u32;
+        let mut reimpact_events = 0_u32;
+        let mut interval_start_gap_m = None;
+        let mut interval_normal_force_n = None;
+        let mut contact_active = false;
+        let mut channels = ChannelOwnership::default();
+        let mut channel_work_j = [0.0; 5];
+        let mut body_mechanical_energy_j = None;
+        let mut post_support_gap_m = None;
+        let mut post_support_source_feature = None;
+
+        while remaining_s > 0.0 {
+            let trial = advance_segment(
+                state,
+                base_deflection_m,
+                base_velocity_m_per_s,
+                remaining_s,
+                branch,
+                mass,
+                factors,
+                gravity,
+                &integrator,
+                &geometry_model,
+            )?;
+            let event = localize_contact_transition(
+                checkpoint.time_s + elapsed_s,
+                remaining_s,
+                branch,
+                trial.interval_start_gap_m,
+                |candidate_duration_s| {
+                    if candidate_duration_s == remaining_s {
+                        Ok(trial.post_support_gap_m)
+                    } else {
+                        Ok(advance_segment(
+                            state,
+                            base_deflection_m,
+                            base_velocity_m_per_s,
+                            candidate_duration_s,
+                            branch,
+                            mass,
+                            factors,
+                            gravity,
+                            &integrator,
+                            &geometry_model,
+                        )?
+                        .post_support_gap_m)
+                    }
+                },
+            )?;
+            let (accepted, accepted_duration_s, next_branch) = if let Some(event) = event {
+                if events_in_macro_step >= MAX_CONTACT_EVENTS_PER_MACRO_STEP {
+                    return Ok(CoupledRun {
+                        samples,
+                        checkpoint,
+                        terminal: CoupledTerminal::NumericalRefusal {
+                            reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                        },
+                        applicability: applicability(),
+                        model_disagreement: disagreement(),
+                    });
+                }
+                let event_duration_s = event.time_s - (checkpoint.time_s + elapsed_s);
+                if !(event_duration_s.is_finite()
+                    && event_duration_s > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
+                    && event_duration_s <= remaining_s)
+                {
+                    return Ok(CoupledRun {
+                        samples,
+                        checkpoint,
+                        terminal: CoupledTerminal::NumericalRefusal {
+                            reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                        },
+                        applicability: applicability(),
+                        model_disagreement: disagreement(),
+                    });
+                }
+                // Refuse at the next prohibited reimpact boundary. The
+                // pre-event segment is retained in the restart checkpoint;
+                // no post-event closed mechanics is committed past the budget.
+                if event.kind == ContactTransitionKind::Reimpact
+                    && reimpact_budget_exceeded(
+                        checkpoint.reimpact_count,
+                        reimpact_events + 1,
+                        controls.reimpact_limit,
+                    )
+                {
+                    debug_assert_eq!(event.kind, ContactTransitionKind::Reimpact);
+                    let accepted = advance_segment(
+                        state,
+                        base_deflection_m,
+                        base_velocity_m_per_s,
+                        event_duration_s,
+                        branch,
+                        mass,
+                        factors,
+                        gravity,
+                        &integrator,
+                        &geometry_model,
+                    )?;
+                    channel_work_j[0] += accepted.channels.gravity.work_j;
+                    channel_work_j[1] +=
+                        accepted.tangential_work_j + accepted.contact_damping_work_j;
+                    channel_work_j[2] += accepted.channels.rolling.work_j;
+                    channel_work_j[3] += accepted.channels.base.work_j;
+                    channel_work_j[4] += accepted.channels.gas.work_j;
+                    checkpoint.state = accepted.state_after;
+                    checkpoint.base_deflection_m = accepted.base_deflection_m;
+                    checkpoint.base_velocity_m_per_s = accepted.base_velocity_m_per_s;
+                    checkpoint.time_s += elapsed_s + event_duration_s;
+                    let Some(committed_reimpact_count) =
+                        checkpoint.reimpact_count.checked_add(reimpact_events)
+                    else {
+                        return Ok(CoupledRun {
+                            samples,
+                            checkpoint,
+                            terminal: CoupledTerminal::NumericalRefusal {
+                                reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
+                            },
+                            applicability: applicability(),
+                            model_disagreement: disagreement(),
+                        });
+                    };
+                    checkpoint.reimpact_count = committed_reimpact_count;
+                    checkpoint.was_in_contact = false;
+                    checkpoint.accumulated_channel_work_j[0] += channel_work_j[0];
+                    checkpoint.accumulated_channel_work_j[1] += channel_work_j[1];
+                    checkpoint.accumulated_channel_work_j[2] += channel_work_j[2];
+                    checkpoint.accumulated_channel_work_j[3] += channel_work_j[3];
+                    checkpoint.accumulated_channel_work_j[4] += channel_work_j[4];
+                    let total_energy = total_energy(
+                        accepted.body_mechanical_energy_j,
+                        factors,
+                        checkpoint.base_deflection_m,
+                        checkpoint.base_velocity_m_per_s,
+                        (-accepted.post_support_gap_m).max(0.0),
+                    );
+                    checkpoint.accumulated_energy_defect_j = (total_energy
+                        - checkpoint.initial_total_energy_j)
+                        - (checkpoint.accumulated_channel_work_j[1]
+                            + checkpoint.accumulated_channel_work_j[2]
+                            + checkpoint.accumulated_channel_work_j[3]
+                            + checkpoint.accumulated_channel_work_j[4]);
+                    return Ok(CoupledRun {
+                        samples,
+                        checkpoint,
+                        terminal: CoupledTerminal::NumericalRefusal {
+                            reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
+                        },
+                        applicability: applicability(),
+                        model_disagreement: disagreement(),
+                    });
+                }
+                let accepted = advance_segment(
+                    state,
+                    base_deflection_m,
+                    base_velocity_m_per_s,
+                    event_duration_s,
+                    branch,
+                    mass,
+                    factors,
+                    gravity,
+                    &integrator,
+                    &geometry_model,
+                )?;
+                events_in_macro_step += 1;
+                if event.kind == ContactTransitionKind::Reimpact {
+                    reimpact_events += 1;
+                }
+                localized_transitions.push(event);
+                let next_branch = match event.kind {
+                    ContactTransitionKind::Opening => ContactBranch::ForceOpen,
+                    ContactTransitionKind::Reimpact => ContactBranch::ForceClosed,
+                };
+                (accepted, event_duration_s, next_branch)
+            } else {
+                (trial, remaining_s, branch)
+            };
+
+            if interval_start_gap_m.is_none() {
+                interval_start_gap_m = Some(accepted.interval_start_gap_m);
+                interval_normal_force_n = Some(accepted.interval_normal_force_n);
+            }
+            contact_active |= accepted.contact_active;
+            accumulate_channels(&mut channels, accepted.channels, accepted_duration_s);
+            channel_work_j[0] += accepted.channels.gravity.work_j;
+            channel_work_j[1] += accepted.tangential_work_j + accepted.contact_damping_work_j;
+            channel_work_j[2] += accepted.channels.rolling.work_j;
+            channel_work_j[3] += accepted.channels.base.work_j;
+            channel_work_j[4] += accepted.channels.gas.work_j;
+            state = accepted.state_after;
+            base_deflection_m = accepted.base_deflection_m;
+            base_velocity_m_per_s = accepted.base_velocity_m_per_s;
+            body_mechanical_energy_j = Some(accepted.body_mechanical_energy_j);
+            post_support_gap_m = Some(accepted.post_support_gap_m);
+            post_support_source_feature = accepted.post_support_source_feature;
+            elapsed_s += accepted_duration_s;
+            remaining_s -= accepted_duration_s;
+            branch = next_branch;
         }
-        if checkpoint.reimpact_count > controls.reimpact_limit {
+
+        let (Some(interval_start_gap_m), Some(interval_normal_force_n)) =
+            (interval_start_gap_m, interval_normal_force_n)
+        else {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                },
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        };
+        let (Some(body_mechanical_energy_j), Some(post_support_gap_m)) =
+            (body_mechanical_energy_j, post_support_gap_m)
+        else {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                },
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        };
+        if (elapsed_s - controls.timestep_s).abs()
+            > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
+        {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
+                },
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        }
+
+        average_channel_wrenches(&mut channels, controls.timestep_s);
+        checkpoint.state = state;
+        checkpoint.base_deflection_m = base_deflection_m;
+        checkpoint.base_velocity_m_per_s = base_velocity_m_per_s;
+        checkpoint.time_s += controls.timestep_s;
+        checkpoint.was_in_contact = post_support_gap_m <= 0.0;
+        let Some(updated_reimpact_count) = checkpoint.reimpact_count.checked_add(reimpact_events)
+        else {
             return Ok(CoupledRun {
                 samples,
                 checkpoint,
@@ -416,183 +1072,19 @@ fn run_closed_with_geometry(
                 applicability: applicability(),
                 model_disagreement: disagreement(),
             });
-        }
-
-        let tangent_velocity = Vec3::new(contact_velocity.x, contact_velocity.y, 0.0);
-        let tangent_speed = tangent_velocity.norm_squared().sqrt();
-        let friction_force = if contact_active && tangent_speed > 1.0e-14 {
-            tangent_velocity
-                .scale(-factors.sliding_friction_coefficient * normal_force / tangent_speed)
-        } else {
-            Vec3::ZERO
         };
-        let contact_force = Vec3::new(friction_force.x, friction_force.y, normal_force);
-        let contact_torque = contact_arm.cross(contact_force);
-        let gas_force = velocity.scale(-factors.gas_translation_damping_n_s_per_m);
-        let gas_torque = omega_world.scale(-factors.gas_rotational_damping_n_m_s);
-        let provisional = integrator
-            .step(
-                state,
-                mass,
-                Wrench {
-                    force_world: contact_force.add(gas_force),
-                    torque_body: pose
-                        .orientation()
-                        .rotate_world_to_body(contact_torque.add(gas_torque)),
-                },
-                controls.timestep_s,
-            )
-            .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-        let provisional_omega_body = mass
-            .angular_velocity_body_checked(provisional.state_after.angular_momentum_body())
-            .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-        let provisional_omega = provisional
-            .state_after
-            .pose()
-            .orientation()
-            .rotate_body_to_world(provisional_omega_body);
-        let midpoint_omega_for_rolling = omega_world.add(provisional_omega).scale(0.5);
-        let midpoint_state_for_rolling = provisional.state_after;
-        let midpoint_normal = midpoint_state_for_rolling
-            .pose()
-            .orientation()
-            .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
-        let rolling_spin_speed = midpoint_omega_for_rolling.dot(midpoint_normal);
-        let midpoint_velocity_for_rolling = velocity
-            .add(
-                midpoint_state_for_rolling
-                    .center_of_mass_velocity_world(mass)
-                    .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
-            )
-            .scale(0.5);
-        let (midpoint_contact, _) = geometry_model.contact(midpoint_state_for_rolling.pose())?;
-        let midpoint_contact_velocity = midpoint_velocity_for_rolling
-            .add(midpoint_omega_for_rolling.cross(midpoint_contact.radius_world_m));
-        let rolling_contour_speed = Vec3::new(
-            midpoint_contact_velocity.x,
-            midpoint_contact_velocity.y,
-            0.0,
-        )
-        .norm_squared()
-        .sqrt();
-        let declared_rolling_power_w = factors.rolling_resistance_m
-            * normal_force
-            * (rolling_spin_speed.abs() + rolling_contour_speed / factors.radius_m);
-        let omega_squared = omega_world.norm_squared();
-        let rolling_power_w = if omega_squared > 1.0e-28 {
-            declared_rolling_power_w
-        } else {
-            0.0
-        };
-        let rolling_torque = if rolling_power_w > 0.0 {
-            omega_world.scale(-rolling_power_w / omega_squared)
-        } else {
-            Vec3::ZERO
-        };
-        let total_force = contact_force.add(gas_force);
-        let total_torque_world = contact_torque.add(rolling_torque).add(gas_torque);
-        let total_torque_body = pose.orientation().rotate_world_to_body(total_torque_world);
-        let receipt = integrator
-            .step(
-                state,
-                mass,
-                Wrench {
-                    force_world: total_force,
-                    torque_body: total_torque_body,
-                },
-                controls.timestep_s,
-            )
-            .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-        let midpoint_velocity = velocity
-            .add(
-                receipt
-                    .state_after
-                    .center_of_mass_velocity_world(mass)
-                    .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
-            )
-            .scale(0.5);
-        let midpoint_omega = omega_world
-            .add(
-                receipt
-                    .state_after
-                    .pose()
-                    .orientation()
-                    .rotate_body_to_world(
-                        mass.angular_velocity_body_checked(
-                            receipt.state_after.angular_momentum_body(),
-                        )
-                        .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
-                    ),
-            )
-            .scale(0.5);
-        let work = |force: Vec3, torque: Vec3| {
-            (force.dot(midpoint_velocity) + torque.dot(midpoint_omega)) * controls.timestep_s
-        };
-        let channels = ChannelOwnership {
-            gravity: ChannelWrench {
-                force_world_n: gravity.acceleration_world().scale(factors.mass_kg),
-                torque_world_nm: Vec3::ZERO,
-                work_j: work(
-                    gravity.acceleration_world().scale(factors.mass_kg),
-                    Vec3::ZERO,
-                ),
-            },
-            contact: ChannelWrench {
-                force_world_n: contact_force,
-                torque_world_nm: contact_torque,
-                work_j: work(contact_force, contact_torque),
-            },
-            rolling: ChannelWrench {
-                force_world_n: Vec3::ZERO,
-                torque_world_nm: rolling_torque,
-                // The reduced generalized loss is non-negative by construction,
-                // and this torque satisfies tau dot omega = -P_roll.
-                work_j: -rolling_power_w * controls.timestep_s,
-            },
-            base: ChannelWrench {
-                force_world_n: Vec3::ZERO,
-                torque_world_nm: Vec3::ZERO,
-                work_j: -factors.base_damping_n_s_per_m
-                    * checkpoint.base_velocity_m_per_s.powi(2)
-                    * controls.timestep_s,
-            },
-            gas: ChannelWrench {
-                force_world_n: gas_force,
-                torque_world_nm: gas_torque,
-                work_j: work(gas_force, gas_torque),
-            },
-        };
-        let new_base_acceleration = (-normal_force
-            - factors.base_stiffness_n_per_m * checkpoint.base_deflection_m
-            - factors.base_damping_n_s_per_m * checkpoint.base_velocity_m_per_s)
-            / factors.base_effective_mass_kg;
-        checkpoint.base_velocity_m_per_s += new_base_acceleration * controls.timestep_s;
-        checkpoint.base_deflection_m += checkpoint.base_velocity_m_per_s * controls.timestep_s;
-        checkpoint.state = receipt.state_after;
-        checkpoint.time_s += controls.timestep_s;
-        checkpoint.was_in_contact = contact_active;
-        let tangential_work = work(friction_force, contact_arm.cross(friction_force));
-        let contact_damping_work = if penetration > 0.0 {
-            -factors.contact_damping_n_s_per_m
-                * relative_normal_speed.min(0.0).powi(2)
-                * controls.timestep_s
-        } else {
-            0.0
-        };
-        checkpoint.accumulated_channel_work_j[0] += channels.gravity.work_j;
-        checkpoint.accumulated_channel_work_j[1] += tangential_work + contact_damping_work;
-        checkpoint.accumulated_channel_work_j[2] += channels.rolling.work_j;
-        checkpoint.accumulated_channel_work_j[3] += channels.base.work_j;
-        checkpoint.accumulated_channel_work_j[4] += channels.gas.work_j;
-        let (post_geometry, post_support_source_feature) =
-            geometry_model.contact(checkpoint.state.pose())?;
-        let post_penetration = (checkpoint.base_deflection_m - post_geometry.gap_m).max(0.0);
+        checkpoint.reimpact_count = updated_reimpact_count;
+        checkpoint.accumulated_channel_work_j[0] += channel_work_j[0];
+        checkpoint.accumulated_channel_work_j[1] += channel_work_j[1];
+        checkpoint.accumulated_channel_work_j[2] += channel_work_j[2];
+        checkpoint.accumulated_channel_work_j[3] += channel_work_j[3];
+        checkpoint.accumulated_channel_work_j[4] += channel_work_j[4];
         let total_energy = total_energy(
-            receipt.diagnostics_after.mechanical_energy,
+            body_mechanical_energy_j,
             factors,
             checkpoint.base_deflection_m,
             checkpoint.base_velocity_m_per_s,
-            post_penetration,
+            (-post_support_gap_m).max(0.0),
         );
         let defect = (total_energy - checkpoint.initial_total_energy_j)
             - (checkpoint.accumulated_channel_work_j[1]
@@ -609,9 +1101,10 @@ fn run_closed_with_geometry(
             precession_rad_per_s: precession,
             spin_rad_per_s: spin,
             precession_acceleration_rad_per_s2: precession_acceleration,
-            interval_start_gap_m: support_height,
-            interval_normal_force_n: normal_force,
+            interval_start_gap_m,
+            interval_normal_force_n,
             contact_active,
+            contact_transitions: localized_transitions,
             support_source_feature: post_support_source_feature,
             reimpact_count: checkpoint.reimpact_count,
             channels,
@@ -624,6 +1117,17 @@ fn run_closed_with_geometry(
                 checkpoint,
                 terminal: CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState,
+                },
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            });
+        }
+        if checkpoint.reimpact_count > controls.reimpact_limit {
+            return Ok(CoupledRun {
+                samples,
+                checkpoint,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
                 },
                 applicability: applicability(),
                 model_disagreement: disagreement(),
@@ -873,13 +1377,91 @@ fn unilateral_normal_force(
 
 #[cfg(test)]
 mod tests {
-    use super::unilateral_normal_force;
+    use super::{
+        CONTACT_EVENT_GAP_TOLERANCE_M, ContactBranch, ContactTransitionKind, CoupledError,
+        localize_contact_transition, reimpact_budget_exceeded, unilateral_normal_force,
+    };
 
     #[test]
     fn kelvin_voigt_dashpot_is_inactive_across_an_open_gap() {
         assert_eq!(unilateral_normal_force(0.0, -3.0, 80_000.0, 3.0), 0.0);
         assert_eq!(unilateral_normal_force(-1.0e-6, -3.0, 80_000.0, 3.0), 0.0);
         assert!(unilateral_normal_force(1.0e-6, -3.0, 80_000.0, 3.0) > 0.0);
+    }
+
+    #[test]
+    fn localized_opening_time_is_stable_across_equivalent_time_windows() {
+        let gap_at = |time_s: f64| 1.0e-10 * (time_s - 0.3);
+        let full = localize_contact_transition(
+            0.0,
+            1.0,
+            ContactBranch::ForceClosed,
+            gap_at(0.0),
+            |duration_s| Ok::<_, CoupledError>(gap_at(duration_s)),
+        )
+        .expect("finite gap")
+        .expect("opening");
+        let narrowed_start_s = 0.2;
+        let narrowed = localize_contact_transition(
+            narrowed_start_s,
+            0.2,
+            ContactBranch::ForceClosed,
+            gap_at(narrowed_start_s),
+            |duration_s| Ok::<_, CoupledError>(gap_at(narrowed_start_s + duration_s)),
+        )
+        .expect("finite gap")
+        .expect("opening");
+        assert_eq!(full.kind, ContactTransitionKind::Opening);
+        assert_eq!(narrowed.kind, ContactTransitionKind::Opening);
+        // Each locator stops at the declared 1e-15 m root tolerance; with
+        // this 1e-10 m/s synthetic gap slope, the two independent brackets
+        // may differ by at most 2e-5 s plus floating-point roundoff.
+        assert!((full.time_s - narrowed.time_s).abs() <= 2.1e-5);
+        assert!(full.bracket_start_s <= full.time_s);
+        assert!(full.time_s <= full.bracket_end_s);
+    }
+
+    #[test]
+    fn fixed_scan_finds_hidden_open_and_reimpact_pair_without_zero_root_loop() {
+        let tolerance = CONTACT_EVENT_GAP_TOLERANCE_M;
+        let gap_at = |time_s: f64| {
+            if time_s <= 0.25 {
+                -2.0 * tolerance + 16.0 * tolerance * time_s
+            } else if time_s <= 0.75 {
+                2.0 * tolerance - 8.0 * tolerance * (time_s - 0.25)
+            } else {
+                -2.0 * tolerance
+            }
+        };
+        let opening = localize_contact_transition(
+            0.0,
+            1.0,
+            ContactBranch::ForceClosed,
+            gap_at(0.0),
+            |duration_s| Ok::<_, CoupledError>(gap_at(duration_s)),
+        )
+        .expect("finite gap")
+        .expect("opening hidden by equal endpoints");
+        assert_eq!(opening.kind, ContactTransitionKind::Opening);
+        let reimpact_start_s = 0.25;
+        let reimpact = localize_contact_transition(
+            reimpact_start_s,
+            1.0 - reimpact_start_s,
+            ContactBranch::ForceOpen,
+            gap_at(reimpact_start_s),
+            |duration_s| Ok::<_, CoupledError>(gap_at(reimpact_start_s + duration_s)),
+        )
+        .expect("finite gap")
+        .expect("reimpact after opening");
+        assert_eq!(reimpact.kind, ContactTransitionKind::Reimpact);
+        assert!(opening.time_s < reimpact.time_s);
+    }
+
+    #[test]
+    fn reimpact_budget_refuses_overflow_without_wrapping() {
+        assert!(reimpact_budget_exceeded(u32::MAX, 1, u32::MAX));
+        assert!(reimpact_budget_exceeded(7, 1, 7));
+        assert!(!reimpact_budget_exceeded(6, 1, 7));
     }
 }
 
