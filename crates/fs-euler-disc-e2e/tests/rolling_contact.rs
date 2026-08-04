@@ -15,7 +15,8 @@ use fs_tribo::{
 };
 use rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactError, RollingContactIdentity, RollingContactInput,
-    SpinMicroslipAvailability, evaluate_rolling_contact,
+    RollingContactState, SpinMicroslipAvailability, commit_rolling_contact,
+    evaluate_rolling_contact, prepare_rolling_contact, rollback_rolling_contact,
 };
 
 fn close(actual: f64, expected: f64) {
@@ -288,6 +289,42 @@ fn g0_checkpoint_mutation_and_work_overlap_refuse() {
         evaluate_rolling_contact(&overlap),
         Err(RollingContactError::GenericRefusal(_))
     ));
+}
+
+#[test]
+fn g0_rolling_proposal_commits_only_after_outer_acceptance() {
+    let initial = RollingContactState::zero();
+    let first_input = input(coulomb(0.1), contour_ownership());
+    let proposal = prepare_rolling_contact(&initial, &first_input).expect("first proposal");
+    assert_eq!(proposal.parent_version, 0);
+    assert_eq!(rollback_rolling_contact(&proposal), initial);
+    let committed = commit_rolling_contact(&initial, &proposal).expect("accepted proposal");
+    assert_eq!(committed.committed_version, 1);
+    assert_eq!(
+        committed.generic_state, proposal.step.generic.next_state,
+        "accept copies exactly the generic candidate state"
+    );
+    assert!(committed.checkpoint.is_some());
+    assert!(matches!(
+        commit_rolling_contact(&committed, &proposal),
+        Err(RollingContactError::ProposalDoesNotMatchState)
+    ));
+
+    let mut mismatched = first_input;
+    mismatched.state = fs_tribo::rolling_loss::RollingLossState::zero();
+    mismatched.checkpoint = None;
+    assert!(matches!(
+        prepare_rolling_contact(&committed, &mismatched),
+        Err(RollingContactError::StateInputMismatch)
+    ));
+    let mut replay = mismatched;
+    replay.state = committed.generic_state.clone();
+    replay.checkpoint = committed.checkpoint.clone();
+    let next = prepare_rolling_contact(&committed, &replay).expect("checkpoint replay proposal");
+    assert_eq!(next.parent_version, 1);
+
+    replay.checkpoint = None;
+    assert!(prepare_rolling_contact(&committed, &replay).is_ok());
 }
 
 #[test]

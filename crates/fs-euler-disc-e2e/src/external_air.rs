@@ -6,6 +6,7 @@
 //! target-fitted terms have no representation here.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use fs_flux::{
     AlternativeWrenchSet, BodyKinematics, CandidateWrench, DiscGeometry, DiscPose, GasProperties,
@@ -208,6 +209,14 @@ pub enum ExternalAirError {
     ThinGapDomainRejected,
     /// A generic correlation model refused the mapped exterior request.
     GenericRefusal { detail: ReducedAeroError },
+    /// A caller tried to stage exterior work already accepted in this state.
+    DuplicateAcceptedWork { exchange_key: u64 },
+    /// The caller-declared bounded exactly-once ledger has no capacity for a
+    /// new accepted exterior-work interval.
+    AcceptedWorkCapacityExceeded { maximum: usize },
+    /// A staged exterior-work proposal did not originate from the state being
+    /// accepted, so it cannot be applied safely.
+    ProposalDoesNotMatchState,
 }
 
 impl fmt::Display for ExternalAirError {
@@ -310,6 +319,168 @@ impl EulerExternalAirWorkWindow {
     pub fn relative_dissipation_j(&self) -> f64 {
         self.inner.relative_dissipation_j()
     }
+}
+
+/// Cloneable accepted-step accounting state for the exterior free-gas domain.
+///
+/// This is deliberately separate from [`EulerExternalAirWorkWindow`], whose
+/// immediate mutation remains useful for one-shot callers. A coupled solver
+/// should use this state to stage a selected correlation candidate, accept it
+/// only with the outer mechanics step, and retain the result in its checkpoint.
+/// It never selects or averages alternatives and it cannot account for a gas
+/// film or any non-exterior channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EulerExternalAirWorkState {
+    state_id: String,
+    committed_exchange_keys: BTreeSet<u64>,
+    maximum_committed_exchange_keys: usize,
+    body_work_j: f64,
+    relative_dissipation_j: f64,
+    committed_version: u64,
+}
+
+impl EulerExternalAirWorkState {
+    /// Creates an identity-bound, bounded exterior-work checkpoint.
+    ///
+    /// The capacity is an admission budget, not a ring-buffer: accepted keys
+    /// are never discarded, because doing so would re-admit duplicate work.
+    pub fn new(
+        state_id: impl Into<String>,
+        maximum_committed_exchange_keys: usize,
+    ) -> Result<Self, ExternalAirError> {
+        let state_id = state_id.into();
+        validate_identity(&state_id, "exterior_work_state_id")?;
+        if maximum_committed_exchange_keys == 0 {
+            return Err(ExternalAirError::InvalidInput {
+                field: "maximum_committed_exchange_keys",
+            });
+        }
+        Ok(Self {
+            state_id,
+            committed_exchange_keys: BTreeSet::new(),
+            maximum_committed_exchange_keys,
+            body_work_j: 0.0,
+            relative_dissipation_j: 0.0,
+            committed_version: 0,
+        })
+    }
+
+    /// Stable caller-owned identity retained across accept/refuse/checkpoint
+    /// transitions for this one exterior-gas work ledger.
+    #[must_use]
+    pub fn state_id(&self) -> &str {
+        &self.state_id
+    }
+
+    /// Maximum accepted exchange keys retained by this checkpoint.
+    #[must_use]
+    pub const fn maximum_committed_exchange_keys(&self) -> usize {
+        self.maximum_committed_exchange_keys
+    }
+
+    /// Total accepted work into the body [J]. Moving ambient gas may make this
+    /// positive; it is not a total system-energy closure claim.
+    #[must_use]
+    pub const fn body_work_j(&self) -> f64 {
+        self.body_work_j
+    }
+
+    /// Total accepted passive relative dissipation [J].
+    #[must_use]
+    pub const fn relative_dissipation_j(&self) -> f64 {
+        self.relative_dissipation_j
+    }
+
+    /// Count of accepted exterior-work proposals.
+    #[must_use]
+    pub const fn committed_version(&self) -> u64 {
+        self.committed_version
+    }
+
+    /// Stages the exact work receipt for one already-selected exterior
+    /// candidate. The generic `WorkWindow` is used as a non-mutating validator
+    /// for the candidate arithmetic; the returned proposal owns no shared
+    /// mutation until [`Self::commit`] is called.
+    pub fn prepare(
+        &self,
+        exchange_key: u64,
+        duration_s: f64,
+        candidate: &EulerExternalAirCandidate,
+    ) -> Result<EulerExternalAirWorkProposal, ExternalAirError> {
+        if self.committed_exchange_keys.contains(&exchange_key) {
+            return Err(ExternalAirError::DuplicateAcceptedWork { exchange_key });
+        }
+        if self.committed_exchange_keys.len() >= self.maximum_committed_exchange_keys {
+            return Err(ExternalAirError::AcceptedWorkCapacityExceeded {
+                maximum: self.maximum_committed_exchange_keys,
+            });
+        }
+        let mut validator = WorkWindow::default();
+        let receipt = validator
+            .record_once(exchange_key, duration_s, &candidate.world_wrench)
+            .map_err(generic_refusal)?;
+        let body_work_j = self.body_work_j + receipt.body_work_j;
+        let relative_dissipation_j = self.relative_dissipation_j + receipt.relative_dissipation_j;
+        if !(body_work_j.is_finite() && relative_dissipation_j.is_finite()) {
+            return Err(ExternalAirError::InvalidInput {
+                field: "accepted exterior work accumulation",
+            });
+        }
+        let committed_version =
+            self.committed_version
+                .checked_add(1)
+                .ok_or(ExternalAirError::InvalidInput {
+                    field: "accepted exterior work version",
+                })?;
+        let mut committed_exchange_keys = self.committed_exchange_keys.clone();
+        committed_exchange_keys.insert(exchange_key);
+        Ok(EulerExternalAirWorkProposal {
+            receipt,
+            correlation_id: candidate.world_wrench.correlation.id.clone(),
+            parent_version: self.committed_version,
+            prior_state: self.clone(),
+            next_state: Self {
+                state_id: self.state_id.clone(),
+                committed_exchange_keys,
+                maximum_committed_exchange_keys: self.maximum_committed_exchange_keys,
+                body_work_j,
+                relative_dissipation_j,
+                committed_version,
+            },
+        })
+    }
+
+    /// Commits a staged exterior-work proposal only against its exact parent.
+    pub fn commit(
+        &self,
+        proposal: &EulerExternalAirWorkProposal,
+    ) -> Result<Self, ExternalAirError> {
+        if *self != proposal.prior_state || self.committed_version != proposal.parent_version {
+            return Err(ExternalAirError::ProposalDoesNotMatchState);
+        }
+        Ok(proposal.next_state.clone())
+    }
+
+    /// Refuses a staged exterior-work proposal and recovers its exact parent.
+    #[must_use]
+    pub fn rollback(proposal: &EulerExternalAirWorkProposal) -> Self {
+        proposal.prior_state.clone()
+    }
+}
+
+/// Uncommitted exact-once exterior-work candidate. The composition owner
+/// chooses the correlation before this API is called; no ranking is encoded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EulerExternalAirWorkProposal {
+    /// Generic work receipt for the selected candidate and duration.
+    pub receipt: WorkReceipt,
+    /// Retained selected-correlation identity; alternatives remain available
+    /// on the original [`EulerExternalAirSet`].
+    pub correlation_id: String,
+    /// Accepted-state version observed while staging this proposal.
+    pub parent_version: u64,
+    prior_state: EulerExternalAirWorkState,
+    next_state: EulerExternalAirWorkState,
 }
 
 fn map_set(

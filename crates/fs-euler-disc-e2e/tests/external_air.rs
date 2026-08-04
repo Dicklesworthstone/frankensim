@@ -3,9 +3,9 @@ mod external_air;
 
 use external_air::{
     EulerDiscBodyFrame, EulerDiscExteriorGeometry, EulerDiscExteriorState, EulerExternalAirInput,
-    EulerExternalAirWorkWindow, ExteriorAirHeatDisposition, ExteriorAirPressure,
-    ExteriorAirPressureScaling, ExternalAirDomain, ExternalAirError, ExternalAirIdentity,
-    evaluate_euler_disc_external_air,
+    EulerExternalAirWorkState, EulerExternalAirWorkWindow, ExteriorAirHeatDisposition,
+    ExteriorAirPressure, ExteriorAirPressureScaling, ExternalAirDomain, ExternalAirError,
+    ExternalAirIdentity, evaluate_euler_disc_external_air,
 };
 use fs_flux::{
     ApplicabilityEnvelope, ClosedRange, ContributionFamily, CorrelationIdentity,
@@ -223,6 +223,49 @@ fn g0_stationary_ambient_is_passive_and_work_is_exactly_once() {
         Err(ExternalAirError::GenericRefusal {
             detail: ReducedAeroError::DuplicateWorkExchange { key: 7 }
         })
+    ));
+}
+
+#[test]
+fn g0_exterior_work_proposal_accepts_or_refuses_without_mutating_parent() {
+    let selected = candidate(&fixture());
+    assert!(matches!(
+        EulerExternalAirWorkState::new("work/exterior-v1", 0),
+        Err(ExternalAirError::InvalidInput {
+            field: "maximum_committed_exchange_keys"
+        })
+    ));
+    let initial =
+        EulerExternalAirWorkState::new("work/exterior-v1", 1).expect("bounded work checkpoint");
+    let proposal = initial
+        .prepare(17, 0.25, &selected)
+        .expect("stage selected exterior candidate");
+    assert_eq!(proposal.parent_version, 0);
+    assert_eq!(
+        EulerExternalAirWorkState::rollback(&proposal),
+        initial,
+        "refusal preserves the exact parent checkpoint"
+    );
+    let committed = initial.commit(&proposal).expect("accept candidate");
+    assert_eq!(committed.committed_version(), 1);
+    assert_eq!(committed.state_id(), "work/exterior-v1");
+    assert_eq!(committed.maximum_committed_exchange_keys(), 1);
+    assert_eq!(committed.body_work_j(), proposal.receipt.body_work_j);
+    assert_eq!(
+        committed.relative_dissipation_j(),
+        proposal.receipt.relative_dissipation_j
+    );
+    assert!(matches!(
+        committed.commit(&proposal),
+        Err(ExternalAirError::ProposalDoesNotMatchState)
+    ));
+    assert!(matches!(
+        committed.prepare(17, 0.25, &selected),
+        Err(ExternalAirError::DuplicateAcceptedWork { exchange_key: 17 })
+    ));
+    assert!(matches!(
+        committed.prepare(18, 0.25, &selected),
+        Err(ExternalAirError::AcceptedWorkCapacityExceeded { maximum: 1 })
     ));
 }
 

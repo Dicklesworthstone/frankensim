@@ -33,6 +33,11 @@ pub enum RollingContactError {
     NonOrthonormalAxes,
     /// A supplied checkpoint does not restore to the supplied candidate state.
     CheckpointStateMismatch,
+    /// The caller passed raw generic state/checkpoint different from the
+    /// transaction state it asked this adapter to advance.
+    StateInputMismatch,
+    /// A proposal was accepted against a stale or different parent state.
+    ProposalDoesNotMatchState,
     /// The generic rolling-loss leaf refused the retained caller inputs.
     GenericRefusal(RollingLossError),
 }
@@ -170,6 +175,54 @@ pub struct RollingContactStep {
     pub spin_microslip: SpinMicroslipAvailability,
 }
 
+/// Caller-owned accepted-step state for one rolling-loss channel.
+///
+/// The generic rolling law already produces a candidate `next_state` and
+/// identity-bound checkpoint. This wrapper makes the outer accept/refuse
+/// decision explicit without adding a second constitutive state machine. Work
+/// ownership remains the caller's cross-channel responsibility: the adapter
+/// rejects overlap with a supplied partial-slip owner, while the composition
+/// ledger must record accepted rolling work exactly once for its interval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollingContactState {
+    /// Generic cumulative irreversible-loss state.
+    pub generic_state: RollingLossState,
+    /// Optional checkpoint for identity-bound deterministic replay.
+    pub checkpoint: Option<RollingLossCheckpoint>,
+    /// Number of outer mechanics steps that accepted a candidate.
+    pub committed_version: u64,
+}
+
+impl RollingContactState {
+    /// Starts a fresh rolling channel with no accepted interval.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self {
+            generic_state: RollingLossState::zero(),
+            checkpoint: None,
+            committed_version: 0,
+        }
+    }
+}
+
+impl Default for RollingContactState {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+/// An uncommitted rolling candidate paired with the exact parent and successor
+/// state snapshots. It contains no mutable global state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollingContactProposal {
+    /// Mapped physical candidate and generic work/heat receipt.
+    pub step: RollingContactStep,
+    /// Parent version observed by the proposal.
+    pub parent_version: u64,
+    prior_state: RollingContactState,
+    next_state: RollingContactState,
+}
+
 /// Evaluates one generic rolling-loss candidate and maps it into a world wrench.
 ///
 /// The caller decides whether to commit `generic.next_state`; no external state
@@ -273,6 +326,64 @@ pub fn evaluate_rolling_contact(
         },
         spin_microslip: SpinMicroslipAvailability::Unavailable,
     })
+}
+
+/// Stages one rolling candidate against an explicit accepted-step state.
+///
+/// `input.state` must be an exact copy of `state`. If the caller supplies a
+/// checkpoint, it must be the retained checkpoint from that state; omitting it
+/// is intentional for a time-evolving patch, interface, or ownership identity
+/// because a generic checkpoint is bound to those exact inputs. The returned
+/// proposal changes no state. Call [`commit_rolling_contact`] only after the
+/// outer rigid-body step accepts the complete multi-channel candidate, or
+/// [`rollback_rolling_contact`] to recover the parent snapshot.
+pub fn prepare_rolling_contact(
+    state: &RollingContactState,
+    input: &RollingContactInput,
+) -> Result<RollingContactProposal, RollingContactError> {
+    if input.state != state.generic_state
+        || input
+            .checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| state.checkpoint.as_ref() != Some(checkpoint))
+    {
+        return Err(RollingContactError::StateInputMismatch);
+    }
+    let step = evaluate_rolling_contact(input)?;
+    let committed_version =
+        state
+            .committed_version
+            .checked_add(1)
+            .ok_or(RollingContactError::InvalidInput {
+                field: "committed_version",
+            })?;
+    Ok(RollingContactProposal {
+        parent_version: state.committed_version,
+        next_state: RollingContactState {
+            generic_state: step.generic.next_state.clone(),
+            checkpoint: Some(step.generic.checkpoint.clone()),
+            committed_version,
+        },
+        prior_state: state.clone(),
+        step,
+    })
+}
+
+/// Accepts a staged rolling candidate exactly against its recorded parent.
+pub fn commit_rolling_contact(
+    state: &RollingContactState,
+    proposal: &RollingContactProposal,
+) -> Result<RollingContactState, RollingContactError> {
+    if *state != proposal.prior_state || state.committed_version != proposal.parent_version {
+        return Err(RollingContactError::ProposalDoesNotMatchState);
+    }
+    Ok(proposal.next_state.clone())
+}
+
+/// Refuses a staged rolling candidate and returns its exact parent snapshot.
+#[must_use]
+pub fn rollback_rolling_contact(proposal: &RollingContactProposal) -> RollingContactState {
+    proposal.prior_state.clone()
 }
 
 fn validate_axes(contour: Vec3, rolling: Vec3) -> Result<(), RollingContactError> {
