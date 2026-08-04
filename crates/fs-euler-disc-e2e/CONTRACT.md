@@ -843,6 +843,28 @@ localized transition times are ordered inside the retained interval and
 alternate branches, and redundant QoIs must agree with the authoritative state
 and bound mass properties.
 
+The reduced coupled runner now publishes those fields only after an accepted
+macro interval or an accepted localized terminal/contact boundary. `CoupledRun`
+retains the configuration's original rigid/base state, exact mass properties,
+and macro timestep even for resumed segments, so trajectory admission can bind
+metadata without reconstructing the initializer. Every published center-of-
+mass velocity is checked against the retained momentum and those exact mass
+properties. A prohibited reimpact is retained at its localized root with the
+reimpact transition, closed post-root branch, updated event count, checkpoint,
+energy ledger, and numerical-refusal disposition; no positive-duration closed
+mechanics is evolved past that boundary. Restarting that terminal checkpoint
+publishes no duplicate sample. Profile-backed runs poll their execution scope
+before setup and immediately before each checkpoint/sample commit; cancellation
+at either boundary returns a typed refusal and publishes no partial `CoupledRun`.
+
+Localization brackets describe evaluated uncertainty bounds, not additional
+accepted states. A terminal event's retained time must exactly equal its final
+sample time, and a `ReimpactLimitExceeded` refusal's final reimpact must likewise
+equal the refusal-sample time. Consequently, the final bracket may straddle a retained root
+estimate when the sample itself is exactly that terminal/refusal root. Such an
+overhang is admitted only for the final relevant event, only within one declared
+macro timestep, and never relaxes strict retained-sample time ordering.
+
 This schema retains accepted public state rather than every integrator stage.
 It performs no interpolation, hidden-state reconstruction, calibration, or
 physical-authority promotion. Its `f64` times are exact producer values whose
@@ -852,7 +874,44 @@ owned by the dependent trajectory-codec bead rather than being approximated in
 this semantic layer. The focused G0/G3 tests cover valid construction,
 quaternion double-cover canonicalization, quaternion/time/frame/unit/contact/
 base/terminal/QoI refusals, localized brackets, component identities, and
-rigid world translation plus `+z` rotation invariance of intrinsic QoIs.
+rigid world translation plus `+z` rotation invariance of intrinsic QoIs. Direct
+runner E2E coverage additionally checks full-state/checkpoint equality,
+configuration binding, uninterrupted-versus-resumed sample equality, a resolved
+1 mm filleted profile, localized terminal admission, prohibited-reimpact
+publication, and refusal-checkpoint restart behavior.
+
+`timeline_resampling` v1 reconstructs render/audio query times from this
+admitted state without mutating the source artifact. Center-of-mass translation
+and base displacement use cubic Hermite interpolation with the accepted
+endpoint velocities. World linear momentum, body angular momentum, and base
+velocity remain finite continuous reconstructions. Orientation uses normalized
+shortest-arc quaternion SLERP, including explicit small-angle and `q/-q`
+handling. Exact source times reproduce the accepted continuous state rather
+than passing it through the interpolator. The method/version is exposed as
+`CubicHermiteSlerpV1`; the later codec owns composition identity. Every declared
+continuation/producer discontinuity must coincide with an accepted source
+sample; otherwise admission refuses because neither one-sided reconstruction
+has a trustworthy state boundary.
+
+Contact branch, terminal/refusal disposition, and event class are discrete.
+They are never averaged. Queries exactly at a localized event require an
+explicit left- or right-limit policy, and retain the original event time and
+localization bracket. Shutter intervals can either subdivide at every retained
+contact, terminal, continuation-seam, or producer-declared boundary, or refuse
+cross-event blur. Query sequences must be finite, strictly increasing, within
+the accepted sample horizon, and below the trajectory resource ceiling; there
+is no silent extrapolation. Non-representable reconstruction refuses instead
+of emitting NaN/inf state.
+
+This is a visualization and control-signal reconstruction assumption, not a
+solver refinement, contact impulse reconstruction, or physical validation
+claim. Declared continuation seams supply partition metadata only; they do not
+assert continuity. G0/G3 coverage includes exact endpoints, analytic constant
+translation/base motion, tiny and near-pi shortest-arc rotations, quaternion
+double-cover invariance, event-side branch/terminal semantics, shutter
+subdivision/refusal, declared seams, strict query refusal, frame-rate nesting,
+time/rigid-translation equivariance, determinism, and extreme finite-time
+refusal.
 
 ## No-claim boundaries
 

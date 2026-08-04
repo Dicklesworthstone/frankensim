@@ -308,7 +308,15 @@ impl RenderTrajectory {
         metadata: RenderTrajectoryMetadata,
         run: &CoupledRun,
     ) -> Result<Self, RenderTrajectoryError> {
-        if metadata.configuration_fingerprint != run.checkpoint.configuration_fingerprint {
+        if metadata.configuration_fingerprint != run.checkpoint.configuration_fingerprint
+            || metadata.mass_properties.properties != run.mass_properties
+            || metadata.initial_state != run.configuration_initial_state
+            || metadata.initial_base_mode.displacement_m.to_bits()
+                != run.configuration_initial_base_deflection_m.to_bits()
+            || metadata.initial_base_mode.velocity_m_per_s.to_bits()
+                != run.configuration_initial_base_velocity_m_per_s.to_bits()
+            || metadata.timestep_s.to_bits() != run.macro_timestep_s.to_bits()
+        {
             return Err(RenderTrajectoryError::RunnerConfigurationMismatch);
         }
         let Some(last) = run.samples.last() else {
@@ -323,6 +331,15 @@ impl RenderTrajectory {
                 != run.checkpoint.accumulated_energy_defect_j.to_bits()
         {
             return Err(RenderTrajectoryError::RunnerCheckpointMismatch);
+        }
+        for (index, sample) in run.samples.iter().enumerate() {
+            let derived_velocity = sample
+                .state
+                .center_of_mass_velocity_world(run.mass_properties)
+                .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+            if derived_velocity != sample.center_of_mass_velocity_world_m_per_s {
+                return Err(RenderTrajectoryError::RunnerSampleMismatch(index));
+            }
         }
         let final_index = run.samples.len() - 1;
         let inputs = run
@@ -464,6 +481,8 @@ pub enum RenderTrajectoryError {
     RunnerConfigurationMismatch,
     /// The final accepted sample did not exactly match the restart checkpoint.
     RunnerCheckpointMismatch,
+    /// A runner sample's redundant accepted-state diagnostic was inconsistent.
+    RunnerSampleMismatch(usize),
 }
 
 impl fmt::Display for RenderTrajectoryError {
@@ -676,18 +695,20 @@ fn validate_sample(
         .ok_or(RenderTrajectoryError::MissingBaseState(index))?;
     finite_scalar(base.displacement_m, index, "base_mode.displacement_m")?;
     finite_scalar(base.velocity_m_per_s, index, "base_mode.velocity_m_per_s")?;
-    validate_channels(input.channels, index)?;
+    validate_channels(&input.channels, index)?;
     finite_scalar(input.mechanical_energy_j, index, "mechanical_energy_j")?;
     finite_scalar(input.energy_defect_j, index, "energy_defect_j")?;
     validate_qois(metadata, &input, state, index)?;
     validate_transitions(
         &input.contact_transitions,
         input.contact_branch,
+        input.disposition,
         previous_time,
         input.time_s,
+        metadata.timestep_s,
         index,
     )?;
-    validate_terminal_event(&input, previous_time, index)?;
+    validate_terminal_event(&input, previous_time, metadata.timestep_s, index)?;
 
     Ok(RenderTrajectorySample { input, state })
 }
@@ -759,8 +780,10 @@ fn validate_contact(
 fn validate_transitions(
     transitions: &[RenderContactTransition],
     final_branch: RenderContactBranch,
+    disposition: RenderSampleDisposition,
     previous_time: Option<f64>,
     sample_time: f64,
+    timestep_s: f64,
     sample: usize,
 ) -> Result<(), RenderTrajectoryError> {
     if transitions.len() > MAX_RENDER_TRANSITIONS_PER_SAMPLE {
@@ -773,13 +796,21 @@ fn validate_transitions(
     let mut last_time = interval_start;
     let mut previous_kind = None;
     for (transition, event) in transitions.iter().enumerate() {
+        let terminal_root_bracket = transition + 1 == transitions.len()
+            && disposition
+                == RenderSampleDisposition::NumericalRefusal(
+                    RenderNumericalRefusalReason::ReimpactLimitExceeded,
+                )
+            && event.kind == ContactTransitionKind::Reimpact
+            && event.time_s.to_bits() == sample_time.to_bits()
+            && event.bracket_end_s - sample_time <= timestep_s;
         let valid = event.time_s.is_finite()
             && event.bracket_start_s.is_finite()
             && event.bracket_end_s.is_finite()
             && event.bracket_start_s <= event.time_s
             && event.time_s <= event.bracket_end_s
             && interval_start <= event.bracket_start_s
-            && event.bracket_end_s <= sample_time
+            && (event.bracket_end_s <= sample_time || terminal_root_bracket)
             && (transition == 0 && event.time_s >= last_time
                 || transition > 0 && event.time_s > last_time)
             && previous_kind != Some(event.kind);
@@ -801,12 +832,27 @@ fn validate_transitions(
             ));
         }
     }
+    if disposition
+        == RenderSampleDisposition::NumericalRefusal(
+            RenderNumericalRefusalReason::ReimpactLimitExceeded,
+        )
+        && !transitions.last().is_some_and(|event| {
+            event.kind == ContactTransitionKind::Reimpact
+                && event.time_s.to_bits() == sample_time.to_bits()
+        })
+    {
+        return Err(RenderTrajectoryError::InvalidTransition {
+            sample,
+            transition: transitions.len().saturating_sub(1),
+        });
+    }
     Ok(())
 }
 
 fn validate_terminal_event(
     input: &RenderTrajectorySampleInput,
     previous_time: Option<f64>,
+    timestep_s: f64,
     index: usize,
 ) -> Result<(), RenderTrajectoryError> {
     if matches!(
@@ -818,13 +864,16 @@ fn validate_terminal_event(
     match (input.disposition, input.terminal_event) {
         (RenderSampleDisposition::TerminalInclination, Some(event)) => {
             let interval_start = previous_time.unwrap_or(0.0);
+            let retained_root_bracket = event.time_s.to_bits() == input.time_s.to_bits()
+                && event.bracket_end_s - input.time_s <= timestep_s;
             if !event.time_s.is_finite()
                 || !event.bracket_start_s.is_finite()
                 || !event.bracket_end_s.is_finite()
+                || event.time_s.to_bits() != input.time_s.to_bits()
                 || event.bracket_start_s > event.time_s
                 || event.time_s > event.bracket_end_s
                 || event.bracket_start_s < interval_start
-                || event.bracket_end_s > input.time_s
+                || (event.bracket_end_s > input.time_s && !retained_root_bracket)
             {
                 return Err(RenderTrajectoryError::TerminalEventMismatch(index));
             }
@@ -875,7 +924,7 @@ fn validate_qois(
 }
 
 fn validate_channels(
-    channels: ChannelOwnership,
+    channels: &ChannelOwnership,
     index: usize,
 ) -> Result<(), RenderTrajectoryError> {
     for (name, channel) in [

@@ -1,7 +1,8 @@
 use fs_euler_disc_e2e::coupled_runner::{
-    ADAPTER_INTEGRATION_PLAN, CoupledChannelFactors, CoupledControls, CoupledError, CoupledFactors,
-    CoupledInitialState, initial_contact_point_velocity, initial_qois, run_closed_profile_reduced,
-    run_closed_reduced,
+    ADAPTER_INTEGRATION_PLAN, ContactTransitionKind, CoupledChannelFactors, CoupledContactBranch,
+    CoupledControls, CoupledError, CoupledFactors, CoupledInitialState,
+    CoupledNumericalRefusalReason, CoupledTerminal, initial_contact_point_velocity, initial_qois,
+    run_closed_profile_reduced, run_closed_reduced,
 };
 use fs_euler_disc_e2e::specimen::DiscProfileSpec;
 use fs_exec::Budget;
@@ -103,6 +104,7 @@ fn evolves_and_replays_from_a_deterministic_checkpoint() {
         None,
     )
     .expect("prefix");
+    let split_checkpoint = split.checkpoint.clone();
     let resumed = run_closed_reduced(
         factors(0.038, 2680.0),
         CoupledControls {
@@ -110,13 +112,65 @@ fn evolves_and_replays_from_a_deterministic_checkpoint() {
             ..controls()
         },
         initial(),
-        Some(split.checkpoint),
+        Some(split_checkpoint.clone()),
     )
     .expect("resume");
+    assert!(
+        resumed
+            .samples
+            .first()
+            .is_some_and(|sample| sample.time_s > split_checkpoint.time_s)
+    );
+    let mut stitched = split.samples.clone();
+    stitched.extend(resumed.samples.iter().cloned());
+    assert_eq!(stitched, first.samples);
     assert_eq!(first.checkpoint.state, resumed.checkpoint.state);
     assert_eq!(
         first.checkpoint.accumulated_channel_work_j,
         resumed.checkpoint.accumulated_channel_work_j
+    );
+    assert_eq!(
+        first.configuration_initial_state,
+        resumed.configuration_initial_state
+    );
+    assert_eq!(first.mass_properties, resumed.mass_properties);
+    assert_eq!(first.macro_timestep_s, resumed.macro_timestep_s);
+
+    for sample in &first.samples {
+        assert_eq!(
+            sample.center_of_mass_velocity_world_m_per_s,
+            sample
+                .state
+                .center_of_mass_velocity_world(first.mass_properties)
+                .expect("sample velocity")
+        );
+        assert_eq!(
+            sample.endpoint_signed_gap_m,
+            sample.endpoint_contact_geometry.gap_m - sample.base_deflection_m
+        );
+        assert_eq!(
+            sample.contact_branch,
+            if sample.endpoint_signed_gap_m <= 0.0 {
+                CoupledContactBranch::Closed
+            } else {
+                CoupledContactBranch::Open
+            }
+        );
+    }
+    let final_sample = first.samples.last().expect("final accepted sample");
+    assert_eq!(final_sample.time_s, first.checkpoint.time_s);
+    assert_eq!(final_sample.state, first.checkpoint.state);
+    assert_eq!(
+        final_sample.base_deflection_m,
+        first.checkpoint.base_deflection_m
+    );
+    assert_eq!(
+        final_sample.base_velocity_m_per_s,
+        first.checkpoint.base_velocity_m_per_s
+    );
+    assert_eq!(
+        final_sample.energy_defect_j,
+        first.checkpoint.accumulated_energy_defect_j
     );
 }
 
@@ -292,7 +346,7 @@ fn true_profile_run_uses_profile_support_and_binds_restart_to_chart_identity() {
         let cylinder = DiscProfileSpec::SolidCylinder {
             outer_radius_m: 0.038,
             thickness_m: 0.006,
-            edge_treatment: SquatDiscEdgeTreatment::Sharp,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
         }
         .resolve(2_680.0, cx)
         .expect("cylinder profile");
@@ -341,4 +395,89 @@ fn true_profile_run_uses_profile_support_and_binds_restart_to_chart_identity() {
             Err(CoupledError::CheckpointMismatch)
         );
     });
+}
+
+#[test]
+fn cancelled_profile_scope_publishes_no_partial_run() {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x4341_4e43_454c_4c45,
+                kernel_id: 3,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        let profile = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        }
+        .resolve(2_680.0, &cx)
+        .expect("profile before cancellation");
+        gate.request();
+        assert_eq!(
+            run_closed_profile_reduced(
+                &profile,
+                factors(0.038, 2_680.0).channel_factors(),
+                CoupledControls {
+                    maximum_steps: 20,
+                    ..controls()
+                },
+                initial(),
+                None,
+                &cx,
+            ),
+            Err(CoupledError::Cancelled)
+        );
+    });
+}
+
+#[test]
+fn prohibited_reimpact_publishes_the_exact_refusal_checkpoint() {
+    let run = run_closed_reduced(
+        factors(0.038, 2_680.0),
+        CoupledControls {
+            timestep_s: 1.0e-4,
+            maximum_steps: 100,
+            terminal_inclination_rad: 0.002,
+            reimpact_limit: 0,
+        },
+        CoupledInitialState {
+            inclination_rad: 0.03,
+            precession_rad_per_s: 0.0,
+            spin_rad_per_s: 0.0,
+        },
+        None,
+    )
+    .expect("finite reimpact run");
+    assert_eq!(
+        run.terminal,
+        CoupledTerminal::NumericalRefusal {
+            reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
+        }
+    );
+    let sample = run
+        .samples
+        .last()
+        .expect("accepted refusal-boundary sample");
+    assert_eq!(sample.time_s, run.checkpoint.time_s);
+    assert_eq!(sample.state, run.checkpoint.state);
+    assert_eq!(sample.reimpact_count, 1);
+    assert_eq!(run.checkpoint.reimpact_count, 1);
+    assert_eq!(sample.contact_branch, CoupledContactBranch::Closed);
+    assert_eq!(
+        sample.contact_transitions.last().map(|event| event.kind),
+        Some(ContactTransitionKind::Reimpact)
+    );
+    assert_eq!(
+        sample.energy_defect_j,
+        run.checkpoint.accumulated_energy_defect_j
+    );
 }

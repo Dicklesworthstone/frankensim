@@ -1,7 +1,10 @@
 //! G0/G3 checks for animation-grade Euler trajectory semantics.
 
 use fs_blake3::{ContentHash, hash_domain};
-use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind};
+use fs_euler_disc_e2e::coupled_runner::{
+    ChannelOwnership, ContactTransitionKind, CoupledControls, CoupledFactors, CoupledInitialState,
+    CoupledRun, run_closed_reduced,
+};
 use fs_euler_disc_e2e::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseModeState,
     RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
@@ -105,6 +108,60 @@ fn metadata() -> RenderTrajectoryMetadata {
         no_claims: vec![
             "not calibrated physical truth".into(),
             "no continuum finite-contact-patch claim".into(),
+        ],
+        authority: RenderTrajectoryAuthority::SimulationEvidence,
+    }
+}
+
+fn runner_factors() -> CoupledFactors {
+    let radius_m = 0.038;
+    let thickness_m = 0.006;
+    let mass_kg = std::f64::consts::PI * radius_m * radius_m * thickness_m * 2_680.0;
+    CoupledFactors {
+        mass_kg,
+        radius_m,
+        thickness_m,
+        transverse_inertia_kg_m2: mass_kg * (3.0 * radius_m.powi(2) + thickness_m.powi(2)) / 12.0,
+        axial_inertia_kg_m2: 0.5 * mass_kg * radius_m.powi(2),
+        gravity_m_per_s2: 9.806_65,
+        sliding_friction_coefficient: 0.0,
+        rolling_resistance_m: 0.0,
+        contact_stiffness_n_per_m: 8.0e4,
+        contact_damping_n_s_per_m: 3.0,
+        base_effective_mass_kg: 0.25,
+        base_stiffness_n_per_m: 4.0e4,
+        base_damping_n_s_per_m: 4.0,
+        gas_rotational_damping_n_m_s: 0.0,
+        gas_translation_damping_n_s_per_m: 0.0,
+    }
+}
+
+fn runner_metadata(run: &CoupledRun) -> RenderTrajectoryMetadata {
+    RenderTrajectoryMetadata {
+        schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+        world_frame: RenderWorldFrame::RightHandedZUp,
+        units: RenderUnitSystem::SiRadians,
+        specimen_profile_identity: identity("runner-profile"),
+        specimen_chart_identity: identity("runner-chart"),
+        mass_properties: RenderMassProperties {
+            identity: identity("runner-mass"),
+            properties: run.mass_properties,
+        },
+        initial_state: run.configuration_initial_state,
+        initial_base_mode: RenderBaseModeState {
+            displacement_m: run.configuration_initial_base_deflection_m,
+            velocity_m_per_s: run.configuration_initial_base_velocity_m_per_s,
+        },
+        base_model_identity: identity("runner-base"),
+        model_identity: identity("runner-model"),
+        configuration_identity: identity("runner-configuration"),
+        configuration_fingerprint: run.checkpoint.configuration_fingerprint,
+        timestep_s: run.macro_timestep_s,
+        producer_version: "fs-euler-disc-e2e-test-v1".into(),
+        applicability: run.applicability.into(),
+        no_claims: vec![
+            "reduced-model simulation evidence, not calibrated physical truth".into(),
+            run.model_disagreement.into(),
         ],
         authority: RenderTrajectoryAuthority::SimulationEvidence,
     }
@@ -334,7 +391,29 @@ fn localized_transition_brackets_and_terminal_placement_are_checked() {
         bracket_start_s: 0.009,
         bracket_end_s: 0.01,
     });
-    RenderTrajectory::try_new(metadata(), vec![terminal]).unwrap();
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![terminal]).unwrap_err(),
+        RenderTrajectoryError::TerminalEventMismatch(0)
+    );
+    let mut terminal_at_retained_root = sample(0.01, RenderSampleDisposition::TerminalInclination);
+    terminal_at_retained_root.terminal_event = Some(RenderTerminalEvent {
+        time_s: 0.01,
+        bracket_start_s: 0.009,
+        bracket_end_s: 0.011,
+    });
+    RenderTrajectory::try_new(metadata(), vec![terminal_at_retained_root]).unwrap();
+
+    let mut excessive_terminal_overhang =
+        sample(0.01, RenderSampleDisposition::TerminalInclination);
+    excessive_terminal_overhang.terminal_event = Some(RenderTerminalEvent {
+        time_s: 0.01,
+        bracket_start_s: 0.009,
+        bracket_end_s: 0.020_001,
+    });
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![excessive_terminal_overhang]).unwrap_err(),
+        RenderTrajectoryError::TerminalEventMismatch(0)
+    );
 
     let invalid_refusal = sample(
         0.01,
@@ -343,6 +422,60 @@ fn localized_transition_brackets_and_terminal_placement_are_checked() {
     assert_eq!(
         RenderTrajectory::try_new(metadata(), vec![invalid_refusal]).unwrap_err(),
         RenderTrajectoryError::InvalidNumericalRefusalCode(0)
+    );
+
+    let mut excessive_reimpact_overhang = sample(
+        0.01,
+        RenderSampleDisposition::NumericalRefusal(
+            RenderNumericalRefusalReason::ReimpactLimitExceeded,
+        ),
+    );
+    excessive_reimpact_overhang.contact_branch = RenderContactBranch::Closed;
+    excessive_reimpact_overhang.signed_gap_m = -1.0e-8;
+    excessive_reimpact_overhang.contact_geometry = Some(RenderContactGeometry {
+        point_world_m: Vec3::ZERO,
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        support_feature: RenderSupportFeature::CylinderRim,
+    });
+    excessive_reimpact_overhang.contact_transitions = vec![RenderContactTransition {
+        kind: ContactTransitionKind::Reimpact,
+        time_s: 0.01,
+        bracket_start_s: 0.009,
+        bracket_end_s: 0.020_001,
+    }];
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![excessive_reimpact_overhang]).unwrap_err(),
+        RenderTrajectoryError::InvalidTransition {
+            sample: 0,
+            transition: 0,
+        }
+    );
+
+    let mut interior_reimpact_refusal = sample(
+        0.01,
+        RenderSampleDisposition::NumericalRefusal(
+            RenderNumericalRefusalReason::ReimpactLimitExceeded,
+        ),
+    );
+    interior_reimpact_refusal.contact_branch = RenderContactBranch::Closed;
+    interior_reimpact_refusal.signed_gap_m = -1.0e-8;
+    interior_reimpact_refusal.contact_geometry = Some(RenderContactGeometry {
+        point_world_m: Vec3::ZERO,
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        support_feature: RenderSupportFeature::CylinderRim,
+    });
+    interior_reimpact_refusal.contact_transitions = vec![RenderContactTransition {
+        kind: ContactTransitionKind::Reimpact,
+        time_s: 0.0095,
+        bracket_start_s: 0.009,
+        bracket_end_s: 0.01,
+    }];
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![interior_reimpact_refusal]).unwrap_err(),
+        RenderTrajectoryError::InvalidTransition {
+            sample: 0,
+            transition: 0,
+        }
     );
 }
 
@@ -426,5 +559,162 @@ fn unknown_schema_and_zero_component_identity_refuse() {
         )
         .unwrap_err(),
         RenderTrajectoryError::ZeroIdentity("model_identity")
+    );
+}
+
+#[test]
+fn accepted_coupled_runner_output_converts_without_reconstructing_state() {
+    let initial = CoupledInitialState {
+        inclination_rad: 0.08,
+        precession_rad_per_s: 16.0,
+        spin_rad_per_s: 120.0,
+    };
+    let run = run_closed_reduced(
+        runner_factors(),
+        CoupledControls {
+            timestep_s: 2.0e-5,
+            maximum_steps: 20,
+            terminal_inclination_rad: 0.002,
+            reimpact_limit: 32,
+        },
+        initial,
+        None,
+    )
+    .expect("accepted reduced run");
+    let trajectory = RenderTrajectory::from_coupled_run(runner_metadata(&run), &run)
+        .expect("runner trajectory admission");
+    assert_eq!(trajectory.samples().len(), run.samples.len());
+    for (retained, source) in trajectory.samples().iter().zip(&run.samples) {
+        assert_eq!(retained.state(), source.state);
+        assert_eq!(retained.input().time_s, source.time_s);
+        assert_eq!(
+            retained.input().base_mode,
+            Some(RenderBaseModeState {
+                displacement_m: source.base_deflection_m,
+                velocity_m_per_s: source.base_velocity_m_per_s,
+            })
+        );
+    }
+
+    let mut wrong_metadata = runner_metadata(&run);
+    wrong_metadata.timestep_s *= 2.0;
+    assert_eq!(
+        RenderTrajectory::from_coupled_run(wrong_metadata, &run).unwrap_err(),
+        RenderTrajectoryError::RunnerConfigurationMismatch
+    );
+
+    let mut inconsistent_sample = run.clone();
+    inconsistent_sample.samples[0]
+        .center_of_mass_velocity_world_m_per_s
+        .x += 1.0e-9;
+    assert_eq!(
+        RenderTrajectory::from_coupled_run(
+            runner_metadata(&inconsistent_sample),
+            &inconsistent_sample
+        )
+        .unwrap_err(),
+        RenderTrajectoryError::RunnerSampleMismatch(0)
+    );
+
+    let mut inconsistent_checkpoint = run.clone();
+    inconsistent_checkpoint.checkpoint.base_deflection_m += 1.0e-9;
+    assert_eq!(
+        RenderTrajectory::from_coupled_run(
+            runner_metadata(&inconsistent_checkpoint),
+            &inconsistent_checkpoint,
+        )
+        .unwrap_err(),
+        RenderTrajectoryError::RunnerCheckpointMismatch
+    );
+}
+
+#[test]
+fn localized_terminal_bracket_from_runner_is_admitted_at_the_retained_root() {
+    let run = run_closed_reduced(
+        runner_factors(),
+        CoupledControls {
+            timestep_s: 1.0e-3,
+            maximum_steps: 32,
+            terminal_inclination_rad: 0.079,
+            reimpact_limit: 8,
+        },
+        CoupledInitialState {
+            inclination_rad: 0.08,
+            precession_rad_per_s: 0.0,
+            spin_rad_per_s: 0.0,
+        },
+        None,
+    )
+    .expect("terminal reduced run");
+    let source = run.samples.last().expect("terminal sample");
+    let event = source
+        .terminal_inclination_event
+        .expect("localized terminal bracket");
+    assert_eq!(source.time_s, event.time_s);
+    assert!(event.bracket_start_s <= event.time_s);
+    assert!(event.time_s <= event.bracket_end_s);
+    let trajectory = RenderTrajectory::from_coupled_run(runner_metadata(&run), &run)
+        .expect("terminal runner trajectory admission");
+    assert_eq!(
+        trajectory.samples().last().unwrap().input().disposition,
+        RenderSampleDisposition::TerminalInclination
+    );
+}
+
+#[test]
+fn prohibited_reimpact_root_is_a_complete_numerical_refusal_sample() {
+    let controls = CoupledControls {
+        timestep_s: 1.0e-4,
+        maximum_steps: 100,
+        terminal_inclination_rad: 0.002,
+        reimpact_limit: 0,
+    };
+    let initial = CoupledInitialState {
+        inclination_rad: 0.03,
+        precession_rad_per_s: 0.0,
+        spin_rad_per_s: 0.0,
+    };
+    let run = run_closed_reduced(runner_factors(), controls, initial, None)
+        .expect("reimpact-refusal run");
+    let trajectory = RenderTrajectory::from_coupled_run(runner_metadata(&run), &run)
+        .expect("refusal-boundary trajectory admission");
+    let final_sample = trajectory.samples().last().expect("refusal sample");
+    assert_eq!(final_sample.input().time_s, run.checkpoint.time_s);
+    assert_eq!(final_sample.state(), run.checkpoint.state);
+    assert_eq!(
+        final_sample.input().disposition,
+        RenderSampleDisposition::NumericalRefusal(
+            RenderNumericalRefusalReason::ReimpactLimitExceeded
+        )
+    );
+    assert_eq!(
+        final_sample
+            .input()
+            .contact_transitions
+            .last()
+            .map(|event| event.kind),
+        Some(ContactTransitionKind::Reimpact)
+    );
+    assert_eq!(
+        final_sample
+            .input()
+            .contact_transitions
+            .last()
+            .map(|event| event.time_s.to_bits()),
+        Some(final_sample.input().time_s.to_bits())
+    );
+
+    let resumed = run_closed_reduced(
+        runner_factors(),
+        controls,
+        initial,
+        Some(run.checkpoint.clone()),
+    )
+    .expect("refusal checkpoint restart");
+    assert!(resumed.samples.is_empty());
+    assert_eq!(resumed.checkpoint, run.checkpoint);
+    assert_eq!(
+        RenderTrajectory::from_coupled_run(runner_metadata(&resumed), &resumed).unwrap_err(),
+        RenderTrajectoryError::EmptyTrajectory
     );
 }

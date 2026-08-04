@@ -254,6 +254,17 @@ pub struct CoupledCheckpoint {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoupledRun {
+    /// Accepted initial rigid-body state named by the configuration
+    /// fingerprint, retained even when this run is a resumed segment.
+    pub configuration_initial_state: RigidBodyState,
+    /// Accepted initial one-mode base displacement [m].
+    pub configuration_initial_base_deflection_m: f64,
+    /// Accepted initial one-mode base velocity [m/s].
+    pub configuration_initial_base_velocity_m_per_s: f64,
+    /// Exact mass properties used to evolve and interpret every sample.
+    pub mass_properties: MassProperties,
+    /// Fixed macro timestep admitted by the runner [s].
+    pub macro_timestep_s: f64,
     pub samples: Vec<CoupledSample>,
     pub checkpoint: CoupledCheckpoint,
     pub terminal: CoupledTerminal,
@@ -268,6 +279,9 @@ pub enum CoupledError {
     /// A checkpoint's state or accumulated ledger was modified after the
     /// runner sealed it, so it cannot be used as a physical restart state.
     CheckpointIntegrityMismatch,
+    /// The profile execution scope requested cancellation before an accepted
+    /// publication boundary.
+    Cancelled,
     Dynamics(String),
 }
 
@@ -287,6 +301,13 @@ enum CoupledGeometry<'profile, 'cx> {
 }
 
 impl CoupledGeometry<'_, '_> {
+    fn publication_checkpoint(&self) -> Result<(), CoupledError> {
+        match self {
+            Self::Cylinder(_) => Ok(()),
+            Self::Profile { cx, .. } => cx.checkpoint().map_err(|_| CoupledError::Cancelled),
+        }
+    }
+
     fn contact(&self, pose: Pose) -> Result<(ContactGeometry, Option<usize>), CoupledError> {
         match self {
             Self::Cylinder(geometry) => contact_geometry(*geometry, pose)
@@ -930,6 +951,7 @@ fn run_closed_with_geometry(
     geometry_model: CoupledGeometry<'_, '_>,
 ) -> Result<CoupledRun, CoupledError> {
     validate(factors, controls, initial)?;
+    geometry_model.publication_checkpoint()?;
     let mass = MassProperties::new(
         factors.mass_kg,
         Vec3::ZERO,
@@ -944,6 +966,9 @@ fn run_closed_with_geometry(
         .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
     let integrator = RigidBodyIntegrator::new(gravity);
     let mut configured_checkpoint = initial_checkpoint(factors, initial, mass, &geometry_model)?;
+    let configuration_initial_state = configured_checkpoint.state;
+    let configuration_initial_base_deflection_m = configured_checkpoint.base_deflection_m;
+    let configuration_initial_base_velocity_m_per_s = configured_checkpoint.base_velocity_m_per_s;
     let configured_initial_energy_j = total_energy(
         integrator
             .diagnostics(configured_checkpoint.state, mass)
@@ -980,20 +1005,42 @@ fn run_closed_with_geometry(
             configured_checkpoint
         }
     };
+    let finish_run =
+        |samples: Vec<CoupledSample>, checkpoint: CoupledCheckpoint, terminal: CoupledTerminal| {
+            CoupledRun {
+                configuration_initial_state,
+                configuration_initial_base_deflection_m,
+                configuration_initial_base_velocity_m_per_s,
+                mass_properties: mass,
+                macro_timestep_s: controls.timestep_s,
+                samples,
+                checkpoint,
+                terminal,
+                applicability: applicability(),
+                model_disagreement: disagreement(),
+            }
+        };
     let mut samples = Vec::with_capacity(controls.maximum_steps as usize);
+    if checkpoint.reimpact_count > controls.reimpact_limit {
+        return Ok(finish_run(
+            samples,
+            checkpoint,
+            CoupledTerminal::NumericalRefusal {
+                reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
+            },
+        ));
+    }
     let mut previous_precession = qois(checkpoint.state, mass)?.1;
 
     for _ in 0..controls.maximum_steps {
         let state = checkpoint.state;
         let inclination = inclination_rad(state);
         if inclination <= controls.terminal_inclination_rad {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::TerminalInclination,
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+                CoupledTerminal::TerminalInclination,
+            ));
         }
         let mut state = checkpoint.state;
         let mut base_deflection_m = checkpoint.base_deflection_m;
@@ -1021,6 +1068,7 @@ fn run_closed_with_geometry(
         let mut post_contact_geometry = None;
         let mut post_support_source_feature = None;
         let mut terminal_inclination_event = None;
+        let mut numerical_refusal_reason = None;
 
         while remaining_s > 0.0 {
             let start_inclination_rad = inclination_rad(state);
@@ -1098,30 +1146,26 @@ fn run_closed_with_geometry(
             });
             let (accepted, accepted_duration_s, next_branch) = if terminal_precedes_contact {
                 let Some(terminal) = terminal_event else {
-                    return Ok(CoupledRun {
+                    return Ok(finish_run(
                         samples,
                         checkpoint,
-                        terminal: CoupledTerminal::NumericalRefusal {
+                        CoupledTerminal::NumericalRefusal {
                             reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                         },
-                        applicability: applicability(),
-                        model_disagreement: disagreement(),
-                    });
+                    ));
                 };
                 let event_duration_s = terminal.time_s - (checkpoint.time_s + elapsed_s);
                 if !(event_duration_s.is_finite()
                     && event_duration_s > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
                     && event_duration_s <= remaining_s)
                 {
-                    return Ok(CoupledRun {
+                    return Ok(finish_run(
                         samples,
                         checkpoint,
-                        terminal: CoupledTerminal::NumericalRefusal {
+                        CoupledTerminal::NumericalRefusal {
                             reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                         },
-                        applicability: applicability(),
-                        model_disagreement: disagreement(),
-                    });
+                    ));
                 }
                 terminal_inclination_event = Some(terminal);
                 (
@@ -1142,108 +1186,36 @@ fn run_closed_with_geometry(
                 )
             } else if let Some(event) = event {
                 if events_in_macro_step >= MAX_CONTACT_EVENTS_PER_MACRO_STEP {
-                    return Ok(CoupledRun {
+                    return Ok(finish_run(
                         samples,
                         checkpoint,
-                        terminal: CoupledTerminal::NumericalRefusal {
+                        CoupledTerminal::NumericalRefusal {
                             reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                         },
-                        applicability: applicability(),
-                        model_disagreement: disagreement(),
-                    });
+                    ));
                 }
                 let event_duration_s = event.time_s - (checkpoint.time_s + elapsed_s);
                 if !(event_duration_s.is_finite()
                     && event_duration_s > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
                     && event_duration_s <= remaining_s)
                 {
-                    return Ok(CoupledRun {
+                    return Ok(finish_run(
                         samples,
                         checkpoint,
-                        terminal: CoupledTerminal::NumericalRefusal {
+                        CoupledTerminal::NumericalRefusal {
                             reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                         },
-                        applicability: applicability(),
-                        model_disagreement: disagreement(),
-                    });
+                    ));
                 }
-                // Refuse at the next prohibited reimpact boundary. The
-                // pre-event segment is retained in the restart checkpoint;
-                // no post-event closed mechanics is committed past the budget.
-                if event.kind == ContactTransitionKind::Reimpact
+                // A prohibited reimpact is still a localized, accepted
+                // boundary state. Retain that root and its transition, but do
+                // not evolve any positive-duration closed mechanics beyond it.
+                let prohibited_reimpact = event.kind == ContactTransitionKind::Reimpact
                     && reimpact_budget_exceeded(
                         checkpoint.reimpact_count,
                         reimpact_events + 1,
                         controls.reimpact_limit,
-                    )
-                {
-                    debug_assert_eq!(event.kind, ContactTransitionKind::Reimpact);
-                    let Some(committed_reimpact_count) =
-                        checkpoint.reimpact_count.checked_add(reimpact_events)
-                    else {
-                        return Ok(CoupledRun {
-                            samples,
-                            checkpoint,
-                            terminal: CoupledTerminal::NumericalRefusal {
-                                reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
-                            },
-                            applicability: applicability(),
-                            model_disagreement: disagreement(),
-                        });
-                    };
-                    let accepted = advance_segment(
-                        state,
-                        base_deflection_m,
-                        base_velocity_m_per_s,
-                        event_duration_s,
-                        branch,
-                        mass,
-                        factors,
-                        gravity,
-                        &integrator,
-                        &geometry_model,
-                    )?;
-                    channel_work_j[0] += accepted.channels.gravity.work_j;
-                    channel_work_j[1] +=
-                        accepted.tangential_work_j + accepted.contact_damping_work_j;
-                    channel_work_j[2] += accepted.channels.rolling.work_j;
-                    channel_work_j[3] += accepted.channels.base.work_j;
-                    channel_work_j[4] += accepted.channels.gas.work_j;
-                    checkpoint.state = accepted.state_after;
-                    checkpoint.base_deflection_m = accepted.base_deflection_m;
-                    checkpoint.base_velocity_m_per_s = accepted.base_velocity_m_per_s;
-                    checkpoint.time_s += elapsed_s + event_duration_s;
-                    checkpoint.reimpact_count = committed_reimpact_count;
-                    checkpoint.was_in_contact = false;
-                    checkpoint.accumulated_channel_work_j[0] += channel_work_j[0];
-                    checkpoint.accumulated_channel_work_j[1] += channel_work_j[1];
-                    checkpoint.accumulated_channel_work_j[2] += channel_work_j[2];
-                    checkpoint.accumulated_channel_work_j[3] += channel_work_j[3];
-                    checkpoint.accumulated_channel_work_j[4] += channel_work_j[4];
-                    let total_energy = total_energy(
-                        accepted.body_mechanical_energy_j,
-                        factors,
-                        checkpoint.base_deflection_m,
-                        checkpoint.base_velocity_m_per_s,
-                        (-accepted.post_support_gap_m).max(0.0),
                     );
-                    checkpoint.accumulated_energy_defect_j = (total_energy
-                        - checkpoint.initial_total_energy_j)
-                        - (checkpoint.accumulated_channel_work_j[1]
-                            + checkpoint.accumulated_channel_work_j[2]
-                            + checkpoint.accumulated_channel_work_j[3]
-                            + checkpoint.accumulated_channel_work_j[4]);
-                    seal_checkpoint(&mut checkpoint);
-                    return Ok(CoupledRun {
-                        samples,
-                        checkpoint,
-                        terminal: CoupledTerminal::NumericalRefusal {
-                            reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
-                        },
-                        applicability: applicability(),
-                        model_disagreement: disagreement(),
-                    });
-                }
                 let accepted = advance_segment(
                     state,
                     base_deflection_m,
@@ -1265,6 +1237,10 @@ fn run_closed_with_geometry(
                     ContactTransitionKind::Opening => ContactBranch::ForceOpen,
                     ContactTransitionKind::Reimpact => ContactBranch::ForceClosed,
                 };
+                if prohibited_reimpact {
+                    numerical_refusal_reason =
+                        Some(CoupledNumericalRefusalReason::ReimpactLimitExceeded);
+                }
                 (accepted, event_duration_s, next_branch)
             } else {
                 (trial, remaining_s, branch)
@@ -1291,7 +1267,7 @@ fn run_closed_with_geometry(
             elapsed_s += accepted_duration_s;
             remaining_s -= accepted_duration_s;
             branch = next_branch;
-            if terminal_inclination_event.is_some() {
+            if terminal_inclination_event.is_some() || numerical_refusal_reason.is_some() {
                 break;
             }
         }
@@ -1299,70 +1275,65 @@ fn run_closed_with_geometry(
         let (Some(interval_start_gap_m), Some(interval_normal_force_n)) =
             (interval_start_gap_m, interval_normal_force_n)
         else {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
+                CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                 },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+            ));
         };
         let (Some(body_mechanical_energy_j), Some(post_support_gap_m), Some(post_contact_geometry)) = (
             body_mechanical_energy_j,
             post_support_gap_m,
             post_contact_geometry,
         ) else {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
+                CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                 },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+            ));
         };
         if terminal_inclination_event.is_none()
+            && numerical_refusal_reason.is_none()
             && (elapsed_s - controls.timestep_s).abs()
                 > controls.timestep_s * CONTACT_EVENT_MIN_PROGRESS_FRACTION
         {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
+                CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                 },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+            ));
         }
 
         if !(elapsed_s.is_finite() && elapsed_s > 0.0) {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
+                CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::ContactEventLocalizationFailed,
                 },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+            ));
         }
         average_channel_wrenches(&mut channels, elapsed_s);
         let Some(updated_reimpact_count) = checkpoint.reimpact_count.checked_add(reimpact_events)
         else {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
+                CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
                 },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+            ));
         };
+        // Publication is atomic with respect to the execution scope: a
+        // request observed here leaves the last accepted checkpoint/sample
+        // pair untouched and returns no falsely complete trajectory.
+        geometry_model.publication_checkpoint()?;
         checkpoint.state = state;
         checkpoint.base_deflection_m = base_deflection_m;
         checkpoint.base_velocity_m_per_s = base_velocity_m_per_s;
@@ -1402,15 +1373,13 @@ fn run_closed_with_geometry(
             || !center_of_mass_velocity_world_m_per_s.is_finite()
             || !post_support_gap_m.is_finite()
         {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
+                CoupledTerminal::NumericalRefusal {
                     reason: CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState,
                 },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+            ));
         }
         samples.push(CoupledSample {
             time_s: checkpoint.time_s,
@@ -1440,36 +1409,28 @@ fn run_closed_with_geometry(
             mechanical_energy_j: total_energy,
             energy_defect_j: defect,
         });
-        if checkpoint.reimpact_count > controls.reimpact_limit {
-            return Ok(CoupledRun {
+        if let Some(reason) = numerical_refusal_reason {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal {
-                    reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
-                },
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+                CoupledTerminal::NumericalRefusal { reason },
+            ));
         }
         if terminal_inclination_event.is_some()
             || sample_inclination <= controls.terminal_inclination_rad
         {
-            return Ok(CoupledRun {
+            return Ok(finish_run(
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::TerminalInclination,
-                applicability: applicability(),
-                model_disagreement: disagreement(),
-            });
+                CoupledTerminal::TerminalInclination,
+            ));
         }
     }
-    Ok(CoupledRun {
+    Ok(finish_run(
         samples,
         checkpoint,
-        terminal: CoupledTerminal::HorizonReached,
-        applicability: applicability(),
-        model_disagreement: disagreement(),
-    })
+        CoupledTerminal::HorizonReached,
+    ))
 }
 
 fn initial_checkpoint(
