@@ -1411,7 +1411,11 @@ V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP = RUN_ARTIFACT_CAP
 # These fixed logical charges conservatively cover the shallow list/dict copy,
 # snapshot index, identity maps, and tracking tuple without relying on
 # interpreter-specific getsizeof values. They are accounting constants, not
-# claims about a particular allocator's exact peak resident memory.
+# claims about a particular allocator's exact peak resident memory. Bottom-up
+# detachment keeps the original bounded snapshots while constructing a second
+# exact tree. Each container set is admitted independently under the same cap;
+# twice that cap is therefore a container-copy charge ceiling only. It excludes
+# caller-owned input, scalar/path objects, bookkeeping, and allocator overhead.
 V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES = 512
 V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES = 16
 V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES = 1_024
@@ -40463,11 +40467,16 @@ def v2_exact_wire_container_unchanged(
             return False
         if left is None or type(left) is bool:
             return left is right
-        if type(left) in {int, str}:
-            return left == right
+        if type(left) is int:
+            return int.__eq__(left, right) is True
+        if type(left) is str:
+            return str.__eq__(left, right) is True
         if type(left) is float:
-            return float.hex(left) == float.hex(right)
-        if type(left) in {list, dict}:
+            return str.__eq__(
+                float.hex(left),
+                float.hex(right),
+            ) is True
+        if type(left) is list or type(left) is dict:
             return left is right
         return False
 
@@ -40495,14 +40504,44 @@ def v2_exact_wire_container_unchanged(
                     unchanged = False
                     break
     elif type(value) is dict and type(snapshot) is dict:
-        unchanged = dict.__len__(value) == dict.__len__(snapshot)
+        snapshot_length = dict.__len__(snapshot)
+        live_length = dict.__len__(value)
+        unchanged = live_length == snapshot_length
         if unchanged:
-            for key, snapshot_item in dict.items(snapshot):
-                if not dict.__contains__(value, key):
+            # Copy through the exact base descriptor before any keyed probe.
+            # Preflight every key in both private dictionaries first: looking
+            # up an exact string in a table that still contains a custom key
+            # with the same cached hash could otherwise execute that key's
+            # equality hook before the later key is reached by iteration.
+            live_snapshot = dict.copy(value)
+            if (
+                dict.__len__(value) != live_length
+                or dict.__len__(live_snapshot) != live_length
+            ):
+                raise InputRefused(
+                    f"{label} changed while validating {path}"
+                )
+            for candidate_key in dict.__iter__(snapshot):
+                if type(candidate_key) is not str:
+                    raise EvidenceFailed(
+                        f"{label} exact-wire snapshot key is not exact text"
+                    )
+            for candidate_key in dict.__iter__(live_snapshot):
+                if type(candidate_key) is not str:
+                    raise InputRefused(
+                        f"{label} contains a non-exact object key at {path}"
+                    )
+            for key in dict.__iter__(snapshot):
+                if type(key) is not str:
+                    raise EvidenceFailed(
+                        f"{label} exact-wire snapshot key is not exact text"
+                    )
+                snapshot_item = dict.__getitem__(snapshot, key)
+                if not dict.__contains__(live_snapshot, key):
                     unchanged = False
                     break
                 try:
-                    live_item = dict.__getitem__(value, key)
+                    live_item = dict.__getitem__(live_snapshot, key)
                 except (KeyError, RuntimeError) as error:
                     raise InputRefused(
                         f"{label} changed while validating {path}"
@@ -40510,6 +40549,8 @@ def v2_exact_wire_container_unchanged(
                 if not same_member(live_item, snapshot_item):
                     unchanged = False
                     break
+            if dict.__len__(value) != live_length:
+                unchanged = False
     else:
         raise EvidenceFailed(
             f"{label} exact-wire snapshot type differs at {path}"
@@ -40567,6 +40608,130 @@ def v2_exact_json_string_wire_lengths(
     return utf8_bytes, wire_bytes
 
 
+def v2_exact_wire_reconstruct_snapshots(
+    snapshot_records: list[tuple[Any, Any, str]],
+    *,
+    label: str,
+    reconstruction_byte_cap: int = (
+        V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP
+    ),
+) -> Any:
+    """Rebuild validated snapshot records into one detached exact JSON tree."""
+    if (
+        type(snapshot_records) is not list
+        or type(reconstruction_byte_cap) is not int
+        or reconstruction_byte_cap < 0
+    ):
+        raise EvidenceFailed(
+            f"{label} exact-wire reconstruction contract is malformed"
+        )
+    detached_by_path: dict[str, Any] = {}
+    reconstruction_bytes = 0
+    record_index = list.__len__(snapshot_records)
+    while record_index:
+        record_index = v2_exact_int_add(record_index, -1)
+        record = list.__getitem__(snapshot_records, record_index)
+        if type(record) is not tuple or tuple.__len__(record) != 3:
+            raise EvidenceFailed(
+                f"{label} exact-wire snapshot record is malformed"
+            )
+        _live_container, snapshot, snapshot_path = record
+        if type(snapshot_path) is not str:
+            raise EvidenceFailed(
+                f"{label} exact-wire snapshot path is not exact text"
+            )
+        if (
+            type(_live_container) is not type(snapshot)
+            or (
+                type(snapshot) is not list
+                and type(snapshot) is not dict
+            )
+        ):
+            raise EvidenceFailed(
+                f"{label} exact-wire live/snapshot types differ"
+            )
+        if type(snapshot) is list:
+            reconstruction_charge = (
+                V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+                + list.__len__(snapshot)
+                * V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES
+            )
+            if (
+                reconstruction_charge
+                > reconstruction_byte_cap - reconstruction_bytes
+            ):
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire reconstruction cap"
+                )
+            reconstruction_bytes = v2_exact_int_add(
+                reconstruction_bytes,
+                reconstruction_charge,
+            )
+            detached_snapshot: Any = []
+            for index in range(list.__len__(snapshot)):
+                item = list.__getitem__(snapshot, index)
+                if type(item) is list or type(item) is dict:
+                    child_path = f"{snapshot_path}[{index}]"
+                    child = dict.get(detached_by_path, child_path)
+                    if child is None or type(child) is not type(item):
+                        raise EvidenceFailed(
+                            f"{label} exact-wire detached list child differs"
+                        )
+                    item = child
+                detached_snapshot.append(item)
+        elif type(snapshot) is dict:
+            reconstruction_charge = (
+                V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES
+                + dict.__len__(snapshot)
+                * V2_EXACT_WIRE_DICT_SNAPSHOT_ITEM_BYTES
+            )
+            if (
+                reconstruction_charge
+                > reconstruction_byte_cap - reconstruction_bytes
+            ):
+                raise InputRefused(
+                    f"{label} exceeds its exact-wire reconstruction cap"
+                )
+            reconstruction_bytes = v2_exact_int_add(
+                reconstruction_bytes,
+                reconstruction_charge,
+            )
+            detached_snapshot = {}
+            for ordinal, key in enumerate(dict.__iter__(snapshot)):
+                if type(key) is not str:
+                    raise EvidenceFailed(
+                        f"{label} exact-wire snapshot key is not exact text"
+                    )
+                item = dict.__getitem__(snapshot, key)
+                if type(item) is list or type(item) is dict:
+                    child_path = f"{snapshot_path}.<member:{ordinal}>"
+                    child = dict.get(detached_by_path, child_path)
+                    if child is None or type(child) is not type(item):
+                        raise EvidenceFailed(
+                            f"{label} exact-wire detached object child differs"
+                        )
+                    item = child
+                dict.__setitem__(detached_snapshot, key, item)
+        else:
+            raise EvidenceFailed(
+                f"{label} exact-wire snapshot record type differs"
+            )
+        if dict.__contains__(detached_by_path, snapshot_path):
+            raise EvidenceFailed(
+                f"{label} exact-wire snapshot path is duplicated"
+            )
+        detached_by_path[snapshot_path] = detached_snapshot
+        record = None
+        _live_container = None
+        snapshot = None
+        item = None
+        child = None
+    detached_root = dict.get(detached_by_path, "$")
+    if detached_root is None:
+        raise EvidenceFailed(f"{label} exact-wire detached root is missing")
+    return detached_root
+
+
 def v2_validate_exact_json_wire(
     value: Any,
     *,
@@ -40591,8 +40756,8 @@ def v2_validate_exact_json_wire(
         or snapshot_byte_cap < 0
     ):
         raise EvidenceFailed(f"{label} exact-wire caps are invalid")
-    stack: list[tuple[str, Any, int, str, Any]] = [
-        ("value", value, 0, "$", None)
+    stack: list[tuple[str, Any, int, str, Any, int, int]] = [
+        ("value", value, 0, "$", None, 0, 0)
     ]
     active_containers: dict[int, None] = {}
     container_snapshots: dict[str, tuple[Any, Any, str]] = {}
@@ -40604,16 +40769,24 @@ def v2_validate_exact_json_wire(
     while stack:
         frame = list.__getitem__(stack, -1)
         list.pop(stack)
-        operation, current, depth, path, state = frame
+        (
+            operation,
+            current,
+            depth,
+            path,
+            cursor,
+            ordinal,
+            expected_length,
+        ) = frame
         if operation == "leave":
             dict.pop(active_containers, id(current), None)
             continue
         if operation == "list-item":
-            index, expected_length = state
+            index = cursor
             present, item = v2_exact_wire_list_item(
                 current,
-                index=int(index),
-                expected_length=int(expected_length),
+                index=index,
+                expected_length=expected_length,
                 label=label,
                 path=path,
             )
@@ -40624,25 +40797,26 @@ def v2_validate_exact_json_wire(
                 current,
                 depth,
                 path,
-                (
-                    v2_exact_int_add(int(index), 1),
-                    int(expected_length),
-                ),
+                v2_exact_int_add(index, 1),
+                0,
+                expected_length,
             ))
             stack.append((
                 "value",
                 item,
-                v2_exact_int_add(int(depth), 1),
+                v2_exact_int_add(depth, 1),
                 f"{path}[{index}]",
                 None,
+                0,
+                0,
             ))
             continue
         if operation == "dict-item":
-            iterator, ordinal, expected_length = state
+            iterator = cursor
             present, key, item = v2_exact_wire_dict_item(
                 current,
                 iterator=iterator,
-                expected_length=int(expected_length),
+                expected_length=expected_length,
                 label=label,
                 path=path,
             )
@@ -40673,18 +40847,18 @@ def v2_validate_exact_json_wire(
                 current,
                 depth,
                 path,
-                (
-                    iterator,
-                    v2_exact_int_add(int(ordinal), 1),
-                    int(expected_length),
-                ),
+                iterator,
+                v2_exact_int_add(ordinal, 1),
+                expected_length,
             ))
             stack.append((
                 "value",
                 item,
-                v2_exact_int_add(int(depth), 1),
+                v2_exact_int_add(depth, 1),
                 f"{path}.<member:{ordinal}>",
                 None,
+                0,
+                0,
             ))
             if (
                 scalar_bytes > byte_cap
@@ -40714,7 +40888,7 @@ def v2_validate_exact_json_wire(
         if type(current) is bool:
             canonical_wire_bytes = v2_exact_int_add(
                 canonical_wire_bytes,
-                4 if current else 5,
+                4 if current is True else 5,
             )
             if canonical_wire_bytes > byte_cap:
                 raise InputRefused(
@@ -40741,7 +40915,7 @@ def v2_validate_exact_json_wire(
                 raise InputRefused(
                     f"{label} contains a non-finite float at {path}"
                 )
-            float_text = repr(current)
+            float_text = float.__repr__(current)
             float_bytes = len(str.encode(float_text, "ascii"))
             scalar_bytes = v2_exact_int_add(
                 scalar_bytes,
@@ -40810,13 +40984,23 @@ def v2_validate_exact_json_wire(
                 path,
                 (current, snapshot, path),
             )
-            stack.append(("leave", current, depth, path, None))
+            stack.append((
+                "leave",
+                current,
+                depth,
+                path,
+                None,
+                0,
+                0,
+            ))
             stack.append((
                 "list-item",
                 snapshot,
                 depth,
                 path,
-                (0, length),
+                0,
+                0,
+                length,
             ))
         elif type(current) is dict:
             length = dict.__len__(current)
@@ -40860,18 +41044,37 @@ def v2_validate_exact_json_wire(
                 raise InputRefused(
                     f"{label} changed while validating {path}"
                 )
+            # Gate the complete private key set before v2_exact_wire_dict_item
+            # performs its first exact-string lookup. A later custom key can
+            # occupy an earlier collision slot even when iteration yields an
+            # exact string first, so per-key gating at lookup time is too late.
+            for snapshot_key in dict.__iter__(snapshot):
+                if type(snapshot_key) is not str:
+                    raise InputRefused(
+                        f"{label} contains a non-exact object key at {path}"
+                    )
             dict.__setitem__(
                 container_snapshots,
                 path,
                 (current, snapshot, path),
             )
-            stack.append(("leave", current, depth, path, None))
+            stack.append((
+                "leave",
+                current,
+                depth,
+                path,
+                None,
+                0,
+                0,
+            ))
             stack.append((
                 "dict-item",
                 snapshot,
                 depth,
                 path,
-                (dict.__iter__(snapshot), 0, length),
+                dict.__iter__(snapshot),
+                0,
+                length,
             ))
         else:
             raise InputRefused(
@@ -40885,58 +41088,46 @@ def v2_validate_exact_json_wire(
             raise InputRefused(
                 f"{label} exceeds an exact-wire byte or snapshot cap"
             )
-    # The traversal worklist is empty here by construction. Rebind it before
-    # detached-tree reconstruction so later writes into retained snapshots
-    # cannot be conservatively mistaken for mutations of stale frame aliases.
+        # The retained snapshot now lives in the bounded record collection and
+        # traversal worklist.  Do not carry this temporary local into the next
+        # worklist iteration, where it would create an unnecessary additional
+        # alias across the loop join.
+        snapshot = None
+    # The traversal worklist is empty here by construction. Materialize one
+    # bounded, owned record sequence, then release the collection map and stale
+    # frame aliases before the reconstruction phase reads those records.
+    snapshot_records = [*dict.values(container_snapshots)]
+    container_snapshots = {}
     stack = []
-    frame = ("released", None, 0, "$", None)
+    frame = ("released", None, 0, "$", None, 0, 0)
     current = None
-    state = None
+    cursor = None
+    ordinal = 0
+    expected_length = 0
     item = None
     snapshot = None
     iterator = None
-    for live_container, snapshot, path in dict.values(
-        container_snapshots
-    ):
+    for live_container, snapshot, path in snapshot_records:
         v2_exact_wire_container_unchanged(
             live_container,
             snapshot,
             label=label,
             path=path,
         )
-    detached_by_path: dict[str, Any] = {}
-    for _live_container, snapshot, snapshot_path in reversed(tuple(
-        dict.values(container_snapshots)
-    )):
-        if type(snapshot) is list:
-            for index in range(list.__len__(snapshot)):
-                item = list.__getitem__(snapshot, index)
-                if type(item) in {list, dict}:
-                    child_path = f"{snapshot_path}[{index}]"
-                    child = dict.get(detached_by_path, child_path)
-                    if child is None:
-                        raise EvidenceFailed(
-                            f"{label} exact-wire detached list child is missing"
-                        )
-                    list.__setitem__(snapshot, index, child)
-        else:
-            for ordinal, (key, item) in enumerate(dict.items(snapshot)):
-                if type(item) in {list, dict}:
-                    child_path = f"{snapshot_path}.<member:{ordinal}>"
-                    child = dict.get(detached_by_path, child_path)
-                    if child is None:
-                        raise EvidenceFailed(
-                            f"{label} exact-wire detached object child is missing"
-                        )
-                    dict.__setitem__(snapshot, key, child)
-        detached_by_path[snapshot_path] = snapshot
-    if type(value) in {list, dict}:
-        detached_root = dict.get(detached_by_path, "$")
-        if detached_root is None:
-            raise EvidenceFailed(f"{label} exact-wire detached root is missing")
-    else:
-        detached_root = value
-    return detached_root
+    live_container = None
+    snapshot = None
+    path = "$"
+    if type(value) is list or type(value) is dict:
+        return v2_exact_wire_reconstruct_snapshots(
+            snapshot_records,
+            label=label,
+            reconstruction_byte_cap=snapshot_byte_cap,
+        )
+    if snapshot_records:
+        raise EvidenceFailed(
+            f"{label} exact-wire scalar retained container snapshots"
+        )
+    return value
 
 
 def v2_validate_source_document_against_source_files(
@@ -47932,6 +48123,7 @@ V2_SCALAR_PROTOCOL_RESULTS = frozenset({
     "format",
     "hash",
     "hex",
+    "id",
     "int",
     "isinstance",
     "issubclass",
@@ -48643,11 +48835,11 @@ def v2_fast_local_origin_dataflow(
         int,
         tuple[tuple[Any, ...], int, bool],
     ] = {}
-    hazardous_mapping_allocation_sites: set[tuple[Any, ...]] = set()
+    hazardous_local_allocation_sites: set[tuple[Any, ...]] = set()
     hazard_epoch = 0
 
     def exact_json_hazard_sites() -> frozenset[tuple[Any, ...]]:
-        return frozenset(hazardous_mapping_allocation_sites)
+        return frozenset(hazardous_local_allocation_sites)
 
     def origin_carries_exact_json_alias(
         origin: tuple[Any, ...],
@@ -48684,21 +48876,22 @@ def v2_fast_local_origin_dataflow(
             hazardous_allocation_sites=exact_json_hazard_sites(),
         )
 
-    def register_mapping_exact_json_hazard(
+    def register_exact_json_allocation_hazard(
         origin: tuple[Any, ...],
     ) -> tuple[Any, ...]:
         nonlocal hazard_epoch
         if not (
             len(origin) >= 5
             and origin[0] == "aggregate"
-            and origin[1] in {"BUILD_MAP", "BUILD_CONST_KEY_MAP"}
+            and origin[1]
+            in {"BUILD_LIST", "BUILD_MAP", "BUILD_CONST_KEY_MAP"}
             and type(origin[3]) is tuple
             and origin_carries_exact_json_alias(origin)
         ):
             return origin
         allocation_site = origin[3]
-        if allocation_site not in hazardous_mapping_allocation_sites:
-            set.add(hazardous_mapping_allocation_sites, allocation_site)
+        if allocation_site not in hazardous_local_allocation_sites:
+            set.add(hazardous_local_allocation_sites, allocation_site)
             hazard_epoch += 1
             # A previously clean aggregate reference can become hazardous in
             # the middle of one instruction.  Invalidate immediately; the
@@ -48813,6 +49006,73 @@ def v2_fast_local_origin_dataflow(
             return ("nested-function-code", expression[1])
         return expression
 
+    def collapse_recursive_list_family(
+        candidate: tuple[Any, ...],
+        allocation_site: tuple[Any, ...],
+        *,
+        depth: int = 0,
+    ) -> tuple[Any, ...]:
+        """Replace one list allocation family's descendants by a token."""
+        if candidate and candidate[0] in {
+            "binding",
+            "call-result",
+            "result-access",
+        }:
+            return candidate
+        if (
+            candidate
+            and candidate[0] == "attribute"
+            and candidate[1]
+            and candidate[1][0] == "binding"
+        ):
+            return candidate
+        if depth > V2_REFUSAL_STATE_DEPTH_CAP:
+            return V2_FAST_ORIGIN_UNKNOWN
+        if (
+            len(candidate) >= 5
+            and candidate[0] == "aggregate"
+            and candidate[1] == "BUILD_LIST"
+            and candidate[3] == allocation_site
+        ):
+            return ("aggregate-reference", allocation_site, False)
+        changed = False
+        parts: list[Any] = []
+        for part in candidate:
+            if type(part) is tuple:
+                updated = collapse_recursive_list_family(
+                    part,
+                    allocation_site,
+                    depth=depth + 1,
+                )
+                changed = changed or updated is not part
+                parts.append(updated)
+            else:
+                parts.append(part)
+        return tuple(parts) if changed else candidate
+
+    def mark_list_family_alias_references(
+        candidate: Any,
+        allocation_site: tuple[Any, ...],
+    ) -> Any:
+        if type(candidate) is not tuple or not candidate:
+            return candidate
+        if (
+            candidate[0] == "aggregate-reference"
+            and len(candidate) >= 2
+            and candidate[1] == allocation_site
+        ):
+            return ("aggregate-reference", allocation_site, True)
+        changed = False
+        parts: list[Any] = []
+        for part in candidate:
+            updated = mark_list_family_alias_references(
+                part,
+                allocation_site,
+            )
+            changed = changed or updated is not part
+            parts.append(updated)
+        return tuple(parts) if changed else candidate
+
     def append_aggregate_members(
         target: tuple[Any, ...],
         members: Iterable[tuple[Any, ...]],
@@ -48823,24 +49083,43 @@ def v2_fast_local_origin_dataflow(
             and target[1] == "BUILD_LIST"
         ):
             return V2_FAST_ORIGIN_UNKNOWN
+        allocation_site = target[3]
+
         member_origins = (*target[2], *members)
+        carries_exact_json_alias = any(
+            origin_carries_exact_json_alias(candidate)
+            for candidate in (target, *member_origins)
+        )
+        member_origins = tuple(
+            collapse_recursive_list_family(candidate, allocation_site)
+            for candidate in member_origins
+        )
+
+        if carries_exact_json_alias:
+            member_origins = tuple(
+                mark_list_family_alias_references(
+                    candidate,
+                    allocation_site,
+                )
+                for candidate in member_origins
+            )
         # A list reached through append is a possibility set, not a positional
         # sequence.  Merge its possible member provenance into one bounded
-        # origin instead of accumulating one row per loop iteration.  Tuple
-        # work items retain their positional shape through merge_origin, while
-        # heterogeneous members remain an explicit bounded choice.
+        # origin instead of accumulating one row per loop iteration. Recursive
+        # descendants from this allocation family are represented by a stable
+        # site token; external leaves and exact-JSON alias hazards remain.
         combined = (
             (merge_origins(member_origins),)
             if member_origins
             else ()
         )
-        return (
+        return register_exact_json_allocation_hazard((
             "aggregate",
             "BUILD_LIST",
             combined,
             target[3],
             True,
-        )
+        ))
 
     def replace_aggregate_list_item(
         target: tuple[Any, ...],
@@ -48861,13 +49140,13 @@ def v2_fast_local_origin_dataflow(
         index = int(key[1]) % len(target[2])
         members = list(target[2])
         members[index] = value
-        return (
+        return register_exact_json_allocation_hazard((
             "aggregate",
             "BUILD_LIST",
             tuple(members),
             target[3],
             False,
-        )
+        ))
 
     def aggregate_mapping_entries(
         candidate: tuple[Any, ...],
@@ -49007,7 +49286,7 @@ def v2_fast_local_origin_dataflow(
             ))
             if len(combined) > V2_FAST_ORIGIN_RESOLUTION_CAP:
                 return V2_FAST_ORIGIN_UNKNOWN
-            return register_mapping_exact_json_hazard((
+            return register_exact_json_allocation_hazard((
                 "aggregate",
                 "BUILD_MAP",
                 tuple(part for entry in combined for part in entry),
@@ -49054,7 +49333,7 @@ def v2_fast_local_origin_dataflow(
                 if sources
                 else V2_FAST_ORIGIN_STATIC
             )
-            return register_mapping_exact_json_hazard((
+            return register_exact_json_allocation_hazard((
                 "aggregate",
                 "BUILD_MAP",
                 (V2_FAST_ORIGIN_STATIC, summary_value),
@@ -49067,7 +49346,7 @@ def v2_fast_local_origin_dataflow(
         ))
         if len(combined) > V2_FAST_ORIGIN_RESOLUTION_CAP:
             return V2_FAST_ORIGIN_UNKNOWN
-        return register_mapping_exact_json_hazard((
+        return register_exact_json_allocation_hazard((
             "aggregate",
             "BUILD_MAP",
             tuple(part for entry in combined for part in entry),
@@ -49446,7 +49725,7 @@ def v2_fast_local_origin_dataflow(
                 # the list's positional shape.  Preserve each position while
                 # merging its origin; LIST_APPEND/comprehension possibility
                 # sets carry the True marker and remain on the branch below.
-                return (
+                return register_exact_json_allocation_hazard((
                     "aggregate",
                     "BUILD_LIST",
                     tuple(
@@ -49459,25 +49738,38 @@ def v2_fast_local_origin_dataflow(
                     ),
                     left[3],
                     False,
-                )
+                ))
             # LIST_APPEND retains the comprehension list below the iterator.
             # Merge possible appended member origins for the same allocation
             # site instead of growing a recursive choice on every loop edge.
             # The final marker disables positional-subscript exactness because
             # these members are a bounded possibility set, not list positions.
             possible_members = (*left[2], *right[2])
+            carries_exact_json_alias = any(
+                origin_carries_exact_json_alias(candidate)
+                for candidate in (left, right, *possible_members)
+            )
+            possible_members = tuple(
+                collapse_recursive_list_family(candidate, left[3])
+                for candidate in possible_members
+            )
+            if carries_exact_json_alias:
+                possible_members = tuple(
+                    mark_list_family_alias_references(candidate, left[3])
+                    for candidate in possible_members
+                )
             members = (
                 (merge_origins(possible_members),)
                 if possible_members
                 else ()
             )
-            return (
+            return register_exact_json_allocation_hazard((
                 "aggregate",
                 "BUILD_LIST",
                 members,
                 left[3],
                 True,
-            )
+            ))
         if (
             len(left) >= 5
             and len(right) >= 5
@@ -49492,12 +49784,17 @@ def v2_fast_local_origin_dataflow(
             ))
             if len(members) > V2_FAST_ORIGIN_RESOLUTION_CAP:
                 return V2_FAST_ORIGIN_UNKNOWN
-            return (
+            merged_collection = (
                 "aggregate",
                 left[1],
                 members,
                 left[3],
                 True,
+            )
+            return (
+                register_exact_json_allocation_hazard(merged_collection)
+                if left[1] == "BUILD_LIST"
+                else merged_collection
             )
         if (
             len(left) == len(right) == 3
@@ -49636,7 +49933,7 @@ def v2_fast_local_origin_dataflow(
                     if summary_values
                     else V2_FAST_ORIGIN_STATIC
                 )
-                return register_mapping_exact_json_hazard((
+                return register_exact_json_allocation_hazard((
                     "aggregate",
                     "BUILD_MAP",
                     (V2_FAST_ORIGIN_STATIC, summary_value),
@@ -49653,7 +49950,7 @@ def v2_fast_local_origin_dataflow(
             ))
             if len(entries) > V2_FAST_ORIGIN_RESOLUTION_CAP:
                 return V2_FAST_ORIGIN_UNKNOWN
-            return register_mapping_exact_json_hazard((
+            return register_exact_json_allocation_hazard((
                 "aggregate",
                 "BUILD_MAP",
                 tuple(part for entry in entries for part in entry),
@@ -49788,7 +50085,7 @@ def v2_fast_local_origin_dataflow(
         depth: int = 0,
     ) -> tuple[Any, ...]:
         if value == target:
-            return register_mapping_exact_json_hazard(replacement)
+            return register_exact_json_allocation_hazard(replacement)
         if depth > V2_REFUSAL_STATE_DEPTH_CAP or type(value) is not tuple:
             return value
         changed = False
@@ -49838,7 +50135,7 @@ def v2_fast_local_origin_dataflow(
                 else candidate
             )
 
-        return register_mapping_exact_json_hazard(
+        return register_exact_json_allocation_hazard(
             mark_alias_references(rebuilt)
         )
 
@@ -50182,6 +50479,18 @@ def v2_fast_local_origin_dataflow(
                 tuple(arguments),
                 False,
             )
+        if result_kind in {"exact-bytes", "exact-int", "exact-str"}:
+            # These code-pinned helpers exact-gate a scalar result. Scalars
+            # cannot retain aliases to their arguments, so carrying the whole
+            # argument graph here is both unnecessary and harmful for
+            # loop-carried arithmetic: each iteration would otherwise nest
+            # the prior scalar expression one level deeper.
+            return (
+                "protocol-result",
+                (f"audited-local:{binding[2]}:{result_kind}",),
+                (),
+                True,
+            )
         return (
             "protocol-result",
             (f"audited-local:{binding[2]}:{result_kind}",),
@@ -50393,13 +50702,24 @@ def v2_fast_local_origin_dataflow(
             and aggregate_mapping_entries(candidate[1]) is not None
             for candidate in callable_options
         )
+        proven_bound_list_copy = bool(callable_options) and all(
+            candidate
+            and candidate[0] == "attribute"
+            and candidate[2] == ("copy",)
+            and len(candidate[1]) >= 5
+            and candidate[1][0] == "aggregate"
+            and candidate[1][1] == "BUILD_LIST"
+            for candidate in callable_options
+        )
         if not unbound_call and not bound_call:
             if callable_options and all(
                 candidate
                 and candidate[0] == "attribute"
                 and candidate[2] == ("copy",)
                 for candidate in callable_options
-            ):
+            ) and not proven_bound_list_copy and flattened != {
+                ("binding", "global", "list", ("copy",))
+            }:
                 dynamic_uses[index].add((
                     "non-exact-dict-copy-receiver",
                     V2_FAST_ORIGIN_STATIC,
@@ -50447,6 +50767,99 @@ def v2_fast_local_origin_dataflow(
                     else False
                 ),
             ))
+        return merge_origins(snapshots) if snapshots else None
+
+    def list_copy_result_origin(
+        callable_options: set[tuple[Any, ...]],
+        arguments: Sequence[tuple[Any, ...]],
+        keyword_names: tuple[str, ...] | None,
+        *,
+        call_index: int,
+    ) -> tuple[Any, ...] | None:
+        """Model an exact base-list shallow copy as a fresh owned list."""
+        flattened = {
+            flattened_callable_binding(candidate)
+            for candidate in callable_options
+        }
+        unbound_call = flattened == {
+            ("binding", "global", "list", ("copy",))
+        }
+        bound_call = bool(callable_options) and all(
+            candidate
+            and candidate[0] == "attribute"
+            and candidate[2] == ("copy",)
+            and len(candidate[1]) >= 5
+            and candidate[1][0] == "aggregate"
+            and candidate[1][1] == "BUILD_LIST"
+            for candidate in callable_options
+        )
+        if not unbound_call and not bound_call:
+            return None
+        expected_argument_count = 1 if unbound_call else 0
+        if (
+            keyword_names != ()
+            or len(arguments) != expected_argument_count
+        ):
+            dynamic_uses[index].add((
+                "invalid-exact-list-copy-call-shape",
+                V2_FAST_ORIGIN_STATIC,
+            ))
+            return None
+        if not has_direct_attribute_call(call_index, "copy"):
+            dynamic_uses[index].add((
+                "aliased-exact-list-copy-call",
+                V2_FAST_ORIGIN_STATIC,
+            ))
+            return None
+        receivers = (
+            tuple(origin_options(arguments[0]))
+            if unbound_call
+            else tuple(
+                candidate[1] for candidate in callable_options
+            )
+        )
+        # The exact descriptor allocates a plain list and shallowly retains
+        # only the members present at the call. A proven aggregate therefore
+        # transfers its member tuple into a fresh allocation; it must not keep
+        # the source allocation itself, because a later source replacement is
+        # not reflected by a shallow copy. An opaque receiver retains one
+        # unknown possible member so all later member-sensitive use remains
+        # fail-closed without inventing source/copy aliasing.
+        snapshots: list[tuple[Any, ...]] = []
+        for receiver in receivers:
+            if (
+                len(receiver) >= 5
+                and receiver[0] == "aggregate"
+                and receiver[1] == "BUILD_LIST"
+                and type(receiver[2]) is tuple
+                and type(receiver[4]) is bool
+            ):
+                members = tuple(receiver[2])
+                summarized = receiver[4]
+            elif v2_fast_origin_is_exact_json(receiver):
+                members = ((
+                    "exact-json-member",
+                    receiver,
+                    "<copy-member>",
+                ),)
+                summarized = True
+            elif origin_carries_exact_json_alias(receiver):
+                members = ((
+                    "aggregate-reference",
+                    ("copy-source-alias", call_index),
+                    True,
+                ),)
+                summarized = True
+            else:
+                members = (V2_FAST_ORIGIN_UNKNOWN,)
+                summarized = True
+            snapshots.append(register_exact_json_allocation_hazard((
+                "aggregate",
+                "BUILD_LIST",
+                members,
+                ("copy-allocation-site", call_index),
+                summarized,
+            )))
         return merge_origins(snapshots) if snapshots else None
 
     def dict_items_result_origin(
@@ -50726,6 +51139,59 @@ def v2_fast_local_origin_dataflow(
         # user code or returns a built-in int.  Do not retain the receiver as
         # an alias of that scalar result.
         return V2_FAST_ORIGIN_STATIC
+
+    def exact_base_scalar_descriptor_result_origin(
+        callable_options: set[tuple[Any, ...]],
+        arguments: Sequence[tuple[Any, ...]],
+        keyword_names: tuple[str, ...] | None,
+        *,
+        call_index: int,
+    ) -> tuple[Any, ...] | None:
+        """Model exact scalar descriptors that cannot dispatch input hooks."""
+        flattened = {
+            flattened_callable_binding(candidate)
+            for candidate in callable_options
+        }
+        descriptor_results = {
+            ("binding", "global", "float", ("__repr__",)): (
+                "float.__repr__",
+                1,
+            ),
+            ("binding", "global", "float", ("hex",)): (
+                "float.hex",
+                1,
+            ),
+            ("binding", "global", "int", ("__eq__",)): (
+                "int.__eq__",
+                2,
+            ),
+            ("binding", "global", "str", ("__eq__",)): (
+                "str.__eq__",
+                2,
+            ),
+        }
+        if len(flattened) != 1:
+            return None
+        descriptor = next(iter(flattened))
+        result_contract = descriptor_results.get(descriptor)
+        if result_contract is None:
+            return None
+        result_name, expected_argument_count = result_contract
+        attribute_name = descriptor[3][0]
+        if (
+            keyword_names != ()
+            or len(arguments) != expected_argument_count
+            or not has_direct_attribute_call(call_index, attribute_name)
+        ):
+            return None
+        # Each exact descriptor either rejects an incompatible receiver itself
+        # or returns a scalar; none invokes receiver overrides.
+        return (
+            "protocol-result",
+            (result_name,),
+            (),
+            True,
+        )
 
     def exact_container_method_result_origin(
         callable_options: set[tuple[Any, ...]],
@@ -51129,6 +51595,27 @@ def v2_fast_local_origin_dataflow(
                 if prior[1].get((kind, name))
                 != merged[1].get((kind, name))
             ) if prior is not None else []
+            changed_binding_shapes = [
+                (
+                    binding_name,
+                    (
+                        prior_origin[0] if prior_origin else "missing",
+                        origin_depth(prior_origin) if prior_origin else 0,
+                    ),
+                    (
+                        merged_origin[0] if merged_origin else "missing",
+                        origin_depth(merged_origin) if merged_origin else 0,
+                    ),
+                )
+                for binding_name in changed_bindings[:8]
+                for binding_key_parts in (
+                    tuple(binding_name.split(":", 1)),
+                )
+                for prior_origin, merged_origin in ((
+                    prior[1].get(binding_key_parts),
+                    merged[1].get(binding_key_parts),
+                ),)
+            ] if prior is not None else []
             raise EvidenceFailed(
                 "refusal-state fast-local CFG exceeds its convergence cap "
                 f"in {code.co_qualname} on edge {index}->{target}; "
@@ -51138,6 +51625,7 @@ def v2_fast_local_origin_dataflow(
                 "stack_shapes="
                 f"{[(item[0] if item else 'empty', origin_depth(item)) for item in merged[0]][:8]}, "
                 f"binding_changes={changed_bindings[:8]}, "
+                f"binding_shapes={changed_binding_shapes}, "
                 "invalidation_changed="
                 f"{prior is None or prior[2] != merged[2]}"
             )
@@ -51164,6 +51652,7 @@ def v2_fast_local_origin_dataflow(
         "frozenset",
         "hash",
         "hex",
+        "id",
         "int",
         "isinstance",
         "issubclass",
@@ -51401,6 +51890,9 @@ def v2_fast_local_origin_dataflow(
                     or active_executable_function
                     is v2_validate_exact_json_wire
                     and code is v2_validate_exact_json_wire.__code__
+                    or active_executable_function
+                    is v2_exact_wire_reconstruct_snapshots
+                    and code is v2_exact_wire_reconstruct_snapshots.__code__
                 )
             )
             if not (
@@ -52482,6 +52974,12 @@ def v2_fast_local_origin_dataflow(
                 call_keyword_names,
                 call_index=index,
             )
+            list_copy_result = list_copy_result_origin(
+                callable_options,
+                arguments,
+                call_keyword_names,
+                call_index=index,
+            )
             dict_items_result = dict_items_result_origin(
                 callable_options,
                 arguments,
@@ -52500,6 +52998,14 @@ def v2_fast_local_origin_dataflow(
                 call_keyword_names,
                 call_index=index,
             )
+            exact_base_scalar_result = (
+                exact_base_scalar_descriptor_result_origin(
+                    callable_options,
+                    arguments,
+                    call_keyword_names,
+                    call_index=index,
+                )
+            )
             container_method_result = exact_container_method_result_origin(
                 callable_options,
                 arguments,
@@ -52514,9 +53020,11 @@ def v2_fast_local_origin_dataflow(
                 or dict_get_result is not None
                 or dict_getitem_result is not None
                 or dict_copy_result is not None
+                or list_copy_result is not None
                 or dict_items_result is not None
                 or dict_values_result is not None
                 or exact_base_len_result is not None
+                or exact_base_scalar_result is not None
                 or container_method_result is not None
             )
             if not modeled_bound_call:
@@ -52595,8 +53103,13 @@ def v2_fast_local_origin_dataflow(
                 for candidate in callable_options
             )
             if protocol or scalar_module_call:
-                class_test_protocol = protocol and all(
-                    candidate[2] in {"isinstance", "issubclass", "type"}
+                non_dispatch_identity_or_class_test = protocol and all(
+                    candidate[2] in {
+                        "id",
+                        "isinstance",
+                        "issubclass",
+                        "type",
+                    }
                     for candidate in callable_options
                 )
                 keyword_count = (
@@ -52629,13 +53142,13 @@ def v2_fast_local_origin_dataflow(
                     (),
                 )
                 for argument_index, argument in enumerate(arguments):
-                    if class_test_protocol:
-                        # type/isinstance/issubclass do not dispatch ordinary
-                        # conversion/iteration protocols modeled by this
-                        # path.  Their class-info operands remain normal
-                        # binding accesses and are identity/state projected;
-                        # treating typing.Mapping/Sequence as iterable data
-                        # would reject an identity-pinned class-info value.
+                    if non_dispatch_identity_or_class_test:
+                        # id/type/isinstance/issubclass do not dispatch the
+                        # ordinary conversion/iteration protocols modeled by
+                        # this path. Their operands remain normal binding
+                        # accesses and are identity/state projected; treating
+                        # class-info values as iterable data would reject an
+                        # otherwise identity-pinned value.
                         continue
                     if argument_index not in key_argument_indices:
                         receiver_only_operation = next(
@@ -52767,6 +53280,8 @@ def v2_fast_local_origin_dataflow(
                 or recognized_dict_pop
                 or recognized_list_pop
                 or recognized_list_setitem
+                or exact_base_scalar_result is not None
+                or list_copy_result is not None
                 or callable_options
                 and all(
                     candidate
@@ -52852,7 +53367,9 @@ def v2_fast_local_origin_dataflow(
                     or dict_getitem_result is not None
                     or dict_get_result is not None
                     or dict_copy_result is not None
+                    or list_copy_result is not None
                     or exact_base_len_result is not None
+                    or exact_base_scalar_result is not None
                     or recognized_dict_pop
                     or recognized_list_pop
                     or recognized_list_setitem
@@ -52876,12 +53393,16 @@ def v2_fast_local_origin_dataflow(
                     if dict_get_result is not None
                     else dict_copy_result
                     if dict_copy_result is not None
+                    else list_copy_result
+                    if list_copy_result is not None
                     else dict_items_result
                     if dict_items_result is not None
                     else dict_values_result
                     if dict_values_result is not None
                     else exact_base_len_result
                     if exact_base_len_result is not None
+                    else exact_base_scalar_result
+                    if exact_base_scalar_result is not None
                     else container_method_result
                     if container_method_result is not None
                     else (
@@ -53345,8 +53866,7 @@ def v2_fast_local_origin_dataflow(
             if opname == "BUILD_SET":
                 for member in members:
                     dynamic_uses[index].add(("call-protocol", member))
-            list.append(
-                stack,
+            constructed_collection = (
                 (
                     "aggregate",
                     opname,
@@ -53355,7 +53875,17 @@ def v2_fast_local_origin_dataflow(
                     False,
                 )
                 if opname in {"BUILD_LIST", "BUILD_SET"}
-                else ("aggregate", opname, members),
+                else ("aggregate", opname, members)
+            )
+            if opname == "BUILD_LIST":
+                constructed_collection = (
+                    register_exact_json_allocation_hazard(
+                        constructed_collection
+                    )
+                )
+            list.append(
+                stack,
+                constructed_collection,
             )
         if opname == "LIST_APPEND":
             member = pop_origin()
@@ -53397,7 +53927,7 @@ def v2_fast_local_origin_dataflow(
                 dynamic_uses[index].add(("call-protocol", key_origin))
             list.append(
                 stack,
-                register_mapping_exact_json_hazard((
+                register_exact_json_allocation_hazard((
                     "aggregate",
                     opname,
                     members,
@@ -53410,7 +53940,7 @@ def v2_fast_local_origin_dataflow(
             members = tuple(reversed(pop_origins(count + 1)))
             list.append(
                 stack,
-                register_mapping_exact_json_hazard((
+                register_exact_json_allocation_hazard((
                     "aggregate",
                     opname,
                     members,
@@ -53857,6 +54387,7 @@ def v2_fast_local_origin_dataflow(
             key=lambda row: (row[0], v2_fast_origin_sort_key(row[1])),
         )),
         "exact_result_call_indices": frozenset(exact_result_call_indices),
+        "hazardous_allocation_sites": exact_json_hazard_sites(),
         "invoked_nested_codes": frozenset({
             nested_code
             for nested_code, calls_by_site in invoked_nested_calls.items()
@@ -56168,6 +56699,16 @@ def v2_code_access_analysis(
         if operation == "aliased-exact-dict-copy-call":
             raise EvidenceFailed(
                 "refusal-state exact dict copy callable requires a direct "
+                f"source-to-call window in {code.co_qualname}"
+            )
+        if operation == "invalid-exact-list-copy-call-shape":
+            raise EvidenceFailed(
+                "refusal-state exact list copy call has invalid positional "
+                f"or keyword shape in {code.co_qualname}"
+            )
+        if operation == "aliased-exact-list-copy-call":
+            raise EvidenceFailed(
+                "refusal-state exact list copy callable requires a direct "
                 f"source-to-call window in {code.co_qualname}"
             )
         if operation == "non-exact-dict-copy-receiver":
@@ -84825,6 +85366,236 @@ def v2_execute_source_cases(
             ),
             contains="non-exact object key",
         )
+        collision_key_hooks = {"hash": 0, "equality": 0, "repr": 0}
+        collision_key_armed = False
+
+        class CollidingExactWireKey:
+            def __hash__(self) -> int:
+                collision_key_hooks["hash"] += 1
+                return hash("x")
+
+            def __eq__(self, other: object) -> bool:
+                collision_key_hooks["equality"] += 1
+                if collision_key_armed:
+                    raise RuntimeError(
+                        "colliding exact-wire key equality executed"
+                    )
+                return False
+
+            def __repr__(self) -> str:
+                collision_key_hooks["repr"] += 1
+                raise RuntimeError(
+                    "colliding exact-wire key repr executed"
+                )
+
+        collision_key = CollidingExactWireKey()
+        collision_document: dict[Any, Any] = {
+            collision_key: "custom",
+            "x": "exact",
+        }
+        dict.__delitem__(collision_document, collision_key)
+        dict.__setitem__(collision_document, collision_key, "custom")
+        collision_exact_key_is_first = (
+            type(next(dict.__iter__(collision_document))) is str
+        )
+        collision_key_hooks = {"hash": 0, "equality": 0, "repr": 0}
+        collision_key_armed = True
+        collision_key_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                collision_document,
+                label="exact-wire colliding non-string key fixture",
+            ),
+            contains="non-exact object key",
+        )
+        collision_validation_hook_counts = dict(collision_key_hooks)
+        collision_key_hooks = {"hash": 0, "equality": 0, "repr": 0}
+        collision_comparison_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_container_unchanged(
+                collision_document,
+                {"x": "exact", "y": "custom"},
+                label="exact-wire colliding comparison fixture",
+                path="$",
+            ),
+            contains="non-exact object key",
+        )
+        collision_comparison_hook_counts = dict(collision_key_hooks)
+
+        reconstruction_live_child = ["value"]
+        reconstruction_live_dictionary = {
+            "child": reconstruction_live_child
+        }
+        reconstruction_live_root = [reconstruction_live_dictionary]
+        reconstruction_child_snapshot = ["value"]
+        reconstruction_dictionary_snapshot = {
+            "child": reconstruction_live_child
+        }
+        reconstruction_root_snapshot = [reconstruction_live_dictionary]
+        reconstruction_records = [
+            (
+                reconstruction_live_root,
+                reconstruction_root_snapshot,
+                "$",
+            ),
+            (
+                reconstruction_live_dictionary,
+                reconstruction_dictionary_snapshot,
+                "$[0]",
+            ),
+            (
+                reconstruction_live_child,
+                reconstruction_child_snapshot,
+                "$[0].<member:0>",
+            ),
+        ]
+        reconstruction_container_charge = (
+            2
+            * (
+                V2_EXACT_WIRE_LIST_SNAPSHOT_BASE_BYTES
+                + V2_EXACT_WIRE_LIST_SNAPSHOT_ITEM_BYTES
+            )
+            + V2_EXACT_WIRE_DICT_SNAPSHOT_BASE_BYTES
+            + V2_EXACT_WIRE_DICT_SNAPSHOT_ITEM_BYTES
+        )
+        reconstructed_direct = v2_exact_wire_reconstruct_snapshots(
+            reconstruction_records,
+            label="exact-wire direct reconstruction fixture",
+            reconstruction_byte_cap=reconstruction_container_charge,
+        )
+        reconstruction_cap_error = expect_error(
+            InputRefused,
+            lambda: v2_exact_wire_reconstruct_snapshots(
+                reconstruction_records,
+                label="exact-wire direct reconstruction plus-one fixture",
+                reconstruction_byte_cap=(
+                    reconstruction_container_charge - 1
+                ),
+            ),
+            contains="exact-wire reconstruction cap",
+        )
+        reconstruction_contract_errors = {
+            "records-not-list": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    (),  # type: ignore[arg-type]
+                    label="exact-wire non-list records fixture",
+                ),
+                contains="reconstruction contract is malformed",
+            ),
+            "record-shape": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [([], "$")],  # type: ignore[list-item]
+                    label="exact-wire malformed record fixture",
+                ),
+                contains="snapshot record is malformed",
+            ),
+            "path-type": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [([], [], 0)],  # type: ignore[list-item]
+                    label="exact-wire non-string path fixture",
+                ),
+                contains="snapshot path is not exact text",
+            ),
+            "live-snapshot-type": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [([], {}, "$")],
+                    label="exact-wire live/snapshot type fixture",
+                ),
+                contains="live/snapshot types differ",
+            ),
+            "missing-list-child": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [([[]], [[]], "$")],
+                    label="exact-wire missing list child fixture",
+                ),
+                contains="detached list child differs",
+            ),
+            "missing-dict-child": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [
+                        (
+                            {"child": []},
+                            {"child": []},
+                            "$",
+                        )
+                    ],
+                    label="exact-wire missing object child fixture",
+                ),
+                contains="detached object child differs",
+            ),
+            "snapshot-key-type": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [({1: None}, {1: None}, "$")],
+                    label="exact-wire non-string snapshot key fixture",
+                ),
+                contains="snapshot key is not exact text",
+            ),
+            "missing-root": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [([], [], "$[0]")],
+                    label="exact-wire missing reconstruction root fixture",
+                ),
+                contains="detached root is missing",
+            ),
+            "duplicate-path": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [([], [], "$"), ([], [], "$")],
+                    label="exact-wire duplicate path fixture",
+                ),
+                contains="snapshot path is duplicated",
+            ),
+            "child-kind": expect_error(
+                EvidenceFailed,
+                lambda: v2_exact_wire_reconstruct_snapshots(
+                    [
+                        ([[]], [[]], "$"),
+                        ({}, {}, "$[0]"),
+                    ],
+                    label="exact-wire child kind fixture",
+                ),
+                contains="detached list child differs",
+            ),
+        }
+        reconstruction_records_unchanged = (
+            reconstruction_records[0][0] is reconstruction_live_root
+            and reconstruction_records[0][1]
+            is reconstruction_root_snapshot
+            and reconstruction_root_snapshot[0]
+            is reconstruction_live_dictionary
+            and reconstruction_records[1][0]
+            is reconstruction_live_dictionary
+            and reconstruction_records[1][1]
+            is reconstruction_dictionary_snapshot
+            and reconstruction_dictionary_snapshot["child"]
+            is reconstruction_live_child
+            and reconstruction_records[2][0]
+            is reconstruction_live_child
+            and reconstruction_records[2][1]
+            is reconstruction_child_snapshot
+            and reconstruction_child_snapshot == ["value"]
+        )
+        reconstruction_direct_disjoint = (
+            reconstructed_direct == [{"child": ["value"]}]
+            and reconstructed_direct is not reconstruction_live_root
+            and reconstructed_direct is not reconstruction_root_snapshot
+            and reconstructed_direct[0]
+            is not reconstruction_live_dictionary
+            and reconstructed_direct[0]
+            is not reconstruction_dictionary_snapshot
+            and reconstructed_direct[0]["child"]
+            is not reconstruction_live_child
+            and reconstructed_direct[0]["child"]
+            is not reconstruction_child_snapshot
+        )
         disjoint_input = [{"value": 1}, {"value": 1}]
         disjoint_detached = v2_validate_exact_json_wire(
             disjoint_input,
@@ -84835,6 +85606,21 @@ def v2_execute_source_cases(
             and disjoint_detached[0] is not disjoint_input[0]
             and disjoint_detached[1] is not disjoint_input[1]
             and disjoint_detached[0] is not disjoint_detached[1]
+        )
+        precedence_label = "exact-wire sibling refusal precedence fixture"
+        precedence_expected = (
+            f"{precedence_label} contains a non-finite float at $[0]"
+        )
+        precedence_error = expect_error(
+            InputRefused,
+            lambda: v2_validate_exact_json_wire(
+                [float("nan"), {1: None}],
+                label=precedence_label,
+            ),
+            contains=precedence_expected,
+        )
+        reconstruction_container_copy_charge_ceiling = (
+            2 * V2_SOURCE_EXACT_WIRE_SNAPSHOT_BYTES_CAP
         )
         checks.check(
             "source-exact-wire-tree-shape-and-dictionary-accounting",
@@ -84851,7 +85637,25 @@ def v2_execute_source_cases(
             and hostile_non_string_key_error.terminal == "InputRefused"
             and hostile_key_hooks
             == {"hash": 0, "equality": 0, "repr": 0}
-            and disjoint_tree_preserved,
+            and collision_exact_key_is_first
+            and collision_key_error.terminal == "InputRefused"
+            and collision_comparison_error.terminal == "InputRefused"
+            and collision_validation_hook_counts
+            == {"hash": 0, "equality": 0, "repr": 0}
+            and collision_comparison_hook_counts
+            == {"hash": 0, "equality": 0, "repr": 0}
+            and reconstruction_records_unchanged
+            and reconstruction_direct_disjoint
+            and reconstruction_cap_error.terminal == "InputRefused"
+            and all(
+                error.terminal == "EvidenceFailed"
+                for error in reconstruction_contract_errors.values()
+            )
+            and disjoint_tree_preserved
+            and precedence_error.terminal == "InputRefused"
+            and str(precedence_error) == precedence_expected
+            and reconstruction_container_copy_charge_ceiling
+            == 2 * RUN_ARTIFACT_CAP,
             expected={
                 "cycles": "InputRefused",
                 "repeated_container_identity": "de-aliased-per-wire-occurrence",
@@ -84863,7 +85667,32 @@ def v2_execute_source_cases(
                 "non_string_key": "InputRefused",
                 "hostile_non_string_key": "InputRefused",
                 "hostile_non_string_key_hook_calls": 0,
+                "colliding_non_string_key": "InputRefused",
+                "colliding_comparison_key": "InputRefused",
+                "colliding_non_string_key_hook_calls": 0,
+                "direct_reconstruction": {
+                    "snapshot_records": "unchanged",
+                    "output": "fully-identity-disjoint",
+                    "exact_container_charge_bytes": (
+                        reconstruction_container_charge
+                    ),
+                    "cap_plus_one": "InputRefused",
+                    "contract_refusals": {
+                        name: "EvidenceFailed"
+                        for name in reconstruction_contract_errors
+                    },
+                },
                 "detached_siblings": "identity-disjoint",
+                "sibling_refusal_precedence": {
+                    "first_visited": "$[0]",
+                    "later_unvisited": "non-exact object key at $[1]",
+                },
+                "reconstruction_container_copy_charge_ceiling_bytes": (
+                    2 * RUN_ARTIFACT_CAP
+                ),
+                "reconstruction_charge_no_claim": (
+                    "not caller-input, bookkeeping, allocator, or RSS proof"
+                ),
             },
             observed={
                 "terminals": {
@@ -84883,9 +85712,44 @@ def v2_execute_source_cases(
                     hostile_non_string_key_error.terminal
                 ),
                 "hostile_non_string_key_hooks": hostile_key_hooks,
+                "colliding_non_string_key": collision_key_error.terminal,
+                "colliding_comparison_key": (
+                    collision_comparison_error.terminal
+                ),
+                "colliding_non_string_key_hooks": (
+                    collision_validation_hook_counts
+                ),
+                "colliding_comparison_key_hooks": (
+                    collision_comparison_hook_counts
+                ),
+                "colliding_exact_key_is_first": (
+                    collision_exact_key_is_first
+                ),
+                "direct_reconstruction_records_unchanged": (
+                    reconstruction_records_unchanged
+                ),
+                "direct_reconstruction_identity_disjoint": (
+                    reconstruction_direct_disjoint
+                ),
+                "direct_reconstruction_charge_bytes": (
+                    reconstruction_container_charge
+                ),
+                "direct_reconstruction_cap_plus_one": (
+                    reconstruction_cap_error.terminal
+                ),
+                "direct_reconstruction_contract_refusals": {
+                    name: error.terminal
+                    for name, error in reconstruction_contract_errors.items()
+                },
                 "detached_siblings_identity_disjoint": (
                     disjoint_tree_preserved
                 ),
+                "sibling_refusal_terminal": precedence_error.terminal,
+                "sibling_refusal_diagnostic": str(precedence_error),
+                "reconstruction_container_copy_charge_ceiling_bytes": (
+                    reconstruction_container_copy_charge_ceiling
+                ),
+                "reconstruction_charge_scope": "container-copies-only",
             },
         )
 
@@ -102146,6 +103010,117 @@ def v2_execute_artifact_cases(
                 "known",
             ).strip()
 
+        def direct_unbound_list_copy_projection(
+            value: str = " padded ",
+        ) -> str:
+            copied = list.copy([value])
+            return list.__getitem__(copied, 0).strip()
+
+        def direct_bound_list_copy_projection(
+            value: str = " padded ",
+        ) -> str:
+            copied = [value].copy()
+            return list.__getitem__(copied, 0).strip()
+
+        def aliased_list_copy_projection() -> list[str]:
+            copier = list.copy
+            return copier([" value "])
+
+        def invalid_list_copy_projection() -> list[str]:
+            return list.copy(self=[" value "])
+
+        def list_copy_then_source_rebind(
+            before: Callable[[], Any],
+            after: Callable[[], Any],
+        ) -> None:
+            source = [before]
+            copied = list.copy(source)
+            list.__setitem__(source, 0, after)
+            list.__getitem__(copied, 0)()
+
+        def list_copy_then_copy_rebind(
+            before: Callable[[], Any],
+            after: Callable[[], Any],
+        ) -> None:
+            source = [before]
+            copied = list.copy(source)
+            list.__setitem__(copied, 0, after)
+            list.__getitem__(source, 0)()
+
+        def list_mutate_then_copy(
+            before: Callable[[], Any],
+            after: Callable[[], Any],
+        ) -> None:
+            source = [before]
+            list.__setitem__(source, 0, after)
+            copied = list.copy(source)
+            list.__getitem__(copied, 0)()
+
+        def list_source_add_absent_from_copy(
+            before: Callable[[], Any],
+            after: Callable[[], Any],
+        ) -> None:
+            source = [before]
+            copied = list.copy(source)
+            source.append(after)
+            list.__getitem__(copied, 0)()
+
+        def list_copy_add_absent_from_source(
+            before: Callable[[], Any],
+            after: Callable[[], Any],
+        ) -> None:
+            source = [before]
+            copied = list.copy(source)
+            copied.append(after)
+            list.__getitem__(source, 0)()
+
+        def shallow_list_copy_nested_mutation_projection() -> str:
+            nested = [" before "]
+            source = [nested]
+            copied = list.copy(source)
+            list.__setitem__(nested, 0, " after ")
+            return list.__getitem__(
+                list.__getitem__(copied, 0),
+                0,
+            ).strip()
+
+        def list_copy_alias_hook() -> None:
+            pass
+
+        def list_copy_retains_prior_exact_json_alias() -> None:
+            root = v2_br_exact_mapping(
+                {"items": []},
+                frozenset({"items"}),
+                label="list-copy retained exact-JSON alias fixture",
+                error_type=EvidenceFailed,
+            )
+            source = [root["items"]]
+            copied = list.copy(source)
+            list.__setitem__(source, 0, [])
+            list.__getitem__(copied, 0).append(list_copy_alias_hook)
+
+        def list_copy_excludes_later_exact_json_alias() -> None:
+            root = v2_br_exact_mapping(
+                {"items": []},
+                frozenset({"items"}),
+                label="list-copy later exact-JSON alias fixture",
+                error_type=EvidenceFailed,
+            )
+            source = [[]]
+            copied = list.copy(source)
+            list.__setitem__(source, 0, root["items"])
+            list.__getitem__(copied, 0).append(list_copy_alias_hook)
+
+        def list_copy_direct_exact_json_nested_alias() -> None:
+            root = v2_br_exact_mapping(
+                {"items": [[]]},
+                frozenset({"items"}),
+                label="list-copy direct exact-JSON alias fixture",
+                error_type=EvidenceFailed,
+            )
+            copied = list.copy(root["items"])
+            list.__getitem__(copied, 0).append(list_copy_alias_hook)
+
         def exact_copy_get_projection(
             value: str = " padded ",
         ) -> str:
@@ -102191,6 +103166,226 @@ def v2_execute_artifact_cases(
             dict.pop(mapping, "removed", None)
             for callback in view:
                 callback()
+
+        def fixed_bound_list_pop_result(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values = [initial, removed]
+            values.pop()()
+
+        def fixed_unbound_list_pop_result(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values = [initial, removed]
+            list.pop(values)()
+
+        def fixed_bound_list_pop_remaining(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values = [initial, removed]
+            values.pop()
+            list.__getitem__(values, 0)()
+
+        def indexed_bound_list_pop(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values = [initial, removed]
+            values.pop(-1)()
+
+        def indexed_unbound_list_pop(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values = [initial, removed]
+            list.pop(values, -1)()
+
+        def dynamic_index_list_pop(
+            removed: Callable[[], Any],
+            index: int,
+        ) -> None:
+            values = [removed]
+            values.pop(index)()
+
+        captured_list_pop_receiver: list[Any] = []
+
+        def captured_list_pop(
+            receiver: list[Any] = captured_list_pop_receiver,
+        ) -> None:
+            receiver.pop()
+
+        def summarized_list_pop_result(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values: list[Callable[[], Any]] = []
+            for callback in (initial, removed):
+                values.append(callback)
+            values.pop()()
+
+        def summarized_list_pop_remaining(
+            initial: Callable[[], Any],
+            removed: Callable[[], Any],
+        ) -> None:
+            values: list[Callable[[], Any]] = []
+            for callback in (initial, removed):
+                values.append(callback)
+            values.pop()
+            list.__getitem__(values, 0)()
+
+        def spread_record_nested_mutation(
+            initial: Callable[[], Any],
+            replacement: Callable[[], Any],
+        ) -> None:
+            snapshot = [initial]
+            by_path = {"$": ([], snapshot, "$")}
+            records = [*dict.values(by_path)]
+            by_path = {}
+            _live, selected_snapshot, _path = list.__getitem__(records, 0)
+            list.__setitem__(selected_snapshot, 0, replacement)
+            list.__getitem__(selected_snapshot, 0)()
+
+        class ListFamilyEqualityProbe:
+            calls = 0
+            __hash__ = object.__hash__
+
+            def __eq__(self, other: object) -> bool:
+                type(self).calls += 1
+                return self is other
+
+            def __ne__(self, other: object) -> bool:
+                type(self).calls += 1
+                return self is not other
+
+        def list_alias_marker_probe(carried: object) -> list[object]:
+            values: list[object] = []
+            values.append(carried)
+            return values
+
+        list_alias_marker_code = list_alias_marker_probe.__code__
+        list_alias_marker_instructions = v2_analysis_instructions(
+            list_alias_marker_code
+        )
+        list_alias_marker_index = next(
+            instruction_index
+            for instruction_index, instruction in enumerate(
+                list_alias_marker_instructions
+            )
+            if instruction.opname == "BUILD_LIST"
+        )
+        list_alias_marker_allocation_site = (
+            "allocation-site",
+            list_alias_marker_index,
+        )
+        list_family_equality_probe = ListFamilyEqualityProbe()
+        list_family_exact_json_origin = (
+            "audited-exact-json",
+            "list-family equality-hook fixture",
+            "exact-json-list",
+            list_alias_marker_code,
+            list_alias_marker_code,
+            0,
+        )
+        list_family_carried_origin = (
+            "choice",
+            (
+                list_family_exact_json_origin,
+                (
+                    "aggregate-reference",
+                    list_alias_marker_allocation_site,
+                    False,
+                ),
+                v2_fast_constant_origin(list_family_equality_probe),
+            ),
+        )
+        ListFamilyEqualityProbe.calls = 0
+        list_alias_marker_data = v2_fast_local_origin_dataflow(
+            list_alias_marker_instructions,
+            list_alias_marker_code,
+            parameter_origins={
+                "carried": list_family_carried_origin,
+            },
+        )
+
+        def contains_marked_list_reference(value: object) -> bool:
+            if type(value) is not tuple:
+                return False
+            if (
+                len(value) == 3
+                and value[0] == "aggregate-reference"
+                and value[1] == list_alias_marker_allocation_site
+                and value[2] is True
+            ):
+                return True
+            return any(
+                contains_marked_list_reference(part) for part in value
+            )
+
+        list_family_marked_reference = any(
+            contains_marked_list_reference(return_expression)
+            for return_expression in list_alias_marker_data[
+                "return_expressions"
+            ]
+        )
+
+        def stale_list_family_alias_probe(exact: object) -> object:
+            values: list[object] = []
+            values.append(values)
+            alias = list.__getitem__(values, 0)
+            values.append(exact)
+            return alias
+
+        def stale_list_copy_family_alias_probe(
+            exact: object,
+        ) -> list[object]:
+            values: list[object] = []
+            values.append(values)
+            copied = list.copy(values)
+            values.append(exact)
+            return copied
+
+        def stale_family_probe_result(
+            callback: Callable[..., Any],
+        ) -> tuple[bool, int]:
+            probe_code = callback.__code__
+            probe_instructions = v2_analysis_instructions(probe_code)
+            exact_origin = (
+                "audited-exact-json",
+                "stale list-family alias fixture",
+                "exact-json-list",
+                probe_code,
+                probe_code,
+                0,
+            )
+            probe_data = v2_fast_local_origin_dataflow(
+                probe_instructions,
+                probe_code,
+                parameter_origins={"exact": exact_origin},
+            )
+            hazardous_sites = probe_data["hazardous_allocation_sites"]
+            return (
+                bool(probe_data["return_expressions"])
+                and all(
+                    v2_fast_origin_carries_exact_json_alias(
+                        return_expression,
+                        hazardous_allocation_sites=hazardous_sites,
+                    )
+                    for return_expression in probe_data[
+                        "return_expressions"
+                    ]
+                ),
+                len(hazardous_sites),
+            )
+
+        stale_list_family_result = stale_family_probe_result(
+            stale_list_family_alias_probe
+        )
+        stale_list_copy_family_result = stale_family_probe_result(
+            stale_list_copy_family_alias_probe
+        )
 
         def modeled_bound_list_append(
             initial: Callable[[], Any],
@@ -102241,6 +103436,16 @@ def v2_execute_artifact_cases(
 
         def exact_json_alias_hook() -> None:
             exact_json_alias_hook_calls["calls"] += 1
+
+        def exact_json_alias_list_pop() -> None:
+            root = v2_br_exact_mapping(
+                {"items": [exact_json_alias_hook]},
+                frozenset({"items"}),
+                label="list-pop exact-JSON alias fixture",
+                error_type=EvidenceFailed,
+            )
+            alias = root["items"]
+            alias.pop()()
 
         def iterator_exact_json_alias_launder() -> None:
             root = v2_br_exact_mapping(
@@ -102822,6 +104027,71 @@ def v2_execute_artifact_cases(
                     shallow_copy_nested_mutation_projection
                 )["kind"],
             },
+            "list-copy": {
+                "unbound": v2_fixture_callback_data_projection(
+                    direct_unbound_list_copy_projection
+                )["kind"],
+                "bound": v2_fixture_callback_data_projection(
+                    direct_bound_list_copy_projection
+                )["kind"],
+                "alias": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        aliased_list_copy_projection
+                    ),
+                    contains="requires a direct source-to-call window",
+                ).terminal,
+                "invalid-shape": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        invalid_list_copy_projection
+                    ),
+                    contains="invalid positional or keyword shape",
+                ).terminal,
+                "dynamic-receiver": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        dynamic_copy_receiver_projection
+                    ),
+                ).terminal,
+                "source-rebind-called": exact_analysis_called_parameters(
+                    list_copy_then_source_rebind
+                ),
+                "copy-rebind-called": exact_analysis_called_parameters(
+                    list_copy_then_copy_rebind
+                ),
+                "prior-rebind-called": exact_analysis_called_parameters(
+                    list_mutate_then_copy
+                ),
+                "source-add-called": exact_analysis_called_parameters(
+                    list_source_add_absent_from_copy
+                ),
+                "copy-add-called": exact_analysis_called_parameters(
+                    list_copy_add_absent_from_source
+                ),
+                "shallow-nested": v2_fixture_callback_data_projection(
+                    shallow_list_copy_nested_mutation_projection
+                )["kind"],
+                "retains-prior-exact-json-alias": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        list_copy_retains_prior_exact_json_alias
+                    ),
+                    contains="exact container mutation is not modeled",
+                ).terminal,
+                "excludes-later-exact-json-alias": (
+                    v2_fixture_callback_data_projection(
+                        list_copy_excludes_later_exact_json_alias
+                    )["kind"]
+                ),
+                "direct-exact-json-nested-alias": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        list_copy_direct_exact_json_nested_alias
+                    ),
+                    contains="exact container mutation is not modeled",
+                ).terminal,
+            },
             "dict-get": {
                 "known": v2_fixture_callback_data_projection(
                     exact_copy_get_projection
@@ -102872,6 +104142,93 @@ def v2_execute_artifact_cases(
                     exact_pop_live_view
                 ),
                 "rooted-called": exact_analysis_called_parameters(v2_rooted),
+            },
+            "list-pop": {
+                "bound-result-called": exact_analysis_called_parameters(
+                    fixed_bound_list_pop_result
+                ),
+                "unbound-result-called": exact_analysis_called_parameters(
+                    fixed_unbound_list_pop_result
+                ),
+                "remaining-called": exact_analysis_called_parameters(
+                    fixed_bound_list_pop_remaining
+                ),
+                "indexed-bound": exact_analysis_refusal(
+                    indexed_bound_list_pop,
+                    contains=(
+                        "exact list mutation call has invalid positional "
+                        "or keyword shape"
+                    ),
+                ),
+                "indexed-unbound": exact_analysis_refusal(
+                    indexed_unbound_list_pop,
+                    contains=(
+                        "exact list mutation call has invalid positional "
+                        "or keyword shape"
+                    ),
+                ),
+                "dynamic-index": exact_analysis_refusal(
+                    dynamic_index_list_pop,
+                    contains=(
+                        "exact list mutation call has invalid positional "
+                        "or keyword shape"
+                    ),
+                ),
+                "captured-receiver": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        captured_list_pop
+                    ),
+                ).terminal,
+                "exact-json-alias": expect_error(
+                    EvidenceFailed,
+                    lambda: v2_fixture_callback_data_projection(
+                        exact_json_alias_list_pop
+                    ),
+                    contains="exact container mutation is not modeled",
+                ).terminal,
+                "exact-json-alias-hook-calls": (
+                    exact_json_alias_hook_calls["calls"]
+                ),
+                "summarized-result-called": live_view_callback_parameters(
+                    summarized_list_pop_result
+                ),
+                "summarized-result-terminal": exact_analysis_refusal(
+                    summarized_list_pop_result,
+                    contains="control-flow-ambiguous local alias",
+                ),
+                "summarized-remaining-called": live_view_callback_parameters(
+                    summarized_list_pop_remaining
+                ),
+                "summarized-remaining-terminal": exact_analysis_refusal(
+                    summarized_list_pop_remaining,
+                    contains="control-flow-ambiguous local alias",
+                ),
+                "spread-record-replacement-called": (
+                    exact_analysis_called_parameters(
+                        spread_record_nested_mutation
+                    )
+                ),
+                "exact-wire-static-kind": (
+                    v2_fixture_callback_data_projection(
+                        v2_validate_exact_json_wire
+                    )["kind"]
+                ),
+            },
+            "list-family-marking": {
+                "marked-reference": list_family_marked_reference,
+                "equality-hook-calls": ListFamilyEqualityProbe.calls,
+                "return-count": len(
+                    list_alias_marker_data["return_expressions"]
+                ),
+                "stale-alias-carries": stale_list_family_result[0],
+                "stale-alias-hazard-sites": stale_list_family_result[1],
+                "pre-hazard-copy-carries": (
+                    stale_list_copy_family_result[0]
+                ),
+                "pre-hazard-copy-sites": (
+                    stale_list_copy_family_result[1]
+                ),
             },
             "mutations": {
                 "bound-append": exact_analysis_refusal(
@@ -103242,6 +104599,22 @@ def v2_execute_artifact_cases(
                 "copy-add-called": ["before"],
                 "shallow-nested": "function",
             },
+            "list-copy": {
+                "unbound": "function",
+                "bound": "function",
+                "alias": "EvidenceFailed",
+                "invalid-shape": "EvidenceFailed",
+                "dynamic-receiver": "EvidenceFailed",
+                "source-rebind-called": ["before"],
+                "copy-rebind-called": ["before"],
+                "prior-rebind-called": ["after"],
+                "source-add-called": ["before"],
+                "copy-add-called": ["before"],
+                "shallow-nested": "function",
+                "retains-prior-exact-json-alias": "EvidenceFailed",
+                "excludes-later-exact-json-alias": "function",
+                "direct-exact-json-nested-alias": "EvidenceFailed",
+            },
             "dict-get": {
                 "known": "function",
                 "literal-equivalent": "function",
@@ -103258,6 +104631,32 @@ def v2_execute_artifact_cases(
             "pop-and-rooted": {
                 "live-view-called": ["kept"],
                 "rooted-called": [],
+            },
+            "list-pop": {
+                "bound-result-called": ["removed"],
+                "unbound-result-called": ["removed"],
+                "remaining-called": ["initial"],
+                "indexed-bound": "EvidenceFailed",
+                "indexed-unbound": "EvidenceFailed",
+                "dynamic-index": "EvidenceFailed",
+                "captured-receiver": "EvidenceFailed",
+                "exact-json-alias": "EvidenceFailed",
+                "exact-json-alias-hook-calls": 0,
+                "summarized-result-called": ["initial", "removed"],
+                "summarized-result-terminal": "EvidenceFailed",
+                "summarized-remaining-called": ["initial", "removed"],
+                "summarized-remaining-terminal": "EvidenceFailed",
+                "spread-record-replacement-called": ["replacement"],
+                "exact-wire-static-kind": "function",
+            },
+            "list-family-marking": {
+                "marked-reference": True,
+                "equality-hook-calls": 0,
+                "return-count": 1,
+                "stale-alias-carries": True,
+                "stale-alias-hazard-sites": 1,
+                "pre-hazard-copy-carries": True,
+                "pre-hazard-copy-sites": 2,
             },
             "mutations": {
                 "bound-append": "EvidenceFailed",
@@ -132894,6 +134293,10 @@ V2_LATE_AUDITED_LOCAL_PURE_CALL_RESULT_PATHS += (
         frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
     ),
     (
+        v2_exact_wire_reconstruct_snapshots,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH[0]}),
+    ),
+    (
         v2_graph_node_index,
         frozenset({
             V2_DERIVED_CALL_RESULT_PATH[0],
@@ -133085,6 +134488,58 @@ V2_EXACT_CONTAINER_VALIDATOR_RESULT_CONTRACTS = (
                 }),
             ),
         )
+    ),
+    # Exact-wire comparison and reconstruction operate only on plain
+    # containers captured by the validator. Descriptor results remain data:
+    # they are identity/scalar compared, copied into fresh containers, or
+    # exact-type checked, never invoked as dynamically selected callables.
+    (
+        v2_exact_wire_container_unchanged,
+        v2_exact_wire_container_unchanged.__code__,
+        list.__getitem__,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    (
+        v2_exact_wire_container_unchanged,
+        v2_exact_wire_container_unchanged.__code__,
+        dict.__getitem__,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    (
+        v2_exact_wire_container_unchanged,
+        v2_exact_wire_container_unchanged.__code__,
+        dict.__iter__,
+        frozenset({
+            V2_DERIVED_CALL_RESULT_PATH,
+            ("<iter-item>",),
+        }),
+    ),
+    (
+        v2_exact_wire_reconstruct_snapshots,
+        v2_exact_wire_reconstruct_snapshots.__code__,
+        list.__getitem__,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    (
+        v2_exact_wire_reconstruct_snapshots,
+        v2_exact_wire_reconstruct_snapshots.__code__,
+        dict.__getitem__,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    (
+        v2_exact_wire_reconstruct_snapshots,
+        v2_exact_wire_reconstruct_snapshots.__code__,
+        dict.get,
+        frozenset({V2_DERIVED_CALL_RESULT_PATH}),
+    ),
+    (
+        v2_exact_wire_reconstruct_snapshots,
+        v2_exact_wire_reconstruct_snapshots.__code__,
+        dict.__iter__,
+        frozenset({
+            V2_DERIVED_CALL_RESULT_PATH,
+            ("<iter-item>",),
+        }),
     ),
     # The descriptor-slot closer exact-gates ``slot`` as a plain one-element
     # list before every base-descriptor read. The selected value is used only
