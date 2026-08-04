@@ -12,6 +12,110 @@ MUST LISTEN TO ME. I AM IN CHARGE, NOT YOU.
 
 ---
 
+## RULE 0.1 - VALUE DELIVERY OVER PROCESS: NO PROCESS PORN
+
+FrankenSim is missing large amounts of real product functionality. Agent time,
+user time, tokens, review attention, and repository complexity are scarce. The
+default job is to implement the requested capability or fix the concrete defect,
+not to elaborate the machinery surrounding the work.
+
+**Process is never the product unless the user explicitly asks for process
+work.** Beads, plans, Agent Mail, audits, manifests, provenance, logging, CI,
+test harnesses, dashboards, status reports, and agent coordination exist only to
+support delivery. They must not become a self-perpetuating substitute for
+delivery.
+
+### The value test
+
+Before doing non-product work, answer all three questions:
+
+1. What concrete user-visible capability, correctness defect, or immediate
+   implementation blocker does this work address?
+2. Is this the smallest direct action that addresses it?
+3. Will its likely value exceed its implementation, maintenance, review, and
+   delay cost right now?
+
+If any answer is unclear, **do not do the work**. Return to implementing the
+requested functionality. Speculative future usefulness, elegance, completeness,
+or “more confidence” is not enough.
+
+### Hard scope limits
+
+- A review request authorizes reading the relevant code, reproducing concrete
+  defects, making the smallest sound fixes, and adding focused regressions. It
+  does **not** authorize redesigning adjacent infrastructure, inventing a new
+  analyzer, exhaustively hardening hypothetical cases, or chasing unrelated
+  pre-existing failures.
+- Never turn a small review or repair into hundreds or thousands of lines of CI,
+  harness, analyzer, schema, logging, provenance, or planning code without the
+  user's explicit approval for that expansion.
+- If incidental support work is becoming comparable to or larger than the
+  requested implementation, stop before expanding it. Report the concrete
+  blocker and ask whether the user wants the support work. Do not rationalize
+  continuing because time has already been spent.
+- Do not build a validator for a validator, a harness for a harness, or an
+  analyzer whose principal purpose is proving internal process artifacts unless
+  that exact system is the requested deliverable.
+- Do not chase a failure already present on `HEAD` unless it blocks the requested
+  deliverable and the user authorizes broadening the scope. Record it briefly and
+  continue or stop at the real boundary.
+- Do not repeatedly re-audit, re-plan, re-hash, re-seal, poll, or add reviewers
+  after the requested behavior has focused evidence. One coherent implementation
+  plus proportionate verification is better than layers of ceremonial assurance.
+- Do not spawn an agent swarm for a narrow task. Delegate only concrete,
+  independent implementation or bounded verification that materially shortens
+  the path to the requested result. Never create recursive review loops or wait
+  repeatedly for agents with no deliverable in hand.
+
+### Implementation must dominate
+
+Unless the user explicitly requests planning, governance, CI, or tooling:
+
+- Spend the dominant share of effort on working product code and direct tests of
+  that product code.
+- Prefer an existing test seam over creating a new framework. Tests should prove
+  changed behavior, important boundaries, and named claims; exhaustive testing
+  of internal ceremony is negative value.
+- Keep logging actionable and proportional. “Great logging” means enough context
+  to diagnose a real failure, not recording every intermediate state or building
+  a second product around evidence collection.
+- Treat Beads as concise execution bookkeeping. Once a Bead is sufficiently
+  clear to implement safely, implement it. Do not spend hours optimizing issue
+  prose, graph metrics, dependencies, or acceptance wording while its actual
+  functionality remains absent.
+- Run the narrowest relevant checks while iterating. Run broad DSR/repository
+  gates only when there is a coherent implementation ready for that proof or the
+  user explicitly asks for them.
+- When choosing between missing P0 functionality and optional meta-infrastructure,
+  implement the P0 functionality. Tooling wins only when it is a demonstrated
+  blocker to that implementation.
+
+### Mandatory checkpoint and stop rule
+
+At the first sign of scope expansion, pause and state in plain language:
+
+- the user-facing outcome being delivered;
+- the files and approximate size of the proposed expansion;
+- why the expansion is strictly necessary; and
+- the smaller alternatives considered.
+
+If that explanation cannot establish immediate net value in a few sentences,
+**do not proceed**. Ask the user before expanding. A “fresh-eyes” instruction is
+not permission for an unbounded expedition.
+
+When work has drifted into process porn, stop immediately. Do not add more tests,
+proof layers, or cleanup to justify the sunk cost. Freeze the tree, disclose the
+exact state candidly, and wait for direction.
+
+### Concrete anti-pattern
+
+Adding roughly 1,500 lines to an internal Beads/CI harness during a fresh-eyes
+review, then spending hours extending static analysis and evidence machinery
+while user-facing FrankenSim functionality remains missing, is a canonical
+failure—not thoroughness. Never repeat it.
+
+---
+
 ## RULE NUMBER 1: NO FILE DELETION
 
 **YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a
