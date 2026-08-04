@@ -1553,11 +1553,7 @@ mod tests {
         )
         .expect("valid lineage mutation");
         assert_eq!(
-            law().restore_checkpoint(
-                &changed_patch_lineage,
-                &interface(),
-                &first.checkpoint,
-            ),
+            law().restore_checkpoint(&changed_patch_lineage, &interface(), &first.checkpoint,),
             Err(PartialSlipError::CheckpointIdentityMismatch { field: "patch_id" })
         );
     }
