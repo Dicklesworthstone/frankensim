@@ -6,6 +6,7 @@
 
 use core::fmt;
 
+use fs_blake3::{ContentHash, hash_domain};
 use fs_contact::normal_patch::{NormalPatchEmbedState, NormalPatchPort, NormalPatchReceipt};
 use fs_mbd::{Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
 use fs_tribo::{
@@ -15,6 +16,10 @@ use fs_tribo::{
 };
 
 use crate::{
+    air::{
+        AirFilmError, AirFilmProposal, AirFilmTransactionState, AirVec3, TiltedDiscAirFilmInput,
+        TiltedDiscKinematics,
+    },
     base_response::{
         ReducedBaseCheckpoint, ReducedBasePort, ReducedBaseStepInput, ReducedBaseStepProposal,
     },
@@ -40,6 +45,56 @@ use crate::{
         TangentialContactRequest, TangentialContactState,
     },
 };
+
+/// The one gas mechanism that owns a production substep's aerodynamic work.
+///
+/// This sum type prevents exterior free-gas and thin-gap film wrenches from
+/// being supplied together for the same interval.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GasChannelStepInput {
+    /// Free exterior gas; one caller-named correlation is selected without ranking.
+    ExteriorFreeGas {
+        /// Exterior-air cards and candidate alternatives.
+        input: EulerExternalAirInput,
+        /// Exact selected correlation identity.
+        selected_correlation_id: String,
+        /// Exactly-once exterior work key.
+        exchange_key: u64,
+    },
+    /// Thin-gap gas-film card, whose transactional state owns restart and work.
+    ThinGap {
+        /// Film cards; disc pose/rates and duration are replaced from fs-mbd.
+        input: TiltedDiscAirFilmInput,
+        /// Exactly-once wall-to-gas work key.
+        exchange_key: u64,
+    },
+}
+
+/// Accepted state for exactly one mutually exclusive gas mechanism.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GasChannelState {
+    /// Exterior-air exact-once work ledger.
+    ExteriorFreeGas(EulerExternalAirWorkState),
+    /// Thin-gap gas-film checkpoint and exact-once work ledger.
+    ThinGap(AirFilmTransactionState),
+}
+
+/// Accepted receipt for the gas mechanism selected by a substep.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GasChannelReceipt {
+    /// One explicitly named exterior-air candidate and its staged work.
+    ExteriorFreeGas {
+        /// Selected candidate; alternatives were not ranked or averaged.
+        candidate: EulerExternalAirCandidate,
+        /// Exactly-once exterior work proposal.
+        work: EulerExternalAirWorkProposal,
+    },
+    /// One staged thin-gap candidate with its restart/work transaction.
+    ThinGap {
+        /// Gas-film proposal; its receipt wrench is gas-on-disc in world axes.
+        proposal: AirFilmProposal,
+    },
+}
 
 /// Stable owner identity for an accepted production-coupling lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +130,21 @@ pub struct ProductionCouplingCheckpoint {
     pub committed_version: u64,
     /// Disc rigid-body state.
     pub disc_state: RigidBodyState,
+    /// Deterministic integrity binding for the complete accepted snapshot.
+    checkpoint_fingerprint: ContentHash,
     normal_state: NormalPatchEmbedState,
     tangential_state: TangentialContactState,
     rolling_state: RollingContactState,
-    exterior_air_state: EulerExternalAirWorkState,
+    gas_channel_state: GasChannelState,
     base_state: ReducedBaseCheckpoint,
+}
+
+impl ProductionCouplingCheckpoint {
+    /// Content hash binding identity, version, rigid state, and every channel snapshot.
+    #[must_use]
+    pub const fn fingerprint(&self) -> ContentHash {
+        self.checkpoint_fingerprint
+    }
 }
 
 /// All caller-owned cards and one explicit selection for one attempted substep.
@@ -99,12 +164,8 @@ pub struct ProductionCouplingStepInput {
     pub tangential: TangentialContactRequest,
     /// Rolling card/ownership; state/checkpoint/patch/interval are replaced.
     pub rolling: RollingContactInput,
-    /// Exterior free-gas alternatives. The named candidate is selected exactly, never ranked.
-    pub exterior_air: EulerExternalAirInput,
-    /// Explicit correlation identity selected by the caller from `exterior_air.alternatives`.
-    pub selected_exterior_correlation_id: String,
-    /// Exactly-once exterior work key for this accepted interval.
-    pub exterior_exchange_key: u64,
+    /// Exactly one selected gas mechanism; the enum forbids exterior/film double counting.
+    pub gas_channel: GasChannelStepInput,
     /// Base-port replay identity for this accepted interval.
     pub base_step_id: String,
     /// Moving-load location at interval start.
@@ -124,10 +185,8 @@ pub struct ProductionCouplingReceipt {
     pub tangential: TangentialContactReceipt,
     /// Prepared and accepted rolling response.
     pub rolling: RollingContactProposal,
-    /// Explicitly selected exterior candidate, retained without ranking alternatives.
-    pub exterior_air: EulerExternalAirCandidate,
-    /// Exactly-once exterior work staged/accepted with this mechanics step.
-    pub exterior_air_work: EulerExternalAirWorkProposal,
+    /// The one gas-channel receipt contributing its real wrench to fs-mbd.
+    pub gas_channel: GasChannelReceipt,
     /// Accepted moving-one-mode base transition accounting.
     pub base: ReducedBaseStepProposal,
     /// Total real world-frame force sent to fs-mbd [N].
@@ -186,6 +245,8 @@ pub enum ProductionCouplingError {
     CheckpointMismatch,
     /// Caller prepared cards from a different accepted outer checkpoint.
     CheckpointVersionMismatch { expected: u64, observed: u64 },
+    /// Public checkpoint fields were altered without rebuilding its state binding.
+    CheckpointIntegrityMismatch,
     /// A caller-owned adapter card is not bound to this case or world frame.
     InputIdentityMismatch { field: &'static str },
     /// Invalid outer scalar or identity.
@@ -204,8 +265,12 @@ pub enum ProductionCouplingError {
     Tangential(TangentialContactError),
     /// Rolling generic admission/refusal, including work ownership overlap.
     Rolling(RollingContactError),
-    /// Exterior-air admission/refusal; thin-gap input is explicitly rejected downstream.
+    /// Exterior-air admission/refusal.
     ExteriorAir(ExternalAirError),
+    /// Thin-gap gas-film admission, topology, or exact-once-work refusal.
+    AirFilm(AirFilmError),
+    /// The input gas mechanism does not match the accepted gas checkpoint mode.
+    GasChannelMismatch,
     /// The named exterior candidate was absent; alternatives are never auto-selected.
     ExteriorCandidateUnavailable,
     /// Reduced base explicitly refuses resolved/as-built/unsupported requests.
@@ -230,7 +295,7 @@ impl ProductionCouplingModel {
         normal_state: NormalPatchEmbedState,
         tangential_state: TangentialContactState,
         rolling_state: RollingContactState,
-        exterior_air_state: EulerExternalAirWorkState,
+        gas_channel_state: GasChannelState,
     ) -> Result<ProductionCouplingCheckpoint, ProductionCouplingError> {
         validate_identity(&self.identity)?;
         if !disc_state.pose().position_world().is_finite() {
@@ -238,15 +303,28 @@ impl ProductionCouplingModel {
                 field: "disc_state",
             });
         }
+        validate_gas_state_identity(&self.identity, &gas_channel_state)?;
+        let base_state = self.base_port.initial_checkpoint();
+        let checkpoint_fingerprint = production_checkpoint_fingerprint(
+            &self.identity,
+            0,
+            disc_state,
+            &normal_state,
+            &tangential_state,
+            &rolling_state,
+            &gas_channel_state,
+            &base_state,
+        );
         Ok(ProductionCouplingCheckpoint {
             identity: self.identity.clone(),
             committed_version: 0,
             disc_state,
+            checkpoint_fingerprint,
             normal_state,
             tangential_state,
             rolling_state,
-            exterior_air_state,
-            base_state: self.base_port.initial_checkpoint(),
+            gas_channel_state,
+            base_state,
         })
     }
 
@@ -260,6 +338,20 @@ impl ProductionCouplingModel {
         validate_identity(&self.identity)?;
         if checkpoint.identity != self.identity {
             return Err(ProductionCouplingError::CheckpointMismatch);
+        }
+        if checkpoint.checkpoint_fingerprint
+            != production_checkpoint_fingerprint(
+                &checkpoint.identity,
+                checkpoint.committed_version,
+                checkpoint.disc_state,
+                &checkpoint.normal_state,
+                &checkpoint.tangential_state,
+                &checkpoint.rolling_state,
+                &checkpoint.gas_channel_state,
+                &checkpoint.base_state,
+            )
+        {
+            return Err(ProductionCouplingError::CheckpointIntegrityMismatch);
         }
         if input.expected_checkpoint_version != checkpoint.committed_version {
             return Err(ProductionCouplingError::CheckpointVersionMismatch {
@@ -337,23 +429,13 @@ impl ProductionCouplingModel {
         let rolling = prepare_rolling_contact(&checkpoint.rolling_state, &rolling_input)
             .map_err(ProductionCouplingError::Rolling)?;
 
-        let mut exterior_air_input = input.exterior_air.clone();
-        exterior_air_input.state =
-            exterior_state_from_disc(checkpoint.disc_state, self.disc_mass_properties)
-                .map_err(ProductionCouplingError::Dynamics)?;
-        let exterior_set = evaluate_euler_disc_external_air(&exterior_air_input)
-            .map_err(ProductionCouplingError::ExteriorAir)?;
-        let exterior_air = exterior_set
-            .candidates
-            .into_iter()
-            .find(|candidate| {
-                candidate.world_wrench.correlation.id == input.selected_exterior_correlation_id
-            })
-            .ok_or(ProductionCouplingError::ExteriorCandidateUnavailable)?;
-        let exterior_air_work = checkpoint
-            .exterior_air_state
-            .prepare(input.exterior_exchange_key, input.duration_s, &exterior_air)
-            .map_err(ProductionCouplingError::ExteriorAir)?;
+        let (gas_channel, gas_force, gas_moment) = prepare_gas_channel(
+            &input.gas_channel,
+            &checkpoint.gas_channel_state,
+            checkpoint.disc_state,
+            self.disc_mass_properties,
+            input.duration_s,
+        )?;
 
         let normal_force_n = point_normal_force(&normal)?;
         let base = self
@@ -379,11 +461,11 @@ impl ProductionCouplingModel {
         let total_force_world_n = normal_force
             .add(tangential.force_on_disc_world_n)
             .add(rolling.step.body_wrench.contour_force_world_n)
-            .add(flux_vec3(exterior_air.world_wrench.force_world_n));
+            .add(gas_force);
         let total_moment_about_com_world_n_m = normal_moment
             .add(tangential_moment)
             .add(rolling.step.body_wrench.total_moment_about_com_world_nm)
-            .add(flux_vec3(exterior_air.world_wrench.torque_world_n_m));
+            .add(gas_moment);
         if !(total_force_world_n.is_finite() && total_moment_about_com_world_n_m.is_finite()) {
             return Err(ProductionCouplingError::InvalidInput {
                 field: "summed wrench",
@@ -406,29 +488,43 @@ impl ProductionCouplingModel {
             .map_err(ProductionCouplingError::Dynamics)?
             .state_after;
 
+        let committed_version = checkpoint.committed_version.checked_add(1).ok_or(
+            ProductionCouplingError::InvalidInput {
+                field: "committed_version",
+            },
+        )?;
+        let normal_state = normal.generic.next_state.clone();
+        let tangential_state = self
+            .tangential_adapter
+            .commit(&checkpoint.tangential_state, &tangential)
+            .map_err(ProductionCouplingError::Tangential)?;
+        let rolling_state = commit_rolling_contact(&checkpoint.rolling_state, &rolling)
+            .map_err(ProductionCouplingError::Rolling)?;
+        let gas_channel_state = commit_gas_channel(&checkpoint.gas_channel_state, &gas_channel)?;
+        let base_state = self
+            .base_port
+            .accept(&checkpoint.base_state, base.clone())
+            .map_err(ProductionCouplingError::Base)?;
+        let checkpoint_fingerprint = production_checkpoint_fingerprint(
+            &self.identity,
+            committed_version,
+            next_disc_state,
+            &normal_state,
+            &tangential_state,
+            &rolling_state,
+            &gas_channel_state,
+            &base_state,
+        );
         let next = ProductionCouplingCheckpoint {
             identity: self.identity.clone(),
-            committed_version: checkpoint.committed_version.checked_add(1).ok_or(
-                ProductionCouplingError::InvalidInput {
-                    field: "committed_version",
-                },
-            )?,
+            committed_version,
             disc_state: next_disc_state,
-            normal_state: normal.generic.next_state.clone(),
-            tangential_state: self
-                .tangential_adapter
-                .commit(&checkpoint.tangential_state, &tangential)
-                .map_err(ProductionCouplingError::Tangential)?,
-            rolling_state: commit_rolling_contact(&checkpoint.rolling_state, &rolling)
-                .map_err(ProductionCouplingError::Rolling)?,
-            exterior_air_state: checkpoint
-                .exterior_air_state
-                .commit(&exterior_air_work)
-                .map_err(ProductionCouplingError::ExteriorAir)?,
-            base_state: self
-                .base_port
-                .accept(&checkpoint.base_state, base.clone())
-                .map_err(ProductionCouplingError::Base)?,
+            checkpoint_fingerprint,
+            normal_state,
+            tangential_state,
+            rolling_state,
+            gas_channel_state,
+            base_state,
         };
         Ok((
             next,
@@ -437,8 +533,7 @@ impl ProductionCouplingModel {
                 normal,
                 tangential,
                 rolling,
-                exterior_air,
-                exterior_air_work,
+                gas_channel,
                 base,
                 total_force_world_n,
                 total_moment_about_com_world_n_m,
@@ -623,6 +718,31 @@ fn validate_identity(identity: &ProductionCouplingIdentity) -> Result<(), Produc
     Ok(())
 }
 
+/// Canonical enough state binding for this crate's wholly in-memory checkpoint.
+///
+/// Every nested checkpoint type supplies a deterministic derived `Debug`
+/// representation (including ordered/BTree retained work keys). The field is
+/// intentionally recomputed before every step, so a caller cannot modify the
+/// public mechanics state or version while retaining private channel snapshots.
+fn production_checkpoint_fingerprint(
+    identity: &ProductionCouplingIdentity,
+    committed_version: u64,
+    disc_state: RigidBodyState,
+    normal_state: &NormalPatchEmbedState,
+    tangential_state: &TangentialContactState,
+    rolling_state: &RollingContactState,
+    gas_channel_state: &GasChannelState,
+    base_state: &ReducedBaseCheckpoint,
+) -> ContentHash {
+    hash_domain(
+        "fs-euler-disc-e2e/production-coupling-checkpoint/v1",
+        format!(
+            "{identity:?}|{committed_version}|{disc_state:?}|{normal_state:?}|{tangential_state:?}|{rolling_state:?}|{gas_channel_state:?}|{base_state:?}"
+        )
+        .as_bytes(),
+    )
+}
+
 fn validate_step_identity(
     identity: &ProductionCouplingIdentity,
     input: &ProductionCouplingStepInput,
@@ -643,15 +763,80 @@ fn validate_step_identity(
             identity.world_frame_id.as_str(),
             "rolling.world_frame_id",
         ),
+    ] {
+        if actual != expected {
+            return Err(ProductionCouplingError::InputIdentityMismatch { field });
+        }
+    }
+    match &input.gas_channel {
+        GasChannelStepInput::ExteriorFreeGas { input, .. } => {
+            for (actual, expected, field) in [
+                (
+                    input.identity.case_id.as_str(),
+                    identity.case_id.as_str(),
+                    "exterior_air.case_id",
+                ),
+                (
+                    input.identity.world_frame_id.as_str(),
+                    identity.world_frame_id.as_str(),
+                    "exterior_air.world_frame_id",
+                ),
+            ] {
+                if actual != expected {
+                    return Err(ProductionCouplingError::InputIdentityMismatch { field });
+                }
+            }
+        }
+        GasChannelStepInput::ThinGap { input, .. } => {
+            for (actual, expected, field) in [
+                (
+                    input.identity.case_id.as_str(),
+                    identity.case_id.as_str(),
+                    "air_film.case_id",
+                ),
+                (
+                    input.identity.configuration_id.as_str(),
+                    identity.configuration_id.as_str(),
+                    "air_film.configuration_id",
+                ),
+                (
+                    input.identity.frame_id.as_str(),
+                    identity.world_frame_id.as_str(),
+                    "air_film.frame_id",
+                ),
+            ] {
+                if actual != expected {
+                    return Err(ProductionCouplingError::InputIdentityMismatch { field });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_gas_state_identity(
+    identity: &ProductionCouplingIdentity,
+    state: &GasChannelState,
+) -> Result<(), ProductionCouplingError> {
+    let GasChannelState::ThinGap(state) = state else {
+        return Ok(());
+    };
+    let gas_identity = state.identity();
+    for (actual, expected, field) in [
         (
-            input.exterior_air.identity.case_id.as_str(),
+            gas_identity.case_id.as_str(),
             identity.case_id.as_str(),
-            "exterior_air.case_id",
+            "air_film_state.case_id",
         ),
         (
-            input.exterior_air.identity.world_frame_id.as_str(),
+            gas_identity.configuration_id.as_str(),
+            identity.configuration_id.as_str(),
+            "air_film_state.configuration_id",
+        ),
+        (
+            gas_identity.frame_id.as_str(),
             identity.world_frame_id.as_str(),
-            "exterior_air.world_frame_id",
+            "air_film_state.frame_id",
         ),
     ] {
         if actual != expected {
@@ -659,6 +844,88 @@ fn validate_step_identity(
         }
     }
     Ok(())
+}
+
+fn prepare_gas_channel(
+    input: &GasChannelStepInput,
+    state: &GasChannelState,
+    disc_state: RigidBodyState,
+    properties: MassProperties,
+    duration_s: f64,
+) -> Result<(GasChannelReceipt, Vec3, Vec3), ProductionCouplingError> {
+    match (input, state) {
+        (
+            GasChannelStepInput::ExteriorFreeGas {
+                input,
+                selected_correlation_id,
+                exchange_key,
+            },
+            GasChannelState::ExteriorFreeGas(state),
+        ) => {
+            let mut exterior_air_input = input.clone();
+            exterior_air_input.state = exterior_state_from_disc(disc_state, properties)
+                .map_err(ProductionCouplingError::Dynamics)?;
+            let exterior_set = evaluate_euler_disc_external_air(&exterior_air_input)
+                .map_err(ProductionCouplingError::ExteriorAir)?;
+            let candidate = exterior_set
+                .candidates
+                .into_iter()
+                .find(|candidate| candidate.world_wrench.correlation.id == *selected_correlation_id)
+                .ok_or(ProductionCouplingError::ExteriorCandidateUnavailable)?;
+            let force = flux_vec3(candidate.world_wrench.force_world_n);
+            let moment = flux_vec3(candidate.world_wrench.torque_world_n_m);
+            let work = state
+                .prepare(*exchange_key, duration_s, &candidate)
+                .map_err(ProductionCouplingError::ExteriorAir)?;
+            Ok((
+                GasChannelReceipt::ExteriorFreeGas { candidate, work },
+                force,
+                moment,
+            ))
+        }
+        (
+            GasChannelStepInput::ThinGap {
+                input,
+                exchange_key,
+            },
+            GasChannelState::ThinGap(state),
+        ) => {
+            let mut air_film_input = input.clone();
+            air_film_input.disc = air_film_disc_state_from_disc(disc_state, properties)
+                .map_err(ProductionCouplingError::Dynamics)?;
+            air_film_input.timestep_s = duration_s;
+            let proposal = state
+                .prepare(*exchange_key, &air_film_input)
+                .map_err(ProductionCouplingError::AirFilm)?;
+            let wrench = proposal.step.receipt.wrench;
+            Ok((
+                GasChannelReceipt::ThinGap { proposal },
+                air_vec3(wrench.force_world_n),
+                air_vec3(wrench.moment_about_com_world_n_m),
+            ))
+        }
+        _ => Err(ProductionCouplingError::GasChannelMismatch),
+    }
+}
+
+fn commit_gas_channel(
+    state: &GasChannelState,
+    receipt: &GasChannelReceipt,
+) -> Result<GasChannelState, ProductionCouplingError> {
+    match (state, receipt) {
+        (
+            GasChannelState::ExteriorFreeGas(state),
+            GasChannelReceipt::ExteriorFreeGas { work, .. },
+        ) => state
+            .commit(work)
+            .map(GasChannelState::ExteriorFreeGas)
+            .map_err(ProductionCouplingError::ExteriorAir),
+        (GasChannelState::ThinGap(state), GasChannelReceipt::ThinGap { proposal }) => state
+            .commit(proposal)
+            .map(GasChannelState::ThinGap)
+            .map_err(ProductionCouplingError::AirFilm),
+        _ => Err(ProductionCouplingError::GasChannelMismatch),
+    }
 }
 
 /// Derives the exterior-air state from the checkpoint that receives its wrench.
@@ -689,10 +956,43 @@ fn exterior_state_from_disc(
     })
 }
 
+/// Derives the gas-film disc kinematics from the same fs-mbd checkpoint that
+/// receives the gas-on-body wrench. `AirFilmWrench` is documented in world
+/// axes about COM, so no sign or frame conversion is inferred at composition.
+fn air_film_disc_state_from_disc(
+    state: RigidBodyState,
+    properties: MassProperties,
+) -> Result<TiltedDiscKinematics, fs_mbd::DynamicsError> {
+    let pose = state.pose();
+    let orientation = pose.orientation();
+    let angular_velocity_body =
+        properties.angular_velocity_body_checked(state.angular_momentum_body())?;
+    Ok(TiltedDiscKinematics {
+        center_world_m: mbd_to_air_vec3(pose.position_world()),
+        normal_away_from_base_world: mbd_to_air_vec3(
+            orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+        ),
+        center_velocity_world_m_per_s: mbd_to_air_vec3(
+            state.center_of_mass_velocity_world(properties)?,
+        ),
+        angular_velocity_world_rad_per_s: mbd_to_air_vec3(
+            orientation.rotate_body_to_world(angular_velocity_body),
+        ),
+    })
+}
+
 fn flux_vec3(value: fs_flux::Vec3) -> Vec3 {
     Vec3::new(value.x, value.y, value.z)
 }
 
 fn mbd_to_flux_vec3(value: Vec3) -> fs_flux::Vec3 {
     fs_flux::Vec3::new(value.x, value.y, value.z)
+}
+
+fn air_vec3(value: AirVec3) -> Vec3 {
+    Vec3::new(value.x, value.y, value.z)
+}
+
+fn mbd_to_air_vec3(value: Vec3) -> AirVec3 {
+    AirVec3::new(value.x, value.y, value.z)
 }

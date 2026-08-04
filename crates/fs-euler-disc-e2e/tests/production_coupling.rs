@@ -5,6 +5,11 @@ use fs_contact::normal_patch::{
     NormalPatchReceipt,
 };
 use fs_couple::StableId;
+use fs_euler_disc_e2e::air::{
+    AirFilmDiscretization, AirFilmTransactionState, AirFilmWorkOwnership, AirVec3,
+    ContactExclusion, PrescribedPlaneBase, TILTED_DISC_GAS_FILM_ADAPTER_ID, TiltedDiscAirFilmInput,
+    TiltedDiscKinematics,
+};
 use fs_euler_disc_e2e::base_response::{ReducedBasePort, ReducedBasePortIdentity};
 use fs_euler_disc_e2e::external_air::{
     EulerDiscBodyFrame, EulerDiscExteriorGeometry, EulerDiscExteriorState, EulerExternalAirInput,
@@ -22,8 +27,9 @@ use fs_euler_disc_e2e::patch_kinematics::{
     compute_moving_one_mode_patch_kinematics,
 };
 use fs_euler_disc_e2e::production_coupling::{
-    ProductionCouplingError, ProductionCouplingIdentity, ProductionCouplingModel,
-    ProductionCouplingStepInput, SmoothContactTrajectoryTermination,
+    GasChannelReceipt, GasChannelState, GasChannelStepInput, ProductionCouplingError,
+    ProductionCouplingIdentity, ProductionCouplingModel, ProductionCouplingStepInput,
+    SmoothContactTrajectoryTermination,
 };
 use fs_euler_disc_e2e::rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput, RollingContactState,
@@ -37,8 +43,9 @@ use fs_euler_disc_e2e::{
 use fs_flux::Vec3 as FluxVec3;
 use fs_flux::{
     ApplicabilityEnvelope, ClosedRange, ContributionFamily, CorrelationIdentity,
-    CorrelationUncertainty, FormDrag, GasPropertyCard, ReducedAeroComponents, ReducedAeroModel,
-    SurfaceRoughness,
+    CorrelationUncertainty, FormDrag, GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget,
+    GasFilmInputAuthority, GasFilmUncertainty, GasPropertyCard, IsothermalIdealGas,
+    ReducedAeroComponents, ReducedAeroModel, RoughnessPolicy, SlipPolicy, SurfaceRoughness,
 };
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_solid::{
@@ -70,6 +77,15 @@ fn disc_state() -> RigidBodyState {
         Vec3::ZERO,
     )
     .expect("state")
+}
+
+fn thin_gap_disc_state() -> RigidBodyState {
+    RigidBodyState::new(
+        Pose::new(Vec3::new(0.0, 0.0, 1.0e-3), UnitQuaternion::IDENTITY).expect("thin pose"),
+        Vec3::new(0.2, 0.0, 0.0),
+        Vec3::ZERO,
+    )
+    .expect("thin state")
 }
 
 fn thresholds() -> PatchKinematicThresholds {
@@ -352,6 +368,81 @@ fn aero() -> EulerExternalAirInput {
     }
 }
 
+/// Synthetic, applicable thin-gap card. Its stale disc record is intentional:
+/// production coupling must replace it from the fs-mbd checkpoint.
+fn thin_gap_air() -> TiltedDiscAirFilmInput {
+    let pressure = 101_325.0;
+    TiltedDiscAirFilmInput {
+        identity: fs_euler_disc_e2e::air::AirFilmIdentity {
+            case_id: "synthetic/production-case".into(),
+            adapter_model_id: TILTED_DISC_GAS_FILM_ADAPTER_ID.into(),
+            frame_id: "synthetic/world".into(),
+            base_motion_id: "synthetic/prescribed-plane".into(),
+            gas_species_id: "synthetic-air".into(),
+            eos_id: "synthetic-isothermal-ideal-gas".into(),
+            viscosity_source_id: "synthetic-viscosity".into(),
+            thermal_model_id: "synthetic-isothermal".into(),
+            configuration_id: "synthetic/production-config".into(),
+            deterministic_seed: 17,
+            authority: GasFilmInputAuthority::SyntheticFixture,
+        },
+        disc_radius_m: 1.0e-2,
+        disc_half_thickness_m: 1.0e-4,
+        disc: TiltedDiscKinematics {
+            center_world_m: AirVec3::ZERO,
+            normal_away_from_base_world: AirVec3::new(0.0, 0.0, 1.0),
+            center_velocity_world_m_per_s: AirVec3::ZERO,
+            angular_velocity_world_rad_per_s: AirVec3::ZERO,
+        },
+        base: PrescribedPlaneBase {
+            height_m: 0.0,
+            vertical_velocity_m_per_s: 0.0,
+        },
+        discretization: AirFilmDiscretization {
+            azimuthal_sectors: 4,
+            radial_cells: 4,
+        },
+        contact_exclusion: ContactExclusion {
+            handoff_gap_m: 1.0e-6,
+        },
+        gas: IsothermalIdealGas {
+            specific_gas_constant_j_kg_k: 287.05,
+            temperature_k: 300.0,
+            dynamic_viscosity_pa_s: 1.8e-5,
+            declared_density_kg_m3: pressure / (287.05 * 300.0),
+            declared_specific_enthalpy_j_kg: 300_000.0,
+        },
+        boundary: GasFilmBoundaryTopology::Sealed,
+        slip_policy: SlipPolicy::NoSlipContinuum {
+            source_id: "synthetic/no-slip".into(),
+        },
+        roughness_policy: RoughnessPolicy::ResolvedSmooth {
+            source_id: "synthetic/smooth".into(),
+            maximum_roughness_m: 1.0e-8,
+        },
+        applicability: GasFilmApplicability {
+            mean_free_path_m: 65.0e-9,
+            maximum_knudsen_number: 0.01,
+            maximum_gap_slope: 0.2,
+            speed_of_sound_m_per_s: 347.0,
+            maximum_mach_number: 0.3,
+        },
+        uncertainty: GasFilmUncertainty {
+            viscosity_relative_bound: 0.0,
+            gap_relative_bound: 0.0,
+            pressure_relative_bound: 0.0,
+        },
+        initial_absolute_pressure_pa: pressure,
+        gauge_reference_absolute_pressure_pa: pressure,
+        timestep_s: 1.0e-6,
+        budget: GasFilmBudget {
+            maximum_iterations: 2_000,
+            mass_residual_tolerance_kg_m2_s: 1.0e-9,
+            relaxation: 0.8,
+        },
+    }
+}
+
 fn rolling_law() -> RollingLossLaw {
     RollingLossLaw::CoulombContour(
         CoulombContourCard::new(
@@ -377,16 +468,17 @@ fn request_for_checkpoint(
 ) -> ProductionCouplingStepInput {
     let mut input = template.clone();
     let version = checkpoint.committed_version;
-    let disc_position = checkpoint.disc_state.pose().position_world();
+    let disc_center = checkpoint.disc_state.pose().position_world();
+    let disc_point = disc_center.add(input.patch.bridge.profile_support.disc_arm_world_m);
     input.expected_checkpoint_version = version;
     input.time_s = version as f64 * input.duration_s;
     input.normal.iteration = version + 1;
-    input.patch.bridge.profile_support.disc_point_world_m = disc_position;
+    input.patch.bridge.profile_support.disc_point_world_m = disc_point;
     input
         .patch
         .bridge
         .base_mode
-        .undeformed_contact_point_world_m = Vec3::new(disc_position.x, disc_position.y, 0.0);
+        .undeformed_contact_point_world_m = Vec3::new(disc_point.x, disc_point.y, 0.0);
     input.tangential.request_id = format!("synthetic/tangent-step-{}", version + 1);
     input.tangential.work_ownership = GeneralizedWorkOwnership::new(
         "synthetic/rim-patch",
@@ -403,7 +495,10 @@ fn request_for_checkpoint(
         RollingLossChannel::ContourDeformation,
     )
     .expect("synthetic rolling work ownership");
-    input.exterior_exchange_key = version + 1;
+    match &mut input.gas_channel {
+        GasChannelStepInput::ExteriorFreeGas { exchange_key, .. }
+        | GasChannelStepInput::ThinGap { exchange_key, .. } => *exchange_key = version + 1,
+    }
     input.base_step_id = format!("synthetic/base-step-{}", version + 1);
     input
 }
@@ -466,7 +561,10 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
                 .initial_state(&normal_view, &interface, 4)
                 .expect("tangent checkpoint"),
             RollingContactState::zero(),
-            EulerExternalAirWorkState::new("synthetic/exterior-work", 4).expect("air checkpoint"),
+            GasChannelState::ExteriorFreeGas(
+                EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                    .expect("air checkpoint"),
+            ),
         )
         .expect("production checkpoint");
     let request = ProductionCouplingStepInput {
@@ -479,8 +577,8 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
             request_id: "synthetic/tangent-step".into(),
             expected_state_version: 0,
             patch_kinematics: kinematics,
-            normal_patch: normal_view,
-            interface,
+            normal_patch: normal_view.clone(),
+            interface: interface.clone(),
             work_ownership: GeneralizedWorkOwnership::new(
                 "synthetic/rim-patch",
                 "synthetic/interval-1",
@@ -541,9 +639,11 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
             excitation_frequency_hz: 1.0,
             interval_s: 1.0e-6,
         },
-        exterior_air: aero(),
-        selected_exterior_correlation_id: "synthetic/exterior-a".into(),
-        exterior_exchange_key: 1,
+        gas_channel: GasChannelStepInput::ExteriorFreeGas {
+            input: aero(),
+            selected_correlation_id: "synthetic/exterior-a".into(),
+            exchange_key: 1,
+        },
         base_step_id: "synthetic/base-step-1".into(),
         base_load_progress_start: 0.0,
         base_load_progress_end: 0.0,
@@ -555,9 +655,98 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
     assert!(receipt.estimate_only);
     assert!(receipt.total_force_world_n.is_finite());
     assert!(
-        receipt.exterior_air.world_wrench.force_world_n.x < 0.0,
+        matches!(
+            &receipt.gas_channel,
+            GasChannelReceipt::ExteriorFreeGas { candidate, .. }
+                if candidate.world_wrench.force_world_n.x < 0.0
+        ),
         "exterior force must use the checkpoint's +x velocity, not the stale card state"
     );
+
+    let thin_air = thin_gap_air();
+    let thin_channel_state = AirFilmTransactionState::new(
+        "synthetic/thin-gap-transaction",
+        AirFilmWorkOwnership {
+            owner_id: "synthetic/thin-gap-wall-work".into(),
+        },
+        &thin_air,
+        4,
+    )
+    .expect("synthetic thin-gap state");
+    let mut thin_template = request.clone();
+    thin_template.patch.bridge.profile_support.disc_arm_world_m = Vec3::new(0.0, 0.0, -1.001e-3);
+    thin_template.gas_channel = GasChannelStepInput::ThinGap {
+        input: thin_air,
+        exchange_key: 1,
+    };
+    let mut thin_patch = thin_template.patch.clone();
+    thin_patch.bridge.disc_state = thin_gap_disc_state();
+    thin_patch.bridge.profile_support.disc_point_world_m = Vec3::new(0.0, 0.0, -1.0e-6);
+    let thin_kinematics =
+        compute_moving_one_mode_patch_kinematics(thin_patch).expect("synthetic thin patch");
+    let thin_outcome =
+        evaluate_normal_contact(&normal_input(thin_kinematics)).expect("synthetic thin normal");
+    let EulerNormalContactOutcome::Active(thin_active) = thin_outcome else {
+        return;
+    };
+    let NormalPatchReceipt::Point(thin_point) = thin_active.generic.receipt else {
+        return;
+    };
+    let thin_normal_view = NormalPatchView::new(
+        "synthetic/rim-patch",
+        "synthetic/steel-card",
+        "synthetic/material-source",
+        NormalPatchAuthority::SyntheticFixture,
+        thin_point.normal_force_n,
+        thin_point.patch_radius_m,
+        thin_point.patch_radius_m,
+        thin_point.pressure.second_moment_m2,
+    )
+    .expect("thin normal view");
+    let thin_checkpoint = model
+        .initial_checkpoint(
+            thin_gap_disc_state(),
+            NormalPatchEmbedState::new(0.0, 1.0).expect("thin normal checkpoint"),
+            adapter
+                .initial_state(&thin_normal_view, &interface, 4)
+                .expect("thin tangent checkpoint"),
+            RollingContactState::zero(),
+            GasChannelState::ThinGap(thin_channel_state),
+        )
+        .expect("thin production checkpoint");
+    let thin_request = request_for_checkpoint(&thin_template, &thin_checkpoint);
+    let (thin_next, thin_receipt) = model
+        .step(&thin_checkpoint, &thin_request)
+        .expect("applicable synthetic thin-gap composition");
+    assert!(matches!(
+        &thin_receipt.gas_channel,
+        GasChannelReceipt::ThinGap { .. }
+    ));
+    let GasChannelReceipt::ThinGap { proposal } = &thin_receipt.gas_channel else {
+        return;
+    };
+    assert!(proposal.step.receipt.wrench.force_world_n.x.is_finite());
+    assert!(
+        proposal
+            .step
+            .samples
+            .iter()
+            .any(|sample| sample.radial_relative_velocity_m_per_s.abs() > 0.0),
+        "thin-gap card's stale zero velocity must be replaced by the checkpoint's +x velocity"
+    );
+    assert_eq!(thin_next.committed_version, 1);
+    let mut inapplicable_thin = thin_request.clone();
+    let GasChannelStepInput::ThinGap { input, .. } = &mut inapplicable_thin.gas_channel else {
+        return;
+    };
+    input.applicability.mean_free_path_m = 1.0e-5;
+    let thin_before_refusal = thin_checkpoint.clone();
+    assert!(matches!(
+        model.step(&thin_checkpoint, &inapplicable_thin),
+        Err(ProductionCouplingError::AirFilm(_))
+    ));
+    assert_eq!(thin_checkpoint, thin_before_refusal);
+
     let mut stale_version = request.clone();
     stale_version.expected_checkpoint_version = 1;
     assert!(matches!(
@@ -567,6 +756,16 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
             observed: 0
         })
     ));
+    let mut forged = checkpoint.clone();
+    forged.disc_state = thin_gap_disc_state();
+    assert!(matches!(
+        model.step(&forged, &request),
+        Err(ProductionCouplingError::CheckpointIntegrityMismatch)
+    ));
+    assert_eq!(
+        checkpoint.committed_version, 0,
+        "forgery cannot mutate the source checkpoint"
+    );
     let mut overlapping = request.clone();
     overlapping.rolling.ownership = RollingWorkOwnership::new(
         "synthetic/rim-patch",
@@ -582,11 +781,12 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
     let whole = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
         Ok(request_for_checkpoint(&request, state))
     });
-    assert_eq!(whole.accepted_steps.len(), 3);
+    assert_eq!(whole.accepted_steps.len(), 1);
     assert!(matches!(
         whole.termination,
-        SmoothContactTrajectoryTermination::StepLimitReached {
-            maximum_accepted_steps: 3
+        SmoothContactTrajectoryTermination::Refused {
+            attempted_checkpoint_version: 1,
+            error: ProductionCouplingError::Tangential(_)
         }
     ));
     assert_ne!(
@@ -635,7 +835,10 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
     ));
 
     let mut thin_gap = request;
-    thin_gap.exterior_air.domain = ExternalAirDomain::ThinGap;
+    let GasChannelStepInput::ExteriorFreeGas { input, .. } = &mut thin_gap.gas_channel else {
+        return;
+    };
+    input.domain = ExternalAirDomain::ThinGap;
     assert!(matches!(
         model.step(&checkpoint, &thin_gap),
         Err(ProductionCouplingError::ExteriorAir(_))
