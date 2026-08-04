@@ -14,6 +14,51 @@ on fs-blake3 for typed canonical identities and fs-obs for deterministic
 telemetry/legacy correlation.
 
 ## Public types and semantics
+- `cinematic::CinematicDeliverableContract::euler_disc_v1()` freezes the first
+  delivery envelope as 3840×2160, exact 24/1 fps, 192–288 frames (inclusive
+  8–12 seconds), per-frame float OpenEXR masters, display-referred previews,
+  stereo 48 kHz float32 RIFF/WAVE, a required sequence manifest, and an
+  optional explicitly non-authoritative muxed derivative. Its timeline check
+  requires the audio sample-frame and video-frame endpoints to agree exactly.
+  `CinematicTerm::{RenderConvergence, DeterministicReplay, VisualApproval,
+  ModelCalibration, ExperimentalValidation, MediaEncoding}` supplies the
+  normative stable definitions shared by producer, CLI, verifier, and report.
+- `cinematic::CinematicAuthorityRecord` is the opaque, schema-versioned
+  authority envelope for simulation-driven media. It keeps accepted simulated
+  state, raw Monte Carlo render estimates, biased visualization derivatives,
+  and audio authority non-interchangeable. Audio further declares exactly one
+  of `Artistic`, `PhysicallyInformed`, or `Calibrated`; calibrated audio must
+  bind nonzero dataset, method, validity-domain, and version identities in a
+  `DeclaredAcousticCalibrationReceipt`. Every record binds the payload, its
+  immediate source, transform receipt/name, complete configuration/version,
+  units, an exact rational clock/range, raw-or-biased transform disposition,
+  and the closed required no-claim set. `derive` checks both immediate-parent
+  identity and a conservative transition graph; it cannot relabel a biased
+  derivative as raw evidence or artistic audio as calibrated. Canonical binary
+  bytes, domain-separated identity, deterministic JSON, and human disclosure
+  are views of the same admitted record. This is structural admission, not
+  authentication or validation of the referenced science.
+- `cinematic_brief::CinematicBrief` is the validated, renderer-independent
+  creative acceptance input. The v1 reference is exactly 240 frames (10 s) and
+  four contiguous shots: establishing product, inclination/contact orbit,
+  macro precession, and terminal close-up. Each shot carries camera keyframes,
+  semantic focus targets, integer-unit optics/aperture/shutter intent, exposure,
+  lighting, material, background, glass/base visibility, audio perspective,
+  hard-cut policy, and physical or explicitly visualization-only time mapping.
+  The brief also freezes 5% action/10% title safe areas, subtle two-fold
+  anisotropic brushing with no mass/contact representation, clipped shutter
+  support at cuts, rigid studio-frame camera interpolation, zero reference
+  audio lead/lag, terminal-only bounded labeled censored holds, and mandatory
+  muted review. Exact frame and per-audio-sample rational simulation-tick
+  helpers, effective clipped shutter windows, and `storyboard_proxy` let
+  downstream work validate the whole story before path tracing.
+- `cinematic_budget::CinematicQualityProfile` freezes storyboard smoke, 1080p
+  daily, representative 4K-frame qualification, and full 4K final tiers. Static
+  admission uses checked arithmetic for camera paths, transactional f64 film,
+  AOV/staging/checkpoint memory, image/audio/mux storage, and host-measured wall
+  time. Exact resource limits admit; one-unit deficits refuse with deterministic
+  repair advice. Final repairs never silently substitute preview SPP, AOVs, or
+  denoising, and timing remains a host-specific estimate rather than a promise.
 - `Evidence<T> { value, qoi, numerical, statistical, model, sensitivity,
   provenance, adjoint_ref }` — the traveling noun. `Certified<T>` is the
   opaque newtype whose constructor discipline is `Evidence::certified()`: rigorous
@@ -644,6 +689,17 @@ telemetry/legacy correlation.
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
 `OutOfDomain`, `FitError`, `FalsifyError`, and typed identity refusals including
+`CinematicDeliverableError` for duration or A/V synchronization refusal and
+`CinematicAuthorityError` for unknown schemas/tags, incomplete provenance,
+unit/clock/disposition incompatibility, missing disclosures or acoustic
+calibration, and illegal authority promotion,
+`CinematicBriefError` for shot gaps/overlaps, invalid A/V or trajectory clocks,
+camera/focus singularities, invalid shutter/optics, out-of-trajectory mapping,
+invalid censored holds or A/V offsets, audio-only meaning, and invalid
+apparent-rotation inputs,
+`CinematicBudgetError` for malformed or downgraded quality tiers, missing host
+throughput measurements, checked-arithmetic overflow, and exact profile/host
+resource deficits with ranked repairs,
 `UncertaintyError` / `UncertaintyCodecError` for eight-term budget admission
 and canonical transport,
 `ModelEvidenceIdentityError`, `ModelCardIdentityError`,
@@ -660,6 +716,11 @@ actionable Display text. Constructors are total
 Deterministic: pure values and mutable diagnostic state machines produce the
 same results for the same ordered call sequence; renderings use sorted
 (`BTreeMap`) order; there are no clocks, addresses, or hidden randomness.
+The cinematic authority codec uses fixed little-endian framing, sorted closed
+no-claim enums, exact rational clocks, bounded identifier grammar, and a
+versioned BLAKE3 domain. Its JSON field order and human disclosures are stable
+functions of the canonical record; the JSON and human forms source limitations
+from the same enum rather than maintaining parallel prose.
 Bit-stable across runs and platforms up to fs-math-class scalar-arithmetic
 divergence. Engineering uncertainty terms and covariance members are emitted
 in a closed canonical source order; totals use a fixed traversal and upward
@@ -709,6 +770,25 @@ None. The mechanisms are `[S]`-grade bookkeeping; the models they DESCRIBE
 carry their own ambition tags in their cards.
 
 ## Conformance tests
+`tests/cinematic_authority.rs` covers the cinematic contract at G0/G3: every
+authority class and sound tier, byte/identity round trips, complete legal
+state-to-render-to-visualization and state-to-informed-to-calibrated-audio
+chains, parent immutability, forbidden promotions, source mismatch, explicit
+calibration binding, machine/human disclosure parity, unit and rational-clock
+presence, schema/tag/length mutations, every truncated prefix, trailing bytes,
+and negative twins that strip the source identity or a mandatory no-claim.
+`tests/cinematic_brief.rs` covers the four-shot reference and exact golden
+frame/sample/simulation mapping (including every master audio sample), full
+muted storyboard proxy, gap/overlap/tail mutants, camera/focus singularities,
+invalid A/V duration, cut/master shutter clipping, trajectory escape, bounded
+terminal censored holds, audio-only-meaning refusal, and apparent-rotation
+fixtures for false reversal, frozen markings, flicker risk, and shutter smear
+across frame-rate and alias boundaries.
+`tests/cinematic_budget.rs` covers all four canonical profiles, final-tier
+anti-downgrade rules, zero/exact-max/max-plus-one structural fields, checked
+frame-range overflow, exact host resource boundaries, film/staging/AOV/EXR/PNG/
+checkpoint/WAV/mux accounting, missing throughput, every host shortage class,
+stable repair ordering, and bounded dry-admission JSON.
 tests/conformance.rs, cases evd-001..evd-015 (JSON-line verdicts; seeded
 cases carry seeds): the G0 conservativeness battery, the registration
 lint, the worked model-discrepancy-dominates example (10% closure vs 0.7%
@@ -1056,6 +1136,33 @@ physical validation, process-standard conformance, or decision fitness.
   labels, not signatures or source authority.
 
 ## No-claim boundaries
+- Cinematic authority records prove only bounded structural consistency,
+  canonical identity, lineage declaration, and honest transform/disclosure
+  classification. They do not authenticate a hash producer, validate mechanics
+  or renderer equations, establish a physical stopping time, establish a
+  ring/cone/disc ranking, validate a contact law, predict a terminal physical
+  singularity, or demonstrate correspondence with the Steve Mould video.
+  Visual or audible realism cannot promote those claims. `Calibrated` sound
+  means a structurally bound external declaration exists; a separate verifier
+  must authenticate it and establish that the artifact lies in its validity
+  domain. Artistic and physically-informed sound explicitly retain the
+  no-calibrated-acoustic-prediction disclosure.
+- The cinematic brief is creative acceptance input, not a camera/render/audio
+  implementation and not scientific evidence. Camera paths never modify
+  simulation state. Brushing and an optional engraved mark are visualization
+  cues only and have no typed path into contact or mass geometry. Physical
+  frames remain linearly mapped; a hold is admitted only as explicitly
+  visualization-only, at the final accepted state, and within its declared
+  frame bound. The alias assessment diagnoses a constant-speed sampled marking
+  model; its flicker classification is a presentation-QA heuristic, not a
+  perceptual-quality or physical-angular-velocity proof, and a proxy approval
+  does not imply final-render approval.
+- Cinematic budget admission is a conservative static estimate, not proof of
+  achieved ray rate, memory residency, compression ratio, visual convergence,
+  or deadline. Wall time is meaningful only relative to the explicitly
+  supplied host/configuration measurement. Adaptive rendering may stop before
+  the SPP ceiling, but admission budgets the ceiling and never silently lowers
+  final quality.
 - The eight-term engineering budget validates representation, source
   completeness, explicit covariance structure, composition monotonicity, and
   canonical identity. It does not prove that a producer selected the correct
