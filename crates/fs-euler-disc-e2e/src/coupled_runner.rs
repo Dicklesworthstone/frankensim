@@ -217,6 +217,10 @@ pub struct CoupledCheckpoint {
     pub initial_total_energy_j: f64,
     /// Stable identity of factors, restart-relevant controls, initial twist, and energy.
     pub configuration_fingerprint: u64,
+    /// Deterministic binding of every restartable state and ledger field.
+    /// Callers must treat this as opaque: changing a public checkpoint field
+    /// without resealing it is refused on restart.
+    checkpoint_fingerprint: u64,
     pub reimpact_count: u32,
     pub was_in_contact: bool,
 }
@@ -234,6 +238,9 @@ pub struct CoupledRun {
 pub enum CoupledError {
     InvalidInput(&'static str),
     CheckpointMismatch,
+    /// A checkpoint's state or accumulated ledger was modified after the
+    /// runner sealed it, so it cannot be used as a physical restart state.
+    CheckpointIntegrityMismatch,
     Dynamics(String),
 }
 
@@ -842,12 +849,16 @@ fn run_closed_with_geometry(
                 == configured_initial_energy_j.to_bits()
                 && checkpoint.configuration_fingerprint == configured_fingerprint =>
         {
+            if checkpoint.checkpoint_fingerprint != checkpoint_fingerprint(&checkpoint) {
+                return Err(CoupledError::CheckpointIntegrityMismatch);
+            }
             checkpoint
         }
         Some(_) => return Err(CoupledError::CheckpointMismatch),
         None => {
             configured_checkpoint.initial_total_energy_j = configured_initial_energy_j;
             configured_checkpoint.configuration_fingerprint = configured_fingerprint;
+            seal_checkpoint(&mut configured_checkpoint);
             configured_checkpoint
         }
     };
@@ -1048,6 +1059,19 @@ fn run_closed_with_geometry(
                     )
                 {
                     debug_assert_eq!(event.kind, ContactTransitionKind::Reimpact);
+                    let Some(committed_reimpact_count) =
+                        checkpoint.reimpact_count.checked_add(reimpact_events)
+                    else {
+                        return Ok(CoupledRun {
+                            samples,
+                            checkpoint,
+                            terminal: CoupledTerminal::NumericalRefusal {
+                                reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
+                            },
+                            applicability: applicability(),
+                            model_disagreement: disagreement(),
+                        });
+                    };
                     let accepted = advance_segment(
                         state,
                         base_deflection_m,
@@ -1070,19 +1094,6 @@ fn run_closed_with_geometry(
                     checkpoint.base_deflection_m = accepted.base_deflection_m;
                     checkpoint.base_velocity_m_per_s = accepted.base_velocity_m_per_s;
                     checkpoint.time_s += elapsed_s + event_duration_s;
-                    let Some(committed_reimpact_count) =
-                        checkpoint.reimpact_count.checked_add(reimpact_events)
-                    else {
-                        return Ok(CoupledRun {
-                            samples,
-                            checkpoint,
-                            terminal: CoupledTerminal::NumericalRefusal {
-                                reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
-                            },
-                            applicability: applicability(),
-                            model_disagreement: disagreement(),
-                        });
-                    };
                     checkpoint.reimpact_count = committed_reimpact_count;
                     checkpoint.was_in_contact = false;
                     checkpoint.accumulated_channel_work_j[0] += channel_work_j[0];
@@ -1103,6 +1114,7 @@ fn run_closed_with_geometry(
                             + checkpoint.accumulated_channel_work_j[2]
                             + checkpoint.accumulated_channel_work_j[3]
                             + checkpoint.accumulated_channel_work_j[4]);
+                    seal_checkpoint(&mut checkpoint);
                     return Ok(CoupledRun {
                         samples,
                         checkpoint,
@@ -1217,11 +1229,6 @@ fn run_closed_with_geometry(
             });
         }
         average_channel_wrenches(&mut channels, elapsed_s);
-        checkpoint.state = state;
-        checkpoint.base_deflection_m = base_deflection_m;
-        checkpoint.base_velocity_m_per_s = base_velocity_m_per_s;
-        checkpoint.time_s += elapsed_s;
-        checkpoint.was_in_contact = post_support_gap_m <= 0.0;
         let Some(updated_reimpact_count) = checkpoint.reimpact_count.checked_add(reimpact_events)
         else {
             return Ok(CoupledRun {
@@ -1234,6 +1241,11 @@ fn run_closed_with_geometry(
                 model_disagreement: disagreement(),
             });
         };
+        checkpoint.state = state;
+        checkpoint.base_deflection_m = base_deflection_m;
+        checkpoint.base_velocity_m_per_s = base_velocity_m_per_s;
+        checkpoint.time_s += elapsed_s;
+        checkpoint.was_in_contact = post_support_gap_m <= 0.0;
         checkpoint.reimpact_count = updated_reimpact_count;
         checkpoint.accumulated_channel_work_j[0] += channel_work_j[0];
         checkpoint.accumulated_channel_work_j[1] += channel_work_j[1];
@@ -1253,6 +1265,7 @@ fn run_closed_with_geometry(
                 + checkpoint.accumulated_channel_work_j[3]
                 + checkpoint.accumulated_channel_work_j[4]);
         checkpoint.accumulated_energy_defect_j = defect;
+        seal_checkpoint(&mut checkpoint);
         let (sample_inclination, precession, spin) = qois(checkpoint.state, mass)?;
         let precession_acceleration = (precession - previous_precession) / elapsed_s;
         previous_precession = precession;
@@ -1375,6 +1388,7 @@ fn initial_checkpoint(
         accumulated_energy_defect_j: 0.0,
         initial_total_energy_j: 0.0,
         configuration_fingerprint: 0,
+        checkpoint_fingerprint: 0,
         reimpact_count: 0,
         was_in_contact: contact_penetration_m > 0.0,
     })
@@ -1536,7 +1550,7 @@ fn unilateral_normal_force(
 
 #[cfg(test)]
 mod tests {
-    use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
+    use fs_mbd::{RigidBodyState, Vec3};
 
     use super::{
         CONTACT_EVENT_GAP_TOLERANCE_M, ContactBranch, ContactTransitionKind, CoupledControls,
@@ -1575,39 +1589,6 @@ mod tests {
             precession_rad_per_s: 0.0,
             spin_rad_per_s: 0.0,
         }
-    }
-
-    fn declared_airborne_terminal_restart(
-        factors: CoupledFactors,
-        controls: CoupledControls,
-        initial: CoupledInitialState,
-    ) -> super::CoupledCheckpoint {
-        let seed = run_closed_reduced(
-            factors,
-            CoupledControls {
-                maximum_steps: 1,
-                ..controls
-            },
-            initial,
-            None,
-        )
-        .expect("seed checkpoint");
-        let orientation =
-            UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), initial.inclination_rad)
-                .expect("finite initial tilt");
-        let pose = Pose::new(Vec3::new(0.0, 0.0, 1.0), orientation).expect("finite pose");
-        let mut restart = seed.checkpoint;
-        restart.state = RigidBodyState::new(
-            pose,
-            Vec3::ZERO,
-            Vec3::new(0.0, -factors.transverse_inertia_kg_m2, 0.0),
-        )
-        .expect("finite torque-free terminal state");
-        restart.time_s = 0.0;
-        restart.base_deflection_m = 0.0;
-        restart.base_velocity_m_per_s = 0.0;
-        restart.was_in_contact = false;
-        restart
     }
 
     #[test]
@@ -1690,104 +1671,36 @@ mod tests {
     }
 
     #[test]
-    fn reduced_runner_localizes_reimpact_from_a_declared_open_initial_branch() {
-        let radius_m = 0.038;
-        let thickness_m = 0.006;
-        let mass_kg = std::f64::consts::PI * radius_m * radius_m * thickness_m * 2680.0;
-        let factors = CoupledFactors {
-            mass_kg,
-            radius_m,
-            thickness_m,
-            transverse_inertia_kg_m2: mass_kg * (3.0 * radius_m * radius_m + thickness_m.powi(2))
-                / 12.0,
-            axial_inertia_kg_m2: 0.5 * mass_kg * radius_m * radius_m,
-            gravity_m_per_s2: 9.806_65,
-            sliding_friction_coefficient: 0.0,
-            rolling_resistance_m: 0.0,
-            contact_stiffness_n_per_m: 8.0e4,
-            contact_damping_n_s_per_m: 3.0,
-            base_effective_mass_kg: 0.25,
-            base_stiffness_n_per_m: 4.0e4,
-            base_damping_n_s_per_m: 4.0,
-            gas_rotational_damping_n_m_s: 0.0,
-            gas_translation_damping_n_s_per_m: 0.0,
-        };
+    fn restart_refuses_modified_state_base_or_branch() {
+        let factors = terminal_factors();
         let controls = CoupledControls {
             timestep_s: 1.0e-3,
-            maximum_steps: 2,
+            maximum_steps: 1,
             terminal_inclination_rad: 0.002,
             reimpact_limit: 8,
         };
-        let initial = CoupledInitialState {
-            inclination_rad: 0.08,
-            precession_rad_per_s: 0.0,
-            spin_rad_per_s: 0.0,
-        };
-        let seed = run_closed_reduced(
-            factors,
-            CoupledControls {
-                maximum_steps: 1,
-                ..controls
-            },
-            initial,
-            None,
+        let initial = terminal_initial();
+        let seed = run_closed_reduced(factors, controls, initial, None).expect("seed run");
+        let mut state_mutation = seed.checkpoint.clone();
+        state_mutation.state = RigidBodyState::new(
+            state_mutation.state.pose(),
+            state_mutation
+                .state
+                .linear_momentum_world()
+                .add(Vec3::new(1.0e-9, 0.0, 0.0)),
+            state_mutation.state.angular_momentum_body(),
         )
-        .expect("seed run");
-        // This is a real runner restart state: lift the disc into a declared
-        // open gap and give it a downward velocity. The configuration identity
-        // remains the original physical case, while the public checkpoint is
-        // intentionally the independently supplied restart state.
-        let mut airborne = seed.checkpoint;
-        let pose = airborne.state.pose();
-        let elevated_pose = Pose::new(
-            pose.position_world().add(Vec3::new(0.0, 0.0, 5.0e-4)),
-            pose.orientation(),
-        )
-        .expect("finite elevated pose");
-        airborne.state = RigidBodyState::new(
-            elevated_pose,
-            Vec3::new(0.0, 0.0, -1.0).scale(mass_kg),
-            airborne.state.angular_momentum_body(),
-        )
-        .expect("finite airborne state");
-        airborne.base_deflection_m = 0.0;
-        airborne.base_velocity_m_per_s = 0.0;
-        airborne.was_in_contact = false;
-        let run = run_closed_reduced(factors, controls, initial, Some(airborne.clone()))
-            .expect("reduced run");
-        assert!(run.samples.iter().any(|sample| {
-            sample
-                .contact_transitions
-                .iter()
-                .any(|transition| transition.kind == ContactTransitionKind::Reimpact)
-        }));
-        let prefix = run_closed_reduced(
-            factors,
-            CoupledControls {
-                maximum_steps: 1,
-                ..controls
-            },
-            initial,
-            Some(airborne),
-        )
-        .expect("transition prefix");
-        assert!(
-            prefix.samples[0]
-                .contact_transitions
-                .iter()
-                .any(|transition| transition.kind == ContactTransitionKind::Reimpact)
-        );
-        let resumed = run_closed_reduced(
-            factors,
-            CoupledControls {
-                maximum_steps: 1,
-                ..controls
-            },
-            initial,
-            Some(prefix.checkpoint),
-        )
-        .expect("post-transition restart");
-        assert_eq!(run.checkpoint, resumed.checkpoint);
+        .expect("finite mutation");
+        let mut base_mutation = seed.checkpoint.clone();
+        base_mutation.base_deflection_m += 1.0e-9;
+        let mut branch_mutation = seed.checkpoint;
+        branch_mutation.was_in_contact = !branch_mutation.was_in_contact;
+        for mutated in [state_mutation, base_mutation, branch_mutation] {
+            assert_eq!(
+                run_closed_reduced(factors, controls, initial, Some(mutated)),
+                Err(CoupledError::CheckpointIntegrityMismatch)
+            );
+        }
     }
 
     #[test]
@@ -1795,38 +1708,20 @@ mod tests {
         let factors = terminal_factors();
         let initial = terminal_initial();
         let coarse_controls = CoupledControls {
-            timestep_s: 0.05,
-            maximum_steps: 2,
-            terminal_inclination_rad: 0.04,
+            timestep_s: 1.0e-3,
+            maximum_steps: 32,
+            terminal_inclination_rad: 0.079,
             reimpact_limit: 8,
         };
         let fine_controls = CoupledControls {
-            timestep_s: 0.01,
-            maximum_steps: 8,
+            timestep_s: 5.0e-4,
+            maximum_steps: 64,
             ..coarse_controls
         };
-        let coarse = run_closed_reduced(
-            factors,
-            coarse_controls,
-            initial,
-            Some(declared_airborne_terminal_restart(
-                factors,
-                coarse_controls,
-                initial,
-            )),
-        )
-        .expect("coarse terminal run");
-        let fine = run_closed_reduced(
-            factors,
-            fine_controls,
-            initial,
-            Some(declared_airborne_terminal_restart(
-                factors,
-                fine_controls,
-                initial,
-            )),
-        )
-        .expect("fine terminal run");
+        let coarse = run_closed_reduced(factors, coarse_controls, initial, None)
+            .expect("coarse terminal run");
+        let fine =
+            run_closed_reduced(factors, fine_controls, initial, None).expect("fine terminal run");
         assert_eq!(coarse.terminal, CoupledTerminal::TerminalInclination);
         assert_eq!(fine.terminal, CoupledTerminal::TerminalInclination);
         let coarse_event = coarse
@@ -1839,12 +1734,19 @@ mod tests {
             .last()
             .and_then(|sample| sample.terminal_inclination_event)
             .expect("fine terminal bracket");
-        assert!(coarse.checkpoint.time_s < coarse_controls.timestep_s);
+        assert!(
+            coarse.checkpoint.time_s
+                < coarse_controls.maximum_steps as f64 * coarse_controls.timestep_s
+        );
         assert_eq!(coarse.checkpoint.time_s, coarse_event.time_s);
         assert_eq!(fine.checkpoint.time_s, fine_event.time_s);
         assert!(coarse_event.bracket_start_s <= coarse_event.time_s);
         assert!(coarse_event.time_s <= coarse_event.bracket_end_s);
-        assert!((coarse.checkpoint.time_s - fine.checkpoint.time_s).abs() <= 1.0e-8);
+        // The event locator is substep-accurate for each discrete trajectory,
+        // but the trajectories themselves use a first-order rigid/base step.
+        // Their observed terminal times must therefore agree within the
+        // coarser 1 ms macrostep rather than a root-solver-only tolerance.
+        assert!((coarse.checkpoint.time_s - fine.checkpoint.time_s).abs() <= 1.0e-3);
         assert!(
             (coarse
                 .samples
@@ -1862,14 +1764,12 @@ mod tests {
         let factors = terminal_factors();
         let initial = terminal_initial();
         let controls = CoupledControls {
-            timestep_s: 0.03,
-            maximum_steps: 2,
-            terminal_inclination_rad: 0.04,
+            timestep_s: 1.0e-3,
+            maximum_steps: 32,
+            terminal_inclination_rad: 0.079,
             reimpact_limit: 8,
         };
-        let restart = declared_airborne_terminal_restart(factors, controls, initial);
-        let full = run_closed_reduced(factors, controls, initial, Some(restart.clone()))
-            .expect("full terminal run");
+        let full = run_closed_reduced(factors, controls, initial, None).expect("full terminal run");
         let prefix = run_closed_reduced(
             factors,
             CoupledControls {
@@ -1877,7 +1777,7 @@ mod tests {
                 ..controls
             },
             initial,
-            Some(restart),
+            None,
         )
         .expect("nonterminal prefix");
         assert_eq!(prefix.terminal, CoupledTerminal::HorizonReached);
@@ -1960,6 +1860,56 @@ fn configuration_fingerprint(
     }
     fingerprint
 }
+
+fn checkpoint_fingerprint(checkpoint: &CoupledCheckpoint) -> u64 {
+    // This is an integrity binding for a restartable numerical state, not a
+    // cryptographic authenticity mechanism. It prevents a caller from
+    // silently grafting a different pose, base state, ledger, or branch onto
+    // an otherwise valid configuration identity.
+    let pose = checkpoint.state.pose();
+    let position = pose.position_world();
+    let orientation = pose.orientation().components();
+    let linear_momentum = checkpoint.state.linear_momentum_world();
+    let angular_momentum = checkpoint.state.angular_momentum_body();
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+    for bits in [
+        position.x.to_bits(),
+        position.y.to_bits(),
+        position.z.to_bits(),
+        orientation[0].to_bits(),
+        orientation[1].to_bits(),
+        orientation[2].to_bits(),
+        orientation[3].to_bits(),
+        linear_momentum.x.to_bits(),
+        linear_momentum.y.to_bits(),
+        linear_momentum.z.to_bits(),
+        angular_momentum.x.to_bits(),
+        angular_momentum.y.to_bits(),
+        angular_momentum.z.to_bits(),
+        checkpoint.time_s.to_bits(),
+        checkpoint.base_deflection_m.to_bits(),
+        checkpoint.base_velocity_m_per_s.to_bits(),
+        checkpoint.accumulated_channel_work_j[0].to_bits(),
+        checkpoint.accumulated_channel_work_j[1].to_bits(),
+        checkpoint.accumulated_channel_work_j[2].to_bits(),
+        checkpoint.accumulated_channel_work_j[3].to_bits(),
+        checkpoint.accumulated_channel_work_j[4].to_bits(),
+        checkpoint.accumulated_energy_defect_j.to_bits(),
+        checkpoint.initial_total_energy_j.to_bits(),
+        checkpoint.configuration_fingerprint,
+        u64::from(checkpoint.reimpact_count),
+        if checkpoint.was_in_contact { 1 } else { 0 },
+    ] {
+        fingerprint ^= bits;
+        fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    fingerprint
+}
+
+fn seal_checkpoint(checkpoint: &mut CoupledCheckpoint) {
+    checkpoint.checkpoint_fingerprint = checkpoint_fingerprint(checkpoint);
+}
+
 fn validate(
     f: CoupledFactors,
     c: CoupledControls,
