@@ -53,12 +53,18 @@ const EXECUTION_POLL_QUOTA: u32 = 10_000;
 const EXECUTION_COST_QUOTA: u64 = 100_000;
 const CLOSED_INITIAL_HORIZON_S: f64 = 2.0;
 const CLOSED_MAXIMUM_HORIZON_S: f64 = 32.0;
+const CLOSED_RADIUS_M: f64 = 0.038;
+const CLOSED_THICKNESS_M: f64 = 0.006;
+const CLOSED_INNER_RATIO: f64 = 0.65;
+const CLOSED_FILLET_RADIUS_M: f64 = 0.001;
+const CLOSED_REFERENCE_DENSITY_KG_PER_M3: f64 = 2_680.0;
 
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
         None => run_campaign().and_then(|_| run_closed_campaign()),
         Some("--closed-only") => run_closed_campaign(),
-        Some(_) => Err("usage: euler_disc_campaign [--closed-only]".to_string()),
+        Some("--convergence-only") => run_closed_convergence_campaign(),
+        Some(_) => Err("usage: euler_disc_campaign [--closed-only|--convergence-only]".to_string()),
     };
     if let Err(error) = result {
         eprintln!("euler-disc campaign refusal: {error}");
@@ -68,6 +74,40 @@ fn main() {
 
 fn run_closed_campaign() -> Result<(), String> {
     with_closed_context(run_closed_campaign_with_context)
+}
+
+fn run_closed_convergence_campaign() -> Result<(), String> {
+    with_closed_context(|cx| {
+        let (solid_profile, ring_profile, _) = resolve_equal_mass_fillet_pair(cx)?;
+        let initial = closed_initial_state();
+        let channels = channels_for(cases_defaults(solid_profile.spec));
+        let records = [
+            convergence_record(&solid_profile, channels, initial, cx)?,
+            ranking_convergence_record(
+                RankingRefinementInput {
+                    solid_profile: &solid_profile,
+                    solid_channels: channels,
+                    ring_profile: &ring_profile,
+                    ring_channels: channels,
+                    initial,
+                },
+                cx,
+            )?,
+        ];
+        let payload = records.join("\n");
+        let digest = fs_blake3::hash_domain(
+            "org.frankensim.euler-disc-campaign-convergence-jsonl.v3",
+            payload.as_bytes(),
+        );
+        for record in records {
+            println!("{record}");
+        }
+        println!(
+            "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"convergence-campaign-complete\",\"model\":\"matched-1mm-outer-fillet-equal-mass-comparison\",\"authority\":\"numerical-convergence-evidence-only\",\"terminal\":\"completed\",\"record_count\":2,\"digest_blake3\":\"{}\",\"no_claim\":\"not-experimental-calibration-or-physical-validation\"}}",
+            digest.to_hex(),
+        );
+        Ok(())
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -90,13 +130,10 @@ struct ContinuedRun {
 }
 
 fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
-    const RADIUS: f64 = 0.038;
-    const THICKNESS: f64 = 0.006;
-    const INNER_RATIO: f64 = 0.65;
-    const DENSITY: f64 = 2_680.0;
+    let (_, _, equal_mass_fillet_density) = resolve_equal_mass_fillet_pair(cx)?;
     let sharp = DiscProfileSpec::SolidCylinder {
-        outer_radius_m: RADIUS,
-        thickness_m: THICKNESS,
+        outer_radius_m: CLOSED_RADIUS_M,
+        thickness_m: CLOSED_THICKNESS_M,
         edge_treatment: SquatDiscEdgeTreatment::Sharp,
     };
     let cases = [
@@ -104,7 +141,7 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             name: "solid",
             profile_kind: "solid-cylinder-sharp",
             profile: sharp,
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             base_stiffness_scale: 1.0,
             rolling_resistance_m: 4.0e-5,
             gas_rotational_damping_n_m_s: 2.0e-7,
@@ -114,56 +151,71 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             name: "solid-fillet-1mm",
             profile_kind: "solid-cylinder-circular-fillet",
             profile: DiscProfileSpec::SolidCylinder {
-                outer_radius_m: RADIUS,
-                thickness_m: THICKNESS,
-                edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+                outer_radius_m: CLOSED_RADIUS_M,
+                thickness_m: CLOSED_THICKNESS_M,
+                edge_treatment: SquatDiscEdgeTreatment::CircularFillet {
+                    radius: CLOSED_FILLET_RADIUS_M,
+                },
             },
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             ..cases_defaults(sharp)
         },
         ClosedCase {
             name: "solid-chamfer-1mm",
             profile_kind: "solid-cylinder-linear-chamfer",
             profile: DiscProfileSpec::ChamferedCylinder {
-                outer_radius_m: RADIUS,
-                thickness_m: THICKNESS,
+                outer_radius_m: CLOSED_RADIUS_M,
+                thickness_m: CLOSED_THICKNESS_M,
                 chamfer_radial_m: 0.001,
                 chamfer_axial_m: 0.001,
             },
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             ..cases_defaults(sharp)
         },
         ClosedCase {
             name: "ring-fixed-density",
             profile_kind: "annular-cylinder",
             profile: DiscProfileSpec::AnnularCylinder {
-                outer_radius_m: RADIUS,
-                inner_radius_m: INNER_RATIO * RADIUS,
-                thickness_m: THICKNESS,
+                outer_radius_m: CLOSED_RADIUS_M,
+                inner_radius_m: CLOSED_INNER_RATIO * CLOSED_RADIUS_M,
+                thickness_m: CLOSED_THICKNESS_M,
             },
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             ..cases_defaults(sharp)
         },
         ClosedCase {
             name: "ring-equal-mass",
             profile_kind: "annular-cylinder-equal-mass-control",
             profile: DiscProfileSpec::AnnularCylinder {
-                outer_radius_m: RADIUS,
-                inner_radius_m: INNER_RATIO * RADIUS,
-                thickness_m: THICKNESS,
+                outer_radius_m: CLOSED_RADIUS_M,
+                inner_radius_m: CLOSED_INNER_RATIO * CLOSED_RADIUS_M,
+                thickness_m: CLOSED_THICKNESS_M,
             },
-            density_kg_per_m3: DENSITY / (1.0 - INNER_RATIO * INNER_RATIO),
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3
+                / (1.0 - CLOSED_INNER_RATIO * CLOSED_INNER_RATIO),
+            ..cases_defaults(sharp)
+        },
+        ClosedCase {
+            name: "ring-equal-mass-fillet-1mm",
+            profile_kind: "annular-cylinder-outer-circular-fillet-equal-mass-control",
+            profile: DiscProfileSpec::OuterFilletedAnnularCylinder {
+                outer_radius_m: CLOSED_RADIUS_M,
+                inner_radius_m: CLOSED_INNER_RATIO * CLOSED_RADIUS_M,
+                thickness_m: CLOSED_THICKNESS_M,
+                outer_fillet_radius_m: CLOSED_FILLET_RADIUS_M,
+            },
+            density_kg_per_m3: equal_mass_fillet_density,
             ..cases_defaults(sharp)
         },
         ClosedCase {
             name: "symmetric-tapered",
             profile_kind: "symmetric-double-frustum",
             profile: DiscProfileSpec::SymmetricTapered {
-                outer_radius_m: RADIUS,
+                outer_radius_m: CLOSED_RADIUS_M,
                 face_radius_m: 0.012,
-                thickness_m: THICKNESS,
+                thickness_m: CLOSED_THICKNESS_M,
             },
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             ..cases_defaults(sharp)
         },
         ClosedCase {
@@ -171,10 +223,10 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             profile_kind: "solid-cylinder-sharp",
             profile: DiscProfileSpec::SolidCylinder {
                 outer_radius_m: 0.052,
-                thickness_m: THICKNESS,
+                thickness_m: CLOSED_THICKNESS_M,
                 edge_treatment: SquatDiscEdgeTreatment::Sharp,
             },
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             ..cases_defaults(sharp)
         },
         ClosedCase {
@@ -188,7 +240,7 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             name: "compliant-base",
             profile_kind: "solid-cylinder-sharp",
             profile: sharp,
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             base_stiffness_scale: 0.35,
             ..cases_defaults(sharp)
         },
@@ -196,7 +248,7 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             name: "solid-no-gas",
             profile_kind: "solid-cylinder-sharp",
             profile: sharp,
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             gas_rotational_damping_n_m_s: 0.0,
             gas_translation_damping_n_s_per_m: 0.0,
             ..cases_defaults(sharp)
@@ -205,7 +257,7 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             name: "solid-no-rolling",
             profile_kind: "solid-cylinder-sharp",
             profile: sharp,
-            density_kg_per_m3: DENSITY,
+            density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
             rolling_resistance_m: 0.0,
             ..cases_defaults(sharp)
         },
@@ -216,11 +268,7 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
         terminal_inclination_rad: 0.002,
         reimpact_limit: 128,
     };
-    let initial = CoupledInitialState {
-        inclination_rad: 0.08,
-        precession_rad_per_s: 16.0,
-        spin_rad_per_s: 120.0,
-    };
+    let initial = closed_initial_state();
     let continuation = HorizonContinuationPolicy {
         initial_horizon_s: CLOSED_INITIAL_HORIZON_S,
         maximum_horizon_s: CLOSED_MAXIMUM_HORIZON_S,
@@ -236,17 +284,33 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
             .resolve(case.density_kg_per_m3, cx)
             .map_err(|error| format!("{} profile: {error}", case.name))?;
         let channels = channels_for(case);
-        let continued =
-            run_with_declared_continuation(&profile, channels, controls, initial, continuation, cx)
-                .map_err(|error| format!("{}: {error}", case.name))?;
+        let continued = run_with_declared_continuation(
+            case.name,
+            &profile,
+            channels,
+            controls,
+            initial,
+            continuation,
+            cx,
+        )
+        .map_err(|error| format!("{}: {error}", case.name))?;
         let outcome = classify_outcome(&continued.run)
             .map_err(|error| format!("{} outcome: {error}", case.name))?;
+        let (outcome_kind, retained_time_s, _) = outcome_kind_and_time(outcome);
+        eprintln!(
+            "euler-disc closed stage=case-complete case={} outcome={} retained_time_s={:.9} continuations={} reimpacts={}",
+            case.name,
+            outcome_kind,
+            retained_time_s,
+            continued.continuation_count,
+            continued.run.checkpoint.reimpact_count,
+        );
         records.push(closed_case_record(
             case, &profile, controls, initial, &continued, outcome,
         )?);
-        if case.name == "solid" {
+        if case.name == "solid-fillet-1mm" {
             resolved_solid = Some((profile, channels));
-        } else if case.name == "ring-equal-mass" {
+        } else if case.name == "ring-equal-mass-fillet-1mm" {
             resolved_equal_mass_ring = Some((profile, channels));
         }
     }
@@ -289,12 +353,59 @@ fn run_closed_campaign_with_context(cx: &Cx<'_>) -> Result<(), String> {
     Ok(())
 }
 
+const fn closed_initial_state() -> CoupledInitialState {
+    CoupledInitialState {
+        inclination_rad: 0.08,
+        precession_rad_per_s: 16.0,
+        spin_rad_per_s: 120.0,
+    }
+}
+
+fn resolve_equal_mass_fillet_pair(
+    cx: &Cx<'_>,
+) -> Result<(ResolvedDiscProfile, ResolvedDiscProfile, f64), String> {
+    let solid_spec = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: CLOSED_RADIUS_M,
+        thickness_m: CLOSED_THICKNESS_M,
+        edge_treatment: SquatDiscEdgeTreatment::CircularFillet {
+            radius: CLOSED_FILLET_RADIUS_M,
+        },
+    };
+    let ring_spec = DiscProfileSpec::OuterFilletedAnnularCylinder {
+        outer_radius_m: CLOSED_RADIUS_M,
+        inner_radius_m: CLOSED_INNER_RATIO * CLOSED_RADIUS_M,
+        thickness_m: CLOSED_THICKNESS_M,
+        outer_fillet_radius_m: CLOSED_FILLET_RADIUS_M,
+    };
+    let solid = solid_spec
+        .resolve(CLOSED_REFERENCE_DENSITY_KG_PER_M3, cx)
+        .map_err(|error| format!("matched filleted solid profile: {error}"))?;
+    let unit_density_ring = ring_spec
+        .resolve(1.0, cx)
+        .map_err(|error| format!("unit-density matched filleted ring profile: {error}"))?;
+    let equal_mass_density = solid.mass_properties.mass / unit_density_ring.mass_properties.volume;
+    if !equal_mass_density.is_finite() || equal_mass_density <= 0.0 {
+        return Err("matched filleted ring equal-mass density was invalid".to_owned());
+    }
+    let ring = ring_spec
+        .resolve(equal_mass_density, cx)
+        .map_err(|error| format!("equal-mass matched filleted ring profile: {error}"))?;
+    let relative_mass_error =
+        (ring.mass_properties.mass - solid.mass_properties.mass).abs() / solid.mass_properties.mass;
+    if relative_mass_error > 1.0e-12 {
+        return Err(format!(
+            "matched filleted ring equal-mass resolution drifted by {relative_mass_error:.17e}"
+        ));
+    }
+    Ok((solid, ring, equal_mass_density))
+}
+
 const fn cases_defaults(profile: DiscProfileSpec) -> ClosedCase {
     ClosedCase {
         name: "unused-default-name",
         profile_kind: "unused-default-profile-kind",
         profile,
-        density_kg_per_m3: 2_680.0,
+        density_kg_per_m3: CLOSED_REFERENCE_DENSITY_KG_PER_M3,
         base_stiffness_scale: 1.0,
         rolling_resistance_m: 4.0e-5,
         gas_rotational_damping_n_m_s: 2.0e-7,
@@ -318,6 +429,7 @@ fn channels_for(case: ClosedCase) -> CoupledChannelFactors {
 }
 
 fn run_with_declared_continuation(
+    case_name: &str,
     profile: &ResolvedDiscProfile,
     channels: CoupledChannelFactors,
     controls: CoupledControls,
@@ -349,6 +461,10 @@ fn run_with_declared_continuation(
             maximum_steps: step_count_f64 as u32,
             ..controls
         };
+        eprintln!(
+            "euler-disc closed stage=segment-start case={case_name} completed_time_s={completed_time_s:.9} declared_horizon_s={declared_horizon_s:.9} segment_steps={}",
+            segment_controls.maximum_steps,
+        );
         let run =
             run_closed_profile_reduced(profile, channels, segment_controls, initial, restart, cx)
                 .map_err(|error| error.to_string())?;
@@ -559,6 +675,10 @@ fn convergence_record(
             .map_err(|error| error.to_string())?
             .class(),
     ];
+    eprintln!(
+        "euler-disc closed stage=state-convergence-complete assessed_timesteps_s=2e-5,1e-5,5e-6 within_declared_band={within_declared_delta_band} qoi_linf={fine_reference_qoi_linf:.9e} work_linf={fine_reference_work_linf:.9e} energy_defect_delta={:.9e}",
+        receipt.fine_reference_work_energy.energy_defect,
+    );
     Ok(format!(
         "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-solid-timestep-convergence\",\"model\":\"bounded-five-rung-fixed-horizon-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"dimensionless-normalized-deltas\",\"terminal\":\"analysis-complete\",\"horizon_s\":{HORIZON_S:.17e},\"sentinel_timesteps_s\":{{\"h16\":8.0e-5,\"h8\":4.0e-5}},\"sentinel_terminal_classes\":{{\"h16\":\"{}\",\"h8\":\"{}\"}},\"assessed_timesteps_s\":{{\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"terminal_class_agreement\":{},\"fine_reference_qoi\":{{\"inclination\":{:.17e},\"precession\":{:.17e},\"spin\":{:.17e}}},\"fine_reference_qoi_linf\":{fine_reference_qoi_linf:.17e},\"fine_reference_work_linf\":{fine_reference_work_linf:.17e},\"fine_reference_energy_defect\":{:.17e},\"declared_normalized_delta_limit\":{declared_delta_limit:.17e},\"within_declared_delta_band\":{},\"observed_order\":\"{}\",\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"fixed-horizon-numerical-sensitivity-only;eventful-mode-withholds-smooth-order;not-terminal-time-or-physical-validation\"}}",
         outcome_class_name(sentinel_classes[0]),
@@ -637,6 +757,12 @@ fn ranking_convergence_record(
         let ring = classify_outcome(&ring_run)
             .map_err(|error| format!("ring ranking outcome at dt={timestep_s}: {error}"))?;
         let ordering = compare_censor_aware_durations(ring, solid);
+        eprintln!(
+            "euler-disc closed stage=ranking-rung timestep_s={timestep_s:.9e} ring_outcome={} solid_outcome={} ordering={}",
+            outcome_kind_and_time(ring).0,
+            outcome_kind_and_time(solid).0,
+            censor_ordering_name(ordering),
+        );
         rungs.push(RankingRung {
             timestep_s,
             solid,
@@ -658,6 +784,9 @@ fn ranking_convergence_record(
         .unwrap_or(false);
     let ranking_numerically_supported =
         ring_shorter_bound_proven && event_time_within_declared_band;
+    eprintln!(
+        "euler-disc closed stage=ranking-convergence-complete ordering_agreement={ordering_agreement} ring_shorter_bound_all_assessed_rungs={ring_shorter_bound_proven} event_time_within_band={event_time_within_declared_band} ranking_numerically_supported={ranking_numerically_supported}",
+    );
 
     Ok(format!(
         "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"equal-mass-ring-vs-solid-ranking-convergence\",\"model\":\"bounded-five-rung-common-window-censor-aware-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"SI:s\",\"terminal\":\"analysis-complete\",\"common_horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h16\":{:.17e},\"h8\":{:.17e},\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"rungs\":{{\"h16\":{},\"h8\":{},\"h4\":{},\"h2\":{},\"h\":{}}},\"assessed_triplet\":\"h4,h2,h\",\"ordering_agreement\":{},\"ring_shorter_than_solid_bound_proven_at_all_rungs\":{},\"ring_event_time_coarse_fine\":{},\"ring_event_time_fine_reference\":{},\"declared_event_time_relative_limit\":{EVENT_TIME_RELATIVE_LIMIT:.17e},\"ring_event_time_within_declared_band\":{},\"ranking_numerically_supported\":{},\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"numerical-ranking-of-declared-reduced-model-only;solid-censor-is-a-lower-bound-not-a-duration;not-experimental-calibration-or-video-validation\"}}",

@@ -133,10 +133,10 @@ pub struct CoupledSample {
     /// a newly localized reimpact may begin at zero penetration.
     pub contact_active: bool,
     /// Every bounded, mechanically split contact transition retained within
-    /// this interval, in chronological order. An empty list does not prove
-    /// that no open/reimpact pair occurred while both macro-step endpoints
-    /// remained on the same branch; this reduced runner localizes endpoint
-    /// crossings only and makes no sub-grid chatter claim.
+    /// this interval, in chronological order. The locator probes four fixed
+    /// subintervals before bisection. An empty list therefore does not prove
+    /// that no open/reimpact excursion occurred entirely between adjacent scan
+    /// nodes, and makes no continuum-scale chatter claim.
     pub contact_transitions: Vec<LocalizedContactTransition>,
     /// Bracket for the terminal-inclination crossing that ended this sample,
     /// when one occurred. The locator re-evolves the reduced mechanics within
@@ -308,6 +308,10 @@ impl CoupledGeometry<'_, '_> {
 }
 
 const CONTACT_EVENT_BISECTION_ITERATIONS: u32 = 48;
+/// Fixed deterministic interior scan used before root bisection. Four equal
+/// subintervals resolve the first crossing whose excursion persists to a scan
+/// node without turning the reduced runner into an unbounded adaptive search.
+const CONTACT_EVENT_SCAN_SUBDIVISIONS: u32 = 4;
 const CONTACT_EVENT_GAP_TOLERANCE_M: f64 = 1.0e-12;
 const CONTACT_EVENT_ROOT_TOLERANCE_M: f64 = 1.0e-15;
 const TERMINAL_EVENT_BISECTION_ITERATIONS: u32 = 48;
@@ -369,11 +373,11 @@ fn reimpact_budget_exceeded(base_count: u32, additional_events: u32, limit: u32)
         .map_or(true, |count| count > limit)
 }
 
-/// Localizes one deterministic endpoint-bracketed transition by re-evaluating
-/// the actual reduced segment evolution. No interior scan is attempted when
-/// both macro-step endpoints select the same branch: a sub-grid open/reimpact
-/// pair is therefore explicitly outside this reduced runner's claim boundary.
-/// The event cap applies only to transitions it does resolve.
+/// Localizes the first transition found by a bounded deterministic interior
+/// scan, then re-evaluates the actual reduced segment evolution to bisect that
+/// bracket. An excursion entirely between adjacent scan nodes remains outside
+/// this reduced runner's claim boundary; the event cap applies only to
+/// transitions it resolves.
 fn localize_endpoint_transition(
     interval_start_s: f64,
     duration_s: f64,
@@ -390,11 +394,30 @@ fn localize_endpoint_transition(
     {
         return Ok(None);
     }
-    let Some(kind) = transition_kind(branch, start_gap_m, end_gap_m) else {
+    let mut low_s = 0.0;
+    let mut low_gap_m = start_gap_m;
+    let mut bracket = None;
+    for scan_index in 1..=CONTACT_EVENT_SCAN_SUBDIVISIONS {
+        let high_s =
+            duration_s * f64::from(scan_index) / f64::from(CONTACT_EVENT_SCAN_SUBDIVISIONS);
+        let high_gap_m = if scan_index == CONTACT_EVENT_SCAN_SUBDIVISIONS {
+            end_gap_m
+        } else {
+            gap_after(high_s)?
+        };
+        if !high_gap_m.is_finite() {
+            return Ok(None);
+        }
+        if let Some(kind) = transition_kind(branch, low_gap_m, high_gap_m) {
+            bracket = Some((kind, low_s, high_s));
+            break;
+        }
+        low_s = high_s;
+        low_gap_m = high_gap_m;
+    }
+    let Some((kind, mut low_s, mut high_s)) = bracket else {
         return Ok(None);
     };
-    let mut low_s = 0.0;
-    let mut high_s = duration_s;
     for _ in 0..CONTACT_EVENT_BISECTION_ITERATIONS {
         let midpoint_s = 0.5 * (low_s + high_s);
         let midpoint_gap_m = gap_after(midpoint_s)?;
@@ -1633,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_only_locator_makes_no_hidden_chatter_inference() {
+    fn bounded_interior_scan_finds_first_hidden_opening() {
         use core::cell::Cell;
 
         let tolerance = CONTACT_EVENT_GAP_TOLERANCE_M;
@@ -1659,8 +1682,12 @@ mod tests {
             },
         )
         .expect("finite gap");
-        assert_eq!(event, None);
-        assert_eq!(callback_count.get(), 0);
+        let event = event.expect("bounded scan must retain the first opening");
+        assert_eq!(event.kind, ContactTransitionKind::Opening);
+        assert!((event.time_s - 0.1875).abs() <= 1.0e-4);
+        assert!(event.bracket_start_s <= event.time_s);
+        assert!(event.time_s <= event.bracket_end_s);
+        assert!(callback_count.get() > 0);
     }
 
     #[test]
