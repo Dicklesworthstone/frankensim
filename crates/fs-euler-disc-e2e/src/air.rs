@@ -6,6 +6,7 @@
 //! rim, molecular, contact, or outcome claim**.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use fs_flux::{
     ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget,
@@ -100,6 +101,32 @@ pub enum AirFilmError {
     ContactTopologyUnavailable,
     /// Restart state was not made by the same identity/discretization.
     CheckpointMismatch { field: &'static str },
+    /// A request is outside the delegated continuum-film applicability envelope.
+    ///
+    /// This adapter deliberately retains the generic reason instead of treating
+    /// a rarefied, rough, or otherwise unavailable request as a numerical
+    /// failure that a coupled solver could retry blindly.
+    GasFilmApplicabilityUnavailable {
+        /// Delegated continuum-model applicability reason.
+        reason: &'static str,
+    },
+    /// A staged request changed the identity bound into its accepted state.
+    StateIdentityMismatch {
+        /// Identity component that differed from the accepted state.
+        field: &'static str,
+    },
+    /// The caller attempted to accept the same gas-work interval twice.
+    DuplicateAcceptedWork {
+        /// Previously accepted caller-provided exchange key.
+        exchange_key: u64,
+    },
+    /// The bounded exact-once key ledger cannot admit another accepted interval.
+    AcceptedWorkCapacityExceeded {
+        /// Fixed maximum number of retained accepted exchange keys.
+        maximum: usize,
+    },
+    /// A proposal was staged from a stale or different accepted state.
+    ProposalDoesNotMatchState,
     /// The delegated generic film operator refused the sector.
     GasFilmRefusal { detail: GasFilmError },
 }
@@ -307,6 +334,234 @@ pub struct AirFilmStep {
     pub receipt: AirFilmReceipt,
     /// Identity-bound restart state.
     pub checkpoint: AirFilmCheckpoint,
+}
+
+/// Explicit owner for mechanical work transferred from the disc/base walls to
+/// the thin-gap gas. Ownership is an accounting boundary only: it does not
+/// allocate the model's isothermal viscous heat or assert a whole-system energy
+/// closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AirFilmWorkOwnership {
+    /// Stable composition-ledger owner for this one thin-gap gas-work channel.
+    pub owner_id: String,
+}
+
+/// One proposed, exactly-once mechanical work exchange from the gas-film step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirFilmWorkReceipt {
+    /// Caller-supplied key unique within the retained work ledger.
+    pub exchange_key: u64,
+    /// Explicit owner of this thin-gap wall-to-gas transfer.
+    pub ownership: AirFilmWorkOwnership,
+    /// Mechanical work from both walls into the gas during this step [J].
+    /// It may have either sign and is not a total energy-closure claim.
+    pub wall_work_to_gas_j: f64,
+    /// Authority retained from the delegated gas-film request.
+    pub input_authority: GasFilmInputAuthority,
+}
+
+/// Cloneable accepted state for transactional tilted-disc gas-film advancement.
+///
+/// The generic gas-film solver is pure: it returns a candidate and an
+/// identity-bound checkpoint. This wrapper pairs that candidate with the exact
+/// parent and successor snapshots so the coupled mechanics step can accept it
+/// once, or reject it without mutating gas state or charging its work. The
+/// identity and checkpoint remain specific to this adapter; this is neither a
+/// rarefied-gas port nor a constitutive selection layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirFilmTransactionState {
+    state_id: String,
+    ownership: AirFilmWorkOwnership,
+    identity: AirFilmIdentity,
+    checkpoint: Option<AirFilmCheckpoint>,
+    accepted_exchange_keys: BTreeSet<u64>,
+    maximum_accepted_exchange_keys: usize,
+    accepted_wall_work_to_gas_j: f64,
+    committed_version: u64,
+}
+
+impl AirFilmTransactionState {
+    /// Starts an identity-bound gas-film transaction channel with no accepted step.
+    ///
+    /// `maximum_accepted_exchange_keys` is an admission budget, not a rotating
+    /// window: keys are retained so a restored state cannot charge one interval
+    /// twice. Construction validates adapter-local request structure only; the
+    /// delegated continuum applicability gate still runs for each proposal.
+    pub fn new(
+        state_id: impl Into<String>,
+        ownership: AirFilmWorkOwnership,
+        input: &TiltedDiscAirFilmInput,
+        maximum_accepted_exchange_keys: usize,
+    ) -> Result<Self, AirFilmError> {
+        let state_id = state_id.into();
+        canonical(&state_id, "air_film_transaction_state_id")?;
+        canonical(&ownership.owner_id, "air_film_work_owner_id")?;
+        input.validate()?;
+        if maximum_accepted_exchange_keys == 0 {
+            return Err(AirFilmError::InvalidInput {
+                field: "maximum_accepted_exchange_keys",
+            });
+        }
+        Ok(Self {
+            state_id,
+            ownership,
+            identity: input.identity.clone(),
+            checkpoint: None,
+            accepted_exchange_keys: BTreeSet::new(),
+            maximum_accepted_exchange_keys,
+            accepted_wall_work_to_gas_j: 0.0,
+            committed_version: 0,
+        })
+    }
+
+    /// Stable caller-owned transaction identity retained across restart.
+    #[must_use]
+    pub fn state_id(&self) -> &str {
+        &self.state_id
+    }
+
+    /// Explicit owner for this state's thin-gap gas-work channel.
+    #[must_use]
+    pub fn ownership(&self) -> &AirFilmWorkOwnership {
+        &self.ownership
+    }
+
+    /// Exact adapter/case/configuration identity bound into this restart state.
+    #[must_use]
+    pub fn identity(&self) -> &AirFilmIdentity {
+        &self.identity
+    }
+
+    /// Last accepted sector checkpoint, if any.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<&AirFilmCheckpoint> {
+        self.checkpoint.as_ref()
+    }
+
+    /// Maximum exactly-once work keys retained by this state.
+    #[must_use]
+    pub const fn maximum_accepted_exchange_keys(&self) -> usize {
+        self.maximum_accepted_exchange_keys
+    }
+
+    /// Total accepted mechanical wall work into the thin-gap gas [J].
+    #[must_use]
+    pub const fn accepted_wall_work_to_gas_j(&self) -> f64 {
+        self.accepted_wall_work_to_gas_j
+    }
+
+    /// Number of accepted gas-film proposals in this transaction state.
+    #[must_use]
+    pub const fn committed_version(&self) -> u64 {
+        self.committed_version
+    }
+
+    /// Stages one gas-film candidate without mutating accepted state.
+    ///
+    /// The input must retain the state-bound identity. This intentionally does
+    /// not infer, relax, or synthesize continuum applicability; the delegated
+    /// solver either admits the supplied model or returns its typed refusal.
+    pub fn prepare(
+        &self,
+        exchange_key: u64,
+        input: &TiltedDiscAirFilmInput,
+    ) -> Result<AirFilmProposal, AirFilmError> {
+        self.require_identity(input)?;
+        if self.accepted_exchange_keys.contains(&exchange_key) {
+            return Err(AirFilmError::DuplicateAcceptedWork { exchange_key });
+        }
+        if self.accepted_exchange_keys.len() >= self.maximum_accepted_exchange_keys {
+            return Err(AirFilmError::AcceptedWorkCapacityExceeded {
+                maximum: self.maximum_accepted_exchange_keys,
+            });
+        }
+        let step = solve_tilted_disc_air_film(input, self.checkpoint.as_ref())?;
+        let wall_work_to_gas_j = checked(
+            step.receipt.wall_power_to_gas_w * input.timestep_s,
+            "wall_work_to_gas_j",
+        )?;
+        let accepted_wall_work_to_gas_j = checked(
+            self.accepted_wall_work_to_gas_j + wall_work_to_gas_j,
+            "accepted_wall_work_to_gas_j",
+        )?;
+        let committed_version =
+            self.committed_version
+                .checked_add(1)
+                .ok_or(AirFilmError::InvalidInput {
+                    field: "committed_version",
+                })?;
+        let mut accepted_exchange_keys = self.accepted_exchange_keys.clone();
+        accepted_exchange_keys.insert(exchange_key);
+        Ok(AirFilmProposal {
+            work: AirFilmWorkReceipt {
+                exchange_key,
+                ownership: self.ownership.clone(),
+                wall_work_to_gas_j,
+                input_authority: step.receipt.input_authority,
+            },
+            parent_version: self.committed_version,
+            prior_state: self.clone(),
+            next_state: Self {
+                state_id: self.state_id.clone(),
+                ownership: self.ownership.clone(),
+                identity: self.identity.clone(),
+                checkpoint: Some(step.checkpoint.clone()),
+                accepted_exchange_keys,
+                maximum_accepted_exchange_keys: self.maximum_accepted_exchange_keys,
+                accepted_wall_work_to_gas_j,
+                committed_version,
+            },
+            step,
+        })
+    }
+
+    /// Commits a staged candidate only against the exact state it observed.
+    pub fn commit(&self, proposal: &AirFilmProposal) -> Result<Self, AirFilmError> {
+        if *self != proposal.prior_state || self.committed_version != proposal.parent_version {
+            return Err(AirFilmError::ProposalDoesNotMatchState);
+        }
+        Ok(proposal.next_state.clone())
+    }
+
+    /// Refuses a staged candidate and recovers its exact parent snapshot.
+    #[must_use]
+    pub fn rollback(proposal: &AirFilmProposal) -> Self {
+        proposal.prior_state.clone()
+    }
+
+    fn require_identity(&self, input: &TiltedDiscAirFilmInput) -> Result<(), AirFilmError> {
+        input.validate()?;
+        if input.identity.adapter_model_id != self.identity.adapter_model_id {
+            return Err(AirFilmError::StateIdentityMismatch {
+                field: "adapter_model_id",
+            });
+        }
+        if input.identity.case_id != self.identity.case_id {
+            return Err(AirFilmError::StateIdentityMismatch { field: "case_id" });
+        }
+        if input.identity.configuration_id != self.identity.configuration_id {
+            return Err(AirFilmError::StateIdentityMismatch {
+                field: "configuration_id",
+            });
+        }
+        if input.identity != self.identity {
+            return Err(AirFilmError::StateIdentityMismatch { field: "identity" });
+        }
+        Ok(())
+    }
+}
+
+/// An uncommitted thin-gap gas-film candidate with exact parent/successor state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirFilmProposal {
+    /// Candidate result from the declared independent-sector adapter.
+    pub step: AirFilmStep,
+    /// Exactly-once wall-to-gas work charge for this candidate.
+    pub work: AirFilmWorkReceipt,
+    /// Accepted-state version observed when this candidate was staged.
+    pub parent_version: u64,
+    prior_state: AirFilmTransactionState,
+    next_state: AirFilmTransactionState,
 }
 
 fn finite(value: f64, field: &'static str) -> Result<(), AirFilmError> {
@@ -691,7 +946,7 @@ pub fn solve_tilted_disc_air_film(
             &gas_input,
             checkpoint.map(|state| &state.sectors[sector]),
         )
-        .map_err(|detail| AirFilmError::GasFilmRefusal { detail })?;
+        .map_err(gas_film_refusal)?;
         accumulate_receipt(
             &mut gas_mass,
             &mut storage,
@@ -783,6 +1038,15 @@ pub fn solve_tilted_disc_air_film(
             sectors: sector_checkpoints,
         },
     })
+}
+
+fn gas_film_refusal(detail: GasFilmError) -> AirFilmError {
+    match detail {
+        GasFilmError::Unavailable { reason } => {
+            AirFilmError::GasFilmApplicabilityUnavailable { reason }
+        }
+        detail => AirFilmError::GasFilmRefusal { detail },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -4,9 +4,10 @@
 //! establish an air-dominance mechanism, cross-sector flow, or any video/device outcome.
 
 use fs_euler_disc_e2e::air::{
-    AirFilmDiscretization, AirFilmError, AirFilmIdentity, AirVec3, ContactExclusion,
-    PrescribedPlaneBase, TILTED_DISC_GAS_FILM_ADAPTER_ID, TiltedDiscAirFilmInput,
-    TiltedDiscKinematics, sample_tilted_disc_gap, solve_tilted_disc_air_film,
+    AirFilmDiscretization, AirFilmError, AirFilmIdentity, AirFilmTransactionState,
+    AirFilmWorkOwnership, AirVec3, ContactExclusion, PrescribedPlaneBase,
+    TILTED_DISC_GAS_FILM_ADAPTER_ID, TiltedDiscAirFilmInput, TiltedDiscKinematics,
+    sample_tilted_disc_gap, solve_tilted_disc_air_film,
 };
 use fs_flux::{
     GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget, GasFilmInputAuthority,
@@ -144,9 +145,12 @@ fn g3_tilted_sector_permutation_preserves_sorted_gaps_and_vertical_load() {
         .collect::<Vec<_>>();
     gaps_a.sort_by(f64::total_cmp);
     gaps_b.sort_by(f64::total_cmp);
-    assert_eq!(
-        gaps_a, gaps_b,
-        "sector permutation must preserve sampled gap multiset"
+    assert!(
+        gaps_a
+            .iter()
+            .zip(&gaps_b)
+            .all(|(left, right)| (left - right).abs() < 1.0e-18),
+        "sector permutation must preserve sampled gap multiset within floating-point rotation error: {gaps_a:?} vs {gaps_b:?}"
     );
     assert!(
         (a.receipt.wrench.force_world_n.z - b.receipt.wrench.force_world_n.z).abs() < 1.0e-10,
@@ -236,6 +240,11 @@ fn g0_action_work_sign_and_checkpoint_replay_are_deterministic() {
 #[test]
 fn g0_changing_tilt_advances_nonuniform_gap_profile_across_checkpoint() {
     let mut first_input = fixture();
+    // The tilted manufactured state is deliberately close to the fixture's
+    // residual gate; give this G0 restart check enough deterministic Picard
+    // budget to test checkpoint evolution rather than iteration exhaustion.
+    first_input.budget.maximum_iterations = 20_000;
+    first_input.budget.mass_residual_tolerance_kg_m2_s = 1.0e-8;
     let normal = AirVec3::new(0.02, 0.0, (1.0 - 0.0004_f64).sqrt());
     let angular_velocity = AirVec3::new(0.0, 5.0, 0.0);
     first_input.disc.normal_away_from_base_world = normal;
@@ -271,6 +280,10 @@ fn g0_changing_tilt_advances_nonuniform_gap_profile_across_checkpoint() {
 #[test]
 fn g0_contact_and_boundary_topology_are_explicit() {
     let mut contact = fixture();
+    // This test targets the explicit contact handoff, not rarefied flow. Keep
+    // its synthetic gas card within the declared continuum envelope at the
+    // near-contact active cells.
+    contact.applicability.mean_free_path_m = 1.0e-9;
     contact.disc.center_world_m.z = contact.disc_half_thickness_m + 1.1e-6;
     contact.disc.normal_away_from_base_world =
         AirVec3::new(2.0e-5, 0.0, (1.0 - 4.0e-10_f64).sqrt());
@@ -317,7 +330,7 @@ fn hostile_invalid_contact_rarefied_roughness_and_topology_refuse() {
     rarefied.applicability.mean_free_path_m = 1.0e-5;
     assert!(matches!(
         solve_tilted_disc_air_film(&rarefied, None),
-        Err(AirFilmError::GasFilmRefusal { .. })
+        Err(AirFilmError::GasFilmApplicabilityUnavailable { .. })
     ));
 
     let mut rough = fixture();
@@ -326,7 +339,7 @@ fn hostile_invalid_contact_rarefied_roughness_and_topology_refuse() {
     };
     assert!(matches!(
         solve_tilted_disc_air_film(&rough, None),
-        Err(AirFilmError::GasFilmRefusal { .. })
+        Err(AirFilmError::GasFilmApplicabilityUnavailable { .. })
     ));
 
     let mut molecular = fixture();
@@ -335,7 +348,7 @@ fn hostile_invalid_contact_rarefied_roughness_and_topology_refuse() {
     };
     assert!(matches!(
         solve_tilted_disc_air_film(&molecular, None),
-        Err(AirFilmError::GasFilmRefusal { .. })
+        Err(AirFilmError::GasFilmApplicabilityUnavailable { .. })
     ));
 
     let mut invalid = fixture();
@@ -363,5 +376,95 @@ fn hostile_invalid_contact_rarefied_roughness_and_topology_refuse() {
         Err(AirFilmError::CheckpointMismatch {
             field: "configuration_id"
         })
+    );
+}
+
+#[test]
+fn g0_transaction_stages_commits_and_rolls_back_gas_state_and_work_exactly_once() {
+    let input = fixture();
+    let state = AirFilmTransactionState::new(
+        "air-film-transaction-fixture-v1",
+        AirFilmWorkOwnership {
+            owner_id: "thin-gap-wall-work-v1".to_owned(),
+        },
+        &input,
+        1,
+    )
+    .expect("valid transaction state");
+    let original = state.clone();
+    let proposal = state.prepare(41, &input).expect("stage film candidate");
+
+    assert_eq!(state, original, "preparing must not mutate accepted state");
+    assert_eq!(proposal.parent_version, 0);
+    assert_eq!(proposal.work.exchange_key, 41);
+    assert_eq!(proposal.work.ownership, state.ownership().clone());
+    assert_eq!(
+        proposal.work.wall_work_to_gas_j,
+        proposal.step.receipt.wall_power_to_gas_w * input.timestep_s,
+        "the transaction owns only this model's declared wall-to-gas work"
+    );
+    assert_eq!(
+        AirFilmTransactionState::rollback(&proposal),
+        original,
+        "rejection restores the exact restart/work snapshot"
+    );
+
+    let accepted = state.commit(&proposal).expect("commit exact parent");
+    assert_eq!(accepted.committed_version(), 1);
+    assert!(accepted.checkpoint().is_some());
+    assert_eq!(
+        accepted.accepted_wall_work_to_gas_j(),
+        proposal.work.wall_work_to_gas_j
+    );
+    assert_eq!(
+        accepted.commit(&proposal),
+        Err(AirFilmError::ProposalDoesNotMatchState),
+        "a proposal cannot be committed twice"
+    );
+    assert_eq!(
+        accepted.prepare(41, &input),
+        Err(AirFilmError::DuplicateAcceptedWork { exchange_key: 41 }),
+        "restored keys preserve exact-once work ownership"
+    );
+    assert_eq!(
+        accepted.prepare(42, &input),
+        Err(AirFilmError::AcceptedWorkCapacityExceeded { maximum: 1 }),
+        "the checkpoint never evicts a key and silently re-admits old work"
+    );
+}
+
+#[test]
+fn g0_transaction_preserves_identity_and_delegated_applicability_refusals() {
+    let input = fixture();
+    let state = AirFilmTransactionState::new(
+        "air-film-identity-state-v1",
+        AirFilmWorkOwnership {
+            owner_id: "thin-gap-wall-work-v1".to_owned(),
+        },
+        &input,
+        1,
+    )
+    .expect("valid transaction state");
+    let original = state.clone();
+
+    let mut different_restart_identity = input.clone();
+    different_restart_identity.identity.configuration_id = "different-air-film-config".to_owned();
+    assert_eq!(
+        state.prepare(7, &different_restart_identity),
+        Err(AirFilmError::StateIdentityMismatch {
+            field: "configuration_id"
+        }),
+        "a transaction cannot silently restart against another frozen configuration"
+    );
+
+    let mut rarefied = input.clone();
+    rarefied.applicability.mean_free_path_m = 1.0e-5;
+    assert!(matches!(
+        state.prepare(7, &rarefied),
+        Err(AirFilmError::GasFilmApplicabilityUnavailable { .. })
+    ));
+    assert_eq!(
+        state, original,
+        "a delegated continuum refusal must not charge work or alter checkpoint state"
     );
 }
