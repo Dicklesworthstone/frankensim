@@ -680,7 +680,7 @@ fn convergence_record(
         receipt.fine_reference_work_energy.energy_defect,
     );
     Ok(format!(
-        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-solid-timestep-convergence\",\"model\":\"bounded-five-rung-fixed-horizon-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"dimensionless-normalized-deltas\",\"terminal\":\"analysis-complete\",\"horizon_s\":{HORIZON_S:.17e},\"sentinel_timesteps_s\":{{\"h16\":8.0e-5,\"h8\":4.0e-5}},\"sentinel_terminal_classes\":{{\"h16\":\"{}\",\"h8\":\"{}\"}},\"assessed_timesteps_s\":{{\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"terminal_class_agreement\":{},\"fine_reference_qoi\":{{\"inclination\":{:.17e},\"precession\":{:.17e},\"spin\":{:.17e}}},\"fine_reference_qoi_linf\":{fine_reference_qoi_linf:.17e},\"fine_reference_work_linf\":{fine_reference_work_linf:.17e},\"fine_reference_energy_defect\":{:.17e},\"declared_normalized_delta_limit\":{declared_delta_limit:.17e},\"within_declared_delta_band\":{},\"observed_order\":\"{}\",\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"fixed-horizon-numerical-sensitivity-only;eventful-mode-withholds-smooth-order;not-terminal-time-or-physical-validation\"}}",
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-solid-fillet-1mm-timestep-convergence\",\"model\":\"bounded-five-rung-fixed-horizon-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"dimensionless-normalized-deltas\",\"terminal\":\"analysis-complete\",\"horizon_s\":{HORIZON_S:.17e},\"sentinel_timesteps_s\":{{\"h16\":8.0e-5,\"h8\":4.0e-5}},\"sentinel_terminal_classes\":{{\"h16\":\"{}\",\"h8\":\"{}\"}},\"assessed_timesteps_s\":{{\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"terminal_class_agreement\":{},\"fine_reference_qoi\":{{\"inclination\":{:.17e},\"precession\":{:.17e},\"spin\":{:.17e}}},\"fine_reference_qoi_linf\":{fine_reference_qoi_linf:.17e},\"fine_reference_work_linf\":{fine_reference_work_linf:.17e},\"fine_reference_energy_defect\":{:.17e},\"declared_normalized_delta_limit\":{declared_delta_limit:.17e},\"within_declared_delta_band\":{},\"observed_order\":\"{}\",\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"fixed-horizon-numerical-sensitivity-only;eventful-mode-withholds-smooth-order;not-terminal-time-or-physical-validation\"}}",
         outcome_class_name(sentinel_classes[0]),
         outcome_class_name(sentinel_classes[1]),
         2.0e-5,
@@ -775,21 +775,38 @@ fn ranking_convergence_record(
     };
     let coarse_fine_event_delta = event_time_delta(coarse.ring, fine.ring);
     let fine_reference_event_delta = event_time_delta(fine.ring, reference.ring);
+    let solid_fine_reference_event_delta = event_time_delta(fine.solid, reference.solid);
     let ordering_agreement =
         coarse.ordering == fine.ordering && fine.ordering == reference.ordering;
-    let ring_shorter_bound_proven = ordering_agreement
-        && reference.ordering == Ok(CensorAwareDurationOrdering::ProvenLeftShorter);
-    let event_time_within_declared_band = fine_reference_event_delta
-        .map(|(_, relative)| relative <= EVENT_TIME_RELATIVE_LIMIT)
-        .unwrap_or(false);
-    let ranking_numerically_supported =
-        ring_shorter_bound_proven && event_time_within_declared_band;
+    let conclusive_ordering = matches!(
+        reference.ordering,
+        Ok(CensorAwareDurationOrdering::ProvenLeftShorter
+            | CensorAwareDurationOrdering::EqualObserved
+            | CensorAwareDurationOrdering::ProvenLeftLonger)
+    );
+    let ring_time_within_declared_band = outcome_time_is_stable(
+        fine.ring,
+        reference.ring,
+        fine_reference_event_delta,
+        EVENT_TIME_RELATIVE_LIMIT,
+    );
+    let solid_time_within_declared_band = outcome_time_is_stable(
+        fine.solid,
+        reference.solid,
+        solid_fine_reference_event_delta,
+        EVENT_TIME_RELATIVE_LIMIT,
+    );
+    let ranking_numerically_supported = ordering_agreement
+        && conclusive_ordering
+        && ring_time_within_declared_band
+        && solid_time_within_declared_band;
     eprintln!(
-        "euler-disc closed stage=ranking-convergence-complete ordering_agreement={ordering_agreement} ring_shorter_bound_all_assessed_rungs={ring_shorter_bound_proven} event_time_within_band={event_time_within_declared_band} ranking_numerically_supported={ranking_numerically_supported}",
+        "euler-disc closed stage=ranking-convergence-complete ordering_agreement={ordering_agreement} converged_ordering={} ring_time_within_band={ring_time_within_declared_band} solid_time_within_band={solid_time_within_declared_band} ranking_numerically_supported={ranking_numerically_supported}",
+        censor_ordering_name(reference.ordering),
     );
 
     Ok(format!(
-        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"equal-mass-ring-vs-solid-ranking-convergence\",\"model\":\"bounded-five-rung-common-window-censor-aware-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"SI:s\",\"terminal\":\"analysis-complete\",\"common_horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h16\":{:.17e},\"h8\":{:.17e},\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"rungs\":{{\"h16\":{},\"h8\":{},\"h4\":{},\"h2\":{},\"h\":{}}},\"assessed_triplet\":\"h4,h2,h\",\"ordering_agreement\":{},\"ring_shorter_than_solid_bound_proven_at_all_rungs\":{},\"ring_event_time_coarse_fine\":{},\"ring_event_time_fine_reference\":{},\"declared_event_time_relative_limit\":{EVENT_TIME_RELATIVE_LIMIT:.17e},\"ring_event_time_within_declared_band\":{},\"ranking_numerically_supported\":{},\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"numerical-ranking-of-declared-reduced-model-only;solid-censor-is-a-lower-bound-not-a-duration;not-experimental-calibration-or-video-validation\"}}",
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"matched-1mm-fillet-equal-mass-ring-vs-solid-ranking-convergence\",\"model\":\"bounded-five-rung-common-window-censor-aware-profile-native-runner\",\"authority\":\"numerical-convergence-evidence-only\",\"units\":\"SI:s\",\"terminal\":\"analysis-complete\",\"common_horizon_s\":{HORIZON_S:.17e},\"timesteps_s\":{{\"h16\":{:.17e},\"h8\":{:.17e},\"h4\":{:.17e},\"h2\":{:.17e},\"h\":{:.17e}}},\"rungs\":{{\"h16\":{},\"h8\":{},\"h4\":{},\"h2\":{},\"h\":{}}},\"assessed_triplet\":\"h4,h2,h\",\"ordering_agreement\":{},\"converged_ordering\":\"{}\",\"conclusive_ordering_at_all_assessed_rungs\":{},\"ring_event_time_coarse_fine\":{},\"ring_event_time_fine_reference\":{},\"solid_event_time_fine_reference\":{},\"declared_event_time_relative_limit\":{EVENT_TIME_RELATIVE_LIMIT:.17e},\"ring_time_within_declared_band\":{},\"solid_time_within_declared_band\":{},\"ranking_numerically_supported\":{},\"assessment_policy\":\"finest-predeclared-triplet;coarser-rungs-retained-as-sentinels\",\"no_claim\":\"matched-outer-fillet-equal-mass-numerical-ranking-of-declared-reduced-model-only;solid-censor-is-a-lower-bound-not-a-duration;not-experimental-calibration-or-video-validation\"}}",
         sentinel_h16.timestep_s,
         sentinel_h8.timestep_s,
         coarse.timestep_s,
@@ -801,12 +818,43 @@ fn ranking_convergence_record(
         ranking_rung_json(*fine),
         ranking_rung_json(*reference),
         ordering_agreement,
-        ring_shorter_bound_proven,
+        censor_ordering_name(reference.ordering),
+        conclusive_ordering,
         event_delta_json(coarse_fine_event_delta),
         event_delta_json(fine_reference_event_delta),
-        event_time_within_declared_band,
+        event_delta_json(solid_fine_reference_event_delta),
+        ring_time_within_declared_band,
+        solid_time_within_declared_band,
         ranking_numerically_supported,
     ))
+}
+
+fn outcome_time_is_stable(
+    fine: RunOutcome,
+    reference: RunOutcome,
+    physical_event_delta: Option<(f64, f64)>,
+    relative_limit: f64,
+) -> bool {
+    match (fine, reference) {
+        (RunOutcome::PhysicalTerminal { .. }, RunOutcome::PhysicalTerminal { .. }) => {
+            physical_event_delta.is_some_and(|(_, relative)| relative <= relative_limit)
+        }
+        (
+            RunOutcome::RightCensored {
+                censor_time_s: fine_time,
+            },
+            RunOutcome::RightCensored {
+                censor_time_s: reference_time,
+            },
+        ) => {
+            let scale = fine_time
+                .abs()
+                .max(reference_time.abs())
+                .max(f64::MIN_POSITIVE);
+            (fine_time - reference_time).abs() / scale <= relative_limit
+        }
+        _ => false,
+    }
 }
 
 fn ranking_rung_json(rung: RankingRung) -> String {

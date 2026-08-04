@@ -51,7 +51,7 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
             })
         })
         .collect();
-    assert_eq!(closed.len(), 11);
+    assert_eq!(closed.len(), 12);
     assert!(
         closed
             .iter()
@@ -77,6 +77,9 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
             .iter()
             .any(|fields| { string(fields, "scenario") == "closed-reduced-solid-fillet-1mm" })
     );
+    assert!(closed.iter().any(|fields| {
+        string(fields, "scenario") == "closed-reduced-ring-equal-mass-fillet-1mm"
+    }));
     let inputs = object(closed[0].get("inputs").expect("closed inputs"));
     for key in [
         "mass_kg",
@@ -112,12 +115,12 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     }
     let solid = closed
         .iter()
-        .find(|fields| string(fields, "scenario") == "closed-reduced-solid")
-        .expect("solid controlled case");
+        .find(|fields| string(fields, "scenario") == "closed-reduced-solid-fillet-1mm")
+        .expect("matched-fillet solid controlled case");
     let equal_mass_ring = closed
         .iter()
-        .find(|fields| string(fields, "scenario") == "closed-reduced-ring-equal-mass")
-        .expect("equal-mass ring controlled case");
+        .find(|fields| string(fields, "scenario") == "closed-reduced-ring-equal-mass-fillet-1mm")
+        .expect("matched-fillet equal-mass ring controlled case");
     let solid_inputs = object(solid.get("inputs").expect("solid inputs"));
     let ring_inputs = object(equal_mass_ring.get("inputs").expect("ring inputs"));
     let solid_mass = number(solid_inputs, "mass_kg");
@@ -176,7 +179,9 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     }
     let convergence = v3_roots
         .iter()
-        .find(|fields| string(fields, "scenario") == "closed-reduced-solid-timestep-convergence")
+        .find(|fields| {
+            string(fields, "scenario") == "closed-reduced-solid-fillet-1mm-timestep-convergence"
+        })
         .expect("h/h2/h4 convergence record");
     assert_eq!(
         string(convergence, "observed_order"),
@@ -186,7 +191,10 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     assert!(convergence.contains_key("fine_reference_qoi"));
     let ranking = v3_roots
         .iter()
-        .find(|fields| string(fields, "scenario") == "equal-mass-ring-vs-solid-ranking-convergence")
+        .find(|fields| {
+            string(fields, "scenario")
+                == "matched-1mm-fillet-equal-mass-ring-vs-solid-ranking-convergence"
+        })
         .expect("censor-aware ranking convergence record");
     assert_eq!(string(ranking, "assessed_triplet"), "h4,h2,h");
     assert_eq!(
@@ -198,9 +206,14 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         assert!(boolean(ranking, "ordering_agreement"));
         assert!(boolean(
             ranking,
-            "ring_shorter_than_solid_bound_proven_at_all_rungs"
+            "conclusive_ordering_at_all_assessed_rungs"
         ));
-        assert!(boolean(ranking, "ring_event_time_within_declared_band"));
+        assert!(matches!(
+            string(ranking, "converged_ordering"),
+            "ring-proven-shorter" | "equal-observed" | "ring-proven-longer"
+        ));
+        assert!(boolean(ranking, "ring_time_within_declared_band"));
+        assert!(boolean(ranking, "solid_time_within_declared_band"));
     }
     let ranking_rungs = object(ranking.get("rungs").expect("ranking rungs"));
     for rung in ["h16", "h8", "h4", "h2", "h"] {
