@@ -42,6 +42,8 @@ mod cards;
 pub mod cinematic;
 pub mod cinematic_brief;
 pub mod cinematic_budget;
+pub mod cinematic_config;
+pub mod cinematic_sound;
 pub mod claim_class;
 pub mod color;
 mod discrepancy;

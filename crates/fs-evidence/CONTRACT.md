@@ -59,6 +59,30 @@ telemetry/legacy correlation.
   time. Exact resource limits admit; one-unit deficits refuse with deterministic
   repair advice. Final repairs never silently substitute preview SPP, AOVs, or
   denoising, and timing remains a host-specific estimate rather than a promise.
+- `cinematic_config::CinematicConfig` composes versioned content references for
+  trajectory, timeline, camera, scene, renderer, image, sound, and separately
+  partitioned render/audio budgets. Units, seed, capabilities, versions, and
+  budgets are mandatory. External assets bind bytes plus interpretation while
+  locator hints remain non-authoritative. Domain-separated trajectory, image,
+  audio, mux, and composition identities provide minimal safe invalidation:
+  camera/material changes do not invalidate trajectory/audio, room changes do
+  not invalidate images, and trajectory changes invalidate every consumer.
+- `cinematic_sound::SoundSynthesisConfig` is the fail-closed input and receipt
+  boundary for the reference soundtrack. It reuses the cinematic authority and
+  rational-clock types, requires exact 48 kHz stereo timing aligned to video,
+  binds camera-relative listener geometry, per-channel source scales,
+  modal/material/base parameters, room and amplitude conventions,
+  resampler/filter versions,
+  trajectory terminal policy, assumptions, and optional calibration evidence
+  into one content identity. Artistic and physically informed output cannot
+  carry calibrated pressure or a calibration receipt; calibrated structural
+  acoustics requires both. Numerical refusal produces silence, while physical
+  terminal and horizon-censored trajectories end at the last accepted state
+  with a bounded fade. This config validates and identifies synthesis inputs;
+  it does not itself synthesize samples or validate acoustic source attribution,
+  absolute SPL, terminal frequency scaling, or a finite-time singularity. Its
+  compact receipt is the handoff boundary for the future `fs-acoustics` runtime;
+  that downstream crate is not required to admit or inspect this configuration.
 - `Evidence<T> { value, qoi, numerical, statistical, model, sensitivity,
   provenance, adjoint_ref }` — the traveling noun. `Certified<T>` is the
   opaque newtype whose constructor discipline is `Evidence::certified()`: rigorous
@@ -700,6 +724,13 @@ apparent-rotation inputs,
 `CinematicBudgetError` for malformed or downgraded quality tiers, missing host
 throughput measurements, checked-arithmetic overflow, and exact profile/host
 resource deficits with ranked repairs,
+`CinematicConfigError` for missing Five Explicits, unknown schemas/capabilities,
+cross-wired component roles, zero versions/identities, duplicate or stale asset
+bindings, invalid locator/namespace text, and unauthorized mux requests,
+`SoundSynthesisError` for invalid sound schema, semantic role cross-wiring,
+sample/video rate and exact endpoint mismatches, invalid listener geometry,
+missing or noncanonical source controls/modes/assumptions, invalid physical
+parameters, incompatible terminal policy, and absent or laundered calibration,
 `UncertaintyError` / `UncertaintyCodecError` for eight-term budget admission
 and canonical transport,
 `ModelEvidenceIdentityError`, `ModelCardIdentityError`,
@@ -789,6 +820,16 @@ anti-downgrade rules, zero/exact-max/max-plus-one structural fields, checked
 frame-range overflow, exact host resource boundaries, film/staging/AOV/EXR/PNG/
 checkpoint/WAV/mux accounting, missing throughput, every host shortage class,
 stable repair ordering, and bounded dry-admission JSON.
+`tests/cinematic_config.rs` covers canonical order/path relocation, a known
+composition identity vector, missing Five Explicits, unknown versions, stale
+asset bytes, duplicate assets, mux capability admission, and one-field
+trajectory/camera/material/room/timeline/render-budget/audio-budget invalidation
+matrices including proof that unused mux capability does not churn artifacts.
+`tests/cinematic_sound.rs` covers all three authority tiers, calibrated-pressure
+promotion gates, exact 24 fps/48 kHz endpoints, stereo and camera-relative
+listener admission, modal frequency/damping/gain, dimensioned source controls,
+required assumptions, terminal/censor/refusal policy, role/version failures,
+manifest/receipt agreement, and deterministic whole-input invalidation.
 tests/conformance.rs, cases evd-001..evd-015 (JSON-line verdicts; seeded
 cases carry seeds): the G0 conservativeness battery, the registration
 lint, the worked model-discrepancy-dominates example (10% closure vs 0.7%
@@ -1163,6 +1204,12 @@ physical validation, process-standard conformance, or decision fitness.
   supplied host/configuration measurement. Adaptive rendering may stop before
   the SPP ceiling, but admission budgets the ceiling and never silently lowers
   final quality.
+- Cinematic configuration identity proves deterministic structural composition,
+  not authenticity, availability, or semantic correctness of referenced
+  components. Asset-byte verification detects stale/substituted bytes only for
+  bindings created under this schema's asset domain. Locator hints are omitted
+  from identities by design, and mux output remains a non-authoritative adapter
+  derivative.
 - The eight-term engineering budget validates representation, source
   completeness, explicit covariance structure, composition monotonicity, and
   canonical identity. It does not prove that a producer selected the correct
