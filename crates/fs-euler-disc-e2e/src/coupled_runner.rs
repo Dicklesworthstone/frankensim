@@ -134,7 +134,9 @@ pub struct CoupledSample {
     pub contact_active: bool,
     /// Every bounded, mechanically split contact transition retained within
     /// this interval, in chronological order. An empty list does not prove
-    /// that no substep event exists below the configured scan resolution.
+    /// that no open/reimpact pair occurred while both macro-step endpoints
+    /// remained on the same branch; this reduced runner localizes endpoint
+    /// crossings only and makes no sub-grid chatter claim.
     pub contact_transitions: Vec<LocalizedContactTransition>,
     /// Profile feature selected by the analytic support query at this
     /// sample's retained post-step pose. Cylinder-only compatibility runs do
@@ -284,7 +286,6 @@ impl CoupledGeometry<'_, '_> {
 }
 
 const CONTACT_EVENT_BISECTION_ITERATIONS: u32 = 48;
-const CONTACT_EVENT_BRACKET_SUBDIVISIONS: u32 = 8;
 const CONTACT_EVENT_GAP_TOLERANCE_M: f64 = 1.0e-12;
 const CONTACT_EVENT_ROOT_TOLERANCE_M: f64 = 1.0e-15;
 const CONTACT_EVENT_MIN_PROGRESS_FRACTION: f64 = 1.0e-12;
@@ -344,49 +345,32 @@ fn reimpact_budget_exceeded(base_count: u32, additional_events: u32, limit: u32)
         .map_or(true, |count| count > limit)
 }
 
-/// Finds the earliest scanned root by re-evaluating the actual reduced segment
-/// evolution, not by merely interpolating a post-hoc grid-point gap. A
-/// non-monotone/multi-contact interval is still only bounded by the fixed scan
-/// resolution and `MAX_CONTACT_EVENTS_PER_MACRO_STEP`; the runner deliberately
-/// refuses excess resolved events rather than silently treating chatter as one.
-fn localize_contact_transition(
+/// Localizes one deterministic endpoint-bracketed transition by re-evaluating
+/// the actual reduced segment evolution. No interior scan is attempted when
+/// both macro-step endpoints select the same branch: a sub-grid open/reimpact
+/// pair is therefore explicitly outside this reduced runner's claim boundary.
+/// The event cap applies only to transitions it does resolve.
+fn localize_endpoint_transition(
     interval_start_s: f64,
     duration_s: f64,
     branch: ContactBranch,
     start_gap_m: f64,
+    end_gap_m: f64,
     mut gap_after: impl FnMut(f64) -> Result<f64, CoupledError>,
 ) -> Result<Option<LocalizedContactTransition>, CoupledError> {
     if !(interval_start_s.is_finite()
         && duration_s.is_finite()
         && duration_s > 0.0
-        && start_gap_m.is_finite())
+        && start_gap_m.is_finite()
+        && end_gap_m.is_finite())
     {
         return Ok(None);
     }
-    // A fixed scan deliberately looks for the earliest sign change even when
-    // the two macro-step endpoints agree. This catches one open/reimpact pair
-    // on the chosen scan resolution; it is not a certificate against faster
-    // chatter below that resolution.
-    let mut low_s = 0.0;
-    let mut low_gap_m = start_gap_m;
-    let mut bracket = None;
-    for subdivision in 1..=CONTACT_EVENT_BRACKET_SUBDIVISIONS {
-        let high_s =
-            duration_s * f64::from(subdivision) / f64::from(CONTACT_EVENT_BRACKET_SUBDIVISIONS);
-        let high_gap_m = gap_after(high_s)?;
-        if !high_gap_m.is_finite() {
-            return Ok(None);
-        }
-        if let Some(kind) = transition_kind(branch, low_gap_m, high_gap_m) {
-            bracket = Some((kind, low_s, high_s));
-            break;
-        }
-        low_s = high_s;
-        low_gap_m = high_gap_m;
-    }
-    let Some((kind, mut low_s, mut high_s)) = bracket else {
+    let Some(kind) = transition_kind(branch, start_gap_m, end_gap_m) else {
         return Ok(None);
     };
+    let mut low_s = 0.0;
+    let mut high_s = duration_s;
     for _ in 0..CONTACT_EVENT_BISECTION_ITERATIONS {
         let midpoint_s = 0.5 * (low_s + high_s);
         let midpoint_gap_m = gap_after(midpoint_s)?;
@@ -839,29 +823,26 @@ fn run_closed_with_geometry(
                 &integrator,
                 &geometry_model,
             )?;
-            let event = localize_contact_transition(
+            let event = localize_endpoint_transition(
                 checkpoint.time_s + elapsed_s,
                 remaining_s,
                 branch,
                 trial.interval_start_gap_m,
+                trial.post_support_gap_m,
                 |candidate_duration_s| {
-                    if candidate_duration_s == remaining_s {
-                        Ok(trial.post_support_gap_m)
-                    } else {
-                        Ok(advance_segment(
-                            state,
-                            base_deflection_m,
-                            base_velocity_m_per_s,
-                            candidate_duration_s,
-                            branch,
-                            mass,
-                            factors,
-                            gravity,
-                            &integrator,
-                            &geometry_model,
-                        )?
-                        .post_support_gap_m)
-                    }
+                    Ok(advance_segment(
+                        state,
+                        base_deflection_m,
+                        base_velocity_m_per_s,
+                        candidate_duration_s,
+                        branch,
+                        mass,
+                        factors,
+                        gravity,
+                        &integrator,
+                        &geometry_model,
+                    )?
+                    .post_support_gap_m)
                 },
             )?;
             let (accepted, accepted_duration_s, next_branch) = if let Some(event) = event {
@@ -1377,9 +1358,12 @@ fn unilateral_normal_force(
 
 #[cfg(test)]
 mod tests {
+    use fs_mbd::{Pose, RigidBodyState, Vec3};
+
     use super::{
-        CONTACT_EVENT_GAP_TOLERANCE_M, ContactBranch, ContactTransitionKind, CoupledError,
-        localize_contact_transition, reimpact_budget_exceeded, unilateral_normal_force,
+        CONTACT_EVENT_GAP_TOLERANCE_M, ContactBranch, ContactTransitionKind, CoupledControls,
+        CoupledError, CoupledFactors, CoupledInitialState, localize_endpoint_transition,
+        reimpact_budget_exceeded, run_closed_reduced, unilateral_normal_force,
     };
 
     #[test]
@@ -1392,21 +1376,23 @@ mod tests {
     #[test]
     fn localized_opening_time_is_stable_across_equivalent_time_windows() {
         let gap_at = |time_s: f64| 1.0e-10 * (time_s - 0.3);
-        let full = localize_contact_transition(
+        let full = localize_endpoint_transition(
             0.0,
             1.0,
             ContactBranch::ForceClosed,
             gap_at(0.0),
+            gap_at(1.0),
             |duration_s| Ok::<_, CoupledError>(gap_at(duration_s)),
         )
         .expect("finite gap")
         .expect("opening");
         let narrowed_start_s = 0.2;
-        let narrowed = localize_contact_transition(
+        let narrowed = localize_endpoint_transition(
             narrowed_start_s,
             0.2,
             ContactBranch::ForceClosed,
             gap_at(narrowed_start_s),
+            gap_at(narrowed_start_s + 0.2),
             |duration_s| Ok::<_, CoupledError>(gap_at(narrowed_start_s + duration_s)),
         )
         .expect("finite gap")
@@ -1422,7 +1408,9 @@ mod tests {
     }
 
     #[test]
-    fn fixed_scan_finds_hidden_open_and_reimpact_pair_without_zero_root_loop() {
+    fn endpoint_only_locator_makes_no_hidden_chatter_inference() {
+        use core::cell::Cell;
+
         let tolerance = CONTACT_EVENT_GAP_TOLERANCE_M;
         let gap_at = |time_s: f64| {
             if time_s <= 0.25 {
@@ -1433,28 +1421,21 @@ mod tests {
                 -2.0 * tolerance
             }
         };
-        let opening = localize_contact_transition(
+        let callback_count = Cell::new(0_u32);
+        let event = localize_endpoint_transition(
             0.0,
             1.0,
             ContactBranch::ForceClosed,
             gap_at(0.0),
-            |duration_s| Ok::<_, CoupledError>(gap_at(duration_s)),
+            gap_at(1.0),
+            |duration_s| {
+                callback_count.set(callback_count.get() + 1);
+                Ok::<_, CoupledError>(gap_at(duration_s))
+            },
         )
-        .expect("finite gap")
-        .expect("opening hidden by equal endpoints");
-        assert_eq!(opening.kind, ContactTransitionKind::Opening);
-        let reimpact_start_s = 0.25;
-        let reimpact = localize_contact_transition(
-            reimpact_start_s,
-            1.0 - reimpact_start_s,
-            ContactBranch::ForceOpen,
-            gap_at(reimpact_start_s),
-            |duration_s| Ok::<_, CoupledError>(gap_at(reimpact_start_s + duration_s)),
-        )
-        .expect("finite gap")
-        .expect("reimpact after opening");
-        assert_eq!(reimpact.kind, ContactTransitionKind::Reimpact);
-        assert!(opening.time_s < reimpact.time_s);
+        .expect("finite gap");
+        assert_eq!(event, None);
+        assert_eq!(callback_count.get(), 0);
     }
 
     #[test]
@@ -1462,6 +1443,107 @@ mod tests {
         assert!(reimpact_budget_exceeded(u32::MAX, 1, u32::MAX));
         assert!(reimpact_budget_exceeded(7, 1, 7));
         assert!(!reimpact_budget_exceeded(6, 1, 7));
+    }
+
+    #[test]
+    fn reduced_runner_localizes_reimpact_from_a_declared_open_initial_branch() {
+        let radius_m = 0.038;
+        let thickness_m = 0.006;
+        let mass_kg = std::f64::consts::PI * radius_m * radius_m * thickness_m * 2680.0;
+        let factors = CoupledFactors {
+            mass_kg,
+            radius_m,
+            thickness_m,
+            transverse_inertia_kg_m2: mass_kg * (3.0 * radius_m * radius_m + thickness_m.powi(2))
+                / 12.0,
+            axial_inertia_kg_m2: 0.5 * mass_kg * radius_m * radius_m,
+            gravity_m_per_s2: 9.806_65,
+            sliding_friction_coefficient: 0.0,
+            rolling_resistance_m: 0.0,
+            contact_stiffness_n_per_m: 8.0e4,
+            contact_damping_n_s_per_m: 3.0,
+            base_effective_mass_kg: 0.25,
+            base_stiffness_n_per_m: 4.0e4,
+            base_damping_n_s_per_m: 4.0,
+            gas_rotational_damping_n_m_s: 0.0,
+            gas_translation_damping_n_s_per_m: 0.0,
+        };
+        let controls = CoupledControls {
+            timestep_s: 1.0e-3,
+            maximum_steps: 2,
+            terminal_inclination_rad: 0.002,
+            reimpact_limit: 8,
+        };
+        let initial = CoupledInitialState {
+            inclination_rad: 0.08,
+            precession_rad_per_s: 0.0,
+            spin_rad_per_s: 0.0,
+        };
+        let seed = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 1,
+                ..controls
+            },
+            initial,
+            None,
+        )
+        .expect("seed run");
+        // This is a real runner restart state: lift the disc into a declared
+        // open gap and give it a downward velocity. The configuration identity
+        // remains the original physical case, while the public checkpoint is
+        // intentionally the independently supplied restart state.
+        let mut airborne = seed.checkpoint;
+        let pose = airborne.state.pose();
+        let elevated_pose = Pose::new(
+            pose.position_world().add(Vec3::new(0.0, 0.0, 5.0e-4)),
+            pose.orientation(),
+        )
+        .expect("finite elevated pose");
+        airborne.state = RigidBodyState::new(
+            elevated_pose,
+            Vec3::new(0.0, 0.0, -1.0).scale(mass_kg),
+            airborne.state.angular_momentum_body(),
+        )
+        .expect("finite airborne state");
+        airborne.base_deflection_m = 0.0;
+        airborne.base_velocity_m_per_s = 0.0;
+        airborne.was_in_contact = false;
+        let run = run_closed_reduced(factors, controls, initial, Some(airborne.clone()))
+            .expect("reduced run");
+        assert!(run.samples.iter().any(|sample| {
+            sample
+                .contact_transitions
+                .iter()
+                .any(|transition| transition.kind == ContactTransitionKind::Reimpact)
+        }));
+        let prefix = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 1,
+                ..controls
+            },
+            initial,
+            Some(airborne),
+        )
+        .expect("transition prefix");
+        assert!(
+            prefix.samples[0]
+                .contact_transitions
+                .iter()
+                .any(|transition| transition.kind == ContactTransitionKind::Reimpact)
+        );
+        let resumed = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 1,
+                ..controls
+            },
+            initial,
+            Some(prefix.checkpoint),
+        )
+        .expect("post-transition restart");
+        assert_eq!(run.checkpoint, resumed.checkpoint);
     }
 }
 
