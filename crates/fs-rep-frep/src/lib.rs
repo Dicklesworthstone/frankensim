@@ -43,7 +43,7 @@ pub use axisymmetric::{
     AxisymmetricCurvatureError, AxisymmetricError, AxisymmetricIdentity,
     AxisymmetricPrincipalCurvatureEstimate, AxisymmetricSupportAuthority, AxisymmetricSupportError,
     AxisymmetricSupportPoint, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
-    SquatDiscEdgeTreatment, squat_disc,
+    SquatDiscEdgeTreatment, annular_disc_outer_fillets, squat_disc,
 };
 pub use axisymmetric_mass::{
     AxisymmetricMassError, AxisymmetricMassProperties, AxisymmetricMassRoundoffDiagnostics,

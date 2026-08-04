@@ -96,6 +96,73 @@ fn g0_annular_cylinder_resolution_uses_bore_for_mass_not_only_inertia() {
 }
 
 #[test]
+fn g0_outer_filleted_annulus_uses_one_chart_for_equal_mass_geometry_and_inertia() {
+    let outer = 0.038;
+    let inner = 0.021;
+    let thickness = 0.006;
+    let fillet = 0.001;
+    let solid_density = 7_800.0;
+    let solid = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: outer,
+        thickness_m: thickness,
+        edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: fillet },
+    };
+    let annulus = DiscProfileSpec::OuterFilletedAnnularCylinder {
+        outer_radius_m: outer,
+        inner_radius_m: inner,
+        thickness_m: thickness,
+        outer_fillet_radius_m: fillet,
+    };
+    let (solid, unit_density_annulus) = with_cx(|cx| {
+        (
+            solid
+                .resolve(solid_density, cx)
+                .expect("filleted solid baseline"),
+            annulus
+                .resolve(1.0, cx)
+                .expect("unit-density filleted annulus"),
+        )
+    });
+    let equal_mass_density =
+        solid.mass_properties.mass / unit_density_annulus.mass_properties.volume;
+    let ring = with_cx(|cx| {
+        annulus
+            .resolve(equal_mass_density, cx)
+            .expect("equal-mass filleted annulus")
+    });
+
+    assert!(
+        !ring.chart.construction_certificate().touches_axis,
+        "the equal-mass control must retain a real through bore"
+    );
+    assert!(
+        ring.chart
+            .segments()
+            .iter()
+            .filter(|segment| matches!(segment, fs_rep_frep::MeridianSegment::Arc { .. }))
+            .count()
+            == 2,
+        "the ring's outer contact geometry must be circular rather than sharp"
+    );
+    assert!(
+        equal_mass_density > solid_density,
+        "equal mass is achieved by the declared density control, not an inertia multiplier"
+    );
+    assert_close(ring.mass_properties.mass, solid.mass_properties.mass);
+    assert_close(ring.mass_properties.center_of_mass.z, 0.0);
+    assert!(
+        ring.mass_properties.principal_inertia.axial
+            > solid.mass_properties.principal_inertia.axial
+    );
+    assert!(
+        ring.mass_properties
+            .principal_inertia
+            .transverse
+            .is_finite()
+    );
+}
+
+#[test]
 fn g0_true_symmetric_bicone_matches_closed_forms_and_is_centered() {
     let radius = 0.038;
     let thickness = 0.006;
@@ -245,6 +312,29 @@ fn g0_invalid_profile_relationships_refuse_before_mass_properties_publish() {
                 thickness_m: 0.006,
                 chamfer_radial_m: 0.001,
                 chamfer_axial_m: 0.0031,
+            }
+            .resolve(2_680.0, cx),
+            Err(DiscProfileError::InvalidRelationship { .. })
+        ));
+        assert!(matches!(
+            DiscProfileSpec::OuterFilletedAnnularCylinder {
+                outer_radius_m: 0.038,
+                inner_radius_m: 0.021,
+                thickness_m: 0.006,
+                outer_fillet_radius_m: 0.0,
+            }
+            .resolve(2_680.0, cx),
+            Err(DiscProfileError::InvalidParameter {
+                field: "outer_fillet_radius_m",
+                ..
+            })
+        ));
+        assert!(matches!(
+            DiscProfileSpec::OuterFilletedAnnularCylinder {
+                outer_radius_m: 0.038,
+                inner_radius_m: 0.021,
+                thickness_m: 0.006,
+                outer_fillet_radius_m: 0.0031,
             }
             .resolve(2_680.0, cx),
             Err(DiscProfileError::InvalidRelationship { .. })

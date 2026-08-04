@@ -48,6 +48,22 @@ pub enum DiscProfileSpec {
         /// Distance between cap planes [m].
         thickness_m: f64,
     },
+    /// An annular cylinder with true circular fillets at both outer rims.
+    ///
+    /// The through bore and its cap intersections remain deliberately sharp.
+    /// The strictly positive outer fillet is resolved as two circular meridian
+    /// arcs, so no sharp ring-contact surrogate or independent inertia factor
+    /// is introduced.
+    OuterFilletedAnnularCylinder {
+        /// Outer cylindrical radius [m].
+        outer_radius_m: f64,
+        /// Radius of the through bore [m].
+        inner_radius_m: f64,
+        /// Distance between cap planes [m].
+        thickness_m: f64,
+        /// Radius of each true outer-rim meridian fillet [m]. Must be positive.
+        outer_fillet_radius_m: f64,
+    },
     /// A symmetric double-conical or double-frustum profile.
     ///
     /// `face_radius_m == 0` is a true bicone whose two points lie on the
@@ -216,6 +232,43 @@ impl DiscProfileSpec {
                     line(outer_radius_m, half, inner_radius_m, half),
                     line(inner_radius_m, half, inner_radius_m, -half),
                 ])?;
+                Ok((
+                    chart,
+                    DiscProfileDimensions {
+                        outer_radius_m,
+                        thickness_m,
+                    },
+                ))
+            }
+            Self::OuterFilletedAnnularCylinder {
+                outer_radius_m,
+                inner_radius_m,
+                thickness_m,
+                outer_fillet_radius_m,
+            } => {
+                positive("outer_radius_m", outer_radius_m)?;
+                positive("inner_radius_m", inner_radius_m)?;
+                positive("thickness_m", thickness_m)?;
+                positive("outer_fillet_radius_m", outer_fillet_radius_m)?;
+                if inner_radius_m >= outer_radius_m {
+                    return Err(DiscProfileError::InvalidRelationship {
+                        detail: "annular inner_radius_m must be smaller than outer_radius_m",
+                    });
+                }
+                let maximum_fillet_radius =
+                    (outer_radius_m - inner_radius_m).min(0.5 * thickness_m);
+                if outer_fillet_radius_m > maximum_fillet_radius {
+                    return Err(DiscProfileError::InvalidRelationship {
+                        detail: "outer_fillet_radius_m must not exceed both annular cap span and thickness_m / 2",
+                    });
+                }
+                let chart = AxisymmetricChart::annular_disc_outer_fillets(
+                    outer_radius_m,
+                    inner_radius_m,
+                    thickness_m,
+                    outer_fillet_radius_m,
+                )
+                .map_err(DiscProfileError::Geometry)?;
                 Ok((
                     chart,
                     DiscProfileDimensions {

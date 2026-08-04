@@ -330,6 +330,21 @@ pub enum AxisymmetricError {
         /// Largest admissible radius for this disc.
         maximum: f64,
     },
+    /// A public annular-disc bore did not remain strictly inside its outer radius.
+    InvalidAnnularBoreRadius {
+        /// Requested bore radius.
+        inner_radius: f64,
+        /// Requested outer radius.
+        outer_radius: f64,
+    },
+    /// A public annular-disc outer fillet was zero, non-finite, or too large
+    /// for either the cap's radial span or the half thickness.
+    InvalidAnnularOuterFilletRadius {
+        /// Requested outer-rim fillet radius.
+        radius: f64,
+        /// Largest admissible positive radius for this annular disc.
+        maximum: f64,
+    },
     /// Consecutive features do not share a literal endpoint.
     OpenLoop {
         /// Index of the feature whose end fails to join its successor.
@@ -390,6 +405,17 @@ impl core::fmt::Display for AxisymmetricError {
             Self::InvalidEdgeRadius { radius, maximum } => write!(
                 f,
                 "squat-disc edge radius must lie in [0, {maximum}], got {radius}"
+            ),
+            Self::InvalidAnnularBoreRadius {
+                inner_radius,
+                outer_radius,
+            } => write!(
+                f,
+                "annular-disc inner radius must lie in (0, {outer_radius}), got {inner_radius}"
+            ),
+            Self::InvalidAnnularOuterFilletRadius { radius, maximum } => write!(
+                f,
+                "annular-disc outer fillet radius must lie in (0, {maximum}], got {radius}"
             ),
             Self::OpenLoop { index } => write!(
                 f,
@@ -520,6 +546,97 @@ impl AxisymmetricChart {
             segments.push(line(upper_tangent, upper_axis));
         }
         segments.push(line(upper_axis, lower_axis));
+        Self::try_new(segments)
+    }
+
+    /// Build a centered annular cylinder with true circular fillets at its
+    /// two *outer* rims and deliberately sharp inner-bore edges.
+    ///
+    /// The bore is part of the retained meridian, so support, volume, center
+    /// of mass, and principal inertia all derive from the same geometry. The
+    /// outer fillet must be strictly positive and no larger than both the
+    /// annular cap's radial span and half the thickness. A zero radius is
+    /// refused here rather than silently degrading this explicitly smooth
+    /// profile into a sharp annulus; callers that want sharp geometry must
+    /// construct that distinct profile deliberately.
+    pub fn annular_disc_outer_fillets(
+        outer_radius: f64,
+        inner_radius: f64,
+        thickness: f64,
+        outer_fillet_radius: f64,
+    ) -> Result<Self, AxisymmetricError> {
+        if !outer_radius.is_finite() || outer_radius <= 0.0 {
+            return Err(AxisymmetricError::NonPositiveDimension {
+                field: "outer_radius",
+                value: outer_radius,
+            });
+        }
+        if !inner_radius.is_finite() || inner_radius <= 0.0 {
+            return Err(AxisymmetricError::NonPositiveDimension {
+                field: "inner_radius",
+                value: inner_radius,
+            });
+        }
+        if inner_radius >= outer_radius {
+            return Err(AxisymmetricError::InvalidAnnularBoreRadius {
+                inner_radius,
+                outer_radius,
+            });
+        }
+        if !thickness.is_finite() || thickness <= 0.0 {
+            return Err(AxisymmetricError::NonPositiveDimension {
+                field: "thickness",
+                value: thickness,
+            });
+        }
+        let half_thickness = thickness * 0.5;
+        let radial_cap_span = outer_radius - inner_radius;
+        let maximum = radial_cap_span.min(half_thickness);
+        if !outer_fillet_radius.is_finite()
+            || outer_fillet_radius <= 0.0
+            || outer_fillet_radius > maximum
+        {
+            return Err(AxisymmetricError::InvalidAnnularOuterFilletRadius {
+                radius: outer_fillet_radius,
+                maximum,
+            });
+        }
+
+        let lower_inner = point(inner_radius, -half_thickness);
+        let lower_tangent = point(outer_radius - outer_fillet_radius, -half_thickness);
+        let lower_outer = point(outer_radius, -half_thickness + outer_fillet_radius);
+        let upper_outer = point(outer_radius, half_thickness - outer_fillet_radius);
+        let upper_tangent = point(outer_radius - outer_fillet_radius, half_thickness);
+        let upper_inner = point(inner_radius, half_thickness);
+        let mut segments = Vec::with_capacity(6);
+        if outer_fillet_radius < radial_cap_span {
+            segments.push(line(lower_inner, lower_tangent));
+        }
+        segments.push(MeridianSegment::Arc {
+            start: lower_tangent,
+            end: lower_outer,
+            center: point(
+                outer_radius - outer_fillet_radius,
+                -half_thickness + outer_fillet_radius,
+            ),
+            clockwise: false,
+        });
+        if outer_fillet_radius < half_thickness {
+            segments.push(line(lower_outer, upper_outer));
+        }
+        segments.push(MeridianSegment::Arc {
+            start: upper_outer,
+            end: upper_tangent,
+            center: point(
+                outer_radius - outer_fillet_radius,
+                half_thickness - outer_fillet_radius,
+            ),
+            clockwise: false,
+        });
+        if outer_fillet_radius < radial_cap_span {
+            segments.push(line(upper_tangent, upper_inner));
+        }
+        segments.push(line(upper_inner, lower_inner));
         Self::try_new(segments)
     }
 
@@ -727,7 +844,7 @@ impl AxisymmetricChart {
         }
         let closest = nearest_on_segment(segment, local);
         let residual_m = squared_delta(local, closest).sqrt();
-        let tolerance_m = query_tolerance(local, closest);
+        let tolerance_m = point_query_tolerance(local, closest);
         if !residual_m.is_finite() || !tolerance_m.is_finite() {
             return Err(AxisymmetricCurvatureError::NonFiniteResult);
         }
@@ -842,6 +959,23 @@ pub fn squat_disc(
     edge_treatment: SquatDiscEdgeTreatment,
 ) -> Result<AxisymmetricChart, AxisymmetricError> {
     AxisymmetricChart::squat_disc(outer_radius, thickness, edge_treatment)
+}
+
+/// Build an annular disc with true circular outer-rim fillets. See
+/// [`AxisymmetricChart::annular_disc_outer_fillets`] for its exact geometry,
+/// sharp-inner-bore boundary, and validation contract.
+pub fn annular_disc_outer_fillets(
+    outer_radius: f64,
+    inner_radius: f64,
+    thickness: f64,
+    outer_fillet_radius: f64,
+) -> Result<AxisymmetricChart, AxisymmetricError> {
+    AxisymmetricChart::annular_disc_outer_fillets(
+        outer_radius,
+        inner_radius,
+        thickness,
+        outer_fillet_radius,
+    )
 }
 
 impl Chart for AxisymmetricChart {
@@ -1022,6 +1156,15 @@ fn length_tolerance(points: &[MeridianPoint]) -> f64 {
 }
 fn query_tolerance(a: MeridianPoint, b: MeridianPoint) -> f64 {
     length_tolerance(&[a, b])
+}
+fn point_query_tolerance(a: MeridianPoint, b: MeridianPoint) -> f64 {
+    // A support point is converted from meridian radius to a 3-D azimuth and
+    // back through `hypot`. When the selected and nearest points coincide,
+    // their difference alone has no scale and `query_tolerance` collapses to
+    // MIN_POSITIVE. Retain one conservative binary64 radial reconstruction
+    // allowance without using axial translation as a geometric slack.
+    query_tolerance(a, b)
+        .max(ROUNDING_ULPS * a.radius.abs().max(b.radius.abs()).max(f64::MIN_POSITIVE))
 }
 fn area_tolerance(points: &[MeridianPoint]) -> f64 {
     let scale = scale_of(points);

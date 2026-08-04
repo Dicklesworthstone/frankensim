@@ -5,7 +5,7 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricCurvatureAuthority, AxisymmetricCurvatureError,
-    SquatDiscEdgeTreatment,
+    AxisymmetricError, MeridianSegment, SquatDiscEdgeTreatment,
 };
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -108,4 +108,52 @@ fn g3_directional_entrypoint_cannot_promote_a_forged_on_feature_point_to_support
             .expect("recomputed selected support");
         assert_eq!(selected.source_feature, 3);
     });
+}
+
+#[test]
+fn g0_outer_filleted_annulus_selects_a_smooth_outer_arc_with_its_real_curvature() {
+    let outer = 0.038;
+    let inner = 0.021;
+    let thickness = 0.006;
+    let fillet = 0.001;
+    let chart = AxisymmetricChart::annular_disc_outer_fillets(outer, inner, thickness, fillet)
+        .expect("valid annular outer fillets");
+    assert!(
+        !chart.construction_certificate().touches_axis,
+        "the inner bore must remain physical geometry"
+    );
+    assert_eq!(
+        chart
+            .segments()
+            .iter()
+            .filter(|segment| matches!(segment, MeridianSegment::Arc { .. }))
+            .count(),
+        2,
+        "both outer rims must be literal circular arcs"
+    );
+    let estimate = with_cx(|cx| {
+        chart
+            .principal_curvatures_at_support_direction(Vec3::new(1.0, 0.0, -1.0), cx)
+            .expect("tilted support lies in the upper outer-fillet interior")
+    });
+    assert_eq!(estimate.source_feature, 3);
+    assert_eq!(estimate.authority, AxisymmetricCurvatureAuthority::Estimate);
+    assert_close(estimate.meridional_m_inverse, fillet.recip());
+    let root_half = 1.0 / 2.0_f64.sqrt();
+    assert_close(
+        estimate.azimuthal_m_inverse,
+        root_half / (outer - fillet + root_half * fillet),
+    );
+}
+
+#[test]
+fn g0_annular_outer_fillet_refuses_zero_and_out_of_span_radius() {
+    assert!(matches!(
+        AxisymmetricChart::annular_disc_outer_fillets(0.038, 0.021, 0.006, 0.0),
+        Err(AxisymmetricError::InvalidAnnularOuterFilletRadius { .. })
+    ));
+    assert!(matches!(
+        AxisymmetricChart::annular_disc_outer_fillets(0.038, 0.021, 0.006, 0.0031),
+        Err(AxisymmetricError::InvalidAnnularOuterFilletRadius { .. })
+    ));
 }
