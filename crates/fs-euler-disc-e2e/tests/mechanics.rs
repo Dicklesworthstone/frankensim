@@ -130,6 +130,17 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn sub_joule_relative_tolerance_uses_the_actual_energy_scale() {
+    let bound = EnergyAcceptanceBound {
+        absolute_j: 0.0,
+        relative: 0.1,
+    };
+
+    assert!(bound.admits(0.0001, 0.001));
+    assert!(!bound.admits(0.01, 0.001));
+}
+
+#[test]
 fn force_arm_is_recentered_in_world_then_rotated_once_to_body() {
     let rotation =
         UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), core::f64::consts::FRAC_PI_2)

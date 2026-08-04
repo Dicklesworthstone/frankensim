@@ -484,7 +484,8 @@ pub fn run_mechanics_macro_step(
     let body_energy_residual_j = mechanical_energy_change_j - reconstructed_body_work_j;
     let interface_energy_residual_j =
         -claimed_body_work_j - (recoverable_storage_change_j + irreversible_work_j);
-    let combined_energy_residual_j = body_energy_residual_j + interface_energy_residual_j;
+    let combined_energy_residual_j =
+        combined_energy_residual_j(body_energy_residual_j, interface_energy_residual_j);
     if !all_finite(&[
         mechanical_energy_before_j,
         mechanical_energy_after_j,
@@ -765,13 +766,49 @@ fn reconstruct_contribution(
 }
 
 fn energy_scale(first_j: f64, second_j: f64, uncertainty_j: f64) -> f64 {
-    first_j
-        .abs()
-        .max(second_j.abs())
-        .max(uncertainty_j)
-        .max(1.0)
+    first_j.abs().max(second_j.abs()).max(uncertainty_j)
+}
+
+fn combined_energy_residual_j(
+    body_energy_residual_j: f64,
+    interface_energy_residual_j: f64,
+) -> f64 {
+    body_energy_residual_j - interface_energy_residual_j
 }
 
 fn all_finite(values: &[f64]) -> bool {
     values.iter().all(|value| value.is_finite())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{combined_energy_residual_j, energy_scale};
+
+    #[test]
+    fn combined_residual_subtracts_nonzero_interface_residual() {
+        let mechanical_energy_change_j = -0.12;
+        let reconstructed_body_work_j = -0.15;
+        let claimed_body_work_j = -0.15;
+        let recoverable_storage_change_j = 0.10;
+        let irreversible_work_j = 0.07;
+        let body_energy_residual_j = mechanical_energy_change_j - reconstructed_body_work_j;
+        let interface_energy_residual_j =
+            -claimed_body_work_j - (recoverable_storage_change_j + irreversible_work_j);
+
+        assert_ne!(body_energy_residual_j, 0.0);
+        assert_ne!(interface_energy_residual_j, 0.0);
+        let aggregate_residual_j =
+            combined_energy_residual_j(body_energy_residual_j, interface_energy_residual_j);
+        let physical_full_system_residual_j =
+            mechanical_energy_change_j + recoverable_storage_change_j + irreversible_work_j;
+        assert!(
+            (aggregate_residual_j - physical_full_system_residual_j).abs() <= 1.0e-15,
+            "aggregate={aggregate_residual_j:?}, physical={physical_full_system_residual_j:?}"
+        );
+    }
+
+    #[test]
+    fn energy_scale_keeps_sub_joule_relative_tolerances_sub_joule() {
+        assert_eq!(energy_scale(0.001, 0.0002, 0.0), 0.001);
+    }
 }
