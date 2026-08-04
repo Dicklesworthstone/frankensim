@@ -9,6 +9,7 @@
 //! cancellable API is required before it can make that project-level claim.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use fs_solid::{OperatorDiagnostics, ShellAssembly, ShellError, ShellPlate, ShellSupport};
 
@@ -38,6 +39,9 @@ pub enum BaseGeometryScope {
     CurvedShell,
     /// Refused: multi-patch/mortar coupling is not part of this rung.
     MultiPatch,
+    /// Refused: a measured/as-built surface requires an evidence-bearing
+    /// geometry and compliant-base path, not this nominal flat plate model.
+    AsBuiltSurface,
 }
 
 /// Explicit contact scope of the applied force.
@@ -126,6 +130,16 @@ pub enum BaseResponseError {
     RefinementNotImproved { component: &'static str },
     /// A derived quantity became non-finite.
     NonFiniteDerived { field: &'static str },
+    /// An incremental port/checkpoint belongs to a different immutable model.
+    PortIdentityMismatch,
+    /// A proposed accepted step does not extend the supplied checkpoint.
+    PortProposalMismatch,
+    /// The caller attempted to accept a stale or skipped checkpoint version.
+    PortVersionMismatch { expected: u64, observed: u64 },
+    /// A step identity was already accepted from this checkpoint lineage.
+    DuplicatePortStepIdentity,
+    /// The port's declared accepted-step/replay budget is exhausted.
+    PortStepBudgetExceeded,
 }
 
 impl fmt::Display for BaseResponseError {
@@ -246,47 +260,414 @@ pub struct BaseResponseRefinement {
     pub energy_refinement_improved: bool,
 }
 
+/// Immutable identity for a composable reduced-base port.
+///
+/// The port deliberately names both the physical/reduction model and the
+/// configuration that selected it.  A checkpoint from one identity is never
+/// accepted by another, even if their numerical values happen to match.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReducedBasePortIdentity {
+    /// Stable identity of the reduced physical model.
+    pub model_id: String,
+    /// Stable identity of the configuration/parameter set.
+    pub configuration_id: String,
+}
+
+/// One contact-load interval supplied to the accepted-step base port.
+///
+/// `compressive_normal_force_on_base_n` is nonnegative and acts *into* the
+/// base, opposite `LevelSupportInput::level_normal`.  This is the same sign
+/// convention as `MovingContactLoad::normal_force_n`; it is work done on the
+/// base, not a reaction reported back to the disc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedBaseStepInput {
+    /// Bounded caller identity used to reject replay within one checkpoint lineage.
+    pub step_id: String,
+    /// Exact version of the checkpoint this interval extends.
+    pub expected_version: u64,
+    /// Positive accepted mechanics-subinterval duration [s].  It may be
+    /// shorter than the legacy trajectory timestep but must satisfy this
+    /// immutable mode's same nondimensional resolution limit.
+    pub duration_s: f64,
+    /// Nonnegative compressive force applied to the base [N].
+    pub compressive_normal_force_on_base_n: f64,
+    /// Moving-load position at the beginning of the interval, in `[0, 1]`.
+    pub load_progress_start: f64,
+    /// Moving-load position at the end of the interval, in `[0, 1]`.
+    pub load_progress_end: f64,
+}
+
+/// Cloneable committed state of the one-mode reduced-base port.
+///
+/// It contains only scalar modal dynamics plus a bounded set of accepted step
+/// identities.  The full plate operators and modal shape remain immutable in
+/// `ReducedBasePort`, so checkpoint cloning does not duplicate them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedBaseCheckpoint {
+    identity: ReducedBasePortIdentity,
+    accepted_version: u64,
+    elapsed_time_s: f64,
+    modal_displacement_m: f64,
+    modal_velocity_m_per_s: f64,
+    cumulative_damping_work_j: f64,
+    cumulative_external_work_j: f64,
+    accepted_step_ids: BTreeSet<String>,
+}
+
+impl ReducedBaseCheckpoint {
+    /// Number of committed intervals in this checkpoint lineage.
+    #[must_use]
+    pub fn accepted_version(&self) -> u64 {
+        self.accepted_version
+    }
+
+    /// Elapsed accepted physical time [s].
+    #[must_use]
+    pub fn elapsed_time_s(&self) -> f64 {
+        self.elapsed_time_s
+    }
+
+    /// Generalized modal displacement [m].
+    #[must_use]
+    pub fn modal_displacement_m(&self) -> f64 {
+        self.modal_displacement_m
+    }
+
+    /// Generalized modal velocity [m/s].
+    #[must_use]
+    pub fn modal_velocity_m_per_s(&self) -> f64 {
+        self.modal_velocity_m_per_s
+    }
+
+    /// Cumulative dissipated Rayleigh work [J].
+    #[must_use]
+    pub fn cumulative_damping_work_j(&self) -> f64 {
+        self.cumulative_damping_work_j
+    }
+
+    /// Cumulative moving-contact work on the base [J].
+    #[must_use]
+    pub fn cumulative_external_work_j(&self) -> f64 {
+        self.cumulative_external_work_j
+    }
+}
+
+/// Exact interval accounting produced before a base step is accepted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedBaseStepReceipt {
+    /// Identity of the immutable port that produced this result.
+    pub identity: ReducedBasePortIdentity,
+    /// Checkpoint version consumed by this interval.
+    pub parent_version: u64,
+    /// Version produced if the proposal is accepted.
+    pub next_version: u64,
+    /// Accepted interval duration [s], bounded by the immutable port model.
+    pub timestep_s: f64,
+    /// Positive compressive force applied into the base [N].
+    pub compressive_normal_force_on_base_n: f64,
+    /// Equal-and-opposite contact reaction acting on the disc [N] in the
+    /// declared world Cartesian frame.  It equals the positive compressive
+    /// magnitude times `level_normal`; this scalar port does not resolve a
+    /// finite-patch pressure or moment distribution.
+    pub normal_reaction_on_disc_world_n: [f64; 3],
+    /// Start load position used for the interval.
+    pub load_progress_start: f64,
+    /// End load position used for the interval.
+    pub load_progress_end: f64,
+    /// Midpoint projected generalized force [N].
+    pub midpoint_modal_force_n: f64,
+    /// Generalized displacement before the interval [m].
+    pub modal_displacement_start_m: f64,
+    /// Generalized displacement after the interval [m].
+    pub modal_displacement_end_m: f64,
+    /// Generalized velocity before the interval [m/s].
+    pub modal_velocity_start_m_per_s: f64,
+    /// Generalized velocity after the interval [m/s].
+    pub modal_velocity_end_m_per_s: f64,
+    /// Change in retained kinetic plus elastic energy [J].
+    pub stored_energy_change_j: f64,
+    /// Rayleigh damping work in this interval [J].
+    pub damping_work_j: f64,
+    /// Moving-contact work done on the base in this interval [J].
+    pub external_contact_work_j: f64,
+    /// `stored_energy_change_j - external_contact_work_j + damping_work_j` [J].
+    pub energy_closure_residual_j: f64,
+    /// Norm of the end-state three-support reaction [N].
+    pub end_support_reaction_norm_n: f64,
+}
+
+/// Prepared but uncommitted accepted-step transition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedBaseStepProposal {
+    parent: ReducedBaseCheckpoint,
+    next: ReducedBaseCheckpoint,
+    receipt: ReducedBaseStepReceipt,
+}
+
+impl ReducedBaseStepProposal {
+    /// Immutable interval accounting.  `next` remains inaccessible until accept.
+    #[must_use]
+    pub fn receipt(&self) -> &ReducedBaseStepReceipt {
+        &self.receipt
+    }
+}
+
+/// Immutable one-mode base model with a transactional accepted-step interface.
+///
+/// This port is intentionally the existing flat, single-patch, nodal-load
+/// reduction factored at its implicit-midpoint step boundary.  It does not
+/// represent resolved finite contact patches, as-built base compliance,
+/// multiple modes, or a curved shell.
+#[derive(Debug, Clone)]
+pub struct ReducedBasePort {
+    identity: ReducedBasePortIdentity,
+    input: BaseResponseInput,
+    assembly: ShellAssembly,
+    mode: ReducedMode,
+    diagnostics: BaseResponseDiagnostics,
+    maximum_accepted_steps: u64,
+}
+
+impl ReducedBasePort {
+    /// Assemble a fixed reduced base model for bounded accepted-step use.
+    pub fn build(
+        identity: ReducedBasePortIdentity,
+        input: BaseResponseInput,
+        maximum_accepted_steps: u64,
+    ) -> Result<Self, BaseResponseError> {
+        validate_port_identity(&identity)?;
+        if maximum_accepted_steps == 0 {
+            return Err(BaseResponseError::PortStepBudgetExceeded);
+        }
+        let prepared = prepare_reduced_base_response(&input)?;
+        Ok(Self {
+            identity,
+            input,
+            assembly: prepared.assembly,
+            mode: prepared.mode,
+            diagnostics: prepared.diagnostics,
+            maximum_accepted_steps,
+        })
+    }
+
+    /// Fixed identity used to bind checkpoints and receipts to this model.
+    #[must_use]
+    pub fn identity(&self) -> &ReducedBasePortIdentity {
+        &self.identity
+    }
+
+    /// Fixed reduction diagnostics; no accepted step can mutate this model.
+    #[must_use]
+    pub fn diagnostics(&self) -> &BaseResponseDiagnostics {
+        &self.diagnostics
+    }
+
+    /// Start a lineage from the model's declared initial modal state.
+    #[must_use]
+    pub fn initial_checkpoint(&self) -> ReducedBaseCheckpoint {
+        ReducedBaseCheckpoint {
+            identity: self.identity.clone(),
+            accepted_version: 0,
+            elapsed_time_s: 0.0,
+            modal_displacement_m: self.input.initial_modal_displacement_m,
+            modal_velocity_m_per_s: self.input.initial_modal_velocity_m_per_s,
+            cumulative_damping_work_j: 0.0,
+            cumulative_external_work_j: 0.0,
+            accepted_step_ids: BTreeSet::new(),
+        }
+    }
+
+    /// Prepare one exact implicit-midpoint interval without mutating a checkpoint.
+    pub fn propose(
+        &self,
+        checkpoint: &ReducedBaseCheckpoint,
+        step: &ReducedBaseStepInput,
+    ) -> Result<ReducedBaseStepProposal, BaseResponseError> {
+        self.validate_checkpoint(checkpoint)?;
+        validate_port_step(
+            step,
+            checkpoint,
+            self.maximum_accepted_steps,
+            self.diagnostics.modal_frequency_rad_s,
+            self.diagnostics.nondimensional_timestep_limit,
+        )?;
+        if checkpoint.accepted_step_ids.contains(&step.step_id) {
+            return Err(BaseResponseError::DuplicatePortStepIdentity);
+        }
+        let mut step_input = self.input.clone();
+        step_input.load.normal_force_n = step.compressive_normal_force_on_base_n;
+        let modal_step = advance_implicit_midpoint(
+            &self.mode,
+            &step_input,
+            step.load_progress_start,
+            step.load_progress_end,
+            checkpoint.modal_displacement_m,
+            checkpoint.modal_velocity_m_per_s,
+            step.duration_s,
+        );
+        let timestep = step.duration_s;
+        let modal_step = modal_step?;
+        let damping_work = modal_step.damping_work_j;
+        let external_work = modal_step.external_work_j;
+        let start_energy = modal_energy(
+            &self.mode,
+            checkpoint.modal_displacement_m,
+            checkpoint.modal_velocity_m_per_s,
+        );
+        let end_energy = modal_energy(
+            &self.mode,
+            modal_step.next_displacement_m,
+            modal_step.next_velocity_m_per_s,
+        );
+        let stored_energy_change = end_energy - start_energy;
+        let energy_closure_residual = stored_energy_change - external_work + damping_work;
+        for (value, field) in [
+            (damping_work, "port damping work"),
+            (external_work, "port external work"),
+            (stored_energy_change, "port stored energy change"),
+            (energy_closure_residual, "port energy closure residual"),
+        ] {
+            finite(value, field)?;
+        }
+        let next_damping_work = checkpoint.cumulative_damping_work_j + damping_work;
+        let next_external_work = checkpoint.cumulative_external_work_j + external_work;
+        let next_elapsed_time = checkpoint.elapsed_time_s + timestep;
+        for (value, field) in [
+            (next_damping_work, "port cumulative damping work"),
+            (next_external_work, "port cumulative external work"),
+            (next_elapsed_time, "port elapsed time"),
+        ] {
+            finite(value, field)?;
+        }
+        let end_sample = sample_at_progress(
+            &step_input,
+            &self.assembly,
+            &self.mode,
+            step.load_progress_end,
+            next_elapsed_time,
+            modal_step.next_displacement_m,
+            modal_step.next_velocity_m_per_s,
+            modal_step.next_acceleration_m_per_s2,
+            next_damping_work,
+            next_external_work,
+        )?;
+        let mut accepted_step_ids = checkpoint.accepted_step_ids.clone();
+        accepted_step_ids.insert(step.step_id.clone());
+        let next = ReducedBaseCheckpoint {
+            identity: self.identity.clone(),
+            accepted_version: checkpoint.accepted_version + 1,
+            elapsed_time_s: next_elapsed_time,
+            modal_displacement_m: modal_step.next_displacement_m,
+            modal_velocity_m_per_s: modal_step.next_velocity_m_per_s,
+            cumulative_damping_work_j: next_damping_work,
+            cumulative_external_work_j: next_external_work,
+            accepted_step_ids,
+        };
+        Ok(ReducedBaseStepProposal {
+            parent: checkpoint.clone(),
+            next,
+            receipt: ReducedBaseStepReceipt {
+                identity: self.identity.clone(),
+                parent_version: checkpoint.accepted_version,
+                next_version: checkpoint.accepted_version + 1,
+                timestep_s: timestep,
+                compressive_normal_force_on_base_n: step.compressive_normal_force_on_base_n,
+                normal_reaction_on_disc_world_n: self
+                    .input
+                    .level_support
+                    .level_normal
+                    .map(|component| component * step.compressive_normal_force_on_base_n),
+                load_progress_start: step.load_progress_start,
+                load_progress_end: step.load_progress_end,
+                midpoint_modal_force_n: modal_step.midpoint_force_n,
+                modal_displacement_start_m: checkpoint.modal_displacement_m,
+                modal_displacement_end_m: modal_step.next_displacement_m,
+                modal_velocity_start_m_per_s: checkpoint.modal_velocity_m_per_s,
+                modal_velocity_end_m_per_s: modal_step.next_velocity_m_per_s,
+                stored_energy_change_j: stored_energy_change,
+                damping_work_j: damping_work,
+                external_contact_work_j: external_work,
+                energy_closure_residual_j: energy_closure_residual,
+                end_support_reaction_norm_n: end_sample.support_reaction_norm_n,
+            },
+        })
+    }
+
+    /// Commit a proposal only when it still extends the supplied checkpoint.
+    pub fn accept(
+        &self,
+        checkpoint: &ReducedBaseCheckpoint,
+        proposal: ReducedBaseStepProposal,
+    ) -> Result<ReducedBaseCheckpoint, BaseResponseError> {
+        self.validate_checkpoint(checkpoint)?;
+        if proposal.parent != *checkpoint
+            || proposal.receipt.identity != self.identity
+            || proposal.next.identity != self.identity
+        {
+            return Err(BaseResponseError::PortProposalMismatch);
+        }
+        Ok(proposal.next)
+    }
+
+    /// Refuse a proposal without changing the supplied checkpoint.
+    pub fn refuse(
+        &self,
+        checkpoint: &ReducedBaseCheckpoint,
+        proposal: &ReducedBaseStepProposal,
+    ) -> Result<ReducedBaseCheckpoint, BaseResponseError> {
+        self.validate_checkpoint(checkpoint)?;
+        if proposal.parent != *checkpoint || proposal.receipt.identity != self.identity {
+            return Err(BaseResponseError::PortProposalMismatch);
+        }
+        Ok(checkpoint.clone())
+    }
+
+    fn validate_checkpoint(
+        &self,
+        checkpoint: &ReducedBaseCheckpoint,
+    ) -> Result<(), BaseResponseError> {
+        if checkpoint.identity != self.identity {
+            return Err(BaseResponseError::PortIdentityMismatch);
+        }
+        if checkpoint.accepted_version > self.maximum_accepted_steps
+            || u64::try_from(checkpoint.accepted_step_ids.len()).ok()
+                != Some(checkpoint.accepted_version)
+        {
+            return Err(BaseResponseError::PortProposalMismatch);
+        }
+        for (value, field) in [
+            (checkpoint.elapsed_time_s, "port checkpoint elapsed time"),
+            (
+                checkpoint.modal_displacement_m,
+                "port checkpoint displacement",
+            ),
+            (
+                checkpoint.modal_velocity_m_per_s,
+                "port checkpoint velocity",
+            ),
+            (
+                checkpoint.cumulative_damping_work_j,
+                "port checkpoint damping work",
+            ),
+            (
+                checkpoint.cumulative_external_work_j,
+                "port checkpoint external work",
+            ),
+        ] {
+            finite(value, field)?;
+        }
+        Ok(())
+    }
+}
+
 /// Assemble and integrate the one-mode production flexible-base rung.
 pub fn run_reduced_base_response(
     input: &BaseResponseInput,
 ) -> Result<BaseResponseRun, BaseResponseError> {
-    validate_input(input)?;
-    let assembly = input
-        .plate
-        .assemble()
-        .map_err(|error| BaseResponseError::PlateAssembly {
-            detail: shell_error_detail(error),
-        })?;
-    let level_tilt_rad = validate_level_support(input)?;
-    let mode = load_shaped_mode(input, &assembly)?;
-    let modal_frequency_rad_s = (mode.stiffness / mode.mass).sqrt();
-    let modal_damping_ratio = mode.damping / (2.0 * (mode.stiffness * mode.mass).sqrt());
-    finite(modal_frequency_rad_s, "modal_frequency")?;
-    finite(modal_damping_ratio, "modal_damping_ratio")?;
-    let nondimensional_timestep_limit = 0.2 / (1.0 + modal_damping_ratio);
-    let diagnostics = BaseResponseDiagnostics {
-        operator: assembly.diagnostics.clone(),
-        level_tilt_rad,
-        modal_mass_kg: mode.mass,
-        modal_stiffness_n_per_m: mode.stiffness,
-        modal_damping_n_s_per_m: mode.damping,
-        modal_shape_translation_scale_m: mode.translation_scale_m,
-        modal_damping_ratio,
-        nondimensional_timestep_limit,
-        reduced_solve_scaled_residual: mode.scaled_solve_residual,
-        reduced_solve_scaled_residual_limit: MAX_REDUCED_SOLVE_SCALED_RESIDUAL,
-        supported_static_shape: mode.full_static_shape.clone(),
-        modal_frequency_rad_s,
-    };
-    let nondimensional_step = input.timestep_s * diagnostics.modal_frequency_rad_s;
-    if !(nondimensional_step.is_finite()
-        && nondimensional_step <= diagnostics.nondimensional_timestep_limit)
-    {
-        return Err(BaseResponseError::TimestepOutsideResolution {
-            nondimensional_step,
-            limit: diagnostics.nondimensional_timestep_limit,
-        });
-    }
+    let prepared = prepare_reduced_base_response(input)?;
+    let assembly = prepared.assembly;
+    let mode = prepared.mode;
+    let diagnostics = prepared.diagnostics;
 
     let mut displacement = input.initial_modal_displacement_m;
     let mut velocity = input.initial_modal_velocity_m_per_s;
@@ -295,11 +676,12 @@ pub fn run_reduced_base_response(
     let mut damping_work = 0.0;
     let mut external_work = 0.0;
     let mut samples = Vec::with_capacity(input.steps as usize + 1);
-    samples.push(sample(
+    samples.push(sample_at_progress(
         input,
         &assembly,
         &mode,
-        0,
+        0.0,
+        0.0,
         displacement,
         velocity,
         acceleration,
@@ -311,31 +693,29 @@ pub fn run_reduced_base_response(
         // Implicit midpoint uses one midpoint state for acceleration, damping
         // work, external work, and the state update. Its linear solve is
         // scalar because this rung retains exactly one supported mode.
-        let timestep = input.timestep_s;
-        let midpoint_force = mode.force_at(input, (step as f64 - 0.5) / input.steps as f64);
-        let midpoint_velocity = (midpoint_force + 2.0 * mode.mass * velocity / timestep
-            - mode.stiffness * displacement)
-            / (2.0 * mode.mass / timestep + mode.damping + 0.5 * mode.stiffness * timestep);
-        let next_displacement = displacement + timestep * midpoint_velocity;
-        let next_velocity = 2.0 * midpoint_velocity - velocity;
         let progress = step as f64 / input.steps as f64;
-        let next_acceleration =
-            modal_acceleration(&mode, input, progress, next_displacement, next_velocity);
-        finite(next_displacement, "modal_displacement")?;
-        finite(next_velocity, "modal_velocity")?;
-        finite(next_acceleration, "modal_acceleration")?;
-        damping_work += mode.damping * midpoint_velocity * midpoint_velocity * timestep;
-        external_work += midpoint_force * (next_displacement - displacement);
+        let modal_step = advance_implicit_midpoint(
+            &mode,
+            input,
+            (step as f64 - 1.0) / input.steps as f64,
+            progress,
+            displacement,
+            velocity,
+            input.timestep_s,
+        )?;
+        damping_work += modal_step.damping_work_j;
+        external_work += modal_step.external_work_j;
         finite(damping_work, "damping_work")?;
         finite(external_work, "external_work")?;
-        displacement = next_displacement;
-        velocity = next_velocity;
-        acceleration = next_acceleration;
-        samples.push(sample(
+        displacement = modal_step.next_displacement_m;
+        velocity = modal_step.next_velocity_m_per_s;
+        acceleration = modal_step.next_acceleration_m_per_s2;
+        samples.push(sample_at_progress(
             input,
             &assembly,
             &mode,
-            step,
+            progress,
+            step as f64 * input.timestep_s,
             displacement,
             velocity,
             acceleration,
@@ -471,6 +851,65 @@ fn refinement_improved(coarse_difference: f64, fine_difference: f64, scale: f64)
 }
 
 #[derive(Debug, Clone)]
+struct PreparedReducedBaseResponse {
+    assembly: ShellAssembly,
+    mode: ReducedMode,
+    diagnostics: BaseResponseDiagnostics,
+}
+
+/// Assemble the exact fixed modal system used by both trajectory and port APIs.
+///
+/// Keeping this construction shared is deliberate: the port is a different
+/// transaction boundary around the same reduction, not an independently tuned
+/// approximation of base compliance.
+fn prepare_reduced_base_response(
+    input: &BaseResponseInput,
+) -> Result<PreparedReducedBaseResponse, BaseResponseError> {
+    validate_input(input)?;
+    let assembly = input
+        .plate
+        .assemble()
+        .map_err(|error| BaseResponseError::PlateAssembly {
+            detail: shell_error_detail(error),
+        })?;
+    let level_tilt_rad = validate_level_support(input)?;
+    let mode = load_shaped_mode(input, &assembly)?;
+    let modal_frequency_rad_s = (mode.stiffness / mode.mass).sqrt();
+    let modal_damping_ratio = mode.damping / (2.0 * (mode.stiffness * mode.mass).sqrt());
+    finite(modal_frequency_rad_s, "modal_frequency")?;
+    finite(modal_damping_ratio, "modal_damping_ratio")?;
+    let nondimensional_timestep_limit = 0.2 / (1.0 + modal_damping_ratio);
+    let diagnostics = BaseResponseDiagnostics {
+        operator: assembly.diagnostics.clone(),
+        level_tilt_rad,
+        modal_mass_kg: mode.mass,
+        modal_stiffness_n_per_m: mode.stiffness,
+        modal_damping_n_s_per_m: mode.damping,
+        modal_shape_translation_scale_m: mode.translation_scale_m,
+        modal_damping_ratio,
+        nondimensional_timestep_limit,
+        reduced_solve_scaled_residual: mode.scaled_solve_residual,
+        reduced_solve_scaled_residual_limit: MAX_REDUCED_SOLVE_SCALED_RESIDUAL,
+        supported_static_shape: mode.full_static_shape.clone(),
+        modal_frequency_rad_s,
+    };
+    let nondimensional_step = input.timestep_s * diagnostics.modal_frequency_rad_s;
+    if !(nondimensional_step.is_finite()
+        && nondimensional_step <= diagnostics.nondimensional_timestep_limit)
+    {
+        return Err(BaseResponseError::TimestepOutsideResolution {
+            nondimensional_step,
+            limit: diagnostics.nondimensional_timestep_limit,
+        });
+    }
+    Ok(PreparedReducedBaseResponse {
+        assembly,
+        mode,
+        diagnostics,
+    })
+}
+
+#[derive(Debug, Clone)]
 struct ReducedMode {
     full_shape: Vec<f64>,
     full_static_shape: Vec<f64>,
@@ -498,6 +937,133 @@ fn modal_acceleration(
         / mode.mass
 }
 
+fn modal_energy(mode: &ReducedMode, displacement: f64, velocity: f64) -> f64 {
+    0.5 * mode.mass * velocity * velocity + 0.5 * mode.stiffness * displacement * displacement
+}
+
+/// One shared scalar implicit-midpoint update used by both public APIs.
+#[derive(Debug, Clone, Copy)]
+struct ModalMidpointStep {
+    midpoint_force_n: f64,
+    next_displacement_m: f64,
+    next_velocity_m_per_s: f64,
+    next_acceleration_m_per_s2: f64,
+    damping_work_j: f64,
+    external_work_j: f64,
+}
+
+fn advance_implicit_midpoint(
+    mode: &ReducedMode,
+    input: &BaseResponseInput,
+    progress_start: f64,
+    progress_end: f64,
+    displacement_m: f64,
+    velocity_m_per_s: f64,
+    timestep_s: f64,
+) -> Result<ModalMidpointStep, BaseResponseError> {
+    let midpoint_force_n = mode.force_at(input, 0.5 * (progress_start + progress_end));
+    let midpoint_velocity_m_per_s = (midpoint_force_n
+        + 2.0 * mode.mass * velocity_m_per_s / timestep_s
+        - mode.stiffness * displacement_m)
+        / (2.0 * mode.mass / timestep_s + mode.damping + 0.5 * mode.stiffness * timestep_s);
+    let next_displacement_m = displacement_m + timestep_s * midpoint_velocity_m_per_s;
+    let next_velocity_m_per_s = 2.0 * midpoint_velocity_m_per_s - velocity_m_per_s;
+    let next_acceleration_m_per_s2 = modal_acceleration(
+        mode,
+        input,
+        progress_end,
+        next_displacement_m,
+        next_velocity_m_per_s,
+    );
+    let damping_work_j =
+        mode.damping * midpoint_velocity_m_per_s * midpoint_velocity_m_per_s * timestep_s;
+    let external_work_j = midpoint_force_n * (next_displacement_m - displacement_m);
+    for (value, field) in [
+        (midpoint_force_n, "midpoint force"),
+        (midpoint_velocity_m_per_s, "midpoint velocity"),
+        (next_displacement_m, "modal displacement"),
+        (next_velocity_m_per_s, "modal velocity"),
+        (next_acceleration_m_per_s2, "modal acceleration"),
+        (damping_work_j, "damping work"),
+        (external_work_j, "external work"),
+    ] {
+        finite(value, field)?;
+    }
+    Ok(ModalMidpointStep {
+        midpoint_force_n,
+        next_displacement_m,
+        next_velocity_m_per_s,
+        next_acceleration_m_per_s2,
+        damping_work_j,
+        external_work_j,
+    })
+}
+
+fn validate_port_identity(identity: &ReducedBasePortIdentity) -> Result<(), BaseResponseError> {
+    for value in [&identity.model_id, &identity.configuration_id] {
+        if value.is_empty() || value.len() > 256 || !value.is_ascii() {
+            return Err(BaseResponseError::InvalidInput {
+                field: "port identity",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_port_step(
+    step: &ReducedBaseStepInput,
+    checkpoint: &ReducedBaseCheckpoint,
+    maximum_accepted_steps: u64,
+    modal_frequency_rad_s: f64,
+    nondimensional_timestep_limit: f64,
+) -> Result<(), BaseResponseError> {
+    if step.step_id.is_empty() || step.step_id.len() > 256 || !step.step_id.is_ascii() {
+        return Err(BaseResponseError::InvalidInput {
+            field: "port step identity",
+        });
+    }
+    if step.expected_version != checkpoint.accepted_version {
+        return Err(BaseResponseError::PortVersionMismatch {
+            expected: checkpoint.accepted_version,
+            observed: step.expected_version,
+        });
+    }
+    if checkpoint.accepted_version >= maximum_accepted_steps {
+        return Err(BaseResponseError::PortStepBudgetExceeded);
+    }
+    for (value, field) in [
+        (
+            step.compressive_normal_force_on_base_n,
+            "port compressive_normal_force_on_base_n",
+        ),
+        (step.duration_s, "port duration_s"),
+        (step.load_progress_start, "port load_progress_start"),
+        (step.load_progress_end, "port load_progress_end"),
+    ] {
+        if !value.is_finite()
+            || (field == "port compressive_normal_force_on_base_n" && value < 0.0)
+            || (field == "port duration_s" && value <= 0.0)
+            || ((field == "port load_progress_start" || field == "port load_progress_end")
+                && !(0.0..=1.0).contains(&value))
+        {
+            return Err(BaseResponseError::InvalidInput { field });
+        }
+    }
+    if step.load_progress_end < step.load_progress_start {
+        return Err(BaseResponseError::InvalidInput {
+            field: "port decreasing load progress",
+        });
+    }
+    let nondimensional_step = step.duration_s * modal_frequency_rad_s;
+    if !(nondimensional_step.is_finite() && nondimensional_step <= nondimensional_timestep_limit) {
+        return Err(BaseResponseError::TimestepOutsideResolution {
+            nondimensional_step,
+            limit: nondimensional_timestep_limit,
+        });
+    }
+    Ok(())
+}
+
 fn validate_input(input: &BaseResponseInput) -> Result<(), BaseResponseError> {
     match input.geometry_scope {
         BaseGeometryScope::FlatSinglePatch => {}
@@ -509,6 +1075,11 @@ fn validate_input(input: &BaseResponseInput) -> Result<(), BaseResponseError> {
         BaseGeometryScope::MultiPatch => {
             return Err(BaseResponseError::UnsupportedScope {
                 scope: "multi-patch shell",
+            });
+        }
+        BaseGeometryScope::AsBuiltSurface => {
+            return Err(BaseResponseError::UnsupportedScope {
+                scope: "as-built base surface",
             });
         }
     }
@@ -665,18 +1236,18 @@ fn load_shaped_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sample(
+fn sample_at_progress(
     input: &BaseResponseInput,
     assembly: &ShellAssembly,
     mode: &ReducedMode,
-    step: u32,
+    progress: f64,
+    time_s: f64,
     displacement: f64,
     velocity: f64,
     acceleration: f64,
     damping_work: f64,
     external_work: f64,
 ) -> Result<BaseResponseSample, BaseResponseError> {
-    let progress = step as f64 / input.steps as f64;
     let force = mode.force_at(input, progress);
     let full_displacement: Vec<f64> = mode
         .full_shape
@@ -716,7 +1287,7 @@ fn sample(
         .sum::<f64>()
         .sqrt();
     let sample = BaseResponseSample {
-        time_s: step as f64 * input.timestep_s,
+        time_s,
         load_progress: progress,
         modal_force_n: force,
         modal_displacement_m: displacement,

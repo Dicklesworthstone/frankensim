@@ -1,3 +1,6 @@
+use fs_euler_disc_e2e::base_response::{
+    ReducedBasePort, ReducedBasePortIdentity, ReducedBaseStepInput,
+};
 use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseError, BaseResponseInput, ContactLoadScope, LevelSupportInput,
     MAX_BASE_RESPONSE_STEPS, MovingContactLoad, refine_reduced_base_response,
@@ -400,5 +403,177 @@ fn e2e_reduced_flexible_base_refuses_level_scope_and_resolved_contact_overreach(
     assert!(matches!(
         run_reduced_base_response(&tilted),
         Err(BaseResponseError::SupportMismatch | BaseResponseError::InvalidInput { .. })
+    ));
+}
+
+#[test]
+fn e2e_reduced_base_port_replays_the_existing_implicit_midpoint_trajectory() {
+    let request = moving_input(DampingModel::Rayleigh {
+        mass_proportional_per_s: 0.2,
+        stiffness_proportional_s: 1.0e-6,
+    });
+    let reference = run_reduced_base_response(&request).expect("reference trajectory");
+    let port = ReducedBasePort::build(
+        ReducedBasePortIdentity {
+            model_id: "e2e/reduced-base-port-v1".into(),
+            configuration_id: "moving-rayleigh-fixture-v1".into(),
+        },
+        request.clone(),
+        u64::from(request.steps),
+    )
+    .expect("same flat nodal model prepares once");
+    assert_eq!(
+        port.diagnostics().modal_mass_kg,
+        reference.diagnostics.modal_mass_kg,
+        "the port reuses the prepared one-mode reduction"
+    );
+
+    let mut checkpoint = port.initial_checkpoint();
+    for step_index in 1..=request.steps {
+        let proposal = port
+            .propose(
+                &checkpoint,
+                &ReducedBaseStepInput {
+                    step_id: format!("mechanics-substep-{step_index}"),
+                    expected_version: checkpoint.accepted_version(),
+                    duration_s: request.timestep_s,
+                    compressive_normal_force_on_base_n: request.load.normal_force_n,
+                    load_progress_start: f64::from(step_index - 1) / f64::from(request.steps),
+                    load_progress_end: f64::from(step_index) / f64::from(request.steps),
+                },
+            )
+            .expect("prepare interval");
+        assert_eq!(proposal.receipt().parent_version, u64::from(step_index - 1));
+        assert_eq!(proposal.receipt().next_version, u64::from(step_index));
+        assert!(proposal.receipt().end_support_reaction_norm_n.is_finite());
+        assert!(proposal.receipt().energy_closure_residual_j.abs() < 1.0e-14);
+        if step_index == 1 {
+            assert_eq!(
+                port.refuse(&checkpoint, &proposal)
+                    .expect("refuse leaves state intact"),
+                checkpoint,
+                "a refused mechanics candidate cannot advance base state"
+            );
+        }
+        checkpoint = port.accept(&checkpoint, proposal).expect("commit interval");
+    }
+    let terminal = reference.final_sample().expect("terminal reference sample");
+    assert_eq!(checkpoint.accepted_version(), u64::from(request.steps));
+    for (label, actual, expected) in [
+        ("elapsed time", checkpoint.elapsed_time_s(), terminal.time_s),
+        (
+            "modal displacement",
+            checkpoint.modal_displacement_m(),
+            terminal.modal_displacement_m,
+        ),
+        (
+            "modal velocity",
+            checkpoint.modal_velocity_m_per_s(),
+            terminal.modal_velocity_m_per_s,
+        ),
+        (
+            "damping work",
+            checkpoint.cumulative_damping_work_j(),
+            terminal.damping_work_j,
+        ),
+        (
+            "external work",
+            checkpoint.cumulative_external_work_j(),
+            terminal.external_work_j,
+        ),
+    ] {
+        assert!(
+            (actual - expected).abs() <= 2.0e-15,
+            "{label}: port={actual:e}, legacy={expected:e}"
+        );
+    }
+}
+
+#[test]
+fn e2e_reduced_base_port_refuses_stale_replay_capacity_and_higher_fidelity_claims() {
+    let request = input(DampingModel::None);
+    let identity = ReducedBasePortIdentity {
+        model_id: "e2e/reduced-base-port-v1".into(),
+        configuration_id: "refusal-fixture-v1".into(),
+    };
+    let port = ReducedBasePort::build(identity, request.clone(), 1).expect("one interval budget");
+    let checkpoint = port.initial_checkpoint();
+    let accepted = port
+        .propose(
+            &checkpoint,
+            &ReducedBaseStepInput {
+                step_id: "accepted-step".into(),
+                expected_version: 0,
+                duration_s: 0.5 * request.timestep_s,
+                compressive_normal_force_on_base_n: 1.0,
+                load_progress_start: 0.0,
+                load_progress_end: 0.01,
+            },
+        )
+        .expect("first proposal");
+    assert_eq!(accepted.receipt().compressive_normal_force_on_base_n, 1.0);
+    assert_eq!(
+        accepted.receipt().normal_reaction_on_disc_world_n,
+        [0.0, 0.0, 1.0]
+    );
+    assert_eq!(accepted.receipt().timestep_s, 0.5 * request.timestep_s);
+    let checkpoint = port.accept(&checkpoint, accepted).expect("first accept");
+    assert!(matches!(
+        port.propose(
+            &checkpoint,
+            &ReducedBaseStepInput {
+                step_id: "stale-step".into(),
+                expected_version: 0,
+                duration_s: request.timestep_s,
+                compressive_normal_force_on_base_n: 1.0,
+                load_progress_start: 0.01,
+                load_progress_end: 0.02,
+            },
+        ),
+        Err(BaseResponseError::PortVersionMismatch { .. })
+    ));
+    assert!(matches!(
+        port.propose(
+            &checkpoint,
+            &ReducedBaseStepInput {
+                step_id: "over-budget-step".into(),
+                expected_version: 1,
+                duration_s: request.timestep_s,
+                compressive_normal_force_on_base_n: 1.0,
+                load_progress_start: 0.01,
+                load_progress_end: 0.02,
+            },
+        ),
+        Err(BaseResponseError::PortStepBudgetExceeded)
+    ));
+    let mut resolved = request;
+    resolved.contact_scope = ContactLoadScope::ResolvedFinitePatch;
+    assert!(matches!(
+        ReducedBasePort::build(
+            ReducedBasePortIdentity {
+                model_id: "e2e/reduced-base-port-v1".into(),
+                configuration_id: "resolved-finite-patch-v1".into(),
+            },
+            resolved,
+            1,
+        ),
+        Err(BaseResponseError::UnsupportedScope {
+            scope: "resolved finite-patch contact"
+        })
+    ));
+    let mut as_built = input(DampingModel::None);
+    as_built.geometry_scope = BaseGeometryScope::AsBuiltSurface;
+    assert!(matches!(
+        ReducedBasePort::build(
+            ReducedBasePortIdentity {
+                model_id: "e2e/reduced-base-port-v1".into(),
+                configuration_id: "as-built-base-v1".into(),
+            },
+            as_built,
+            1,
+        ),
+        Err(BaseResponseError::UnsupportedScope {
+            scope: "as-built base surface"
+        })
     ));
 }
