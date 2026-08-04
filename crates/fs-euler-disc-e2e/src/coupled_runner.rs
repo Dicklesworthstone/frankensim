@@ -341,6 +341,30 @@ struct SegmentAdvance {
     post_support_source_feature: Option<usize>,
 }
 
+/// All reduced channel quantities evaluated at one explicit state/base pair.
+///
+/// This is intentionally an internal stage value, not a retained physical
+/// receipt: the macro-step exposes the midpoint approximation only through the
+/// existing averaged channel and work fields.
+#[derive(Clone, Copy, Debug)]
+struct SegmentEvaluation {
+    velocity_world_m_per_s: Vec3,
+    omega_world_rad_per_s: Vec3,
+    contact_arm_world_m: Vec3,
+    interval_gap_m: f64,
+    normal_force_n: f64,
+    contact_active: bool,
+    friction_force_world_n: Vec3,
+    contact_force_world_n: Vec3,
+    contact_torque_world_nm: Vec3,
+    gas_force_world_n: Vec3,
+    gas_torque_world_nm: Vec3,
+    rolling_torque_world_nm: Vec3,
+    rolling_power_w: f64,
+    penetration_m: f64,
+    relative_normal_speed_m_per_s: f64,
+}
+
 fn transition_kind(
     branch: ContactBranch,
     start_gap_m: f64,
@@ -539,140 +563,76 @@ fn advance_segment(
     integrator: &RigidBodyIntegrator,
     geometry_model: &CoupledGeometry<'_, '_>,
 ) -> Result<SegmentAdvance, CoupledError> {
-    let pose = state.pose();
-    let velocity = state
-        .center_of_mass_velocity_world(mass)
-        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-    let omega_body = mass
-        .angular_velocity_body_checked(state.angular_momentum_body())
-        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-    let omega_world = pose.orientation().rotate_body_to_world(omega_body);
-    let (geometry, _) = geometry_model.contact(pose)?;
-    let contact_arm = geometry.radius_world_m;
-    let interval_start_gap_m = geometry.gap_m - base_deflection_m;
-    let contact_velocity = velocity.add(omega_world.cross(contact_arm));
-    let relative_normal_speed = contact_velocity.z - base_velocity_m_per_s;
-    let penetration_m = (-interval_start_gap_m).max(0.0);
-    let automatic_normal_force = unilateral_normal_force(
-        penetration_m,
-        relative_normal_speed,
-        factors.contact_stiffness_n_per_m,
-        factors.contact_damping_n_s_per_m,
-    );
-    let interval_normal_force_n = match branch {
-        ContactBranch::ForceClosed => automatic_normal_force,
-        ContactBranch::ForceOpen => 0.0,
-    };
-    let contact_active = match branch {
-        ContactBranch::ForceOpen => false,
-        ContactBranch::ForceClosed => true,
-    };
-    let tangent_velocity = Vec3::new(contact_velocity.x, contact_velocity.y, 0.0);
-    let tangent_speed = tangent_velocity.norm_squared().sqrt();
-    let friction_force = if contact_active && tangent_speed > 1.0e-14 {
-        tangent_velocity
-            .scale(-factors.sliding_friction_coefficient * interval_normal_force_n / tangent_speed)
-    } else {
-        Vec3::ZERO
-    };
-    let contact_force = Vec3::new(friction_force.x, friction_force.y, interval_normal_force_n);
-    let contact_torque = contact_arm.cross(contact_force);
-    let gas_force = velocity.scale(-factors.gas_translation_damping_n_s_per_m);
-    let gas_torque = omega_world.scale(-factors.gas_rotational_damping_n_m_s);
-    let provisional = integrator
+    let start = evaluate_segment_channels(
+        state,
+        base_deflection_m,
+        base_velocity_m_per_s,
+        branch,
+        mass,
+        factors,
+        geometry_model,
+    )?;
+    let half_duration_s = 0.5 * duration_s;
+    let predicted_state = integrator
         .step(
             state,
             mass,
             Wrench {
-                force_world: contact_force.add(gas_force),
-                torque_body: pose
-                    .orientation()
-                    .rotate_world_to_body(contact_torque.add(gas_torque)),
+                force_world: start.contact_force_world_n.add(start.gas_force_world_n),
+                torque_body: state.pose().orientation().rotate_world_to_body(
+                    start
+                        .contact_torque_world_nm
+                        .add(start.rolling_torque_world_nm)
+                        .add(start.gas_torque_world_nm),
+                ),
             },
-            duration_s,
+            half_duration_s,
         )
-        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-    let provisional_omega_body = mass
-        .angular_velocity_body_checked(provisional.state_after.angular_momentum_body())
-        .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-    let provisional_omega = provisional
-        .state_after
-        .pose()
-        .orientation()
-        .rotate_body_to_world(provisional_omega_body);
-    let midpoint_omega_for_rolling = omega_world.add(provisional_omega).scale(0.5);
-    let midpoint_state_for_rolling = provisional.state_after;
-    let midpoint_normal = midpoint_state_for_rolling
-        .pose()
-        .orientation()
-        .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
-    let rolling_spin_speed = midpoint_omega_for_rolling.dot(midpoint_normal);
-    let midpoint_velocity_for_rolling = velocity
-        .add(
-            midpoint_state_for_rolling
-                .center_of_mass_velocity_world(mass)
-                .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
-        )
-        .scale(0.5);
-    let (midpoint_contact, _) = geometry_model.contact(midpoint_state_for_rolling.pose())?;
-    let midpoint_contact_velocity = midpoint_velocity_for_rolling
-        .add(midpoint_omega_for_rolling.cross(midpoint_contact.radius_world_m));
-    let rolling_contour_speed = Vec3::new(
-        midpoint_contact_velocity.x,
-        midpoint_contact_velocity.y,
-        0.0,
-    )
-    .norm_squared()
-    .sqrt();
-    let declared_rolling_power_w = factors.rolling_resistance_m
-        * interval_normal_force_n
-        * (rolling_spin_speed.abs() + rolling_contour_speed / factors.radius_m);
-    let omega_squared = omega_world.norm_squared();
-    let rolling_power_w = if omega_squared > 1.0e-28 {
-        declared_rolling_power_w
-    } else {
-        0.0
-    };
-    let rolling_torque = if rolling_power_w > 0.0 {
-        omega_world.scale(-rolling_power_w / omega_squared)
-    } else {
-        Vec3::ZERO
-    };
-    let total_force = contact_force.add(gas_force);
-    let total_torque_world = contact_torque.add(rolling_torque).add(gas_torque);
+        .map_err(|e| CoupledError::Dynamics(e.to_string()))?
+        .state_after;
+    let start_base_acceleration_m_per_s2 = (-start.normal_force_n
+        - factors.base_stiffness_n_per_m * base_deflection_m
+        - factors.base_damping_n_s_per_m * base_velocity_m_per_s)
+        / factors.base_effective_mass_kg;
+    let predicted_base_deflection_m = base_deflection_m + base_velocity_m_per_s * half_duration_s;
+    let predicted_base_velocity_m_per_s =
+        base_velocity_m_per_s + start_base_acceleration_m_per_s2 * half_duration_s;
+    let midpoint = evaluate_segment_channels(
+        predicted_state,
+        predicted_base_deflection_m,
+        predicted_base_velocity_m_per_s,
+        branch,
+        mass,
+        factors,
+        geometry_model,
+    )?;
+    let total_force = midpoint
+        .contact_force_world_n
+        .add(midpoint.gas_force_world_n);
+    let total_torque_world = midpoint
+        .contact_torque_world_nm
+        .add(midpoint.rolling_torque_world_nm)
+        .add(midpoint.gas_torque_world_nm);
     let receipt = integrator
         .step(
             state,
             mass,
             Wrench {
                 force_world: total_force,
-                torque_body: pose.orientation().rotate_world_to_body(total_torque_world),
+                // The force and torque are sampled at the predicted midpoint.
+                // `Wrench::torque_body` is expressed in the body frame, so use
+                // that same midpoint orientation rather than the start frame.
+                torque_body: predicted_state
+                    .pose()
+                    .orientation()
+                    .rotate_world_to_body(total_torque_world),
             },
             duration_s,
         )
         .map_err(|e| CoupledError::Dynamics(e.to_string()))?;
-    let midpoint_velocity = velocity
-        .add(
-            receipt
-                .state_after
-                .center_of_mass_velocity_world(mass)
-                .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
-        )
-        .scale(0.5);
-    let midpoint_omega = omega_world
-        .add(
-            receipt
-                .state_after
-                .pose()
-                .orientation()
-                .rotate_body_to_world(
-                    mass.angular_velocity_body_checked(receipt.state_after.angular_momentum_body())
-                        .map_err(|e| CoupledError::Dynamics(e.to_string()))?,
-                ),
-        )
-        .scale(0.5);
     let work = |force: Vec3, torque: Vec3| {
-        (force.dot(midpoint_velocity) + torque.dot(midpoint_omega)) * duration_s
+        (force.dot(midpoint.velocity_world_m_per_s) + torque.dot(midpoint.omega_world_rad_per_s))
+            * duration_s
     };
     let channels = ChannelOwnership {
         gravity: ChannelWrench {
@@ -684,51 +644,157 @@ fn advance_segment(
             ),
         },
         contact: ChannelWrench {
-            force_world_n: contact_force,
-            torque_world_nm: contact_torque,
-            work_j: work(contact_force, contact_torque),
+            force_world_n: midpoint.contact_force_world_n,
+            torque_world_nm: midpoint.contact_torque_world_nm,
+            work_j: work(
+                midpoint.contact_force_world_n,
+                midpoint.contact_torque_world_nm,
+            ),
         },
         rolling: ChannelWrench {
             force_world_n: Vec3::ZERO,
-            torque_world_nm: rolling_torque,
-            work_j: -rolling_power_w * duration_s,
+            torque_world_nm: midpoint.rolling_torque_world_nm,
+            work_j: -midpoint.rolling_power_w * duration_s,
         },
         base: ChannelWrench {
             force_world_n: Vec3::ZERO,
             torque_world_nm: Vec3::ZERO,
-            work_j: -factors.base_damping_n_s_per_m * base_velocity_m_per_s.powi(2) * duration_s,
+            work_j: -factors.base_damping_n_s_per_m
+                * predicted_base_velocity_m_per_s.powi(2)
+                * duration_s,
         },
         gas: ChannelWrench {
-            force_world_n: gas_force,
-            torque_world_nm: gas_torque,
-            work_j: work(gas_force, gas_torque),
+            force_world_n: midpoint.gas_force_world_n,
+            torque_world_nm: midpoint.gas_torque_world_nm,
+            work_j: work(midpoint.gas_force_world_n, midpoint.gas_torque_world_nm),
         },
     };
-    let new_base_acceleration = (-interval_normal_force_n
-        - factors.base_stiffness_n_per_m * base_deflection_m
-        - factors.base_damping_n_s_per_m * base_velocity_m_per_s)
+    let midpoint_base_acceleration_m_per_s2 = (-midpoint.normal_force_n
+        - factors.base_stiffness_n_per_m * predicted_base_deflection_m
+        - factors.base_damping_n_s_per_m * predicted_base_velocity_m_per_s)
         / factors.base_effective_mass_kg;
-    let base_velocity_m_per_s = base_velocity_m_per_s + new_base_acceleration * duration_s;
-    let base_deflection_m = base_deflection_m + base_velocity_m_per_s * duration_s;
+    let base_velocity_m_per_s =
+        base_velocity_m_per_s + midpoint_base_acceleration_m_per_s2 * duration_s;
+    let base_deflection_m = base_deflection_m + predicted_base_velocity_m_per_s * duration_s;
     let (post_geometry, post_support_source_feature) =
         geometry_model.contact(receipt.state_after.pose())?;
     Ok(SegmentAdvance {
         state_after: receipt.state_after,
         base_deflection_m,
         base_velocity_m_per_s,
-        interval_start_gap_m,
-        interval_normal_force_n,
-        contact_active,
+        interval_start_gap_m: start.interval_gap_m,
+        interval_normal_force_n: midpoint.normal_force_n,
+        contact_active: midpoint.contact_active,
         channels,
-        tangential_work_j: work(friction_force, contact_arm.cross(friction_force)),
-        contact_damping_work_j: if penetration_m > 0.0 {
-            -factors.contact_damping_n_s_per_m * relative_normal_speed.min(0.0).powi(2) * duration_s
+        tangential_work_j: work(
+            midpoint.friction_force_world_n,
+            midpoint
+                .contact_arm_world_m
+                .cross(midpoint.friction_force_world_n),
+        ),
+        contact_damping_work_j: if midpoint.penetration_m > 0.0 {
+            -factors.contact_damping_n_s_per_m
+                * midpoint.relative_normal_speed_m_per_s.min(0.0).powi(2)
+                * duration_s
         } else {
             0.0
         },
         body_mechanical_energy_j: receipt.diagnostics_after.mechanical_energy,
         post_support_gap_m: post_geometry.gap_m - base_deflection_m,
         post_support_source_feature,
+    })
+}
+
+fn evaluate_segment_channels(
+    state: RigidBodyState,
+    base_deflection_m: f64,
+    base_velocity_m_per_s: f64,
+    branch: ContactBranch,
+    mass: MassProperties,
+    factors: CoupledFactors,
+    geometry_model: &CoupledGeometry<'_, '_>,
+) -> Result<SegmentEvaluation, CoupledError> {
+    let pose = state.pose();
+    let velocity_world_m_per_s = state
+        .center_of_mass_velocity_world(mass)
+        .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
+    let omega_world_rad_per_s = pose.orientation().rotate_body_to_world(
+        mass.angular_velocity_body_checked(state.angular_momentum_body())
+            .map_err(|error| CoupledError::Dynamics(error.to_string()))?,
+    );
+    let (geometry, _) = geometry_model.contact(pose)?;
+    let contact_arm_world_m = geometry.radius_world_m;
+    let interval_gap_m = geometry.gap_m - base_deflection_m;
+    let contact_velocity_world_m_per_s =
+        velocity_world_m_per_s.add(omega_world_rad_per_s.cross(contact_arm_world_m));
+    let relative_normal_speed_m_per_s = contact_velocity_world_m_per_s.z - base_velocity_m_per_s;
+    let penetration_m = (-interval_gap_m).max(0.0);
+    let contact_active = matches!(branch, ContactBranch::ForceClosed);
+    let normal_force_n = if contact_active {
+        unilateral_normal_force(
+            penetration_m,
+            relative_normal_speed_m_per_s,
+            factors.contact_stiffness_n_per_m,
+            factors.contact_damping_n_s_per_m,
+        )
+    } else {
+        0.0
+    };
+    let tangent_velocity_world_m_per_s = Vec3::new(
+        contact_velocity_world_m_per_s.x,
+        contact_velocity_world_m_per_s.y,
+        0.0,
+    );
+    let tangent_speed_m_per_s = tangent_velocity_world_m_per_s.norm_squared().sqrt();
+    let friction_force_world_n = if contact_active && tangent_speed_m_per_s > 1.0e-14 {
+        tangent_velocity_world_m_per_s
+            .scale(-factors.sliding_friction_coefficient * normal_force_n / tangent_speed_m_per_s)
+    } else {
+        Vec3::ZERO
+    };
+    let contact_force_world_n = Vec3::new(
+        friction_force_world_n.x,
+        friction_force_world_n.y,
+        normal_force_n,
+    );
+    let contact_torque_world_nm = contact_arm_world_m.cross(contact_force_world_n);
+    let gas_force_world_n =
+        velocity_world_m_per_s.scale(-factors.gas_translation_damping_n_s_per_m);
+    let gas_torque_world_nm = omega_world_rad_per_s.scale(-factors.gas_rotational_damping_n_m_s);
+    let normal_world = pose
+        .orientation()
+        .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+    let declared_rolling_power_w = factors.rolling_resistance_m
+        * normal_force_n
+        * (omega_world_rad_per_s.dot(normal_world).abs()
+            + tangent_speed_m_per_s / factors.radius_m);
+    let omega_squared = omega_world_rad_per_s.norm_squared();
+    let rolling_power_w = if omega_squared > 1.0e-28 {
+        declared_rolling_power_w
+    } else {
+        0.0
+    };
+    let rolling_torque_world_nm = if rolling_power_w > 0.0 {
+        omega_world_rad_per_s.scale(-rolling_power_w / omega_squared)
+    } else {
+        Vec3::ZERO
+    };
+    Ok(SegmentEvaluation {
+        velocity_world_m_per_s,
+        omega_world_rad_per_s,
+        contact_arm_world_m,
+        interval_gap_m,
+        normal_force_n,
+        contact_active,
+        friction_force_world_n,
+        contact_force_world_n,
+        contact_torque_world_nm,
+        gas_force_world_n,
+        gas_torque_world_nm,
+        rolling_torque_world_nm,
+        rolling_power_w,
+        penetration_m,
+        relative_normal_speed_m_per_s,
     })
 }
 
@@ -1817,7 +1883,7 @@ mod tests {
         let resumed = run_closed_reduced(
             factors,
             CoupledControls {
-                maximum_steps: 1,
+                maximum_steps: controls.maximum_steps - 1,
                 ..controls
             },
             initial,
@@ -1825,8 +1891,10 @@ mod tests {
         )
         .expect("restart through terminal event");
         assert_eq!(resumed.terminal, CoupledTerminal::TerminalInclination);
-        let resumed_event = resumed.samples[0]
-            .terminal_inclination_event
+        let resumed_event = resumed
+            .samples
+            .last()
+            .and_then(|sample| sample.terminal_inclination_event)
             .expect("resumed terminal bracket");
         assert!(resumed_event.time_s > prefix.checkpoint.time_s);
         assert_eq!(full.checkpoint, resumed.checkpoint);
