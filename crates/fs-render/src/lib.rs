@@ -24,6 +24,9 @@ use core::f64::consts::PI;
 #[cfg(feature = "chart-backends")]
 pub mod charts;
 
+#[cfg(feature = "chart-backends")]
+pub mod instances;
+
 #[cfg(feature = "differentiable")]
 pub mod diff;
 pub mod spectral;

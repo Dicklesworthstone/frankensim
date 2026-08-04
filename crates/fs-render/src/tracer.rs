@@ -26,6 +26,7 @@
 //! keeps work deterministic).
 
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
+use crate::instances::{GeometryInstance, InstanceError};
 use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, cie_x, cie_y, cie_z, xyz_e_to_d65, xyz_to_linear_srgb,
     y_integral,
@@ -36,6 +37,7 @@ use fs_geom::{Chart, Point3, Vec3};
 use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 use fs_rand::qmc::Sobol;
+use std::collections::BTreeSet;
 
 /// Bit-affecting semantic surface version of the tracer (see
 /// golden-couplings.json): the path-integrator estimator shape, the
@@ -125,6 +127,8 @@ pub enum Shape {
     Mesh(TriMesh),
     /// A certified-Lipschitz chart, sphere-traced.
     Chart(Box<dyn Chart>),
+    /// Shared immutable chart/mesh placed by a validated proper-rigid transform.
+    Instance(GeometryInstance),
 }
 
 /// One scene object.
@@ -231,6 +235,8 @@ pub enum TracerError {
     /// Shading requires a finite surface normal; no arbitrary fallback normal
     /// may be minted.
     MissingNormal,
+    /// Instance construction, placement, hit data, or object IDs were invalid.
+    InvalidInstance,
 }
 
 impl core::fmt::Display for TracerError {
@@ -248,6 +254,7 @@ impl core::fmt::Display for TracerError {
             }
             Self::InvalidInput => formatter.write_str("invalid spectral render input"),
             Self::MissingNormal => formatter.write_str("surface hit has no finite normal"),
+            Self::InvalidInstance => formatter.write_str("invalid rigid render instance"),
         }
     }
 }
@@ -257,6 +264,24 @@ impl core::error::Error for TracerError {}
 impl From<Cancelled> for TracerError {
     fn from(_: Cancelled) -> Self {
         Self::Cancelled
+    }
+}
+
+impl From<InstanceError> for TracerError {
+    fn from(error: InstanceError) -> Self {
+        match error {
+            InstanceError::Cancelled => Self::Cancelled,
+            InstanceError::BackendFailure(termination) => Self::BackendFailure(termination),
+            InstanceError::UncertifiedTrace => Self::UncertifiedTrace,
+            InstanceError::MissingNormal => Self::MissingNormal,
+            InstanceError::InvalidTransform
+            | InstanceError::InvalidObjectId
+            | InstanceError::InvalidGeometryIdentity
+            | InstanceError::DuplicateObjectId
+            | InstanceError::TooManyInstances
+            | InstanceError::InvalidIntersectionInput
+            | InstanceError::InvalidHit => Self::InvalidInstance,
+        }
     }
 }
 
@@ -351,6 +376,7 @@ pub fn render_range(
     if film.xyz.len() != expected_len {
         return Err(TracerError::InvalidInput);
     }
+    validate_instance_ids(scene)?;
     assert_eq!(film.spp_done, from, "progressive checkpoint mismatch");
     if to < from {
         return Err(TracerError::InvalidRange { from, to });
@@ -617,14 +643,45 @@ fn intersect(scene: &Scene, cx: &Cx<'_>, ray: &Ray) -> Result<Option<(usize, Hit
                     termination => return Err(TracerError::BackendFailure(termination)),
                 }
             }
+            Shape::Instance(instance) => instance
+                .intersect(cx, ray, 1e4, TRACE_EPS)?
+                .map(|instance_hit| instance_hit.hit),
         };
-        if let Some(h) = hit
-            && best.as_ref().is_none_or(|(_, bh)| h.t < bh.t)
-        {
-            best = Some((i, h));
+        if let Some(h) = hit {
+            let replace = match best.as_ref() {
+                None => true,
+                Some((_, best_hit)) if h.t < best_hit.t => true,
+                Some((best_index, best_hit))
+                    if h.t.total_cmp(&best_hit.t) == core::cmp::Ordering::Equal =>
+                {
+                    match (&prim.shape, &scene.primitives[*best_index].shape) {
+                        (Shape::Instance(candidate), Shape::Instance(current)) => {
+                            candidate.object_id() < current.object_id()
+                        }
+                        _ => false,
+                    }
+                }
+                Some(_) => false,
+            };
+            if replace {
+                best = Some((i, h));
+            }
         }
     }
     Ok(best)
+}
+
+fn validate_instance_ids(scene: &Scene) -> Result<(), TracerError> {
+    let mut object_ids = BTreeSet::new();
+    for primitive in &scene.primitives {
+        let Shape::Instance(instance) = &primitive.shape else {
+            continue;
+        };
+        if !object_ids.insert(instance.object_id()) {
+            return Err(TracerError::InvalidInstance);
+        }
+    }
+    Ok(())
 }
 
 fn oriented_normal(hit: &Hit, ray: &Ray) -> Result<Vec3, TracerError> {

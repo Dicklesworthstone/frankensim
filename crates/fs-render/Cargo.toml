@@ -12,6 +12,7 @@ layer = "L5"
 
 [dependencies]
 fs-ad = { path = "../fs-ad", optional = true }
+fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-evidence = { path = "../fs-evidence", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
@@ -33,7 +34,7 @@ fs-rep-frep = { path = "../fs-rep-frep" }
 # the recorded adversarial, workspace, nested-Wasm, and four-quadrant gates.
 # The wider SIMD BVH and ray-rate claims remain separate perf-evidence work.
 default = ["chart-backends"]
-chart-backends = ["dep:fs-evidence", "dep:fs-exec", "dep:fs-geom", "dep:fs-rep-nurbs"]
+chart-backends = ["dep:fs-blake3", "dep:fs-evidence", "dep:fs-exec", "dep:fs-geom", "dep:fs-rep-nurbs"]
 # [F]-gated per the Ambition-Tag rule: volumetric media ship disabled
 # until the live-field progressive lane lands in perf-CI.
 volumes = ["dep:fs-rand"]
@@ -64,4 +65,8 @@ workspace = true
 # feature is off, never a zero-test pass.
 [[test]]
 name = "charts"
+required-features = ["chart-backends"]
+
+[[test]]
+name = "instances"
 required-features = ["chart-backends"]

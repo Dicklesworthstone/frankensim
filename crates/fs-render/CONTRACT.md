@@ -97,6 +97,21 @@ differentiable lift). Pure Rust throughout.
   `bvh_fingerprint` is a stable diagnostic receipt over its sorted layout.
   `trace_scene` mixes all three backend kinds by closest hit.
 
+- `instances` module (bead `frankensim-h7xu5.3.1`, default-on through
+  `chart-backends`): `RigidTransform` admits only finite proper-rigid
+  body-to-world placements (a near-unit quaternion and translation in metres),
+  canonicalizes the quaternion double cover, and cannot represent scale,
+  shear, or reflection. `SharedGeometry` keeps one immutable chart or mesh
+  allocation behind `Arc`; `GeometryInstance` binds it to a nonzero stable
+  object ID, a caller-supplied geometry content identity, and a placement.
+  Intersection transforms the world ray into local coordinates, delegates to
+  the existing certified chart or deterministic mesh backend, preserves the ray
+  parameter and backend audit, and rotates geometric/shading normals, tangents,
+  and surface derivatives back to world space. `InstanceScene` rejects object-ID
+  collisions, orders instances by object ID, and content-identifies the ordered
+  placements with a length-framed streaming hash. Material and emission remain
+  properties of the tracer `Primitive`, separate from shared geometry and pose.
+
 - `volumes` module (bead qfx.3, feature `volumes`): [`VolumeGrid`]
   BORROWS its density buffer (zero-copy: live simulation fields render
   in place), [`MajorantGrid`] per-block maxima, Woodcock delta
@@ -125,6 +140,11 @@ differentiable lift). Pure Rust throughout.
 - Hero-wavelength integration is exact on a constant spectrum and accurate on a
   ramp; `cosine_sample_hemisphere` returns unit vectors in the upper hemisphere.
 - Everything is deterministic (low-discrepancy sequences, no RNG here).
+- Proper-rigid placement preserves lengths and therefore preserves the local
+  backend's ray parameter. Exact-distance instance ties select the lowest
+  object ID, independent of caller insertion order. A geometry identity stays
+  unchanged when only its placement changes; the frame identity binds object,
+  geometry, and the canonical placement.
 
 - Volumes (vol-001..009): homogeneous slabs match exp(−σL) within
   3σ_stat; heterogeneous means are invariant under a 3× LOOSE
@@ -156,7 +176,12 @@ derivatives. `RenderCfg.max_trace_steps` makes its per-ray work envelope
 explicit; zero or values above the hard 16384-step ceiling are invalid. The
 tracer returns `TracerError`, preserving cancellation,
 invalid dimensions/film buffers/progressive ranges, backend refusal,
-uncertified traces, and missing normals. `halton`
+uncertified traces, missing normals, and invalid/colliding rigid instances.
+Instance construction rejects zero identities, invalid transforms, and any
+scene count that cannot fit the canonical identity encoding;
+intersection rejects malformed rays, non-positive/non-finite limits,
+non-finite hit data, and missing geometric normals rather than manufacturing
+shading data. `halton`
 panics only on `dim >= 8` (out of the prime table).
 Transfer construction and direct-volume admission return `DvrError`.
 The high-level renderer reserves its complete private image buffer before
@@ -177,6 +202,9 @@ volume tracking, phase functions, and disk sampling call platform libm
 may differ by last-ULP across ISAs or libm versions. Cross-ISA bitwise
 replay of renders is deliberately NOT claimed; promote by routing through
 `fs_math::det` and registering in `check-libm` if a lane ever needs it.
+Instance ordering and exact-hit ties are deterministic by stable object ID.
+Canonical quaternion sign and signed-zero normalization ensure equivalent
+proper-rigid inputs produce the same transform and frame identities.
 
 ## Cancellation behavior
 
@@ -188,6 +216,8 @@ propagates `RenderError::Cancelled`. The spectral tracer polls per row, sample,
 bounce, and primitive, and copies progressive staging buffers in checked
 chunks; it propagates `TracerError::Cancelled`. A failed or reversed range
 leaves both film sums and `spp_done` unchanged so retry cannot double-count.
+Instance traversal polls between objects and delegates to the backend's existing
+bounded cancellation points; cancellation is propagated without a partial hit.
 
 ## Unsafe boundary
 
@@ -233,6 +263,19 @@ emitters do not reflect.
 
 ## Conformance tests
 
+`tests/instances.rs` (bead `frankensim-h7xu5.3.1`, feature
+`chart-backends`, with one `tracer`-gated E2E case): transform admission and
+quaternion canonicalization; inverse/composition round trips; identity and
+placed-mesh equivalence; world-space differential frames; certified chart
+authority preservation; shared-allocation reuse; collision rejection and
+object-ID tie order; missing-normal, no-claim, and cancellation refusal; stable
+geometry/frame identities; and a production spectral render whose visible
+result changes when the immutable mesh instance moves out of view. Exact chart
+tangency is pinned as a bounded fail-closed backend outcome, not presented as a
+certified hit. A second tracer E2E regression proves exact-tie output is
+independent of primitive insertion order and that duplicate object IDs refuse
+before sampling.
+
 `tests/render.rs` (7 cases): radical inverse known values; cosine samples are
 unit vectors with the right pdf; the furnace test conserves energy exactly; MIS
 weights sum to one (+ heuristic ordering); MIS integration is unbiased;
@@ -277,6 +320,14 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 
 ## No-claim boundaries
 
+- `GeometryInstance::try_new` validates that the supplied geometry identity is
+  nonzero but does not derive or independently verify that identity against the
+  chart or mesh bytes. Callers remain responsible for supplying the immutable
+  geometry artifact's authoritative content identity. Instance transforms are
+  visualization placements only: they do not alter mass properties, contact
+  geometry, mechanics state, material parameters, or emission. Only proper
+  rigid transforms are supported; motion blur, deformation, scaling, and
+  interpolated pose trajectories remain successor work.
 - v0 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
   watertight ray-triangle tests, a LIGHT-BVH, media coupling, ray-stream
   sorting, and progressive tile streaming to HELM remain staged.

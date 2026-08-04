@@ -1895,6 +1895,7 @@ dependencies = [
  "asupersync",
  "fs-ad",
  "fs-alloc",
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-geom",

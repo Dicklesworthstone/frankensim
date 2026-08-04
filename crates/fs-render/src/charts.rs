@@ -60,6 +60,17 @@ pub struct Hit {
     pub point: Point3,
     /// The surface normal, when the backend supplies one.
     pub normal: Option<Vec3>,
+    /// Optional shading normal before face-forwarding. Backends without a
+    /// separate shading frame repeat the geometric normal.
+    pub shading_normal: Option<Vec3>,
+    /// Optional normalized first surface tangent.
+    pub tangent_u: Option<Vec3>,
+    /// Optional normalized second surface tangent.
+    pub tangent_v: Option<Vec3>,
+    /// Optional unnormalized first surface derivative.
+    pub dp_du: Option<Vec3>,
+    /// Optional unnormalized second surface derivative.
+    pub dp_dv: Option<Vec3>,
     /// Work spent (marcher steps / Newton iterations / BVH visits).
     pub steps: u32,
 }
@@ -523,6 +534,11 @@ pub fn sphere_trace_with_step_budget(
                                 t: caller_t,
                                 point,
                                 normal,
+                                shading_normal: normal,
+                                tangent_u: None,
+                                tangent_v: None,
+                                dp_du: None,
+                                dp_dv: None,
                                 steps,
                             }),
                             TraceAudit {
@@ -601,6 +617,11 @@ pub fn sphere_trace_with_step_budget(
                     t: caller_t,
                     point: p,
                     normal,
+                    shading_normal: normal,
+                    tangent_u: None,
+                    tangent_v: None,
+                    dp_du: None,
+                    dp_dv: None,
                     steps,
                 }),
                 TraceAudit {
@@ -726,6 +747,11 @@ pub fn sphere_trace_with_step_budget(
                         t: t_max,
                         point: boundary_point,
                         normal,
+                        shading_normal: normal,
+                        tangent_u: None,
+                        tangent_v: None,
+                        dp_du: None,
+                        dp_dv: None,
                         steps,
                     }),
                     TraceAudit {
@@ -1736,10 +1762,18 @@ fn ray_intersect_nurbs_impl(
             let residual = finite_norm(Vec3::new(f[0], f[1], f[2]));
             if residual.is_some_and(|norm| norm < eps) {
                 let parameter_t = t / parameter_scale;
+                let dp_du = Vec3::new(su[0], su[1], su[2]);
+                let dp_dv = Vec3::new(sv[0], sv[1], sv[2]);
+                let normal = normalized_cross(su, sv);
                 let hit = Hit {
                     t: parameter_t,
                     point: input_ray.at(parameter_t),
-                    normal: normalized_cross(su, sv),
+                    normal,
+                    shading_normal: normal,
+                    tangent_u: normalize_gradient(dp_du),
+                    tangent_v: normalize_gradient(dp_dv),
+                    dp_du: Some(dp_du),
+                    dp_dv: Some(dp_dv),
                     steps: iter_count,
                 };
                 if parameter_t.is_finite()
@@ -2130,10 +2164,18 @@ impl TriMesh {
         (tt > 0.0).then(|| {
             let n = cross(e1, e2);
             let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let normal = (nn > 1e-12).then(|| Vec3::new(n[0] / nn, n[1] / nn, n[2] / nn));
+            let dp_du = Vec3::new(e1[0], e1[1], e1[2]);
+            let dp_dv = Vec3::new(e2[0], e2[1], e2[2]);
             Hit {
                 t: tt,
                 point: ray.at(tt),
-                normal: (nn > 1e-12).then(|| Vec3::new(n[0] / nn, n[1] / nn, n[2] / nn)),
+                normal,
+                shading_normal: normal,
+                tangent_u: normalize_gradient(dp_du),
+                tangent_v: normalize_gradient(dp_dv),
+                dp_du: Some(dp_du),
+                dp_dv: Some(dp_dv),
                 steps: 0,
             }
         })
