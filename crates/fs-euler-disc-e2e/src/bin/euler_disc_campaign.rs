@@ -621,9 +621,10 @@ fn ranking_convergence_record(
     };
     let coarse_fine_event_delta = event_time_delta(coarse.ring, fine.ring);
     let fine_reference_event_delta = event_time_delta(fine.ring, reference.ring);
-    let ordering_agreement = coarse.ordering == fine.ordering && fine.ordering == reference.ordering;
-    let ring_shorter_bound_proven = ordering_agreement
-        && reference.ordering == CensorAwareDurationOrdering::ProvenLeftShorter;
+    let ordering_agreement =
+        coarse.ordering == fine.ordering && fine.ordering == reference.ordering;
+    let ring_shorter_bound_proven =
+        ordering_agreement && reference.ordering == CensorAwareDurationOrdering::ProvenLeftShorter;
     let event_time_within_declared_band = fine_reference_event_delta
         .map(|(_, relative)| relative <= EVENT_TIME_RELATIVE_LIMIT)
         .unwrap_or(false);
@@ -658,11 +659,13 @@ fn ranking_rung_json(rung: RankingRung) -> String {
 
 fn outcome_kind_and_time(outcome: RunOutcome) -> (&'static str, f64) {
     match outcome {
-        RunOutcome::PhysicalTerminal { event_time_s, .. } =>
-            ("physical-terminal-inclination", event_time_s),
+        RunOutcome::PhysicalTerminal { event_time_s, .. } => {
+            ("physical-terminal-inclination", event_time_s)
+        }
         RunOutcome::RightCensored { censor_time_s } => ("right-censored", censor_time_s),
-        RunOutcome::NumericalRefusal { last_valid_time_s } =>
-            ("numerical-refusal", last_valid_time_s),
+        RunOutcome::NumericalRefusal { last_valid_time_s } => {
+            ("numerical-refusal", last_valid_time_s)
+        }
     }
 }
 

@@ -127,6 +127,14 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         number(solid_inputs, "axial_inertia_kg_m2"),
         number(ring_inputs, "axial_inertia_kg_m2")
     );
+    let solid_outcome = object(solid.get("outcome").expect("solid outcome"));
+    let ring_outcome = object(equal_mass_ring.get("outcome").expect("ring outcome"));
+    assert_eq!(string(solid_outcome, "kind"), "right-censored");
+    assert_eq!(
+        string(ring_outcome, "kind"),
+        "physical-terminal-inclination"
+    );
+    assert!(number(ring_outcome, "retained_time_s") < number(solid_outcome, "retained_time_s"));
     for fields in &closed {
         let profile = object(fields.get("profile").expect("resolved profile"));
         assert!(boolean(profile, "mass_and_support_same_chart"));
@@ -159,6 +167,17 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         "withheld-eventful-mode"
     );
     assert!(convergence.contains_key("fine_reference_qoi_linf"));
+    assert!(convergence.contains_key("fine_reference_qoi"));
+    let ranking = v3_roots
+        .iter()
+        .find(|fields| string(fields, "scenario") == "equal-mass-ring-vs-solid-ranking-convergence")
+        .expect("censor-aware ranking convergence record");
+    assert!(boolean(ranking, "ordering_agreement"));
+    assert!(boolean(
+        ranking,
+        "ring_shorter_than_solid_bound_proven_at_all_rungs"
+    ));
+    assert!(ranking.contains_key("ranking_numerically_supported"));
     let calibration = v3_roots
         .iter()
         .find(|fields| string(fields, "scenario") == "physical-calibration-readiness")
@@ -169,7 +188,7 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         .iter()
         .find(|fields| string(fields, "scenario") == "campaign-complete")
         .expect("v3 manifest");
-    assert_eq!(number(manifest, "record_count"), (closed.len() + 2) as f64);
+    assert_eq!(number(manifest, "record_count"), (closed.len() + 3) as f64);
 }
 
 #[derive(Debug)]
