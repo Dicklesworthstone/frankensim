@@ -584,13 +584,20 @@ impl PartialSlipLaw {
         })
     }
 
-    /// Restores state only when every constitutive and admitted-input datum matches.
+    /// Restores state only when the constitutive law and contact lineage match.
     ///
     /// In particular, a matching model name alone is insufficient: source identity,
-    /// caller authority, every coefficient, the normal patch data, and ordered
-    /// interface provenance all bind a checkpoint.  This law does not claim that
-    /// matching values establish external physical validity; it merely refuses an
-    /// ambiguous deterministic replay.
+    /// caller authority, every coefficient, and ordered interface provenance bind
+    /// a checkpoint.  The normal patch's identity, normal-model identity, source,
+    /// and authority bind its lineage. Its load, semi-axes, and pressure moment are
+    /// *current step data*: [`Self::advance`] recomputes the Coulomb capacity from
+    /// them, so a normal solver may evolve a continuous contact without erasing
+    /// the tangential elastic state.
+    ///
+    /// The checkpoint still retains the complete normal-patch receipt from the
+    /// preceding accepted step for auditability. This method does not claim that
+    /// equal lineage values establish external physical validity; it merely
+    /// refuses an ambiguous constitutive or provenance restart.
     pub fn restore_checkpoint(
         &self,
         patch: &NormalPatchView,
@@ -632,15 +639,6 @@ impl PartialSlipLaw {
         if checkpoint.patch.authority != patch.authority {
             return Err(PartialSlipError::CheckpointIdentityMismatch {
                 field: "normal_patch_authority",
-            });
-        }
-        if checkpoint.patch.normal_load_n != patch.normal_load_n
-            || checkpoint.patch.semi_axis_longitudinal_m != patch.semi_axis_longitudinal_m
-            || checkpoint.patch.semi_axis_lateral_m != patch.semi_axis_lateral_m
-            || checkpoint.patch.pressure_second_moment_m2 != patch.pressure_second_moment_m2
-        {
-            return Err(PartialSlipError::CheckpointIdentityMismatch {
-                field: "normal_patch_geometry_or_load",
             });
         }
         if checkpoint.interface.ordered_interface_id != interface.ordered_interface_id {
@@ -742,11 +740,13 @@ impl PartialSlipState {
     }
 }
 
-/// Full-input-bound snapshot of reversible partial-slip history.
+/// Lineage-bound snapshot of reversible partial-slip history.
 ///
-/// The snapshot retains the complete admitted inputs instead of a lossy hash so
-/// a decoder can retain a transparent replay receipt.  It does not validate the
-/// physical truth of those caller-declared inputs.
+/// The snapshot retains the complete inputs from its accepted step instead of a
+/// lossy hash, so a decoder can retain a transparent receipt. Numeric normal
+/// load and geometry are deliberately not restore identity: they are resolved
+/// again by the current normal step. It does not validate the physical truth of
+/// caller-declared inputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartialSlipCheckpoint {
     patch: NormalPatchView,
@@ -1506,6 +1506,62 @@ mod tests {
         );
     }
 
+    /// G3: a normal solve may evolve its resolved load and patch geometry while
+    /// retaining the same constitutive lineage and tangential history.
+    #[test]
+    fn checkpoint_admits_evolved_normal_step_data_but_refuses_lineage_change() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 1.0);
+        let evolved_patch = NormalPatchView::new(
+            "patch-a",
+            "normal-card-v1",
+            "synthetic/normal-patch",
+            NormalPatchAuthority::SyntheticFixture,
+            125.0,
+            0.024,
+            0.012,
+            1.5e-4,
+        )
+        .expect("same-lineage normal update");
+        let restored = law()
+            .restore_checkpoint(&evolved_patch, &interface(), &first.checkpoint)
+            .expect("evolved normal step data must restore tangential history");
+        assert_eq!(restored, first.next_state);
+
+        let second = law()
+            .advance(
+                &evolved_patch,
+                &interface(),
+                frame(),
+                kinematics([6.0, 0.0], 1.0),
+                &ownership(),
+                &restored,
+            )
+            .expect("evolved normal step must advance");
+        assert_eq!(second.next_state.accepted_steps(), 2);
+        close(second.capacity.static_force_n, 100.0);
+        assert_eq!(second.checkpoint.normal_patch(), &evolved_patch);
+
+        let changed_patch_lineage = NormalPatchView::new(
+            "other-patch",
+            "normal-card-v1",
+            "synthetic/normal-patch",
+            NormalPatchAuthority::SyntheticFixture,
+            125.0,
+            0.024,
+            0.012,
+            1.5e-4,
+        )
+        .expect("valid lineage mutation");
+        assert_eq!(
+            law().restore_checkpoint(
+                &changed_patch_lineage,
+                &interface(),
+                &first.checkpoint,
+            ),
+            Err(PartialSlipError::CheckpointIdentityMismatch { field: "patch_id" })
+        );
+    }
+
     /// G3: replay refuses every law/source/authority receipt mutation, not only display IDs.
     #[test]
     fn checkpoint_rejects_coefficients_and_admitted_provenance_mutations() {
@@ -1617,20 +1673,6 @@ mod tests {
                 )
                 .expect("valid authority mutation"),
                 "normal_patch_authority",
-            ),
-            (
-                NormalPatchView::new(
-                    "patch-a",
-                    "normal-card-v1",
-                    "synthetic/normal-patch",
-                    NormalPatchAuthority::SyntheticFixture,
-                    101.0,
-                    0.02,
-                    0.01,
-                    1.0e-4,
-                )
-                .expect("valid load mutation"),
-                "normal_patch_geometry_or_load",
             ),
         ] {
             expect_refusal(law(), current_patch, interface(), field);

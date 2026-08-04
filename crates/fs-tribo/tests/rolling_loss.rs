@@ -358,7 +358,7 @@ fn g0_temperature_frequency_and_ownership_refuse() {
 }
 
 #[test]
-fn g3_checkpoint_replay_binds_source_cards_and_patch_receipts() {
+fn g3_checkpoint_replay_binds_source_cards_and_patch_lineage() {
     let law = coulomb(0.2);
     let step = law
         .advance(
@@ -422,6 +422,65 @@ fn g3_checkpoint_replay_binds_source_cards_and_patch_receipts() {
         ),
         Err(RollingLossError::CheckpointMismatch { field: "patch" })
     );
+
+    let evolved_patch = RollingPatchReceipt::new(
+        "fixture/patch-a",
+        "fixture/normal-patch-v1",
+        "fixture/patch-source-v1",
+        InputAuthority::SyntheticFixture,
+        125.0,
+        2.5e-4,
+        PatchCurvature::EquivalentRadiusApproximation {
+            radius_m: 0.024,
+            authority: InputAuthority::Estimated,
+        },
+    )
+    .unwrap();
+    let next_interval = RollingWorkOwnership::new(
+        "fixture/patch-a",
+        "fixture/rolling-interval-b",
+        "fixture/contour-speed",
+        RollingLossChannel::ContourDeformation,
+    )
+    .unwrap();
+    let restored = law
+        .restore_checkpoint(
+            &evolved_patch,
+            &interface(),
+            &next_interval,
+            &step.checkpoint,
+        )
+        .expect("same-lineage patch and fresh interval must restore history");
+    assert_eq!(restored, step.next_state);
+    let evolved_step = law
+        .advance(
+            &evolved_patch,
+            &interface(),
+            kinematics(2.0, 0.0, 0.0),
+            &next_interval,
+            &restored,
+        )
+        .expect("evolved normal patch must advance");
+    close(evolved_step.wrench.contour_force_n, -25.0);
+    assert_eq!(evolved_step.next_state.accepted_steps(), 2);
+
+    let changed_coordinate = RollingWorkOwnership::new(
+        "fixture/patch-a",
+        "fixture/rolling-interval-b",
+        "fixture/other-contour-coordinate",
+        RollingLossChannel::ContourDeformation,
+    )
+    .unwrap();
+    assert_eq!(
+        law.restore_checkpoint(
+            &evolved_patch,
+            &interface(),
+            &changed_coordinate,
+            &step.checkpoint,
+        ),
+        Err(RollingLossError::CheckpointMismatch { field: "ownership" })
+    );
+
     let approximation_step = law
         .advance(
             &changed_patch,

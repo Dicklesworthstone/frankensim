@@ -723,8 +723,16 @@ impl RollingLossLaw {
         })
     }
 
-    /// Restores a candidate state only when every retained receipt and source
-    /// card exactly matches the checkpoint.
+    /// Restores a candidate state only when stable receipt lineage and source
+    /// card identity match the checkpoint.
+    ///
+    /// Normal load, contact area, and curvature are resolved for the current
+    /// step by [`Self::advance`], and an ownership interval names that current
+    /// work interval. They therefore must not freeze a continuous rolling
+    /// trajectory at its first accepted step. Patch lineage (patch/model/source/
+    /// authority), the complete interface, law card, and work coordinate/channel
+    /// remain bound so a changed material, law, interface, or work channel still
+    /// refuses deterministically.
     pub fn restore_checkpoint(
         &self,
         patch: &RollingPatchReceipt,
@@ -740,13 +748,20 @@ impl RollingLossLaw {
         if checkpoint.law != *self {
             return Err(RollingLossError::CheckpointMismatch { field: "law" });
         }
-        if checkpoint.patch != *patch {
+        if checkpoint.patch.patch_id != patch.patch_id
+            || checkpoint.patch.normal_model_id != patch.normal_model_id
+            || checkpoint.patch.source_id != patch.source_id
+            || checkpoint.patch.authority != patch.authority
+        {
             return Err(RollingLossError::CheckpointMismatch { field: "patch" });
         }
         if checkpoint.interface != *interface {
             return Err(RollingLossError::CheckpointMismatch { field: "interface" });
         }
-        if checkpoint.ownership != *ownership {
+        if checkpoint.ownership.patch_id != ownership.patch_id
+            || checkpoint.ownership.generalized_coordinate_id != ownership.generalized_coordinate_id
+            || checkpoint.ownership.channel != ownership.channel
+        {
             return Err(RollingLossError::CheckpointMismatch { field: "ownership" });
         }
         Ok(checkpoint.state.clone())
@@ -1045,7 +1060,11 @@ pub enum RollingLossUncertainty {
     },
 }
 
-/// Identity-bound replay candidate.
+/// Lineage-bound rolling-loss replay candidate.
+///
+/// The checkpoint retains the full accepted-step patch and work receipt for
+/// auditability, while restoration deliberately admits current normal geometry
+/// and a fresh interval key with stable contact and work-channel lineage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RollingLossCheckpoint {
     patch: RollingPatchReceipt,

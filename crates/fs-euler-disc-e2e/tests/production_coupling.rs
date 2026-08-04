@@ -504,7 +504,7 @@ fn request_for_checkpoint(
 }
 
 #[test]
-fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation() {
+fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() {
     let kinematics = compute_moving_one_mode_patch_kinematics(patch_input())
         .expect("synthetic moving-base patch");
     let normal = normal_input(kinematics.clone());
@@ -781,14 +781,13 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
     let whole = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
         Ok(request_for_checkpoint(&request, state))
     });
-    assert_eq!(whole.accepted_steps.len(), 1);
-    assert!(matches!(
+    assert_eq!(whole.accepted_steps.len(), 3, "trajectory={whole:#?}");
+    assert_eq!(
         whole.termination,
-        SmoothContactTrajectoryTermination::Refused {
-            attempted_checkpoint_version: 1,
-            error: ProductionCouplingError::Tangential(_)
+        SmoothContactTrajectoryTermination::StepLimitReached {
+            maximum_accepted_steps: 3
         }
-    ));
+    );
     assert_ne!(
         whole.last_accepted_checkpoint.disc_state,
         checkpoint.disc_state
