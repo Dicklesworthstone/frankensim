@@ -45,6 +45,20 @@ pub enum NormalPatchLaw {
         reduced_modulus_pa: f64,
         dissipation_s_per_m: f64,
     },
+    /// Elastic Hertz contact for the local separation paraboloid
+    /// `0.5 * (k_max * x^2 + k_min * y^2)` against a half space.
+    ///
+    /// The curvatures are those of the *relative local gap*, not an inferred
+    /// radius of either body. `maximum_principal_curvature_m_inverse` must be
+    /// at least `minimum_principal_curvature_m_inverse`, and both must be
+    /// strictly positive. The resulting patch is generally elliptical.
+    /// Caller-declared uncertainty is retained in the receipt but this rung
+    /// does not claim a propagated uncertainty bound.
+    HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: f64,
+        minimum_principal_curvature_m_inverse: f64,
+        reduced_modulus_pa: f64,
+    },
 }
 
 /// Declared local geometry. The analytic rungs deliberately do not approximate
@@ -55,6 +69,11 @@ pub enum NormalPatchGeometry {
     SpherePlane,
     /// Cylinder against a plane half space, normalized per unit axial length.
     CylinderPlane,
+    /// A locally quadratic, two-positive-principal-curvature separation.
+    ///
+    /// This is intentionally narrower than a generic toroidal body: callers
+    /// must establish the local paraboloid and supply the relative curvatures.
+    EllipticParaboloid,
     /// A two-curvature or strongly elliptical patch requiring another law.
     ToroidalOrHighlyElliptical,
 }
@@ -126,6 +145,20 @@ pub struct PointPressureMoments {
     pub second_moment_m2: f64,
 }
 
+/// Semiaxes of an elliptic point-contact patch in the principal-curvature
+/// frame. The major axis lies along the smaller supplied curvature.
+///
+/// This is present only for [`NormalPatchLaw::HertzEllipticParaboloid`]. It is
+/// not an effective-radius approximation: `patch_radius_m` is an
+/// area-equivalent reporting value retained for schema compatibility and must
+/// not be used for physical ranking or applicability decisions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EllipticPatchAxes {
+    pub semi_major_axis_m: f64,
+    pub semi_minor_axis_m: f64,
+    pub aspect_ratio: f64,
+}
+
 /// Line-contact pressure moments, normalized by the line resultant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinePressureMoments {
@@ -147,7 +180,13 @@ pub struct PointNormalPatchReceipt {
     pub approach_m: f64,
     pub normal_force_n: f64,
     pub tangent_n_per_m: f64,
+    /// Circular-patch radius. For an elliptic receipt this is only the
+    /// area-equivalent reporting value `sqrt(a*b)`; it does not enter the
+    /// constitutive force, tangent, or applicability admission. Consumers
+    /// making a physical comparison must use `elliptic_patch_axes`.
     pub patch_radius_m: f64,
+    /// Exact elliptic axes when the admitted law produces an ellipse.
+    pub elliptic_patch_axes: Option<EllipticPatchAxes>,
     pub pressure: PointPressureMoments,
     pub reversible_energy_j: f64,
     pub irreversible_work_j: f64,
@@ -233,6 +272,14 @@ pub enum NormalPatchError {
     GeometryLawMismatch {
         geometry: NormalPatchGeometry,
     },
+    /// The bounded elliptic-integral solver intentionally refuses aspect
+    /// ratios too extreme for its documented numerical envelope.
+    EllipticAspectRatioUnsupported {
+        curvature_ratio: f64,
+        maximum_supported: f64,
+    },
+    /// A finite in-envelope elliptic-integral solve did not converge.
+    EllipticShapeSolveFailure,
     Overflow {
         field: &'static str,
     },
@@ -262,6 +309,17 @@ impl fmt::Display for NormalPatchError {
                 f,
                 "normal-patch law does not match declared local geometry: {geometry:?}"
             ),
+            Self::EllipticAspectRatioUnsupported {
+                curvature_ratio,
+                maximum_supported,
+            } => write!(
+                f,
+                "elliptic Hertz curvature ratio {curvature_ratio} exceeds the documented numerical limit {maximum_supported}"
+            ),
+            Self::EllipticShapeSolveFailure => write!(
+                f,
+                "elliptic Hertz aspect-ratio solve did not converge within its declared numerical envelope"
+            ),
             Self::Overflow { field } => write!(f, "finite-patch derived value overflowed: {field}"),
         }
     }
@@ -282,6 +340,18 @@ impl NormalPatchRequest {
                 effective_radius_m,
                 reduced_modulus_pa,
             } => return self.cylinder(request_id, effective_radius_m, reduced_modulus_pa),
+            NormalPatchLaw::HertzEllipticParaboloid {
+                maximum_principal_curvature_m_inverse,
+                minimum_principal_curvature_m_inverse,
+                reduced_modulus_pa,
+            } => {
+                return self.elliptic_paraboloid(
+                    request_id,
+                    maximum_principal_curvature_m_inverse,
+                    minimum_principal_curvature_m_inverse,
+                    reduced_modulus_pa,
+                );
+            }
             NormalPatchLaw::HuntCrossleySphere {
                 effective_radius_m,
                 reduced_modulus_pa,
@@ -297,6 +367,9 @@ impl NormalPatchRequest {
                 self.sphere(request_id, radius, modulus, dissipative)
             }
             NormalPatchGeometry::CylinderPlane => Err(NormalPatchError::GeometryLawMismatch {
+                geometry: self.geometry,
+            }),
+            NormalPatchGeometry::EllipticParaboloid => Err(NormalPatchError::GeometryLawMismatch {
                 geometry: self.geometry,
             }),
             NormalPatchGeometry::ToroidalOrHighlyElliptical => {
@@ -417,6 +490,84 @@ impl NormalPatchRequest {
         )
     }
 
+    /// Evaluates the elastic Hertz solution for a two-positive-curvature local
+    /// gap. The complete elliptic integrals determine the ellipse aspect ratio
+    /// from the supplied curvatures; no scalar effective-radius contact law is
+    /// used.
+    ///
+    /// With `A = k_min / 2`, `B = k_max / 2`, and major/minor semiaxes
+    /// `a >= b`, the construction is
+    ///
+    /// ```text
+    /// B/A = (a^2 E(m) - b^2 K(m)) / (b^2 (K(m) - E(m))),
+    /// m = 1 - (b/a)^2,
+    /// b^2 = d E(m) / ((A + B) K(m)),
+    /// F = 2 pi E* b^3 (a/b) (A + B) / (3 E(m)).
+    /// ```
+    ///
+    /// `K` and `E` are complete elliptic integrals. This is the classical
+    /// nonadhesive, small-strain half-space solution. It does not establish
+    /// that a finite chamfer is locally parabolic, nor does it include
+    /// plasticity, adhesion, viscoelasticity, or tangential coupling.
+    fn elliptic_paraboloid(
+        &self,
+        request_id: ContentHash,
+        maximum_curvature: f64,
+        minimum_curvature: f64,
+        modulus: f64,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        let d = self.indentation_m;
+        let shape = elliptic_hertz_shape(maximum_curvature, minimum_curvature)?;
+        let curvature_sum = checked(maximum_curvature + minimum_curvature, "curvature_sum")?;
+        let b_squared = checked(
+            d * shape.complete_e / (0.5 * curvature_sum * shape.complete_k),
+            "elliptic_minor_axis_squared",
+        )?;
+        let b = checked(b_squared.sqrt(), "elliptic_minor_axis")?;
+        let a = checked(b * shape.aspect_ratio, "elliptic_major_axis")?;
+        let force = checked(
+            core::f64::consts::PI * modulus * b.powi(3) * shape.aspect_ratio * curvature_sum
+                / (3.0 * shape.complete_e),
+            "elliptic_force",
+        )?;
+        let tangent = if d == 0.0 {
+            0.0
+        } else {
+            checked(1.5 * force / d, "elliptic_tangent")?
+        };
+        let patch_area = checked(core::f64::consts::PI * a * b, "elliptic_patch_area")?;
+        let p0 = if patch_area == 0.0 {
+            0.0
+        } else {
+            checked(1.5 * force / patch_area, "elliptic_peak_pressure")?
+        };
+        // `a` and `1/k_max` are deliberately conservative scales: they make
+        // the admitted small-patch and small-strain envelope hold in both
+        // principal directions without replacing the constitutive law by an
+        // effective-radius approximation.
+        let minimum_radius = checked(1.0 / maximum_curvature, "minimum_radius")?;
+        let ratios = self.ratios(a, minimum_radius, d, p0)?;
+        let axes = EllipticPatchAxes {
+            semi_major_axis_m: a,
+            semi_minor_axis_m: b,
+            aspect_ratio: shape.aspect_ratio,
+        };
+        let reporting_radius = checked((a * b).sqrt(), "elliptic_reporting_radius")?;
+        let reversible = checked(0.4 * force * d, "elliptic_reversible_energy")?;
+        self.elliptic_point_receipt(
+            request_id,
+            d,
+            force,
+            tangent,
+            reporting_radius,
+            axes,
+            p0,
+            checked((a * a + b * b) / 5.0, "elliptic_second_moment")?,
+            reversible,
+            ratios,
+        )
+    }
+
     fn point_receipt(
         &self,
         request_id: ContentHash,
@@ -468,6 +619,7 @@ impl NormalPatchRequest {
             normal_force_n: force,
             tangent_n_per_m: tangent,
             patch_radius_m: patch,
+            elliptic_patch_axes: None,
             pressure: PointPressureMoments {
                 peak_pressure_pa: peak,
                 resultant_n: force,
@@ -476,6 +628,68 @@ impl NormalPatchRequest {
             reversible_energy_j: reversible,
             irreversible_work_j: irreversible,
             dissipated_power_w: power,
+            ratios,
+            uncertainty: self.uncertainty,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn elliptic_point_receipt(
+        &self,
+        request_id: ContentHash,
+        approach: f64,
+        force: f64,
+        tangent: f64,
+        reporting_radius: f64,
+        axes: EllipticPatchAxes,
+        peak: f64,
+        moment: f64,
+        reversible: f64,
+        ratios: ApplicabilityRatios,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        self.validate_response(
+            approach,
+            force,
+            tangent,
+            reporting_radius,
+            peak,
+            reversible,
+            0.0,
+            0.0,
+        )?;
+        let receipt_id = self.elliptic_receipt_id(
+            request_id,
+            approach,
+            force,
+            tangent,
+            reporting_radius,
+            axes,
+            peak,
+            moment,
+            reversible,
+            ratios,
+        );
+        Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
+            request_id,
+            receipt_id,
+            units: POINT_SI_UNITS,
+            interface_system_id: self.interface.ordered_system_id().to_owned(),
+            history_id: self.interface.history_id().to_owned(),
+            input_source_id: self.interface.provenance().source_id().to_owned(),
+            authority: self.interface.provenance().authority(),
+            approach_m: approach,
+            normal_force_n: force,
+            tangent_n_per_m: tangent,
+            patch_radius_m: reporting_radius,
+            elliptic_patch_axes: Some(axes),
+            pressure: PointPressureMoments {
+                peak_pressure_pa: peak,
+                resultant_n: force,
+                second_moment_m2: moment,
+            },
+            reversible_energy_j: reversible,
+            irreversible_work_j: 0.0,
+            dissipated_power_w: 0.0,
             ratios,
             uncertainty: self.uncertainty,
         }))
@@ -609,6 +823,53 @@ impl NormalPatchRequest {
                 reversible,
                 irreversible,
                 power,
+                ratios,
+                self.uncertainty.radius_relative,
+                self.uncertainty.modulus_relative,
+                self.uncertainty.load_relative,
+                self.interface.provenance().authority(),
+                self.interface.ordered_system_id(),
+                self.interface.history_id(),
+                self.interface.provenance().source_id(),
+            )
+            .as_bytes(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn elliptic_receipt_id(
+        &self,
+        request_id: ContentHash,
+        approach: f64,
+        force: f64,
+        tangent: f64,
+        reporting_radius: f64,
+        axes: EllipticPatchAxes,
+        peak: f64,
+        moment: f64,
+        reversible: f64,
+        ratios: ApplicabilityRatios,
+    ) -> ContentHash {
+        hash_domain(
+            DOMAIN,
+            format!(
+                concat!(
+                    "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                    "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                    "{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
+                ),
+                request_id.to_hex(),
+                self.identity.state_id,
+                approach,
+                force,
+                tangent,
+                reporting_radius,
+                axes.semi_major_axis_m,
+                axes.semi_minor_axis_m,
+                axes.aspect_ratio,
+                peak,
+                moment,
+                reversible,
                 ratios,
                 self.uncertainty.radius_relative,
                 self.uncertainty.modulus_relative,
@@ -783,6 +1044,28 @@ impl NormalPatchRequest {
                     });
                 }
             }
+            NormalPatchLaw::HertzEllipticParaboloid {
+                maximum_principal_curvature_m_inverse,
+                minimum_principal_curvature_m_inverse,
+                reduced_modulus_pa,
+            } => {
+                if !(maximum_principal_curvature_m_inverse.is_finite()
+                    && maximum_principal_curvature_m_inverse > 0.0
+                    && minimum_principal_curvature_m_inverse.is_finite()
+                    && minimum_principal_curvature_m_inverse > 0.0
+                    && reduced_modulus_pa.is_finite()
+                    && reduced_modulus_pa > 0.0)
+                {
+                    return Err(NormalPatchError::InvalidInput {
+                        field: "principal_curvature_or_modulus",
+                    });
+                }
+                if minimum_principal_curvature_m_inverse > maximum_principal_curvature_m_inverse {
+                    return Err(NormalPatchError::InvalidInput {
+                        field: "principal_curvature_order",
+                    });
+                }
+            }
         }
         if let NormalPatchLaw::HuntCrossleySphere {
             dissipation_s_per_m,
@@ -805,6 +1088,10 @@ impl NormalPatchRequest {
             | (
                 NormalPatchLaw::HertzSpherePlane { .. } | NormalPatchLaw::HuntCrossleySphere { .. },
                 NormalPatchGeometry::SpherePlane,
+            )
+            | (
+                NormalPatchLaw::HertzEllipticParaboloid { .. },
+                NormalPatchGeometry::EllipticParaboloid,
             ) => {}
             _ => {
                 return Err(NormalPatchError::GeometryLawMismatch {
@@ -862,5 +1149,134 @@ fn checked(value: f64, field: &'static str) -> Result<f64, NormalPatchError> {
         Ok(value)
     } else {
         Err(NormalPatchError::Overflow { field })
+    }
+}
+
+/// Numerical shape factors for the classical elliptic Hertz solution.
+#[derive(Debug, Clone, Copy)]
+struct EllipticHertzShape {
+    aspect_ratio: f64,
+    complete_k: f64,
+    complete_e: f64,
+}
+
+/// Smallest permitted squared minor-to-major axis ratio. The associated
+/// curvature-ratio threshold is derived from the elliptic equation rather
+/// than guessed from an effective radius. The limit keeps `1 - m` separated
+/// from the logarithmic singular endpoint of the complete integral in f64.
+const MIN_MINOR_TO_MAJOR_SQUARED: f64 = 1.0e-12;
+const ELLIPTIC_BISECTION_STEPS: usize = 80;
+
+fn elliptic_hertz_shape(
+    maximum_curvature: f64,
+    minimum_curvature: f64,
+) -> Result<EllipticHertzShape, NormalPatchError> {
+    if maximum_curvature.to_bits() == minimum_curvature.to_bits() {
+        return Ok(EllipticHertzShape {
+            aspect_ratio: 1.0,
+            complete_k: core::f64::consts::FRAC_PI_2,
+            complete_e: core::f64::consts::FRAC_PI_2,
+        });
+    }
+    let target = minimum_curvature / maximum_curvature;
+    let (low_k, low_e) = complete_elliptic_integrals(1.0 - MIN_MINOR_TO_MAJOR_SQUARED)?;
+    let minimum_target = elliptic_curvature_ratio(MIN_MINOR_TO_MAJOR_SQUARED, low_k, low_e)?;
+    if target < minimum_target {
+        return Err(NormalPatchError::EllipticAspectRatioUnsupported {
+            curvature_ratio: maximum_curvature / minimum_curvature,
+            maximum_supported: 1.0 / minimum_target,
+        });
+    }
+
+    let mut lower = MIN_MINOR_TO_MAJOR_SQUARED;
+    let mut upper = 1.0;
+    for _ in 0..ELLIPTIC_BISECTION_STEPS {
+        let middle = 0.5 * (lower + upper);
+        let (k, e) = complete_elliptic_integrals(1.0 - middle)?;
+        let recovered = elliptic_curvature_ratio(middle, k, e)?;
+        if recovered < target {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    let minor_to_major_squared = 0.5 * (lower + upper);
+    let (complete_k, complete_e) = complete_elliptic_integrals(1.0 - minor_to_major_squared)?;
+    let recovered = elliptic_curvature_ratio(minor_to_major_squared, complete_k, complete_e)?;
+    if (recovered - target).abs() > 1.0e-12 * target.max(MIN_MINOR_TO_MAJOR_SQUARED) {
+        return Err(NormalPatchError::EllipticShapeSolveFailure);
+    }
+    Ok(EllipticHertzShape {
+        aspect_ratio: 1.0 / minor_to_major_squared.sqrt(),
+        complete_k,
+        complete_e,
+    })
+}
+
+/// Returns `k_min / k_max` from `q = (b/a)^2` and complete elliptic
+/// integrals at `m = 1 - q`.
+fn elliptic_curvature_ratio(
+    minor_to_major_squared: f64,
+    complete_k: f64,
+    complete_e: f64,
+) -> Result<f64, NormalPatchError> {
+    if minor_to_major_squared >= 1.0 {
+        return Ok(1.0);
+    }
+    checked(
+        (complete_k - complete_e) / (complete_e / minor_to_major_squared - complete_k),
+        "elliptic_curvature_ratio",
+    )
+}
+
+/// Complete elliptic integrals `K(m)` and `E(m)` for `0 <= m < 1`, evaluated
+/// by the arithmetic-geometric mean. The series for `E` is the companion AGM
+/// identity, so both values share a deterministic, cancellation-free kernel.
+fn complete_elliptic_integrals(parameter_m: f64) -> Result<(f64, f64), NormalPatchError> {
+    if !(parameter_m.is_finite() && (0.0..1.0).contains(&parameter_m)) {
+        return Err(NormalPatchError::EllipticShapeSolveFailure);
+    }
+    if parameter_m == 0.0 {
+        return Ok((core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2));
+    }
+    let mut arithmetic = 1.0;
+    let mut geometric = (1.0 - parameter_m).sqrt();
+    let mut sum = 0.5 * parameter_m;
+    let mut weight = 1.0;
+    for _ in 0..32 {
+        let difference = 0.5 * (arithmetic - geometric);
+        let next_arithmetic = 0.5 * (arithmetic + geometric);
+        let next_geometric = (arithmetic * geometric).sqrt();
+        sum = checked(sum + weight * difference * difference, "elliptic_e_series")?;
+        arithmetic = next_arithmetic;
+        geometric = next_geometric;
+        if difference.abs() <= 8.0 * f64::EPSILON * arithmetic {
+            let complete_k = checked(core::f64::consts::FRAC_PI_2 / arithmetic, "elliptic_k")?;
+            let complete_e = checked(complete_k * (1.0 - sum), "elliptic_e")?;
+            return Ok((complete_k, complete_e));
+        }
+        weight *= 2.0;
+    }
+    Err(NormalPatchError::EllipticShapeSolveFailure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{complete_elliptic_integrals, elliptic_hertz_shape};
+
+    #[test]
+    fn elliptic_agm_matches_reference_values_at_half_parameter() {
+        let (k, e) = complete_elliptic_integrals(0.5).unwrap();
+        assert!((k - 1.854_074_677_301_371_9).abs() < 2.0e-15);
+        assert!((e - 1.350_643_881_047_675_5).abs() < 2.0e-15);
+    }
+
+    #[test]
+    fn elliptic_shape_inverts_the_principal_curvature_ratio() {
+        let shape = elliptic_hertz_shape(100.0, 25.0).unwrap();
+        let q = 1.0 / shape.aspect_ratio.powi(2);
+        let recovered =
+            (shape.complete_k - shape.complete_e) / (shape.complete_e / q - shape.complete_k);
+        assert!((recovered - 0.25).abs() < 3.0e-13);
     }
 }

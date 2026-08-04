@@ -7,6 +7,7 @@ fn request(law: NormalPatchLaw) -> NormalPatchRequest {
         NormalPatchLaw::HertzSpherePlane { .. } | NormalPatchLaw::HuntCrossleySphere { .. } => {
             NormalPatchGeometry::SpherePlane
         }
+        NormalPatchLaw::HertzEllipticParaboloid { .. } => NormalPatchGeometry::EllipticParaboloid,
     };
     NormalPatchRequest {
         identity: NormalPatchIdentity {
@@ -319,5 +320,133 @@ fn np_008_identity_mutations_and_unsupported_geometry_refuse() {
         Err(NormalPatchError::GeometryLawMismatch {
             geometry: NormalPatchGeometry::CylinderPlane,
         })
+    ));
+}
+
+#[test]
+fn np_009_elliptic_hertz_reconstructs_axes_resultant_energy_and_tangent() {
+    let law = NormalPatchLaw::HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 100.0,
+        minimum_principal_curvature_m_inverse: 25.0,
+        reduced_modulus_pa: 2.0e9,
+    };
+    let req = request(law);
+    let receipt = point(req.evaluate().unwrap()).unwrap();
+    let axes = receipt
+        .elliptic_patch_axes
+        .expect("elliptic law records axes");
+    assert!(axes.semi_major_axis_m >= axes.semi_minor_axis_m);
+    assert!(axes.aspect_ratio > 1.0);
+    assert!((axes.semi_major_axis_m / axes.semi_minor_axis_m - axes.aspect_ratio).abs() < 1e-12);
+    assert!(
+        (receipt.patch_radius_m - (axes.semi_major_axis_m * axes.semi_minor_axis_m).sqrt()).abs()
+            < 1e-18
+    );
+    assert!(
+        (receipt.pressure.resultant_n
+            - 2.0 / 3.0
+                * core::f64::consts::PI
+                * axes.semi_major_axis_m
+                * axes.semi_minor_axis_m
+                * receipt.pressure.peak_pressure_pa)
+            .abs()
+            <= receipt.normal_force_n * 1e-12
+    );
+    assert!(
+        (receipt.pressure.second_moment_m2
+            - (axes.semi_major_axis_m.powi(2) + axes.semi_minor_axis_m.powi(2)) / 5.0)
+            .abs()
+            < 1e-18
+    );
+    assert!(
+        (receipt.reversible_energy_j - 0.4 * receipt.normal_force_n * req.indentation_m).abs()
+            < 1e-18
+    );
+    assert_eq!(receipt.irreversible_work_j, 0.0);
+    assert_eq!(receipt.dissipated_power_w, 0.0);
+    let h = 1.0e-8;
+    let mut plus = req.clone();
+    plus.indentation_m += h;
+    let mut minus = req;
+    minus.indentation_m -= h;
+    let numerical = (point(plus.evaluate().unwrap()).unwrap().normal_force_n
+        - point(minus.evaluate().unwrap()).unwrap().normal_force_n)
+        / (2.0 * h);
+    assert!((numerical - receipt.tangent_n_per_m).abs() / receipt.tangent_n_per_m < 2.0e-6);
+}
+
+#[test]
+fn np_010_elliptic_hertz_reduces_to_sphere_and_refuses_out_of_domain_shapes() {
+    let sphere = request(NormalPatchLaw::HertzSpherePlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    });
+    let elliptic = request(NormalPatchLaw::HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 50.0,
+        minimum_principal_curvature_m_inverse: 50.0,
+        reduced_modulus_pa: 2.0e9,
+    });
+    let sphere_receipt = point(sphere.evaluate().unwrap()).unwrap();
+    let elliptic_receipt = point(elliptic.evaluate().unwrap()).unwrap();
+    let axes = elliptic_receipt.elliptic_patch_axes.unwrap();
+    for (elliptic_value, sphere_value) in [
+        (
+            elliptic_receipt.normal_force_n,
+            sphere_receipt.normal_force_n,
+        ),
+        (
+            elliptic_receipt.tangent_n_per_m,
+            sphere_receipt.tangent_n_per_m,
+        ),
+        (
+            elliptic_receipt.pressure.peak_pressure_pa,
+            sphere_receipt.pressure.peak_pressure_pa,
+        ),
+        (
+            elliptic_receipt.reversible_energy_j,
+            sphere_receipt.reversible_energy_j,
+        ),
+        (axes.semi_major_axis_m, sphere_receipt.patch_radius_m),
+        (axes.semi_minor_axis_m, sphere_receipt.patch_radius_m),
+    ] {
+        assert!((elliptic_value - sphere_value).abs() <= sphere_value.abs() * 1e-12);
+    }
+    assert_eq!(axes.aspect_ratio, 1.0);
+
+    let mut reversed = elliptic.clone();
+    reversed.law = NormalPatchLaw::HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 25.0,
+        minimum_principal_curvature_m_inverse: 50.0,
+        reduced_modulus_pa: 2.0e9,
+    };
+    assert!(matches!(
+        reversed.evaluate(),
+        Err(NormalPatchError::InvalidInput {
+            field: "principal_curvature_order"
+        })
+    ));
+
+    let mut nonpositive = elliptic.clone();
+    nonpositive.law = NormalPatchLaw::HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 50.0,
+        minimum_principal_curvature_m_inverse: 0.0,
+        reduced_modulus_pa: 2.0e9,
+    };
+    assert!(matches!(
+        nonpositive.evaluate(),
+        Err(NormalPatchError::InvalidInput {
+            field: "principal_curvature_or_modulus"
+        })
+    ));
+
+    let mut extreme = elliptic;
+    extreme.law = NormalPatchLaw::HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 1.0e16,
+        minimum_principal_curvature_m_inverse: 1.0,
+        reduced_modulus_pa: 2.0e9,
+    };
+    assert!(matches!(
+        extreme.evaluate(),
+        Err(NormalPatchError::EllipticAspectRatioUnsupported { .. })
     ));
 }

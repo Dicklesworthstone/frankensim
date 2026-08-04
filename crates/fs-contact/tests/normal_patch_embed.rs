@@ -7,6 +7,7 @@ fn law_request(law: NormalPatchLaw) -> NormalPatchRequest {
         NormalPatchLaw::HertzSpherePlane { .. } | NormalPatchLaw::HuntCrossleySphere { .. } => {
             NormalPatchGeometry::SpherePlane
         }
+        NormalPatchLaw::HertzEllipticParaboloid { .. } => NormalPatchGeometry::EllipticParaboloid,
     };
     NormalPatchRequest {
         identity: NormalPatchIdentity {
