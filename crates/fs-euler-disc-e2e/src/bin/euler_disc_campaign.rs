@@ -6,10 +6,11 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_euler_disc_e2e::convergence::{
-    CalibrationReadinessInput, CensorAwareDurationOrdering, CensorAwareRankingRefusal,
-    ConvergenceScales, DeclaredEvidence, HorizonContinuationPolicy, ObservedOrder, RefinementMode,
-    RunOutcome, ThreeRungConvergence, admit_calibration_readiness, analyse_three_rung_convergence,
-    classify_outcome, compare_censor_aware_durations,
+    CalibrationEvidenceKind, CalibrationReadinessError, CalibrationReadinessInput,
+    CensorAwareDurationOrdering, CensorAwareRankingRefusal, ConvergenceScales, DeclaredEvidence,
+    HorizonContinuationPolicy, ObservedOrder, RefinementMode, RunOutcome, ThreeRungConvergence,
+    admit_calibration_readiness, analyse_three_rung_convergence, classify_outcome,
+    compare_censor_aware_durations, missing_calibration_evidence,
 };
 use fs_euler_disc_e2e::coupled_runner::{
     CoupledChannelFactors, CoupledControls, CoupledInitialState, CoupledNumericalRefusalReason,
@@ -740,7 +741,7 @@ fn event_delta_json(delta: Option<(f64, f64)>) -> String {
 }
 
 fn calibration_readiness_record() -> Result<String, String> {
-    let readiness = admit_calibration_readiness(CalibrationReadinessInput {
+    let input = CalibrationReadinessInput {
         specimen: DeclaredEvidence::Missing,
         rig: DeclaredEvidence::Missing,
         instrument: DeclaredEvidence::Missing,
@@ -748,11 +749,38 @@ fn calibration_readiness_record() -> Result<String, String> {
         observation_covariance: DeclaredEvidence::Missing,
         calibration_partition: DeclaredEvidence::Missing,
         blind_holdout: DeclaredEvidence::Missing,
-    });
-    if readiness.is_ok() {
+    };
+    let missing = missing_calibration_evidence(&input);
+    let expected = [
+        CalibrationEvidenceKind::Specimen,
+        CalibrationEvidenceKind::Rig,
+        CalibrationEvidenceKind::Instrument,
+        CalibrationEvidenceKind::RawObservations,
+        CalibrationEvidenceKind::ObservationCovariance,
+        CalibrationEvidenceKind::CalibrationPartition,
+        CalibrationEvidenceKind::BlindHoldout,
+    ];
+    if missing.as_slice() != expected {
+        return Err(
+            "calibration no-data record omitted or reordered a typed prerequisite".to_owned(),
+        );
+    }
+    if !matches!(
+        admit_calibration_readiness(input),
+        Err(CalibrationReadinessError::MissingEvidence {
+            kind: CalibrationEvidenceKind::Specimen,
+        })
+    ) {
         return Err("calibration readiness unexpectedly admitted missing evidence".to_owned());
     }
-    Ok("{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"physical-calibration-readiness\",\"model\":\"structural-evidence-admission\",\"authority\":\"no-data\",\"units\":\"not-applicable\",\"terminal\":\"no-data\",\"missing_evidence\":\"specimen,rig,instrument,raw-observations,observation-covariance,calibration-partition,blind-holdout\",\"synthetic_substitution\":false,\"target_ordering_fit\":false,\"no_claim\":\"no-calibration-or-physical-validation-without-retained-independent-evidence\"}".to_owned())
+    let missing_evidence = missing
+        .into_iter()
+        .map(CalibrationEvidenceKind::slug)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(format!(
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"physical-calibration-readiness\",\"model\":\"structural-evidence-admission\",\"authority\":\"no-data\",\"units\":\"not-applicable\",\"terminal\":\"no-data\",\"missing_evidence\":\"{missing_evidence}\",\"synthetic_substitution\":false,\"target_ordering_fit\":false,\"no_claim\":\"no-calibration-or-physical-validation-without-retained-independent-evidence\"}}"
+    ))
 }
 
 fn with_closed_context<R>(

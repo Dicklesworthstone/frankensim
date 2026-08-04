@@ -6,7 +6,7 @@ use fs_euler_disc_e2e::convergence::{
     HorizonContinuationPolicy, ObservedDurationOrdering, ObservedOrder, OrderUnavailableReason,
     RefinementMode, RunOutcome, ThreeRungConvergence, admit_calibration_readiness,
     analyse_three_rung_convergence, classify_outcome, compare_censor_aware_durations,
-    compare_observed_durations,
+    compare_observed_durations, missing_calibration_evidence,
 };
 use fs_euler_disc_e2e::coupled_runner::{
     CoupledControls, CoupledFactors, CoupledInitialState, CoupledNumericalRefusalReason,
@@ -338,6 +338,47 @@ fn calibration_readiness_refuses_missing_or_aliased_evidence_without_fitting() {
     assert_eq!(
         admit_calibration_readiness(aliased),
         Err(CalibrationReadinessError::PartitionAlias)
+    );
+}
+
+#[test]
+fn no_data_diagnostic_enumerates_every_missing_prerequisite_in_typed_order() {
+    let input = CalibrationReadinessInput {
+        specimen: DeclaredEvidence::Missing,
+        rig: DeclaredEvidence::Missing,
+        instrument: DeclaredEvidence::Missing,
+        raw_observations: DeclaredEvidence::Missing,
+        observation_covariance: DeclaredEvidence::Missing,
+        calibration_partition: DeclaredEvidence::Missing,
+        blind_holdout: DeclaredEvidence::Missing,
+    };
+    let missing = missing_calibration_evidence(&input);
+    assert_eq!(
+        missing,
+        vec![
+            CalibrationEvidenceKind::Specimen,
+            CalibrationEvidenceKind::Rig,
+            CalibrationEvidenceKind::Instrument,
+            CalibrationEvidenceKind::RawObservations,
+            CalibrationEvidenceKind::ObservationCovariance,
+            CalibrationEvidenceKind::CalibrationPartition,
+            CalibrationEvidenceKind::BlindHoldout,
+        ]
+    );
+    assert_eq!(
+        missing
+            .into_iter()
+            .map(CalibrationEvidenceKind::slug)
+            .collect::<Vec<_>>(),
+        vec![
+            "specimen",
+            "rig",
+            "instrument",
+            "raw-observations",
+            "observation-covariance",
+            "calibration-partition",
+            "blind-holdout",
+        ]
     );
 }
 

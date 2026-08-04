@@ -850,6 +850,25 @@ pub enum CalibrationEvidenceKind {
     BlindHoldout,
 }
 
+impl CalibrationEvidenceKind {
+    /// Stable diagnostic name for a required evidence category.
+    ///
+    /// These names are for an explicit no-data record only.  They do not
+    /// promote a declared identity into retained data or physical authority.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Specimen => "specimen",
+            Self::Rig => "rig",
+            Self::Instrument => "instrument",
+            Self::RawObservations => "raw-observations",
+            Self::ObservationCovariance => "observation-covariance",
+            Self::CalibrationPartition => "calibration-partition",
+            Self::BlindHoldout => "blind-holdout",
+        }
+    }
+}
+
 /// An evidence identity is only a declared binding. It is not an authenticated
 /// artifact, a calibrated measurement, or a physical-validation promotion.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -869,6 +888,40 @@ pub struct CalibrationReadinessInput {
     pub observation_covariance: DeclaredEvidence,
     pub calibration_partition: DeclaredEvidence,
     pub blind_holdout: DeclaredEvidence,
+}
+
+/// Report every absent prerequisite in stable admission order.
+///
+/// [`admit_calibration_readiness`] returns the first invalid field so callers
+/// can fix one malformed binding directly.  A no-data report instead needs the
+/// complete absence set: otherwise a human-facing diagnostic can silently
+/// become stale as its typed input evolves.  This function performs no fitting
+/// and treats invalid-but-present identities separately from absence.
+#[must_use]
+pub fn missing_calibration_evidence(
+    input: &CalibrationReadinessInput,
+) -> Vec<CalibrationEvidenceKind> {
+    [
+        (CalibrationEvidenceKind::Specimen, &input.specimen),
+        (CalibrationEvidenceKind::Rig, &input.rig),
+        (CalibrationEvidenceKind::Instrument, &input.instrument),
+        (
+            CalibrationEvidenceKind::RawObservations,
+            &input.raw_observations,
+        ),
+        (
+            CalibrationEvidenceKind::ObservationCovariance,
+            &input.observation_covariance,
+        ),
+        (
+            CalibrationEvidenceKind::CalibrationPartition,
+            &input.calibration_partition,
+        ),
+        (CalibrationEvidenceKind::BlindHoldout, &input.blind_holdout),
+    ]
+    .into_iter()
+    .filter_map(|(kind, evidence)| matches!(evidence, DeclaredEvidence::Missing).then_some(kind))
+    .collect()
 }
 
 /// Structurally complete calibration-data bindings. This deliberately carries

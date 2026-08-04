@@ -195,6 +195,10 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         .expect("calibration readiness record");
     assert_eq!(string(calibration, "terminal"), "no-data");
     assert!(!boolean(calibration, "synthetic_substitution"));
+    assert_eq!(
+        string(calibration, "missing_evidence"),
+        "specimen,rig,instrument,raw-observations,observation-covariance,calibration-partition,blind-holdout"
+    );
     let manifest = v3_roots
         .iter()
         .find(|fields| string(fields, "scenario") == "campaign-complete")
