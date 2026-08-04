@@ -21,6 +21,7 @@ pub mod mechanics;
 pub mod normal_contact;
 pub mod patch_kinematics;
 pub mod ports;
+pub mod production_coupling;
 #[cfg(feature = "scientific-contract")]
 pub mod protocol;
 pub mod reduced_decay;

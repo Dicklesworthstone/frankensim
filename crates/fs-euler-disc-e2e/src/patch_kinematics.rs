@@ -343,6 +343,24 @@ pub struct MovingOneModePatchBridgeInput {
     pub thresholds: PatchKinematicThresholds,
 }
 
+/// Inputs that complete a moving-one-mode bridge into a full patch record.
+///
+/// The base point is represented directly as a material-point kinematic
+/// record with zero angular velocity; it is not promoted into an invented
+/// rigid body.  This is the common bridge for a coupled solver that owns one
+/// flexible base mode and one rigid Euler disc.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MovingOneModePatchKinematicsInput {
+    /// Actual profile-support and moving-base bridge inputs.
+    pub bridge: MovingOneModePatchBridgeInput,
+    /// Explicit ordered disc/base surface identities.
+    pub surfaces: OrderedSurfacePair,
+    /// Resolved profile feature and relative-gap curvature metadata.
+    pub patch: PatchGeometryMetadata,
+    /// Optional diagnostic effort only; it is not a force law.
+    pub tangent_effort_probe_world_n: Option<Vec3>,
+}
+
 /// Direct kinematics available before any normal/tangential constitutive law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MovingOneModePatchBridge {
@@ -576,6 +594,158 @@ pub fn bridge_moving_one_mode_patch_kinematics(
         tangential_relative_velocity_world_m_per_s,
         normal_world,
         tangent_basis,
+    })
+}
+
+/// Complete a full pre-constitutive patch record from the moving-one-mode bridge.
+///
+/// This shares the same threshold classification as the rigid-base path while
+/// retaining the base as an explicitly translational material point.
+pub fn compute_moving_one_mode_patch_kinematics(
+    input: MovingOneModePatchKinematicsInput,
+) -> Result<PatchKinematics, PatchKinematicsError> {
+    input.bridge.thresholds.validate()?;
+    validate_patch(&input.patch, input.bridge.profile_support.source_feature)?;
+    let bridge = bridge_moving_one_mode_patch_kinematics(input.bridge.clone())?;
+    let base_point = PointKinematics {
+        arm_body: Vec3::ZERO,
+        arm_world: Vec3::ZERO,
+        point_world: bridge.base_contact_point_world_m,
+        center_of_mass_velocity_world: bridge.base_contact_velocity_world_m_per_s,
+        angular_velocity_body: Vec3::ZERO,
+        angular_velocity_world: Vec3::ZERO,
+        point_velocity_world: bridge.base_contact_velocity_world_m_per_s,
+    };
+    let (first_velocity, second_velocity, first_angular, second_angular) =
+        match input.surfaces.order {
+            SurfaceOrder::DiscThenBase => (
+                bridge.disc_point.point_velocity_world,
+                base_point.point_velocity_world,
+                bridge.disc_point.angular_velocity_world,
+                base_point.angular_velocity_world,
+            ),
+            SurfaceOrder::BaseThenDisc => (
+                base_point.point_velocity_world,
+                bridge.disc_point.point_velocity_world,
+                base_point.angular_velocity_world,
+                bridge.disc_point.angular_velocity_world,
+            ),
+        };
+    let relative_velocity_world_m_per_s = checked_sub(
+        first_velocity,
+        second_velocity,
+        "moving one-mode relative velocity",
+    )?;
+    let normal_relative_velocity_m_per_s = checked_dot(
+        relative_velocity_world_m_per_s,
+        bridge.normal_world,
+        "moving one-mode normal relative velocity",
+    )?;
+    let tangential_relative_velocity_world_m_per_s = checked_sub(
+        relative_velocity_world_m_per_s,
+        bridge.normal_world.scale(normal_relative_velocity_m_per_s),
+        "moving one-mode tangential relative velocity",
+    )?;
+    let tangential_relative_velocity = tangent_components(
+        tangential_relative_velocity_world_m_per_s,
+        bridge.tangent_basis,
+        "moving one-mode tangent components",
+    )?;
+    let rolling_entrainment_velocity_world_m_per_s = checked_scale(
+        bridge
+            .disc_point
+            .point_velocity_world
+            .add(base_point.point_velocity_world),
+        0.5,
+        "moving one-mode rolling entrainment",
+    )?;
+    let rolling_normal = checked_dot(
+        rolling_entrainment_velocity_world_m_per_s,
+        bridge.normal_world,
+        "moving one-mode rolling normal",
+    )?;
+    let rolling_entrainment_tangent_world_m_per_s = checked_sub(
+        rolling_entrainment_velocity_world_m_per_s,
+        bridge.normal_world.scale(rolling_normal),
+        "moving one-mode rolling tangent",
+    )?;
+    let reference_rolling_speed_m_per_s = norm(
+        rolling_entrainment_tangent_world_m_per_s,
+        "moving one-mode reference rolling speed",
+    )?;
+    let creepage = if reference_rolling_speed_m_per_s
+        > input
+            .bridge
+            .thresholds
+            .minimum_reference_rolling_speed_m_per_s
+    {
+        Creepage::Available {
+            longitudinal: finite_divide(
+                tangential_relative_velocity.first,
+                reference_rolling_speed_m_per_s,
+                "moving one-mode longitudinal creepage",
+            )?,
+            lateral: finite_divide(
+                tangential_relative_velocity.second,
+                reference_rolling_speed_m_per_s,
+                "moving one-mode lateral creepage",
+            )?,
+            reference_rolling_speed_m_per_s,
+        }
+    } else {
+        Creepage::Unavailable {
+            reference_rolling_speed_m_per_s,
+            minimum_reference_rolling_speed_m_per_s: input
+                .bridge
+                .thresholds
+                .minimum_reference_rolling_speed_m_per_s,
+        }
+    };
+    let tangential_power_w = input
+        .tangent_effort_probe_world_n
+        .map(|effort| {
+            finite_vec(effort, "moving one-mode tangent effort probe")?;
+            checked_dot(
+                effort,
+                tangential_relative_velocity_world_m_per_s,
+                "moving one-mode tangential power",
+            )
+        })
+        .transpose()?;
+    let status = classify_status(
+        input.bridge.profile_support.gap_m,
+        input.patch.gap_uncertainty_m,
+        normal_relative_velocity_m_per_s,
+        tangential_relative_velocity.squared_norm().sqrt(),
+        &input.bridge.thresholds,
+    )?;
+    let normal_spin_rad_per_s = checked_dot(
+        checked_sub(
+            first_angular,
+            second_angular,
+            "moving one-mode relative angular velocity",
+        )?,
+        bridge.normal_world,
+        "moving one-mode normal spin",
+    )?;
+    Ok(PatchKinematics {
+        surfaces: input.surfaces,
+        patch: input.patch,
+        support_authority: input.bridge.profile_support.support_authority,
+        disc_point: bridge.disc_point,
+        base_point,
+        tangent_basis: bridge.tangent_basis,
+        relative_velocity_world_m_per_s,
+        normal_relative_velocity_m_per_s,
+        tangential_relative_velocity_world_m_per_s,
+        tangential_relative_velocity,
+        rolling_entrainment_velocity_world_m_per_s,
+        rolling_entrainment_tangent_world_m_per_s,
+        reference_rolling_speed_m_per_s,
+        normal_spin_rad_per_s,
+        creepage,
+        tangential_power_w,
+        status,
     })
 }
 
