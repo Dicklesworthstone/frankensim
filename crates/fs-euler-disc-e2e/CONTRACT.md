@@ -2,11 +2,14 @@
 
 Status: [S] structural scientific-contract infrastructure plus a bounded,
 deterministic numerical/software campaign slice. The slice composes real
-squat-disc line/arc geometry and mass properties, a profile unilateral-sticking
-micro-trajectory, a one-way flexible-base load response, encoded reduced-decay
-ablations, and a one-way exterior passivity probe. It is not a closed coupled
-Euler-disc model, an experiment or video validation, or support for claims
-about Steve Mould's reported observations.
+squat-disc line/arc geometry and mass properties, a profile-native reduced
+rigid-body/contact/base/gas trajectory, transactional finite-patch normal,
+partial-slip, rolling, exterior-air, thin-gap gas-film, and reduced-base ports,
+plus encoded reduced-decay ablations. The higher-fidelity ports now compose
+atomically for bounded smooth-contact trajectory prefixes; impact and
+separation still hand off through typed refusals. This is not an experiment or
+video validation and does not support claims about Steve Mould's reported
+observations.
 
 ## Purpose and layer
 
@@ -16,10 +19,13 @@ before geometry, solver, calibration, or experiment choices can bias those
 questions.
 
 The committed `euler_disc_campaign` binary is a deterministic JSONL runner for
-the bounded slice. It is deliberately composition-only: each rung consumes a
-declared snapshot or one-way input from its owning production operator. It does
-not solve mutual contact/base/exterior feedback or identify a physical decay
-law.
+the bounded slice. Its closed reduced lane evolves profile support, rigid-body
+motion, unilateral contact, a one-mode base, rolling loss, and reduced gas drag
+together. Opening, reimpact, and terminal-inclination endpoint crossings are
+localized by re-evolving the actual reduced step. A separate Estimate-only
+production composition exercises the higher-fidelity transactional adapters in
+smooth contact, but the campaign does not yet use that composition as its
+event-loop backend. Neither lane identifies a physical decay law.
 
 The crate composes 15 artifact roles across four ownership surfaces. Their
 rows live in a separately versioned, domain-separated owner-matrix routing
@@ -74,17 +80,30 @@ campaign command exited zero before retrieval of its separately built artifact
 failed. The retained receipt still marks artifact retrieval incomplete and its
 local transcript authority as non-cryptographic. Other nonzero exits refuse;
 ordinary RCH success with empty direct stdout also refuses rather than inferring
-records from diagnostics. The wrapper emits, in order: sharp and
-1-mm-filleted squat-disc line/arc geometry-plus-mass records;
-a conservative steady oracle; a profile unilateral-sticking micro-trajectory;
-a one-way reduced flexible-base record; contour-only, boundary-layer-only, and
-combined reduced-decay records; a one-way reduced exterior-wrench passivity
-record; and a campaign manifest. The manifest is a deterministic digest of the
-preceding records, not a validation certificate.
+records from diagnostics. The wrapper emits the original bounded component
+records and manifest, followed by a v3 closed-lane block. That block contains
+eleven profile-native controlled cases (solid, fillet, chamfer, fixed-density
+and equal-mass rings, symmetric taper, scale, density, base, gas, and rolling
+ablations), a five-rung numerical convergence record, a five-rung censor-aware
+equal-mass-ring/solid ordering record, a typed physical-calibration NO-DATA
+record, and its own manifest. The closed cases use a declared 2/4/8/16/32 s
+continuation policy. Any case still live at 32 s remains right-censored; that
+bound is never reported as a spin duration. The finest predeclared 20/10/5
+microsecond triplet owns the convergence decision while 80 and 40 microseconds
+remain visible as pre-asymptotic sentinels. Both manifests are deterministic
+digests, not validation certificates.
 
 This contract deliberately records no output path, digest, or numerical value
 until an actual retained run supplies them. The runner's receipts demonstrate
 only the encoded numerical/software composition and its input/record checks.
+
+The reduced event locator detects only endpoint-bracketed crossings. An empty
+event list does not certify absence of an open/reimpact pair that leaves both
+macro-step endpoints on the same branch. The production smooth-contact helper
+is restartable and atomic across its accepted adapters, but it is intentionally
+not an impact/event owner. Thin-gap gas-film work has exact-once transactional
+ownership and typed continuum/applicability refusals; it is not rarefied-gas or
+resolved body-base FSI evidence.
 
 ## Public types and semantics
 
