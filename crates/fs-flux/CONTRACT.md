@@ -215,6 +215,10 @@ roughness/applicability, uncertainty, gauge reference, timestep, budget, and
 authority. Dynamic current gaps and wall motion remain per-step inputs: restart
 checks each new active gap against accepted gap plus declared `dh/dt * dt`
 within a named numerical tolerance, while allowing changed tangential speed.
+`dh/dt` may be a uniform fallback or an exact one-value-per-geometric-cell
+profile; the latter is used consistently for fresh-state reconstruction,
+restart evolution, storage, and normal pressure-work accounting so changing
+wedge slopes are not collapsed to a mean rate.
 The checkpoint also retains the full accepted-request fingerprint for
 provenance, but never mistakes it for a static restart constraint.
 

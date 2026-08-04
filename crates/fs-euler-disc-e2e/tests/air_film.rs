@@ -219,8 +219,10 @@ fn g0_action_work_sign_and_checkpoint_replay_are_deterministic() {
     let mut input = fixture();
     input.disc.center_velocity_world_m_per_s.z = -2.0e-3;
     let first = solve_tilted_disc_air_film(&input, None).expect("first admitted");
-    let replay_a = solve_tilted_disc_air_film(&input, Some(&first.checkpoint)).expect("replay a");
-    let replay_b = solve_tilted_disc_air_film(&input, Some(&first.checkpoint)).expect("replay b");
+    let mut next = input.clone();
+    next.disc.center_world_m.z += input.disc.center_velocity_world_m_per_s.z * input.timestep_s;
+    let replay_a = solve_tilted_disc_air_film(&next, Some(&first.checkpoint)).expect("replay a");
+    let replay_b = solve_tilted_disc_air_film(&next, Some(&first.checkpoint)).expect("replay b");
     assert_eq!(
         replay_a, replay_b,
         "identity-bound sector state replays deterministically"
@@ -228,6 +230,41 @@ fn g0_action_work_sign_and_checkpoint_replay_are_deterministic() {
     assert!(
         first.receipt.wrench.force_world_n.z * input.disc.center_velocity_world_m_per_s.z < 0.0,
         "gas force must oppose squeeze velocity"
+    );
+}
+
+#[test]
+fn g0_changing_tilt_advances_nonuniform_gap_profile_across_checkpoint() {
+    let mut first_input = fixture();
+    let normal = AirVec3::new(0.02, 0.0, (1.0 - 0.0004_f64).sqrt());
+    let angular_velocity = AirVec3::new(0.0, 5.0, 0.0);
+    first_input.disc.normal_away_from_base_world = normal;
+    first_input.disc.angular_velocity_world_rad_per_s = angular_velocity;
+    let first = solve_tilted_disc_air_film(&first_input, None).expect("initial tilted film step");
+
+    let mut second_input = first_input.clone();
+    let candidate = AirVec3::new(
+        normal.x + angular_velocity.y * normal.z * first_input.timestep_s,
+        normal.y,
+        normal.z - angular_velocity.y * normal.x * first_input.timestep_s,
+    );
+    let norm =
+        (candidate.x * candidate.x + candidate.y * candidate.y + candidate.z * candidate.z).sqrt();
+    second_input.disc.normal_away_from_base_world =
+        AirVec3::new(candidate.x / norm, candidate.y / norm, candidate.z / norm);
+    let second = solve_tilted_disc_air_film(&second_input, Some(&first.checkpoint))
+        .expect("changing wedge slope must restart");
+    assert!(
+        second
+            .checkpoint
+            .sectors
+            .iter()
+            .all(|sector| sector.step_index == 2)
+    );
+    assert_eq!(
+        second,
+        solve_tilted_disc_air_film(&second_input, Some(&first.checkpoint))
+            .expect("changing-slope replay")
     );
 }
 

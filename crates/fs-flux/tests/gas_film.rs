@@ -61,6 +61,7 @@ fn fixture(cells: usize) -> GasFilmInput {
             lower_tangential_velocity_m_per_s: 0.0,
             upper_tangential_velocity_m_per_s: 0.0,
             gap_rate_m_per_s: 0.0,
+            gap_rate_profile_m_per_s: None,
         },
         initial_absolute_pressure_pa: pressure,
         gauge_reference_absolute_pressure_pa: pressure,
@@ -103,7 +104,7 @@ fn g1_planar_couette_is_uniform_and_has_analytic_shear_and_heat() {
     for pressure in active_pressure(&step) {
         assert!((pressure - input.initial_absolute_pressure_pa).abs() < 1.0e-9);
     }
-    for shear in step.receipt.upper_wall_shear_pa {
+    for shear in &step.receipt.upper_wall_shear_pa {
         assert!((shear.expect("active") - expected_shear).abs() < 1.0e-12);
     }
     for index in 0..input.grid.gap_m.len() {
@@ -449,6 +450,64 @@ fn restart_admits_physical_gap_evolution_and_changed_tangential_speed() {
     let second = solve_isothermal_gas_film_1d(&second_input, Some(&first.checkpoint))
         .expect("consistent second squeeze step");
     assert_eq!(second.checkpoint.step_index, 2);
+}
+
+#[test]
+fn restart_admits_nonuniform_gap_evolution_and_uses_cellwise_pressure_work() {
+    let mut first_input = fixture(8);
+    let rates = (0..8)
+        .map(|index| -2.0e-5 - index as f64 * 1.0e-6)
+        .collect::<Vec<_>>();
+    first_input.wall_motion.gap_rate_profile_m_per_s = Some(rates.clone());
+    let first =
+        solve_isothermal_gas_film_1d(&first_input, None).expect("first changing-wedge step");
+
+    let spacing = first_input.grid.length_m / first_input.grid.gap_m.len() as f64;
+    let reconstructed_normal_power = first
+        .absolute_pressure_pa
+        .iter()
+        .zip(&rates)
+        .map(|(pressure, rate)| -pressure.expect("active pressure") * rate * spacing)
+        .sum::<f64>();
+    assert!(
+        (first.receipt.normal_gap_power_to_gas_w_per_m - reconstructed_normal_power).abs()
+            <= 1.0e-12 * reconstructed_normal_power.abs().max(1.0)
+    );
+
+    let mut second_input = first_input.clone();
+    second_input.grid.gap_m = first_input
+        .grid
+        .gap_m
+        .iter()
+        .zip(&rates)
+        .map(|(gap, rate)| gap + rate * second_input.timestep_s)
+        .collect();
+    let second = solve_isothermal_gas_film_1d(&second_input, Some(&first.checkpoint))
+        .expect("nonuniform physical restart");
+    assert_eq!(second.checkpoint.step_index, 2);
+}
+
+#[test]
+fn per_cell_gap_rate_requires_one_finite_value_per_geometric_cell() {
+    let mut wrong_length = fixture(8);
+    wrong_length.wall_motion.gap_rate_profile_m_per_s = Some(vec![0.0; 7]);
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&wrong_length, None),
+        Err(GasFilmError::InvalidInput {
+            field: "wall_motion.gap_rate_profile_m_per_s.length"
+        })
+    );
+
+    let mut nonfinite = fixture(8);
+    let mut rates = vec![0.0; 8];
+    rates[3] = f64::NAN;
+    nonfinite.wall_motion.gap_rate_profile_m_per_s = Some(rates);
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&nonfinite, None),
+        Err(GasFilmError::InvalidInput {
+            field: "wall_motion.gap_rate_profile_m_per_s"
+        })
+    );
 }
 
 #[test]

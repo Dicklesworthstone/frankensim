@@ -1,8 +1,9 @@
 //! Explicit sector/strip adapter from a tilted rigid disc to `fs_flux::gas_film`.
 //!
 //! Each azimuthal sector is an independent radial strip of constant equivalent
-//! width.  This preserves the sampled area and first radial moment, but makes
-//! **no cross-sector-flow, resolved rim, molecular, contact, or outcome claim**.
+//! width. The surrogate preserves sampled area but has a retained, explicit
+//! radial first-moment discrepancy; it makes **no cross-sector-flow, resolved
+//! rim, molecular, contact, or outcome claim**.
 
 use core::fmt;
 
@@ -625,6 +626,28 @@ pub fn solve_tilted_disc_air_film(
         let radial_angle = 2.0 * core::f64::consts::PI * (sector as f64 + 0.5)
             / input.discretization.azimuthal_sectors as f64;
         let (radial_direction, circumferential_direction) = sector_basis(normal, radial_angle)?;
+        let interval_gap_rates = if let Some(state) = checkpoint {
+            let previous = &state.sectors[sector].active_gap_m;
+            if previous.len() != active {
+                return Err(AirFilmError::CheckpointMismatch {
+                    field: "active_gap_count",
+                });
+            }
+            gaps.iter()
+                .take(active)
+                .zip(previous)
+                .map(|(current, prior)| {
+                    checked(
+                        (current - prior) / input.timestep_s,
+                        "sector_interval_gap_rate",
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            rates.iter().take(active).copied().collect::<Vec<_>>()
+        };
+        let mut full_interval_gap_rates = interval_gap_rates.clone();
+        full_interval_gap_rates.resize(input.discretization.radial_cells, 0.0);
         let gas_input = GasFilmInput {
             identity: GasFilmIdentity {
                 case_id: format!("{}:sector:{sector}", input.identity.case_id),
@@ -656,7 +679,8 @@ pub fn solve_tilted_disc_air_film(
             wall_motion: MovingWallInput {
                 lower_tangential_velocity_m_per_s: 0.0,
                 upper_tangential_velocity_m_per_s: mean(&speeds, "sector_mean_radial_speed")?,
-                gap_rate_m_per_s: mean(&rates, "sector_mean_gap_rate")?,
+                gap_rate_m_per_s: mean(&interval_gap_rates, "sector_mean_gap_rate")?,
+                gap_rate_profile_m_per_s: Some(full_interval_gap_rates),
             },
             initial_absolute_pressure_pa: input.initial_absolute_pressure_pa,
             gauge_reference_absolute_pressure_pa: input.gauge_reference_absolute_pressure_pa,

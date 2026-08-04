@@ -136,14 +136,22 @@ pub struct GasFilmGrid1d {
 }
 
 /// Relative wall motion used by the Reynolds mass flux and Couette receipt.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MovingWallInput {
     /// Lower-wall line velocity [m s^-1].
     pub lower_tangential_velocity_m_per_s: f64,
     /// Upper-wall line velocity [m s^-1].
     pub upper_tangential_velocity_m_per_s: f64,
-    /// Uniform `dh/dt` [m s^-1]; negative values squeeze the gas.
+    /// Uniform fallback `dh/dt` [m s^-1]; negative values squeeze the gas.
+    ///
+    /// This value is used when `gap_rate_profile_m_per_s` is `None`.
     pub gap_rate_m_per_s: f64,
+    /// Optional exact per-cell `dh/dt` [m s^-1].
+    ///
+    /// A profile is required for changing wedge slopes, such as a tilting
+    /// rigid surface. When present it has exactly one value per geometric cell
+    /// and overrides `gap_rate_m_per_s` in storage/restart/work accounting.
+    pub gap_rate_profile_m_per_s: Option<Vec<f64>>,
 }
 
 /// Explicit continuum-domain gates.  There is no slip correction in this slice.
@@ -323,6 +331,8 @@ pub struct GasFilmReceipt {
     pub maximum_knudsen_number: f64,
     /// Maximum adjacent gap slope.
     pub maximum_gap_slope: f64,
+    /// Caller-declared input uncertainty retained without propagation or promotion.
+    pub input_uncertainty: GasFilmUncertainty,
 }
 
 /// Fully accepted pressure field, receipt, and restart checkpoint.
@@ -425,6 +435,13 @@ fn face_flux(
 }
 
 impl GasFilmInput {
+    fn gap_rate_m_per_s(&self, cell: usize) -> f64 {
+        self.wall_motion
+            .gap_rate_profile_m_per_s
+            .as_ref()
+            .map_or(self.wall_motion.gap_rate_m_per_s, |profile| profile[cell])
+    }
+
     fn validate(&self) -> Result<(usize, f64, f64, f64, f64), GasFilmError> {
         for (field, value) in [
             ("case_id", self.identity.case_id.as_str()),
@@ -577,6 +594,16 @@ impl GasFilmInput {
             self.wall_motion.gap_rate_m_per_s,
             "wall_motion.gap_rate_m_per_s",
         )?;
+        if let Some(profile) = &self.wall_motion.gap_rate_profile_m_per_s {
+            if profile.len() != self.grid.gap_m.len() {
+                return Err(GasFilmError::InvalidInput {
+                    field: "wall_motion.gap_rate_profile_m_per_s.length",
+                });
+            }
+            for rate in profile {
+                finite(*rate, "wall_motion.gap_rate_profile_m_per_s")?;
+            }
+        }
         let wall_speed = self
             .wall_motion
             .lower_tangential_velocity_m_per_s
@@ -683,7 +710,8 @@ fn initial_state(
                 .gap_m
                 .iter()
                 .take(active)
-                .map(|gap| gap - input.wall_motion.gap_rate_m_per_s * input.timestep_s)
+                .enumerate()
+                .map(|(index, gap)| gap - input.gap_rate_m_per_s(index) * input.timestep_s)
                 .collect::<Vec<_>>();
             for gap in &old_gap {
                 positive(*gap, "derived.previous_gap_m")?;
@@ -721,15 +749,16 @@ fn initial_state(
             for pressure in &state.active_absolute_pressure_pa {
                 positive(*pressure, "checkpoint.active_absolute_pressure_pa")?;
             }
-            for (new_gap, old_gap) in input
+            for (index, (new_gap, old_gap)) in input
                 .grid
                 .gap_m
                 .iter()
                 .take(active)
                 .zip(&state.active_gap_m)
+                .enumerate()
             {
                 let expected = derived(
-                    *old_gap + input.wall_motion.gap_rate_m_per_s * input.timestep_s,
+                    *old_gap + input.gap_rate_m_per_s(index) * input.timestep_s,
                     "checkpoint_expected_active_gap_m",
                 )?;
                 let tolerance = RESTART_GAP_EVOLUTION_ABSOLUTE_TOLERANCE_M
@@ -1028,6 +1057,15 @@ fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
         input.wall_motion.upper_tangential_velocity_m_per_s,
     );
     number(&mut output, "gap_rate", input.wall_motion.gap_rate_m_per_s);
+    match &input.wall_motion.gap_rate_profile_m_per_s {
+        None => text(&mut output, "gap_rate_profile", "none"),
+        Some(profile) => {
+            text(&mut output, "gap_rate_profile", "per-cell");
+            for value in profile {
+                number(&mut output, "gap_rate_cell", *value);
+            }
+        }
+    }
     number(
         &mut output,
         "initial_pressure",
@@ -1307,7 +1345,7 @@ pub fn solve_isothermal_gas_film_1d(
             "gauge_pressure_load_n_per_m",
         )?;
         normal_gap_power = derived(
-            normal_gap_power - pressure_value * input.wall_motion.gap_rate_m_per_s * spacing,
+            normal_gap_power - pressure_value * input.gap_rate_m_per_s(index) * spacing,
             "normal_gap_power_to_gas_w_per_m",
         )?;
         let shear = derived(
