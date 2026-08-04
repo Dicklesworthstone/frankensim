@@ -9,9 +9,10 @@ use fs_couple::StableId;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_rep_frep::AxisymmetricSupportAuthority;
 use patch_kinematics::{
-    Creepage, CurvatureMetadata, OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata,
-    PatchKinematicThresholds, PatchKinematicsInput, ProfileSupportKinematics, SurfaceOrder,
-    TangentGaugeInput, TangentGaugeSource, compute_patch_kinematics,
+    Creepage, CurvatureMetadata, MovingOneModeBaseState, MovingOneModePatchBridgeInput,
+    OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata, PatchKinematicThresholds,
+    PatchKinematicsInput, ProfileSupportKinematics, SurfaceOrder, TangentGaugeInput,
+    TangentGaugeSource, bridge_moving_one_mode_patch_kinematics, compute_patch_kinematics,
 };
 
 fn id(value: &str) -> StableId {
@@ -101,6 +102,93 @@ fn assert_vec_close(left: Vec3, right: Vec3) {
     assert_close(left.x, right.x);
     assert_close(left.y, right.y);
     assert_close(left.z, right.z);
+}
+
+#[test]
+fn moving_one_mode_bridge_uses_disc_material_motion_without_faking_a_base_body() {
+    let bridge = bridge_moving_one_mode_patch_kinematics(MovingOneModePatchBridgeInput {
+        profile_support: ProfileSupportKinematics {
+            disc_arm_world_m: Vec3::new(0.0, 0.0, -1.0),
+            disc_point_world_m: Vec3::ZERO,
+            gap_m: 0.0,
+            source_feature: 7,
+            support_authority: AxisymmetricSupportAuthority::Estimate,
+        },
+        disc_state: state(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        ),
+        disc_mass_properties: properties(),
+        base_mode: MovingOneModeBaseState {
+            undeformed_contact_point_world_m: Vec3::ZERO,
+            vertical_displacement_m: 0.25,
+            vertical_velocity_m_per_s: -0.5,
+        },
+        normal_world: Vec3::new(0.0, 0.0, 4.0),
+        tangent_gauge: TangentGaugeInput {
+            reference_world: Vec3::new(1.0, 0.0, 0.0),
+            rotation_rad: 0.0,
+        },
+        thresholds: thresholds(),
+    })
+    .expect("moving-one-mode bridge");
+    // omega x r cancels the disc COM velocity at the selected material point.
+    assert_vec_close(bridge.disc_point.point_velocity_world, Vec3::ZERO);
+    assert_vec_close(bridge.base_contact_point_world_m, Vec3::new(0.0, 0.0, 0.25));
+    assert_vec_close(
+        bridge.base_contact_velocity_world_m_per_s,
+        Vec3::new(0.0, 0.0, -0.5),
+    );
+    assert_vec_close(bridge.normal_world, Vec3::new(0.0, 0.0, 1.0));
+    assert_close(bridge.normal_gap_m, -0.25);
+    assert_close(bridge.tangent_counterpart_residual_m, 0.0);
+    assert_vec_close(
+        bridge.relative_velocity_world_m_per_s,
+        Vec3::new(0.0, 0.0, 0.5),
+    );
+    assert_close(bridge.normal_relative_velocity_m_per_s, 0.5);
+    assert_vec_close(
+        bridge.tangential_relative_velocity_world_m_per_s,
+        Vec3::ZERO,
+    );
+    assert_vec_close(
+        bridge
+            .tangent_basis
+            .first_world
+            .cross(bridge.tangent_basis.second_world),
+        bridge.normal_world,
+    );
+}
+
+#[test]
+fn moving_one_mode_bridge_refuses_a_tangentially_unrelated_base_point() {
+    let result = bridge_moving_one_mode_patch_kinematics(MovingOneModePatchBridgeInput {
+        profile_support: ProfileSupportKinematics {
+            disc_arm_world_m: Vec3::new(0.0, 0.0, -1.0),
+            disc_point_world_m: Vec3::ZERO,
+            gap_m: 0.0,
+            source_feature: 7,
+            support_authority: AxisymmetricSupportAuthority::Estimate,
+        },
+        disc_state: state(Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO, Vec3::ZERO),
+        disc_mass_properties: properties(),
+        base_mode: MovingOneModeBaseState {
+            undeformed_contact_point_world_m: Vec3::new(1.0e-2, 0.0, 0.0),
+            vertical_displacement_m: 0.0,
+            vertical_velocity_m_per_s: 0.0,
+        },
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        tangent_gauge: TangentGaugeInput {
+            reference_world: Vec3::new(1.0, 0.0, 0.0),
+            rotation_rad: 0.0,
+        },
+        thresholds: thresholds(),
+    });
+    assert!(matches!(
+        result,
+        Err(patch_kinematics::PatchKinematicsError::MovingOneModeCounterpartMismatch { .. })
+    ));
 }
 
 #[test]

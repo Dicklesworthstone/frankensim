@@ -39,8 +39,9 @@ mod axisymmetric_mass;
 mod ival;
 
 pub use axisymmetric::{
-    AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricError,
-    AxisymmetricIdentity, AxisymmetricSupportAuthority, AxisymmetricSupportError,
+    AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricCurvatureAuthority,
+    AxisymmetricCurvatureError, AxisymmetricError, AxisymmetricIdentity,
+    AxisymmetricPrincipalCurvatureEstimate, AxisymmetricSupportAuthority, AxisymmetricSupportError,
     AxisymmetricSupportPoint, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
     SquatDiscEdgeTreatment, squat_disc,
 };

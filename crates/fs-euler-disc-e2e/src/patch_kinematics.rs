@@ -309,6 +309,66 @@ pub struct PatchKinematicsInput {
     pub tangent_effort_probe_world_n: Option<Vec3>,
 }
 
+/// Kinematics of one scalar, vertical flexible-base mode at a contact point.
+///
+/// This is intentionally not a rigid-body state: it carries no invented base
+/// mass, orientation, angular velocity, or material arm.  It is only the
+/// moving-one-mode base state that the reduced Euler runner actually owns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MovingOneModeBaseState {
+    /// Contact point in the undeformed base reference configuration [m].
+    pub undeformed_contact_point_world_m: Vec3,
+    /// Signed vertical displacement of that material point [m].
+    pub vertical_displacement_m: f64,
+    /// Signed vertical material-point velocity [m/s].
+    pub vertical_velocity_m_per_s: f64,
+}
+
+/// Inputs for the geometry-to-patch bridge used by the moving-one-mode base.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MovingOneModePatchBridgeInput {
+    /// Profile-selected disc support point and support authority.
+    pub profile_support: ProfileSupportKinematics,
+    /// Disc state used to reconstruct the selected material-point velocity.
+    pub disc_state: RigidBodyState,
+    /// Disc centroidal mass/inertia.
+    pub disc_mass_properties: MassProperties,
+    /// Explicit scalar base-mode state; never reinterpreted as a rigid body.
+    pub base_mode: MovingOneModeBaseState,
+    /// Unit world normal used by the downstream patch law.
+    pub normal_world: Vec3,
+    /// Caller-selected tangent gauge and deterministic in-plane rotation.
+    pub tangent_gauge: TangentGaugeInput,
+    /// Gauge and support-point coincidence tolerances.
+    pub thresholds: PatchKinematicThresholds,
+}
+
+/// Direct kinematics available before any normal/tangential constitutive law.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MovingOneModePatchBridge {
+    /// Disc material-point reconstruction from the actual rigid-body state.
+    pub disc_point: PointKinematics,
+    /// Deformed base contact position [m].
+    pub base_contact_point_world_m: Vec3,
+    /// Base material-point velocity [m/s], constrained to world vertical.
+    pub base_contact_velocity_world_m_per_s: Vec3,
+    /// Signed normal gap, `disc_point - base_point` dotted with the normal [m].
+    /// It is intentionally unclassified; no contact decision is made here.
+    pub normal_gap_m: f64,
+    /// Tangential residual between the two declared counterpart points [m].
+    pub tangent_counterpart_residual_m: f64,
+    /// Disc-minus-base material-point velocity [m/s].
+    pub relative_velocity_world_m_per_s: Vec3,
+    /// Signed normal relative velocity [m/s].
+    pub normal_relative_velocity_m_per_s: f64,
+    /// Tangential disc-minus-base relative velocity [m/s].
+    pub tangential_relative_velocity_world_m_per_s: Vec3,
+    /// Deterministic unit normal retained for a downstream patch law.
+    pub normal_world: Vec3,
+    /// Deterministic right-handed tangent basis around `normal_world`.
+    pub tangent_basis: TangentBasis,
+}
+
 /// One ordered pre-constitutive patch-kinematics record.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatchKinematics {
@@ -373,6 +433,14 @@ pub enum PatchKinematicsError {
         /// Declared tangent-coincidence tolerance in metres.
         tangent_tolerance_m: f64,
     },
+    /// The moving-one-mode base point is not on the normal line through the
+    /// selected disc support, so it cannot represent the same patch.
+    MovingOneModeCounterpartMismatch {
+        /// Tangential separation magnitude in metres.
+        tangent_residual_m: f64,
+        /// Declared tangent-coincidence tolerance in metres.
+        tangent_tolerance_m: f64,
+    },
     /// A lower-level rigid-body point kinematics query refused input.
     RigidBodyRefusal { detail: DynamicsError },
     /// A finite derived result could not be represented.
@@ -388,6 +456,128 @@ impl fmt::Display for PatchKinematicsError {
 }
 
 impl std::error::Error for PatchKinematicsError {}
+
+/// Bridge the actual disc rigid-body point motion to the moving-one-mode base.
+///
+/// It intentionally does not classify contact, derive a normal force, or make
+/// the scalar base mode into a fake rigid body.  The returned point velocities
+/// and deterministic basis are the smallest common input for later patch laws.
+pub fn bridge_moving_one_mode_patch_kinematics(
+    input: MovingOneModePatchBridgeInput,
+) -> Result<MovingOneModePatchBridge, PatchKinematicsError> {
+    input.thresholds.validate()?;
+    validate_profile_support(input.profile_support)?;
+    finite_vec(
+        input.base_mode.undeformed_contact_point_world_m,
+        "base_mode.undeformed_contact_point_world_m",
+    )?;
+    finite_scalar(
+        input.base_mode.vertical_displacement_m,
+        "base_mode.vertical_displacement_m",
+    )?;
+    finite_scalar(
+        input.base_mode.vertical_velocity_m_per_s,
+        "base_mode.vertical_velocity_m_per_s",
+    )?;
+    if !input.tangent_gauge.reference_world.is_finite()
+        || !input.tangent_gauge.rotation_rad.is_finite()
+    {
+        return Err(PatchKinematicsError::InvalidInput {
+            field: "tangent gauge",
+        });
+    }
+    let normal_world = unit(input.normal_world, "normal_world")?;
+    let tangent_basis = tangent_basis(normal_world, input.tangent_gauge, &input.thresholds)?;
+    let disc_arm_body_m = input
+        .disc_state
+        .pose()
+        .orientation()
+        .rotate_world_to_body(input.profile_support.disc_arm_world_m);
+    finite_vec(disc_arm_body_m, "disc_contact_arm_body_m")?;
+    let disc_point = input
+        .disc_state
+        .point_kinematics(input.disc_mass_properties, disc_arm_body_m)
+        .map_err(rigid_refusal)?;
+    let support_point_residual_m = norm(
+        disc_point
+            .point_world
+            .sub(input.profile_support.disc_point_world_m),
+        "support_point_residual_m",
+    )?;
+    if support_point_residual_m > input.thresholds.support_point_coincidence_tolerance_m {
+        return Err(PatchKinematicsError::SupportPointMismatch {
+            residual_m: support_point_residual_m,
+            tolerance_m: input.thresholds.support_point_coincidence_tolerance_m,
+        });
+    }
+    let base_contact_point_world_m = checked_add(
+        input.base_mode.undeformed_contact_point_world_m,
+        Vec3::new(0.0, 0.0, input.base_mode.vertical_displacement_m),
+        "base_mode.deformed_contact_point_world_m",
+    )?;
+    let base_contact_velocity_world_m_per_s =
+        Vec3::new(0.0, 0.0, input.base_mode.vertical_velocity_m_per_s);
+    finite_vec(
+        base_contact_velocity_world_m_per_s,
+        "base_mode.vertical_contact_velocity_world_m_per_s",
+    )?;
+    // The scalar base mode has a single named point. A tangentially displaced
+    // location is not the same contact patch, even if a caller could make its
+    // vertical gap appear plausible; refuse it before any contact law sees it.
+    let disc_minus_base_world_m = checked_sub(
+        disc_point.point_world,
+        base_contact_point_world_m,
+        "disc_minus_base_counterpart_position",
+    )?;
+    let normal_gap_m = checked_dot(
+        disc_minus_base_world_m,
+        normal_world,
+        "moving_one_mode_normal_gap",
+    )?;
+    let tangent_counterpart_world_m = checked_sub(
+        disc_minus_base_world_m,
+        normal_world.scale(normal_gap_m),
+        "moving_one_mode_tangent_counterpart",
+    )?;
+    let tangent_counterpart_residual_m = norm(
+        tangent_counterpart_world_m,
+        "moving_one_mode_tangent_counterpart_residual",
+    )?;
+    if tangent_counterpart_residual_m > input.thresholds.tangent_counterpart_coincidence_tolerance_m
+    {
+        return Err(PatchKinematicsError::MovingOneModeCounterpartMismatch {
+            tangent_residual_m: tangent_counterpart_residual_m,
+            tangent_tolerance_m: input.thresholds.tangent_counterpart_coincidence_tolerance_m,
+        });
+    }
+    let relative_velocity_world_m_per_s = checked_sub(
+        disc_point.point_velocity_world,
+        base_contact_velocity_world_m_per_s,
+        "moving_one_mode_relative_velocity",
+    )?;
+    let normal_relative_velocity_m_per_s = checked_dot(
+        relative_velocity_world_m_per_s,
+        normal_world,
+        "moving_one_mode_normal_relative_velocity",
+    )?;
+    let tangential_relative_velocity_world_m_per_s = checked_sub(
+        relative_velocity_world_m_per_s,
+        normal_world.scale(normal_relative_velocity_m_per_s),
+        "moving_one_mode_tangential_relative_velocity",
+    )?;
+    Ok(MovingOneModePatchBridge {
+        disc_point,
+        base_contact_point_world_m,
+        base_contact_velocity_world_m_per_s,
+        normal_gap_m,
+        tangent_counterpart_residual_m,
+        relative_velocity_world_m_per_s,
+        normal_relative_velocity_m_per_s,
+        tangential_relative_velocity_world_m_per_s,
+        normal_world,
+        tangent_basis,
+    })
+}
 
 /// Computes one bounded, pre-constitutive Euler contact-patch record.
 pub fn compute_patch_kinematics(
@@ -797,6 +987,12 @@ fn unit(value: Vec3, field: &'static str) -> Result<Vec3, PatchKinematicsError> 
 
 fn checked_sub(left: Vec3, right: Vec3, field: &'static str) -> Result<Vec3, PatchKinematicsError> {
     let result = left.sub(right);
+    finite_vec(result, field)?;
+    Ok(result)
+}
+
+fn checked_add(left: Vec3, right: Vec3, field: &'static str) -> Result<Vec3, PatchKinematicsError> {
+    let result = left.add(right);
     finite_vec(result, field)?;
     Ok(result)
 }

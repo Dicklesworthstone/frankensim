@@ -106,6 +106,95 @@ pub struct AxisymmetricSupportPoint {
     pub authority: AxisymmetricSupportAuthority,
 }
 
+/// Authority attached to an [`AxisymmetricPrincipalCurvatureEstimate`].
+///
+/// The local formula is analytic for the retained line/arc feature, but all
+/// arithmetic is binary64 and no directed-rounding enclosure is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisymmetricCurvatureAuthority {
+    /// Deterministic binary64 local evaluation, not a numerical certificate.
+    Estimate,
+}
+
+/// Local principal-curvature magnitudes on one smooth revolved feature.
+///
+/// `meridional` is curvature within the generating meridian and `azimuthal`
+/// is curvature around the revolution axis.  The values are magnitudes rather
+/// than oriented curvatures: a downstream contact law must declare its own
+/// normal/sign convention.  The uncertainty is a conservative binary64
+/// rounding/conditioning estimate, not a geometric tolerance certificate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricPrincipalCurvatureEstimate {
+    /// Retained meridian feature that supplied the local differential geometry.
+    pub source_feature: usize,
+    /// Principal curvature in the meridian direction [m^-1].
+    pub meridional_m_inverse: f64,
+    /// Principal curvature in the azimuthal direction [m^-1].
+    pub azimuthal_m_inverse: f64,
+    /// Conservative absolute binary64 rounding/conditioning estimate [m^-1].
+    pub uncertainty_m_inverse: f64,
+    /// Explicit non-certificate authority label.
+    pub authority: AxisymmetricCurvatureAuthority,
+}
+
+/// Refusal from local axisymmetric principal-curvature extraction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxisymmetricCurvatureError {
+    /// Directional support selection did not produce one unique point.
+    Support(AxisymmetricSupportError),
+    /// Retained construction evidence no longer verifies.
+    InvalidChart(AxisymmetricError),
+    /// Cancellation was observed before local geometry could be published.
+    Cancelled,
+    /// The claimed feature index is not retained by this chart.
+    FeatureOutOfRange {
+        /// Claimed meridian feature index.
+        source_feature: usize,
+    },
+    /// The supplied support point was not finite.
+    NonFinitePoint {
+        /// Rejected world-space feature point.
+        point: Point3,
+    },
+    /// The support point is not on the claimed selected feature within the
+    /// chart's local binary64 point tolerance.
+    PointNotOnSelectedFeature {
+        /// Claimed meridian feature index.
+        source_feature: usize,
+        /// Distance from supplied point to that feature [m].
+        residual_m: f64,
+        /// Local binary64 on-feature tolerance [m].
+        tolerance_m: f64,
+    },
+    /// A local axis point has no well-conditioned azimuthal curvature in this
+    /// representation, so the API refuses rather than selecting an azimuth.
+    AxisPoint {
+        /// Claimed meridian feature index.
+        source_feature: usize,
+    },
+    /// The selected point is on a feature boundary.  Even a tangent-matched
+    /// join can have a curvature jump, so v1 withholds a local value.
+    NonsmoothFeatureBoundary {
+        /// Claimed meridian feature index.
+        source_feature: usize,
+    },
+    /// A retained feature did not yield a finite non-zero local length/radius.
+    DegenerateFeature {
+        /// Claimed meridian feature index.
+        source_feature: usize,
+    },
+    /// A finite input produced a non-finite curvature or uncertainty.
+    NonFiniteResult,
+}
+
+impl core::fmt::Display for AxisymmetricCurvatureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for AxisymmetricCurvatureError {}
+
 /// Refusal from [`AxisymmetricChart::minimum_support_point`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum AxisymmetricSupportError {
@@ -585,6 +674,101 @@ impl AxisymmetricChart {
             support_value: best.value,
             source_feature: best.source_feature,
             authority: AxisymmetricSupportAuthority::Estimate,
+        })
+    }
+
+    /// Select support for `direction` and extract its principal curvatures.
+    ///
+    /// The support search is repeated inside this call rather than accepting a
+    /// public [`AxisymmetricSupportPoint`]: a caller could otherwise forge an
+    /// on-feature but non-minimizing point and mislabel it as selected support.
+    /// It refuses axis points and every feature boundary,
+    /// including tangent-matched joins, because they do not provide a single
+    /// reliable local principal-curvature pair in this bounded representation.
+    pub fn principal_curvatures_at_support_direction(
+        &self,
+        direction: Vec3,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricPrincipalCurvatureEstimate, AxisymmetricCurvatureError> {
+        let support = self
+            .minimum_support_point(direction, cx)
+            .map_err(AxisymmetricCurvatureError::Support)?;
+        self.principal_curvatures_at_feature_point(support.source_feature, support.point, cx)
+    }
+
+    /// Extract local curvature at an explicitly named feature point.
+    ///
+    /// This is useful for diagnostics, but it does not claim the point is a
+    /// global support minimizer. Consumers needing selected-contact curvature
+    /// must call [`Self::principal_curvatures_at_support_direction`].
+    pub fn principal_curvatures_at_feature_point(
+        &self,
+        source_feature: usize,
+        point: Point3,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricPrincipalCurvatureEstimate, AxisymmetricCurvatureError> {
+        match self.verify_construction_with_cx(cx) {
+            Ok(_) => {}
+            Err(AxisymmetricError::Cancelled) => return Err(AxisymmetricCurvatureError::Cancelled),
+            Err(error) => return Err(AxisymmetricCurvatureError::InvalidChart(error)),
+        }
+        if !finite3(point) {
+            return Err(AxisymmetricCurvatureError::NonFinitePoint { point });
+        }
+        let Some(segment) = self.segments.get(source_feature).copied() else {
+            return Err(AxisymmetricCurvatureError::FeatureOutOfRange { source_feature });
+        };
+        if axis_closure(segment) {
+            return Err(AxisymmetricCurvatureError::AxisPoint { source_feature });
+        }
+        let local = MeridianPoint::new(point.x.hypot(point.y), point.z);
+        if !finite_point(local) {
+            return Err(AxisymmetricCurvatureError::NonFinitePoint { point });
+        }
+        let closest = nearest_on_segment(segment, local);
+        let residual_m = squared_delta(local, closest).sqrt();
+        let tolerance_m = query_tolerance(local, closest);
+        if !residual_m.is_finite() || !tolerance_m.is_finite() {
+            return Err(AxisymmetricCurvatureError::NonFiniteResult);
+        }
+        if residual_m > tolerance_m {
+            return Err(AxisymmetricCurvatureError::PointNotOnSelectedFeature {
+                source_feature,
+                residual_m,
+                tolerance_m,
+            });
+        }
+        if local.radius <= tolerance_m {
+            return Err(AxisymmetricCurvatureError::AxisPoint { source_feature });
+        }
+        if squared_delta(closest, segment.start()).sqrt() <= tolerance_m
+            || squared_delta(closest, segment.end()).sqrt() <= tolerance_m
+        {
+            return Err(AxisymmetricCurvatureError::NonsmoothFeatureBoundary { source_feature });
+        }
+        let (meridional_m_inverse, azimuthal_m_inverse, feature_scale_m) =
+            local_curvature_magnitudes(segment, closest)
+                .ok_or(AxisymmetricCurvatureError::DegenerateFeature { source_feature })?;
+        let conditioning_m_inverse = feature_scale_m.recip().max(local.radius.recip());
+        let uncertainty_m_inverse = 4096.0
+            * f64::EPSILON
+            * (meridional_m_inverse
+                .abs()
+                .max(azimuthal_m_inverse.abs())
+                .max(conditioning_m_inverse));
+        if !meridional_m_inverse.is_finite()
+            || !azimuthal_m_inverse.is_finite()
+            || !uncertainty_m_inverse.is_finite()
+            || uncertainty_m_inverse < 0.0
+        {
+            return Err(AxisymmetricCurvatureError::NonFiniteResult);
+        }
+        Ok(AxisymmetricPrincipalCurvatureEstimate {
+            source_feature,
+            meridional_m_inverse,
+            azimuthal_m_inverse,
+            uncertainty_m_inverse,
+            authority: AxisymmetricCurvatureAuthority::Estimate,
         })
     }
 
@@ -1189,6 +1373,48 @@ fn nearest_on_segment(segment: MeridianSegment, q: MeridianPoint) -> MeridianPoi
                     end
                 }
             }
+        }
+    }
+}
+
+/// Return unsigned local meridional/azimuthal curvatures and the smallest
+/// positive geometric scale used to bound binary64 conditioning.
+fn local_curvature_magnitudes(
+    segment: MeridianSegment,
+    point: MeridianPoint,
+) -> Option<(f64, f64, f64)> {
+    match segment {
+        MeridianSegment::Line { start, end } => {
+            let dr = end.radius - start.radius;
+            let dz = end.axial - start.axial;
+            let length = dr.hypot(dz);
+            if !length.is_finite()
+                || length <= 0.0
+                || !point.radius.is_finite()
+                || point.radius <= 0.0
+            {
+                return None;
+            }
+            let azimuthal = (dz / length).abs() / point.radius;
+            (azimuthal.is_finite() && length.is_finite()).then_some((0.0, azimuthal, length))
+        }
+        MeridianSegment::Arc { center, .. } => {
+            let radius = arc_radius(segment);
+            if !radius.is_finite()
+                || radius <= 0.0
+                || !point.radius.is_finite()
+                || point.radius <= 0.0
+            {
+                return None;
+            }
+            // For a unit-speed circular meridian, |dz/ds| is the absolute
+            // radial component of the circle radius vector.  Its revolution
+            // gives |k_azimuthal| = |dz/ds| / rho.
+            let radial_component = (point.radius - center.radius) / radius;
+            let azimuthal = radial_component.abs() / point.radius;
+            let meridional = radius.recip();
+            (meridional.is_finite() && azimuthal.is_finite())
+                .then_some((meridional, azimuthal, radius))
         }
     }
 }
