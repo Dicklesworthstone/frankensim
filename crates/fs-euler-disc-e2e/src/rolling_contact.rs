@@ -241,7 +241,7 @@ pub fn evaluate_rolling_contact(
         rolling_free_couple_world_nm,
         "total_moment_about_com_world_nm",
     )?;
-    let body_power_w = checked_add(
+    let body_power_w = checked_scalar_add(
         checked_mul(
             generic.wrench.contour_force_n,
             input.contour_speed_mps,
@@ -347,6 +347,16 @@ fn checked_cross(
 fn checked_add(left: Vec3, right: Vec3, field: &'static str) -> Result<Vec3, RollingContactError> {
     let value = left.add(right);
     finite_vec(value, field)?;
+    Ok(value)
+}
+
+fn checked_scalar_add(
+    left: f64,
+    right: f64,
+    field: &'static str,
+) -> Result<f64, RollingContactError> {
+    let value = left + right;
+    finite(value, field)?;
     Ok(value)
 }
 

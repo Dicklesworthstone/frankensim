@@ -521,9 +521,9 @@ fn merged_uncertainty(
         });
     }
     Ok(InputUncertainty {
-        radius_relative: material.uncertainty.radius_relative.max(curvature_relative),
-        modulus_relative: material.uncertainty.modulus_relative,
-        load_relative: material.uncertainty.load_relative,
+        radius_relative: material.radius_relative.max(curvature_relative),
+        modulus_relative: material.modulus_relative,
+        load_relative: material.load_relative,
     })
 }
 
