@@ -1,3 +1,5 @@
+//! Outcome, censoring, refinement, and calibration-admission regressions.
+
 use fs_euler_disc_e2e::convergence::{
     CalibrationEvidenceKind, CalibrationReadinessError, CalibrationReadinessInput,
     CensorAwareDurationOrdering, CensorAwareRankingRefusal, ConvergenceScales, DeclaredEvidence,
@@ -7,7 +9,8 @@ use fs_euler_disc_e2e::convergence::{
     compare_observed_durations,
 };
 use fs_euler_disc_e2e::coupled_runner::{
-    CoupledControls, CoupledFactors, CoupledInitialState, run_closed_reduced,
+    CoupledControls, CoupledFactors, CoupledInitialState, CoupledNumericalRefusalReason,
+    run_closed_reduced,
 };
 
 fn factors() -> CoupledFactors {
@@ -115,6 +118,7 @@ fn censor_aware_ordering_retains_overlapping_bounds_as_indeterminate() {
 fn censor_aware_ordering_refuses_numerical_failures() {
     let refusal = RunOutcome::NumericalRefusal {
         last_valid_time_s: 0.5,
+        reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
     };
     assert_eq!(
         compare_censor_aware_durations(refusal, observed(1.0)),

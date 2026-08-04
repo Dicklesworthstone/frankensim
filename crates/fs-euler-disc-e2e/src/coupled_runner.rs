@@ -143,7 +143,18 @@ pub struct CoupledSample {
 pub enum CoupledTerminal {
     TerminalInclination,
     HorizonReached,
-    NumericalRefusal,
+    NumericalRefusal {
+        reason: CoupledNumericalRefusalReason,
+    },
+}
+
+/// Typed reason why the reduced numerical trajectory refused to continue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoupledNumericalRefusalReason {
+    /// The declared separation-to-contact transition budget was exceeded.
+    ReimpactLimitExceeded,
+    /// Energy accounting or the reduced base state became non-finite.
+    NonFiniteEnergyOrBaseState,
 }
 
 /// Deterministic, restartable reduced state.  It contains only actual state,
@@ -399,7 +410,9 @@ fn run_closed_with_geometry(
             return Ok(CoupledRun {
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::ReimpactLimitExceeded,
+                },
                 applicability: applicability(),
                 model_disagreement: disagreement(),
             });
@@ -609,7 +622,9 @@ fn run_closed_with_geometry(
             return Ok(CoupledRun {
                 samples,
                 checkpoint,
-                terminal: CoupledTerminal::NumericalRefusal,
+                terminal: CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState,
+                },
                 applicability: applicability(),
                 model_disagreement: disagreement(),
             });

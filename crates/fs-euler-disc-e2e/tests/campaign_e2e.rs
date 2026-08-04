@@ -148,6 +148,7 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
             boolean(outcome, "observed_physical_terminal"),
             outcome_kind == "physical-terminal-inclination"
         );
+        assert!(outcome.contains_key("numerical_refusal_reason"));
         let energy = object(fields.get("energy").expect("closed energy accounting"));
         assert!(number(energy, "initial_total_j") > 0.0);
         assert!(number(energy, "final_total_j") >= 0.0);
@@ -172,12 +173,22 @@ fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
         .iter()
         .find(|fields| string(fields, "scenario") == "equal-mass-ring-vs-solid-ranking-convergence")
         .expect("censor-aware ranking convergence record");
-    assert!(boolean(ranking, "ordering_agreement"));
-    assert!(boolean(
+    assert!(!boolean(ranking, "ordering_agreement"));
+    assert!(!boolean(
         ranking,
         "ring_shorter_than_solid_bound_proven_at_all_rungs"
     ));
-    assert!(ranking.contains_key("ranking_numerically_supported"));
+    assert!(!boolean(ranking, "ranking_numerically_supported"));
+    let ranking_rungs = object(ranking.get("rungs").expect("ranking rungs"));
+    let h2 = object(ranking_rungs.get("h2").expect("h2 ranking rung"));
+    assert_eq!(
+        string(h2, "censor_aware_ordering"),
+        "ring-numerical-refusal"
+    );
+    assert_eq!(
+        string(h2, "ring_numerical_refusal_reason"),
+        "reimpact-limit-exceeded"
+    );
     let calibration = v3_roots
         .iter()
         .find(|fields| string(fields, "scenario") == "physical-calibration-readiness")

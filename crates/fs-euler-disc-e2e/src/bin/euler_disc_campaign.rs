@@ -6,14 +6,14 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_euler_disc_e2e::convergence::{
-    CalibrationReadinessInput, CensorAwareDurationOrdering, ConvergenceScales, DeclaredEvidence,
-    HorizonContinuationPolicy, ObservedOrder, RefinementMode, RunOutcome, ThreeRungConvergence,
-    admit_calibration_readiness, analyse_three_rung_convergence, classify_outcome,
-    compare_censor_aware_durations,
+    CalibrationReadinessInput, CensorAwareDurationOrdering, CensorAwareRankingRefusal,
+    ConvergenceScales, DeclaredEvidence, HorizonContinuationPolicy, ObservedOrder, RefinementMode,
+    RunOutcome, ThreeRungConvergence, admit_calibration_readiness, analyse_three_rung_convergence,
+    classify_outcome, compare_censor_aware_durations,
 };
 use fs_euler_disc_e2e::coupled_runner::{
-    CoupledChannelFactors, CoupledControls, CoupledInitialState, CoupledRun,
-    run_closed_profile_reduced,
+    CoupledChannelFactors, CoupledControls, CoupledInitialState, CoupledNumericalRefusalReason,
+    CoupledRun, run_closed_profile_reduced,
 };
 use fs_euler_disc_e2e::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 use fs_euler_disc_e2e::{
@@ -381,14 +381,23 @@ fn closed_case_record(
 ) -> Result<String, String> {
     let run = &continued.run;
     let last = &continued.last_sample;
-    let (outcome_kind, observed_physical_terminal, retained_time_s) = match outcome {
+    let (outcome_kind, observed_physical_terminal, retained_time_s, refusal_reason) = match outcome
+    {
         RunOutcome::PhysicalTerminal { event_time_s, .. } => {
-            ("physical-terminal-inclination", true, event_time_s)
+            ("physical-terminal-inclination", true, event_time_s, "none")
         }
-        RunOutcome::RightCensored { censor_time_s } => ("right-censored", false, censor_time_s),
-        RunOutcome::NumericalRefusal { last_valid_time_s } => {
-            ("numerical-refusal", false, last_valid_time_s)
+        RunOutcome::RightCensored { censor_time_s } => {
+            ("right-censored", false, censor_time_s, "none")
         }
+        RunOutcome::NumericalRefusal {
+            last_valid_time_s,
+            reason,
+        } => (
+            "numerical-refusal",
+            false,
+            last_valid_time_s,
+            numerical_refusal_reason_name(reason),
+        ),
     };
     let properties = profile.mass_properties;
     let channels = channels_for(case);
@@ -396,7 +405,7 @@ fn closed_case_record(
         .support_source_feature
         .ok_or_else(|| format!("{}: profile support feature was not retained", case.name))?;
     Ok(format!(
-        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-{}\",\"model\":\"fs-mbd-profile-native-reduced-coupled-runner\",\"authority\":\"numerical-slice-only\",\"units\":\"SI:m,kg,s,N,J,rad\",\"profile\":{{\"kind\":\"{}\",\"identity_u64_dec\":\"{}\",\"support_source_feature\":{},\"mass_and_support_same_chart\":true}},\"inputs\":{{\"input_units\":\"SI:kg,m,s,N,J,rad\",\"mass_kg\":{:.17e},\"radius_m\":{:.17e},\"thickness_m\":{:.17e},\"density_kg_m3\":{:.17e},\"gravity_m_per_s2\":{:.17e},\"transverse_inertia_kg_m2\":{:.17e},\"axial_inertia_kg_m2\":{:.17e},\"timestep_s\":{:.17e},\"initial_segment_maximum_steps\":{},\"maximum_steps\":{},\"initial_horizon_s\":{:.17e},\"maximum_horizon_s\":{:.17e},\"declared_final_horizon_s\":{:.17e},\"continuation_count\":{},\"terminal_inclination_rad\":{:.17e},\"reimpact_limit\":{},\"initial_inclination_rad\":{:.17e},\"initial_precession_rad_per_s\":{:.17e},\"initial_spin_rad_per_s\":{:.17e},\"sliding_friction_coefficient\":{:.17e},\"rolling_resistance_m\":{:.17e},\"base_effective_mass_kg\":{:.17e},\"base_stiffness_n_per_m\":{:.17e},\"base_damping_n_s_per_m\":{:.17e},\"contact_stiffness_n_per_m\":{:.17e},\"contact_damping_n_s_per_m\":{:.17e},\"gas_rotational_damping_n_m_s\":{:.17e},\"gas_translation_damping_n_s_per_m\":{:.17e}}},\"terminal\":\"{}\",\"outcome\":{{\"kind\":\"{}\",\"observed_physical_terminal\":{},\"retained_time_s\":{:.17e}}},\"qoi\":{{\"retained_time_s\":{:.17e},\"inclination_rad\":{:.17e},\"precession_rad_per_s\":{:.17e},\"spin_rad_per_s\":{:.17e},\"precession_acceleration_rad_per_s2\":{:.17e},\"reimpact_count\":{}}},\"channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"last_step_channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"energy\":{{\"initial_total_j\":{:.17e},\"final_total_j\":{:.17e},\"defect_j\":{:.17e},\"relative_defect\":{:.17e}}},\"applicability\":\"{}\",\"model_disagreement\":\"{}\",\"no_claim\":\"no-physical-validation-or-video-ranking;right-censored-time-is-not-duration\"}}",
+        "{{\"schema\":\"euler-disc-campaign-jsonl-v3\",\"scenario\":\"closed-reduced-{}\",\"model\":\"fs-mbd-profile-native-reduced-coupled-runner\",\"authority\":\"numerical-slice-only\",\"units\":\"SI:m,kg,s,N,J,rad\",\"profile\":{{\"kind\":\"{}\",\"identity_u64_dec\":\"{}\",\"support_source_feature\":{},\"mass_and_support_same_chart\":true}},\"inputs\":{{\"input_units\":\"SI:kg,m,s,N,J,rad\",\"mass_kg\":{:.17e},\"radius_m\":{:.17e},\"thickness_m\":{:.17e},\"density_kg_m3\":{:.17e},\"gravity_m_per_s2\":{:.17e},\"transverse_inertia_kg_m2\":{:.17e},\"axial_inertia_kg_m2\":{:.17e},\"timestep_s\":{:.17e},\"initial_segment_maximum_steps\":{},\"maximum_steps\":{},\"initial_horizon_s\":{:.17e},\"maximum_horizon_s\":{:.17e},\"declared_final_horizon_s\":{:.17e},\"continuation_count\":{},\"terminal_inclination_rad\":{:.17e},\"reimpact_limit\":{},\"initial_inclination_rad\":{:.17e},\"initial_precession_rad_per_s\":{:.17e},\"initial_spin_rad_per_s\":{:.17e},\"sliding_friction_coefficient\":{:.17e},\"rolling_resistance_m\":{:.17e},\"base_effective_mass_kg\":{:.17e},\"base_stiffness_n_per_m\":{:.17e},\"base_damping_n_s_per_m\":{:.17e},\"contact_stiffness_n_per_m\":{:.17e},\"contact_damping_n_s_per_m\":{:.17e},\"gas_rotational_damping_n_m_s\":{:.17e},\"gas_translation_damping_n_s_per_m\":{:.17e}}},\"terminal\":\"{}\",\"outcome\":{{\"kind\":\"{}\",\"observed_physical_terminal\":{},\"retained_time_s\":{:.17e},\"numerical_refusal_reason\":\"{}\"}},\"qoi\":{{\"retained_time_s\":{:.17e},\"inclination_rad\":{:.17e},\"precession_rad_per_s\":{:.17e},\"spin_rad_per_s\":{:.17e},\"precession_acceleration_rad_per_s2\":{:.17e},\"reimpact_count\":{}}},\"channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"last_step_channel_work_j\":{{\"gravity\":{:.17e},\"contact\":{:.17e},\"rolling\":{:.17e},\"base\":{:.17e},\"gas\":{:.17e}}},\"energy\":{{\"initial_total_j\":{:.17e},\"final_total_j\":{:.17e},\"defect_j\":{:.17e},\"relative_defect\":{:.17e}}},\"applicability\":\"{}\",\"model_disagreement\":\"{}\",\"no_claim\":\"no-physical-validation-or-video-ranking;right-censored-time-is-not-duration\"}}",
         case.name,
         case.profile_kind,
         profile.identity.0,
@@ -433,6 +442,7 @@ fn closed_case_record(
         outcome_kind,
         observed_physical_terminal,
         retained_time_s,
+        refusal_reason,
         last.time_s,
         last.inclination_rad,
         last.precession_rad_per_s,
@@ -561,7 +571,7 @@ struct RankingRung {
     timestep_s: f64,
     solid: RunOutcome,
     ring: RunOutcome,
-    ordering: CensorAwareDurationOrdering,
+    ordering: Result<CensorAwareDurationOrdering, CensorAwareRankingRefusal>,
 }
 
 /// Refines the actual ranking claim, rather than inferring it from a
@@ -607,8 +617,7 @@ fn ranking_convergence_record(
             .map_err(|error| format!("solid ranking outcome at dt={timestep_s}: {error}"))?;
         let ring = classify_outcome(&ring_run)
             .map_err(|error| format!("ring ranking outcome at dt={timestep_s}: {error}"))?;
-        let ordering = compare_censor_aware_durations(ring, solid)
-            .map_err(|error| format!("ranking comparison at dt={timestep_s}: {error:?}"))?;
+        let ordering = compare_censor_aware_durations(ring, solid);
         rungs.push(RankingRung {
             timestep_s,
             solid,
@@ -623,8 +632,8 @@ fn ranking_convergence_record(
     let fine_reference_event_delta = event_time_delta(fine.ring, reference.ring);
     let ordering_agreement =
         coarse.ordering == fine.ordering && fine.ordering == reference.ordering;
-    let ring_shorter_bound_proven =
-        ordering_agreement && reference.ordering == CensorAwareDurationOrdering::ProvenLeftShorter;
+    let ring_shorter_bound_proven = ordering_agreement
+        && reference.ordering == Ok(CensorAwareDurationOrdering::ProvenLeftShorter);
     let event_time_within_declared_band = fine_reference_event_delta
         .map(|(_, relative)| relative <= EVENT_TIME_RELATIVE_LIMIT)
         .unwrap_or(false);
@@ -649,32 +658,61 @@ fn ranking_convergence_record(
 }
 
 fn ranking_rung_json(rung: RankingRung) -> String {
-    let (ring_kind, ring_time_s) = outcome_kind_and_time(rung.ring);
-    let (solid_kind, solid_time_s) = outcome_kind_and_time(rung.solid);
+    let (ring_kind, ring_time_s, ring_refusal_reason) = outcome_kind_and_time(rung.ring);
+    let (solid_kind, solid_time_s, solid_refusal_reason) = outcome_kind_and_time(rung.solid);
     format!(
-        "{{\"ring_outcome\":\"{ring_kind}\",\"ring_retained_time_s\":{ring_time_s:.17e},\"solid_outcome\":\"{solid_kind}\",\"solid_retained_time_s\":{solid_time_s:.17e},\"censor_aware_ordering\":\"{}\"}}",
+        "{{\"ring_outcome\":\"{ring_kind}\",\"ring_retained_time_s\":{ring_time_s:.17e},\"ring_numerical_refusal_reason\":\"{ring_refusal_reason}\",\"solid_outcome\":\"{solid_kind}\",\"solid_retained_time_s\":{solid_time_s:.17e},\"solid_numerical_refusal_reason\":\"{solid_refusal_reason}\",\"censor_aware_ordering\":\"{}\"}}",
         censor_ordering_name(rung.ordering),
     )
 }
 
-fn outcome_kind_and_time(outcome: RunOutcome) -> (&'static str, f64) {
+fn outcome_kind_and_time(outcome: RunOutcome) -> (&'static str, f64, &'static str) {
     match outcome {
         RunOutcome::PhysicalTerminal { event_time_s, .. } => {
-            ("physical-terminal-inclination", event_time_s)
+            ("physical-terminal-inclination", event_time_s, "none")
         }
-        RunOutcome::RightCensored { censor_time_s } => ("right-censored", censor_time_s),
-        RunOutcome::NumericalRefusal { last_valid_time_s } => {
-            ("numerical-refusal", last_valid_time_s)
+        RunOutcome::RightCensored { censor_time_s } => ("right-censored", censor_time_s, "none"),
+        RunOutcome::NumericalRefusal {
+            last_valid_time_s,
+            reason,
+        } => (
+            "numerical-refusal",
+            last_valid_time_s,
+            numerical_refusal_reason_name(reason),
+        ),
+    }
+}
+
+const fn numerical_refusal_reason_name(reason: CoupledNumericalRefusalReason) -> &'static str {
+    match reason {
+        CoupledNumericalRefusalReason::ReimpactLimitExceeded => "reimpact-limit-exceeded",
+        CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState => {
+            "non-finite-energy-or-base-state"
         }
     }
 }
 
-const fn censor_ordering_name(ordering: CensorAwareDurationOrdering) -> &'static str {
+const fn censor_ordering_name(
+    ordering: Result<CensorAwareDurationOrdering, CensorAwareRankingRefusal>,
+) -> &'static str {
     match ordering {
-        CensorAwareDurationOrdering::ProvenLeftShorter => "ring-proven-shorter",
-        CensorAwareDurationOrdering::EqualObserved => "equal-observed",
-        CensorAwareDurationOrdering::ProvenLeftLonger => "ring-proven-longer",
-        CensorAwareDurationOrdering::Indeterminate => "indeterminate",
+        Ok(CensorAwareDurationOrdering::ProvenLeftShorter) => "ring-proven-shorter",
+        Ok(CensorAwareDurationOrdering::EqualObserved) => "equal-observed",
+        Ok(CensorAwareDurationOrdering::ProvenLeftLonger) => "ring-proven-longer",
+        Ok(CensorAwareDurationOrdering::Indeterminate) => "indeterminate",
+        Err(CensorAwareRankingRefusal::LeftNumericalRefusal) => "ring-numerical-refusal",
+        Err(CensorAwareRankingRefusal::RightNumericalRefusal) => "solid-numerical-refusal",
+        Err(CensorAwareRankingRefusal::InvalidLeftPhysicalTerminalTime) => {
+            "ring-invalid-physical-terminal-time"
+        }
+        Err(CensorAwareRankingRefusal::InvalidRightPhysicalTerminalTime) => {
+            "solid-invalid-physical-terminal-time"
+        }
+        Err(CensorAwareRankingRefusal::InvalidLeftCensorTime) => "ring-invalid-censor-time",
+        Err(CensorAwareRankingRefusal::InvalidRightCensorTime) => "solid-invalid-censor-time",
+        Err(CensorAwareRankingRefusal::DifferentPhysicalTerminalKinds) => {
+            "different-physical-terminal-kinds"
+        }
     }
 }
 

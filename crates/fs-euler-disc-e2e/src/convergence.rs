@@ -8,7 +8,7 @@
 
 use core::fmt;
 
-use crate::coupled_runner::{CoupledRun, CoupledTerminal};
+use crate::coupled_runner::{CoupledNumericalRefusalReason, CoupledRun, CoupledTerminal};
 
 /// Relative tolerance used only to bind a retained floating checkpoint time
 /// back to the caller's declared horizon. It is deliberately far tighter than
@@ -40,7 +40,10 @@ pub enum RunOutcome {
     /// duration and not a failed run.
     RightCensored { censor_time_s: f64 },
     /// The numerical lane refused before a physical terminal event.
-    NumericalRefusal { last_valid_time_s: f64 },
+    NumericalRefusal {
+        last_valid_time_s: f64,
+        reason: CoupledNumericalRefusalReason,
+    },
 }
 
 impl RunOutcome {
@@ -103,8 +106,9 @@ pub fn classify_outcome(run: &CoupledRun) -> Result<RunOutcome, OutcomeError> {
         CoupledTerminal::HorizonReached => RunOutcome::RightCensored {
             censor_time_s: time_s,
         },
-        CoupledTerminal::NumericalRefusal => RunOutcome::NumericalRefusal {
+        CoupledTerminal::NumericalRefusal { reason } => RunOutcome::NumericalRefusal {
             last_valid_time_s: time_s,
+            reason,
         },
     })
 }
