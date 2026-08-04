@@ -23,7 +23,9 @@ the bounded slice. Its closed reduced lane evolves profile support, rigid-body
 motion, unilateral contact, a one-mode base, rolling loss, and reduced gas drag
 together. Opening and reimpact crossings are sought on four deterministic
 subintervals, while terminal-inclination endpoint crossings are localized by
-re-evolving the actual reduced step. A separate Estimate-only
+re-evolving the actual reduced step. Body, contact, base, rolling, and gas
+channels share an explicit-midpoint stage, eliminating the former staggered
+start-force/base-response lag. A separate Estimate-only
 production composition exercises the higher-fidelity transactional adapters in
 smooth contact, but the campaign does not yet use that composition as its
 event-loop backend. Neither lane identifies a physical decay law.
@@ -853,13 +855,15 @@ require later preregistration, exact measurement/custody artifacts, admitted
 criterion-evaluation receipts, solver and model verification, blind
 experiments, and candid comparison against negative or inconclusive outcomes.
 
-The bounded campaign additionally makes no claim that its one-way snapshot
-composition is closed multiphysics; that its encoded reduced decay exponents or
-channel laws were identified from data; that any result ranks sharp versus
-filleted edges, glass versus steel, rings versus discs, or other configurations;
-or that it predicts a spin time. Its geometry, contact, base, decay, and
-exterior records are numerical/software rungs, not experiment-, video-, or
-Mould-backed evidence.
+The bounded campaign additionally makes no claim that its reduced point-contact
+closure is resolved multiphysics or that its encoded decay exponents and
+channel laws were identified from data. Its convergence receipt may support a
+configuration ordering *inside that declared reduced numerical model* in
+either direction; it cannot promote that result into a physical ranking of
+sharp versus filleted edges, glass versus steel, rings versus discs, or any
+other real configuration. It does not predict a physical spin time. Its
+geometry, contact, base, decay, and exterior records are numerical/software
+rungs, not experiment-, video-, or Mould-backed evidence.
 
 The Euler-local port registry does not implement any gravity, contact,
 partial-slip, rolling/contour/spin, impact, base, exterior-gas, or gas-film

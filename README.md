@@ -89,7 +89,8 @@ stdout under an ordinary zero result, refuses. Host-local output paths and
 observed values are run evidence rather than frozen documentation.
 
 The closed campaign lane couples only its declared reduced rigid-body,
-unilateral-contact, one-mode-base, rolling, and gas-damping laws. The separate
+unilateral-contact, one-mode-base, rolling, and gas-damping laws through one
+explicit-midpoint stage. The separate
 higher-fidelity transactional stack is not yet the campaign's impact/event-loop
 backend. Reduced decay exponents and channel laws remain encoded model inputs,
 not experimentally identified laws. Right-censored horizons remain lower
