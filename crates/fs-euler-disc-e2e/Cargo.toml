@@ -10,15 +10,20 @@ description = "Euler-disc scientific contract and emergent-prediction campaign i
 [package.metadata.frankensim]
 layer = "L6"
 
+[features]
+default = ["scientific-contract"]
+scientific-contract = ["dep:fs-ir"]
+
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-contact = { path = "../fs-contact" }
 fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-flux = { path = "../fs-flux" }
 fs-geom = { path = "../fs-geom" }
 fs-govern = { path = "../fs-govern" }
-fs-ir = { path = "../fs-ir" }
+fs-ir = { path = "../fs-ir", optional = true }
 fs-mbd = { path = "../fs-mbd" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-solid = { path = "../fs-solid" }

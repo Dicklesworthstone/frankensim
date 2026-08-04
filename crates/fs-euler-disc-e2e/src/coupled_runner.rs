@@ -230,9 +230,12 @@ pub fn run_closed_reduced(
         let contact_velocity = velocity.add(omega_world.cross(contact_arm));
         let relative_normal_speed = contact_velocity.z - checkpoint.base_velocity_m_per_s;
         let penetration = (-support_height).max(0.0);
-        let normal_force = (factors.contact_stiffness_n_per_m * penetration
-            + factors.contact_damping_n_s_per_m * (-relative_normal_speed).max(0.0))
-        .max(0.0);
+        let normal_force = unilateral_normal_force(
+            penetration,
+            relative_normal_speed,
+            factors.contact_stiffness_n_per_m,
+            factors.contact_damping_n_s_per_m,
+        );
         let contact_active = normal_force > 0.0;
         if contact_active && !checkpoint.was_in_contact {
             checkpoint.reimpact_count += 1;
@@ -403,9 +406,13 @@ pub fn run_closed_reduced(
         checkpoint.time_s += controls.timestep_s;
         checkpoint.was_in_contact = contact_active;
         let tangential_work = work(friction_force, contact_arm.cross(friction_force));
-        let contact_damping_work = -factors.contact_damping_n_s_per_m
-            * relative_normal_speed.min(0.0).powi(2)
-            * controls.timestep_s;
+        let contact_damping_work = if penetration > 0.0 {
+            -factors.contact_damping_n_s_per_m
+                * relative_normal_speed.min(0.0).powi(2)
+                * controls.timestep_s
+        } else {
+            0.0
+        };
         checkpoint.accumulated_channel_work_j[0] += channels.gravity.work_j;
         checkpoint.accumulated_channel_work_j[1] += tangential_work + contact_damping_work;
         checkpoint.accumulated_channel_work_j[2] += channels.rolling.work_j;
@@ -667,6 +674,36 @@ fn total_energy(
         + 0.5 * factors.base_effective_mass_kg * base_velocity_m_per_s.powi(2)
         + 0.5 * factors.base_stiffness_n_per_m * base_deflection_m.powi(2)
         + 0.5 * factors.contact_stiffness_n_per_m * penetration_m.powi(2)
+}
+
+fn unilateral_normal_force(
+    penetration_m: f64,
+    relative_normal_speed_m_per_s: f64,
+    stiffness_n_per_m: f64,
+    damping_n_s_per_m: f64,
+) -> f64 {
+    // Kelvin-Voigt damping belongs to the closed contact branch. Applying the
+    // dashpot while the gap is open would create a non-physical attractive
+    // pre-contact force and could turn harmless approach/separation into
+    // artificial reimpact chatter.
+    if penetration_m <= 0.0 {
+        return 0.0;
+    }
+    (stiffness_n_per_m * penetration_m
+        + damping_n_s_per_m * (-relative_normal_speed_m_per_s).max(0.0))
+    .max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unilateral_normal_force;
+
+    #[test]
+    fn kelvin_voigt_dashpot_is_inactive_across_an_open_gap() {
+        assert_eq!(unilateral_normal_force(0.0, -3.0, 80_000.0, 3.0), 0.0);
+        assert_eq!(unilateral_normal_force(-1.0e-6, -3.0, 80_000.0, 3.0), 0.0);
+        assert!(unilateral_normal_force(1.0e-6, -3.0, 80_000.0, 3.0) > 0.0);
+    }
 }
 
 /// Public integration plan for replacing each reduced channel law with the

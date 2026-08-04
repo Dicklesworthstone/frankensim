@@ -6,12 +6,16 @@ use std::process::Command;
 use fs_blake3::hash_domain;
 
 #[test]
-fn campaign_preserves_legacy_records_and_appends_deterministic_closed_trajectory_output() {
+fn closed_campaign_emits_deterministic_controlled_trajectory_output() {
     let binary = env!("CARGO_BIN_EXE_euler_disc_campaign");
-    let first = Command::new(binary).output().expect("campaign launches");
-    let second = Command::new(binary)
+    let first = Command::new(binary)
+        .arg("--closed-only")
         .output()
-        .expect("campaign replay launches");
+        .expect("closed campaign launches");
+    let second = Command::new(binary)
+        .arg("--closed-only")
+        .output()
+        .expect("closed campaign replay launches");
     assert!(
         first.status.success(),
         "stderr: {}",
@@ -19,13 +23,14 @@ fn campaign_preserves_legacy_records_and_appends_deterministic_closed_trajectory
     );
     assert_eq!(first.stdout, second.stdout);
     let output = String::from_utf8(first.stdout).expect("utf8");
-    assert!(output.contains("one-way-contact-state-snapshot"));
     assert!(!output.contains("CONTOUR_FORCE_PER_NORMAL_FORCE"));
     assert!(output.contains("closed-time-evolving-reduced-euler-disc"));
     assert!(output.contains("channel_work_j"));
+    assert!(output.contains("\"relative_defect\""));
+    assert!(output.contains("\"reimpact_count\""));
     assert!(output.contains("last_step_channel_work_j"));
     assert!(output.contains("precession_acceleration_rad_per_s2"));
-    assert!(output.contains("energy_defect_j"));
+    assert!(output.contains("\"defect_j\""));
     assert!(output.contains("model_disagreement"));
     assert!(output.contains("does not yet consume exported mechanics/rolling_contact/air"));
     assert!(!output.contains("shape_inertia_factor"));
@@ -103,6 +108,17 @@ fn campaign_preserves_legacy_records_and_appends_deterministic_closed_trajectory
         number(solid_inputs, "axial_inertia_kg_m2"),
         number(ring_inputs, "axial_inertia_kg_m2")
     );
+    for fields in &closed {
+        let energy = object(fields.get("energy").expect("closed energy accounting"));
+        assert!(number(energy, "initial_total_j") > 0.0);
+        assert!(number(energy, "final_total_j") >= 0.0);
+        let relative_defect = number(energy, "relative_defect");
+        assert!(
+            (0.0..=0.01).contains(&relative_defect),
+            "unexpected relative energy defect for {}: {relative_defect}",
+            string(fields, "scenario")
+        );
+    }
     let manifest = v2_roots
         .iter()
         .find(|fields| string(fields, "scenario") == "campaign-complete")

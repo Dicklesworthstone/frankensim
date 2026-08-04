@@ -12,6 +12,7 @@ pub mod air;
 pub mod base_response;
 pub mod baseline;
 pub mod contact_dynamics;
+#[cfg(feature = "scientific-contract")]
 pub mod contract;
 pub mod coupled_runner;
 pub mod external_air;
@@ -19,6 +20,7 @@ pub mod mechanics;
 pub mod normal_contact;
 pub mod patch_kinematics;
 pub mod ports;
+#[cfg(feature = "scientific-contract")]
 pub mod protocol;
 pub mod reduced_decay;
 pub mod rolling_contact;
@@ -54,6 +56,7 @@ pub use ports::{
     PortDeclaration, PortInterval, SurfacePair,
 };
 
+#[cfg(feature = "scientific-contract")]
 pub use contract::{
     AuthorityCeiling, CLAIM_POLICY_ASSESSMENT_LOG_DOMAIN, CONTRACT_CHECK_RECEIPT_DOMAIN,
     CORE_NO_CLAIMS, ContractError, ContractIdentity, EULER_ASSESSMENT_IDENTITY_DOMAIN,
@@ -67,6 +70,7 @@ pub use contract::{
     MAX_EULER_CLAIMS, MAX_EULER_NO_CLAIMS, MAX_OWNER_MATRIX_BYTES, OwnerMatrix,
     OwnerMatrixIdentity, OwnerRole, OwnerRow, ScientificRisk,
 };
+#[cfg(feature = "scientific-contract")]
 pub use protocol::{
     AssessmentDisposition, ClaimEvidencePacket, ClaimPolicyAssessment, ClaimPolicyAssessmentLog,
     ContractCheckReceipt, DeclaredEvidenceAccessClass, EULER_PROTOCOL_SCHEMA_VERSION,
