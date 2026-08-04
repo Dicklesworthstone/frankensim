@@ -59,7 +59,7 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Thermal and airflow | `fs-conduction` provides a steady P1 FEM kernel, card-backed thermal contact on exact matching traces, card-backed linearized surface radiation, and deterministic gray-diffuse enclosure exchange over admitted view-factor matrices; `fs-convection` provides 12 validity-gated Nusselt cards, including one narrow Shah-London developing-rectangular table slice at `Pr=0.72` and aspect ratio 0.5; and `fs-airflow` provides typed fan curves, series/parallel quadratic loss networks with explicit leakage, nominal-model interval-Newton operating-point brackets, and an evidence-preserving branch-flow handoff to convection. Only conduction is currently registered for capability maturity |
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 reference-only Level-A thermal definitions/targets, one synthetic Level-B fixture, and one gap-preserving Level-C retained curve, while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
-| Euler-disc flagship contract and bounded campaign | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its deterministic JSONL campaign now adds eleven profile-native reduced closed trajectories, 2/4/8/16/32 s censor-aware continuation, endpoint-bracketed contact and terminal events, five-rung timestep/ranking diagnostics, and a typed physical-calibration NO-DATA record. Separately, Estimate-only finite-patch normal, partial-slip, rolling, exterior-air, thin-gap gas-film, and reduced-base adapters compose atomically for restartable smooth-contact prefixes. The campaign is still a reduced numerical model, not experimental or video validation, calibrated physics, or a spin-time prediction |
+| Euler-disc flagship contract and bounded campaign | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its deterministic JSONL campaign now adds twelve profile-native reduced closed trajectories, 2/4/8/16/32 s censor-aware continuation, bounded interior contact-event scanning plus bracketed terminal events, five-rung timestep/ranking diagnostics, and a typed physical-calibration NO-DATA record. The ranking refinement compares matched 1 mm outer fillets and derives the ring's equal-mass density from resolved chart volume. Separately, Estimate-only finite-patch normal, partial-slip, rolling, exterior-air, thin-gap gas-film, and reduced-base adapters compose atomically for restartable smooth-contact prefixes. The campaign is still a reduced numerical model, not experimental or video validation, calibrated physics, or a spin-time prediction |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
 | Tests | 594 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
@@ -76,7 +76,7 @@ scripts/e2e/euler_disc_campaign.sh \
 
 The script uses strict remote RCH for the committed campaign executable and
 refuses existing output paths or dirty/untracked Cargo inputs. It emits the
-original bounded component rungs, then eleven profile-native reduced closed
+original bounded component rungs, then twelve profile-native reduced closed
 cases, fixed-policy horizon continuation, five-rung state/ranking diagnostics,
 an explicit calibration NO-DATA record, and deterministic manifests. The JSONL
 and stderr log are the retained software receipts. If the remote command exits zero but RCH then
@@ -93,11 +93,19 @@ unilateral-contact, one-mode-base, rolling, and gas-damping laws. The separate
 higher-fidelity transactional stack is not yet the campaign's impact/event-loop
 backend. Reduced decay exponents and channel laws remain encoded model inputs,
 not experimentally identified laws. Right-censored horizons remain lower
-bounds, endpoint-only event detection does not exclude sub-grid chatter, and
-the absence of independent raw/calibration/holdout evidence remains a typed
+bounds, the four-subinterval event scan does not exclude excursions entirely
+between adjacent scan nodes, and the absence of independent
+raw/calibration/holdout evidence remains a typed
 NO-DATA result. Consequently this makes no experiment- or video-backed Mould
 claim, no validated edge optimum or material/configuration ranking, and no
 physical spin-time prediction.
+
+For numerical iteration without paying for every 32-second continuation case,
+`cargo run -p fs-euler-disc-e2e --bin euler_disc_campaign -- --convergence-only`
+emits only the five-rung matched-fillet state/ranking records and a dedicated
+digest manifest. It uses the same production binary and model path as the full
+campaign; it is a bounded numerical diagnostic, not a reduced substitute for
+experimental validation.
 
 ### Capability Maturity, Not Crate Count
 

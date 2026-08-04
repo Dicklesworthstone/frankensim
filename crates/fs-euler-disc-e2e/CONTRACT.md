@@ -21,8 +21,9 @@ questions.
 The committed `euler_disc_campaign` binary is a deterministic JSONL runner for
 the bounded slice. Its closed reduced lane evolves profile support, rigid-body
 motion, unilateral contact, a one-mode base, rolling loss, and reduced gas drag
-together. Opening, reimpact, and terminal-inclination endpoint crossings are
-localized by re-evolving the actual reduced step. A separate Estimate-only
+together. Opening and reimpact crossings are sought on four deterministic
+subintervals, while terminal-inclination endpoint crossings are localized by
+re-evolving the actual reduced step. A separate Estimate-only
 production composition exercises the higher-fidelity transactional adapters in
 smooth contact, but the campaign does not yet use that composition as its
 event-loop backend. Neither lane identifies a physical decay law.
@@ -82,10 +83,11 @@ local transcript authority as non-cryptographic. Other nonzero exits refuse;
 ordinary RCH success with empty direct stdout also refuses rather than inferring
 records from diagnostics. The wrapper emits the original bounded component
 records and manifest, followed by a v3 closed-lane block. That block contains
-eleven profile-native controlled cases (solid, fillet, chamfer, fixed-density
-and equal-mass rings, symmetric taper, scale, density, base, gas, and rolling
-ablations), a five-rung numerical convergence record, a five-rung censor-aware
-equal-mass-ring/solid ordering record, a typed physical-calibration NO-DATA
+12 profile-native controlled cases (solid, fillet, chamfer, fixed-density and
+sharp equal-mass rings, a matched 1-mm-outer-fillet equal-mass ring, symmetric
+taper, scale, density, base, gas, and rolling ablations), a five-rung numerical
+convergence record, a five-rung censor-aware matched-fillet equal-mass
+ring/solid ordering record, a typed physical-calibration NO-DATA
 record, and its own manifest. The closed cases use a declared 2/4/8/16/32 s
 continuation policy. Any case still live at 32 s remains right-censored; that
 bound is never reported as a spin duration. The finest predeclared 20/10/5
@@ -97,9 +99,9 @@ This contract deliberately records no output path, digest, or numerical value
 until an actual retained run supplies them. The runner's receipts demonstrate
 only the encoded numerical/software composition and its input/record checks.
 
-The reduced event locator detects only endpoint-bracketed crossings. An empty
-event list does not certify absence of an open/reimpact pair that leaves both
-macro-step endpoints on the same branch. The production smooth-contact helper
+The reduced event locator scans four fixed subintervals before bisection. An
+empty event list does not certify absence of an open/reimpact excursion wholly
+between adjacent scan nodes. The production smooth-contact helper
 is restartable and atomic across its accepted adapters, but it is intentionally
 not an impact/event owner. Thin-gap gas-film work has exact-once transactional
 ownership and typed continuum/applicability refusals; it is not rarefied-gas or
