@@ -140,6 +140,45 @@ pub struct ProductionCouplingReceipt {
     pub estimate_only: bool,
 }
 
+/// Terminal state of a bounded smooth-contact trajectory attempt.
+///
+/// A refusal is an expected, typed handoff boundary: the failed proposed
+/// substep is not included in [`SmoothContactTrajectory::accepted_steps`] and
+/// [`SmoothContactTrajectory::last_accepted_checkpoint`] remains restartable.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmoothContactTrajectoryTermination {
+    /// The caller-selected accepted-step budget was consumed.
+    StepLimitReached {
+        /// Maximum accepted steps requested for this invocation.
+        maximum_accepted_steps: usize,
+    },
+    /// The next homogeneous smooth-contact step was refused without commit.
+    Refused {
+        /// Outer checkpoint version from which the failed step was proposed.
+        attempted_checkpoint_version: u64,
+        /// Exact lower-level refusal; impact/event/gas-film owners remain separate.
+        error: ProductionCouplingError,
+    },
+}
+
+/// Replayable prefix produced by [`ProductionCouplingModel::run_smooth_contact_trajectory`].
+///
+/// The input factory is caller-supplied and must be deterministic for an exact
+/// replay claim. It is called from each accepted checkpoint so support
+/// direction, resolved patch metadata, and all cards can be recomputed after
+/// the preceding mechanics update rather than frozen at the initial state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmoothContactTrajectory {
+    /// Checkpoint supplied to this invocation; also the prefix-resume boundary.
+    pub start_checkpoint: ProductionCouplingCheckpoint,
+    /// The last checkpoint actually accepted by all channels.
+    pub last_accepted_checkpoint: ProductionCouplingCheckpoint,
+    /// One receipt for every accepted mechanics substep, in order.
+    pub accepted_steps: Vec<ProductionCouplingReceipt>,
+    /// Bounded completion or the first uncommitted typed refusal.
+    pub termination: SmoothContactTrajectoryTermination,
+}
+
 /// Typed refusal; no caller checkpoint is changed on every error path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProductionCouplingError {
@@ -407,6 +446,73 @@ impl ProductionCouplingModel {
                 estimate_only: true,
             },
         ))
+    }
+
+    /// Runs at most `maximum_accepted_steps` smooth homogeneous substeps.
+    ///
+    /// This is deliberately a trajectory *prefix* helper, not an event owner:
+    /// when a rebuilt patch leaves the touching/grazing envelope, [`Self::step`]
+    /// returns its typed refusal and this method preserves the preceding
+    /// checkpoint for an impact, separation, thin-gap, or terminal-event owner.
+    /// The caller must supply a deterministic factory to make replay or a
+    /// prefix/resume comparison meaningful.
+    pub fn run_smooth_contact_trajectory<F>(
+        &self,
+        start_checkpoint: ProductionCouplingCheckpoint,
+        maximum_accepted_steps: usize,
+        mut input_for_checkpoint: F,
+    ) -> SmoothContactTrajectory
+    where
+        F: FnMut(
+            &ProductionCouplingCheckpoint,
+        ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+    {
+        let mut last_accepted_checkpoint = start_checkpoint.clone();
+        // Do not reserve an untrusted caller limit up front: bounded execution
+        // must not turn a large limit into an immediate allocation failure.
+        let mut accepted_steps = Vec::new();
+        for _ in 0..maximum_accepted_steps {
+            let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
+            let input = match input_for_checkpoint(&last_accepted_checkpoint) {
+                Ok(input) => input,
+                Err(error) => {
+                    return SmoothContactTrajectory {
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        termination: SmoothContactTrajectoryTermination::Refused {
+                            attempted_checkpoint_version,
+                            error,
+                        },
+                    };
+                }
+            };
+            match self.step(&last_accepted_checkpoint, &input) {
+                Ok((next_checkpoint, receipt)) => {
+                    last_accepted_checkpoint = next_checkpoint;
+                    accepted_steps.push(receipt);
+                }
+                Err(error) => {
+                    return SmoothContactTrajectory {
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        termination: SmoothContactTrajectoryTermination::Refused {
+                            attempted_checkpoint_version,
+                            error,
+                        },
+                    };
+                }
+            }
+        }
+        SmoothContactTrajectory {
+            start_checkpoint,
+            last_accepted_checkpoint,
+            accepted_steps,
+            termination: SmoothContactTrajectoryTermination::StepLimitReached {
+                maximum_accepted_steps,
+            },
+        }
     }
 }
 

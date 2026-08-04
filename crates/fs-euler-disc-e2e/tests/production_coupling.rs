@@ -23,7 +23,7 @@ use fs_euler_disc_e2e::patch_kinematics::{
 };
 use fs_euler_disc_e2e::production_coupling::{
     ProductionCouplingError, ProductionCouplingIdentity, ProductionCouplingModel,
-    ProductionCouplingStepInput,
+    ProductionCouplingStepInput, SmoothContactTrajectoryTermination,
 };
 use fs_euler_disc_e2e::rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput, RollingContactState,
@@ -369,6 +369,45 @@ fn rolling_law() -> RollingLossLaw {
     )
 }
 
+/// Rebuilds synthetic cards from the accepted state exactly as a real profile
+/// resolver would, while keeping this G0 fixture deliberately uncalibrated.
+fn request_for_checkpoint(
+    template: &ProductionCouplingStepInput,
+    checkpoint: &fs_euler_disc_e2e::production_coupling::ProductionCouplingCheckpoint,
+) -> ProductionCouplingStepInput {
+    let mut input = template.clone();
+    let version = checkpoint.committed_version;
+    let disc_position = checkpoint.disc_state.pose().position_world();
+    input.expected_checkpoint_version = version;
+    input.time_s = version as f64 * input.duration_s;
+    input.normal.iteration = version + 1;
+    input.patch.bridge.profile_support.disc_point_world_m = disc_position;
+    input
+        .patch
+        .bridge
+        .base_mode
+        .undeformed_contact_point_world_m = Vec3::new(disc_position.x, disc_position.y, 0.0);
+    input.tangential.request_id = format!("synthetic/tangent-step-{}", version + 1);
+    input.tangential.work_ownership = GeneralizedWorkOwnership::new(
+        "synthetic/rim-patch",
+        format!("synthetic/tangent-interval-{}", version + 1),
+        "long",
+        "lat",
+        "spin",
+    )
+    .expect("synthetic tangential work ownership");
+    input.rolling.ownership = RollingWorkOwnership::new(
+        "synthetic/rim-patch",
+        format!("synthetic/rolling-interval-{}", version + 1),
+        "contour",
+        RollingLossChannel::ContourDeformation,
+    )
+    .expect("synthetic rolling work ownership");
+    input.exterior_exchange_key = version + 1;
+    input.base_step_id = format!("synthetic/base-step-{}", version + 1);
+    input
+}
+
 #[test]
 fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation() {
     let kinematics = compute_moving_one_mode_patch_kinematics(patch_input())
@@ -540,6 +579,61 @@ fn synthetic_g0_one_substep_composes_real_adapters_and_refuses_without_mutation(
         model.step(&checkpoint, &overlapping),
         Err(ProductionCouplingError::Rolling(_))
     ));
+    let whole = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
+        Ok(request_for_checkpoint(&request, state))
+    });
+    assert_eq!(whole.accepted_steps.len(), 3);
+    assert!(matches!(
+        whole.termination,
+        SmoothContactTrajectoryTermination::StepLimitReached {
+            maximum_accepted_steps: 3
+        }
+    ));
+    assert_ne!(
+        whole.last_accepted_checkpoint.disc_state,
+        checkpoint.disc_state
+    );
+
+    let replay = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
+        Ok(request_for_checkpoint(&request, state))
+    });
+    assert_eq!(whole, replay, "deterministic inputs must replay exactly");
+
+    let prefix = model.run_smooth_contact_trajectory(checkpoint.clone(), 1, |state| {
+        Ok(request_for_checkpoint(&request, state))
+    });
+    let resumed =
+        model.run_smooth_contact_trajectory(prefix.last_accepted_checkpoint.clone(), 2, |state| {
+            Ok(request_for_checkpoint(&request, state))
+        });
+    assert_eq!(
+        resumed.last_accepted_checkpoint,
+        whole.last_accepted_checkpoint
+    );
+    let mut resumed_receipts = prefix.accepted_steps.clone();
+    resumed_receipts.extend(resumed.accepted_steps.clone());
+    assert_eq!(resumed_receipts, whole.accepted_steps);
+
+    let stopped = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
+        let mut rebuilt = request_for_checkpoint(&request, state);
+        if state.committed_version == 1 {
+            rebuilt.patch.bridge.profile_support.gap_m = 2.0e-3;
+        }
+        Ok(rebuilt)
+    });
+    assert_eq!(stopped.accepted_steps.len(), 1);
+    assert_eq!(
+        stopped.last_accepted_checkpoint, prefix.last_accepted_checkpoint,
+        "the deliberate out-of-envelope proposal must not commit"
+    );
+    assert!(matches!(
+        stopped.termination,
+        SmoothContactTrajectoryTermination::Refused {
+            attempted_checkpoint_version: 1,
+            error: ProductionCouplingError::UnsupportedMechanism { .. }
+        }
+    ));
+
     let mut thin_gap = request;
     thin_gap.exterior_air.domain = ExternalAirDomain::ThinGap;
     assert!(matches!(
