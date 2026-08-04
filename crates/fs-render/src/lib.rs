@@ -26,6 +26,7 @@ pub mod charts;
 
 #[cfg(feature = "chart-backends")]
 pub mod instances;
+pub mod motion;
 
 #[cfg(feature = "differentiable")]
 pub mod diff;

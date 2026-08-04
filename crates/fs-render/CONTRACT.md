@@ -413,3 +413,19 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 - The zero-copy claim at smoke tier is BORROW SEMANTICS (the API takes
   `&[f64]`; the battery binds a live `FreeSurface` mass buffer); the
   FrankenNumpy membrane view protocol is the fuller deliverable.
+
+## Motion-time foundation
+
+`motion` defines a non-breaking timed-ray envelope for every existing spatial
+ray backend. Frame shutters resolve centered, front-loaded, or back-loaded
+exposure intervals inside explicit shot bounds. Normalized shutter coordinates
+are finite and in `[0,1]`; absolute time is retained on `TimedRay` in seconds.
+The `UniformCounterV1` sampler uses a dedicated stable counter domain keyed by
+logical pixel and sample identities, never worker order. Zero-width shutters
+map every sample bit-exactly to the static frame time.
+
+This foundation does not yet claim moving-instance intersection, conservative
+motion bounds, event-crossing subdivision, camera/object relative-motion
+correctness, or render-image equivalence. Those remain work inside active bead
+`frankensim-h7xu5.3.2`; this slice establishes the explicit time and sampling
+contract they consume.
