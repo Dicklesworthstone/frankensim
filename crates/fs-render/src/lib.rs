@@ -15,6 +15,9 @@
 //!   strategy boundaries;
 //! - HERO-WAVELENGTH spectral integration ([`spectral_integral`]) — an unbiased
 //!   estimate of a spectral integral.
+//! - validated ideal thin-lens and keyframed cameras ([`camera`]) — explicit
+//!   projection, aperture, focus, shot bounds, and hard-cut semantics without
+//!   perturbing the legacy pinhole stream.
 //!
 //! Deterministic and pure Rust. The default chart backend composes the
 //! lower-layer execution, geometry, and NURBS contracts.
@@ -22,11 +25,19 @@
 use core::f64::consts::PI;
 
 #[cfg(feature = "chart-backends")]
+pub mod animated_instances;
+#[cfg(feature = "chart-backends")]
+pub mod camera;
+#[cfg(feature = "chart-backends")]
 pub mod charts;
 
 #[cfg(feature = "chart-backends")]
 pub mod instances;
 pub mod motion;
+#[cfg(feature = "chart-backends")]
+pub mod motion_bounds;
+#[cfg(feature = "chart-backends")]
+pub mod temporal_accumulation;
 
 #[cfg(feature = "differentiable")]
 pub mod diff;

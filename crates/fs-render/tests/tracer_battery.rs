@@ -12,15 +12,25 @@ use std::sync::{
 };
 
 use asupersync::types::Budget;
+use fs_blake3::hash_domain;
 use fs_evidence::NumericalCertificate;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::SphereChart;
 use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
+use fs_render::animated_instances::{
+    AnimatedGeometryInstance, RigidTransformTrajectory, TransformKeyframe,
+};
+use fs_render::camera::{
+    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide, PhysicalCamera,
+};
 use fs_render::charts::TriMesh;
+use fs_render::instances::{GeometryInstance, RigidTransform, SharedGeometry};
+use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
 use fs_render::spectral::{LAMBDA_MAX, LAMBDA_MIN, lift_rgb, xyz_of_spectrum};
 use fs_render::tracer::{
-    Camera, DirectStrategy, Film, Material, Primitive, RectLight, Sampler, Scene, Settings, Shape,
-    TracerError, film_to_exr, render, render_range,
+    Camera, DirectStrategy, Film, FilmTimeMode, Material, Primitive, RectLight, Sampler, Scene,
+    Settings, Shape, TracerError, film_to_exr, render, render_cinematic, render_cinematic_range,
+    render_motion, render_motion_range, render_range,
 };
 use fs_render::{cosine_sample_hemisphere, hero_wavelengths, radical_inverse};
 use fs_rep_frep::FrepBuilder;
@@ -58,6 +68,11 @@ fn assert_film_bits_eq(left: &Film, right: &Film, context: &str) {
             assert_eq!(a[channel].to_bits(), b[channel].to_bits(), "{context}");
         }
     }
+}
+
+fn assert_film_state_bits_eq(left: &Film, right: &Film, context: &str) {
+    assert_film_bits_eq(left, right, context);
+    assert_eq!(left.time_mode, right.time_mode, "{context}");
 }
 
 struct CancellingSphere {
@@ -262,6 +277,307 @@ fn settings(strategy: DirectStrategy, sampler: Sampler, seed: u64, px: u32, spp:
     }
 }
 
+fn motion_shutter(frame_time_s: f64, duration_s: f64) -> ShutterInterval {
+    ShutterInterval::resolve(
+        frame_time_s,
+        duration_s,
+        ShutterConvention::FrontLoaded,
+        ShutterDistribution::StratifiedCounterV1 { strata: 4_096 },
+        ShotTimeBounds::try_new(0.0, 1.0).expect("motion-fixture shot bounds"),
+    )
+    .expect("motion-fixture shutter")
+}
+
+fn emissive_motion_scene(animated: bool) -> Scene {
+    let local_mesh = quad(
+        [-0.5, -2.0, 0.0],
+        [0.5, -2.0, 0.0],
+        [0.5, 2.0, 0.0],
+        [-0.5, 2.0, 0.0],
+    );
+    let geometry = SharedGeometry::mesh(local_mesh);
+    let geometry_identity = hash_domain(
+        "org.frankensim.test.motion-blur-emissive-quad.v1",
+        b"unit-width-quad",
+    );
+    let shape = if animated {
+        let start = TransformKeyframe::try_new(
+            0.0,
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [-1.0, 0.0, 0.0])
+                .expect("start transform"),
+            [2.0, 0.0, 0.0],
+        )
+        .expect("start keyframe");
+        let end = TransformKeyframe::try_new(
+            1.0,
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).expect("end transform"),
+            [2.0, 0.0, 0.0],
+        )
+        .expect("end keyframe");
+        let trajectory =
+            RigidTransformTrajectory::try_new(vec![start, end]).expect("linear trajectory");
+        Shape::AnimatedInstance(
+            AnimatedGeometryInstance::try_new(101, geometry_identity, geometry, trajectory)
+                .expect("animated instance"),
+        )
+    } else {
+        Shape::Instance(
+            GeometryInstance::try_new(101, geometry_identity, geometry, RigidTransform::identity())
+                .expect("static instance"),
+        )
+    };
+    emissive_instance_scene(shape, Point3::new(0.0, 0.0, 2.0))
+}
+
+fn absolute_time_translation_scene(animated: bool, start_s: f64, end_s: f64) -> Scene {
+    let half_width = 0.125;
+    let local_mesh = quad(
+        [-half_width, -2.0, 0.0],
+        [half_width, -2.0, 0.0],
+        [half_width, 2.0, 0.0],
+        [-half_width, 2.0, 0.0],
+    );
+    let geometry = SharedGeometry::mesh(local_mesh);
+    let geometry_identity = hash_domain(
+        "org.frankensim.test.absolute-time-translation.v1",
+        &half_width.to_bits().to_le_bytes(),
+    );
+    let shape = if animated {
+        let velocity_x = 2.0 / (end_s - start_s);
+        let start = TransformKeyframe::try_new(
+            start_s,
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [-1.0, 0.0, 0.0])
+                .expect("absolute-time start transform"),
+            [velocity_x, 0.0, 0.0],
+        )
+        .expect("absolute-time start keyframe");
+        let end = TransformKeyframe::try_new(
+            end_s,
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
+                .expect("absolute-time end transform"),
+            [velocity_x, 0.0, 0.0],
+        )
+        .expect("absolute-time end keyframe");
+        let trajectory =
+            RigidTransformTrajectory::try_new(vec![start, end]).expect("absolute-time trajectory");
+        Shape::AnimatedInstance(
+            AnimatedGeometryInstance::try_new(103, geometry_identity, geometry, trajectory)
+                .expect("absolute-time animated instance"),
+        )
+    } else {
+        Shape::Instance(
+            GeometryInstance::try_new(103, geometry_identity, geometry, RigidTransform::identity())
+                .expect("absolute-time static instance"),
+        )
+    };
+    emissive_instance_scene(shape, Point3::new(0.0, 0.0, 2.0))
+}
+
+fn emissive_spin_scene(animated: bool) -> Scene {
+    let local_mesh = quad(
+        [-1.0, -0.1, 0.0],
+        [1.0, -0.1, 0.0],
+        [1.0, 0.1, 0.0],
+        [-1.0, 0.1, 0.0],
+    );
+    let geometry = SharedGeometry::mesh(local_mesh);
+    let geometry_identity = hash_domain(
+        "org.frankensim.test.motion-blur-emissive-spinner.v1",
+        b"thin-spinning-quad",
+    );
+    let shape = if animated {
+        let start = TransformKeyframe::try_new(0.0, RigidTransform::identity(), [0.0; 3])
+            .expect("spin start keyframe");
+        let half_angle = core::f64::consts::FRAC_PI_4;
+        let end = TransformKeyframe::try_new(
+            1.0,
+            RigidTransform::try_new([0.0, 0.0, half_angle.sin(), half_angle.cos()], [0.0; 3])
+                .expect("spin end transform"),
+            [0.0; 3],
+        )
+        .expect("spin end keyframe");
+        let trajectory =
+            RigidTransformTrajectory::try_new(vec![start, end]).expect("constant spin trajectory");
+        Shape::AnimatedInstance(
+            AnimatedGeometryInstance::try_new(102, geometry_identity, geometry, trajectory)
+                .expect("spinning instance"),
+        )
+    } else {
+        Shape::Instance(
+            GeometryInstance::try_new(102, geometry_identity, geometry, RigidTransform::identity())
+                .expect("static spinner"),
+        )
+    };
+    emissive_instance_scene(shape, Point3::new(0.75, 0.0, 2.0))
+}
+
+fn emissive_instance_scene(shape: Shape, eye: Point3) -> Scene {
+    let white = lift_rgb([0.8, 0.8, 0.8]);
+    Scene {
+        primitives: vec![
+            Primitive {
+                shape,
+                material: Material::Lambertian { reflectance: white },
+                emission: Some((white, 1.0)),
+            },
+            Primitive {
+                shape: Shape::Mesh(quad(
+                    [10.0, -0.5, 0.0],
+                    [11.0, -0.5, 0.0],
+                    [11.0, 0.5, 0.0],
+                    [10.0, 0.5, 0.0],
+                )),
+                material: Material::Lambertian { reflectance: white },
+                emission: Some((white, 1.0)),
+            },
+        ],
+        light: RectLight {
+            corner: Point3::new(10.0, -0.5, 0.0),
+            edge_u: Vec3::new(1.0, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, 1.0, 0.0),
+            prim: 1,
+            emission: (white, 1.0),
+        },
+        camera: Camera {
+            eye,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            half_tan: 0.0,
+        },
+    }
+}
+
+fn motion_settings(spp: u32) -> Settings {
+    Settings {
+        width: 1,
+        height: 1,
+        spp,
+        max_depth: 1,
+        sampler: Sampler::Iid,
+        strategy: DirectStrategy::Mis,
+        seed: 0x6d6f_7469_6f6e,
+    }
+}
+
+fn physical_from_legacy(
+    camera: &Camera,
+    focus_distance_m: f64,
+    aperture: Aperture,
+) -> PhysicalCamera {
+    PhysicalCamera::try_legacy_compatible(
+        camera.eye,
+        camera.forward,
+        camera.up,
+        camera.half_tan,
+        focus_distance_m,
+        aperture,
+    )
+    .expect("valid legacy-equivalent physical camera")
+}
+
+fn static_cinematic_camera(camera: PhysicalCamera) -> AnimatedCamera {
+    AnimatedCamera::try_static(701, 0.0, 1.0, camera).expect("static cinematic camera")
+}
+
+/// Directly visible emissive cards at two depths make lens-origin changes
+/// observable without conflating the camera test with indirect-light noise.
+fn depth_varying_emissive_scene() -> Scene {
+    let near = lift_rgb([1.0, 0.12, 0.04]);
+    let far = lift_rgb([0.04, 0.3, 1.0]);
+    let white = lift_rgb([1.0, 1.0, 1.0]);
+    Scene {
+        primitives: vec![
+            Primitive {
+                shape: Shape::Mesh(quad(
+                    [-0.32, -0.32, 1.0],
+                    [0.32, -0.32, 1.0],
+                    [0.32, 0.32, 1.0],
+                    [-0.32, 0.32, 1.0],
+                )),
+                material: Material::Lambertian { reflectance: near },
+                emission: Some((near, 2.0)),
+            },
+            Primitive {
+                shape: Shape::Mesh(quad(
+                    [-0.9, -0.9, 0.0],
+                    [0.9, -0.9, 0.0],
+                    [0.9, 0.9, 0.0],
+                    [-0.9, 0.9, 0.0],
+                )),
+                material: Material::Lambertian { reflectance: far },
+                emission: Some((far, 1.0)),
+            },
+            Primitive {
+                shape: Shape::Mesh(quad(
+                    [10.0, -0.5, 0.0],
+                    [11.0, -0.5, 0.0],
+                    [11.0, 0.5, 0.0],
+                    [10.0, 0.5, 0.0],
+                )),
+                material: Material::Lambertian { reflectance: white },
+                emission: Some((white, 1.0)),
+            },
+        ],
+        light: RectLight {
+            corner: Point3::new(10.0, -0.5, 0.0),
+            edge_u: Vec3::new(1.0, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, 1.0, 0.0),
+            prim: 2,
+            emission: (white, 1.0),
+        },
+        camera: Camera {
+            eye: Point3::new(0.0, 0.0, 2.0),
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            half_tan: 0.5,
+        },
+    }
+}
+
+/// A centered emissive square used to measure ideal thin-lens occupancy.
+/// `half_extent` is in world metres and `target_z` selects focused (`0`) or
+/// halfway-to-camera (`1`) placement for the canonical two-metre focus.
+fn focus_probe_scene(target_z: f64, half_extent: f64) -> Scene {
+    let white = lift_rgb([1.0, 1.0, 1.0]);
+    Scene {
+        primitives: vec![
+            Primitive {
+                shape: Shape::Mesh(quad(
+                    [-half_extent, -half_extent, target_z],
+                    [half_extent, -half_extent, target_z],
+                    [half_extent, half_extent, target_z],
+                    [-half_extent, half_extent, target_z],
+                )),
+                material: Material::Lambertian { reflectance: white },
+                emission: Some((white, 1.0)),
+            },
+            Primitive {
+                shape: Shape::Mesh(quad(
+                    [10.0, -0.5, 0.0],
+                    [11.0, -0.5, 0.0],
+                    [11.0, 0.5, 0.0],
+                    [10.0, 0.5, 0.0],
+                )),
+                material: Material::Lambertian { reflectance: white },
+                emission: Some((white, 1.0)),
+            },
+        ],
+        light: RectLight {
+            corner: Point3::new(10.0, -0.5, 0.0),
+            edge_u: Vec3::new(1.0, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, 1.0, 0.0),
+            prim: 1,
+            emission: (white, 1.0),
+        },
+        camera: Camera {
+            eye: Point3::new(0.0, 0.0, 2.0),
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            half_tan: 0.0,
+        },
+    }
+}
+
 /// ACCEPTANCE (1): the furnace, now in color. Radiance part: for a
 /// Lambertian under uniform incident L, every cosine-weighted sample
 /// returns EXACTLY ρ(λ)·L (f·cos/pdf = (ρ/π)·L·cos·(π/cos)) — the v0
@@ -420,7 +736,7 @@ fn reversed_progressive_range_is_rejected_transactionally() {
         with_cx(|cx| render_range(&scene, cx, &s, &mut film, 3, 2)),
         Err(TracerError::InvalidRange { from: 3, to: 2 })
     );
-    assert_film_bits_eq(&film, &before, "invalid range changed film bits");
+    assert_film_state_bits_eq(&film, &before, "invalid range changed film bits");
 }
 
 #[test]
@@ -451,6 +767,7 @@ fn film_allocation_and_public_buffer_shape_fail_closed() {
         height: 0,
         xyz: Vec::new(),
         spp_done: 0,
+        time_mode: FilmTimeMode::Uninitialized,
     };
     assert_eq!(
         with_cx(|cx| render_range(&scene, cx, &zero_settings, &mut zero_film, 0, 0)),
@@ -521,12 +838,780 @@ fn cancelled_range_is_transactional_and_retryable() {
         );
     });
     assert!(evaluations.load(Ordering::SeqCst) >= 64);
-    assert_film_bits_eq(&film, &before, "failed ranges must not alter film state");
+    assert_film_state_bits_eq(&film, &before, "failed ranges must not alter film state");
 
     with_cx(|cx| render_range(&cancelling_scene, cx, &s, &mut film, 1, 3))
         .expect("retry after cancellation");
     let direct = with_cx(|cx| render(&reference_scene, cx, &s)).expect("direct reference");
     assert_film_bits_eq(&film, &direct, "retry must equal a direct render bitwise");
+}
+
+#[test]
+fn motion_path_zero_shutter_is_static_exact_and_missing_time_refuses() {
+    let settings = motion_settings(256);
+    let static_scene = emissive_motion_scene(false);
+    let animated_scene = emissive_motion_scene(true);
+    let static_film = with_cx(|cx| render(&static_scene, cx, &settings)).expect("static reference");
+    let static_with_time =
+        with_cx(|cx| render_motion(&static_scene, cx, &settings, motion_shutter(0.0, 1.0)))
+            .expect("timed static render");
+    assert_film_bits_eq(
+        &static_with_time,
+        &static_film,
+        "drawing shutter time perturbed an existing static sample dimension",
+    );
+    let zero_shutter = motion_shutter(0.5, 0.0);
+    let motion_film = with_cx(|cx| render_motion(&animated_scene, cx, &settings, zero_shutter))
+        .expect("zero-width motion render");
+    assert_film_bits_eq(
+        &motion_film,
+        &static_film,
+        "zero-width shutter must equal the matching static pose",
+    );
+
+    let mut refused_film = Film::new(1, 1);
+    let before = refused_film.clone();
+    assert_eq!(
+        with_cx(|cx| render_range(&animated_scene, cx, &settings, &mut refused_film, 0, 1)),
+        Err(TracerError::MissingRayTime)
+    );
+    assert_film_state_bits_eq(
+        &refused_film,
+        &before,
+        "missing ray time published a partial film",
+    );
+}
+
+#[test]
+fn constant_velocity_motion_blur_matches_analytic_occupancy_and_replays_progressively() {
+    let settings = motion_settings(4_096);
+    let static_scene = emissive_motion_scene(false);
+    let animated_scene = emissive_motion_scene(true);
+    let full_shutter = motion_shutter(0.0, 1.0);
+    let static_film = with_cx(|cx| render(&static_scene, cx, &settings)).expect("static reference");
+    let blurred = with_cx(|cx| render_motion(&animated_scene, cx, &settings, full_shutter))
+        .expect("high-rate motion render");
+
+    // The unit-width quad center moves linearly from x=-1 to x=1. The
+    // center camera ray is covered exactly for t in [0.25, 0.75], so the
+    // analytic temporal occupancy is one half. Spectral wavelength samples
+    // are independently keyed, hence finite-sample channel ratios approach
+    // (rather than being forced to) that physical occupancy.
+    for channel in 0..3 {
+        let ratio = blurred.xyz[0][channel] / static_film.xyz[0][channel];
+        assert!(
+            (ratio - 0.5).abs() < 0.025,
+            "channel {channel} blur ratio {ratio} missed analytic occupancy 0.5"
+        );
+    }
+
+    let frozen_start =
+        with_cx(|cx| render_motion(&animated_scene, cx, &settings, motion_shutter(0.0, 0.0)))
+            .expect("frozen start render");
+    assert!(
+        frozen_start.xyz[0].iter().all(|value| *value == 0.0),
+        "the off-axis start pose unexpectedly covered the center ray"
+    );
+    assert!(
+        blurred.xyz[0].iter().all(|value| *value > 0.0),
+        "temporal integration collapsed to a frozen endpoint"
+    );
+
+    let mut progressive = Film::new(1, 1);
+    with_cx(|cx| {
+        render_motion_range(
+            &animated_scene,
+            cx,
+            &settings,
+            &mut progressive,
+            0,
+            997,
+            full_shutter,
+        )?;
+        render_motion_range(
+            &animated_scene,
+            cx,
+            &settings,
+            &mut progressive,
+            997,
+            4_096,
+            full_shutter,
+        )
+    })
+    .expect("progressive motion render");
+    assert_film_bits_eq(
+        &progressive,
+        &blurred,
+        "motion sample partitions changed replay bits",
+    );
+}
+
+#[test]
+fn constant_spin_motion_blur_matches_analytic_angular_envelope() {
+    let settings = motion_settings(4_096);
+    let static_scene = emissive_spin_scene(false);
+    let animated_scene = emissive_spin_scene(true);
+    let static_film = with_cx(|cx| render(&static_scene, cx, &settings)).expect("static spinner");
+    let blurred =
+        with_cx(|cx| render_motion(&animated_scene, cx, &settings, motion_shutter(0.0, 1.0)))
+            .expect("spinning motion render");
+
+    // At the fixed camera ray (x=0.75,y=0), the thin local rectangle remains
+    // covered while |0.75 sin(theta)| <= 0.1. The admitted SLERP is constant
+    // angular speed from 0 to pi/2, so its exact occupancy fraction is
+    // asin(0.1/0.75)/(pi/2).
+    let analytic_occupancy = (0.1_f64 / 0.75).asin() / core::f64::consts::FRAC_PI_2;
+    for channel in 0..3 {
+        let ratio = blurred.xyz[0][channel] / static_film.xyz[0][channel];
+        assert!(
+            (ratio - analytic_occupancy).abs() < 0.02,
+            "channel {channel} spin ratio {ratio} missed analytic occupancy {analytic_occupancy}"
+        );
+    }
+}
+
+#[test]
+fn motion_shutter_outside_trajectory_refuses_before_film_publication() {
+    let scene = emissive_motion_scene(true);
+    let settings = motion_settings(4);
+    let outside = ShutterInterval::resolve(
+        1.0,
+        0.5,
+        ShutterConvention::FrontLoaded,
+        ShutterDistribution::UniformCounterV1,
+        ShotTimeBounds::try_new(0.0, 2.0).expect("extended shot"),
+    )
+    .expect("otherwise valid shutter");
+    let mut film = Film::new(1, 1);
+    let before = film.clone();
+    assert_eq!(
+        with_cx(|cx| render_motion_range(&scene, cx, &settings, &mut film, 0, 4, outside)),
+        Err(TracerError::MotionOutsideTrajectory)
+    );
+    assert_film_state_bits_eq(&film, &before, "out-of-trajectory shutter changed film");
+}
+
+#[test]
+fn progressive_motion_checkpoint_rejects_shutter_changes_transactionally() {
+    let scene = emissive_motion_scene(true);
+    let settings = motion_settings(2);
+    let mut film = Film::new(1, 1);
+    let full = motion_shutter(0.0, 1.0);
+    with_cx(|cx| render_motion_range(&scene, cx, &settings, &mut film, 0, 1, full))
+        .expect("first motion partition");
+    assert_eq!(
+        film.time_mode,
+        FilmTimeMode::Motion {
+            shutter: full,
+            stream_identity: settings.seed,
+        }
+    );
+    let before = film.clone();
+    assert_eq!(
+        with_cx(|cx| {
+            render_motion_range(
+                &scene,
+                cx,
+                &settings,
+                &mut film,
+                1,
+                2,
+                motion_shutter(0.5, 0.0),
+            )
+        }),
+        Err(TracerError::ProgressiveTimeModeMismatch)
+    );
+    assert_eq!(film, before);
+}
+
+#[test]
+fn progressive_motion_checkpoint_rejects_shutter_stream_changes_transactionally() {
+    let scene = emissive_motion_scene(true);
+    let settings = motion_settings(2);
+    let shutter = motion_shutter(0.0, 1.0);
+    let mut film = Film::new(1, 1);
+    with_cx(|cx| render_motion_range(&scene, cx, &settings, &mut film, 0, 1, shutter))
+        .expect("first seeded motion partition");
+    let before = film.clone();
+    let mut reseeded = settings;
+    reseeded.seed ^= 0x5eed;
+
+    assert_eq!(
+        with_cx(|cx| { render_motion_range(&scene, cx, &reseeded, &mut film, 1, 2, shutter) }),
+        Err(TracerError::ProgressiveTimeModeMismatch)
+    );
+    assert_eq!(film, before);
+}
+
+#[test]
+fn animated_nee_light_refuses_until_time_dependent_light_sampling_exists() {
+    let mut scene = emissive_motion_scene(true);
+    scene.light.prim = 0;
+    let settings = motion_settings(1);
+    assert_eq!(
+        with_cx(|cx| render_motion(&scene, cx, &settings, motion_shutter(0.5, 0.0))),
+        Err(TracerError::AnimatedLightUnsupported)
+    );
+}
+
+#[test]
+fn cinematic_pinhole_matches_legacy_bits_for_iid_and_owen_sobol() {
+    for sampler in [Sampler::Iid, Sampler::OwenSobol] {
+        let scene = cornell();
+        let camera = static_cinematic_camera(physical_from_legacy(
+            &scene.camera,
+            1.0,
+            Aperture::try_circular(0.0).expect("pinhole aperture"),
+        ));
+        let settings = settings(DirectStrategy::Mis, sampler, 0x0070_696e_686f_6c65, 5, 3);
+        let shutter = motion_shutter(0.5, 0.0);
+        let (legacy, cinematic) = with_cx(|cx| {
+            (
+                render(&scene, cx, &settings).expect("legacy pinhole render"),
+                render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter)
+                    .expect("cinematic pinhole render"),
+            )
+        });
+        assert_film_bits_eq(
+            &cinematic,
+            &legacy,
+            "zero-aperture cinematic path changed legacy XYZ bits",
+        );
+    }
+}
+
+#[test]
+fn cinematic_depth_of_field_changes_depth_fixture_and_replays_progressively() {
+    let half_extent = 0.05;
+    let aperture_radius = 0.3;
+    let scene = focus_probe_scene(1.0, half_extent);
+    let pinhole = static_cinematic_camera(physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(0.0).expect("pinhole aperture"),
+    ));
+    let finite_aperture = static_cinematic_camera(physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(aperture_radius).expect("finite circular aperture"),
+    ));
+    let settings = Settings {
+        width: 1,
+        height: 1,
+        spp: 4_096,
+        max_depth: 1,
+        sampler: Sampler::Iid,
+        strategy: DirectStrategy::Mis,
+        seed: 0x6465_7074_682d_6f66,
+    };
+    let shutter = motion_shutter(0.5, 0.0);
+    let (pinhole_film, finite_aperture_film) = with_cx(|cx| {
+        (
+            render_cinematic(&scene, &pinhole, CutSide::After, cx, &settings, shutter)
+                .expect("pinhole depth-fixture render"),
+            render_cinematic(
+                &scene,
+                &finite_aperture,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+            )
+            .expect("finite-aperture depth-fixture render"),
+        )
+    });
+    assert!(
+        pinhole_film
+            .xyz
+            .iter()
+            .flatten()
+            .any(|channel| *channel > 0.0),
+        "depth fixture produced no pinhole radiance"
+    );
+    // At z=1 the ray is halfway between a lens point and the z=0 focus
+    // point. The target therefore admits lens coordinates in a centered
+    // square of half-extent 2h. That square lies wholly inside the radius-r
+    // disk, so its exact area occupancy is (4h)^2/(pi*r^2).
+    let expected_occupancy = 16.0 * half_extent * half_extent
+        / (core::f64::consts::PI * aperture_radius * aperture_radius);
+    for channel in 0..3 {
+        let ratio = finite_aperture_film.xyz[0][channel] / pinhole_film.xyz[0][channel];
+        assert!(
+            (ratio - expected_occupancy).abs() < 0.03,
+            "channel {channel} defocus occupancy {ratio} missed analytic {expected_occupancy}"
+        );
+    }
+
+    let focused_scene = focus_probe_scene(0.0, half_extent);
+    let focused_pinhole = static_cinematic_camera(physical_from_legacy(
+        &focused_scene.camera,
+        2.0,
+        Aperture::try_circular(0.0).expect("focused pinhole aperture"),
+    ));
+    let focused_aperture = static_cinematic_camera(physical_from_legacy(
+        &focused_scene.camera,
+        2.0,
+        Aperture::try_circular(aperture_radius).expect("focused finite aperture"),
+    ));
+    let (focused_pinhole_film, focused_aperture_film) = with_cx(|cx| {
+        (
+            render_cinematic(
+                &focused_scene,
+                &focused_pinhole,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+            )
+            .expect("focused pinhole probe"),
+            render_cinematic(
+                &focused_scene,
+                &focused_aperture,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+            )
+            .expect("focused finite-aperture probe"),
+        )
+    });
+    assert_film_bits_eq(
+        &focused_aperture_film,
+        &focused_pinhole_film,
+        "an on-focus emitter changed under finite aperture",
+    );
+
+    let mut progressive = Film::new(settings.width, settings.height);
+    with_cx(|cx| {
+        render_cinematic_range(
+            &scene,
+            &finite_aperture,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            0,
+            997,
+            shutter,
+        )?;
+        render_cinematic_range(
+            &scene,
+            &finite_aperture,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            997,
+            settings.spp,
+            shutter,
+        )
+    })
+    .expect("progressive finite-aperture render");
+    assert_film_state_bits_eq(
+        &progressive,
+        &finite_aperture_film,
+        "lens samples changed across progressive partitions",
+    );
+}
+
+#[test]
+fn moving_keyframed_camera_replays_progressively_bitwise() {
+    let scene = depth_varying_emissive_scene();
+    let first_legacy = Camera {
+        eye: Point3::new(-0.25, 0.0, 2.0),
+        forward: scene.camera.forward,
+        up: scene.camera.up,
+        half_tan: scene.camera.half_tan,
+    };
+    let last_legacy = Camera {
+        eye: Point3::new(0.25, 0.0, 2.0),
+        forward: scene.camera.forward,
+        up: scene.camera.up,
+        half_tan: scene.camera.half_tan,
+    };
+    let shot = CameraShot::try_new(
+        702,
+        0.0,
+        1.0,
+        vec![
+            CameraKeyframe::try_new(
+                0.0,
+                physical_from_legacy(
+                    &first_legacy,
+                    2.0,
+                    Aperture::try_circular(0.0).expect("pinhole aperture"),
+                ),
+            )
+            .expect("first camera keyframe"),
+            CameraKeyframe::try_new(
+                1.0,
+                physical_from_legacy(
+                    &last_legacy,
+                    2.0,
+                    Aperture::try_circular(0.0).expect("pinhole aperture"),
+                ),
+            )
+            .expect("last camera keyframe"),
+        ],
+    )
+    .expect("moving camera shot");
+    let camera = AnimatedCamera::try_new(vec![shot]).expect("moving animated camera");
+    let settings = Settings {
+        width: 6,
+        height: 6,
+        spp: 11,
+        max_depth: 1,
+        sampler: Sampler::OwenSobol,
+        strategy: DirectStrategy::Mis,
+        seed: 0x6d6f_7669_6e67_6361,
+    };
+    let shutter = motion_shutter(0.0, 1.0);
+    let full =
+        with_cx(|cx| render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter))
+            .expect("one-shot moving-camera render");
+    let mut progressive = Film::new(settings.width, settings.height);
+    with_cx(|cx| {
+        render_cinematic_range(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            0,
+            4,
+            shutter,
+        )?;
+        render_cinematic_range(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            4,
+            settings.spp,
+            shutter,
+        )
+    })
+    .expect("progressive moving-camera render");
+    assert_film_state_bits_eq(
+        &progressive,
+        &full,
+        "moving-camera evaluation changed across progressive partitions",
+    );
+}
+
+#[test]
+fn moving_camera_and_geometry_share_one_absolute_path_time() {
+    let start_s = 7.0;
+    let end_s = 9.0;
+    let animated_scene = absolute_time_translation_scene(true, start_s, end_s);
+    let first = Camera {
+        eye: Point3::new(-1.0, 0.0, 2.0),
+        forward: animated_scene.camera.forward,
+        up: animated_scene.camera.up,
+        half_tan: animated_scene.camera.half_tan,
+    };
+    let last = Camera {
+        eye: Point3::new(1.0, 0.0, 2.0),
+        forward: animated_scene.camera.forward,
+        up: animated_scene.camera.up,
+        half_tan: animated_scene.camera.half_tan,
+    };
+    let camera = AnimatedCamera::try_new(vec![
+        CameraShot::try_new(
+            703,
+            start_s,
+            end_s,
+            vec![
+                CameraKeyframe::try_new(
+                    start_s,
+                    physical_from_legacy(
+                        &first,
+                        2.0,
+                        Aperture::try_circular(0.0).expect("first pinhole"),
+                    ),
+                )
+                .expect("first tracking keyframe"),
+                CameraKeyframe::try_new(
+                    end_s,
+                    physical_from_legacy(
+                        &last,
+                        2.0,
+                        Aperture::try_circular(0.0).expect("last pinhole"),
+                    ),
+                )
+                .expect("last tracking keyframe"),
+            ],
+        )
+        .expect("tracking camera shot"),
+    ])
+    .expect("tracking camera timeline");
+    let settings = motion_settings(4_096);
+    let shutter = ShutterInterval::resolve(
+        start_s,
+        end_s - start_s,
+        ShutterConvention::FrontLoaded,
+        ShutterDistribution::StratifiedCounterV1 { strata: 4_096 },
+        ShotTimeBounds::try_new(start_s, end_s).expect("absolute-time shot bounds"),
+    )
+    .expect("absolute-time shutter");
+    let joint = with_cx(|cx| {
+        render_cinematic(
+            &animated_scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter,
+        )
+    })
+    .expect("joint camera-and-geometry motion render");
+
+    // Object and camera both translate from x=-1 to x=+1 at the same path
+    // time, so their relative pose is the static centered reference for every
+    // sample. This is exact emissive occupancy, not a visual-difference proxy.
+    let static_scene = absolute_time_translation_scene(false, start_s, end_s);
+    let static_camera = AnimatedCamera::try_static(
+        704,
+        start_s,
+        end_s,
+        physical_from_legacy(
+            &static_scene.camera,
+            2.0,
+            Aperture::try_circular(0.0).expect("static reference pinhole"),
+        ),
+    )
+    .expect("static reference camera");
+    let static_reference = with_cx(|cx| {
+        render_cinematic(
+            &static_scene,
+            &static_camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter,
+        )
+    })
+    .expect("static relative-pose reference");
+    assert_film_bits_eq(
+        &joint,
+        &static_reference,
+        "camera and geometry did not evaluate at the same path time",
+    );
+
+    // The control keeps the camera fixed while the narrow object sweeps past.
+    // A nonzero but incomplete occupancy proves the fixture would detect an
+    // unshared, normalized-as-absolute, or frozen camera time.
+    let fixed_camera_control = with_cx(|cx| {
+        render_cinematic(
+            &animated_scene,
+            &static_camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter,
+        )
+    })
+    .expect("fixed-camera sensitivity control");
+    for channel in 0..3 {
+        assert!(
+            fixed_camera_control.xyz[0][channel] > 0.0
+                && fixed_camera_control.xyz[0][channel] < static_reference.xyz[0][channel],
+            "channel {channel} fixed-camera control did not expose relative motion"
+        );
+    }
+}
+
+#[test]
+fn cinematic_cut_and_out_of_shot_refusals_are_transactional() {
+    let scene = depth_varying_emissive_scene();
+    let physical = physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(0.0).expect("pinhole aperture"),
+    );
+    let camera = AnimatedCamera::try_new(vec![
+        CameraShot::try_new(
+            801,
+            0.0,
+            0.5,
+            vec![CameraKeyframe::try_new(0.0, physical.clone()).expect("first shot keyframe")],
+        )
+        .expect("first cut shot"),
+        CameraShot::try_new(
+            802,
+            0.5,
+            1.0,
+            vec![CameraKeyframe::try_new(0.5, physical).expect("second shot keyframe")],
+        )
+        .expect("second cut shot"),
+    ])
+    .expect("hard-cut camera timeline");
+    let settings = Settings {
+        width: 2,
+        height: 2,
+        spp: 2,
+        max_depth: 1,
+        sampler: Sampler::Iid,
+        strategy: DirectStrategy::Mis,
+        seed: 0x6375_742d_7265_6675,
+    };
+    let crossing_cut = ShutterInterval::resolve(
+        0.4,
+        0.2,
+        ShutterConvention::FrontLoaded,
+        ShutterDistribution::UniformCounterV1,
+        ShotTimeBounds::try_new(0.0, 2.0).expect("admission test bounds"),
+    )
+    .expect("crossing-cut shutter syntax");
+    let outside_timeline = ShutterInterval::resolve(
+        1.25,
+        0.0,
+        ShutterConvention::FrontLoaded,
+        ShutterDistribution::UniformCounterV1,
+        ShotTimeBounds::try_new(0.0, 2.0).expect("extended admission test bounds"),
+    )
+    .expect("out-of-shot shutter syntax");
+    let mut film = Film::new(settings.width, settings.height);
+    for xyz in &mut film.xyz {
+        *xyz = [0.25, -0.0, f64::from_bits(0x7ff8_0000_0000_0701)];
+    }
+    let before = film.clone();
+
+    for (shutter, context) in [
+        (crossing_cut, "crossing-cut exposure"),
+        (outside_timeline, "out-of-shot exposure"),
+    ] {
+        assert_eq!(
+            with_cx(|cx| {
+                render_cinematic_range(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    &mut film,
+                    0,
+                    settings.spp,
+                    shutter,
+                )
+            }),
+            Err(TracerError::Camera(CameraError::ShutterCrossesCut)),
+            "{context} was not refused during admission"
+        );
+        assert_film_state_bits_eq(&film, &before, "{context} changed film state");
+    }
+}
+
+#[test]
+fn progressive_cinematic_checkpoint_binds_cut_side_and_camera_path() {
+    let scene = depth_varying_emissive_scene();
+    let physical = physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(0.0).expect("pinhole aperture"),
+    );
+    let camera = AnimatedCamera::try_new(vec![
+        CameraShot::try_new(
+            811,
+            0.0,
+            0.5,
+            vec![CameraKeyframe::try_new(0.0, physical.clone()).expect("outgoing keyframe")],
+        )
+        .expect("outgoing shot"),
+        CameraShot::try_new(
+            812,
+            0.5,
+            1.0,
+            vec![CameraKeyframe::try_new(0.5, physical).expect("entering keyframe")],
+        )
+        .expect("entering shot"),
+    ])
+    .expect("hard-cut camera timeline");
+    let settings = Settings {
+        width: 2,
+        height: 2,
+        spp: 2,
+        max_depth: 1,
+        sampler: Sampler::Iid,
+        strategy: DirectStrategy::Mis,
+        seed: 0x6375_742d_6269_6e64,
+    };
+    let cut_instant = motion_shutter(0.5, 0.0);
+
+    let mut cut_film = Film::new(settings.width, settings.height);
+    with_cx(|cx| {
+        render_cinematic_range(
+            &scene,
+            &camera,
+            CutSide::Before,
+            cx,
+            &settings,
+            &mut cut_film,
+            0,
+            1,
+            cut_instant,
+        )
+    })
+    .expect("outgoing cut-side partition");
+    assert_eq!(
+        cut_film.time_mode,
+        FilmTimeMode::Cinematic {
+            shutter: cut_instant,
+            stream_identity: settings.seed,
+            shot_id: 811,
+        }
+    );
+    let before_side_switch = cut_film.clone();
+    assert_eq!(
+        with_cx(|cx| {
+            render_cinematic_range(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut cut_film,
+                1,
+                2,
+                cut_instant,
+            )
+        }),
+        Err(TracerError::ProgressiveTimeModeMismatch)
+    );
+    assert_film_state_bits_eq(
+        &cut_film,
+        &before_side_switch,
+        "cut-side mismatch changed film state",
+    );
+
+    let mut path_film = Film::new(settings.width, settings.height);
+    with_cx(|cx| render_motion_range(&scene, cx, &settings, &mut path_film, 0, 1, cut_instant))
+        .expect("legacy-motion partition");
+    let before_path_switch = path_film.clone();
+    assert_eq!(
+        with_cx(|cx| {
+            render_cinematic_range(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut path_film,
+                1,
+                2,
+                cut_instant,
+            )
+        }),
+        Err(TracerError::ProgressiveTimeModeMismatch)
+    );
+    assert_film_state_bits_eq(
+        &path_film,
+        &before_path_switch,
+        "camera-path mismatch changed film state",
+    );
 }
 
 /// Deterministic replay under the Owen-Sobol stream. Progressive sample-range

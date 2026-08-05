@@ -25,8 +25,11 @@
 //! separate); no environment light; no Russian roulette (fixed depth
 //! keeps work deterministic).
 
+use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
+use crate::camera::{AnimatedCamera, CameraError, CameraExposure, CutSide, LensSample};
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
 use crate::instances::{GeometryInstance, InstanceError};
+use crate::motion::{NormalizedShutterTime, ShutterInterval, TimedRay};
 use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, cie_x, cie_y, cie_z, xyz_e_to_d65, xyz_to_linear_srgb,
     y_integral,
@@ -46,6 +49,20 @@ use std::collections::BTreeSet;
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
 pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
+/// Bit-affecting semantics of the optional motion-time path. This is versioned
+/// separately because the legacy static entry points do not draw a shutter
+/// dimension and retain their existing image bits.
+pub const MOTION_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
+
+/// Bit-affecting semantics of the opt-in cinematic-camera path. This is
+/// versioned independently so adding lens and camera-trajectory dimensions
+/// cannot silently change the legacy pinhole tracer's frozen stream.
+pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
+
+/// Dedicated Philox counter domain for the two lens coordinates. Lens draws
+/// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.
+const CAMERA_LENS_SAMPLE_DOMAIN_V1: u32 = 0x6c65_6e73;
+
 const PI: f64 = core::f64::consts::PI;
 /// Hero-wavelength packet width (the bead's 4-wavelength packets).
 pub const PACKET: usize = 4;
@@ -53,6 +70,21 @@ pub const PACKET: usize = 4;
 const RAY_EPS: f64 = 1e-6;
 /// Sphere-trace surface tolerance.
 const TRACE_EPS: f64 = 1e-7;
+
+#[derive(Clone, Copy)]
+struct PathTime {
+    interval: ShutterInterval,
+    normalized: NormalizedShutterTime,
+}
+
+#[derive(Clone, Copy)]
+enum CameraPath<'a> {
+    Legacy,
+    Cinematic {
+        camera: &'a AnimatedCamera,
+        exposure: CameraExposure<'a>,
+    },
+}
 
 /// The per-draw uniform stream: Philox keyed by (pixel, sample,
 /// dimension). Counter-based — random access, no state shared between
@@ -129,6 +161,9 @@ pub enum Shape {
     Chart(Box<dyn Chart>),
     /// Shared immutable chart/mesh placed by a validated proper-rigid transform.
     Instance(GeometryInstance),
+    /// Shared immutable chart/mesh evaluated from a rigid trajectory at the
+    /// current path's absolute shutter time.
+    AnimatedInstance(AnimatedGeometryInstance),
 }
 
 /// One scene object.
@@ -237,6 +272,18 @@ pub enum TracerError {
     MissingNormal,
     /// Instance construction, placement, hit data, or object IDs were invalid.
     InvalidInstance,
+    /// An animated instance was supplied to a static render entry point.
+    MissingRayTime,
+    /// The resolved shutter extends beyond an animated instance trajectory.
+    MotionOutsideTrajectory,
+    /// A progressive append attempted to mix static, legacy-motion, or
+    /// cinematic samples, or changed the admitted shutter, stream, or shot.
+    ProgressiveTimeModeMismatch,
+    /// The v1 NEE light is static metadata and cannot name animated geometry.
+    AnimatedLightUnsupported,
+    /// A cinematic camera was malformed, evaluated outside its admitted shot,
+    /// or cancelled. The nested error retains ranked admission fixes.
+    Camera(CameraError),
 }
 
 impl core::fmt::Display for TracerError {
@@ -255,6 +302,19 @@ impl core::fmt::Display for TracerError {
             Self::InvalidInput => formatter.write_str("invalid spectral render input"),
             Self::MissingNormal => formatter.write_str("surface hit has no finite normal"),
             Self::InvalidInstance => formatter.write_str("invalid rigid render instance"),
+            Self::MissingRayTime => {
+                formatter.write_str("animated render instance requires explicit shutter time")
+            }
+            Self::MotionOutsideTrajectory => {
+                formatter.write_str("render shutter lies outside an instance trajectory")
+            }
+            Self::ProgressiveTimeModeMismatch => {
+                formatter.write_str("progressive film camera/time checkpoint mismatch")
+            }
+            Self::AnimatedLightUnsupported => {
+                formatter.write_str("animated area-light geometry is unsupported")
+            }
+            Self::Camera(error) => write!(formatter, "cinematic camera refused: {error}"),
         }
     }
 }
@@ -285,6 +345,59 @@ impl From<InstanceError> for TracerError {
     }
 }
 
+impl From<AnimatedInstanceError> for TracerError {
+    fn from(error: AnimatedInstanceError) -> Self {
+        match error {
+            AnimatedInstanceError::Cancelled => Self::Cancelled,
+            AnimatedInstanceError::ShutterOutsideTrajectory
+            | AnimatedInstanceError::Extrapolation => Self::MotionOutsideTrajectory,
+            AnimatedInstanceError::Instance(error) => error.into(),
+            AnimatedInstanceError::EmptyTrajectory
+            | AnimatedInstanceError::InvalidKeyframeTime
+            | AnimatedInstanceError::InvalidKeyframeVelocity
+            | AnimatedInstanceError::NonIncreasingKeyframeTime
+            | AnimatedInstanceError::InvalidEvaluationTime
+            | AnimatedInstanceError::InvalidInterpolation => Self::InvalidInstance,
+        }
+    }
+}
+
+impl From<CameraError> for TracerError {
+    fn from(error: CameraError) -> Self {
+        match error {
+            CameraError::Cancelled => Self::Cancelled,
+            other => Self::Camera(other),
+        }
+    }
+}
+
+/// Time semantics already committed to a progressive film.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilmTimeMode {
+    /// No non-empty sample range has committed yet.
+    Uninitialized,
+    /// Samples came from the legacy static render path.
+    Static,
+    /// Samples came from one exact admitted shutter and render stream.
+    Motion {
+        /// Complete shutter definition used by every committed path.
+        shutter: ShutterInterval,
+        /// Render seed that domain-separated the shutter-time stream.
+        stream_identity: u64,
+    },
+    /// Samples came from one admitted cinematic-camera shot. The stable shot
+    /// ID prevents progressive appends from crossing a hard-cut side or
+    /// silently switching between legacy and cinematic ray generation.
+    Cinematic {
+        /// Complete shutter definition used by every committed path.
+        shutter: ShutterInterval,
+        /// Render seed that domain-separated shutter and lens streams.
+        stream_identity: u64,
+        /// Stable nonzero identity of the shot that owns the exposure.
+        shot_id: u64,
+    },
+}
+
 /// Accumulated CIE XYZ film: `spp` samples summed per pixel (divide on
 /// output). Checkpointable: rendering samples `[a, b)` then `[b, c)`
 /// into the same film equals rendering `[a, c)` bitwise.
@@ -298,6 +411,8 @@ pub struct Film {
     pub xyz: Vec<[f64; 3]>,
     /// Samples accumulated so far.
     pub spp_done: u32,
+    /// Camera path and exact-shutter provenance required for the next append.
+    pub time_mode: FilmTimeMode,
 }
 
 impl Film {
@@ -325,6 +440,7 @@ impl Film {
             height,
             xyz,
             spp_done: 0,
+            time_mode: FilmTimeMode::Uninitialized,
         })
     }
 
@@ -366,6 +482,74 @@ pub fn render_range(
     from: u32,
     to: u32,
 ) -> Result<(), TracerError> {
+    render_range_impl(scene, cx, s, film, from, to, None, CameraPath::Legacy)
+}
+
+/// Render a progressive sample range with one deterministic shutter-time draw
+/// per camera path. Every secondary and shadow ray in that path retains the
+/// same physical time. The operation is transactional just like
+/// [`render_range`].
+pub fn render_motion_range(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    s: &Settings,
+    film: &mut Film,
+    from: u32,
+    to: u32,
+    shutter: ShutterInterval,
+) -> Result<(), TracerError> {
+    render_range_impl(
+        scene,
+        cx,
+        s,
+        film,
+        from,
+        to,
+        Some(shutter),
+        CameraPath::Legacy,
+    )
+}
+
+/// Render a progressive range with a validated thin-lens/keyframed camera.
+/// Camera and geometry share the one absolute shutter time drawn for each
+/// path. The complete exposure must belong to one camera shot; a positive
+/// shutter crossing a hard cut refuses before film publication.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_range(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    s: &Settings,
+    film: &mut Film,
+    from: u32,
+    to: u32,
+    shutter: ShutterInterval,
+) -> Result<(), TracerError> {
+    let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
+    render_range_impl(
+        scene,
+        cx,
+        s,
+        film,
+        from,
+        to,
+        Some(shutter),
+        CameraPath::Cinematic { camera, exposure },
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // private seam keeps legacy public APIs unchanged
+fn render_range_impl(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    s: &Settings,
+    film: &mut Film,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+) -> Result<(), TracerError> {
     assert_eq!((film.width, film.height), (s.width, s.height), "film shape");
     if film.width == 0 || film.height == 0 || s.width == 0 || s.height == 0 {
         return Err(TracerError::InvalidInput);
@@ -376,11 +560,12 @@ pub fn render_range(
     if film.xyz.len() != expected_len {
         return Err(TracerError::InvalidInput);
     }
-    validate_instance_ids(scene)?;
-    assert_eq!(film.spp_done, from, "progressive checkpoint mismatch");
     if to < from {
         return Err(TracerError::InvalidRange { from, to });
     }
+    validate_film_time_mode(film, shutter, s.seed, camera_path)?;
+    validate_instance_ids(scene, shutter)?;
+    assert_eq!(film.spp_done, from, "progressive checkpoint mismatch");
     cx.checkpoint()?;
     if to == from {
         return Ok(());
@@ -407,7 +592,27 @@ pub fn render_range(
             for sample in from..to {
                 cx.checkpoint()?;
                 let (jx, jy, ul) = pixel_dims(s, &sobol, key, pixel, sample);
-                let xyz = trace_path(scene, cx, s, kn, pixel, sample, jx, jy, ul)?;
+                let ray_time = shutter.map(|interval| PathTime {
+                    interval,
+                    normalized: interval.sample_for_stream(
+                        s.seed,
+                        u64::from(pixel),
+                        u64::from(sample),
+                    ),
+                });
+                let xyz = trace_path(
+                    scene,
+                    cx,
+                    s,
+                    kn,
+                    pixel,
+                    sample,
+                    jx,
+                    jy,
+                    ul,
+                    ray_time,
+                    camera_path,
+                )?;
                 slot[0] += xyz[0];
                 slot[1] += xyz[1];
                 slot[2] += xyz[2];
@@ -417,6 +622,9 @@ pub fn render_range(
     cx.checkpoint()?;
     film.xyz = staged_xyz;
     film.spp_done = to;
+    if film.time_mode == FilmTimeMode::Uninitialized {
+        film.time_mode = requested_time_mode(shutter, s.seed, camera_path)?;
+    }
     Ok(())
 }
 
@@ -425,6 +633,34 @@ pub fn render(scene: &Scene, cx: &Cx<'_>, s: &Settings) -> Result<Film, TracerEr
     cx.checkpoint()?;
     let mut film = Film::try_new(s.width, s.height)?;
     render_range(scene, cx, s, &mut film, 0, s.spp)?;
+    Ok(film)
+}
+
+/// Render a fresh film with deterministic motion blur over `shutter`.
+pub fn render_motion(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    s: &Settings,
+    shutter: ShutterInterval,
+) -> Result<Film, TracerError> {
+    cx.checkpoint()?;
+    let mut film = Film::try_new(s.width, s.height)?;
+    render_motion_range(scene, cx, s, &mut film, 0, s.spp, shutter)?;
+    Ok(film)
+}
+
+/// Render a fresh film with a validated physical/keyframed camera.
+pub fn render_cinematic(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    s: &Settings,
+    shutter: ShutterInterval,
+) -> Result<Film, TracerError> {
+    cx.checkpoint()?;
+    let mut film = Film::try_new(s.width, s.height)?;
+    render_cinematic_range(scene, camera, cut_side, cx, s, &mut film, 0, s.spp, shutter)?;
     Ok(film)
 }
 
@@ -475,6 +711,8 @@ fn trace_path(
     jx: f64,
     jy: f64,
     ul: f64,
+    ray_time: Option<PathTime>,
+    camera_path: CameraPath<'_>,
 ) -> Result<[f64; 3], TracerError> {
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let mut rng = PathRng {
@@ -486,21 +724,33 @@ fn trace_path(
     // Hero wavelengths: one stratified draw covers the packet.
     let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
     let lambdas = hero_wavelengths(hero, PACKET, LAMBDA_MIN, LAMBDA_MAX);
-    // Camera ray.
+    // Camera ray. Keep the legacy branch expression-for-expression compatible;
+    // the opt-in cinematic branch owns separate lens dimensions and evaluates
+    // at the same absolute time already carried by animated geometry.
     let px = pixel % s.width;
     let py = pixel / s.width;
     let (w, h) = (f64::from(s.width), f64::from(s.height));
-    let ndc_x = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * scene.camera.half_tan;
-    let ndc_y = (1.0 - 2.0 * (f64::from(py) + jy) / h) * scene.camera.half_tan;
-    let right = cross(scene.camera.forward, scene.camera.up);
-    let dir = unit(Vec3::new(
-        scene.camera.forward.x + ndc_x * right.x + ndc_y * scene.camera.up.x,
-        scene.camera.forward.y + ndc_x * right.y + ndc_y * scene.camera.up.y,
-        scene.camera.forward.z + ndc_x * right.z + ndc_y * scene.camera.up.z,
-    ));
-    let mut ray = Ray {
-        origin: scene.camera.eye,
-        dir,
+    let mut ray = match camera_path {
+        CameraPath::Legacy => {
+            let ndc_x =
+                (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * scene.camera.half_tan;
+            let ndc_y = (1.0 - 2.0 * (f64::from(py) + jy) / h) * scene.camera.half_tan;
+            legacy_camera_ray(&scene.camera, ndc_x, ndc_y)
+        }
+        CameraPath::Cinematic { camera, exposure } => {
+            let time = ray_time.ok_or(TracerError::MissingRayTime)?;
+            let physical =
+                camera.evaluate_exposure(cx, exposure, time.interval.time_at(time.normalized))?;
+            let half_tan = physical.projection().vertical_half_tan();
+            let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
+            let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
+            physical.generate_ray_from_tangent_offsets(
+                cx,
+                x_tan,
+                y_tan,
+                camera_lens_sample(key, pixel, sample)?,
+            )?
+        }
     };
     let mut throughput = [1.0f64; PACKET];
     let mut radiance = [0.0f64; PACKET];
@@ -508,7 +758,7 @@ fn trace_path(
     let mut prev_origin = ray.origin;
     for _depth in 0..s.max_depth {
         cx.checkpoint()?;
-        let Some((prim_idx, hit)) = intersect(scene, cx, &ray)? else {
+        let Some((prim_idx, hit)) = intersect(scene, cx, &ray, ray_time)? else {
             break;
         };
         let prim = &scene.primitives[prim_idx];
@@ -516,23 +766,24 @@ fn trace_path(
         if let Some((spec, scale)) = &prim.emission {
             // MIS weight against NEE for this light, seen from the
             // previous vertex.
-            #[allow(clippy::match_same_arms)] // distinct reasons for the same weight
-            let weight = match (s.strategy, prev_bsdf_pdf) {
-                (_, None) => 1.0, // camera ray: only BSDF "found" it
-                (DirectStrategy::BsdfOnly, _) => 1.0,
-                (DirectStrategy::NeeOnly, _) => 0.0,
-                (DirectStrategy::Mis, Some(bp)) => {
+            let nee_pdf = if s.strategy == DirectStrategy::Mis
+                && prev_bsdf_pdf.is_some()
+                && prim_idx == scene.light.prim
+            {
+                Some({
                     let d = hit.point.delta_from(prev_origin);
                     let d2 = d.dot(d);
                     let cos_l = scene.light.normal().dot(unit(d)).abs();
-                    let pdf_nee = if cos_l > 1e-12 {
+                    if cos_l > 1e-12 {
                         d2 / (cos_l * scene.light.area())
                     } else {
                         0.0
-                    };
-                    balance_heuristic(1, bp, 1, pdf_nee)
-                }
+                    }
+                })
+            } else {
+                None
             };
+            let weight = emissive_hit_weight(s.strategy, prev_bsdf_pdf, nee_pdf);
             for (k, &l) in lambdas.iter().enumerate() {
                 radiance[k] += throughput[k] * spec.eval(l) * scale * weight;
             }
@@ -557,7 +808,7 @@ fn trace_path(
                     origin: hit.point.offset(n.scale(RAY_EPS)),
                     dir: wi,
                 };
-                let vis = match intersect(scene, cx, &shadow)? {
+                let vis = match intersect(scene, cx, &shadow, ray_time)? {
                     Some((i, h)) => i == scene.light.prim && h.t > dist - 1e-4,
                     None => false,
                 };
@@ -611,13 +862,57 @@ fn trace_path(
     Ok(xyz)
 }
 
+/// Preserve the exact v1 camera arithmetic as one explicit compatibility
+/// branch. In particular, a zero-aperture cinematic camera must call this
+/// helper rather than construct and subtract a focus point: those expressions
+/// are mathematically equivalent but are not generally bit-equivalent.
+fn legacy_camera_ray(camera: &Camera, ndc_x: f64, ndc_y: f64) -> Ray {
+    let right = cross(camera.forward, camera.up);
+    let dir = unit(Vec3::new(
+        camera.forward.x + ndc_x * right.x + ndc_y * camera.up.x,
+        camera.forward.y + ndc_x * right.y + ndc_y * camera.up.y,
+        camera.forward.z + ndc_x * right.z + ndc_y * camera.up.z,
+    ));
+    Ray {
+        origin: camera.eye,
+        dir,
+    }
+}
+
+fn camera_lens_sample(key: [u32; 2], pixel: u32, sample: u32) -> Result<LensSample, TracerError> {
+    let u = philox4x32_10([pixel, sample, CAMERA_LENS_SAMPLE_DOMAIN_V1, 1], key);
+    let v = philox4x32_10([pixel, sample, CAMERA_LENS_SAMPLE_DOMAIN_V1, 2], key);
+    Ok(LensSample::try_new(u32_unit(u[0]), u32_unit(v[0]))?)
+}
+
+fn emissive_hit_weight(
+    strategy: DirectStrategy,
+    previous_bsdf_pdf: Option<f64>,
+    designated_light_nee_pdf: Option<f64>,
+) -> f64 {
+    let Some(bsdf_pdf) = previous_bsdf_pdf else {
+        return 1.0;
+    };
+    match strategy {
+        DirectStrategy::BsdfOnly => 1.0,
+        DirectStrategy::NeeOnly => 0.0,
+        DirectStrategy::Mis => designated_light_nee_pdf
+            .map_or(1.0, |nee_pdf| balance_heuristic(1, bsdf_pdf, 1, nee_pdf)),
+    }
+}
+
 impl Settings {
     fn camera_aspect(&self) -> f64 {
         f64::from(self.width) / f64::from(self.height)
     }
 }
 
-fn intersect(scene: &Scene, cx: &Cx<'_>, ray: &Ray) -> Result<Option<(usize, Hit)>, TracerError> {
+fn intersect(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray: &Ray,
+    ray_time: Option<PathTime>,
+) -> Result<Option<(usize, Hit)>, TracerError> {
     let mut best: Option<(usize, Hit)> = None;
     for (i, prim) in scene.primitives.iter().enumerate() {
         cx.checkpoint()?;
@@ -646,6 +941,13 @@ fn intersect(scene: &Scene, cx: &Cx<'_>, ray: &Ray) -> Result<Option<(usize, Hit
             Shape::Instance(instance) => instance
                 .intersect(cx, ray, 1e4, TRACE_EPS)?
                 .map(|instance_hit| instance_hit.hit),
+            Shape::AnimatedInstance(instance) => {
+                let time = ray_time.ok_or(TracerError::MissingRayTime)?;
+                let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
+                instance
+                    .intersect(cx, &timed_ray, 1e4, TRACE_EPS)?
+                    .map(|instance_hit| instance_hit.hit)
+            }
         };
         if let Some(h) = hit {
             let replace = match best.as_ref() {
@@ -654,12 +956,9 @@ fn intersect(scene: &Scene, cx: &Cx<'_>, ray: &Ray) -> Result<Option<(usize, Hit
                 Some((best_index, best_hit))
                     if h.t.total_cmp(&best_hit.t) == core::cmp::Ordering::Equal =>
                 {
-                    match (&prim.shape, &scene.primitives[*best_index].shape) {
-                        (Shape::Instance(candidate), Shape::Instance(current)) => {
-                            candidate.object_id() < current.object_id()
-                        }
-                        _ => false,
-                    }
+                    instance_object_id(&prim.shape)
+                        .zip(instance_object_id(&scene.primitives[*best_index].shape))
+                        .is_some_and(|(candidate, current)| candidate < current)
                 }
                 Some(_) => false,
             };
@@ -671,17 +970,78 @@ fn intersect(scene: &Scene, cx: &Cx<'_>, ray: &Ray) -> Result<Option<(usize, Hit
     Ok(best)
 }
 
-fn validate_instance_ids(scene: &Scene) -> Result<(), TracerError> {
+fn validate_instance_ids(
+    scene: &Scene,
+    shutter: Option<ShutterInterval>,
+) -> Result<(), TracerError> {
+    let light_primitive = scene
+        .primitives
+        .get(scene.light.prim)
+        .ok_or(TracerError::InvalidInput)?;
+    if matches!(&light_primitive.shape, Shape::AnimatedInstance(_)) {
+        return Err(TracerError::AnimatedLightUnsupported);
+    }
     let mut object_ids = BTreeSet::new();
     for primitive in &scene.primitives {
-        let Shape::Instance(instance) = &primitive.shape else {
+        let Some(object_id) = instance_object_id(&primitive.shape) else {
             continue;
         };
-        if !object_ids.insert(instance.object_id()) {
+        if !object_ids.insert(object_id) {
             return Err(TracerError::InvalidInstance);
+        }
+        if let Shape::AnimatedInstance(instance) = &primitive.shape {
+            let shutter = shutter.ok_or(TracerError::MissingRayTime)?;
+            instance.trajectory().admit_shutter(shutter)?;
         }
     }
     Ok(())
+}
+
+fn requested_time_mode(
+    shutter: Option<ShutterInterval>,
+    stream_identity: u64,
+    camera_path: CameraPath<'_>,
+) -> Result<FilmTimeMode, TracerError> {
+    match (shutter, camera_path) {
+        (None, CameraPath::Legacy) => Ok(FilmTimeMode::Static),
+        (Some(shutter), CameraPath::Legacy) => Ok(FilmTimeMode::Motion {
+            shutter,
+            stream_identity,
+        }),
+        (Some(shutter), CameraPath::Cinematic { exposure, .. }) => Ok(FilmTimeMode::Cinematic {
+            shutter,
+            stream_identity,
+            shot_id: exposure.shot_id(),
+        }),
+        (None, CameraPath::Cinematic { .. }) => Err(TracerError::InvalidInput),
+    }
+}
+
+fn validate_film_time_mode(
+    film: &Film,
+    shutter: Option<ShutterInterval>,
+    stream_identity: u64,
+    camera_path: CameraPath<'_>,
+) -> Result<(), TracerError> {
+    let requested = requested_time_mode(shutter, stream_identity, camera_path)?;
+    match (film.spp_done, film.time_mode) {
+        (0, FilmTimeMode::Uninitialized) => Ok(()),
+        (
+            0,
+            FilmTimeMode::Static | FilmTimeMode::Motion { .. } | FilmTimeMode::Cinematic { .. },
+        )
+        | (1.., FilmTimeMode::Uninitialized) => Err(TracerError::InvalidInput),
+        (_, accepted) if accepted == requested => Ok(()),
+        _ => Err(TracerError::ProgressiveTimeModeMismatch),
+    }
+}
+
+fn instance_object_id(shape: &Shape) -> Option<u64> {
+    match shape {
+        Shape::Instance(instance) => Some(instance.object_id()),
+        Shape::AnimatedInstance(instance) => Some(instance.object_id()),
+        Shape::Mesh(_) | Shape::Chart(_) => None,
+    }
 }
 
 fn oriented_normal(hit: &Hit, ray: &Ray) -> Result<Vec3, TracerError> {
@@ -694,6 +1054,44 @@ fn oriented_normal(hit: &Hit, ray: &Ray) -> Result<Vec3, TracerError> {
     } else {
         n
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mis_weights_only_emitters_reachable_by_the_nee_technique() {
+        let bsdf_pdf = 0.25;
+        let nee_pdf = 0.75;
+        assert_eq!(
+            emissive_hit_weight(DirectStrategy::Mis, Some(bsdf_pdf), None).to_bits(),
+            1.0_f64.to_bits(),
+            "an emitter absent from NEE has no competing technique"
+        );
+        assert_eq!(
+            emissive_hit_weight(DirectStrategy::Mis, Some(bsdf_pdf), Some(nee_pdf)).to_bits(),
+            balance_heuristic(1, bsdf_pdf, 1, nee_pdf).to_bits()
+        );
+        assert_eq!(
+            emissive_hit_weight(DirectStrategy::NeeOnly, Some(bsdf_pdf), None).to_bits(),
+            0.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn cinematic_lens_stream_v1_has_frozen_replay_bits_and_keying() {
+        let sample = camera_lens_sample([0x89ab_cdef, 0x0123_4567], 17, 29).unwrap();
+        assert_eq!(sample.u().to_bits(), 0x3f9f_babf_b800_0000);
+        assert_eq!(sample.v().to_bits(), 0x3fe1_6175_5c60_0000);
+
+        let reseeded = camera_lens_sample([0x89ab_cdee, 0x0123_4567], 17, 29).unwrap();
+        assert_ne!(
+            [sample.u().to_bits(), sample.v().to_bits()],
+            [reseeded.u().to_bits(), reseeded.v().to_bits()],
+            "lens stream ignored the explicit render key"
+        );
+    }
 }
 
 // ---- BSDF machinery --------------------------------------------------

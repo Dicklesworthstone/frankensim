@@ -326,8 +326,11 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   geometry artifact's authoritative content identity. Instance transforms are
   visualization placements only: they do not alter mass properties, contact
   geometry, mechanics state, material parameters, or emission. Only proper
-  rigid transforms are supported; motion blur, deformation, scaling, and
-  interpolated pose trajectories remain successor work.
+  rigid transforms are supported. Time-varying proper-rigid placements and
+  motion blur are implemented under the contracts below; deformation, scaling,
+  and time-varying emission or animated NEE-light sampling remain successor
+  work. Emissive geometry may move with its instance, but its emission itself is
+  time-invariant.
 - v0 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
   watertight ray-triangle tests, a LIGHT-BVH, media coupling, ray-stream
   sorting, and progressive tile streaming to HELM remain staged.
@@ -416,16 +419,138 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 
 ## Motion-time foundation
 
-`motion` defines a non-breaking timed-ray envelope for every existing spatial
-ray backend. Frame shutters resolve centered, front-loaded, or back-loaded
-exposure intervals inside explicit shot bounds. Normalized shutter coordinates
-are finite and in `[0,1]`; absolute time is retained on `TimedRay` in seconds.
-The `UniformCounterV1` sampler uses a dedicated stable counter domain keyed by
-logical pixel and sample identities, never worker order. Zero-width shutters
-map every sample bit-exactly to the static frame time.
+`motion` defines a timed-ray envelope for every existing spatial ray backend.
+Frame shutters resolve centered, front-loaded, or back-loaded exposure
+intervals inside explicit shot bounds. Normalized shutter coordinates are
+finite and in `[0,1]`; `TimedRay` retains the complete admitted shutter,
+normalized coordinate, and absolute seconds so a downstream adapter can reject
+mixing rays from coincident but different exposures. `UniformCounterV1` and
+`StratifiedCounterV1` use a dedicated stable counter domain, independently mix
+the explicit render-stream seed, logical pixel, and absolute sample identities,
+and never consume the tracer's wavelength, pixel, light, lens, or BSDF streams.
+Every consecutive full-cycle window of a stratified stream visits each temporal stratum once,
+while the keyed permutation spreads incomplete groups across the exposure
+instead of pinning low sample IDs near shutter open. Zero-width shutters map
+every sample bit-exactly to the static frame time. Positive requested durations
+that collapse to one binary64 endpoint at the declared absolute-time scale
+refuse instead of silently becoming static; explicit normalized endpoints
+return the stored open/close bits exactly.
 
-This foundation does not yet claim moving-instance intersection, conservative
-motion bounds, event-crossing subdivision, camera/object relative-motion
-correctness, or render-image equivalence. Those remain work inside active bead
-`frankensim-h7xu5.3.2`; this slice establishes the explicit time and sampling
-contract they consume.
+`animated_instances` binds shared immutable geometry to strictly ordered
+proper-rigid keyframes. Translation uses cubic Hermite interpolation with
+declared endpoint velocities; orientation uses shortest-arc SLERP with a
+normalized-linear fallback for nearly coincident quaternions.
+Evaluation is by a `TimedRay`'s absolute time, never extrapolates, retains object
+and geometry identities, and binds the returned frame identity to the evaluated
+pose. It polls cancellation before and after trajectory materialization and
+backend intersection. Equal camera/object translations preserve the relative
+hit, while holding the camera fixed changes it as expected.
+
+`motion_bounds` validates finite local boxes and returns conservative finite
+world AABBs. Arbitrary proper rotation is enclosed without angular sampling by
+an outward-rounded body-origin sphere, so endpoint quaternions cannot hide
+additional full spins. Linear segments retain their declared endpoint
+translation envelope and constant identity rotation uses the tighter analytic
+translated-box envelope. The runtime-trajectory path converts every overlapping
+cubic-Hermite translation segment to its equivalent Bezier controls and bounds
+their convex hull, including velocity-driven interior overshoot; it keeps
+shutter-clipped boundary segments whole and adds an outward numerical margin.
+This is a safe primitive for the later animated TLAS, not a TLAS itself.
+
+`temporal_accumulation` evaluates absolute logical sample IDs in fixed order and
+transactionally appends three-channel linear RGB or XYZ sums. A checkpoint
+retains shutter, shutter-stream identity, pixel identity, color interpretation,
+sum, accepted count, and next sample ID. One-shot and contiguous progressive
+partitions execute the same floating additions and are bit-identical.
+Cancellation, non-finite evaluator output, range mismatch, and arithmetic
+overflow leave accepted state unchanged.
+
+With feature `tracer`, `Shape::AnimatedInstance` and
+`render_motion`/`render_motion_range` make the time contract part of actual
+spectral rendering. One shutter time keyed by render seed, pixel, and absolute
+logical sample is drawn per camera path and retained for every secondary and
+shadow ray. A progressive `Film` checkpoints the exact shutter plus shutter
+stream seed and refuses mixed exposure histories. Animated geometry on the
+legacy static entry point refuses with `MissingRayTime`; a shutter outside any
+animated trajectory refuses before film publication. Legacy static rendering
+does not draw the motion dimension, and rendering static geometry through the
+motion entry point is bit-identical in XYZ output. A zero-width shutter at an animated
+keyframe is bit-identical to the equivalent static instance. G0/G3/G5 coverage
+includes malformed/full/zero exposures, deterministic strata and progressive
+partitions, trajectory admission and interpolation, moving-camera/object
+relative intersection, conservative sampled bounds, transactional
+cancellation, and high-rate spectral renders matching analytic
+constant-velocity and constant-spin occupancy envelopes.
+
+The v1 rectangular NEE light is static metadata. A scene that names an animated
+instance as that light refuses with `AnimatedLightUnsupported`; it is never
+rendered with a stale light-sampling transform.
+
+## Cinematic physical camera
+
+`camera` adds an opt-in, validated ideal thin-lens camera without changing the
+legacy `tracer::Camera` or its frozen image stream. `CameraProjection` accepts
+either focal length plus **vertical** active sensor height in metres, an
+explicit vertical FOV in radians, or the legacy vertical half tangent. Sensor
+format is never guessed: in particular, there is no hidden 36x24 mm default.
+The render dimensions still declare film aspect ratio.
+
+`PhysicalCamera` admits a finite eye, a positive focus distance, and an
+orthonormal right/up/forward frame. Look-at construction uses scaled
+normalization so representable very large or small vectors do not overflow or
+underflow before validation. An explicit up reference whose scale-free sine
+against the view axis is below the contract threshold refuses with ranked
+fixes; the camera never silently chooses a different roll. Camera local axes
+are the proper rotation `+X=right`, `+Y=up`, `-Z=forward`.
+
+Focus distance is the positive axial distance from the lens plane. For raster
+vector `v = forward + x*right + y*up`, all thin-lens rays converge on
+`eye + focus_distance*v`. A declarative world-point focus track projects the
+identity-resolved point onto the evaluated optical axis; a target on or behind
+the lens refuses. It is not heuristic autofocus.
+
+`Aperture` is constructible only through validating constructors. A circular
+aperture uses the area-preserving concentric-square map. A regular bladed
+aperture declares its circumradius and canonical rotation, precomputes 3--64
+vertices, and samples equal-area centre triangles uniformly; its closing
+triangle reuses vertex zero bit-exactly. Radius zero canonicalizes to a true
+pinhole. `Aperture::try_from_f_number` uses
+`radius = focal_length / (2*f_number)`.
+
+`CameraShot` linearly interpolates eye position, uses deterministic
+shortest-arc quaternion SLERP for orientation, and linearly interpolates either
+axial focus distance or an explicitly moving world focus point. It returns
+stored endpoint bits exactly and holds the first/last keyframe only inside the
+declared shot bounds. Projection, aperture, exposure metadata, and focus policy
+may not change inside one continuous shot. `AnimatedCamera` never extrapolates
+or blends across hard cuts. A positive-width shutter must belong wholly to one
+shot; a zero-width exposure exactly on a cut declares `CutSide::Before` or
+`CutSide::After`. The admitted `CameraExposure` binds subsequent evaluation to
+that shot so a rare exact boundary sample cannot jump across the cut.
+
+With feature `tracer`, `render_cinematic`/`render_cinematic_range` evaluate the
+camera and animated geometry at the same one absolute `PathTime`. Lens U/V use
+the separately versioned Philox camera-lens domain and never consume the
+pixel/wavelength, shutter, light, or BSDF streams. The pinhole branch performs
+the legacy camera arithmetic directly rather than reconstructing a focus point,
+so an equivalent aperture-zero camera is bit-identical to the legacy render.
+Camera validation, shutter admission, evaluation, and ray generation poll
+`Cx`; failures leave a progressive film transactionally unchanged.
+
+Determinism is same-ISA/toolchain bit replay under the existing tracer policy.
+The camera model makes no claim for lens distortion, chromatic aberration,
+diffraction, rolling shutter, vignetting, autofocus, sensor irradiance, or
+photometrically calibrated exposure. `ExposureMetadata` is retained but is not
+applied by the current radiance-averaging integrator. `FilmTimeMode` binds the
+render-path kind, shutter, stream seed, and cinematic shot ID, so progressive
+appends cannot cross a cut or switch between legacy-motion and cinematic rays.
+Like the pre-existing progressive tracer, it does not yet content-bind the
+scene or full camera content; composition-level artifact identity owns that
+broader provenance closure.
+
+The motion path reconstructs only the supplied interpolation model. It does not
+invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
+declared contact/terminal discontinuity, validate the source dynamics, or claim
+that motion blur recovers unresolved terminal physics. Event-aware subdivision
+or refusal is owned by the Euler trajectory adapter; final animated TLAS and
+cinematic-camera composition remain their dependent beads.
