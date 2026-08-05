@@ -55,6 +55,10 @@ name = "tracer_battery"
 required-features = ["tracer"]
 
 [[test]]
+name = "dielectric_battery"
+required-features = ["tracer"]
+
+[[test]]
 name = "diff_battery"
 required-features = ["differentiable"]
 

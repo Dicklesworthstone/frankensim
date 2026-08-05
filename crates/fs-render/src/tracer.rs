@@ -28,6 +28,11 @@
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
 use crate::camera::{AnimatedCamera, CameraError, CameraExposure, CutSide, LensSample};
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
+use crate::dielectric::{
+    DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
+    evaluate_rough_dielectric, fresnel_dielectric, sample_rough_dielectric,
+    sample_smooth_dielectric,
+};
 use crate::instances::{GeometryInstance, InstanceError};
 use crate::motion::{NormalizedShutterTime, ShutterInterval, TimedRay};
 use crate::spectral::{
@@ -59,6 +64,10 @@ pub const MOTION_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 /// cannot silently change the legacy pinhole tracer's frozen stream.
 pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
+/// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
+/// opaque materials retain tracer-v1 stream order and image bits.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
+
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.
 const CAMERA_LENS_SAMPLE_DOMAIN_V1: u32 = 0x6c65_6e73;
@@ -70,11 +79,53 @@ pub const PACKET: usize = 4;
 const RAY_EPS: f64 = 1e-6;
 /// Sphere-trace surface tolerance.
 const TRACE_EPS: f64 = 1e-7;
+const MAX_MEDIUM_STACK_DEPTH: usize = 64;
 
 #[derive(Clone, Copy)]
 struct PathTime {
     interval: ShutterInterval,
     normalized: NormalizedShutterTime,
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceFrame {
+    oriented: Vec3,
+    geometric: Vec3,
+    entering: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MediumEntry {
+    boundary_primitive: usize,
+    glass: DielectricGlass,
+}
+
+#[derive(Clone, Copy)]
+enum MediumTransition {
+    Enter(MediumEntry),
+    Exit { boundary_primitive: usize },
+}
+
+#[derive(Clone, Copy)]
+struct BoundaryMedia {
+    incident: Option<DielectricGlass>,
+    transmitted: Option<DielectricGlass>,
+    transition: MediumTransition,
+}
+
+#[derive(Clone, Copy)]
+struct PreviousBsdf {
+    pdf: f64,
+    delta: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DielectricPathSample {
+    direction: Vec3,
+    event: DielectricEvent,
+    pdf: f64,
+    delta: bool,
+    weights: [f64; PACKET],
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +199,15 @@ pub enum Material {
         reflectance: LiftedSpectrum,
         /// Roughness α (GGX convention, > 0).
         alpha: f64,
+    },
+    /// Homogeneous spectral dielectric boundary. Geometry must be a closed,
+    /// consistently outward-oriented solid; encountered violations refuse
+    /// through the path-local medium stack.
+    Dielectric {
+        /// Validated interior glass definition.
+        glass: DielectricGlass,
+        /// Smooth-delta or isotropic-GGX boundary treatment.
+        surface: DielectricSurface,
     },
 }
 
@@ -284,6 +344,23 @@ pub enum TracerError {
     /// A cinematic camera was malformed, evaluated outside its admitted shot,
     /// or cancelled. The nested error retains ranked admission fixes.
     Camera(CameraError),
+    /// Validated dielectric evaluation unexpectedly refused.
+    Dielectric(DielectricError),
+    /// An encountered dielectric boundary violated strict LIFO nesting or was
+    /// oriented as an exit while the path remained in ambient air.
+    MediumStackMismatch {
+        /// Boundary primitive being processed.
+        boundary_primitive: usize,
+        /// Active top boundary, if any.
+        active_boundary: Option<usize>,
+    },
+    /// The defensive nested-medium ceiling was exceeded.
+    MediumStackOverflow,
+    /// A ray missed all geometry while still inside a declared closed medium.
+    UnclosedMedium {
+        /// Active top boundary at the miss.
+        boundary_primitive: usize,
+    },
 }
 
 impl core::fmt::Display for TracerError {
@@ -315,6 +392,19 @@ impl core::fmt::Display for TracerError {
                 formatter.write_str("animated area-light geometry is unsupported")
             }
             Self::Camera(error) => write!(formatter, "cinematic camera refused: {error}"),
+            Self::Dielectric(error) => write!(formatter, "dielectric transport refused: {error}"),
+            Self::MediumStackMismatch {
+                boundary_primitive,
+                active_boundary,
+            } => write!(
+                formatter,
+                "dielectric boundary {boundary_primitive} violated LIFO nesting; active boundary {active_boundary:?}"
+            ),
+            Self::MediumStackOverflow => formatter.write_str("dielectric medium stack overflow"),
+            Self::UnclosedMedium { boundary_primitive } => write!(
+                formatter,
+                "ray missed while still inside dielectric boundary {boundary_primitive}"
+            ),
         }
     }
 }
@@ -368,6 +458,12 @@ impl From<CameraError> for TracerError {
             CameraError::Cancelled => Self::Cancelled,
             other => Self::Camera(other),
         }
+    }
+}
+
+impl From<DielectricError> for TracerError {
+    fn from(error: DielectricError) -> Self {
+        Self::Dielectric(error)
     }
 }
 
@@ -754,20 +850,36 @@ fn trace_path(
     };
     let mut throughput = [1.0f64; PACKET];
     let mut radiance = [0.0f64; PACKET];
-    let mut prev_bsdf_pdf: Option<f64> = None;
+    let mut previous_bsdf: Option<PreviousBsdf> = None;
     let mut prev_origin = ray.origin;
+    let mut segment_origin = ray.origin;
+    let mut medium_stack = Vec::<MediumEntry>::new();
+    let mut packet_collapsed = false;
     for _depth in 0..s.max_depth {
         cx.checkpoint()?;
         let Some((prim_idx, hit)) = intersect(scene, cx, &ray, ray_time)? else {
+            if let Some(active) = medium_stack.last() {
+                return Err(TracerError::UnclosedMedium {
+                    boundary_primitive: active.boundary_primitive,
+                });
+            }
             break;
         };
+        attenuate_segment(
+            &mut throughput,
+            &lambdas,
+            &medium_stack,
+            segment_origin,
+            &hit,
+        )?;
         let prim = &scene.primitives[prim_idx];
-        let n = oriented_normal(&hit, &ray)?;
+        let frame = surface_frame(&hit, &ray)?;
+        let n = frame.oriented;
         if let Some((spec, scale)) = &prim.emission {
             // MIS weight against NEE for this light, seen from the
             // previous vertex.
             let nee_pdf = if s.strategy == DirectStrategy::Mis
-                && prev_bsdf_pdf.is_some()
+                && previous_bsdf.is_some()
                 && prim_idx == scene.light.prim
             {
                 Some({
@@ -783,71 +895,231 @@ fn trace_path(
             } else {
                 None
             };
-            let weight = emissive_hit_weight(s.strategy, prev_bsdf_pdf, nee_pdf);
+            let weight = emissive_hit_weight(s.strategy, previous_bsdf, nee_pdf);
             for (k, &l) in lambdas.iter().enumerate() {
                 radiance[k] += throughput[k] * spec.eval(l) * scale * weight;
             }
             break; // v1: emitters do not reflect
         }
+
+        let dielectric_boundary = match prim.material {
+            Material::Dielectric { glass, .. } => {
+                collapse_dispersive_packet(&mut throughput, &mut packet_collapsed, glass);
+                Some(boundary_media(
+                    prim_idx,
+                    glass,
+                    frame.entering,
+                    &medium_stack,
+                )?)
+            }
+            Material::Lambertian { .. } | Material::Ggx { .. } => None,
+        };
+
         // Next-event estimation.
         if s.strategy != DirectStrategy::BsdfOnly {
-            let (u1, u2) = rng.next2();
-            let q = scene
-                .light
-                .corner
-                .offset(scene.light.edge_u.scale(u1))
-                .offset(scene.light.edge_v.scale(u2));
-            let to_light = q.delta_from(hit.point);
-            let d2 = to_light.dot(to_light);
-            let dist = d2.sqrt();
-            let wi = to_light.scale(1.0 / dist);
-            let cos_s = n.dot(wi);
-            let cos_l = scene.light.normal().dot(wi).abs();
-            if cos_s > 0.0 && cos_l > 1e-9 {
-                let shadow = Ray {
-                    origin: hit.point.offset(n.scale(RAY_EPS)),
-                    dir: wi,
-                };
-                let vis = match intersect(scene, cx, &shadow, ray_time)? {
-                    Some((i, h)) => i == scene.light.prim && h.t > dist - 1e-4,
-                    None => false,
-                };
-                if vis {
-                    let pdf_nee = d2 / (cos_l * scene.light.area());
-                    let wo = ray.dir.scale(-1.0);
-                    let bsdf_pdf = bsdf_pdf(&prim.material, n, wo, wi);
-                    let weight = match s.strategy {
-                        DirectStrategy::Mis => balance_heuristic(1, pdf_nee, 1, bsdf_pdf),
-                        _ => 1.0,
-                    };
-                    let (espec, escale) = &scene.light.emission;
-                    for (k, &l) in lambdas.iter().enumerate() {
-                        let f = bsdf_eval(&prim.material, n, wo, wi, l);
-                        radiance[k] +=
-                            throughput[k] * f * cos_s * espec.eval(l) * escale / pdf_nee * weight;
+            match prim.material {
+                Material::Dielectric { surface, .. } => {
+                    if let Some(alpha) = surface.roughness_alpha() {
+                        let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
+                        let (u1, u2) = rng.next2();
+                        let q = scene
+                            .light
+                            .corner
+                            .offset(scene.light.edge_u.scale(u1))
+                            .offset(scene.light.edge_v.scale(u2));
+                        let to_light = q.delta_from(hit.point);
+                        let d2 = to_light.dot(to_light);
+                        if d2 > 0.0 && d2.is_finite() {
+                            let dist = d2.sqrt();
+                            let wi = to_light.scale(1.0 / dist);
+                            let cos_s = n.dot(wi).abs();
+                            let cos_l = scene.light.normal().dot(wi).abs();
+                            let wo = ray.dir.scale(-1.0);
+                            let eta_i = medium_ior(boundary.incident, lambdas[0])?;
+                            let eta_t = medium_ior(boundary.transmitted, lambdas[0])?;
+                            let evaluation =
+                                evaluate_rough_dielectric(n, wo, wi, eta_i, eta_t, alpha)?;
+                            if evaluation.value > 0.0
+                                && evaluation.pdf > 0.0
+                                && cos_s > 0.0
+                                && cos_l > 1.0e-9
+                            {
+                                let shadow = Ray {
+                                    origin: dielectric_spawn_origin(hit.point, frame.geometric, wi),
+                                    dir: wi,
+                                };
+                                let visible = match intersect(scene, cx, &shadow, ray_time)? {
+                                    Some((index, shadow_hit)) => {
+                                        index == scene.light.prim && shadow_hit.t > dist - 1.0e-4
+                                    }
+                                    None => false,
+                                };
+                                if visible {
+                                    let pdf_nee = d2 / (cos_l * scene.light.area());
+                                    let weight = match s.strategy {
+                                        DirectStrategy::Mis => {
+                                            balance_heuristic(1, pdf_nee, 1, evaluation.pdf)
+                                        }
+                                        DirectStrategy::NeeOnly => 1.0,
+                                        DirectStrategy::BsdfOnly => unreachable!(),
+                                    };
+                                    let shadow_medium = match evaluation.event {
+                                        DielectricEvent::Reflection => boundary.incident,
+                                        DielectricEvent::Transmission => boundary.transmitted,
+                                    };
+                                    let (emission, emission_scale) = &scene.light.emission;
+                                    for (lane, &lambda) in lambdas.iter().enumerate() {
+                                        if throughput[lane].to_bits() == 0.0_f64.to_bits() {
+                                            continue;
+                                        }
+                                        let eta_i = medium_ior(boundary.incident, lambda)?;
+                                        let eta_t = medium_ior(boundary.transmitted, lambda)?;
+                                        let value = evaluate_rough_dielectric(
+                                            n, wo, wi, eta_i, eta_t, alpha,
+                                        )?
+                                        .value;
+                                        let attenuation =
+                                            medium_transmittance(shadow_medium, lambda, dist)?;
+                                        radiance[lane] += throughput[lane]
+                                            * value
+                                            * cos_s
+                                            * attenuation
+                                            * emission.eval(lambda)
+                                            * emission_scale
+                                            / pdf_nee
+                                            * weight;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Material::Lambertian { .. } | Material::Ggx { .. } => {
+                    // Preserve the opaque tracer-v1 arithmetic and draw order
+                    // expression-for-expression so the frozen Cornell path is
+                    // unaffected by enabling dielectric support.
+                    let (u1, u2) = rng.next2();
+                    let q = scene
+                        .light
+                        .corner
+                        .offset(scene.light.edge_u.scale(u1))
+                        .offset(scene.light.edge_v.scale(u2));
+                    let to_light = q.delta_from(hit.point);
+                    let d2 = to_light.dot(to_light);
+                    let dist = d2.sqrt();
+                    let wi = to_light.scale(1.0 / dist);
+                    let cos_s = n.dot(wi);
+                    let cos_l = scene.light.normal().dot(wi).abs();
+                    if cos_s > 0.0 && cos_l > 1e-9 {
+                        let shadow = Ray {
+                            origin: hit.point.offset(n.scale(RAY_EPS)),
+                            dir: wi,
+                        };
+                        let vis = match intersect(scene, cx, &shadow, ray_time)? {
+                            Some((i, h)) => i == scene.light.prim && h.t > dist - 1e-4,
+                            None => false,
+                        };
+                        if vis {
+                            let pdf_nee = d2 / (cos_l * scene.light.area());
+                            let wo = ray.dir.scale(-1.0);
+                            let bsdf_pdf = bsdf_pdf(&prim.material, n, wo, wi);
+                            let weight = match s.strategy {
+                                DirectStrategy::Mis => balance_heuristic(1, pdf_nee, 1, bsdf_pdf),
+                                _ => 1.0,
+                            };
+                            let (espec, escale) = &scene.light.emission;
+                            if let Some(active) = medium_stack.last() {
+                                for (k, &l) in lambdas.iter().enumerate() {
+                                    let f = bsdf_eval(&prim.material, n, wo, wi, l);
+                                    let attenuation =
+                                        medium_transmittance(Some(active.glass), l, dist)?;
+                                    radiance[k] += throughput[k]
+                                        * f
+                                        * cos_s
+                                        * attenuation
+                                        * espec.eval(l)
+                                        * escale
+                                        / pdf_nee
+                                        * weight;
+                                }
+                            } else {
+                                // Keep the ambient opaque tracer-v1 arithmetic
+                                // bit-for-bit identical to its frozen path.
+                                for (k, &l) in lambdas.iter().enumerate() {
+                                    let f = bsdf_eval(&prim.material, n, wo, wi, l);
+                                    radiance[k] +=
+                                        throughput[k] * f * cos_s * espec.eval(l) * escale
+                                            / pdf_nee
+                                            * weight;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+
         // BSDF sampling for the next bounce.
         let (u1, u2) = rng.next2();
         let wo = ray.dir.scale(-1.0);
-        let Some((wi, pdf)) = bsdf_sample(&prim.material, n, wo, u1, u2) else {
-            break;
-        };
-        let cos_s = n.dot(wi).max(0.0);
-        if pdf <= 0.0 || cos_s <= 0.0 {
-            break;
+        match prim.material {
+            Material::Dielectric { surface, .. } => {
+                let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
+                let event_sample = if surface.is_delta() {
+                    u1
+                } else {
+                    rng.next2().0
+                };
+                let Some(sampled) = sample_dielectric_path(
+                    n,
+                    wo,
+                    surface,
+                    boundary,
+                    &lambdas,
+                    u1,
+                    u2,
+                    event_sample,
+                )?
+                else {
+                    break;
+                };
+                for (lane, weight) in sampled.weights.into_iter().enumerate() {
+                    throughput[lane] *= weight;
+                }
+                if sampled.event == DielectricEvent::Transmission {
+                    apply_medium_transition(&mut medium_stack, boundary.transition)?;
+                }
+                previous_bsdf = Some(PreviousBsdf {
+                    pdf: sampled.pdf,
+                    delta: sampled.delta,
+                });
+                prev_origin = hit.point;
+                segment_origin = hit.point;
+                ray = Ray {
+                    origin: dielectric_spawn_origin(hit.point, frame.geometric, sampled.direction),
+                    dir: sampled.direction,
+                };
+            }
+            Material::Lambertian { .. } | Material::Ggx { .. } => {
+                let Some((wi, pdf)) = bsdf_sample(&prim.material, n, wo, u1, u2) else {
+                    break;
+                };
+                let cos_s = n.dot(wi).max(0.0);
+                if pdf <= 0.0 || cos_s <= 0.0 {
+                    break;
+                }
+                for (k, &l) in lambdas.iter().enumerate() {
+                    throughput[k] *= bsdf_eval(&prim.material, n, wo, wi, l) * cos_s / pdf;
+                }
+                previous_bsdf = Some(PreviousBsdf { pdf, delta: false });
+                prev_origin = hit.point;
+                segment_origin = hit.point;
+                ray = Ray {
+                    origin: hit.point.offset(n.scale(RAY_EPS)),
+                    dir: wi,
+                };
+            }
         }
-        for (k, &l) in lambdas.iter().enumerate() {
-            throughput[k] *= bsdf_eval(&prim.material, n, wo, wi, l) * cos_s / pdf;
-        }
-        prev_bsdf_pdf = Some(pdf);
-        prev_origin = hit.point;
-        ray = Ray {
-            origin: hit.point.offset(n.scale(RAY_EPS)),
-            dir: wi,
-        };
     }
     // Hero-wavelength estimator → XYZ (same normalization convention
     // as `spectral::xyz_of_spectrum`: Y of unit radiance is 1).
@@ -885,19 +1157,274 @@ fn camera_lens_sample(key: [u32; 2], pixel: u32, sample: u32) -> Result<LensSamp
     Ok(LensSample::try_new(u32_unit(u[0]), u32_unit(v[0]))?)
 }
 
+fn surface_frame(hit: &Hit, ray: &Ray) -> Result<SurfaceFrame, TracerError> {
+    let geometric = hit.normal.ok_or(TracerError::MissingNormal)?;
+    if !geometric.x.is_finite()
+        || !geometric.y.is_finite()
+        || !geometric.z.is_finite()
+        || geometric.norm() <= 0.0
+    {
+        return Err(TracerError::MissingNormal);
+    }
+    let norm = geometric.norm();
+    let geometric_unit = geometric.scale(1.0 / norm);
+    let entering = geometric.dot(ray.dir) <= 0.0;
+    let oriented = if geometric.dot(ray.dir) > 0.0 {
+        geometric.scale(-1.0)
+    } else {
+        geometric
+    };
+    Ok(SurfaceFrame {
+        oriented,
+        geometric: geometric_unit,
+        entering,
+    })
+}
+
+fn boundary_media(
+    boundary_primitive: usize,
+    glass: DielectricGlass,
+    entering: bool,
+    stack: &[MediumEntry],
+) -> Result<BoundaryMedia, TracerError> {
+    if entering {
+        if stack.len() >= MAX_MEDIUM_STACK_DEPTH {
+            return Err(TracerError::MediumStackOverflow);
+        }
+        if stack
+            .iter()
+            .any(|entry| entry.boundary_primitive == boundary_primitive)
+        {
+            return Err(TracerError::MediumStackMismatch {
+                boundary_primitive,
+                active_boundary: stack.last().map(|entry| entry.boundary_primitive),
+            });
+        }
+        Ok(BoundaryMedia {
+            incident: stack.last().map(|entry| entry.glass),
+            transmitted: Some(glass),
+            transition: MediumTransition::Enter(MediumEntry {
+                boundary_primitive,
+                glass,
+            }),
+        })
+    } else {
+        let Some(active) = stack.last() else {
+            return Err(TracerError::MediumStackMismatch {
+                boundary_primitive,
+                active_boundary: None,
+            });
+        };
+        if active.boundary_primitive != boundary_primitive || active.glass != glass {
+            return Err(TracerError::MediumStackMismatch {
+                boundary_primitive,
+                active_boundary: Some(active.boundary_primitive),
+            });
+        }
+        Ok(BoundaryMedia {
+            incident: Some(active.glass),
+            transmitted: stack
+                .get(stack.len().saturating_sub(2))
+                .map(|entry| entry.glass),
+            transition: MediumTransition::Exit { boundary_primitive },
+        })
+    }
+}
+
+fn apply_medium_transition(
+    stack: &mut Vec<MediumEntry>,
+    transition: MediumTransition,
+) -> Result<(), TracerError> {
+    match transition {
+        MediumTransition::Enter(entry) => {
+            if stack.len() >= MAX_MEDIUM_STACK_DEPTH
+                || stack
+                    .iter()
+                    .any(|active| active.boundary_primitive == entry.boundary_primitive)
+            {
+                return Err(if stack.len() >= MAX_MEDIUM_STACK_DEPTH {
+                    TracerError::MediumStackOverflow
+                } else {
+                    TracerError::MediumStackMismatch {
+                        boundary_primitive: entry.boundary_primitive,
+                        active_boundary: stack.last().map(|active| active.boundary_primitive),
+                    }
+                });
+            }
+            stack.push(entry);
+        }
+        MediumTransition::Exit { boundary_primitive } => {
+            if stack.last().map(|entry| entry.boundary_primitive) != Some(boundary_primitive) {
+                return Err(TracerError::MediumStackMismatch {
+                    boundary_primitive,
+                    active_boundary: stack.last().map(|entry| entry.boundary_primitive),
+                });
+            }
+            let _ = stack.pop();
+        }
+    }
+    Ok(())
+}
+
+fn medium_ior(medium: Option<DielectricGlass>, wavelength_nm: f64) -> Result<f64, TracerError> {
+    medium.map_or(Ok(1.0), |glass| {
+        glass.ior().eval(wavelength_nm).map_err(Into::into)
+    })
+}
+
+fn medium_transmittance(
+    medium: Option<DielectricGlass>,
+    wavelength_nm: f64,
+    distance_m: f64,
+) -> Result<f64, TracerError> {
+    medium.map_or(Ok(1.0), |glass| {
+        glass
+            .absorption()
+            .transmittance(wavelength_nm, distance_m)
+            .map_err(Into::into)
+    })
+}
+
+fn attenuate_segment(
+    throughput: &mut [f64; PACKET],
+    lambdas: &[f64],
+    medium_stack: &[MediumEntry],
+    physical_origin: Point3,
+    hit: &Hit,
+) -> Result<(), TracerError> {
+    let Some(active) = medium_stack.last() else {
+        return Ok(());
+    };
+    // Intersection rays are numerically offset from the preceding boundary;
+    // absorption is measured from the unshifted physical vertex so the offset
+    // cannot silently shorten every path through a thin medium.
+    let distance_m = hit.point.delta_from(physical_origin).norm();
+    if !distance_m.is_finite() || distance_m < 0.0 {
+        return Err(TracerError::Dielectric(DielectricError::InvalidAbsorption));
+    }
+    for (lane, &lambda) in lambdas.iter().enumerate() {
+        if throughput[lane].to_bits() != 0.0_f64.to_bits() {
+            throughput[lane] *= active
+                .glass
+                .absorption()
+                .transmittance(lambda, distance_m)?;
+        }
+    }
+    Ok(())
+}
+
+fn collapse_dispersive_packet(
+    throughput: &mut [f64; PACKET],
+    packet_collapsed: &mut bool,
+    glass: DielectricGlass,
+) {
+    if glass.ior().is_dispersive() && !*packet_collapsed {
+        throughput[0] *= PACKET as f64;
+        for lane in &mut throughput[1..] {
+            *lane = 0.0;
+        }
+        *packet_collapsed = true;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_dielectric_path(
+    normal: Vec3,
+    wo: Vec3,
+    surface: DielectricSurface,
+    boundary: BoundaryMedia,
+    lambdas: &[f64],
+    microfacet_u: f64,
+    microfacet_v: f64,
+    event_sample: f64,
+) -> Result<Option<DielectricPathSample>, TracerError> {
+    let hero_eta_i = medium_ior(boundary.incident, lambdas[0])?;
+    let hero_eta_t = medium_ior(boundary.transmitted, lambdas[0])?;
+    if let Some(alpha) = surface.roughness_alpha() {
+        let Some(sample) = sample_rough_dielectric(
+            normal,
+            wo,
+            hero_eta_i,
+            hero_eta_t,
+            alpha,
+            microfacet_u,
+            microfacet_v,
+            event_sample,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut weights = [0.0; PACKET];
+        if sample.delta {
+            weights.fill(sample.radiance_weight);
+        } else {
+            for (lane, &lambda) in lambdas.iter().enumerate() {
+                let eta_i = medium_ior(boundary.incident, lambda)?;
+                let eta_t = medium_ior(boundary.transmitted, lambda)?;
+                let evaluation =
+                    evaluate_rough_dielectric(normal, wo, sample.direction, eta_i, eta_t, alpha)?;
+                weights[lane] = evaluation.value * normal.dot(sample.direction).abs() / sample.pdf;
+            }
+        }
+        return Ok(Some(DielectricPathSample {
+            direction: sample.direction,
+            event: sample.event,
+            pdf: if sample.delta { 0.0 } else { sample.pdf },
+            delta: sample.delta,
+            weights,
+        }));
+    }
+
+    let sample = sample_smooth_dielectric(normal, wo, hero_eta_i, hero_eta_t, event_sample)?;
+    let mut weights = [0.0; PACKET];
+    for (lane, &lambda) in lambdas.iter().enumerate() {
+        let eta_i = medium_ior(boundary.incident, lambda)?;
+        let eta_t = medium_ior(boundary.transmitted, lambda)?;
+        let fresnel = fresnel_dielectric(normal.dot(wo), eta_i, eta_t)?;
+        weights[lane] = match sample.event {
+            DielectricEvent::Reflection => fresnel.reflectance / sample.probability,
+            DielectricEvent::Transmission => {
+                let eta_ratio = eta_i / eta_t;
+                (1.0 - fresnel.reflectance) * eta_ratio * eta_ratio / sample.probability
+            }
+        };
+    }
+    Ok(Some(DielectricPathSample {
+        direction: sample.direction,
+        event: sample.event,
+        pdf: 0.0,
+        delta: true,
+        weights,
+    }))
+}
+
+fn dielectric_spawn_origin(point: Point3, geometric_normal: Vec3, direction: Vec3) -> Point3 {
+    let scale = point.x.abs().max(point.y.abs()).max(point.z.abs()).max(1.0);
+    let side = if geometric_normal.dot(direction) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    point.offset(geometric_normal.scale(side * RAY_EPS * scale))
+}
+
 fn emissive_hit_weight(
     strategy: DirectStrategy,
-    previous_bsdf_pdf: Option<f64>,
+    previous_bsdf: Option<PreviousBsdf>,
     designated_light_nee_pdf: Option<f64>,
 ) -> f64 {
-    let Some(bsdf_pdf) = previous_bsdf_pdf else {
+    let Some(previous) = previous_bsdf else {
         return 1.0;
     };
+    if previous.delta {
+        return 1.0;
+    }
     match strategy {
         DirectStrategy::BsdfOnly => 1.0,
         DirectStrategy::NeeOnly => 0.0,
-        DirectStrategy::Mis => designated_light_nee_pdf
-            .map_or(1.0, |nee_pdf| balance_heuristic(1, bsdf_pdf, 1, nee_pdf)),
+        DirectStrategy::Mis => designated_light_nee_pdf.map_or(1.0, |nee_pdf| {
+            balance_heuristic(1, previous.pdf, 1, nee_pdf)
+        }),
     }
 }
 
@@ -1044,18 +1571,6 @@ fn instance_object_id(shape: &Shape) -> Option<u64> {
     }
 }
 
-fn oriented_normal(hit: &Hit, ray: &Ray) -> Result<Vec3, TracerError> {
-    let n = hit.normal.ok_or(TracerError::MissingNormal)?;
-    if !n.x.is_finite() || !n.y.is_finite() || !n.z.is_finite() || n.norm() <= 0.0 {
-        return Err(TracerError::MissingNormal);
-    }
-    Ok(if n.dot(ray.dir) > 0.0 {
-        n.scale(-1.0)
-    } else {
-        n
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,18 +1579,35 @@ mod tests {
     fn mis_weights_only_emitters_reachable_by_the_nee_technique() {
         let bsdf_pdf = 0.25;
         let nee_pdf = 0.75;
+        let previous = Some(PreviousBsdf {
+            pdf: bsdf_pdf,
+            delta: false,
+        });
         assert_eq!(
-            emissive_hit_weight(DirectStrategy::Mis, Some(bsdf_pdf), None).to_bits(),
+            emissive_hit_weight(DirectStrategy::Mis, previous, None).to_bits(),
             1.0_f64.to_bits(),
             "an emitter absent from NEE has no competing technique"
         );
         assert_eq!(
-            emissive_hit_weight(DirectStrategy::Mis, Some(bsdf_pdf), Some(nee_pdf)).to_bits(),
+            emissive_hit_weight(DirectStrategy::Mis, previous, Some(nee_pdf)).to_bits(),
             balance_heuristic(1, bsdf_pdf, 1, nee_pdf).to_bits()
         );
         assert_eq!(
-            emissive_hit_weight(DirectStrategy::NeeOnly, Some(bsdf_pdf), None).to_bits(),
+            emissive_hit_weight(DirectStrategy::NeeOnly, previous, None).to_bits(),
             0.0_f64.to_bits()
+        );
+        assert_eq!(
+            emissive_hit_weight(
+                DirectStrategy::NeeOnly,
+                Some(PreviousBsdf {
+                    pdf: 0.0,
+                    delta: true,
+                }),
+                Some(nee_pdf),
+            )
+            .to_bits(),
+            1.0_f64.to_bits(),
+            "a delta path has no competing solid-angle NEE technique"
         );
     }
 
@@ -1171,6 +1703,7 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
             let f = schlick(reflectance.eval(lambda), wo.dot(m).max(0.0));
             d * g * f / (4.0 * cos_o * cos_i)
         }
+        Material::Dielectric { .. } => 0.0,
     }
 }
 
@@ -1194,6 +1727,7 @@ fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
             }
             ggx_d(*alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom)
         }
+        Material::Dielectric { .. } => 0.0,
     }
 }
 
@@ -1227,6 +1761,7 @@ fn bsdf_sample(mat: &Material, n: Vec3, wo: Vec3, u1: f64, u2: f64) -> Option<(V
             let pdf = ggx_d(*alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom);
             (pdf > 0.0).then_some((wi, pdf))
         }
+        Material::Dielectric { .. } => None,
     }
 }
 

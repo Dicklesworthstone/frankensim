@@ -39,6 +39,8 @@ pub mod motion_bounds;
 #[cfg(feature = "chart-backends")]
 pub mod temporal_accumulation;
 
+#[cfg(feature = "tracer")]
+pub mod dielectric;
 #[cfg(feature = "differentiable")]
 pub mod diff;
 pub mod spectral;
