@@ -1334,6 +1334,46 @@ struct BoundShardSpec {
     cut_side: fs_render::camera::CutSide,
 }
 
+fn index_frame_inputs<'prepared>(
+    plan: &EulerUniformRenderPlan,
+    scene: &EulerCinematicScene<'_>,
+    inputs: &[EulerRenderFrameInput<'prepared>],
+    cx: &Cx<'_>,
+) -> Result<BTreeMap<u64, &'prepared EulerPreparedFrame>, EulerRenderShardingError> {
+    checkpoint(cx)?;
+    validate_scene_binding(plan, scene)?;
+    let observed = u64::try_from(inputs.len())
+        .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("frame input count"))?;
+    if observed > plan.limits.max_frames {
+        return Err(EulerRenderShardingError::FrameLimit {
+            limit: plan.limits.max_frames,
+            observed,
+        });
+    }
+    if inputs.len() != plan.frames.len() {
+        return Err(EulerRenderShardingError::FrameBindingMismatch);
+    }
+    let mut indexed = BTreeMap::new();
+    for input in inputs {
+        checkpoint(cx)?;
+        if indexed
+            .insert(input.frame_ordinal, input.prepared)
+            .is_some()
+        {
+            return Err(EulerRenderShardingError::DuplicateFrameOrdinal(
+                input.frame_ordinal,
+            ));
+        }
+    }
+    for frame in &plan.frames {
+        checkpoint(cx)?;
+        if !indexed.contains_key(&frame.frame_ordinal) {
+            return Err(EulerRenderShardingError::FrameBindingMismatch);
+        }
+    }
+    Ok(indexed)
+}
+
 fn bind_shard_spec_from_index(
     plan: &EulerUniformRenderPlan,
     scene: &EulerCinematicScene<'_>,
