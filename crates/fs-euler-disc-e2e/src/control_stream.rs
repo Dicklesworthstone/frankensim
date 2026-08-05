@@ -633,6 +633,13 @@ pub enum ControlStreamError {
         /// Source sample index at which continuity failed.
         interval: usize,
     },
+    /// An internal control representation contradicted source availability.
+    ChannelAvailabilityMismatch {
+        /// Source sample index at which the contradiction was observed.
+        sample: usize,
+        /// Stable channel name.
+        channel: &'static str,
+    },
 }
 
 impl fmt::Display for ControlStreamError {
@@ -737,9 +744,11 @@ fn coarsen_group(
     let channels = aggregate_channel_sets(intervals, duration_s, cx)?;
     let mut weighted_normal_force = 0.0;
     let mut normal_available = true;
+    let mut interval_contact_active = false;
     let mut events = Vec::new();
     for interval in intervals {
         cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+        interval_contact_active |= interval.interval_contact_active;
         if let Some(value) = interval.mean_base_normal_contact_force_n {
             weighted_normal_force = value.mul_add(interval.duration_s, weighted_normal_force);
         } else {
@@ -765,9 +774,7 @@ fn coarsen_group(
         start_time_s: first.start_time_s,
         end_time_s: last.end_time_s,
         duration_s,
-        interval_contact_active: intervals
-            .iter()
-            .any(|interval| interval.interval_contact_active),
+        interval_contact_active,
         mean_base_normal_contact_force_n,
         channels,
         events,
@@ -901,11 +908,41 @@ impl ChannelWorkAccumulators {
         duration_s: f64,
         sample: usize,
     ) -> Result<(), ControlStreamError> {
-        accumulate_channel_work(&mut self.gravity, channels.gravity, duration_s, sample)?;
-        accumulate_channel_work(&mut self.contact, channels.contact, duration_s, sample)?;
-        accumulate_channel_work(&mut self.rolling, channels.rolling, duration_s, sample)?;
-        accumulate_channel_work(&mut self.base, channels.base, duration_s, sample)?;
-        accumulate_channel_work(&mut self.gas, channels.gas, duration_s, sample)
+        accumulate_channel_work(
+            &mut self.gravity,
+            channels.gravity,
+            duration_s,
+            sample,
+            "gravity",
+        )?;
+        accumulate_channel_work(
+            &mut self.contact,
+            channels.contact,
+            duration_s,
+            sample,
+            "contact",
+        )?;
+        accumulate_channel_work(
+            &mut self.rolling,
+            channels.rolling,
+            duration_s,
+            sample,
+            "rolling",
+        )?;
+        accumulate_channel_work(
+            &mut self.base,
+            channels.base,
+            duration_s,
+            sample,
+            "base",
+        )?;
+        accumulate_channel_work(
+            &mut self.gas,
+            channels.gas,
+            duration_s,
+            sample,
+            "gas",
+        )
     }
 
     fn finish(self, sample: usize) -> Result<ChannelWorkIntegralChecks, ControlStreamError> {
@@ -924,12 +961,16 @@ fn accumulate_channel_work(
     channel: ChannelControl,
     duration_s: f64,
     sample: usize,
+    channel_name: &'static str,
 ) -> Result<(), ControlStreamError> {
-    let Some(accumulator) = accumulator else {
-        return Ok(());
-    };
-    let Some(channel) = channel.available() else {
-        return Ok(());
+    let (Some(accumulator), Some(channel)) = (accumulator, channel.available()) else {
+        if accumulator.is_none() && channel.available().is_none() {
+            return Ok(());
+        }
+        return Err(ControlStreamError::ChannelAvailabilityMismatch {
+            sample,
+            channel: channel_name,
+        });
     };
     accumulator.retained_work_j += channel.signed_work_j;
     accumulator.integrated_work_j = channel
