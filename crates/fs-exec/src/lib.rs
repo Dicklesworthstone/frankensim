@@ -73,10 +73,11 @@ pub use kernel::{KernelRunner, Reduce, TileKernel, TilePlan};
 pub use kill::{CandidateId, KillRegistry, UnregisteredKill};
 pub use latency::{LaneError, LatencyLane};
 pub use pool::{
-    CompletionKernelRunner, CrewScopeError, ParkedTilePool, PoolConfig, RunError, RunReport,
-    TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS, TILEPOOL_COMPLETION_WITNESS_VERSION, TilePool,
-    TilePoolCompletionDisposition, TilePoolCompletionWitness, TilePoolCompletionWitnessError,
-    TilePoolInvocationPermit, TilePoolRequestPhase, WitnessedRun, victim_order, weighted_ranges,
+    CompletionKernelRunner, CrewScopeError, LocalTaskCaps, ParkedTilePool, PoolConfig, RunError,
+    RunReport, TILEPOOL_COMPLETION_WITNESS_NO_CLAIMS, TILEPOOL_COMPLETION_WITNESS_VERSION,
+    TilePool, TilePoolCompletionDisposition, TilePoolCompletionWitness,
+    TilePoolCompletionWitnessError, TilePoolInvocationPermit, TilePoolRequestPhase, WitnessedRun,
+    victim_order, weighted_ranges,
 };
 pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
 pub use tune::{

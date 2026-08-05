@@ -713,6 +713,26 @@ impl<'s> Cx<'s> {
         self.key
     }
 
+    /// Rebind only the semantic seed visible to nested work while preserving
+    /// this context's cancellation gate, arena, logical kernel/tile/iteration,
+    /// budget, mode, refusal routing, operation lease, and time source.
+    ///
+    /// Higher-level kernels use this when their public seed is part of result
+    /// identity but the pool seed controls scheduling or placement only.
+    #[must_use]
+    pub fn with_stream_seed(&self, seed: u64) -> Self {
+        Self {
+            gate: self.gate,
+            arena: self.arena,
+            key: StreamKey { seed, ..self.key },
+            budget: self.budget,
+            mode: self.mode,
+            refusals: self.refusals,
+            lease: self.lease,
+            clock: self.clock,
+        }
+    }
+
     /// The budget slice this tile runs under (asupersync's vocabulary;
     /// enforcement beyond cancellation lands with the session governor —
     /// see CONTRACT no-claims).
@@ -866,9 +886,21 @@ mod tests {
                 Budget::INFINITE,
                 ExecMode::Deterministic,
             );
+            let rebound = cx.with_stream_seed(9);
+            assert_eq!(
+                rebound.stream_key(),
+                StreamKey {
+                    seed: 9,
+                    ..cx.stream_key()
+                }
+            );
+            assert_eq!(rebound.mode(), cx.mode());
+            assert_eq!(rebound.budget(), cx.budget());
+            assert!(core::ptr::eq(rebound.arena(), cx.arena()));
             assert!(cx.checkpoint().is_ok());
             gate.request();
             assert_eq!(cx.checkpoint(), Err(Cancelled));
+            assert_eq!(rebound.checkpoint(), Err(Cancelled));
             assert!(cx.is_cancel_requested());
             assert_eq!(cx.mode().name(), "deterministic");
         });

@@ -81,6 +81,19 @@ fs-blake3, fs-substrate, fs-obs.
   there; see the no-claims section for the full contract). Thread stacks,
   allocator bookkeeping, panic strings, and heap a kernel allocates and
   drops entirely within its own tile body remain explicit no-claims.
+  `run_declared_leased_with_cx` is the nested-throughput bridge: it derives
+  the exact gate and budget from an ambient `fs_exec::Cx`, while the caller
+  still supplies the logical `RunId` and operation lease. It therefore creates
+  no second cancellation authority and otherwise has the same admission,
+  structured-outcome, full-drain, and report semantics as
+  `run_declared_leased_budgeted`.
+  `ParkedTilePool::run_declared_leased_with_cx` preserves that exact bridge on
+  an already-parked crew, so frame/batch callers can reuse worker threads
+  without minting a second gate or changing run identity.
+  `Cx::with_stream_seed` lets a higher-level kernel replace only a
+  result-semantic seed while retaining the exact gate, arena, logical
+  kernel/tile/iteration, budget, mode, refusal sink, lease, and time source;
+  it is the narrow bridge when a pool seed is placement-only.
   Workers are scoped per run; each owns one contiguous `TileRun`
   (bead wf9.16.2: two u64s, zero post-launch allocation) seeded from the
   contiguous, weight-proportional `weighted_ranges` plan, stealing the

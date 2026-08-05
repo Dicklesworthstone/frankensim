@@ -3453,8 +3453,13 @@ impl Drop for ParkedDispatchAdmission<'_> {
     }
 }
 
-/// Caps stand-in for launches that carry no task context.
-type NoTask = asupersync::cx::cap::All;
+/// Capability set used by locally parked crews that carry no ambient
+/// asupersync task. Exported so higher-level scoped runners can name the
+/// callback-only [`ParkedTilePool`] type without depending on asupersync's
+/// concrete capability module.
+pub type LocalTaskCaps = asupersync::cx::cap::All;
+
+type NoTask = LocalTaskCaps;
 
 /// Everything one worker's loop touches, bundled so the launch
 /// harnesses — `std::thread::scope`, asupersync's `Cx::scoped_cpu`
@@ -3894,6 +3899,29 @@ impl TilePool {
         K::Out: crate::LeaseAdmittedOut,
     {
         self.run_inner(kernel, gate, run, budget, lease, Launch::<NoTask>::OwnScope)
+    }
+
+    /// Run a kernel under the exact cancellation authority and budget of an
+    /// ambient executor [`Cx`], while retaining an explicit logical run
+    /// identity and operation memory lease.
+    ///
+    /// This is the nested-throughput bridge for callers that already execute
+    /// under an `fs-exec` context: it deliberately reuses `outer`'s gate
+    /// instead of creating a second cancellation authority. The worker lane,
+    /// memory admission, structured failures, full drain, and [`RunReport`]
+    /// semantics are exactly those of
+    /// [`Self::run_declared_leased_budgeted`].
+    pub fn run_declared_leased_with_cx<K: TileKernel>(
+        &self,
+        outer: &Cx<'_>,
+        kernel: &K,
+        run: RunId,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> (Result<K::Out, RunError>, RunReport)
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.run_declared_leased_budgeted(kernel, outer.cancel_gate(), run, outer.budget(), lease)
     }
 
     /// [`Self::run_declared_leased_budgeted`] plus executor-minted completion
@@ -5004,6 +5032,22 @@ impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
         )
     }
 
+    /// Run on the parked crew under the exact cancellation authority and
+    /// budget of an ambient executor [`Cx`]. This is the parked counterpart
+    /// of [`TilePool::run_declared_leased_with_cx`].
+    pub fn run_declared_leased_with_cx<K: TileKernel>(
+        &self,
+        outer: &Cx<'_>,
+        kernel: &K,
+        run: RunId,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> (Result<K::Out, RunError>, RunReport)
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
+        self.run_declared_leased_budgeted(kernel, outer.cancel_gate(), run, outer.budget(), lease)
+    }
+
     /// [`TilePool::run_declared_leased_budgeted_witnessed`] on the parked
     /// crew.
     pub fn run_declared_leased_budgeted_witnessed<K: TileKernel>(
@@ -5480,6 +5524,26 @@ mod tests {
         TilePool::new(PoolConfig::new(workers, CcdTopology::APPLE_M_CLASS, 0x5EED))
     }
 
+    fn with_outer_cx<R>(gate: &CancelGate, budget: Budget, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        const OUTER_STREAM: StreamKey = StreamKey {
+            seed: 0x4F55_5445_525F_4358,
+            kernel_id: 0x4252_4944_4745,
+            tile: 3,
+            iteration: 5,
+        };
+
+        let arenas = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        let result = arenas.scope(|arena| {
+            let outer = Cx::new(gate, arena, OUTER_STREAM, budget, ExecMode::Deterministic);
+            f(&outer)
+        });
+        assert!(
+            arenas.stats().quiescent(),
+            "ambient Cx arena must be quiescent after the nested run"
+        );
+        result
+    }
+
     /// Run `f` inside a REAL asupersync root task (the canonical shape from
     /// `latency.rs`): the scoped lane demands a live task context, and using
     /// the runtime — not a synthetic Cx — is the P7-honest harness.
@@ -5735,6 +5799,76 @@ mod tests {
                 u64::MAX.wrapping_mul(workers as u64)
             );
         }
+    }
+
+    #[test]
+    fn declared_leased_with_cx_inherits_budget_and_run_identity() {
+        let pool = pool(4);
+        let gate = CancelGate::new();
+        let budget = Budget::new().with_cost_quota(65_536);
+        let lease = fs_alloc::OperationMemoryLease::unbounded();
+
+        let (result, report) = with_outer_cx(&gate, budget, |outer| {
+            pool.run_declared_leased_with_cx(
+                outer,
+                &BudgetProbe { tiles: 4 },
+                RunId(0x4358),
+                &lease,
+            )
+        });
+
+        assert_eq!(
+            result.expect("ambient-Cx run"),
+            4 * 65_536,
+            "every tile must receive the outer context's exact budget"
+        );
+        assert_eq!(report.declared_run, RunId(0x4358));
+        assert_eq!((report.completed, report.total), (4, 4));
+        assert!(!gate.is_requested());
+        assert!(pool.arena_pool().stats().quiescent());
+        let receipt = lease.receipt();
+        assert!(receipt.requested_bytes > 0, "root metadata was admitted");
+        assert_eq!(receipt.used_bytes, 0, "all transient charges were released");
+    }
+
+    #[test]
+    fn declared_leased_with_cx_honors_ambient_pre_cancel() {
+        struct MustNotRun;
+
+        impl TileKernel for MustNotRun {
+            type Out = ();
+
+            fn tiles(&self) -> TilePlan {
+                TilePlan::new("test/ambient-pre-cancel", 8)
+            }
+
+            fn run(&self, _tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, ()> {
+                panic!("a pre-cancelled ambient context must not execute a tile")
+            }
+        }
+
+        let pool = pool(2);
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        let lease = fs_alloc::OperationMemoryLease::unbounded();
+
+        let (result, report) = with_outer_cx(&gate, Budget::INFINITE, |outer| {
+            pool.run_declared_leased_with_cx(outer, &MustNotRun, RunId(0xCA11), &lease)
+        });
+
+        assert!(matches!(
+            result,
+            Err(RunError::Cancelled {
+                completed: 0,
+                total: 8,
+                ..
+            })
+        ));
+        assert_eq!(report.declared_run, RunId(0xCA11));
+        assert_eq!((report.completed, report.total), (0, 8));
+        assert!(report.cancel_latencies_ns.is_empty());
+        assert!(pool.arena_pool().stats().quiescent());
+        assert_eq!(lease.receipt().used_bytes, 0);
     }
 
     #[test]
