@@ -32,6 +32,29 @@ const TILE_RECORD_BYTES: u64 = 8 + 5 * 4;
 const UNIFORM_PIXEL_BYTES: u64 = 3 * 8;
 const ADAPTIVE_PIXEL_BYTES: u64 = 9 * 8 + 4 + 1;
 
+/// Process-local identity of one admitted opaque pending-render instance.
+///
+/// Clones retain the same token across ownership moves, voluntary yields, and
+/// in-process restore of that pending object. Two independently admitted jobs
+/// always receive different live tokens, even when every durable job input is
+/// identical. This token is intentionally absent from checkpoint bytes,
+/// content hashes, and durable equality: it cannot identify an instance after
+/// process loss.
+#[derive(Clone)]
+pub struct RenderCheckpointInstance(std::sync::Arc<()>);
+
+impl RenderCheckpointInstance {
+    pub(super) fn fresh() -> Self {
+        Self(std::sync::Arc::new(()))
+    }
+
+    /// Whether two live tokens refer to the same process-local pending job.
+    #[must_use]
+    pub fn same_instance(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// Exact estimator/AOV payload stored in a render checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -1003,6 +1026,15 @@ fn finish_stream<E>(
 }
 
 impl PendingRender<'_> {
+    /// Process-local token for this exact opaque pending instance.
+    ///
+    /// The returned clone survives ownership moves but has no durable
+    /// encoding or equality meaning after process loss.
+    #[must_use]
+    pub fn checkpoint_instance(&self) -> RenderCheckpointInstance {
+        self.checkpoint_instance.clone()
+    }
+
     /// Deterministic identity of every renderer-owned input that must remain
     /// identical across a uniform checkpoint write and restore.
     #[must_use]
@@ -1115,6 +1147,15 @@ impl PendingRender<'_> {
 }
 
 impl PendingAdaptiveRender<'_> {
+    /// Process-local token for this exact opaque pending instance.
+    ///
+    /// The returned clone survives ownership moves but has no durable
+    /// encoding or equality meaning after process loss.
+    #[must_use]
+    pub fn checkpoint_instance(&self) -> RenderCheckpointInstance {
+        self.checkpoint_instance.clone()
+    }
+
     /// Deterministic identity of every renderer-owned input that must remain
     /// identical across an adaptive checkpoint write and restore.
     #[must_use]

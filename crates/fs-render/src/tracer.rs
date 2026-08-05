@@ -64,7 +64,7 @@ mod checkpoint;
 pub use checkpoint::{
     RENDER_CHECKPOINT_CONTENT_DOMAIN, RENDER_CHECKPOINT_EXECUTION_ENVIRONMENT_DOMAIN,
     RENDER_CHECKPOINT_JOB_DOMAIN, RENDER_CHECKPOINT_SCHEMA_VERSION, RenderCheckpointBinding,
-    RenderCheckpointError, RenderCheckpointKind, RenderCheckpointReceipt,
+    RenderCheckpointError, RenderCheckpointInstance, RenderCheckpointKind, RenderCheckpointReceipt,
     RenderCheckpointWriteError, adaptive_checkpoint_job_identity, uniform_checkpoint_job_identity,
 };
 
@@ -1467,6 +1467,7 @@ pub struct PendingRender<'assets> {
     execution_budget: Budget,
     execution: RenderExecutionConfig,
     layout: RenderTileLayout,
+    checkpoint_instance: RenderCheckpointInstance,
     state: Mutex<PendingRenderState>,
     sobol: Option<Sobol>,
     lease: OperationMemoryLease,
@@ -1516,6 +1517,7 @@ pub struct PendingAdaptiveRender<'assets> {
     execution_budget: Budget,
     execution: RenderExecutionConfig,
     layout: RenderTileLayout,
+    checkpoint_instance: RenderCheckpointInstance,
     state: Mutex<PendingAdaptiveRenderState>,
     sobol: Option<Sobol>,
     lease: OperationMemoryLease,
@@ -3881,6 +3883,7 @@ impl<'assets> PendingRender<'assets> {
             execution_budget: cx.budget(),
             execution,
             layout,
+            checkpoint_instance: RenderCheckpointInstance::fresh(),
             state: Mutex::new(PendingRenderState { xyz, next_row }),
             sobol,
             lease,
@@ -4515,6 +4518,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             execution_budget: cx.budget(),
             execution,
             layout,
+            checkpoint_instance: RenderCheckpointInstance::fresh(),
             state: Mutex::new(PendingAdaptiveRenderState { film, next_row }),
             sobol,
             lease,
