@@ -2073,10 +2073,18 @@ fn validate_header(
         });
     }
     decode_availability_bits(header.availability, "header.channel_availability")?;
-    let mut tag_decoder = SliceDecoder::new(&[header.world_frame], 0, 0);
-    let _ = decode_world_frame(&mut tag_decoder, "header.world_frame")?;
-    let mut tag_decoder = SliceDecoder::new(&[header.units], 0, 0);
-    let _ = decode_unit_system(&mut tag_decoder, "header.units")?;
+    if !matches!(header.world_frame, 1 | 2) {
+        return Err(RenderTrajectoryCodecError::InvalidTag {
+            field: "header.world_frame",
+            tag: u64::from(header.world_frame),
+        });
+    }
+    if !matches!(header.units, 1 | 2) {
+        return Err(RenderTrajectoryCodecError::InvalidTag {
+            field: "header.units",
+            tag: u64::from(header.units),
+        });
+    }
 
     let minimum = HEADER_LEN
         .checked_add(u64::from(plan.metadata_len))
