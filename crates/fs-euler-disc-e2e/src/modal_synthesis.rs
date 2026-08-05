@@ -134,6 +134,20 @@ pub enum ModalSpatialParticipation<'a> {
     Declared,
     /// Multiply by one normalized signed factor per frame and canonical mode.
     PerFrameModeFactors(&'a [f64]),
+    /// Use already-participated localized modal drive in row-major
+    /// `(frame, canonical_mode)` order.
+    ///
+    /// This is the resampling-safe path when source location changes within the
+    /// anti-alias filter support: the mapper filters the localized force-factor
+    /// product, rather than filtering its operands independently. The frame's
+    /// localized component fields must be exactly zero; distributed component
+    /// fields remain active through each mode's declared static participation.
+    PreparticipatedLocalizedDrive {
+        /// Piecewise-constant localized generalized force per mode [N].
+        generalized_force_n: &'a [f64],
+        /// Localized left-boundary generalized impulse per mode [N s].
+        boundary_impulse_n_s: &'a [f64],
+    },
 }
 
 /// Complete model input. Modes may arrive in any order; construction sorts by
@@ -330,7 +344,7 @@ impl RepresentativeModalPreset {
 pub enum ModalSynthesisError {
     /// Execution scope requested cancellation before atomic publication.
     Cancelled,
-    /// Only the exact reference-master rate is accepted by v1.
+    /// Only the exact reference-master rate is accepted by v2.
     InvalidSampleRate(u32),
     /// No mode was supplied.
     EmptyModes,
@@ -383,6 +397,13 @@ pub enum ModalSynthesisError {
         frame: usize,
         /// Stable canonical mode ID.
         mode_id: u32,
+    },
+    /// Direct per-mode localized drive was combined with component-localized drive.
+    ConflictingLocalizedDrive {
+        /// Chunk-local frame index.
+        frame: usize,
+        /// Stable nonzero localized coordinate name.
+        field: &'static str,
     },
     /// A checkpoint belongs to another complete modal model.
     CheckpointIdentityMismatch,
@@ -683,13 +704,18 @@ impl ModalSynthesisModel {
                 actual: spatial_slice_len(spatial_participation),
             },
         )?;
-        if let ModalSpatialParticipation::PerFrameModeFactors(factors) = spatial_participation
-            && factors.len() != spatial_len
-        {
-            return Err(ModalSynthesisError::SpatialParticipationLength {
-                expected: spatial_len,
-                actual: factors.len(),
-            });
+        match spatial_participation {
+            ModalSpatialParticipation::Declared => {}
+            ModalSpatialParticipation::PerFrameModeFactors(factors) => {
+                validate_spatial_length(spatial_len, factors.len())?;
+            }
+            ModalSpatialParticipation::PreparticipatedLocalizedDrive {
+                generalized_force_n,
+                boundary_impulse_n_s,
+            } => {
+                validate_spatial_length(spatial_len, generalized_force_n.len())?;
+                validate_spatial_length(spatial_len, boundary_impulse_n_s.len())?;
+            }
         }
         preflight_drive(drive, spatial_participation, &self.modes, checkpoint_fn)?;
         checkpoint_fn()?;
@@ -736,31 +762,23 @@ impl ModalSynthesisModel {
             let mut kicked_energy_sum = NeumaierSum::new();
             let mut energy_sum = NeumaierSum::new();
             for (mode_index, (mode, state)) in self.modes.iter().zip(&mut states).enumerate() {
-                let spatial = spatial_factor(
+                let modal_drive_index = local_frame * self.modes.len() + mode_index;
+                let (localized_force_n, localized_impulse_n_s) = localized_modal_drive(
                     spatial_participation,
-                    local_frame,
-                    mode_index,
-                    self.modes.len(),
-                );
-                let localized_force_n = participation_dot(
+                    frame,
                     mode.mode.source_participation,
-                    frame.localized_generalized_force_n,
+                    modal_drive_index,
                 );
                 let distributed_force_n = participation_dot(
                     mode.mode.source_participation,
                     frame.distributed_generalized_force_n,
                 );
-                let generalized_force_n = localized_force_n * spatial + distributed_force_n;
-                let localized_impulse_n_s = participation_dot(
-                    mode.mode.source_participation,
-                    frame.localized_boundary_impulse_n_s,
-                );
                 let distributed_impulse_n_s = participation_dot(
                     mode.mode.source_participation,
                     frame.distributed_boundary_impulse_n_s,
                 );
-                let generalized_impulse_n_s =
-                    localized_impulse_n_s * spatial + distributed_impulse_n_s;
+                let generalized_force_n = localized_force_n + distributed_force_n;
+                let generalized_impulse_n_s = localized_impulse_n_s + distributed_impulse_n_s;
                 if !generalized_force_n.is_finite() || !generalized_impulse_n_s.is_finite() {
                     return Err(ModalSynthesisError::NonFiniteResult {
                         sample_frame: absolute_frame,
@@ -1365,21 +1383,75 @@ fn preflight_drive(
                 }
             }
         }
+        if matches!(
+            spatial,
+            ModalSpatialParticipation::PreparticipatedLocalizedDrive { .. }
+        ) {
+            for (field, value) in [
+                (
+                    "localized disc force",
+                    values.localized_generalized_force_n.disc,
+                ),
+                (
+                    "localized glass plate force",
+                    values.localized_generalized_force_n.glass_plate,
+                ),
+                (
+                    "localized base assembly force",
+                    values.localized_generalized_force_n.base_assembly,
+                ),
+                (
+                    "localized disc impulse",
+                    values.localized_boundary_impulse_n_s.disc,
+                ),
+                (
+                    "localized glass plate impulse",
+                    values.localized_boundary_impulse_n_s.glass_plate,
+                ),
+                (
+                    "localized base assembly impulse",
+                    values.localized_boundary_impulse_n_s.base_assembly,
+                ),
+            ] {
+                if value != 0.0 {
+                    return Err(ModalSynthesisError::ConflictingLocalizedDrive { frame, field });
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn spatial_factor(
+fn validate_spatial_length(expected: usize, actual: usize) -> Result<(), ModalSynthesisError> {
+    if actual != expected {
+        return Err(ModalSynthesisError::SpatialParticipationLength { expected, actual });
+    }
+    Ok(())
+}
+
+fn localized_modal_drive(
     spatial: ModalSpatialParticipation<'_>,
-    frame: usize,
-    mode: usize,
-    mode_count: usize,
-) -> f64 {
+    frame: &ModalDriveFrame,
+    participation: SoundModeParticipation,
+    row_major_index: usize,
+) -> (f64, f64) {
+    let participated_force =
+        participation_dot(participation, frame.localized_generalized_force_n);
+    let participated_impulse =
+        participation_dot(participation, frame.localized_boundary_impulse_n_s);
     match spatial {
-        ModalSpatialParticipation::Declared => 1.0,
+        ModalSpatialParticipation::Declared => (participated_force, participated_impulse),
         ModalSpatialParticipation::PerFrameModeFactors(factors) => {
-            factors[frame * mode_count + mode]
+            let factor = factors[row_major_index];
+            (participated_force * factor, participated_impulse * factor)
         }
+        ModalSpatialParticipation::PreparticipatedLocalizedDrive {
+            generalized_force_n,
+            boundary_impulse_n_s,
+        } => (
+            generalized_force_n[row_major_index],
+            boundary_impulse_n_s[row_major_index],
+        ),
     }
 }
 
@@ -1387,6 +1459,10 @@ fn spatial_slice_len(spatial: ModalSpatialParticipation<'_>) -> usize {
     match spatial {
         ModalSpatialParticipation::Declared => 0,
         ModalSpatialParticipation::PerFrameModeFactors(factors) => factors.len(),
+        ModalSpatialParticipation::PreparticipatedLocalizedDrive {
+            generalized_force_n,
+            ..
+        } => generalized_force_n.len(),
     }
 }
 
