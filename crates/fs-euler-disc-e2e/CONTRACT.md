@@ -913,6 +913,36 @@ subdivision/refusal, declared seams, strict query refusal, frame-rate nesting,
 time/rigid-translation equivariance, determinism, and extreme finite-time
 refusal.
 
+`render_motion_bridge` v1 is the L6 visualization adapter from that resampler
+to L5 render-time contracts. It resolves each frame shutter inside the exact
+accepted trajectory horizon, applies explicit `Subdivide` or `Refuse` policy
+before ray evaluation, and treats a genuinely zero-width shutter as one static
+time. A positive requested duration that collapses at the absolute-time
+binary64 resolution refuses. Prepared shutters are bound to the exact source
+trajectory, declared-discontinuity model, and event policy and retain source
+authority unchanged. A `TimedRay` must retain the identical admitted shutter;
+matching one coincident absolute time from a different exposure is insufficient.
+Multi-segment `Subdivide` shutters cannot pass through the global-coordinate or
+global-ray sampling APIs. The caller must select an explicit segment-local
+shutter; segment endpoints deterministically use the left limit at an interior
+closing event and the right limit at the following segment opening, and each
+segment exposes its positive duration weight.
+Each query is reconstructed by `TimelineResampler`, then maps the mechanics
+quaternion from `(w,x,y,z)` into the renderer's `(x,y,z,w)` convention and maps
+center-of-mass world metres directly into the proper-rigid translation. Tests
+pin endpoints, quaternion double-cover equivalence, cross-shutter and
+cross-event-model refusal, enforced segment selection and one-sided event evaluation,
+collapsed-exposure refusal, horizon refusal, zero-width equivalence, replay,
+and the unchanged `SimulationEvidence` authority ceiling.
+
+The adapter does not promote interpolated visualization poses into accepted
+solver states, assert continuity across a returned event partition, or add
+mechanical bandwidth. The prepared global-coordinate and global-ray APIs refuse
+unsplit sampling of a multi-segment exposure. The raw absolute-time resampling
+API remains available for expert non-exposure queries and does not apply
+shutter admission or event policy. Downstream weighted image accumulation over
+explicitly selected segments remains a separate composition responsibility.
+
 ## No-claim boundaries
 
 The binding v1 statements are:

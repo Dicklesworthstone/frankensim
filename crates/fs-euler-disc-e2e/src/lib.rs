@@ -25,6 +25,7 @@ pub mod production_coupling;
 #[cfg(feature = "scientific-contract")]
 pub mod protocol;
 pub mod reduced_decay;
+pub mod render_motion_bridge;
 pub mod render_trajectory;
 pub mod rolling_contact;
 pub mod specimen;

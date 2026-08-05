@@ -26,6 +26,7 @@ fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }
 fs-mbd = { path = "../fs-mbd" }
 fs-rep-frep = { path = "../fs-rep-frep" }
+fs-render = { path = "../fs-render" }
 fs-solid = { path = "../fs-solid" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
