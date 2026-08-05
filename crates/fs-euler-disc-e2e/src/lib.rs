@@ -9,7 +9,9 @@
 #![forbid(unsafe_code)]
 
 pub mod air;
+pub mod audio_artifact;
 pub mod audio_excitation;
+pub mod audio_resampling;
 pub mod base_response;
 pub mod baseline;
 pub mod contact_dynamics;
@@ -42,17 +44,37 @@ pub mod specimen;
 pub mod tangential_contact;
 pub mod timeline_resampling;
 
+pub use audio_artifact::{
+    AUDIO_ARTIFACT_CANCELLATION_POLL_BYTES, AUDIO_ARTIFACT_CANCELLATION_POLL_FRAMES,
+    AUDIO_ARTIFACT_SCHEMA_VERSION, AUDIO_TRUE_PEAK_OVERSAMPLE_FACTOR, AudioArtifactBudget,
+    AudioArtifactError, AudioArtifactManifest, AudioArtifactRole, AudioChannelLayoutReceipt,
+    AudioDryMixSpec, AudioMasterSource, AudioMeters, AudioSignalPath, DecodedStereoWav,
+    EULER_WAV_CODEC_VERSION, MAX_WAV_COMMENT_BYTES, SoundWavArtifact, StemGainPan, StereoSample,
+    WavCodecReceipt, WavMetadata, WavSampleEncoding, decode_stereo_wav, encode_stereo_wav,
+    measure_audio, mix_dry_modal_stems, verify_wav_against_manifest,
+};
 pub use audio_excitation::{
     AUDIO_EXCITATION_ALGORITHM_VERSION, AUDIO_EXCITATION_CANCELLATION_POLL_INTERVALS,
     ArtisticEventExcitation, ArtisticTextureConfig, ArtisticTextureEnvelope,
     AudioExcitationAvailability, AudioExcitationBudget, AudioExcitationCheckpoint,
-    AudioExcitationChunk, AudioExcitationDiagnostics, AudioExcitationError, AudioExcitationGrid,
-    AudioExcitationInterval, AudioExcitationMapper, AudioExcitationModelInput,
+    AudioExcitationChunk, AudioExcitationDiagnostics, AudioExcitationError, AudioExcitationEvent,
+    AudioExcitationGrid, AudioExcitationInterval, AudioExcitationMapper, AudioExcitationModelInput,
     AudioExcitationReconstructionStatus, AudioExcitationReduction, AudioExcitationStems,
     ContactModeShape, ContactParticipationPolicy, ExcitationSourceAvailability,
     MAX_AUDIO_EXCITATION_AZIMUTHAL_HARMONIC, MAX_AUDIO_EXCITATION_CHUNK_INTERVALS,
     ModalSpatialEnvelope, ModeContactParticipationRule, SpatialEnvelopeSource,
     procedural_texture_unit_sample,
+};
+pub use audio_resampling::{
+    AUDIO_RECONSTRUCTION_FILTER_VERSION, AUDIO_RESAMPLING_ALGORITHM_VERSION,
+    AUDIO_RESAMPLING_CANCELLATION_POLL_FRAMES, AUDIO_RESAMPLING_CANCELLATION_POLL_MODES,
+    AudioEventFractionalDelay, AudioReconstructionFilterDiagnostics, AudioReconstructionFilterSpec,
+    AudioResampler, AudioResamplingBoundaryPolicy, AudioResamplingBudget,
+    AudioResamplingCheckpoint, AudioResamplingChunk, AudioResamplingDiagnostics,
+    AudioResamplingError, AudioResamplingModelInput, AudioVideoAlignment, AudioVideoSyncMarker,
+    EVENT_SAMPLE_SNAP_TOLERANCE_FRAMES, MAX_AUDIO_FILTER_PASSBAND_RIPPLE_DB,
+    MAX_AUDIO_RECONSTRUCTION_FILTER_TAPS, MAX_SOURCE_CLOCK_ALIGNMENT_ERROR_FRAMES,
+    MIN_AUDIO_FILTER_STOPBAND_ATTENUATION_DB, ResampledAudioEvent,
 };
 pub use control_stream::{
     AudioControlFilter, AudioControlInterval, AudioVisualCoverage, AudioVisualHorizon,

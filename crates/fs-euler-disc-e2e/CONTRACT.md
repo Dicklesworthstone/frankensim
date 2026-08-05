@@ -1067,18 +1067,204 @@ impulse, deterministic artistic replay, exact/event-side spatial factors,
 resource refusals, split/resume equivalence, wrong-checkpoint refusal, and
 injected cancellation before atomic publication.
 
-`modal_synthesis` v1 is the deterministic 48 kHz damped-resonator runtime for
-those later audio controls. Every canonical mode solves
+`audio_resampling` v1 is the deterministic, offline bridge from those complete
+source-clock intervals to the exact 48 kHz modal-drive clock. It admits an exact
+24/1 Hz video clock and 48,000/1 Hz audio clock with identical rational start and
+exclusive-end instants. Every video boundary must therefore be an integral audio
+boundary: the frozen master has exactly 2,000 audio frames per video frame, an
+explicit final endpoint marker, and zero integer-clock endpoint drift. Binary64
+source-grid endpoints may differ from the exact audio clock by at most
+`1e-6` audio frame; this tolerance is only an interchange boundary and does not
+replace the source timeline's bit-exact interval continuity.
+
+Source intervals are finite-volume cells, not point samples. The resampler
+integrates each retained force-time measure `[N s]` over its overlap with an
+audio cell and divides by that cell's exact duration to obtain a held force
+`[N]`. For localized contact and rolling drive it first integrates the product
+of component participation and the interval's linearly varying, signed modal
+location factor; only that already-participated per-mode force is filtered.
+Filtering force and location independently is not equivalent and is forbidden
+when location varies inside the filter support. Distributed base-damping and
+exterior-gas drive remains in component coordinates and uses each mode's static
+declared participation later. Output localized component fields are exactly
+zero; row-major `(audio_frame, canonical_mode)` arrays carry localized force
+`[N]` and left-boundary impulse `[N s]` into modal synthesis's
+`PreparticipatedLocalizedDrive` path.
+
+Continuous mechanics-derived controls use a normalized odd-length, centered,
+exactly symmetric Blackman-Harris-4 windowed-sinc low-pass whose cutoff is the
+arithmetic midpoint of the declared passband and stopband edges. Its odd tap
+count is `2h + 1` for declared half-length `h >= 4`. The declared source
+bandwidth must fit both the source cadence's conservative Nyquist ceiling and
+the passband; ordered
+pass/stop edges must also lie below the 24 kHz output Nyquist. Admission measures
+the exact versioned coefficients on a declared grid of 8,192 through 32,768
+intervals, with at least eight intervals per filter half-length, and refuses a
+requested passband contract weaker than 0.1 dB ripple, a stopband contract weaker
+than 80 dB attenuation, or coefficients that miss the requested limits. This is
+a sampled response audit, not a proof between grid frequencies and not evidence
+that the mechanics source contains all acoustic bandwidth. Optional artistic
+rolling texture uses a separate content-identified band filter and carries no
+physical-filter response authority.
+
+The FIR uses half-sample even reflection at the complete admitted horizon, never
+at chunk seams. Centered evaluation explicitly compensates its `half_length`
+frame group delay, publishes zero alignment offset, and requires the same number
+of future frames as lookahead. It is therefore an offline reconstruction policy,
+not a causal or live-processing latency claim; reflection is a deterministic
+boundary convention, not modeled physical pre-roll or post-roll. Each chunk
+recomputes its global-horizon halo from the immutable complete source payload, so
+chunk size and restart boundaries do not reset filter state.
+
+Opening and reimpact events retain their source bracket and requested binary64
+sample coordinate. A tolerance of `1e-9` frame may snap only near-integral
+roundoff. The `LinearTwoBoundaryV1` rule divides an admitted artistic impulse
+between neighboring frame boundaries with weights `1-f` and `f`, retaining the
+resulting centroid error in its receipt. Nonzero impulses that would require the
+exclusive endpoint refuse; zero-impulse timing receipts may name that endpoint.
+Physical event impulse remains exactly zero, an opening can never acquire an
+artistic reimpact impulse, and artistic event impulses bypass the continuous
+control FIR. Event ownership is unique to one half-open output chunk even when
+its two signal contributions straddle a chunk boundary.
+
+Resampler identity binds the excitation and modal identities, exact source
+payload, deterministic-math and algorithm versions, physical and optional
+artistic filter identities, clocks, bandwidth declaration, boundary and event
+policies, total horizon, and all resource ceilings. Admission requires that the
+excitation mapper was itself constructed against that exact modal identity;
+structurally similar modes from another model cannot be substituted. Checkpoints
+bind that model and the next absolute audio frame. High-level sound admission additionally
+requires exact excitation, modal, resampler, filter, mode-list, version, and
+clock agreement. Source intervals, events, synchronization markers, total/chunk
+frames, filter taps (hard-capped at 4,097), row-major output and raw-halo mode
+values, and the combined raster plus physical and optional-artistic
+convolution-work estimate are checked before result storage; allocations owned
+by this boundary have typed refusal. Cancellation is polled in admission and at
+bounded inner raster, mode, filter, event, identity, and synchronization-marker
+work. A chunk, its event and synchronization receipts, and its successor
+checkpoint publish atomically, so refusal or cancellation leaves the predecessor
+valid and exposes no partial drive. The chunk's `synthesize_modal` handoff
+verifies the bound modal identity and exact next-sample checkpoint, then selects
+`PreparticipatedLocalizedDrive` itself, preventing a caller from reordering
+chunks or silently dropping the already-projected contact/rolling channels.
+Absolute frame indexing, immutable source data, versioned deterministic math,
+compensated summation, and global boundary handling are the basis of replay and
+split/resume equivalence.
+
+Before this boundary supports a release claim, focused G0/G3/G4/G5 evidence must
+cover constant-measure conservation; localized force-factor product ordering;
+distributed-drive immunity to spatial modulation; pass/stop admission; global
+reflection and compensated delay; integral, fractional, opening, reimpact, and
+terminal event rules; exact A/V markers; budget and allocation refusals;
+pre-cancellation and bounded in-work cancellation; deterministic replay; and
+bit-identical one-shot versus split/resume output. Even with that evidence the
+artifact is a model-derived modal drive, not calibrated pressure, radiated
+acoustic energy, absolute SPL, room response, structural/acoustic coupling, or
+physical validation.
+
+`audio_artifact` v1 turns complete modal or separately spatialized samples into
+the deterministic stereo artifact consumed by the cinematic finalizer. Its
+production format surface is deliberately narrow: RIFF/WAVE at exactly 48 kHz
+and two channels, using either packed signed little-endian PCM24 or IEEE-754
+binary32. Float32 WAV is the authoritative `euler-disc-v1` audio master; PCM24
+is a deterministic quantized derivative and cannot silently replace it.
+The writer emits one canonical order: `RIFF/WAVE`, `fmt `, `fact` for float32,
+an optional bounded `LIST/INFO/ICMT`, then `data`. V1 metadata admits only
+printable ASCII plus line feed; it does not guess a RIFF text encoding or emit
+an undeclared code page. Chunk and RIFF sizes use
+checked arithmetic, odd payloads receive one zero pad byte excluded from their
+declared size, and RF64, compression, extensible layouts, arbitrary channel
+orders, and unknown chunks are explicit no-claims. The strict reader accepts
+only this emitted subset, exact internal rates/widths/counts and exact EOF;
+well-formed features outside it return `Unsupported` rather than being guessed.
+
+Dry input is the canonical disc, glass-plate, base-assembly stem order. Each
+mono stem has an explicit decibel gain and pan `p` in `[-1,1]`; equal-power
+coefficients are `sqrt((1-p)/2)` left and `sqrt((1+p)/2)` right, evaluated by
+the versioned deterministic math core. Three terms are accumulated in fixed
+order with compensation, followed by one explicit master gain. A distinct
+channel-layout receipt identifies already-spatialized stereo and requires a
+nonzero spatialization identity; that path is copied without repanning. Dry and
+spatialized inputs cannot be blended implicitly, and the dry mix has no camera,
+listener, room-response, or renderer dependency.
+
+There is no limiter, compressor, normalizer, dither, DC blocker, or hidden gain.
+All input must be finite. The configured headroom ceiling is
+`10^(-headroom_db/20)` and both stored-sample peak and the declared intersample
+estimate must fit it or the whole transaction refuses. PCM24 uses round-to-even
+at scale `2^23` followed by signed-24-bit clamping, so `-1` is exact and `+1`
+decodes as `1-2^-23`; float32 preserves finite converted bits including signed
+zero. Final meters are recomputed over decoded format semantics, not the
+pre-quantized `f64` mix.
+
+Meters report exact stored-sample peak; population stereo RMS and per-channel
+DC estimates; a four-times Lanczos-8 windowed-sinc intersample estimate under
+half-sample-even boundary extension;
+and a BS.1770-derived digital programme-loudness diagnostic. Loudness uses the
+frozen 48 kHz two-biquad K weighting, complete 400 ms blocks at 100 ms hops,
+stereo weights of one, a strict `-70 LUFS` absolute gate, and a strict relative
+gate ten loudness units below the absolute-gated energy mean. A programme under
+400 ms, silence, or an empty final gate returns unavailable loudness rather
+than NaN or infinity. The Lanczos peak is not the BS.1770 Annex-2 filter, a
+continuous-time supremum, or a standards certificate; the loudness result is
+not an EBU normalization target, perceived-loudness proof, calibrated SPL, or
+radiated acoustic power.
+
+The typed manifest binds the complete `SoundSynthesisReceipt` (and therefore
+trajectory, excitation, model, timeline, authority, assumptions, resampler and
+filter configuration), an exactly matching caller-declared source-synthesis
+receipt, dry/spatialized channel receipt, source-sample and
+optional mix identities, exact 24/48 kHz start/end ticks, 2,000 audio frames per
+video frame, stored sample count/encoding, metadata identity, complete WAV byte
+count/hash, configured headroom, and final decoded-sample meters. Binary typed
+fields define manifest identity; JSON is only a deterministic view. WAV bytes
+do not embed their own final hash or manifest identity, avoiding a hash cycle.
+The matching receipt catches accidental cross-configuration relabeling, but
+raw sample slices are not an independently replayed proof that upstream modal
+synthesis or spatialization actually produced them. Configuration authority is
+declared unchanged and is never minted by mixing, metering, encoding, or a byte
+hash; this boundary alone therefore cannot establish calibrated acoustics.
+
+Frames, bytes, metadata and deterministic work have caller-controlled ceilings
+under the RIFF `u32` hard limit. Owned buffers use fallible reservation.
+Cancellation is polled at fixed sample boundaries and 64-KiB byte-hash
+boundaries in source/WAV hashing, mixing, peak interpolation, K weighting,
+block accumulation and gating, encode and decode. Aggregate work is preflighted
+before high-level frame traversal and allocation. Public output
+is an in-memory transaction published only after the complete WAV, strict
+round-trip, meters and manifest agree; cancellation exposes no partial artifact.
+Focused G0/G3/G4/G5 evidence must cover known RIFF bytes, zero/one/budget edges,
+PCM extrema and near-positive-full-scale rounding, exact float bits/nonfinite
+refusal, metadata padding, every proper prefix, deterministic mutation/junk,
+dry pan/gain and spatialized separation, no-normalization/headroom refusal,
+meter and loudness boundaries, exact A/V count, byte replay, verification and
+cancellation. External decoder inspection is compatibility evidence only, not
+authority or physical validation.
+
+`modal_synthesis` v2 is the deterministic 48 kHz damped-resonator runtime for
+the reconstructed audio controls. Every canonical mode solves
 `m q'' + 2 zeta m omega q' + m omega^2 q = F`: a declared boundary impulse is
 applied first as an exact velocity jump, then a constant generalized force is
 integrated over the frame by an exact zero-order-held transition. Stable
 underdamped, critical, overdamped, and small-step coefficient branches use the
 versioned deterministic `fs-math` core. Modes are sorted by unique nonzero ID;
-distinct degenerate modes remain distinct. Disc, glass-plate, and base-assembly
-forces enter through signed declared modal participation, optional bounded
-per-frame source-location factors multiply that participation, and each mode's
-radiation is assigned to one dry component stem. Off-component participation
-is explicit source routing, not a claim of a coupled structural solve.
+distinct degenerate modes remain distinct.
+
+Each drive frame separates localized and distributed component force `[N]` and
+left-boundary impulse `[N s]`. `Declared` participation applies each mode's
+static signed component vector to both classes. `PerFrameModeFactors` additionally
+multiplies only localized drive by one finite normalized factor in `[-1, 1]` per
+`(frame, canonical_mode)`; distributed drive is invariant to that factor. The
+resampling-safe `PreparticipatedLocalizedDrive` instead accepts localized
+per-mode force and impulse arrays directly, while still applying static modal
+participation to distributed fields. Its localized component fields must be
+exactly zero or synthesis refuses, preventing accidental double routing. This
+per-frame factor array, when selected, and each direct array must have exactly
+`frames * canonical_modes` finite row-major values. The direct path is required
+when anti-alias reconstruction spans a changing contact location; the modal
+runtime does not reconstruct or filter either operand.
+Each mode's radiation is assigned to one dry component stem. Off-component
+participation is explicit source routing, not a coupled structural solve.
 
 The model identity binds the algorithm and deterministic-math versions, sample
 rate, complete canonical modes, routing class, output convention, and every
@@ -1096,12 +1282,14 @@ Focused G0/G3/G4/G5 coverage compares impulse, step, and harmonic response to
 independent analytic or exact-discrete oracles; exercises zero, critical, and
 high damping, Nyquist guard refusal, unforced energy decay, mode permutation,
 duplicates, degeneracy, zero and cross-component participation, signed spatial
-factors, bounded state, cancellation before and during work, exact replay, and
-bit-identical split/resume. Built-in tungsten/stainless-disc plus glass/base
-presets are `RepresentativeUncalibrated`: their frequencies, damping, masses,
-participation, and radiation gains are plausible film parameters, not measured
-eigenmodes, radiated acoustic energy, absolute SPL, structural/acoustic
-calibration, or physical validation.
+factors, direct preparticipated localized routing, distributed-drive immunity to
+spatial factors, bounded state, cancellation before and during work, exact
+replay, and bit-identical split/resume. Built-in
+tungsten/stainless-disc plus glass/base presets are
+`RepresentativeUncalibrated`: their frequencies, damping, masses, participation,
+and radiation gains are plausible film parameters, not measured eigenmodes,
+radiated acoustic energy, absolute SPL, structural/acoustic calibration, or
+physical validation.
 
 `timeline_resampling` v1 reconstructs render/audio query times from this
 admitted state without mutating the source artifact. Center-of-mass translation

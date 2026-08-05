@@ -36,6 +36,7 @@ fn shortage_parts(
 
 #[test]
 fn all_four_frozen_profiles_are_explicit_and_admit_with_abundant_resources() {
+    let mut identities = std::collections::BTreeSet::new();
     for tier in [
         CinematicQualityTier::StoryboardSmoke,
         CinematicQualityTier::Daily1080p,
@@ -47,7 +48,56 @@ fn all_four_frozen_profiles_are_explicit_and_admit_with_abundant_resources() {
         assert!(admitted.estimate().camera_paths > 0);
         assert!(admitted.estimate().total_storage_bytes > 0);
         assert!(admitted.summary_json().contains("\"verdict\":\"admitted\""));
+        assert!(identities.insert(profile.identity()));
+        assert_eq!(profile.canonical_bytes().len(), 91);
     }
+}
+
+#[test]
+fn profile_identity_binds_every_budget_and_quality_field() {
+    let baseline =
+        CinematicQualityProfile::canonical(CinematicQualityTier::Final4k).expect("canonical final");
+    let baseline_identity = baseline.identity();
+
+    let mutations: Vec<Mutation> = vec![
+        |p| p.first_frame = 1,
+        |p| p.frame_count -= 1,
+        |p| p.spp_floor += 1,
+        |p| p.spp_ceiling += 1,
+        |p| p.max_path_depth += 1,
+        |p| p.adaptive_error_ppm += 1,
+        |p| p.shutter_samples += 1,
+        |p| p.tile_width += 1,
+        |p| p.tile_height += 1,
+        |p| p.worker_limit += 1,
+        |p| p.checkpoint_cadence_spp += 1,
+        |p| p.memory_ceiling_bytes += 1,
+        |p| p.per_frame_wall_time_ceiling_s += 1,
+        |p| p.sequence_wall_time_ceiling_s += 1,
+        |p| p.output_ceiling_bytes += 1,
+        |p| p.minimum_free_space_reserve_bytes += 1,
+    ];
+    for mutate in mutations {
+        let mut changed = baseline.input().clone();
+        mutate(&mut changed);
+        let changed = CinematicQualityProfile::try_new(changed).expect("valid one-field change");
+        assert_ne!(baseline_identity, changed.identity());
+    }
+
+    let storyboard =
+        CinematicQualityProfile::canonical(CinematicQualityTier::StoryboardSmoke)
+            .expect("canonical storyboard");
+    for mutate in [
+        (|p: &mut CinematicQualityProfileInput| p.width_pixels -= 1) as Mutation,
+        |p: &mut CinematicQualityProfileInput| p.height_pixels -= 1,
+    ] {
+        let mut changed = storyboard.input().clone();
+        mutate(&mut changed);
+        let changed = CinematicQualityProfile::try_new(changed).expect("valid dimension change");
+        assert_ne!(storyboard.identity(), changed.identity());
+    }
+
+    assert_eq!(baseline.identity(), baseline.identity(), "identity is stable");
 }
 
 #[test]

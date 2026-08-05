@@ -5,6 +5,13 @@
 //! quality reduction remains a new, visible configuration decision.
 
 use core::fmt;
+use fs_blake3::{ContentHash, hash_domain};
+
+/// Version of the canonical quality-profile identity preimage.
+pub const CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION: u16 = 1;
+/// Domain separating quality profiles from every other content identity.
+pub const CINEMATIC_QUALITY_PROFILE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.cinematic-quality-profile.v1";
 
 const MAX_DIMENSION: u32 = 7_680;
 const MAX_FRAMES: u32 = 12 * 24;
@@ -19,6 +26,7 @@ const AUDIO_BYTES_PER_SAMPLE: u64 = 4;
 
 /// Stable quality/use tier. Qualification is deliberately distinct from final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum CinematicQualityTier {
     /// Cheap story/camera/synchronization smoke preview.
     StoryboardSmoke,
@@ -32,6 +40,7 @@ pub enum CinematicQualityTier {
 
 /// Denoising disposition. Final raw estimates are never overwritten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum DenoisePolicy {
     /// No denoising.
     Disabled,
@@ -43,6 +52,7 @@ pub enum DenoisePolicy {
 
 /// Frozen AOV bundles with a deterministic float-channel count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum AovPreset {
     /// XYZ beauty only.
     BeautyXyz,
@@ -184,6 +194,51 @@ impl CinematicQualityProfile {
     #[must_use]
     pub const fn input(&self) -> &CinematicQualityProfileInput {
         &self.0
+    }
+
+    /// Canonical fixed-width encoding of every admitted profile field.
+    ///
+    /// This is the byte-level bridge between static budget admission and the
+    /// `RenderBudgetProfile` / `AudioBudgetProfile` references carried by a
+    /// [`crate::cinematic_config::CinematicConfig`]. Without it, a composition
+    /// could name unrelated bytes while the CLI admitted a different profile.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let input = self.input();
+        let mut bytes = Vec::with_capacity(91);
+        bytes.extend_from_slice(&CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION.to_le_bytes());
+        bytes.push(input.tier as u8);
+        bytes.extend_from_slice(&input.width_pixels.to_le_bytes());
+        bytes.extend_from_slice(&input.height_pixels.to_le_bytes());
+        bytes.extend_from_slice(&input.frames_per_second.to_le_bytes());
+        bytes.extend_from_slice(&input.first_frame.to_le_bytes());
+        bytes.extend_from_slice(&input.frame_count.to_le_bytes());
+        bytes.extend_from_slice(&input.spp_floor.to_le_bytes());
+        bytes.extend_from_slice(&input.spp_ceiling.to_le_bytes());
+        bytes.extend_from_slice(&input.max_path_depth.to_le_bytes());
+        bytes.extend_from_slice(&input.adaptive_error_ppm.to_le_bytes());
+        bytes.push(input.denoise_policy as u8);
+        bytes.push(input.aov_preset as u8);
+        bytes.extend_from_slice(&input.shutter_samples.to_le_bytes());
+        bytes.extend_from_slice(&input.tile_width.to_le_bytes());
+        bytes.extend_from_slice(&input.tile_height.to_le_bytes());
+        bytes.extend_from_slice(&input.worker_limit.to_le_bytes());
+        bytes.extend_from_slice(&input.checkpoint_cadence_spp.to_le_bytes());
+        bytes.extend_from_slice(&input.memory_ceiling_bytes.to_le_bytes());
+        bytes.extend_from_slice(&input.per_frame_wall_time_ceiling_s.to_le_bytes());
+        bytes.extend_from_slice(&input.sequence_wall_time_ceiling_s.to_le_bytes());
+        bytes.extend_from_slice(&input.output_ceiling_bytes.to_le_bytes());
+        bytes.extend_from_slice(&input.minimum_free_space_reserve_bytes.to_le_bytes());
+        bytes
+    }
+
+    /// Domain-separated identity consumed by cinematic composition references.
+    #[must_use]
+    pub fn identity(&self) -> ContentHash {
+        hash_domain(
+            CINEMATIC_QUALITY_PROFILE_IDENTITY_DOMAIN,
+            &self.canonical_bytes(),
+        )
     }
 }
 

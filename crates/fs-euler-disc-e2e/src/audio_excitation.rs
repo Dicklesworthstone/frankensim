@@ -749,6 +749,12 @@ impl<'controls, 'trajectory> AudioExcitationMapper<'controls, 'trajectory> {
         self.identity
     }
 
+    /// Modal model identity against which mappings and spatial rules were admitted.
+    #[must_use]
+    pub const fn modal_identity(&self) -> ContentHash {
+        self.modal_identity
+    }
+
     /// Durable canonical source-trajectory identity.
     #[must_use]
     pub const fn source_identity(&self) -> ContentHash {

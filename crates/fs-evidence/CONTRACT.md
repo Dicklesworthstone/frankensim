@@ -59,6 +59,9 @@ telemetry/legacy correlation.
   time. Exact resource limits admit; one-unit deficits refuse with deterministic
   repair advice. Final repairs never silently substitute preview SPP, AOVs, or
   denoising, and timing remains a host-specific estimate rather than a promise.
+  Its fixed-width canonical encoding and domain-separated identity bind every
+  admitted quality and resource field into the budget references consumed by a
+  composition; a CLI may not admit one profile while naming another identity.
 - `cinematic_config::CinematicConfig` composes versioned content references for
   trajectory, timeline, camera, scene, renderer, image, sound, and separately
   partitioned render/audio budgets. Units, seed, capabilities, versions, and
