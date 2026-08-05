@@ -191,7 +191,12 @@ fn trajectory(
     base_frame: RenderBaseFrame,
     availability: RenderChannelAvailability,
 ) -> RenderTrajectory {
-    RenderTrajectory::try_new(metadata(&inputs[0], base_frame, availability), inputs).unwrap()
+    let mut trajectory_metadata = metadata(&inputs[0], base_frame, availability);
+    trajectory_metadata.timestep_s = inputs
+        .iter()
+        .map(|input| input.time_s - input.interval_start_time_s)
+        .fold(f64::MIN_POSITIVE, f64::max);
+    RenderTrajectory::try_new(trajectory_metadata, inputs).unwrap()
 }
 
 fn wrench(force: Vec3, torque: Vec3, work_j: f64) -> ChannelWrench {
@@ -287,6 +292,9 @@ fn resumed_interval_derives_exact_frames_velocities_signed_power_and_source_bind
         );
 
         let interval = &controls.audio()[0];
+        assert!(!interval.visual_coverage.is_fully_bracketed());
+        assert!(controls.fully_bracketed_audio().is_empty());
+        assert!(controls.audio_visual_horizon().is_none());
         assert_eq!(interval.start_time_s.to_bits(), 5.0_f64.to_bits());
         assert_close(interval.duration_s, 0.1);
         assert_close(interval.mean_base_normal_contact_force_n.unwrap(), 30.0);
@@ -317,6 +325,8 @@ fn resumed_interval_derives_exact_frames_velocities_signed_power_and_source_bind
             .unwrap();
         assert!(coarse.is_bound_to(&source));
         assert!(!coarse.is_bound_to(&source_clone));
+        assert!(coarse.fully_bracketed_bins().is_empty());
+        assert!(coarse.audio_visual_horizon().is_none());
     });
 }
 
@@ -475,7 +485,12 @@ fn opening_and_zero_force_reimpact_retain_timing_only_events_and_barriers() {
 
 #[test]
 fn whole_interval_boxcar_cancels_alternation_before_decimation_and_conserves_work() {
-    let mut inputs = Vec::new();
+    let mut inputs = vec![sample(
+        0.0,
+        0.0,
+        RenderContactBranch::Open,
+        RenderSampleDisposition::Continue,
+    )];
     for index in 0..4 {
         let mut retained = sample(
             index as f64,
@@ -520,6 +535,14 @@ fn whole_interval_boxcar_cancels_alternation_before_decimation_and_conserves_wor
             .unwrap();
         assert_eq!(coarse.filter(), AudioControlFilter::WholeIntervalBoxcarV1);
         assert_eq!(coarse.bins().len(), 2);
+        assert_eq!(coarse.fully_bracketed_bins(), coarse.bins());
+        assert_eq!(
+            coarse.audio_visual_horizon(),
+            Some(fs_euler_disc_e2e::AudioVisualHorizon {
+                start_time_s: 0.0,
+                end_time_s: 4.0,
+            })
+        );
         for bin in coarse.bins() {
             let gas = bin.channels.gas.available().unwrap();
             assert_eq!(gas.signed_work_j.to_bits(), 0.0_f64.to_bits());
@@ -527,6 +550,81 @@ fn whole_interval_boxcar_cancels_alternation_before_decimation_and_conserves_wor
             assert_vec_close(gas.mean_force_world_n, Vec3::ZERO);
         }
         assert!(coarse.work_integral_checks().within_tolerance(0.0).unwrap());
+    });
+}
+
+#[test]
+fn preroll_isolated_and_unequal_duration_controls_are_weighted_conservatively() {
+    let mut preroll = sample(
+        0.0,
+        2.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::Continue,
+    );
+    preroll.channels.contact = wrench(Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO, -2.0);
+    let mut short = sample(
+        2.0,
+        2.5,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::Continue,
+    );
+    short.channels.contact = wrench(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, -1.0);
+    let mut long = sample(
+        2.5,
+        4.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    long.channels.contact = wrench(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, -3.0);
+    let source = trajectory(
+        vec![preroll, short, long],
+        default_base_frame(),
+        RenderChannelAvailability::ALL_AVAILABLE,
+    );
+
+    with_cx(false, |cx| {
+        let controls = EulerControlStream::try_derive(&source, cx).unwrap();
+        assert!(!controls.audio()[0].visual_coverage.is_fully_bracketed());
+        assert_eq!(controls.fully_bracketed_audio().len(), 2);
+        assert_eq!(
+            controls.audio_visual_horizon(),
+            Some(fs_euler_disc_e2e::AudioVisualHorizon {
+                start_time_s: 2.0,
+                end_time_s: 4.0,
+            })
+        );
+
+        let coarse = controls
+            .boxcar_coarsen(NonZeroUsize::new(16).unwrap(), cx)
+            .unwrap();
+        assert_eq!(coarse.bins().len(), 2, "preroll must be its own bin");
+        assert!(!coarse.bins()[0].visual_coverage.is_fully_bracketed());
+        assert!(coarse.bins()[1].visual_coverage.is_fully_bracketed());
+        assert_eq!(coarse.fully_bracketed_bins(), &coarse.bins()[1..]);
+        assert_eq!(
+            coarse.audio_visual_horizon(),
+            Some(fs_euler_disc_e2e::AudioVisualHorizon {
+                start_time_s: 2.0,
+                end_time_s: 4.0,
+            })
+        );
+        let contact = coarse.bins()[1].channels.contact.available().unwrap();
+        assert_close(contact.mean_force_world_n.z, 4.5);
+        assert_close(
+            coarse.bins()[1]
+                .mean_base_normal_contact_force_n
+                .unwrap(),
+            4.5,
+        );
+        assert_close(contact.force_time_measure_world_n_s.z, 9.0);
+        assert_close(contact.signed_work_j, -4.0);
+        assert_close(contact.signed_mean_work_rate_w, -2.0);
+        assert!(
+            coarse
+                .work_integral_checks()
+                .within_tolerance(1.0e-15)
+                .unwrap()
+        );
     });
 }
 
@@ -704,6 +802,35 @@ fn extreme_finite_controls_are_not_saturated_and_overflow_refuses_atomically() {
             ControlStreamError::NonFiniteDerived {
                 sample: 0,
                 field: "signed_mean_work_rate_w",
+            }
+        );
+    });
+
+    let mut first = sample(
+        0.0,
+        1.0,
+        RenderContactBranch::Open,
+        RenderSampleDisposition::Continue,
+    );
+    first.channels.gas.work_j = f64::MAX * 0.75;
+    let mut second = sample(
+        1.0,
+        2.0,
+        RenderContactBranch::Open,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    second.channels.gas.work_j = f64::MAX * 0.75;
+    let aggregate_overflow_source = trajectory(
+        vec![first, second],
+        default_base_frame(),
+        RenderChannelAvailability::ALL_AVAILABLE,
+    );
+    with_cx(false, |cx| {
+        assert_eq!(
+            EulerControlStream::try_derive(&aggregate_overflow_source, cx).unwrap_err(),
+            ControlStreamError::NonFiniteDerived {
+                sample: 1,
+                field: "work_integral_accumulator",
             }
         );
     });
