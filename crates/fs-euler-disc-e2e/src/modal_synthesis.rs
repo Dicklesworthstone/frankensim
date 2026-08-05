@@ -24,7 +24,7 @@ use fs_exec::Cx;
 use fs_math::{STRICT_CORE_GOLDEN_HASH, STRICT_CORE_SEMANTICS_VERSION, det};
 
 /// Exact version of the sampled modal algorithm and checkpoint semantics.
-pub const MODAL_SYNTHESIS_ALGORITHM_VERSION: u32 = 1;
+pub const MODAL_SYNTHESIS_ALGORITHM_VERSION: u32 = 2;
 /// Maximum frames admitted in one transactional chunk (about 21.8 s at 48 kHz).
 pub const MAX_MODAL_SYNTHESIS_CHUNK_FRAMES: usize = 1_048_576;
 /// Maximum total frames admitted in one checkpoint lineage (one hour at 48 kHz).
@@ -34,7 +34,7 @@ pub const MAX_MODAL_SPATIAL_PARTICIPATION: f64 = 1.0;
 /// Maximum delay between cancellation polls during synthesis (1.33 ms at 48 kHz).
 pub const MODAL_CANCELLATION_POLL_FRAMES: usize = 64;
 
-const MODEL_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-synthesis-model.v1";
+const MODEL_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-synthesis-model.v2";
 const PRESET_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-preset.v1";
 const PRESET_COMPONENT_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-preset-component.v1";
 const COEFFICIENT_TAYLOR_TERMS: usize = 18;
@@ -103,20 +103,31 @@ impl ModalComponentValues {
     };
 }
 
-/// One audio-frame drive. `generalized_force_n` is held over the entire frame;
-/// `boundary_impulse_n_s` is applied at the frame's left boundary first.
+/// One audio-frame drive with explicit localized and distributed source classes.
+///
+/// Both force fields are held over the entire frame, and both impulse fields are
+/// applied at the frame's left boundary first. [`ModalSpatialParticipation`]
+/// modulates only the localized fields (contact and rolling sources). Distributed
+/// fields (base damping and exterior-gas sources) retain the modes' declared
+/// participation without contact-location modulation.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ModalDriveFrame {
-    /// Piecewise-constant generalized component forces [N].
-    pub generalized_force_n: ModalComponentValues,
-    /// Exact generalized component impulses at the left boundary [N s].
-    pub boundary_impulse_n_s: ModalComponentValues,
+    /// Piecewise-constant localized generalized component forces [N].
+    pub localized_generalized_force_n: ModalComponentValues,
+    /// Piecewise-constant distributed generalized component forces [N].
+    pub distributed_generalized_force_n: ModalComponentValues,
+    /// Exact localized generalized component impulses at the left boundary [N s].
+    pub localized_boundary_impulse_n_s: ModalComponentValues,
+    /// Exact distributed generalized component impulses at the left boundary [N s].
+    pub distributed_boundary_impulse_n_s: ModalComponentValues,
 }
 
 /// Optional caller-supplied source-location modulation. The row-major slice is
-/// indexed by `(frame, canonical_mode)` and multiplies the mode's declared
-/// component participation. Deriving these factors from contact geometry is
-/// owned by the later excitation-mapping stage.
+/// indexed by `(frame, canonical_mode)` and multiplies only the localized
+/// force and impulse after the mode's declared component participation is
+/// applied. Deriving these factors from contact geometry is owned by the
+/// excitation-mapping stage. Distributed force and impulse never use this
+/// modulation.
 #[derive(Debug, Clone, Copy)]
 pub enum ModalSpatialParticipation<'a> {
     /// Use each mode's declared static participation unchanged.
@@ -731,12 +742,25 @@ impl ModalSynthesisModel {
                     mode_index,
                     self.modes.len(),
                 );
-                let generalized_force_n =
-                    participation_dot(mode.mode.source_participation, frame.generalized_force_n)
-                        * spatial;
+                let localized_force_n = participation_dot(
+                    mode.mode.source_participation,
+                    frame.localized_generalized_force_n,
+                );
+                let distributed_force_n = participation_dot(
+                    mode.mode.source_participation,
+                    frame.distributed_generalized_force_n,
+                );
+                let generalized_force_n = localized_force_n * spatial + distributed_force_n;
+                let localized_impulse_n_s = participation_dot(
+                    mode.mode.source_participation,
+                    frame.localized_boundary_impulse_n_s,
+                );
+                let distributed_impulse_n_s = participation_dot(
+                    mode.mode.source_participation,
+                    frame.distributed_boundary_impulse_n_s,
+                );
                 let generalized_impulse_n_s =
-                    participation_dot(mode.mode.source_participation, frame.boundary_impulse_n_s)
-                        * spatial;
+                    localized_impulse_n_s * spatial + distributed_impulse_n_s;
                 if !generalized_force_n.is_finite() || !generalized_impulse_n_s.is_finite() {
                     return Err(ModalSynthesisError::NonFiniteResult {
                         sample_frame: absolute_frame,
@@ -1276,20 +1300,53 @@ fn preflight_drive(
             checkpoint_fn()?;
         }
         for (field, value) in [
-            ("disc force", values.generalized_force_n.disc),
-            ("glass plate force", values.generalized_force_n.glass_plate),
             (
-                "base assembly force",
-                values.generalized_force_n.base_assembly,
-            ),
-            ("disc impulse", values.boundary_impulse_n_s.disc),
-            (
-                "glass plate impulse",
-                values.boundary_impulse_n_s.glass_plate,
+                "localized disc force",
+                values.localized_generalized_force_n.disc,
             ),
             (
-                "base assembly impulse",
-                values.boundary_impulse_n_s.base_assembly,
+                "localized glass plate force",
+                values.localized_generalized_force_n.glass_plate,
+            ),
+            (
+                "localized base assembly force",
+                values.localized_generalized_force_n.base_assembly,
+            ),
+            (
+                "distributed disc force",
+                values.distributed_generalized_force_n.disc,
+            ),
+            (
+                "distributed glass plate force",
+                values.distributed_generalized_force_n.glass_plate,
+            ),
+            (
+                "distributed base assembly force",
+                values.distributed_generalized_force_n.base_assembly,
+            ),
+            (
+                "localized disc impulse",
+                values.localized_boundary_impulse_n_s.disc,
+            ),
+            (
+                "localized glass plate impulse",
+                values.localized_boundary_impulse_n_s.glass_plate,
+            ),
+            (
+                "localized base assembly impulse",
+                values.localized_boundary_impulse_n_s.base_assembly,
+            ),
+            (
+                "distributed disc impulse",
+                values.distributed_boundary_impulse_n_s.disc,
+            ),
+            (
+                "distributed glass plate impulse",
+                values.distributed_boundary_impulse_n_s.glass_plate,
+            ),
+            (
+                "distributed base assembly impulse",
+                values.distributed_boundary_impulse_n_s.base_assembly,
             ),
         ] {
             if !value.is_finite() {

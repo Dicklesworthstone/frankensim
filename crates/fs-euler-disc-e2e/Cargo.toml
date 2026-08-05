@@ -39,6 +39,7 @@ fs-ir = { path = "../fs-ir", optional = true }
 fs-ledger = { path = "../fs-ledger", optional = true }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
+fs-rand = { path = "../fs-rand" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-render = { path = "../fs-render" }
 fs-solid = { path = "../fs-solid" }

@@ -12,10 +12,11 @@ use crate::cinematic::{
 };
 use crate::cinematic_config::{CinematicComponentRef, CinematicComponentRole};
 
-/// Exact schema version accepted by [`SoundSynthesisConfig`]. Version two
-/// separates physical modal mass, component routing, participation, and
-/// velocity-radiation gain instead of conflating them in one scalar gain.
-pub const SOUND_SYNTHESIS_SCHEMA_VERSION: u16 = 2;
+/// Exact schema version accepted by [`SoundSynthesisConfig`]. Version three
+/// retains v2's separated modal mass/routing/participation/radiation fields and
+/// adds explicit signed-work-rate selectors for contact, rolling, base damping,
+/// and exterior-gas body work.
+pub const SOUND_SYNTHESIS_SCHEMA_VERSION: u16 = 3;
 /// Frozen reference-master audio sample rate.
 pub const SOUND_MASTER_SAMPLE_RATE_HZ: u32 = 48_000;
 /// Frozen reference-master video rate numerator (denominator is one).
@@ -38,7 +39,7 @@ pub const MAX_SOUND_MODE_RADIATION_GAIN: f64 = 1.0e12;
 /// Smallest admitted positive generalized modal mass [kg].
 pub const MIN_SOUND_MODE_MASS_KG: f64 = 1.0e-12;
 
-const IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.sound-config.v2";
+const IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.sound-config.v3";
 
 /// Listener coordinates. The reference composition requires camera-relative geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,7 +106,7 @@ impl SoundChannelLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum SoundExcitationChannel {
-    /// Normal contact force in newtons.
+    /// Base-local `+z` aggregate contact-force component in newtons.
     ContactNormalForce = 1,
     /// Tangential contact force in newtons.
     ContactTangentialForce = 2,
@@ -115,6 +116,35 @@ pub enum SoundExcitationChannel {
     DiscAngularSpeed = 4,
     /// Disc precession rate in radians per second.
     PrecessionRate = 5,
+    /// Signed aggregate-contact work rate in watts. Positive means work into
+    /// the simulated disc/body under the retained channel convention.
+    ContactSignedWorkRate = 6,
+    /// Signed reduced rolling-resistance work rate in watts.
+    RollingSignedWorkRate = 7,
+    /// Signed reduced-base damping work rate in watts. This is not a total
+    /// contact reaction applied to the base.
+    BaseDampingSignedWorkRate = 8,
+    /// Signed exterior-gas body-work rate in watts. This is not relative gas
+    /// dissipation unless the upstream model separately establishes that fact.
+    ExteriorGasBodySignedWorkRate = 9,
+}
+
+impl SoundExcitationChannel {
+    /// SI unit of the scalar source consumed by [`SoundExcitationControl`].
+    /// The declared `source_scale` therefore has units N per returned unit.
+    #[must_use]
+    pub const fn source_unit(self) -> &'static str {
+        match self {
+            Self::ContactNormalForce | Self::ContactTangentialForce | Self::BaseReactionForce => {
+                "N"
+            }
+            Self::DiscAngularSpeed | Self::PrecessionRate => "rad/s",
+            Self::ContactSignedWorkRate
+            | Self::RollingSignedWorkRate
+            | Self::BaseDampingSignedWorkRate
+            | Self::ExteriorGasBodySignedWorkRate => "W",
+        }
+    }
 }
 
 /// Dimensionally explicit mapping from one simulation channel into a typed

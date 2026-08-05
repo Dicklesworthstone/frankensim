@@ -1214,6 +1214,7 @@ dependencies = [
  "fs-ledger",
  "fs-math",
  "fs-mbd",
+ "fs-rand",
  "fs-render",
  "fs-rep-frep",
  "fs-solid",

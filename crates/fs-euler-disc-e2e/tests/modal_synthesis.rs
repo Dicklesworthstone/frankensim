@@ -104,8 +104,10 @@ fn build(modes: Vec<SoundMode>, budget: ModalSynthesisBudget) -> ModalSynthesisM
 
 fn drive(force: ModalComponentValues, impulse: ModalComponentValues) -> ModalDriveFrame {
     ModalDriveFrame {
-        generalized_force_n: force,
-        boundary_impulse_n_s: impulse,
+        localized_generalized_force_n: force,
+        distributed_generalized_force_n: ModalComponentValues::ZERO,
+        localized_boundary_impulse_n_s: impulse,
+        distributed_boundary_impulse_n_s: ModalComponentValues::ZERO,
     }
 }
 
@@ -331,7 +333,7 @@ fn g0_zero_critical_overdamped_and_long_decay_energy_are_stable() {
         );
         let initial = with_cx(false, |cx| model.initial_checkpoint(cx).unwrap());
         let mut frames = vec![ModalDriveFrame::default(); 20_000];
-        frames[0].boundary_impulse_n_s.disc = 1.0e-3;
+        frames[0].localized_boundary_impulse_n_s.disc = 1.0e-3;
         let result = with_cx(false, |cx| {
             model
                 .synthesize_chunk(&initial, &frames, ModalSpatialParticipation::Declared, cx)
@@ -506,7 +508,7 @@ fn g3_nyquist_nonfinite_and_state_bounds_refuse_atomically() {
         )),
         Err(ModalSynthesisError::NonFiniteDrive {
             frame: 0,
-            field: "disc force",
+            field: "localized disc force",
         })
     );
 }
@@ -689,6 +691,83 @@ fn g3_declared_cross_routing_and_source_location_factors_are_observable() {
 }
 
 #[test]
+fn g3_spatial_factor_modulates_localized_but_not_distributed_drive() {
+    let model = build(
+        vec![mode(1, SoundModalComponent::Disc, 700.0, 0.02)],
+        generous_budget(1),
+    );
+    let initial = with_cx(false, |cx| model.initial_checkpoint(cx).unwrap());
+    let force = ModalComponentValues {
+        disc: 0.25,
+        ..ModalComponentValues::ZERO
+    };
+    let impulse = ModalComponentValues {
+        disc: 1.0e-5,
+        ..ModalComponentValues::ZERO
+    };
+
+    let localized = drive(force, impulse);
+    let localized_suppressed = with_cx(false, |cx| {
+        model
+            .synthesize_chunk(
+                &initial,
+                &[localized],
+                ModalSpatialParticipation::PerFrameModeFactors(&[0.0]),
+                cx,
+            )
+            .unwrap()
+    });
+    assert_eq!(localized_suppressed.mixed_samples_fs, vec![0.0]);
+    assert_eq!(localized_suppressed.total_modal_energy_j, vec![0.0]);
+
+    let distributed = ModalDriveFrame {
+        localized_generalized_force_n: ModalComponentValues::ZERO,
+        distributed_generalized_force_n: force,
+        localized_boundary_impulse_n_s: ModalComponentValues::ZERO,
+        distributed_boundary_impulse_n_s: impulse,
+    };
+    let distributed_declared = with_cx(false, |cx| {
+        model
+            .synthesize_chunk(
+                &initial,
+                &[distributed],
+                ModalSpatialParticipation::Declared,
+                cx,
+            )
+            .unwrap()
+    });
+    let distributed_with_zero_factor = with_cx(false, |cx| {
+        model
+            .synthesize_chunk(
+                &initial,
+                &[distributed],
+                ModalSpatialParticipation::PerFrameModeFactors(&[0.0]),
+                cx,
+            )
+            .unwrap()
+    });
+    assert_ne!(distributed_declared.mixed_samples_fs, vec![0.0]);
+    assert_eq!(distributed_with_zero_factor, distributed_declared);
+
+    let combined = ModalDriveFrame {
+        localized_generalized_force_n: force,
+        localized_boundary_impulse_n_s: impulse,
+        ..distributed
+    };
+    let combined_with_zero_factor = with_cx(false, |cx| {
+        model
+            .synthesize_chunk(
+                &initial,
+                &[combined],
+                ModalSpatialParticipation::PerFrameModeFactors(&[0.0]),
+                cx,
+            )
+            .unwrap()
+    });
+    assert_eq!(combined_with_zero_factor, distributed_declared);
+}
+
+#[test]
 fn g0_representative_presets_are_distinct_complete_and_honestly_labeled() {
     let tungsten = representative_modal_preset(RepresentativeDiscMaterial::Tungsten);
     let stainless = representative_modal_preset(RepresentativeDiscMaterial::StainlessSteel);
@@ -722,7 +801,7 @@ fn g0_representative_presets_are_distinct_complete_and_honestly_labeled() {
     assert_ne!(tungsten_model.identity(), stainless_model.identity());
     let frames = {
         let mut values = vec![ModalDriveFrame::default(); 256];
-        values[0].boundary_impulse_n_s.disc = 1.0e-5;
+        values[0].localized_boundary_impulse_n_s.disc = 1.0e-5;
         values
     };
     let render = |model: &ModalSynthesisModel| {

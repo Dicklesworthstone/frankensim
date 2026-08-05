@@ -1016,6 +1016,57 @@ pre-cancellation, and deterministic injected cancellation inside continuity,
 aggregation, post-aggregation, and work-reconciliation loops. These controls
 are neither calibrated sound nor physical validation.
 
+`audio_excitation` v1 maps the admitted control stream into a content-identified,
+source-clock generalized-force artifact. Canonically ordered controls may select
+base-local normal contact force or signed aggregate-contact, rolling-resistance,
+reduced-base-damping, and exterior-gas body-work rates. A declared scale converts
+each selector's explicit SI unit into a component generalized force. For every
+selected interval the mapper retains contact, rolling, base, and gas stems,
+their duration means, their force-time measures, availability distinct from
+numerical zero, and per-stem arithmetic reconciliation. The work-rate path is a
+dimensionally valid transfer-model proxy; it is not a claim that signed work
+alone determines acoustic phase, an energy-conserving mechanics force, radiated
+energy, calibrated pressure, or absolute SPL.
+
+Contact and rolling stems are explicitly localized; base and gas stems are
+explicitly distributed. Azimuthal mode-shape factors derive from exact disc-body
+or displaced-base contact coordinates and apply only to localized stems. Smooth
+raw intervals may interpolate exact endpoint factors. A single opening holds the
+exact contact-side start factor and a single reimpact holds the exact contact-side
+end factor; multiple events or missing required event-side geometry refuse rather
+than substituting unity coupling. Because boxcar reduction before a varying
+mode-shape projection does not conserve the spatially weighted measure, v1
+refuses `WholeIntervalBoxcarV1` together with nonuniform contact-coordinate
+participation. Static participation remains compatible with measure-first
+boxcar reduction and its event barriers.
+
+Opening and reimpact records remain `TimingOnly` and carry an exact zero physical
+impulse. An optional deterministic rolling-noise envelope and randomized reimpact
+impulse are separately typed as artistic, domain-separated by source/event/seed,
+and bounded before publication. They do not promote the soundtrack's physical
+authority. The mapper does not produce `ModalDriveFrame` values or 48 kHz samples:
+its interval measures, event brackets, spatial partitions, and explicit
+`RequiresBandLimitedResampling` status are the input to the later multirate stage,
+which alone owns anti-alias reconstruction, filter latency, fractional-delay
+events, and audio/video clock alignment.
+
+Mapper identity transitively binds the durable trajectory, control-stream schema,
+modal model, mapping/scaling, reduction, spatial rules, artistic seed/config,
+deterministic math and RNG semantics, selected grid, and all budgets. Raw source
+work is capped before optional coarsening; each transactional chunk separately
+caps intervals, events, and interval-by-mode envelopes, polls cancellation in
+preflight and inner bounded loops, and publishes intervals and successor
+checkpoint only together. Checkpoints are bound to mapper/source, exact next
+interval, preceding end time, and compensated cumulative per-stem measures.
+Numerical-refusal trajectories cannot mint excitation; horizon-censored sources
+retain their accepted interval history without inventing terminal events.
+Focused G0/G3/G4/G5 tests cover every admitted selector and SI transfer unit,
+signed stem/measure reconciliation, available-zero versus unavailable sources,
+alternating-signal pre-decimation cancellation, event barriers and zero physical
+impulse, deterministic artistic replay, exact/event-side spatial factors,
+resource refusals, split/resume equivalence, wrong-checkpoint refusal, and
+injected cancellation before atomic publication.
+
 `modal_synthesis` v1 is the deterministic 48 kHz damped-resonator runtime for
 those later audio controls. Every canonical mode solves
 `m q'' + 2 zeta m omega q' + m omega^2 q = F`: a declared boundary impulse is

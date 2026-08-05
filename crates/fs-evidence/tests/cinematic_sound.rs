@@ -64,7 +64,7 @@ fn informed_input() -> SoundSynthesisInput {
                 source_scale: 1.0e-3,
             },
             SoundExcitationControl {
-                channel: SoundExcitationChannel::BaseReactionForce,
+                channel: SoundExcitationChannel::BaseDampingSignedWorkRate,
                 target_component: SoundModalComponent::BaseAssembly,
                 source_scale: -2.0e-4,
             },
@@ -453,5 +453,30 @@ fn identity_is_deterministic_and_every_modal_physics_field_invalidates_it() {
         mutate(&mut input);
         let changed = SoundSynthesisConfig::try_admit(input).unwrap();
         assert_ne!(first.identity(), changed.identity());
+    }
+}
+
+#[test]
+fn excitation_channel_units_are_exhaustive_and_dimensionally_explicit() {
+    for channel in [
+        SoundExcitationChannel::ContactNormalForce,
+        SoundExcitationChannel::ContactTangentialForce,
+        SoundExcitationChannel::BaseReactionForce,
+    ] {
+        assert_eq!(channel.source_unit(), "N");
+    }
+    for channel in [
+        SoundExcitationChannel::DiscAngularSpeed,
+        SoundExcitationChannel::PrecessionRate,
+    ] {
+        assert_eq!(channel.source_unit(), "rad/s");
+    }
+    for channel in [
+        SoundExcitationChannel::ContactSignedWorkRate,
+        SoundExcitationChannel::RollingSignedWorkRate,
+        SoundExcitationChannel::BaseDampingSignedWorkRate,
+        SoundExcitationChannel::ExteriorGasBodySignedWorkRate,
+    ] {
+        assert_eq!(channel.source_unit(), "W");
     }
 }

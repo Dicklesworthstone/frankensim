@@ -68,7 +68,7 @@ telemetry/legacy correlation.
   camera/material changes do not invalidate trajectory/audio, room changes do
   not invalidate images, and trajectory changes invalidate every consumer.
 - `cinematic_sound::SoundSynthesisConfig` is the fail-closed input and receipt
-  boundary for the reference soundtrack. Schema v2 reuses the cinematic
+  boundary for the reference soundtrack. Schema v3 reuses the cinematic
   authority and rational-clock types, requires exact 48 kHz stereo timing
   aligned to video, and binds camera-relative listener geometry, component-
   targeted source scales ordered by `(channel, target component)`, and explicit
@@ -76,7 +76,12 @@ telemetry/legacy correlation.
   component participation, velocity-radiation gain, material, and base
   identities. Frequencies at or above 90% of Nyquist, invalid or excessive
   damping/participation/gain, nonpositive modal mass, duplicate mode IDs, and
-  noncanonical source mappings refuse before identity is minted. Room and
+  noncanonical source mappings refuse before identity is minted. Excitation
+  selectors distinguish base-local normal force from aggregate-contact,
+  rolling-resistance, reduced-base-damping, and exterior-gas signed work rates;
+  each selector exposes its SI source unit and the scale remains generalized-
+  force newtons per source unit. Work-rate mappings are declared transfer-model
+  proxies, not energy-conserving mechanics forces or calibrated acoustics. Room and
   amplitude conventions, resampler/filter versions,
   trajectory terminal policy, assumptions, and optional calibration evidence
   into one content identity. Artistic and physically informed output cannot

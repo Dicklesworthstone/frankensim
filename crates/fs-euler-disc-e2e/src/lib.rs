@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod air;
+pub mod audio_excitation;
 pub mod base_response;
 pub mod baseline;
 pub mod contact_dynamics;
@@ -41,6 +42,18 @@ pub mod specimen;
 pub mod tangential_contact;
 pub mod timeline_resampling;
 
+pub use audio_excitation::{
+    AUDIO_EXCITATION_ALGORITHM_VERSION, AUDIO_EXCITATION_CANCELLATION_POLL_INTERVALS,
+    ArtisticEventExcitation, ArtisticTextureConfig, ArtisticTextureEnvelope,
+    AudioExcitationAvailability, AudioExcitationBudget, AudioExcitationCheckpoint,
+    AudioExcitationChunk, AudioExcitationDiagnostics, AudioExcitationError, AudioExcitationGrid,
+    AudioExcitationInterval, AudioExcitationMapper, AudioExcitationModelInput,
+    AudioExcitationReconstructionStatus, AudioExcitationReduction, AudioExcitationStems,
+    ContactModeShape, ContactParticipationPolicy, ExcitationSourceAvailability,
+    MAX_AUDIO_EXCITATION_AZIMUTHAL_HARMONIC, MAX_AUDIO_EXCITATION_CHUNK_INTERVALS,
+    ModalSpatialEnvelope, ModeContactParticipationRule, SpatialEnvelopeSource,
+    procedural_texture_unit_sample,
+};
 pub use control_stream::{
     AudioControlFilter, AudioControlInterval, AudioVisualCoverage, AudioVisualHorizon,
     AvailableChannelControl, ChannelControl, ChannelControlSet, ChannelWorkIntegralChecks,
