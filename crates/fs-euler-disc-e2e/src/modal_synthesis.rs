@@ -123,11 +123,11 @@ pub struct ModalDriveFrame {
 }
 
 /// Optional caller-supplied source-location modulation. The row-major slice is
-/// indexed by `(frame, canonical_mode)` and multiplies only the localized
-/// force and impulse after the mode's declared component participation is
-/// applied. Deriving these factors from contact geometry is owned by the
-/// excitation-mapping stage. Distributed force and impulse never use this
-/// modulation.
+/// indexed by `(frame, canonical_mode)`. A caller may either multiply localized
+/// component drive by a normalized factor or supply the already-participated,
+/// already-filtered localized modal drive directly. Deriving either form from
+/// contact geometry is owned by the excitation-mapping stage. Distributed force
+/// and impulse never use this modulation.
 #[derive(Debug, Clone, Copy)]
 pub enum ModalSpatialParticipation<'a> {
     /// Use each mode's declared static participation unchanged.
@@ -154,7 +154,7 @@ pub enum ModalSpatialParticipation<'a> {
 /// unique nonzero `mode_id` before hashing or arithmetic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModalSynthesisModelInput {
-    /// Exact sample rate. The v1 cinematic master requires 48 kHz.
+    /// Exact sample rate. The v2 cinematic master requires 48 kHz.
     pub sample_rate_hz: u32,
     /// Unordered modes to admit and canonicalize.
     pub modes: Vec<SoundMode>,
@@ -1371,15 +1371,39 @@ fn preflight_drive(
                 return Err(ModalSynthesisError::NonFiniteDrive { frame, field });
             }
         }
-        if let ModalSpatialParticipation::PerFrameModeFactors(factors) = spatial {
-            let row = frame * modes.len();
-            for (mode_index, mode) in modes.iter().enumerate() {
-                let factor = factors[row + mode_index];
-                if !factor.is_finite() || factor.abs() > MAX_MODAL_SPATIAL_PARTICIPATION {
-                    return Err(ModalSynthesisError::InvalidSpatialParticipation {
-                        frame,
-                        mode_id: mode.mode.mode_id,
-                    });
+        let row = frame * modes.len();
+        match spatial {
+            ModalSpatialParticipation::Declared => {}
+            ModalSpatialParticipation::PerFrameModeFactors(factors) => {
+                for (mode_index, mode) in modes.iter().enumerate() {
+                    let factor = factors[row + mode_index];
+                    if !factor.is_finite() || factor.abs() > MAX_MODAL_SPATIAL_PARTICIPATION {
+                        return Err(ModalSynthesisError::InvalidSpatialParticipation {
+                            frame,
+                            mode_id: mode.mode.mode_id,
+                        });
+                    }
+                }
+            }
+            ModalSpatialParticipation::PreparticipatedLocalizedDrive {
+                generalized_force_n,
+                boundary_impulse_n_s,
+            } => {
+                for mode_index in 0..modes.len() {
+                    for (field, value) in [
+                        (
+                            "preparticipated localized force",
+                            generalized_force_n[row + mode_index],
+                        ),
+                        (
+                            "preparticipated localized impulse",
+                            boundary_impulse_n_s[row + mode_index],
+                        ),
+                    ] {
+                        if !value.is_finite() {
+                            return Err(ModalSynthesisError::NonFiniteDrive { frame, field });
+                        }
+                    }
                 }
             }
         }
@@ -1435,15 +1459,17 @@ fn localized_modal_drive(
     participation: SoundModeParticipation,
     row_major_index: usize,
 ) -> (f64, f64) {
-    let participated_force =
-        participation_dot(participation, frame.localized_generalized_force_n);
-    let participated_impulse =
-        participation_dot(participation, frame.localized_boundary_impulse_n_s);
     match spatial {
-        ModalSpatialParticipation::Declared => (participated_force, participated_impulse),
+        ModalSpatialParticipation::Declared => (
+            participation_dot(participation, frame.localized_generalized_force_n),
+            participation_dot(participation, frame.localized_boundary_impulse_n_s),
+        ),
         ModalSpatialParticipation::PerFrameModeFactors(factors) => {
             let factor = factors[row_major_index];
-            (participated_force * factor, participated_impulse * factor)
+            (
+                participation_dot(participation, frame.localized_generalized_force_n) * factor,
+                participation_dot(participation, frame.localized_boundary_impulse_n_s) * factor,
+            )
         }
         ModalSpatialParticipation::PreparticipatedLocalizedDrive {
             generalized_force_n,

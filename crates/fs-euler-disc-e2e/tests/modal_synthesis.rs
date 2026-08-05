@@ -765,6 +765,31 @@ fn g3_spatial_factor_modulates_localized_but_not_distributed_drive() {
             .unwrap()
     });
     assert_eq!(combined_with_zero_factor, distributed_declared);
+
+    let preparticipated_with_distributed = with_cx(false, |cx| {
+        model
+            .synthesize_chunk(
+                &initial,
+                &[distributed],
+                ModalSpatialParticipation::PreparticipatedLocalizedDrive {
+                    generalized_force_n: &[force.disc],
+                    boundary_impulse_n_s: &[impulse.disc],
+                },
+                cx,
+            )
+            .unwrap()
+    });
+    let combined_declared = with_cx(false, |cx| {
+        model
+            .synthesize_chunk(
+                &initial,
+                &[combined],
+                ModalSpatialParticipation::Declared,
+                cx,
+            )
+            .unwrap()
+    });
+    assert_eq!(preparticipated_with_distributed, combined_declared);
 }
 
 #[test]
