@@ -28,6 +28,7 @@ pub mod protocol;
 pub mod reduced_decay;
 pub mod render_motion_bridge;
 pub mod render_trajectory;
+pub mod render_trajectory_codec;
 pub mod rolling_contact;
 pub mod specimen;
 pub mod tangential_contact;
@@ -48,6 +49,15 @@ pub use render_trajectory::{
     RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
     RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
     RenderTrajectorySample, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+};
+pub use render_trajectory_codec::{
+    EULER_RENDER_TRAJECTORY_ARTIFACT_IDENTITY_DOMAIN,
+    EULER_RENDER_TRAJECTORY_CHUNK_FINGERPRINT_DOMAIN, EULER_RENDER_TRAJECTORY_CODEC_VERSION,
+    EULER_RENDER_TRAJECTORY_PAYLOAD_FINGERPRINT_DOMAIN,
+    EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK, EulerRenderTrajectoryArtifact,
+    MAX_RENDER_TRAJECTORY_ARTIFACT_BYTES, MAX_RENDER_TRAJECTORY_TEXT_BYTES,
+    MAX_RENDER_TRAJECTORY_TOTAL_TRANSITIONS, RenderTrajectoryCodecBudget,
+    RenderTrajectoryCodecError, RenderTrajectoryCodecReceipt,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,
