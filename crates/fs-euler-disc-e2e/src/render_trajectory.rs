@@ -543,6 +543,9 @@ pub enum RenderTrajectoryError {
     /// The exact interval start was non-finite, after its endpoint, or did not
     /// equal the preceding retained endpoint.
     InvalidIntervalStart(usize),
+    /// A positive interval exceeded the declared fixed macro timestep beyond
+    /// the binary64 comparison tolerance.
+    IntervalExceedsDeclaredTimestep(usize),
     /// A zero-duration initial point carried interval-only data.
     ZeroDurationIntervalData(usize),
     /// A channel declared unavailable carried a nonzero payload.
@@ -764,6 +767,13 @@ fn validate_sample(
     {
         return Err(RenderTrajectoryError::InvalidIntervalStart(index));
     }
+    let interval_duration_s = input.time_s - input.interval_start_time_s;
+    let timestep_excess_s = interval_duration_s - metadata.timestep_s;
+    if timestep_excess_s > metadata.timestep_s * UNIT_TOLERANCE {
+        return Err(RenderTrajectoryError::IntervalExceedsDeclaredTimestep(
+            index,
+        ));
+    }
     finite_vec(
         input.center_of_mass_world_m,
         index,
@@ -914,6 +924,19 @@ fn validate_contact(
             }
         }
         _ => return Err(RenderTrajectoryError::ContactGeometryMismatch(index)),
+    }
+    let positive_duration = input.interval_start_time_s.to_bits() != input.time_s.to_bits();
+    let inactive_closed_at_endpoint_reimpact = input.contact_branch == RenderContactBranch::Closed
+        && input.contact_transitions.last().is_some_and(|event| {
+            event.kind == ContactTransitionKind::Reimpact
+                && event.time_s.to_bits() == input.time_s.to_bits()
+        });
+    if positive_duration
+        && !input.interval_contact_active
+        && input.contact_branch == RenderContactBranch::Closed
+        && !inactive_closed_at_endpoint_reimpact
+    {
+        return Err(RenderTrajectoryError::InactiveContactHasIntervalData(index));
     }
     Ok(())
 }

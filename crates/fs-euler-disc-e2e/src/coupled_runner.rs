@@ -147,7 +147,9 @@ pub struct CoupledSample {
     pub precession_acceleration_rad_per_s2: f64,
     /// Gap evaluated at the beginning of the interval ending at `time_s` [m].
     pub interval_start_gap_m: f64,
-    /// Unilateral normal force evaluated over the interval ending at `time_s` [N].
+    /// Unilateral normal force evaluated at the midpoint of the first accepted
+    /// subinterval ending at `time_s` [N]. Event-split intervals must use the
+    /// duration-weighted contact-channel force when a mean load is required.
     pub interval_normal_force_n: f64,
     /// True when any accepted subinterval used the closed signed-gap branch.
     /// This is intentionally not inferred from the normal-force magnitude:

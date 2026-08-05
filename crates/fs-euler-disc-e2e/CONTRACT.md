@@ -938,7 +938,7 @@ trajectory and inherit its `SimulationEvidence` ceiling; durable canonical
 bytes and content identity remain owned by the trajectory codec. Focused G0/G3
 coverage exercises resumed clocks, exact frame/velocity derivation, zero and
 unavailable channels, zero-force reimpact, opening/event barriers, signed-work
-and force-time conservation, alternating-signal anti-alias behavior, admissible
+and force-time conservation, alternating-signal boxcar cancellation, admissible
 rigid transforms, extreme finite values, derived overflow, deterministic replay,
 and cancellation. These controls are neither calibrated sound nor physical
 validation.

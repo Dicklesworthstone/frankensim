@@ -1,4 +1,4 @@
-//! G0/G3 controls: frame/unit semantics, conservative anti-aliasing, replay,
+//! G0/G3 controls: frame/unit semantics, conservative boxcar mitigation, replay,
 //! cancellation, and explicit no-data behavior.
 
 use core::{f64::consts::FRAC_PI_2, num::NonZeroUsize};
@@ -474,7 +474,7 @@ fn opening_and_zero_force_reimpact_retain_timing_only_events_and_barriers() {
 }
 
 #[test]
-fn whole_interval_boxcar_antialiases_before_decimation_and_conserves_work() {
+fn whole_interval_boxcar_cancels_alternation_before_decimation_and_conserves_work() {
     let mut inputs = Vec::new();
     for index in 0..4 {
         let mut retained = sample(

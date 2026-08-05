@@ -441,7 +441,8 @@ impl<'trajectory> EulerControlStream<'trajectory> {
 
     /// Applies duration-weighted whole-interval box filtering before reducing
     /// temporal resolution. Eventful source intervals are output alone and are
-    /// never blended across a contact transition.
+    /// never blended across a contact transition. This prefilter mitigates
+    /// aliasing but does not claim band-limited sample-rate conversion.
     pub fn boxcar_coarsen(
         &self,
         intervals_per_bin: NonZeroUsize,
@@ -465,6 +466,7 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                 && cursor - start < intervals_per_bin.get()
                 && self.audio[cursor].events.is_empty()
             {
+                cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
                 cursor += 1;
             }
             bins.push(coarsen_group(&self.audio[start..cursor], false, cx)?);
@@ -472,7 +474,11 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
         let represented =
             coarsened_work_checks(&bins, self.source.metadata().channel_availability, cx)?;
-        let reconciliation = reconcile_against_raw(self.reconciliation, represented)?;
+        let last_sample = bins
+            .last()
+            .map_or(0, |bin| bin.last_source_sample_index);
+        let reconciliation =
+            reconcile_against_raw(self.reconciliation, represented, last_sample)?;
         Ok(CoarsenedAudioControls {
             source: self.source,
             filter: AudioControlFilter::WholeIntervalBoxcarV1,
@@ -483,7 +489,7 @@ impl<'trajectory> EulerControlStream<'trajectory> {
     }
 }
 
-/// One anti-aliased output control bin.
+/// One whole-interval boxcar-coarsened output control bin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoarsenedAudioBin {
     /// First source interval included in this bin.
@@ -509,7 +515,7 @@ pub struct CoarsenedAudioBin {
     pub event_barrier: bool,
 }
 
-/// Result of deterministic whole-interval anti-alias filtering.
+/// Result of deterministic whole-interval boxcar prefiltering and coarsening.
 #[derive(Debug)]
 pub struct CoarsenedAudioControls<'trajectory> {
     source: &'trajectory RenderTrajectory,
@@ -963,14 +969,15 @@ fn accumulate_channel_work(
     sample: usize,
     channel_name: &'static str,
 ) -> Result<(), ControlStreamError> {
-    let (Some(accumulator), Some(channel)) = (accumulator, channel.available()) else {
-        if accumulator.is_none() && channel.available().is_none() {
-            return Ok(());
+    let (accumulator, channel) = match (accumulator.as_mut(), channel) {
+        (Some(accumulator), ChannelControl::Available(channel)) => (accumulator, channel),
+        (None, ChannelControl::Unavailable) => return Ok(()),
+        _ => {
+            return Err(ControlStreamError::ChannelAvailabilityMismatch {
+                sample,
+                channel: channel_name,
+            });
         }
-        return Err(ControlStreamError::ChannelAvailabilityMismatch {
-            sample,
-            channel: channel_name,
-        });
     };
     accumulator.retained_work_j += channel.signed_work_j;
     accumulator.integrated_work_j = channel
@@ -1010,26 +1017,29 @@ fn finish_channel_work(
 fn reconcile_against_raw(
     raw: ChannelWorkIntegralChecks,
     represented: ChannelWorkIntegralChecks,
+    sample: usize,
 ) -> Result<ChannelWorkIntegralChecks, ControlStreamError> {
     Ok(ChannelWorkIntegralChecks {
-        gravity: reconcile_channel(raw.gravity, represented.gravity)?,
-        contact: reconcile_channel(raw.contact, represented.contact)?,
-        rolling: reconcile_channel(raw.rolling, represented.rolling)?,
-        base: reconcile_channel(raw.base, represented.base)?,
-        gas: reconcile_channel(raw.gas, represented.gas)?,
+        gravity: reconcile_channel(raw.gravity, represented.gravity, sample, "gravity")?,
+        contact: reconcile_channel(raw.contact, represented.contact, sample, "contact")?,
+        rolling: reconcile_channel(raw.rolling, represented.rolling, sample, "rolling")?,
+        base: reconcile_channel(raw.base, represented.base, sample, "base")?,
+        gas: reconcile_channel(raw.gas, represented.gas, sample, "gas")?,
     })
 }
 
 fn reconcile_channel(
     raw: Option<WorkIntegralCheck>,
     represented: Option<WorkIntegralCheck>,
+    sample: usize,
+    channel_name: &'static str,
 ) -> Result<Option<WorkIntegralCheck>, ControlStreamError> {
     match (raw, represented) {
         (Some(raw), Some(represented)) => {
             let residual_j = represented.integrated_work_j - raw.retained_work_j;
             if !residual_j.is_finite() {
                 return Err(ControlStreamError::NonFiniteDerived {
-                    sample: 0,
+                    sample,
                     field: "coarsened.work_integral_residual_j",
                 });
             }
@@ -1039,7 +1049,11 @@ fn reconcile_channel(
                 residual_j,
             }))
         }
-        _ => Ok(None),
+        (None, None) => Ok(None),
+        _ => Err(ControlStreamError::ChannelAvailabilityMismatch {
+            sample,
+            channel: channel_name,
+        }),
     }
 }
 
