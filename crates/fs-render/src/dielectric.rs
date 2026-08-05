@@ -33,7 +33,8 @@ pub enum DielectricError {
     /// A direction or normal was non-finite, non-unit, or oriented outside the
     /// interface convention.
     InvalidDirection,
-    /// A scalar interface parameter was non-finite or non-positive.
+    /// A scalar interface parameter was non-finite or an absolute index was
+    /// outside the admitted `[1, 3]` dielectric domain.
     InvalidInterface,
 }
 
@@ -404,7 +405,7 @@ pub struct FresnelDielectric {
 }
 
 /// Evaluate exact unpolarized dielectric Fresnel for an incident cosine in
-/// `[0, 1]` and positive absolute indices `eta_i`, `eta_t`.
+/// `[0, 1]` and admitted absolute indices `eta_i`, `eta_t` in `[1, 3]`.
 pub fn fresnel_dielectric(
     incident_cosine: f64,
     eta_i: f64,
@@ -414,7 +415,7 @@ pub fn fresnel_dielectric(
     if incident_cosine < 0.0 || incident_cosine > 1.0 {
         return Err(DielectricError::InvalidInterface);
     }
-    if eta_i.to_bits() == eta_t.to_bits() {
+    if indices_exactly_equal(eta_i, eta_t) {
         return Ok(FresnelDielectric {
             reflectance: 0.0,
             transmitted_cosine: incident_cosine,
@@ -440,8 +441,13 @@ pub fn fresnel_dielectric(
     }
     let parallel = parallel_numerator / parallel_denominator;
     let perpendicular = perpendicular_numerator / perpendicular_denominator;
+    // Both ratios are bounded in [-1, 1], so the textbook half-sum cannot
+    // overflow. Preserve this explicit Fresnel form rather than changing the
+    // new transport bit semantics to satisfy the generic midpoint lint.
+    #[allow(clippy::manual_midpoint)]
+    let reflectance = 0.5 * (parallel * parallel + perpendicular * perpendicular);
     Ok(FresnelDielectric {
-        reflectance: (0.5 * (parallel * parallel + perpendicular * perpendicular)).clamp(0.0, 1.0),
+        reflectance: reflectance.clamp(0.0, 1.0),
         transmitted_cosine,
         total_internal_reflection: false,
     })
@@ -483,7 +489,9 @@ pub fn sample_smooth_dielectric(
     if !event_sample.is_finite() || !(0.0..1.0).contains(&event_sample) {
         return Err(DielectricError::InvalidInterface);
     }
-    if eta_i.to_bits() == eta_t.to_bits() {
+    let normal = normalize_admitted(normal);
+    let wo = normalize_admitted(wo);
+    if indices_exactly_equal(eta_i, eta_t) {
         return Ok(SmoothDielectricSample {
             direction: wo.scale(-1.0),
             event: DielectricEvent::Transmission,
@@ -491,7 +499,10 @@ pub fn sample_smooth_dielectric(
             radiance_weight: 1.0,
         });
     }
-    let incident_cosine = normal.dot(wo);
+    // Normalizing two binary64 vectors does not guarantee their recomputed dot
+    // is <= 1 by the last ulp. The frame validator already established the
+    // geometric domain, so canonicalize that roundoff before Fresnel.
+    let incident_cosine = normal.dot(wo).clamp(0.0, 1.0);
     let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
     if fresnel.total_internal_reflection || event_sample < fresnel.reflectance {
         let direction = reflect(wo, normal);
@@ -558,9 +569,12 @@ pub fn evaluate_rough_dielectric(
     validate_unit(wi)?;
     validate_interface_scalar(normal.dot(wo), eta_i, eta_t)?;
     validate_roughness(roughness_alpha)?;
-    let cos_o = normal.dot(wo);
-    let cos_i = normal.dot(wi);
-    if cos_i.to_bits() == 0.0_f64.to_bits() {
+    let normal = normalize_admitted(normal);
+    let wo = normalize_admitted(wo);
+    let wi = normalize_admitted(wi);
+    let cos_o = normal.dot(wo).clamp(0.0, 1.0);
+    let cos_i = normal.dot(wi).clamp(-1.0, 1.0);
+    if cos_i == 0.0 {
         return Ok(RoughDielectricEvaluation {
             value: 0.0,
             pdf: 0.0,
@@ -573,7 +587,7 @@ pub fn evaluate_rough_dielectric(
     } else {
         DielectricEvent::Transmission
     };
-    if eta_i.to_bits() == eta_t.to_bits() && !reflection {
+    if indices_exactly_equal(eta_i, eta_t) && !reflection {
         return Ok(RoughDielectricEvaluation {
             value: 0.0,
             pdf: 0.0,
@@ -587,8 +601,8 @@ pub fn evaluate_rough_dielectric(
     } else {
         add(wo, wi.scale(eta))
     };
-    let half_norm = half_sum.norm();
-    if !half_norm.is_finite() || half_norm <= 1.0e-14 {
+    let half_norm = scale_safe_norm(half_sum);
+    if !half_norm.is_finite() || half_norm <= 0.0 {
         return Ok(RoughDielectricEvaluation {
             value: 0.0,
             pdf: 0.0,
@@ -599,9 +613,9 @@ pub fn evaluate_rough_dielectric(
     if normal.dot(micro_normal) < 0.0 {
         micro_normal = micro_normal.scale(-1.0);
     }
-    let n_dot_m = normal.dot(micro_normal);
-    let wo_dot_m = wo.dot(micro_normal);
-    let wi_dot_m = wi.dot(micro_normal);
+    let n_dot_m = normal.dot(micro_normal).clamp(-1.0, 1.0);
+    let wo_dot_m = wo.dot(micro_normal).clamp(-1.0, 1.0);
+    let wi_dot_m = wi.dot(micro_normal).clamp(-1.0, 1.0);
     if n_dot_m <= 0.0 || wo_dot_m <= 0.0 {
         return Ok(RoughDielectricEvaluation {
             value: 0.0,
@@ -633,9 +647,13 @@ pub fn evaluate_rough_dielectric(
             event,
         });
     }
-    let denominator = wo_dot_m + eta * wi_dot_m;
-    let denominator2 = denominator * denominator;
-    if denominator2 <= 1.0e-28 {
+    // `half_sum = wo + eta*wi = denominator*m`. Retain its scale before
+    // normalization instead of subtracting the two nearly equal dot terms a
+    // second time. This keeps distinct adjacent-f64 indices finite at normal
+    // incidence while preserving the Walter Jacobian exactly in real
+    // arithmetic.
+    let denominator2 = half_norm * half_norm;
+    if !denominator2.is_finite() || denominator2 <= 0.0 {
         return Ok(RoughDielectricEvaluation {
             value: 0.0,
             pdf: 0.0,
@@ -675,7 +693,9 @@ pub fn sample_rough_dielectric(
             return Err(DielectricError::InvalidInterface);
         }
     }
-    if eta_i.to_bits() == eta_t.to_bits() {
+    let normal = normalize_admitted(normal);
+    let wo = normalize_admitted(wo);
+    if indices_exactly_equal(eta_i, eta_t) {
         return Ok(Some(RoughDielectricSample {
             direction: wo.scale(-1.0),
             event: DielectricEvent::Transmission,
@@ -750,8 +770,8 @@ fn validate_interface_scalar(
     if incident_cosine.is_finite()
         && eta_i.is_finite()
         && eta_t.is_finite()
-        && eta_i > 0.0
-        && eta_t > 0.0
+        && (1.0..=MAX_GLASS_IOR).contains(&eta_i)
+        && (1.0..=MAX_GLASS_IOR).contains(&eta_t)
     {
         Ok(())
     } else {
@@ -787,6 +807,26 @@ fn validate_unit(direction: Vec3) -> Result<(), DielectricError> {
         Ok(())
     } else {
         Err(DielectricError::InvalidDirection)
+    }
+}
+
+fn normalize_admitted(direction: Vec3) -> Vec3 {
+    direction.scale(1.0 / direction.norm())
+}
+
+fn indices_exactly_equal(eta_i: f64, eta_t: f64) -> bool {
+    eta_i.to_bits() == eta_t.to_bits()
+}
+
+fn scale_safe_norm(vector: Vec3) -> f64 {
+    let scale = vector.x.abs().max(vector.y.abs()).max(vector.z.abs());
+    if scale == 0.0 {
+        0.0
+    } else if !scale.is_finite() {
+        f64::INFINITY
+    } else {
+        let scaled = vector.scale(1.0 / scale);
+        scale * scaled.dot(scaled).sqrt()
     }
 }
 
@@ -855,14 +895,19 @@ fn smith_g1(alpha: f64, cosine: f64) -> f64 {
 }
 
 fn basis(normal: Vec3) -> (Vec3, Vec3) {
-    if normal.z < -0.999_999_9 {
-        return (Vec3::new(0.0, -1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0));
-    }
-    let a = 1.0 / (1.0 + normal.z);
-    let b = -normal.x * normal.y * a;
+    // Duff et al.'s cancellation-free all-sphere ONB. The older Frisvad
+    // south-pole shortcut was exact only at (0, 0, -1); applying it to a cap
+    // produced non-unit microfacet normals and a sampling/PDF mismatch.
+    let sign = if normal.z < 0.0 { -1.0 } else { 1.0 };
+    let a = -1.0 / (sign + normal.z);
+    let b = normal.x * normal.y * a;
     (
-        Vec3::new(1.0 - normal.x * normal.x * a, b, -normal.x),
-        Vec3::new(b, 1.0 - normal.y * normal.y * a, -normal.y),
+        Vec3::new(
+            1.0 + sign * normal.x * normal.x * a,
+            sign * b,
+            -sign * normal.x,
+        ),
+        Vec3::new(b, sign + normal.y * normal.y * a, -normal.y),
     )
 }
 
@@ -937,6 +982,21 @@ mod tests {
         let above_critical = fresnel_dielectric(0.5, 1.5, 1.0).expect("glass/air");
         assert!(above_critical.total_internal_reflection);
         assert_eq!(above_critical.reflectance.to_bits(), 1.0_f64.to_bits());
+
+        let critical_cosine = (1.0_f64 - (1.0_f64 / 1.5).powi(2)).sqrt();
+        let at_critical =
+            fresnel_dielectric(critical_cosine, 1.5, 1.0).expect("critical glass/air");
+        assert!(at_critical.total_internal_reflection);
+        assert_eq!(at_critical.reflectance.to_bits(), 1.0_f64.to_bits());
+        let just_above_angle =
+            fresnel_dielectric(f64::from_bits(critical_cosine.to_bits() - 1), 1.5, 1.0)
+                .expect("one ulp above critical angle");
+        assert!(just_above_angle.total_internal_reflection);
+        let just_below_angle =
+            fresnel_dielectric(f64::from_bits(critical_cosine.to_bits() + 1), 1.5, 1.0)
+                .expect("one ulp below critical angle");
+        assert!(!just_below_angle.total_internal_reflection);
+        assert!(just_below_angle.transmitted_cosine > 0.0);
     }
 
     #[test]
@@ -959,7 +1019,7 @@ mod tests {
         let null =
             sample_smooth_dielectric(normal, wo, 1.0, 1.0, 0.0).expect("equal-IOR null boundary");
         assert_eq!(null.event, DielectricEvent::Transmission);
-        assert_eq!(null.direction, wo.scale(-1.0));
+        assert_eq!(null.direction, normalize_admitted(wo).scale(-1.0));
         assert_eq!(null.probability.to_bits(), 1.0_f64.to_bits());
         assert_eq!(null.radiance_weight.to_bits(), 1.0_f64.to_bits());
     }
@@ -968,10 +1028,10 @@ mod tests {
     fn lossless_smooth_slab_cancels_radiance_eta_factors() {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let wo = normal;
-        let entry = sample_smooth_dielectric(normal, wo, 1.0, 1.5, 0.5)
-            .expect("air-to-glass transmission");
-        let exit = sample_smooth_dielectric(normal, wo, 1.5, 1.0, 0.5)
-            .expect("glass-to-air transmission");
+        let entry =
+            sample_smooth_dielectric(normal, wo, 1.0, 1.5, 0.5).expect("air-to-glass transmission");
+        let exit =
+            sample_smooth_dielectric(normal, wo, 1.5, 1.0, 0.5).expect("glass-to-air transmission");
         assert_eq!(entry.event, DielectricEvent::Transmission);
         assert_eq!(exit.event, DielectricEvent::Transmission);
         assert_close(
@@ -1019,7 +1079,7 @@ mod tests {
             DielectricSurface::try_rough(0.0),
             Err(DielectricError::InvalidRoughness)
         );
-        for invalid_eta in [0.0, -1.0, f64::INFINITY] {
+        for invalid_eta in [0.0, -1.0, 0.99, 3.01, f64::MAX, f64::INFINITY] {
             assert_eq!(
                 sample_smooth_dielectric(
                     Vec3::new(0.0, 0.0, 1.0),
@@ -1031,6 +1091,9 @@ mod tests {
                 Err(DielectricError::InvalidInterface)
             );
         }
+        for boundary_eta in [1.0, MAX_GLASS_IOR] {
+            assert!(fresnel_dielectric(1.0, boundary_eta, boundary_eta).is_ok());
+        }
         let signed_zero = CauchyIor::try_new(1.5, -0.0, -0.0).expect("signed zero");
         assert!(!signed_zero.is_dispersive());
         assert_eq!(signed_zero.coefficients()[1].to_bits(), 0.0_f64.to_bits());
@@ -1040,6 +1103,101 @@ mod tests {
                 .parameters(),
             BeerLambertParameters::Clear
         );
+    }
+
+    #[test]
+    fn admitted_non_axis_directions_are_normalized_before_every_sampling_return() {
+        // A second normalization of this ordinary non-axis vector self-dots to
+        // 1 + 1 ulp on binary64, so it exercises both direction normalization
+        // and the post-validation Fresnel cosine clamp.
+        let near_unit = Vec3::new(
+            0.792_305_471_084_122_2,
+            0.238_331_816_145_395_78,
+            0.561_649_344_255_830_4,
+        );
+        let smooth = sample_smooth_dielectric(near_unit, near_unit, 1.0, 1.5, 0.5)
+            .expect("admitted near-unit smooth frame");
+        assert_close(
+            smooth.direction.norm(),
+            1.0,
+            2.0e-15,
+            "normalized smooth direction",
+        );
+        let rough = sample_rough_dielectric(near_unit, near_unit, 1.0, 1.5, 0.2, 0.37, 0.61, 0.0)
+            .expect("admitted near-unit rough frame")
+            .expect("rough reflection");
+        assert_close(
+            rough.direction.norm(),
+            1.0,
+            2.0e-15,
+            "normalized rough direction",
+        );
+
+        let smooth_null = sample_smooth_dielectric(near_unit, near_unit, 1.5, 1.5, 0.0)
+            .expect("equal-IOR smooth early return");
+        assert_eq!(smooth_null.event, DielectricEvent::Transmission);
+        assert_close(
+            smooth_null.direction.norm(),
+            1.0,
+            2.0e-15,
+            "normalized smooth null direction",
+        );
+        let rough_null =
+            sample_rough_dielectric(near_unit, near_unit, 1.5, 1.5, 0.2, 0.37, 0.61, 0.0)
+                .expect("equal-IOR rough early return")
+                .expect("equal-IOR rough null sample");
+        assert!(rough_null.delta);
+        assert_close(
+            rough_null.direction.norm(),
+            1.0,
+            2.0e-15,
+            "normalized rough null direction",
+        );
+    }
+
+    #[test]
+    fn adjacent_distinct_indices_retain_fresnel_and_stable_rough_transmission() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let eta = 1.5_f64;
+        let lower = f64::from_bits(eta.to_bits() - 1);
+        let upper = f64::from_bits(eta.to_bits() + 1);
+        assert!(indices_exactly_equal(eta, eta));
+        for adjacent_eta in [lower, upper] {
+            assert!(!indices_exactly_equal(eta, adjacent_eta));
+            let grazing =
+                fresnel_dielectric(0.0, eta, adjacent_eta).expect("adjacent-IOR grazing Fresnel");
+            assert_eq!(grazing.reflectance.to_bits(), 1.0_f64.to_bits());
+            assert_eq!(
+                grazing.total_internal_reflection,
+                eta > adjacent_eta,
+                "adjacent-IOR grazing TIR classification"
+            );
+            let normal_fresnel =
+                fresnel_dielectric(1.0, eta, adjacent_eta).expect("adjacent-IOR normal Fresnel");
+            let expected_normal_reflectance = ((eta - adjacent_eta) / (eta + adjacent_eta)).powi(2);
+            assert_close(
+                normal_fresnel.reflectance,
+                expected_normal_reflectance,
+                8.0 * f64::EPSILON * expected_normal_reflectance,
+                "adjacent-IOR normal Fresnel closed form",
+            );
+
+            let sample =
+                sample_rough_dielectric(normal, normal, eta, adjacent_eta, 0.2, 0.0, 0.0, 0.5)
+                    .expect("adjacent-IOR rough evaluation")
+                    .expect("adjacent-IOR transmission remains contributing");
+            assert!(!sample.delta);
+            assert_eq!(sample.event, DielectricEvent::Transmission);
+            assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
+            assert!(sample.value.is_finite() && sample.value > 0.0);
+            assert!(sample.radiance_weight.is_finite() && sample.radiance_weight > 0.0);
+            assert_close(
+                sample.radiance_weight,
+                (eta / adjacent_eta).powi(2),
+                2.0e-15,
+                "adjacent-IOR radiance factor",
+            );
+        }
     }
 
     #[test]
@@ -1169,6 +1327,50 @@ mod tests {
             0.989_234_223_683_053,
             3.0e-14,
             "Walter reflection weight",
+        );
+    }
+
+    #[test]
+    fn rough_sampling_frame_is_orthonormal_beside_both_poles() {
+        let x = 4.0e-4_f64;
+        let z = (1.0 - x * x).sqrt();
+        let normals = [Vec3::new(x, 0.0, z), Vec3::new(x, 0.0, -z)];
+        let mut samples = Vec::new();
+        for normal in normals {
+            let (tangent, bitangent) = basis(normal);
+            assert_close(tangent.norm(), 1.0, 4.0e-15, "pole tangent norm");
+            assert_close(bitangent.norm(), 1.0, 4.0e-15, "pole bitangent norm");
+            assert_close(normal.dot(tangent), 0.0, 4.0e-15, "pole n dot t");
+            assert_close(normal.dot(bitangent), 0.0, 4.0e-15, "pole n dot b");
+            assert_close(tangent.dot(bitangent), 0.0, 4.0e-15, "pole t dot b");
+
+            let sample = sample_rough_dielectric(normal, normal, 1.0, 1.5, 0.2, 0.37, 0.61, 0.0)
+                .expect("pole-adjacent sample must retain a unit frame")
+                .expect("pole-adjacent reflection contributes");
+            assert_eq!(sample.event, DielectricEvent::Reflection);
+            assert_close(
+                sample.direction.norm(),
+                1.0,
+                4.0e-15,
+                "sample direction norm",
+            );
+            let replay = evaluate_rough_dielectric(normal, normal, sample.direction, 1.0, 1.5, 0.2)
+                .expect("pole-adjacent evaluation");
+            assert_close(sample.value, replay.value, 0.0, "pole value replay");
+            assert_close(sample.pdf, replay.pdf, 0.0, "pole PDF replay");
+            samples.push(sample);
+        }
+        assert_close(
+            samples[0].value,
+            samples[1].value,
+            2.0e-14,
+            "north/south isotropic value",
+        );
+        assert_close(
+            samples[0].pdf,
+            samples[1].pdf,
+            2.0e-14,
+            "north/south isotropic PDF",
         );
     }
 

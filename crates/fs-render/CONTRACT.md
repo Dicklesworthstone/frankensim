@@ -24,6 +24,12 @@ differentiable lift). Pure Rust throughout.
   uniform + linear-importance strategies.
 - `hero_wavelengths(hero, count, min, max)` / `spectral_integral(spectrum, min,
   max, samples)` — hero-wavelength spectral integration.
+- `dielectric` module (feature `tracer`): validated Cauchy phase-index laws in
+  vacuum nanometres, homogeneous Beer-Lambert absorption in inverse metres,
+  provenance-bearing representative glass presets, exact unpolarized Fresnel,
+  Snell refraction and total internal reflection, plus smooth-delta and
+  single-scattering isotropic-GGX reflection/transmission. Radiance transport
+  uses the documented `(eta_i/eta_t)^2` transmission convention.
 
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
   `chart-backends`): render charts that opt into a typed trace theorem, WITHOUT
@@ -139,7 +145,15 @@ differentiable lift). Pure Rust throughout.
 - MIS integration is unbiased (converges to `∫f`).
 - Hero-wavelength integration is exact on a constant spectrum and accurate on a
   ramp; `cosine_sample_hemisphere` returns unit vectors in the upper hemisphere.
-- Everything is deterministic (low-discrepancy sequences, no RNG here).
+- Smooth dielectric Fresnel branch probabilities partition unity; a lossless
+  entry/exit slab cancels its reciprocal radiance eta factors. Rough dielectric
+  evaluation and sampling share the Walter solid-angle Jacobian and remain
+  finite and nonnegative over the admitted grazing/roughness grid. Homogeneous
+  attenuation composes as `T(L1 + L2) = T(L1) T(L2)` to floating-point
+  tolerance.
+- Sampling is deterministic: analytic and low-discrepancy helpers are
+  stateless, while stochastic render paths use explicitly keyed counter-based
+  streams rather than ambient mutable RNG state.
 - Proper-rigid placement preserves lengths and therefore preserves the local
   backend's ray parameter. Exact-distance instance ties select the lowest
   object ID, independent of caller insertion order. A geometry identity stays
@@ -176,7 +190,9 @@ derivatives. `RenderCfg.max_trace_steps` makes its per-ray work envelope
 explicit; zero or values above the hard 16384-step ceiling are invalid. The
 tracer returns `TracerError`, preserving cancellation,
 invalid dimensions/film buffers/progressive ranges, backend refusal,
-uncertified traces, missing normals, and invalid/colliding rigid instances.
+uncertified traces, missing normals, invalid/colliding rigid instances,
+dielectric evaluation refusal, LIFO medium-stack mismatch/overflow, and a miss
+while still inside a declared closed medium.
 Instance construction rejects zero identities, invalid transforms, and any
 scene count that cannot fit the canonical identity encoding;
 intersection rejects malformed rays, non-positive/non-finite limits,
@@ -245,7 +261,8 @@ the implicit hit equation.
 
 `tracer` (bead 872c) gates the spectral path tracer v1
 (chart-backends + fs-rand + fs-img): hero-wavelength (4-packet)
-NEE+MIS path integration, Lambertian + GGX with spectral reflectance
+NEE+MIS path integration, Lambertian + reflective GGX with spectral reflectance,
+and provenance-bearing smooth/rough spectral dielectric glass
 (the `spectral` module's bounded sigmoid lift; round-trip RGB error
 pinned under 1e-3), one rect area light per scene, CIE-XYZ film →
 Bradford-adapted linear sRGB → byte-exact EXR. Streams are
@@ -259,7 +276,14 @@ golden (`fs-render:cornell` in golden-couplings.json) reproduced
 identically in all four ISA/profile quadrants at freeze. v1 no-claims:
 single NEE light, no volumetric coupling, no environment light, no
 Russian roulette, GGX samples the NDF (VNDF is a recorded follow-up),
-emitters do not reflect.
+emitters do not reflect. On the first dispersive dielectric event, the shared
+four-wavelength geometric packet collapses once to its uniformly selected hero
+lane with the matching factor-four estimator weight; companion lanes are zeroed
+instead of being biased along the hero wavelength's refracted direction.
+Absorption uses unshifted physical segment length. Smooth events have zero
+solid-angle query density and receive delta-correct MIS treatment. A strict
+path-local stack mutates only after sampled transmission and supports nested,
+closed, consistently outward-oriented media.
 
 ## Conformance tests
 
@@ -275,6 +299,17 @@ tangency is pinned as a bounded fail-closed backend outcome, not presented as a
 certified hit. A second tracer E2E regression proves exact-tie output is
 independent of primitive insertion order and that duplicate object IDs refuse
 before sampling.
+
+`tests/dielectric_battery.rs` (feature `tracer`): equal-IOR null slabs across all
+direct-light strategies; a translation-invariant 0.1 mm slab at `x = 10^9`;
+exact thin/thick Beer-Lambert scaling; nested active-medium accounting;
+reversed-winding and non-LIFO transactional refusal; finite rough transmitted
+NEE with target-medium attenuation; cancellation; and bitwise progressive
+replay. Inline analytic tests add independent Fresnel, Snell/critical-angle,
+signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
+grazing, pole-frame, adjacent-IOR, and one-time dispersive packet-collapse
+fixtures. The pre-existing Cornell tracer battery remains byte-stable and is
+the opaque-path non-regression gate.
 
 `tests/render.rs` (7 cases): radical inverse known values; cosine samples are
 unit vectors with the right pdf; the furnace test conserves energy exactly; MIS
@@ -331,12 +366,24 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   and time-varying emission or animated NEE-light sampling remain successor
   work. Emissive geometry may move with its instance, but its emission itself is
   time-invariant.
-- v0 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
-  watertight ray-triangle tests, a LIGHT-BVH, media coupling, ray-stream
-  sorting, and progressive tile streaming to HELM remain staged.
-- The spectral pipeline here integrates a spectrum; the radiometrically correct
-  spectra→XYZ→display transforms and layered measured-spectrum materials are
+- v1 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
+  watertight ray-triangle tests, a LIGHT-BVH, heterogeneous volume/surface
+  coupling, ray-stream sorting, and progressive tile streaming to HELM remain
   staged.
+- Dielectric support is homogeneous, non-polarizing geometric optics. It does
+  not claim polarization, coherence, fluorescence, birefringence, measured
+  preset fidelity, camera-start-inside-medium support, arbitrary overlapping
+  media, or a topology certificate. GGX transmission is single-scattering and
+  does not claim multiple-scattering furnace closure at appreciable roughness.
+  Shadow rays stop at the first intervening surface rather than travelling
+  undeviated through glass. Difficult focused caustics therefore remain a
+  slow-convergence case for this unidirectional integrator; no
+  bidirectional/manifold transport, denoising, or unbiased firefly-clamping
+  claim is made. Fixed-metric, representability-aware ray offsets are robust
+  engineering, not a certified positional-error enclosure.
+- The tracer implements spectrum→CIE XYZ→Bradford-adapted linear sRGB and
+  floating-point EXR output. Display-referred tone/color management and layered
+  measured-spectrum materials remain staged.
 - `mis_integrate_unit` is a 1-D demonstrator of the balance heuristic; the
   production MIS lives in the path integrator across BSDF/light strategies.
 - The G3 furnace adopter covers only bounded positive scalar albedo/radiance,

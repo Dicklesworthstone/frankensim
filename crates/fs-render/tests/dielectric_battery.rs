@@ -26,7 +26,7 @@ fn with_gate<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
             gate,
             arena,
             StreamKey {
-                seed: 0x474c_4153_53,
+                seed: 0x0000_0047_4c41_5353,
                 kernel_id: 42,
                 tile: 0,
                 iteration: 0,
@@ -49,17 +49,17 @@ fn material(index: f64, extinction_per_m: f64, surface: DielectricSurface) -> Ma
     }
 }
 
-fn box_mesh(z_front: f64, z_back: f64, reverse_winding: bool) -> TriMesh {
+fn box_mesh_at(center_x: f64, z_front: f64, z_back: f64, reverse_winding: bool) -> TriMesh {
     let half = 4.0;
     let vertices = vec![
-        [-half, -half, z_back],
-        [half, -half, z_back],
-        [half, half, z_back],
-        [-half, half, z_back],
-        [-half, -half, z_front],
-        [half, -half, z_front],
-        [half, half, z_front],
-        [-half, half, z_front],
+        [center_x - half, -half, z_back],
+        [center_x + half, -half, z_back],
+        [center_x + half, half, z_back],
+        [center_x - half, half, z_back],
+        [center_x - half, -half, z_front],
+        [center_x + half, -half, z_front],
+        [center_x + half, half, z_front],
+        [center_x - half, half, z_front],
     ];
     let mut triangles = vec![
         [0, 2, 1],
@@ -83,13 +83,13 @@ fn box_mesh(z_front: f64, z_back: f64, reverse_winding: bool) -> TriMesh {
     TriMesh::new(vertices, triangles)
 }
 
-fn emitter_mesh(z: f64, half: f64) -> TriMesh {
+fn emitter_mesh_at(center_x: f64, z: f64, half: f64) -> TriMesh {
     TriMesh::new(
         vec![
-            [-half, -half, z],
-            [half, -half, z],
-            [half, half, z],
-            [-half, half, z],
+            [center_x - half, -half, z],
+            [center_x + half, -half, z],
+            [center_x + half, half, z],
+            [center_x - half, half, z],
         ],
         vec![[0, 1, 2], [0, 2, 3]],
     )
@@ -100,11 +100,20 @@ fn scene_with_boundaries(
     emitter_z: f64,
     emitter_half: f64,
 ) -> Scene {
+    scene_with_boundaries_at(0.0, boundaries, emitter_z, emitter_half)
+}
+
+fn scene_with_boundaries_at(
+    center_x: f64,
+    boundaries: &[(f64, f64, Material, bool)],
+    emitter_z: f64,
+    emitter_half: f64,
+) -> Scene {
     let white = lift_rgb([1.0, 1.0, 1.0]);
     let mut primitives = boundaries
         .iter()
         .map(|&(front, back, material, reverse)| Primitive {
-            shape: Shape::Mesh(box_mesh(front, back, reverse)),
+            shape: Shape::Mesh(box_mesh_at(center_x, front, back, reverse)),
             material,
             emission: None,
         })
@@ -112,21 +121,22 @@ fn scene_with_boundaries(
     let emission = (white, 3.0);
     let light_primitive = primitives.len();
     primitives.push(Primitive {
-        shape: Shape::Mesh(emitter_mesh(emitter_z, emitter_half)),
+        shape: Shape::Mesh(emitter_mesh_at(center_x, emitter_z, emitter_half)),
         material: Material::Lambertian { reflectance: white },
         emission: Some(emission),
     });
     Scene {
         primitives,
-        light: RectLight {
-            corner: Point3::new(-emitter_half, -emitter_half, emitter_z),
+        lights: vec![RectLight {
+            corner: Point3::new(center_x - emitter_half, -emitter_half, emitter_z),
             edge_u: Vec3::new(2.0 * emitter_half, 0.0, 0.0),
             edge_v: Vec3::new(0.0, 2.0 * emitter_half, 0.0),
             prim: light_primitive,
             emission,
-        },
+        }],
+        environment: None,
         camera: Camera {
-            eye: Point3::new(0.0, 0.0, 1.0),
+            eye: Point3::new(center_x, 0.0, 1.0),
             forward: Vec3::new(0.0, 0.0, -1.0),
             up: Vec3::new(0.0, 1.0, 0.0),
             half_tan: 0.0,
@@ -197,6 +207,27 @@ fn equal_ior_lossless_slab_is_a_null_boundary_under_every_strategy() {
         render(&bare, cx, &settings(DirectStrategy::Mis, 16, 3)).expect("bare emitter")
     });
     assert_film_bits_eq(&films[0], &bare_film, "equal-IOR slab versus ambient");
+}
+
+#[test]
+fn translated_thin_slab_preserves_the_null_boundary_result() {
+    let clear = material(1.0, 0.0, DielectricSurface::SMOOTH);
+    let boundary = [(0.0, -1.0e-4, clear, false)];
+    let local = scene_with_boundaries_at(0.0, &boundary, -1.0, 2.0);
+    let translated = scene_with_boundaries_at(1.0e9, &boundary, -1.0, 2.0);
+    let settings = settings(DirectStrategy::Mis, 8, 3);
+    let (local_film, translated_film) = with_cx(|cx| {
+        (
+            render(&local, cx, &settings).expect("local thin slab"),
+            render(&translated, cx, &settings).expect("translated thin slab"),
+        )
+    });
+
+    assert_film_bits_eq(
+        &translated_film,
+        &local_film,
+        "rigid translation changed a thin null-boundary slab",
+    );
 }
 
 #[test]
