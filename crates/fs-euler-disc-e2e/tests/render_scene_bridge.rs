@@ -26,7 +26,9 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_render::camera::{
     AnimatedCamera, Aperture, CameraKeyframe, CameraProjection, CameraShot, CutSide, PhysicalCamera,
 };
-use fs_render::dielectric::{DielectricGlass, DielectricSurface, GlassProvenance};
+use fs_render::dielectric::{
+    CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance,
+};
 use fs_render::instances::SharedGeometry;
 use fs_render::motion::{ShutterConvention, ShutterDistribution};
 use fs_render::tracer::{Material, Shape};
@@ -749,8 +751,10 @@ fn e2e_zero_width_frame_traces_real_pixels_and_round_trips_exr_deterministically
     with_cx(false, |cx| {
         let specimen = specimen(cx);
         let artifact = artifact(&specimen, None, false, Vec::new(), cx);
-        let scene = EulerCinematicScene::try_build(&artifact, &specimen, config(), cx)
-            .expect("renderable scene");
+        let reference_config = config();
+        let scene =
+            EulerCinematicScene::try_build(&artifact, &specimen, reference_config.clone(), cx)
+                .expect("renderable scene");
         let settings = euler_scene_smoke_settings(12, 8);
         let request = frame_request(ExposureEventPolicy::Refuse);
 
@@ -777,6 +781,40 @@ fn e2e_zero_width_frame_traces_real_pixels_and_round_trips_exr_deterministically
             }
         }
         assert_eq!(cinematic.spp_done, settings.spp);
+
+        let crown = DielectricGlass::representative_crown();
+        let mut null_interface_config = reference_config;
+        null_interface_config.plate_material = EulerMaterialStyle::Dielectric {
+            glass: DielectricGlass::new(
+                CauchyIor::try_constant(1.0).expect("unit IOR"),
+                crown.absorption(),
+                GlassProvenance::Custom,
+            ),
+            surface: DielectricSurface::POLISHED,
+        };
+        let null_interface_scene = EulerCinematicScene::try_build(
+            &artifact,
+            &specimen,
+            null_interface_config,
+            cx,
+        )
+        .expect("matched-absorption null-interface scene");
+        let null_interface_film = null_interface_scene
+            .render_frame(request, &settings, cx)
+            .expect("null-interface comparison render");
+        assert!(
+            cinematic
+                .xyz
+                .iter()
+                .zip(&null_interface_film.xyz)
+                .any(|(glass_pixel, null_pixel)| {
+                    glass_pixel
+                        .iter()
+                        .zip(null_pixel)
+                        .any(|(glass, null)| glass.to_bits() != null.to_bits())
+                }),
+            "changing only plate IOR must change traced pixels; otherwise the reference glass is not optically active"
+        );
 
         let first_bytes = scene
             .render_frame_exr(request, &settings, cx)

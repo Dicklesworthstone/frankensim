@@ -965,6 +965,24 @@ mod tests {
     }
 
     #[test]
+    fn lossless_smooth_slab_cancels_radiance_eta_factors() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = normal;
+        let entry = sample_smooth_dielectric(normal, wo, 1.0, 1.5, 0.5)
+            .expect("air-to-glass transmission");
+        let exit = sample_smooth_dielectric(normal, wo, 1.5, 1.0, 0.5)
+            .expect("glass-to-air transmission");
+        assert_eq!(entry.event, DielectricEvent::Transmission);
+        assert_eq!(exit.event, DielectricEvent::Transmission);
+        assert_close(
+            entry.radiance_weight * exit.radiance_weight,
+            1.0,
+            2.0e-15,
+            "lossless slab eta cancellation",
+        );
+    }
+
+    #[test]
     fn beer_lambert_path_scaling_is_multiplicative() {
         let absorption = BeerLambertAbsorption::try_constant(17.0).expect("constant extinction");
         let one = absorption.transmittance(550.0, 0.012).expect("one length");
