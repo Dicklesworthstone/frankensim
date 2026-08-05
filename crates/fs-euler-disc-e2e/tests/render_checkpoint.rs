@@ -289,11 +289,9 @@ fn execution(run: u64) -> RenderExecutionConfig {
 }
 
 fn provenance() -> EulerRenderCheckpointProvenance {
-    EulerRenderCheckpointProvenance::try_new(
+    EulerRenderCheckpointProvenance::try_root(
         identity("producer-build"),
         identity("producer-claim"),
-        0,
-        None,
     )
     .expect("explicit root checkpoint provenance")
 }
@@ -401,17 +399,25 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
             .expect("resolved Euler frame");
         let settings = euler_scene_smoke_settings(4, 3);
         let execution = execution(0x4348_4543_4b50_0001);
+        let uniform_pending = scene
+            .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
+            .expect("uniform pending render");
         let uniform_binding = try_uniform_render_checkpoint_binding(
             &scene,
             &prepared,
             0,
             &settings,
             &execution,
+            &uniform_pending,
             provenance(),
+            cx,
         )
         .expect("uniform checkpoint binding");
         let adaptive =
             AdaptiveSamplingConfig::try_new(2, 2, 0.0, 0.0, 0.0).expect("adaptive policy");
+        let adaptive_pending = scene
+            .begin_segment_adaptive_render(&prepared, 0, settings, adaptive, execution.clone(), cx)
+            .expect("adaptive pending render");
         let adaptive_binding = try_adaptive_render_checkpoint_binding(
             &scene,
             &prepared,
@@ -419,7 +425,9 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
             &settings,
             &execution,
             adaptive,
+            &adaptive_pending,
             provenance(),
+            cx,
         )
         .expect("adaptive checkpoint binding");
         assert_ne!(uniform_binding, adaptive_binding);
@@ -428,9 +436,6 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
         let path = path.to_str().expect("UTF-8 temporary ledger path");
         let (uniform_artifact, uniform_content, adaptive_artifact, adaptive_content) = {
             let mut ledger = Ledger::open(path).expect("create checkpoint ledger");
-            let uniform_pending = scene
-                .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
-                .expect("uniform pending render");
             let uniform_yield = uniform_pending
                 .advance_to_safe_point(cx, NonZeroU32::MIN)
                 .expect("advance uniform render to a strict safe point");
@@ -446,16 +451,6 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
             )
             .expect("store uniform checkpoint");
             assert_eq!(uniform.checkpoint().progress(), uniform_progress);
-            let adaptive_pending = scene
-                .begin_segment_adaptive_render(
-                    &prepared,
-                    0,
-                    settings,
-                    adaptive,
-                    execution.clone(),
-                    cx,
-                )
-                .expect("adaptive pending render");
             let adaptive_yield = adaptive_pending
                 .advance_to_safe_point(cx, NonZeroU32::MIN)
                 .expect("advance adaptive render to a strict safe point");
@@ -483,7 +478,7 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
         let uniform_seed = scene
             .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
             .expect("fresh uniform seed");
-        let (uniform_restored, uniform_receipt) = restore_uniform_render_checkpoint(
+        let (uniform_restored, uniform_stored) = restore_uniform_render_checkpoint(
             &ledger,
             uniform_artifact,
             uniform_seed,
@@ -492,6 +487,7 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
             cx,
         )
         .expect("restore uniform after ledger reopen");
+        let uniform_receipt = uniform_stored.checkpoint();
         assert_eq!(uniform_receipt.content_hash(), uniform_content);
         assert_strict_partial_progress(uniform_receipt.progress(), "restored uniform receipt");
         let restored_uniform = uniform_restored
@@ -511,7 +507,7 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
         let adaptive_seed = scene
             .begin_segment_adaptive_render(&prepared, 0, settings, adaptive, execution.clone(), cx)
             .expect("fresh adaptive seed");
-        let (adaptive_restored, adaptive_receipt) = restore_adaptive_render_checkpoint(
+        let (adaptive_restored, adaptive_stored) = restore_adaptive_render_checkpoint(
             &ledger,
             adaptive_artifact,
             adaptive_seed,
@@ -520,6 +516,7 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
             cx,
         )
         .expect("restore adaptive after ledger reopen");
+        let adaptive_receipt = adaptive_stored.checkpoint();
         assert_eq!(adaptive_receipt.content_hash(), adaptive_content);
         assert_strict_partial_progress(adaptive_receipt.progress(), "restored adaptive receipt");
         let restored_adaptive = adaptive_restored
@@ -539,6 +536,265 @@ fn g3_ledger_reopen_restores_uniform_and_adaptive_jobs_exactly() {
 }
 
 #[test]
+fn g0_cross_wired_pending_binding_and_wrong_ledger_kind_refuse() {
+    with_cx(|cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, cx);
+        let scene = EulerCinematicScene::try_build(&artifact, &specimen, config(), cx)
+            .expect("renderable Euler scene");
+        let prepared = scene
+            .prepare_frame(request(CutSide::After))
+            .expect("resolved Euler frame");
+        let settings = euler_scene_smoke_settings(4, 3);
+        let execution = execution(0x4348_4543_4b50_0010);
+        let pending = scene
+            .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
+            .expect("uniform checkpoint job");
+        let binding = try_uniform_render_checkpoint_binding(
+            &scene,
+            &prepared,
+            0,
+            &settings,
+            &execution,
+            &pending,
+            provenance(),
+            cx,
+        )
+        .expect("binding from admitted uniform job");
+
+        let mut changed_settings = settings;
+        changed_settings.seed ^= 1;
+        let changed_pending = scene
+            .begin_segment_render(&prepared, 0, changed_settings, execution.clone(), cx)
+            .expect("different admitted render job");
+        assert!(matches!(
+            try_uniform_render_checkpoint_binding(
+                &scene,
+                &prepared,
+                0,
+                &settings,
+                &execution,
+                &changed_pending,
+                provenance(),
+                cx,
+            ),
+            Err(EulerRenderCheckpointError::PendingJobMismatch(_))
+        ));
+
+        let path = ledger_path("cross-wire-kind");
+        let path = path.to_str().expect("UTF-8 temporary ledger path");
+        let mut ledger = Ledger::open(path).expect("create refusal ledger");
+        assert!(matches!(
+            store_uniform_render_checkpoint(
+                &mut ledger,
+                &changed_pending,
+                binding,
+                CHECKPOINT_MAX_BYTES,
+                cx,
+            ),
+            Err(EulerRenderCheckpointError::PendingJobMismatch(_))
+        ));
+        assert_eq!(
+            ledger.table_count("artifacts").expect("artifact count"),
+            0,
+            "cross-wired pending/binding must publish nothing"
+        );
+
+        let wrong_kind = ledger
+            .put_artifact(
+                "generic-render-bytes",
+                b"stored under the wrong artifact contract",
+                None,
+            )
+            .expect("store deliberately wrong-kind artifact");
+        let fresh = scene
+            .begin_segment_render(&prepared, 0, settings, execution, cx)
+            .expect("fresh correct restore target");
+        match restore_uniform_render_checkpoint(
+            &ledger,
+            wrong_kind.hash,
+            fresh,
+            binding,
+            CHECKPOINT_MAX_BYTES,
+            cx,
+        ) {
+            Err(EulerRenderCheckpointError::ArtifactKindMismatch { expected, actual }) => {
+                assert_eq!(expected, EULER_RENDER_CHECKPOINT_ARTIFACT_KIND);
+                assert_eq!(actual, "generic-render-bytes");
+            }
+            other => panic!("wrong-kind checkpoint restore produced {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn g3_root_successor_reopen_restores_successor_and_preserves_root() {
+    with_cx(|cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, cx);
+        let scene = EulerCinematicScene::try_build(&artifact, &specimen, config(), cx)
+            .expect("renderable Euler scene");
+        let prepared = scene
+            .prepare_frame(request(CutSide::After))
+            .expect("resolved Euler frame");
+        let settings = euler_scene_smoke_settings(4, 3);
+        let execution = execution(0x4348_4543_4b50_0011);
+        let pending = scene
+            .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
+            .expect("root render job")
+            .advance_to_safe_point(cx, NonZeroU32::MIN)
+            .expect("advance root generation to a strict safe point")
+            .into_pending();
+        assert_strict_partial_progress(pending.progress(), "root pending");
+        let root_binding = try_uniform_render_checkpoint_binding(
+            &scene,
+            &prepared,
+            0,
+            &settings,
+            &execution,
+            &pending,
+            provenance(),
+            cx,
+        )
+        .expect("root binding from admitted job");
+
+        let path = ledger_path("root-successor");
+        let path = path.to_str().expect("UTF-8 temporary ledger path");
+        let mut ledger = Ledger::open(path).expect("create generation ledger");
+        let root = store_uniform_render_checkpoint(
+            &mut ledger,
+            &pending,
+            root_binding,
+            CHECKPOINT_MAX_BYTES,
+            cx,
+        )
+        .expect("store root generation");
+        let root_artifact = root.artifact().hash;
+        let root_content = root.checkpoint().content_hash();
+        let root_bytes = ledger
+            .get_artifact_bounded(&root_artifact, CHECKPOINT_MAX_BYTES)
+            .expect("read stored root")
+            .expect("stored root exists");
+        drop(ledger);
+
+        let mut ledger = Ledger::open(path).expect("reopen ledger before deriving successor");
+        assert_eq!(
+            ledger
+                .get_artifact_bounded(&root_artifact, CHECKPOINT_MAX_BYTES)
+                .expect("read immutable root after first reopen")
+                .expect("stored root remains readable"),
+            root_bytes
+        );
+        let root_seed = scene
+            .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
+            .expect("fresh root restore target");
+        let (restored_root, reopened_root) = restore_uniform_render_checkpoint(
+            &ledger,
+            root_artifact,
+            root_seed,
+            root_binding,
+            CHECKPOINT_MAX_BYTES,
+            cx,
+        )
+        .expect("restore root after ledger reopen");
+        assert_eq!(reopened_root.artifact().hash, root_artifact);
+        assert_eq!(reopened_root.checkpoint().content_hash(), root_content);
+        let successor_provenance = EulerRenderCheckpointProvenance::try_successor(
+            identity("successor-build"),
+            identity("successor-claim"),
+            reopened_root,
+        )
+        .expect("derive successor from the reopened, restored root");
+        let successor_pending = restored_root
+            .advance_to_safe_point(cx, NonZeroU32::MIN)
+            .expect("advance successor generation")
+            .into_pending();
+        assert_eq!(
+            successor_pending.progress().completed_tiles,
+            successor_pending.progress().total_tiles,
+            "second row quota completes this compact frame"
+        );
+        let successor_binding = try_uniform_render_checkpoint_binding(
+            &scene,
+            &prepared,
+            0,
+            &settings,
+            &execution,
+            &successor_pending,
+            successor_provenance,
+            cx,
+        )
+        .expect("successor binding retains the root lineage");
+        assert_eq!(successor_binding.renderer().generation(), 1);
+        assert_eq!(
+            successor_binding.renderer().predecessor_checkpoint(),
+            Some(root_content)
+        );
+        let successor = store_uniform_render_checkpoint(
+            &mut ledger,
+            &successor_pending,
+            successor_binding,
+            CHECKPOINT_MAX_BYTES,
+            cx,
+        )
+        .expect("store successor generation");
+        let successor_artifact = successor.artifact().hash;
+        let successor_content = successor.checkpoint().content_hash();
+        assert_ne!(root_artifact, successor_artifact);
+        drop(ledger);
+
+        let ledger = Ledger::open(path).expect("reopen ledger with both generations");
+        assert_eq!(
+            ledger
+                .get_artifact_bounded(&root_artifact, CHECKPOINT_MAX_BYTES)
+                .expect("read immutable root after reopen")
+                .expect("root remains readable after successor publication"),
+            root_bytes
+        );
+        let fresh = scene
+            .begin_segment_render(&prepared, 0, settings, execution.clone(), cx)
+            .expect("fresh successor restore target");
+        let (restored, restored_successor) = restore_uniform_render_checkpoint(
+            &ledger,
+            successor_artifact,
+            fresh,
+            successor_binding,
+            CHECKPOINT_MAX_BYTES,
+            cx,
+        )
+        .expect("restore successor after ledger reopen");
+        assert_eq!(restored_successor.artifact().hash, successor_artifact);
+        let receipt = restored_successor.checkpoint();
+        assert_eq!(receipt.content_hash(), successor_content);
+        assert_eq!(receipt.binding().generation(), 1);
+        assert_eq!(
+            receipt.binding().predecessor_checkpoint(),
+            Some(root_content)
+        );
+        let restored = restored
+            .resume(cx)
+            .expect("publish restored complete successor without retracing");
+        let reference = scene
+            .begin_segment_render(&prepared, 0, settings, execution, cx)
+            .expect("uninterrupted reference")
+            .resume(cx)
+            .expect("finish uninterrupted reference");
+        assert_film_bits_eq(
+            &restored.film,
+            &reference.film,
+            "reopened successor generation",
+        );
+        assert_eq!(
+            ledger
+                .get_artifact_bounded(&root_artifact, CHECKPOINT_MAX_BYTES)
+                .expect("read root after successor restore")
+                .expect("successor restore must not replace the root"),
+            root_bytes
+        );
+    });
+}
+
+#[test]
 fn g3_identity_mismatch_and_failed_writer_preserve_prior_artifact() {
     with_cx(|cx| {
         assert_eq!(
@@ -546,45 +802,16 @@ fn g3_identity_mismatch_and_failed_writer_preserve_prior_artifact() {
             "euler-render-checkpoint-v1"
         );
         assert!(matches!(
-            EulerRenderCheckpointProvenance::try_new(
-                ContentHash([0; 32]),
-                identity("claim"),
-                0,
-                None
-            ),
+            EulerRenderCheckpointProvenance::try_root(ContentHash([0; 32]), identity("claim")),
             Err(EulerRenderCheckpointError::InvalidProvenance(_))
         ));
         assert!(matches!(
-            EulerRenderCheckpointProvenance::try_new(
-                identity("build"),
-                identity("claim"),
-                1,
-                Some(ContentHash([0; 32]))
-            ),
+            EulerRenderCheckpointProvenance::try_root(identity("build"), ContentHash([0; 32])),
             Err(EulerRenderCheckpointError::InvalidProvenance(_))
         ));
-        assert!(matches!(
-            EulerRenderCheckpointProvenance::try_new(
-                identity("build"),
-                identity("claim"),
-                0,
-                Some(identity("predecessor"))
-            ),
-            Err(EulerRenderCheckpointError::InvalidProvenance(_))
-        ));
-        assert!(matches!(
-            EulerRenderCheckpointProvenance::try_new(identity("build"), identity("claim"), 1, None),
-            Err(EulerRenderCheckpointError::InvalidProvenance(_))
-        ));
-        let nonroot = EulerRenderCheckpointProvenance::try_new(
-            identity("build"),
-            identity("claim"),
-            1,
-            Some(identity("predecessor")),
-        )
-        .expect("valid non-root provenance");
-        assert_eq!(nonroot.generation(), 1);
-        assert_eq!(nonroot.predecessor(), Some(identity("predecessor")));
+        let root = provenance();
+        assert_eq!(root.generation(), 0);
+        assert_eq!(root.predecessor(), None);
 
         let specimen = specimen(cx);
         let artifact = artifact(&specimen, cx);
@@ -616,20 +843,22 @@ fn g3_identity_mismatch_and_failed_writer_preserve_prior_artifact() {
 
         let settings = euler_scene_smoke_settings(4, 3);
         let execution = execution(0x4348_4543_4b50_0002);
+        let pending = scene
+            .begin_segment_render(&prepared_after, 0, settings, execution.clone(), cx)
+            .expect("uniform pending render");
         let binding = try_uniform_render_checkpoint_binding(
             &scene,
             &prepared_after,
             0,
             &settings,
             &execution,
+            &pending,
             provenance(),
+            cx,
         )
         .expect("uniform checkpoint binding");
         assert_eq!(binding.renderer().generation(), 0);
         assert_eq!(binding.renderer().predecessor_checkpoint(), None);
-        let pending = scene
-            .begin_segment_render(&prepared_after, 0, settings, execution.clone(), cx)
-            .expect("uniform pending render");
         let path = ledger_path("rollback");
         let path = path.to_str().expect("UTF-8 temporary ledger path");
         let mut ledger = Ledger::open(path).expect("create rollback ledger");
@@ -726,19 +955,21 @@ fn g3_identity_mismatch_and_failed_writer_preserve_prior_artifact() {
 
         let mut changed_settings = settings;
         changed_settings.seed ^= 1;
+        let changed_pending = scene
+            .begin_segment_render(&prepared_after, 0, changed_settings, execution.clone(), cx)
+            .expect("changed pending job");
         let changed_binding = try_uniform_render_checkpoint_binding(
             &scene,
             &prepared_after,
             0,
             &changed_settings,
             &execution,
+            &changed_pending,
             provenance(),
+            cx,
         )
         .expect("changed job binding");
         assert_ne!(binding, changed_binding);
-        let changed_pending = scene
-            .begin_segment_render(&prepared_after, 0, changed_settings, execution, cx)
-            .expect("changed pending job");
         assert!(matches!(
             restore_uniform_render_checkpoint(
                 &ledger,
