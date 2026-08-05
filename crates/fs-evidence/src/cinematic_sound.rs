@@ -12,16 +12,33 @@ use crate::cinematic::{
 };
 use crate::cinematic_config::{CinematicComponentRef, CinematicComponentRole};
 
-/// Exact schema version accepted by [`SoundSynthesisConfig`].
-pub const SOUND_SYNTHESIS_SCHEMA_VERSION: u16 = 1;
+/// Exact schema version accepted by [`SoundSynthesisConfig`]. Version two
+/// separates physical modal mass, component routing, participation, and
+/// velocity-radiation gain instead of conflating them in one scalar gain.
+pub const SOUND_SYNTHESIS_SCHEMA_VERSION: u16 = 2;
 /// Frozen reference-master audio sample rate.
 pub const SOUND_MASTER_SAMPLE_RATE_HZ: u32 = 48_000;
 /// Frozen reference-master video rate numerator (denominator is one).
 pub const SOUND_MASTER_VIDEO_RATE_HZ: u32 = 24;
 /// Resource ceiling for admitted structural modes.
 pub const MAX_SOUND_MODES: usize = 256;
+/// Guard band below Nyquist used by the reference modal runtime.
+///
+/// Frequencies at or above 90% of Nyquist are refused so coefficient error,
+/// later source resampling, and spatial processing cannot silently turn a
+/// nominally admitted mode into an alias-prone endpoint case.
+pub const SOUND_MODE_NYQUIST_GUARD_FRACTION: f64 = 0.9;
+/// Largest admitted damping ratio. The modal runtime handles underdamped,
+/// critical, and overdamped modes, but refuses arbitrarily stiff decay rates.
+pub const MAX_SOUND_MODE_DAMPING_RATIO: f64 = 16.0;
+/// Magnitude ceiling for one dimensionless modal participation coefficient.
+pub const MAX_SOUND_MODE_PARTICIPATION: f64 = 1.0e6;
+/// Magnitude ceiling for a declared non-calibrated radiation transfer.
+pub const MAX_SOUND_MODE_RADIATION_GAIN: f64 = 1.0e12;
+/// Smallest admitted positive generalized modal mass [kg].
+pub const MIN_SOUND_MODE_MASS_KG: f64 = 1.0e-12;
 
-const IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.sound-config.v1";
+const IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.sound-config.v2";
 
 /// Listener coordinates. The reference composition requires camera-relative geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,14 +117,65 @@ pub enum SoundExcitationChannel {
     PrecessionRate = 5,
 }
 
-/// Dimensionally explicit mapping from one simulation channel into the
-/// normalized scalar source coordinate that drives every admitted mode.
+/// Dimensionally explicit mapping from one simulation channel into a typed
+/// component generalized force consumed by modal participation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SoundExcitationControl {
     /// Typed input channel, including its documented SI unit.
     pub channel: SoundExcitationChannel,
-    /// Normalized source-coordinate units per input-channel unit.
+    /// Component generalized-force coordinate driven by this mapping.
+    pub target_component: SoundModalComponent,
+    /// Generalized-force newtons per input-channel unit.
     pub source_scale: f64,
+}
+
+/// One deterministic, damped structural mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum SoundModalComponent {
+    /// Modes whose radiation is attributed to the spinning disc body.
+    Disc = 1,
+    /// Modes whose radiation is attributed to the glass support plate.
+    GlassPlate = 2,
+    /// Modes whose radiation is attributed to the surrounding base assembly.
+    BaseAssembly = 3,
+}
+
+impl SoundModalComponent {
+    /// Stable machine-readable code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Disc => "disc",
+            Self::GlassPlate => "glass-plate",
+            Self::BaseAssembly => "base-assembly",
+        }
+    }
+}
+
+/// Dimensionless participation of one mode in generalized forces applied to
+/// the disc, glass plate, and base assembly. Off-component terms explicitly
+/// represent declared cross-coupling; one-hot terms describe independent banks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoundModeParticipation {
+    /// Participation in generalized force applied to the disc.
+    pub disc: f64,
+    /// Participation in generalized force applied to the glass plate.
+    pub glass_plate: f64,
+    /// Participation in generalized force applied to the base assembly.
+    pub base_assembly: f64,
+}
+
+impl SoundModeParticipation {
+    /// Participation coefficient for one typed source component.
+    #[must_use]
+    pub const fn for_component(self, component: SoundModalComponent) -> f64 {
+        match component {
+            SoundModalComponent::Disc => self.disc,
+            SoundModalComponent::GlassPlate => self.glass_plate,
+            SoundModalComponent::BaseAssembly => self.base_assembly,
+        }
+    }
 }
 
 /// One deterministic, damped structural mode.
@@ -115,12 +183,20 @@ pub struct SoundExcitationControl {
 pub struct SoundMode {
     /// Stable caller-assigned mode identifier. Zero is invalid.
     pub mode_id: u32,
+    /// Component whose dry stem receives this mode's radiated output.
+    pub component: SoundModalComponent,
     /// Undamped natural frequency in hertz.
     pub frequency_hz: f64,
-    /// Dimensionless damping ratio, in `(0, 1]`.
+    /// Nonnegative dimensionless damping ratio. Values below, equal to, and
+    /// above one select underdamped, critical, and overdamped dynamics.
     pub damping_ratio: f64,
-    /// Signed digital-full-scale gain per normalized source-coordinate unit.
-    pub gain: f64,
+    /// Generalized modal mass [kg] for displacement-normalized coordinates.
+    pub modal_mass_kg: f64,
+    /// Signed modal participation in each generalized component force.
+    pub source_participation: SoundModeParticipation,
+    /// Signed digital-full-scale radiation gain per modal velocity [m/s].
+    /// This is a declared rendering transfer, not calibrated pressure.
+    pub radiation_gain_fs_s_per_m: f64,
     /// Identity of material parameters used for this mode.
     pub material_identity: ContentHash,
     /// Identity of base/support parameters used for this mode.
@@ -530,14 +606,12 @@ fn validate(input: &SoundSynthesisInput) -> Result<(), SoundSynthesisError> {
     if informed && input.excitation_controls.is_empty() {
         return Err(SoundSynthesisError::MissingExcitationChannels);
     }
-    if !input
+    if !input.excitation_controls.windows(2).all(|pair| {
+        (pair[0].channel, pair[0].target_component) < (pair[1].channel, pair[1].target_component)
+    }) || input
         .excitation_controls
-        .windows(2)
-        .all(|pair| pair[0].channel < pair[1].channel)
-        || input
-            .excitation_controls
-            .iter()
-            .any(|control| !control.source_scale.is_finite() || control.source_scale == 0.0)
+        .iter()
+        .any(|control| !control.source_scale.is_finite() || control.source_scale == 0.0)
     {
         return Err(SoundSynthesisError::NonCanonicalExcitationChannels);
     }
@@ -651,11 +725,22 @@ fn validate_modes(modes: &[SoundMode]) -> Result<(), SoundSynthesisError> {
             || previous_id.is_some_and(|previous| mode.mode_id <= previous)
             || !mode.frequency_hz.is_finite()
             || mode.frequency_hz <= 0.0
-            || mode.frequency_hz >= f64::from(SOUND_MASTER_SAMPLE_RATE_HZ) / 2.0
+            || mode.frequency_hz
+                >= f64::from(SOUND_MASTER_SAMPLE_RATE_HZ) * 0.5 * SOUND_MODE_NYQUIST_GUARD_FRACTION
             || !mode.damping_ratio.is_finite()
-            || mode.damping_ratio <= 0.0
-            || mode.damping_ratio > 1.0
-            || !mode.gain.is_finite()
+            || mode.damping_ratio < 0.0
+            || mode.damping_ratio > MAX_SOUND_MODE_DAMPING_RATIO
+            || !mode.modal_mass_kg.is_finite()
+            || mode.modal_mass_kg < MIN_SOUND_MODE_MASS_KG
+            || [
+                mode.source_participation.disc,
+                mode.source_participation.glass_plate,
+                mode.source_participation.base_assembly,
+            ]
+            .iter()
+            .any(|value| !value.is_finite() || value.abs() > MAX_SOUND_MODE_PARTICIPATION)
+            || !mode.radiation_gain_fs_s_per_m.is_finite()
+            || mode.radiation_gain_fs_s_per_m.abs() > MAX_SOUND_MODE_RADIATION_GAIN
             || is_zero(mode.material_identity)
             || is_zero(mode.base_identity)
         {
@@ -744,14 +829,20 @@ fn sound_identity(input: &SoundSynthesisInput) -> ContentHash {
     push_u32(&mut bytes, input.excitation_controls.len() as u32);
     for control in &input.excitation_controls {
         bytes.push(control.channel as u8);
+        bytes.push(control.target_component as u8);
         push_f64(&mut bytes, control.source_scale);
     }
     push_u32(&mut bytes, input.modes.len() as u32);
     for mode in &input.modes {
         push_u32(&mut bytes, mode.mode_id);
+        bytes.push(mode.component as u8);
         push_f64(&mut bytes, mode.frequency_hz);
         push_f64(&mut bytes, mode.damping_ratio);
-        push_f64(&mut bytes, mode.gain);
+        push_f64(&mut bytes, mode.modal_mass_kg);
+        push_f64(&mut bytes, mode.source_participation.disc);
+        push_f64(&mut bytes, mode.source_participation.glass_plate);
+        push_f64(&mut bytes, mode.source_participation.base_assembly);
+        push_f64(&mut bytes, mode.radiation_gain_fs_s_per_m);
         bytes.extend_from_slice(mode.material_identity.as_bytes());
         bytes.extend_from_slice(mode.base_identity.as_bytes());
     }

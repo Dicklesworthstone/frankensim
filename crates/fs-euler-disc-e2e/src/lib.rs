@@ -19,6 +19,7 @@ pub mod convergence;
 pub mod coupled_runner;
 pub mod external_air;
 pub mod mechanics;
+pub mod modal_synthesis;
 pub mod normal_contact;
 pub mod patch_kinematics;
 pub mod ports;
@@ -92,6 +93,15 @@ pub use contact_dynamics::{
     refine_profile_timestep_by_two, refine_timestep_by_two, run_contact_dynamics,
     run_profile_contact_dynamics, small_angle_rolling_profile_initializer, state_at_ground_contact,
     state_at_profile_ground_contact,
+};
+pub use modal_synthesis::{
+    MAX_MODAL_SPATIAL_PARTICIPATION, MAX_MODAL_SYNTHESIS_CHUNK_FRAMES,
+    MAX_MODAL_SYNTHESIS_TOTAL_FRAMES, MODAL_CANCELLATION_POLL_FRAMES,
+    MODAL_SYNTHESIS_ALGORITHM_VERSION, ModalComponentValues, ModalCouplingClass, ModalDriveFrame,
+    ModalModeEnergy, ModalModeState, ModalPresetAuthority, ModalSpatialParticipation,
+    ModalStemFrame, ModalSynthesisBudget, ModalSynthesisCheckpoint, ModalSynthesisChunk,
+    ModalSynthesisDiagnostics, ModalSynthesisError, ModalSynthesisModel, ModalSynthesisModelInput,
+    RepresentativeDiscMaterial, RepresentativeModalPreset, representative_modal_preset,
 };
 pub use ports::{
     ChannelActivity, ContributionDomain, ContributionOwnership, DecompositionReceipt,

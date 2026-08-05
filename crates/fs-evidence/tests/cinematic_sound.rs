@@ -8,9 +8,9 @@ use fs_evidence::cinematic_config::{CinematicComponentRef, CinematicComponentRol
 use fs_evidence::cinematic_sound::{
     ListenerFrame, ListenerPose, SOUND_MASTER_SAMPLE_RATE_HZ, SOUND_SYNTHESIS_SCHEMA_VERSION,
     SoundAmplitudeReference, SoundChannelLayout, SoundExcitationChannel, SoundExcitationControl,
-    SoundMode, SoundModelAssumption, SoundOutputKind, SoundRoomResponse, SoundSynthesisConfig,
-    SoundSynthesisError, SoundSynthesisInput, SoundTerminalPolicy, SoundTrajectoryDisposition,
-    synthesis_class_code,
+    SoundModalComponent, SoundMode, SoundModeParticipation, SoundModelAssumption, SoundOutputKind,
+    SoundRoomResponse, SoundSynthesisConfig, SoundSynthesisError, SoundSynthesisInput,
+    SoundTerminalPolicy, SoundTrajectoryDisposition, synthesis_class_code,
 };
 
 fn identity(label: &str) -> ContentHash {
@@ -60,27 +60,43 @@ fn informed_input() -> SoundSynthesisInput {
         excitation_controls: vec![
             SoundExcitationControl {
                 channel: SoundExcitationChannel::ContactNormalForce,
+                target_component: SoundModalComponent::Disc,
                 source_scale: 1.0e-3,
             },
             SoundExcitationControl {
                 channel: SoundExcitationChannel::BaseReactionForce,
+                target_component: SoundModalComponent::BaseAssembly,
                 source_scale: -2.0e-4,
             },
         ],
         modes: vec![
             SoundMode {
                 mode_id: 1,
+                component: SoundModalComponent::Disc,
                 frequency_hz: 733.0,
                 damping_ratio: 0.012,
-                gain: 0.18,
+                modal_mass_kg: 0.12,
+                source_participation: SoundModeParticipation {
+                    disc: 1.0,
+                    glass_plate: 0.0,
+                    base_assembly: 0.0,
+                },
+                radiation_gain_fs_s_per_m: 0.18,
                 material_identity: identity("steel-material"),
                 base_identity: identity("glass-base"),
             },
             SoundMode {
                 mode_id: 2,
+                component: SoundModalComponent::GlassPlate,
                 frequency_hz: 1_421.0,
                 damping_ratio: 0.019,
-                gain: -0.07,
+                modal_mass_kg: 0.8,
+                source_participation: SoundModeParticipation {
+                    disc: 0.05,
+                    glass_plate: 1.0,
+                    base_assembly: 0.1,
+                },
+                radiation_gain_fs_s_per_m: -0.07,
                 material_identity: identity("steel-material"),
                 base_identity: identity("glass-base"),
             },
@@ -254,11 +270,14 @@ fn stereo_and_camera_relative_orthonormal_listener_are_mandatory() {
 }
 
 #[test]
-fn modal_frequency_damping_gain_and_order_are_checked() {
-    let mutations: [fn(&mut SoundMode); 4] = [
+fn modal_frequency_damping_mass_participation_radiation_and_order_are_checked() {
+    let mutations: [fn(&mut SoundMode); 7] = [
         |mode: &mut SoundMode| mode.frequency_hz = 24_000.0,
-        |mode: &mut SoundMode| mode.damping_ratio = 0.0,
-        |mode: &mut SoundMode| mode.gain = f64::NAN,
+        |mode: &mut SoundMode| mode.damping_ratio = -0.01,
+        |mode: &mut SoundMode| mode.damping_ratio = 17.0,
+        |mode: &mut SoundMode| mode.modal_mass_kg = 0.0,
+        |mode: &mut SoundMode| mode.source_participation.disc = f64::NAN,
+        |mode: &mut SoundMode| mode.radiation_gain_fs_s_per_m = f64::NAN,
         |mode: &mut SoundMode| mode.material_identity = ContentHash([0; 32]),
     ];
     for mutate in mutations {
@@ -275,6 +294,11 @@ fn modal_frequency_damping_gain_and_order_are_checked() {
         SoundSynthesisConfig::try_admit(input),
         Err(SoundSynthesisError::InvalidMode)
     );
+
+    let mut input = informed_input();
+    input.modes[0].damping_ratio = 0.0;
+    input.modes[1].damping_ratio = 1.0;
+    assert!(SoundSynthesisConfig::try_admit(input).is_ok());
 }
 
 #[test]
@@ -339,7 +363,9 @@ fn wrong_roles_and_missing_algorithm_versions_refuse() {
     input.schema_version += 1;
     assert_eq!(
         SoundSynthesisConfig::try_admit(input),
-        Err(SoundSynthesisError::UnsupportedSchemaVersion(2))
+        Err(SoundSynthesisError::UnsupportedSchemaVersion(
+            SOUND_SYNTHESIS_SCHEMA_VERSION + 1
+        ))
     );
 
     let mut input = informed_input();
@@ -361,13 +387,18 @@ fn wrong_roles_and_missing_algorithm_versions_refuse() {
 }
 
 #[test]
-fn identity_is_deterministic_and_material_changes_invalidate_it() {
+fn identity_is_deterministic_and_every_modal_physics_field_invalidates_it() {
     let first = SoundSynthesisConfig::try_admit(informed_input()).unwrap();
     let replay = SoundSynthesisConfig::try_admit(informed_input()).unwrap();
     assert_eq!(first.identity(), replay.identity());
 
-    let mutations: [fn(&mut SoundSynthesisInput); 6] = [
+    let mutations: [fn(&mut SoundSynthesisInput); 11] = [
         |input| input.modes[0].frequency_hz += 1.0,
+        |input| input.modes[0].component = SoundModalComponent::BaseAssembly,
+        |input| input.modes[0].damping_ratio += 0.001,
+        |input| input.modes[0].modal_mass_kg *= 2.0,
+        |input| input.modes[0].source_participation.disc *= 0.5,
+        |input| input.modes[0].radiation_gain_fs_s_per_m *= 2.0,
         |input| input.excitation_controls[0].source_scale *= 2.0,
         |input| input.listener.position_m[0] += 0.001,
         |input| input.filter_version += 1,

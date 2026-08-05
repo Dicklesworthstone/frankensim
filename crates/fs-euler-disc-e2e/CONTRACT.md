@@ -1253,18 +1253,27 @@ frame-segment identity, and all resource caps. Plan admission checks frame,
 shard, canonical-plan-byte, per-shard path, per-shard result-byte, and per-segment
 aggregate-result limits before returning the plan. Its strict canonical codec
 recomputes ordering, coverage, identities, derived counts, and byte length under
-an external plan pin; decoded bytes alone do not authorize a render.
+an external plan pin. Construction derives the exact segment, shard, and plan
+byte counts, then proves every per-shard path/result and per-segment aggregate
+cap before allocating the canonical frame-order map, so a certainly over-cap
+plan cannot force that retained allocation; decoded bytes alone do not authorize
+a render.
 
 Each worker must re-present the original scene-bound prepared frame, from which
 the coordinator reconstructs the exact shutter, cut side, frame identity, and
 generic renderer shard spec. Workers may exchange only the renderer's bounded
 canonical result bytes. A single coordinator strictly decodes those bytes and
 stores them under the dedicated immutable ledger kind; workers do not share or
-write the coordinator ledger. Segment merge preflights all unique artifact
-kinds and lengths against the aggregate cap before reading any payload, then
-refuses missing, foreign, corrupt, aliased, or conflicting work and publishes
-only a complete film. Exact duplicate references are idempotent. Raw segments
-remain independently renderable; `finishing_neighbors` exposes only explicit
+write the coordinator ledger. Segment merge first validates the complete
+reference set without artifact I/O: exact duplicate references are idempotent,
+an unexpected logical shard refuses, and differing artifact references for the
+same logical shard return the lowest conflicting logical identity independent
+of arrival order. After that structural pass, it preflights every unique
+selected artifact kind and length together against the aggregate cap before
+reading any payload. Payload materialization uses the ledger's controlled
+64-KiB tiles and polls the caller's `Cx` between tiles. Missing, foreign,
+corrupt, aliased, or conflicting work publishes no film. Raw segments remain
+independently renderable; `finishing_neighbors` exposes only explicit
 frame-position dependency metadata for a later temporal finishing pass and does
 not blend films. This feature is a portable file/byte boundary and local
 multi-worker plan, not a network scheduler, lease/claim protocol, distributed

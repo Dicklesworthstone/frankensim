@@ -1212,6 +1212,7 @@ dependencies = [
  "fs-img",
  "fs-ir",
  "fs-ledger",
+ "fs-math",
  "fs-mbd",
  "fs-render",
  "fs-rep-frep",

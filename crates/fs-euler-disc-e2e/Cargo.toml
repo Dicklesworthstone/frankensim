@@ -37,6 +37,7 @@ fs-geom = { path = "../fs-geom" }
 fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }
 fs-ledger = { path = "../fs-ledger", optional = true }
+fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-render = { path = "../fs-render" }
