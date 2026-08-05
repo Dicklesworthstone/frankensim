@@ -43,6 +43,8 @@ pub mod temporal_accumulation;
 pub mod dielectric;
 #[cfg(feature = "differentiable")]
 pub mod diff;
+#[cfg(feature = "tracer")]
+pub mod lighting;
 pub mod spectral;
 #[cfg(feature = "tracer")]
 pub mod tracer;

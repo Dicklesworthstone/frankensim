@@ -118,6 +118,51 @@ differentiable lift). Pure Rust throughout.
   placements with a length-framed streaming hash. Material and emission remain
   properties of the tracer `Primitive`, separate from shared geometry and pose.
 
+- `tracer` tile execution (bead `frankensim-h7xu5.5.1`):
+  `RenderExecutionConfig` makes logical tile shape, worker ceiling, operation
+  memory, scheduling weights, and `RunId` explicit. The
+  `render_*_with_execution` convenience functions preserve the serial APIs as
+  bitwise oracles while executing fixed row-major tiles through `fs-exec`.
+  `RenderWorkerPool::with_parked_crew_local` is the animation/batch surface:
+  one scoped worker crew serves every `ParkedRenderScope` job and joins
+  structurally when the callback exits. Each success reports requested versus
+  admitted workers, layout, setup/traversal/compute/merge/publication timings,
+  executor drain diagnostics, and the operation-memory receipt.
+
+- `tracer` deterministic adaptive sampling (bead
+  `frankensim-h7xu5.5.2`): `AdaptiveSamplingConfig` declares a minimum,
+  maximum through `Settings::spp`, fixed decision-batch spacing, per-channel
+  absolute and relative dispersion thresholds, and a dark-channel scale.
+  `AdaptiveFilm` privately owns the raw sequential XYZ sum, Welford mean and
+  second central moment, exact sample count, and terminal decision for every
+  pixel. It binds sampler, stream seed, policy, maximum SPP, camera/time mode,
+  and `ADAPTIVE_SAMPLING_SEMANTICS_VERSION`. This is diagnostic estimator
+  provenance, not a complete replay identity: the current film does not bind
+  full render settings or scene content, which remain obligations of the
+  checkpoint/artifact layer. `beauty_mean_xyz` always divides the raw sum,
+  preserving the uniform renderer as the oracle;
+  `estimator_mean_xyz` exposes the separately retained Welford mean used by
+  stopping. Decisions occur only at the declared fixed checkpoints, require
+  all three XYZ channels, and record threshold success in preference to the
+  hard ceiling when both occur at the final checkpoint. Static, legacy-motion,
+  cinematic-camera, scoped-worker, parked-crew, and opaque resumable entry
+  points share the same estimator.
+
+- `tracer` crash-recovery codec (bead `frankensim-h7xu5.5.3`):
+  `PendingRender` and `PendingAdaptiveRender` stream a schema-versioned,
+  domain-hashed checkpoint in at most 64 KiB body chunks and one fixed seal.
+  The canonical body binds uniform/adaptive kind, every bit-affecting tracer
+  semantics version, complete settings/time/execution/adaptive policy, exact
+  tile-row prefixes and attempt count, raw binary64 accumulators/AOVs, and an
+  L6-supplied source/configuration/scene/frame/job/build/claim/generation chain.
+  Generation zero has no predecessor; every later generation names a nonzero
+  prior renderer-content digest. Emission accepts a caller byte ceiling and
+  fallible sink, while restore consumes a freshly admitted opaque job, verifies
+  the complete seal and binding before decoding, refuses malformed numeric or
+  row-prefix state, and returns no partially restored job on error. The codec
+  never publishes a film or durable artifact by itself; only a completed film
+  may enter final image/manifest publication.
+
 - `volumes` module (bead qfx.3, feature `volumes`): [`VolumeGrid`]
   BORROWS its density buffer (zero-copy: live simulation fields render
   in place), [`MajorantGrid`] per-block maxima, Woodcock delta
@@ -203,6 +248,19 @@ Transfer construction and direct-volume admission return `DvrError`.
 The high-level renderer reserves its complete private image buffer before
 sampling and drops it on any tracking refusal; no error path returns a partial
 image.
+The tile renderer additionally reserves retained/staging film payloads, one
+shared three-dimensional Sobol direction table for Owen-Sobol jobs, its worst-case concurrent
+tile-pixel scratch envelope, and `fs-exec` root metadata before dispatch. Tile
+scratch uses fallible raw buffers only inside that already-held aggregate
+charge, so scheduling overlap cannot change lease admission. The dielectric
+medium stack is fixed-capacity inline state. Thread stacks, allocator
+usable-size overhead, and heap owned by lower chart implementations remain
+outside the operation-memory claim.
+Adaptive jobs reserve three XYZ binary64 planes (raw sum, Welford mean, and
+second moment), one `u32` count plane, one terminal-decision plane, sampler
+state when applicable, and tile or row scratch before dispatch. Published AOV
+allocations leave the operation lease while remaining owned by the returned
+film. This is allocation accounting, not a 4K resident-set or throughput claim.
 
 ## Determinism class
 
@@ -221,6 +279,19 @@ replay of renders is deliberately NOT claimed; promote by routing through
 Instance ordering and exact-hit ties are deterministic by stable object ID.
 Canonical quaternion sign and signed-zero normalization ensure equivalent
 proper-rigid inputs produce the same transform and frame identities.
+Tile geometry is independent of worker count. Each tile owns disjoint pixels,
+and each pixel evaluates samples in ascending absolute sample order with the
+same `(pixel, sample, dimension)` stream and floating-point expression as the
+serial oracle. No cross-tile floating-point reduction exists, so worker counts,
+steals, scheduling weights, and parked-versus-spawned worker lifetime do not
+change film bits on the same ISA.
+Adaptive pixels likewise consume the unchanged absolute sample prefix
+`0..terminal_count`; active-mask shape, batch checkpoint spacing, tile shape,
+worker count, scheduling weights, and resume attempts never reseed or compact a
+continuing pixel's stream. The raw sum preserves the uniform tracer's
+sequential per-pixel addition order. Welford state is updated transactionally
+across all XYZ channels, so a non-finite sample or invalid intermediate moment
+publishes none of that sample.
 
 ## Cancellation behavior
 
@@ -232,6 +303,17 @@ propagates `RenderError::Cancelled`. The spectral tracer polls per row, sample,
 bounce, and primitive, and copies progressive staging buffers in checked
 chunks; it propagates `TracerError::Cancelled`. A failed or reversed range
 leaves both film sums and `spp_done` unchanged so retry cannot double-count.
+Tile execution derives the exact gate and budget from the caller's `Cx`, polls
+inside path traversal as well as at tile boundaries, contains panics, and fully
+drains the worker lane before returning. A public film is swapped only after a
+successful complete executor report and a final caller-gate checkpoint.
+Parked crews use the same run protocol and join on callback exit or unwind.
+`PendingAdaptiveRender` commits one complete tile row at a time into opaque
+private raw-sum/moment/count/decision buffers. Cancellation or a contained
+worker panic discards the uncommitted row, retains completed row prefixes, and
+recomputes the row from the same absolute sample IDs under a fresh `Cx`.
+Policy, estimator version, sampler/seed, scene/camera borrow, shutter mode,
+layout, `RunId`, execution mode, and budget cannot be substituted on resume.
 Instance traversal polls between objects and delegates to the backend's existing
 bounded cancellation points; cancellation is propagated without a partial hit.
 
@@ -264,7 +346,8 @@ the implicit hit equation.
 NEE+MIS path integration, Lambertian + reflective GGX with spectral reflectance,
 and provenance-bearing smooth/rough spectral dielectric glass
 (the `spectral` module's bounded sigmoid lift; round-trip RGB error
-pinned under 1e-3), one rect area light per scene, CIE-XYZ film →
+pinned under 1e-3), deterministic multiple rectangular emitters plus an
+optional canonical lat-long environment, CIE-XYZ film →
 Bradford-adapted linear sRGB → byte-exact EXR. Streams are
 counter-based and keyed (pixel, sample, dimension) — Philox for path
 decisions, optional Owen-scrambled Sobol' for pixel dimensions
@@ -273,10 +356,24 @@ iid, ledgered on bead 872c) — so images are bitwise invariant to any
 pixel/tile scheduling and progressive checkpoints resume bitwise.
 Radiance-path transcendentals go through `fs_math::det`; the Cornell
 golden (`fs-render:cornell` in golden-couplings.json) reproduced
-identically in all four ISA/profile quadrants at freeze. v1 no-claims:
-single NEE light, no volumetric coupling, no environment light, no
-Russian roulette, GGX samples the NDF (VNDF is a recorded follow-up),
-emitters do not reflect. On the first dispersive dielectric event, the shared
+identically in all four ISA/profile quadrants at freeze. The lighting-v1
+extension admits each rectangle only when its named primitive resolves to the
+same two-triangle world-space quad (directly or through a static mesh instance),
+then sorts semantic light identities independently of construction order. It
+selects among incident solid-angle/luminance rectangle weights and the
+environment's integrated luminance. Environment texels use exact spherical-cell
+solid angles and a two-level row/column CDF, so selection is logarithmic in map
+dimensions; rotation is around world +Y, with increasing columns running from
++X toward +Z. A semantic pixel hash drives deterministic sample ordering while
+the separate source/provenance hashes retain container lineage without changing
+the sampling stream. Both NEE and BSDF-hit paths include the same selection
+probability in their solid-angle PDFs. At a lighting-v1 path's final permitted
+bounce, NEE has weight one because no competing BSDF continuation is evaluated.
+The exact legacy one-rectangle/no-environment branch retains its original draws,
+grazing cutoff, estimator, and image bits.
+Current no-claims: no volumetric coupling, no Russian roulette, GGX samples the
+NDF (VNDF is a recorded follow-up), and emitters do not reflect. On the first
+dispersive dielectric event, the shared
 four-wavelength geometric packet collapses once to its uniformly selected hero
 lane with the matching factor-four estimator weight; companion lanes are zeroed
 instead of being biased along the hero wavelength's refracted direction.
@@ -310,6 +407,49 @@ signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
 grazing, pole-frame, adjacent-IOR, and one-time dispersive packet-collapse
 fixtures. The pre-existing Cornell tracer battery remains byte-stable and is
 the opaque-path non-regression gate.
+
+`lighting` inline tests and `tests/lighting_battery.rs` (feature `tracer`) cover
+rectangle admission and identity order, zero/duplicate emitters, exact
+solid-angle selection, constant and concentrated environment maps, spherical
+PDF normalization, rotation/seam/pole conventions, supported linear-float EXR
+ingestion and source/provenance binding, deterministic replay, mixed-emitter
+MIS accounting, no-light refusal, cancellation, and finite high-dynamic-range
+transport. Focused assertion messages include whichever seed, sample count,
+light identities, PDFs, and radiance deltas are applicable to reproducing the
+case.
+
+`tests/tile_parallel_battery.rs` (feature `tracer`) covers odd and clipped tile
+partitioning, one-tile worker admission, pre-dispatch film and scratch-envelope
+memory refusal, exact serial equality across 1/2/4/8 workers and skewed
+schedules, progressive partition changes, pre/mid-run cancellation, panic
+containment, unchanged-film retry, and multiple bit-identical jobs through one
+parked crew. Its owned `PendingRender` cases cancel after a strict committed-row
+prefix, resume under a fresh authority without double-counting, remain below
+two film payloads, refuse scratch before dispatch with zero progress, and retain
+a precompleted zero-sample private job when publication starts under a
+cancelled authority. A contained one-time worker panic also retains a strict
+row prefix and resumes bit-exactly. Mode- or budget-changing retries refuse
+before dispatch; cancellation/resume uses four workers and multiple tiles; and
+a pool placement seed is not observable by scene charts. IID and zero-sample
+jobs prove that they neither allocate nor charge unused Sobol direction state. Failures name
+run, tile policy, pixel, channel, and binary64 bits; success logs setup,
+traversal, compute, merge, idle, and memory measurements. The Euler cinematic
+bridge adds animated-camera, geometry, dielectric, and direct-light
+serial-versus-tiled equality through both one-shot and parked-crew paths.
+
+`tests/adaptive_battery.rs` plus `tracer` inline tests (feature `tracer`) cover
+policy admission and signed-zero canonicalization; fixed and truncated
+checkpoint schedules; exact threshold equality and final-checkpoint precedence;
+Welford variance/dispersion arithmetic, dark channels, one-noisy-channel
+behavior, HDR offsets, power-of-two scaling, NaN/later-channel overflow/count
+overflow rollback; constant-scene minimum stopping; exact path counts and
+per-tile summaries; private AOV shape and identity getters; IID and Owen-Sobol
+full-ceiling equality to uniform raw sums; exact decisions, moments, sums, and
+counts across worker counts, tile shapes, skewed schedules, and parked crews;
+and cancellation after committed rows followed by bit-exact parked resume. A
+sparse GGX fixture records heterogeneous path allocation and compares adaptive
+and rounded-up uniform cost against a disjoint-seed high-SPP reference. That
+fixture is a regression for this scene/profile, not a universal quality claim.
 
 `tests/render.rs` (7 cases): radical inverse known values; cosine samples are
 unit vectors with the right pdf; the furnace test conserves energy exactly; MIS
@@ -367,9 +507,52 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   work. Emissive geometry may move with its instance, but its emission itself is
   time-invariant.
 - v1 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
-  watertight ray-triangle tests, a LIGHT-BVH, heterogeneous volume/surface
-  coupling, ray-stream sorting, and progressive tile streaming to HELM remain
-  staged.
+  watertight ray-triangle tests, a LIGHT-BVH for large emitter populations,
+  heterogeneous volume/surface coupling, ray-stream sorting, and progressive
+  tile streaming to HELM remain staged.
+- The free `render_*_with_execution` functions are one-job convenience APIs
+  and construct a scoped worker lane per call. Sustained frame sequences must
+  use `RenderWorkerPool::with_parked_crew_local`. Timing fields are diagnostic
+  wall-clock observations, not a universal scaling or 4K-attainment claim;
+  bead `frankensim-h7xu5.5.5` owns representative 1080p/4K qualification.
+- Transactional `&mut Film` compatibility calls necessarily retain the
+  caller's committed film and one complete private staging film. Fresh
+  `PendingRender` instead owns the one eventual film and atomic per-tile row
+  prefixes; a suspension exposes counts and reports but never partial pixels.
+  It binds the execution mode and compute budget at admission and refuses a
+  retry under another mode or budget. Tracer-visible child contexts rebind the pool's placement seed to the
+  public `Settings::seed`, so changing a parked pool's scheduling seed cannot
+  change chart or camera semantics.
+  `PendingAdaptiveRender` owns the corresponding raw sum, Welford, count, and
+  decision AOVs with the same row-prefix rule. Both opaque states can emit and
+  restore the versioned canonical checkpoint codec described below. `fs-render`
+  itself still owns no filesystem, transaction, replacement, or scheduler-claim
+  policy: crash recovery exists only when L6 streams a successfully sealed
+  checkpoint through a transactional artifact store and re-admits the exact
+  bound job. The codec also cannot certify identity against interior mutation
+  inside a borrowed `Chart`; L6 must bind the immutable scene/source identities.
+- Adaptive dispersion is an IID standard-error estimate only for IID streams;
+  it is a within-stream heuristic for a single Owen-Sobol scramble. It is not a
+  confidence interval under adaptive stopping, a formal image-error
+  certificate, or evidence that a threshold transfers between scenes,
+  exposures, samplers, materials, or output transforms. Statistically
+  meaningful randomized-QMC error estimation requires independent scrambles.
+  Denoised and postprocessed pixels cannot enter the accumulator or stopping
+  API. Uniform rendering remains the final-quality fallback.
+- Operation-memory receipts cover the named film, progress, Sobol, tile
+  scratch, executor metadata, and arena charges. They do not cover OS thread
+  stacks, allocator usable-size overhead, the small lighting-admission
+  candidate vector created during preflight, or arbitrary heap owned by chart
+  implementations. They are not process-RSS certificates. For an in-memory
+  resumable job, lease requests, refusals, and peak usage are cumulative from
+  job admission through the reported attempt; executor and timing fields are
+  scoped to the most recent attempt.
+- Environment radiance uses a deterministic bounded linear-sRGB spectral lift
+  and piecewise-constant lat-long texels. It does not claim measured spectra,
+  arbitrary HDR decoder compatibility, texture filtering, sun/sky delta
+  models, portal sampling, or calibrated real-studio illumination. The current
+  exact-CDF light selector is intended for the small studio rigs in scope; it
+  is not the planned many-thousand-emitter light BVH.
 - Dielectric support is homogeneous, non-polarizing geometric optics. It does
   not claim polarization, coherence, fluorescence, birefringence, measured
   preset fidelity, camera-start-inside-medium support, arbitrary overlapping
@@ -529,9 +712,13 @@ relative intersection, conservative sampled bounds, transactional
 cancellation, and high-rate spectral renders matching analytic
 constant-velocity and constant-spin occupancy envelopes.
 
-The v1 rectangular NEE light is static metadata. A scene that names an animated
-instance as that light refuses with `AnimatedLightUnsupported`; it is never
-rendered with a stale light-sampling transform.
+Rectangular NEE lights are static metadata. A scene that names an animated
+instance as any such light refuses with `AnimatedLightUnsupported`; it is never
+rendered with a stale light-sampling transform. Environment maps are immutable
+linear-sRGB radiance artifacts in a declared Y-up lat-long layout. Their
+semantic identity binds dimensions, canonical f32 pixel bits, color/layout
+interpretation, and rotation; separate source and provenance identities retain
+the supported-EXR import lineage.
 
 ## Cinematic physical camera
 

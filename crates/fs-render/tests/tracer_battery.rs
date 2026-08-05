@@ -245,13 +245,14 @@ fn cornell() -> Scene {
     let light_prim = primitives.len() - 1;
     Scene {
         primitives,
-        light: RectLight {
+        lights: vec![RectLight {
             corner,
             edge_u: eu,
             edge_v: ev,
             prim: light_prim,
             emission,
-        },
+        }],
+        environment: None,
         camera: Camera {
             // Framed so the near-specular sphere (the light's sharp
             // reflection — the BSDF-favored Veach regime) fills a
@@ -431,13 +432,14 @@ fn emissive_instance_scene(shape: Shape, eye: Point3) -> Scene {
                 emission: Some((white, 1.0)),
             },
         ],
-        light: RectLight {
+        lights: vec![RectLight {
             corner: Point3::new(10.0, -0.5, 0.0),
             edge_u: Vec3::new(1.0, 0.0, 0.0),
             edge_v: Vec3::new(0.0, 1.0, 0.0),
             prim: 1,
             emission: (white, 1.0),
-        },
+        }],
+        environment: None,
         camera: Camera {
             eye,
             forward: Vec3::new(0.0, 0.0, -1.0),
@@ -518,13 +520,14 @@ fn depth_varying_emissive_scene() -> Scene {
                 emission: Some((white, 1.0)),
             },
         ],
-        light: RectLight {
+        lights: vec![RectLight {
             corner: Point3::new(10.0, -0.5, 0.0),
             edge_u: Vec3::new(1.0, 0.0, 0.0),
             edge_v: Vec3::new(0.0, 1.0, 0.0),
             prim: 2,
             emission: (white, 1.0),
-        },
+        }],
+        environment: None,
         camera: Camera {
             eye: Point3::new(0.0, 0.0, 2.0),
             forward: Vec3::new(0.0, 0.0, -1.0),
@@ -562,13 +565,14 @@ fn focus_probe_scene(target_z: f64, half_extent: f64) -> Scene {
                 emission: Some((white, 1.0)),
             },
         ],
-        light: RectLight {
+        lights: vec![RectLight {
             corner: Point3::new(10.0, -0.5, 0.0),
             edge_u: Vec3::new(1.0, 0.0, 0.0),
             edge_v: Vec3::new(0.0, 1.0, 0.0),
             prim: 1,
             emission: (white, 1.0),
-        },
+        }],
+        environment: None,
         camera: Camera {
             eye: Point3::new(0.0, 0.0, 2.0),
             forward: Vec3::new(0.0, 0.0, -1.0),
@@ -1046,7 +1050,7 @@ fn progressive_motion_checkpoint_rejects_shutter_stream_changes_transactionally(
 #[test]
 fn animated_nee_light_refuses_until_time_dependent_light_sampling_exists() {
     let mut scene = emissive_motion_scene(true);
-    scene.light.prim = 0;
+    scene.lights[0].prim = 0;
     let settings = motion_settings(1);
     assert_eq!(
         with_cx(|cx| render_motion(&scene, cx, &settings, motion_shutter(0.5, 0.0))),

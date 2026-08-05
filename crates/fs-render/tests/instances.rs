@@ -504,13 +504,14 @@ fn tracer_e2e_renders_one_pose_and_observes_a_moved_pose() {
                 material: Material::Lambertian { reflectance: white },
                 emission: Some(emission),
             }],
-            light: RectLight {
+            lights: vec![RectLight {
                 corner: Point3::new(translation[0] - 1.0, translation[1] - 1.0, translation[2]),
                 edge_u: Vec3::new(2.0, 0.0, 0.0),
                 edge_v: Vec3::new(0.0, 2.0, 0.0),
                 prim: 0,
                 emission,
-            },
+            }],
+            environment: None,
             camera: Camera {
                 eye: Point3::new(0.0, 0.0, 2.0),
                 forward: Vec3::new(0.0, 0.0, -1.0),
@@ -585,13 +586,14 @@ fn tracer_rejects_duplicate_ids_and_makes_exact_ties_order_independent() {
         let low_index = ids.iter().position(|id| *id == 2).unwrap();
         Scene {
             primitives,
-            light: RectLight {
+            lights: vec![RectLight {
                 corner: Point3::new(-1.0, -1.0, 0.0),
                 edge_u: Vec3::new(2.0, 0.0, 0.0),
                 edge_v: Vec3::new(0.0, 2.0, 0.0),
                 prim: low_index,
                 emission: low_emission,
-            },
+            }],
+            environment: None,
             camera: Camera {
                 eye: Point3::new(0.0, 0.0, 2.0),
                 forward: Vec3::new(0.0, 0.0, -1.0),

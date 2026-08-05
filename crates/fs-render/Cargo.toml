@@ -12,6 +12,7 @@ layer = "L5"
 
 [dependencies]
 fs-ad = { path = "../fs-ad", optional = true }
+fs-alloc = { path = "../fs-alloc", optional = true }
 fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-evidence = { path = "../fs-evidence", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
@@ -44,7 +45,7 @@ volumes = ["dep:fs-rand"]
 differentiable = ["chart-backends", "dep:fs-ad"]
 # [F]-gated per the Ambition-Tag rule (bead 872c): the spectral path
 # tracer v1 — hero-wavelength MIS over the chart backends, EXR out.
-tracer = ["chart-backends", "dep:fs-rand", "dep:fs-img"]
+tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img"]
 
 [[test]]
 name = "volumes_battery"
@@ -56,6 +57,22 @@ required-features = ["tracer"]
 
 [[test]]
 name = "dielectric_battery"
+required-features = ["tracer"]
+
+[[test]]
+name = "lighting_battery"
+required-features = ["tracer"]
+
+[[test]]
+name = "tile_parallel_battery"
+required-features = ["tracer"]
+
+[[test]]
+name = "adaptive_battery"
+required-features = ["tracer"]
+
+[[test]]
+name = "checkpoint_battery"
 required-features = ["tracer"]
 
 [[test]]
