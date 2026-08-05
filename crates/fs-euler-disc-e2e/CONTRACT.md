@@ -912,6 +912,17 @@ midpoint diagnostic from the first accepted subinterval. Duration-mean normal
 load instead comes from the contact-channel mean force projected onto base
 `+z`. Available numerical zero is never treated as missing.
 
+Each audio interval also declares its exact visualization endpoint coverage.
+If the first retained sample owns a positive-duration interval, only its closing
+visual state exists; that interval is retained as endpoint-only preroll and is
+emitted alone by coarsening. It is excluded from the exposed common positive-
+duration audio/visual horizon. Later intervals are fully bracketed by adjacent
+retained visualization points. Consumers must not reconstruct preroll motion
+from `metadata.initial_state`, because that value describes the original run
+configuration and is not necessarily the start state of a resumed segment.
+Exact preroll animation requires a future source schema that retains the
+segment-start rigid, base, branch, and contact state.
+
 Opening and reimpact records retain their exact source interval, class, time,
 and localization bracket. Their excitation measure is explicitly `TimingOnly`:
 the trajectory contains neither an event-specific impulse nor a resolved force

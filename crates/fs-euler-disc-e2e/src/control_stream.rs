@@ -536,6 +536,14 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         let mut cursor = 0;
         while cursor < self.audio.len() {
             cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+            if !self.audio[cursor]
+                .visual_coverage
+                .is_fully_bracketed()
+            {
+                bins.push(coarsen_group(&self.audio[cursor..=cursor], false, cx)?);
+                cursor += 1;
+                continue;
+            }
             if !self.audio[cursor].events.is_empty() {
                 bins.push(coarsen_group(&self.audio[cursor..=cursor], true, cx)?);
                 cursor += 1;

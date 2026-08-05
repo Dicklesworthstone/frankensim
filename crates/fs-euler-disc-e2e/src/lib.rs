@@ -34,11 +34,11 @@ pub mod tangential_contact;
 pub mod timeline_resampling;
 
 pub use control_stream::{
-    AudioControlFilter, AudioControlInterval, AvailableChannelControl, ChannelControl,
-    ChannelControlSet, ChannelWorkIntegralChecks, CoarsenedAudioBin, CoarsenedAudioControls,
-    ContactEventMeasure, ContactFrameCoordinates, ControlContactEvent, ControlStreamError,
-    EULER_CONTROL_STREAM_SCHEMA_VERSION, EulerControlStream, VisualizationControlPoint,
-    WorkIntegralCheck,
+    AudioControlFilter, AudioControlInterval, AudioVisualCoverage, AudioVisualHorizon,
+    AvailableChannelControl, ChannelControl, ChannelControlSet, ChannelWorkIntegralChecks,
+    CoarsenedAudioBin, CoarsenedAudioControls, ContactEventMeasure, ContactFrameCoordinates,
+    ControlContactEvent, ControlStreamError, EULER_CONTROL_STREAM_SCHEMA_VERSION,
+    EulerControlStream, VisualizationControlPoint, WorkIntegralCheck,
 };
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
