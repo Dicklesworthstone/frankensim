@@ -778,7 +778,8 @@ fn render_shard_impl(
 ///
 /// Exact duplicates are ignored. A different valid result for one shard ID is
 /// a conflict. Submitted order is nonsemantic: arithmetic follows ascending
-/// tile ranges and, within each tile range, ascending sample ranges.
+/// sample ranges and then tile ranges, preserving the per-pixel sample-block
+/// order even for non-Cartesian exact rectangle partitions.
 pub fn merge_uniform_shards(
     expected_specs: &[UniformRenderShardSpec],
     results: &[UniformRenderShardResult],
@@ -801,11 +802,9 @@ pub fn merge_uniform_shards(
     }
     let expected_count = u64::try_from(expected_specs.len())
         .map_err(|_| RenderShardError::ArithmeticOverflow("expected shard count"))?;
-    let minimum_input = expected_count
-        .checked_mul(encoded_result_bytes(1)?)
-        .ok_or(RenderShardError::ArithmeticOverflow(
-            "minimum aggregate result bytes",
-        ))?;
+    let minimum_input = expected_count.checked_mul(encoded_result_bytes(1)?).ok_or(
+        RenderShardError::ArithmeticOverflow("minimum aggregate result bytes"),
+    )?;
     if minimum_input > limits.max_input_bytes {
         return Err(RenderShardError::AggregateInputLimit {
             limit: limits.max_input_bytes,
@@ -924,10 +923,7 @@ fn validate_expected_specs(
     }
     events.sort_unstable();
     if events.first().map(|event| event.0) != Some(0) {
-        return Err(RenderShardError::CoverageGap {
-            tile: 0,
-            sample: 0,
-        });
+        return Err(RenderShardError::CoverageGap { tile: 0, sample: 0 });
     }
 
     let mut active: BTreeMap<(u32, u32), i64> = BTreeMap::new();
