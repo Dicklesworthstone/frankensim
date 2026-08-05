@@ -276,6 +276,12 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
         RenderTrajectoryError::InvalidIntervalStart(1)
     );
 
+    let overlong = sample(0.02, RenderSampleDisposition::HorizonCensored);
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![overlong]).unwrap_err(),
+        RenderTrajectoryError::IntervalExceedsDeclaredTimestep(0)
+    );
+
     let mut point_with_interval_data = sample(0.01, RenderSampleDisposition::HorizonCensored);
     point_with_interval_data.interval_start_time_s = point_with_interval_data.time_s;
     point_with_interval_data.channels.gravity.work_j = 1.0;
@@ -297,6 +303,40 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
     assert_eq!(
         RenderTrajectory::try_new(metadata(), vec![negative_mean_normal]).unwrap_err(),
         RenderTrajectoryError::NegativeNormalForce(0)
+    );
+
+    let mut inactive_closed_without_root =
+        sample(0.01, RenderSampleDisposition::HorizonCensored);
+    inactive_closed_without_root.contact_branch = RenderContactBranch::Closed;
+    inactive_closed_without_root.signed_gap_m = 0.0;
+    inactive_closed_without_root.contact_geometry = Some(RenderContactGeometry {
+        point_world_m: Vec3::ZERO,
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        support_feature: RenderSupportFeature::CylinderRim,
+    });
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![inactive_closed_without_root]).unwrap_err(),
+        RenderTrajectoryError::InactiveContactHasIntervalData(0)
+    );
+
+    let mut inactive_interior_reimpact =
+        sample(0.01, RenderSampleDisposition::HorizonCensored);
+    inactive_interior_reimpact.contact_branch = RenderContactBranch::Closed;
+    inactive_interior_reimpact.signed_gap_m = 0.0;
+    inactive_interior_reimpact.contact_geometry = Some(RenderContactGeometry {
+        point_world_m: Vec3::ZERO,
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        support_feature: RenderSupportFeature::CylinderRim,
+    });
+    inactive_interior_reimpact.contact_transitions = vec![RenderContactTransition {
+        kind: ContactTransitionKind::Reimpact,
+        time_s: 0.005,
+        bracket_start_s: 0.004,
+        bracket_end_s: 0.006,
+    }];
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![inactive_interior_reimpact]).unwrap_err(),
+        RenderTrajectoryError::InactiveContactHasIntervalData(0)
     );
 
     let half_angle = 0.05_f64;
