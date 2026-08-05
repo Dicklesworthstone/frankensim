@@ -1211,6 +1211,7 @@ dependencies = [
  "fs-govern",
  "fs-img",
  "fs-ir",
+ "fs-ledger",
  "fs-mbd",
  "fs-render",
  "fs-rep-frep",

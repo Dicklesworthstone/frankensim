@@ -474,13 +474,18 @@ kernel, memory mapping, platform-specific dispatch, or unchecked deserializer.
 
 ## Feature flags
 
-There are no feature flags. The v1 scientific contract is a solid structural
-spine, and the committed runner is a bounded numerical/software slice rather
-than default-on experimental physics. Its profile contact, flexible-base, and
-exterior records remain one-way bounded operators. Closed fluid/solid/contact
-coupling, rarefied-gas or fluid-film claims, calibration, and inverse-model
-capabilities remain out of scope and require their owning contracts and
-evidence.
+`scientific-contract` is enabled by default and gates the `fs-ir`-backed
+contract and protocol surfaces. `cinematic-render` is an opt-in [F] feature
+that enables the `fs-render/tracer` dependency, animated scene bridge, and
+focused render E2E without promoting the frontier tracer into the default
+scientific-contract path. `render-checkpoint-ledger` implies
+`cinematic-render` and adds the optional L6 `fs-ledger` persistence adapter;
+it remains absent from the default graph. The committed runner remains a bounded
+numerical/software slice rather than default-on experimental physics. Its
+profile contact, flexible-base, and exterior records remain one-way bounded
+operators. Closed fluid/solid/contact coupling, rarefied-gas or fluid-film
+claims, calibration, and inverse-model capabilities remain out of scope and
+require their owning contracts and evidence.
 
 ## Conformance tests
 
@@ -1119,11 +1124,22 @@ plate follows the reduced base's local `+z` displacement and velocity composed
 with its nominal rigid frame; the housing remains attached to the nominal base
 frame. Plate and housing dimensions are declared visual inputs and remain
 representative unless separately bound to measured apparatus geometry. The
-current frontier tracer provides opaque Lambertian and GGX surfaces plus one
-rectangular area light, so the reference plate is explicitly an opaque polished
-surrogate rather than dielectric glass. True glass transmission, conductor
-optics, layered engraving/brushing, environment lighting, and final studio look
-development remain downstream capabilities.
+reference plate is a closed, outward-wound box rendered as homogeneous spectral
+dielectric glass. Its Cauchy dispersion, Beer-Lambert absorption, polished-GGX
+boundary, and explicit `RepresentativeCrownV1` provenance are bound into the
+scene identity. The preset is a look-development starting point, not measured
+stock or experimental calibration data. Tracer paths preserve raw boundary
+sidedness, apply absorption over physical in-medium segment length, and enforce
+strict path-local LIFO entry/exit semantics. Encountered reversed winding,
+non-nested overlap, or escape from a declared closed medium refuses rather than
+silently choosing an index of refraction. This local runtime check is not a
+global watertightness, orientation, or non-overlap certificate for the mesh.
+Conductor optics, layered engraving/brushing, environment lighting, measured
+material fitting, and final studio look development remain downstream
+capabilities. Difficult focused caustics can converge slowly in the current
+unidirectional tracer; it has no bidirectional or manifold-light-transport
+claim, and straight shadow rays do not pretend to refract through intervening
+glass.
 
 Frame requests resolve their shutter and contact/event policy before tracing.
 A zero-width request renders one exact time. A positive exposure crossing a
@@ -1137,6 +1153,70 @@ horizon are irrelevant; source times and in-horizon camera keyframes must meet
 the declared near/far depth admission. Those depths are validation requirements
 over scene bounds, not tracer clipping planes.
 
+The serial segment/frame methods remain the reference path.
+`render_segment_with_execution` and `render_frame_with_execution` expose the
+same admitted cinematic shutter through an explicit tile shape, worker count,
+operation-memory ceiling, and logical run identity. They return the renderer's
+tile, executor, and memory-admission report and preserve `RenderExecutionError`
+as a structured `EulerSceneError` variant rather than flattening it into a
+generic scene refusal. For animation batches,
+`render_segment_with_parked_scope` and `render_frame_with_parked_scope` accept
+the callback-scoped crew from `RenderWorkerPool::with_parked_crew_local`, so
+successive jobs reuse one structurally joined worker crew. Each parked job
+retains its own tile shape, memory ceiling, and logical run identity; its worker
+count, scheduling weights, and execution mode must match the parked crew.
+`begin_segment_render` and `begin_frame_render` bind the exact Euler scene,
+camera exposure, settings, layout, execution mode, compute budget, and run
+identity into an opaque single-film `PendingRender`; cancellation returns a
+resumable suspension with row-prefix progress but never exposes partially
+accumulated pixels.
+The corresponding `render_*_adaptive_with_execution`,
+`render_*_adaptive_with_parked_scope`, and `begin_*_adaptive_render` methods
+bind the same cinematic scene and shutter to fs-render's versioned raw-sample
+adaptive policy. Their returned `AdaptiveFilm` retains raw sums, Welford
+moments, sample counts, and terminal decisions; their opaque pending jobs retain
+only complete tile-row prefixes across in-process cancellation. The dispersion
+proxy remains a scene/profile-specific render heuristic, not a statement about
+Euler mechanics, physical fidelity, perceptual error, or a universal 4K preset.
+Event-delimited multi-film composition remains explicit in every execution
+mode.
+
+The separate opt-in `render-checkpoint-ledger` feature connects those opaque
+pending jobs to `fs-ledger` without changing their rendering semantics. A v1
+binding names the exact source trajectory artifact, the complete admitted
+scene-builder configuration, the resulting beauty scene, and a canonical
+event-delimited frame identity. That frame identity covers cut ownership,
+segment index, resolved shutter endpoints/convention/distribution, and duration
+weight. The render-job identity additionally covers fixed-spp versus adaptive
+kind, every `Settings` field, every `RenderExecutionConfig` field including
+raw scheduling weights, and every adaptive-policy field plus its estimator
+semantics version. Producer build and claim identities are explicit and
+nonzero. Generation lineage follows fs-render's exact invariant: generation
+zero is the root and has no predecessor, while every later generation names
+the exact nonzero renderer-content identity of its predecessor. The general
+constructor validates caller-declared lineage structurally; the preferred
+successor constructor derives both fields from a checkpoint this adapter
+successfully stored. This does not independently prove scheduler ownership or
+claim continuity. A mismatch
+refuses through fs-render's binding check rather than
+approximately reinterpreting progress.
+
+Checkpoint codec v1 bytes stream directly through
+`Ledger::artifact_writer/write/finish`. Dropping or failing that writer rolls
+back its transaction, so a prior immutable content-addressed checkpoint
+remains readable. Restore first uses `get_artifact_bounded` with the caller's
+explicit byte ceiling and then invokes fs-render's strict v1 decoder against
+the expected binding. Encode and decode receive the caller's `Cx` and poll at
+bounded codec chunks/tiles; cancellation refuses before publication or restored
+state escapes. The raw BLAKE3 ledger artifact key covers the complete sealed
+bytes, while fs-render's separately domain-separated receipt digest covers the
+canonical body named by the seal; both identities are retained and are not
+falsely equated. Their byte counts must agree. Reopening a ledger does not
+weaken those checks. This adapter does
+not invent a universal checkpoint-size constant or assert that any fixed
+memory limit admits 4K uniform or adaptive state; callers must budget each job
+and fs-render remains the concrete memory/codec admission authority.
+
 Focused G0/G3/E2E coverage builds the scene from a real 1 mm circular-filleted
 disc, checks deterministic scene and mesh identities, COM/base transforms,
 fillet chord retention, stable primitive binding, authority preservation,
@@ -1144,10 +1224,33 @@ restyling identity separation, and irrelevant camera-history isolation. It
 also exercises asset/unit/angular/discontinuity/cancellation refusals and
 explicit pre/post-event segment renders. A tiny real spectral-path-traced frame
 must contain finite illuminated spatial variation, reproduce byte-exactly on
-the same cinematic path, agree tightly with the materialized static seam, and
-round-trip through the in-house floating-point EXR codec. This evidence proves
-the software composition path, not the physical fidelity or 4K quality of a
-finished Euler-disc film.
+the same cinematic path, agree bit-for-bit between the serial and explicit
+tile-parallel cinematic paths, and render two different frame jobs bit-for-bit
+against their serial oracles while reusing one parked crew and preserving each
+declared run identity. The adaptive cinematic surface must likewise produce
+bit-identical raw sums, moments, counts, and decisions through one-shot,
+parked-crew, and opaque-pending frame entry points while preserving the
+declared adaptive run identity. Separately, the uniform cinematic frame must
+agree tightly with the materialized static seam and round-trip through the
+in-house floating-point EXR codec; adaptive-film EXR serialization is not
+claimed here. Changing only
+the plate phase-index magnitude from representative crown glass to a
+same-absorption, same-dispersion-class lower-index control must produce a
+finite, quantitative multi-pixel radiance difference. Keeping both materials
+dispersive prevents packet-collapse policy from masquerading as optical
+activity in this comparison.
+This evidence proves the software composition path, not the physical fidelity
+or 4K quality of a finished Euler-disc film.
+
+The ledger-checkpoint G3/E2E additionally advances every uniform and adaptive
+tile to a nonzero but strictly partial row-atomic safe point, persists that
+state, and requires an exact final-buffer match after closing and reopening the
+ledger and resuming. It also requires refusal after any binding or job identity
+mutation, cancellation refusal without artifact publication or restored state,
+and preservation of an earlier checkpoint when a later streaming writer fails
+before `finish`. These are replay and transactional storage claims only; they
+do not establish render convergence, 4K capacity, or scientific authority
+beyond the source trajectory.
 
 ## No-claim boundaries
 

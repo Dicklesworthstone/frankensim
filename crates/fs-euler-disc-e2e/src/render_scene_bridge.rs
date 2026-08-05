@@ -29,8 +29,11 @@ use fs_render::motion_bounds::{
 };
 use fs_render::spectral::lift_rgb;
 use fs_render::tracer::{
-    Camera, DirectStrategy, Film, Material, Primitive, RectLight, Sampler, Scene, Settings, Shape,
-    TracerError, film_to_exr, render, render_cinematic,
+    AdaptiveRenderOutput, AdaptiveSamplingConfig, Camera, DirectStrategy, Film, Material,
+    ParkedRenderScope, PendingAdaptiveRender, PendingRender, Primitive, RectLight,
+    RenderExecutionConfig, RenderExecutionError, RenderExecutionOutput, Sampler, Scene, Settings,
+    Shape, TracerError, film_to_exr, render, render_cinematic,
+    render_cinematic_adaptive_with_execution, render_cinematic_with_execution,
 };
 use fs_rep_frep::{MeridianPoint, MeridianSegment};
 
@@ -53,6 +56,9 @@ pub const EULER_PREVIEW_MESH_IDENTITY_DOMAIN: &str =
 /// Domain for the complete trajectory/configuration scene identity.
 pub const EULER_RENDER_SCENE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.euler-render-scene.v1";
+/// Domain for the complete admitted scene-builder configuration.
+pub const EULER_RENDER_CONFIGURATION_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.euler-render-configuration.v1";
 
 /// Hard topology ceilings for the one-time render-only lathe conversion.
 pub const MAX_EULER_PREVIEW_VERTICES: usize = 1_000_000;
@@ -76,7 +82,7 @@ pub const EULER_HOUSING_OBJECT_ID: u64 = 0x4555_4c45_525f_0003;
 pub const EULER_DEBUG_MARKER_OBJECT_ID: u64 = 0x4555_4c45_525f_00ff;
 
 /// Binding no-claim for the current scene bridge.
-pub const EULER_RENDER_SCENE_NO_CLAIM: &str = "scene composition and chordal preview geometry do not validate Euler mechanics, physical materials, lighting, or a real apparatus";
+pub const EULER_RENDER_SCENE_NO_CLAIM: &str = "scene composition and chordal preview geometry do not validate Euler mechanics, measured material parameters, calibrated lighting, or a real apparatus";
 
 /// Declared length convention of scene configuration values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -327,7 +333,7 @@ pub struct EulerScenePrimitiveIndices {
     pub base_plate: usize,
     /// Static housing primitive.
     pub housing: usize,
-    /// Emissive softbox primitive referenced by `Scene.light`.
+    /// Emissive softbox primitive referenced by the sole v1 `Scene::lights` entry.
     pub light: usize,
 }
 
@@ -385,6 +391,18 @@ pub struct EulerPreparedFrame {
 }
 
 impl EulerPreparedFrame {
+    /// Beauty scene that resolved this event-aware frame.
+    #[must_use]
+    pub const fn scene_identity(&self) -> ContentHash {
+        self.scene_identity
+    }
+
+    /// Camera-shot ownership used for an exact cut-boundary exposure.
+    #[must_use]
+    pub const fn cut_side(&self) -> CutSide {
+        self.cut_side
+    }
+
     /// Ordered explicit shutter segments.
     #[must_use]
     pub fn segments(&self) -> &[EulerPreparedFrameSegment] {
@@ -414,6 +432,7 @@ pub struct EulerCinematicScene<'artifact> {
     artifact: &'artifact EulerRenderTrajectoryArtifact,
     scene: Scene,
     camera: AnimatedCamera,
+    source_configuration_identity: ContentHash,
     scene_identity: ContentHash,
     preview_mesh: EulerPreviewMeshReceipt,
     primitive_indices: EulerScenePrimitiveIndices,
@@ -512,6 +531,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             config.camera_far_m,
             cx,
         )?;
+        let source_configuration_identity = configuration_identity(&config);
         let scene_identity = scene_identity(
             artifact,
             identities,
@@ -564,13 +584,6 @@ impl<'artifact> EulerCinematicScene<'artifact> {
         let first_time = artifact.trajectory().samples()[0].input().time_s;
         let first_camera = config.camera.evaluate(cx, first_time, CutSide::After)?;
         let legacy_camera = legacy_camera(&first_camera);
-        let light = RectLight {
-            corner: config.light.corner_world_m,
-            edge_u: config.light.edge_u_world_m,
-            edge_v: config.light.edge_v_world_m,
-            prim: light_index,
-            emission: light_emission,
-        };
         let primitive_indices = EulerScenePrimitiveIndices {
             disc: 0,
             base_plate: 1,
@@ -583,10 +596,18 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             artifact,
             scene: Scene {
                 primitives,
-                light,
+                lights: vec![RectLight {
+                    corner: config.light.corner_world_m,
+                    edge_u: config.light.edge_u_world_m,
+                    edge_v: config.light.edge_v_world_m,
+                    prim: light_index,
+                    emission: light_emission,
+                }],
+                environment: None,
                 camera: legacy_camera,
             },
             camera: config.camera,
+            source_configuration_identity,
             scene_identity,
             preview_mesh,
             primitive_indices,
@@ -599,6 +620,16 @@ impl<'artifact> EulerCinematicScene<'artifact> {
     #[must_use]
     pub const fn scene_identity(&self) -> ContentHash {
         self.scene_identity
+    }
+
+    /// Complete identity of the admitted scene-builder configuration.
+    ///
+    /// Unlike [`Self::scene_identity`], this does not include the source
+    /// trajectory or resolved specimen. It is the configuration component of
+    /// durable renderer-checkpoint provenance.
+    #[must_use]
+    pub const fn source_configuration_identity(&self) -> ContentHash {
+        self.source_configuration_identity
     }
 
     /// Source trajectory artifact identity.
@@ -715,18 +746,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
         settings: &Settings,
         cx: &Cx<'_>,
     ) -> Result<Film, EulerSceneError> {
-        if prepared.scene_identity != self.scene_identity {
-            return Err(EulerSceneError::PreparedFrameMismatch);
-        }
-        let segment = prepared.segments.get(segment_index).ok_or(
-            EulerSceneError::InvalidPreparedSegment {
-                index: segment_index,
-                segment_count: prepared.segments.len(),
-            },
-        )?;
-        if segment.scene_identity != self.scene_identity {
-            return Err(EulerSceneError::PreparedFrameMismatch);
-        }
+        let segment = self.prepared_segment(prepared, segment_index)?;
         Ok(render_cinematic(
             &self.scene,
             &self.camera,
@@ -734,6 +754,153 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             cx,
             settings,
             segment.shutter,
+        )?)
+    }
+
+    /// Tile-parallel render of one explicit prepared segment under a caller-
+    /// supplied, replayable execution policy. The returned output retains the
+    /// executor, memory-admission, and tile-layout report.
+    pub fn render_segment_with_execution(
+        &self,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+        settings: &Settings,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<RenderExecutionOutput, EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok(render_cinematic_with_execution(
+            &self.scene,
+            &self.camera,
+            prepared.cut_side,
+            cx,
+            settings,
+            segment.shutter,
+            execution,
+        )?)
+    }
+
+    /// Render one explicit prepared segment using an already parked worker
+    /// crew. Reusing the scope across segments or frames avoids creating and
+    /// joining a fresh crew for every animation job while retaining each
+    /// job's explicit execution policy and run identity.
+    pub fn render_segment_with_parked_scope(
+        &self,
+        parked: &ParkedRenderScope<'_>,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+        settings: &Settings,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<RenderExecutionOutput, EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok(parked.render_cinematic(
+            &self.scene,
+            &self.camera,
+            prepared.cut_side,
+            cx,
+            settings,
+            segment.shutter,
+            execution,
+        )?)
+    }
+
+    /// Deterministic adaptive render of one explicit prepared segment. The
+    /// returned film retains raw sums, estimator moments, sample counts, and
+    /// terminal decisions; it does not convert the error proxy into a physical
+    /// or perceptual quality claim.
+    pub fn render_segment_adaptive_with_execution(
+        &self,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+        settings: &Settings,
+        adaptive: AdaptiveSamplingConfig,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<AdaptiveRenderOutput, EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok(render_cinematic_adaptive_with_execution(
+            &self.scene,
+            &self.camera,
+            prepared.cut_side,
+            cx,
+            settings,
+            adaptive,
+            segment.shutter,
+            execution,
+        )?)
+    }
+
+    /// Adaptive render of one explicit prepared segment on an already parked
+    /// animation crew.
+    pub fn render_segment_adaptive_with_parked_scope(
+        &self,
+        parked: &ParkedRenderScope<'_>,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+        settings: &Settings,
+        adaptive: AdaptiveSamplingConfig,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<AdaptiveRenderOutput, EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok(parked.render_cinematic_adaptive(
+            &self.scene,
+            &self.camera,
+            prepared.cut_side,
+            cx,
+            settings,
+            adaptive,
+            segment.shutter,
+            execution,
+        )?)
+    }
+
+    /// Begin an opaque single-film segment job whose committed row prefixes
+    /// survive cancellation without exposing a partial film. Resume it with
+    /// `PendingRender::resume_on_parked` inside an animation crew scope, or
+    /// with `PendingRender::resume` on a one-shot lane.
+    pub fn begin_segment_render(
+        &self,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+        settings: Settings,
+        execution: RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<PendingRender<'_>, EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok(PendingRender::begin_cinematic(
+            &self.scene,
+            &self.camera,
+            prepared.cut_side,
+            cx,
+            settings,
+            segment.shutter,
+            execution,
+        )?)
+    }
+
+    /// Begin an opaque adaptive segment render whose complete-row prefixes and
+    /// statistical AOVs survive in-process cancellation.
+    pub fn begin_segment_adaptive_render(
+        &self,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+        settings: Settings,
+        adaptive: AdaptiveSamplingConfig,
+        execution: RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<PendingAdaptiveRender<'_>, EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok(PendingAdaptiveRender::begin_cinematic(
+            &self.scene,
+            &self.camera,
+            prepared.cut_side,
+            cx,
+            settings,
+            adaptive,
+            segment.shutter,
+            execution,
         )?)
     }
 
@@ -751,6 +918,144 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             });
         }
         self.render_segment(&prepared, 0, settings, cx)
+    }
+
+    /// Tile-parallel convenience render for a frame requiring no event
+    /// subdivision. Event-delimited multi-film composition remains explicit.
+    pub fn render_frame_with_execution(
+        &self,
+        request: EulerFrameRequest,
+        settings: &Settings,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<RenderExecutionOutput, EulerSceneError> {
+        let prepared = self.prepare_frame(request)?;
+        if prepared.segments.len() != 1 {
+            return Err(EulerSceneError::ExposureNeedsComposition {
+                segment_count: prepared.segments.len(),
+            });
+        }
+        self.render_segment_with_execution(&prepared, 0, settings, execution, cx)
+    }
+
+    /// Parked-crew convenience render for a frame requiring no event
+    /// subdivision. Call this repeatedly inside
+    /// [`fs_render::tracer::RenderWorkerPool::with_parked_crew_local`] to reuse
+    /// one worker crew across an animation batch. Event-delimited multi-film
+    /// composition remains explicit.
+    pub fn render_frame_with_parked_scope(
+        &self,
+        parked: &ParkedRenderScope<'_>,
+        request: EulerFrameRequest,
+        settings: &Settings,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<RenderExecutionOutput, EulerSceneError> {
+        let prepared = self.prepare_frame(request)?;
+        if prepared.segments.len() != 1 {
+            return Err(EulerSceneError::ExposureNeedsComposition {
+                segment_count: prepared.segments.len(),
+            });
+        }
+        self.render_segment_with_parked_scope(parked, &prepared, 0, settings, execution, cx)
+    }
+
+    /// Deterministic adaptive convenience render for a frame requiring no
+    /// event subdivision.
+    pub fn render_frame_adaptive_with_execution(
+        &self,
+        request: EulerFrameRequest,
+        settings: &Settings,
+        adaptive: AdaptiveSamplingConfig,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<AdaptiveRenderOutput, EulerSceneError> {
+        let prepared = self.prepare_frame(request)?;
+        if prepared.segments.len() != 1 {
+            return Err(EulerSceneError::ExposureNeedsComposition {
+                segment_count: prepared.segments.len(),
+            });
+        }
+        self.render_segment_adaptive_with_execution(&prepared, 0, settings, adaptive, execution, cx)
+    }
+
+    /// Parked-crew adaptive convenience render for a frame requiring no event
+    /// subdivision.
+    pub fn render_frame_adaptive_with_parked_scope(
+        &self,
+        parked: &ParkedRenderScope<'_>,
+        request: EulerFrameRequest,
+        settings: &Settings,
+        adaptive: AdaptiveSamplingConfig,
+        execution: &RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<AdaptiveRenderOutput, EulerSceneError> {
+        let prepared = self.prepare_frame(request)?;
+        if prepared.segments.len() != 1 {
+            return Err(EulerSceneError::ExposureNeedsComposition {
+                segment_count: prepared.segments.len(),
+            });
+        }
+        self.render_segment_adaptive_with_parked_scope(
+            parked, &prepared, 0, settings, adaptive, execution, cx,
+        )
+    }
+
+    /// Begin an opaque resumable job for a frame requiring no event
+    /// subdivision. Event-delimited multi-film composition remains explicit.
+    pub fn begin_frame_render(
+        &self,
+        request: EulerFrameRequest,
+        settings: Settings,
+        execution: RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<PendingRender<'_>, EulerSceneError> {
+        let prepared = self.prepare_frame(request)?;
+        if prepared.segments.len() != 1 {
+            return Err(EulerSceneError::ExposureNeedsComposition {
+                segment_count: prepared.segments.len(),
+            });
+        }
+        self.begin_segment_render(&prepared, 0, settings, execution, cx)
+    }
+
+    /// Begin an opaque adaptive job for a frame requiring no event
+    /// subdivision.
+    pub fn begin_frame_adaptive_render(
+        &self,
+        request: EulerFrameRequest,
+        settings: Settings,
+        adaptive: AdaptiveSamplingConfig,
+        execution: RenderExecutionConfig,
+        cx: &Cx<'_>,
+    ) -> Result<PendingAdaptiveRender<'_>, EulerSceneError> {
+        let prepared = self.prepare_frame(request)?;
+        if prepared.segments.len() != 1 {
+            return Err(EulerSceneError::ExposureNeedsComposition {
+                segment_count: prepared.segments.len(),
+            });
+        }
+        self.begin_segment_adaptive_render(&prepared, 0, settings, adaptive, execution, cx)
+    }
+
+    fn prepared_segment<'prepared>(
+        &self,
+        prepared: &'prepared EulerPreparedFrame,
+        segment_index: usize,
+    ) -> Result<&'prepared EulerPreparedFrameSegment, EulerSceneError> {
+        if prepared.scene_identity != self.scene_identity {
+            return Err(EulerSceneError::PreparedFrameMismatch);
+        }
+        let segment = prepared.segments.get(segment_index).ok_or(
+            EulerSceneError::InvalidPreparedSegment {
+                index: segment_index,
+                segment_count: prepared.segments.len(),
+            },
+        )?;
+        if segment.scene_identity != self.scene_identity {
+            return Err(EulerSceneError::PreparedFrameMismatch);
+        }
+        Ok(segment)
     }
 
     /// Render and encode one non-subdivided frame as linear floating-point EXR.
@@ -796,13 +1101,14 @@ impl<'artifact> EulerCinematicScene<'artifact> {
         let physical = self.camera.evaluate(cx, time_s, cut_side)?;
         Ok(Scene {
             primitives,
-            light: RectLight {
-                corner: self.scene.light.corner,
-                edge_u: self.scene.light.edge_u,
-                edge_v: self.scene.light.edge_v,
-                prim: self.scene.light.prim,
-                emission: self.scene.light.emission,
-            },
+            lights: vec![RectLight {
+                corner: self.scene.lights[0].corner,
+                edge_u: self.scene.lights[0].edge_u,
+                edge_v: self.scene.lights[0].edge_v,
+                prim: self.scene.lights[0].prim,
+                emission: self.scene.lights[0].emission,
+            }],
+            environment: None,
             camera: legacy_camera(&physical),
         })
     }
@@ -938,6 +1244,9 @@ pub enum EulerSceneError {
     Motion(RenderMotionBridgeError),
     /// Spectral tracer refused.
     Tracer(TracerError),
+    /// Explicit tile-render execution, memory admission, or tracer execution
+    /// refused while retaining its structured renderer diagnostic.
+    RenderExecution(RenderExecutionError),
     /// Conservative animated-instance bounds refused.
     MotionBounds(MotionBoundsError),
 }
@@ -977,6 +1286,12 @@ impl From<RenderMotionBridgeError> for EulerSceneError {
 impl From<TracerError> for EulerSceneError {
     fn from(error: TracerError) -> Self {
         Self::Tracer(error)
+    }
+}
+
+impl From<RenderExecutionError> for EulerSceneError {
+    fn from(error: RenderExecutionError) -> Self {
+        Self::RenderExecution(error)
     }
 }
 
@@ -1958,6 +2273,48 @@ fn scene_identity(
     hasher.finalize()
 }
 
+fn configuration_identity(config: &EulerSceneConfig) -> ContentHash {
+    let mut hasher = DomainHasher::new(EULER_RENDER_CONFIGURATION_IDENTITY_DOMAIN);
+    hasher.update(&EULER_RENDER_SCENE_BRIDGE_VERSION.to_le_bytes());
+    hasher.update(&[match config.length_unit {
+        EulerSceneLengthUnit::Metres => 0,
+        EulerSceneLengthUnit::Millimetres => 1,
+    }]);
+    hash_base_config(&mut hasher, config);
+    for id in [
+        config.object_ids.disc,
+        config.object_ids.base_plate,
+        config.object_ids.housing,
+        config.object_ids.debug_marker,
+    ] {
+        hasher.update(&id.to_le_bytes());
+    }
+    hash_material(&mut hasher, config.disc_material);
+    hash_material(&mut hasher, config.plate_material);
+    hash_material(&mut hasher, config.housing_material);
+    hash_light(&mut hasher, config.light);
+    hash_camera(&mut hasher, &config.camera);
+    hasher.update(&config.camera_near_m.to_bits().to_le_bytes());
+    hasher.update(&config.camera_far_m.to_bits().to_le_bytes());
+    hasher.update(&config.maximum_angular_step_rad.to_bits().to_le_bytes());
+    match config.debug_overlay {
+        EulerDebugOverlay::None => hasher.update(&[0]),
+        EulerDebugOverlay::ContactMarker {
+            sample_index,
+            radius_m,
+        } => {
+            hasher.update(&[1]);
+            hasher.update(
+                &u64::try_from(sample_index)
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            hasher.update(&radius_m.to_bits().to_le_bytes());
+        }
+    }
+    hasher.finalize()
+}
+
 fn hash_base_config(hasher: &mut DomainHasher, config: &EulerSceneConfig) {
     hasher.update(&config.tessellation.azimuthal_segments.to_le_bytes());
     hasher.update(&config.tessellation.arc_subdivisions_per_arc.to_le_bytes());
@@ -1977,6 +2334,8 @@ fn hash_base_config(hasher: &mut DomainHasher, config: &EulerSceneConfig) {
 fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
     match style {
         EulerMaterialStyle::Lambertian { linear_rgb } => {
+            // Preserve the v1 opaque-material byte order so existing scene
+            // identities do not change merely because dielectric tag 2 exists.
             hasher.update(&[0]);
             hash_linear_rgb(hasher, linear_rgb);
         }
@@ -2065,6 +2424,7 @@ fn hash_camera(hasher: &mut DomainHasher, camera: &AnimatedCamera) {
         for keyframe in shot.keyframes() {
             hasher.update(&keyframe.absolute_time_s().to_bits().to_le_bytes());
             let camera = keyframe.camera();
+            let projection = camera.projection();
             for value in [
                 camera.eye().x,
                 camera.eye().y,
@@ -2075,13 +2435,25 @@ fn hash_camera(hasher: &mut DomainHasher, camera: &AnimatedCamera) {
                 camera.up().x,
                 camera.up().y,
                 camera.up().z,
-                camera.projection().vertical_half_tan(),
+                projection.vertical_half_tan(),
                 camera.focus_distance_m(),
                 camera.aperture().radius_m(),
                 camera.exposure_metadata().sensitivity_iso(),
                 camera.exposure_metadata().compensation_ev(),
             ] {
                 hasher.update(&value.to_bits().to_le_bytes());
+            }
+            if let (Some(focal_length_m), Some(sensor_height_m)) =
+                (projection.focal_length_m(), projection.sensor_height_m())
+            {
+                hasher.update(&[0]);
+                hasher.update(&focal_length_m.to_bits().to_le_bytes());
+                hasher.update(&sensor_height_m.to_bits().to_le_bytes());
+            } else if let Some(vertical_fov_rad) = projection.vertical_fov_rad() {
+                hasher.update(&[1]);
+                hasher.update(&vertical_fov_rad.to_bits().to_le_bytes());
+            } else {
+                hasher.update(&[2]);
             }
             match camera.aperture().blades() {
                 Some(blades) => {

@@ -17,6 +17,10 @@ scientific-contract = ["dep:fs-ir"]
 # code, but enabling it must not silently promote fs-render's frontier tracer
 # into the default scientific-contract path.
 cinematic-render = ["fs-render/tracer"]
+# [F] Durable renderer checkpoints remain explicitly opt-in because they bind
+# the frontier tracer to the L6 Design Ledger. This feature implies the scene
+# bridge and keeps fs-ledger out of the default scientific-contract graph.
+render-checkpoint-ledger = ["cinematic-render", "dep:fs-ledger"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
@@ -28,6 +32,7 @@ fs-flux = { path = "../fs-flux" }
 fs-geom = { path = "../fs-geom" }
 fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }
+fs-ledger = { path = "../fs-ledger", optional = true }
 fs-mbd = { path = "../fs-mbd" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-render = { path = "../fs-render" }
@@ -42,6 +47,10 @@ fs-img = { path = "../fs-img" }
 [[test]]
 name = "render_scene_bridge"
 required-features = ["cinematic-render"]
+
+[[test]]
+name = "render_checkpoint"
+required-features = ["render-checkpoint-ledger"]
 
 [lints]
 workspace = true

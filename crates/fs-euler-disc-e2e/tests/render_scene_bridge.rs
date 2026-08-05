@@ -2,6 +2,8 @@
 
 #![cfg(feature = "cinematic-render")]
 
+use std::collections::BTreeMap;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind};
@@ -20,18 +22,20 @@ use fs_euler_disc_e2e::{
     RenderTrajectoryCodecBudget, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
     RenderUnitSystem, RenderWorldFrame,
 };
-use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, RunId, StreamKey};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_render::camera::{
     AnimatedCamera, Aperture, CameraKeyframe, CameraProjection, CameraShot, CutSide, PhysicalCamera,
 };
-use fs_render::dielectric::{
-    CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance,
-};
+use fs_render::charts::TriMesh;
+use fs_render::dielectric::{CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance};
 use fs_render::instances::SharedGeometry;
 use fs_render::motion::{ShutterConvention, ShutterDistribution};
-use fs_render::tracer::{Material, Shape};
+use fs_render::tracer::{
+    AdaptiveFilm, AdaptiveSamplingConfig, Film, Material, RenderExecutionConfig,
+    RenderExecutionError, RenderWorkerPool, Shape,
+};
 use fs_rep_frep::SquatDiscEdgeTreatment;
 
 const END_TIME_S: f64 = 0.02;
@@ -41,6 +45,163 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64, context: &str) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "{context}: actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
+    );
+}
+
+fn assert_film_bits_eq(actual: &Film, expected: &Film, context: &str) {
+    assert_eq!(
+        (
+            actual.width,
+            actual.height,
+            actual.spp_done,
+            actual.time_mode
+        ),
+        (
+            expected.width,
+            expected.height,
+            expected.spp_done,
+            expected.time_mode,
+        ),
+        "{context}: film metadata differed"
+    );
+    assert_eq!(actual.xyz.len(), expected.xyz.len(), "{context}");
+    for (pixel, (actual, expected)) in actual.xyz.iter().zip(&expected.xyz).enumerate() {
+        for channel in 0..3 {
+            assert_eq!(
+                actual[channel].to_bits(),
+                expected[channel].to_bits(),
+                "{context}: pixel={pixel} channel={channel} actual={:#018x} expected={:#018x}",
+                actual[channel].to_bits(),
+                expected[channel].to_bits(),
+            );
+        }
+    }
+}
+
+fn assert_adaptive_film_bits_eq(actual: &AdaptiveFilm, expected: &AdaptiveFilm, context: &str) {
+    assert_eq!(
+        (
+            actual.width(),
+            actual.height(),
+            actual.maximum_samples(),
+            actual.policy(),
+            actual.sampler(),
+            actual.stream_seed(),
+            actual.semantics_version(),
+            actual.time_mode(),
+        ),
+        (
+            expected.width(),
+            expected.height(),
+            expected.maximum_samples(),
+            expected.policy(),
+            expected.sampler(),
+            expected.stream_seed(),
+            expected.semantics_version(),
+            expected.time_mode(),
+        ),
+        "{context}: adaptive film identity differed"
+    );
+    assert_eq!(
+        actual.sample_counts(),
+        expected.sample_counts(),
+        "{context}"
+    );
+    assert_eq!(actual.decisions(), expected.decisions(), "{context}");
+    for pixel in 0..actual.xyz_sums().len() {
+        for (label, actual, expected) in [
+            ("sum", actual.xyz_sums()[pixel], expected.xyz_sums()[pixel]),
+            (
+                "mean",
+                actual.running_means_xyz()[pixel],
+                expected.running_means_xyz()[pixel],
+            ),
+            ("m2", actual.m2_xyz()[pixel], expected.m2_xyz()[pixel]),
+        ] {
+            for channel in 0..3 {
+                assert_eq!(
+                    actual[channel].to_bits(),
+                    expected[channel].to_bits(),
+                    "{context}: {label} pixel={pixel} channel={channel} actual={:#018x} expected={:#018x}",
+                    actual[channel].to_bits(),
+                    expected[channel].to_bits(),
+                );
+            }
+        }
+    }
+}
+
+fn assert_closed_outward_box(mesh: &TriMesh, expected_min_m: [f64; 3], expected_max_m: [f64; 3]) {
+    assert_eq!(
+        mesh.vertices.len(),
+        8,
+        "a box must have eight shared corners"
+    );
+    assert_eq!(mesh.triangles.len(), 12, "a box must have twelve triangles");
+
+    let mut actual_min_m = [f64::INFINITY; 3];
+    let mut actual_max_m = [f64::NEG_INFINITY; 3];
+    for vertex in &mesh.vertices {
+        assert!(vertex.iter().all(|coordinate| coordinate.is_finite()));
+        for axis in 0..3 {
+            actual_min_m[axis] = actual_min_m[axis].min(vertex[axis]);
+            actual_max_m[axis] = actual_max_m[axis].max(vertex[axis]);
+        }
+    }
+    for axis in 0..3 {
+        assert_eq!(actual_min_m[axis].to_bits(), expected_min_m[axis].to_bits());
+        assert_eq!(actual_max_m[axis].to_bits(), expected_max_m[axis].to_bits());
+    }
+
+    let center_m = [
+        0.5 * (expected_min_m[0] + expected_max_m[0]),
+        0.5 * (expected_min_m[1] + expected_max_m[1]),
+        0.5 * (expected_min_m[2] + expected_max_m[2]),
+    ];
+    let mut undirected_edge_incidence = BTreeMap::<(u32, u32), usize>::new();
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        for index in triangle {
+            assert!(
+                (*index as usize) < mesh.vertices.len(),
+                "triangle {triangle_index} has out-of-range vertex {index}"
+            );
+        }
+        for [from, to] in [
+            [triangle[0], triangle[1]],
+            [triangle[1], triangle[2]],
+            [triangle[2], triangle[0]],
+        ] {
+            let edge = if from < to { (from, to) } else { (to, from) };
+            *undirected_edge_incidence.entry(edge).or_default() += 1;
+        }
+
+        let a = mesh.vertices[triangle[0] as usize];
+        let b = mesh.vertices[triangle[1] as usize];
+        let c = mesh.vertices[triangle[2] as usize];
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let normal = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        let centroid_from_center = [
+            (a[0] + b[0] + c[0]) / 3.0 - center_m[0],
+            (a[1] + b[1] + c[1]) / 3.0 - center_m[1],
+            (a[2] + b[2] + c[2]) / 3.0 - center_m[2],
+        ];
+        let outward_dot = normal[0] * centroid_from_center[0]
+            + normal[1] * centroid_from_center[1]
+            + normal[2] * centroid_from_center[2];
+        assert!(
+            outward_dot > 0.0,
+            "triangle {triangle_index} is degenerate or not outward-wound: dot={outward_dot:.17e}"
+        );
+    }
+    assert_eq!(undirected_edge_incidence.len(), 18);
+    assert!(
+        undirected_edge_incidence.values().all(|count| *count == 2),
+        "every closed-box edge must have exactly two incident triangles: {undirected_edge_incidence:?}"
     );
 }
 
@@ -416,6 +577,16 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
         assert_eq!(indices.light, 3);
         assert_eq!(first.debug_layer_receipt(), None);
         assert_eq!(first.scene().primitives.len(), 4);
+        assert_eq!(
+            first.scene().lights.len(),
+            1,
+            "the v1 Euler cinematic rig must retain exactly one rectangular emitter"
+        );
+        assert_eq!(first.scene().lights[0].prim, indices.light);
+        assert!(
+            first.scene().environment.is_none(),
+            "the v1 Euler cinematic rig must not silently acquire an environment emitter"
+        );
         assert!(matches!(
             first.scene().primitives[indices.disc].material,
             Material::Ggx { alpha, .. } if alpha.to_bits() == 0.12_f64.to_bits()
@@ -432,6 +603,40 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
             Material::Ggx { alpha, .. } if alpha.to_bits() == 0.28_f64.to_bits()
         ));
         assert!(first.scene().primitives[indices.light].emission.is_some());
+
+        let Shape::AnimatedInstance(plate) = &first.scene().primitives[indices.base_plate].shape
+        else {
+            assert!(
+                matches!(
+                    &first.scene().primitives[indices.base_plate].shape,
+                    Shape::AnimatedInstance(_)
+                ),
+                "the dielectric base plate must remain an animated instance"
+            );
+            return;
+        };
+        assert_eq!(plate.object_id(), scene_config.object_ids.base_plate);
+        let SharedGeometry::Mesh(plate_mesh) = plate.geometry() else {
+            assert!(
+                matches!(plate.geometry(), SharedGeometry::Mesh(_)),
+                "the dielectric base plate must remain an explicit closed mesh"
+            );
+            return;
+        };
+        assert_closed_outward_box(
+            plate_mesh,
+            [
+                -0.5 * scene_config.base.plate_width_m,
+                -0.5 * scene_config.base.plate_depth_m,
+                -scene_config.base.plate_thickness_m,
+            ],
+            [
+                0.5 * scene_config.base.plate_width_m,
+                0.5 * scene_config.base.plate_depth_m,
+                0.0,
+            ],
+        );
+
         let Shape::AnimatedInstance(disc) = &first.scene().primitives[indices.disc].shape else {
             assert!(
                 matches!(
@@ -761,6 +966,156 @@ fn e2e_zero_width_frame_traces_real_pixels_and_round_trips_exr_deterministically
         let cinematic = scene
             .render_frame(request, &settings, cx)
             .expect("zero-width cinematic render");
+        let execution =
+            RenderExecutionConfig::try_new(5, 3, 4, 64 << 20, RunId(0x4555_4c45_525f_5041))
+                .expect("valid Euler cinematic tile policy");
+        let parallel = scene
+            .render_frame_with_execution(request, &settings, &execution, cx)
+            .expect("tile-parallel zero-width cinematic render");
+        assert_film_bits_eq(
+            &parallel.film,
+            &cinematic,
+            "Euler cinematic parallel render differed from serial oracle",
+        );
+        assert_eq!(parallel.report.requested_workers, 4);
+        assert_eq!(parallel.report.workers, 4);
+        assert_eq!(parallel.report.layout.tile_count(), 9);
+        assert_eq!(parallel.report.executor.declared_run, execution.run_id());
+        assert_eq!(
+            (
+                parallel.report.executor.completed,
+                parallel.report.executor.total,
+            ),
+            (9, 9)
+        );
+        assert_eq!(parallel.report.memory.used_bytes, 0);
+
+        let next_request = EulerFrameRequest {
+            frame_time_s: END_TIME_S,
+            ..request
+        };
+        let next_serial = scene
+            .render_frame(next_request, &settings, cx)
+            .expect("next zero-width cinematic render");
+        let next_execution =
+            RenderExecutionConfig::try_new(4, 5, 4, 64 << 20, RunId(0x4555_4c45_525f_5042))
+                .expect("valid second Euler cinematic tile policy");
+        let adaptive =
+            AdaptiveSamplingConfig::try_new(2, 2, 0.0, 0.0, 0.0).expect("adaptive policy");
+        let adaptive_reference = scene
+            .render_frame_adaptive_with_execution(request, &settings, adaptive, &execution, cx)
+            .expect("one-shot adaptive Euler cinematic render");
+        let pending = scene
+            .begin_frame_render(request, settings, execution.clone(), cx)
+            .expect("admitted opaque Euler frame job");
+        let adaptive_pending = scene
+            .begin_frame_adaptive_render(request, settings, adaptive, execution.clone(), cx)
+            .expect("admitted opaque adaptive Euler frame job");
+        let worker_pool = RenderWorkerPool::new(&execution, cx.mode(), 0x4555_4c45_525f_4352);
+        let (parked_first, parked_next, owned, parked_adaptive, owned_adaptive) = worker_pool
+            .with_parked_crew_local(|parked| {
+                let first = scene
+                    .render_frame_with_parked_scope(parked, request, &settings, &execution, cx)
+                    .expect("first render on parked Euler cinematic crew");
+                let next = scene
+                    .render_frame_with_parked_scope(
+                        parked,
+                        next_request,
+                        &settings,
+                        &next_execution,
+                        cx,
+                    )
+                    .expect("second render on same parked Euler cinematic crew");
+                let owned = pending
+                    .resume_on_parked(parked, cx)
+                    .expect("opaque Euler job on parked crew");
+                let parked_adaptive = scene
+                    .render_frame_adaptive_with_parked_scope(
+                        parked, request, &settings, adaptive, &execution, cx,
+                    )
+                    .expect("adaptive Euler frame on parked crew");
+                let owned_adaptive = adaptive_pending
+                    .resume_on_parked(parked, cx)
+                    .expect("opaque adaptive Euler job on parked crew");
+                (first, next, owned, parked_adaptive, owned_adaptive)
+            });
+        assert_film_bits_eq(
+            &parked_first.film,
+            &cinematic,
+            "first parked Euler frame differed from serial oracle",
+        );
+        assert_film_bits_eq(
+            &parked_next.film,
+            &next_serial,
+            "second parked Euler frame differed from serial oracle",
+        );
+        assert_film_bits_eq(
+            &owned.film,
+            &cinematic,
+            "owned single-film Euler frame differed from serial oracle",
+        );
+        assert!(owned.report.progress_state_bytes > 0);
+        assert_eq!(owned.report.memory.used_bytes, 0);
+        assert_adaptive_film_bits_eq(
+            &parked_adaptive.film,
+            &adaptive_reference.film,
+            "parked adaptive Euler frame differed from one-shot reference",
+        );
+        assert_adaptive_film_bits_eq(
+            &owned_adaptive.film,
+            &adaptive_reference.film,
+            "opaque adaptive Euler frame differed from one-shot reference",
+        );
+        assert!(owned_adaptive.report.progress_state_bytes > 0);
+        assert_eq!(owned_adaptive.report.memory.used_bytes, 0);
+        assert_eq!(
+            adaptive_reference.report.executor.declared_run,
+            execution.run_id()
+        );
+        assert_eq!(
+            parked_adaptive.report.executor.declared_run,
+            execution.run_id()
+        );
+        assert_eq!(
+            owned_adaptive.report.executor.declared_run,
+            execution.run_id()
+        );
+        assert_eq!(
+            parked_first.report.executor.declared_run,
+            execution.run_id()
+        );
+        assert_eq!(
+            parked_next.report.executor.declared_run,
+            next_execution.run_id()
+        );
+        assert_ne!(
+            parked_first.report.executor.declared_run,
+            parked_next.report.executor.declared_run
+        );
+        assert_eq!(
+            (
+                parked_first.report.executor.completed,
+                parked_first.report.executor.total,
+            ),
+            (9, 9)
+        );
+        assert_eq!(
+            (
+                parked_next.report.executor.completed,
+                parked_next.report.executor.total,
+            ),
+            (6, 6)
+        );
+
+        let one_byte_execution =
+            RenderExecutionConfig::try_new(5, 3, 4, 1, RunId(0x4555_4c45_525f_4f4d))
+                .expect("one-byte limit is structurally valid");
+        assert!(matches!(
+            scene.render_frame_with_execution(request, &settings, &one_byte_execution, cx),
+            Err(EulerSceneError::RenderExecution(
+                RenderExecutionError::Memory(_)
+            ))
+        ));
         let static_film = scene
             .render_static_at(STEP_S, CutSide::After, &settings, cx)
             .expect("materialized static render");
@@ -783,37 +1138,47 @@ fn e2e_zero_width_frame_traces_real_pixels_and_round_trips_exr_deterministically
         assert_eq!(cinematic.spp_done, settings.spp);
 
         let crown = DielectricGlass::representative_crown();
-        let mut null_interface_config = reference_config;
-        null_interface_config.plate_material = EulerMaterialStyle::Dielectric {
-            glass: DielectricGlass::new(
-                CauchyIor::try_constant(1.0).expect("unit IOR"),
-                crown.absorption(),
-                GlassProvenance::Custom,
-            ),
+        let [_, crown_b_um2, crown_c_um4] = crown.ior().coefficients();
+        let low_index_ior = CauchyIor::try_new(1.0, crown_b_um2, crown_c_um4)
+            .expect("same-dispersion-class low-index control");
+        assert!(crown.ior().is_dispersive() && low_index_ior.is_dispersive());
+        let mut low_index_config = reference_config;
+        low_index_config.plate_material = EulerMaterialStyle::Dielectric {
+            glass: DielectricGlass::new(low_index_ior, crown.absorption(), GlassProvenance::Custom),
             surface: DielectricSurface::POLISHED,
         };
-        let null_interface_scene = EulerCinematicScene::try_build(
-            &artifact,
-            &specimen,
-            null_interface_config,
-            cx,
-        )
-        .expect("matched-absorption null-interface scene");
-        let null_interface_film = null_interface_scene
+        let low_index_scene =
+            EulerCinematicScene::try_build(&artifact, &specimen, low_index_config, cx)
+                .expect("matched-absorption low-index scene");
+        let low_index_film = low_index_scene
             .render_frame(request, &settings, cx)
-            .expect("null-interface comparison render");
-        assert!(
-            cinematic
-                .xyz
+            .expect("low-index comparison render");
+
+        let mut materially_changed_pixels = 0_usize;
+        let mut total_absolute_delta = 0.0_f64;
+        let mut comparison_energy = 0.0_f64;
+        for (glass_pixel, low_index_pixel) in cinematic.xyz.iter().zip(&low_index_film.xyz) {
+            let pixel_delta = glass_pixel
                 .iter()
-                .zip(&null_interface_film.xyz)
-                .any(|(glass_pixel, null_pixel)| {
-                    glass_pixel
-                        .iter()
-                        .zip(null_pixel)
-                        .any(|(glass, null)| glass.to_bits() != null.to_bits())
-                }),
-            "changing only plate IOR must change traced pixels; otherwise the reference glass is not optically active"
+                .zip(low_index_pixel)
+                .map(|(glass, low_index)| (glass - low_index).abs())
+                .sum::<f64>();
+            let pixel_energy = glass_pixel
+                .iter()
+                .zip(low_index_pixel)
+                .map(|(glass, low_index)| glass.abs().max(low_index.abs()))
+                .sum::<f64>();
+            assert!(pixel_delta.is_finite() && pixel_energy.is_finite());
+            if pixel_delta > 1.0e-9 * pixel_energy.max(1.0) {
+                materially_changed_pixels += 1;
+            }
+            total_absolute_delta += pixel_delta;
+            comparison_energy += pixel_energy;
+        }
+        let normalized_l1_delta = total_absolute_delta / comparison_energy.max(f64::MIN_POSITIVE);
+        assert!(
+            materially_changed_pixels >= 4 && normalized_l1_delta > 1.0e-5,
+            "changing only the plate's phase-index magnitude within the same dispersive estimator class must materially change multiple traced pixels; changed_pixels={materially_changed_pixels}, normalized_l1_delta={normalized_l1_delta:.17e}"
         );
 
         let first_bytes = scene
