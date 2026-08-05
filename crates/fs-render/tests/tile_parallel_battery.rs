@@ -1471,4 +1471,69 @@ fn g5_uniform_shards_are_arrival_order_invariant_with_explicit_exactness_boundar
             "split-sample permutation or exact duplicate changed frozen-plan bits",
         );
     }
+
+    // Positive regression for an exact cover that is not a Cartesian product
+    // of one tile partition and one sample partition. Sample one spans both
+    // tiles while sample zero is split at the tile boundary.
+    let scene = scene();
+    let mut settings = shard_test_settings(Sampler::Iid);
+    settings.width = 4;
+    settings.height = 1;
+    settings.spp = 2;
+    let layout = RenderTileLayout::try_new(4, 1, 2, 1).expect("two-tile layout");
+    let plan_identity = shard_test_identity("non-cartesian-cover-plan");
+    let frame_identity = shard_test_identity("non-cartesian-cover-frame");
+    let limits = RenderShardLimits::try_new(1 << 20, 4 << 20).expect("shard caps");
+    let specs = [
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            0,
+            2,
+            1,
+            2,
+            limits,
+        ),
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            1,
+            2,
+            0,
+            1,
+            limits,
+        ),
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            0,
+            1,
+            0,
+            1,
+            limits,
+        ),
+    ];
+    let results = with_cx(false, |cx| render_shard_set(&scene, &specs, cx));
+    let merged = with_cx(false, |cx| {
+        merge_uniform_shards(
+            &specs,
+            &results,
+            RenderShardMergeLimits::try_new(4 << 20, 4 << 20).expect("merge caps"),
+            cx,
+        )
+    })
+    .expect("non-Cartesian exact cover");
+    let serial =
+        with_cx(false, |cx| render(&scene, cx, &settings)).expect("non-Cartesian serial oracle");
+    assert_film_bits_eq(
+        &serial,
+        &merged,
+        "two-tile/two-sample non-Cartesian exact cover changed serial bits",
+    );
 }
