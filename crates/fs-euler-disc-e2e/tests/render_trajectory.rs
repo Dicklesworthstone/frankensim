@@ -6,12 +6,12 @@ use fs_euler_disc_e2e::coupled_runner::{
     CoupledRun, run_closed_reduced,
 };
 use fs_euler_disc_e2e::{
-    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseModeState,
-    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
-    RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
-    RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
-    RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
-    RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseFrame, RenderBaseModeState,
+    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry, RenderContactTransition,
+    RenderMassProperties, RenderNumericalRefusalReason, RenderSampleDisposition,
+    RenderSupportFeature, RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority,
+    RenderTrajectoryError, RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem,
+    RenderWorldFrame,
 };
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
@@ -61,6 +61,7 @@ fn sample(time_s: f64, disposition: RenderSampleDisposition) -> RenderTrajectory
         contact_branch: RenderContactBranch::Open,
         contact_geometry: None,
         signed_gap_m: 0.001,
+        interval_contact_active: false,
         interval_normal_force_n: 0.0,
         contact_transitions: Vec::new(),
         base_mode: Some(RenderBaseModeState {
@@ -101,6 +102,10 @@ fn metadata() -> RenderTrajectoryMetadata {
             velocity_m_per_s: 0.0,
         },
         base_model_identity: identity("base"),
+        base_frame: RenderBaseFrame {
+            origin_world_m: Vec3::ZERO,
+            orientation_base_to_world: UnitQuaternion::IDENTITY,
+        },
         model_identity: identity("model"),
         channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
         configuration_identity: identity("configuration"),
@@ -156,6 +161,10 @@ fn runner_metadata(run: &CoupledRun) -> RenderTrajectoryMetadata {
             velocity_m_per_s: run.configuration_initial_base_velocity_m_per_s,
         },
         base_model_identity: identity("runner-base"),
+        base_frame: RenderBaseFrame {
+            origin_world_m: Vec3::ZERO,
+            orientation_base_to_world: UnitQuaternion::IDENTITY,
+        },
         model_identity: identity("runner-model"),
         channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
         configuration_identity: identity("runner-configuration"),
@@ -259,6 +268,44 @@ fn duplicate_and_nonmonotone_times_refuse() {
 }
 
 #[test]
+fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradictions() {
+    let mut noncontiguous = two_samples();
+    noncontiguous[1].interval_start_time_s = noncontiguous[0].time_s + 1.0e-6;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), noncontiguous).unwrap_err(),
+        RenderTrajectoryError::InvalidIntervalStart(1)
+    );
+
+    let mut point_with_interval_data = sample(0.01, RenderSampleDisposition::HorizonCensored);
+    point_with_interval_data.interval_start_time_s = point_with_interval_data.time_s;
+    point_with_interval_data.channels.gravity.work_j = 1.0;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![point_with_interval_data]).unwrap_err(),
+        RenderTrajectoryError::ZeroDurationIntervalData(0)
+    );
+
+    let mut inactive_contact = sample(0.01, RenderSampleDisposition::HorizonCensored);
+    inactive_contact.channels.contact.work_j = -1.0e-3;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![inactive_contact]).unwrap_err(),
+        RenderTrajectoryError::InactiveContactHasIntervalData(0)
+    );
+
+    let half_angle = 0.05_f64;
+    let mut tilted_base = metadata();
+    tilted_base.base_frame.orientation_base_to_world =
+        UnitQuaternion::new(half_angle.cos(), half_angle.sin(), 0.0, 0.0).unwrap();
+    assert_eq!(
+        RenderTrajectory::try_new(
+            tilted_base,
+            vec![sample(0.01, RenderSampleDisposition::HorizonCensored)]
+        )
+        .unwrap_err(),
+        RenderTrajectoryError::UnsupportedBaseFrame
+    );
+}
+
+#[test]
 fn frame_and_unit_cross_wiring_refuses() {
     let mut wrong_frame = sample(0.01, RenderSampleDisposition::HorizonCensored);
     wrong_frame.world_frame = RenderWorldFrame::RightHandedYUp;
@@ -280,6 +327,7 @@ fn contact_geometry_and_base_state_are_branch_consistent_and_complete() {
     let mut closed = sample(0.01, RenderSampleDisposition::HorizonCensored);
     closed.contact_branch = RenderContactBranch::Closed;
     closed.signed_gap_m = -1.0e-8;
+    closed.interval_contact_active = true;
     closed.interval_normal_force_n = 3.0;
     closed.contact_geometry = Some(RenderContactGeometry {
         point_world_m: Vec3::new(0.0, 0.0, 0.0),
@@ -344,6 +392,7 @@ fn contact_geometry_and_base_state_are_branch_consistent_and_complete() {
 #[test]
 fn localized_transition_brackets_and_terminal_placement_are_checked() {
     let mut inputs = two_samples();
+    inputs[1].interval_contact_active = true;
     inputs[1].contact_transitions = vec![RenderContactTransition {
         kind: ContactTransitionKind::Opening,
         time_s: 0.015,

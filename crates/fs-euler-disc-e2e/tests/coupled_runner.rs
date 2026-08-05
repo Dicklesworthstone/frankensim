@@ -121,6 +121,11 @@ fn evolves_and_replays_from_a_deterministic_checkpoint() {
             .first()
             .is_some_and(|sample| sample.time_s > split_checkpoint.time_s)
     );
+    assert_eq!(
+        resumed.samples[0].interval_start_time_s.to_bits(),
+        split_checkpoint.time_s.to_bits(),
+        "the first resumed interval must retain the restart clock instead of being rebased to zero"
+    );
     let mut stitched = split.samples.clone();
     stitched.extend(resumed.samples.iter().cloned());
     assert_eq!(stitched, first.samples);

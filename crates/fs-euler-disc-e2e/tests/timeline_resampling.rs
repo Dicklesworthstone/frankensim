@@ -5,11 +5,11 @@ use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind}
 use fs_euler_disc_e2e::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, DerivedEulerQois,
     EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EventEvaluationSide, ExposureEventPolicy,
-    RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
-    RenderContactTransition, RenderMassProperties, RenderSampleDisposition, RenderSupportFeature,
-    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryMetadata,
-    RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame, TimelineEvent,
-    TimelineResampler, TimelineResamplingError, TimelineSampleSource,
+    RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability, RenderContactBranch,
+    RenderContactGeometry, RenderContactTransition, RenderMassProperties, RenderSampleDisposition,
+    RenderSupportFeature, RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority,
+    RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    TimelineEvent, TimelineResampler, TimelineResamplingError, TimelineSampleSource,
 };
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
@@ -95,7 +95,8 @@ fn input(
         } else {
             1.0e-3
         },
-        interval_normal_force_n: if branch == RenderContactBranch::Closed {
+        interval_contact_active: time_s > 0.0 && branch == RenderContactBranch::Closed,
+        interval_normal_force_n: if time_s > 0.0 && branch == RenderContactBranch::Closed {
             1.0
         } else {
             0.0
@@ -141,6 +142,10 @@ fn metadata(initial: &RenderTrajectorySampleInput) -> RenderTrajectoryMetadata {
         initial_state,
         initial_base_mode: initial.base_mode.unwrap(),
         base_model_identity: identity("base"),
+        base_frame: RenderBaseFrame {
+            origin_world_m: Vec3::ZERO,
+            orientation_base_to_world: UnitQuaternion::IDENTITY,
+        },
         model_identity: identity("model"),
         channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
         configuration_identity: identity("configuration"),
@@ -184,6 +189,7 @@ fn event_trajectory() -> RenderTrajectory {
         RenderSampleDisposition::HorizonCensored,
     );
     second.interval_start_time_s = first.time_s;
+    second.interval_contact_active = true;
     second.contact_transitions.push(RenderContactTransition {
         kind: ContactTransitionKind::Opening,
         time_s: 0.5,
@@ -439,6 +445,8 @@ fn time_translation_frame_rate_changes_and_rigid_translation_are_equivariant() {
         RenderContactBranch::Open,
         RenderSampleDisposition::HorizonCensored,
     );
+    first.interval_start_time_s = first.time_s;
+    second.interval_start_time_s = first.time_s;
     first.center_of_mass_world_m = first.center_of_mass_world_m.add(offset);
     second.center_of_mass_world_m = second.center_of_mass_world_m.add(offset);
     let shifted = RenderTrajectory::try_new(metadata(&first), vec![first, second]).unwrap();
@@ -466,6 +474,8 @@ fn time_translation_frame_rate_changes_and_rigid_translation_are_equivariant() {
     let time_offset = 7.0;
     scaled_first.time_s = time_offset;
     scaled_last.time_s = time_offset + time_scale;
+    scaled_first.interval_start_time_s = time_offset;
+    scaled_last.interval_start_time_s = time_offset;
     scaled_first.linear_momentum_world_kg_m_per_s = scaled_first
         .linear_momentum_world_kg_m_per_s
         .scale(time_scale.recip());

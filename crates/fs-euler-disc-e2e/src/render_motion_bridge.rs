@@ -539,8 +539,8 @@ mod tests {
     use super::*;
     use crate::coupled_runner::{ChannelOwnership, ContactTransitionKind};
     use crate::render_trajectory::{
-        DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseModeState,
-        RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+        DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseFrame,
+        RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
         RenderContactTransition, RenderMassProperties, RenderSampleDisposition,
         RenderSupportFeature, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
         RenderUnitSystem, RenderWorldFrame,
@@ -615,7 +615,8 @@ mod tests {
             } else {
                 1.0e-3
             },
-            interval_normal_force_n: if branch == RenderContactBranch::Closed {
+            interval_contact_active: time_s > 0.0 && branch == RenderContactBranch::Closed,
+            interval_normal_force_n: if time_s > 0.0 && branch == RenderContactBranch::Closed {
                 1.0
             } else {
                 0.0
@@ -656,6 +657,10 @@ mod tests {
             initial_state,
             initial_base_mode: first.base_mode.unwrap(),
             base_model_identity: identity("base"),
+            base_frame: RenderBaseFrame {
+                origin_world_m: Vec3::ZERO,
+                orientation_base_to_world: UnitQuaternion::IDENTITY,
+            },
             model_identity: identity("model"),
             channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
             configuration_identity: identity("configuration"),
@@ -688,6 +693,9 @@ mod tests {
             RenderSampleDisposition::HorizonCensored,
         );
         second.interval_start_time_s = first.time_s;
+        if with_event {
+            second.interval_contact_active = true;
+        }
         if with_event {
             second.contact_transitions.push(RenderContactTransition {
                 kind: ContactTransitionKind::Opening,
@@ -730,12 +738,13 @@ mod tests {
     }
 
     fn single_sample_trajectory(time_s: f64) -> RenderTrajectory {
-        let only = sample(
+        let mut only = sample(
             time_s,
             orientation().components(),
             RenderContactBranch::Open,
             RenderSampleDisposition::HorizonCensored,
         );
+        only.interval_start_time_s = time_s;
         let metadata = metadata(&only);
         RenderTrajectory::try_new(metadata, vec![only]).unwrap()
     }

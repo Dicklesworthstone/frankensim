@@ -80,6 +80,20 @@ pub struct RenderChannelAvailability {
     pub gas: bool,
 }
 
+/// Nominal rigid frame of the reduced base plane.
+///
+/// The one-mode displacement translates this frame along its local `+z`
+/// without changing orientation. V1 requires that axis to coincide with world
+/// `+z`, while retaining yaw and origin so local contact coordinates survive
+/// admissible horizontal rigid transforms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderBaseFrame {
+    /// Nominal origin of the undisplaced base frame in world coordinates [m].
+    pub origin_world_m: Vec3,
+    /// Nominal base-to-world orientation.
+    pub orientation_base_to_world: UnitQuaternion,
+}
+
 impl RenderChannelAvailability {
     /// Availability emitted by the current coupled runner, which evaluates
     /// every declared channel even when a configured coefficient is zero.
@@ -122,6 +136,8 @@ pub struct RenderTrajectoryMetadata {
     pub initial_base_mode: RenderBaseModeState,
     /// Base model/configuration identity.
     pub base_model_identity: ContentHash,
+    /// Nominal coordinate frame of the reduced base plane.
+    pub base_frame: RenderBaseFrame,
     /// Physics model identity.
     pub model_identity: ContentHash,
     /// Explicit availability of every interval wrench/work channel.
@@ -296,6 +312,10 @@ pub struct RenderTrajectorySampleInput {
     pub contact_geometry: Option<RenderContactGeometry>,
     /// Signed support gap [m].
     pub signed_gap_m: f64,
+    /// Whether any accepted subinterval used the closed contact branch. This
+    /// is not inferred from force magnitude because a localized root may have
+    /// zero penetration and zero force.
+    pub interval_contact_active: bool,
     /// Normal load evaluated at the midpoint of the first accepted subinterval
     /// [N]. When an event splits the interval this is not its mean load; use the
     /// duration-weighted contact-channel force for interval controls.
@@ -358,6 +378,8 @@ impl RenderTrajectory {
         if metadata.configuration_fingerprint != run.checkpoint.configuration_fingerprint
             || metadata.mass_properties.properties != run.mass_properties
             || metadata.channel_availability != RenderChannelAvailability::ALL_AVAILABLE
+            || metadata.base_frame.origin_world_m != Vec3::ZERO
+            || metadata.base_frame.orientation_base_to_world != UnitQuaternion::IDENTITY
             || metadata.initial_state != run.configuration_initial_state
             || metadata.initial_base_mode.displacement_m.to_bits()
                 != run.configuration_initial_base_deflection_m.to_bits()
@@ -465,6 +487,9 @@ pub enum RenderTrajectoryError {
     UnsupportedWorldFrame(RenderWorldFrame),
     /// Only SI/radians are admitted by v1.
     UnsupportedUnits(RenderUnitSystem),
+    /// The reduced base frame was non-finite or its local `+z` did not align
+    /// with the frozen world `+z` axis.
+    UnsupportedBaseFrame,
     /// A mandatory content identity was all zeroes.
     ZeroIdentity(&'static str),
     /// A bounded required text field was empty or too large.
@@ -500,6 +525,8 @@ pub enum RenderTrajectoryError {
     ContactGapMismatch(usize),
     /// Contact force was negative.
     NegativeNormalForce(usize),
+    /// An interval declared no active contact but carried contact-only data.
+    InactiveContactHasIntervalData(usize),
     /// A localized transition or its bracket was malformed.
     InvalidTransition {
         /// Sample containing the invalid transition.
@@ -583,6 +610,7 @@ fn coupled_sample_input(
         },
         contact_geometry,
         signed_gap_m: sample.endpoint_signed_gap_m,
+        interval_contact_active: sample.contact_active,
         interval_normal_force_n: sample.interval_normal_force_n,
         contact_transitions: sample
             .contact_transitions
@@ -681,6 +709,18 @@ fn validate_metadata(metadata: &RenderTrajectoryMetadata) -> Result<(), RenderTr
             field: "initial_base_mode",
         });
     }
+    if !metadata.base_frame.origin_world_m.is_finite()
+        || !vec_close(
+            metadata
+                .base_frame
+                .orientation_base_to_world
+                .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+            Vec3::new(0.0, 0.0, 1.0),
+            UNIT_TOLERANCE,
+        )
+    {
+        return Err(RenderTrajectoryError::UnsupportedBaseFrame);
+    }
     metadata
         .initial_state
         .center_of_mass_velocity_world(metadata.mass_properties.properties)
@@ -717,11 +757,7 @@ fn validate_sample(
     if input.time_s < 0.0 || previous_time.is_some_and(|time| input.time_s <= time) {
         return Err(RenderTrajectoryError::NonMonotoneTime(index));
     }
-    finite_scalar(
-        input.interval_start_time_s,
-        index,
-        "interval_start_time_s",
-    )?;
+    finite_scalar(input.interval_start_time_s, index, "interval_start_time_s")?;
     if input.interval_start_time_s < 0.0
         || input.interval_start_time_s > input.time_s
         || previous_time.is_some_and(|time| input.interval_start_time_s.to_bits() != time.to_bits())
@@ -767,13 +803,10 @@ fn validate_sample(
         .ok_or(RenderTrajectoryError::MissingBaseState(index))?;
     finite_scalar(base.displacement_m, index, "base_mode.displacement_m")?;
     finite_scalar(base.velocity_m_per_s, index, "base_mode.velocity_m_per_s")?;
-    validate_channels(
-        &input.channels,
-        metadata.channel_availability,
-        index,
-    )?;
+    validate_channels(&input.channels, metadata.channel_availability, index)?;
     if input.interval_start_time_s.to_bits() == input.time_s.to_bits()
-        && (input.interval_normal_force_n != 0.0
+        && (input.interval_contact_active
+            || input.interval_normal_force_n != 0.0
             || !input.contact_transitions.is_empty()
             || channel_ownership_has_data(&input.channels))
     {
@@ -843,6 +876,16 @@ fn validate_contact(
     )?;
     if input.interval_normal_force_n < 0.0 {
         return Err(RenderTrajectoryError::NegativeNormalForce(index));
+    }
+    if !input.interval_contact_active
+        && (input.interval_normal_force_n != 0.0
+            || channel_has_data(input.channels.contact)
+            || input
+                .contact_transitions
+                .iter()
+                .any(|event| event.kind == ContactTransitionKind::Opening))
+    {
+        return Err(RenderTrajectoryError::InactiveContactHasIntervalData(index));
     }
     match (input.contact_branch, input.contact_geometry) {
         (RenderContactBranch::Open, None) => {
