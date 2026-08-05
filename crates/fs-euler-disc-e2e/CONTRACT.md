@@ -1016,6 +1016,42 @@ pre-cancellation, and deterministic injected cancellation inside continuity,
 aggregation, post-aggregation, and work-reconciliation loops. These controls
 are neither calibrated sound nor physical validation.
 
+`modal_synthesis` v1 is the deterministic 48 kHz damped-resonator runtime for
+those later audio controls. Every canonical mode solves
+`m q'' + 2 zeta m omega q' + m omega^2 q = F`: a declared boundary impulse is
+applied first as an exact velocity jump, then a constant generalized force is
+integrated over the frame by an exact zero-order-held transition. Stable
+underdamped, critical, overdamped, and small-step coefficient branches use the
+versioned deterministic `fs-math` core. Modes are sorted by unique nonzero ID;
+distinct degenerate modes remain distinct. Disc, glass-plate, and base-assembly
+forces enter through signed declared modal participation, optional bounded
+per-frame source-location factors multiply that participation, and each mode's
+radiation is assigned to one dry component stem. Off-component participation
+is explicit source routing, not a claim of a coupled structural solve.
+
+The model identity binds the algorithm and deterministic-math versions, sample
+rate, complete canonical modes, routing class, output convention, and every
+resource/state limit. A checkpoint binds that identity, the next sample frame,
+and every canonical `(q, q')` state. Chunk synthesis preflights the complete
+drive and spatial-factor envelope, reserves all result storage, polls the
+execution scope at bounded frame intervals, and publishes samples and successor
+state only together. Displacement, velocity, per-mode energy, summed energy,
+and dry-output ceilings refuse rather than clamp; boundary impulses are checked
+before decay can hide an excessive kick. Outputs include end-boundary mono
+samples, component stems, per-frame internal modal energy, final per-mode
+kinetic/elastic energies, and explicit population RMS and absolute peak.
+
+Focused G0/G3/G4/G5 coverage compares impulse, step, and harmonic response to
+independent analytic or exact-discrete oracles; exercises zero, critical, and
+high damping, Nyquist guard refusal, unforced energy decay, mode permutation,
+duplicates, degeneracy, zero and cross-component participation, signed spatial
+factors, bounded state, cancellation before and during work, exact replay, and
+bit-identical split/resume. Built-in tungsten/stainless-disc plus glass/base
+presets are `RepresentativeUncalibrated`: their frequencies, damping, masses,
+participation, and radiation gains are plausible film parameters, not measured
+eigenmodes, radiated acoustic energy, absolute SPL, structural/acoustic
+calibration, or physical validation.
+
 `timeline_resampling` v1 reconstructs render/audio query times from this
 admitted state without mutating the source artifact. Center-of-mass translation
 and base displacement use cubic Hermite interpolation with the accepted

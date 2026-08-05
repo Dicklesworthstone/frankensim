@@ -461,6 +461,35 @@ fn g3_nyquist_nonfinite_and_state_bounds_refuse_atomically() {
         })
     ));
 
+    let mut aggregate_bounded = generous_budget(1);
+    aggregate_bounded.maximum_mode_energy_j = 1.0;
+    aggregate_bounded.maximum_total_energy_j = 1.0e-7;
+    let aggregate_model = build(
+        vec![mode(1, SoundModalComponent::Disc, 500.0, 0.02)],
+        aggregate_bounded,
+    );
+    let aggregate_checkpoint = with_cx(false, |cx| aggregate_model.initial_checkpoint(cx).unwrap());
+    assert!(matches!(
+        with_cx(false, |cx| aggregate_model.synthesize_chunk(
+            &aggregate_checkpoint,
+            &[drive(
+                ModalComponentValues::ZERO,
+                ModalComponentValues {
+                    disc: 1.0e-3,
+                    ..ModalComponentValues::ZERO
+                },
+            )],
+            ModalSpatialParticipation::Declared,
+            cx,
+        )),
+        Err(ModalSynthesisError::LimitExceeded {
+            sample_frame: 0,
+            mode_id: None,
+            field: "total modal energy",
+            ..
+        })
+    ));
+
     let invalid = drive(
         ModalComponentValues {
             disc: f64::NAN,

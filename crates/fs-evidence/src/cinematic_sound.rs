@@ -129,7 +129,7 @@ pub struct SoundExcitationControl {
     pub source_scale: f64,
 }
 
-/// One deterministic, damped structural mode.
+/// Component coordinate receiving generalized force and dry-stem radiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum SoundModalComponent {
@@ -484,7 +484,8 @@ pub enum SoundSynthesisError {
     InvalidListenerPose,
     /// Physically informed/calibrated synthesis has no excitation channels.
     MissingExcitationChannels,
-    /// Excitation channels are duplicated or out of canonical order.
+    /// Excitation mappings are duplicated, out of canonical order, or have an
+    /// invalid zero/non-finite scale.
     NonCanonicalExcitationChannels,
     /// Physically informed/calibrated synthesis has no modes.
     MissingModes,

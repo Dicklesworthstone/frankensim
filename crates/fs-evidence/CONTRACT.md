@@ -68,11 +68,16 @@ telemetry/legacy correlation.
   camera/material changes do not invalidate trajectory/audio, room changes do
   not invalidate images, and trajectory changes invalidate every consumer.
 - `cinematic_sound::SoundSynthesisConfig` is the fail-closed input and receipt
-  boundary for the reference soundtrack. It reuses the cinematic authority and
-  rational-clock types, requires exact 48 kHz stereo timing aligned to video,
-  binds camera-relative listener geometry, per-channel source scales,
-  modal/material/base parameters, room and amplitude conventions,
-  resampler/filter versions,
+  boundary for the reference soundtrack. Schema v2 reuses the cinematic
+  authority and rational-clock types, requires exact 48 kHz stereo timing
+  aligned to video, and binds camera-relative listener geometry, component-
+  targeted source scales ordered by `(channel, target component)`, and explicit
+  displacement-normalized mode frequency, damping ratio, modal mass, signed
+  component participation, velocity-radiation gain, material, and base
+  identities. Frequencies at or above 90% of Nyquist, invalid or excessive
+  damping/participation/gain, nonpositive modal mass, duplicate mode IDs, and
+  noncanonical source mappings refuse before identity is minted. Room and
+  amplitude conventions, resampler/filter versions,
   trajectory terminal policy, assumptions, and optional calibration evidence
   into one content identity. Artistic and physically informed output cannot
   carry calibrated pressure or a calibration receipt; calibrated structural

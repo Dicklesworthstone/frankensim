@@ -101,10 +101,6 @@ impl ModalComponentValues {
         glass_plate: 0.0,
         base_assembly: 0.0,
     };
-
-    fn values(self) -> [f64; 3] {
-        [self.disc, self.glass_plate, self.base_assembly]
-    }
 }
 
 /// One audio-frame drive. `generalized_force_n` is held over the entire frame;
@@ -437,7 +433,6 @@ struct ModalTransition {
 #[derive(Debug, Clone, Copy)]
 struct PreparedMode {
     mode: SoundMode,
-    omega_rad_per_s: f64,
     stiffness_n_per_m: f64,
     transition: ModalTransition,
 }
@@ -491,7 +486,6 @@ impl ModalSynthesisModel {
             }
             modes.push(PreparedMode {
                 mode: *mode,
-                omega_rad_per_s,
                 stiffness_n_per_m,
                 transition,
             });
@@ -1076,9 +1070,6 @@ fn validate_budget(budget: ModalSynthesisBudget) -> Result<(), ModalSynthesisErr
             return Err(ModalSynthesisError::InvalidBudget(field));
         }
     }
-    if budget.maximum_total_energy_j < budget.maximum_mode_energy_j {
-        return Err(ModalSynthesisError::InvalidBudget("maximum_total_energy_j"));
-    }
     Ok(())
 }
 
@@ -1233,18 +1224,18 @@ fn modal_transition_overdamped(omega: f64, damping_ratio: f64, dt: f64) -> Modal
     let fast = omega * sum;
     let separation = fast - slow;
     let slow_decay = det::exp(-slow * dt);
-    let fast_decay = det::exp(-fast * dt);
     let s = slow_decay * (-det::expm1(-separation * dt)) / separation;
-    let a00 = (fast * slow_decay - slow * fast_decay) / separation;
-    let a11 = (fast * fast_decay - slow * slow_decay) / separation;
     let one_minus_slow = -det::expm1(-slow * dt);
-    let one_minus_fast = -det::expm1(-fast * dt);
+    // These algebraically equivalent forms avoid subtracting nearly equal
+    // pole-weighted exponentials as damping approaches the critical branch.
+    let a00 = slow_decay + slow * s;
+    let a11 = slow_decay - fast * s;
     ModalTransition {
         a00,
         a01: s,
         a10: -omega * omega * s,
         a11,
-        gamma_q: (fast * one_minus_slow - slow * one_minus_fast) / (separation * omega * omega),
+        gamma_q: (one_minus_slow - slow * s) / (omega * omega),
         gamma_v: s,
     }
 }
@@ -1695,6 +1686,28 @@ fn push_f64(bytes: &mut Vec<u8>, value: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    fn with_test_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        let pool = ArenaPool::new(ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x4d4f_4441_4c5f_554e,
+                    kernel_id: 0x4555_4c45,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            operation(&cx)
+        })
+    }
 
     #[test]
     fn coefficient_branches_are_continuous_around_critical_damping() {
@@ -1744,5 +1757,72 @@ mod tests {
         ] {
             assert!((actual - expected).abs() <= 2.0e-13 * expected.abs().max(1.0));
         }
+        let gamma_q_series = 0.5 * dt * dt - damping * omega * dt * dt * dt / 3.0
+            + (4.0 * damping * damping - 1.0) * omega * omega * dt.powi(4) / 24.0;
+        assert!(
+            (taylor.gamma_q - gamma_q_series).abs() <= 2.0e-10 * gamma_q_series.abs(),
+            "gamma_q={} series={gamma_q_series}",
+            taylor.gamma_q,
+        );
+    }
+
+    #[test]
+    fn injected_mid_synthesis_cancellation_publishes_no_successor() {
+        let test_identity = hash_domain("org.frankensim.test.modal-cancellation.v1", b"disc-mode");
+        let mode = SoundMode {
+            mode_id: 1,
+            component: SoundModalComponent::Disc,
+            frequency_hz: 800.0,
+            damping_ratio: 0.02,
+            modal_mass_kg: 0.2,
+            source_participation: SoundModeParticipation {
+                disc: 1.0,
+                glass_plate: 0.0,
+                base_assembly: 0.0,
+            },
+            radiation_gain_fs_s_per_m: 0.1,
+            material_identity: test_identity,
+            base_identity: test_identity,
+        };
+        let budget = ModalSynthesisBudget {
+            maximum_total_sample_frames: 256,
+            maximum_chunk_sample_frames: 256,
+            maximum_abs_displacement_m: 1.0,
+            maximum_abs_velocity_m_per_s: 1_000.0,
+            maximum_mode_energy_j: 1.0e6,
+            maximum_total_energy_j: 1.0e6,
+            maximum_abs_output_fs: 1.0e6,
+        };
+        let model = with_test_cx(|cx| {
+            ModalSynthesisModel::try_new(
+                ModalSynthesisModelInput {
+                    sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
+                    modes: vec![mode],
+                    budget,
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        let initial = with_test_cx(|cx| model.initial_checkpoint(cx).unwrap());
+        let original = initial.clone();
+        let drive = vec![ModalDriveFrame::default(); 256];
+        let mut polls = 0_usize;
+        let result = model.synthesize_chunk_with_checkpoint(
+            &initial,
+            &drive,
+            ModalSpatialParticipation::Declared,
+            &mut || {
+                polls += 1;
+                if polls == 9 {
+                    Err(ModalSynthesisError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(polls, 9, "cancellation must be injected during synthesis");
+        assert_eq!(result, Err(ModalSynthesisError::Cancelled));
+        assert_eq!(initial, original);
     }
 }

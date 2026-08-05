@@ -299,6 +299,17 @@ fn modal_frequency_damping_mass_participation_radiation_and_order_are_checked() 
     input.modes[0].damping_ratio = 0.0;
     input.modes[1].damping_ratio = 1.0;
     assert!(SoundSynthesisConfig::try_admit(input).is_ok());
+
+    let guard_hz: f64 = f64::from(SOUND_MASTER_SAMPLE_RATE_HZ) * 0.5 * 0.9;
+    let mut input = informed_input();
+    input.modes[0].frequency_hz = f64::from_bits(guard_hz.to_bits() - 1);
+    assert!(SoundSynthesisConfig::try_admit(input).is_ok());
+    let mut input = informed_input();
+    input.modes[0].frequency_hz = guard_hz;
+    assert_eq!(
+        SoundSynthesisConfig::try_admit(input),
+        Err(SoundSynthesisError::InvalidMode)
+    );
 }
 
 #[test]
@@ -312,6 +323,29 @@ fn informed_source_requires_channels_modes_and_complete_assumptions() {
 
     let mut input = informed_input();
     input.excitation_controls[0].source_scale = 0.0;
+    assert_eq!(
+        SoundSynthesisConfig::try_admit(input),
+        Err(SoundSynthesisError::NonCanonicalExcitationChannels)
+    );
+
+    let additional_target = SoundExcitationControl {
+        channel: SoundExcitationChannel::ContactNormalForce,
+        target_component: SoundModalComponent::GlassPlate,
+        source_scale: 2.0e-4,
+    };
+    let mut input = informed_input();
+    input.excitation_controls.insert(1, additional_target);
+    assert!(SoundSynthesisConfig::try_admit(input.clone()).is_ok());
+    input.excitation_controls.swap(0, 1);
+    assert_eq!(
+        SoundSynthesisConfig::try_admit(input),
+        Err(SoundSynthesisError::NonCanonicalExcitationChannels)
+    );
+
+    let mut input = informed_input();
+    input
+        .excitation_controls
+        .insert(1, input.excitation_controls[0]);
     assert_eq!(
         SoundSynthesisConfig::try_admit(input),
         Err(SoundSynthesisError::NonCanonicalExcitationChannels)
@@ -392,7 +426,7 @@ fn identity_is_deterministic_and_every_modal_physics_field_invalidates_it() {
     let replay = SoundSynthesisConfig::try_admit(informed_input()).unwrap();
     assert_eq!(first.identity(), replay.identity());
 
-    let mutations: [fn(&mut SoundSynthesisInput); 11] = [
+    let mutations: [fn(&mut SoundSynthesisInput); 12] = [
         |input| input.modes[0].frequency_hz += 1.0,
         |input| input.modes[0].component = SoundModalComponent::BaseAssembly,
         |input| input.modes[0].damping_ratio += 0.001,
@@ -400,6 +434,9 @@ fn identity_is_deterministic_and_every_modal_physics_field_invalidates_it() {
         |input| input.modes[0].source_participation.disc *= 0.5,
         |input| input.modes[0].radiation_gain_fs_s_per_m *= 2.0,
         |input| input.excitation_controls[0].source_scale *= 2.0,
+        |input| {
+            input.excitation_controls[0].target_component = SoundModalComponent::GlassPlate;
+        },
         |input| input.listener.position_m[0] += 0.001,
         |input| input.filter_version += 1,
         |input| {
