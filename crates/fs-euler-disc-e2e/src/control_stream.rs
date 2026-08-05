@@ -376,7 +376,7 @@ impl<'trajectory> EulerControlStream<'trajectory> {
             let duration_s = input.time_s - input.interval_start_time_s;
             let preceding_audio_interval_index = if duration_s > 0.0 {
                 let channels = derive_channel_set(
-                    input.channels,
+                    &input.channels,
                     metadata.channel_availability,
                     duration_s,
                     sample_index,
@@ -396,7 +396,7 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                     .iter()
                     .map(|event| control_event(sample_index, *event))
                     .collect::<Result<Vec<_>, _>>()?;
-                work_accumulators.accumulate(channels, duration_s, sample_index)?;
+                work_accumulators.accumulate(&channels, duration_s, sample_index)?;
                 let index = audio.len();
                 audio.push(AudioControlInterval {
                     source_sample_index: sample_index,
@@ -487,11 +487,11 @@ impl<'trajectory> EulerControlStream<'trajectory> {
     /// endpoint-only preroll.
     #[must_use]
     pub fn fully_bracketed_audio(&self) -> &[AudioControlInterval] {
-        let first = self
-            .audio
-            .first()
-            .is_some_and(|interval| !interval.visual_coverage.is_fully_bracketed())
-            as usize;
+        let first = usize::from(
+            self.audio
+                .first()
+                .is_some_and(|interval| !interval.visual_coverage.is_fully_bracketed()),
+        );
         &self.audio[first..]
     }
 
@@ -522,7 +522,8 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         intervals_per_bin: NonZeroUsize,
         cx: &Cx<'_>,
     ) -> Result<CoarsenedAudioControls<'trajectory>, ControlStreamError> {
-        cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+        let mut checkpoint = || cx.checkpoint().map_err(|_| ControlStreamError::Cancelled);
+        checkpoint()?;
         if self.audio.is_empty() {
             return Err(ControlStreamError::NoPositiveDurationIntervals);
         }
@@ -535,12 +536,12 @@ impl<'trajectory> EulerControlStream<'trajectory> {
             })?;
         let mut cursor = 0;
         while cursor < self.audio.len() {
-            cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+            checkpoint()?;
             if !self.audio[cursor].visual_coverage.is_fully_bracketed() {
                 let event_barrier = !self.audio[cursor].events.is_empty();
                 push_coarsened_bin(
                     &mut bins,
-                    coarsen_group(&self.audio[cursor..=cursor], event_barrier, cx)?,
+                    coarsen_group(&self.audio[cursor..=cursor], event_barrier, &mut checkpoint)?,
                 )?;
                 cursor += 1;
                 continue;
@@ -548,7 +549,7 @@ impl<'trajectory> EulerControlStream<'trajectory> {
             if !self.audio[cursor].events.is_empty() {
                 push_coarsened_bin(
                     &mut bins,
-                    coarsen_group(&self.audio[cursor..=cursor], true, cx)?,
+                    coarsen_group(&self.audio[cursor..=cursor], true, &mut checkpoint)?,
                 )?;
                 cursor += 1;
                 continue;
@@ -558,17 +559,20 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                 && cursor - start < intervals_per_bin.get()
                 && self.audio[cursor].events.is_empty()
             {
-                cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+                checkpoint()?;
                 cursor += 1;
             }
             push_coarsened_bin(
                 &mut bins,
-                coarsen_group(&self.audio[start..cursor], false, cx)?,
+                coarsen_group(&self.audio[start..cursor], false, &mut checkpoint)?,
             )?;
         }
-        cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
-        let represented =
-            coarsened_work_checks(&bins, self.source.metadata().channel_availability, cx)?;
+        checkpoint()?;
+        let represented = coarsened_work_checks(
+            &bins,
+            self.source.metadata().channel_availability,
+            &mut checkpoint,
+        )?;
         let last_sample = bins.last().map_or(0, |bin| bin.last_source_sample_index);
         let reconciliation = reconcile_against_raw(self.reconciliation, represented, last_sample)?;
         Ok(CoarsenedAudioControls {
@@ -654,10 +658,11 @@ impl<'trajectory> CoarsenedAudioControls<'trajectory> {
     /// exactly retained.
     #[must_use]
     pub fn fully_bracketed_bins(&self) -> &[CoarsenedAudioBin] {
-        let first =
+        let first = usize::from(
             self.bins
                 .first()
-                .is_some_and(|bin| !bin.visual_coverage.is_fully_bracketed()) as usize;
+                .is_some_and(|bin| !bin.visual_coverage.is_fully_bracketed()),
+        );
         &self.bins[first..]
     }
 
@@ -780,7 +785,7 @@ impl fmt::Display for ControlStreamError {
 impl std::error::Error for ControlStreamError {}
 
 fn derive_channel_set(
-    channels: ChannelOwnership,
+    channels: &ChannelOwnership,
     availability: RenderChannelAvailability,
     duration_s: f64,
     sample: usize,
@@ -857,12 +862,12 @@ fn control_event(
 fn coarsen_group(
     intervals: &[AudioControlInterval],
     event_barrier: bool,
-    cx: &Cx<'_>,
+    checkpoint: &mut impl FnMut() -> Result<(), ControlStreamError>,
 ) -> Result<CoarsenedAudioBin, ControlStreamError> {
     let first = &intervals[0];
     let last = &intervals[intervals.len() - 1];
     for pair in intervals.windows(2) {
-        cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+        checkpoint()?;
         if pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits() {
             return Err(ControlStreamError::NonContiguousIntervals {
                 interval: pair[1].source_sample_index,
@@ -870,13 +875,13 @@ fn coarsen_group(
         }
     }
     let duration_s = last.end_time_s - first.start_time_s;
-    let channels = aggregate_channel_sets(intervals, duration_s, cx)?;
+    let channels = aggregate_channel_sets(intervals, duration_s, &mut *checkpoint)?;
     let mut weighted_normal_force = 0.0;
     let mut normal_available = true;
     let mut interval_contact_active = false;
     let mut events = Vec::new();
     for interval in intervals {
-        cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+        checkpoint()?;
         interval_contact_active |= interval.interval_contact_active;
         if let Some(value) = interval.mean_base_normal_contact_force_n {
             weighted_normal_force = value.mul_add(interval.duration_s, weighted_normal_force);
@@ -933,14 +938,14 @@ fn push_coarsened_bin(
 fn aggregate_channel_sets(
     intervals: &[AudioControlInterval],
     duration_s: f64,
-    cx: &Cx<'_>,
+    checkpoint: &mut impl FnMut() -> Result<(), ControlStreamError>,
 ) -> Result<ChannelControlSet, ControlStreamError> {
     Ok(ChannelControlSet {
-        gravity: aggregate_channel(intervals, duration_s, |set| set.gravity, cx)?,
-        contact: aggregate_channel(intervals, duration_s, |set| set.contact, cx)?,
-        rolling: aggregate_channel(intervals, duration_s, |set| set.rolling, cx)?,
-        base: aggregate_channel(intervals, duration_s, |set| set.base, cx)?,
-        gas: aggregate_channel(intervals, duration_s, |set| set.gas, cx)?,
+        gravity: aggregate_channel(intervals, duration_s, |set| set.gravity, &mut *checkpoint)?,
+        contact: aggregate_channel(intervals, duration_s, |set| set.contact, &mut *checkpoint)?,
+        rolling: aggregate_channel(intervals, duration_s, |set| set.rolling, &mut *checkpoint)?,
+        base: aggregate_channel(intervals, duration_s, |set| set.base, &mut *checkpoint)?,
+        gas: aggregate_channel(intervals, duration_s, |set| set.gas, &mut *checkpoint)?,
     })
 }
 
@@ -948,7 +953,7 @@ fn aggregate_channel(
     intervals: &[AudioControlInterval],
     duration_s: f64,
     select: impl Fn(ChannelControlSet) -> ChannelControl,
-    cx: &Cx<'_>,
+    checkpoint: &mut impl FnMut() -> Result<(), ControlStreamError>,
 ) -> Result<ChannelControl, ControlStreamError> {
     if matches!(select(intervals[0].channels), ChannelControl::Unavailable) {
         return Ok(ChannelControl::Unavailable);
@@ -960,7 +965,7 @@ fn aggregate_channel(
     let mut torque_time = Vec3::ZERO;
     let mut signed_work_j = 0.0;
     for interval in intervals {
-        cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
+        checkpoint()?;
         let Some(channel) = select(interval.channels).available() else {
             return Ok(ChannelControl::Unavailable);
         };
@@ -999,12 +1004,12 @@ fn aggregate_channel(
 fn coarsened_work_checks(
     bins: &[CoarsenedAudioBin],
     availability: RenderChannelAvailability,
-    cx: &Cx<'_>,
+    checkpoint: &mut impl FnMut() -> Result<(), ControlStreamError>,
 ) -> Result<ChannelWorkIntegralChecks, ControlStreamError> {
     let mut accumulators = ChannelWorkAccumulators::new(availability);
     for bin in bins {
-        cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
-        accumulators.accumulate(bin.channels, bin.duration_s, bin.last_source_sample_index)?;
+        checkpoint()?;
+        accumulators.accumulate(&bin.channels, bin.duration_s, bin.last_source_sample_index)?;
     }
     accumulators.finish(bins.last().map_or(0, |bin| bin.last_source_sample_index))
 }
@@ -1052,7 +1057,7 @@ impl ChannelWorkAccumulators {
 
     fn accumulate(
         &mut self,
-        channels: ChannelControlSet,
+        channels: &ChannelControlSet,
         duration_s: f64,
         sample: usize,
     ) -> Result<(), ControlStreamError> {
@@ -1192,5 +1197,91 @@ fn finite_vec(value: Vec3, sample: usize, field: &'static str) -> Result<(), Con
         Ok(())
     } else {
         Err(ControlStreamError::NonFiniteDerived { sample, field })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn available_channel() -> ChannelControl {
+        ChannelControl::Available(AvailableChannelControl {
+            mean_force_world_n: Vec3::new(0.0, 0.0, 1.0),
+            mean_torque_world_nm: Vec3::new(0.0, 0.0, -0.25),
+            signed_work_j: -0.5,
+            signed_mean_work_rate_w: -0.5,
+            force_time_measure_world_n_s: Vec3::new(0.0, 0.0, 1.0),
+            torque_time_measure_world_nm_s: Vec3::new(0.0, 0.0, -0.25),
+        })
+    }
+
+    fn interval(index: usize) -> AudioControlInterval {
+        let start_time_s = index as f64;
+        let channel = available_channel();
+        AudioControlInterval {
+            source_sample_index: index + 1,
+            start_time_s,
+            end_time_s: start_time_s + 1.0,
+            duration_s: 1.0,
+            visual_coverage: AudioVisualCoverage {
+                start_visualization_index: Some(index),
+                end_visualization_index: index + 1,
+            },
+            interval_contact_active: true,
+            mean_base_normal_contact_force_n: Some(1.0),
+            first_subinterval_midpoint_normal_force_n: 1.0,
+            channels: ChannelControlSet {
+                gravity: channel,
+                contact: channel,
+                rolling: channel,
+                base: channel,
+                gas: channel,
+            },
+            endpoint_center_of_mass_velocity_world_m_per_s: Vec3::ZERO,
+            endpoint_angular_velocity_world_rad_per_s: Vec3::ZERO,
+            endpoint_base_velocity_world_m_per_s: Vec3::ZERO,
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn g4_inner_coarsening_loops_observe_deterministic_cancellation() {
+        let intervals = [interval(0), interval(1), interval(2)];
+
+        // The selected checkpoints land respectively in continuity scanning,
+        // channel aggregation, and the post-aggregation interval fold.
+        for cancel_at in [1, 3, 18] {
+            let mut observed = 0;
+            let mut checkpoint = || {
+                observed += 1;
+                if observed == cancel_at {
+                    Err(ControlStreamError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            };
+            assert_eq!(
+                coarsen_group(&intervals, false, &mut checkpoint).unwrap_err(),
+                ControlStreamError::Cancelled
+            );
+            assert_eq!(observed, cancel_at);
+        }
+
+        let bin = coarsen_group(&intervals, false, &mut || Ok(())).unwrap();
+        let mut observed = 0;
+        let mut checkpoint = || {
+            observed += 1;
+            Err(ControlStreamError::Cancelled)
+        };
+        assert_eq!(
+            coarsened_work_checks(
+                &[bin],
+                RenderChannelAvailability::ALL_AVAILABLE,
+                &mut checkpoint,
+            )
+            .unwrap_err(),
+            ControlStreamError::Cancelled
+        );
+        assert_eq!(observed, 1);
     }
 }

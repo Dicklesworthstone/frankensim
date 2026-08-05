@@ -446,11 +446,20 @@ impl RenderTrajectory {
         }
 
         let sample_count = inputs.len();
-        let mut samples = Vec::with_capacity(sample_count);
+        let mut samples = Vec::new();
+        samples.try_reserve_exact(sample_count).map_err(|_| {
+            RenderTrajectoryError::Capacity {
+                artifact: "render trajectory samples",
+                requested: sample_count,
+            }
+        })?;
         let mut previous_time = None;
+        let mut previous_branch = None;
         for (index, input) in inputs.into_iter().enumerate() {
             let sample = validate_sample(&metadata, input, index, previous_time)?;
+            validate_transition_origin(&sample.input, previous_branch, index)?;
             previous_time = Some(sample.input.time_s);
+            previous_branch = Some(sample.input.contact_branch);
             let is_last = index + 1 == sample_count;
             if !is_last && sample.input.disposition != RenderSampleDisposition::Continue {
                 return Err(RenderTrajectoryError::TerminalBeforeFinalSample(index));
@@ -501,6 +510,13 @@ pub enum RenderTrajectoryError {
     EmptyTrajectory,
     /// The retained sample ceiling was exceeded.
     TooManySamples(usize),
+    /// A bounded trajectory allocation could not be admitted.
+    Capacity {
+        /// Stable artifact/component name.
+        artifact: &'static str,
+        /// Requested item count.
+        requested: usize,
+    },
     /// A sample repeated a different frame.
     FrameMismatch(usize),
     /// A sample repeated a different unit system.
@@ -952,6 +968,18 @@ fn validate_contact(
     {
         return Err(RenderTrajectoryError::InactiveContactHasIntervalData(index));
     }
+    if positive_duration
+        && input.interval_contact_active
+        && input.contact_branch == RenderContactBranch::Open
+        && !input
+            .contact_transitions
+            .iter()
+            .any(|event| event.kind == ContactTransitionKind::Opening)
+    {
+        return Err(RenderTrajectoryError::ContactTransitionBranchMismatch(
+            index,
+        ));
+    }
     Ok(())
 }
 
@@ -1024,6 +1052,35 @@ fn validate_transitions(
         });
     }
     Ok(())
+}
+
+fn validate_transition_origin(
+    input: &RenderTrajectorySampleInput,
+    previous_branch: Option<RenderContactBranch>,
+    sample: usize,
+) -> Result<(), RenderTrajectoryError> {
+    let Some(previous_branch) = previous_branch else {
+        // The retained segment-start branch is unavailable for first-sample
+        // preroll, so its transition origin cannot be reconstructed safely.
+        return Ok(());
+    };
+    let origin_matches = input.contact_transitions.first().map_or(
+        input.contact_branch == previous_branch,
+        |transition| {
+            matches!(
+                (previous_branch, transition.kind),
+                (RenderContactBranch::Open, ContactTransitionKind::Reimpact)
+                    | (RenderContactBranch::Closed, ContactTransitionKind::Opening)
+            )
+        },
+    );
+    if origin_matches {
+        Ok(())
+    } else {
+        Err(RenderTrajectoryError::ContactTransitionBranchMismatch(
+            sample,
+        ))
+    }
 }
 
 fn validate_terminal_event(

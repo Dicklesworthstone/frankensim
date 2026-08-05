@@ -1,5 +1,6 @@
 //! G0/G3 controls: frame/unit semantics, conservative boxcar mitigation, replay,
-//! cancellation, and explicit no-data behavior.
+//! pre-cancellation, and explicit no-data behavior. Deterministic G4 inner-loop
+//! cancellation coverage lives beside the private coarsening implementation.
 
 use core::{f64::consts::FRAC_PI_2, num::NonZeroUsize};
 
@@ -523,8 +524,8 @@ fn whole_interval_boxcar_cancels_alternation_before_decimation_and_conserves_wor
     )];
     for index in 0..4 {
         let mut retained = sample(
-            index as f64,
-            (index + 1) as f64,
+            f64::from(index),
+            f64::from(index + 1),
             RenderContactBranch::Open,
             if index == 3 {
                 RenderSampleDisposition::HorizonCensored

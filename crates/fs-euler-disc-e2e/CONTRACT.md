@@ -841,14 +841,27 @@ sample and must match. Quaternion inputs must already be finite unit
 quaternions; admission canonicalizes the `q/-q` double cover. Times are finite,
 non-negative, and strictly increasing; each interval start is exact, must equal
 the preceding endpoint after the first sample, and may equal its endpoint only
-for an interval-data-free initial point. Contact geometry is present exactly on
+for an interval-data-free initial point. A positive interval endpoint may not
+exceed `interval_start + metadata.timestep_s` advanced by 32 nonnegative
+binary64 ULPs. This admits producer-shaped addition at large absolute clocks
+without a cancellation-prone endpoint subtraction; it is an admission
+tolerance only and does not rewrite either retained time. Contact geometry is
+present exactly on
 the closed branch, contact normals and redundant symmetry axes are unit vectors,
 localized transition times are ordered inside the retained interval and
 alternate branches, and redundant QoIs must agree with the authoritative state
 and bound mass properties. A channel declared unavailable must contain an exact
 zero payload, while an available zero payload remains distinguishable. The
 interval contact-activity flag cannot be inferred from force magnitude because
-a localized reimpact root may be active at zero penetration and zero force.
+a localized reimpact root may be active at zero penetration and zero force. On
+a positive-duration interval, an active-contact interval that ends open must
+retain an opening transition; an inactive interval may end closed only at an
+exact endpoint reimpact. Across retained adjacent samples, an interval with no
+transition must preserve the preceding endpoint branch, while its first
+transition must be reimpact from open or opening from closed. The first
+positive-duration sample remains explicit preroll: because its segment-start
+branch is not retained, v1 makes no claim that its first transition is bound to
+that unavailable state.
 
 The reduced coupled runner now publishes those fields only after an accepted
 macro interval or an accepted localized terminal/contact boundary. `CoupledRun`
@@ -951,8 +964,9 @@ coverage exercises resumed clocks, exact frame/velocity derivation, zero and
 unavailable channels, zero-force reimpact, opening/event barriers, signed-work
 and force-time conservation, alternating-signal boxcar cancellation, admissible
 rigid transforms, extreme finite values, derived overflow, deterministic replay,
-and cancellation. These controls are neither calibrated sound nor physical
-validation.
+pre-cancellation, and deterministic injected cancellation inside continuity,
+aggregation, post-aggregation, and work-reconciliation loops. These controls
+are neither calibrated sound nor physical validation.
 
 `timeline_resampling` v1 reconstructs render/audio query times from this
 admitted state without mutating the source artifact. Center-of-mass translation

@@ -363,6 +363,41 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
         RenderTrajectoryError::InactiveContactHasIntervalData(0)
     );
 
+    let mut active_open_without_opening = sample(0.01, RenderSampleDisposition::HorizonCensored);
+    active_open_without_opening.interval_contact_active = true;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![active_open_without_opening]).unwrap_err(),
+        RenderTrajectoryError::ContactTransitionBranchMismatch(0)
+    );
+
+    let mut open_to_closed_without_reimpact = two_samples();
+    open_to_closed_without_reimpact[1].contact_branch = RenderContactBranch::Closed;
+    open_to_closed_without_reimpact[1].contact_geometry = Some(RenderContactGeometry {
+        point_world_m: Vec3::ZERO,
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        support_feature: RenderSupportFeature::CylinderRim,
+    });
+    open_to_closed_without_reimpact[1].signed_gap_m = 0.0;
+    open_to_closed_without_reimpact[1].interval_contact_active = true;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), open_to_closed_without_reimpact).unwrap_err(),
+        RenderTrajectoryError::ContactTransitionBranchMismatch(1)
+    );
+
+    let mut closed_to_open_without_opening = two_samples();
+    closed_to_open_without_opening[0].contact_branch = RenderContactBranch::Closed;
+    closed_to_open_without_opening[0].contact_geometry = Some(RenderContactGeometry {
+        point_world_m: Vec3::ZERO,
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        support_feature: RenderSupportFeature::CylinderRim,
+    });
+    closed_to_open_without_opening[0].signed_gap_m = 0.0;
+    closed_to_open_without_opening[0].interval_contact_active = true;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), closed_to_open_without_opening).unwrap_err(),
+        RenderTrajectoryError::ContactTransitionBranchMismatch(1)
+    );
+
     let half_angle = 0.05_f64;
     let mut tilted_base = metadata();
     tilted_base.base_frame.orientation_base_to_world =
@@ -465,12 +500,20 @@ fn contact_geometry_and_base_state_are_branch_consistent_and_complete() {
 fn localized_transition_brackets_and_terminal_placement_are_checked() {
     let mut inputs = two_samples();
     inputs[1].interval_contact_active = true;
-    inputs[1].contact_transitions = vec![RenderContactTransition {
-        kind: ContactTransitionKind::Opening,
-        time_s: 0.015,
-        bracket_start_s: 0.014,
-        bracket_end_s: 0.016,
-    }];
+    inputs[1].contact_transitions = vec![
+        RenderContactTransition {
+            kind: ContactTransitionKind::Reimpact,
+            time_s: 0.012,
+            bracket_start_s: 0.011,
+            bracket_end_s: 0.013,
+        },
+        RenderContactTransition {
+            kind: ContactTransitionKind::Opening,
+            time_s: 0.015,
+            bracket_start_s: 0.014,
+            bracket_end_s: 0.016,
+        },
+    ];
     RenderTrajectory::try_new(metadata(), inputs).unwrap();
 
     let mut invalid = two_samples();
@@ -562,6 +605,7 @@ fn localized_transition_brackets_and_terminal_placement_are_checked() {
         normal_world: Vec3::new(0.0, 0.0, 1.0),
         support_feature: RenderSupportFeature::CylinderRim,
     });
+    excessive_reimpact_overhang.interval_contact_active = true;
     excessive_reimpact_overhang.contact_transitions = vec![RenderContactTransition {
         kind: ContactTransitionKind::Reimpact,
         time_s: 0.01,
@@ -589,6 +633,7 @@ fn localized_transition_brackets_and_terminal_placement_are_checked() {
         normal_world: Vec3::new(0.0, 0.0, 1.0),
         support_feature: RenderSupportFeature::CylinderRim,
     });
+    interior_reimpact_refusal.interval_contact_active = true;
     interior_reimpact_refusal.contact_transitions = vec![RenderContactTransition {
         kind: ContactTransitionKind::Reimpact,
         time_s: 0.0095,

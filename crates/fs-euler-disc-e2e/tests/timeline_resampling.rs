@@ -532,7 +532,10 @@ fn unrepresentable_finite_time_interval_refuses_instead_of_emitting_nan() {
     second.linear_momentum_world_kg_m_per_s = Vec3::ZERO;
     first.time_s = 0.0;
     second.time_s = f64::MAX;
-    let trajectory = RenderTrajectory::try_new(metadata(&first), vec![first, second]).unwrap();
+    let mut extreme_clock_metadata = metadata(&first);
+    extreme_clock_metadata.timestep_s = f64::MAX;
+    let trajectory =
+        RenderTrajectory::try_new(extreme_clock_metadata, vec![first, second]).unwrap();
     assert_eq!(
         TimelineResampler::new(&trajectory)
             .resample(&[0.5 * f64::MAX], EventEvaluationSide::RightLimit)
