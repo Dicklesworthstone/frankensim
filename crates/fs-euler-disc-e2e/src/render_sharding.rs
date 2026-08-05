@@ -513,7 +513,7 @@ impl EulerUniformRenderPlan {
             finishing_neighbor_radius,
             limits,
         };
-        let plan_identity = plan_identity(&canonical, &frames, &raw_segments)?;
+        let plan_identity = plan_identity(&canonical, &frames, &raw_segments, cx)?;
         let (segments, shards, total_paths) = partition_segments(
             plan_identity,
             &raw_segments,
@@ -933,7 +933,7 @@ impl EulerUniformRenderPlan {
             return Err(EulerRenderShardingError::Codec("trailing plan bytes"));
         }
         validate_canonical_tables(&frames, &raw_segments)?;
-        let actual_plan_identity = plan_identity(&canonical, &frames, &raw_segments)?;
+        let actual_plan_identity = plan_identity(&canonical, &frames, &raw_segments, cx)?;
         if actual_plan_identity != declared_plan_identity {
             return Err(EulerRenderShardingError::PlanIdentityMismatch {
                 expected: declared_plan_identity,
@@ -1079,6 +1079,17 @@ pub fn store_uniform_render_shard_artifact(
         .get(shard_index)
         .ok_or(EulerRenderShardingError::UnknownShardIndex(shard_index))?;
     let bound = bind_shard_spec_from_index(plan, scene, &indexed_inputs, shard_index, cx)?;
+    store_bound_shard_result(ledger, plan, shard, &bound, result, cx)
+}
+
+fn store_bound_shard_result(
+    ledger: &Ledger,
+    plan: &EulerUniformRenderPlan,
+    shard: EulerRenderPlannedShard,
+    bound: &BoundShardSpec,
+    result: &UniformRenderShardResult,
+    cx: &Cx<'_>,
+) -> Result<EulerRenderShardArtifactReceipt, EulerRenderShardingError> {
     if result.spec() != &bound.spec
         || result.shard_identity() != bound.spec.shard_identity()
         || result.spec().plan_identity() != plan.plan_identity
@@ -1104,15 +1115,14 @@ pub fn store_uniform_render_shard_artifact(
         result.shard_identity(),
         result.result_identity(),
     );
+    checkpoint(cx)?;
     let PutReceipt {
         hash,
         len: stored_len,
         deduped,
         ..
     } = ledger.put_artifact(EULER_RENDER_SHARD_RESULT_ARTIFACT_KIND, &bytes, Some(&meta))?;
-    if stored_len != len {
-        return Err(EulerRenderShardingError::ShardResultBindingMismatch);
-    }
+    debug_assert_eq!(stored_len, len, "ledger receipt length must match input");
     Ok(EulerRenderShardArtifactReceipt {
         artifact: EulerRenderShardArtifactRef::new(shard.logical_shard_identity, hash),
         renderer_shard_identity: result.shard_identity(),
@@ -1155,7 +1165,11 @@ pub fn store_uniform_render_shard_artifact_bytes(
         bound.spec.shard_identity(),
         cx,
     )?;
-    store_uniform_render_shard_artifact(ledger, plan, scene, inputs, shard_index, &result, cx)
+    let shard = *plan
+        .shards
+        .get(shard_index)
+        .ok_or(EulerRenderShardingError::UnknownShardIndex(shard_index))?;
+    store_bound_shard_result(ledger, plan, shard, &bound, &result, cx)
 }
 
 /// Load and merge exactly one event-delimited film. All unique artifact
@@ -1271,11 +1285,22 @@ pub fn merge_uniform_render_segment_artifacts(
         }
     }
 
+    let first_selected = *selected.first().ok_or(EulerRenderShardingError::Codec(
+        "segment has no planned shards",
+    ))?;
+    let semantics = bind_segment_semantics(plan, scene, &indexed_inputs, first_selected, cx)?;
     let mut expected_specs = try_vec_capacity(segment.shard_count, "expected shard specs")?;
-    for global_index in start..end {
-        expected_specs.push(
-            bind_shard_spec_from_index(plan, scene, &indexed_inputs, global_index, cx)?.spec,
-        );
+    for shard in selected {
+        checkpoint(cx)?;
+        if shard.frame_ordinal != first_selected.frame_ordinal
+            || shard.segment_index != first_selected.segment_index
+            || shard.frame_identity != first_selected.frame_identity
+        {
+            return Err(EulerRenderShardingError::Codec(
+                "segment shard range crosses a frame binding",
+            ));
+        }
+        expected_specs.push(renderer_spec_for_shard(plan, *shard, semantics)?);
     }
     let mut results: Vec<Option<UniformRenderShardResult>> =
         try_vec_capacity(segment.shard_count, "decoded shard results")?;
@@ -1334,6 +1359,13 @@ struct BoundShardSpec {
     cut_side: fs_render::camera::CutSide,
 }
 
+#[derive(Clone, Copy)]
+struct BoundSegmentSemantics {
+    shutter: fs_render::motion::ShutterInterval,
+    cut_side: fs_render::camera::CutSide,
+    time_mode: FilmTimeMode,
+}
+
 fn index_frame_inputs<'prepared>(
     plan: &EulerUniformRenderPlan,
     scene: &EulerCinematicScene<'_>,
@@ -1387,14 +1419,30 @@ fn bind_shard_spec_from_index(
         .shards
         .get(shard_index)
         .ok_or(EulerRenderShardingError::UnknownShardIndex(shard_index))?;
+    let semantics = bind_segment_semantics(plan, scene, inputs, shard, cx)?;
+    let spec = renderer_spec_for_shard(plan, shard, semantics)?;
+    Ok(BoundShardSpec {
+        spec,
+        shutter: semantics.shutter,
+        cut_side: semantics.cut_side,
+    })
+}
+
+fn bind_segment_semantics(
+    plan: &EulerUniformRenderPlan,
+    scene: &EulerCinematicScene<'_>,
+    inputs: &BTreeMap<u64, &EulerPreparedFrame>,
+    shard: EulerRenderPlannedShard,
+    cx: &Cx<'_>,
+) -> Result<BoundSegmentSemantics, EulerRenderShardingError> {
+    checkpoint(cx)?;
     let prepared = inputs
         .get(&shard.frame_ordinal)
         .copied()
         .ok_or(EulerRenderShardingError::FrameBindingMismatch)?;
     let segment_index = usize::try_from(shard.segment_index)
         .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_index"))?;
-    let (shutter, cut_side) =
-        scene.prepared_segment_shard_binding(prepared, segment_index)?;
+    let (shutter, cut_side) = scene.prepared_segment_shard_binding(prepared, segment_index)?;
     let actual_frame_identity = euler_render_checkpoint_frame_identity(prepared, segment_index)?;
     if actual_frame_identity != shard.frame_identity {
         return Err(EulerRenderShardingError::FrameBindingMismatch);
@@ -1408,6 +1456,18 @@ fn bind_shard_spec_from_index(
         stream_identity: plan.settings.seed,
         shot_id: exposure.shot_id(),
     };
+    Ok(BoundSegmentSemantics {
+        shutter,
+        cut_side,
+        time_mode,
+    })
+}
+
+fn renderer_spec_for_shard(
+    plan: &EulerUniformRenderPlan,
+    shard: EulerRenderPlannedShard,
+    semantics: BoundSegmentSemantics,
+) -> Result<UniformRenderShardSpec, EulerRenderShardingError> {
     let renderer_limits = RenderShardLimits::try_new(
         plan.limits.max_paths_per_shard,
         plan.limits.max_result_bytes_per_shard,
@@ -1417,7 +1477,7 @@ fn bind_shard_spec_from_index(
         shard.frame_identity,
         shard.frame_ordinal,
         plan.settings,
-        time_mode,
+        semantics.time_mode,
         plan.tile_layout()?,
         shard.tile_start,
         shard.tile_end,
@@ -1428,11 +1488,7 @@ fn bind_shard_spec_from_index(
     if spec.path_count() != shard.path_count {
         return Err(EulerRenderShardingError::ShardResultBindingMismatch);
     }
-    Ok(BoundShardSpec {
-        spec,
-        shutter,
-        cut_side,
-    })
+    Ok(spec)
 }
 
 fn validate_scene_binding(
@@ -1742,11 +1798,9 @@ fn partition_segments(
             paths_per_segment = paths_per_segment.checked_add(path_count).ok_or(
                 EulerRenderShardingError::ArithmeticOverflow("segment paths"),
             )?;
-            result_bytes_per_segment = result_bytes_per_segment
-                .checked_add(result_bytes)
-                .ok_or(EulerRenderShardingError::ArithmeticOverflow(
-                    "segment result bytes",
-                ))?;
+            result_bytes_per_segment = result_bytes_per_segment.checked_add(result_bytes).ok_or(
+                EulerRenderShardingError::ArithmeticOverflow("segment result bytes"),
+            )?;
             if result_bytes_per_segment > limits.max_aggregate_result_bytes {
                 return Err(EulerRenderShardingError::AggregateResultByteLimit {
                     limit: limits.max_aggregate_result_bytes,
@@ -1834,6 +1888,7 @@ fn plan_identity(
     canonical: &CanonicalPlanInputs,
     frames: &[EulerRenderPlannedFrame],
     segments: &[RawSegment],
+    cx: &Cx<'_>,
 ) -> Result<ContentHash, EulerRenderShardingError> {
     let mut hasher = DomainHasher::new(EULER_RENDER_SHARD_PLAN_IDENTITY_DOMAIN);
     hasher.update(&EULER_RENDER_SHARD_PLAN_SCHEMA_VERSION.to_le_bytes());
@@ -1849,16 +1904,19 @@ fn plan_identity(
             .to_le_bytes(),
     );
     for frame in frames {
+        checkpoint(cx)?;
         hasher.update(&frame.frame_ordinal.to_le_bytes());
         hasher.update(&frame.first_segment.to_le_bytes());
         hasher.update(&frame.segment_count.to_le_bytes());
     }
     for segment in segments {
+        checkpoint(cx)?;
         hasher.update(&segment.frame_ordinal.to_le_bytes());
         hasher.update(&segment.frame_position.to_le_bytes());
         hasher.update(&segment.segment_index.to_le_bytes());
         hasher.update(segment.frame_identity.as_bytes());
     }
+    checkpoint(cx)?;
     Ok(hasher.finalize())
 }
 
