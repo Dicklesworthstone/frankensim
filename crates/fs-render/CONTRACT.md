@@ -166,9 +166,34 @@ differentiable lift). Pure Rust throughout.
   consumes a freshly admitted opaque job, verifies the complete seal and
   binding before decoding, refuses malformed numeric or row-prefix state, and
   additionally verifies adaptive raw-sum/mean/count consistency plus canonical
-  nonnegative second moments. It returns no partially restored job on error. The codec
-  never publishes a film or durable artifact by itself; only a completed film
-  may enter final image/manifest publication.
+  nonnegative second moments. Successor restore consumes an already restored
+  predecessor job and refuses unless tile prefixes and attempts are
+  nondecreasing and every predecessor-committed uniform accumulator or adaptive
+  sum/moment/count/decision is retained bit-for-bit. It returns no partially
+  restored job on error.
+  The codec never publishes a film or durable artifact by itself; only a
+  completed film may enter final image/manifest publication.
+
+- `tracer` uniform render sharding (bead `frankensim-h7xu5.5.4`):
+  `UniformRenderShardSpec` admits one nonempty rectangle of the canonical
+  `(row-major tile, absolute sample)` space under explicit path and encoded-byte
+  caps. Its identity binds the external plan and frame identities, stable frame
+  ordinal, complete fixed-SPP settings and time mode, tile layout and ranges,
+  renderer semantic versions, and runtime ISA/features. Workers trace only that
+  rectangle and return finite immutable XYZ partial sums; random streams remain
+  keyed by absolute pixel/sample identity. The strict canonical result codec
+  requires external plan and shard pins and rejects truncation, trailing bytes,
+  corruption, non-finite payloads, or a foreign header before returning a
+  result. `merge_uniform_shards` validates exact nonoverlapping full coverage,
+  ignores exact duplicate results without charging their bytes twice, rejects
+  conflicts/missing/foreign work, follows canonical tile/sample order, checks
+  aggregate-input and output-film caps, and publishes no partial film.
+  Full-SPP tile-only plans retain the legacy serial accumulation order and bits.
+  A sample-split result is bit-stable across worker counts and arrival orders
+  for the same frozen plan, but is not claimed bit-identical to the monolithic
+  accumulator because binary64 addition is non-associative. This surface does
+  not implement adaptive sample repartition, a process launcher, remote
+  transport, leases, or cluster fault tolerance.
 
 - `volumes` module (bead qfx.3, feature `volumes`): [`VolumeGrid`]
   BORROWS its density buffer (zero-copy: live simulation fields render

@@ -32,29 +32,6 @@ const TILE_RECORD_BYTES: u64 = 8 + 5 * 4;
 const UNIFORM_PIXEL_BYTES: u64 = 3 * 8;
 const ADAPTIVE_PIXEL_BYTES: u64 = 9 * 8 + 4 + 1;
 
-/// Process-local identity of one admitted opaque pending-render instance.
-///
-/// Clones retain the same token across ownership moves, voluntary yields, and
-/// in-process restore of that pending object. Two independently admitted jobs
-/// always receive different live tokens, even when every durable job input is
-/// identical. This token is intentionally absent from checkpoint bytes,
-/// content hashes, and durable equality: it cannot identify an instance after
-/// process loss.
-#[derive(Clone)]
-pub struct RenderCheckpointInstance(std::sync::Arc<()>);
-
-impl RenderCheckpointInstance {
-    pub(super) fn fresh() -> Self {
-        Self(std::sync::Arc::new(()))
-    }
-
-    /// Whether two live tokens refer to the same process-local pending job.
-    #[must_use]
-    pub fn same_instance(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
 /// Exact estimator/AOV payload stored in a render checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -291,6 +268,12 @@ pub enum RenderCheckpointError {
     /// A numeric accumulator, count, or decision could not have been produced
     /// by the pending-render transaction.
     InvalidPixelState,
+    /// A named successor did not monotonically extend the consumed
+    /// predecessor state.
+    SuccessorRegression {
+        /// First regressed progress or retained-state component.
+        field: &'static str,
+    },
     /// The domain-separated body digest or stored byte length disagreed.
     IntegrityMismatch,
     /// Canonical payload bytes remained after the derived final record.
@@ -330,6 +313,9 @@ impl core::fmt::Display for RenderCheckpointError {
             }
             Self::InvalidTileState => formatter.write_str("invalid render checkpoint tile state"),
             Self::InvalidPixelState => formatter.write_str("invalid render checkpoint pixel state"),
+            Self::SuccessorRegression { field } => {
+                write!(formatter, "render checkpoint successor regressed {field}")
+            }
             Self::IntegrityMismatch => {
                 formatter.write_str("render checkpoint seal or content digest mismatch")
             }
@@ -1026,15 +1012,6 @@ fn finish_stream<E>(
 }
 
 impl PendingRender<'_> {
-    /// Process-local token for this exact opaque pending instance.
-    ///
-    /// The returned clone survives ownership moves but has no durable
-    /// encoding or equality meaning after process loss.
-    #[must_use]
-    pub fn checkpoint_instance(&self) -> RenderCheckpointInstance {
-        self.checkpoint_instance.clone()
-    }
-
     /// Deterministic identity of every renderer-owned input that must remain
     /// identical across a uniform checkpoint write and restore.
     #[must_use]
@@ -1147,15 +1124,6 @@ impl PendingRender<'_> {
 }
 
 impl PendingAdaptiveRender<'_> {
-    /// Process-local token for this exact opaque pending instance.
-    ///
-    /// The returned clone survives ownership moves but has no durable
-    /// encoding or equality meaning after process loss.
-    #[must_use]
-    pub fn checkpoint_instance(&self) -> RenderCheckpointInstance {
-        self.checkpoint_instance.clone()
-    }
-
     /// Deterministic identity of every renderer-owned input that must remain
     /// identical across an adaptive checkpoint write and restore.
     #[must_use]
@@ -1698,11 +1666,47 @@ impl<'assets> PendingRender<'assets> {
     /// only emission is streaming.  On any failure `self` is consumed and no
     /// partially restored job can escape.
     pub fn restore_checkpoint(
+        self,
+        expected: RenderCheckpointBinding,
+        bytes: &[u8],
+        max_bytes: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RenderCheckpointReceipt), RenderCheckpointError> {
+        self.restore_checkpoint_inner(expected, bytes, max_bytes, cx, false)
+    }
+
+    /// Restore a named non-root checkpoint only when it monotonically extends
+    /// this consumed predecessor job.
+    ///
+    /// Header, renderer semantics, execution environment, and binding checks
+    /// are identical to [`Self::restore_checkpoint`]. In addition, attempts
+    /// and every tile row prefix must be nondecreasing, and every pixel already
+    /// committed by this predecessor must be retained bit-for-bit. Pixels that
+    /// remain uncommitted in the successor must still carry canonical positive
+    /// zero. On any refusal `self` is consumed, so no partially decoded state
+    /// can escape.
+    pub fn restore_successor_checkpoint(
+        self,
+        expected: RenderCheckpointBinding,
+        bytes: &[u8],
+        max_bytes: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RenderCheckpointReceipt), RenderCheckpointError> {
+        cx.checkpoint()
+            .map_err(|_| RenderCheckpointError::Cancelled)?;
+        if expected.generation == 0 || expected.predecessor_checkpoint.is_none() {
+            return Err(RenderCheckpointError::InvalidGenerationChain);
+        }
+        self.restore_checkpoint_inner(expected, bytes, max_bytes, cx, true)
+    }
+
+    fn restore_checkpoint_inner(
         mut self,
         expected: RenderCheckpointBinding,
         bytes: &[u8],
         max_bytes: u64,
         cx: &Cx<'_>,
+        require_monotone_extension: bool,
     ) -> Result<(Self, RenderCheckpointReceipt), RenderCheckpointError> {
         cx.checkpoint()
             .map_err(|_| RenderCheckpointError::Cancelled)?;
@@ -1724,6 +1728,9 @@ impl<'assets> PendingRender<'assets> {
                 field: "render_job_identity",
             });
         }
+        if require_monotone_extension && attempts < self.attempts {
+            return Err(RenderCheckpointError::SuccessorRegression { field: "attempts" });
+        }
         let mut state = self
             .state
             .lock()
@@ -1736,7 +1743,13 @@ impl<'assets> PendingRender<'assets> {
                 .layout
                 .bounds(tile)
                 .ok_or(RenderCheckpointError::InvalidTileState)?;
+            let predecessor_next_row = state.next_row[tile as usize];
             let next_row = decode_tile_header(&mut reader, tile, bounds)?;
+            if require_monotone_extension && next_row < predecessor_next_row {
+                return Err(RenderCheckpointError::SuccessorRegression {
+                    field: "tile_next_row",
+                });
+            }
             state.next_row[tile as usize] = next_row;
             for local_y in 0..bounds.height {
                 for x in bounds.x..bounds.x + bounds.width {
@@ -1752,7 +1765,18 @@ impl<'assets> PendingRender<'assets> {
                         return Err(RenderCheckpointError::InvalidPixelState);
                     }
                     let y = bounds.y + local_y;
-                    state.xyz[pixel_index(self.settings.width, x, y)] = xyz;
+                    let pixel = pixel_index(self.settings.width, x, y);
+                    if require_monotone_extension
+                        && local_y < predecessor_next_row
+                        && (0..3).any(|channel| {
+                            state.xyz[pixel][channel].to_bits() != xyz[channel].to_bits()
+                        })
+                    {
+                        return Err(RenderCheckpointError::SuccessorRegression {
+                            field: "committed_pixel",
+                        });
+                    }
+                    state.xyz[pixel] = xyz;
                 }
             }
         }
@@ -1776,11 +1800,46 @@ impl<'assets> PendingAdaptiveRender<'assets> {
     /// Restore exact adaptive sums/moments/counts/decisions into a freshly
     /// re-admitted job.  Invalid or partially decoded state is never returned.
     pub fn restore_checkpoint(
+        self,
+        expected: RenderCheckpointBinding,
+        bytes: &[u8],
+        max_bytes: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RenderCheckpointReceipt), RenderCheckpointError> {
+        self.restore_checkpoint_inner(expected, bytes, max_bytes, cx, false)
+    }
+
+    /// Restore a named non-root adaptive checkpoint only when it monotonically
+    /// extends this consumed predecessor job.
+    ///
+    /// Besides the ordinary strict header and job checks, successor attempts
+    /// and tile row prefixes cannot decrease. Every previously committed XYZ
+    /// sum, Welford mean and M2 value, sample count, and decision must be
+    /// retained bit-for-bit; all successor-uncommitted AOV state must remain
+    /// canonical zero. On refusal `self` is consumed and no partially decoded
+    /// adaptive state escapes.
+    pub fn restore_successor_checkpoint(
+        self,
+        expected: RenderCheckpointBinding,
+        bytes: &[u8],
+        max_bytes: u64,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RenderCheckpointReceipt), RenderCheckpointError> {
+        cx.checkpoint()
+            .map_err(|_| RenderCheckpointError::Cancelled)?;
+        if expected.generation == 0 || expected.predecessor_checkpoint.is_none() {
+            return Err(RenderCheckpointError::InvalidGenerationChain);
+        }
+        self.restore_checkpoint_inner(expected, bytes, max_bytes, cx, true)
+    }
+
+    fn restore_checkpoint_inner(
         mut self,
         expected: RenderCheckpointBinding,
         bytes: &[u8],
         max_bytes: u64,
         cx: &Cx<'_>,
+        require_monotone_extension: bool,
     ) -> Result<(Self, RenderCheckpointReceipt), RenderCheckpointError> {
         cx.checkpoint()
             .map_err(|_| RenderCheckpointError::Cancelled)?;
@@ -1802,6 +1861,9 @@ impl<'assets> PendingAdaptiveRender<'assets> {
                 field: "render_job_identity",
             });
         }
+        if require_monotone_extension && attempts < self.attempts {
+            return Err(RenderCheckpointError::SuccessorRegression { field: "attempts" });
+        }
         let mut state = self
             .state
             .lock()
@@ -1814,7 +1876,13 @@ impl<'assets> PendingAdaptiveRender<'assets> {
                 .layout
                 .bounds(tile)
                 .ok_or(RenderCheckpointError::InvalidTileState)?;
+            let predecessor_next_row = state.next_row[tile as usize];
             let next_row = decode_tile_header(&mut reader, tile, bounds)?;
+            if require_monotone_extension && next_row < predecessor_next_row {
+                return Err(RenderCheckpointError::SuccessorRegression {
+                    field: "tile_next_row",
+                });
+            }
             state.next_row[tile as usize] = next_row;
             for local_y in 0..bounds.height {
                 for x in bounds.x..bounds.x + bounds.width {
@@ -1873,6 +1941,27 @@ impl<'assets> PendingAdaptiveRender<'assets> {
                     }
                     let y = bounds.y + local_y;
                     let pixel = pixel_index(self.settings.width, x, y);
+                    if require_monotone_extension && local_y < predecessor_next_row {
+                        let retained_vectors = [
+                            state.film.xyz[pixel],
+                            state.film.mean_xyz[pixel],
+                            state.film.m2_xyz[pixel],
+                        ];
+                        let vectors_equal = (0..3).all(|vector| {
+                            (0..3).all(|channel| {
+                                retained_vectors[vector][channel].to_bits()
+                                    == vectors[vector][channel].to_bits()
+                            })
+                        });
+                        if !vectors_equal
+                            || state.film.sample_counts[pixel] != samples
+                            || state.film.decisions[pixel] != decision
+                        {
+                            return Err(RenderCheckpointError::SuccessorRegression {
+                                field: "committed_adaptive_pixel",
+                            });
+                        }
+                    }
                     state.film.xyz[pixel] = vectors[0];
                     state.film.mean_xyz[pixel] = vectors[1];
                     state.film.m2_xyz[pixel] = vectors[2];
@@ -2000,6 +2089,55 @@ mod tests {
 
     fn binding() -> RenderCheckpointBinding {
         binding_with_job(identity("job"))
+    }
+
+    fn successor_binding(predecessor: RenderCheckpointReceipt) -> RenderCheckpointBinding {
+        let binding = predecessor.binding();
+        RenderCheckpointBinding::try_new(
+            binding.source_artifact_identity(),
+            binding.source_configuration_identity(),
+            binding.scene_identity(),
+            binding.frame_identity(),
+            binding.render_job_identity(),
+            binding.producer_build_identity(),
+            binding.producer_claim_identity(),
+            binding
+                .generation()
+                .checked_add(1)
+                .expect("test checkpoint generation has a successor"),
+            Some(predecessor.content_hash()),
+        )
+        .expect("valid successor binding")
+    }
+
+    fn encode_uniform_fixture(
+        pending: &PendingRender<'_>,
+        binding: RenderCheckpointBinding,
+        cx: &Cx<'_>,
+    ) -> (Vec<u8>, RenderCheckpointReceipt) {
+        let mut bytes = Vec::new();
+        let receipt = pending
+            .write_checkpoint::<Infallible>(binding, MAX_CHECKPOINT_BYTES, cx, |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            })
+            .expect("encode uniform successor fixture");
+        (bytes, receipt)
+    }
+
+    fn encode_adaptive_fixture(
+        pending: &PendingAdaptiveRender<'_>,
+        binding: RenderCheckpointBinding,
+        cx: &Cx<'_>,
+    ) -> (Vec<u8>, RenderCheckpointReceipt) {
+        let mut bytes = Vec::new();
+        let receipt = pending
+            .write_checkpoint::<Infallible>(binding, MAX_CHECKPOINT_BYTES, cx, |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            })
+            .expect("encode adaptive successor fixture");
+        (bytes, receipt)
     }
 
     fn assert_film_bits_eq(actual: &Film, expected: &Film, context: &str) {
@@ -2309,6 +2447,260 @@ mod tests {
                     .resume(cx)
                     .expect("finish adaptive reference");
             assert_adaptive_bits_eq(&restored.film, &reference.film, "adaptive checkpoint");
+        });
+    }
+
+    #[test]
+    fn g0_uniform_successor_restore_accepts_extensions_and_refuses_regressions() {
+        let gate = CancelGate::new_clock_free();
+        with_gate_cx(&gate, |cx| {
+            let scene = scene();
+            let settings = test_settings(0x6368_6563_6b70_0505);
+            let execution = execution();
+            let predecessor = PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                .expect("admit uniform predecessor")
+                .advance_to_safe_point(cx, NonZeroU32::MIN)
+                .expect("advance uniform predecessor")
+                .into_pending();
+            let root_binding = binding_with_job(predecessor.checkpoint_job_identity());
+            let (predecessor_bytes, predecessor_receipt) =
+                encode_uniform_fixture(&predecessor, root_binding, cx);
+            let successor_binding = successor_binding(predecessor_receipt);
+
+            let extension = predecessor
+                .advance_to_safe_point(cx, NonZeroU32::MIN)
+                .expect("advance valid uniform successor")
+                .into_pending();
+            let (extension_bytes, extension_receipt) =
+                encode_uniform_fixture(&extension, successor_binding, cx);
+            let restored_predecessor =
+                PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                    .expect("re-admit uniform extension target")
+                    .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+                    .expect("restore uniform predecessor")
+                    .0;
+            let (restored_extension, restored_extension_receipt) = restored_predecessor
+                .restore_successor_checkpoint(
+                    successor_binding,
+                    &extension_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                )
+                .expect("restore true uniform extension");
+            assert_eq!(restored_extension_receipt, extension_receipt);
+            assert_eq!(restored_extension.progress(), extension.progress());
+
+            let mut attempt_regression =
+                PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                    .expect("admit uniform attempt-regression fixture")
+                    .advance_to_safe_point(cx, NonZeroU32::MIN)
+                    .expect("advance uniform attempt-regression fixture")
+                    .into_pending();
+            attempt_regression.attempts = 0;
+            let (attempt_regression_bytes, _) =
+                encode_uniform_fixture(&attempt_regression, successor_binding, cx);
+            let restored_predecessor =
+                PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                    .expect("re-admit uniform attempt-regression target")
+                    .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+                    .expect("restore uniform attempt-regression predecessor")
+                    .0;
+            assert!(matches!(
+                restored_predecessor.restore_successor_checkpoint(
+                    successor_binding,
+                    &attempt_regression_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                ),
+                Err(RenderCheckpointError::SuccessorRegression { field: "attempts" })
+            ));
+
+            let mut row_regression =
+                PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                    .expect("admit uniform row-regression fixture");
+            row_regression.attempts = predecessor_receipt.progress().attempts;
+            let (row_regression_bytes, _) =
+                encode_uniform_fixture(&row_regression, successor_binding, cx);
+            let restored_predecessor =
+                PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                    .expect("re-admit uniform row-regression target")
+                    .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+                    .expect("restore uniform row-regression predecessor")
+                    .0;
+            assert!(matches!(
+                restored_predecessor.restore_successor_checkpoint(
+                    successor_binding,
+                    &row_regression_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                ),
+                Err(RenderCheckpointError::SuccessorRegression {
+                    field: "tile_next_row"
+                })
+            ));
+
+            let retained_regression =
+                PendingRender::begin_static(&scene, cx, settings, execution.clone())
+                    .expect("admit uniform retained-pixel fixture")
+                    .advance_to_safe_point(cx, NonZeroU32::MIN)
+                    .expect("advance uniform retained-pixel fixture")
+                    .into_pending();
+            {
+                let mut state = retained_regression
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.xyz[0][0] += 1.0;
+            }
+            let (retained_regression_bytes, _) =
+                encode_uniform_fixture(&retained_regression, successor_binding, cx);
+            let restored_predecessor = PendingRender::begin_static(&scene, cx, settings, execution)
+                .expect("re-admit uniform retained-pixel target")
+                .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+                .expect("restore uniform retained-pixel predecessor")
+                .0;
+            assert!(matches!(
+                restored_predecessor.restore_successor_checkpoint(
+                    successor_binding,
+                    &retained_regression_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                ),
+                Err(RenderCheckpointError::SuccessorRegression {
+                    field: "committed_pixel"
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn g0_adaptive_successor_restore_accepts_extensions_and_refuses_regressions() {
+        let gate = CancelGate::new_clock_free();
+        with_gate_cx(&gate, |cx| {
+            let scene = scene();
+            let settings = test_settings(0x6368_6563_6b70_0606);
+            let execution = execution();
+            let policy = AdaptiveSamplingConfig::try_new(2, 1, 0.0, 0.0, 0.0)
+                .expect("valid adaptive successor policy");
+            let predecessor = PendingAdaptiveRender::begin_static(
+                &scene,
+                cx,
+                settings,
+                policy,
+                execution.clone(),
+            )
+            .expect("admit adaptive predecessor")
+            .advance_to_safe_point(cx, NonZeroU32::MIN)
+            .expect("advance adaptive predecessor")
+            .into_pending();
+            let root_binding = binding_with_job(predecessor.checkpoint_job_identity());
+            let (predecessor_bytes, predecessor_receipt) =
+                encode_adaptive_fixture(&predecessor, root_binding, cx);
+            let successor_binding = successor_binding(predecessor_receipt);
+
+            let extension = predecessor
+                .advance_to_safe_point(cx, NonZeroU32::MIN)
+                .expect("advance valid adaptive successor")
+                .into_pending();
+            let (extension_bytes, extension_receipt) =
+                encode_adaptive_fixture(&extension, successor_binding, cx);
+            let restored_predecessor = PendingAdaptiveRender::begin_static(
+                &scene,
+                cx,
+                settings,
+                policy,
+                execution.clone(),
+            )
+            .expect("re-admit adaptive extension target")
+            .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+            .expect("restore adaptive predecessor")
+            .0;
+            let (restored_extension, restored_extension_receipt) = restored_predecessor
+                .restore_successor_checkpoint(
+                    successor_binding,
+                    &extension_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                )
+                .expect("restore true adaptive extension");
+            assert_eq!(restored_extension_receipt, extension_receipt);
+            assert_eq!(restored_extension.progress(), extension.progress());
+
+            let mut row_regression = PendingAdaptiveRender::begin_static(
+                &scene,
+                cx,
+                settings,
+                policy,
+                execution.clone(),
+            )
+            .expect("admit adaptive row-regression fixture");
+            row_regression.attempts = predecessor_receipt.progress().attempts;
+            let (row_regression_bytes, _) =
+                encode_adaptive_fixture(&row_regression, successor_binding, cx);
+            let restored_predecessor = PendingAdaptiveRender::begin_static(
+                &scene,
+                cx,
+                settings,
+                policy,
+                execution.clone(),
+            )
+            .expect("re-admit adaptive row-regression target")
+            .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+            .expect("restore adaptive row-regression predecessor")
+            .0;
+            assert!(matches!(
+                restored_predecessor.restore_successor_checkpoint(
+                    successor_binding,
+                    &row_regression_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                ),
+                Err(RenderCheckpointError::SuccessorRegression {
+                    field: "tile_next_row"
+                })
+            ));
+
+            let retained_regression = PendingAdaptiveRender::begin_static(
+                &scene,
+                cx,
+                settings,
+                policy,
+                execution.clone(),
+            )
+            .expect("admit adaptive retained-AOV fixture")
+            .advance_to_safe_point(cx, NonZeroU32::MIN)
+            .expect("advance adaptive retained-AOV fixture")
+            .into_pending();
+            {
+                let mut state = retained_regression
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.film.xyz[0] = [2.0; 3];
+                state.film.mean_xyz[0] = [1.0; 3];
+                state.film.m2_xyz[0] = [0.0; 3];
+                state.film.sample_counts[0] = 2;
+                state.film.decisions[0] = AdaptiveDecision::ErrorThreshold;
+            }
+            let (retained_regression_bytes, _) =
+                encode_adaptive_fixture(&retained_regression, successor_binding, cx);
+            let restored_predecessor =
+                PendingAdaptiveRender::begin_static(&scene, cx, settings, policy, execution)
+                    .expect("re-admit adaptive retained-AOV target")
+                    .restore_checkpoint(root_binding, &predecessor_bytes, MAX_CHECKPOINT_BYTES, cx)
+                    .expect("restore adaptive retained-AOV predecessor")
+                    .0;
+            assert!(matches!(
+                restored_predecessor.restore_successor_checkpoint(
+                    successor_binding,
+                    &retained_regression_bytes,
+                    MAX_CHECKPOINT_BYTES,
+                    cx,
+                ),
+                Err(RenderCheckpointError::SuccessorRegression {
+                    field: "committed_adaptive_pixel"
+                })
+            ));
         });
     }
 

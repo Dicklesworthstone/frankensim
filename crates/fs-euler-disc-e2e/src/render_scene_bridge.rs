@@ -1058,6 +1058,19 @@ impl<'artifact> EulerCinematicScene<'artifact> {
         Ok(segment)
     }
 
+    /// Revalidate a prepared segment at the L6 sharding boundary without
+    /// exposing the bridge's scene-binding fields. A decoded render plan is
+    /// never sufficient authority to manufacture a shutter: the coordinator
+    /// must present the original scene-bound prepared frame again.
+    pub(crate) fn prepared_segment_shard_binding(
+        &self,
+        prepared: &EulerPreparedFrame,
+        segment_index: usize,
+    ) -> Result<(ShutterInterval, CutSide), EulerSceneError> {
+        let segment = self.prepared_segment(prepared, segment_index)?;
+        Ok((segment.shutter, prepared.cut_side))
+    }
+
     /// Render and encode one non-subdivided frame as linear floating-point EXR.
     pub fn render_frame_exr(
         &self,

@@ -64,8 +64,15 @@ mod checkpoint;
 pub use checkpoint::{
     RENDER_CHECKPOINT_CONTENT_DOMAIN, RENDER_CHECKPOINT_EXECUTION_ENVIRONMENT_DOMAIN,
     RENDER_CHECKPOINT_JOB_DOMAIN, RENDER_CHECKPOINT_SCHEMA_VERSION, RenderCheckpointBinding,
-    RenderCheckpointError, RenderCheckpointInstance, RenderCheckpointKind, RenderCheckpointReceipt,
+    RenderCheckpointError, RenderCheckpointKind, RenderCheckpointReceipt,
     RenderCheckpointWriteError, adaptive_checkpoint_job_identity, uniform_checkpoint_job_identity,
+};
+mod sharding;
+pub use sharding::{
+    RENDER_SHARD_ARTIFACT_DOMAIN, RENDER_SHARD_IDENTITY_DOMAIN, RENDER_SHARD_SCHEMA_VERSION,
+    RENDER_SHARD_SEMANTICS_VERSION, RenderShardError, RenderShardLimits, RenderShardMergeLimits,
+    UniformRenderShardResult, UniformRenderShardSpec, merge_uniform_shards, render_cinematic_shard,
+    render_motion_shard, render_static_shard,
 };
 
 /// Bit-affecting semantic surface version of the tracer (see
@@ -397,7 +404,7 @@ pub struct Scene {
 }
 
 /// Render settings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     /// Image width (pixels).
     pub width: u32,
@@ -1242,6 +1249,30 @@ impl RenderTileLayout {
         self.tile_count
     }
 
+    /// Image width bound into this layout.
+    #[must_use]
+    pub const fn image_width(self) -> u32 {
+        self.image_width
+    }
+
+    /// Image height bound into this layout.
+    #[must_use]
+    pub const fn image_height(self) -> u32 {
+        self.image_height
+    }
+
+    /// Unclipped logical tile width.
+    #[must_use]
+    pub const fn tile_width(self) -> u32 {
+        self.tile_width
+    }
+
+    /// Unclipped logical tile height.
+    #[must_use]
+    pub const fn tile_height(self) -> u32 {
+        self.tile_height
+    }
+
     /// Number of tile columns.
     #[must_use]
     pub const fn tiles_x(self) -> u32 {
@@ -1271,6 +1302,39 @@ impl RenderTileLayout {
             width: self.tile_width.min(self.image_width - x),
             height: self.tile_height.min(self.image_height - y),
         })
+    }
+
+    /// Exact pixel count in a half-open contiguous row-major tile range.
+    ///
+    /// This is constant-time even for a layout containing billions of tiny
+    /// tiles, so resource admission never has to enumerate untrusted work.
+    #[must_use]
+    pub fn pixel_count_in_range(self, start: u64, end: u64) -> Option<u64> {
+        if start > end || end > self.tile_count {
+            return None;
+        }
+        let start_pixels = self.pixel_prefix(start)?;
+        let end_pixels = self.pixel_prefix(end)?;
+        end_pixels.checked_sub(start_pixels)
+    }
+
+    fn pixel_prefix(self, tile: u64) -> Option<u64> {
+        if tile > self.tile_count {
+            return None;
+        }
+        let tiles_x = u64::from(self.tiles_x);
+        let row = tile / tiles_x;
+        let column = tile % tiles_x;
+        let row_origin = row.checked_mul(u64::from(self.tile_height))?;
+        let completed_height = row_origin.min(u64::from(self.image_height));
+        let completed_rows = completed_height.checked_mul(u64::from(self.image_width))?;
+        let current_height = u64::from(self.image_height)
+            .saturating_sub(row_origin)
+            .min(u64::from(self.tile_height));
+        let current_width = column
+            .checked_mul(u64::from(self.tile_width))?
+            .min(u64::from(self.image_width));
+        completed_rows.checked_add(current_height.checked_mul(current_width)?)
     }
 }
 
@@ -1467,7 +1531,6 @@ pub struct PendingRender<'assets> {
     execution_budget: Budget,
     execution: RenderExecutionConfig,
     layout: RenderTileLayout,
-    checkpoint_instance: RenderCheckpointInstance,
     state: Mutex<PendingRenderState>,
     sobol: Option<Sobol>,
     lease: OperationMemoryLease,
@@ -1517,7 +1580,6 @@ pub struct PendingAdaptiveRender<'assets> {
     execution_budget: Budget,
     execution: RenderExecutionConfig,
     layout: RenderTileLayout,
-    checkpoint_instance: RenderCheckpointInstance,
     state: Mutex<PendingAdaptiveRenderState>,
     sobol: Option<Sobol>,
     lease: OperationMemoryLease,
@@ -3883,7 +3945,6 @@ impl<'assets> PendingRender<'assets> {
             execution_budget: cx.budget(),
             execution,
             layout,
-            checkpoint_instance: RenderCheckpointInstance::fresh(),
             state: Mutex::new(PendingRenderState { xyz, next_row }),
             sobol,
             lease,
@@ -4518,7 +4579,6 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             execution_budget: cx.budget(),
             execution,
             layout,
-            checkpoint_instance: RenderCheckpointInstance::fresh(),
             state: Mutex::new(PendingAdaptiveRenderState { film, next_row }),
             sobol,
             lease,

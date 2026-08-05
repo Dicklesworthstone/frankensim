@@ -6,6 +6,7 @@
 
 use asupersync::types::Budget;
 use core::mem::size_of;
+use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::NumericalCertificate;
 use fs_exec::{CancelGate, Cx, ExecMode, RunError, RunId, StreamKey};
 use fs_geom::fixtures::SphereChart;
@@ -13,9 +14,11 @@ use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_render::lighting::EnvironmentMap;
 use fs_render::spectral::lift_rgb;
 use fs_render::tracer::{
-    Camera, DirectStrategy, Film, Material, PendingRender, Primitive, RenderExecutionConfig,
-    RenderExecutionError, RenderTileLayout, RenderWorkerPool, Sampler, Scene, Settings, Shape,
-    TracerError, render, render_range_with_execution, render_with_execution,
+    Camera, DirectStrategy, Film, FilmTimeMode, Material, PendingRender, Primitive,
+    RenderExecutionConfig, RenderExecutionError, RenderShardError, RenderShardLimits,
+    RenderShardMergeLimits, RenderTileLayout, RenderWorkerPool, Sampler, Scene, Settings, Shape,
+    TracerError, UniformRenderShardResult, UniformRenderShardSpec, merge_uniform_shards, render,
+    render_range_with_execution, render_static_shard, render_with_execution,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -875,4 +878,597 @@ fn g4_worker_panic_is_contained_and_film_remains_transactional() {
     let reference = with_cx(false, |cx| render(&healthy_scene, cx, &settings))
         .expect("serial post-panic reference");
     assert_film_bits_eq(&reference, &film, "post-panic retry drifted from serial");
+}
+
+fn shard_test_identity(label: &str) -> ContentHash {
+    hash_domain("org.frankensim.test.render-sharding.v1", label.as_bytes())
+}
+
+fn shard_test_settings(sampler: Sampler) -> Settings {
+    Settings {
+        width: 6,
+        height: 5,
+        spp: 4,
+        max_depth: 2,
+        sampler,
+        strategy: DirectStrategy::Mis,
+        seed: SEED,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shard_spec(
+    plan_identity: ContentHash,
+    frame_identity: ContentHash,
+    settings: Settings,
+    layout: RenderTileLayout,
+    tile_start: u64,
+    tile_end: u64,
+    sample_start: u32,
+    sample_end: u32,
+    limits: RenderShardLimits,
+) -> UniformRenderShardSpec {
+    UniformRenderShardSpec::try_new(
+        plan_identity,
+        frame_identity,
+        17,
+        settings,
+        FilmTimeMode::Static,
+        layout,
+        tile_start,
+        tile_end,
+        sample_start,
+        sample_end,
+        limits,
+    )
+    .expect("valid bounded static render shard")
+}
+
+fn render_shard_set(
+    scene: &Scene,
+    specs: &[UniformRenderShardSpec],
+    cx: &Cx<'_>,
+) -> Vec<UniformRenderShardResult> {
+    specs
+        .iter()
+        .map(|spec| render_static_shard(scene, cx, spec).expect("deterministic shard render"))
+        .collect()
+}
+
+#[test]
+fn g0_uniform_shards_enforce_caps_codec_completeness_and_transactional_retry() {
+    let scene = scene();
+    let settings = shard_test_settings(Sampler::Iid);
+    let layout = RenderTileLayout::try_new(settings.width, settings.height, 3, 3)
+        .expect("four-tile irregular-edge layout");
+    assert_eq!(layout.tile_count(), 4);
+    let plan_identity = shard_test_identity("bounded-plan");
+    let frame_identity = shard_test_identity("bounded-frame");
+    let generous = RenderShardLimits::try_new(1 << 20, 4 << 20).expect("generous shard caps");
+
+    let probe = shard_spec(
+        plan_identity,
+        frame_identity,
+        settings,
+        layout,
+        0,
+        3,
+        0,
+        2,
+        generous,
+    );
+    assert_eq!(probe.payload_pixel_count(), 24);
+    assert_eq!(probe.path_count(), 48);
+    let exact_limits = RenderShardLimits::try_new(probe.path_count(), probe.encoded_result_bytes())
+        .expect("positive exact shard caps");
+    let exact_spec = shard_spec(
+        plan_identity,
+        frame_identity,
+        settings,
+        layout,
+        0,
+        3,
+        0,
+        2,
+        exact_limits,
+    );
+    assert_eq!(exact_spec.path_count(), exact_limits.max_paths());
+    assert_eq!(
+        exact_spec.encoded_result_bytes(),
+        exact_limits.max_result_bytes()
+    );
+    assert!(matches!(
+        UniformRenderShardSpec::try_new(
+            plan_identity,
+            frame_identity,
+            17,
+            settings,
+            FilmTimeMode::Static,
+            layout,
+            0,
+            3,
+            0,
+            2,
+            RenderShardLimits::try_new(probe.path_count() - 1, 4 << 20)
+                .expect("one-short path policy"),
+        ),
+        Err(RenderShardError::PathLimit { .. })
+    ));
+    assert!(matches!(
+        UniformRenderShardSpec::try_new(
+            plan_identity,
+            frame_identity,
+            17,
+            settings,
+            FilmTimeMode::Static,
+            layout,
+            0,
+            3,
+            0,
+            2,
+            RenderShardLimits::try_new(1 << 20, probe.encoded_result_bytes() - 1)
+                .expect("one-short result-byte policy"),
+        ),
+        Err(RenderShardError::ResultByteLimit { .. })
+    ));
+
+    let exact_result = with_cx(false, |cx| {
+        render_static_shard(&scene, cx, &exact_spec).expect("exact-cap shard render")
+    });
+    let encoded = with_cx(false, |cx| {
+        exact_result
+            .encode_canonical(exact_result.encoded_result_bytes(), cx)
+            .expect("exact-cap canonical shard encoding")
+    });
+    assert_eq!(encoded.len() as u64, exact_result.encoded_result_bytes());
+    assert!(
+        with_cx(false, |cx| exact_result
+            .encode_canonical(exact_result.encoded_result_bytes() - 1, cx))
+        .is_err()
+    );
+    let decoded = with_cx(false, |cx| {
+        UniformRenderShardResult::decode_canonical(
+            &encoded,
+            encoded.len() as u64,
+            &exact_spec,
+            exact_spec.plan_identity(),
+            exact_spec.shard_identity(),
+            cx,
+        )
+        .expect("strict pinned shard decode")
+    });
+    assert_eq!(decoded, exact_result);
+    for prefix in [0, 1, 7, encoded.len() - 1] {
+        assert!(
+            with_cx(false, |cx| UniformRenderShardResult::decode_canonical(
+                &encoded[..prefix],
+                encoded.len() as u64,
+                &exact_spec,
+                exact_spec.plan_identity(),
+                exact_spec.shard_identity(),
+                cx,
+            ))
+            .is_err(),
+            "accepted truncated shard prefix {prefix}/{}",
+            encoded.len()
+        );
+    }
+    let mut corrupt = encoded.clone();
+    let corrupt_index = corrupt.len() / 2;
+    corrupt[corrupt_index] ^= 1;
+    assert!(
+        with_cx(false, |cx| UniformRenderShardResult::decode_canonical(
+            &corrupt,
+            corrupt.len() as u64,
+            &exact_spec,
+            exact_spec.plan_identity(),
+            exact_spec.shard_identity(),
+            cx,
+        ))
+        .is_err()
+    );
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(matches!(
+        with_cx(false, |cx| UniformRenderShardResult::decode_canonical(
+            &trailing,
+            trailing.len() as u64,
+            &exact_spec,
+            exact_spec.plan_identity(),
+            exact_spec.shard_identity(),
+            cx,
+        )),
+        Err(RenderShardError::ResultByteLimit { .. } | RenderShardError::TrailingBytes)
+    ));
+    assert!(matches!(
+        with_cx(false, |cx| UniformRenderShardResult::decode_canonical(
+            &encoded,
+            encoded.len() as u64,
+            &exact_spec,
+            shard_test_identity("wrong-plan-pin"),
+            exact_spec.shard_identity(),
+            cx,
+        )),
+        Err(RenderShardError::PlanIdentityMismatch { .. })
+    ));
+    assert!(matches!(
+        with_cx(false, |cx| UniformRenderShardResult::decode_canonical(
+            &encoded,
+            encoded.len() as u64,
+            &exact_spec,
+            exact_spec.plan_identity(),
+            shard_test_identity("wrong-shard-pin"),
+            cx,
+        )),
+        Err(RenderShardError::ShardIdentityMismatch { .. })
+    ));
+
+    let specs = [
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            0,
+            2,
+            0,
+            2,
+            generous,
+        ),
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            0,
+            2,
+            2,
+            4,
+            generous,
+        ),
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            2,
+            4,
+            0,
+            2,
+            generous,
+        ),
+        shard_spec(
+            plan_identity,
+            frame_identity,
+            settings,
+            layout,
+            2,
+            4,
+            2,
+            4,
+            generous,
+        ),
+    ];
+    let results = with_cx(false, |cx| render_shard_set(&scene, &specs, cx));
+    let mut generously_capped_bytes = with_cx(false, |cx| {
+        results[0]
+            .encode_canonical(generous.max_result_bytes(), cx)
+            .expect("generously capped canonical result")
+    });
+    generously_capped_bytes.push(0);
+    assert!(matches!(
+        with_cx(false, |cx| UniformRenderShardResult::decode_canonical(
+            &generously_capped_bytes,
+            generously_capped_bytes.len() as u64,
+            &specs[0],
+            specs[0].plan_identity(),
+            specs[0].shard_identity(),
+            cx,
+        )),
+        Err(RenderShardError::TrailingBytes)
+    ));
+    let input_bytes = results
+        .iter()
+        .map(UniformRenderShardResult::encoded_result_bytes)
+        .sum::<u64>();
+    let output_bytes = u64::from(settings.width) * u64::from(settings.height) * 24;
+    let exact_merge_limits =
+        RenderShardMergeLimits::try_new(input_bytes, output_bytes).expect("exact merge caps");
+    with_cx(false, |cx| {
+        merge_uniform_shards(&specs, &results, exact_merge_limits, cx)
+    })
+    .expect("complete result set at exact aggregate caps");
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &results,
+            RenderShardMergeLimits::try_new(input_bytes - 1, output_bytes)
+                .expect("one-short input cap"),
+            cx,
+        )),
+        Err(RenderShardError::AggregateInputLimit { .. })
+    ));
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &results,
+            RenderShardMergeLimits::try_new(input_bytes, output_bytes - 1)
+                .expect("one-short output cap"),
+            cx,
+        )),
+        Err(RenderShardError::OutputByteLimit { .. })
+    ));
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &results[..results.len() - 1],
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::MissingShard(_))
+    ));
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs[1..],
+            &[],
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::CoverageGap { .. })
+    ));
+    let overlapping_specs = [specs[0], specs[0], specs[1], specs[2], specs[3]];
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &overlapping_specs,
+            &[],
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::CoverageOverlap { .. })
+    ));
+
+    let mut exact_duplicate_results = results.clone();
+    exact_duplicate_results.push(results[0].clone());
+    with_cx(false, |cx| {
+        merge_uniform_shards(&specs, &exact_duplicate_results, exact_merge_limits, cx)
+    })
+    .expect("exact duplicate is idempotent and consumes no second aggregate-byte charge");
+    let mut altered_scene = crate::scene();
+    altered_scene.environment = Some(
+        EnvironmentMap::try_from_linear_srgb(4, 2, vec![[0.1, 0.9, 0.2]; 8], 0.11)
+            .expect("alternate finite emitter"),
+    );
+    let conflict = with_cx(false, |cx| {
+        render_static_shard(&altered_scene, cx, &specs[0]).expect("alternate valid shard result")
+    });
+    assert_ne!(conflict.result_identity(), results[0].result_identity());
+    let mut conflicting_results = results.clone();
+    conflicting_results.push(conflict);
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &conflicting_results,
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::ConflictingDuplicate(_))
+    ));
+
+    let foreign_plan_spec = shard_spec(
+        shard_test_identity("foreign-plan"),
+        frame_identity,
+        settings,
+        layout,
+        0,
+        2,
+        0,
+        2,
+        generous,
+    );
+    let foreign_plan_result = with_cx(false, |cx| {
+        render_static_shard(&scene, cx, &foreign_plan_spec).expect("foreign-plan result")
+    });
+    let mut foreign_results = results.clone();
+    foreign_results.push(foreign_plan_result);
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &foreign_results,
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::ForeignPlan(_))
+    ));
+    let foreign_frame_spec = shard_spec(
+        plan_identity,
+        shard_test_identity("foreign-frame"),
+        settings,
+        layout,
+        0,
+        2,
+        0,
+        2,
+        generous,
+    );
+    let foreign_frame_result = with_cx(false, |cx| {
+        render_static_shard(&scene, cx, &foreign_frame_spec).expect("foreign-frame result")
+    });
+    foreign_results.pop();
+    foreign_results.push(foreign_frame_result);
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &foreign_results,
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::ForeignFrame(_))
+    ));
+    let unexpected_spec = shard_spec(
+        plan_identity,
+        frame_identity,
+        settings,
+        layout,
+        0,
+        4,
+        0,
+        settings.spp,
+        generous,
+    );
+    let unexpected_result = with_cx(false, |cx| {
+        render_static_shard(&scene, cx, &unexpected_spec).expect("unexpected valid shard result")
+    });
+    foreign_results.pop();
+    foreign_results.push(unexpected_result);
+    assert!(matches!(
+        with_cx(false, |cx| merge_uniform_shards(
+            &specs,
+            &foreign_results,
+            RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge policy"),
+            cx,
+        )),
+        Err(RenderShardError::UnexpectedShard(_))
+    ));
+
+    assert!(matches!(
+        with_cx(true, |cx| render_static_shard(&scene, cx, &specs[0])),
+        Err(RenderShardError::Cancelled)
+    ));
+    let retried = with_cx(false, |cx| {
+        render_static_shard(&scene, cx, &specs[0]).expect("fresh-authority retry")
+    });
+    assert_eq!(retried, results[0]);
+}
+
+#[test]
+fn g5_uniform_shards_are_arrival_order_invariant_with_explicit_exactness_boundaries() {
+    for sampler in [Sampler::Iid, Sampler::OwenSobol] {
+        let scene = scene();
+        let settings = shard_test_settings(sampler);
+        let layout = RenderTileLayout::try_new(settings.width, settings.height, 3, 3)
+            .expect("four-tile irregular-edge layout");
+        let plan_identity = shard_test_identity(match sampler {
+            Sampler::Iid => "iid-plan",
+            Sampler::OwenSobol => "sobol-plan",
+        });
+        let frame_identity = shard_test_identity("g5-frame");
+        let limits = RenderShardLimits::try_new(1 << 20, 4 << 20).expect("shard caps");
+        let merge_limits = RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge caps");
+
+        let serial =
+            with_cx(false, |cx| render(&scene, cx, &settings)).expect("legacy serial reference");
+        let tile_only_specs = [
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                0,
+                2,
+                0,
+                settings.spp,
+                limits,
+            ),
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                2,
+                4,
+                0,
+                settings.spp,
+                limits,
+            ),
+        ];
+        let tile_only_results = with_cx(false, |cx| render_shard_set(&scene, &tile_only_specs, cx));
+        let tile_only = with_cx(false, |cx| {
+            merge_uniform_shards(&tile_only_specs, &tile_only_results, merge_limits, cx)
+        })
+        .expect("complete tile-only merge");
+        assert_film_bits_eq(
+            &serial,
+            &tile_only,
+            "full-SPP tile-only shards must retain legacy serial bits",
+        );
+
+        let split_specs = [
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                0,
+                2,
+                0,
+                2,
+                limits,
+            ),
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                0,
+                2,
+                2,
+                4,
+                limits,
+            ),
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                2,
+                4,
+                0,
+                2,
+                limits,
+            ),
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                2,
+                4,
+                2,
+                4,
+                limits,
+            ),
+        ];
+        let split_results = with_cx(false, |cx| render_shard_set(&scene, &split_specs, cx));
+        let canonical = with_cx(false, |cx| {
+            merge_uniform_shards(&split_specs, &split_results, merge_limits, cx)
+        })
+        .expect("canonical split-sample merge");
+        let mut reversed = split_results.clone();
+        reversed.reverse();
+        let reverse_merged = with_cx(false, |cx| {
+            merge_uniform_shards(&split_specs, &reversed, merge_limits, cx)
+        })
+        .expect("reverse-arrival split-sample merge");
+        assert_film_bits_eq(
+            &canonical,
+            &reverse_merged,
+            "split-sample reverse arrival changed frozen-plan bits",
+        );
+        let permuted = vec![
+            split_results[2].clone(),
+            split_results[0].clone(),
+            split_results[3].clone(),
+            split_results[1].clone(),
+            split_results[2].clone(),
+        ];
+        let permuted_merged = with_cx(false, |cx| {
+            merge_uniform_shards(&split_specs, &permuted, merge_limits, cx)
+        })
+        .expect("permuted split-sample merge with exact duplicate");
+        assert_film_bits_eq(
+            &canonical,
+            &permuted_merged,
+            "split-sample permutation or exact duplicate changed frozen-plan bits",
+        );
+    }
 }

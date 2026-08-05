@@ -1192,30 +1192,46 @@ kind, every `Settings` field, every `RenderExecutionConfig` field including
 raw scheduling weights, the admitted execution mode and exact `Budget`, the
 runtime ISA and sorted detected feature set, the complete cinematic shutter
 mode and shot identity, and every adaptive-policy field plus its estimator
-semantics version. Binding construction receives the already-admitted pending
-job and rejects any mismatch in its borrowed scene/camera objects or its
-renderer-derived job identity. Store and restore repeat that pairing check at
-the ledger boundary before writing or loading bytes. Producer build and claim
-identities are explicit and nonzero. Generation lineage follows fs-render's
-exact invariant: the only public manual constructor creates generation-zero
-root provenance with no predecessor. Every later generation is mechanically
-derived by `try_successor` from a typed checkpoint that this adapter previously
-stored or strictly restored. A successor must retain the exact source,
-configuration, scene, frame, and render-job identities; producer build and
-claim may change. This does not independently prove scheduler ownership or
-claim continuity. A mismatch refuses rather than approximately reinterpreting
-progress.
+semantics version. `begin_uniform_checkpoint_job` and
+`begin_adaptive_checkpoint_job` atomically admit the raw renderer job and
+freeze the canonical Euler frame identity from the same prepared segment.
+Persistence accepts only the resulting sealed, non-cloneable Euler job; it
+never accepts a raw pending render or a caller-created binding. The wrapper
+privately carries both the evolving pending state and its latest durable head
+through bounded advances, suspensions, parked-crew attempts, and restores.
+Store derives generation zero when no head exists and otherwise derives the
+next generation and predecessor digest from that private head. Safe code
+therefore cannot replace the state while retaining successor authority.
+Producer build and claim identities are explicit and nonzero and may change
+between generations, while source, configuration, scene, frame, and render-job
+identities remain fixed. A separate expectation type can reconstruct a root or
+typed successor binding only inside restore; it cannot publish fresh state.
+Successor restore reopens the typed predecessor artifact as well as the proposed
+successor, strictly revalidates the predecessor receipt, and asks fs-render to
+prove that every predecessor-committed accumulator/AOV bit is retained, every
+tile-row prefix and attempt count is nondecreasing, and all newly uncommitted
+state remains canonical zero. Merely naming a valid predecessor digest in a
+canonical lower-level checkpoint therefore cannot mint state-ancestry
+authority. This is a safe-adapter construction guarantee, not cryptographic
+producer authentication, scheduler ownership, or concurrent single-writer
+claim arbitration.
 
 Checkpoint codec v1 bytes stream directly through
 `Ledger::artifact_writer/write/finish`. Dropping or failing that writer rolls
 back its transaction, so a prior immutable content-addressed checkpoint
-remains readable. Restore checks ledger metadata for the exact
+remains readable. Before `finish`, the adapter counts every streamed byte and
+requires exact agreement with fs-render's sealed receipt. After successful
+commit, constructing the typed stored receipt and replacing the wrapper's head
+are infallible; the adapter cannot report an ordinary validation error after
+publication. Restore checks ledger metadata for the exact
 `euler-render-checkpoint-v1` artifact kind, then uses `get_artifact_bounded`
 with the caller's explicit byte ceiling and invokes fs-render's strict v1
-decoder against the expected binding. A successful restore returns both the
-opaque resumed pending job and a typed, verified stored-checkpoint token, so a
-post-restart caller can derive the next successor without reconstructing
-provenance by hand. Encode and decode receive the caller's `Cx` and poll at
+decoder against the expected binding. For a root the ceiling covers that one
+artifact; for a successor it covers the aggregate predecessor-plus-successor
+bytes that must coexist during extension verification. A successful restore returns a sealed
+Euler job whose private head is the typed, verified stored checkpoint, so a
+post-restart advance and store derives its successor without reconstructing or
+injecting lineage scalars. Encode and decode receive the caller's `Cx` and poll at
 bounded codec chunks/tiles; cancellation refuses before publication or restored
 state escapes. The raw BLAKE3 ledger artifact key covers the complete sealed
 bytes, while fs-render's separately domain-separated receipt digest covers the
@@ -1225,6 +1241,34 @@ weaken those checks. This adapter does not invent a universal checkpoint-size
 constant or assert that any fixed memory limit admits 4K uniform or adaptive
 state; callers must budget each job and fs-render remains the concrete
 memory/codec admission authority.
+
+The opt-in `render-sharding-ledger` feature adds a bounded L6 coordinator for
+uniform fixed-SPP cinematic work. `EulerUniformRenderPlan` canonically sorts
+stable frame ordinals, retains every event-delimited prepared segment as a
+separate film, and partitions each segment's complete tile/sample cell space
+exactly once. Its externally pinnable identity covers the sequence, source
+trajectory, scene configuration and built scene, complete render settings,
+tile/sample partition, finishing-neighbor radius, every exact checkpoint-derived
+frame-segment identity, and all resource caps. Plan admission checks frame,
+shard, canonical-plan-byte, per-shard path, per-shard result-byte, and per-segment
+aggregate-result limits before returning the plan. Its strict canonical codec
+recomputes ordering, coverage, identities, derived counts, and byte length under
+an external plan pin; decoded bytes alone do not authorize a render.
+
+Each worker must re-present the original scene-bound prepared frame, from which
+the coordinator reconstructs the exact shutter, cut side, frame identity, and
+generic renderer shard spec. Workers may exchange only the renderer's bounded
+canonical result bytes. A single coordinator strictly decodes those bytes and
+stores them under the dedicated immutable ledger kind; workers do not share or
+write the coordinator ledger. Segment merge preflights all unique artifact
+kinds and lengths against the aggregate cap before reading any payload, then
+refuses missing, foreign, corrupt, aliased, or conflicting work and publishes
+only a complete film. Exact duplicate references are idempotent. Raw segments
+remain independently renderable; `finishing_neighbors` exposes only explicit
+frame-position dependency metadata for a later temporal finishing pass and does
+not blend films. This feature is a portable file/byte boundary and local
+multi-worker plan, not a network scheduler, lease/claim protocol, distributed
+database, adaptive-sampling sharder, or cluster-fault-tolerance claim.
 
 Focused G0/G3/E2E coverage builds the scene from a real 1 mm circular-filleted
 disc, checks deterministic scene and mesh identities, COM/base transforms,
@@ -1255,12 +1299,16 @@ The ledger-checkpoint G3/E2E additionally advances every uniform and adaptive
 tile to a nonzero but strictly partial row-atomic safe point, persists that
 state, and requires an exact final-buffer match after closing and reopening the
 ledger and resuming. It also requires refusal after any binding or job identity
-mutation, cross-wired pending/binding pairs, and an artifact-kind mismatch;
-cancellation refusal without artifact publication or restored state; and
-preservation of an earlier checkpoint when a later streaming writer fails
-before `finish`. A persisted root must remain byte-identical and independently
-readable after ledger reopen, typed restore, successor derivation, successor
-store, and a second reopen/restore. These are replay and transactional storage
+mutation, the same-shutter/different-duration-weight frame collision, and an
+artifact-kind mismatch; cancellation refusal without artifact publication or
+restored state; and preservation of an earlier checkpoint when a later store
+refuses. A fresh sealed job can publish only generation zero. A persisted root
+must remain byte-identical and independently readable after ledger reopen,
+typed restore, state advance, automatic successor publication, and a second
+reopen/restore. A separately serialized canonical generation that names the
+root but regresses its committed state must refuse, as must an aggregate
+successor-recovery budget one byte below the exact artifact pair. These are
+replay, state-ancestry, and transactional storage
 claims only; they do not establish concurrent scheduler-claim arbitration,
 render convergence, 4K capacity, or scientific authority beyond the source
 trajectory.
