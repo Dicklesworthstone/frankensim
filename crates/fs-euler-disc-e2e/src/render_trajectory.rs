@@ -797,13 +797,13 @@ fn validate_sample(
     {
         return Err(RenderTrajectoryError::SymmetryAxisMismatch(index));
     }
-    validate_contact(&input, index)?;
+    validate_channels(&input.channels, metadata.channel_availability, index)?;
+    validate_contact(metadata, &input, index)?;
     let base = input
         .base_mode
         .ok_or(RenderTrajectoryError::MissingBaseState(index))?;
     finite_scalar(base.displacement_m, index, "base_mode.displacement_m")?;
     finite_scalar(base.velocity_m_per_s, index, "base_mode.velocity_m_per_s")?;
-    validate_channels(&input.channels, metadata.channel_availability, index)?;
     if input.interval_start_time_s.to_bits() == input.time_s.to_bits()
         && (input.interval_contact_active
             || input.interval_normal_force_n != 0.0
@@ -865,6 +865,7 @@ fn checked_unit_quaternion(
 }
 
 fn validate_contact(
+    metadata: &RenderTrajectoryMetadata,
     input: &RenderTrajectorySampleInput,
     index: usize,
 ) -> Result<(), RenderTrajectoryError> {
@@ -876,6 +877,15 @@ fn validate_contact(
     )?;
     if input.interval_normal_force_n < 0.0 {
         return Err(RenderTrajectoryError::NegativeNormalForce(index));
+    }
+    if metadata.channel_availability.contact {
+        let base_axis_world = metadata
+            .base_frame
+            .orientation_base_to_world
+            .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+        if input.channels.contact.force_world_n.dot(base_axis_world) < 0.0 {
+            return Err(RenderTrajectoryError::NegativeNormalForce(index));
+        }
     }
     if !input.interval_contact_active
         && (input.interval_normal_force_n != 0.0

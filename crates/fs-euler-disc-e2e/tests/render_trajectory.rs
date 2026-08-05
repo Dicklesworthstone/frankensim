@@ -291,6 +291,14 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
         RenderTrajectoryError::InactiveContactHasIntervalData(0)
     );
 
+    let mut negative_mean_normal = sample(0.01, RenderSampleDisposition::HorizonCensored);
+    negative_mean_normal.interval_contact_active = true;
+    negative_mean_normal.channels.contact.force_world_n = Vec3::new(0.0, 0.0, -1.0);
+    assert_eq!(
+        RenderTrajectory::try_new(metadata(), vec![negative_mean_normal]).unwrap_err(),
+        RenderTrajectoryError::NegativeNormalForce(0)
+    );
+
     let half_angle = 0.05_f64;
     let mut tilted_base = metadata();
     tilted_base.base_frame.orientation_base_to_world =
