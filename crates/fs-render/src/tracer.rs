@@ -698,6 +698,8 @@ pub const MAX_RENDER_TILE_EDGE: u32 = 4_096;
 /// Defensive ceiling on renderer-created worker threads.
 pub const MAX_RENDER_WORKERS: usize = 256;
 const RENDER_TILE_KERNEL: &str = "fs-render/spectral-film-tile-v1";
+const PENDING_ADAPTIVE_RENDER_TILE_KERNEL: &str =
+    "fs-render/pending-adaptive-spectral-film-tile-v1";
 
 /// Invalid explicit tile-render execution policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3050,10 +3052,7 @@ impl TileKernel for PendingAdaptiveRenderKernel<'_, '_> {
     type Out = ();
 
     fn tiles(&self) -> TilePlan {
-        TilePlan::new(
-            "fs-render/pending-adaptive-spectral-film-tile-v1",
-            self.layout.tile_count(),
-        )
+        TilePlan::new(PENDING_ADAPTIVE_RENDER_TILE_KERNEL, self.layout.tile_count())
     }
 
     fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, Self::Out> {
@@ -3353,6 +3352,7 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
                 cx,
                 layout,
                 execution,
+                RENDER_TILE_KERNEL,
                 elapsed_ns(setup_started),
                 0,
                 0,
@@ -3395,6 +3395,7 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
                 cx,
                 layout,
                 execution,
+                RENDER_TILE_KERNEL,
                 elapsed_ns(setup_started),
                 0,
                 film_bytes,
@@ -3672,6 +3673,7 @@ fn empty_parallel_report(
     cx: &Cx<'_>,
     layout: RenderTileLayout,
     execution: &RenderExecutionConfig,
+    kernel: &'static str,
     setup_ns: u64,
     retained_film_bytes: u64,
     staging_film_bytes: u64,
@@ -3694,7 +3696,7 @@ fn empty_parallel_report(
         publication_ns: 0,
         idle_worker_ns: 0,
         executor: RunReport {
-            kernel: RENDER_TILE_KERNEL,
+            kernel,
             mode: cx.mode().name(),
             declared_run: execution.run_id,
             completed: 0,
@@ -4251,6 +4253,7 @@ impl<'assets> PendingRender<'assets> {
             cx,
             self.layout,
             &self.execution,
+            RENDER_TILE_KERNEL,
             self.setup_ns,
             0,
             self.film_bytes,
@@ -4280,6 +4283,7 @@ impl<'assets> PendingRender<'assets> {
             cx,
             self.layout,
             &self.execution,
+            RENDER_TILE_KERNEL,
             self.setup_ns,
             0,
             self.film_bytes,
@@ -4308,6 +4312,7 @@ impl<'assets> PendingRender<'assets> {
             cx,
             self.layout,
             &self.execution,
+            RENDER_TILE_KERNEL,
             self.setup_ns,
             0,
             self.film_bytes,
@@ -4882,6 +4887,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             cx,
             self.layout,
             &self.execution,
+            PENDING_ADAPTIVE_RENDER_TILE_KERNEL,
             self.setup_ns,
             0,
             self.state_bytes,
@@ -4911,6 +4917,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             cx,
             self.layout,
             &self.execution,
+            PENDING_ADAPTIVE_RENDER_TILE_KERNEL,
             self.setup_ns,
             0,
             self.state_bytes,
@@ -4939,6 +4946,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             cx,
             self.layout,
             &self.execution,
+            PENDING_ADAPTIVE_RENDER_TILE_KERNEL,
             self.setup_ns,
             0,
             self.state_bytes,
