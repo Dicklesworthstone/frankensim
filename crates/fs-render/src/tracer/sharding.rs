@@ -387,7 +387,7 @@ impl UniformRenderShardResult {
                 bytes.extend_from_slice(&value.to_bits().to_le_bytes());
             }
         }
-        let actual = hash_result_body(&bytes);
+        let actual = hash_result_body(&bytes, cx)?;
         if actual != self.result_identity {
             return Err(RenderShardError::Integrity);
         }
@@ -456,7 +456,7 @@ impl UniformRenderShardResult {
             return Err(RenderShardError::NonCanonical("payload count"));
         }
         let seal_start = bytes.len() - 32;
-        let actual = hash_result_body(&bytes[..seal_start]);
+        let actual = hash_result_body(&bytes[..seal_start], cx)?;
         let stored = ContentHash(
             bytes[seal_start..]
                 .try_into()
@@ -766,7 +766,7 @@ fn render_shard_impl(
         ));
     }
     checkpoint(cx)?;
-    let result_identity = result_identity(spec, &xyz);
+    let result_identity = result_identity(spec, &xyz, cx)?;
     Ok(UniformRenderShardResult {
         spec: *spec,
         xyz,
@@ -799,6 +799,19 @@ pub fn merge_uniform_shards(
             observed: output_bytes,
         });
     }
+    let expected_count = u64::try_from(expected_specs.len())
+        .map_err(|_| RenderShardError::ArithmeticOverflow("expected shard count"))?;
+    let minimum_input = expected_count
+        .checked_mul(encoded_result_bytes(1)?)
+        .ok_or(RenderShardError::ArithmeticOverflow(
+            "minimum aggregate result bytes",
+        ))?;
+    if minimum_input > limits.max_input_bytes {
+        return Err(RenderShardError::AggregateInputLimit {
+            limit: limits.max_input_bytes,
+            observed: minimum_input,
+        });
+    }
     let mut ordered_specs: Vec<&UniformRenderShardSpec> = Vec::new();
     ordered_specs
         .try_reserve_exact(expected_specs.len())
@@ -806,14 +819,14 @@ pub fn merge_uniform_shards(
     ordered_specs.extend(expected_specs.iter());
     ordered_specs.sort_by_key(|spec| {
         (
-            spec.tile_start,
-            spec.tile_end,
             spec.sample_start,
             spec.sample_end,
+            spec.tile_start,
+            spec.tile_end,
             spec.shard_identity,
         )
     });
-    validate_expected_specs(&ordered_specs, first)?;
+    validate_expected_specs(&ordered_specs, first, cx)?;
 
     let mut expected_by_id = BTreeMap::new();
     for spec in &ordered_specs {
@@ -841,11 +854,12 @@ pub fn merge_uniform_shards(
         if result.spec != *expected {
             return Err(RenderShardError::UnexpectedShard(identity));
         }
+        let recomputed_result_identity = result_identity(&result.spec, &result.xyz, cx)?;
         if result.xyz.len()
             != usize::try_from(result.spec.payload_pixel_count)
                 .map_err(|_| RenderShardError::ArithmeticOverflow("payload count"))?
             || result.xyz.iter().flatten().any(|value| !value.is_finite())
-            || result_identity(&result.spec, &result.xyz) != result.result_identity
+            || recomputed_result_identity != result.result_identity
         {
             return Err(RenderShardError::Integrity);
         }
@@ -891,58 +905,97 @@ pub fn merge_uniform_shards(
 fn validate_expected_specs(
     ordered: &[&UniformRenderShardSpec],
     first: &UniformRenderShardSpec,
+    cx: &Cx<'_>,
 ) -> Result<(), RenderShardError> {
-    let mut tile_cursor = 0_u64;
+    let event_count = ordered
+        .len()
+        .checked_mul(2)
+        .ok_or(RenderShardError::ArithmeticOverflow("coverage event count"))?;
+    let mut events = Vec::new();
+    events
+        .try_reserve_exact(event_count)
+        .map_err(|_| RenderShardError::Capacity("coverage events"))?;
+    for spec in ordered {
+        checkpoint(cx)?;
+        validate_common_spec(spec, first)?;
+        events.push((spec.tile_start, 1_i8, spec.sample_start, spec.sample_end));
+        events.push((spec.tile_end, -1_i8, spec.sample_start, spec.sample_end));
+    }
+    events.sort_unstable();
+    if events.first().map(|event| event.0) != Some(0) {
+        return Err(RenderShardError::CoverageGap {
+            tile: 0,
+            sample: 0,
+        });
+    }
+
+    let mut active: BTreeMap<(u32, u32), i64> = BTreeMap::new();
     let mut index = 0usize;
-    while index < ordered.len() {
-        let tile_start = ordered[index].tile_start;
-        let tile_end = ordered[index].tile_end;
-        if tile_start > tile_cursor {
-            return Err(RenderShardError::CoverageGap {
-                tile: tile_cursor,
-                sample: 0,
-            });
-        }
-        if tile_start < tile_cursor {
-            return Err(RenderShardError::CoverageOverlap {
-                tile: tile_start,
-                sample: 0,
-            });
-        }
-        let mut sample_cursor = 0_u32;
-        while index < ordered.len()
-            && ordered[index].tile_start == tile_start
-            && ordered[index].tile_end == tile_end
-        {
-            let spec = ordered[index];
-            validate_common_spec(spec, first)?;
-            if spec.sample_start > sample_cursor {
-                return Err(RenderShardError::CoverageGap {
-                    tile: tile_start,
-                    sample: sample_cursor,
-                });
-            }
-            if spec.sample_start < sample_cursor {
+    let mut last_event_tile = 0_u64;
+    while index < events.len() {
+        checkpoint(cx)?;
+        let tile = events[index].0;
+        last_event_tile = tile;
+        while index < events.len() && events[index].0 == tile {
+            let (_, delta, sample_start, sample_end) = events[index];
+            let key = (sample_start, sample_end);
+            let next = active.get(&key).copied().unwrap_or(0) + i64::from(delta);
+            if next < 0 {
                 return Err(RenderShardError::CoverageOverlap {
-                    tile: tile_start,
-                    sample: spec.sample_start,
+                    tile,
+                    sample: sample_start,
                 });
             }
-            sample_cursor = spec.sample_end;
+            if next == 0 {
+                active.remove(&key);
+            } else {
+                active.insert(key, next);
+            }
             index += 1;
         }
-        if sample_cursor != first.settings.spp {
+        let next_tile = events
+            .get(index)
+            .map_or(first.layout.tile_count(), |event| event.0);
+        if tile < next_tile {
+            validate_active_sample_coverage(&active, first.settings.spp, tile, cx)?;
+        }
+    }
+    if last_event_tile != first.layout.tile_count() || !active.is_empty() {
+        return Err(RenderShardError::CoverageGap {
+            tile: last_event_tile.min(first.layout.tile_count()),
+            sample: 0,
+        });
+    }
+    Ok(())
+}
+
+fn validate_active_sample_coverage(
+    active: &BTreeMap<(u32, u32), i64>,
+    spp: u32,
+    tile: u64,
+    cx: &Cx<'_>,
+) -> Result<(), RenderShardError> {
+    let mut sample_cursor = 0_u32;
+    for (&(sample_start, sample_end), &count) in active {
+        checkpoint(cx)?;
+        if count != 1 || sample_start < sample_cursor {
+            return Err(RenderShardError::CoverageOverlap {
+                tile,
+                sample: sample_start,
+            });
+        }
+        if sample_start > sample_cursor {
             return Err(RenderShardError::CoverageGap {
-                tile: tile_start,
+                tile,
                 sample: sample_cursor,
             });
         }
-        tile_cursor = tile_end;
+        sample_cursor = sample_end;
     }
-    if tile_cursor != first.layout.tile_count() {
+    if sample_cursor != spp {
         return Err(RenderShardError::CoverageGap {
-            tile: tile_cursor,
-            sample: 0,
+            tile,
+            sample: sample_cursor,
         });
     }
     Ok(())
@@ -1157,24 +1210,36 @@ fn hash_time_mode(hasher: &mut DomainHasher, mode: FilmTimeMode) {
     hasher.update(&bytes);
 }
 
-fn result_identity(spec: &UniformRenderShardSpec, xyz: &[[f64; 3]]) -> ContentHash {
+fn result_identity(
+    spec: &UniformRenderShardSpec,
+    xyz: &[[f64; 3]],
+    cx: &Cx<'_>,
+) -> Result<ContentHash, RenderShardError> {
     let mut bytes = Vec::with_capacity(SPEC_HEADER_BYTES as usize + 8);
     encode_spec_header(&mut bytes, spec);
     bytes.extend_from_slice(&spec.payload_pixel_count.to_le_bytes());
     let mut hasher = DomainHasher::new(RENDER_SHARD_ARTIFACT_DOMAIN);
     hasher.update(&bytes);
-    for sample in xyz {
+    for (index, sample) in xyz.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            checkpoint(cx)?;
+        }
         for value in sample {
             hasher.update(&value.to_bits().to_le_bytes());
         }
     }
-    hasher.finalize()
+    checkpoint(cx)?;
+    Ok(hasher.finalize())
 }
 
-fn hash_result_body(body: &[u8]) -> ContentHash {
+fn hash_result_body(body: &[u8], cx: &Cx<'_>) -> Result<ContentHash, RenderShardError> {
     let mut hasher = DomainHasher::new(RENDER_SHARD_ARTIFACT_DOMAIN);
-    hasher.update(body);
-    hasher.finalize()
+    for chunk in body.chunks(64 * 1024) {
+        checkpoint(cx)?;
+        hasher.update(chunk);
+    }
+    checkpoint(cx)?;
+    Ok(hasher.finalize())
 }
 
 fn encode_spec_header(bytes: &mut Vec<u8>, spec: &UniformRenderShardSpec) {
