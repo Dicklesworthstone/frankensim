@@ -14,6 +14,7 @@ pub mod baseline;
 pub mod contact_dynamics;
 #[cfg(feature = "scientific-contract")]
 pub mod contract;
+pub mod control_stream;
 pub mod convergence;
 pub mod coupled_runner;
 pub mod external_air;
@@ -32,10 +33,17 @@ pub mod specimen;
 pub mod tangential_contact;
 pub mod timeline_resampling;
 
+pub use control_stream::{
+    AudioControlFilter, AudioControlInterval, AvailableChannelControl, ChannelControl,
+    ChannelControlSet, ChannelWorkIntegralChecks, CoarsenedAudioBin, CoarsenedAudioControls,
+    ContactEventMeasure, ContactFrameCoordinates, ControlContactEvent, ControlStreamError,
+    EULER_CONTROL_STREAM_SCHEMA_VERSION, EulerControlStream, VisualizationControlPoint,
+    WorkIntegralCheck,
+};
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
-    MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseModeState,
-    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+    MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseFrame,
+    RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
     RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
     RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
     RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,

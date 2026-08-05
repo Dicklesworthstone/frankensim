@@ -825,23 +825,30 @@ restart checkpoint. The v1 trajectory retains, at every accepted time, the
 center-of-mass pose, canonical body-to-world unit quaternion, world linear
 momentum, principal-body angular momentum bound to exact mass properties,
 symmetry-axis diagnostic, contact branch and geometry, localized contact
-transitions, complete one-mode base displacement/velocity, channel
+transitions, the exact start and contact-activity flag of each accepted
+interval, complete one-mode base displacement/velocity, channel
 wrenches/work, total energy/defect, redundant Euler QoIs, and an explicit final
 terminal, censor, or numerical-refusal disposition. A localized inclination
 event is required exactly for the corresponding terminal disposition.
 
 Top-level metadata binds the resolved specimen profile and chart, mass
 properties, initial state, base and physics models, full configuration,
-restart fingerprint, fixed timestep, producer version, applicability, and
-mandatory no-claims. V1 admits only right-handed Cartesian `+z`-up world
+the nominal reduced-base frame, explicit per-channel availability, restart
+fingerprint, fixed timestep, producer version, applicability, and mandatory
+no-claims. V1 admits only right-handed Cartesian `+z`-up world
 coordinates and SI/radian units. Those declarations are repeated on each raw
 sample and must match. Quaternion inputs must already be finite unit
 quaternions; admission canonicalizes the `q/-q` double cover. Times are finite,
-non-negative, and strictly increasing. Contact geometry is present exactly on
+non-negative, and strictly increasing; each interval start is exact, must equal
+the preceding endpoint after the first sample, and may equal its endpoint only
+for an interval-data-free initial point. Contact geometry is present exactly on
 the closed branch, contact normals and redundant symmetry axes are unit vectors,
 localized transition times are ordered inside the retained interval and
 alternate branches, and redundant QoIs must agree with the authoritative state
-and bound mass properties.
+and bound mass properties. A channel declared unavailable must contain an exact
+zero payload, while an available zero payload remains distinguishable. The
+interval contact-activity flag cannot be inferred from force magnitude because
+a localized reimpact root may be active at zero penetration and zero force.
 
 The reduced coupled runner now publishes those fields only after an accepted
 macro interval or an accepted localized terminal/contact boundary. `CoupledRun`
@@ -879,6 +886,62 @@ runner E2E coverage additionally checks full-state/checkpoint equality,
 configuration binding, uninterrupted-versus-resumed sample equality, a resolved
 1 mm filleted profile, localized terminal admission, prohibited-reimpact
 publication, and refusal-checkpoint restart behavior.
+
+`control_stream` v1 derives synchronized raw rendering and sound controls from
+that admitted boundary. `VisualizationControlPoint` is point sampled at an
+exact accepted endpoint and carries the exact pose, center-of-mass velocity,
+body/world angular velocity, symmetry axis, reduced-base pose/velocity,
+post-interval branch, gap, QoIs, and disposition. When and only when the
+endpoint branch is closed, it also carries the exact retained contact point and
+normal in world, disc-body, and displaced-base coordinates together with the
+disc, base, and relative material-point velocities. The reduced base translates
+along its local `+z`; v1 admits only base frames whose local `+z` coincides with
+world `+z`, while allowing a declared origin and yaw so the controls remain
+equivariant under admissible horizontal rigid transforms.
+
+`AudioControlInterval` owns one exact positive-duration accepted interval. For
+each explicitly available channel it exposes the duration-weighted mean force
+and torque, the exact retained signed work, signed mean work rate `work / dt`,
+and force-time/torque-time measures. Positive work means energy transferred into
+the simulated disc/body under the producer channel convention. The aggregate
+contact channel is not tangential-only work; the reduced-base channel is base
+damping work rather than total contact work into the base; and the exterior-gas
+channel is body work rather than relative gas dissipation. The separately
+retained `interval_normal_force_n` is exposed only under its true meaning: a
+midpoint diagnostic from the first accepted subinterval. Duration-mean normal
+load instead comes from the contact-channel mean force projected onto base
+`+z`. Available numerical zero is never treated as missing.
+
+Opening and reimpact records retain their exact source interval, class, time,
+and localization bracket. Their excitation measure is explicitly `TimingOnly`:
+the trajectory contains neither an event-specific impulse nor a resolved force
+history, so raw controls do not invent an amplitude or assign interval work to
+one side of a root. Raw controls likewise perform no artistic normalization,
+gain, saturation, clamping, spectral shaping, or conversion of mechanical QoIs
+into an acoustic frequency.
+
+The only v1 reduction is `WholeIntervalBoxcarV1`. It integrates complete source
+intervals before decimation, sums signed work, duration-weights mean wrench and
+normal-load controls, recomputes rates over the resulting duration, and treats
+every event-bearing source interval as a one-interval barrier. Thus it cannot
+blend across a declared contact transition or fabricate subinterval timing.
+This is a deterministic preview/control filter, not a fixed-rate band-limited
+audio resampler; fractional event placement and 48 kHz synthesis remain owned
+by the later audio pipeline.
+
+Both raw derivation and coarsening are transactional, poll their execution scope
+at bounded source-interval work, and return no partially published stream.
+Finite source values that overflow a derived rate, measure, aggregate, or work
+reconciliation refuse with a typed error. Raw and coarsened controls expose
+signed-work integral checks. They borrow and pointer-bind the exact admitted
+trajectory and inherit its `SimulationEvidence` ceiling; durable canonical
+bytes and content identity remain owned by the trajectory codec. Focused G0/G3
+coverage exercises resumed clocks, exact frame/velocity derivation, zero and
+unavailable channels, zero-force reimpact, opening/event barriers, signed-work
+and force-time conservation, alternating-signal anti-alias behavior, admissible
+rigid transforms, extreme finite values, derived overflow, deterministic replay,
+and cancellation. These controls are neither calibrated sound nor physical
+validation.
 
 `timeline_resampling` v1 reconstructs render/audio query times from this
 admitted state without mutating the source artifact. Center-of-mass translation
