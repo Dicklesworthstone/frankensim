@@ -7,10 +7,11 @@ use fs_euler_disc_e2e::coupled_runner::{
 };
 use fs_euler_disc_e2e::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseModeState,
-    RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
-    RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature,
-    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
-    RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+    RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
+    RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
+    RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
+    RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
 };
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
@@ -48,6 +49,7 @@ fn sample(time_s: f64, disposition: RenderSampleDisposition) -> RenderTrajectory
     let q = quaternion();
     let orientation = UnitQuaternion::new(q[0], q[1], q[2], q[3]).unwrap();
     let mut sample = RenderTrajectorySampleInput {
+        interval_start_time_s: 0.0,
         time_s,
         world_frame: RenderWorldFrame::RightHandedZUp,
         units: RenderUnitSystem::SiRadians,
@@ -100,6 +102,7 @@ fn metadata() -> RenderTrajectoryMetadata {
         },
         base_model_identity: identity("base"),
         model_identity: identity("model"),
+        channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
         configuration_identity: identity("configuration"),
         configuration_fingerprint: 0x0123_4567_89ab_cdef,
         timestep_s: 0.01,
@@ -154,6 +157,7 @@ fn runner_metadata(run: &CoupledRun) -> RenderTrajectoryMetadata {
         },
         base_model_identity: identity("runner-base"),
         model_identity: identity("runner-model"),
+        channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
         configuration_identity: identity("runner-configuration"),
         configuration_fingerprint: run.checkpoint.configuration_fingerprint,
         timestep_s: run.macro_timestep_s,
@@ -168,10 +172,10 @@ fn runner_metadata(run: &CoupledRun) -> RenderTrajectoryMetadata {
 }
 
 fn two_samples() -> Vec<RenderTrajectorySampleInput> {
-    vec![
-        sample(0.01, RenderSampleDisposition::Continue),
-        sample(0.02, RenderSampleDisposition::HorizonCensored),
-    ]
+    let first = sample(0.01, RenderSampleDisposition::Continue);
+    let mut second = sample(0.02, RenderSampleDisposition::HorizonCensored);
+    second.interval_start_time_s = first.time_s;
+    vec![first, second]
 }
 
 #[test]

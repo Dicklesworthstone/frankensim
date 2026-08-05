@@ -35,11 +35,11 @@ pub mod timeline_resampling;
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
     MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseModeState,
-    RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
-    RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature,
-    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
-    RenderTrajectoryMetadata, RenderTrajectorySample, RenderTrajectorySampleInput,
-    RenderUnitSystem, RenderWorldFrame,
+    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+    RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
+    RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
+    RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
+    RenderTrajectorySample, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,

@@ -118,6 +118,10 @@ pub struct ChannelOwnership {
 /// One retained, time-evolving sample.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoupledSample {
+    /// Exact start of the accepted interval ending at `time_s` [s]. This is
+    /// retained explicitly because the first sample of a resumed run does not
+    /// generally begin at zero.
+    pub interval_start_time_s: f64,
     pub time_s: f64,
     /// Complete accepted rigid-body state at `time_s`.
     pub state: RigidBodyState,
@@ -1033,6 +1037,7 @@ fn run_closed_with_geometry(
     let mut previous_precession = qois(checkpoint.state, mass)?.1;
 
     for _ in 0..controls.maximum_steps {
+        let interval_start_time_s = checkpoint.time_s;
         let state = checkpoint.state;
         let inclination = inclination_rad(state);
         if inclination <= controls.terminal_inclination_rad {
@@ -1382,6 +1387,7 @@ fn run_closed_with_geometry(
             ));
         }
         samples.push(CoupledSample {
+            interval_start_time_s,
             time_s: checkpoint.time_s,
             state: checkpoint.state,
             center_of_mass_velocity_world_m_per_s,

@@ -10,8 +10,8 @@ use fs_blake3::ContentHash;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 use crate::coupled_runner::{
-    ChannelOwnership, ContactTransitionKind, CoupledContactBranch, CoupledNumericalRefusalReason,
-    CoupledRun, CoupledSample, CoupledTerminal, qois,
+    ChannelOwnership, ChannelWrench, ContactTransitionKind, CoupledContactBranch,
+    CoupledNumericalRefusalReason, CoupledRun, CoupledSample, CoupledTerminal, qois,
 };
 
 /// Exact schema version admitted by [`RenderTrajectory::try_new`].
@@ -61,6 +61,46 @@ pub struct RenderMassProperties {
     pub properties: MassProperties,
 }
 
+/// Declares which reduced-model channel payloads are present in every sample.
+///
+/// A present channel may legitimately be all zero. An unavailable channel must
+/// be all zero, so consumers never have to guess whether zero means quiescent
+/// physics or missing data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RenderChannelAvailability {
+    /// Gravity wrench/work payloads are present.
+    pub gravity: bool,
+    /// Aggregate contact wrench/work payloads are present.
+    pub contact: bool,
+    /// Reduced rolling-resistance wrench/work payloads are present.
+    pub rolling: bool,
+    /// Reduced-base damping-channel payloads are present.
+    pub base: bool,
+    /// Exterior-gas body wrench/work payloads are present.
+    pub gas: bool,
+}
+
+impl RenderChannelAvailability {
+    /// Availability emitted by the current coupled runner, which evaluates
+    /// every declared channel even when a configured coefficient is zero.
+    pub const ALL_AVAILABLE: Self = Self {
+        gravity: true,
+        contact: true,
+        rolling: true,
+        base: true,
+        gas: true,
+    };
+
+    /// Explicitly unavailable channel set for import/refusal tests.
+    pub const NONE_AVAILABLE: Self = Self {
+        gravity: false,
+        contact: false,
+        rolling: false,
+        base: false,
+        gas: false,
+    };
+}
+
 /// Top-level metadata required to interpret every retained sample.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderTrajectoryMetadata {
@@ -84,6 +124,8 @@ pub struct RenderTrajectoryMetadata {
     pub base_model_identity: ContentHash,
     /// Physics model identity.
     pub model_identity: ContentHash,
+    /// Explicit availability of every interval wrench/work channel.
+    pub channel_availability: RenderChannelAvailability,
     /// Full run configuration identity.
     pub configuration_identity: ContentHash,
     /// Existing reduced-run restart fingerprint, retained as an opaque audit aid.
@@ -229,6 +271,9 @@ pub enum RenderNumericalRefusalReason {
 /// `q/-q` representative and retains a checked [`RigidBodyState`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderTrajectorySampleInput {
+    /// Exact start of the accepted interval ending at `time_s` [s]. For a
+    /// resumed segment this is the restart checkpoint time, not zero.
+    pub interval_start_time_s: f64,
     /// Exact producer `f64` time value [s]; later encoding preserves its bits.
     pub time_s: f64,
     /// Repeated frame declaration.
@@ -251,7 +296,9 @@ pub struct RenderTrajectorySampleInput {
     pub contact_geometry: Option<RenderContactGeometry>,
     /// Signed support gap [m].
     pub signed_gap_m: f64,
-    /// Normal load over the retained interval [N].
+    /// Normal load evaluated at the midpoint of the first accepted subinterval
+    /// [N]. When an event splits the interval this is not its mean load; use the
+    /// duration-weighted contact-channel force for interval controls.
     pub interval_normal_force_n: f64,
     /// Chronological localized transitions in the preceding interval.
     pub contact_transitions: Vec<RenderContactTransition>,
@@ -310,6 +357,7 @@ impl RenderTrajectory {
     ) -> Result<Self, RenderTrajectoryError> {
         if metadata.configuration_fingerprint != run.checkpoint.configuration_fingerprint
             || metadata.mass_properties.properties != run.mass_properties
+            || metadata.channel_availability != RenderChannelAvailability::ALL_AVAILABLE
             || metadata.initial_state != run.configuration_initial_state
             || metadata.initial_base_mode.displacement_m.to_bits()
                 != run.configuration_initial_base_deflection_m.to_bits()
@@ -465,6 +513,18 @@ pub enum RenderTrajectoryError {
     MissingBaseState(usize),
     /// Sample times were duplicated or decreased.
     NonMonotoneTime(usize),
+    /// The exact interval start was non-finite, after its endpoint, or did not
+    /// equal the preceding retained endpoint.
+    InvalidIntervalStart(usize),
+    /// A zero-duration initial point carried interval-only data.
+    ZeroDurationIntervalData(usize),
+    /// A channel declared unavailable carried a nonzero payload.
+    UnavailableChannelHasData {
+        /// Sample containing the contradictory payload.
+        sample: usize,
+        /// Stable channel name.
+        channel: &'static str,
+    },
     /// Redundant QoIs did not agree with authoritative state/mass properties.
     DerivedQoiMismatch(usize),
     /// Authoritative-state QoI derivation refused.
@@ -508,6 +568,7 @@ fn coupled_sample_input(
             ),
         });
     RenderTrajectorySampleInput {
+        interval_start_time_s: sample.interval_start_time_s,
         time_s: sample.time_s,
         world_frame: RenderWorldFrame::RightHandedZUp,
         units: RenderUnitSystem::SiRadians,
@@ -656,6 +717,17 @@ fn validate_sample(
     if input.time_s < 0.0 || previous_time.is_some_and(|time| input.time_s <= time) {
         return Err(RenderTrajectoryError::NonMonotoneTime(index));
     }
+    finite_scalar(
+        input.interval_start_time_s,
+        index,
+        "interval_start_time_s",
+    )?;
+    if input.interval_start_time_s < 0.0
+        || input.interval_start_time_s > input.time_s
+        || previous_time.is_some_and(|time| input.interval_start_time_s.to_bits() != time.to_bits())
+    {
+        return Err(RenderTrajectoryError::InvalidIntervalStart(index));
+    }
     finite_vec(
         input.center_of_mass_world_m,
         index,
@@ -695,7 +767,18 @@ fn validate_sample(
         .ok_or(RenderTrajectoryError::MissingBaseState(index))?;
     finite_scalar(base.displacement_m, index, "base_mode.displacement_m")?;
     finite_scalar(base.velocity_m_per_s, index, "base_mode.velocity_m_per_s")?;
-    validate_channels(&input.channels, index)?;
+    validate_channels(
+        &input.channels,
+        metadata.channel_availability,
+        index,
+    )?;
+    if input.interval_start_time_s.to_bits() == input.time_s.to_bits()
+        && (input.interval_normal_force_n != 0.0
+            || !input.contact_transitions.is_empty()
+            || channel_ownership_has_data(&input.channels))
+    {
+        return Err(RenderTrajectoryError::ZeroDurationIntervalData(index));
+    }
     finite_scalar(input.mechanical_energy_j, index, "mechanical_energy_j")?;
     finite_scalar(input.energy_defect_j, index, "energy_defect_j")?;
     validate_qois(metadata, &input, state, index)?;
@@ -703,12 +786,17 @@ fn validate_sample(
         &input.contact_transitions,
         input.contact_branch,
         input.disposition,
-        previous_time,
+        input.interval_start_time_s,
         input.time_s,
         metadata.timestep_s,
         index,
     )?;
-    validate_terminal_event(&input, previous_time, metadata.timestep_s, index)?;
+    validate_terminal_event(
+        &input,
+        input.interval_start_time_s,
+        metadata.timestep_s,
+        index,
+    )?;
 
     Ok(RenderTrajectorySample { input, state })
 }
@@ -781,7 +869,7 @@ fn validate_transitions(
     transitions: &[RenderContactTransition],
     final_branch: RenderContactBranch,
     disposition: RenderSampleDisposition,
-    previous_time: Option<f64>,
+    interval_start: f64,
     sample_time: f64,
     timestep_s: f64,
     sample: usize,
@@ -792,7 +880,6 @@ fn validate_transitions(
             transition: MAX_RENDER_TRANSITIONS_PER_SAMPLE,
         });
     }
-    let interval_start = previous_time.unwrap_or(0.0);
     let mut last_time = interval_start;
     let mut previous_kind = None;
     for (transition, event) in transitions.iter().enumerate() {
@@ -851,7 +938,7 @@ fn validate_transitions(
 
 fn validate_terminal_event(
     input: &RenderTrajectorySampleInput,
-    previous_time: Option<f64>,
+    interval_start: f64,
     timestep_s: f64,
     index: usize,
 ) -> Result<(), RenderTrajectoryError> {
@@ -863,7 +950,6 @@ fn validate_terminal_event(
     }
     match (input.disposition, input.terminal_event) {
         (RenderSampleDisposition::TerminalInclination, Some(event)) => {
-            let interval_start = previous_time.unwrap_or(0.0);
             let retained_root_bracket = event.time_s.to_bits() == input.time_s.to_bits()
                 && event.bracket_end_s - input.time_s <= timestep_s;
             if !event.time_s.is_finite()
@@ -925,20 +1011,45 @@ fn validate_qois(
 
 fn validate_channels(
     channels: &ChannelOwnership,
+    availability: RenderChannelAvailability,
     index: usize,
 ) -> Result<(), RenderTrajectoryError> {
-    for (name, channel) in [
-        ("channels.gravity", channels.gravity),
-        ("channels.contact", channels.contact),
-        ("channels.rolling", channels.rolling),
-        ("channels.base", channels.base),
-        ("channels.gas", channels.gas),
+    for (name, channel, available) in [
+        ("gravity", channels.gravity, availability.gravity),
+        ("contact", channels.contact, availability.contact),
+        ("rolling", channels.rolling, availability.rolling),
+        ("base", channels.base, availability.base),
+        ("gas", channels.gas, availability.gas),
     ] {
-        finite_vec(channel.force_world_n, index, name)?;
-        finite_vec(channel.torque_world_nm, index, name)?;
-        finite_scalar(channel.work_j, index, name)?;
+        finite_vec(channel.force_world_n, index, "channels.force_world_n")?;
+        finite_vec(channel.torque_world_nm, index, "channels.torque_world_nm")?;
+        finite_scalar(channel.work_j, index, "channels.work_j")?;
+        if !available && channel_has_data(channel) {
+            return Err(RenderTrajectoryError::UnavailableChannelHasData {
+                sample: index,
+                channel: name,
+            });
+        }
     }
     Ok(())
+}
+
+fn channel_ownership_has_data(channels: &ChannelOwnership) -> bool {
+    [
+        channels.gravity,
+        channels.contact,
+        channels.rolling,
+        channels.base,
+        channels.gas,
+    ]
+    .into_iter()
+    .any(channel_has_data)
+}
+
+fn channel_has_data(channel: ChannelWrench) -> bool {
+    channel.force_world_n != Vec3::ZERO
+        || channel.torque_world_nm != Vec3::ZERO
+        || channel.work_j != 0.0
 }
 
 fn validate_text(field: &'static str, value: &str) -> Result<(), RenderTrajectoryError> {

@@ -5,9 +5,9 @@ use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind}
 use fs_euler_disc_e2e::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, DerivedEulerQois,
     EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EventEvaluationSide, ExposureEventPolicy,
-    RenderBaseModeState, RenderContactBranch, RenderContactGeometry, RenderContactTransition,
-    RenderMassProperties, RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent,
-    RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryMetadata,
+    RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+    RenderContactTransition, RenderMassProperties, RenderSampleDisposition, RenderSupportFeature,
+    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryMetadata,
     RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame, TimelineEvent,
     TimelineResampler, TimelineResamplingError, TimelineSampleSource,
 };
@@ -73,6 +73,7 @@ fn input(
     let state = state(time_s, angle_rad);
     let orientation = state.pose().orientation();
     RenderTrajectorySampleInput {
+        interval_start_time_s: 0.0,
         time_s,
         world_frame: RenderWorldFrame::RightHandedZUp,
         units: RenderUnitSystem::SiRadians,
@@ -141,6 +142,7 @@ fn metadata(initial: &RenderTrajectorySampleInput) -> RenderTrajectoryMetadata {
         initial_base_mode: initial.base_mode.unwrap(),
         base_model_identity: identity("base"),
         model_identity: identity("model"),
+        channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
         configuration_identity: identity("configuration"),
         configuration_fingerprint: 0x7265_7361_6d70_6c65,
         timestep_s: 1.0,
@@ -158,12 +160,13 @@ fn analytic_trajectory() -> RenderTrajectory {
         RenderContactBranch::Open,
         RenderSampleDisposition::Continue,
     );
-    let second = input(
+    let mut second = input(
         1.0,
         1.0,
         RenderContactBranch::Open,
         RenderSampleDisposition::HorizonCensored,
     );
+    second.interval_start_time_s = first.time_s;
     RenderTrajectory::try_new(metadata(&first), vec![first, second]).unwrap()
 }
 
@@ -180,6 +183,7 @@ fn event_trajectory() -> RenderTrajectory {
         RenderContactBranch::Open,
         RenderSampleDisposition::HorizonCensored,
     );
+    second.interval_start_time_s = first.time_s;
     second.contact_transitions.push(RenderContactTransition {
         kind: ContactTransitionKind::Opening,
         time_s: 0.5,
@@ -202,6 +206,7 @@ fn terminal_trajectory() -> RenderTrajectory {
         RenderContactBranch::Open,
         RenderSampleDisposition::TerminalInclination,
     );
+    second.interval_start_time_s = first.time_s;
     second.terminal_event = Some(RenderTerminalEvent {
         time_s: 1.0,
         bracket_start_s: 0.99,
@@ -542,12 +547,13 @@ fn declared_continuation_seams_partition_exposure_without_changing_pose() {
         RenderContactBranch::Open,
         RenderSampleDisposition::Continue,
     );
-    let last = input(
+    let mut last = input(
         1.0,
         1.0,
         RenderContactBranch::Open,
         RenderSampleDisposition::HorizonCensored,
     );
+    last.interval_start_time_s = middle.time_s;
     let trajectory =
         RenderTrajectory::try_new(metadata(&first), vec![first, middle, last]).unwrap();
     let resampler = TimelineResampler::with_declared_discontinuities(

@@ -540,9 +540,10 @@ mod tests {
     use crate::coupled_runner::{ChannelOwnership, ContactTransitionKind};
     use crate::render_trajectory::{
         DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseModeState,
-        RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
-        RenderSampleDisposition, RenderSupportFeature, RenderTrajectoryMetadata,
-        RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+        RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+        RenderContactTransition, RenderMassProperties, RenderSampleDisposition,
+        RenderSupportFeature, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
+        RenderUnitSystem, RenderWorldFrame,
     };
     use crate::timeline_resampling::{
         DeclaredDiscontinuityKind, TimelineEvent, TimelineSampleSource,
@@ -592,6 +593,7 @@ mod tests {
         .unwrap();
         let state = state(time_s, orientation);
         RenderTrajectorySampleInput {
+            interval_start_time_s: 0.0,
             time_s,
             world_frame: RenderWorldFrame::RightHandedZUp,
             units: RenderUnitSystem::SiRadians,
@@ -655,6 +657,7 @@ mod tests {
             initial_base_mode: first.base_mode.unwrap(),
             base_model_identity: identity("base"),
             model_identity: identity("model"),
+            channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
             configuration_identity: identity("configuration"),
             configuration_fingerprint: 0x6d6f_7469_6f6e_0001,
             timestep_s: 1.0,
@@ -684,6 +687,7 @@ mod tests {
             RenderContactBranch::Open,
             RenderSampleDisposition::HorizonCensored,
         );
+        second.interval_start_time_s = first.time_s;
         if with_event {
             second.contact_transitions.push(RenderContactTransition {
                 kind: ContactTransitionKind::Opening,
@@ -714,12 +718,13 @@ mod tests {
             RenderContactBranch::Open,
             RenderSampleDisposition::Continue,
         );
-        let last = sample(
+        let mut last = sample(
             1.0,
             raw,
             RenderContactBranch::Open,
             RenderSampleDisposition::HorizonCensored,
         );
+        last.interval_start_time_s = middle.time_s;
         let metadata = metadata(&first);
         RenderTrajectory::try_new(metadata, vec![first, middle, last]).unwrap()
     }
