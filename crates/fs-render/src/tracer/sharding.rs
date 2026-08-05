@@ -854,13 +854,14 @@ pub fn merge_uniform_shards(
         if result.spec != *expected {
             return Err(RenderShardError::UnexpectedShard(identity));
         }
-        let recomputed_result_identity = result_identity(&result.spec, &result.xyz, cx)?;
         if result.xyz.len()
             != usize::try_from(result.spec.payload_pixel_count)
                 .map_err(|_| RenderShardError::ArithmeticOverflow("payload count"))?
             || result.xyz.iter().flatten().any(|value| !value.is_finite())
-            || recomputed_result_identity != result.result_identity
         {
+            return Err(RenderShardError::Integrity);
+        }
+        if result_identity(&result.spec, &result.xyz, cx)? != result.result_identity {
             return Err(RenderShardError::Integrity);
         }
         if let Some(prior) = result_by_id.get(&identity) {
