@@ -21,6 +21,10 @@ cinematic-render = ["fs-render/tracer"]
 # the frontier tracer to the L6 Design Ledger. This feature implies the scene
 # bridge and keeps fs-ledger out of the default scientific-contract graph.
 render-checkpoint-ledger = ["cinematic-render", "dep:fs-ledger"]
+# [F] Canonical uniform render sharding is an opt-in L6 coordinator over the
+# frontier tracer and the immutable Design Ledger artifact store. The ledger
+# is not a shared scheduler or multi-process writer.
+render-sharding-ledger = ["render-checkpoint-ledger"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }

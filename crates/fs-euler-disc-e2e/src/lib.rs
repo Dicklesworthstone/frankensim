@@ -31,6 +31,8 @@ pub mod render_checkpoint;
 pub mod render_motion_bridge;
 #[cfg(feature = "cinematic-render")]
 pub mod render_scene_bridge;
+#[cfg(feature = "render-sharding-ledger")]
+pub mod render_sharding;
 pub mod render_trajectory;
 pub mod render_trajectory_codec;
 pub mod rolling_contact;
