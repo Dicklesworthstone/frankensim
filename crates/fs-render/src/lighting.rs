@@ -6,10 +6,11 @@
 //! environment uses texel luminance times exact texel solid angle. The same
 //! mixture probabilities are exposed for NEE samples and BSDF-hit MIS.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
@@ -34,6 +35,9 @@ const SPECTRAL_LUT_EDGE: usize = 9;
 /// Admission failures for rectangular and environment lighting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightingError {
+    /// The caller's execution authority requested cancellation while scene
+    /// emitters were being admitted.
+    Cancelled,
     /// A rectangular emitter had non-finite, zero, non-orthogonal, or
     /// non-positive-radiance metadata.
     InvalidRectangle {
@@ -76,6 +80,7 @@ pub enum LightingError {
 impl core::fmt::Display for LightingError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("lighting admission cancelled"),
             Self::InvalidRectangle { light_index } => {
                 write!(
                     formatter,
@@ -611,12 +616,43 @@ impl<'a> AdmittedLighting<'a> {
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
     ) -> Result<Self, LightingError> {
-        let mut candidates = Vec::new();
-        candidates
-            .try_reserve_exact(rectangles.len() + usize::from(environment.is_some()))
-            .map_err(|_| LightingError::EnvironmentTooLarge)?;
+        Self::try_new_controlled(rectangles, environment, || Ok(()))
+    }
+
+    /// Cancellable form of [`Self::try_new`] used by production render
+    /// admission. It polls before every emitter and every ordered-candidate
+    /// publication step, so an arbitrarily large caller-owned light list does
+    /// not become one uninterruptible preflight operation.
+    pub fn try_new_cancellable(
+        cx: &Cx<'_>,
+        rectangles: &'a [RectLight],
+        environment: Option<&'a EnvironmentMap>,
+    ) -> Result<Self, LightingError> {
+        Self::try_new_controlled(rectangles, environment, || {
+            cx.checkpoint().map_err(|_| LightingError::Cancelled)
+        })
+    }
+
+    fn try_new_controlled(
+        rectangles: &'a [RectLight],
+        environment: Option<&'a EnvironmentMap>,
+        mut checkpoint: impl FnMut() -> Result<(), LightingError>,
+    ) -> Result<Self, LightingError> {
+        checkpoint()?;
+        let candidate_capacity = rectangles
+            .len()
+            .checked_add(usize::from(environment.is_some()))
+            .ok_or(LightingError::EnvironmentTooLarge)?;
+        // Ordered insertion avoids handing an unbounded caller-owned light
+        // list to an uncancellable sort. The tuple preserves the former stable
+        // sort semantics for the cryptographic-collision case: rectangles in
+        // input order, followed by the environment.
+        let mut ordered_candidates = BTreeMap::new();
+        let mut rectangle_identity_owners = BTreeMap::new();
+        let mut duplicate_rectangle = None;
         let mut primitives = BTreeSet::new();
         for (light_index, rectangle) in rectangles.iter().enumerate() {
+            checkpoint()?;
             let luminance = rectangle.luminance();
             if !rectangle.is_valid() || !luminance.is_finite() || luminance <= 0.0 {
                 return Err(LightingError::InvalidRectangle { light_index });
@@ -626,36 +662,58 @@ impl<'a> AdmittedLighting<'a> {
                     primitive_index: rectangle.prim,
                 });
             }
-            candidates.push(Candidate {
-                kind: LightKind::Rectangle(light_index),
-                identity: rectangle.identity(),
-            });
+            let identity = rectangle.identity();
+            if let Some(first) = rectangle_identity_owners.get(&identity).copied() {
+                if duplicate_rectangle
+                    .as_ref()
+                    .is_none_or(|(current, _, _)| identity < *current)
+                {
+                    duplicate_rectangle = Some((identity, first, light_index));
+                }
+            } else {
+                rectangle_identity_owners.insert(identity, light_index);
+            }
+            ordered_candidates.insert(
+                (identity, 0_u8, light_index),
+                Candidate {
+                    kind: LightKind::Rectangle(light_index),
+                    identity,
+                },
+            );
         }
+        checkpoint()?;
         // A black map still supplies explicit black miss radiance, but it is
         // not a sampling candidate. In particular, adding a black map must not
         // perturb the frozen one-rectangle random-number mapping.
         if let Some(environment) = environment.filter(|map| !map.is_black()) {
-            candidates.push(Candidate {
-                kind: LightKind::Environment,
-                // Sampling order is a property of rendered content. Two
-                // byte-distinct containers with identical canonical pixels
-                // therefore retain one stream mapping; source lineage remains
-                // available separately through `provenance_hash`.
-                identity: environment.semantic_hash(),
-            });
+            let identity = environment.semantic_hash();
+            ordered_candidates.insert(
+                (identity, 1_u8, 0),
+                Candidate {
+                    kind: LightKind::Environment,
+                    // Sampling order is a property of rendered content. Two
+                    // byte-distinct containers with identical canonical pixels
+                    // therefore retain one stream mapping; source lineage remains
+                    // available separately through `provenance_hash`.
+                    identity,
+                },
+            );
         }
-        candidates.sort_by_key(|candidate| candidate.identity);
-        for pair in candidates.windows(2) {
-            if pair[0].identity == pair[1].identity
-                && let (LightKind::Rectangle(first), LightKind::Rectangle(second)) =
-                    (pair[0].kind, pair[1].kind)
-            {
-                return Err(LightingError::DuplicateRectangle { first, second });
-            }
+        if let Some((_, first, second)) = duplicate_rectangle {
+            return Err(LightingError::DuplicateRectangle { first, second });
         }
         if rectangles.is_empty() && environment.is_none_or(EnvironmentMap::is_black) {
             return Err(LightingError::NoFiniteEmitter);
         }
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(candidate_capacity)
+            .map_err(|_| LightingError::EnvironmentTooLarge)?;
+        for (_, candidate) in ordered_candidates {
+            checkpoint()?;
+            candidates.push(candidate);
+        }
+        checkpoint()?;
         Ok(Self {
             rectangles,
             environment,
@@ -1167,6 +1225,35 @@ mod tests {
             AdmittedLighting::try_new(&[valid, duplicate_identity], None),
             Err(LightingError::DuplicateRectangle { .. })
         ));
+    }
+
+    #[test]
+    fn g4_light_admission_polls_during_validation_and_ordered_publication() {
+        let lights = [
+            rectangle(-2.0, 10, 1.0),
+            rectangle(0.0, 11, 2.0),
+            rectangle(2.0, 12, 3.0),
+        ];
+        // Poll four interrupts before the third input is inspected. Poll six
+        // interrupts when canonical candidates begin moving into published
+        // storage. These pins keep both phases bounded without timing races.
+        for cancellation_poll in [4, 6] {
+            let mut polls = 0;
+            let result = AdmittedLighting::try_new_controlled(&lights, None, || {
+                polls += 1;
+                if polls == cancellation_poll {
+                    Err(LightingError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                LightingError::Cancelled,
+                "cancellation_poll={cancellation_poll} polls={polls}: admission continued past its bounded checkpoint"
+            );
+            assert_eq!(polls, cancellation_poll);
+        }
     }
 
     #[test]

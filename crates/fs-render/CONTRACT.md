@@ -184,10 +184,13 @@ differentiable lift). Pure Rust throughout.
   keyed by absolute pixel/sample identity. The strict canonical result codec
   requires external plan and shard pins and rejects truncation, trailing bytes,
   corruption, non-finite payloads, or a foreign header before returning a
-  result. `merge_uniform_shards` validates exact nonoverlapping full coverage,
-  ignores exact duplicate results without charging their bytes twice, rejects
-  conflicts/missing/foreign work, follows canonical tile/sample order, checks
-  aggregate-input and output-film caps, and publishes no partial film.
+  result. `merge_uniform_shards` derives the exact complete-set input envelope
+  from expected specs before allocating merge indexes, validates exact
+  nonoverlapping full coverage, and ignores submitted exact duplicates without
+  changing that envelope. Expected and submitted order are nonsemantic:
+  reference semantics, diagnostics, conflicts, and accumulation use canonical
+  ordering or fixed error precedence. Missing, foreign, corrupt, or conflicting
+  work and aggregate-input/output-film cap violations publish no partial film.
   Full-SPP tile-only plans retain the legacy serial accumulation order and bits.
   A sample-split result is bit-stable across worker counts and arrival orders
   for the same frozen plan, but is not claimed bit-identical to the monolithic
@@ -331,9 +334,12 @@ publishes none of that sample.
 terminal success. Cancellable NURBS seeding/Newton and BVH traversal poll before
 and after each bounded seed/iteration/node/triangle. Differentiable scanline rendering
 polls at entry, per search iteration, row, pixel, and loss-reduction element and
-propagates `RenderError::Cancelled`. The spectral tracer polls per row, sample,
-bounce, and primitive, and copies progressive staging buffers in checked
-chunks; it propagates `TracerError::Cancelled`. A failed or reversed range
+propagates `RenderError::Cancelled`. Spectral scene preflight polls while
+validating each light and primitive and while materializing canonical light
+order; both progressive and shard entry points map that refusal to
+`TracerError::Cancelled` without publishing a partial result. The spectral
+tracer also polls per row, sample, bounce, and primitive, and copies progressive
+staging buffers in checked chunks. A failed or reversed range
 leaves both film sums and `spp_done` unchanged so retry cannot double-count.
 Tile execution derives the exact gate and budget from the caller's `Cx`, polls
 inside path traversal as well as at tile boundaries, contains panics, and fully
@@ -391,7 +397,8 @@ golden (`fs-render:cornell` in golden-couplings.json) reproduced
 identically in all four ISA/profile quadrants at freeze. The lighting-v1
 extension admits each rectangle only when its named primitive resolves to the
 same two-triangle world-space quad (directly or through a static mesh instance),
-then sorts semantic light identities independently of construction order. It
+then orders semantic light identities by cancellation-controlled keyed
+insertion independently of construction order. It
 selects among incident solid-angle/luminance rectangle weights and the
 environment's integrated luminance. Environment texels use exact spherical-cell
 solid angles and a two-level row/column CDF, so selection is logarithmic in map
@@ -586,17 +593,19 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 - Operation-memory receipts cover the named film, progress, Sobol, tile
   scratch, executor metadata, and arena charges. They do not cover OS thread
   stacks, allocator usable-size overhead, the small lighting-admission
-  candidate vector created during preflight, or arbitrary heap owned by chart
-  implementations. They are not process-RSS certificates. For an in-memory
-  resumable job, lease requests, refusals, and peak usage are cumulative from
-  job admission through the reported attempt; executor and timing fields are
-  scoped to the most recent attempt.
+  candidate/index structures created during preflight, or arbitrary heap owned
+  by chart implementations. They are not process-RSS certificates. For an
+  in-memory resumable job, lease requests, refusals, and peak usage are
+  cumulative from job admission through the reported attempt; executor and
+  timing fields are scoped to the most recent attempt.
 - Environment radiance uses a deterministic bounded linear-sRGB spectral lift
   and piecewise-constant lat-long texels. It does not claim measured spectra,
   arbitrary HDR decoder compatibility, texture filtering, sun/sky delta
   models, portal sampling, or calibrated real-studio illumination. The current
   exact-CDF light selector is intended for the small studio rigs in scope; it
-  is not the planned many-thousand-emitter light BVH.
+  is not the planned many-thousand-emitter light BVH. The standalone
+  `AdmittedLighting::try_new` compatibility/analysis constructor has no `Cx`;
+  production tracer entry points use its cancellation-aware counterpart.
 - Dielectric support is homogeneous, non-polarizing geometric optics. It does
   not claim polarization, coherence, fluorescence, birefringence, measured
   preset fidelity, camera-start-inside-medium support, arbitrary overlapping
