@@ -811,24 +811,36 @@ pub fn merge_uniform_shards(
             observed: minimum_input,
         });
     }
-    let mut ordered_specs: Vec<&UniformRenderShardSpec> = Vec::new();
-    ordered_specs
-        .try_reserve_exact(expected_specs.len())
-        .map_err(|_| RenderShardError::Capacity("ordered specs"))?;
-    ordered_specs.extend(expected_specs.iter());
-    ordered_specs.sort_by_key(|spec| {
-        (
+    let mut ordered_by_key = BTreeMap::new();
+    for spec in expected_specs {
+        checkpoint(cx)?;
+        let key = (
             spec.sample_start,
             spec.sample_end,
             spec.tile_start,
             spec.tile_end,
             spec.shard_identity,
-        )
-    });
+        );
+        if ordered_by_key.insert(key, spec).is_some() {
+            return Err(RenderShardError::CoverageOverlap {
+                tile: spec.tile_start,
+                sample: spec.sample_start,
+            });
+        }
+    }
+    let mut ordered_specs: Vec<&UniformRenderShardSpec> = Vec::new();
+    ordered_specs
+        .try_reserve_exact(expected_specs.len())
+        .map_err(|_| RenderShardError::Capacity("ordered specs"))?;
+    for spec in ordered_by_key.values() {
+        checkpoint(cx)?;
+        ordered_specs.push(*spec);
+    }
     validate_expected_specs(&ordered_specs, first, cx)?;
 
     let mut expected_by_id = BTreeMap::new();
     for spec in &ordered_specs {
+        checkpoint(cx)?;
         if expected_by_id.insert(spec.shard_identity, **spec).is_some() {
             return Err(RenderShardError::CoverageOverlap {
                 tile: spec.tile_start,
@@ -856,7 +868,6 @@ pub fn merge_uniform_shards(
         if result.xyz.len()
             != usize::try_from(result.spec.payload_pixel_count)
                 .map_err(|_| RenderShardError::ArithmeticOverflow("payload count"))?
-            || result.xyz.iter().flatten().any(|value| !value.is_finite())
         {
             return Err(RenderShardError::Integrity);
         }
@@ -883,6 +894,7 @@ pub fn merge_uniform_shards(
         }
     }
     for spec in &ordered_specs {
+        checkpoint(cx)?;
         if !result_by_id.contains_key(&spec.shard_identity) {
             return Err(RenderShardError::MissingShard(spec.shard_identity));
         }
@@ -907,40 +919,56 @@ fn validate_expected_specs(
     first: &UniformRenderShardSpec,
     cx: &Cx<'_>,
 ) -> Result<(), RenderShardError> {
-    let event_count = ordered
+    let _event_count = ordered
         .len()
         .checked_mul(2)
         .ok_or(RenderShardError::ArithmeticOverflow("coverage event count"))?;
-    let mut events = Vec::new();
-    events
-        .try_reserve_exact(event_count)
-        .map_err(|_| RenderShardError::Capacity("coverage events"))?;
+    let mut events: BTreeMap<u64, BTreeMap<(u32, u32), i64>> = BTreeMap::new();
     for spec in ordered {
         checkpoint(cx)?;
         validate_common_spec(spec, first)?;
-        events.push((spec.tile_start, 1_i8, spec.sample_start, spec.sample_end));
-        events.push((spec.tile_end, -1_i8, spec.sample_start, spec.sample_end));
+        for (tile, delta) in [(spec.tile_start, 1_i64), (spec.tile_end, -1_i64)] {
+            let deltas = events.entry(tile).or_default();
+            let key = (spec.sample_start, spec.sample_end);
+            let combined = deltas
+                .get(&key)
+                .copied()
+                .unwrap_or(0_i64)
+                .checked_add(delta)
+                .ok_or(RenderShardError::ArithmeticOverflow(
+                    "coverage event multiplicity",
+                ))?;
+            if combined == 0 {
+                deltas.remove(&key);
+            } else {
+                deltas.insert(key, combined);
+            }
+        }
     }
-    events.sort_unstable();
-    if events.first().map(|event| event.0) != Some(0) {
+    if events.first_key_value().map(|(&tile, _)| tile) != Some(0) {
         return Err(RenderShardError::CoverageGap { tile: 0, sample: 0 });
     }
 
     let mut active: BTreeMap<(u32, u32), i64> = BTreeMap::new();
-    let mut index = 0usize;
     let mut last_event_tile = 0_u64;
-    while index < events.len() {
+    let mut events = events.iter().peekable();
+    while let Some((&tile, deltas)) = events.next() {
         checkpoint(cx)?;
-        let tile = events[index].0;
         last_event_tile = tile;
-        while index < events.len() && events[index].0 == tile {
-            let (_, delta, sample_start, sample_end) = events[index];
-            let key = (sample_start, sample_end);
-            let next = active.get(&key).copied().unwrap_or(0) + i64::from(delta);
+        for (&key, &delta) in deltas {
+            checkpoint(cx)?;
+            let next = active
+                .get(&key)
+                .copied()
+                .unwrap_or(0_i64)
+                .checked_add(delta)
+                .ok_or(RenderShardError::ArithmeticOverflow(
+                    "active coverage multiplicity",
+                ))?;
             if next < 0 {
                 return Err(RenderShardError::CoverageOverlap {
                     tile,
-                    sample: sample_start,
+                    sample: key.0,
                 });
             }
             if next == 0 {
@@ -948,11 +976,10 @@ fn validate_expected_specs(
             } else {
                 active.insert(key, next);
             }
-            index += 1;
         }
         let next_tile = events
-            .get(index)
-            .map_or(first.layout.tile_count(), |event| event.0);
+            .peek()
+            .map_or(first.layout.tile_count(), |(tile, _)| **tile);
         if tile < next_tile {
             validate_active_sample_coverage(&active, first.settings.spp, tile, cx)?;
         }
@@ -1222,6 +1249,9 @@ fn result_identity(
             checkpoint(cx)?;
         }
         for value in sample {
+            if !value.is_finite() {
+                return Err(RenderShardError::NonFinitePayload);
+            }
             hasher.update(&value.to_bits().to_le_bytes());
         }
     }

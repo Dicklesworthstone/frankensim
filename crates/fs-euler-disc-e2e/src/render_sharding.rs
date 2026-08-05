@@ -9,7 +9,7 @@
 //! claim table, lease service, or arbitration mechanism.
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -419,18 +419,34 @@ impl EulerUniformRenderPlan {
             RenderTileLayout::try_new(settings.width, settings.height, tile_width, tile_height)
                 .map_err(|_| EulerRenderShardingError::InvalidPartition("tile_layout"))?;
 
+        let mut sorted_by_ordinal = BTreeMap::new();
+        let mut lowest_duplicate_ordinal: Option<u64> = None;
+        for input in inputs {
+            checkpoint(cx)?;
+            match sorted_by_ordinal.entry(input.frame_ordinal) {
+                Entry::Vacant(entry) => {
+                    entry.insert(*input);
+                }
+                Entry::Occupied(_) => {
+                    lowest_duplicate_ordinal = Some(
+                        lowest_duplicate_ordinal
+                            .map_or(input.frame_ordinal, |prior| prior.min(input.frame_ordinal)),
+                    );
+                }
+            }
+        }
+        if let Some(frame_ordinal) = lowest_duplicate_ordinal {
+            return Err(EulerRenderShardingError::DuplicateFrameOrdinal(
+                frame_ordinal,
+            ));
+        }
         let mut sorted: Vec<EulerRenderFrameInput<'_>> = Vec::new();
         sorted
             .try_reserve_exact(inputs.len())
             .map_err(|_| EulerRenderShardingError::Capacity("frame inputs"))?;
-        sorted.extend_from_slice(inputs);
-        sorted.sort_by_key(|input| input.frame_ordinal);
-        for pair in sorted.windows(2) {
-            if pair[0].frame_ordinal == pair[1].frame_ordinal {
-                return Err(EulerRenderShardingError::DuplicateFrameOrdinal(
-                    pair[0].frame_ordinal,
-                ));
-            }
+        for input in sorted_by_ordinal.values() {
+            checkpoint(cx)?;
+            sorted.push(*input);
         }
 
         let mut segment_count = 0_u64;
@@ -477,6 +493,7 @@ impl EulerUniformRenderPlan {
             let first_segment = u64::try_from(raw_segments.len())
                 .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("first_segment"))?;
             for segment_index in 0..input.prepared.segments().len() {
+                checkpoint(cx)?;
                 scene.prepared_segment_shard_binding(input.prepared, segment_index)?;
                 let frame_identity =
                     euler_render_checkpoint_frame_identity(input.prepared, segment_index)?;
@@ -932,7 +949,7 @@ impl EulerUniformRenderPlan {
         if !reader.is_finished() {
             return Err(EulerRenderShardingError::Codec("trailing plan bytes"));
         }
-        validate_canonical_tables(&frames, &raw_segments)?;
+        validate_canonical_tables(&frames, &raw_segments, cx)?;
         let actual_plan_identity = plan_identity(&canonical, &frames, &raw_segments, cx)?;
         if actual_plan_identity != declared_plan_identity {
             return Err(EulerRenderShardingError::PlanIdentityMismatch {
@@ -950,7 +967,9 @@ impl EulerUniformRenderPlan {
             canonical.limits,
             cx,
         )?;
-        if declared_segments != segments || declared_shards != shards {
+        if !slices_equal_cancellable(&declared_segments, &segments, cx)?
+            || !slices_equal_cancellable(&declared_shards, &shards, cx)?
+        {
             return Err(EulerRenderShardingError::Codec(
                 "noncanonical segment or shard table",
             ));
@@ -980,7 +999,7 @@ impl EulerUniformRenderPlan {
             encoded_plan_bytes: measured,
         };
         let canonical_bytes = plan.encode_canonical(max_bytes, cx)?;
-        if canonical_bytes != bytes {
+        if !slices_equal_cancellable(&canonical_bytes, bytes, cx)? {
             return Err(EulerRenderShardingError::Codec(
                 "noncanonical plan encoding",
             ));
@@ -1208,6 +1227,7 @@ pub fn merge_uniform_render_segment_artifacts(
 
     let mut expected_by_logical = BTreeMap::new();
     for (local_index, shard) in selected.iter().enumerate() {
+        checkpoint(cx)?;
         if expected_by_logical
             .insert(shard.logical_shard_identity, local_index)
             .is_some()
@@ -1237,6 +1257,7 @@ pub fn merge_uniform_render_segment_artifacts(
         }
     }
     for shard in selected {
+        checkpoint(cx)?;
         if !unique_by_logical.contains_key(&shard.logical_shard_identity) {
             return Err(EulerRenderShardingError::MissingArtifact(
                 shard.logical_shard_identity,
@@ -1248,6 +1269,7 @@ pub fn merge_uniform_render_segment_artifacts(
     // Refuse an untrusted hash aliased to multiple logical shards before read.
     let mut logical_by_hash = BTreeMap::new();
     for artifact in unique_by_logical.values() {
+        checkpoint(cx)?;
         match logical_by_hash.insert(artifact.artifact_hash, artifact.logical_shard_identity) {
             Some(previous) if previous != artifact.logical_shard_identity => {
                 return Err(EulerRenderShardingError::ShardResultBindingMismatch);
@@ -1290,6 +1312,8 @@ pub fn merge_uniform_render_segment_artifacts(
     ))?;
     let semantics = bind_segment_semantics(plan, scene, &indexed_inputs, first_selected, cx)?;
     let mut expected_specs = try_vec_capacity(segment.shard_count, "expected shard specs")?;
+    let mut results: Vec<Option<UniformRenderShardResult>> =
+        try_vec_capacity(segment.shard_count, "decoded shard results")?;
     for shard in selected {
         checkpoint(cx)?;
         if shard.frame_ordinal != first_selected.frame_ordinal
@@ -1301,10 +1325,8 @@ pub fn merge_uniform_render_segment_artifacts(
             ));
         }
         expected_specs.push(renderer_spec_for_shard(plan, *shard, semantics)?);
+        results.push(None);
     }
-    let mut results: Vec<Option<UniformRenderShardResult>> =
-        try_vec_capacity(segment.shard_count, "decoded shard results")?;
-    results.resize_with(selected.len(), || None);
     for artifact in unique_by_logical.values() {
         checkpoint(cx)?;
         let local_index = expected_by_logical[&artifact.logical_shard_identity];
@@ -1337,6 +1359,7 @@ pub fn merge_uniform_render_segment_artifacts(
     }
     let mut complete_results = try_vec_capacity(segment.shard_count, "complete shard results")?;
     for (local_index, result) in results.into_iter().enumerate() {
+        checkpoint(cx)?;
         complete_results.push(result.ok_or(EulerRenderShardingError::MissingArtifact(
             selected[local_index].logical_shard_identity,
         ))?);
@@ -1539,9 +1562,11 @@ struct RawSegment {
 fn validate_canonical_tables(
     frames: &[EulerRenderPlannedFrame],
     segments: &[RawSegment],
+    cx: &Cx<'_>,
 ) -> Result<(), EulerRenderShardingError> {
     let mut segment_cursor = 0_u64;
     for (frame_position, frame) in frames.iter().enumerate() {
+        checkpoint(cx)?;
         if frame.segment_count == 0 || frame.first_segment != segment_cursor {
             return Err(EulerRenderShardingError::Codec(
                 "noncanonical frame segment range",
@@ -1566,10 +1591,15 @@ fn validate_canonical_tables(
                     "frame segment range outside table",
                 ))?;
         for (segment_index, segment) in frame_segments.iter().enumerate() {
+            checkpoint(cx)?;
             require_nonzero_identity("frame_identity", segment.frame_identity)?;
+            let canonical_frame_position = u64::try_from(frame_position)
+                .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("frame_position"))?;
+            let canonical_segment_index = u64::try_from(segment_index)
+                .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_index"))?;
             if segment.frame_ordinal != frame.frame_ordinal
-                || segment.frame_position != frame_position as u64
-                || segment.segment_index != segment_index as u64
+                || segment.frame_position != canonical_frame_position
+                || segment.segment_index != canonical_segment_index
             {
                 return Err(EulerRenderShardingError::Codec(
                     "noncanonical frame-segment ordering",
@@ -1584,6 +1614,24 @@ fn validate_canonical_tables(
         ));
     }
     Ok(())
+}
+
+fn slices_equal_cancellable<T: PartialEq>(
+    left: &[T],
+    right: &[T],
+    cx: &Cx<'_>,
+) -> Result<bool, EulerRenderShardingError> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left_chunk, right_chunk) in left.chunks(1024).zip(right.chunks(1024)) {
+        checkpoint(cx)?;
+        if left_chunk != right_chunk {
+            return Ok(false);
+        }
+    }
+    checkpoint(cx)?;
+    Ok(true)
 }
 
 fn put_u16(bytes: &mut Vec<u8>, value: u16) {

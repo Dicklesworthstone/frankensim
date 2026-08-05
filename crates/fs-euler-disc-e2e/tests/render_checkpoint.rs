@@ -1559,6 +1559,37 @@ fn g0_euler_render_plan_is_canonical_bounded_and_exactly_covers_one_and_many_fra
             ),
             Err(EulerRenderShardingError::DuplicateFrameOrdinal(10))
         ));
+        for duplicate_inputs in [
+            [
+                EulerRenderFrameInput::new(30, &late),
+                EulerRenderFrameInput::new(10, &early),
+                EulerRenderFrameInput::new(30, &late),
+                EulerRenderFrameInput::new(10, &early),
+            ],
+            [
+                EulerRenderFrameInput::new(10, &early),
+                EulerRenderFrameInput::new(30, &late),
+                EulerRenderFrameInput::new(10, &early),
+                EulerRenderFrameInput::new(30, &late),
+            ],
+        ] {
+            assert!(matches!(
+                EulerUniformRenderPlan::try_new(
+                    &scene,
+                    sequence,
+                    &duplicate_inputs,
+                    settings,
+                    3,
+                    2,
+                    3,
+                    2,
+                    1,
+                    limits,
+                    cx,
+                ),
+                Err(EulerRenderShardingError::DuplicateFrameOrdinal(10))
+            ));
+        }
 
         let exact_plan_bytes = plan.summary().encoded_plan_bytes;
         let exact_limits =
