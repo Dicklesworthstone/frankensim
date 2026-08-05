@@ -451,6 +451,15 @@ sparse GGX fixture records heterogeneous path allocation and compares adaptive
 and rounded-up uniform cost against a disjoint-seed high-SPP reference. That
 fixture is a regression for this scene/profile, not a universal quality claim.
 
+`tests/checkpoint_battery.rs` plus `tracer::checkpoint` inline tests (feature
+`tracer`) cover strict nonzero partial uniform and adaptive safe points;
+bit-exact serialize/restore/finalize equivalence; preservation of raw sums,
+moments, counts, and adaptive decisions; every-prefix truncation; body and seal
+corruption; stale job and binding refusal; one-byte-short read/write budgets;
+fallible sinks; and cancellation before emission and during the final seal.
+These tests establish deterministic codec and resume semantics, not filesystem
+durability or concurrent scheduler-claim arbitration.
+
 `tests/render.rs` (7 cases): radical inverse known values; cosine samples are
 unit vectors with the right pdf; the furnace test conserves energy exactly; MIS
 weights sum to one (+ heuristic ordering); MIS integration is unbiased;
