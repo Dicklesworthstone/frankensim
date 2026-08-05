@@ -1834,22 +1834,9 @@ fn tile_block_pixel_count(
     tile_start: u64,
     tile_end: u64,
 ) -> Result<u64, EulerRenderShardingError> {
-    let mut pixels = 0_u64;
-    for tile in tile_start..tile_end {
-        let bounds = layout
-            .bounds(tile)
-            .ok_or(EulerRenderShardingError::InvalidPartition("tile range"))?;
-        let tile_pixels = u64::from(bounds.width)
-            .checked_mul(u64::from(bounds.height))
-            .ok_or(EulerRenderShardingError::ArithmeticOverflow("tile pixels"))?;
-        pixels =
-            pixels
-                .checked_add(tile_pixels)
-                .ok_or(EulerRenderShardingError::ArithmeticOverflow(
-                    "tile block pixels",
-                ))?;
-    }
-    Ok(pixels)
+    layout
+        .pixel_count_in_range(tile_start, tile_end)
+        .ok_or(EulerRenderShardingError::InvalidPartition("tile range"))
 }
 
 fn measured_plan_bytes(
