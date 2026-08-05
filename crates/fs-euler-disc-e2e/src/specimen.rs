@@ -15,11 +15,22 @@
 
 use core::fmt;
 
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricError, AxisymmetricIdentity, AxisymmetricMassError,
     AxisymmetricMassProperties, MeridianPoint, MeridianSegment, SquatDiscEdgeTreatment,
 };
+
+/// Canonical identity domain for the exact retained axisymmetric chart input.
+pub const EULER_SPECIMEN_CHART_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.specimen-chart.v1";
+/// Canonical identity domain for resolved geometry plus homogeneous density.
+pub const EULER_SPECIMEN_PROFILE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.specimen-profile.v1";
+/// Canonical identity domain for the resolved production mass properties.
+pub const EULER_SPECIMEN_MASS_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.specimen-mass-properties.v1";
 
 /// The bounded, user-facing profile families admitted by the Euler campaign.
 ///
@@ -31,9 +42,9 @@ use fs_rep_frep::{
 pub enum DiscProfileSpec {
     /// A solid squat cylinder with either sharp or true circular-filleted rims.
     SolidCylinder {
-        /// Maximum cylindrical radius [m].
+        /// Maximum cylindrical radius (m).
         outer_radius_m: f64,
-        /// Distance between the two cap planes [m].
+        /// Distance between the two cap planes (m).
         thickness_m: f64,
         /// Exact outer-rim treatment.
         edge_treatment: SquatDiscEdgeTreatment,
@@ -41,11 +52,11 @@ pub enum DiscProfileSpec {
     /// A homogeneous annular cylinder.  Its inner bore is physical geometry,
     /// rather than a mass-only adjustment to a solid-cylinder contact shape.
     AnnularCylinder {
-        /// Outer cylindrical radius [m].
+        /// Outer cylindrical radius (m).
         outer_radius_m: f64,
-        /// Radius of the through bore [m].
+        /// Radius of the through bore (m).
         inner_radius_m: f64,
-        /// Distance between cap planes [m].
+        /// Distance between cap planes (m).
         thickness_m: f64,
     },
     /// An annular cylinder with true circular fillets at both outer rims.
@@ -55,13 +66,13 @@ pub enum DiscProfileSpec {
     /// arcs, so no sharp ring-contact surrogate or independent inertia factor
     /// is introduced.
     OuterFilletedAnnularCylinder {
-        /// Outer cylindrical radius [m].
+        /// Outer cylindrical radius (m).
         outer_radius_m: f64,
-        /// Radius of the through bore [m].
+        /// Radius of the through bore (m).
         inner_radius_m: f64,
-        /// Distance between cap planes [m].
+        /// Distance between cap planes (m).
         thickness_m: f64,
-        /// Radius of each true outer-rim meridian fillet [m]. Must be positive.
+        /// Radius of each true outer-rim meridian fillet (m). Must be positive.
         outer_fillet_radius_m: f64,
     },
     /// A symmetric double-conical or double-frustum profile.
@@ -72,11 +83,11 @@ pub enum DiscProfileSpec {
     /// symmetric about `z = 0` while making contact geometry differ from a
     /// cylinder.
     SymmetricTapered {
-        /// Maximum radius at the equatorial plane [m].
+        /// Maximum radius at the equatorial plane (m).
         outer_radius_m: f64,
-        /// Radius of each planar end face [m].
+        /// Radius of each planar end face (m).
         face_radius_m: f64,
-        /// Axial tip-to-tip/end-face separation [m].
+        /// Axial tip-to-tip/end-face separation (m).
         thickness_m: f64,
     },
     /// A solid cylinder with equal straight conical chamfers at both rims.
@@ -85,13 +96,13 @@ pub enum DiscProfileSpec {
     /// to request no chamfer; accepting a half-zero chamfer would conceal a
     /// caller-unit or topology mistake.
     ChamferedCylinder {
-        /// Maximum radius on the retained cylindrical band [m].
+        /// Maximum radius on the retained cylindrical band (m).
         outer_radius_m: f64,
-        /// Distance between cap planes [m].
+        /// Distance between cap planes (m).
         thickness_m: f64,
-        /// Radial inset from the cylindrical band to either cap edge [m].
+        /// Radial inset from the cylindrical band to either cap edge (m).
         chamfer_radial_m: f64,
-        /// Axial run of either conical chamfer [m].
+        /// Axial run of either conical chamfer (m).
         chamfer_axial_m: f64,
     },
 }
@@ -99,9 +110,9 @@ pub enum DiscProfileSpec {
 /// Geometry extents declared by a resolved profile.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiscProfileDimensions {
-    /// Largest radial extent of the profile [m].
+    /// Largest radial extent of the profile (m).
     pub outer_radius_m: f64,
-    /// Difference between maximum and minimum meridian axial coordinates [m].
+    /// Difference between maximum and minimum meridian axial coordinates (m).
     pub thickness_m: f64,
 }
 
@@ -112,23 +123,116 @@ pub struct ResolvedDiscProfile {
     pub spec: DiscProfileSpec,
     /// Validated line/arc solid of revolution used for every support query.
     pub chart: AxisymmetricChart,
-    /// Homogeneous volumetric density used for the mass integration [kg/m³].
+    /// Homogeneous volumetric density used for the mass integration (kg/m³).
     pub density_kg_per_m3: f64,
     /// Deterministic identity of the exact retained meridian input.
     pub identity: AxisymmetricIdentity,
-    /// Stable outer-radius and axial-thickness dimensions [m].
+    /// Stable outer-radius and axial-thickness dimensions (m).
     pub dimensions: DiscProfileDimensions,
     /// Analytic line/arc mass, center of mass, and centroidal inertia.
     pub mass_properties: AxisymmetricMassProperties,
+}
+
+/// Strong content identities used to bind a trajectory to its resolved asset.
+///
+/// These roots complement the compact diagnostic [`AxisymmetricIdentity`].
+/// They hash the complete canonical line/arc input rather than promoting its
+/// 64-bit cache fingerprint into a durable content address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedDiscProfileIdentities {
+    /// Exact ordered canonical meridian and construction-schema identity.
+    pub chart: ContentHash,
+    /// Exact chart plus homogeneous density identity.
+    pub profile: ContentHash,
+    /// Resolved production mass/centroid/inertia identity.
+    pub mass_properties: ContentHash,
+}
+
+impl ResolvedDiscProfile {
+    /// Compute the versioned strong identities used by trajectory metadata and
+    /// visualization asset admission.
+    #[must_use]
+    pub fn content_identities(&self) -> ResolvedDiscProfileIdentities {
+        let mut chart = DomainHasher::new(EULER_SPECIMEN_CHART_IDENTITY_DOMAIN);
+        let certificate = self.chart.construction_certificate();
+        chart.update(&certificate.schema_version.to_le_bytes());
+        chart.update(
+            &u64::try_from(self.chart.segments().len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for segment in self.chart.segments() {
+            match *segment {
+                MeridianSegment::Line { start, end } => {
+                    chart.update(&[0]);
+                    hash_meridian_point(&mut chart, start);
+                    hash_meridian_point(&mut chart, end);
+                }
+                MeridianSegment::Arc {
+                    start,
+                    end,
+                    center,
+                    clockwise,
+                } => {
+                    chart.update(&[1]);
+                    hash_meridian_point(&mut chart, start);
+                    hash_meridian_point(&mut chart, end);
+                    hash_meridian_point(&mut chart, center);
+                    chart.update(&[u8::from(clockwise)]);
+                }
+            }
+        }
+        let chart = chart.finalize();
+
+        let mut profile = DomainHasher::new(EULER_SPECIMEN_PROFILE_IDENTITY_DOMAIN);
+        profile.update(chart.as_bytes());
+        profile.update(&self.density_kg_per_m3.to_bits().to_le_bytes());
+        let profile = profile.finalize();
+
+        let mut mass = DomainHasher::new(EULER_SPECIMEN_MASS_IDENTITY_DOMAIN);
+        mass.update(profile.as_bytes());
+        for value in [
+            self.mass_properties.volume,
+            self.mass_properties.mass,
+            self.mass_properties.center_of_mass.x,
+            self.mass_properties.center_of_mass.y,
+            self.mass_properties.center_of_mass.z,
+            self.mass_properties.principal_inertia.transverse,
+            self.mass_properties.principal_inertia.axial,
+            self.mass_properties.origin_inertia.transverse,
+            self.mass_properties.origin_inertia.axial,
+        ] {
+            mass.update(&value.to_bits().to_le_bytes());
+        }
+
+        ResolvedDiscProfileIdentities {
+            chart,
+            profile,
+            mass_properties: mass.finalize(),
+        }
+    }
+}
+
+fn hash_meridian_point(hasher: &mut DomainHasher, point: MeridianPoint) {
+    hasher.update(&point.radius.to_bits().to_le_bytes());
+    hasher.update(&point.axial.to_bits().to_le_bytes());
 }
 
 /// Refusal from resolving a profile specification.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DiscProfileError {
     /// A named profile parameter was non-finite or outside its documented domain.
-    InvalidParameter { field: &'static str, value: f64 },
+    InvalidParameter {
+        /// Stable name of the refused parameter.
+        field: &'static str,
+        /// Refused numeric value.
+        value: f64,
+    },
     /// A parameter relationship does not describe the named profile family.
-    InvalidRelationship { detail: &'static str },
+    InvalidRelationship {
+        /// Stable description of the violated relationship.
+        detail: &'static str,
+    },
     /// The generic line/arc chart refused the constructed meridian.
     Geometry(AxisymmetricError),
     /// The exact line/arc mass integration refused to publish properties.

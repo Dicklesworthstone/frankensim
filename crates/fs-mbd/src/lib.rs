@@ -222,6 +222,51 @@ impl UnitQuaternion {
         ))
     }
 
+    /// Admits already-normalized, canonically signed components without
+    /// changing any component bits.
+    ///
+    /// This constructor is intended for canonical transport and replay. It
+    /// refuses appreciable norm drift and the negative representative of the
+    /// quaternion double cover, but deliberately does not renormalize valid
+    /// input: binary64 normalization is not bit-idempotent. General callers
+    /// with arbitrary finite components should use [`Self::new`].
+    pub fn from_canonical_components(components: [f64; 4]) -> Result<Self, DynamicsError> {
+        let [w, x, y, z] = components;
+        if components.iter().any(|component| !component.is_finite()) {
+            return Err(DynamicsError::InvalidOrientation);
+        }
+        let scale = components
+            .iter()
+            .fold(0.0_f64, |maximum, component| maximum.max(component.abs()));
+        if scale == 0.0 {
+            return Err(DynamicsError::InvalidOrientation);
+        }
+        let scaled = components.map(|component| component / scale);
+        let norm = scale
+            * scaled[0]
+                .mul_add(
+                    scaled[0],
+                    scaled[1].mul_add(
+                        scaled[1],
+                        scaled[2].mul_add(scaled[2], scaled[3] * scaled[3]),
+                    ),
+                )
+                .sqrt();
+        if !norm.is_finite() || (norm - 1.0).abs() > 64.0 * f64::EPSILON {
+            return Err(DynamicsError::InvalidOrientation);
+        }
+        let canonical = Self::canonical(w, x, y, z);
+        if canonical
+            .components()
+            .iter()
+            .zip(components)
+            .any(|(canonical, supplied)| canonical.to_bits() != supplied.to_bits())
+        {
+            return Err(DynamicsError::InvalidOrientation);
+        }
+        Ok(Self { w, x, y, z })
+    }
+
     /// Builds an orientation from a body-frame axis and angle in radians.
     pub fn from_axis_angle(axis_body: Vec3, angle_radians: f64) -> Result<Self, DynamicsError> {
         if !axis_body.is_finite() || !angle_radians.is_finite() {
@@ -1376,6 +1421,29 @@ mod tests {
         let rotated = positive.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
         assert_close(rotated.x, -1.0, EPSILON);
         assert_close(rotated.y, 0.0, EPSILON);
+    }
+
+    #[test]
+    fn canonical_quaternion_replay_preserves_bits_without_renormalizing() {
+        for angle in [0.0, 0.1, 0.7, 1.3, core::f64::consts::PI] {
+            let original =
+                UnitQuaternion::from_axis_angle(Vec3::new(1.0, -2.0, 3.0), angle).unwrap();
+            let replayed =
+                UnitQuaternion::from_canonical_components(original.components()).unwrap();
+            assert_eq!(
+                replayed.components().map(f64::to_bits),
+                original.components().map(f64::to_bits)
+            );
+        }
+
+        assert_eq!(
+            UnitQuaternion::from_canonical_components([-1.0, 0.0, 0.0, 0.0]),
+            Err(DynamicsError::InvalidOrientation)
+        );
+        assert_eq!(
+            UnitQuaternion::from_canonical_components([1.0 + 1.0e-10, 0.0, 0.0, 0.0]),
+            Err(DynamicsError::InvalidOrientation)
+        );
     }
 
     #[test]

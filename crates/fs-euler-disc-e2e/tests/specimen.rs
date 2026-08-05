@@ -244,6 +244,54 @@ fn g0_zero_fillet_is_the_same_resolved_sharp_profile() {
         sharp.mass_properties.principal_inertia,
         zero_fillet.mass_properties.principal_inertia
     );
+    assert_eq!(
+        sharp.content_identities(),
+        zero_fillet.content_identities(),
+        "semantically identical resolved charts and densities need one durable identity"
+    );
+}
+
+#[test]
+fn g0_strong_profile_identities_bind_complete_chart_density_and_mass_inputs() {
+    let spec = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: 0.038,
+        thickness_m: 0.006,
+        edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+    };
+    let (steel, replay, tungsten) = with_cx(|cx| {
+        (
+            spec.resolve(7_800.0, cx).expect("steel profile"),
+            spec.resolve(7_800.0, cx).expect("steel replay"),
+            spec.resolve(19_250.0, cx).expect("tungsten profile"),
+        )
+    });
+    let steel_ids = steel.content_identities();
+    let replay_ids = replay.content_identities();
+    let tungsten_ids = tungsten.content_identities();
+
+    assert_eq!(steel_ids, replay_ids, "re-resolution must be deterministic");
+    assert_eq!(steel_ids.chart, tungsten_ids.chart);
+    assert_ne!(steel_ids.profile, tungsten_ids.profile);
+    assert_ne!(steel_ids.mass_properties, tungsten_ids.mass_properties);
+    for identity in [
+        steel_ids.chart,
+        steel_ids.profile,
+        steel_ids.mass_properties,
+    ] {
+        assert!(identity.as_bytes().iter().any(|byte| *byte != 0));
+    }
+
+    let chamfer = with_cx(|cx| {
+        DiscProfileSpec::ChamferedCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            chamfer_radial_m: 0.001,
+            chamfer_axial_m: 0.001,
+        }
+        .resolve(7_800.0, cx)
+        .expect("chamfered profile")
+    });
+    assert_ne!(steel_ids.chart, chamfer.content_identities().chart);
 }
 
 #[test]
