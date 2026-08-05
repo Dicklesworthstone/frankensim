@@ -1909,6 +1909,7 @@ dependencies = [
  "fs-rand",
  "fs-rep-frep",
  "fs-rep-nurbs",
+ "fs-substrate",
 ]
 
 [[package]]

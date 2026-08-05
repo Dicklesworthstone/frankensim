@@ -62,9 +62,10 @@ use std::time::Instant;
 
 mod checkpoint;
 pub use checkpoint::{
-    RENDER_CHECKPOINT_CONTENT_DOMAIN, RENDER_CHECKPOINT_SCHEMA_VERSION, RenderCheckpointBinding,
+    RENDER_CHECKPOINT_CONTENT_DOMAIN, RENDER_CHECKPOINT_EXECUTION_ENVIRONMENT_DOMAIN,
+    RENDER_CHECKPOINT_JOB_DOMAIN, RENDER_CHECKPOINT_SCHEMA_VERSION, RenderCheckpointBinding,
     RenderCheckpointError, RenderCheckpointKind, RenderCheckpointReceipt,
-    RenderCheckpointWriteError,
+    RenderCheckpointWriteError, adaptive_checkpoint_job_identity, uniform_checkpoint_job_identity,
 };
 
 /// Bit-affecting semantic surface version of the tracer (see
@@ -1368,7 +1369,8 @@ pub struct RenderExecutionReport {
     /// Retained per-tile row-prefix checkpoint payload. Zero for the
     /// compatibility all-or-nothing APIs.
     pub progress_state_bytes: u64,
-    /// Setup and admission wall time.
+    /// Setup and admission wall time. Resumable jobs retain their original
+    /// admission time in every later attempt report.
     pub setup_ns: u64,
     /// Throughput-lane wall time, including drain on failure.
     pub traversal_ns: u64,
@@ -1385,7 +1387,9 @@ pub struct RenderExecutionReport {
     pub executor: RunReport,
     /// Exact operation-memory admission trace after transient charges release.
     /// For a resumable job, counters and peak are cumulative from admission
-    /// through this attempt; executor and timing fields describe this attempt.
+    /// through this attempt. Executor and traversal/compute/merge/publication
+    /// timings describe this attempt; `setup_ns` remains the initial resumable
+    /// job admission time.
     pub memory: LeaseReceipt,
 }
 
@@ -1428,7 +1432,8 @@ pub struct RenderProgress {
     pub completed_tiles: u64,
     /// Total logical tiles.
     pub total_tiles: u64,
-    /// Worker attempts already made, including failed/cancelled attempts.
+    /// Execution API attempts already made, including failed, cancelled, and
+    /// completed-job calls that require no worker dispatch.
     pub attempts: u64,
 }
 
@@ -3052,7 +3057,10 @@ impl TileKernel for PendingAdaptiveRenderKernel<'_, '_> {
     type Out = ();
 
     fn tiles(&self) -> TilePlan {
-        TilePlan::new(PENDING_ADAPTIVE_RENDER_TILE_KERNEL, self.layout.tile_count())
+        TilePlan::new(
+            PENDING_ADAPTIVE_RENDER_TILE_KERNEL,
+            self.layout.tile_count(),
+        )
     }
 
     fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, Self::Out> {

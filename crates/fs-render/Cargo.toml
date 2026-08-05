@@ -21,6 +21,7 @@ fs-img = { path = "../fs-img", optional = true }
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand", optional = true }
 fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
+fs-substrate = { path = "../fs-substrate", optional = true }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
@@ -45,7 +46,7 @@ volumes = ["dep:fs-rand"]
 differentiable = ["chart-backends", "dep:fs-ad"]
 # [F]-gated per the Ambition-Tag rule (bead 872c): the spectral path
 # tracer v1 — hero-wavelength MIS over the chart backends, EXR out.
-tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img"]
+tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs-substrate"]
 
 [[test]]
 name = "volumes_battery"

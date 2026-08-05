@@ -20,7 +20,11 @@ use std::num::NonZeroU32;
 const SEED: u64 = 0x6368_6563_6b70_7431;
 const MAX_CHECKPOINT_BYTES: u64 = 8 << 20;
 
-fn with_gate_cx<R>(gate: &CancelGate, operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+fn with_gate_budget_cx<R>(
+    gate: &CancelGate,
+    budget: Budget,
+    operation: impl FnOnce(&Cx<'_>) -> R,
+) -> R {
     let arenas = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     arenas.scope(|arena| {
         let cx = Cx::new(
@@ -32,15 +36,23 @@ fn with_gate_cx<R>(gate: &CancelGate, operation: impl FnOnce(&Cx<'_>) -> R) -> R
                 tile: 0,
                 iteration: 0,
             },
-            Budget::INFINITE,
+            budget,
             ExecMode::Deterministic,
         );
         operation(&cx)
     })
 }
 
+fn with_gate_cx<R>(gate: &CancelGate, operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    with_gate_budget_cx(gate, Budget::INFINITE, operation)
+}
+
 fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
     with_gate_cx(&CancelGate::new_clock_free(), operation)
+}
+
+fn with_budget_cx<R>(budget: Budget, operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    with_gate_budget_cx(&CancelGate::new_clock_free(), budget, operation)
 }
 
 fn scene() -> Scene {
@@ -100,23 +112,19 @@ fn identity(byte: u8) -> ContentHash {
     ContentHash([byte; 32])
 }
 
-fn binding_with_job(job: u8) -> RenderCheckpointBinding {
+fn binding_with_job(job: ContentHash) -> RenderCheckpointBinding {
     RenderCheckpointBinding::try_new(
         identity(1),
         identity(2),
         identity(3),
         identity(4),
-        identity(job),
+        job,
         identity(6),
         identity(7),
         0,
         None,
     )
     .expect("admit complete root checkpoint binding")
-}
-
-fn binding() -> RenderCheckpointBinding {
-    binding_with_job(5)
 }
 
 fn write_uniform(
@@ -214,7 +222,8 @@ fn g4_uniform_safe_point_checkpoint_restore_finishes_without_double_samples() {
     assert_eq!(yielded.attempt_report().attempt_index, 1);
 
     let pending = yielded.into_pending();
-    let (bytes, written) = write_uniform(&pending, binding());
+    let binding = binding_with_job(pending.checkpoint_job_identity());
+    let (bytes, written) = write_uniform(&pending, binding);
     assert_eq!(written.kind(), RenderCheckpointKind::Uniform);
     assert_eq!(written.progress(), partial);
 
@@ -222,7 +231,7 @@ fn g4_uniform_safe_point_checkpoint_restore_finishes_without_double_samples() {
     let (restored, read) = with_cx(|cx| {
         let fresh = PendingRender::begin_static(&restored_scene, cx, settings, execution.clone())
             .expect("re-admit uniform restore target");
-        fresh.restore_checkpoint(binding(), &bytes, MAX_CHECKPOINT_BYTES, cx)
+        fresh.restore_checkpoint(binding, &bytes, MAX_CHECKPOINT_BYTES, cx)
     })
     .expect("restore uniform checkpoint");
     assert_eq!(read, written);
@@ -264,10 +273,11 @@ fn g4_adaptive_safe_point_checkpoint_restore_finishes_with_exact_aovs() {
     assert_eq!(yielded.attempt_report().attempt_index, 1);
 
     let pending = yielded.into_pending();
+    let binding = binding_with_job(pending.checkpoint_job_identity());
     let mut bytes = Vec::new();
     let written = with_cx(|cx| {
         pending.write_checkpoint(
-            binding(),
+            binding,
             MAX_CHECKPOINT_BYTES,
             cx,
             |chunk| -> Result<(), Infallible> {
@@ -290,12 +300,48 @@ fn g4_adaptive_safe_point_checkpoint_restore_finishes_with_exact_aovs() {
             execution.clone(),
         )
         .expect("re-admit adaptive restore target");
-        fresh.restore_checkpoint(binding(), &bytes, MAX_CHECKPOINT_BYTES, cx)
+        fresh.restore_checkpoint(binding, &bytes, MAX_CHECKPOINT_BYTES, cx)
     })
     .expect("restore adaptive checkpoint");
     assert_eq!(read, written);
-    let resumed = with_cx(|cx| restored.resume(cx)).expect("finish restored adaptive render");
-    assert_eq!(resumed.report.attempt_index, 2);
+    let completed = with_cx(|cx| {
+        restored.advance_to_safe_point(
+            cx,
+            NonZeroU32::new(u32::MAX).expect("nonzero completion quota"),
+        )
+    })
+    .expect("finish restored adaptive work at an opaque safe point");
+    assert_eq!(completed.attempt_report().attempt_index, 2);
+    assert_eq!(
+        completed.progress().completed_tiles,
+        completed.progress().total_tiles
+    );
+    assert_eq!(
+        completed.attempt_report().executor.kernel,
+        "fs-render/pending-adaptive-spectral-film-tile-v1"
+    );
+
+    let completed_again = with_cx(|cx| {
+        completed
+            .into_pending()
+            .advance_to_safe_point(cx, NonZeroU32::new(1).expect("nonzero completed-job quota"))
+    })
+    .expect("yield an already-complete adaptive job without retracing");
+    assert_eq!(completed_again.attempt_report().attempt_index, 3);
+    assert_eq!(completed_again.attempt_report().workers, 0);
+    assert_eq!(completed_again.attempt_report().executor.total, 0);
+    assert_eq!(
+        completed_again.attempt_report().executor.kernel,
+        "fs-render/pending-adaptive-spectral-film-tile-v1"
+    );
+    let resumed = with_cx(|cx| completed_again.into_pending().resume(cx))
+        .expect("publish completed restored adaptive render without retracing");
+    assert_eq!(resumed.report.attempt_index, 4);
+    assert_eq!(resumed.report.workers, 0);
+    assert_eq!(
+        resumed.report.executor.kernel,
+        "fs-render/pending-adaptive-spectral-film-tile-v1"
+    );
 
     let reference_scene = scene();
     let reference = with_cx(|cx| {
@@ -306,6 +352,79 @@ fn g4_adaptive_safe_point_checkpoint_restore_finishes_with_exact_aovs() {
         &resumed.film,
         &reference.film,
         "adaptive safe-point/checkpoint exactness",
+    );
+}
+
+#[test]
+fn g0_checkpoint_refuses_execution_budget_substitution_for_uniform_and_adaptive_jobs() {
+    let settings = Settings {
+        width: 2,
+        height: 2,
+        ..settings(Sampler::Iid)
+    };
+    let execution = execution();
+    let source_scene = scene();
+
+    let uniform =
+        with_cx(|cx| PendingRender::begin_static(&source_scene, cx, settings, execution.clone()))
+            .expect("admit infinite-budget uniform checkpoint source");
+    let uniform_binding = binding_with_job(uniform.checkpoint_job_identity());
+    let (uniform_bytes, _) = write_uniform(&uniform, uniform_binding);
+    let restored_scene = scene();
+    let uniform_refused = with_budget_cx(Budget::new().with_cost_quota(65_536), |cx| {
+        let fresh = PendingRender::begin_static(&restored_scene, cx, settings, execution.clone())
+            .expect("admit otherwise-identical finite-budget uniform restore target");
+        fresh.restore_checkpoint(uniform_binding, &uniform_bytes, MAX_CHECKPOINT_BYTES, cx)
+    });
+    assert!(
+        matches!(
+            uniform_refused,
+            Err(RenderCheckpointError::JobMismatch {
+                field: "execution_budget"
+            })
+        ),
+        "uniform restore accepted substituted finite execution budget: {uniform_refused:?}"
+    );
+
+    let policy = adaptive_policy();
+    let adaptive = with_cx(|cx| {
+        PendingAdaptiveRender::begin_static(&source_scene, cx, settings, policy, execution.clone())
+    })
+    .expect("admit infinite-budget adaptive checkpoint source");
+    let adaptive_binding = binding_with_job(adaptive.checkpoint_job_identity());
+    let mut adaptive_bytes = Vec::new();
+    with_cx(|cx| {
+        adaptive.write_checkpoint(
+            adaptive_binding,
+            MAX_CHECKPOINT_BYTES,
+            cx,
+            |chunk| -> Result<(), Infallible> {
+                adaptive_bytes.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+    })
+    .expect("stream infinite-budget adaptive checkpoint");
+    let restored_scene = scene();
+    let adaptive_refused = with_budget_cx(Budget::new().with_cost_quota(65_536), |cx| {
+        let fresh = PendingAdaptiveRender::begin_static(
+            &restored_scene,
+            cx,
+            settings,
+            policy,
+            execution.clone(),
+        )
+        .expect("admit otherwise-identical finite-budget adaptive restore target");
+        fresh.restore_checkpoint(adaptive_binding, &adaptive_bytes, MAX_CHECKPOINT_BYTES, cx)
+    });
+    assert!(
+        matches!(
+            adaptive_refused,
+            Err(RenderCheckpointError::JobMismatch {
+                field: "execution_budget"
+            })
+        ),
+        "adaptive restore accepted substituted finite execution budget: {adaptive_refused:?}"
     );
 }
 
@@ -321,12 +440,13 @@ fn g0_checkpoint_refuses_every_truncation_corruption_wrong_job_and_short_budget(
     let pending =
         with_cx(|cx| PendingRender::begin_static(&source_scene, cx, settings, execution.clone()))
             .expect("begin small checkpoint fixture");
-    let (bytes, receipt) = write_uniform(&pending, binding());
+    let binding = binding_with_job(pending.checkpoint_job_identity());
+    let (bytes, receipt) = write_uniform(&pending, binding);
 
     let mut sink_called = false;
     let short_write = with_cx(|cx| {
         pending.write_checkpoint(
-            binding(),
+            binding,
             receipt.byte_len() - 1,
             cx,
             |_chunk| -> Result<(), Infallible> {
@@ -346,7 +466,7 @@ fn g0_checkpoint_refuses_every_truncation_corruption_wrong_job_and_short_budget(
         let refused = with_cx(|cx| {
             let fresh = PendingRender::begin_static(&source_scene, cx, settings, execution.clone())
                 .expect("re-admit truncation target");
-            fresh.restore_checkpoint(binding(), &bytes[..prefix], MAX_CHECKPOINT_BYTES, cx)
+            fresh.restore_checkpoint(binding, &bytes[..prefix], MAX_CHECKPOINT_BYTES, cx)
         });
         assert!(
             refused.is_err(),
@@ -361,7 +481,7 @@ fn g0_checkpoint_refuses_every_truncation_corruption_wrong_job_and_short_budget(
         let refused = with_cx(|cx| {
             let fresh = PendingRender::begin_static(&source_scene, cx, settings, execution.clone())
                 .expect("re-admit corruption target");
-            fresh.restore_checkpoint(binding(), &corrupt, MAX_CHECKPOINT_BYTES, cx)
+            fresh.restore_checkpoint(binding, &corrupt, MAX_CHECKPOINT_BYTES, cx)
         });
         assert!(
             matches!(refused, Err(RenderCheckpointError::IntegrityMismatch)),
@@ -372,7 +492,12 @@ fn g0_checkpoint_refuses_every_truncation_corruption_wrong_job_and_short_budget(
     let wrong_job = with_cx(|cx| {
         let fresh = PendingRender::begin_static(&source_scene, cx, settings, execution.clone())
             .expect("re-admit wrong-job target");
-        fresh.restore_checkpoint(binding_with_job(99), &bytes, MAX_CHECKPOINT_BYTES, cx)
+        fresh.restore_checkpoint(
+            binding_with_job(identity(99)),
+            &bytes,
+            MAX_CHECKPOINT_BYTES,
+            cx,
+        )
     });
     assert!(matches!(
         wrong_job,
@@ -384,7 +509,7 @@ fn g0_checkpoint_refuses_every_truncation_corruption_wrong_job_and_short_budget(
     let short_read = with_cx(|cx| {
         let fresh = PendingRender::begin_static(&source_scene, cx, settings, execution.clone())
             .expect("re-admit short-read target");
-        fresh.restore_checkpoint(binding(), &bytes, bytes.len() as u64 - 1, cx)
+        fresh.restore_checkpoint(binding, &bytes, bytes.len() as u64 - 1, cx)
     });
     assert!(matches!(
         short_read,
@@ -403,13 +528,14 @@ fn g4_checkpoint_observes_precancel_and_cancel_requested_by_final_seal_sink() {
     let source_scene = scene();
     let pending = with_cx(|cx| PendingRender::begin_static(&source_scene, cx, settings, execution))
         .expect("begin cancellation checkpoint fixture");
+    let binding = binding_with_job(pending.checkpoint_job_identity());
 
     let precancelled = CancelGate::new_clock_free();
     precancelled.request();
     let mut pre_bytes = Vec::new();
     let pre = with_gate_cx(&precancelled, |cx| {
         pending.write_checkpoint(
-            binding(),
+            binding,
             MAX_CHECKPOINT_BYTES,
             cx,
             |chunk| -> Result<(), Infallible> {
@@ -430,7 +556,7 @@ fn g4_checkpoint_observes_precancel_and_cancel_requested_by_final_seal_sink() {
     let mut sealed_bytes = Vec::new();
     let after_seal = with_gate_cx(&gate, |cx| {
         pending.write_checkpoint(
-            binding(),
+            binding,
             MAX_CHECKPOINT_BYTES,
             cx,
             |chunk| -> Result<(), Infallible> {

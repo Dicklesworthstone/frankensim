@@ -152,14 +152,21 @@ differentiable lift). Pure Rust throughout.
   `PendingRender` and `PendingAdaptiveRender` stream a schema-versioned,
   domain-hashed checkpoint in at most 64 KiB body chunks and one fixed seal.
   The canonical body binds uniform/adaptive kind, every bit-affecting tracer
-  semantics version, complete settings/time/execution/adaptive policy, exact
-  tile-row prefixes and attempt count, raw binary64 accumulators/AOVs, and an
-  L6-supplied source/configuration/scene/frame/job/build/claim/generation chain.
+  semantics version, complete settings/time/execution/adaptive policy, the
+  caller's exact execution `Budget`, the runtime ISA and sorted detected
+  feature set, exact tile-row prefixes and attempt count, raw binary64
+  accumulators/AOVs, and an L6-supplied
+  source/configuration/scene/frame/job/build/claim/generation chain. The
+  renderer derives and validates the render-job identity from those owned
+  inputs; an L6 binding cannot substitute a caller-invented job digest.
   Generation zero has no predecessor; every later generation names a nonzero
   prior renderer-content digest. Emission accepts a caller byte ceiling and
-  fallible sink, while restore consumes a freshly admitted opaque job, verifies
-  the complete seal and binding before decoding, refuses malformed numeric or
-  row-prefix state, and returns no partially restored job on error. The codec
+  fallible sink. It snapshots at most one committed tile row while holding the
+  pending-state lock and never calls the external sink under that lock. Restore
+  consumes a freshly admitted opaque job, verifies the complete seal and
+  binding before decoding, refuses malformed numeric or row-prefix state, and
+  additionally verifies adaptive raw-sum/mean/count consistency plus canonical
+  nonnegative second moments. It returns no partially restored job on error. The codec
   never publishes a film or durable artifact by itself; only a completed film
   may enter final image/manifest publication.
 
@@ -455,9 +462,12 @@ fixture is a regression for this scene/profile, not a universal quality claim.
 `tracer`) cover strict nonzero partial uniform and adaptive safe points;
 bit-exact serialize/restore/finalize equivalence; preservation of raw sums,
 moments, counts, and adaptive decisions; every-prefix truncation; body and seal
-corruption; stale job and binding refusal; one-byte-short read/write budgets;
-fallible sinks; and cancellation before emission and during the final seal.
-These tests establish deterministic codec and resume semantics, not filesystem
+corruption; stale job, binding, execution-budget, and runtime-environment
+refusal; well-sealed but semantically malformed tile/AOV state; one-byte-short
+read/write ceilings; fallible and re-entrant sinks; cancellation before
+emission and during the final seal; and no-retrace completion of already
+finished uniform and adaptive jobs with the correct kernel identity. These
+tests establish deterministic codec and resume semantics, not filesystem
 durability or concurrent scheduler-claim arbitration.
 
 `tests/render.rs` (7 cases): radical inverse known values; cosine samples are
