@@ -1946,7 +1946,10 @@ impl From<DielectricError> for TracerError {
 
 impl From<LightingError> for TracerError {
     fn from(error: LightingError) -> Self {
-        Self::Lighting(error)
+        match error {
+            LightingError::Cancelled => Self::Cancelled,
+            other => Self::Lighting(other),
+        }
     }
 }
 
@@ -6307,12 +6310,15 @@ fn intersect(
     Ok(best)
 }
 
-fn validate_scene(
-    scene: &Scene,
+fn validate_scene<'scene>(
+    scene: &'scene Scene,
+    cx: &Cx<'_>,
     shutter: Option<ShutterInterval>,
-) -> Result<AdmittedLighting<'_>, TracerError> {
-    let lighting = AdmittedLighting::try_new(&scene.lights, scene.environment.as_ref())?;
+) -> Result<AdmittedLighting<'scene>, TracerError> {
+    let lighting =
+        AdmittedLighting::try_new_cancellable(cx, &scene.lights, scene.environment.as_ref())?;
     for light in &scene.lights {
+        cx.checkpoint()?;
         let Some(light_primitive) = scene.primitives.get(light.prim) else {
             return Err(TracerError::LightPrimitiveMismatch {
                 light_primitive: light.prim,
@@ -6329,8 +6335,10 @@ fn validate_scene(
             });
         }
     }
+    cx.checkpoint()?;
     let mut object_ids = BTreeSet::new();
     for primitive in &scene.primitives {
+        cx.checkpoint()?;
         let Some(object_id) = instance_object_id(&primitive.shape) else {
             continue;
         };
@@ -6342,6 +6350,7 @@ fn validate_scene(
             instance.trajectory().admit_shutter(shutter)?;
         }
     }
+    cx.checkpoint()?;
     Ok(lighting)
 }
 
@@ -6373,7 +6382,7 @@ fn preflight_render<'a>(
     } else if from != 0 {
         return Err(TracerError::InvalidInput);
     }
-    let lighting = validate_scene(scene, shutter)?;
+    let lighting = validate_scene(scene, cx, shutter)?;
     cx.checkpoint()?;
     Ok((lighting, requested_mode))
 }
@@ -6541,6 +6550,14 @@ fn instance_object_id(shape: &Shape) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lighting_admission_cancellation_preserves_tracer_cancellation_authority() {
+        assert_eq!(
+            TracerError::from(LightingError::Cancelled),
+            TracerError::Cancelled
+        );
+    }
 
     #[test]
     fn mis_weights_only_emitters_reachable_by_the_nee_technique() {

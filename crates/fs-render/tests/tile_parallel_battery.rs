@@ -1178,16 +1178,21 @@ fn g0_uniform_shards_enforce_caps_codec_completeness_and_transactional_retry() {
         merge_uniform_shards(&specs, &results, exact_merge_limits, cx)
     })
     .expect("complete result set at exact aggregate caps");
-    assert!(matches!(
-        with_cx(false, |cx| merge_uniform_shards(
-            &specs,
-            &results,
-            RenderShardMergeLimits::try_new(input_bytes - 1, output_bytes)
-                .expect("one-short input cap"),
-            cx,
-        )),
-        Err(RenderShardError::AggregateInputLimit { .. })
-    ));
+    let one_short_input = RenderShardMergeLimits::try_new(input_bytes - 1, output_bytes)
+        .expect("one-short input cap");
+    for submitted in [&results[..], &[][..]] {
+        match with_cx(false, |cx| {
+            merge_uniform_shards(&specs, submitted, one_short_input, cx)
+        }) {
+            Err(RenderShardError::AggregateInputLimit { limit, observed }) => {
+                assert_eq!(limit, input_bytes - 1);
+                assert_eq!(observed, input_bytes);
+            }
+            other => panic!(
+                "one-short exact aggregate cap must precede result inspection, got {other:?}"
+            ),
+        }
+    }
     assert!(matches!(
         with_cx(false, |cx| merge_uniform_shards(
             &specs,
@@ -1338,6 +1343,173 @@ fn g0_uniform_shards_enforce_caps_codec_completeness_and_transactional_retry() {
         render_static_shard(&scene, cx, &specs[0]).expect("fresh-authority retry")
     });
     assert_eq!(retried, results[0]);
+}
+
+#[test]
+fn g3_uniform_shard_invalid_input_diagnostics_are_permutation_invariant() {
+    let scene = scene();
+    let settings = shard_test_settings(Sampler::Iid);
+    let layout = RenderTileLayout::try_new(settings.width, settings.height, 3, 3)
+        .expect("four-tile irregular-edge layout");
+    let plan_identity = shard_test_identity("g3-plan");
+    let frame_identity = shard_test_identity("g3-frame");
+    let limits = RenderShardLimits::try_new(1 << 20, 4 << 20).expect("shard caps");
+    let merge_limits = RenderShardMergeLimits::try_new(64 << 20, 64 << 20).expect("merge caps");
+    let specs = [(0, 2, 0, 2), (0, 2, 2, 4), (2, 4, 0, 2), (2, 4, 2, 4)].map(
+        |(tile_start, tile_end, sample_start, sample_end)| {
+            shard_spec(
+                plan_identity,
+                frame_identity,
+                settings,
+                layout,
+                tile_start,
+                tile_end,
+                sample_start,
+                sample_end,
+                limits,
+            )
+        },
+    );
+
+    // The reference spec must come from canonical logical order, not caller
+    // order. Reversing this invalid expected set therefore reports the same
+    // foreign plan identity.
+    let foreign_expected = shard_spec(
+        shard_test_identity("g3-foreign-expected-plan"),
+        frame_identity,
+        settings,
+        layout,
+        2,
+        4,
+        2,
+        4,
+        limits,
+    );
+    let mut mixed_expected = specs;
+    mixed_expected[3] = foreign_expected;
+    for expected in [mixed_expected.to_vec(), {
+        let mut reversed = mixed_expected.to_vec();
+        reversed.reverse();
+        reversed
+    }] {
+        match with_cx(false, |cx| {
+            merge_uniform_shards(&expected, &[], merge_limits, cx)
+        }) {
+            Err(RenderShardError::ForeignPlan(actual)) => {
+                assert_eq!(actual, foreign_expected.plan_identity());
+            }
+            other => panic!("expected-order permutation changed rejection: {other:?}"),
+        }
+    }
+
+    // Structural result errors use fixed class precedence and the minimum
+    // offending authority identity, independent of submission order.
+    let foreign_plan_specs =
+        ["g3-foreign-result-plan-a", "g3-foreign-result-plan-b"].map(|label| {
+            shard_spec(
+                shard_test_identity(label),
+                frame_identity,
+                settings,
+                layout,
+                0,
+                2,
+                0,
+                2,
+                limits,
+            )
+        });
+    let foreign_frame_spec = shard_spec(
+        plan_identity,
+        shard_test_identity("g3-foreign-result-frame"),
+        settings,
+        layout,
+        0,
+        2,
+        0,
+        2,
+        limits,
+    );
+    let unexpected_spec = shard_spec(
+        plan_identity,
+        frame_identity,
+        settings,
+        layout,
+        0,
+        4,
+        0,
+        settings.spp,
+        limits,
+    );
+    let mut invalid_results = with_cx(false, |cx| {
+        vec![
+            render_static_shard(&scene, cx, &foreign_frame_spec).expect("foreign-frame result"),
+            render_static_shard(&scene, cx, &foreign_plan_specs[0])
+                .expect("first foreign-plan result"),
+            render_static_shard(&scene, cx, &unexpected_spec).expect("unexpected result"),
+            render_static_shard(&scene, cx, &foreign_plan_specs[1])
+                .expect("second foreign-plan result"),
+        ]
+    });
+    let expected_foreign_plan = foreign_plan_specs
+        .iter()
+        .map(|spec| spec.plan_identity())
+        .min()
+        .expect("two foreign plan identities");
+    for submitted in [invalid_results.clone(), {
+        invalid_results.reverse();
+        invalid_results
+    }] {
+        match with_cx(false, |cx| {
+            merge_uniform_shards(&specs, &submitted, merge_limits, cx)
+        }) {
+            Err(RenderShardError::ForeignPlan(actual)) => {
+                assert_eq!(actual, expected_foreign_plan);
+            }
+            other => panic!("result permutation changed structural rejection: {other:?}"),
+        }
+    }
+
+    // Multiple valid conflicting duplicates likewise report the canonical
+    // minimum shard identity rather than whichever conflict arrived first.
+    let baseline = with_cx(false, |cx| render_shard_set(&scene, &specs, cx));
+    let mut altered_scene = crate::scene();
+    altered_scene.environment = Some(
+        EnvironmentMap::try_from_linear_srgb(4, 2, vec![[0.8, 0.1, 0.4]; 8], 0.17)
+            .expect("alternate finite emitter"),
+    );
+    let conflicts = with_cx(false, |cx| {
+        [
+            render_static_shard(&altered_scene, cx, &specs[0]).expect("first alternate result"),
+            render_static_shard(&altered_scene, cx, &specs[3]).expect("second alternate result"),
+        ]
+    });
+    assert_ne!(
+        conflicts[0].result_identity(),
+        baseline[0].result_identity()
+    );
+    assert_ne!(
+        conflicts[1].result_identity(),
+        baseline[3].result_identity()
+    );
+    let expected_conflict = [specs[0].shard_identity(), specs[3].shard_identity()]
+        .into_iter()
+        .min()
+        .expect("two conflicting shard identities");
+    let mut conflicting_results = baseline;
+    conflicting_results.extend(conflicts);
+    for submitted in [conflicting_results.clone(), {
+        conflicting_results.reverse();
+        conflicting_results
+    }] {
+        match with_cx(false, |cx| {
+            merge_uniform_shards(&specs, &submitted, merge_limits, cx)
+        }) {
+            Err(RenderShardError::ConflictingDuplicate(actual)) => {
+                assert_eq!(actual, expected_conflict);
+            }
+            other => panic!("result permutation changed conflict rejection: {other:?}"),
+        }
+    }
 }
 
 #[test]

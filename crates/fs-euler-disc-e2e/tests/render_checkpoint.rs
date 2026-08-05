@@ -1591,6 +1591,114 @@ fn g0_euler_render_plan_is_canonical_bounded_and_exactly_covers_one_and_many_fra
             ));
         }
 
+        // Resource refusal precedes construction of the O(frame_count)
+        // canonical-order map.  Even structurally duplicate input cannot use
+        // that map as an allocation side channel once the exact plan size is
+        // already known to exceed its declared cap.
+        for (label, preallocation_refusal_limits) in [
+            (
+                "plan bytes",
+                EulerRenderShardLimits::try_new(8, 128, 1, 1_000, 4 << 20, 64 << 20)
+                    .expect("preallocation plan-byte refusal policy"),
+            ),
+            (
+                "paths",
+                EulerRenderShardLimits::try_new(8, 128, 1 << 20, 1, 4 << 20, 64 << 20)
+                    .expect("preallocation path refusal policy"),
+            ),
+            (
+                "result bytes",
+                EulerRenderShardLimits::try_new(8, 128, 1 << 20, 1_000, 1, 64 << 20)
+                    .expect("preallocation result-byte refusal policy"),
+            ),
+            (
+                "aggregate bytes",
+                EulerRenderShardLimits::try_new(8, 128, 1 << 20, 1_000, 4 << 20, 1)
+                    .expect("preallocation aggregate-byte refusal policy"),
+            ),
+        ] {
+            let refusal = EulerUniformRenderPlan::try_new(
+                &scene,
+                sequence,
+                &[
+                    EulerRenderFrameInput::new(10, &early),
+                    EulerRenderFrameInput::new(10, &late),
+                ],
+                settings,
+                3,
+                2,
+                3,
+                2,
+                1,
+                preallocation_refusal_limits,
+                cx,
+            )
+            .expect_err(label);
+            assert!(
+                matches!(
+                    (&refusal, label),
+                    (
+                        EulerRenderShardingError::PlanByteLimit { limit: 1, .. },
+                        "plan bytes"
+                    ) | (
+                        EulerRenderShardingError::PathLimit { limit: 1, .. },
+                        "paths"
+                    ) | (
+                        EulerRenderShardingError::ResultByteLimit { limit: 1, .. },
+                        "result bytes"
+                    ) | (
+                        EulerRenderShardingError::AggregateResultByteLimit { limit: 1, .. },
+                        "aggregate bytes"
+                    )
+                ),
+                "{label} did not refuse before canonical-map construction: {refusal:?}"
+            );
+        }
+
+        // Re-presenting inputs for execution/store/merge uses a second public
+        // indexing boundary. Its duplicate diagnostic must be just as
+        // permutation-invariant as plan construction, even when more than one
+        // ordinal is duplicated in the same hostile input set.
+        let four_frame_inputs = [
+            EulerRenderFrameInput::new(10, &early),
+            EulerRenderFrameInput::new(20, &event),
+            EulerRenderFrameInput::new(30, &late),
+            EulerRenderFrameInput::new(40, &early),
+        ];
+        let four_frame_plan = EulerUniformRenderPlan::try_new(
+            &scene,
+            sequence,
+            &four_frame_inputs,
+            settings,
+            3,
+            2,
+            3,
+            2,
+            1,
+            limits,
+            cx,
+        )
+        .expect("four-frame binding-diagnostic plan");
+        for duplicate_bindings in [
+            [
+                EulerRenderFrameInput::new(30, &late),
+                EulerRenderFrameInput::new(10, &early),
+                EulerRenderFrameInput::new(30, &late),
+                EulerRenderFrameInput::new(10, &early),
+            ],
+            [
+                EulerRenderFrameInput::new(10, &early),
+                EulerRenderFrameInput::new(30, &late),
+                EulerRenderFrameInput::new(10, &early),
+                EulerRenderFrameInput::new(30, &late),
+            ],
+        ] {
+            assert!(matches!(
+                execute_uniform_render_shard(&four_frame_plan, &scene, &duplicate_bindings, 0, cx,),
+                Err(EulerRenderShardingError::DuplicateFrameOrdinal(10))
+            ));
+        }
+
         let exact_plan_bytes = plan.summary().encoded_plan_bytes;
         let exact_limits =
             EulerRenderShardLimits::try_new(3, 24, exact_plan_bytes, 26, 4 << 20, 64 << 20)
@@ -1998,6 +2106,37 @@ fn g3_independent_workers_exchange_strict_bytes_and_reopened_ledger_replays_exac
             let first_start = first_segment.first_shard() as usize;
             let first_end = first_start + first_segment.shard_count() as usize;
             let first_refs = &artifact_refs[first_start..first_end];
+            let first_logical = plan.shards()[first_start].logical_shard_identity();
+            let second_logical = plan.shards()[first_start + 1].logical_shard_identity();
+            let expected_conflict = first_logical.min(second_logical);
+            let mut conflicting_refs = first_refs.to_vec();
+            conflicting_refs.extend([
+                EulerRenderShardArtifactRef::new(
+                    first_logical,
+                    artifact_refs[first_start + 1].artifact_hash(),
+                ),
+                EulerRenderShardArtifactRef::new(
+                    second_logical,
+                    artifact_refs[first_start].artifact_hash(),
+                ),
+            ]);
+            let mut reversed_conflicting_refs = conflicting_refs.clone();
+            reversed_conflicting_refs.reverse();
+            for arrival in [conflicting_refs, reversed_conflicting_refs] {
+                assert!(matches!(
+                    merge_uniform_render_segment_artifacts(
+                        &ledger,
+                        &plan,
+                        &scene,
+                        &inputs,
+                        0,
+                        &arrival,
+                        cx,
+                    ),
+                    Err(EulerRenderShardingError::ConflictingShardReference(actual))
+                        if actual == expected_conflict
+                ));
+            }
             assert!(matches!(
                 merge_uniform_render_segment_artifacts(
                     &ledger,
@@ -2137,9 +2276,7 @@ fn g3_independent_workers_exchange_strict_bytes_and_reopened_ledger_replays_exac
                 .expect("one-short result policy"),
                 cx,
             ),
-            Err(EulerRenderShardingError::Renderer(
-                RenderShardError::ResultByteLimit { .. }
-            ))
+            Err(EulerRenderShardingError::ResultByteLimit { .. })
         ));
         assert!(matches!(
             EulerUniformRenderPlan::try_new(

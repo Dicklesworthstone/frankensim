@@ -115,7 +115,7 @@ impl RenderShardMergeLimits {
         })
     }
 
-    /// Aggregate canonical bytes accepted from all submitted results.
+    /// Aggregate canonical bytes required by the expected complete result set.
     #[must_use]
     pub const fn max_input_bytes(self) -> u64 {
         self.max_input_bytes
@@ -552,7 +552,7 @@ pub enum RenderShardError {
         /// Required or supplied bytes.
         observed: u64,
     },
-    /// Unique complete results exceeded the aggregate input cap.
+    /// The expected unique complete result set exceeded the aggregate input cap.
     AggregateInputLimit {
         /// Admitted maximum bytes.
         limit: u64,
@@ -703,7 +703,7 @@ fn render_shard_impl(
         return Err(RenderShardError::SpecMismatch("time mode"));
     }
     let _ = checked_pixel_len(spec.settings.width, spec.settings.height)?;
-    let lighting = validate_scene(scene, shutter)?;
+    let lighting = validate_scene(scene, cx, shutter)?;
     let payload_len = usize::try_from(spec.payload_pixel_count)
         .map_err(|_| RenderShardError::ArithmeticOverflow("payload_pixel_count"))?;
     let mut xyz = Vec::new();
@@ -787,28 +787,24 @@ pub fn merge_uniform_shards(
     cx: &Cx<'_>,
 ) -> Result<Film, RenderShardError> {
     checkpoint(cx)?;
-    let first = expected_specs
-        .first()
-        .ok_or(RenderShardError::SpecMismatch("empty expected shard set"))?;
-    let output_bytes = u64::from(first.settings.width)
-        .checked_mul(u64::from(first.settings.height))
-        .and_then(|pixels| pixels.checked_mul(24))
-        .ok_or(RenderShardError::ArithmeticOverflow("output film bytes"))?;
-    if output_bytes > limits.max_output_bytes {
-        return Err(RenderShardError::OutputByteLimit {
-            limit: limits.max_output_bytes,
-            observed: output_bytes,
-        });
+    if expected_specs.is_empty() {
+        return Err(RenderShardError::SpecMismatch("empty expected shard set"));
     }
-    let expected_count = u64::try_from(expected_specs.len())
-        .map_err(|_| RenderShardError::ArithmeticOverflow("expected shard count"))?;
-    let minimum_input = expected_count.checked_mul(encoded_result_bytes(1)?).ok_or(
-        RenderShardError::ArithmeticOverflow("minimum aggregate result bytes"),
-    )?;
-    if minimum_input > limits.max_input_bytes {
+    // Admit the exact complete-set envelope before allocating canonical plan
+    // indexes. Submitted omissions and duplicates cannot change this cost.
+    let mut aggregate_input = 0_u64;
+    for spec in expected_specs {
+        checkpoint(cx)?;
+        aggregate_input = aggregate_input
+            .checked_add(spec.encoded_result_bytes)
+            .ok_or(RenderShardError::ArithmeticOverflow(
+                "aggregate result bytes",
+            ))?;
+    }
+    if aggregate_input > limits.max_input_bytes {
         return Err(RenderShardError::AggregateInputLimit {
             limit: limits.max_input_bytes,
-            observed: minimum_input,
+            observed: aggregate_input,
         });
     }
     let mut ordered_by_key = BTreeMap::new();
@@ -836,7 +832,20 @@ pub fn merge_uniform_shards(
         checkpoint(cx)?;
         ordered_specs.push(*spec);
     }
+    let first = *ordered_specs
+        .first()
+        .ok_or(RenderShardError::SpecMismatch("empty expected shard set"))?;
     validate_expected_specs(&ordered_specs, first, cx)?;
+    let output_bytes = u64::from(first.settings.width)
+        .checked_mul(u64::from(first.settings.height))
+        .and_then(|pixels| pixels.checked_mul(24))
+        .ok_or(RenderShardError::ArithmeticOverflow("output film bytes"))?;
+    if output_bytes > limits.max_output_bytes {
+        return Err(RenderShardError::OutputByteLimit {
+            limit: limits.max_output_bytes,
+            observed: output_bytes,
+        });
+    }
 
     let mut expected_by_id = BTreeMap::new();
     for spec in &ordered_specs {
@@ -848,18 +857,49 @@ pub fn merge_uniform_shards(
             });
         }
     }
-    let mut aggregate_input = 0_u64;
-    let mut result_by_id: BTreeMap<ContentHash, &UniformRenderShardResult> = BTreeMap::new();
+
+    // Validate result authority and work membership without retaining one map
+    // entry per submitted value.  The submitted slice may contain arbitrarily
+    // many exact duplicates, so diagnostics are accumulated as canonical
+    // minima and returned with fixed precedence after the complete scan.
+    let mut lowest_foreign_plan = None;
+    let mut lowest_foreign_frame = None;
+    let mut lowest_unexpected_shard = None;
     for result in results {
         checkpoint(cx)?;
         let identity = result.shard_identity();
         let Some(expected) = expected_by_id.get(&identity) else {
             if result.spec.plan_identity != first.plan_identity {
-                return Err(RenderShardError::ForeignPlan(result.spec.plan_identity));
+                note_lowest_hash(&mut lowest_foreign_plan, result.spec.plan_identity);
+            } else if result.spec.frame_identity != first.frame_identity {
+                note_lowest_hash(&mut lowest_foreign_frame, result.spec.frame_identity);
+            } else {
+                note_lowest_hash(&mut lowest_unexpected_shard, identity);
             }
-            if result.spec.frame_identity != first.frame_identity {
-                return Err(RenderShardError::ForeignFrame(result.spec.frame_identity));
-            }
+            continue;
+        };
+        if result.spec != *expected {
+            note_lowest_hash(&mut lowest_unexpected_shard, identity);
+        }
+    }
+    if let Some(identity) = lowest_foreign_plan {
+        return Err(RenderShardError::ForeignPlan(identity));
+    }
+    if let Some(identity) = lowest_foreign_frame {
+        return Err(RenderShardError::ForeignFrame(identity));
+    }
+    if let Some(identity) = lowest_unexpected_shard {
+        return Err(RenderShardError::UnexpectedShard(identity));
+    }
+
+    let mut saw_non_finite_payload = false;
+    let mut saw_integrity_failure = false;
+    let mut lowest_conflicting_duplicate = None;
+    let mut result_by_id: BTreeMap<ContentHash, &UniformRenderShardResult> = BTreeMap::new();
+    for result in results {
+        checkpoint(cx)?;
+        let identity = result.shard_identity();
+        let Some(expected) = expected_by_id.get(&identity) else {
             return Err(RenderShardError::UnexpectedShard(identity));
         };
         if result.spec != *expected {
@@ -869,29 +909,37 @@ pub fn merge_uniform_shards(
             != usize::try_from(result.spec.payload_pixel_count)
                 .map_err(|_| RenderShardError::ArithmeticOverflow("payload count"))?
         {
-            return Err(RenderShardError::Integrity);
+            saw_integrity_failure = true;
+            continue;
         }
-        if result_identity(&result.spec, &result.xyz, cx)? != result.result_identity {
-            return Err(RenderShardError::Integrity);
+        let actual_identity = match result_identity(&result.spec, &result.xyz, cx) {
+            Ok(identity) => identity,
+            Err(RenderShardError::NonFinitePayload) => {
+                saw_non_finite_payload = true;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if actual_identity != result.result_identity {
+            saw_integrity_failure = true;
+            continue;
         }
         if let Some(prior) = result_by_id.get(&identity) {
             if prior.result_identity != result.result_identity {
-                return Err(RenderShardError::ConflictingDuplicate(identity));
+                note_lowest_hash(&mut lowest_conflicting_duplicate, identity);
             }
         } else {
-            aggregate_input = aggregate_input
-                .checked_add(result.encoded_result_bytes())
-                .ok_or(RenderShardError::ArithmeticOverflow(
-                    "aggregate result bytes",
-                ))?;
-            if aggregate_input > limits.max_input_bytes {
-                return Err(RenderShardError::AggregateInputLimit {
-                    limit: limits.max_input_bytes,
-                    observed: aggregate_input,
-                });
-            }
             result_by_id.insert(identity, result);
         }
+    }
+    if saw_non_finite_payload {
+        return Err(RenderShardError::NonFinitePayload);
+    }
+    if saw_integrity_failure {
+        return Err(RenderShardError::Integrity);
+    }
+    if let Some(identity) = lowest_conflicting_duplicate {
+        return Err(RenderShardError::ConflictingDuplicate(identity));
     }
     for spec in &ordered_specs {
         checkpoint(cx)?;
@@ -912,6 +960,12 @@ pub fn merge_uniform_shards(
     film.spp_done = first.settings.spp;
     film.time_mode = first.time_mode;
     Ok(film)
+}
+
+fn note_lowest_hash(lowest: &mut Option<ContentHash>, candidate: ContentHash) {
+    if lowest.is_none_or(|current| candidate < current) {
+        *lowest = Some(candidate);
+    }
 }
 
 fn validate_expected_specs(

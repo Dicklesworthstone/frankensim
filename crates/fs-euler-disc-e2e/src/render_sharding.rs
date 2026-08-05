@@ -8,7 +8,7 @@
 //! Design Ledger is deliberately not used as a shared multi-process writer,
 //! claim table, lease service, or arbitration mechanism.
 
-use core::fmt;
+use core::{fmt, ops::ControlFlow};
 use std::collections::{BTreeMap, btree_map::Entry};
 
 use fs_blake3::{ContentHash, DomainHasher};
@@ -419,6 +419,56 @@ impl EulerUniformRenderPlan {
             RenderTileLayout::try_new(settings.width, settings.height, tile_width, tile_height)
                 .map_err(|_| EulerRenderShardingError::InvalidPartition("tile_layout"))?;
 
+        // Establish the exact retained plan size before allocating the
+        // canonical ordering map.  In particular, a hostile caller cannot
+        // force O(frame_count) retained allocation for a plan that is already
+        // certain to exceed the declared shard or encoded-byte ceiling.
+        let mut segment_count = 0_u64;
+        for input in inputs {
+            checkpoint(cx)?;
+            let count = u64::try_from(input.prepared.segments().len())
+                .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_count"))?;
+            if count == 0 {
+                return Err(EulerRenderShardingError::EmptyPreparedFrame(
+                    input.frame_ordinal,
+                ));
+            }
+            segment_count = segment_count.checked_add(count).ok_or(
+                EulerRenderShardingError::ArithmeticOverflow("segment_count"),
+            )?;
+        }
+        let tile_blocks = div_ceil_u64(layout.tile_count(), tiles_per_shard)?;
+        let sample_blocks = div_ceil_u64(u64::from(settings.spp), u64::from(samples_per_shard))?;
+        let shards_per_segment = tile_blocks.checked_mul(sample_blocks).ok_or(
+            EulerRenderShardingError::ArithmeticOverflow("shards_per_segment"),
+        )?;
+        let shard_count = segment_count
+            .checked_mul(shards_per_segment)
+            .ok_or(EulerRenderShardingError::ArithmeticOverflow("shard_count"))?;
+        if shard_count > limits.max_shards {
+            return Err(EulerRenderShardingError::ShardLimit {
+                limit: limits.max_shards,
+                observed: shard_count,
+            });
+        }
+        let encoded_plan_bytes = measured_plan_bytes(frame_count, segment_count, shard_count)?;
+        if encoded_plan_bytes > limits.max_plan_bytes {
+            return Err(EulerRenderShardingError::PlanByteLimit {
+                limit: limits.max_plan_bytes,
+                observed: encoded_plan_bytes,
+            });
+        }
+        let partition_preflight = preflight_partition(
+            layout,
+            settings.spp,
+            tiles_per_shard,
+            samples_per_shard,
+            segment_count,
+            limits,
+            cx,
+        )?;
+        debug_assert_eq!(partition_preflight.shard_count, shard_count);
+
         let mut sorted_by_ordinal = BTreeMap::new();
         let mut lowest_duplicate_ordinal: Option<u64> = None;
         for input in inputs {
@@ -447,43 +497,6 @@ impl EulerUniformRenderPlan {
         for input in sorted_by_ordinal.values() {
             checkpoint(cx)?;
             sorted.push(*input);
-        }
-
-        let mut segment_count = 0_u64;
-        for input in &sorted {
-            checkpoint(cx)?;
-            let count = u64::try_from(input.prepared.segments().len())
-                .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_count"))?;
-            if count == 0 {
-                return Err(EulerRenderShardingError::EmptyPreparedFrame(
-                    input.frame_ordinal,
-                ));
-            }
-            segment_count = segment_count.checked_add(count).ok_or(
-                EulerRenderShardingError::ArithmeticOverflow("segment_count"),
-            )?;
-        }
-
-        let tile_blocks = div_ceil_u64(layout.tile_count(), tiles_per_shard)?;
-        let sample_blocks = div_ceil_u64(u64::from(settings.spp), u64::from(samples_per_shard))?;
-        let shards_per_segment = tile_blocks.checked_mul(sample_blocks).ok_or(
-            EulerRenderShardingError::ArithmeticOverflow("shards_per_segment"),
-        )?;
-        let shard_count = segment_count
-            .checked_mul(shards_per_segment)
-            .ok_or(EulerRenderShardingError::ArithmeticOverflow("shard_count"))?;
-        if shard_count > limits.max_shards {
-            return Err(EulerRenderShardingError::ShardLimit {
-                limit: limits.max_shards,
-                observed: shard_count,
-            });
-        }
-        let encoded_plan_bytes = measured_plan_bytes(frame_count, segment_count, shard_count)?;
-        if encoded_plan_bytes > limits.max_plan_bytes {
-            return Err(EulerRenderShardingError::PlanByteLimit {
-                limit: limits.max_plan_bytes,
-                observed: encoded_plan_bytes,
-            });
         }
 
         let mut frames = try_vec_capacity(frame_count, "plan frames")?;
@@ -538,7 +551,7 @@ impl EulerUniformRenderPlan {
             settings.spp,
             tiles_per_shard,
             samples_per_shard,
-            limits,
+            partition_preflight,
             cx,
         )?;
         debug_assert_eq!(u64::try_from(shards.len()).ok(), Some(shard_count));
@@ -899,6 +912,20 @@ impl EulerUniformRenderPlan {
                 observed: measured,
             });
         }
+        let partition_preflight = preflight_partition(
+            layout,
+            canonical.settings.spp,
+            canonical.tiles_per_shard,
+            canonical.samples_per_shard,
+            segment_count,
+            canonical.limits,
+            cx,
+        )?;
+        if partition_preflight.shard_count != shard_count {
+            return Err(EulerRenderShardingError::Codec(
+                "preflight shard count does not match declared table",
+            ));
+        }
 
         let mut frames = try_vec_capacity(frame_count, "decoded frames")?;
         for _ in 0..frame_count {
@@ -964,7 +991,7 @@ impl EulerUniformRenderPlan {
             canonical.settings.spp,
             canonical.tiles_per_shard,
             canonical.samples_per_shard,
-            canonical.limits,
+            partition_preflight,
             cx,
         )?;
         if !slices_equal_cancellable(&declared_segments, &segments, cx)?
@@ -1191,11 +1218,12 @@ pub fn store_uniform_render_shard_artifact_bytes(
     store_bound_shard_result(ledger, plan, shard, &bound, &result, cx)
 }
 
-/// Load and merge exactly one event-delimited film. All unique artifact
-/// envelope lengths and kinds are preflighted together under the aggregate cap
-/// before any payload byte is read. Exact duplicate references collapse;
-/// differing valid results for one logical shard conflict; missing, foreign,
-/// corrupt, or mismatched inputs return no film.
+/// Load and merge exactly one event-delimited film. Structural reference
+/// validation runs first: exact duplicates collapse, while differing artifact
+/// references for one logical shard conflict before artifact I/O. After that,
+/// every unique selected envelope is preflighted together under the aggregate
+/// cap before any payload byte is read. Missing, foreign, corrupt, or
+/// mismatched inputs return no film.
 #[allow(clippy::too_many_arguments)]
 pub fn merge_uniform_render_segment_artifacts(
     ledger: &Ledger,
@@ -1239,22 +1267,35 @@ pub fn merge_uniform_render_segment_artifacts(
     }
 
     let mut unique_by_logical = BTreeMap::new();
+    let mut saw_unexpected_logical = false;
+    let mut lowest_conflicting_logical: Option<ContentHash> = None;
     for artifact in artifacts {
         checkpoint(cx)?;
         if !expected_by_logical.contains_key(&artifact.logical_shard_identity) {
-            return Err(EulerRenderShardingError::ShardResultBindingMismatch);
+            saw_unexpected_logical = true;
+            continue;
         }
         match unique_by_logical.get(&artifact.logical_shard_identity) {
             Some(previous) if previous != artifact => {
-                return Err(EulerRenderShardingError::ConflictingShardResult(
-                    artifact.logical_shard_identity,
-                ));
+                lowest_conflicting_logical = Some(
+                    lowest_conflicting_logical.map_or(artifact.logical_shard_identity, |prior| {
+                        prior.min(artifact.logical_shard_identity)
+                    }),
+                );
             }
             Some(_) => {}
             None => {
                 unique_by_logical.insert(artifact.logical_shard_identity, *artifact);
             }
         }
+    }
+    if saw_unexpected_logical {
+        return Err(EulerRenderShardingError::ShardResultBindingMismatch);
+    }
+    if let Some(logical_shard_identity) = lowest_conflicting_logical {
+        return Err(EulerRenderShardingError::ConflictingShardReference(
+            logical_shard_identity,
+        ));
     }
     for shard in selected {
         checkpoint(cx)?;
@@ -1279,6 +1320,7 @@ pub fn merge_uniform_render_segment_artifacts(
     }
 
     let mut aggregate_bytes = 0_u64;
+    let mut artifact_len_by_hash = BTreeMap::new();
     for artifact_hash in logical_by_hash.keys() {
         checkpoint(cx)?;
         let info = ledger
@@ -1305,6 +1347,7 @@ pub fn merge_uniform_render_segment_artifacts(
                 observed: aggregate_bytes,
             });
         }
+        artifact_len_by_hash.insert(*artifact_hash, info.len);
     }
 
     let first_selected = *selected.first().ok_or(EulerRenderShardingError::Codec(
@@ -1329,16 +1372,25 @@ pub fn merge_uniform_render_segment_artifacts(
     }
     for artifact in unique_by_logical.values() {
         checkpoint(cx)?;
-        let local_index = expected_by_logical[&artifact.logical_shard_identity];
-        let expected_spec = &expected_specs[local_index];
-        let bytes = ledger
-            .get_artifact_bounded(
-                &artifact.artifact_hash,
-                plan.limits.max_result_bytes_per_shard,
-            )?
-            .ok_or(EulerRenderShardingError::MissingArtifact(
-                artifact.artifact_hash,
-            ))?;
+        let local_index = *expected_by_logical
+            .get(&artifact.logical_shard_identity)
+            .ok_or(EulerRenderShardingError::ShardResultBindingMismatch)?;
+        let expected_spec =
+            expected_specs
+                .get(local_index)
+                .ok_or(EulerRenderShardingError::Codec(
+                    "logical shard index outside expected specs",
+                ))?;
+        let expected_len = *artifact_len_by_hash.get(&artifact.artifact_hash).ok_or(
+            EulerRenderShardingError::MissingArtifact(artifact.artifact_hash),
+        )?;
+        let bytes = read_artifact_bytes_cancellable(
+            ledger,
+            artifact.artifact_hash,
+            expected_len,
+            plan.limits.max_result_bytes_per_shard,
+            cx,
+        )?;
         let decoded = UniformRenderShardResult::decode_canonical(
             &bytes,
             plan.limits.max_result_bytes_per_shard,
@@ -1347,21 +1399,23 @@ pub fn merge_uniform_render_segment_artifacts(
             expected_spec.shard_identity(),
             cx,
         )?;
-        match &results[local_index] {
-            Some(previous) if previous.result_identity() != decoded.result_identity() => {
-                return Err(EulerRenderShardingError::ConflictingShardResult(
-                    artifact.logical_shard_identity,
-                ));
-            }
-            Some(_) => {}
-            None => results[local_index] = Some(decoded),
-        }
+        *results
+            .get_mut(local_index)
+            .ok_or(EulerRenderShardingError::Codec(
+                "logical shard index outside result slots",
+            ))? = Some(decoded);
     }
     let mut complete_results = try_vec_capacity(segment.shard_count, "complete shard results")?;
     for (local_index, result) in results.into_iter().enumerate() {
         checkpoint(cx)?;
+        let logical_shard_identity = selected
+            .get(local_index)
+            .ok_or(EulerRenderShardingError::Codec(
+                "result slot outside selected shard range",
+            ))?
+            .logical_shard_identity;
         complete_results.push(result.ok_or(EulerRenderShardingError::MissingArtifact(
-            selected[local_index].logical_shard_identity,
+            logical_shard_identity,
         ))?);
     }
     let merge_limits = RenderShardMergeLimits::try_new(
@@ -1374,6 +1428,63 @@ pub fn merge_uniform_render_segment_artifacts(
         merge_limits,
         cx,
     )?)
+}
+
+fn read_artifact_bytes_cancellable(
+    ledger: &Ledger,
+    artifact_hash: ContentHash,
+    expected_len: u64,
+    max_bytes: u64,
+    cx: &Cx<'_>,
+) -> Result<Vec<u8>, EulerRenderShardingError> {
+    checkpoint(cx)?;
+    if expected_len > max_bytes {
+        return Err(EulerRenderShardingError::ResultByteLimit {
+            limit: max_bytes,
+            observed: expected_len,
+        });
+    }
+    let capacity = usize::try_from(expected_len)
+        .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("artifact byte length"))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| EulerRenderShardingError::Capacity("artifact bytes"))?;
+    checkpoint(cx)?;
+    let read = ledger
+        .read_artifact_chunks_bounded_controlled(&artifact_hash, max_bytes, &mut |chunk| {
+            if let Err(error) = checkpoint(cx) {
+                return ControlFlow::Break(error);
+            }
+            let Some(next_len) = bytes.len().checked_add(chunk.len()) else {
+                return ControlFlow::Break(EulerRenderShardingError::ArithmeticOverflow(
+                    "materialized artifact length",
+                ));
+            };
+            if next_len > capacity {
+                return ControlFlow::Break(EulerRenderShardingError::Codec(
+                    "artifact length changed after preflight",
+                ));
+            }
+            bytes.extend_from_slice(chunk);
+            ControlFlow::Continue(())
+        })?
+        .ok_or(EulerRenderShardingError::MissingArtifact(artifact_hash))?;
+    match read {
+        ControlFlow::Break(error) => Err(error),
+        ControlFlow::Continue(streamed) => {
+            let observed = u64::try_from(bytes.len()).map_err(|_| {
+                EulerRenderShardingError::ArithmeticOverflow("materialized artifact length")
+            })?;
+            if streamed != expected_len || observed != expected_len {
+                return Err(EulerRenderShardingError::Codec(
+                    "artifact length changed after preflight",
+                ));
+            }
+            checkpoint(cx)?;
+            Ok(bytes)
+        }
+    }
 }
 
 struct BoundShardSpec {
@@ -1409,16 +1520,25 @@ fn index_frame_inputs<'prepared>(
         return Err(EulerRenderShardingError::FrameBindingMismatch);
     }
     let mut indexed = BTreeMap::new();
+    let mut lowest_duplicate_ordinal: Option<u64> = None;
     for input in inputs {
         checkpoint(cx)?;
-        if indexed
-            .insert(input.frame_ordinal, input.prepared)
-            .is_some()
-        {
-            return Err(EulerRenderShardingError::DuplicateFrameOrdinal(
-                input.frame_ordinal,
-            ));
+        match indexed.entry(input.frame_ordinal) {
+            Entry::Vacant(entry) => {
+                entry.insert(input.prepared);
+            }
+            Entry::Occupied(_) => {
+                lowest_duplicate_ordinal = Some(
+                    lowest_duplicate_ordinal
+                        .map_or(input.frame_ordinal, |prior| prior.min(input.frame_ordinal)),
+                );
+            }
         }
+    }
+    if let Some(frame_ordinal) = lowest_duplicate_ordinal {
+        return Err(EulerRenderShardingError::DuplicateFrameOrdinal(
+            frame_ordinal,
+        ));
     }
     for frame in &plan.frames {
         checkpoint(cx)?;
@@ -1775,23 +1895,23 @@ impl<'a> PlanReader<'a> {
     }
 }
 
-fn partition_segments(
-    plan_identity: ContentHash,
-    raw_segments: &[RawSegment],
+#[derive(Clone, Copy)]
+struct PartitionPreflight {
+    segment_count: u64,
+    shards_per_segment: u64,
+    shard_count: u64,
+    total_paths: u64,
+}
+
+fn preflight_partition(
     layout: RenderTileLayout,
     spp: u32,
     tiles_per_shard: u64,
     samples_per_shard: u32,
+    segment_count: u64,
     limits: EulerRenderShardLimits,
     cx: &Cx<'_>,
-) -> Result<
-    (
-        Vec<EulerRenderPlannedSegment>,
-        Vec<EulerRenderPlannedShard>,
-        u64,
-    ),
-    EulerRenderShardingError,
-> {
+) -> Result<PartitionPreflight, EulerRenderShardingError> {
     let renderer_limits = RenderShardLimits::try_new(
         limits.max_paths_per_shard,
         limits.max_result_bytes_per_shard,
@@ -1801,8 +1921,7 @@ fn partition_segments(
     let shards_per_segment = tile_blocks.checked_mul(sample_blocks).ok_or(
         EulerRenderShardingError::ArithmeticOverflow("shards_per_segment"),
     )?;
-    let shard_count = u64::try_from(raw_segments.len())
-        .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_count"))?
+    let shard_count = segment_count
         .checked_mul(shards_per_segment)
         .ok_or(EulerRenderShardingError::ArithmeticOverflow("shard_count"))?;
     if shard_count > limits.max_shards {
@@ -1811,9 +1930,8 @@ fn partition_segments(
             observed: shard_count,
         });
     }
-    // Prove every worker and per-segment coordinator cap before reserving the
-    // full shard table. The layout and partition are identical for each
-    // segment, so one cancellable pass is sufficient.
+    // The layout and partition are identical for each segment, so one
+    // cancellable pass proves every worker and per-segment coordinator cap.
     let mut paths_per_segment = 0_u64;
     let mut result_bytes_per_segment = 0_u64;
     let mut preflight_tile_start = 0_u64;
@@ -1825,7 +1943,16 @@ fn partition_segments(
             .min(layout.tile_count());
         let block_pixels =
             tile_block_pixel_count(layout, preflight_tile_start, preflight_tile_end)?;
-        let result_bytes = renderer_limits.admit_result_pixels(block_pixels)?;
+        let result_bytes = match renderer_limits.admit_result_pixels(block_pixels) {
+            Ok(result_bytes) => result_bytes,
+            Err(RenderShardError::ResultByteLimit { limit, observed }) => {
+                return Err(EulerRenderShardingError::ResultByteLimit { limit, observed });
+            }
+            Err(RenderShardError::ArithmeticOverflow(quantity)) => {
+                return Err(EulerRenderShardingError::ArithmeticOverflow(quantity));
+            }
+            Err(error) => return Err(EulerRenderShardingError::Renderer(error)),
+        };
         let mut preflight_sample_start = 0_u32;
         while preflight_sample_start < spp {
             checkpoint(cx)?;
@@ -1860,18 +1987,43 @@ fn partition_segments(
         preflight_tile_start = preflight_tile_end;
     }
     let total_paths = paths_per_segment
-        .checked_mul(
-            u64::try_from(raw_segments.len())
-                .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_count"))?,
-        )
+        .checked_mul(segment_count)
         .ok_or(EulerRenderShardingError::ArithmeticOverflow("total_paths"))?;
+    Ok(PartitionPreflight {
+        segment_count,
+        shards_per_segment,
+        shard_count,
+        total_paths,
+    })
+}
 
-    let mut segments = try_vec_capacity(
-        u64::try_from(raw_segments.len())
-            .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_count"))?,
-        "planned segments",
-    )?;
-    let mut shards = try_vec_capacity(shard_count, "planned shards")?;
+fn partition_segments(
+    plan_identity: ContentHash,
+    raw_segments: &[RawSegment],
+    layout: RenderTileLayout,
+    spp: u32,
+    tiles_per_shard: u64,
+    samples_per_shard: u32,
+    preflight: PartitionPreflight,
+    cx: &Cx<'_>,
+) -> Result<
+    (
+        Vec<EulerRenderPlannedSegment>,
+        Vec<EulerRenderPlannedShard>,
+        u64,
+    ),
+    EulerRenderShardingError,
+> {
+    let segment_count = u64::try_from(raw_segments.len())
+        .map_err(|_| EulerRenderShardingError::ArithmeticOverflow("segment_count"))?;
+    if segment_count != preflight.segment_count {
+        return Err(EulerRenderShardingError::Codec(
+            "partition preflight segment count mismatch",
+        ));
+    }
+
+    let mut segments = try_vec_capacity(segment_count, "planned segments")?;
+    let mut shards = try_vec_capacity(preflight.shard_count, "planned shards")?;
 
     for raw in raw_segments {
         checkpoint(cx)?;
@@ -1926,10 +2078,10 @@ fn partition_segments(
             segment_index: raw.segment_index,
             frame_identity: raw.frame_identity,
             first_shard,
-            shard_count: shards_per_segment,
+            shard_count: preflight.shards_per_segment,
         });
     }
-    Ok((segments, shards, total_paths))
+    Ok((segments, shards, preflight.total_paths))
 }
 
 fn plan_identity(
@@ -2213,8 +2365,8 @@ pub enum EulerRenderShardingError {
         /// Stored artifact kind.
         actual: String,
     },
-    /// The same logical shard was submitted with differing valid result bytes.
-    ConflictingShardResult(ContentHash),
+    /// The same logical shard was submitted with differing artifact references.
+    ConflictingShardReference(ContentHash),
     /// A result artifact did not bind the selected logical shard.
     ShardResultBindingMismatch,
 }
