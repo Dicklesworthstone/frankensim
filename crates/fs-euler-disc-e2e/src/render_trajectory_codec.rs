@@ -17,18 +17,16 @@ use crate::{
     EULER_CONTROL_STREAM_SCHEMA_VERSION,
     coupled_runner::{ChannelOwnership, ChannelWrench, ContactTransitionKind},
     render_trajectory::{
-        DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
-        MAX_RENDER_TRAJECTORY_NO_CLAIMS, MAX_RENDER_TRAJECTORY_SAMPLES,
-        MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseFrame, RenderBaseModeState,
-        RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
+        DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
+        MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseFrame,
+        RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
         RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
         RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
         RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
         RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
     },
     timeline_resampling::{
-        DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity,
-        EULER_TIMELINE_RESAMPLER_VERSION,
+        DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,
     },
 };
 
@@ -39,8 +37,7 @@ pub const EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK: usize = 1_024;
 /// Hard transport ceiling. Streaming paths do not allocate this amount.
 pub const MAX_RENDER_TRAJECTORY_ARTIFACT_BYTES: u64 = 32 * 1_024 * 1_024 * 1_024;
 /// Hard aggregate text ceiling implied by two metadata strings and 64 no-claims.
-pub const MAX_RENDER_TRAJECTORY_TEXT_BYTES: usize =
-    (MAX_RENDER_TRAJECTORY_NO_CLAIMS + 2) * 1_024;
+pub const MAX_RENDER_TRAJECTORY_TEXT_BYTES: usize = (MAX_RENDER_TRAJECTORY_NO_CLAIMS + 2) * 1_024;
 /// Hard aggregate transition ceiling implied by the semantic sample limits.
 pub const MAX_RENDER_TRAJECTORY_TOTAL_TRANSITIONS: usize =
     MAX_RENDER_TRAJECTORY_SAMPLES * MAX_RENDER_TRANSITIONS_PER_SAMPLE;
@@ -176,11 +173,6 @@ impl EulerRenderTrajectoryArtifact {
         budget: RenderTrajectoryCodecBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, RenderTrajectoryCodecError> {
-        validate_context(
-            source_campaign_identity,
-            &trajectory,
-            &declared_discontinuities,
-        )?;
         let mut sink = io::sink();
         let receipt = encode_to_writer(
             &trajectory,
@@ -265,6 +257,42 @@ impl EulerRenderTrajectoryArtifact {
         budget: RenderTrajectoryCodecBudget,
         cx: &Cx<'_>,
     ) -> Result<Vec<u8>, RenderTrajectoryCodecError> {
+        validate_budget(budget)?;
+        if self.receipt.byte_len > budget.max_artifact_bytes {
+            return Err(RenderTrajectoryCodecError::ArtifactTooLarge {
+                bytes: self.receipt.byte_len,
+                maximum: budget.max_artifact_bytes,
+            });
+        }
+        if usize::try_from(self.receipt.sample_count)
+            .ok()
+            .is_none_or(|count| count > budget.max_samples)
+        {
+            return Err(RenderTrajectoryCodecError::InvalidLength {
+                field: "sample_count",
+                value: u64::from(self.receipt.sample_count),
+                maximum: u64::try_from(budget.max_samples).unwrap_or(u64::MAX),
+            });
+        }
+        if usize::try_from(self.receipt.transition_count)
+            .ok()
+            .is_none_or(|count| count > budget.max_total_transitions)
+        {
+            return Err(RenderTrajectoryCodecError::InvalidLength {
+                field: "transition_count",
+                value: u64::from(self.receipt.transition_count),
+                maximum: u64::try_from(budget.max_total_transitions).unwrap_or(u64::MAX),
+            });
+        }
+        let text_bytes = text_byte_count(self.trajectory.metadata())?;
+        if text_bytes > budget.max_total_text_bytes {
+            return Err(RenderTrajectoryCodecError::InvalidLength {
+                field: "metadata text bytes",
+                value: u64::try_from(text_bytes).unwrap_or(u64::MAX),
+                maximum: u64::try_from(budget.max_total_text_bytes).unwrap_or(u64::MAX),
+            });
+        }
+        checkpoint(cx)?;
         let requested = usize::try_from(self.receipt.byte_len).map_err(|_| {
             RenderTrajectoryCodecError::Capacity {
                 artifact: "canonical artifact bytes",
@@ -272,12 +300,12 @@ impl EulerRenderTrajectoryArtifact {
             }
         })?;
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(requested).map_err(|_| {
-            RenderTrajectoryCodecError::Capacity {
+        bytes
+            .try_reserve_exact(requested)
+            .map_err(|_| RenderTrajectoryCodecError::Capacity {
                 artifact: "canonical artifact bytes",
                 requested: self.receipt.byte_len,
-            }
-        })?;
+            })?;
         self.write_to(&mut bytes, budget, cx)?;
         if bytes.len() != requested {
             return Err(RenderTrajectoryCodecError::NonCanonical);
@@ -459,10 +487,7 @@ trait CanonicalSink {
         self.f64(value.z)
     }
 
-    fn quaternion(
-        &mut self,
-        value: UnitQuaternion,
-    ) -> Result<(), RenderTrajectoryCodecError> {
+    fn quaternion(&mut self, value: UnitQuaternion) -> Result<(), RenderTrajectoryCodecError> {
         for component in value.components() {
             self.f64(component)?;
         }
@@ -470,13 +495,12 @@ trait CanonicalSink {
     }
 
     fn string(&mut self, value: &str) -> Result<(), RenderTrajectoryCodecError> {
-        let len = u32::try_from(value.len()).map_err(|_| {
-            RenderTrajectoryCodecError::InvalidLength {
+        let len =
+            u32::try_from(value.len()).map_err(|_| RenderTrajectoryCodecError::InvalidLength {
                 field: "string",
                 value: u64::try_from(value.len()).unwrap_or(u64::MAX),
                 maximum: u64::from(u32::MAX),
-            }
-        })?;
+            })?;
         self.u32(len)?;
         self.put(value.as_bytes())
     }
@@ -489,20 +513,20 @@ struct SizeSink {
 
 impl CanonicalSink for SizeSink {
     fn put(&mut self, bytes: &[u8]) -> Result<(), RenderTrajectoryCodecError> {
-        let added = u64::try_from(bytes.len()).map_err(|_| {
-            RenderTrajectoryCodecError::InvalidLength {
+        let added =
+            u64::try_from(bytes.len()).map_err(|_| RenderTrajectoryCodecError::InvalidLength {
                 field: "canonical size",
                 value: u64::MAX,
                 maximum: u64::MAX,
-            }
-        })?;
-        self.len = self.len.checked_add(added).ok_or(
-            RenderTrajectoryCodecError::InvalidLength {
-                field: "canonical size",
-                value: u64::MAX,
-                maximum: u64::MAX,
-            },
-        )?;
+            })?;
+        self.len =
+            self.len
+                .checked_add(added)
+                .ok_or(RenderTrajectoryCodecError::InvalidLength {
+                    field: "canonical size",
+                    value: u64::MAX,
+                    maximum: u64::MAX,
+                })?;
         Ok(())
     }
 }
@@ -527,12 +551,12 @@ impl VecSink {
             });
         }
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(capacity).map_err(|_| {
-            RenderTrajectoryCodecError::Capacity {
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| RenderTrajectoryCodecError::Capacity {
                 artifact,
                 requested: u64::try_from(capacity).unwrap_or(u64::MAX),
-            }
-        })?;
+            })?;
         Ok(Self {
             bytes,
             maximum,
@@ -565,12 +589,12 @@ impl CanonicalSink for VecSink {
             });
         }
         if new_len > self.bytes.capacity() {
-            self.bytes.try_reserve(new_len - self.bytes.len()).map_err(|_| {
-                RenderTrajectoryCodecError::Capacity {
+            self.bytes
+                .try_reserve(new_len - self.bytes.len())
+                .map_err(|_| RenderTrajectoryCodecError::Capacity {
                     artifact: self.artifact,
                     requested: u64::try_from(new_len).unwrap_or(u64::MAX),
-                }
-            })?;
+                })?;
         }
         self.bytes.extend_from_slice(bytes);
         Ok(())
@@ -605,7 +629,10 @@ fn encode_metadata<S: CanonicalSink>(
     sink.f64(metadata.timestep_s)?;
     sink.string(&metadata.producer_version)?;
     sink.string(&metadata.applicability)?;
-    sink.u32(u32_from_usize("metadata.no_claims", metadata.no_claims.len())?)?;
+    sink.u32(u32_from_usize(
+        "metadata.no_claims",
+        metadata.no_claims.len(),
+    )?)?;
     for no_claim in &metadata.no_claims {
         sink.string(no_claim)?;
     }
@@ -680,7 +707,7 @@ fn encode_sample<S: CanonicalSink>(
             sink.f64(base.velocity_m_per_s)?;
         }
     }
-    encode_channels(input.channels, sink)?;
+    encode_channels(&input.channels, sink)?;
     sink.f64(input.mechanical_energy_j)?;
     sink.f64(input.energy_defect_j)?;
     sink.f64(input.qois.inclination_rad)?;
@@ -703,15 +730,15 @@ fn encode_sample<S: CanonicalSink>(
 }
 
 fn encode_channels<S: CanonicalSink>(
-    channels: ChannelOwnership,
+    channels: &ChannelOwnership,
     sink: &mut S,
 ) -> Result<(), RenderTrajectoryCodecError> {
     for channel in [
-        channels.gravity,
-        channels.contact,
-        channels.rolling,
-        channels.base,
-        channels.gas,
+        &channels.gravity,
+        &channels.contact,
+        &channels.rolling,
+        &channels.base,
+        &channels.gas,
     ] {
         sink.vec3(channel.force_world_n)?;
         sink.vec3(channel.torque_world_nm)?;
@@ -789,10 +816,7 @@ const fn disposition_encoding(value: RenderSampleDisposition) -> (u8, u32) {
     }
 }
 
-fn u32_from_usize(
-    field: &'static str,
-    value: usize,
-) -> Result<u32, RenderTrajectoryCodecError> {
+fn u32_from_usize(field: &'static str, value: usize) -> Result<u32, RenderTrajectoryCodecError> {
     u32::try_from(value).map_err(|_| RenderTrajectoryCodecError::InvalidLength {
         field,
         value: u64::try_from(value).unwrap_or(u64::MAX),
@@ -853,7 +877,9 @@ fn validate_context(
     source_campaign_identity: ContentHash,
     trajectory: &RenderTrajectory,
     declared_discontinuities: &[DeclaredTimelineDiscontinuity],
+    checkpoint: &mut impl FnMut() -> Result<(), RenderTrajectoryCodecError>,
 ) -> Result<(), RenderTrajectoryCodecError> {
+    checkpoint()?;
     if source_campaign_identity
         .as_bytes()
         .iter()
@@ -866,9 +892,19 @@ fn validate_context(
     let last_time_s = samples[samples.len() - 1].input().time_s;
     let mut previous_time_s = None;
     for (index, discontinuity) in declared_discontinuities.iter().enumerate() {
+        if index % EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK == 0 {
+            checkpoint()?;
+        }
         let matches_sample = samples
-            .iter()
-            .any(|sample| same_time(sample.input().time_s, discontinuity.time_s));
+            .binary_search_by(|sample| {
+                let sample_time_s = sample.input().time_s;
+                if same_time(sample_time_s, discontinuity.time_s) {
+                    core::cmp::Ordering::Equal
+                } else {
+                    sample_time_s.total_cmp(&discontinuity.time_s)
+                }
+            })
+            .is_ok();
         if !discontinuity.time_s.is_finite()
             || discontinuity.time_s < first_time_s
             || discontinuity.time_s > last_time_s
@@ -881,6 +917,7 @@ fn validate_context(
         }
         previous_time_s = Some(discontinuity.time_s);
     }
+    checkpoint()?;
     Ok(())
 }
 
@@ -890,7 +927,9 @@ fn same_time(first: f64, second: f64) -> bool {
     first_bits == second_bits || (first_bits << 1 == 0 && second_bits << 1 == 0)
 }
 
-fn text_byte_count(metadata: &RenderTrajectoryMetadata) -> Result<usize, RenderTrajectoryCodecError> {
+fn text_byte_count(
+    metadata: &RenderTrajectoryMetadata,
+) -> Result<usize, RenderTrajectoryCodecError> {
     let mut total = metadata
         .producer_version
         .len()
@@ -901,13 +940,14 @@ fn text_byte_count(metadata: &RenderTrajectoryMetadata) -> Result<usize, RenderT
             maximum: u64::try_from(MAX_RENDER_TRAJECTORY_TEXT_BYTES).unwrap_or(u64::MAX),
         })?;
     for no_claim in &metadata.no_claims {
-        total = total.checked_add(no_claim.len()).ok_or(
-            RenderTrajectoryCodecError::InvalidLength {
-                field: "metadata text bytes",
-                value: u64::MAX,
-                maximum: u64::try_from(MAX_RENDER_TRAJECTORY_TEXT_BYTES).unwrap_or(u64::MAX),
-            },
-        )?;
+        total =
+            total
+                .checked_add(no_claim.len())
+                .ok_or(RenderTrajectoryCodecError::InvalidLength {
+                    field: "metadata text bytes",
+                    value: u64::MAX,
+                    maximum: u64::try_from(MAX_RENDER_TRAJECTORY_TEXT_BYTES).unwrap_or(u64::MAX),
+                })?;
     }
     Ok(total)
 }
@@ -979,7 +1019,9 @@ fn measure_wire(
             maximum: MAX_RENDER_TRAJECTORY_ARTIFACT_BYTES,
         })?;
     let sample_count = u32_from_usize("sample_count", samples.len())?;
-    let chunk_count_usize = samples.len().div_ceil(EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK);
+    let chunk_count_usize = samples
+        .len()
+        .div_ceil(EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK);
     let chunk_count = u32_from_usize("chunk_count", chunk_count_usize)?;
     let mut transition_count = 0usize;
     let mut total_len = checked_len_add(HEADER_LEN, metadata_size.len, "artifact length")?;
@@ -1014,11 +1056,8 @@ fn measure_wire(
                 });
             }
             chunk_payload_len = checked_len_add(chunk_payload_len, 4, "chunk payload length")?;
-            chunk_payload_len = checked_len_add(
-                chunk_payload_len,
-                sample_size.len,
-                "chunk payload length",
-            )?;
+            chunk_payload_len =
+                checked_len_add(chunk_payload_len, sample_size.len, "chunk payload length")?;
         }
         if chunk_payload_len > u64::try_from(MAX_CHUNK_PAYLOAD_BYTES).unwrap_or(u64::MAX) {
             return Err(RenderTrajectoryCodecError::InvalidLength {
@@ -1059,12 +1098,11 @@ fn encode_header(
     source_campaign_identity: ContentHash,
     metadata: &RenderTrajectoryMetadata,
 ) -> Result<Vec<u8>, RenderTrajectoryCodecError> {
-    let capacity = usize::try_from(HEADER_LEN).map_err(|_| {
-        RenderTrajectoryCodecError::Capacity {
+    let capacity =
+        usize::try_from(HEADER_LEN).map_err(|_| RenderTrajectoryCodecError::Capacity {
             artifact: "header",
             requested: HEADER_LEN,
-        }
-    })?;
+        })?;
     let mut sink = VecSink::with_exact_capacity(capacity, capacity, "header")?;
     sink.put(MAGIC)?;
     sink.u16(EULER_RENDER_TRAJECTORY_CODEC_VERSION)?;
@@ -1178,10 +1216,13 @@ fn encode_to_writer<W: Write>(
     writer: &mut W,
     checkpoint: &mut impl FnMut() -> Result<(), RenderTrajectoryCodecError>,
 ) -> Result<RenderTrajectoryCodecReceipt, RenderTrajectoryCodecError> {
+    validate_budget(budget)?;
+    checkpoint()?;
     validate_context(
         source_campaign_identity,
         trajectory,
         declared_discontinuities,
+        checkpoint,
     )?;
     let plan = measure_wire(trajectory, declared_discontinuities, budget, checkpoint)?;
     checkpoint()?;
@@ -1189,21 +1230,19 @@ fn encode_to_writer<W: Write>(
     let mut output = ArtifactWriter::new(writer);
     output.prefix(&header)?;
 
-    let metadata_len = usize::try_from(plan.metadata_len).map_err(|_| {
-        RenderTrajectoryCodecError::Capacity {
+    let metadata_len =
+        usize::try_from(plan.metadata_len).map_err(|_| RenderTrajectoryCodecError::Capacity {
             artifact: "metadata",
             requested: u64::from(plan.metadata_len),
-        }
-    })?;
-    let mut metadata = VecSink::with_exact_capacity(
-        metadata_len,
-        MAX_METADATA_BYTES,
-        "metadata",
-    )?;
+        })?;
+    let mut metadata = VecSink::with_exact_capacity(metadata_len, MAX_METADATA_BYTES, "metadata")?;
     encode_metadata(trajectory.metadata(), &mut metadata)?;
     output.prefix(&metadata.finish(metadata_len)?)?;
 
-    for discontinuity in declared_discontinuities {
+    for (index, discontinuity) in declared_discontinuities.iter().enumerate() {
+        if index % EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK == 0 {
+            checkpoint()?;
+        }
         let mut record = VecSink::with_exact_capacity(9, 9, "declared discontinuity")?;
         record.f64(discontinuity.time_s)?;
         record.u8(declared_discontinuity_kind_tag(discontinuity.kind))?;
@@ -1229,11 +1268,8 @@ fn encode_to_writer<W: Write>(
                     maximum: u64::from(u32::MAX),
                 }
             })?)?;
-            payload_size.len = checked_len_add(
-                payload_size.len,
-                sample_size.len,
-                "chunk payload length",
-            )?;
+            payload_size.len =
+                checked_len_add(payload_size.len, sample_size.len, "chunk payload length")?;
             chunk_transition_count = chunk_transition_count
                 .checked_add(sample.input().contact_transitions.len())
                 .ok_or(RenderTrajectoryCodecError::InvalidLength {
@@ -1248,11 +1284,8 @@ fn encode_to_writer<W: Write>(
                 requested: payload_size.len,
             }
         })?;
-        let mut payload = VecSink::with_exact_capacity(
-            payload_len,
-            MAX_CHUNK_PAYLOAD_BYTES,
-            "chunk payload",
-        )?;
+        let mut payload =
+            VecSink::with_exact_capacity(payload_len, MAX_CHUNK_PAYLOAD_BYTES, "chunk payload")?;
         for sample in chunk {
             let mut sample_size = SizeSink::default();
             encode_sample(sample.input(), &mut sample_size)?;
@@ -1282,12 +1315,14 @@ fn encode_to_writer<W: Write>(
         first_sample_index += chunk.len();
     }
 
+    checkpoint()?;
     let payload_fingerprint = output.prefix_hasher.finalize();
     output.trailer(payload_fingerprint.as_bytes())?;
     if output.written != plan.total_len {
         return Err(RenderTrajectoryCodecError::NonCanonical);
     }
     let artifact_identity = output.artifact_hasher.finalize();
+    checkpoint()?;
     Ok(RenderTrajectoryCodecReceipt {
         artifact_identity,
         payload_fingerprint,
@@ -1325,15 +1360,15 @@ impl<'bytes> SliceDecoder<'bytes> {
     ) -> Result<&'bytes [u8], RenderTrajectoryCodecError> {
         let offset = self
             .base_offset
-            .checked_add(u64::try_from(self.position).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
-        let end = self.position.checked_add(length).ok_or(
-            RenderTrajectoryCodecError::InvalidLength {
-                field,
-                value: u64::MAX,
-                maximum: u64::try_from(self.bytes.len()).unwrap_or(u64::MAX),
-            },
-        )?;
+            .saturating_add(u64::try_from(self.position).unwrap_or(u64::MAX));
+        let end =
+            self.position
+                .checked_add(length)
+                .ok_or(RenderTrajectoryCodecError::InvalidLength {
+                    field,
+                    value: u64::MAX,
+                    maximum: u64::try_from(self.bytes.len()).unwrap_or(u64::MAX),
+                })?;
         let value = self
             .bytes
             .get(self.position..end)
@@ -1347,32 +1382,35 @@ impl<'bytes> SliceDecoder<'bytes> {
     }
 
     fn u16(&mut self, field: &'static str) -> Result<u16, RenderTrajectoryCodecError> {
-        let bytes: [u8; 2] = self.take(2, field)?.try_into().map_err(|_| {
-            RenderTrajectoryCodecError::Truncated {
-                field,
-                offset: self.base_offset,
-            }
-        })?;
+        let bytes: [u8; 2] =
+            self.take(2, field)?
+                .try_into()
+                .map_err(|_| RenderTrajectoryCodecError::Truncated {
+                    field,
+                    offset: self.base_offset,
+                })?;
         Ok(u16::from_le_bytes(bytes))
     }
 
     fn u32(&mut self, field: &'static str) -> Result<u32, RenderTrajectoryCodecError> {
-        let bytes: [u8; 4] = self.take(4, field)?.try_into().map_err(|_| {
-            RenderTrajectoryCodecError::Truncated {
-                field,
-                offset: self.base_offset,
-            }
-        })?;
+        let bytes: [u8; 4] =
+            self.take(4, field)?
+                .try_into()
+                .map_err(|_| RenderTrajectoryCodecError::Truncated {
+                    field,
+                    offset: self.base_offset,
+                })?;
         Ok(u32::from_le_bytes(bytes))
     }
 
     fn u64(&mut self, field: &'static str) -> Result<u64, RenderTrajectoryCodecError> {
-        let bytes: [u8; 8] = self.take(8, field)?.try_into().map_err(|_| {
-            RenderTrajectoryCodecError::Truncated {
-                field,
-                offset: self.base_offset,
-            }
-        })?;
+        let bytes: [u8; 8] =
+            self.take(8, field)?
+                .try_into()
+                .map_err(|_| RenderTrajectoryCodecError::Truncated {
+                    field,
+                    offset: self.base_offset,
+                })?;
         Ok(u64::from_le_bytes(bytes))
     }
 
@@ -1402,13 +1440,14 @@ impl<'bytes> SliceDecoder<'bytes> {
         &mut self,
         field: &'static str,
     ) -> Result<UnitQuaternion, RenderTrajectoryCodecError> {
-        UnitQuaternion::new(
+        let components = [
             self.f64(field)?,
             self.f64(field)?,
             self.f64(field)?,
             self.f64(field)?,
-        )
-        .map_err(|_| RenderTrajectoryCodecError::InvalidValue(field))
+        ];
+        UnitQuaternion::from_canonical_components(components)
+            .map_err(|_| RenderTrajectoryCodecError::InvalidValue(field))
     }
 
     fn boolean(&mut self, field: &'static str) -> Result<bool, RenderTrajectoryCodecError> {
@@ -1448,12 +1487,12 @@ impl<'bytes> SliceDecoder<'bytes> {
         let value = core::str::from_utf8(bytes)
             .map_err(|_| RenderTrajectoryCodecError::InvalidUtf8(field))?;
         let mut owned = String::new();
-        owned.try_reserve_exact(value.len()).map_err(|_| {
-            RenderTrajectoryCodecError::Capacity {
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| RenderTrajectoryCodecError::Capacity {
                 artifact: "metadata string",
                 requested: u64::try_from(value.len()).unwrap_or(u64::MAX),
-            }
-        })?;
+            })?;
         owned.push_str(value);
         Ok(owned)
     }
@@ -1566,8 +1605,7 @@ fn decode_metadata(
     let mass_identity = decoder.hash("metadata.mass_properties.identity")?;
     let mass = decoder.f64("metadata.mass_properties.mass")?;
     let center_of_mass_body = decoder.vec3("metadata.mass_properties.center_of_mass_body")?;
-    let principal_inertia_body =
-        decoder.vec3("metadata.mass_properties.principal_inertia_body")?;
+    let principal_inertia_body = decoder.vec3("metadata.mass_properties.principal_inertia_body")?;
     let properties = MassProperties::new(mass, center_of_mass_body, principal_inertia_body)
         .map_err(|_| RenderTrajectoryCodecError::InvalidValue("metadata.mass_properties"))?;
     let initial_state = decode_rigid_state(&mut decoder, "metadata.initial_state")?;
@@ -1587,13 +1625,14 @@ fn decode_metadata(
     let timestep_s = decoder.f64("metadata.timestep_s")?;
     let producer_version = decoder.string("metadata.producer_version")?;
     let applicability = decoder.string("metadata.applicability")?;
-    let no_claim_count = usize::try_from(decoder.u32("metadata.no_claim_count")?).map_err(
-        |_| RenderTrajectoryCodecError::InvalidLength {
-            field: "metadata.no_claim_count",
-            value: u64::MAX,
-            maximum: u64::try_from(MAX_RENDER_TRAJECTORY_NO_CLAIMS).unwrap_or(u64::MAX),
-        },
-    )?;
+    let no_claim_count =
+        usize::try_from(decoder.u32("metadata.no_claim_count")?).map_err(|_| {
+            RenderTrajectoryCodecError::InvalidLength {
+                field: "metadata.no_claim_count",
+                value: u64::MAX,
+                maximum: u64::try_from(MAX_RENDER_TRAJECTORY_NO_CLAIMS).unwrap_or(u64::MAX),
+            }
+        })?;
     if no_claim_count > MAX_RENDER_TRAJECTORY_NO_CLAIMS {
         return Err(RenderTrajectoryCodecError::InvalidLength {
             field: "metadata.no_claim_count",
@@ -1786,13 +1825,14 @@ fn decode_sample(
     let signed_gap_m = decoder.f64("sample.signed_gap_m")?;
     let interval_contact_active = decoder.boolean("sample.interval_contact_active")?;
     let interval_normal_force_n = decoder.f64("sample.interval_normal_force_n")?;
-    let transition_count = usize::try_from(decoder.u32("sample.transition_count")?).map_err(
-        |_| RenderTrajectoryCodecError::InvalidLength {
-            field: "sample.transition_count",
-            value: u64::MAX,
-            maximum: u64::try_from(MAX_RENDER_TRANSITIONS_PER_SAMPLE).unwrap_or(u64::MAX),
-        },
-    )?;
+    let transition_count =
+        usize::try_from(decoder.u32("sample.transition_count")?).map_err(|_| {
+            RenderTrajectoryCodecError::InvalidLength {
+                field: "sample.transition_count",
+                value: u64::MAX,
+                maximum: u64::try_from(MAX_RENDER_TRANSITIONS_PER_SAMPLE).unwrap_or(u64::MAX),
+            }
+        })?;
     if transition_count > MAX_RENDER_TRANSITIONS_PER_SAMPLE {
         return Err(RenderTrajectoryCodecError::InvalidLength {
             field: "sample.transition_count",
@@ -1881,9 +1921,7 @@ fn decode_header(bytes: &[u8], base_offset: u64) -> Result<Header, RenderTraject
             codec_version,
         ));
     }
-    if decoder.u16("header.trajectory_schema_version")?
-        != EULER_RENDER_TRAJECTORY_SCHEMA_VERSION
-    {
+    if decoder.u16("header.trajectory_schema_version")? != EULER_RENDER_TRAJECTORY_SCHEMA_VERSION {
         return Err(RenderTrajectoryCodecError::ContractMismatch(
             "trajectory schema version",
         ));
@@ -2032,7 +2070,10 @@ fn validate_header(
             maximum: u64::try_from(expected_chunks).unwrap_or(u64::MAX),
         });
     }
-    if usize::try_from(plan.discontinuity_count).ok().is_none_or(|count| count > sample_count) {
+    if usize::try_from(plan.discontinuity_count)
+        .ok()
+        .is_none_or(|count| count > sample_count)
+    {
         return Err(RenderTrajectoryCodecError::InvalidLength {
             field: "header.discontinuity_count",
             value: u64::from(plan.discontinuity_count),
@@ -2201,12 +2242,12 @@ fn allocate_bytes(
         });
     }
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(length).map_err(|_| {
-        RenderTrajectoryCodecError::Capacity {
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| RenderTrajectoryCodecError::Capacity {
             artifact,
             requested: u64::try_from(length).unwrap_or(u64::MAX),
-        }
-    })?;
+        })?;
     bytes.resize(length, 0);
     Ok(bytes)
 }
@@ -2215,7 +2256,9 @@ fn decode_declared_discontinuities(
     bytes: &[u8],
     base_offset: u64,
     count: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), RenderTrajectoryCodecError>,
 ) -> Result<Vec<DeclaredTimelineDiscontinuity>, RenderTrajectoryCodecError> {
+    checkpoint()?;
     let mut decoder = SliceDecoder::new(bytes, base_offset, 0);
     let mut discontinuities = Vec::new();
     discontinuities
@@ -2224,7 +2267,10 @@ fn decode_declared_discontinuities(
             artifact: "declared discontinuities",
             requested: u64::try_from(count).unwrap_or(u64::MAX),
         })?;
-    for _ in 0..count {
+    for index in 0..count {
+        if index % EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK == 0 {
+            checkpoint()?;
+        }
         let time_s = decoder.f64("declared_discontinuity.time_s")?;
         let kind = match decoder.u8("declared_discontinuity.kind")? {
             1 => DeclaredDiscontinuityKind::ContinuationSeam,
@@ -2292,6 +2338,7 @@ fn preflight<R: Read + Seek>(
             "header metadata summary",
         ));
     }
+    checkpoint()?;
 
     let discontinuity_len = usize::try_from(header.plan.discontinuity_len).map_err(|_| {
         RenderTrajectoryCodecError::Capacity {
@@ -2316,6 +2363,7 @@ fn preflight<R: Read + Seek>(
                 maximum: u64::from(header.plan.sample_count),
             }
         })?,
+        checkpoint,
     )?;
     let sample_section_offset = input.offset;
 
@@ -2358,6 +2406,29 @@ fn preflight<R: Read + Seek>(
                 field: "sample_count",
             });
         }
+        let declared_chunk_transitions_usize = usize::try_from(declared_chunk_transitions)
+            .map_err(|_| RenderTrajectoryCodecError::InvalidChunk {
+                chunk: chunk_index,
+                field: "transition_count",
+            })?;
+        let maximum_chunk_transitions = expected_chunk_samples
+            .checked_mul(MAX_RENDER_TRANSITIONS_PER_SAMPLE)
+            .unwrap_or(usize::MAX);
+        let remaining_declared_transitions = usize::try_from(header.plan.transition_count)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(observed_transitions);
+        let remaining_budget_transitions = budget
+            .max_total_transitions
+            .saturating_sub(observed_transitions);
+        if declared_chunk_transitions_usize > maximum_chunk_transitions
+            || declared_chunk_transitions_usize > remaining_declared_transitions
+            || declared_chunk_transitions_usize > remaining_budget_transitions
+        {
+            return Err(RenderTrajectoryCodecError::InvalidChunk {
+                chunk: chunk_index,
+                field: "transition_count",
+            });
+        }
         let payload_len = usize::try_from(payload_len_u64).map_err(|_| {
             RenderTrajectoryCodecError::InvalidLength {
                 field: "chunk.payload_len",
@@ -2366,17 +2437,10 @@ fn preflight<R: Read + Seek>(
             }
         })?;
         let mut expected_chunk_fingerprint_bytes = [0u8; 32];
-        input.prefix(
-            &mut expected_chunk_fingerprint_bytes,
-            "chunk fingerprint",
-        )?;
+        input.prefix(&mut expected_chunk_fingerprint_bytes, "chunk fingerprint")?;
         let expected_chunk_fingerprint = ContentHash(expected_chunk_fingerprint_bytes);
         let payload_offset = input.offset;
-        let mut payload = allocate_bytes(
-            payload_len,
-            MAX_CHUNK_PAYLOAD_BYTES,
-            "chunk payload",
-        )?;
+        let mut payload = allocate_bytes(payload_len, MAX_CHUNK_PAYLOAD_BYTES, "chunk payload")?;
         input.prefix(&mut payload, "chunk payload")?;
         let mut chunk_hasher = DomainHasher::new(EULER_RENDER_TRAJECTORY_CHUNK_FINGERPRINT_DOMAIN);
         chunk_hasher.update(&descriptor);
@@ -2407,8 +2471,7 @@ fn preflight<R: Read + Seek>(
             }
             let record_offset = payload_decoder
                 .base_offset
-                .checked_add(u64::try_from(payload_decoder.position).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX);
+                .saturating_add(u64::try_from(payload_decoder.position).unwrap_or(u64::MAX));
             let record = payload_decoder.take(record_len, "sample record")?;
             let sample = decode_sample(record, record_offset)?;
             chunk_transitions = chunk_transitions
@@ -2425,6 +2488,23 @@ fn preflight<R: Read + Seek>(
                     value: u64::MAX,
                     maximum: u64::from(header.plan.transition_count),
                 })?;
+            if chunk_transitions > declared_chunk_transitions_usize {
+                return Err(RenderTrajectoryCodecError::InvalidChunk {
+                    chunk: chunk_index,
+                    field: "transition_count",
+                });
+            }
+            if observed_transitions
+                > usize::try_from(header.plan.transition_count).unwrap_or(usize::MAX)
+                || observed_transitions > budget.max_total_transitions
+            {
+                return Err(RenderTrajectoryCodecError::InvalidLength {
+                    field: "transition count",
+                    value: u64::try_from(observed_transitions).unwrap_or(u64::MAX),
+                    maximum: u64::from(header.plan.transition_count)
+                        .min(u64::try_from(budget.max_total_transitions).unwrap_or(u64::MAX)),
+                });
+            }
             observed_first_time.get_or_insert(sample.time_s);
             observed_last_time = Some(sample.time_s);
             observed_terminal_tag = Some(disposition_encoding(sample.disposition).0);
@@ -2511,6 +2591,7 @@ fn decode_sample_inputs<R: Read + Seek>(
     budget: RenderTrajectoryCodecBudget,
     checkpoint: &mut impl FnMut() -> Result<(), RenderTrajectoryCodecError>,
 ) -> Result<Vec<RenderTrajectorySampleInput>, RenderTrajectoryCodecError> {
+    checkpoint()?;
     let section_start = checked_absolute(start, preflight.sample_section_offset)?;
     seek(
         reader,
@@ -2524,13 +2605,14 @@ fn decode_sample_inputs<R: Read + Seek>(
             maximum: u64::try_from(budget.max_samples).unwrap_or(u64::MAX),
         }
     })?;
+    checkpoint()?;
     let mut inputs = Vec::new();
-    inputs.try_reserve_exact(sample_count).map_err(|_| {
-        RenderTrajectoryCodecError::Capacity {
+    inputs
+        .try_reserve_exact(sample_count)
+        .map_err(|_| RenderTrajectoryCodecError::Capacity {
             artifact: "render trajectory sample inputs",
             requested: u64::try_from(sample_count).unwrap_or(u64::MAX),
-        }
-    })?;
+        })?;
     let mut relative_offset = preflight.sample_section_offset;
     for expected_chunk_index in 0..preflight.header.plan.chunk_count {
         checkpoint()?;
@@ -2576,11 +2658,7 @@ fn decode_sample_inputs<R: Read + Seek>(
                 maximum: u64::try_from(MAX_CHUNK_PAYLOAD_BYTES).unwrap_or(u64::MAX),
             }
         })?;
-        let mut payload = allocate_bytes(
-            payload_len,
-            MAX_CHUNK_PAYLOAD_BYTES,
-            "chunk payload",
-        )?;
+        let mut payload = allocate_bytes(payload_len, MAX_CHUNK_PAYLOAD_BYTES, "chunk payload")?;
         let payload_offset = relative_offset;
         read_exact(reader, &mut payload, "chunk payload", payload_offset)?;
         relative_offset = checked_len_add(
@@ -2607,8 +2685,7 @@ fn decode_sample_inputs<R: Read + Seek>(
             }
             let record_offset = payload_decoder
                 .base_offset
-                .checked_add(u64::try_from(payload_decoder.position).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX);
+                .saturating_add(u64::try_from(payload_decoder.position).unwrap_or(u64::MAX));
             let record = payload_decoder.take(record_len, "sample record")?;
             inputs.push(decode_sample(record, record_offset)?);
         }
@@ -2690,11 +2767,25 @@ fn decode_from_reader<R: Read + Seek>(
     let preflight = preflight(reader, budget, start, available, checkpoint)?;
     checkpoint()?;
     let inputs = decode_sample_inputs(reader, start, &preflight, budget, checkpoint)?;
-    let trajectory = RenderTrajectory::try_new(preflight.metadata.clone(), inputs)?;
+    let Preflight {
+        header,
+        metadata,
+        declared_discontinuities,
+        sample_section_offset: _,
+        receipt,
+    } = preflight;
+    let trajectory = RenderTrajectory::try_new_canonical(metadata, inputs, &mut || {
+        checkpoint().map_err(|_| RenderTrajectoryError::Cancelled)
+    })
+    .map_err(|error| match error {
+        RenderTrajectoryError::Cancelled => RenderTrajectoryCodecError::Cancelled,
+        error => RenderTrajectoryCodecError::Trajectory(error),
+    })?;
     validate_context(
-        preflight.header.source_campaign_identity,
+        header.source_campaign_identity,
         &trajectory,
-        &preflight.declared_discontinuities,
+        &declared_discontinuities,
+        checkpoint,
     )?;
 
     seek(reader, SeekFrom::Start(start), "seek canonical comparison")?;
@@ -2702,25 +2793,25 @@ fn decode_from_reader<R: Read + Seek>(
         let mut comparison = CompareWriter::new(reader);
         let receipt = encode_to_writer(
             &trajectory,
-            preflight.header.source_campaign_identity,
-            &preflight.declared_discontinuities,
+            header.source_campaign_identity,
+            &declared_discontinuities,
             budget,
             &mut comparison,
             checkpoint,
         )?;
         (receipt, comparison.mismatch, comparison.compared)
     };
-    if mismatch || compared != preflight.header.plan.total_len {
+    if mismatch || compared != header.plan.total_len {
         return Err(RenderTrajectoryCodecError::NonCanonical);
     }
-    if canonical_receipt != preflight.receipt {
+    if canonical_receipt != receipt {
         return Err(RenderTrajectoryCodecError::ReceiptMismatch);
     }
     checkpoint()?;
     Ok(EulerRenderTrajectoryArtifact {
         trajectory,
-        source_campaign_identity: preflight.header.source_campaign_identity,
-        declared_discontinuities: preflight.declared_discontinuities,
-        receipt: preflight.receipt,
+        source_campaign_identity: header.source_campaign_identity,
+        declared_discontinuities,
+        receipt,
     })
 }

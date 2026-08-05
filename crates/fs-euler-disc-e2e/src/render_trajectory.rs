@@ -27,6 +27,7 @@ const UNIT_TOLERANCE: f64 = 1.0e-12;
 const DERIVED_QOI_TOLERANCE: f64 = 1.0e-9;
 const MAX_TEXT_BYTES: usize = 1024;
 const INTERVAL_END_ULP_TOLERANCE: u64 = 32;
+const TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES: usize = 1_024;
 
 /// Frozen v1 world-frame convention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -437,6 +438,26 @@ impl RenderTrajectory {
         metadata: RenderTrajectoryMetadata,
         inputs: Vec<RenderTrajectorySampleInput>,
     ) -> Result<Self, RenderTrajectoryError> {
+        Self::try_new_with_policy(metadata, inputs, false, &mut || Ok(()))
+    }
+
+    /// Re-admit canonical wire components without renormalizing quaternions,
+    /// polling the supplied cancellation boundary at a fixed sample cadence.
+    pub(crate) fn try_new_canonical(
+        metadata: RenderTrajectoryMetadata,
+        inputs: Vec<RenderTrajectorySampleInput>,
+        checkpoint: &mut impl FnMut() -> Result<(), RenderTrajectoryError>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        Self::try_new_with_policy(metadata, inputs, true, checkpoint)
+    }
+
+    fn try_new_with_policy(
+        metadata: RenderTrajectoryMetadata,
+        inputs: Vec<RenderTrajectorySampleInput>,
+        canonical_quaternions: bool,
+        checkpoint: &mut impl FnMut() -> Result<(), RenderTrajectoryError>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        checkpoint()?;
         validate_metadata(&metadata)?;
         if inputs.is_empty() {
             return Err(RenderTrajectoryError::EmptyTrajectory);
@@ -447,16 +468,25 @@ impl RenderTrajectory {
 
         let sample_count = inputs.len();
         let mut samples = Vec::new();
-        samples.try_reserve_exact(sample_count).map_err(|_| {
-            RenderTrajectoryError::Capacity {
+        samples
+            .try_reserve_exact(sample_count)
+            .map_err(|_| RenderTrajectoryError::Capacity {
                 artifact: "render trajectory samples",
                 requested: sample_count,
-            }
-        })?;
+            })?;
         let mut previous_time = None;
         let mut previous_branch = None;
         for (index, input) in inputs.into_iter().enumerate() {
-            let sample = validate_sample(&metadata, input, index, previous_time)?;
+            if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
+                checkpoint()?;
+            }
+            let sample = validate_sample(
+                &metadata,
+                input,
+                index,
+                previous_time,
+                canonical_quaternions,
+            )?;
             validate_transition_origin(&sample.input, previous_branch, index)?;
             previous_time = Some(sample.input.time_s);
             previous_branch = Some(sample.input.contact_branch);
@@ -472,6 +502,7 @@ impl RenderTrajectory {
         {
             return Err(RenderTrajectoryError::MissingFinalDisposition);
         }
+        checkpoint()?;
         Ok(Self { metadata, samples })
     }
 
@@ -491,6 +522,8 @@ impl RenderTrajectory {
 /// Structured refusal from trajectory admission.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderTrajectoryError {
+    /// A cancellation-aware admission caller requested an early stop.
+    Cancelled,
     /// Only the exact v1 schema is currently accepted.
     UnsupportedSchemaVersion(u16),
     /// Only right-handed `+z`-up coordinates are admitted by v1.
@@ -766,6 +799,7 @@ fn validate_sample(
     mut input: RenderTrajectorySampleInput,
     index: usize,
     previous_time: Option<f64>,
+    canonical_quaternion: bool,
 ) -> Result<RenderTrajectorySample, RenderTrajectoryError> {
     if input.world_frame != metadata.world_frame {
         return Err(RenderTrajectoryError::FrameMismatch(index));
@@ -806,7 +840,8 @@ fn validate_sample(
         index,
         "angular_momentum_body_kg_m2_per_s",
     )?;
-    let orientation = checked_unit_quaternion(input.orientation_body_to_world, index)?;
+    let orientation =
+        checked_unit_quaternion(input.orientation_body_to_world, index, canonical_quaternion)?;
     input.orientation_body_to_world = orientation.components();
     let pose = Pose::new(input.center_of_mass_world_m, orientation)
         .map_err(|error| RenderTrajectoryError::InvalidRigidState(index, error.to_string()))?;
@@ -864,6 +899,7 @@ fn validate_sample(
 fn checked_unit_quaternion(
     components: [f64; 4],
     index: usize,
+    canonical: bool,
 ) -> Result<UnitQuaternion, RenderTrajectoryError> {
     if components.iter().any(|component| !component.is_finite()) {
         return Err(RenderTrajectoryError::NonFinite {
@@ -887,8 +923,12 @@ fn checked_unit_quaternion(
     if !norm.is_finite() || (norm - 1.0).abs() > UNIT_TOLERANCE {
         return Err(RenderTrajectoryError::QuaternionNotUnit(index));
     }
-    UnitQuaternion::new(components[0], components[1], components[2], components[3])
-        .map_err(|error| RenderTrajectoryError::InvalidRigidState(index, error.to_string()))
+    let admitted = if canonical {
+        UnitQuaternion::from_canonical_components(components)
+    } else {
+        UnitQuaternion::new(components[0], components[1], components[2], components[3])
+    };
+    admitted.map_err(|error| RenderTrajectoryError::InvalidRigidState(index, error.to_string()))
 }
 
 fn advance_nonnegative_ulps(value: f64, ulps: u64) -> f64 {
