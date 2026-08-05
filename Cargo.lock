@@ -1209,6 +1209,7 @@ dependencies = [
  "fs-flux",
  "fs-geom",
  "fs-govern",
+ "fs-img",
  "fs-ir",
  "fs-mbd",
  "fs-render",

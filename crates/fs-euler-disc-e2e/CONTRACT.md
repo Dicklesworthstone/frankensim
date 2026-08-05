@@ -888,17 +888,60 @@ macro timestep, and never relaxes strict retained-sample time ordering.
 This schema retains accepted public state rather than every integrator stage.
 It performs no interpolation, hidden-state reconstruction, calibration, or
 physical-authority promotion. Its `f64` times are exact producer values whose
-bit patterns must be preserved by the later codec. Canonical encoding,
-content-addressed identity, decoding, migration, and replay are intentionally
-owned by the dependent trajectory-codec bead rather than being approximated in
-this semantic layer. The focused G0/G3 tests cover valid construction,
-quaternion double-cover canonicalization, quaternion/time/frame/unit/contact/
-base/terminal/QoI refusals, localized brackets, component identities, and
-rigid world translation plus `+z` rotation invariance of intrinsic QoIs. Direct
+bit patterns are preserved by `render_trajectory_codec`. The focused G0/G3
+tests cover valid construction, quaternion double-cover canonicalization,
+quaternion/time/frame/unit/contact/base/terminal/QoI refusals, localized
+brackets, component identities, and rigid world translation plus `+z` rotation
+invariance of intrinsic QoIs. Direct
 runner E2E coverage additionally checks full-state/checkpoint equality,
 configuration binding, uninterrupted-versus-resumed sample equality, a resolved
 1 mm filleted profile, localized terminal admission, prohibited-reimpact
 publication, and refusal-checkpoint restart behavior.
+
+`render_trajectory_codec` v1 is the canonical durable transport for that
+admitted boundary. It binds a caller-supplied nonzero campaign/operation
+content identity, the complete trajectory metadata and raw accepted sample
+inputs, and ordered producer-declared timeline seams. It does not serialize
+derived visualization points, audio intervals, resampled poses, or artistic
+controls: those are deterministically regenerated from the decoded trajectory
+under the control-stream and timeline-resampler versions pinned in the wire
+header. This single-source rule prevents derived data from silently disagreeing
+with the authoritative accepted state.
+
+The wire format uses raw little-endian binary64 bits, a fixed 1,024-sample
+chunk policy, length-prefixed sample records, a domain-separated fingerprint
+for each chunk, an embedded domain-separated fingerprint for the complete
+prefix, and an out-of-band domain-separated identity for the complete artifact
+including its fingerprint trailer. The fixed header binds the trajectory,
+control-stream, timeline-resampler, interpolation, floating-point, and chunking
+versions; sample/transition/chunk counts; exact first and last sample times;
+terminal disposition; frame, units, channel availability; and source campaign
+identity. Unknown versions, tags, nonzero reserved fields, noncanonical chunk
+order or sizing, trailing bytes, truncation, digest mismatch, and a caller's
+expected-root mismatch refuse with typed errors.
+
+Callers provide explicit byte, sample, aggregate-transition, and aggregate-text
+budgets beneath hard schema ceilings. Seekable decoding first verifies the
+complete envelope and every bounded chunk without retaining the sample corpus,
+then allocates and decodes admitted sample inputs, re-runs
+canonical `RenderTrajectory` admission without renormalizing already-canonical
+quaternion bits, validates every declared seam against exact source sample
+times, and streams a canonical re-encoding against the original bytes.
+Only that exact byte fixed point becomes an `EulerRenderTrajectoryArtifact`.
+The decoder leaves no partially accepted artifact on cancellation or refusal;
+streaming encode/decode still uses bounded per-chunk buffers and polls the
+execution scope at chunk, seam, semantic-admission, allocation, and final
+publication boundaries. Convenience in-memory encoding is only for callers
+whose explicit artifact budget makes a monolithic buffer suitable.
+
+The transport preserves `SimulationEvidence`; integrity and content identity
+are not experimental calibration, cryptographic authentication, physical
+validation, cross-ISA floating-point equivalence, or proof that the reduced
+contact/aerodynamic/base models match a real Euler disc. A producer restart is
+not automatically declared a discontinuity: the composer supplies a seam only
+when continuity is not warranted, allowing semantically identical uninterrupted
+and checkpoint-resumed trajectories to share canonical bytes when their raw
+accepted states and declared composition are identical.
 
 `control_stream` v1 derives synchronized raw rendering and sound controls from
 that admitted boundary. `VisualizationControlPoint` is point sampled at an
@@ -1030,6 +1073,81 @@ unsplit sampling of a multi-segment exposure. The raw absolute-time resampling
 API remains available for expert non-exposure queries and does not apply
 shutter admission or event policy. Downstream weighted image accumulation over
 explicitly selected segments remains a separate composition responsibility.
+
+## Animated Euler scene bridge v1
+
+The opt-in `cinematic-render` feature composes one decoded
+`EulerRenderTrajectoryArtifact`, its exact `ResolvedDiscProfile`, a physical
+camera timeline, and declared visual configuration into a renderable scene.
+Admission recomputes strong domain-separated identities for the complete
+ordered line/arc meridian, density-bound profile, and resolved mass properties;
+all three must exactly match trajectory metadata. The bridge also checks SI
+metres/radians, the center-of-mass mass reference, object-ID uniqueness, and
+camera coverage over the accepted trajectory horizon. Every retained signed
+gap is recomputed from the bound exact chart at the retained pose and displaced
+base plane; closed samples must additionally reproduce the exact support point
+and profile feature and align their normal with the base. Camera depth admission
+uses conservative subject bounds over the full animated horizon, including
+cubic-Hermite Bezier translation controls and arbitrary rotation, rather than
+endpoint positions alone. The bridge also applies an explicit temporal
+angular-sampling ceiling. The angular guard takes the larger
+of endpoint angular-speed times sample duration and the retained quaternion's
+shortest-arc separation. It is an alias diagnostic, not a proof that the source
+contains every intervening revolution or mechanical frequency.
+
+`AxisymmetricChart` intentionally carries no certified tracing claim, and the
+production tracer correctly refuses to interpret it as certified ray geometry.
+The bridge therefore performs one bounded, deterministic visualization-only
+surface-of-revolution conversion from the chart's exact retained line and
+circular-arc segments. Circular arcs use a fixed declared number of equal-angle
+chords; azimuth uses a fixed declared ring resolution. The output mesh is
+centered at the resolved center of mass before the trajectory transform is
+applied, so construction origin and COM cannot be silently conflated. Its
+receipt binds the exact source chart, resolution, canonical vertices and
+triangles, topology counts, local bounds, chord-sagitta diagnostics, and a BVH
+layout fingerprint. These are approximation and replay diagnostics, not a
+watertightness, Hausdorff, shading-normal, or direct-chart intersection
+certificate. Mechanics, contact, support, mass, and inertia continue to use the
+original resolved chart rather than the render mesh.
+
+The emitted beauty scene uses stable semantic indices and object IDs for the
+animated disc and base plate, static housing, and one rectangular emitter. A
+configured contact marker has a separate identity/receipt and is absent from
+all beauty scene and frame APIs; only the explicitly named static diagnostic
+scene/render APIs append it after the beauty primitives. The
+plate follows the reduced base's local `+z` displacement and velocity composed
+with its nominal rigid frame; the housing remains attached to the nominal base
+frame. Plate and housing dimensions are declared visual inputs and remain
+representative unless separately bound to measured apparatus geometry. The
+current frontier tracer provides opaque Lambertian and GGX surfaces plus one
+rectangular area light, so the reference plate is explicitly an opaque polished
+surrogate rather than dielectric glass. True glass transmission, conductor
+optics, layered engraving/brushing, environment lighting, and final studio look
+development remain downstream capabilities.
+
+Frame requests resolve their shutter and contact/event policy before tracing.
+A zero-width request renders one exact time. A positive exposure crossing a
+retained event either refuses or yields ordered event-delimited shutters with
+explicit duration weights. Their films remain separate: v1 will not fabricate
+sample-count or time-mode provenance by silently combining them. Producer-
+declared continuation/discontinuity seams currently refuse scene construction
+because this instance representation cannot encode trustworthy one-sided
+transform keyframes. Camera gaps and poses wholly outside the trajectory
+horizon are irrelevant; source times and in-horizon camera keyframes must meet
+the declared near/far depth admission. Those depths are validation requirements
+over scene bounds, not tracer clipping planes.
+
+Focused G0/G3/E2E coverage builds the scene from a real 1 mm circular-filleted
+disc, checks deterministic scene and mesh identities, COM/base transforms,
+fillet chord retention, stable primitive binding, authority preservation,
+restyling identity separation, and irrelevant camera-history isolation. It
+also exercises asset/unit/angular/discontinuity/cancellation refusals and
+explicit pre/post-event segment renders. A tiny real spectral-path-traced frame
+must contain finite illuminated spatial variation, reproduce byte-exactly on
+the same cinematic path, agree tightly with the materialized static seam, and
+round-trip through the in-house floating-point EXR codec. This evidence proves
+the software composition path, not the physical fidelity or 4K quality of a
+finished Euler-disc film.
 
 ## No-claim boundaries
 

@@ -13,6 +13,10 @@ layer = "L6"
 [features]
 default = ["scientific-contract"]
 scientific-contract = ["dep:fs-ir"]
+# [F] The spectral tracer remains opt-in. The scene bridge is real product
+# code, but enabling it must not silently promote fs-render's frontier tracer
+# into the default scientific-contract path.
+cinematic-render = ["fs-render/tracer"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
@@ -31,6 +35,13 @@ fs-solid = { path = "../fs-solid" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 fs-alloc = { path = "../fs-alloc" }
+
+[dev-dependencies]
+fs-img = { path = "../fs-img" }
+
+[[test]]
+name = "render_scene_bridge"
+required-features = ["cinematic-render"]
 
 [lints]
 workspace = true
