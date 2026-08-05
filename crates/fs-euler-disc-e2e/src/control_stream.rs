@@ -536,16 +536,20 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         let mut cursor = 0;
         while cursor < self.audio.len() {
             cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
-            if !self.audio[cursor]
-                .visual_coverage
-                .is_fully_bracketed()
-            {
-                bins.push(coarsen_group(&self.audio[cursor..=cursor], false, cx)?);
+            if !self.audio[cursor].visual_coverage.is_fully_bracketed() {
+                let event_barrier = !self.audio[cursor].events.is_empty();
+                push_coarsened_bin(
+                    &mut bins,
+                    coarsen_group(&self.audio[cursor..=cursor], event_barrier, cx)?,
+                )?;
                 cursor += 1;
                 continue;
             }
             if !self.audio[cursor].events.is_empty() {
-                bins.push(coarsen_group(&self.audio[cursor..=cursor], true, cx)?);
+                push_coarsened_bin(
+                    &mut bins,
+                    coarsen_group(&self.audio[cursor..=cursor], true, cx)?,
+                )?;
                 cursor += 1;
                 continue;
             }
@@ -557,16 +561,16 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                 cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
                 cursor += 1;
             }
-            bins.push(coarsen_group(&self.audio[start..cursor], false, cx)?);
+            push_coarsened_bin(
+                &mut bins,
+                coarsen_group(&self.audio[start..cursor], false, cx)?,
+            )?;
         }
         cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
         let represented =
             coarsened_work_checks(&bins, self.source.metadata().channel_availability, cx)?;
-        let last_sample = bins
-            .last()
-            .map_or(0, |bin| bin.last_source_sample_index);
-        let reconciliation =
-            reconcile_against_raw(self.reconciliation, represented, last_sample)?;
+        let last_sample = bins.last().map_or(0, |bin| bin.last_source_sample_index);
+        let reconciliation = reconcile_against_raw(self.reconciliation, represented, last_sample)?;
         Ok(CoarsenedAudioControls {
             source: self.source,
             filter: AudioControlFilter::WholeIntervalBoxcarV1,
@@ -650,11 +654,10 @@ impl<'trajectory> CoarsenedAudioControls<'trajectory> {
     /// exactly retained.
     #[must_use]
     pub fn fully_bracketed_bins(&self) -> &[CoarsenedAudioBin] {
-        let first = self
-            .bins
-            .first()
-            .is_some_and(|bin| !bin.visual_coverage.is_fully_bracketed())
-            as usize;
+        let first =
+            self.bins
+                .first()
+                .is_some_and(|bin| !bin.visual_coverage.is_fully_bracketed()) as usize;
         &self.bins[first..]
     }
 
@@ -912,6 +915,21 @@ fn coarsen_group(
     })
 }
 
+fn push_coarsened_bin(
+    bins: &mut Vec<CoarsenedAudioBin>,
+    bin: CoarsenedAudioBin,
+) -> Result<(), ControlStreamError> {
+    if bins.len() == bins.capacity() {
+        bins.try_reserve(1)
+            .map_err(|_| ControlStreamError::Capacity {
+                artifact: "coarsened audio bins",
+                requested: bins.len().saturating_add(1),
+            })?;
+    }
+    bins.push(bin);
+    Ok(())
+}
+
 fn aggregate_channel_sets(
     intervals: &[AudioControlInterval],
     duration_s: f64,
@@ -1059,20 +1077,8 @@ impl ChannelWorkAccumulators {
             sample,
             "rolling",
         )?;
-        accumulate_channel_work(
-            &mut self.base,
-            channels.base,
-            duration_s,
-            sample,
-            "base",
-        )?;
-        accumulate_channel_work(
-            &mut self.gas,
-            channels.gas,
-            duration_s,
-            sample,
-            "gas",
-        )
+        accumulate_channel_work(&mut self.base, channels.base, duration_s, sample, "base")?;
+        accumulate_channel_work(&mut self.gas, channels.gas, duration_s, sample, "gas")
     }
 
     fn finish(self, sample: usize) -> Result<ChannelWorkIntegralChecks, ControlStreamError> {

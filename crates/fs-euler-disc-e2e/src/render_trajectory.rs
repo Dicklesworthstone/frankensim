@@ -879,7 +879,12 @@ fn advance_nonnegative_ulps(value: f64, ulps: u64) -> f64 {
     if value.is_infinite() {
         value
     } else {
-        f64::from_bits(value.to_bits().saturating_add(ulps))
+        f64::from_bits(
+            value
+                .to_bits()
+                .saturating_add(ulps)
+                .min(f64::INFINITY.to_bits()),
+        )
     }
 }
 

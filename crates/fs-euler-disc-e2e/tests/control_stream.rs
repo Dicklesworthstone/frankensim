@@ -451,6 +451,24 @@ fn opening_and_zero_force_reimpact_retain_timing_only_events_and_barriers() {
         default_base_frame(),
         RenderChannelAvailability::ALL_AVAILABLE,
     );
+    let mut eventful_preroll = sample(
+        0.0,
+        1.0,
+        RenderContactBranch::Open,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    eventful_preroll.interval_contact_active = true;
+    eventful_preroll.contact_transitions = vec![RenderContactTransition {
+        kind: ContactTransitionKind::Opening,
+        time_s: 0.5,
+        bracket_start_s: 0.49,
+        bracket_end_s: 0.51,
+    }];
+    let eventful_preroll_source = trajectory(
+        vec![eventful_preroll],
+        default_base_frame(),
+        RenderChannelAvailability::ALL_AVAILABLE,
+    );
     with_cx(false, |cx| {
         let controls = EulerControlStream::try_derive(&source, cx).unwrap();
         assert!(controls.audio()[1].interval_contact_active);
@@ -479,6 +497,18 @@ fn opening_and_zero_force_reimpact_retain_timing_only_events_and_barriers() {
         assert_eq!(
             coarse.bins()[2].events[0].kind,
             ContactTransitionKind::Opening
+        );
+
+        let preroll_controls =
+            EulerControlStream::try_derive(&eventful_preroll_source, cx).unwrap();
+        let preroll_coarse = preroll_controls
+            .boxcar_coarsen(NonZeroUsize::new(8).unwrap(), cx)
+            .unwrap();
+        assert!(preroll_coarse.bins()[0].event_barrier);
+        assert!(
+            !preroll_coarse.bins()[0]
+                .visual_coverage
+                .is_fully_bracketed()
         );
     });
 }
@@ -611,9 +641,7 @@ fn preroll_isolated_and_unequal_duration_controls_are_weighted_conservatively() 
         let contact = coarse.bins()[1].channels.contact.available().unwrap();
         assert_close(contact.mean_force_world_n.z, 4.5);
         assert_close(
-            coarse.bins()[1]
-                .mean_base_normal_contact_force_n
-                .unwrap(),
+            coarse.bins()[1].mean_base_normal_contact_force_n.unwrap(),
             4.5,
         );
         assert_close(contact.force_time_measure_world_n_s.z, 9.0);

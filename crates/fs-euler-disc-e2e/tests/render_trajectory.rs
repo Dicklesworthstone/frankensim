@@ -294,6 +294,20 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
     RenderTrajectory::try_new(runner_shaped_metadata, vec![runner_shaped])
         .expect("producer-shaped full step remains admitted at a large absolute clock");
 
+    let infinity_bits = f64::INFINITY.to_bits();
+    let mut near_maximum = sample(f64::MAX, RenderSampleDisposition::HorizonCensored);
+    near_maximum.interval_start_time_s = 0.0;
+    let mut near_maximum_metadata = metadata();
+    near_maximum_metadata.timestep_s = f64::from_bits(infinity_bits - 16);
+    RenderTrajectory::try_new(near_maximum_metadata, vec![near_maximum.clone()])
+        .expect("ULP tolerance clamps at positive infinity without producing NaN");
+    let mut overlong_near_maximum_metadata = metadata();
+    overlong_near_maximum_metadata.timestep_s = f64::from_bits(infinity_bits - 64);
+    assert_eq!(
+        RenderTrajectory::try_new(overlong_near_maximum_metadata, vec![near_maximum]).unwrap_err(),
+        RenderTrajectoryError::IntervalExceedsDeclaredTimestep(0)
+    );
+
     let mut point_with_interval_data = sample(0.01, RenderSampleDisposition::HorizonCensored);
     point_with_interval_data.interval_start_time_s = point_with_interval_data.time_s;
     point_with_interval_data.channels.gravity.work_j = 1.0;
@@ -317,8 +331,7 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
         RenderTrajectoryError::NegativeNormalForce(0)
     );
 
-    let mut inactive_closed_without_root =
-        sample(0.01, RenderSampleDisposition::HorizonCensored);
+    let mut inactive_closed_without_root = sample(0.01, RenderSampleDisposition::HorizonCensored);
     inactive_closed_without_root.contact_branch = RenderContactBranch::Closed;
     inactive_closed_without_root.signed_gap_m = 0.0;
     inactive_closed_without_root.contact_geometry = Some(RenderContactGeometry {
@@ -331,8 +344,7 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
         RenderTrajectoryError::InactiveContactHasIntervalData(0)
     );
 
-    let mut inactive_interior_reimpact =
-        sample(0.01, RenderSampleDisposition::HorizonCensored);
+    let mut inactive_interior_reimpact = sample(0.01, RenderSampleDisposition::HorizonCensored);
     inactive_interior_reimpact.contact_branch = RenderContactBranch::Closed;
     inactive_interior_reimpact.signed_gap_m = 0.0;
     inactive_interior_reimpact.contact_geometry = Some(RenderContactGeometry {
