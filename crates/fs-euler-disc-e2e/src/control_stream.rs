@@ -56,6 +56,37 @@ pub struct ControlContactEvent {
     pub measure: ContactEventMeasure,
 }
 
+/// Exact visualization endpoints available for an audio/control interval.
+///
+/// `start_visualization_index == None` identifies retained preroll: the
+/// interval's closing state is available, but its opening rigid/base/contact
+/// state was not retained by the source trajectory. Consumers must not animate
+/// that interval by silently substituting configuration metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AudioVisualCoverage {
+    /// Visualization point at the interval start, when exactly retained.
+    pub start_visualization_index: Option<usize>,
+    /// Visualization point at the interval end.
+    pub end_visualization_index: usize,
+}
+
+impl AudioVisualCoverage {
+    /// Whether both endpoints needed for synchronized motion are retained.
+    #[must_use]
+    pub const fn is_fully_bracketed(self) -> bool {
+        self.start_visualization_index.is_some()
+    }
+}
+
+/// Positive-duration clock range covered by both visualization and audio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioVisualHorizon {
+    /// First fully bracketed audio interval start [s].
+    pub start_time_s: f64,
+    /// Last fully bracketed audio interval end [s].
+    pub end_time_s: f64,
+}
+
 /// Contact coordinates and point velocity at one exact closed endpoint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactFrameCoordinates {
@@ -192,6 +223,8 @@ pub struct AudioControlInterval {
     pub end_time_s: f64,
     /// Exact positive duration [s].
     pub duration_s: f64,
+    /// Whether both visual endpoint states exist for this interval.
+    pub visual_coverage: AudioVisualCoverage,
     /// True when any accepted subinterval used the closed branch.
     pub interval_contact_active: bool,
     /// `+z_base` component of the duration-weighted mean contact force [N], or
@@ -237,8 +270,21 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         let mass = metadata.mass_properties.properties;
         let base_orientation = metadata.base_frame.orientation_base_to_world;
         let base_axis_world = base_orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
-        let mut visualization = Vec::with_capacity(source.samples().len());
-        let mut audio = Vec::with_capacity(source.samples().len());
+        let requested_controls = source.samples().len();
+        let mut visualization = Vec::new();
+        visualization
+            .try_reserve_exact(requested_controls)
+            .map_err(|_| ControlStreamError::Capacity {
+                artifact: "visualization controls",
+                requested: requested_controls,
+            })?;
+        let mut audio = Vec::new();
+        audio
+            .try_reserve_exact(requested_controls)
+            .map_err(|_| ControlStreamError::Capacity {
+                artifact: "audio controls",
+                requested: requested_controls,
+            })?;
         let mut work_accumulators = ChannelWorkAccumulators::new(metadata.channel_availability);
 
         for (sample_index, sample) in source.samples().iter().enumerate() {
@@ -357,6 +403,10 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                     start_time_s: input.interval_start_time_s,
                     end_time_s: input.time_s,
                     duration_s,
+                    visual_coverage: AudioVisualCoverage {
+                        start_visualization_index: sample_index.checked_sub(1),
+                        end_visualization_index: sample_index,
+                    },
                     interval_contact_active: input.interval_contact_active,
                     mean_base_normal_contact_force_n,
                     first_subinterval_midpoint_normal_force_n: input.interval_normal_force_n,
@@ -432,6 +482,30 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         &self.audio
     }
 
+    /// Audio intervals whose opening and closing visualization states are both
+    /// exact retained points. At most the first raw interval is omitted as
+    /// endpoint-only preroll.
+    #[must_use]
+    pub fn fully_bracketed_audio(&self) -> &[AudioControlInterval] {
+        let first = self
+            .audio
+            .first()
+            .is_some_and(|interval| !interval.visual_coverage.is_fully_bracketed())
+            as usize;
+        &self.audio[first..]
+    }
+
+    /// Common positive-duration visualization/audio clock range, or `None`
+    /// when the source contains only a point or endpoint-only preroll.
+    #[must_use]
+    pub fn audio_visual_horizon(&self) -> Option<AudioVisualHorizon> {
+        let synchronized = self.fully_bracketed_audio();
+        Some(AudioVisualHorizon {
+            start_time_s: synchronized.first()?.start_time_s,
+            end_time_s: synchronized.last()?.end_time_s,
+        })
+    }
+
     /// Checks that raw mean work rates integrate back to the exact retained
     /// per-channel work.
     #[must_use]
@@ -452,7 +526,13 @@ impl<'trajectory> EulerControlStream<'trajectory> {
         if self.audio.is_empty() {
             return Err(ControlStreamError::NoPositiveDurationIntervals);
         }
-        let mut bins = Vec::with_capacity(self.audio.len().div_ceil(intervals_per_bin.get()));
+        let requested_bins = self.audio.len().div_ceil(intervals_per_bin.get());
+        let mut bins = Vec::new();
+        bins.try_reserve_exact(requested_bins)
+            .map_err(|_| ControlStreamError::Capacity {
+                artifact: "coarsened audio bins",
+                requested: requested_bins,
+            })?;
         let mut cursor = 0;
         while cursor < self.audio.len() {
             cx.checkpoint().map_err(|_| ControlStreamError::Cancelled)?;
@@ -502,6 +582,8 @@ pub struct CoarsenedAudioBin {
     pub end_time_s: f64,
     /// Positive bin duration [s].
     pub duration_s: f64,
+    /// Visualization endpoint coverage inherited from the source intervals.
+    pub visual_coverage: AudioVisualCoverage,
     /// True when any source interval used the closed contact branch.
     pub interval_contact_active: bool,
     /// Duration-weighted mean normal contact force [N], or unavailable.
@@ -538,7 +620,7 @@ impl<'trajectory> CoarsenedAudioControls<'trajectory> {
         core::ptr::eq(self.source, source)
     }
 
-    /// Declared anti-alias filter.
+    /// Declared boxcar prefilter/coarsening rule.
     #[must_use]
     pub const fn filter(&self) -> AudioControlFilter {
         self.filter
@@ -554,6 +636,29 @@ impl<'trajectory> CoarsenedAudioControls<'trajectory> {
     #[must_use]
     pub fn bins(&self) -> &[CoarsenedAudioBin] {
         &self.bins
+    }
+
+    /// Coarsened bins whose opening and closing visualization states are both
+    /// exactly retained.
+    #[must_use]
+    pub fn fully_bracketed_bins(&self) -> &[CoarsenedAudioBin] {
+        let first = self
+            .bins
+            .first()
+            .is_some_and(|bin| !bin.visual_coverage.is_fully_bracketed())
+            as usize;
+        &self.bins[first..]
+    }
+
+    /// Common positive-duration visualization/audio clock range after
+    /// coarsening, or `None` when every bin includes endpoint-only preroll.
+    #[must_use]
+    pub fn audio_visual_horizon(&self) -> Option<AudioVisualHorizon> {
+        let synchronized = self.fully_bracketed_bins();
+        Some(AudioVisualHorizon {
+            start_time_s: synchronized.first()?.start_time_s,
+            end_time_s: synchronized.last()?.end_time_s,
+        })
     }
 
     /// Reconciliation of coarsened signed work against raw retained work.
@@ -609,11 +714,18 @@ impl ChannelWorkIntegralChecks {
     }
 }
 
-/// Typed refusal from control derivation or anti-aliased coarsening.
+/// Typed refusal from control derivation or boxcar coarsening.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlStreamError {
     /// Cancellation was observed before atomic publication.
     Cancelled,
+    /// The allocator refused an explicitly preflighted output capacity.
+    Capacity {
+        /// Output collection being constructed.
+        artifact: &'static str,
+        /// Requested element capacity.
+        requested: usize,
+    },
     /// An admitted sample unexpectedly lacked its mandatory reduced-base state.
     MissingBaseState(usize),
     /// A checked rigid-body derivation refused.
@@ -780,6 +892,10 @@ fn coarsen_group(
         start_time_s: first.start_time_s,
         end_time_s: last.end_time_s,
         duration_s,
+        visual_coverage: AudioVisualCoverage {
+            start_visualization_index: first.visual_coverage.start_visualization_index,
+            end_visualization_index: last.visual_coverage.end_visualization_index,
+        },
         interval_contact_active,
         mean_base_normal_contact_force_n,
         channels,

@@ -282,6 +282,18 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
         RenderTrajectoryError::IntervalExceedsDeclaredTimestep(0)
     );
 
+    let large_clock_start_s = 100.0;
+    let timestep_s = 2.0e-5;
+    let mut runner_shaped = sample(
+        large_clock_start_s + timestep_s,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    runner_shaped.interval_start_time_s = large_clock_start_s;
+    let mut runner_shaped_metadata = metadata();
+    runner_shaped_metadata.timestep_s = timestep_s;
+    RenderTrajectory::try_new(runner_shaped_metadata, vec![runner_shaped])
+        .expect("producer-shaped full step remains admitted at a large absolute clock");
+
     let mut point_with_interval_data = sample(0.01, RenderSampleDisposition::HorizonCensored);
     point_with_interval_data.interval_start_time_s = point_with_interval_data.time_s;
     point_with_interval_data.channels.gravity.work_j = 1.0;

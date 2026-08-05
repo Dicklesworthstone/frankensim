@@ -26,6 +26,7 @@ pub const MAX_RENDER_TRAJECTORY_NO_CLAIMS: usize = 64;
 const UNIT_TOLERANCE: f64 = 1.0e-12;
 const DERIVED_QOI_TOLERANCE: f64 = 1.0e-9;
 const MAX_TEXT_BYTES: usize = 1024;
+const INTERVAL_END_ULP_TOLERANCE: u64 = 32;
 
 /// Frozen v1 world-frame convention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -767,9 +768,9 @@ fn validate_sample(
     {
         return Err(RenderTrajectoryError::InvalidIntervalStart(index));
     }
-    let interval_duration_s = input.time_s - input.interval_start_time_s;
-    let timestep_excess_s = interval_duration_s - metadata.timestep_s;
-    if timestep_excess_s > metadata.timestep_s * UNIT_TOLERANCE {
+    let declared_end_s = input.interval_start_time_s + metadata.timestep_s;
+    let maximum_end_s = advance_nonnegative_ulps(declared_end_s, INTERVAL_END_ULP_TOLERANCE);
+    if input.time_s > maximum_end_s {
         return Err(RenderTrajectoryError::IntervalExceedsDeclaredTimestep(
             index,
         ));
@@ -872,6 +873,14 @@ fn checked_unit_quaternion(
     }
     UnitQuaternion::new(components[0], components[1], components[2], components[3])
         .map_err(|error| RenderTrajectoryError::InvalidRigidState(index, error.to_string()))
+}
+
+fn advance_nonnegative_ulps(value: f64, ulps: u64) -> f64 {
+    if value.is_infinite() {
+        value
+    } else {
+        f64::from_bits(value.to_bits().saturating_add(ulps))
+    }
 }
 
 fn validate_contact(
