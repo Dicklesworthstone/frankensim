@@ -1044,7 +1044,8 @@ fn cinematic_exr_attributes(
     );
     if let Some(policy) = binding.adaptive_policy {
         push(
-            "frankensim.render.adaptivePolicy",
+            // OpenEXR attribute names are limited to 31 UTF-8 bytes.
+            "frankensim.render.adaptive",
             format!(
                 "version={ADAPTIVE_SAMPLING_SEMANTICS_VERSION};minimum={};batch={};absolute={};relative={};darkFloor={}",
                 policy.minimum_samples(),

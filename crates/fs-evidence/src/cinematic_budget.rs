@@ -54,12 +54,21 @@ pub enum DenoisePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AovPreset {
-    /// XYZ beauty only.
+    /// Three linear-sRGB beauty planes: `R`, `G`, and `B`.
     BeautyXyz = 0,
-    /// Beauty, albedo, normal, depth, primary coverage, variance, and motion.
+    /// Fourteen planes: linear-sRGB beauty (`R`, `G`, `B`), linear-sRGB
+    /// albedo (`albedo.R`, `albedo.G`, `albedo.B`), world shading normal
+    /// (`normal.X`, `normal.Y`, `normal.Z`), axial depth in metres
+    /// (`depth.Z`), primary-hit coverage (`primary.coverage`), raw CIE-Y
+    /// sample variance (`variance.Y`), and current-to-previous raster motion
+    /// in pixels (`motion.prev.X`, `motion.prev.Y`).
     DailyCore = 1,
-    /// Daily core plus geometric normal, direct, indirect, emission, object and
-    /// material IDs, sample count, and validity.
+    /// Thirty planes: the complete fourteen-plane daily core plus world
+    /// geometric normal (`normal_geom.X`, `normal_geom.Y`, `normal_geom.Z`),
+    /// linear-sRGB direct, indirect, and camera-visible emission splits
+    /// (three planes each), exact-palette object and material indices
+    /// (`id.object`, `id.material`), accepted sample count (`samples`), and
+    /// diagnostic validity flags (`diagnostic.validity`).
     FinalDiagnostic = 2,
 }
 
