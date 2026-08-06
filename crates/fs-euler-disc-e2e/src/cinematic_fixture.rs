@@ -60,8 +60,8 @@ use crate::{
     },
     measure_audio, mix_dry_modal_stems,
     render_scene_bridge::{
-        EulerCinematicScene, EulerFrameRequest, EulerMaterialStyle, EulerSceneConfig,
-        EulerTessellationConfig, euler_scene_smoke_settings,
+        EulerCinematicScene, EulerFrameRequest, EulerMaterialStyle, EulerRectLightSpec,
+        EulerSceneConfig, EulerTessellationConfig, euler_scene_smoke_settings,
     },
     representative_modal_preset,
     specimen::DiscProfileSpec,
@@ -402,6 +402,16 @@ pub fn run_cinematic_fixture(
         optics: ConductorOptics::representative_tungsten(),
         surface: ConductorSurface::try_rough(0.12).map_err(pipeline)?,
     };
+    // Keep the emitter above the camera frustum while retaining a broad,
+    // downward-facing studio source. The reference light otherwise appears as
+    // a distracting white bar across the top of this particular composition.
+    scene_config.light = EulerRectLightSpec {
+        corner_world_m: Point3::new(-0.09, 0.06, 0.24),
+        edge_u_world_m: GeomVec3::new(0.18, 0.0, 0.0),
+        edge_v_world_m: GeomVec3::new(0.0, -0.12, 0.0),
+        linear_rgb: [1.0, 0.96, 0.90],
+        radiance_scale: 48.0,
+    };
     let scene = EulerCinematicScene::try_build(&trajectory_artifact, &profile, scene_config, cx)
         .map_err(pipeline)?;
     let mut render_settings = euler_scene_smoke_settings(config.width, config.height);
@@ -474,7 +484,7 @@ pub fn run_cinematic_fixture(
 
         let [red, green, blue] = film.beauty().to_linear_srgb();
         let mut color = CinematicColorConfig::reference_srgb_16();
-        color.exposure_ev = -2;
+        color.exposure_ev = 1;
         color.dither = PreviewDither::Disabled;
         let preview = transform_cinematic_preview(
             config.width,
@@ -622,7 +632,7 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
     hasher.update(&config.samples_per_pixel.to_le_bytes());
     hasher.update(&config.max_depth.to_le_bytes());
-    hasher.update(b"zero-width-shutter;daily-core-aov;aces-srgb16;exposure-ev-minus-2");
+    hasher.update(b"zero-width-shutter;daily-core-aov;aces-srgb16;exposure-ev-plus-1");
     hasher.finalize()
 }
 
@@ -1130,11 +1140,11 @@ fn fixture_manifest(
             "{{\n",
             "  \"schema\": \"frankensim-euler-cinematic-critique-v1\",\n",
             "  \"authority\": \"simulation-derived-visualization-and-physically-informed-sound\",\n",
-            "  \"video\": {{\"width\": {}, \"height\": {}, \"frames\": {}, \"fps\": {}, \"duration_s\": {:.9}, \"spp\": {}, \"max_depth\": {}, \"raw_sequence_identity\": \"{}\", \"preview_sequence_identity\": \"{}\", \"over_range_linear_channels\": {}, \"gamut_mapped_pixels\": {}}},\n",
+            "  \"video\": {{\"width\": {}, \"height\": {}, \"frames\": {}, \"fps\": {}, \"duration_s\": {:.9}, \"spp\": {}, \"max_depth\": {}, \"exposure_ev\": 1, \"raw_sequence_identity\": \"{}\", \"preview_sequence_identity\": \"{}\", \"over_range_linear_channels\": {}, \"gamut_mapped_pixels\": {}}},\n",
             "  \"mechanics\": {{\"model\": \"closed-profile-reduced-coupled-runner\", \"timestep_s\": {:.9e}, \"sample_count\": {}, \"retained_time_s\": {:.9}, \"terminal\": \"{:?}\", \"initial_rate_selection\": \"rounded gravity-scale estimate; not fitted or calibrated\", \"first_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"last_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"energy\": {{\"initial_total_j\": {:.17e}, \"final_total_j\": {:.17e}, \"defect_j\": {:.17e}, \"relative_defect\": {:.17e}}}, \"trajectory_identity\": \"{}\"}},\n",
             "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"pre_master_peak_fs\": {:.17e}, \"master_gain_db\": {:.9}, \"terminal_fade_sample_frames\": {}, \"mix_policy\": \"single explicit content-derived digital mastering gain, peak target 0.45 FS, no limiter\"}},\n",
             "  \"mux\": {},\n",
-            "  \"no_claims\": [\"preview timestep and endpoint phase have not been convergence-qualified; inspect the published energy defect\", \"initial rates use a thin-disc gravity scale outside that oracle's admitted geometry for this squat specimen\", \"reduced tangential contact has gross sliding but no static-stick solve\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"digital mastering gain is presentation normalization and is not a sound-pressure-level prediction\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"one-sample-per-pixel preview is intended for motion and composition critique, not final image quality\"]\n",
+            "  \"no_claims\": [\"preview timestep and endpoint phase have not been convergence-qualified; inspect the published energy defect\", \"initial rates use a thin-disc gravity scale outside that oracle's admitted geometry for this squat specimen\", \"reduced tangential contact has gross sliding but no static-stick solve\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"digital mastering gain is presentation normalization and is not a sound-pressure-level prediction\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"low-sample preview is intended for motion and composition critique, not final image quality\"]\n",
             "}}\n"
         ),
         config.width,
