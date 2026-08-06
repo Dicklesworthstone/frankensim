@@ -576,6 +576,7 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
         assert_eq!(indices.base_plate, 1);
         assert_eq!(indices.housing, 2);
         assert_eq!(indices.light, 3);
+        assert_eq!(indices.spin_fiducial, None);
         assert_eq!(first.debug_layer_receipt(), None);
         assert_eq!(first.scene().primitives.len(), 4);
         assert_eq!(
@@ -733,6 +734,85 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
         EulerCinematicScene::try_build(&artifact, &specimen, extra_history, cx)
             .expect("camera gaps and poses outside the trajectory horizon are irrelevant");
     });
+}
+
+#[test]
+fn g0_spin_fiducial_is_disc_local_identity_bound_and_default_off() {
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, None, false, Vec::new(), cx);
+        let reference_config = config();
+        let reference =
+            EulerCinematicScene::try_build(&artifact, &specimen, reference_config.clone(), cx)
+                .expect("reference scene");
+        assert_eq!(reference.primitive_indices().spin_fiducial, None);
+        assert_eq!(reference.scene().primitives.len(), 4);
+        assert_eq!(reference.primitive_indices().light, 3);
+
+        let mut marked_config = reference_config;
+        marked_config.show_spin_fiducial = true;
+        let marked =
+            EulerCinematicScene::try_build(&artifact, &specimen, marked_config.clone(), cx)
+                .expect("scene with spin fiducial");
+        let replay = EulerCinematicScene::try_build(&artifact, &specimen, marked_config, cx)
+            .expect("replayed scene with spin fiducial");
+        let indices = marked.primitive_indices();
+        let marker_index = indices.spin_fiducial.expect("enabled marker primitive");
+        assert_eq!(marker_index, 3);
+        assert_eq!(indices.light, 4);
+        assert_eq!(marked.scene().primitives.len(), 5);
+        assert_ne!(reference.scene_identity(), marked.scene_identity());
+        assert_ne!(
+            reference.source_configuration_identity(),
+            marked.source_configuration_identity()
+        );
+        assert_eq!(marked.scene_identity(), replay.scene_identity());
+        assert_eq!(
+            marked.source_configuration_identity(),
+            replay.source_configuration_identity()
+        );
+
+        let Shape::AnimatedInstance(disc) = &marked.scene().primitives[indices.disc].shape else {
+            panic!("disc must retain animated placement");
+        };
+        let Shape::AnimatedInstance(marker) = &marked.scene().primitives[marker_index].shape else {
+            panic!("spin fiducial must share an animated placement");
+        };
+        assert_eq!(marker.object_id(), marked_config_object_id());
+        assert_eq!(
+            marker.trajectory().keyframes(),
+            disc.trajectory().keyframes(),
+            "the fiducial must use the exact disc trajectory rather than a sampled approximation"
+        );
+        for time_s in [0.0, 0.005, END_TIME_S] {
+            assert_eq!(
+                marker
+                    .trajectory()
+                    .evaluate(time_s)
+                    .expect("marker trajectory"),
+                disc.trajectory().evaluate(time_s).expect("disc trajectory"),
+                "the fiducial must remain rigidly co-moving with the disc"
+            );
+        }
+        let SharedGeometry::Mesh(marker_mesh) = marker.geometry() else {
+            panic!("spin fiducial must be an explicit mesh");
+        };
+        assert!(
+            marker_mesh
+                .vertices
+                .iter()
+                .all(|vertex| vertex[2] > marked.preview_mesh_receipt().local_bounds_m.max.z),
+            "positive local lift must prevent fiducial z-fighting with the derived disc mesh"
+        );
+        assert!(matches!(
+            marked.scene().primitives[marker_index].material,
+            Material::Lambertian { .. }
+        ));
+    });
+}
+
+fn marked_config_object_id() -> u64 {
+    fs_euler_disc_e2e::render_scene_bridge::EULER_SPIN_FIDUCIAL_OBJECT_ID
 }
 
 #[test]

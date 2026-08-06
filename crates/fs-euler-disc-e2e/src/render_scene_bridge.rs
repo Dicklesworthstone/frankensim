@@ -72,6 +72,12 @@ pub const MAX_EULER_ARC_SUBDIVISIONS: u32 = 1_024;
 
 const CONTACT_BASE_ALIGNMENT_TOLERANCE_M: f64 = 1.0e-10;
 const CONTACT_NORMAL_ALIGNMENT_TOLERANCE: f64 = 1.0e-10;
+const SPIN_FIDUCIAL_RADIAL_START_FRACTION: f64 = 0.22;
+const SPIN_FIDUCIAL_RADIAL_END_FRACTION: f64 = 0.74;
+const SPIN_FIDUCIAL_HALF_WIDTH_M: f64 = 0.00075;
+const SPIN_FIDUCIAL_LIFT_M: f64 = 0.00005;
+const SPIN_FIDUCIAL_THICKNESS_M: f64 = 0.00015;
+const SPIN_FIDUCIAL_LINEAR_RGB: [f64; 3] = [0.95, 0.18, 0.03];
 
 /// Stable default object identity for the animated disc.
 pub const EULER_DISC_OBJECT_ID: u64 = 0x4555_4c45_525f_0001;
@@ -81,6 +87,8 @@ pub const EULER_BASE_PLATE_OBJECT_ID: u64 = 0x4555_4c45_525f_0002;
 pub const EULER_HOUSING_OBJECT_ID: u64 = 0x4555_4c45_525f_0003;
 /// Stable default object identity for an optional diagnostic marker.
 pub const EULER_DEBUG_MARKER_OBJECT_ID: u64 = 0x4555_4c45_525f_00ff;
+/// Stable default object identity for the optional disc-local spin fiducial.
+pub const EULER_SPIN_FIDUCIAL_OBJECT_ID: u64 = 0x4555_4c45_525f_00fe;
 
 /// Binding no-claim for the current scene bridge.
 pub const EULER_RENDER_SCENE_NO_CLAIM: &str = "scene composition and chordal preview geometry do not validate Euler mechanics, measured material parameters, calibrated lighting, or a real apparatus";
@@ -180,6 +188,8 @@ pub struct EulerSceneObjectIds {
     pub housing: u64,
     /// Optional debug marker object ID.
     pub debug_marker: u64,
+    /// Optional visualization-only spin-fiducial object ID.
+    pub spin_fiducial: u64,
 }
 
 impl EulerSceneObjectIds {
@@ -189,6 +199,7 @@ impl EulerSceneObjectIds {
         base_plate: EULER_BASE_PLATE_OBJECT_ID,
         housing: EULER_HOUSING_OBJECT_ID,
         debug_marker: EULER_DEBUG_MARKER_OBJECT_ID,
+        spin_fiducial: EULER_SPIN_FIDUCIAL_OBJECT_ID,
     };
 }
 
@@ -259,6 +270,9 @@ pub struct EulerSceneConfig {
     pub maximum_angular_step_rad: f64,
     /// Optional isolated diagnostic layer.
     pub debug_overlay: EulerDebugOverlay,
+    /// Emit a visual-only radial strip that makes axial spin perceptible.
+    /// It shares the disc trajectory but is not part of the physical specimen.
+    pub show_spin_fiducial: bool,
 }
 
 impl EulerSceneConfig {
@@ -304,6 +318,7 @@ impl EulerSceneConfig {
             camera_far_m: 2.0,
             maximum_angular_step_rad: core::f64::consts::FRAC_PI_2,
             debug_overlay: EulerDebugOverlay::None,
+            show_spin_fiducial: false,
         }
     }
 }
@@ -344,6 +359,8 @@ pub struct EulerScenePrimitiveIndices {
     pub housing: usize,
     /// Emissive softbox primitive referenced by the sole v1 `Scene::lights` entry.
     pub light: usize,
+    /// Optional disc-local spin visualization primitive.
+    pub spin_fiducial: Option<usize>,
 }
 
 /// Identity and source binding of the optional non-beauty diagnostic layer.
@@ -484,6 +501,12 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             disc_geometry,
             disc_trajectory,
         )?;
+        let spin_fiducial = build_spin_fiducial(
+            config.show_spin_fiducial,
+            config.object_ids.spin_fiducial,
+            preview_mesh,
+            disc.trajectory().clone(),
+        )?;
 
         let plate_mesh = box_mesh(
             0.5 * config.base.plate_width_m,
@@ -530,8 +553,15 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             nominal_base_transform(artifact)?,
         )?;
 
-        let subject_bounds_m =
-            subject_bounds(artifact, preview_mesh, &config.base, &disc, &plate, cx)?;
+        let subject_bounds_m = subject_bounds(
+            artifact,
+            preview_mesh,
+            &config.base,
+            &disc,
+            &plate,
+            spin_fiducial.as_ref(),
+            cx,
+        )?;
         validate_camera_depths(
             artifact,
             &config.camera,
@@ -547,6 +577,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             preview_mesh,
             plate_geometry_identity,
             housing_geometry_identity,
+            spin_fiducial.as_ref(),
             &config,
         );
         let debug_layer = build_debug_layer(
@@ -579,6 +610,15 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                 emission: None,
             },
         ];
+        let spin_fiducial_index = spin_fiducial.as_ref().map(|fiducial| {
+            let index = primitives.len();
+            primitives.push(Primitive {
+                shape: Shape::AnimatedInstance(fiducial.instance.clone()),
+                material: fiducial.material,
+                emission: None,
+            });
+            index
+        });
         let light_index = primitives.len();
         primitives.push(Primitive {
             shape: Shape::Mesh(rect_mesh(config.light)),
@@ -598,6 +638,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             base_plate: 1,
             housing: 2,
             light: light_index,
+            spin_fiducial: spin_fiducial_index,
         };
         checkpoint(cx)?;
 
@@ -1386,6 +1427,11 @@ fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
             return Err(EulerSceneError::InvalidConfig("debug marker object_id"));
         }
     }
+    if config.show_spin_fiducial {
+        if config.object_ids.spin_fiducial == 0 || !unique.insert(config.object_ids.spin_fiducial) {
+            return Err(EulerSceneError::InvalidConfig("spin fiducial object_id"));
+        }
+    }
     Ok(())
 }
 
@@ -1967,16 +2013,27 @@ fn material(style: EulerMaterialStyle) -> Material {
 }
 
 fn box_mesh(half_x: f64, half_y: f64, z_min: f64, z_max: f64) -> TriMesh {
+    box_mesh_bounds(-half_x, half_x, -half_y, half_y, z_min, z_max)
+}
+
+fn box_mesh_bounds(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    z_min: f64,
+    z_max: f64,
+) -> TriMesh {
     TriMesh::new(
         vec![
-            [-half_x, -half_y, z_min],
-            [half_x, -half_y, z_min],
-            [half_x, half_y, z_min],
-            [-half_x, half_y, z_min],
-            [-half_x, -half_y, z_max],
-            [half_x, -half_y, z_max],
-            [half_x, half_y, z_max],
-            [-half_x, half_y, z_max],
+            [x_min, y_min, z_min],
+            [x_max, y_min, z_min],
+            [x_max, y_max, z_min],
+            [x_min, y_max, z_min],
+            [x_min, y_min, z_max],
+            [x_max, y_min, z_max],
+            [x_max, y_max, z_max],
+            [x_min, y_max, z_max],
         ],
         vec![
             [0, 2, 1],
@@ -1993,6 +2050,78 @@ fn box_mesh(half_x: f64, half_y: f64, z_min: f64, z_max: f64) -> TriMesh {
             [3, 4, 7],
         ],
     )
+}
+
+struct EulerSpinFiducialInstance {
+    instance: AnimatedGeometryInstance,
+    local_bounds_m: Aabb,
+    material: Material,
+}
+
+fn build_spin_fiducial(
+    enabled: bool,
+    object_id: u64,
+    preview: EulerPreviewMeshReceipt,
+    trajectory: RigidTransformTrajectory,
+) -> Result<Option<EulerSpinFiducialInstance>, EulerSceneError> {
+    if !enabled {
+        return Ok(None);
+    }
+    let outer_radius_m = preview
+        .local_bounds_m
+        .min
+        .x
+        .abs()
+        .max(preview.local_bounds_m.max.x.abs())
+        .max(preview.local_bounds_m.min.y.abs())
+        .max(preview.local_bounds_m.max.y.abs());
+    if !outer_radius_m.is_finite() || outer_radius_m <= 0.0 {
+        return Err(EulerSceneError::InvalidConfig("spin fiducial outer radius"));
+    }
+    let x_min = SPIN_FIDUCIAL_RADIAL_START_FRACTION * outer_radius_m;
+    let x_max = SPIN_FIDUCIAL_RADIAL_END_FRACTION * outer_radius_m;
+    let z_min = preview.local_bounds_m.max.z + SPIN_FIDUCIAL_LIFT_M;
+    let z_max = z_min + SPIN_FIDUCIAL_THICKNESS_M;
+    let mesh = box_mesh_bounds(
+        x_min,
+        x_max,
+        -SPIN_FIDUCIAL_HALF_WIDTH_M,
+        SPIN_FIDUCIAL_HALF_WIDTH_M,
+        z_min,
+        z_max,
+    );
+    let local_bounds_m = Aabb::new(
+        Point3::new(x_min, -SPIN_FIDUCIAL_HALF_WIDTH_M, z_min),
+        Point3::new(x_max, SPIN_FIDUCIAL_HALF_WIDTH_M, z_max),
+    );
+    let geometry_identity =
+        radial_strip_identity(x_min, x_max, SPIN_FIDUCIAL_HALF_WIDTH_M, z_min, z_max);
+    Ok(Some(EulerSpinFiducialInstance {
+        instance: AnimatedGeometryInstance::try_new(
+            object_id,
+            geometry_identity,
+            SharedGeometry::mesh(mesh),
+            trajectory,
+        )?,
+        local_bounds_m,
+        material: Material::Lambertian {
+            reflectance: lift_rgb(SPIN_FIDUCIAL_LINEAR_RGB),
+        },
+    }))
+}
+
+fn radial_strip_identity(
+    x_min: f64,
+    x_max: f64,
+    half_width_m: f64,
+    z_min: f64,
+    z_max: f64,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new("org.frankensim.fs-euler-disc-e2e.spin-fiducial.v1");
+    for value in [x_min, x_max, half_width_m, z_min, z_max] {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+    hasher.finalize()
 }
 
 fn box_identity(label: &[u8], values: [f64; 4]) -> ContentHash {
@@ -2143,6 +2272,7 @@ fn subject_bounds(
     base: &EulerBaseVisualSpec,
     disc: &AnimatedGeometryInstance,
     plate: &AnimatedGeometryInstance,
+    spin_fiducial: Option<&EulerSpinFiducialInstance>,
     cx: &Cx<'_>,
 ) -> Result<Aabb, EulerSceneError> {
     let samples = artifact.trajectory().samples();
@@ -2177,6 +2307,13 @@ fn subject_bounds(
         plate.trajectory(),
         shutter,
     )?);
+    if let Some(fiducial) = spin_fiducial {
+        bounds = bounds.union(&conservative_trajectory_swept_aabb(
+            FiniteLocalAabb::try_new(fiducial.local_bounds_m)?,
+            fiducial.instance.trajectory(),
+            shutter,
+        )?);
+    }
     checkpoint(cx)?;
     let housing_top = -base.plate_thickness_m - base.housing_gap_m;
     let housing_bottom = housing_top - base.housing_height_m;
@@ -2272,6 +2409,7 @@ fn scene_identity(
     preview: EulerPreviewMeshReceipt,
     plate_geometry_identity: ContentHash,
     housing_geometry_identity: ContentHash,
+    spin_fiducial: Option<&EulerSpinFiducialInstance>,
     config: &EulerSceneConfig,
 ) -> ContentHash {
     let mut hasher = DomainHasher::new(EULER_RENDER_SCENE_IDENTITY_DOMAIN);
@@ -2299,6 +2437,16 @@ fn scene_identity(
     hasher.update(&config.camera_near_m.to_bits().to_le_bytes());
     hasher.update(&config.camera_far_m.to_bits().to_le_bytes());
     hasher.update(&config.maximum_angular_step_rad.to_bits().to_le_bytes());
+    if let Some(fiducial) = spin_fiducial {
+        // Omit the absent variant entirely: reference beauty-scene identity is
+        // frozen. An enabled visualization aid has its own geometry, material,
+        // object identity, and configuration binding.
+        hasher.update(&[0xf1]);
+        hasher.update(&fiducial.instance.object_id().to_le_bytes());
+        hasher.update(fiducial.instance.geometry_identity().as_bytes());
+        hasher.update(fiducial.material.content_identity().as_bytes());
+        hasher.update(&[1]);
+    }
     hasher.finalize()
 }
 
@@ -2340,6 +2488,11 @@ fn configuration_identity(config: &EulerSceneConfig) -> ContentHash {
             );
             hasher.update(&radius_m.to_bits().to_le_bytes());
         }
+    }
+    if config.show_spin_fiducial {
+        hasher.update(&[0xf1]);
+        hasher.update(&config.object_ids.spin_fiducial.to_le_bytes());
+        hasher.update(&[1]);
     }
     hasher.finalize()
 }
