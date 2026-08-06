@@ -992,6 +992,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
  "fs-io",

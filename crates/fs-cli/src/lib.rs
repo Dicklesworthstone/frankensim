@@ -8,6 +8,7 @@
 //! CLI-shaped mock is not substituted for an integrated workflow.
 
 mod cards;
+mod cinematic;
 mod import;
 mod solve;
 
@@ -20,6 +21,11 @@ pub use cards::{
     AdmittedCardPack, CARD_PACK_SET_DOMAIN, CardPackKind, CardPackRefusal, CardPackSet,
     CardPackSetBuilder, MAX_CARD_PACK_BYTES, MAX_CARD_PACK_SOURCE_BYTES, MAX_CARD_PACKS,
     RawCardPack,
+};
+pub use cinematic::{
+    CINEMATIC_CLI_CONFIG_SCHEMA, CINEMATIC_CLI_DIAGNOSTIC_SCHEMA,
+    CINEMATIC_CLI_RESULT_SCHEMA, MAX_CINEMATIC_ASSET_BYTES, MAX_CINEMATIC_CONFIG_BYTES,
+    MAX_CINEMATIC_TOTAL_ASSET_BYTES, run_cinematic_with_gate,
 };
 pub use import::{
     GeometryImportLimits, GeometryImportRefusal, GeometryImportRun, RawGeometryLibrary,
@@ -50,6 +56,8 @@ pub mod exit {
     /// The run stopped honestly at budget enforcement with a durable,
     /// resumable completed prefix; the partial is not presented as complete.
     pub const BUDGET: u8 = 6;
+    /// Work observed explicit cancellation before publishing a result.
+    pub const CANCELLED: u8 = 130;
 }
 
 const RESULT_SCHEMA: &str = "frankensim.cli.result.v1";
@@ -57,7 +65,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> | package <run-id>";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> | package <run-id> | cinematic <mode> <config.fscine> (--trajectory <artifact>|--run-reduced) [cinematic options]";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -80,6 +88,7 @@ enum OutputMode {
 #[derive(Debug, Clone, PartialEq)]
 enum Command {
     Help,
+    Cinematic(Vec<String>),
     Validate(PathBuf),
     Import(ImportCommand),
     SolveProject {
@@ -159,6 +168,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
 
     match command {
         Command::Help => help(mode),
+        Command::Cinematic(arguments) => cinematic::run(arguments, mode == OutputMode::Json),
         Command::Validate(path) => validate_path(&path, mode),
         Command::Import(command) => import_path(&command, mode),
         Command::SolveProject {
@@ -258,6 +268,7 @@ fn parse_args(
 
     let command = match positional.as_slice() {
         [flag] if flag == "--help" || flag == "help" => Command::Help,
+        [verb, rest @ ..] if verb == "cinematic" => Command::Cinematic(rest.to_vec()),
         [verb, project] if verb == "validate" && is_operand(project) => {
             Command::Validate(PathBuf::from(project))
         }

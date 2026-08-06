@@ -404,6 +404,13 @@ impl CinematicConfigDocument {
         self.artifact_root.logical_namespace()
     }
 
+    /// Current physical output hint. Callers must apply their own filesystem
+    /// policy before writing; this string carries no authority.
+    #[must_use]
+    pub fn artifact_locator_hint(&self) -> &str {
+        self.artifact_root.locator_hint()
+    }
+
     /// Resolve every external asset, verify expected byte identities, and
     /// re-enter the authoritative [`CinematicConfig::try_new`] constructor.
     pub fn admit_with_asset_resolver<F>(
@@ -999,9 +1006,10 @@ impl CinematicConfigDocumentError {
     #[must_use]
     pub fn field_path(&self) -> String {
         match self {
-            Self::UnknownField { field }
-            | Self::DuplicateField { field }
-            | Self::MissingField { field } => format!("config.{field}"),
+            Self::UnknownField { .. } => "config.<unknown>".to_owned(),
+            Self::DuplicateField { field } | Self::MissingField { field } => {
+                format!("config.{field}")
+            }
             Self::InvalidField { field }
             | Self::TooManyAssets { field }
             | Self::BudgetProfileMismatch { field } => format!("config.{field}"),

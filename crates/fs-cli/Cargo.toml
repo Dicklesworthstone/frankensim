@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-blake3 = { path = "../fs-blake3" }
+fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-io = { path = "../fs-io" }
