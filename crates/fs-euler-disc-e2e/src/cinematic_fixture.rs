@@ -72,6 +72,8 @@ use crate::{
 pub const CRITIQUE_FPS: u32 = 24;
 /// Minimum admitted cinematic duration: 192 frames = 8 seconds.
 pub const CRITIQUE_FRAMES: u32 = 192;
+/// Five-millisecond deterministic taper applied at the censored soundtrack end.
+const TERMINAL_FADE_SAMPLE_FRAMES: u32 = 240;
 
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,7 +234,10 @@ pub fn run_cinematic_fixture(
         ));
     }
     let duration_s = f64::from(config.frames) / f64::from(CRITIQUE_FPS);
-    let timestep_s = 1.0e-4;
+    // The 50 us preview rung halves the eight-second cumulative energy defect
+    // seen at 100 us for this configuration (about 2.23% versus 4.52%). It is
+    // still explicitly unconverged; the manifest publishes the actual defect.
+    let timestep_s = 5.0e-5;
     let maximum_steps = (duration_s / timestep_s).round() as u32;
 
     progress("stage=mechanics begin");
@@ -261,18 +266,16 @@ pub fn run_cinematic_fixture(
         terminal_inclination_rad: 1.0e-6,
         reimpact_limit: 128,
     };
-    // Use the crate's thin-disc small-angle relation as a physically motivated
-    // initial-rate estimate.  The former same-sign `(precession=16, spin=120)`
-    // twist forced the no-slip initializer to give the centre of mass roughly
-    // 5 m/s of lateral speed, so the simulated disc left the 180 mm plate. The
+    // Use an opposite-sign, gravity-scale initial twist. The former same-sign
+    // `(precession=16, spin=120)` twist forced the no-slip initializer to give
+    // the centre of mass roughly 5 m/s of lateral speed, so the simulated disc
+    // left the 180 mm plate. The 36 rad/s candidate is the rounded scale
+    // `sqrt(4g/(R*theta))`; it was not fitted to a desired trajectory. The
     // present 6 mm squat profile is outside the thin-disc oracle's admitted
-    // geometry, and the relation is only an initial condition: it neither
-    // constrains the subsequent coupled motion nor upgrades its authority.
-    let inclination_rad = 0.08;
-    let precession_rad_per_s = det::sqrt(
-        4.0 * channels.gravity_m_per_s2
-            / (profile.dimensions.outer_radius_m * det::sin(inclination_rad)),
-    );
+    // geometry, and these rates are only initial conditions: they neither
+    // constrain the subsequent coupled motion nor upgrade its authority.
+    let inclination_rad = 0.8;
+    let precession_rad_per_s = 36.0;
     let initial = CoupledInitialState {
         inclination_rad,
         precession_rad_per_s,
@@ -883,7 +886,7 @@ fn build_audio(
         amplitude_reference: SoundAmplitudeReference::DigitalFullScale { headroom_db: 6.0 },
         trajectory_disposition: SoundTrajectoryDisposition::HorizonCensored,
         terminal_policy: SoundTerminalPolicy::FadeAtLastAccepted {
-            fade_sample_frames: 240,
+            fade_sample_frames: TERMINAL_FADE_SAMPLE_FRAMES,
         },
         resampler_identity: resampler.identity(),
         resampler_version: AUDIO_RESAMPLING_ALGORITHM_VERSION,
@@ -939,6 +942,7 @@ fn build_audio(
             stems.len()
         )));
     }
+    apply_terminal_fade(&mut stems, TERMINAL_FADE_SAMPLE_FRAMES)?;
     let mut mix = AudioDryMixSpec {
         disc: StemGainPan {
             gain_db: -6.0,
@@ -989,6 +993,29 @@ fn build_audio(
         cx,
     )
     .map_err(pipeline)
+}
+
+fn apply_terminal_fade(
+    stems: &mut [crate::ModalStemFrame],
+    fade_sample_frames: u32,
+) -> Result<(), CinematicFixtureError> {
+    let fade_frames = usize::try_from(fade_sample_frames)
+        .map_err(|_| CinematicFixtureError::Pipeline("terminal fade length overflow".into()))?;
+    if fade_frames < 2 || fade_frames > stems.len() {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "terminal fade length {fade_frames} is incompatible with {} stem frames",
+            stems.len()
+        )));
+    }
+    let fade_start = stems.len() - fade_frames;
+    let denominator = (fade_frames - 1) as f64;
+    for (index, frame) in stems[fade_start..].iter_mut().enumerate() {
+        let gain = (fade_frames - 1 - index) as f64 / denominator;
+        frame.disc_fs *= gain;
+        frame.glass_plate_fs *= gain;
+        frame.base_assembly_fs *= gain;
+    }
+    Ok(())
 }
 
 fn mux_movie(
@@ -1051,6 +1078,20 @@ fn fixture_manifest(
     gamut_mapped_pixels: u64,
     mux: &MuxOutcome,
 ) -> String {
+    let first_sample = run
+        .samples
+        .first()
+        .expect("completed fixture run retains a first sample");
+    let last_sample = run
+        .samples
+        .last()
+        .expect("completed fixture run retains a last sample");
+    let relative_energy_defect = last_sample.energy_defect_j
+        / run
+            .checkpoint
+            .initial_total_energy_j
+            .abs()
+            .max(f64::MIN_POSITIVE);
     let mux_json = match mux {
         MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
         MuxOutcome::Unavailable(message) => format!(
@@ -1071,10 +1112,10 @@ fn fixture_manifest(
             "  \"schema\": \"frankensim-euler-cinematic-critique-v1\",\n",
             "  \"authority\": \"simulation-derived-visualization-and-physically-informed-sound\",\n",
             "  \"video\": {{\"width\": {}, \"height\": {}, \"frames\": {}, \"fps\": {}, \"duration_s\": {:.9}, \"spp\": {}, \"max_depth\": {}, \"raw_sequence_identity\": \"{}\", \"preview_sequence_identity\": \"{}\", \"over_range_linear_channels\": {}, \"gamut_mapped_pixels\": {}}},\n",
-            "  \"mechanics\": {{\"model\": \"closed-profile-reduced-coupled-runner\", \"timestep_s\": {:.9e}, \"sample_count\": {}, \"retained_time_s\": {:.9}, \"terminal\": \"{:?}\", \"trajectory_identity\": \"{}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"mix_policy\": \"single static content-derived gain, peak target 0.45 FS, no limiter\"}},\n",
+            "  \"mechanics\": {{\"model\": \"closed-profile-reduced-coupled-runner\", \"timestep_s\": {:.9e}, \"sample_count\": {}, \"retained_time_s\": {:.9}, \"terminal\": \"{:?}\", \"initial_rate_selection\": \"rounded gravity-scale estimate; not fitted or calibrated\", \"first_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"last_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"energy\": {{\"initial_total_j\": {:.17e}, \"final_total_j\": {:.17e}, \"defect_j\": {:.17e}, \"relative_defect\": {:.17e}}}, \"trajectory_identity\": \"{}\"}},\n",
+            "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"terminal_fade_sample_frames\": {}, \"mix_policy\": \"single static content-derived gain, peak target 0.45 FS, no limiter\"}},\n",
             "  \"mux\": {},\n",
-            "  \"no_claims\": [\"preview timestep has not been convergence-qualified\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"one-sample-per-pixel preview is intended for motion and composition critique, not final image quality\"]\n",
+            "  \"no_claims\": [\"preview timestep and endpoint phase have not been convergence-qualified; inspect the published energy defect\", \"initial rates use a thin-disc gravity scale outside that oracle's admitted geometry for this squat specimen\", \"reduced tangential contact has gross sliding but no static-stick solve\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"one-sample-per-pixel preview is intended for motion and composition critique, not final image quality\"]\n",
             "}}\n"
         ),
         config.width,
@@ -1092,9 +1133,20 @@ fn fixture_manifest(
         run.samples.len(),
         run.checkpoint.time_s,
         run.terminal,
+        first_sample.inclination_rad,
+        first_sample.precession_rad_per_s,
+        first_sample.spin_rad_per_s,
+        last_sample.inclination_rad,
+        last_sample.precession_rad_per_s,
+        last_sample.spin_rad_per_s,
+        run.checkpoint.initial_total_energy_j,
+        last_sample.mechanical_energy_j,
+        last_sample.energy_defect_j,
+        relative_energy_defect,
         trajectory_identity.to_hex(),
         SOUND_MASTER_SAMPLE_RATE_HZ,
         wav_identity.to_hex(),
+        TERMINAL_FADE_SAMPLE_FRAMES,
         mux_json,
     )
 }
@@ -1138,5 +1190,22 @@ mod tests {
             config.validate(),
             Err(CinematicFixtureError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn terminal_fade_preserves_prefix_and_reaches_zero() {
+        let mut stems = vec![
+            crate::ModalStemFrame {
+                disc_fs: 1.0,
+                glass_plate_fs: 2.0,
+                base_assembly_fs: 3.0,
+            };
+            4
+        ];
+        apply_terminal_fade(&mut stems, 3).unwrap();
+        assert_eq!(stems[0].disc_fs, 1.0);
+        assert_eq!(stems[1].disc_fs, 1.0);
+        assert_eq!(stems[2].disc_fs, 0.5);
+        assert_eq!(stems[3], crate::ModalStemFrame::default());
     }
 }
