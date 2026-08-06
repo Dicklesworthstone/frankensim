@@ -19,6 +19,13 @@ pub fn white_balance(rgb: [f64; 3], gains: [f64; 3]) -> [f64; 3] {
 /// 11.2 — the classic operator constants, applied per channel.
 #[must_use]
 pub fn hable_filmic(x: f64) -> f64 {
+    hable_filmic_unclamped(x.max(0.0)).clamp(0.0, 1.0)
+}
+
+/// Unclamped normalized Hable curve used before an explicit cinematic gamut
+/// policy. Kept crate-private so the legacy public function retains its exact
+/// `[0, 1]` contract.
+pub(crate) fn hable_filmic_unclamped(x: f64) -> f64 {
     fn partial(x: f64) -> f64 {
         const A: f64 = 0.15;
         const B: f64 = 0.50;
@@ -28,8 +35,7 @@ pub fn hable_filmic(x: f64) -> f64 {
         const F: f64 = 0.30;
         ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F
     }
-    let x = x.max(0.0);
-    (partial(x) / partial(11.2)).clamp(0.0, 1.0)
+    partial(x) / partial(11.2)
 }
 
 /// The sRGB display encode (EOTF⁻¹) on linear [0, 1] values, via

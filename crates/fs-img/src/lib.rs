@@ -11,6 +11,17 @@ pub mod exr;
 pub mod film;
 pub mod png;
 
+mod cinematic_color;
+
+pub use cinematic_color::{
+    CINEMATIC_COLOR_CONFIG_CANONICAL_BYTES, CINEMATIC_COLOR_PIPELINE_VERSION, CinematicColorConfig,
+    CinematicColorError, CinematicColorLimits, CinematicColorMetadata, CinematicDisplayTarget,
+    CinematicGamutMap, CinematicInputValueClass, CinematicNegativePolicy, CinematicPreview,
+    CinematicPreviewAuthority, CinematicPreviewSamples, CinematicToneCurve, CinematicWorkingSpace,
+    MAX_CINEMATIC_GLARE_RADIUS_PX, MAX_CINEMATIC_PREVIEW_PIXELS, PreviewBitDepth, PreviewDither,
+    PreviewGlare, transform_cinematic_preview,
+};
+
 pub use denoise::{DenoiseParams, LabeledPlane, PixelProvenance, atrous_denoise, mse};
 pub use exr::{
     Channel, DecodedExr, ExrAttribute, PixelType, SOURCE_ARTIFACT_HASH_ATTRIBUTE, f16_bits_to_f32,

@@ -39,7 +39,24 @@ readers exist to round-trip **our own** outputs, not the world's files.
   `BiasedDenoised`. `mse` is the improvement metric.
 - `film`: `exposure`, `white_balance`, `hable_filmic` (Hable/Uncharted 2
   operator, W = 11.2), `srgb_encode` (via `fs_math::det::pow`), `quantize8`,
-  `display_transform` (the full chain, HDR f32 → display u8).
+  `display_transform` (the legacy full chain, HDR f32 → display u8).
+- `CinematicColorConfig` freezes the version-one scene-linear-to-display
+  transform: linear-sRGB/D65 input, sRGB/D65 output, Hable-v1 or the explicitly
+  named Narkowicz five-coefficient ACES-filmic *fit*, clip or RGB-ratio gamut
+  handling,
+  counted clamp-to-zero negative policy, exact-power-of-two exposure, positive
+  RGB white-balance gains, 8/16-bit output, keyed half-LSB dither, and optional
+  `BoxBloomV1`. Its exact 64-byte canonical codec is closed, rejects
+  trailing/non-canonical bytes and unknown
+  tags, normalizes floating-point zero, and records every semantic parameter.
+  `transform_cinematic_preview` consumes immutable planar f32 linear-RGB,
+  checks dimensions, plane shapes, numeric values, a hard 8K-UHD pixel ceiling,
+  and caller-supplied pixel/working-byte limits before allocation. It returns
+  interleaved `CinematicPreviewSamples` compatible with `write_png8` or
+  `write_png16`, plus `CinematicColorMetadata` containing canonical replay
+  parameters, negative/over-range handling counts, gamut-operation counts,
+  linear bright-pass/addition sums, and admitted output-plus-scratch bytes.
+  A zero-strength bloom is non-canonical and must be expressed as `Disabled`.
 
 ## Invariants
 
@@ -58,14 +75,28 @@ readers exist to round-trip **our own** outputs, not the world's files.
    truncation at any byte fails.
 5. Half round-trip: `f32_to_f16_bits(f16_bits_to_f32(h)) == h` for every
    finite half (tested exhaustively).
+6. **Raw-master isolation**: cinematic color accepts shared slices and has no
+   mutation surface. Its result is permanently
+   `DisplayReferredDerivativeV1`; it cannot be relabeled as a raw estimate.
+7. **Visible highlight handling**: NaN, infinity, adjusted overflow, and
+   magnitudes above `1e12` refuse in row-major/channel order. Finite negative
+   and above-one channels are counted before explicit handling; no such value
+   disappears silently.
+8. **Budget-before-allocation**: output and optional bloom-scratch sizes use
+   checked arithmetic and are compared with the caller's admitted envelope
+   before `try_reserve_exact`. Allocation refusal is structured and no partial
+   preview is returned.
 
 ## Error model
 
 `ImgError`: `Shape { expected, got, context }` (buffer/shape disagreement),
 `Malformed { what }` (structurally invalid bytes — corruption), and
-`Unsupported { what }` (valid-looking bytes outside our subset). No panics
-on any byte input to the readers (fuzzed); writers panic never — shape
-defects return `Err`.
+`Unsupported { what }` (valid-looking bytes outside our subset).
+`CinematicColorError` separately reports stable config/canonical field paths,
+shape and resource requirements, the first invalid pixel/channel/stage,
+checked-arithmetic overflow, and allocation refusal. No panics occur on byte
+input to the readers (fuzzed); writers and the cinematic transform return
+structured errors for admitted defects.
 
 ## Determinism class
 
@@ -76,11 +107,17 @@ a given target and documented as cross-ISA reproducible only to the extent
 `f64::exp` is (edge-stopping weights; the *tagged bias* is the honest
 qualifier, not the last ulp).
 
+The cinematic pipeline is also D0: its tone curves use frozen arithmetic,
+sRGB uses deterministic `fs-math`, dither is a specified SplitMix64-derived
+keyed variate, and bloom traverses fixed row/column orders. A changed seed or
+any changed semantic parameter changes the canonical configuration bytes.
+
 ## Cancellation behavior
 
-All entry points are bounded, allocation-up-front, single-pass functions —
-no long-running loops that need cancellation tokens (P7 satisfied by
-boundedness). Callers cancel between frames.
+All entry points are bounded, allocation-up-front functions. The cinematic
+path is hard-capped at 8K UHD and uses linear-time sliding-window bloom rather
+than a radius-squared convolution. Callers cancel between frames; this module
+does not claim intra-frame cancellation latency.
 
 ## Unsafe boundary
 
@@ -130,7 +167,13 @@ complete, never that it passed.
 
 Unit tests additionally pin CRC-32/Adler-32 known-answer vectors, PNG
 signature/chunk structure, the exhaustive f16 round-trip, film-transform
-known answers, and denoiser partition-of-unity on constant images.
+known answers, and denoiser partition-of-unity on constant images. Cinematic
+G0/G3/G5 cases cover the closed canonical codec and every semantic field,
+known curve anchors/monotonicity, gray neutrality and exact exposure stops,
+non-finite/shape/pixel/memory refusal, visible negative/over-range counts,
+raw-input immutability, deterministic seed-sensitive dither with exact
+endpoints, local/non-wrapping bloom and constant-field interiors, exact
+working-byte accounting, and direct 8/16-bit PNG round trips.
 
 ## No-claim boundaries
 
@@ -145,9 +188,16 @@ known answers, and denoiser partition-of-unity on constant images.
 - **No compression-ratio claim.** PNG zlib streams use STORED deflate
   blocks: universally decodable, ~0% compression. EXR is NONE compression.
   Compact storage is out of scope for this bead.
-- **No color management beyond sRGB.** One transfer function (IEC sRGB via
-  deterministic `pow`), one tone map (Hable). No ICC profiles, no wide
-  gamuts.
+- **One explicit display target, not general color management.** Version one
+  accepts linear sRGB/D65 and emits sRGB/D65 only. It has no ICC profiles,
+  chromatic-adaptation engine, wide-gamut target, HDR transfer function, or
+  monitor calibration. `AcesFittedNarkowiczV1` is the published compact fit,
+  not an ACES reference transform or an OCIO compatibility claim.
+- **Bloom is a labeled display effect.** `BoxBloomV1` thresholds exposed,
+  white-balanced scene-linear RGB and applies two normalized zero-boundary box
+  passes. The recorded RGB sums make edge loss and added signal visible, but
+  they are not radiometric energy, lens-scattering calibration, diffraction,
+  flare, or a perceptual-quality certificate.
 - **The denoiser is biased, and says so in the type system.** Its output
   must never be used as ground truth in a comparison; the Gauntlet compares
   raw estimates.
