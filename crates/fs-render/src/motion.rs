@@ -81,6 +81,36 @@ pub struct ShutterInterval {
 }
 
 impl ShutterInterval {
+    /// Re-admit already-resolved canonical bounds from a validated binary
+    /// artifact such as a renderer checkpoint.
+    ///
+    /// This crate-private seam avoids reconstructing a resolved interval from
+    /// a nominal frame time, which can change endpoint bits through a second
+    /// round of floating-point arithmetic. It enforces the same stored-field
+    /// invariants as [`Self::resolve`] and canonicalizes the one physical zero.
+    pub(crate) fn try_from_canonical_parts(
+        open_s: f64,
+        close_s: f64,
+        convention: ShutterConvention,
+        distribution: ShutterDistribution,
+    ) -> Result<Self, MotionTimeError> {
+        if !open_s.is_finite() || !close_s.is_finite() || open_s > close_s {
+            return Err(MotionTimeError::InvalidExposure);
+        }
+        if matches!(
+            distribution,
+            ShutterDistribution::StratifiedCounterV1 { strata: 0 }
+        ) {
+            return Err(MotionTimeError::InvalidDistribution);
+        }
+        Ok(Self {
+            open_s: canonical_zero(open_s),
+            close_s: canonical_zero(close_s),
+            convention,
+            distribution,
+        })
+    }
+
     /// Resolve frame-relative shutter semantics inside declared shot bounds.
     pub fn resolve(
         frame_time_s: f64,

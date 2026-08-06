@@ -10,11 +10,16 @@
 //! mapping in header attributes; a hash is never rounded through `f32`.
 
 use core::fmt;
+use core::fmt::Write as _;
 use core::mem::size_of;
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_img::{Channel, ExrAttribute, PixelType};
+use fs_exec::Cx;
+use fs_img::{Channel, ExrAttribute, ExrWriteLimits, PixelType};
+use std::collections::HashSet;
 
-use crate::motion::ShutterInterval;
+use crate::camera::CutSide;
+use crate::charts::CHART_BACKEND_BIT_SEMANTICS_VERSION;
+use crate::motion::{ShutterConvention, ShutterDistribution, ShutterInterval};
 use crate::motion_vectors::MOTION_VECTOR_SEMANTICS_VERSION;
 use crate::spectral::{xyz_e_to_d65, xyz_to_linear_srgb};
 use crate::tracer::{
@@ -25,8 +30,16 @@ use crate::tracer::{
     TRACER_BIT_SEMANTICS_VERSION,
 };
 
+#[path = "aov_checkpoint.rs"]
+mod checkpoint;
+pub use checkpoint::{
+    CINEMATIC_AOV_CHECKPOINT_CONTENT_DOMAIN, CINEMATIC_AOV_CHECKPOINT_SCHEMA_VERSION,
+    CinematicAovCheckpointError, CinematicAovCheckpointExpectation, CinematicAovCheckpointReceipt,
+    CinematicAovCheckpointWriteError,
+};
+
 /// Bit-affecting channel, accumulation, invalid-value, and palette semantics.
-pub const CINEMATIC_AOV_SEMANTICS_VERSION: u32 = 1;
+pub const CINEMATIC_AOV_SEMANTICS_VERSION: u32 = 2;
 /// Deterministic nearest-primary categorical selection semantics.
 pub const CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION: u32 = 1;
 /// Linear-sRGB material-albedo extraction semantics.
@@ -35,7 +48,7 @@ pub const CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION: u32 = 1;
 pub const CINEMATIC_AOV_CONFIG_IDENTITY_DOMAIN: &str =
     "org.frankensim.render.cinematic-aov-config.v1";
 
-const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
+pub(crate) const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
 const STRING_ATTRIBUTE_TYPE: &str = "string";
 
 /// Frozen AOV channel bundles.
@@ -84,7 +97,44 @@ impl CinematicAovProfile {
             Self::FinalDiagnostic => "final-diagnostic-v1",
         }
     }
+
+    fn exr_channel_layout(self) -> &'static [(&'static str, PixelType)] {
+        &CINEMATIC_AOV_CHANNEL_LAYOUT[..self.float_channel_count() as usize]
+    }
 }
+
+const CINEMATIC_AOV_CHANNEL_LAYOUT: [(&str, PixelType); 30] = [
+    ("R", PixelType::Float),
+    ("G", PixelType::Float),
+    ("B", PixelType::Float),
+    ("albedo.R", PixelType::Float),
+    ("albedo.G", PixelType::Float),
+    ("albedo.B", PixelType::Float),
+    ("normal.X", PixelType::Float),
+    ("normal.Y", PixelType::Float),
+    ("normal.Z", PixelType::Float),
+    ("depth.Z", PixelType::Float),
+    ("primary.coverage", PixelType::Float),
+    ("variance.Y", PixelType::Float),
+    ("motion.prev.X", PixelType::Float),
+    ("motion.prev.Y", PixelType::Float),
+    ("normal_geom.X", PixelType::Float),
+    ("normal_geom.Y", PixelType::Float),
+    ("normal_geom.Z", PixelType::Float),
+    ("direct.R", PixelType::Float),
+    ("direct.G", PixelType::Float),
+    ("direct.B", PixelType::Float),
+    ("indirect.R", PixelType::Float),
+    ("indirect.G", PixelType::Float),
+    ("indirect.B", PixelType::Float),
+    ("emission.R", PixelType::Float),
+    ("emission.G", PixelType::Float),
+    ("emission.B", PixelType::Float),
+    ("id.object", PixelType::Float),
+    ("id.material", PixelType::Float),
+    ("samples", PixelType::Float),
+    ("diagnostic.validity", PixelType::Float),
+];
 
 /// Explicit retained/export-memory and palette admission limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +142,9 @@ pub struct CinematicAovLimits {
     max_pixels: u64,
     max_retained_bytes: u64,
     max_export_plane_bytes: u64,
+    max_export_metadata_bytes: u64,
+    max_exr_encoder_scratch_bytes: u64,
+    max_encoded_exr_bytes: u64,
     max_palette_entries: u32,
 }
 
@@ -102,11 +155,17 @@ impl CinematicAovLimits {
         max_pixels: u64,
         max_retained_bytes: u64,
         max_export_plane_bytes: u64,
+        max_export_metadata_bytes: u64,
+        max_exr_encoder_scratch_bytes: u64,
+        max_encoded_exr_bytes: u64,
         max_palette_entries: u32,
     ) -> Result<Self, CinematicAovError> {
         if max_pixels == 0
             || max_retained_bytes == 0
             || max_export_plane_bytes == 0
+            || max_export_metadata_bytes == 0
+            || max_exr_encoder_scratch_bytes == 0
+            || max_encoded_exr_bytes == 0
             || max_palette_entries == 0
             || max_palette_entries >= MAX_EXACT_F32_INTEGER
         {
@@ -116,6 +175,9 @@ impl CinematicAovLimits {
             max_pixels,
             max_retained_bytes,
             max_export_plane_bytes,
+            max_export_metadata_bytes,
+            max_exr_encoder_scratch_bytes,
+            max_encoded_exr_bytes,
             max_palette_entries,
         })
     }
@@ -138,6 +200,24 @@ impl CinematicAovLimits {
         self.max_export_plane_bytes
     }
 
+    /// Maximum logical bytes in channel descriptors and EXR metadata payloads.
+    #[must_use]
+    pub const fn max_export_metadata_bytes(self) -> u64 {
+        self.max_export_metadata_bytes
+    }
+
+    /// Maximum logical bytes in the EXR writer's ordering scratch.
+    #[must_use]
+    pub const fn max_exr_encoder_scratch_bytes(self) -> u64 {
+        self.max_exr_encoder_scratch_bytes
+    }
+
+    /// Maximum exact encoded EXR artifact length.
+    #[must_use]
+    pub const fn max_encoded_exr_bytes(self) -> u64 {
+        self.max_encoded_exr_bytes
+    }
+
     /// Maximum nonzero entries in either exact identity palette.
     #[must_use]
     pub const fn max_palette_entries(self) -> u32 {
@@ -148,13 +228,16 @@ impl CinematicAovLimits {
 impl Default for CinematicAovLimits {
     fn default() -> Self {
         // Admits one 4K final-diagnostic frame and its fallible full-frame
-        // transactional staging copy. This accounts for owned accumulator
-        // payloads, not allocator overhead, EXR encoder scratch, metadata, or
-        // process RSS.
+        // transactional staging copy plus every logical buffer in the current
+        // uncompressed EXR export. Allocator bookkeeping and process RSS are
+        // deliberately outside these payload ceilings.
         Self {
             max_pixels: 3_840 * 2_160,
             max_retained_bytes: 6 * 1024 * 1024 * 1024,
             max_export_plane_bytes: 1024 * 1024 * 1024,
+            max_export_metadata_bytes: 16 * 1024 * 1024,
+            max_exr_encoder_scratch_bytes: 64 * 1024,
+            max_encoded_exr_bytes: 1024 * 1024 * 1024,
             max_palette_entries: 65_535,
         }
     }
@@ -294,6 +377,9 @@ impl CinematicAovConfig {
         hasher.update(&limits.max_pixels.to_le_bytes());
         hasher.update(&limits.max_retained_bytes.to_le_bytes());
         hasher.update(&limits.max_export_plane_bytes.to_le_bytes());
+        hasher.update(&limits.max_export_metadata_bytes.to_le_bytes());
+        hasher.update(&limits.max_exr_encoder_scratch_bytes.to_le_bytes());
+        hasher.update(&limits.max_encoded_exr_bytes.to_le_bytes());
         hasher.update(&limits.max_palette_entries.to_le_bytes());
         Self {
             profile,
@@ -342,8 +428,9 @@ pub mod validity {
     pub const PRIMARY: u32 = 1 << 0;
     /// At least one material had an admitted linear-sRGB albedo.
     pub const ALBEDO: u32 = 1 << 1;
-    /// At least one primary supplied an authored shading normal. The normal AOV
-    /// otherwise deliberately falls back to the geometric normal.
+    /// Reserved for a future transport-correct authored shading-normal path.
+    /// Version 2 always leaves this clear because beauty uses its face-forwarded
+    /// geometric surface frame; `normal.*` exports that exact frame.
     pub const AUTHORED_SHADING_NORMAL: u32 = 1 << 2;
     /// At least one exact current-to-previous projected motion vector existed.
     pub const PREVIOUS_MOTION: u32 = 1 << 3;
@@ -583,6 +670,7 @@ impl CinematicAovPalette {
         scene: &Scene,
         limits: CinematicAovLimits,
         include_id_channels: bool,
+        cx: &Cx<'_>,
     ) -> Result<Self, CinematicAovError> {
         if !include_id_channels {
             return Ok(Self {
@@ -591,43 +679,49 @@ impl CinematicAovPalette {
             });
         }
         let primitive_count = scene.primitives.len();
+        let maximum_entries = limits.max_palette_entries as usize;
+        let bounded_capacity = primitive_count.min(maximum_entries.saturating_add(1));
         let mut object_ids = Vec::new();
         let mut material_identities = Vec::new();
+        let mut object_id_set = HashSet::new();
+        let mut material_identity_set = HashSet::new();
         object_ids
-            .try_reserve_exact(primitive_count)
+            .try_reserve_exact(bounded_capacity)
             .map_err(|_| CinematicAovError::AllocationRefused)?;
         material_identities
-            .try_reserve_exact(primitive_count)
+            .try_reserve_exact(bounded_capacity)
             .map_err(|_| CinematicAovError::AllocationRefused)?;
-        for primitive in &scene.primitives {
-            match &primitive.shape {
-                Shape::Instance(instance) => object_ids.push(instance.object_id()),
-                Shape::AnimatedInstance(instance) => object_ids.push(instance.object_id()),
-                Shape::Mesh(_) | Shape::Chart(_) => {}
+        object_id_set
+            .try_reserve(bounded_capacity)
+            .map_err(|_| CinematicAovError::AllocationRefused)?;
+        material_identity_set
+            .try_reserve(bounded_capacity)
+            .map_err(|_| CinematicAovError::AllocationRefused)?;
+        for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
+            if primitive_index.is_multiple_of(1_024) {
+                cx.checkpoint().map_err(|_| {
+                    CinematicAovError::Tracer(crate::tracer::TracerError::Cancelled)
+                })?;
             }
-            material_identities.push(primitive.material.content_identity());
+            let object_id = match &primitive.shape {
+                Shape::Instance(instance) => Some(instance.object_id()),
+                Shape::AnimatedInstance(instance) => Some(instance.object_id()),
+                Shape::Mesh(_) | Shape::Chart(_) => None,
+            };
+            if let Some(object_id) = object_id
+                && object_id_set.insert(object_id)
+            {
+                admit_palette_entry("object", object_ids.len(), limits)?;
+                object_ids.push(object_id);
+            }
+            let material_identity = primitive.material.content_identity();
+            if material_identity_set.insert(material_identity) {
+                admit_palette_entry("material", material_identities.len(), limits)?;
+                material_identities.push(material_identity);
+            }
         }
         object_ids.sort_unstable();
-        object_ids.dedup();
         material_identities.sort_unstable();
-        material_identities.dedup();
-        for (kind, count) in [
-            ("object", object_ids.len()),
-            ("material", material_identities.len()),
-        ] {
-            let count = u32::try_from(count).map_err(|_| CinematicAovError::PaletteLimit {
-                kind,
-                requested: u64::MAX,
-                limit: u64::from(limits.max_palette_entries),
-            })?;
-            if count > limits.max_palette_entries {
-                return Err(CinematicAovError::PaletteLimit {
-                    kind,
-                    requested: u64::from(count),
-                    limit: u64::from(limits.max_palette_entries),
-                });
-            }
-        }
         Ok(Self {
             object_ids,
             material_identities,
@@ -662,10 +756,10 @@ impl CinematicAovPalette {
         &self.material_identities
     }
 
-    fn try_clone(&self) -> Result<Self, CinematicAovError> {
+    fn try_clone(&self, cx: &Cx<'_>) -> Result<Self, CinematicAovError> {
         Ok(Self {
-            object_ids: fallible_copy(&self.object_ids)?,
-            material_identities: fallible_copy(&self.material_identities)?,
+            object_ids: fallible_copy_with_cx(&self.object_ids, cx)?,
+            material_identities: fallible_copy_with_cx(&self.material_identities, cx)?,
         })
     }
 }
@@ -675,6 +769,7 @@ pub(crate) struct CinematicAovRenderBinding {
     pub settings: Settings,
     pub shutter: ShutterInterval,
     pub shot_id: u64,
+    pub cut_side: CutSide,
     pub palette: CinematicAovPalette,
     /// Process-local guard against progressive mutation of borrowed scene,
     /// lighting, geometry, or camera values. This is not exported authority.
@@ -683,12 +778,13 @@ pub(crate) struct CinematicAovRenderBinding {
 }
 
 impl CinematicAovRenderBinding {
-    fn try_clone(&self) -> Result<Self, CinematicAovError> {
+    fn try_clone(&self, cx: &Cx<'_>) -> Result<Self, CinematicAovError> {
         Ok(Self {
             settings: self.settings,
             shutter: self.shutter,
             shot_id: self.shot_id,
-            palette: self.palette.try_clone()?,
+            cut_side: self.cut_side,
+            palette: self.palette.try_clone(cx)?,
             continuity_fingerprint: self.continuity_fingerprint,
             adaptive_policy: self.adaptive_policy,
         })
@@ -840,7 +936,7 @@ impl CinematicAovFilm {
 
     /// Fallibly clone all accumulator state for an all-or-nothing progressive
     /// append. Publication remains one final assignment in the caller.
-    pub(crate) fn try_clone_for_stage(&self) -> Result<Self, CinematicAovError> {
+    pub(crate) fn try_clone_for_stage(&self, cx: &Cx<'_>) -> Result<Self, CinematicAovError> {
         let staging_peak_bytes = self
             .retained_bytes
             .checked_mul(2)
@@ -855,21 +951,25 @@ impl CinematicAovFilm {
             beauty: Film {
                 width: self.beauty.width,
                 height: self.beauty.height,
-                xyz: fallible_copy(&self.beauty.xyz)?,
+                xyz: fallible_copy_with_cx(&self.beauty.xyz, cx)?,
                 spp_done: self.beauty.spp_done,
                 time_mode: self.beauty.time_mode,
             },
             config: self.config,
-            common: self.common.as_deref().map(fallible_copy).transpose()?,
+            common: self
+                .common
+                .as_deref()
+                .map(|plane| fallible_copy_with_cx(plane, cx))
+                .transpose()?,
             final_diagnostic: self
                 .final_diagnostic
                 .as_deref()
-                .map(fallible_copy)
+                .map(|plane| fallible_copy_with_cx(plane, cx))
                 .transpose()?,
             binding: self
                 .binding
                 .as_ref()
-                .map(|value| value.try_clone())
+                .map(|value| value.try_clone(cx))
                 .transpose()?,
             retained_bytes: self.retained_bytes,
         })
@@ -884,18 +984,15 @@ impl CinematicAovFilm {
             .ok_or(CinematicAovError::UnboundFilm)?;
         self.validate_complete()?;
         let pixel_count = self.beauty.xyz.len();
-        let channel_count = u64::from(self.config.profile.float_channel_count());
-        let plane_bytes = u64::try_from(pixel_count)
-            .ok()
-            .and_then(|pixels| pixels.checked_mul(channel_count))
-            .and_then(|samples| samples.checked_mul(size_of::<f32>() as u64))
-            .ok_or(CinematicAovError::SizeOverflow)?;
-        if plane_bytes > self.config.limits.max_export_plane_bytes {
-            return Err(CinematicAovError::ExportMemoryLimit {
-                requested: plane_bytes,
-                limit: self.config.limits.max_export_plane_bytes,
-            });
-        }
+        validate_export_plane_budget(pixel_count, self.config)?;
+        let attributes = admitted_exr_attributes(
+            self.beauty.width,
+            self.beauty.height,
+            self.config,
+            binding,
+            "uniform",
+            self.beauty.spp_done.to_string(),
+        )?;
 
         let spp = f64::from(self.beauty.spp_done);
         let channels = build_exr_channels(
@@ -906,12 +1003,15 @@ impl CinematicAovFilm {
             self.common.as_deref(),
             self.final_diagnostic.as_deref(),
         )?;
-        let attributes = self.exr_attributes(binding)?;
-        fs_img::write_exr_with_attributes(
+        fs_img::write_exr_with_attributes_budgeted(
             self.beauty.width,
             self.beauty.height,
             &channels,
             &attributes,
+            ExrWriteLimits {
+                max_scratch_bytes: self.config.limits.max_exr_encoder_scratch_bytes,
+                max_output_bytes: self.config.limits.max_encoded_exr_bytes,
+            },
         )
         .map_err(CinematicAovError::Image)
     }
@@ -944,18 +1044,6 @@ impl CinematicAovFilm {
             return Err(CinematicAovError::SampleAlignmentMismatch);
         }
         Ok(())
-    }
-
-    fn exr_attributes(
-        &self,
-        binding: &CinematicAovRenderBinding,
-    ) -> Result<Vec<ExrAttribute>, CinematicAovError> {
-        cinematic_exr_attributes(
-            self.config,
-            binding,
-            "uniform",
-            self.beauty.spp_done.to_string(),
-        )
     }
 }
 
@@ -1058,6 +1146,14 @@ fn cinematic_exr_attributes(
     }
     push("frankensim.render.shotId", binding.shot_id.to_string());
     push(
+        "frankensim.render.cutSide",
+        match binding.cut_side {
+            CutSide::Before => "before",
+            CutSide::After => "after",
+        }
+        .to_string(),
+    );
+    push(
         "frankensim.render.shutterOpenS",
         f64_bits_string(binding.shutter.open_s()),
     );
@@ -1065,19 +1161,32 @@ fn cinematic_exr_attributes(
         "frankensim.render.shutterCloseS",
         f64_bits_string(binding.shutter.close_s()),
     );
+    let convention = match binding.shutter.convention() {
+        ShutterConvention::Centered => "centered",
+        ShutterConvention::FrontLoaded => "front-loaded",
+        ShutterConvention::BackLoaded => "back-loaded",
+    };
+    let (distribution, strata) = match binding.shutter.distribution() {
+        ShutterDistribution::UniformCounterV1 => ("uniform-counter-v1", 0),
+        ShutterDistribution::StratifiedCounterV1 { strata } => ("stratified-counter-v1", strata),
+    };
+    push(
+        "frankensim.render.shutter",
+        format!("convention={convention};distribution={distribution};strata={strata}"),
+    );
     push(
         "frankensim.render.versions",
         format!(
-            "tracer={TRACER_BIT_SEMANTICS_VERSION};motionTracer={MOTION_TRACER_BIT_SEMANTICS_VERSION};cinematicCamera={CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION};dielectric={DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION};lighting={LIGHTING_TRACER_BIT_SEMANTICS_VERSION};motionVector={MOTION_VECTOR_SEMANTICS_VERSION};category={CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION};albedo={CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION}"
+            "tracer={TRACER_BIT_SEMANTICS_VERSION};motionTracer={MOTION_TRACER_BIT_SEMANTICS_VERSION};cinematicCamera={CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION};dielectric={DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION};lighting={LIGHTING_TRACER_BIT_SEMANTICS_VERSION};motionVector={MOTION_VECTOR_SEMANTICS_VERSION};chartBackend={CHART_BACKEND_BIT_SEMANTICS_VERSION};category={CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION};albedo={CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION}"
         ),
     );
     push(
         "frankensim.aov.objectPalette",
-        encode_object_palette(&binding.palette.object_ids),
+        encode_object_palette(&binding.palette.object_ids)?,
     );
     push(
         "frankensim.aov.materialPalette",
-        encode_material_palette(&binding.palette.material_identities),
+        encode_material_palette(&binding.palette.material_identities)?,
     );
     push(
         "frankensim.aov.paletteZero",
@@ -1129,11 +1238,26 @@ impl AdaptiveCinematicAovFilm {
     }
 
     /// Encode the adaptive raw estimate with the same frozen AOV schema as the
-    /// uniform film. `samples` carries each pixel's actual terminal count.
+    /// uniform film. `FinalDiagnostic` exports each pixel's terminal count in
+    /// `samples`; narrower profiles retain it internally and name the omission
+    /// explicitly in metadata rather than changing their frozen channel set.
     pub fn to_exr(&self) -> Result<Vec<u8>, CinematicAovError> {
         self.validate_complete()?;
         let pixel_count = self.beauty.xyz_sums().len();
         validate_export_plane_budget(pixel_count, self.config)?;
+        let rendered_spp = if self.config.profile.has_final() {
+            "per-pixel-channel"
+        } else {
+            "per-pixel-unexported-by-profile"
+        };
+        let attributes = admitted_exr_attributes(
+            self.beauty.width(),
+            self.beauty.height(),
+            self.config,
+            &self.binding,
+            "adaptive",
+            rendered_spp.to_string(),
+        )?;
         let channels = build_exr_channels(
             self.config.profile,
             pixel_count,
@@ -1146,17 +1270,15 @@ impl AdaptiveCinematicAovFilm {
             self.common.as_deref(),
             self.final_diagnostic.as_deref(),
         )?;
-        let attributes = cinematic_exr_attributes(
-            self.config,
-            &self.binding,
-            "adaptive",
-            "per-pixel-channel".to_string(),
-        )?;
-        fs_img::write_exr_with_attributes(
+        fs_img::write_exr_with_attributes_budgeted(
             self.beauty.width(),
             self.beauty.height(),
             &channels,
             &attributes,
+            ExrWriteLimits {
+                max_scratch_bytes: self.config.limits.max_exr_encoder_scratch_bytes,
+                max_output_bytes: self.config.limits.max_encoded_exr_bytes,
+            },
         )
         .map_err(CinematicAovError::Image)
     }
@@ -1360,6 +1482,27 @@ pub enum CinematicAovError {
         /// Configured uncompressed channel-plane byte ceiling.
         limit: u64,
     },
+    /// Channel descriptors and EXR metadata exceeded their admitted payload.
+    ExportMetadataMemoryLimit {
+        /// Conservative logical bytes required before metadata allocation.
+        requested: u64,
+        /// Configured metadata-payload byte ceiling.
+        limit: u64,
+    },
+    /// The EXR writer's canonical-order reference storage exceeded its limit.
+    ExrEncoderScratchLimit {
+        /// Exact logical reference-storage bytes required.
+        requested: u64,
+        /// Configured encoder-scratch byte ceiling.
+        limit: u64,
+    },
+    /// The exact encoded EXR artifact exceeded its admitted byte count.
+    EncodedExrMemoryLimit {
+        /// Exact encoded artifact bytes required.
+        requested: u64,
+        /// Configured encoded-output byte ceiling.
+        limit: u64,
+    },
     /// Scene palette exceeded its entry limit.
     PaletteLimit {
         /// Palette family (`object` or `material`).
@@ -1437,6 +1580,18 @@ impl fmt::Display for CinematicAovError {
             Self::ExportMemoryLimit { requested, limit } => write!(
                 formatter,
                 "cinematic AOV EXR planes need {requested} bytes above limit {limit}"
+            ),
+            Self::ExportMetadataMemoryLimit { requested, limit } => write!(
+                formatter,
+                "cinematic AOV EXR metadata needs a {requested}-byte logical bound above limit {limit}"
+            ),
+            Self::ExrEncoderScratchLimit { requested, limit } => write!(
+                formatter,
+                "cinematic AOV EXR encoder scratch needs {requested} bytes above limit {limit}"
+            ),
+            Self::EncodedExrMemoryLimit { requested, limit } => write!(
+                formatter,
+                "cinematic AOV encoded EXR needs {requested} bytes above limit {limit}"
             ),
             Self::PaletteLimit {
                 kind,
@@ -1520,20 +1675,19 @@ pub(crate) fn validate_binding(
     settings: Settings,
     shutter: ShutterInterval,
     shot_id: u64,
+    cut_side: CutSide,
     palette: &CinematicAovPalette,
     continuity_fingerprint: ContentHash,
 ) -> Result<(), CinematicAovError> {
     validate_reference_times(film.config, shutter)?;
-    let candidate = CinematicAovRenderBinding {
-        settings,
-        shutter,
-        shot_id,
-        palette: palette.try_clone()?,
-        continuity_fingerprint,
-        adaptive_policy: None,
-    };
     if let Some(binding) = &film.binding
-        && binding != &candidate
+        && (binding.settings != settings
+            || binding.shutter != shutter
+            || binding.shot_id != shot_id
+            || binding.cut_side != cut_side
+            || &binding.palette != palette
+            || binding.continuity_fingerprint != continuity_fingerprint
+            || binding.adaptive_policy.is_some())
     {
         return Err(CinematicAovError::ProgressiveBindingMismatch);
     }
@@ -1544,6 +1698,7 @@ pub(crate) fn render_binding(
     settings: Settings,
     shutter: ShutterInterval,
     shot_id: u64,
+    cut_side: CutSide,
     palette: CinematicAovPalette,
     continuity_fingerprint: ContentHash,
 ) -> CinematicAovRenderBinding {
@@ -1551,6 +1706,7 @@ pub(crate) fn render_binding(
         settings,
         shutter,
         shot_id,
+        cut_side,
         palette,
         continuity_fingerprint,
         adaptive_policy: None,
@@ -1561,6 +1717,7 @@ pub(crate) fn adaptive_render_binding(
     settings: Settings,
     shutter: ShutterInterval,
     shot_id: u64,
+    cut_side: CutSide,
     palette: CinematicAovPalette,
     continuity_fingerprint: ContentHash,
     adaptive_policy: AdaptiveSamplingConfig,
@@ -1569,6 +1726,7 @@ pub(crate) fn adaptive_render_binding(
         settings,
         shutter,
         shot_id,
+        cut_side,
         palette,
         continuity_fingerprint,
         adaptive_policy: Some(adaptive_policy),
@@ -1655,6 +1813,112 @@ fn validate_export_plane_budget(
     Ok(plane_bytes)
 }
 
+// Fixed attributes, descriptor structs/names, and one-at-a-time numeric
+// formatting temporaries are all bounded independently of scene size. The two
+// palette strings are the only scene-sized metadata allocations.
+const FIXED_EXPORT_METADATA_BOUND_BYTES: u64 = 64 * 1024;
+const MAX_PALETTE_INDEX_DECIMAL_BYTES: u64 = 8;
+const MAX_U64_DECIMAL_BYTES: u64 = 20;
+const CONTENT_HASH_HEX_BYTES: u64 = 64;
+
+fn export_metadata_payload_bound(
+    binding: &CinematicAovRenderBinding,
+) -> Result<u64, CinematicAovError> {
+    let object_entry_bytes = 1_u64
+        .checked_add(MAX_PALETTE_INDEX_DECIMAL_BYTES)
+        .and_then(|bytes| bytes.checked_add(1 + MAX_U64_DECIMAL_BYTES))
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    let material_entry_bytes = 1_u64
+        .checked_add(MAX_PALETTE_INDEX_DECIMAL_BYTES)
+        .and_then(|bytes| bytes.checked_add(1 + CONTENT_HASH_HEX_BYTES))
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    u64::try_from(binding.palette.object_ids.len())
+        .ok()
+        .and_then(|count| count.checked_mul(object_entry_bytes))
+        .and_then(|object_bytes| {
+            u64::try_from(binding.palette.material_identities.len())
+                .ok()
+                .and_then(|count| count.checked_mul(material_entry_bytes))
+                .and_then(|material_bytes| object_bytes.checked_add(material_bytes))
+        })
+        .and_then(|palette_bytes| palette_bytes.checked_add(FIXED_EXPORT_METADATA_BOUND_BYTES))
+        .ok_or(CinematicAovError::SizeOverflow)
+}
+
+fn export_metadata_payload_bytes(
+    profile: CinematicAovProfile,
+    attributes: &[ExrAttribute],
+) -> Result<u64, CinematicAovError> {
+    let layout = profile.exr_channel_layout();
+    let channel_bytes = u64::try_from(layout.len())
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<Channel>() as u64))
+        .and_then(|bytes| {
+            layout.iter().try_fold(bytes, |total, (name, _)| {
+                total.checked_add(name.len() as u64)
+            })
+        })
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    u64::try_from(attributes.len())
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<ExrAttribute>() as u64))
+        .and_then(|bytes| channel_bytes.checked_add(bytes))
+        .and_then(|bytes| {
+            attributes.iter().try_fold(bytes, |total, attribute| {
+                total
+                    .checked_add(attribute.name.len() as u64)
+                    .and_then(|value| value.checked_add(attribute.ty.len() as u64))
+                    .and_then(|value| value.checked_add(attribute.value.len() as u64))
+            })
+        })
+        .ok_or(CinematicAovError::SizeOverflow)
+}
+
+fn admitted_exr_attributes(
+    width: u32,
+    height: u32,
+    config: CinematicAovConfig,
+    binding: &CinematicAovRenderBinding,
+    sample_mode: &'static str,
+    rendered_spp: String,
+) -> Result<Vec<ExrAttribute>, CinematicAovError> {
+    let metadata_bound = export_metadata_payload_bound(binding)?;
+    if metadata_bound > config.limits.max_export_metadata_bytes {
+        return Err(CinematicAovError::ExportMetadataMemoryLimit {
+            requested: metadata_bound,
+            limit: config.limits.max_export_metadata_bytes,
+        });
+    }
+    let attributes = cinematic_exr_attributes(config, binding, sample_mode, rendered_spp)?;
+    let metadata_bytes = export_metadata_payload_bytes(config.profile, &attributes)?;
+    if metadata_bytes > metadata_bound || metadata_bytes > config.limits.max_export_metadata_bytes {
+        return Err(CinematicAovError::ExportMetadataMemoryLimit {
+            requested: metadata_bytes,
+            limit: config.limits.max_export_metadata_bytes,
+        });
+    }
+    let requirements = fs_img::exr_write_requirements_for_layout(
+        width,
+        height,
+        config.profile.exr_channel_layout(),
+        &attributes,
+    )
+    .map_err(CinematicAovError::Image)?;
+    if requirements.scratch_bytes > config.limits.max_exr_encoder_scratch_bytes {
+        return Err(CinematicAovError::ExrEncoderScratchLimit {
+            requested: requirements.scratch_bytes,
+            limit: config.limits.max_exr_encoder_scratch_bytes,
+        });
+    }
+    if requirements.output_bytes > config.limits.max_encoded_exr_bytes {
+        return Err(CinematicAovError::EncodedExrMemoryLimit {
+            requested: requirements.output_bytes,
+            limit: config.limits.max_encoded_exr_bytes,
+        });
+    }
+    Ok(attributes)
+}
+
 fn fallible_filled<T: Clone>(len: usize, value: T) -> Result<Vec<T>, CinematicAovError> {
     let mut output = Vec::new();
     output
@@ -1664,13 +1928,35 @@ fn fallible_filled<T: Clone>(len: usize, value: T) -> Result<Vec<T>, CinematicAo
     Ok(output)
 }
 
-fn fallible_copy<T: Copy>(source: &[T]) -> Result<Vec<T>, CinematicAovError> {
+fn fallible_copy_with_cx<T: Copy>(source: &[T], cx: &Cx<'_>) -> Result<Vec<T>, CinematicAovError> {
     let mut output = Vec::new();
     output
         .try_reserve_exact(source.len())
         .map_err(|_| CinematicAovError::AllocationRefused)?;
-    output.extend_from_slice(source);
+    for chunk in source.chunks(4_096) {
+        cx.checkpoint()
+            .map_err(|_| CinematicAovError::Tracer(crate::tracer::TracerError::Cancelled))?;
+        output.extend_from_slice(chunk);
+    }
     Ok(output)
+}
+
+fn admit_palette_entry(
+    kind: &'static str,
+    current_entries: usize,
+    limits: CinematicAovLimits,
+) -> Result<(), CinematicAovError> {
+    if current_entries >= limits.max_palette_entries as usize {
+        return Err(CinematicAovError::PaletteLimit {
+            kind,
+            requested: u64::try_from(current_entries)
+                .ok()
+                .and_then(|entries| entries.checked_add(1))
+                .unwrap_or(u64::MAX),
+            limit: u64::from(limits.max_palette_entries),
+        });
+    }
+    Ok(())
 }
 
 fn palette_index(zero_based: usize) -> Result<u32, CinematicAovError> {
@@ -1901,7 +2187,13 @@ fn build_exr_channels(
             |pixel| f64::from(validity_mask(common[pixel], final_diagnostic[pixel])),
         )?);
     }
-    if channels.len() != profile.float_channel_count() as usize {
+    let layout = profile.exr_channel_layout();
+    if channels.len() != layout.len()
+        || channels
+            .iter()
+            .zip(layout)
+            .any(|(channel, (name, ty))| channel.name != *name || channel.ty != *ty)
+    {
         return Err(CinematicAovError::InternalChannelCount);
     }
     Ok(channels)
@@ -1938,26 +2230,69 @@ fn float_channel(
     })
 }
 
-fn encode_object_palette(values: &[u64]) -> String {
-    let mut encoded = String::from("0=unavailable");
-    for (zero_based, value) in values.iter().enumerate() {
-        encoded.push(';');
-        encoded.push_str(&(zero_based + 1).to_string());
-        encoded.push('=');
-        encoded.push_str(&value.to_string());
-    }
+fn encode_object_palette(values: &[u64]) -> Result<String, CinematicAovError> {
+    let required = values
+        .iter()
+        .enumerate()
+        .try_fold("0=unavailable".len(), |bytes, (zero_based, value)| {
+            let one_based = u64::try_from(zero_based.checked_add(1)?).ok()?;
+            bytes
+                .checked_add(1)
+                .and_then(|total| total.checked_add(decimal_digits(one_based)))
+                .and_then(|total| total.checked_add(1))
+                .and_then(|total| total.checked_add(decimal_digits(*value)))
+        })
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    let mut encoded = String::new();
     encoded
+        .try_reserve_exact(required)
+        .map_err(|_| CinematicAovError::AllocationRefused)?;
+    encoded.push_str("0=unavailable");
+    for (zero_based, value) in values.iter().enumerate() {
+        write!(&mut encoded, ";{}={value}", zero_based + 1)
+            .map_err(|_| CinematicAovError::AllocationRefused)?;
+    }
+    debug_assert_eq!(encoded.len(), required);
+    Ok(encoded)
 }
 
-fn encode_material_palette(values: &[ContentHash]) -> String {
-    let mut encoded = String::from("0=unavailable");
-    for (zero_based, value) in values.iter().enumerate() {
-        encoded.push(';');
-        encoded.push_str(&(zero_based + 1).to_string());
-        encoded.push('=');
-        encoded.push_str(&value.to_hex());
-    }
+fn encode_material_palette(values: &[ContentHash]) -> Result<String, CinematicAovError> {
+    let required = values
+        .iter()
+        .enumerate()
+        .try_fold("0=unavailable".len(), |bytes, (zero_based, _)| {
+            let one_based = u64::try_from(zero_based.checked_add(1)?).ok()?;
+            bytes
+                .checked_add(1)
+                .and_then(|total| total.checked_add(decimal_digits(one_based)))
+                .and_then(|total| total.checked_add(1 + CONTENT_HASH_HEX_BYTES as usize))
+        })
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    let mut encoded = String::new();
     encoded
+        .try_reserve_exact(required)
+        .map_err(|_| CinematicAovError::AllocationRefused)?;
+    encoded.push_str("0=unavailable");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (zero_based, value) in values.iter().enumerate() {
+        write!(&mut encoded, ";{}=", zero_based + 1)
+            .map_err(|_| CinematicAovError::AllocationRefused)?;
+        for byte in value.as_bytes() {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    debug_assert_eq!(encoded.len(), required);
+    Ok(encoded)
+}
+
+fn decimal_digits(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 fn f64_bits_string(value: f64) -> String {
@@ -2025,6 +2360,54 @@ mod tests {
         assert!(
             bytes.checked_mul(2).unwrap() <= CinematicAovLimits::default().max_retained_bytes()
         );
+
+        let config = config(CinematicAovProfile::FinalDiagnostic);
+        assert_eq!(
+            validate_export_plane_budget(3_840 * 2_160, config).unwrap(),
+            995_328_000
+        );
+        let binding = CinematicAovRenderBinding {
+            settings: Settings {
+                width: 3_840,
+                height: 2_160,
+                spp: 1,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 17,
+            },
+            shutter: ShutterInterval::try_from_canonical_parts(
+                1.0,
+                1.0,
+                ShutterConvention::Centered,
+                ShutterDistribution::UniformCounterV1,
+            )
+            .unwrap(),
+            shot_id: 9,
+            cut_side: CutSide::After,
+            palette: CinematicAovPalette {
+                object_ids: Vec::new(),
+                material_identities: Vec::new(),
+            },
+            continuity_fingerprint: hash("continuity"),
+            adaptive_policy: None,
+        };
+        let metadata_bound = export_metadata_payload_bound(&binding).unwrap();
+        assert!(metadata_bound <= config.limits().max_export_metadata_bytes());
+        let attributes =
+            cinematic_exr_attributes(config, &binding, "uniform", "1".to_string()).unwrap();
+        assert!(
+            export_metadata_payload_bytes(config.profile(), &attributes).unwrap() <= metadata_bound
+        );
+        let requirements = fs_img::exr_write_requirements_for_layout(
+            3_840,
+            2_160,
+            config.profile().exr_channel_layout(),
+            &attributes,
+        )
+        .unwrap();
+        assert!(requirements.scratch_bytes <= config.limits().max_exr_encoder_scratch_bytes());
+        assert!(requirements.output_bytes <= config.limits().max_encoded_exr_bytes());
     }
 
     #[test]
@@ -2033,6 +2416,24 @@ mod tests {
         let final_profile = config(CinematicAovProfile::FinalDiagnostic);
         assert_eq!(daily.identity(), daily.identity());
         assert_ne!(daily.identity(), final_profile.identity());
+
+        let defaults = CinematicAovLimits::default();
+        let smaller_output = CinematicAovLimits::try_new(
+            defaults.max_pixels(),
+            defaults.max_retained_bytes(),
+            defaults.max_export_plane_bytes(),
+            defaults.max_export_metadata_bytes(),
+            defaults.max_exr_encoder_scratch_bytes(),
+            defaults.max_encoded_exr_bytes() - 1,
+            defaults.max_palette_entries(),
+        )
+        .unwrap();
+        let changed = CinematicAovConfig::new(
+            CinematicAovProfile::DailyCore,
+            daily.provenance(),
+            smaller_output,
+        );
+        assert_ne!(daily.identity(), changed.identity());
     }
 
     #[test]
