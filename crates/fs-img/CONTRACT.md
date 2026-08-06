@@ -28,7 +28,14 @@ readers exist to round-trip **our own** outputs, not the world's files.
   attributes; `DecodedExr.attributes` preserves their names, type names, and
   payload bytes exactly. `SOURCE_ARTIFACT_HASH_ATTRIBUTE` standardizes the
   L5/L6 composition key without teaching this crate ledger semantics. An empty
-  attribute slice is byte-identical to `write_exr`. `read_exr` → `DecodedExr`.
+  attribute slice is byte-identical to `write_exr`.
+  `exr_write_requirements_for_layout` admits dimensions/channel metadata
+  without image planes; `exr_write_requirements` additionally validates owned
+  plane shapes. Both return the exact NONE-compressed encoded length and the
+  logical reference-vector scratch. `write_exr_with_attributes_budgeted`
+  refuses either caller ceiling before allocation, uses fallible reservations,
+  and preserves the compatibility writer's bytes exactly. `read_exr` →
+  `DecodedExr`.
   `f32_to_f16_bits` / `f16_bits_to_f32` — IEEE 754 half conversion with
   round-to-nearest-even, including subnormals, ±inf, and NaN (payload
   preserved as a quiet bit).
@@ -86,12 +93,23 @@ readers exist to round-trip **our own** outputs, not the world's files.
    checked arithmetic and are compared with the caller's admitted envelope
    before `try_reserve_exact`. Allocation refusal is structured and no partial
    preview is returned.
+9. **EXR exact-size admission**: the budgeted EXR writer validates shapes,
+   version-2 short names, duplicate/reserved attributes, signed-i32
+   scanline/header lengths, logical ordering scratch, and exact encoded output
+   bytes before allocating either reference vector or output. It writes the
+   channel list directly into the once-reserved output and uses stack storage
+   for the fixed data window.
+   Scratch accounting is logical reference payload, not allocator bookkeeping;
+   caller-owned channel planes and attribute payloads remain caller-budgeted.
 
 ## Error model
 
 `ImgError`: `Shape { expected, got, context }` (buffer/shape disagreement),
-`Malformed { what }` (structurally invalid bytes — corruption), and
-`Unsupported { what }` (valid-looking bytes outside our subset).
+`Malformed { what }` (structurally invalid bytes — corruption),
+`Unsupported { what }` (valid-looking bytes outside our subset),
+`ResourceLimit` (exact logical requirement exceeds a caller ceiling),
+`AllocationRefused` (fallible reservation failed after admission), and
+`SizeOverflow` (checked size arithmetic cannot represent the artifact).
 `CinematicColorError` separately reports stable config/canonical field paths,
 shape and resource requirements, the first invalid pixel/channel/stage,
 checked-arithmetic overflow, and allocation refusal. No panics occur on byte
