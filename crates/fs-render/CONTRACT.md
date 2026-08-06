@@ -232,6 +232,16 @@ differentiable lift). Pure Rust throughout.
   returned-`Vec` path necessarily holds staged planes and encoded output
   concurrently during finalization.
 
+  `CinematicAovFilm::denoise_guides` exposes the retained `DailyCore` guide
+  subset as owned row-major `f32` planes: previous-frame motion, axial depth,
+  shading normal, primary coverage, and raw-luminance variance. It uses the
+  exact same averaging, normal normalization, finite narrowing, invalid
+  background-zero convention, and signed-zero canonicalization as EXR export;
+  the focused battery compares every returned plane bit-for-bit with its
+  decoded EXR counterpart. `BeautyOnly` refuses because it retained no primary
+  observations. Stable IDs are intentionally omitted rather than converting
+  per-frame palette indices into a stronger identity claim.
+
   Progressive uniform `CinematicAovFilm` state has a distinct `FSRAOVC1`
   checkpoint codec; legacy `FSRCP001` bytes remain unchanged. The AOV codec
   streams at most 64 KiB payload chunks plus one 32-byte seal under an explicit
@@ -255,6 +265,19 @@ differentiable lift). Pure Rust throughout.
   no content identity, its continuity guard contains a process-local allocation
   address and a cross-process chart resume correctly refuses rather than
   pretending identity.
+
+  Fresh uniform AOV films also have an explicit deterministic tile path:
+  `render_cinematic_with_aovs_execution` and
+  `ParkedRenderScope::render_cinematic_with_aovs`. Each logical tile owns
+  disjoint pixels and accumulates every pixel in ascending absolute-sample
+  order before copying the complete tile into one private full-frame staging
+  film. The path reuses `RenderExecutionConfig`, the ambient `Cx`, the existing
+  operation lease, and the ordinary/parked `RenderPoolRunner`; worker count,
+  stealing, and tile completion order cannot change AOV arithmetic. The fresh
+  path allocates one staged AOV film rather than constructing an empty film and
+  cloning it as the progressive compatibility API must. Cancellation, AOV
+  refusal, memory refusal, or a contained worker panic drains the crew and
+  publishes no film.
 
   There is currently no AOV-specific tile-pending state, adaptive checkpoint
   codec/resume state, shard specification, shard result, or shard merge API.
@@ -405,6 +428,10 @@ charge, so scheduling overlap cannot change lease admission. The dielectric
 medium stack is fixed-capacity inline state. Thread stacks, allocator
 usable-size overhead, and heap owned by lower chart implementations remain
 outside the operation-memory claim.
+Fresh cinematic AOV tile jobs charge their complete private beauty/AOV film,
+the exact profile-dependent maximum concurrent tile accumulators, sampler
+state, and executor metadata before dispatch; successful publication releases
+every transient charge while the returned film retains its owned storage.
 Adaptive jobs reserve three XYZ binary64 planes (raw sum, Welford mean, and
 second moment), one `u32` count plane, one terminal-decision plane, sampler
 state when applicable, and tile or row scratch before dispatch. Published AOV
@@ -603,6 +630,13 @@ traversal, compute, merge, idle, and memory measurements. The Euler cinematic
 bridge adds animated-camera, geometry, dielectric, and direct-light
 serial-versus-tiled equality through both one-shot and parked-crew paths.
 
+`tests/aov_battery.rs` additionally covers complete cinematic AOV-film and EXR
+byte equality against the serial oracle across 1/2/8 workers, both IID and
+Owen-Sobol sampling, clipped tile layouts, a skewed schedule, and multiple AOV
+profiles; two different jobs on one parked crew; pre-dispatch memory and AOV
+configuration refusal; mid-trace cancellation; contained worker panic; and
+exact denoise-guide/EXR plane equivalence including background signed zero.
+
 `tests/adaptive_battery.rs` plus `tracer` inline tests (feature `tracer`) cover
 policy admission and signed-zero canonicalization; fixed and truncated
 checkpoint schedules; exact threshold equality and final-checkpoint precedence;
@@ -688,9 +722,10 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   watertight ray-triangle tests, a LIGHT-BVH for large emitter populations,
   heterogeneous volume/surface coupling, ray-stream sorting, and progressive
   tile streaming to HELM remain staged.
-- The free `render_*_with_execution` functions are one-job convenience APIs
-  and construct a scoped worker lane per call. Sustained frame sequences must
-  use `RenderWorkerPool::with_parked_crew_local`. Timing fields are diagnostic
+- The free `render_*_with_execution` functions and
+  `render_cinematic_with_aovs_execution` are one-job convenience APIs and
+  construct a scoped worker lane per call. Sustained frame sequences must use
+  `RenderWorkerPool::with_parked_crew_local`. Timing fields are diagnostic
   wall-clock observations, not a universal scaling or 4K-attainment claim;
   bead `frankensim-h7xu5.5.5` owns representative 1080p/4K qualification.
 - Transactional `&mut Film` compatibility calls necessarily retain the

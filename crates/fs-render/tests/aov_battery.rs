@@ -3,8 +3,10 @@
 
 use asupersync::types::Budget;
 use fs_blake3::{ContentHash, hash_domain};
-use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_geom::{Point3, Vec3};
+use fs_evidence::NumericalCertificate;
+use fs_exec::{CancelGate, Cx, ExecMode, RunError, RunId, StreamKey};
+use fs_geom::fixtures::SphereChart;
+use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_render::animated_instances::{
     AnimatedGeometryInstance, RigidTransformTrajectory, TransformKeyframe,
 };
@@ -21,11 +23,14 @@ use fs_render::instances::{RigidTransform, SharedGeometry};
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
 use fs_render::spectral::lift_rgb;
 use fs_render::tracer::{
-    AdaptiveDecision, AdaptiveSamplingConfig, Camera, DirectStrategy, Film, Material, Primitive,
-    RectLight, Sampler, Scene, Settings, Shape, render_cinematic,
+    AdaptiveDecision, AdaptiveSamplingConfig, Camera, CinematicAovExecutionError, DirectStrategy,
+    Film, Material, Primitive, RectLight, RenderExecutionConfig, RenderExecutionError,
+    RenderWorkerPool, Sampler, Scene, Settings, Shape, render_cinematic,
     render_cinematic_adaptive_with_aovs, render_cinematic_range_with_aovs,
-    render_cinematic_with_aovs, trace_cinematic_pixel_sample,
+    render_cinematic_with_aovs, render_cinematic_with_aovs_execution, trace_cinematic_pixel_sample,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
@@ -188,6 +193,84 @@ fn settings(spp: u32) -> Settings {
         sampler: Sampler::Iid,
         strategy: DirectStrategy::Mis,
         seed: 0xa0_51_0001,
+    }
+}
+
+fn execution(
+    tile_width: u32,
+    tile_height: u32,
+    workers: usize,
+    memory_limit_bytes: u64,
+    run: u64,
+) -> RenderExecutionConfig {
+    RenderExecutionConfig::try_new(
+        tile_width,
+        tile_height,
+        workers,
+        memory_limit_bytes,
+        RunId(run),
+    )
+    .expect("valid cinematic AOV execution policy")
+}
+
+struct CancellingChart {
+    gate: Arc<CancelGate>,
+    evaluations: Arc<AtomicUsize>,
+    cancel_at: usize,
+}
+
+impl Chart for CancellingChart {
+    fn eval(&self, point: Point3, cx: &Cx<'_>) -> ChartSample {
+        let evaluation = self.evaluations.fetch_add(1, Ordering::SeqCst) + 1;
+        if evaluation == self.cancel_at {
+            self.gate.request();
+        }
+        SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 0.5,
+        }
+        .eval(point, cx)
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn name(&self) -> &'static str {
+        "cinematic-aov-cancelling-chart"
+    }
+}
+
+struct PanickingChart;
+
+impl Chart for PanickingChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        panic!("declared cinematic AOV tile panic")
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _point: Point3,
+        _sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        NumericalCertificate::exact(0.0)
+    }
+
+    fn name(&self) -> &'static str {
+        "cinematic-aov-panicking-chart"
     }
 }
 
@@ -376,6 +459,323 @@ fn g5_aov_capture_preserves_cinematic_beauty_bits() {
     assert_film_bits_eq(&legacy, with_aovs.beauty());
     assert_eq!(with_aovs.sample_count(0), Some(3));
     assert_eq!(with_aovs.primary_count(0), Some(3));
+}
+
+#[test]
+fn g5_parallel_aovs_and_exr_are_bit_exact_across_workers_tiles_and_schedules() {
+    let scene = scene(true);
+    let camera = camera(&scene);
+    for (profile, sampler) in [
+        (CinematicAovProfile::DailyCore, Sampler::Iid),
+        (CinematicAovProfile::FinalDiagnostic, Sampler::OwenSobol),
+    ] {
+        let mut settings = settings(3);
+        settings.width = 9;
+        settings.height = 7;
+        settings.sampler = sampler;
+        let aov_config = config(profile);
+        let serial = with_cx(|cx| {
+            render_cinematic_with_aovs(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter(),
+                aov_config,
+            )
+            .expect("serial cinematic AOV oracle")
+        });
+        let serial_exr = serial.to_exr().expect("serial AOV EXR");
+        for workers in [1, 2, 8] {
+            let mut policy = execution(4, 3, workers, 64 << 20, 0xa051_1000 + workers as u64);
+            if workers == 8 {
+                policy = policy
+                    .with_quantum_weights(vec![1, 3, 2, 5, 4, 7, 6, 8])
+                    .expect("valid deliberately skewed worker schedule");
+            }
+            let parallel = with_cx(|cx| {
+                render_cinematic_with_aovs_execution(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    shutter(),
+                    aov_config,
+                    &policy,
+                )
+                .expect("tile-parallel cinematic AOV render")
+            });
+            assert_eq!(
+                parallel.film, serial,
+                "complete AOV state drifted: profile={profile:?} workers={workers}"
+            );
+            assert_eq!(
+                parallel.film.to_exr().unwrap(),
+                serial_exr,
+                "AOV EXR bytes drifted: profile={profile:?} workers={workers}"
+            );
+            assert_eq!(parallel.report.requested_workers, workers);
+            assert_eq!(parallel.report.executor.declared_run, policy.run_id());
+            assert_eq!(parallel.report.memory.used_bytes, 0);
+        }
+    }
+}
+
+#[test]
+fn g5_parked_crew_reuses_workers_for_complete_aov_frames() {
+    let scene = scene(true);
+    let camera = camera(&scene);
+    let mut settings = settings(2);
+    settings.width = 8;
+    settings.height = 6;
+    let daily = config(CinematicAovProfile::DailyCore);
+    let diagnostic = config(CinematicAovProfile::FinalDiagnostic);
+    let first_policy = execution(3, 2, 4, 64 << 20, 0xa051_2001);
+    let second_policy = execution(5, 4, 4, 64 << 20, 0xa051_2002);
+    let first_serial = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter(),
+            daily,
+        )
+        .unwrap()
+    });
+    let second_serial = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter(),
+            diagnostic,
+        )
+        .unwrap()
+    });
+    with_cx(|cx| {
+        let pool = RenderWorkerPool::new(&first_policy, cx.mode(), 0xa051_2ced);
+        pool.with_parked_crew_local(|parked| {
+            let first = parked
+                .render_cinematic_with_aovs(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    shutter(),
+                    daily,
+                    &first_policy,
+                )
+                .unwrap();
+            let second = parked
+                .render_cinematic_with_aovs(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    shutter(),
+                    diagnostic,
+                    &second_policy,
+                )
+                .unwrap();
+            assert_eq!(first.film, first_serial);
+            assert_eq!(second.film, second_serial);
+            assert_eq!(first.report.executor.declared_run, first_policy.run_id());
+            assert_eq!(second.report.executor.declared_run, second_policy.run_id());
+        });
+    });
+}
+
+#[test]
+fn g4_parallel_aov_refusal_cancellation_and_panic_publish_no_film() {
+    let healthy_scene = scene(true);
+    let healthy_camera = camera(&healthy_scene);
+    let mut render_settings = settings(4);
+    render_settings.width = 8;
+    render_settings.height = 6;
+    let aov_config = config(CinematicAovProfile::DailyCore);
+    let one_byte = execution(3, 2, 4, 1, 0xa051_3001);
+    let refused = with_cx(|cx| {
+        render_cinematic_with_aovs_execution(
+            &healthy_scene,
+            &healthy_camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            shutter(),
+            aov_config,
+            &one_byte,
+        )
+    });
+    assert!(matches!(
+        refused,
+        Err(CinematicAovExecutionError::Execution(
+            RenderExecutionError::Memory(_)
+        ))
+    ));
+
+    let bad_times = config_with_times(CinematicAovProfile::DailyCore, 0.0, 0.75, 1.0);
+    let normal_policy = execution(3, 2, 4, 64 << 20, 0xa051_3002);
+    let bad_config = with_cx(|cx| {
+        render_cinematic_with_aovs_execution(
+            &healthy_scene,
+            &healthy_camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            shutter(),
+            bad_times,
+            &normal_policy,
+        )
+    });
+    assert_eq!(
+        bad_config,
+        Err(CinematicAovExecutionError::Aov(
+            CinematicAovError::ReferenceTimesDoNotCoverShutter
+        ))
+    );
+
+    let gate = Arc::new(CancelGate::new());
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let mut cancelling_scene = scene(false);
+    cancelling_scene.primitives[0].shape = Shape::Chart(Box::new(CancellingChart {
+        gate: Arc::clone(&gate),
+        evaluations: Arc::clone(&evaluations),
+        cancel_at: 4,
+    }));
+    let cancelling_camera = camera(&cancelling_scene);
+    let cancelled = with_gate(&gate, |cx| {
+        render_cinematic_with_aovs_execution(
+            &cancelling_scene,
+            &cancelling_camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            shutter(),
+            aov_config,
+            &normal_policy,
+        )
+    });
+    assert!(evaluations.load(Ordering::SeqCst) >= 4);
+    assert!(matches!(
+        cancelled,
+        Err(CinematicAovExecutionError::Execution(
+            RenderExecutionError::Tracer(_)
+        ))
+    ));
+
+    let mut panicking_scene = scene(false);
+    panicking_scene.primitives[0].shape = Shape::Chart(Box::new(PanickingChart));
+    let panicking_camera = camera(&panicking_scene);
+    let panicked = with_cx(|cx| {
+        render_cinematic_with_aovs_execution(
+            &panicking_scene,
+            &panicking_camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            shutter(),
+            aov_config,
+            &normal_policy,
+        )
+    });
+    assert!(matches!(
+        panicked,
+        Err(CinematicAovExecutionError::Execution(
+            RenderExecutionError::Executor(RunError::TilePanicked { .. })
+        ))
+    ));
+}
+
+#[test]
+fn g0_owned_denoise_guides_are_exact_exr_planes_with_background_zeros() {
+    let foreground_scene = scene(true);
+    let foreground_camera = camera(&foreground_scene);
+    let film = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &foreground_scene,
+            &foreground_camera,
+            CutSide::After,
+            cx,
+            &settings(3),
+            shutter(),
+            config(CinematicAovProfile::DailyCore),
+        )
+        .unwrap()
+    });
+    let guides = film.denoise_guides().unwrap();
+    let decoded = fs_img::read_exr(&film.to_exr().unwrap()).unwrap();
+    assert_eq!((guides.width(), guides.height()), (1, 1));
+    for (guide, exr_name) in [
+        (guides.motion_prev_x(), "motion.prev.X"),
+        (guides.motion_prev_y(), "motion.prev.Y"),
+        (guides.axial_depth_m(), "depth.Z"),
+        (guides.normal_x(), "normal.X"),
+        (guides.normal_y(), "normal.Y"),
+        (guides.normal_z(), "normal.Z"),
+        (guides.primary_coverage(), "primary.coverage"),
+        (guides.variance_luminance(), "variance.Y"),
+    ] {
+        assert_eq!(
+            guide,
+            channel(&decoded, exr_name).data.as_slice(),
+            "{exr_name}"
+        );
+    }
+
+    let mut background = scene(false);
+    background.primitives.remove(0);
+    background.lights[0].prim = 0;
+    let background_camera = camera(&background);
+    let background_film = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &background,
+            &background_camera,
+            CutSide::After,
+            cx,
+            &settings(2),
+            shutter(),
+            config(CinematicAovProfile::DailyCore),
+        )
+        .unwrap()
+    });
+    let background_guides = background_film.denoise_guides().unwrap();
+    for plane in [
+        background_guides.motion_prev_x(),
+        background_guides.motion_prev_y(),
+        background_guides.axial_depth_m(),
+        background_guides.normal_x(),
+        background_guides.normal_y(),
+        background_guides.normal_z(),
+        background_guides.primary_coverage(),
+        background_guides.variance_luminance(),
+    ] {
+        assert!(plane.iter().all(|value| value.to_bits() == 0));
+    }
+
+    let beauty_only = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &foreground_scene,
+            &foreground_camera,
+            CutSide::After,
+            cx,
+            &settings(1),
+            shutter(),
+            config(CinematicAovProfile::BeautyOnly),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        beauty_only.denoise_guides(),
+        Err(CinematicAovError::DenoiseGuidesUnavailable)
+    );
 }
 
 #[test]

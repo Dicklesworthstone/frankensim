@@ -699,6 +699,86 @@ impl FinalPixel {
     }
 }
 
+/// Private tile-local accumulator used by the deterministic throughput lane.
+///
+/// Beauty and every enabled AOV plane retain the same per-pixel, ascending
+/// absolute-sample update order as [`CinematicAovFilm::push`]. The vectors are
+/// never published directly: a successfully completed tile is copied into one
+/// full-frame private staging film, and any failed or cancelled tile is simply
+/// dropped.
+pub(crate) struct CinematicAovTileAccumulator {
+    beauty: Vec<[f64; 3]>,
+    common: Option<Vec<CommonPixel>>,
+    final_diagnostic: Option<Vec<FinalPixel>>,
+}
+
+impl CinematicAovTileAccumulator {
+    pub(crate) fn try_new(
+        pixel_count: usize,
+        profile: CinematicAovProfile,
+    ) -> Result<Self, CinematicAovError> {
+        let beauty = fallible_filled(pixel_count, [0.0; 3])?;
+        let common = profile
+            .has_common()
+            .then(|| fallible_filled(pixel_count, CommonPixel::EMPTY))
+            .transpose()?;
+        let final_diagnostic = profile
+            .has_final()
+            .then(|| fallible_filled(pixel_count, FinalPixel::EMPTY))
+            .transpose()?;
+        Ok(Self {
+            beauty,
+            common,
+            final_diagnostic,
+        })
+    }
+
+    pub(crate) fn retained_bytes(
+        pixel_count: usize,
+        profile: CinematicAovProfile,
+    ) -> Result<u64, CinematicAovError> {
+        retained_bytes(pixel_count, profile)
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        pixel: usize,
+        beauty_xyz: [f64; 3],
+        sample: Option<AlignedAovSample>,
+    ) -> Result<(), CinematicAovError> {
+        let beauty = self
+            .beauty
+            .get_mut(pixel)
+            .ok_or(CinematicAovError::ShapeMismatch)?;
+        beauty[0] += beauty_xyz[0];
+        beauty[1] += beauty_xyz[1];
+        beauty[2] += beauty_xyz[2];
+
+        match (&mut self.common, sample) {
+            (Some(common), Some(sample)) => common
+                .get_mut(pixel)
+                .ok_or(CinematicAovError::ShapeMismatch)?
+                .push(sample)?,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(CinematicAovError::SampleAlignmentMismatch);
+            }
+            (None, None) => {}
+        }
+        if let Some(final_diagnostic) = &mut self.final_diagnostic {
+            let sample = sample.ok_or(CinematicAovError::SampleAlignmentMismatch)?;
+            final_diagnostic
+                .get_mut(pixel)
+                .ok_or(CinematicAovError::ShapeMismatch)?
+                .push(sample)?;
+        }
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.beauty.len()
+    }
+}
+
 /// Deterministic lossless mappings for `FLOAT` identity channels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CinematicAovPalette {
@@ -836,6 +916,89 @@ impl CinematicAovRenderBinding {
     }
 }
 
+/// Owned row-major guide planes for temporal/spatial denoising consumers.
+///
+/// Values use exactly the same averaging, unit-normal normalization,
+/// background-zero convention, finite `f32` conversion, and signed-zero
+/// canonicalization as the corresponding cinematic EXR channels. Object and
+/// material IDs deliberately remain absent: `DailyCore` can drive the temporal
+/// denoiser without upgrading palette indices into stable external IDs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CinematicDenoiseGuides {
+    width: u32,
+    height: u32,
+    motion_prev_x: Vec<f32>,
+    motion_prev_y: Vec<f32>,
+    axial_depth_m: Vec<f32>,
+    normal_x: Vec<f32>,
+    normal_y: Vec<f32>,
+    normal_z: Vec<f32>,
+    primary_coverage: Vec<f32>,
+    variance_luminance: Vec<f32>,
+}
+
+impl CinematicDenoiseGuides {
+    /// Raster width shared by every plane.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Raster height shared by every plane.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Previous-minus-current raster displacement X in pixels.
+    #[must_use]
+    pub fn motion_prev_x(&self) -> &[f32] {
+        &self.motion_prev_x
+    }
+
+    /// Previous-minus-current raster displacement Y in pixels.
+    #[must_use]
+    pub fn motion_prev_y(&self) -> &[f32] {
+        &self.motion_prev_y
+    }
+
+    /// Positive axial depth in metres, or zero for background.
+    #[must_use]
+    pub fn axial_depth_m(&self) -> &[f32] {
+        &self.axial_depth_m
+    }
+
+    /// World-space unit shading-normal X, or zero for background.
+    #[must_use]
+    pub fn normal_x(&self) -> &[f32] {
+        &self.normal_x
+    }
+
+    /// World-space unit shading-normal Y, or zero for background.
+    #[must_use]
+    pub fn normal_y(&self) -> &[f32] {
+        &self.normal_y
+    }
+
+    /// World-space unit shading-normal Z, or zero for background.
+    #[must_use]
+    pub fn normal_z(&self) -> &[f32] {
+        &self.normal_z
+    }
+
+    /// Primary-hit fraction in `[0, 1]`.
+    #[must_use]
+    pub fn primary_coverage(&self) -> &[f32] {
+        &self.primary_coverage
+    }
+
+    /// Nonnegative unbiased raw-luminance sample variance.
+    #[must_use]
+    pub fn variance_luminance(&self) -> &[f32] {
+        &self.variance_luminance
+    }
+}
+
 /// Raw beauty plus aligned, unnormalised AOV accumulator state.
 ///
 /// This is an estimate artifact. It does not certify physical material values,
@@ -851,13 +1014,14 @@ pub struct CinematicAovFilm {
 }
 
 impl CinematicAovFilm {
-    /// Allocate an empty shape-aligned film under the declared retained-memory
-    /// limit. No render binding is committed until a nonempty range succeeds.
-    pub fn try_new(
+    /// Validate the AOV-owned retained payload for one raster without
+    /// allocating it. The tile executor uses this to reserve its operation
+    /// lease before constructing the private full-frame staging film.
+    pub(crate) fn admitted_retained_bytes(
         width: u32,
         height: u32,
         config: CinematicAovConfig,
-    ) -> Result<Self, CinematicAovError> {
+    ) -> Result<(usize, u64), CinematicAovError> {
         let pixel_count = checked_pixel_count(width, height)?;
         let pixel_count_u64 = u64::try_from(pixel_count)
             .map_err(|_| CinematicAovError::InvalidDimensions { width, height })?;
@@ -874,6 +1038,17 @@ impl CinematicAovFilm {
                 limit: config.limits.max_retained_bytes,
             });
         }
+        Ok((pixel_count, retained_bytes))
+    }
+
+    /// Allocate an empty shape-aligned film under the declared retained-memory
+    /// limit. No render binding is committed until a nonempty range succeeds.
+    pub fn try_new(
+        width: u32,
+        height: u32,
+        config: CinematicAovConfig,
+    ) -> Result<Self, CinematicAovError> {
+        let (pixel_count, retained_bytes) = Self::admitted_retained_bytes(width, height, config)?;
         let common = config
             .profile
             .has_common()
@@ -936,6 +1111,63 @@ impl CinematicAovFilm {
             .map(|sample| sample.primary_count)
     }
 
+    /// Materialize the `DailyCore` denoising guide subset as owned planar
+    /// `f32` buffers. This is an estimate bridge, not a denoising or image-error
+    /// claim. A beauty-only profile refuses because it retained no surface
+    /// observations from which guides could be reconstructed.
+    pub fn denoise_guides(&self) -> Result<CinematicDenoiseGuides, CinematicAovError> {
+        self.validate_complete()?;
+        let common = self
+            .common
+            .as_deref()
+            .ok_or(CinematicAovError::DenoiseGuidesUnavailable)?;
+        let pixel_count = self.beauty.xyz.len();
+        validate_denoise_guide_budget(pixel_count, self.config)?;
+        let motion_prev_x = float_plane(pixel_count, |pixel| {
+            average(
+                common[pixel].previous_motion_sum_pixels[0],
+                common[pixel].previous_motion_count,
+            )
+        })?;
+        let motion_prev_y = float_plane(pixel_count, |pixel| {
+            average(
+                common[pixel].previous_motion_sum_pixels[1],
+                common[pixel].previous_motion_count,
+            )
+        })?;
+        let axial_depth_m = float_plane(pixel_count, |pixel| {
+            average(common[pixel].depth_sum_m, common[pixel].primary_count)
+        })?;
+        let normal_x = float_plane(pixel_count, |pixel| {
+            normalized(common[pixel].shading_normal_sum)[0]
+        })?;
+        let normal_y = float_plane(pixel_count, |pixel| {
+            normalized(common[pixel].shading_normal_sum)[1]
+        })?;
+        let normal_z = float_plane(pixel_count, |pixel| {
+            normalized(common[pixel].shading_normal_sum)[2]
+        })?;
+        let primary_coverage = float_plane(pixel_count, |pixel| {
+            average(
+                f64::from(common[pixel].primary_count),
+                common[pixel].accepted_count,
+            )
+        })?;
+        let variance_luminance = float_plane(pixel_count, |pixel| sample_variance(common[pixel]))?;
+        Ok(CinematicDenoiseGuides {
+            width: self.beauty.width,
+            height: self.beauty.height,
+            motion_prev_x,
+            motion_prev_y,
+            axial_depth_m,
+            normal_x,
+            normal_y,
+            normal_z,
+            primary_coverage,
+            variance_luminance,
+        })
+    }
+
     pub(crate) fn beauty_mut(&mut self) -> &mut Film {
         &mut self.beauty
     }
@@ -975,6 +1207,69 @@ impl CinematicAovFilm {
                 .get_mut(pixel)
                 .ok_or(CinematicAovError::ShapeMismatch)?;
             target.push(sample)?;
+        }
+        Ok(())
+    }
+
+    /// Copy one complete private tile into this fresh full-frame staging film.
+    /// Partial copies are harmless on later refusal because the film itself is
+    /// not externally visible until the executor and final checkpoint succeed.
+    pub(crate) fn copy_fresh_tile(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        tile: &CinematicAovTileAccumulator,
+        mut poll: impl FnMut() -> bool,
+    ) -> Result<(), CinematicAovError> {
+        let source_width = usize::try_from(width).map_err(|_| CinematicAovError::SizeOverflow)?;
+        let source_height = usize::try_from(height).map_err(|_| CinematicAovError::SizeOverflow)?;
+        let expected = source_width
+            .checked_mul(source_height)
+            .ok_or(CinematicAovError::SizeOverflow)?;
+        let x_end = x
+            .checked_add(width)
+            .filter(|end| *end <= self.beauty.width)
+            .ok_or(CinematicAovError::ShapeMismatch)?;
+        let y_end = y
+            .checked_add(height)
+            .filter(|end| *end <= self.beauty.height)
+            .ok_or(CinematicAovError::ShapeMismatch)?;
+        if x_end < x || y_end < y || tile.len() != expected {
+            return Err(CinematicAovError::ShapeMismatch);
+        }
+        if self.common.is_some() != tile.common.is_some()
+            || self.final_diagnostic.is_some() != tile.final_diagnostic.is_some()
+        {
+            return Err(CinematicAovError::ShapeMismatch);
+        }
+
+        let frame_width = self.beauty.width as usize;
+        let destination_x = x as usize;
+        let destination_y = y as usize;
+        for row in 0..source_height {
+            if !poll() {
+                return Err(CinematicAovError::Tracer(
+                    crate::tracer::TracerError::Cancelled,
+                ));
+            }
+            let source_start = row * source_width;
+            let source_end = source_start + source_width;
+            let destination_start = (destination_y + row) * frame_width + destination_x;
+            let destination_end = destination_start + source_width;
+            self.beauty.xyz[destination_start..destination_end]
+                .copy_from_slice(&tile.beauty[source_start..source_end]);
+            if let (Some(destination), Some(source)) = (&mut self.common, &tile.common) {
+                destination[destination_start..destination_end]
+                    .copy_from_slice(&source[source_start..source_end]);
+            }
+            if let (Some(destination), Some(source)) =
+                (&mut self.final_diagnostic, &tile.final_diagnostic)
+            {
+                destination[destination_start..destination_end]
+                    .copy_from_slice(&source[source_start..source_end]);
+            }
         }
         Ok(())
     }
@@ -1580,6 +1875,8 @@ pub enum CinematicAovError {
     },
     /// No successful nonempty render range has bound the film.
     UnboundFilm,
+    /// The selected beauty-only profile retained no denoising guide state.
+    DenoiseGuidesUnavailable,
     /// A fallible vector reservation failed.
     AllocationRefused,
     /// Checked byte or element arithmetic overflowed.
@@ -1672,6 +1969,9 @@ impl fmt::Display for CinematicAovError {
             ),
             Self::UnboundFilm => {
                 formatter.write_str("cinematic AOV film has no successful render binding")
+            }
+            Self::DenoiseGuidesUnavailable => {
+                formatter.write_str("cinematic AOV profile retained no denoising guide planes")
             }
             Self::AllocationRefused => formatter.write_str("cinematic AOV allocation was refused"),
             Self::SizeOverflow => formatter.write_str("cinematic AOV size arithmetic overflowed"),
@@ -1844,6 +2144,25 @@ fn validate_export_plane_budget(
     let plane_bytes = u64::try_from(pixel_count)
         .ok()
         .and_then(|pixels| pixels.checked_mul(channel_count))
+        .and_then(|samples| samples.checked_mul(size_of::<f32>() as u64))
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    if plane_bytes > config.limits.max_export_plane_bytes {
+        return Err(CinematicAovError::ExportMemoryLimit {
+            requested: plane_bytes,
+            limit: config.limits.max_export_plane_bytes,
+        });
+    }
+    Ok(plane_bytes)
+}
+
+fn validate_denoise_guide_budget(
+    pixel_count: usize,
+    config: CinematicAovConfig,
+) -> Result<u64, CinematicAovError> {
+    const GUIDE_PLANES: u64 = 8;
+    let plane_bytes = u64::try_from(pixel_count)
+        .ok()
+        .and_then(|pixels| pixels.checked_mul(GUIDE_PLANES))
         .and_then(|samples| samples.checked_mul(size_of::<f32>() as u64))
         .ok_or(CinematicAovError::SizeOverflow)?;
     if plane_bytes > config.limits.max_export_plane_bytes {
@@ -2266,8 +2585,19 @@ fn validate_exr_channel_schema(
 fn float_channel(
     name: &str,
     len: usize,
-    mut sample: impl FnMut(usize) -> f64,
+    sample: impl FnMut(usize) -> f64,
 ) -> Result<Channel, CinematicAovError> {
+    Ok(Channel {
+        name: name.to_string(),
+        ty: PixelType::Float,
+        data: float_plane(len, sample)?,
+    })
+}
+
+fn float_plane(
+    len: usize,
+    mut sample: impl FnMut(usize) -> f64,
+) -> Result<Vec<f32>, CinematicAovError> {
     let mut data = Vec::new();
     data.try_reserve_exact(len)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
@@ -2287,11 +2617,7 @@ fn float_channel(
         }
         data.push(if value == 0.0 { 0.0 } else { value });
     }
-    Ok(Channel {
-        name: name.to_string(),
-        ty: PixelType::Float,
-        data,
-    })
+    Ok(data)
 }
 
 /// Canonical EXR metadata value mapping exact one-based indices to object IDs.
