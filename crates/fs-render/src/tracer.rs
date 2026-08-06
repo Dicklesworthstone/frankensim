@@ -22,10 +22,10 @@
 //! rectangular area lights and one canonical lat-long environment, ordered and
 //! importance-sampled independently of caller construction order. Rectangular
 //! lights are also scene geometry so BSDF paths find them (MIS-weighted both
-//! ways); materials are Lambertian and
-//! GGX (Smith separable G, Schlick Fresnel with the spectral
-//! reflectance as F0); no volumetric media (the `volumes` module is
-//! separate); no Russian roulette (fixed depth keeps work deterministic).
+//! ways); materials are Lambertian, legacy Schlick-GGX, exact-Fresnel rough
+//! conductors, and smooth/rough spectral dielectrics; no volumetric media (the
+//! `volumes` module is separate); no Russian roulette (fixed depth keeps work
+//! deterministic).
 
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
 use crate::aov::{
@@ -38,6 +38,9 @@ use crate::camera::{
     OpticalCenterProjection, PhysicalCamera,
 };
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
+use crate::conductor::{
+    CONDUCTOR_BSDF_SEMANTICS_VERSION, ConductorError, ConductorOptics, ConductorSurface,
+};
 use crate::dielectric::{
     BeerLambertParameters, DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
     GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric, sample_rough_dielectric,
@@ -452,6 +455,14 @@ pub enum Material {
         /// Roughness α (GGX convention, > 0).
         alpha: f64,
     },
+    /// Opaque spectral conductor using exact complex-IOR Fresnel and an
+    /// isotropic single-scattering GGX microfacet surface.
+    Conductor {
+        /// Validated absolute complex-index table and honest provenance.
+        optics: ConductorOptics,
+        /// Validated isotropic GGX roughness.
+        surface: ConductorSurface,
+    },
     /// Homogeneous spectral dielectric boundary. Geometry must be a closed,
     /// consistently outward-oriented solid; encountered violations refuse
     /// through the path-local medium stack.
@@ -512,6 +523,14 @@ impl Material {
                         update_material_scalar(&mut hasher, alpha);
                     }
                 }
+            }
+            Self::Conductor { optics, surface } => {
+                // Tags 0--2 are frozen legacy identities. Conductor is an
+                // additive material family with independently versioned bits.
+                hasher.update(&[3]);
+                hasher.update(&CONDUCTOR_BSDF_SEMANTICS_VERSION.to_le_bytes());
+                hasher.update(optics.content_identity().as_bytes());
+                update_material_scalar(&mut hasher, surface.roughness_alpha());
             }
         }
         hasher.finalize()
@@ -1998,6 +2017,8 @@ pub enum TracerError {
     Camera(CameraError),
     /// Validated dielectric evaluation unexpectedly refused.
     Dielectric(DielectricError),
+    /// Validated conductor evaluation unexpectedly refused.
+    Conductor(ConductorError),
     /// Lighting artifact, selection, or probability admission refused.
     Lighting(LightingError),
     /// An encountered dielectric boundary violated strict LIFO nesting or was
@@ -2055,6 +2076,7 @@ impl core::fmt::Display for TracerError {
             ),
             Self::Camera(error) => write!(formatter, "cinematic camera refused: {error}"),
             Self::Dielectric(error) => write!(formatter, "dielectric transport refused: {error}"),
+            Self::Conductor(error) => write!(formatter, "conductor transport refused: {error}"),
             Self::Lighting(error) => write!(formatter, "scene lighting refused: {error}"),
             Self::MediumStackMismatch {
                 boundary_primitive,
@@ -2136,6 +2158,12 @@ impl From<CameraError> for TracerError {
 impl From<DielectricError> for TracerError {
     fn from(error: DielectricError) -> Self {
         Self::Dielectric(error)
+    }
+}
+
+impl From<ConductorError> for TracerError {
+    fn from(error: ConductorError) -> Self {
+        Self::Conductor(error)
     }
 }
 
@@ -6012,7 +6040,7 @@ fn prepare_aligned_aov_primary(
                 rgb[2].clamp(0.0, 1.0),
             ])
         }
-        Material::Dielectric { .. } => None,
+        Material::Conductor { .. } | Material::Dielectric { .. } => None,
     };
     let material_palette_index = if capture_ids {
         palette.material_index(primary.material_identity)?
@@ -6706,7 +6734,7 @@ fn trace_path(
                     &medium_stack,
                 )?)
             }
-            Material::Lambertian { .. } | Material::Ggx { .. } => None,
+            Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => None,
         };
 
         // Next-event estimation.
@@ -6823,7 +6851,7 @@ fn trace_path(
                         }
                     }
                 }
-                Material::Lambertian { .. } | Material::Ggx { .. } => {
+                Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
                     // Preserve the opaque tracer-v1 arithmetic and draw order
                     // expression-for-expression so the frozen Cornell path is
                     // unaffected by enabling dielectric support.
@@ -6884,7 +6912,14 @@ fn trace_path(
                                         direct.target
                                     {
                                         for (k, &l) in lambdas.iter().enumerate() {
-                                            let f = bsdf_eval(&prim.material, n, wo, wi, l);
+                                            let f = opaque_bsdf_eval(
+                                                &prim.material,
+                                                n,
+                                                wo,
+                                                wi,
+                                                l,
+                                                Some(active.glass),
+                                            )?;
                                             let attenuation = medium_transmittance(
                                                 Some(active.glass),
                                                 l,
@@ -6913,7 +6948,8 @@ fn trace_path(
                                     // Keep the ambient opaque tracer-v1 arithmetic
                                     // bit-for-bit identical to its frozen path.
                                     for (k, &l) in lambdas.iter().enumerate() {
-                                        let f = bsdf_eval(&prim.material, n, wo, wi, l);
+                                        let f =
+                                            opaque_bsdf_eval(&prim.material, n, wo, wi, l, None)?;
                                         let before = radiance[k];
                                         radiance[k] +=
                                             throughput[k] * f * cos_s * espec.eval(l) * escale
@@ -6976,7 +7012,7 @@ fn trace_path(
                     dir: sampled.direction,
                 };
             }
-            Material::Lambertian { .. } | Material::Ggx { .. } => {
+            Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
                 let Some((wi, pdf)) = bsdf_sample(&prim.material, n, wo, u1, u2) else {
                     break;
                 };
@@ -6985,7 +7021,15 @@ fn trace_path(
                     break;
                 }
                 for (k, &l) in lambdas.iter().enumerate() {
-                    throughput[k] *= bsdf_eval(&prim.material, n, wo, wi, l) * cos_s / pdf;
+                    throughput[k] *= opaque_bsdf_eval(
+                        &prim.material,
+                        n,
+                        wo,
+                        wi,
+                        l,
+                        medium_stack.last().map(|active| active.glass),
+                    )? * cos_s
+                        / pdf;
                 }
                 previous_bsdf = Some(PreviousBsdf { pdf, delta: false });
                 prev_origin = hit.point;
@@ -7726,6 +7770,128 @@ mod tests {
     }
 
     #[test]
+    fn conductor_material_identity_binds_optics_and_surface_independently() {
+        let smooth = ConductorSurface::try_rough(0.08).unwrap();
+        let rough = ConductorSurface::try_rough(0.24).unwrap();
+        let tungsten = ConductorOptics::representative_tungsten();
+        let stainless = ConductorOptics::representative_stainless_steel();
+        let tungsten_smooth = Material::Conductor {
+            optics: tungsten,
+            surface: smooth,
+        };
+        let tungsten_rough = Material::Conductor {
+            optics: tungsten,
+            surface: rough,
+        };
+        let stainless_smooth = Material::Conductor {
+            optics: stainless,
+            surface: smooth,
+        };
+
+        assert_eq!(
+            tungsten_smooth.content_identity(),
+            tungsten_smooth.content_identity()
+        );
+        assert_ne!(
+            tungsten_smooth.content_identity(),
+            tungsten_rough.content_identity()
+        );
+        assert_ne!(
+            tungsten_smooth.content_identity(),
+            stainless_smooth.content_identity()
+        );
+    }
+
+    #[test]
+    fn conductor_sampling_matches_pdf_at_north_and_south_poles() {
+        let material = Material::Conductor {
+            optics: ConductorOptics::representative_tungsten(),
+            surface: ConductorSurface::try_rough(0.2).unwrap(),
+        };
+        let near_south = Vec3::new(2.0e-5, -3.0e-5, -1.0);
+        let near_south = near_south.scale(1.0 / near_south.norm());
+        for normal in [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            near_south,
+        ] {
+            let mut accepted = 0_usize;
+            for (u1, u2) in [(0.01, 0.0), (0.08, 0.17), (0.21, 0.43), (0.55, 0.79)] {
+                let Some((wi, sampled_pdf)) = bsdf_sample(&material, normal, normal, u1, u2) else {
+                    continue;
+                };
+                accepted += 1;
+                assert!(wi.x.is_finite() && wi.y.is_finite() && wi.z.is_finite());
+                assert!((wi.norm() - 1.0).abs() <= 2.0e-12);
+                assert!(normal.dot(wi) > 0.0);
+                let evaluated_pdf = bsdf_pdf(&material, normal, normal, wi);
+                let tolerance = 2.0e-12 * sampled_pdf.abs().max(1.0);
+                assert!(
+                    (evaluated_pdf - sampled_pdf).abs() <= tolerance,
+                    "conductor sample/PDF mismatch at normal={normal:?}: sampled={sampled_pdf:.17e}, evaluated={evaluated_pdf:.17e}"
+                );
+            }
+            assert!(accepted >= 3, "too few admitted samples at {normal:?}");
+        }
+    }
+
+    #[test]
+    fn conductor_bsdf_is_reciprocal_medium_aware_and_energy_bounded() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo_raw = Vec3::new(0.23, -0.11, 0.97);
+        let wi_raw = Vec3::new(-0.31, 0.19, 0.93);
+        let wo = wo_raw.scale(1.0 / wo_raw.norm());
+        let wi = wi_raw.scale(1.0 / wi_raw.norm());
+        for optics in [
+            ConductorOptics::representative_tungsten(),
+            ConductorOptics::representative_stainless_steel(),
+        ] {
+            let material = Material::Conductor {
+                optics,
+                surface: ConductorSurface::try_rough(0.18).unwrap(),
+            };
+            let forward = opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None).unwrap();
+            let reverse = opaque_bsdf_eval(&material, normal, wi, wo, 550.0, None).unwrap();
+            assert!(forward.is_finite() && forward >= 0.0);
+            assert!((forward - reverse).abs() <= 2.0e-14 * forward.abs().max(1.0));
+
+            let crown = opaque_bsdf_eval(
+                &material,
+                normal,
+                wo,
+                wi,
+                550.0,
+                Some(DielectricGlass::representative_crown()),
+            )
+            .unwrap();
+            assert_ne!(
+                forward.to_bits(),
+                crown.to_bits(),
+                "conductor Fresnel ignored the active incident medium"
+            );
+
+            let mut reflected_energy = 0.0;
+            const SIDE: u32 = 48;
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    let u1 = (f64::from(x) + 0.5) / f64::from(SIDE);
+                    let u2 = (f64::from(y) + 0.5) / f64::from(SIDE);
+                    let (sampled_wi, _) = cosine_sample(normal, u1, u2);
+                    reflected_energy +=
+                        opaque_bsdf_eval(&material, normal, normal, sampled_wi, 550.0, None)
+                            .unwrap()
+                            * PI;
+                }
+            }
+            reflected_energy /= f64::from(SIDE * SIDE);
+            assert!(
+                reflected_energy.is_finite() && (0.0..=1.0 + 1.0e-10).contains(&reflected_energy),
+                "single-scattering conductor furnace escaped its energy bound: {reflected_energy:.17e}"
+            );
+        }
+    }
+
+    #[test]
     fn lighting_admission_cancellation_preserves_tracer_cancellation_authority() {
         assert_eq!(
             TracerError::from(LightingError::Cancelled),
@@ -8077,8 +8243,44 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
             let f = schlick(reflectance.eval(lambda), wo.dot(m).max(0.0));
             d * g * f / (4.0 * cos_o * cos_i)
         }
+        Material::Conductor { .. } => 0.0,
         Material::Dielectric { .. } => 0.0,
     }
+}
+
+fn opaque_bsdf_eval(
+    mat: &Material,
+    n: Vec3,
+    wo: Vec3,
+    wi: Vec3,
+    lambda: f64,
+    incident_medium: Option<DielectricGlass>,
+) -> Result<f64, TracerError> {
+    let Material::Conductor { optics, surface } = mat else {
+        // Keep the frozen Lambertian/GGX arithmetic in `bsdf_eval`; merely
+        // adding the conductor family must not perturb legacy image bits.
+        return Ok(bsdf_eval(mat, n, wo, wi, lambda));
+    };
+    let (cos_o, cos_i) = (n.dot(wo), n.dot(wi));
+    if cos_o <= 0.0 || cos_i <= 0.0 {
+        return Ok(0.0);
+    }
+    let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
+    let hn = hsum.norm();
+    if hn < 1.0e-12 {
+        return Ok(0.0);
+    }
+    let microfacet_normal = hsum.scale(1.0 / hn);
+    let alpha = surface.roughness_alpha();
+    let d = ggx_d(alpha, n.dot(microfacet_normal));
+    let g = smith_g1(alpha, cos_o) * smith_g1(alpha, cos_i);
+    let incident_eta = medium_ior(incident_medium, lambda)?;
+    let fresnel = optics.fresnel(
+        lambda,
+        incident_eta,
+        wo.dot(microfacet_normal).clamp(0.0, 1.0),
+    )?;
+    Ok(d * g * fresnel / (4.0 * cos_o * cos_i))
 }
 
 fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
@@ -8100,6 +8302,19 @@ fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
                 return 0.0;
             }
             ggx_d(*alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom)
+        }
+        Material::Conductor { surface, .. } => {
+            let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
+            let hn = hsum.norm();
+            if hn < 1e-12 {
+                return 0.0;
+            }
+            let m = hsum.scale(1.0 / hn);
+            let wom = wo.dot(m);
+            if wom <= 0.0 {
+                return 0.0;
+            }
+            ggx_d(surface.roughness_alpha(), n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom)
         }
         Material::Dielectric { .. } => 0.0,
     }
@@ -8135,8 +8350,60 @@ fn bsdf_sample(mat: &Material, n: Vec3, wo: Vec3, u1: f64, u2: f64) -> Option<(V
             let pdf = ggx_d(*alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom);
             (pdf > 0.0).then_some((wi, pdf))
         }
+        Material::Conductor { surface, .. } => {
+            // Retain the tracer's established GGX NDF sampler while using an
+            // all-sphere Duff basis for this new path. The legacy GGX branch
+            // remains byte-compatible, including its historical basis.
+            let alpha = surface.roughness_alpha();
+            let a2 = alpha * alpha;
+            let cos_m2 = ((1.0 - u1) / (u1 * (a2 - 1.0) + 1.0)).clamp(0.0, 1.0);
+            let cos_m = cos_m2.sqrt();
+            let sin_m = (1.0 - cos_m2).max(0.0).sqrt();
+            let phi = 2.0 * PI * u2;
+            let m = to_world_conductor(n, [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m]);
+            let wom = wo.dot(m);
+            if wom <= 0.0 {
+                return None;
+            }
+            let wi = Vec3::new(
+                2.0 * wom * m.x - wo.x,
+                2.0 * wom * m.y - wo.y,
+                2.0 * wom * m.z - wo.z,
+            );
+            if n.dot(wi) <= 0.0 {
+                return None;
+            }
+            let pdf = ggx_d(alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom);
+            (pdf > 0.0).then_some((wi, pdf))
+        }
         Material::Dielectric { .. } => None,
     }
+}
+
+fn basis_conductor(normal: Vec3) -> (Vec3, Vec3) {
+    // Duff et al.'s cancellation-free all-sphere ONB. This specifically
+    // avoids the legacy Frisvad cap shortcut's sample/PDF mismatch near the
+    // south pole without changing any established material stream.
+    let sign = if normal.z < 0.0 { -1.0 } else { 1.0 };
+    let a = -1.0 / (sign + normal.z);
+    let b = normal.x * normal.y * a;
+    (
+        Vec3::new(
+            1.0 + sign * normal.x * normal.x * a,
+            sign * b,
+            -sign * normal.x,
+        ),
+        Vec3::new(b, sign + normal.y * normal.y * a, -normal.y),
+    )
+}
+
+fn to_world_conductor(normal: Vec3, local: [f64; 3]) -> Vec3 {
+    let (tangent, bitangent) = basis_conductor(normal);
+    Vec3::new(
+        tangent.x * local[0] + bitangent.x * local[1] + normal.x * local[2],
+        tangent.y * local[0] + bitangent.y * local[1] + normal.y * local[2],
+        tangent.z * local[0] + bitangent.z * local[1] + normal.z * local[2],
+    )
 }
 
 // ---- vector helpers (fs-geom's Vec3 has no cross) ---------------------

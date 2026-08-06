@@ -30,6 +30,13 @@ differentiable lift). Pure Rust throughout.
   Snell refraction and total internal reflection, plus smooth-delta and
   single-scattering isotropic-GGX reflection/transmission. Radiance transport
   uses the documented `(eta_i/eta_t)^2` transmission convention.
+- `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
+  absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
+  nanometres, strict inclusive 380--780 nm support, deterministic linear
+  interpolation, exact unpolarized complex-IOR Fresnel against the path's active
+  incident medium, and validated isotropic-GGX roughness. Built-in tungsten and
+  stainless-steel tables are explicitly representative look-development data;
+  table/source/material identities prove replay binding, not specimen fidelity.
 
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
   `chart-backends`): render charts that opt into a typed trace theorem, WITHOUT
@@ -488,8 +495,9 @@ the implicit hit equation.
 
 `tracer` (bead 872c) gates the spectral path tracer v1
 (chart-backends + fs-rand + fs-img): hero-wavelength (4-packet)
-NEE+MIS path integration, Lambertian + reflective GGX with spectral reflectance,
-and provenance-bearing smooth/rough spectral dielectric glass
+NEE+MIS path integration, Lambertian + legacy reflective GGX with spectral
+reflectance, exact-Fresnel spectral conductors, and provenance-bearing
+smooth/rough spectral dielectric glass
 (the `spectral` module's bounded sigmoid lift; round-trip RGB error
 pinned under 1e-3), deterministic multiple rectangular emitters plus an
 optional canonical lat-long environment, CIE-XYZ film →
@@ -518,7 +526,9 @@ bounce, NEE has weight one because no competing BSDF continuation is evaluated.
 The exact legacy one-rectangle/no-environment branch retains its original draws,
 grazing cutoff, estimator, and image bits.
 Current no-claims: no volumetric coupling, no Russian roulette, GGX samples the
-NDF (VNDF is a recorded follow-up), and emitters do not reflect. On the first
+NDF (VNDF is a recorded follow-up), conductor and dielectric GGX are
+single-scattering without multiple-scattering compensation, and emitters do not
+reflect. On the first
 dispersive dielectric event, the shared
 four-wavelength geometric packet collapses once to its uniformly selected hero
 lane with the matching factor-four estimator weight; companion lanes are zeroed
@@ -553,6 +563,16 @@ signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
 grazing, pole-frame, adjacent-IOR, and one-time dispersive packet-collapse
 fixtures. The pre-existing Cornell tracer battery remains byte-stable and is
 the opaque-path non-regression gate.
+
+`conductor` and `tracer` inline tests plus the Euler scene-bridge E2E fixture
+(feature `tracer`, and `cinematic-render` downstream) cover complex-Fresnel
+known answers and an independent real-form grid, normal/grazing/common-index
+relations, complete-table and wavelength refusal, exact-knot interpolation,
+packet permutation, source/material fingerprint sensitivity, roughness bounds,
+GGX sampling/PDF agreement including the south-pole frame, reciprocity,
+active-incident-medium dependence, a numerical no-energy-gain furnace, exact
+replay, and visibly distinct representative tungsten/stainless renders under
+one neutral light. The Cornell golden remains the legacy-material bit gate.
 
 `lighting` inline tests and `tests/lighting_battery.rs` (feature `tracer`) cover
 rectangle admission and identity order, zero/duplicate emitters, exact
@@ -724,6 +744,14 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   bidirectional/manifold transport, denoising, or unbiased firefly-clamping
   claim is made. Fixed-metric, representability-aware ray offsets are robust
   engineering, not a certified positional-error enclosure.
+- Conductor support is homogeneous, opaque, non-polarizing geometric optics
+  with isotropic single-scattering GGX. The representative presets do not claim
+  material identification, alloy/lot or product calibration, a measured finish,
+  oxide/passivation or thin-film layers, anisotropic brushing/machining grooves,
+  temperature dependence, polarization, interfacet multiple scattering, or a
+  conversion from measured `Ra`/`Rq` to GGX alpha. Caller-asserted measured
+  source metadata is retained but not independently authenticated. A content
+  hash establishes exact replay inputs, not physical truth.
 - The tracer implements spectrum→CIE XYZ→Bradford-adapted linear sRGB and
   floating-point EXR output. Display-referred tone/color management and layered
   measured-spectrum materials remain staged.
