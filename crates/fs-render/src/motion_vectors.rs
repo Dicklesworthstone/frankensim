@@ -182,6 +182,15 @@ impl PrimarySurfaceSample {
         hit: &InstanceHit,
         material_identity: ContentHash,
     ) -> Result<Self, MotionVectorError> {
+        if hit.object_id == 0 {
+            return Err(MotionVectorError::InvalidObjectIdentity);
+        }
+        if is_zero_hash(hit.geometry_identity) {
+            return Err(MotionVectorError::InvalidGeometryIdentity);
+        }
+        if is_zero_hash(hit.frame_identity) {
+            return Err(MotionVectorError::InvalidFrameIdentity);
+        }
         if is_zero_hash(material_identity) {
             return Err(MotionVectorError::InvalidMaterialIdentity);
         }
@@ -445,6 +454,7 @@ pub struct MotionVectorSample {
 
 /// Result of attempting motion correspondence for one accepted primary hit.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // boxing would allocate on every primary-hit AOV sample
 pub enum MotionVectorComputation {
     /// Exact rigid local correspondence was available.
     Available(MotionVectorSample),
@@ -573,6 +583,9 @@ fn project_world(
         OpticalCenterProjection::InFront { ndc_xy, depth_m } => {
             let width = f64::from(raster.width);
             let height = f64::from(raster.height);
+            // Keep operation order identical to the beauty raster convention;
+            // `midpoint` is not guaranteed to preserve these established bits.
+            #[allow(clippy::manual_midpoint)]
             let pixel_xy = [
                 (ndc_xy[0] + 1.0) * 0.5 * width,
                 (1.0 - ndc_xy[1]) * 0.5 * height,
@@ -687,6 +700,8 @@ pub enum ReprojectionStatus {
     TopologyAmbiguous,
     /// The target AOV omitted the mesh-local witness needed for validation.
     MissingSurfaceWitness,
+    /// Finite inputs overflowed while constructing a comparison band.
+    InvalidNumerics,
 }
 
 /// Validate one projected endpoint against the frontmost target-frame AOV
@@ -718,6 +733,9 @@ pub fn validate_reprojection(
     };
 
     let depth_band = tolerance.depth_band(target.depth_m, depth_m);
+    if !depth_band.is_finite() {
+        return ReprojectionStatus::InvalidNumerics;
+    }
     if identity != sample.identity {
         if depth_m + depth_band < target.depth_m {
             return ReprojectionStatus::OccludedAtTarget;
@@ -754,6 +772,12 @@ pub enum MotionVectorError {
     InvalidRasterSize,
     /// Frame time or shot identity is invalid.
     InvalidFrame,
+    /// Object identity is the reserved zero value.
+    InvalidObjectIdentity,
+    /// Geometry identity is the reserved all-zero digest.
+    InvalidGeometryIdentity,
+    /// Source frame identity is the reserved all-zero digest.
+    InvalidFrameIdentity,
     /// Material identity is the reserved all-zero digest.
     InvalidMaterialIdentity,
     /// Local point, normal, or barycentric witness is malformed.
@@ -863,7 +887,7 @@ mod tests {
 
     use super::*;
     use crate::animated_instances::{RigidTransformTrajectory, TransformKeyframe};
-    use crate::camera::{Aperture, CameraKeyframe, CameraProjection, CameraShot};
+    use crate::camera::{Aperture, CameraKeyframe, CameraProjection, CameraShot, LensSample};
     use crate::charts::{Ray, TriMesh};
     use crate::instances::SharedGeometry;
 
@@ -978,11 +1002,19 @@ mod tests {
     #[test]
     fn mesh_hit_retains_barycentrics_and_lowest_triangle_tie() {
         let mesh = TriMesh::new(
-            vec![[0.0, -1.0, 0.0], [2.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
-            vec![[2, 1, 0], [0, 1, 2]],
+            vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [3.0, -1.0, 0.0],
+            ],
+            // Distinct triangles share edge 1--2. At the selected point the
+            // first triangle has u=0.8, v=0.2; reconstructing w as
+            // `1-u-v` used to create a tiny negative valid edge weight.
+            vec![[0, 1, 2], [1, 3, 2]],
         );
         let ray = Ray {
-            origin: Point3::new(1.0, 0.0, 2.0),
+            origin: Point3::new(1.0, -0.6, 2.0),
             dir: Vec3::new(0.0, 0.0, -1.0),
         };
         let bvh = mesh.intersect_surface(&ray).unwrap();
@@ -1004,6 +1036,30 @@ mod tests {
         assert_close(reconstructed[0], bvh.hit.point.x);
         assert_close(reconstructed[1], bvh.hit.point.y);
         assert_close(reconstructed[2], bvh.hit.point.z);
+
+        with_cx(|cx| {
+            let instance = GeometryInstance::try_new(
+                77,
+                identity("shared-edge-mesh"),
+                SharedGeometry::mesh(mesh),
+                RigidTransform::identity(),
+            )
+            .unwrap();
+            let hit = instance.intersect(cx, &ray, 4.0, 1.0e-9).unwrap().unwrap();
+            let sample =
+                PrimarySurfaceSample::try_from_instance_hit(&hit, identity("edge-material"))
+                    .unwrap();
+            let SurfaceCorrespondence::Mesh(surface) = sample.correspondence() else {
+                panic!("mesh hit must retain correspondence");
+            };
+            assert_eq!(surface.triangle_index(), 0);
+            assert!(
+                surface
+                    .barycentric()
+                    .into_iter()
+                    .all(|weight| weight >= 0.0)
+            );
+        });
     }
 
     #[test]
@@ -1070,6 +1126,51 @@ mod tests {
             let (_, common_ndc, common_pixels) = projected(common_motion.next);
             assert_eq!(common_ndc.map(f64::to_bits), [0.0f64.to_bits(); 2]);
             assert_eq!(common_pixels.map(f64::to_bits), [0.0f64.to_bits(); 2]);
+        });
+    }
+
+    #[test]
+    fn rotated_camera_projection_inverts_cinematic_ray_convention() {
+        with_cx(|cx| {
+            let camera = PhysicalCamera::try_look_at(
+                Point3::new(1.0, 2.0, 3.0),
+                Point3::new(-2.0, 0.5, -4.0),
+                Vec3::new(0.2, 1.0, 0.3),
+                CameraProjection::try_half_tangent(0.6).unwrap(),
+                5.0,
+                Aperture::try_circular(0.0).unwrap(),
+            )
+            .unwrap();
+            let raster = RasterSize::try_new(1920, 1080).unwrap();
+            let x_tan = 0.3;
+            let y_tan = -0.15;
+            let axial_depth = 7.0;
+            let point = camera
+                .eye()
+                .offset(camera.forward().scale(axial_depth))
+                .offset(camera.right().scale(axial_depth * x_tan))
+                .offset(camera.up().scale(axial_depth * y_tan));
+            let ProjectedWorldPoint::InFront(projection) =
+                project_world(&camera, point, raster).unwrap()
+            else {
+                panic!("constructed point is in front of camera");
+            };
+            let half_tan = camera.projection().vertical_half_tan();
+            assert_close(
+                projection.ndc_xy()[0] * raster.aspect_ratio() * half_tan,
+                x_tan,
+            );
+            assert_close(projection.ndc_xy()[1] * half_tan, y_tan);
+            let ray = camera
+                .generate_ray_from_tangent_offsets(cx, x_tan, y_tan, LensSample::CENTER)
+                .unwrap();
+            assert_eq!(ray.origin, camera.eye());
+            let expected = point.delta_from(camera.eye());
+            let inverse_norm = 1.0 / expected.dot(expected).sqrt();
+            let expected = expected.scale(inverse_norm);
+            assert_close(ray.dir.x, expected.x);
+            assert_close(ray.dir.y, expected.y);
+            assert_close(ray.dir.z, expected.z);
         });
     }
 
@@ -1222,6 +1323,12 @@ mod tests {
                 validate_reprojection(sample, motion.next, visible, tolerance),
                 ReprojectionStatus::VisibleAtTarget
             );
+            let overflowing_tolerance =
+                ReprojectionTolerance::try_new(f64::MAX, f64::MAX, 0.0).unwrap();
+            assert_eq!(
+                validate_reprojection(sample, motion.next, visible, overflowing_tolerance),
+                ReprojectionStatus::InvalidNumerics
+            );
             assert_eq!(
                 validate_reprojection(
                     sample,
@@ -1245,8 +1352,7 @@ mod tests {
                 validate_reprojection(sample, motion.next, occluder, tolerance),
                 ReprojectionStatus::OccludedAtTarget
             );
-            let mut wrong_barycentric = surface.barycentric();
-            wrong_barycentric.swap(0, 1);
+            let wrong_barycentric = [1.0, 0.0, 0.0];
             let ambiguous = ReprojectionObservation::try_surface(
                 sample.identity(),
                 motion.current.depth_m(),
@@ -1333,6 +1439,24 @@ mod tests {
             assert_eq!(
                 PrimarySurfaceSample::try_from_instance_hit(&hit, ContentHash([0; 32])),
                 Err(MotionVectorError::InvalidMaterialIdentity)
+            );
+            let mut forged = hit;
+            forged.object_id = 0;
+            assert_eq!(
+                PrimarySurfaceSample::try_from_instance_hit(&forged, identity("mat")),
+                Err(MotionVectorError::InvalidObjectIdentity)
+            );
+            forged = hit;
+            forged.geometry_identity = ContentHash([0; 32]);
+            assert_eq!(
+                PrimarySurfaceSample::try_from_instance_hit(&forged, identity("mat")),
+                Err(MotionVectorError::InvalidGeometryIdentity)
+            );
+            forged = hit;
+            forged.frame_identity = ContentHash([0; 32]);
+            assert_eq!(
+                PrimarySurfaceSample::try_from_instance_hit(&forged, identity("mat")),
+                Err(MotionVectorError::InvalidFrameIdentity)
             );
             let sample =
                 PrimarySurfaceSample::try_from_instance_hit(&hit, identity("mat")).unwrap();
