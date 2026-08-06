@@ -6,7 +6,17 @@
 use core::f64::consts::TAU;
 use core::fmt;
 
+use fs_blake3::{ContentHash, hash_domain};
+
 use crate::cinematic::CinematicDeliverableContract;
+
+/// Version of the canonical creative-brief identity preimage.
+pub const CINEMATIC_BRIEF_IDENTITY_VERSION: u16 = 1;
+/// Domain separating creative briefs from every referenced trajectory,
+/// renderer, image, and audio artifact.
+pub const CINEMATIC_BRIEF_IDENTITY_DOMAIN: &str = "org.frankensim.cinematic-brief.identity.v1";
+
+const CINEMATIC_BRIEF_MAGIC: &[u8; 8] = b"FSCBRF01";
 
 /// One half-open range of video frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -478,6 +488,12 @@ impl CinematicBrief {
         if input.shots.is_empty() {
             return Err(CinematicBriefError::MissingShots);
         }
+        if input.shots.len() > input.total_frames as usize {
+            return Err(CinematicBriefError::TooManyShots {
+                maximum: input.total_frames,
+                got: u64::try_from(input.shots.len()).unwrap_or(u64::MAX),
+            });
+        }
         if input.safe_areas.action > 500
             || input.safe_areas.title > 500
             || input.safe_areas.title < input.safe_areas.action
@@ -510,6 +526,12 @@ impl CinematicBrief {
         let mut saw_hold = false;
         let mut shots = Vec::with_capacity(input.shots.len());
         for shot in input.shots {
+            if shot.camera.len() > shot.frames.len() as usize {
+                return Err(CinematicBriefError::TooManyCameraKeyframes {
+                    maximum: shot.frames.len(),
+                    got: u64::try_from(shot.camera.len()).unwrap_or(u64::MAX),
+                });
+            }
             if shot.frames.start != expected_start {
                 return Err(CinematicBriefError::ShotGapOrOverlap {
                     expected_start,
@@ -573,6 +595,58 @@ impl CinematicBrief {
     /// Frozen ten-second, four-shot Euler reference brief.
     pub fn euler_disc_v1() -> Result<Self, CinematicBriefError> {
         Self::try_new(reference_input())
+    }
+
+    /// Canonical, locator-free encoding of every admitted brief semantic.
+    ///
+    /// This is an identity preimage rather than a general interchange codec.
+    /// It lets independent render/audio finalizers bind the exact shot, clock,
+    /// cut, camera, material, and no-audio-only-meaning contract they consumed.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CINEMATIC_BRIEF_MAGIC);
+        bytes.extend_from_slice(&CINEMATIC_BRIEF_IDENTITY_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.total_frames.to_le_bytes());
+        bytes.extend_from_slice(&self.total_audio_sample_frames.to_le_bytes());
+        bytes.extend_from_slice(&self.simulation_ticks_per_second.to_le_bytes());
+        bytes.extend_from_slice(&self.trajectory_start_tick.to_le_bytes());
+        bytes.extend_from_slice(&self.trajectory_end_tick_exclusive.to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(self.shots.len())
+                .expect("admission bounds shots by the u32 frame count")
+                .to_le_bytes(),
+        );
+        for shot in &self.shots {
+            push_shot(&mut bytes, shot);
+        }
+        bytes.extend_from_slice(&self.safe_areas.action.to_le_bytes());
+        bytes.extend_from_slice(&self.safe_areas.title.to_le_bytes());
+        bytes.extend_from_slice(&self.spin_cue.brushing_marking_frequency.to_le_bytes());
+        bytes.push(u8::from(self.spin_cue.engraved_radial_mark));
+        match self.censored_policy {
+            CensoredTrajectoryPolicy::LabeledHoldAndAudioTaper {
+                maximum_hold_frames,
+            } => {
+                bytes.push(1);
+                bytes.extend_from_slice(&maximum_hold_frames.to_le_bytes());
+            }
+        }
+        bytes.push(frame_time_convention_tag(self.frame_time_convention));
+        bytes.push(interpolation_domain_tag(self.interpolation_domain));
+        bytes.push(shutter_boundary_policy_tag(self.shutter_boundary_policy));
+        bytes.extend_from_slice(&self.audio_lead_samples.to_le_bytes());
+        // These values are invariants of every admitted brief even though the
+        // struct need not retain redundant booleans after admission.
+        bytes.push(1); // muted_review_required
+        bytes.push(0); // essential_context_in_audio_only
+        bytes
+    }
+
+    /// Domain-separated identity of [`Self::canonical_bytes`].
+    #[must_use]
+    pub fn identity(&self) -> ContentHash {
+        hash_domain(CINEMATIC_BRIEF_IDENTITY_DOMAIN, &self.canonical_bytes())
     }
 
     /// Total video frames.
@@ -777,6 +851,154 @@ impl CinematicBrief {
             self.total_frames,
             self.shots.len(),
         )
+    }
+}
+
+fn push_shot(bytes: &mut Vec<u8>, shot: &ReferenceShot) {
+    bytes.push(reference_shot_role_tag(shot.role()));
+    bytes.extend_from_slice(&shot.frames().start().to_le_bytes());
+    bytes.extend_from_slice(&shot.frames().end_exclusive().to_le_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(shot.camera().len())
+            .expect("admission bounds keyframes by the u32 shot length")
+            .to_le_bytes(),
+    );
+    for keyframe in shot.camera() {
+        bytes.extend_from_slice(&keyframe.frame.to_le_bytes());
+        for vector in [keyframe.eye_m, keyframe.target_m, keyframe.up] {
+            bytes.extend_from_slice(&canonical_f64_bits(vector.x).to_le_bytes());
+            bytes.extend_from_slice(&canonical_f64_bits(vector.y).to_le_bytes());
+            bytes.extend_from_slice(&canonical_f64_bits(vector.z).to_le_bytes());
+        }
+        bytes.extend_from_slice(&canonical_f64_bits(keyframe.focus_distance_m).to_le_bytes());
+        bytes.push(focus_target_tag(keyframe.focus_target));
+    }
+    let optics = shot.optics();
+    bytes.extend_from_slice(&optics.focal_length_um.to_le_bytes());
+    bytes.extend_from_slice(&optics.f_number_milli.to_le_bytes());
+    bytes.extend_from_slice(&optics.shutter_open_microframes.to_le_bytes());
+    bytes.extend_from_slice(&optics.shutter_close_microframes.to_le_bytes());
+    bytes.push(exposure_intent_tag(optics.exposure));
+    bytes.push(lighting_preset_tag(shot.lighting()));
+    bytes.push(disc_material_tag(shot.disc_material()));
+    bytes.push(background_preset_tag(shot.background()));
+    bytes.push(u8::from(shot.glass_visible()));
+    bytes.push(u8::from(shot.base_visible()));
+    bytes.push(audio_perspective_tag(shot.audio_perspective()));
+    bytes.push(shot_transition_tag(shot.transition()));
+    match shot.time_mapping() {
+        ShotTimeMapping::PhysicalLinear {
+            start_tick,
+            end_tick_exclusive,
+        } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&start_tick.to_le_bytes());
+            bytes.extend_from_slice(&end_tick_exclusive.to_le_bytes());
+        }
+        ShotTimeMapping::VisualizationHold { source_tick, label } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&source_tick.to_le_bytes());
+            bytes.push(visualization_hold_label_tag(label));
+        }
+    }
+    bytes.push(apparent_rotation_intent_tag(
+        shot.apparent_rotation_intent(),
+    ));
+}
+
+const fn canonical_f64_bits(value: f64) -> u64 {
+    if value == 0.0 { 0 } else { value.to_bits() }
+}
+
+const fn focus_target_tag(value: FocusTarget) -> u8 {
+    match value {
+        FocusTarget::DiscCenter => 1,
+        FocusTarget::ContactPoint => 2,
+        FocusTarget::DiscRim => 3,
+    }
+}
+
+const fn reference_shot_role_tag(value: ReferenceShotRole) -> u8 {
+    match value {
+        ReferenceShotRole::EstablishingProduct => 1,
+        ReferenceShotRole::InclinationAndContactOrbit => 2,
+        ReferenceShotRole::MacroPrecession => 3,
+        ReferenceShotRole::TerminalCloseUp => 4,
+    }
+}
+
+const fn exposure_intent_tag(value: ExposureIntent) -> u8 {
+    match value {
+        ExposureIntent::ProtectMetalHighlights => 1,
+        ExposureIntent::ProtectGlassHighlights => 2,
+    }
+}
+
+const fn lighting_preset_tag(value: LightingPreset) -> u8 {
+    match value {
+        LightingPreset::StudioSoftboxRim => 1,
+        LightingPreset::RakingContactMacro => 2,
+        LightingPreset::TerminalGlint => 3,
+    }
+}
+
+const fn disc_material_tag(value: DiscMaterialPreset) -> u8 {
+    match value {
+        DiscMaterialPreset::BrushedTungsten => 1,
+        DiscMaterialPreset::BrushedStainlessSteel => 2,
+    }
+}
+
+const fn background_preset_tag(value: BackgroundPreset) -> u8 {
+    match value {
+        BackgroundPreset::NeutralBlackSweep => 1,
+    }
+}
+
+const fn audio_perspective_tag(value: AudioPerspective) -> u8 {
+    match value {
+        AudioPerspective::StudioObserver => 1,
+        AudioPerspective::ContactMacro => 2,
+        AudioPerspective::TerminalDetail => 3,
+    }
+}
+
+const fn shot_transition_tag(value: ShotTransition) -> u8 {
+    match value {
+        ShotTransition::HardCut => 1,
+    }
+}
+
+const fn visualization_hold_label_tag(value: VisualizationHoldLabel) -> u8 {
+    match value {
+        VisualizationHoldLabel::CensoredTrajectory => 1,
+    }
+}
+
+const fn apparent_rotation_intent_tag(value: ApparentRotationIntent) -> u8 {
+    match value {
+        ApparentRotationIntent::ForwardCueAndInclinationReadable => 1,
+        ApparentRotationIntent::ContactOrbitPrimaryNoFalseReversal => 2,
+        ApparentRotationIntent::WobblePrimaryNoFrozenCue => 3,
+        ApparentRotationIntent::TerminalSlowdownNoAliasReversal => 4,
+    }
+}
+
+const fn frame_time_convention_tag(value: FrameTimeConvention) -> u8 {
+    match value {
+        FrameTimeConvention::IntegerFrameCentersHalfOpenMaster => 1,
+    }
+}
+
+const fn interpolation_domain_tag(value: BriefInterpolationDomain) -> u8 {
+    match value {
+        BriefInterpolationDomain::StudioFrameRigidPoseAndScalarOptics => 1,
+    }
+}
+
+const fn shutter_boundary_policy_tag(value: ShutterBoundaryPolicy) -> u8 {
+    match value {
+        ShutterBoundaryPolicy::ClipAtCutsAndMaster => 1,
     }
 }
 
@@ -1164,6 +1386,13 @@ pub enum CinematicBriefError {
     InvalidTrajectoryClock,
     /// No shots were supplied.
     MissingShots,
+    /// More shots than nonempty master-frame ranges were supplied.
+    TooManyShots {
+        /// Maximum possible number of nonempty shots.
+        maximum: u32,
+        /// Supplied shot count.
+        got: u64,
+    },
     /// Ordered shots overlap or leave a gap.
     ShotGapOrOverlap {
         /// Required next start.
@@ -1175,6 +1404,13 @@ pub enum CinematicBriefError {
     ShotOutsideMaster,
     /// No camera keyframe was supplied.
     MissingCameraKeyframe,
+    /// A shot supplied more unique keyframes than frames in its range.
+    TooManyCameraKeyframes {
+        /// Maximum possible number of strictly ordered keyframes.
+        maximum: u32,
+        /// Supplied keyframe count.
+        got: u64,
+    },
     /// Keyframe frames were outside the shot or not strictly increasing.
     InvalidCameraKeyframeOrder,
     /// Camera coordinates or focus distance were non-finite/invalid.
@@ -1223,9 +1459,11 @@ impl CinematicBriefError {
             Self::InvalidMasterTimeline => "cinematic-brief-invalid-master-timeline",
             Self::InvalidTrajectoryClock => "cinematic-brief-invalid-trajectory-clock",
             Self::MissingShots => "cinematic-brief-missing-shots",
+            Self::TooManyShots { .. } => "cinematic-brief-too-many-shots",
             Self::ShotGapOrOverlap { .. } => "cinematic-brief-shot-gap-or-overlap",
             Self::ShotOutsideMaster => "cinematic-brief-shot-outside-master",
             Self::MissingCameraKeyframe => "cinematic-brief-missing-camera-keyframe",
+            Self::TooManyCameraKeyframes { .. } => "cinematic-brief-too-many-camera-keyframes",
             Self::InvalidCameraKeyframeOrder => "cinematic-brief-camera-keyframe-order",
             Self::InvalidCameraValue => "cinematic-brief-invalid-camera-value",
             Self::CameraSingularity => "cinematic-brief-camera-singularity",

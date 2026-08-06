@@ -91,6 +91,61 @@ fn input() -> CinematicBriefInput {
 }
 
 #[test]
+fn brief_identity_is_deterministic_and_binds_every_retained_semantic() {
+    let first = CinematicBrief::try_new(input()).expect("admitted brief");
+    let replay = CinematicBrief::try_new(input()).expect("replayed brief");
+    assert_eq!(first.canonical_bytes(), replay.canonical_bytes());
+    assert_eq!(first.identity(), replay.identity());
+    assert!(first.identity().as_bytes().iter().any(|byte| *byte != 0));
+
+    let mut changed_input = input();
+    changed_input.spin_cue.engraved_radial_mark = true;
+    let changed = CinematicBrief::try_new(changed_input).expect("changed admitted brief");
+    assert_ne!(first.identity(), changed.identity());
+
+    let mut camera_changed_input = input();
+    camera_changed_input.shots[0].camera[0].focus_distance_m = 0.3;
+    let camera_changed =
+        CinematicBrief::try_new(camera_changed_input).expect("camera-changed admitted brief");
+    assert_ne!(first.identity(), camera_changed.identity());
+
+    let mut signed_zero_input = input();
+    signed_zero_input.shots[0].camera[0].up.x = -0.0;
+    let signed_zero =
+        CinematicBrief::try_new(signed_zero_input).expect("signed-zero-equivalent brief");
+    assert_eq!(
+        first.identity(),
+        signed_zero.identity(),
+        "canonical identity must not distinguish IEEE signed zero"
+    );
+}
+
+#[test]
+fn brief_admission_bounds_identity_table_cardinality() {
+    let mut too_many_shots = input();
+    let template = too_many_shots.shots[0].clone();
+    too_many_shots.shots.resize(241, template);
+    assert!(matches!(
+        CinematicBrief::try_new(too_many_shots),
+        Err(CinematicBriefError::TooManyShots {
+            maximum: 240,
+            got: 241
+        })
+    ));
+
+    let mut too_many_keyframes = input();
+    let template = too_many_keyframes.shots[0].camera[0];
+    too_many_keyframes.shots[0].camera.resize(241, template);
+    assert!(matches!(
+        CinematicBrief::try_new(too_many_keyframes),
+        Err(CinematicBriefError::TooManyCameraKeyframes {
+            maximum: 240,
+            got: 241
+        })
+    ));
+}
+
+#[test]
 fn reference_brief_freezes_four_contiguous_readable_shots() {
     let brief = CinematicBrief::euler_disc_v1().expect("reference brief must admit");
     assert_eq!(brief.total_frames(), 240);
