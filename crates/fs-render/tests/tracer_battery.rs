@@ -26,11 +26,12 @@ use fs_render::camera::{
 use fs_render::charts::TriMesh;
 use fs_render::instances::{GeometryInstance, RigidTransform, SharedGeometry};
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
+use fs_render::motion_vectors::StableFeatureIdentity;
 use fs_render::spectral::{LAMBDA_MAX, LAMBDA_MIN, lift_rgb, xyz_of_spectrum};
 use fs_render::tracer::{
     Camera, DirectStrategy, Film, FilmTimeMode, Material, Primitive, RectLight, Sampler, Scene,
     Settings, Shape, TracerError, film_to_exr, render, render_cinematic, render_cinematic_range,
-    render_motion, render_motion_range, render_range,
+    render_motion, render_motion_range, render_range, trace_cinematic_pixel_sample,
 };
 use fs_render::{cosine_sample_hemisphere, hero_wavelengths, radical_inverse};
 use fs_rep_frep::FrepBuilder;
@@ -1082,6 +1083,70 @@ fn cinematic_pinhole_matches_legacy_bits_for_iid_and_owen_sobol() {
             "zero-aperture cinematic path changed legacy XYZ bits",
         );
     }
+}
+
+#[test]
+fn cinematic_primary_record_is_the_exact_beauty_sample_hit() {
+    let scene = emissive_motion_scene(true);
+    let camera = static_cinematic_camera(physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(0.0).expect("pinhole aperture"),
+    ));
+    let settings = motion_settings(1);
+    let shutter = motion_shutter(0.375, 0.0);
+    let (film, sample) = with_cx(|cx| {
+        let film = render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter)?;
+        let sample = trace_cinematic_pixel_sample(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter,
+            0,
+            0,
+        )?;
+        Ok::<_, TracerError>((film, sample))
+    })
+    .expect("aligned cinematic sample");
+
+    assert_eq!(sample.xyz.map(f64::to_bits), film.xyz[0].map(f64::to_bits));
+    assert_eq!(sample.absolute_time_s.to_bits(), 0.375_f64.to_bits());
+    let primary = sample
+        .primary
+        .expect("center ray accepts the instanced quad");
+    assert_eq!(primary.primitive_index, 0);
+    assert_eq!(
+        primary.material_identity,
+        scene.primitives[0].material.content_identity()
+    );
+    let surface = primary
+        .surface
+        .expect("instance retains local correspondence");
+    assert_eq!(surface.identity().object_id(), 101);
+    assert_eq!(
+        surface.identity().material_identity(),
+        primary.material_identity
+    );
+    assert!(matches!(
+        surface.identity().feature(),
+        StableFeatureIdentity::MeshTriangle(_)
+    ));
+    assert_eq!(primary.hit.point, Point3::new(0.0, 0.0, 0.0));
+    assert_eq!(
+        with_cx(|cx| trace_cinematic_pixel_sample(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            shutter,
+            1,
+            0,
+        )),
+        Err(TracerError::InvalidInput)
+    );
 }
 
 #[test]

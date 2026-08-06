@@ -31,13 +31,14 @@ use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError}
 use crate::camera::{AnimatedCamera, CameraError, CameraExposure, CutSide, LensSample};
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
 use crate::dielectric::{
-    DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
-    evaluate_rough_dielectric, fresnel_dielectric, sample_rough_dielectric,
+    BeerLambertParameters, DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
+    GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric, sample_rough_dielectric,
     sample_smooth_dielectric,
 };
-use crate::instances::{GeometryInstance, InstanceError, SharedGeometry};
+use crate::instances::{GeometryInstance, InstanceError, InstanceHit, SharedGeometry};
 use crate::lighting::{AdmittedLighting, EnvironmentMap, LightSample, LightingError};
 use crate::motion::{NormalizedShutterTime, ShutterInterval, TimedRay};
+use crate::motion_vectors::{MotionVectorError, PrimarySurfaceSample};
 use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, cie_x, cie_y, cie_z, xyz_e_to_d65, xyz_to_linear_srgb,
     y_integral,
@@ -45,6 +46,7 @@ use crate::spectral::{
 use crate::{balance_heuristic, hero_wavelengths};
 use core::mem::size_of;
 use fs_alloc::{AllocError, LeaseCharge, LeaseReceipt, LeaseRefusal, OperationMemoryLease};
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::{
     Budget, Cancelled, Cx, ExecMode, LocalTaskCaps, ParkedTilePool, PoolConfig, RunError, RunId,
     RunReport, TileKernel, TilePlan, TilePool,
@@ -96,6 +98,9 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 /// opaque materials retain tracer-v1 stream order and image bits.
 pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
+/// Domain for deterministic identities of complete tracer material values.
+pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
+
 /// Bit-affecting semantics of construction-order-independent multi-light and
 /// environment sampling. The legacy one-rectangle/no-environment path remains
 /// under [`TRACER_BIT_SEMANTICS_VERSION`] and keeps its frozen stream.
@@ -119,6 +124,55 @@ const RECT_LIGHT_GEOMETRY_REL_TOLERANCE: f64 = 1.0e-10;
 struct PathTime {
     interval: ShutterInterval,
     normalized: NormalizedShutterTime,
+}
+
+#[derive(Clone, Copy)]
+struct SceneIntersection {
+    primitive_index: usize,
+    hit: Hit,
+    instance_hit: Option<InstanceHit>,
+}
+
+/// Accepted frontmost surface for one beauty-path sample.
+///
+/// `primitive_index` is scene-local diagnostic metadata, not a stable object
+/// identity. Instanced geometry additionally carries [`PrimarySurfaceSample`],
+/// whose object/geometry/material/feature tuple is stable across rigid poses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrimaryTraceHit {
+    /// Index of the accepted primitive in [`Scene::primitives`].
+    pub primitive_index: usize,
+    /// Exact world-space hit shaded by the beauty path.
+    pub hit: Hit,
+    /// Deterministic identity of the complete material value on that primitive.
+    pub material_identity: ContentHash,
+    /// Stable local-space identity and correspondence for instanced geometry.
+    /// Direct legacy mesh/chart primitives have no object identity and return
+    /// `None` rather than inventing one.
+    pub surface: Option<PrimarySurfaceSample>,
+}
+
+struct PathTraceSample {
+    xyz: [f64; 3],
+    primary: Option<PrimaryTraceHit>,
+    absolute_time_s: Option<f64>,
+}
+
+/// One deterministic cinematic beauty sample and its exactly aligned primary
+/// surface record.
+///
+/// This is the lossless producer seam for depth, normal, identity, and motion
+/// AOVs. It reports the accepted primary hit from the same path traversal that
+/// produced `xyz`; it does not retrace the pixel. Visibility at a different
+/// reference time still requires [`crate::motion_vectors::validate_reprojection`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CinematicPixelSample {
+    /// Unaccumulated CIE XYZ beauty contribution for this logical sample.
+    pub xyz: [f64; 3],
+    /// Absolute shutter time in seconds used by camera and animated geometry.
+    pub absolute_time_s: f64,
+    /// Frontmost accepted surface, or `None` for a background ray.
+    pub primary: Option<PrimaryTraceHit>,
 }
 
 #[derive(Clone, Copy)]
@@ -346,6 +400,71 @@ pub enum Material {
         /// Smooth-delta or isotropic-GGX boundary treatment.
         surface: DielectricSurface,
     },
+}
+
+impl Material {
+    /// Deterministic content identity of this complete tracer material value.
+    ///
+    /// This binds the numerical visual model, including declared glass
+    /// provenance, but is not evidence that those parameters match a physical
+    /// specimen. Emission remains separate primitive metadata.
+    #[must_use]
+    pub fn content_identity(self) -> ContentHash {
+        let mut hasher = DomainHasher::new(MATERIAL_CONTENT_IDENTITY_DOMAIN);
+        match self {
+            Self::Lambertian { reflectance } => {
+                hasher.update(&[0]);
+                update_material_scalars(&mut hasher, reflectance.c);
+            }
+            Self::Ggx { reflectance, alpha } => {
+                hasher.update(&[1]);
+                update_material_scalars(&mut hasher, reflectance.c);
+                update_material_scalar(&mut hasher, alpha);
+            }
+            Self::Dielectric { glass, surface } => {
+                hasher.update(&[2]);
+                update_material_scalars(&mut hasher, glass.ior().coefficients());
+                match glass.absorption().parameters() {
+                    BeerLambertParameters::Clear => hasher.update(&[0]),
+                    BeerLambertParameters::Constant { extinction_per_m } => {
+                        hasher.update(&[1]);
+                        update_material_scalar(&mut hasher, extinction_per_m);
+                    }
+                    BeerLambertParameters::ReferenceRgb {
+                        linear_rgb,
+                        distance_m,
+                    } => {
+                        hasher.update(&[2]);
+                        update_material_scalars(&mut hasher, linear_rgb);
+                        update_material_scalar(&mut hasher, distance_m);
+                    }
+                }
+                hasher.update(&[match glass.provenance() {
+                    GlassProvenance::Custom => 0,
+                    GlassProvenance::RepresentativeBorosilicateV1 => 1,
+                    GlassProvenance::RepresentativeCrownV1 => 2,
+                }]);
+                match surface.roughness_alpha() {
+                    None => hasher.update(&[0]),
+                    Some(alpha) => {
+                        hasher.update(&[1]);
+                        update_material_scalar(&mut hasher, alpha);
+                    }
+                }
+            }
+        }
+        hasher.finalize()
+    }
+}
+
+fn update_material_scalars(hasher: &mut DomainHasher, values: [f64; 3]) {
+    for value in values {
+        update_material_scalar(hasher, value);
+    }
+}
+
+fn update_material_scalar(hasher: &mut DomainHasher, value: f64) {
+    hasher.update(&value.to_bits().to_le_bytes());
 }
 
 /// Scene geometry: a triangle mesh (BVH) or any certified chart
@@ -1797,6 +1916,8 @@ pub enum TracerError {
     MissingNormal,
     /// Instance construction, placement, hit data, or object IDs were invalid.
     InvalidInstance,
+    /// The accepted instance hit could not form a valid stable surface record.
+    MotionVector(MotionVectorError),
     /// An animated instance was supplied to a static render entry point.
     MissingRayTime,
     /// The resolved shutter extends beyond an animated instance trajectory.
@@ -1851,6 +1972,10 @@ impl core::fmt::Display for TracerError {
             Self::InvalidInput => formatter.write_str("invalid spectral render input"),
             Self::MissingNormal => formatter.write_str("surface hit has no finite normal"),
             Self::InvalidInstance => formatter.write_str("invalid rigid render instance"),
+            Self::MotionVector(error) => write!(
+                formatter,
+                "primary motion/AOV surface record refused: {error}"
+            ),
             Self::MissingRayTime => {
                 formatter.write_str("animated render instance requires explicit shutter time")
             }
@@ -1925,6 +2050,15 @@ impl From<AnimatedInstanceError> for TracerError {
             | AnimatedInstanceError::NonIncreasingKeyframeTime
             | AnimatedInstanceError::InvalidEvaluationTime
             | AnimatedInstanceError::InvalidInterpolation => Self::InvalidInstance,
+        }
+    }
+}
+
+impl From<MotionVectorError> for TracerError {
+    fn from(error: MotionVectorError) -> Self {
+        match error {
+            MotionVectorError::Cancelled => Self::Cancelled,
+            other => Self::MotionVector(other),
         }
     }
 }
@@ -5444,6 +5578,60 @@ pub fn render_cinematic(
     Ok(film)
 }
 
+/// Trace one absolute logical cinematic sample and retain the exact primary
+/// hit accepted by the beauty path.
+///
+/// `pixel` is a row-major index into `settings.width × settings.height`, and
+/// `sample` is the same absolute sample identity used by progressive renders.
+/// The call performs the same scene/camera/shutter admission as
+/// [`render_cinematic`] but does not allocate or mutate a [`Film`].
+#[allow(clippy::too_many_arguments)]
+pub fn trace_cinematic_pixel_sample(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+    pixel: u32,
+    sample: u32,
+) -> Result<CinematicPixelSample, TracerError> {
+    cx.checkpoint()?;
+    let pixel_count = checked_pixel_len(settings.width, settings.height)?;
+    if usize::try_from(pixel).map_or(true, |index| index >= pixel_count) {
+        return Err(TracerError::InvalidInput);
+    }
+    let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, _) =
+        preflight_render(scene, cx, settings, None, 0, 1, Some(shutter), camera_path)?;
+    let key = [
+        (settings.seed & 0xffff_ffff) as u32,
+        (settings.seed >> 32) as u32,
+    ];
+    let sobol =
+        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let traced = trace_pixel_sample_with_primary(
+        scene,
+        &lighting,
+        cx,
+        settings,
+        1.0 / y_integral(),
+        sobol.as_ref(),
+        key,
+        pixel,
+        sample,
+        Some(shutter),
+        camera_path,
+        true,
+    )?;
+    Ok(CinematicPixelSample {
+        xyz: traced.xyz,
+        absolute_time_s: traced.absolute_time_s.ok_or(TracerError::MissingRayTime)?,
+        primary: traced.primary,
+    })
+}
+
 /// The (jitter-x, jitter-y, hero-λ) dimensions for one (pixel, sample).
 #[allow(clippy::too_many_arguments)]
 fn trace_pixel_sample(
@@ -5459,6 +5647,38 @@ fn trace_pixel_sample(
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'_>,
 ) -> Result<[f64; 3], TracerError> {
+    Ok(trace_pixel_sample_with_primary(
+        scene,
+        lighting,
+        cx,
+        settings,
+        kn,
+        sobol,
+        key,
+        pixel,
+        sample,
+        shutter,
+        camera_path,
+        false,
+    )?
+    .xyz)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_pixel_sample_with_primary(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    kn: f64,
+    sobol: Option<&Sobol>,
+    key: [u32; 2],
+    pixel: u32,
+    sample: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    capture_primary: bool,
+) -> Result<PathTraceSample, TracerError> {
     // Pool seeds control scheduling/placement only. Bind downstream chart,
     // camera, and intersection work to the public render seed while retaining
     // the executor's logical tile/iteration and refusal routing.
@@ -5481,6 +5701,7 @@ fn trace_pixel_sample(
         ul,
         ray_time,
         camera_path,
+        capture_primary,
     )
 }
 
@@ -5535,7 +5756,8 @@ fn trace_path(
     ul: f64,
     ray_time: Option<PathTime>,
     camera_path: CameraPath<'_>,
-) -> Result<[f64; 3], TracerError> {
+    capture_primary: bool,
+) -> Result<PathTraceSample, TracerError> {
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let mut rng = PathRng {
         pixel,
@@ -5581,9 +5803,10 @@ fn trace_path(
     let mut segment_origin = ray.origin;
     let mut medium_stack = MediumStack::new();
     let mut packet_collapsed = false;
+    let mut primary = None;
     for depth in 0..s.max_depth {
         cx.checkpoint()?;
-        let Some((prim_idx, hit)) = intersect(scene, cx, &ray, ray_time)? else {
+        let Some(intersection) = intersect(scene, cx, &ray, ray_time)? else {
             if let Some(active) = medium_stack.last() {
                 return Err(TracerError::UnclosedMedium {
                     boundary_primitive: active.boundary_primitive,
@@ -5599,6 +5822,11 @@ fn trace_path(
             }
             break;
         };
+        let SceneIntersection {
+            primitive_index: prim_idx,
+            hit,
+            instance_hit,
+        } = intersection;
         attenuate_segment(
             &mut throughput,
             &lambdas,
@@ -5607,6 +5835,21 @@ fn trace_path(
             &hit,
         )?;
         let prim = &scene.primitives[prim_idx];
+        if capture_primary && depth == 0 {
+            let material_identity = prim.material.content_identity();
+            let surface = instance_hit
+                .as_ref()
+                .map(|instance_hit| {
+                    PrimarySurfaceSample::try_from_instance_hit(instance_hit, material_identity)
+                })
+                .transpose()?;
+            primary = Some(PrimaryTraceHit {
+                primitive_index: prim_idx,
+                hit,
+                material_identity,
+                surface,
+            });
+        }
         let frame = surface_frame(&hit, &ray)?;
         let n = frame.oriented;
         if let Some((spec, scale)) = &prim.emission {
@@ -5671,10 +5914,10 @@ fn trace_path(
                                             primitive_index,
                                             distance_m,
                                         },
-                                        Some((index, shadow_hit)),
+                                        Some(shadow_hit),
                                     ) => {
-                                        index == primitive_index
-                                            && shadow_hit.t > distance_m - 1.0e-4
+                                        shadow_hit.primitive_index == primitive_index
+                                            && shadow_hit.hit.t > distance_m - 1.0e-4
                                     }
                                     (DirectLightTarget::Environment, None) => true,
                                     (DirectLightTarget::Rectangle { .. }, None)
@@ -5770,8 +6013,11 @@ fn trace_path(
                                         primitive_index,
                                         distance_m,
                                     },
-                                    Some((index, shadow_hit)),
-                                ) => index == primitive_index && shadow_hit.t > distance_m - 1.0e-4,
+                                    Some(shadow_hit),
+                                ) => {
+                                    shadow_hit.primitive_index == primitive_index
+                                        && shadow_hit.hit.t > distance_m - 1.0e-4
+                                }
                                 (DirectLightTarget::Environment, None) => true,
                                 (DirectLightTarget::Rectangle { .. }, None)
                                 | (DirectLightTarget::Environment, Some(_)) => false,
@@ -5911,7 +6157,11 @@ fn trace_path(
         xyz[1] += w * cie_y(l);
         xyz[2] += w * cie_z(l);
     }
-    Ok(xyz)
+    Ok(PathTraceSample {
+        xyz,
+        primary,
+        absolute_time_s: ray_time.map(|time| time.interval.time_at(time.normalized)),
+    })
 }
 
 /// Preserve the exact v1 camera arithmetic as one explicit compatibility
@@ -6252,12 +6502,18 @@ fn intersect(
     cx: &Cx<'_>,
     ray: &Ray,
     ray_time: Option<PathTime>,
-) -> Result<Option<(usize, Hit)>, TracerError> {
-    let mut best: Option<(usize, Hit)> = None;
+) -> Result<Option<SceneIntersection>, TracerError> {
+    let mut best: Option<SceneIntersection> = None;
     for (i, prim) in scene.primitives.iter().enumerate() {
         cx.checkpoint()?;
-        let hit = match &prim.shape {
-            Shape::Mesh(mesh) => mesh.intersect_with_cx(cx, ray)?,
+        let candidate = match &prim.shape {
+            Shape::Mesh(mesh) => mesh
+                .intersect_with_cx(cx, ray)?
+                .map(|hit| SceneIntersection {
+                    primitive_index: i,
+                    hit,
+                    instance_hit: None,
+                }),
             Shape::Chart(chart) => {
                 let (hit, audit) = sphere_trace(chart.as_ref(), cx, ray, 1e4, TRACE_EPS, 1.0);
                 if matches!(
@@ -6272,38 +6528,52 @@ fn intersect(
                 match audit.termination {
                     TraceTermination::Cancelled => return Err(TracerError::Cancelled),
                     TraceTermination::Miss => None,
-                    TraceTermination::Hit => {
-                        Some(hit.ok_or(TracerError::BackendFailure(TraceTermination::Hit))?)
-                    }
+                    TraceTermination::Hit => Some(SceneIntersection {
+                        primitive_index: i,
+                        hit: hit.ok_or(TracerError::BackendFailure(TraceTermination::Hit))?,
+                        instance_hit: None,
+                    }),
                     termination => return Err(TracerError::BackendFailure(termination)),
                 }
             }
-            Shape::Instance(instance) => instance
-                .intersect(cx, ray, 1e4, TRACE_EPS)?
-                .map(|instance_hit| instance_hit.hit),
+            Shape::Instance(instance) => {
+                instance
+                    .intersect(cx, ray, 1e4, TRACE_EPS)?
+                    .map(|instance_hit| SceneIntersection {
+                        primitive_index: i,
+                        hit: instance_hit.hit,
+                        instance_hit: Some(instance_hit),
+                    })
+            }
             Shape::AnimatedInstance(instance) => {
                 let time = ray_time.ok_or(TracerError::MissingRayTime)?;
                 let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
                 instance
                     .intersect(cx, &timed_ray, 1e4, TRACE_EPS)?
-                    .map(|instance_hit| instance_hit.hit)
+                    .map(|instance_hit| SceneIntersection {
+                        primitive_index: i,
+                        hit: instance_hit.hit,
+                        instance_hit: Some(instance_hit),
+                    })
             }
         };
-        if let Some(h) = hit {
+        if let Some(candidate) = candidate {
             let replace = match best.as_ref() {
                 None => true,
-                Some((_, best_hit)) if h.t < best_hit.t => true,
-                Some((best_index, best_hit))
-                    if h.t.total_cmp(&best_hit.t) == core::cmp::Ordering::Equal =>
+                Some(best_hit) if candidate.hit.t < best_hit.hit.t => true,
+                Some(best_hit)
+                    if candidate.hit.t.total_cmp(&best_hit.hit.t) == core::cmp::Ordering::Equal =>
                 {
                     instance_object_id(&prim.shape)
-                        .zip(instance_object_id(&scene.primitives[*best_index].shape))
+                        .zip(instance_object_id(
+                            &scene.primitives[best_hit.primitive_index].shape,
+                        ))
                         .is_some_and(|(candidate, current)| candidate < current)
                 }
                 Some(_) => false,
             };
             if replace {
-                best = Some((i, h));
+                best = Some(candidate);
             }
         }
     }
@@ -6550,6 +6820,25 @@ fn instance_object_id(shape: &Shape) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spectral::lift_rgb;
+
+    #[test]
+    fn material_content_identity_is_deterministic_and_value_complete() {
+        let reflectance = lift_rgb([0.2, 0.4, 0.8]);
+        let diffuse = Material::Lambertian { reflectance };
+        let smoother = Material::Ggx {
+            reflectance,
+            alpha: 0.1,
+        };
+        let rougher = Material::Ggx {
+            reflectance,
+            alpha: 0.2,
+        };
+
+        assert_eq!(diffuse.content_identity(), diffuse.content_identity());
+        assert_ne!(diffuse.content_identity(), smoother.content_identity());
+        assert_ne!(smoother.content_identity(), rougher.content_identity());
+    }
 
     #[test]
     fn lighting_admission_cancellation_preserves_tracer_cancellation_authority() {
