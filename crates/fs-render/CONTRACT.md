@@ -85,7 +85,10 @@ differentiable lift). Pure Rust throughout.
   epsilon-clear safe-ball bridge across any coordinate-rounding gap. Normalized
   working parameters size steps, but every chart and overlap evaluation uses
   the caller ray's own `Ray::at` arithmetic so a certificate is never returned
-  for a numerically different point. This is chart-backend bit-semantics v9.
+  for a numerically different point. Mesh hits additionally retain original
+  triangle indices and barycentric coordinates; exact-distance feature ties
+  select the lowest original triangle index. This is chart-backend
+  bit-semantics v10.
   `TraceAudit`
   states whether every marched sample supplied a positive finite certified
   bound and compatible rigorous trace-value certificate, counts retreats to the
@@ -841,3 +844,61 @@ declared contact/terminal discontinuity, validate the source dynamics, or claim
 that motion blur recovers unresolved terminal physics. Event-aware subdivision
 or refusal is owned by the Euler trajectory adapter; final animated TLAS and
 cinematic-camera composition remain their dependent beads.
+
+## Stable hit correspondence and motion vectors
+
+`motion_vectors` (bead `frankensim-h7xu5.3.5`) retains the original triangle
+index, barycentric coordinates, accepted local point, and distinct local
+geometric/shading normals from the same instance hit used for shading. Stable
+hit identity binds the nonzero object ID, caller-supplied immutable-geometry
+identity, deterministic material identity, and original mesh triangle. The
+low-level constructor accepts an explicit nonzero material digest; the tracer's
+aligned cinematic-sample path derives that digest from the complete `Material`
+value (excluding separately modeled emission). Pose or frame identity is
+deliberately separate because it changes while the same material feature moves.
+The geometry digest remains a caller assertion; this module does not re-hash
+mutable public mesh storage.
+
+Motion evaluates one retained local mesh point under explicit previous,
+current, and next proper-rigid object transforms and physical cameras. The
+current frame must match the accepted hit's frame identity, reference times are
+nondecreasing, and every frame must name the same object and geometry. Camera
+projection uses the deterministic optical centre, independent of thin-lens
+samples. NDC is `+x` right/`+y` up; row-major pixel coordinates are `+x`
+right/`+y` down. Each displacement is explicitly `target - current`, both in
+NDC per declared frame step and pixels per declared frame step. It is neither
+metres per second nor an observed mechanical velocity.
+
+The raster extent is explicit and uses the same half-open pixel-edge convention
+as the tracer, including 3840x2160 without a shape-specific path. Off-screen
+in-front projections retain their finite displacement. Points on or behind the
+lens plane have no vector. Different continuous-shot IDs produce `CameraCut`
+rather than a cross-cut numeric vector. Generic chart hits return
+`ChartHasNoStableParameter`; a local implicit hit point is not silently promoted
+to a stable material coordinate. The Euler cinematic bridge's current
+axisymmetric surface is a deterministic immutable preview mesh, so it uses the
+mesh correspondence path; this does not promote that chordal visualization
+mesh into mechanics authority.
+
+Projection alone makes no visibility claim. `validate_reprojection` compares a
+frontmost target observation using full categorical identity, axial depth, and
+mesh barycentrics under caller-declared finite tolerances. It distinguishes
+visible, nearer occluder, absent/farther disocclusion, hard cut, off-screen,
+behind-camera, identity mismatch, depth mismatch, topology ambiguity, and a
+missing local witness. Target observations must come from an aligned AOV or an
+equivalent target-frame trace; the motion module does not fabricate them.
+
+`trace_cinematic_pixel_sample` is the opt-in lossless producer seam: it returns
+the unaccumulated beauty XYZ, exact sampled shutter time, and primary record
+from one traversal. Ordinary beauty rendering does not compute or hash this
+record when it will be discarded. The dependent film/AOV layer can therefore
+accumulate aligned records without retracing and without imposing the feature's
+cost on legacy renders.
+
+G0/G3/G5 coverage pins analytic translation, rigid rotation, camera pan,
+common camera/object motion, quaternion double-cover equivalence, aperture
+independence, hard cuts, off-screen and behind-camera endpoints, mesh-edge tie
+ownership, chart refusal, reprojection classifications, deterministic replay,
+and exact 4K raster indexing. Aligned film buffers, checkpoint payloads, and EXR
+channels are intentionally owned by dependent bead `frankensim-h7xu5.6.1` and
+are not claimed by this kernel alone.
