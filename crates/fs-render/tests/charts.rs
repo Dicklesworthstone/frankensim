@@ -697,7 +697,7 @@ fn oracle_first_hit(chart: &dyn Chart, cx: &Cx<'_>, ray: &Ray, t_max: f64) -> Op
 #[test]
 fn rb_001_zero_tunneling_headline() {
     with_cx(|cx| {
-        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 9);
+        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 10);
         // Falsifier pairing: four thin-feature fields whose L > 1. The naive
         // unit-bound marcher tunnels in every case; the certified d/L path
         // approaches under a no-tunneling theorem and closes a short rigorous

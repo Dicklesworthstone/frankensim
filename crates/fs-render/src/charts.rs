@@ -23,7 +23,7 @@ use fs_rep_nurbs::{NurbsError, NurbsSurface};
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
-pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 9;
+pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 10;
 /// Default per-ray work budget used by [`sphere_trace`].
 pub const DEFAULT_SPHERE_TRACE_STEP_BUDGET: u32 = 4_096;
 /// Hard admission ceiling for an explicit [`sphere_trace_with_step_budget`]
@@ -2125,7 +2125,7 @@ impl TriMesh {
                     if let Some(mut hit) = candidate
                         && best
                             .as_ref()
-                            .is_none_or(|current| mesh_hit_precedes(hit, *current))
+                            .is_none_or(|current| mesh_hit_precedes(&hit, current))
                     {
                         hit.hit.steps = visits;
                         best = Some(hit);
@@ -2173,7 +2173,7 @@ impl TriMesh {
             if let Some(hit) = self.tri_hit(&ray, triangle)
                 && best
                     .as_ref()
-                    .is_none_or(|current: &MeshHit| mesh_hit_precedes(hit, *current))
+                    .is_none_or(|current: &MeshHit| mesh_hit_precedes(&hit, current))
             {
                 best = Some(hit);
             }
@@ -2220,7 +2220,8 @@ impl TriMesh {
         }
         let q = cross(s, e1);
         let v = dot(d, q) * inv;
-        if v < 0.0 || u + v > 1.0 {
+        let uv = u + v;
+        if v < 0.0 || uv > 1.0 {
             return None;
         }
         let tt = dot(e2, q) * inv;
@@ -2245,7 +2246,7 @@ impl TriMesh {
                 },
                 triangle_index: ti,
                 barycentric: [
-                    canonical_zero(1.0 - u - v),
+                    canonical_zero(1.0 - uv),
                     canonical_zero(u),
                     canonical_zero(v),
                 ],
@@ -2255,7 +2256,7 @@ impl TriMesh {
 }
 
 #[allow(clippy::float_cmp)] // Exact-distance ties have a specified feature-ID tie-break.
-fn mesh_hit_precedes(candidate: MeshHit, current: MeshHit) -> bool {
+fn mesh_hit_precedes(candidate: &MeshHit, current: &MeshHit) -> bool {
     candidate.hit.t < current.hit.t
         || (candidate.hit.t == current.hit.t && candidate.triangle_index < current.triangle_index)
 }

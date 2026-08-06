@@ -139,7 +139,7 @@
 {"id":"fs-fft:transform-bits","file":"crates/fs-fft/src/lib.rs","const":"TRANSFORM_BIT_SEMANTICS_VERSION","version":1},
 {"id":"fs-lbm:d3q19-bits","file":"crates/fs-lbm/src/d3q19.rs","const":"D3Q19_BIT_SEMANTICS_VERSION","version":1},
 {"id":"fs-render:tracer-bits","file":"crates/fs-render/src/tracer.rs","const":"TRACER_BIT_SEMANTICS_VERSION","version":1},
-{"id":"fs-render:chart-backend-bits","file":"crates/fs-render/src/charts.rs","const":"CHART_BACKEND_BIT_SEMANTICS_VERSION","version":9}
+{"id":"fs-render:chart-backend-bits","file":"crates/fs-render/src/charts.rs","const":"CHART_BACKEND_BIT_SEMANTICS_VERSION","version":10}
 ],
 "goldens": [
 {"golden":"fs-euler-disc-e2e:frozen-context","file":"crates/fs-euler-disc-e2e/src/protocol.rs","const":"FROZEN_CONTEXT_HASH_HEX","depends_on":"fs-euler-disc-e2e:scientific-contract=1,fs-evidence:vv-artifact=3","justification":"The literal v1 generic Context artifact hash is a structural drift oracle for the exact preregistered Euler Context bytes and artifact identity domain. Re-freezing requires review of the contract and generic V&V artifact schema; equality does not establish scientific adequacy or physical validation."},
