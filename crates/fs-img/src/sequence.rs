@@ -375,6 +375,10 @@ pub enum FrameSamplingStats {
         max_spp: u32,
         /// Exact sum of all per-pixel sample counts.
         total_samples: u64,
+        /// Pixels that terminated before reaching `max_spp`.
+        converged_pixels: u64,
+        /// Pixels that reached `max_spp`.
+        maximum_sample_pixels: u64,
     },
 }
 
@@ -398,13 +402,40 @@ impl FrameSamplingStats {
                 min_spp,
                 max_spp,
                 total_samples,
+                converged_pixels,
+                maximum_sample_pixels,
             } if min_spp != 0 && min_spp <= max_spp => {
-                let minimum = pixels.checked_mul(u64::from(min_spp)).ok_or(
+                if converged_pixels
+                    .checked_add(maximum_sample_pixels)
+                    != Some(pixels)
+                {
+                    return Err(FrameSequenceError::InvalidSampling);
+                }
+                if min_spp == max_spp && converged_pixels != 0 {
+                    return Err(FrameSequenceError::InvalidSampling);
+                }
+                let converged_minimum = converged_pixels
+                    .checked_mul(u64::from(min_spp))
+                    .ok_or(FrameSequenceError::SizeOverflow {
+                        context: "adaptive converged minimum samples",
+                    })?;
+                let maximum_sample_total = maximum_sample_pixels
+                    .checked_mul(u64::from(max_spp))
+                    .ok_or(FrameSequenceError::SizeOverflow {
+                        context: "adaptive maximum-sample pixels",
+                    })?;
+                let minimum = converged_minimum.checked_add(maximum_sample_total).ok_or(
                     FrameSequenceError::SizeOverflow {
                         context: "adaptive minimum samples",
                     },
                 )?;
-                let maximum = pixels.checked_mul(u64::from(max_spp)).ok_or(
+                let converged_maximum_spp = max_spp.saturating_sub(1);
+                let converged_maximum = converged_pixels
+                    .checked_mul(u64::from(converged_maximum_spp))
+                    .ok_or(FrameSequenceError::SizeOverflow {
+                        context: "adaptive converged maximum samples",
+                    })?;
+                let maximum = converged_maximum.checked_add(maximum_sample_total).ok_or(
                     FrameSequenceError::SizeOverflow {
                         context: "adaptive maximum samples",
                     },
@@ -424,20 +455,35 @@ impl FrameSamplingStats {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FrameArtifactKey {
     frame_index: u64,
+    segment_index: u32,
     role: FrameArtifactRole,
 }
 
 impl FrameArtifactKey {
-    /// Construct a key from logical frame index and artifact role.
+    /// Construct a key from logical frame/segment indices and artifact role.
     #[must_use]
-    pub const fn new(frame_index: u64, role: FrameArtifactRole) -> Self {
-        Self { frame_index, role }
+    pub const fn new(
+        frame_index: u64,
+        segment_index: u32,
+        role: FrameArtifactRole,
+    ) -> Self {
+        Self {
+            frame_index,
+            segment_index,
+            role,
+        }
     }
 
     /// Logical frame index.
     #[must_use]
     pub const fn frame_index(self) -> u64 {
         self.frame_index
+    }
+
+    /// Event-delimited segment within the logical presentation frame.
+    #[must_use]
+    pub const fn segment_index(self) -> u32 {
+        self.segment_index
     }
 
     /// Artifact role.
@@ -463,16 +509,18 @@ impl FrameArtifactDescriptor {
     /// Construct and validate one expected frame artifact descriptor.
     ///
     /// Time is retained as exact finite binary64 bits with both signed zeros
-    /// normalized to positive zero. Channel order is semantic.
+    /// normalized to positive zero. EXR channels are sorted by name to match
+    /// the writer; PNG channels are normalized to their standard packed order.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         frame_index: u64,
+        segment_index: u32,
         role: FrameArtifactRole,
         frame_time_s: f64,
         format: FrameArtifactFormat,
         width: u32,
         height: u32,
-        channels: Vec<FrameChannel>,
+        mut channels: Vec<FrameChannel>,
         sampling: FrameSamplingStats,
     ) -> Result<Self, FrameSequenceError> {
         if !frame_time_s.is_finite() {
@@ -484,13 +532,19 @@ impl FrameArtifactDescriptor {
         if channels.is_empty() {
             return Err(FrameSequenceError::InvalidChannelSet { frame_index });
         }
-        for (index, channel) in channels.iter().enumerate() {
-            if channels[..index]
-                .iter()
-                .any(|prior| prior.name == channel.name)
-            {
-                return Err(FrameSequenceError::DuplicateChannel { frame_index });
+        channels.sort_unstable_by(|left, right| match format {
+            FrameArtifactFormat::OpenExr => left.name.cmp(&right.name),
+            FrameArtifactFormat::Png8 | FrameArtifactFormat::Png16 => {
+                png_channel_rank(&left.name)
+                    .cmp(&png_channel_rank(&right.name))
+                    .then_with(|| left.name.cmp(&right.name))
             }
+        });
+        if channels
+            .windows(2)
+            .any(|pair| pair[0].name == pair[1].name)
+        {
+            return Err(FrameSequenceError::DuplicateChannel { frame_index });
         }
         validate_format_channels(role, format, &channels, frame_index)?;
         sampling.validate(width, height)?;
@@ -500,7 +554,7 @@ impl FrameArtifactDescriptor {
             frame_time_s
         };
         Ok(Self {
-            key: FrameArtifactKey::new(frame_index, role),
+            key: FrameArtifactKey::new(frame_index, segment_index, role),
             frame_time_bits: canonical_time.to_bits(),
             format,
             width,
@@ -559,6 +613,17 @@ impl FrameArtifactDescriptor {
     }
 }
 
+fn png_channel_rank(name: &str) -> u8 {
+    match name {
+        "Y" => 0,
+        "R" => 1,
+        "G" => 2,
+        "B" => 3,
+        "A" => 4,
+        _ => u8::MAX,
+    }
+}
+
 fn validate_format_channels(
     role: FrameArtifactRole,
     format: FrameArtifactFormat,
@@ -572,18 +637,8 @@ fn validate_format_channels(
                 FrameChannelType::Float16 | FrameChannelType::Float32
             )
         }),
-        FrameArtifactFormat::Png8 => {
-            matches!(channels.len(), 1 | 3 | 4)
-                && channels
-                    .iter()
-                    .all(|channel| channel.sample_type == FrameChannelType::Uint8)
-        }
-        FrameArtifactFormat::Png16 => {
-            matches!(channels.len(), 1 | 3 | 4)
-                && channels
-                    .iter()
-                    .all(|channel| channel.sample_type == FrameChannelType::Uint16)
-        }
+        FrameArtifactFormat::Png8 => png_channels_match(channels, FrameChannelType::Uint8),
+        FrameArtifactFormat::Png16 => png_channels_match(channels, FrameChannelType::Uint16),
     };
     let role_matches = match role {
         FrameArtifactRole::RawMaster | FrameArtifactRole::DenoisedIntermediate => {
@@ -602,6 +657,19 @@ fn validate_format_channels(
     } else {
         Err(FrameSequenceError::InvalidChannelSet { frame_index })
     }
+}
+
+fn png_channels_match(channels: &[FrameChannel], sample_type: FrameChannelType) -> bool {
+    let expected_names: &[&str] = match channels.len() {
+        1 => &["Y"],
+        3 => &["R", "G", "B"],
+        4 => &["R", "G", "B", "A"],
+        _ => return false,
+    };
+    channels
+        .iter()
+        .zip(expected_names)
+        .all(|(channel, expected)| channel.name == *expected && channel.sample_type == sample_type)
 }
 
 /// Plan row supplied before rendering begins.
@@ -636,6 +704,7 @@ impl ExpectedFrameArtifact {
             }
             (_, Some(source))
                 if source.frame_index == descriptor.key.frame_index
+                    && source.segment_index == descriptor.key.segment_index
                     && source.role.rank() < descriptor.key.role.rank() => {}
             _ => {
                 return Err(FrameSequenceError::InvalidSource {
@@ -853,6 +922,44 @@ pub enum RegistrationOutcome {
     AlreadyRecorded,
 }
 
+/// Immutable canonical bytes for resumable or finalized sequence state.
+///
+/// The identity is domain-separated from ordinary file-byte hashes. Callers
+/// must persist or transmit it through an independent trusted channel before
+/// using it as the pin supplied to [`FrameSequenceManifest::decode_snapshot`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameSequenceSnapshot {
+    identity: ContentHash,
+    bytes: Vec<u8>,
+    state: FrameSequenceState,
+}
+
+impl FrameSequenceSnapshot {
+    /// Domain-separated identity of the exact canonical snapshot bytes.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Exact canonical snapshot bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Lifecycle state encoded in the snapshot.
+    #[must_use]
+    pub const fn state(&self) -> FrameSequenceState {
+        self.state
+    }
+
+    /// Consume the snapshot and return its canonical bytes.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 /// Immutable finalized canonical bytes plus their typed identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameSequenceSeal {
@@ -921,6 +1028,9 @@ impl FrameSequenceManifest {
         available_output_bytes: u64,
     ) -> Result<Self, FrameSequenceError> {
         validate_limits(limits)?;
+        if expected.is_empty() {
+            return Err(FrameSequenceError::EmptySequence);
+        }
         let count = u32::try_from(expected.len()).map_err(|_| {
             FrameSequenceError::ResourceLimit {
                 resource: "artifact count",
@@ -1008,6 +1118,7 @@ impl FrameSequenceManifest {
     /// inconsistent bytes refuse without publishing partial state.
     pub fn decode_snapshot(
         bytes: &[u8],
+        expected_identity: ContentHash,
         admission_limits: FrameSequenceLimits,
         available_output_bytes: u64,
     ) -> Result<Self, FrameSequenceError> {
@@ -1022,6 +1133,14 @@ impl FrameSequenceManifest {
                 resource: "manifest bytes",
                 requested: byte_len,
                 limit: admission_limits.max_manifest_bytes,
+            });
+        }
+        let mut never_cancel = || true;
+        let actual_identity = identity_with_poll(bytes, &mut never_cancel)?;
+        if actual_identity != expected_identity {
+            return Err(FrameSequenceError::IdentityMismatch {
+                expected: expected_identity,
+                actual: actual_identity,
             });
         }
         let mut reader = Reader::new(bytes);
@@ -1091,6 +1210,10 @@ impl FrameSequenceManifest {
         }
         manifest.admit_remaining_storage(available_output_bytes)?;
         if manifest.encoded_len()? != byte_len {
+            return Err(FrameSequenceError::NonCanonical);
+        }
+        let canonical = encode_manifest(&manifest, manifest.state, &mut never_cancel)?;
+        if canonical.as_slice() != bytes {
             return Err(FrameSequenceError::NonCanonical);
         }
         Ok(manifest)
@@ -1254,16 +1377,23 @@ impl FrameSequenceManifest {
     ///
     /// This bounded convenience path never observes cancellation. Use
     /// [`Self::snapshot_with_poll`] when a caller needs cancellation polling.
-    pub fn snapshot(&self) -> Result<Vec<u8>, FrameSequenceError> {
+    pub fn snapshot(&self) -> Result<FrameSequenceSnapshot, FrameSequenceError> {
         self.snapshot_with_poll(|| true)
     }
 
-    /// Encode a deterministic snapshot while polling at artifact boundaries.
+    /// Encode and identify a deterministic snapshot while polling at artifact
+    /// boundaries and fixed-size hash chunks.
     pub fn snapshot_with_poll(
         &self,
         mut poll: impl FnMut() -> bool,
-    ) -> Result<Vec<u8>, FrameSequenceError> {
-        encode_manifest(self, self.state, &mut poll)
+    ) -> Result<FrameSequenceSnapshot, FrameSequenceError> {
+        let bytes = encode_manifest(self, self.state, &mut poll)?;
+        let identity = identity_with_poll(&bytes, &mut poll)?;
+        Ok(FrameSequenceSnapshot {
+            identity,
+            bytes,
+            state: self.state,
+        })
     }
 
     /// Independently re-observe all files named by a finalized manifest.
@@ -1335,6 +1465,9 @@ impl FrameSequenceManifest {
     }
 
     fn validate_structure(&mut self) -> Result<(), FrameSequenceError> {
+        if self.entries.is_empty() {
+            return Err(FrameSequenceError::EmptySequence);
+        }
         if self.entries.len() > usize::try_from(self.limits.max_artifacts).unwrap_or(usize::MAX) {
             return Err(FrameSequenceError::ResourceLimit {
                 resource: "artifact count",

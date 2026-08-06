@@ -10,10 +10,11 @@ frame) [S]; film transforms [S].
 
 ## Purpose and layer
 
-Layer **L5** (LUMEN support). Runtime deps: `std`, `fs-math` (deterministic
-`pow` for sRGB encoding). Renders ship in EXR (lossless f32/f16 AOVs); PNG
-is the preview/report format. The Ledger stores both as artifacts, so the
-readers exist to round-trip **our own** outputs, not the world's files.
+Layer **L5** (LUMEN support). Runtime deps: `std`, `fs-blake3` (typed content
+identities), and `fs-math` (deterministic `pow` for sRGB encoding). Renders
+ship in EXR (lossless f32/f16 AOVs); PNG is the preview/report format. The
+Ledger stores both as artifacts, so the readers exist to round-trip **our
+own** outputs, not the world's files.
 
 ## Public types and semantics
 
@@ -64,6 +65,58 @@ readers exist to round-trip **our own** outputs, not the world's files.
   parameters, negative/over-range handling counts, gamut-operation counts,
   linear bright-pass/addition sums, and admitted output-plus-scratch bytes.
   A zero-strength bloom is non-canonical and must be expressed as `Disabled`.
+- `sequence`: `FrameSequenceContext` binds the shot, trajectory, render-config,
+  scene, producer-build, and image-profile `ContentHash` assertions;
+  `ExpectedFrameArtifact` declares each keyed output and its exact byte
+  reservation; and `FrameSequenceManifest` registers observations, emits or
+  resumes strict canonical snapshots, audits completed byte identities, and
+  produces a `FrameSequenceSeal` only after complete finalization. Artifact
+  descriptors carry exact time bits, format, dimensions, sorted named channel
+  types, sampling statistics, and raw/derived source linkage. The public
+  lifecycle is `Incomplete` or immutable `Finalized`; exact registration
+  retries return `AlreadyRecorded`, while conflicting retries refuse.
+
+### Frame-sequence artifact contract (h7xu5.6.4)
+
+- The complete expected inventory is admitted before rendering. Its stable key
+  is `(frame_index, segment_index, role)`: segments distinguish multiple
+  event-delimited renders of one presentation frame, and roles keep raw EXR,
+  biased denoised EXR, display preview, and scientific overlay artifacts
+  separate. Entries and canonical snapshots are sorted by this key.
+- Paths are generated from typed context and descriptors, are relative to an
+  unspecified artifact root, and contain no caller-selected path components.
+  Moving the root cannot change any path, snapshot byte, or snapshot identity.
+  Absolute paths, parent/current-directory components, platform separators,
+  and alternate spellings are outside the grammar.
+- Frame time is one finite binary64 value stored and compared by its exact
+  `to_bits()` representation. Both signed zeros canonicalize to positive zero;
+  NaN and infinity refuse. Channel descriptors are nonempty, name-unique, and
+  sorted by bytewise channel name with their scalar type retained exactly, so
+  caller insertion order cannot affect identity.
+- A raw master has no source. Every derived row names an earlier role for the
+  same frame and segment and, when complete, repeats that source artifact's
+  exact byte hash. This prevents a derived output from being silently attached
+  to a different registered master; it is a structural lineage assertion, not
+  producer authentication or semantic reconstruction.
+- Every expected file reserves its own nonzero maximum byte count before work
+  begins. Admission uses the checked sum of those reservations; registration
+  checks the file against its own reservation and increments a checked total
+  of actual completed bytes. Pending reservations and completed actual bytes
+  are distinct quantities. Equality with a limit is admitted; limit plus one
+  refuses before state mutation.
+- An incomplete canonical snapshot is resumable. Decode revalidates its closed
+  grammar, canonical order, limits, paths, source graph, completion totals, and
+  the currently available capacity for pending reservations. A finalized
+  snapshot contains every expected completion and is immutable. Its
+  domain-separated identity is computed from the exact canonical bytes and
+  must be pinned and compared by an authority outside the snapshot; a snapshot
+  cannot authenticate or bless its own identity.
+- Snapshot encoding, audit, and finalization poll at artifact boundaries, with
+  identity hashing additionally polling at bounded byte chunks. Cancellation,
+  missing/stale observations, resource refusal, or encoding failure publishes
+  no seal and leaves the mutable manifest unchanged and resumable. The state
+  transition to `Finalized` occurs only after complete re-observation,
+  canonical encoding, and identity calculation succeed.
 
 ## Invariants
 
