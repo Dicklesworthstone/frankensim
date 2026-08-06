@@ -3,8 +3,8 @@
 //! labeled biased, and deterministic film/display transforms. Pure Rust
 //! (P1), byte-exact deterministic encodes (P2).
 //!
-//! Layer: L5 (LUMEN). Runtime deps: `std`, fs-math (deterministic
-//! `pow`/`exp` for the display transforms).
+//! Layer: L5 (LUMEN). Runtime deps: `std`, fs-blake3 (typed frame-sequence
+//! identities), and fs-math (deterministic `pow`/`exp` for display transforms).
 
 pub mod denoise;
 pub mod exr;
@@ -32,11 +32,12 @@ pub use exr::{
 };
 pub use png::{DecodedPng, PngColor, read_png, write_png8, write_png16};
 pub use sequence::{
-    FRAME_SEQUENCE_MANIFEST_VERSION, ContentHash, ExpectedFrameArtifact, FrameArtifactDescriptor,
-    FrameArtifactFileState, FrameArtifactFormat, FrameArtifactKey, FrameArtifactObservation,
-    FrameArtifactRole, FrameChannel, FrameChannelType, FrameSamplingStats, FrameSequenceContext,
-    FrameSequenceError, FrameSequenceLimits, FrameSequenceManifest, FrameSequenceSeal,
-    FrameSequenceState, RegistrationOutcome,
+    ContentHash, ExpectedFrameArtifact, FRAME_SEQUENCE_MANIFEST_VERSION, FrameArtifactDescriptor,
+    FrameArtifactEntry, FrameArtifactFileState, FrameArtifactFormat, FrameArtifactKey,
+    FrameArtifactObservation, FrameArtifactRole, FrameChannel, FrameChannelType,
+    FrameSamplingStats, FrameSequenceContext, FrameSequenceError, FrameSequenceLimits,
+    FrameSequenceManifest, FrameSequenceSeal, FrameSequenceSnapshot, FrameSequenceState,
+    RegistrationOutcome,
 };
 
 use core::fmt;

@@ -74,7 +74,10 @@ own** outputs, not the world's files.
   descriptors carry exact time bits, format, dimensions, sorted named channel
   types, sampling statistics, and raw/derived source linkage. The public
   lifecycle is `Incomplete` or immutable `Finalized`; exact registration
-  retries return `AlreadyRecorded`, while conflicting retries refuse.
+  retries return `AlreadyRecorded`, while conflicting retries refuse. The
+  accepted binary grammar is version 2 (`FSIMSEQ2`); the incompatible,
+  pre-conformance version-1 work-in-progress layout is deliberately not
+  accepted as version 2.
 
 ### Frame-sequence artifact contract (h7xu5.6.4)
 
@@ -85,14 +88,19 @@ own** outputs, not the world's files.
   separate. Entries and canonical snapshots are sorted by this key.
 - Paths are generated from typed context and descriptors, are relative to an
   unspecified artifact root, and contain no caller-selected path components.
+  They include domain-separated identities of the full six-hash sequence
+  context and full normalized expectation (descriptor plus source key),
+  preventing two otherwise-valid contexts or expectation revisions from
+  colliding under one shared root.
   Moving the root cannot change any path, snapshot byte, or snapshot identity.
   Absolute paths, parent/current-directory components, platform separators,
   and alternate spellings are outside the grammar.
 - Frame time is one finite binary64 value stored and compared by its exact
   `to_bits()` representation. Both signed zeros canonicalize to positive zero;
-  NaN and infinity refuse. Channel descriptors are nonempty, name-unique, and
-  sorted by bytewise channel name with their scalar type retained exactly, so
-  caller insertion order cannot affect identity.
+  NaN and infinity refuse. Channel descriptors are nonempty and name-unique.
+  EXR channels sort by bytewise name to match the writer; PNG channels
+  normalize to standard packed `Y` or `R,G,B[,A]` order. Scalar types are
+  retained exactly, so caller insertion order cannot affect identity.
 - A raw master has no source. Every derived row names an earlier role for the
   same frame and segment and, when complete, repeats that source artifact's
   exact byte hash. This prevents a derived output from being silently attached
@@ -103,7 +111,10 @@ own** outputs, not the world's files.
   checks the file against its own reservation and increments a checked total
   of actual completed bytes. Pending reservations and completed actual bytes
   are distinct quantities. Equality with a limit is admitted; limit plus one
-  refuses before state mutation.
+  refuses before state mutation. The worst-case finalized manifest length is
+  also computed and admitted before rendering under the separate exact
+  `max_manifest_bytes` ceiling; callers can query it through
+  `finalized_manifest_bytes()`.
 - An incomplete canonical snapshot is resumable. Decode revalidates its closed
   grammar, canonical order, limits, paths, source graph, completion totals, and
   the currently available capacity for pending reservations. A finalized
@@ -112,11 +123,13 @@ own** outputs, not the world's files.
   must be pinned and compared by an authority outside the snapshot; a snapshot
   cannot authenticate or bless its own identity.
 - Snapshot encoding, audit, and finalization poll at artifact boundaries, with
-  identity hashing additionally polling at bounded byte chunks. Cancellation,
-  missing/stale observations, resource refusal, or encoding failure publishes
-  no seal and leaves the mutable manifest unchanged and resumable. The state
-  transition to `Finalized` occurs only after complete re-observation,
-  canonical encoding, and identity calculation succeed.
+  identity and admitted artifact-byte hashing additionally polling at bounded
+  byte chunks. Registration rejects an unknown path, wrong metadata, or an
+  oversized payload before hashing. Cancellation, missing/stale observations,
+  resource refusal, or encoding failure publishes no seal and leaves the
+  mutable manifest unchanged and resumable. The state transition to
+  `Finalized` occurs only after complete re-observation, canonical encoding,
+  and identity calculation succeed.
 
 ## Invariants
 
@@ -168,6 +181,10 @@ shape and resource requirements, the first invalid pixel/channel/stage,
 checked-arithmetic overflow, and allocation refusal. No panics occur on byte
 input to the readers (fuzzed); writers and the cinematic transform return
 structured errors for admitted defects.
+`FrameSequenceError` separately reports invalid descriptors/lineage, exact
+resource overruns, conflicting retries, missing or stale observations,
+noncanonical snapshots, unsupported versions, and cancellation without
+partially committing a manifest transition.
 
 ## Determinism class
 
@@ -183,12 +200,19 @@ sRGB uses deterministic `fs-math`, dither is a specified SplitMix64-derived
 keyed variate, and bloom traverses fixed row/column orders. A changed seed or
 any changed semantic parameter changes the canonical configuration bytes.
 
+Frame-sequence snapshots and seals are D0 canonical binary artifacts. Expected
+input permutation, artifact-root relocation, and exact idempotent retries do
+not change their bytes or domain-separated identity.
+
 ## Cancellation behavior
 
-All entry points are bounded, allocation-up-front functions. The cinematic
-path is hard-capped at 8K UHD and uses linear-time sliding-window bloom rather
-than a radius-squared convolution. Callers cancel between frames; this module
-does not claim intra-frame cancellation latency.
+Image-codec and color entry points are bounded, allocation-up-front functions.
+The cinematic path is hard-capped at 8K UHD and uses linear-time
+sliding-window bloom rather than a radius-squared convolution. Callers cancel
+those operations between frames; this module does not claim intra-frame image
+codec or transform cancellation latency. Frame-sequence snapshot, audit, and
+finalization APIs instead poll at artifact boundaries and bounded identity-hash
+chunks, with the atomic state semantics specified above.
 
 ## Unsafe boundary
 
@@ -246,6 +270,23 @@ raw-input immutability, deterministic seed-sensitive dither with exact
 endpoints, local/non-wrapping bloom and constant-field interiors, exact
 working-byte accounting, and direct 8/16-bit PNG round trips.
 
+The h7xu5.6.4 frame-sequence suite must additionally name and exercise:
+
+- **G0** — canonical codec round-trip and strict trailing/truncated/version
+  refusal; sorted frame/segment/role keys and channels; signed-zero time
+  normalization; source-graph laws; exact reservation, completion, and
+  maximum/maximum-plus-one arithmetic.
+- **G3** — permutation and artifact-root relocation invariance; exact retry
+  idempotence; and refusal of cross-profile, wrong-descriptor, stale-source,
+  missing, duplicate, or unexpected observations.
+- **G4** — cancellation during admitted artifact hashing, snapshot work, audit,
+  and finalization; allocation/resource refusal; interrupted incomplete
+  snapshot resume; corrupted snapshot refusal; and proof that failed
+  finalization leaves the manifest resumable and emits no seal.
+- **G5** — repeated construction, resume, and finalization produce the pinned
+  canonical snapshot bytes and identity independent of caller input order or
+  execution scheduling.
+
 ## No-claim boundaries
 
 - **Not general-purpose decoders.** `read_png`/`read_exr` cover exactly the
@@ -256,6 +297,33 @@ working-byte accounting, and direct 8/16-bit PNG round trips.
   preserves custom attribute bytes; it does not validate hash algorithms,
   artifact existence, lineage, or whether a claimed source hash matches the
   rendered field. Those checks belong to the L6 composition layer.
+- **Sequence identities are opaque structural assertions.** The six
+  `ContentHash` values in `FrameSequenceContext` and every registered source
+  hash are compared and encoded exactly, but L5 does not authenticate a
+  producer, prove what any hash names, or reconstruct semantic lineage from
+  trajectory, render configuration, scene, build, or profile artifacts.
+- **Sequence audit is byte-state audit, not image validation.** Its observer
+  supplies file length and byte hash for each canonical relative name. L5 does
+  not open or decode those files during audit and therefore does not prove that
+  their pixels, metadata, dimensions, channels, sample statistics, or format
+  match the registered descriptors.
+- **No persistence transaction at L5.** This crate owns no artifact root,
+  directory creation, file write, temporary-file protocol, rename, replacement,
+  deletion, durability sync, Ledger operation, or multi-file transaction.
+  Callers persist files and publish the finalized snapshot without weakening
+  the incomplete/finalized distinction.
+- **Free space is an observation, not provenance.** Available output capacity
+  is supplied by the caller at construction or resume time and is deliberately
+  absent from canonical snapshot bytes. It covers pending image-artifact
+  reservations; canonical snapshot storage has its own separately exposed
+  `max_manifest_bytes`/`finalized_manifest_bytes()` accounting. Capacity can
+  change across locations and must be observed again after relocation or
+  restart.
+- **Not the final independent verifier.** This L5 state machine checks its own
+  declared inventory and fresh byte observations. It does not independently
+  reconstruct the expected sequence from upstream authoritative inputs or
+  establish producer/lineage authenticity; that separate responsibility is
+  Bead `frankensim-h7xu5.8.4`.
 - **No compression-ratio claim.** PNG zlib streams use STORED deflate
   blocks: universally decodable, ~0% compression. EXR is NONE compression.
   Compact storage is out of scope for this bead.

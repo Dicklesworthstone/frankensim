@@ -8,17 +8,21 @@ use core::fmt;
 use core::fmt::Write as _;
 
 pub use fs_blake3::ContentHash;
-use fs_blake3::{DomainHasher, hash_bytes};
+use fs_blake3::{Blake3, DomainHasher, hash_bytes};
 
 /// Version of the exact binary frame-sequence manifest grammar.
-pub const FRAME_SEQUENCE_MANIFEST_VERSION: u16 = 1;
+pub const FRAME_SEQUENCE_MANIFEST_VERSION: u16 = 2;
 
-const MAGIC: &[u8; 8] = b"FSIMSEQ1";
-const MANIFEST_IDENTITY_DOMAIN: &str = "org.frankensim.fs-img.frame-sequence-manifest.v1";
+const MAGIC: &[u8; 8] = b"FSIMSEQ2";
+const MANIFEST_IDENTITY_DOMAIN: &str = "org.frankensim.fs-img.frame-sequence-manifest.v2";
+const CONTEXT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-img.frame-sequence-context.v2";
+const EXPECTATION_IDENTITY_DOMAIN: &str = "org.frankensim.fs-img.frame-artifact-expectation.v2";
 const IDENTITY_POLL_BYTES: usize = 64 * 1024;
 const ZERO_HASH: ContentHash = ContentHash([0; 32]);
 
 /// Hard limits for construction, decoding, and storage admission.
+// The common `max_` prefix is intentional at call sites and in diagnostics.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameSequenceLimits {
     max_artifacts: u32,
@@ -90,7 +94,8 @@ impl FrameSequenceLimits {
         self.max_manifest_bytes
     }
 
-    /// Maximum reserved output bytes for the complete sequence.
+    /// Maximum reserved image-artifact bytes for the complete sequence.
+    /// Canonical manifest bytes use the independent manifest ceiling.
     #[must_use]
     pub const fn max_output_bytes(self) -> u64 {
         self.max_output_bytes
@@ -110,6 +115,8 @@ impl Default for FrameSequenceLimits {
 }
 
 /// Immutable source and configuration identities shared by a sequence.
+// The common `_id` suffix distinguishes asserted hashes from loaded objects.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameSequenceContext {
     shot_id: ContentHash,
@@ -384,11 +391,11 @@ pub enum FrameSamplingStats {
 
 impl FrameSamplingStats {
     fn validate(self, width: u32, height: u32) -> Result<(), FrameSequenceError> {
-        let pixels = u64::from(width)
-            .checked_mul(u64::from(height))
-            .ok_or(FrameSequenceError::SizeOverflow {
+        let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(
+            FrameSequenceError::SizeOverflow {
                 context: "pixel count",
-            })?;
+            },
+        )?;
         match self {
             Self::Uniform { spp } if spp != 0 => {
                 pixels
@@ -405,20 +412,17 @@ impl FrameSamplingStats {
                 converged_pixels,
                 maximum_sample_pixels,
             } if min_spp != 0 && min_spp <= max_spp => {
-                if converged_pixels
-                    .checked_add(maximum_sample_pixels)
-                    != Some(pixels)
-                {
+                if converged_pixels.checked_add(maximum_sample_pixels) != Some(pixels) {
                     return Err(FrameSequenceError::InvalidSampling);
                 }
                 if min_spp == max_spp && converged_pixels != 0 {
                     return Err(FrameSequenceError::InvalidSampling);
                 }
-                let converged_minimum = converged_pixels
-                    .checked_mul(u64::from(min_spp))
-                    .ok_or(FrameSequenceError::SizeOverflow {
+                let converged_minimum = converged_pixels.checked_mul(u64::from(min_spp)).ok_or(
+                    FrameSequenceError::SizeOverflow {
                         context: "adaptive converged minimum samples",
-                    })?;
+                    },
+                )?;
                 let maximum_sample_total = maximum_sample_pixels
                     .checked_mul(u64::from(max_spp))
                     .ok_or(FrameSequenceError::SizeOverflow {
@@ -462,11 +466,7 @@ pub struct FrameArtifactKey {
 impl FrameArtifactKey {
     /// Construct a key from logical frame/segment indices and artifact role.
     #[must_use]
-    pub const fn new(
-        frame_index: u64,
-        segment_index: u32,
-        role: FrameArtifactRole,
-    ) -> Self {
+    pub const fn new(frame_index: u64, segment_index: u32, role: FrameArtifactRole) -> Self {
         Self {
             frame_index,
             segment_index,
@@ -534,16 +534,11 @@ impl FrameArtifactDescriptor {
         }
         channels.sort_unstable_by(|left, right| match format {
             FrameArtifactFormat::OpenExr => left.name.cmp(&right.name),
-            FrameArtifactFormat::Png8 | FrameArtifactFormat::Png16 => {
-                png_channel_rank(&left.name)
-                    .cmp(&png_channel_rank(&right.name))
-                    .then_with(|| left.name.cmp(&right.name))
-            }
+            FrameArtifactFormat::Png8 | FrameArtifactFormat::Png16 => png_channel_rank(&left.name)
+                .cmp(&png_channel_rank(&right.name))
+                .then_with(|| left.name.cmp(&right.name)),
         });
-        if channels
-            .windows(2)
-            .any(|pair| pair[0].name == pair[1].name)
-        {
+        if channels.windows(2).any(|pair| pair[0].name == pair[1].name) {
             return Err(FrameSequenceError::DuplicateChannel { frame_index });
         }
         validate_format_channels(role, format, &channels, frame_index)?;
@@ -988,7 +983,7 @@ impl FrameSequenceSeal {
         self.artifact_count
     }
 
-    /// Exact sum of completed artifact bytes.
+    /// Exact sum of completed image-artifact bytes, excluding seal bytes.
     #[must_use]
     pub const fn output_bytes(&self) -> u64 {
         self.output_bytes
@@ -1031,13 +1026,12 @@ impl FrameSequenceManifest {
         if expected.is_empty() {
             return Err(FrameSequenceError::EmptySequence);
         }
-        let count = u32::try_from(expected.len()).map_err(|_| {
-            FrameSequenceError::ResourceLimit {
+        let count =
+            u32::try_from(expected.len()).map_err(|_| FrameSequenceError::ResourceLimit {
                 resource: "artifact count",
                 requested: u64::MAX,
                 limit: u64::from(limits.max_artifacts),
-            }
-        })?;
+            })?;
         if count > limits.max_artifacts {
             return Err(FrameSequenceError::ResourceLimit {
                 resource: "artifact count",
@@ -1047,28 +1041,30 @@ impl FrameSequenceManifest {
         }
         let mut expected = expected;
         expected.sort_unstable_by_key(|artifact| artifact.descriptor.key);
-        if expected.windows(2).any(|pair| {
-            pair[0].descriptor.key == pair[1].descriptor.key
-        }) {
+        if expected
+            .windows(2)
+            .any(|pair| pair[0].descriptor.key == pair[1].descriptor.key)
+        {
             return Err(FrameSequenceError::DuplicateExpectedArtifact);
         }
 
         let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(expected.len())
-            .map_err(|_| FrameSequenceError::AllocationRefused {
+        entries.try_reserve_exact(expected.len()).map_err(|_| {
+            FrameSequenceError::AllocationRefused {
                 resource: "sequence entries",
                 requested: u64::from(count),
-            })?;
+            }
+        })?;
         let mut reserved_bytes = 0_u64;
         for artifact in expected {
-            let channel_count = u16::try_from(artifact.descriptor.channels.len()).map_err(|_| {
-                FrameSequenceError::ResourceLimit {
-                    resource: "artifact channels",
-                    requested: u64::MAX,
-                    limit: u64::from(limits.max_channels_per_artifact),
-                }
-            })?;
+            let channel_count =
+                u16::try_from(artifact.descriptor.channels.len()).map_err(|_| {
+                    FrameSequenceError::ResourceLimit {
+                        resource: "artifact channels",
+                        requested: u64::MAX,
+                        limit: u64::from(limits.max_channels_per_artifact),
+                    }
+                })?;
             if channel_count > limits.max_channels_per_artifact {
                 return Err(FrameSequenceError::ResourceLimit {
                     resource: "artifact channels",
@@ -1076,7 +1072,8 @@ impl FrameSequenceManifest {
                     limit: u64::from(limits.max_channels_per_artifact),
                 });
             }
-            let relative_path = canonical_relative_path(context, &artifact.descriptor)?;
+            let relative_path =
+                canonical_relative_path(context, &artifact.descriptor, artifact.source)?;
             if relative_path.len() > usize::from(limits.max_relative_path_bytes) {
                 return Err(FrameSequenceError::ResourceLimit {
                     resource: "relative path bytes",
@@ -1098,7 +1095,11 @@ impl FrameSequenceManifest {
             });
         }
         validate_sources(&entries, false)?;
-        admit_storage(reserved_bytes, limits.max_output_bytes, available_output_bytes)?;
+        admit_storage(
+            reserved_bytes,
+            limits.max_output_bytes,
+            available_output_bytes,
+        )?;
         let manifest = Self {
             context,
             limits,
@@ -1106,12 +1107,13 @@ impl FrameSequenceManifest {
             state: FrameSequenceState::Incomplete,
             completed_bytes: 0,
         };
-        manifest.encoded_len()?;
+        manifest.finalized_encoded_len()?;
         Ok(manifest)
     }
 
-    /// Decode a strict canonical incomplete or finalized snapshot and
-    /// re-admit its remaining reservations at the current location.
+    /// Decode a strict canonical incomplete or finalized snapshot, verify its
+    /// independently supplied identity, and re-admit remaining reservations
+    /// at the current location.
     ///
     /// # Errors
     /// Malformed, noncanonical, over-budget, stale-version, or structurally
@@ -1123,11 +1125,10 @@ impl FrameSequenceManifest {
         available_output_bytes: u64,
     ) -> Result<Self, FrameSequenceError> {
         validate_limits(admission_limits)?;
-        let byte_len = u64::try_from(bytes.len()).map_err(|_| {
-            FrameSequenceError::SizeOverflow {
+        let byte_len =
+            u64::try_from(bytes.len()).map_err(|_| FrameSequenceError::SizeOverflow {
                 context: "manifest input length",
-            }
-        })?;
+            })?;
         if byte_len > admission_limits.max_manifest_bytes {
             return Err(FrameSequenceError::ResourceLimit {
                 resource: "manifest bytes",
@@ -1177,11 +1178,10 @@ impl FrameSequenceManifest {
             });
         }
         let encoded_completed_bytes = reader.u64()?;
-        let entry_count_usize = usize::try_from(entry_count).map_err(|_| {
-            FrameSequenceError::SizeOverflow {
+        let entry_count_usize =
+            usize::try_from(entry_count).map_err(|_| FrameSequenceError::SizeOverflow {
                 context: "artifact count on this platform",
-            }
-        })?;
+            })?;
         let mut entries = Vec::new();
         entries.try_reserve_exact(entry_count_usize).map_err(|_| {
             FrameSequenceError::AllocationRefused {
@@ -1255,28 +1255,38 @@ impl FrameSequenceManifest {
         .unwrap_or(u32::MAX)
     }
 
-    /// Exact completed file bytes.
+    /// Exact completed image-artifact bytes, excluding manifest storage.
     #[must_use]
     pub const fn completed_bytes(&self) -> u64 {
         self.completed_bytes
     }
 
     /// Worst-case bytes still reserved for pending rows.
-    #[must_use]
     pub fn remaining_reserved_bytes(&self) -> Result<u64, FrameSequenceError> {
         self.entries
             .iter()
             .filter(|entry| entry.completion.is_none())
             .try_fold(0_u64, |total, entry| {
-                total.checked_add(entry.max_bytes).ok_or(
-                    FrameSequenceError::SizeOverflow {
+                total
+                    .checked_add(entry.max_bytes)
+                    .ok_or(FrameSequenceError::SizeOverflow {
                         context: "remaining reserved bytes",
-                    },
-                )
+                    })
             })
     }
 
-    /// Re-admit the pending reservation after restart or path relocation.
+    /// Canonical byte length of the eventual fully completed manifest.
+    ///
+    /// This is separately bounded by `max_manifest_bytes`; image artifact
+    /// reservations reported by [`Self::remaining_reserved_bytes`] do not
+    /// include these manifest bytes.
+    pub fn finalized_manifest_bytes(&self) -> Result<u64, FrameSequenceError> {
+        self.finalized_encoded_len()
+    }
+
+    /// Re-admit pending image-artifact reservations after restart or path
+    /// relocation. Manifest bytes remain governed separately by
+    /// [`Self::finalized_manifest_bytes`].
     pub fn admit_remaining_storage(
         &self,
         available_output_bytes: u64,
@@ -1298,32 +1308,12 @@ impl FrameSequenceManifest {
     pub fn register_artifact(
         &mut self,
         relative_path: &str,
-        observation: FrameArtifactObservation,
+        observation: &FrameArtifactObservation,
     ) -> Result<RegistrationOutcome, FrameSequenceError> {
-        if self.state == FrameSequenceState::Finalized {
-            return Err(FrameSequenceError::AlreadyFinalized);
-        }
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.relative_path == relative_path)
-            .ok_or_else(|| FrameSequenceError::UnexpectedArtifact {
-                path: relative_path.to_owned(),
-            })?;
+        let index = self.registration_index(relative_path)?;
         let entry = &self.entries[index];
-        validate_observation(self.context, entry, &observation)?;
-        if observation.file.byte_size == 0 {
-            return Err(FrameSequenceError::EmptyArtifact {
-                path: relative_path.to_owned(),
-            });
-        }
-        if observation.file.byte_size > entry.max_bytes {
-            return Err(FrameSequenceError::ResourceLimit {
-                resource: "artifact bytes",
-                requested: observation.file.byte_size,
-                limit: entry.max_bytes,
-            });
-        }
+        validate_observation(self.context, entry, observation)?;
+        validate_artifact_byte_size(entry, observation.file.byte_size)?;
         let completion = FrameArtifactCompletion {
             file: observation.file,
             source_content_hash: observation.source_content_hash,
@@ -1337,6 +1327,7 @@ impl FrameSequenceManifest {
                 })
             };
         }
+        validate_candidate_completion(&self.entries, index, completion)?;
         let completed_bytes = self
             .completed_bytes
             .checked_add(observation.file.byte_size)
@@ -1364,13 +1355,53 @@ impl FrameSequenceManifest {
         bytes: &[u8],
         source_content_hash: Option<ContentHash>,
     ) -> Result<RegistrationOutcome, FrameSequenceError> {
-        let observation = FrameArtifactObservation::from_bytes(
+        self.register_artifact_bytes_with_poll(
+            relative_path,
             descriptor,
             profile_id,
             bytes,
             source_content_hash,
+            || true,
+        )
+    }
+
+    /// Preflight, hash, and register exact bytes with bounded cancellation
+    /// polling. Unknown paths, wrong metadata, and oversized inputs refuse
+    /// before hashing the payload. The poll returns `true` to continue and
+    /// `false` to cancel without mutation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_artifact_bytes_with_poll(
+        &mut self,
+        relative_path: &str,
+        descriptor: FrameArtifactDescriptor,
+        profile_id: ContentHash,
+        bytes: &[u8],
+        source_content_hash: Option<ContentHash>,
+        mut poll: impl FnMut() -> bool,
+    ) -> Result<RegistrationOutcome, FrameSequenceError> {
+        let index = self.registration_index(relative_path)?;
+        let entry = &self.entries[index];
+        let byte_size =
+            u64::try_from(bytes.len()).map_err(|_| FrameSequenceError::SizeOverflow {
+                context: "artifact byte size",
+            })?;
+        validate_artifact_byte_size(entry, byte_size)?;
+        validate_observation_metadata(
+            self.context,
+            entry,
+            &descriptor,
+            profile_id,
+            source_content_hash,
         )?;
-        self.register_artifact(relative_path, observation)
+        validate_declared_source_hash(&self.entries, index, source_content_hash)?;
+        let content_hash = hash_artifact_bytes_with_poll(bytes, &mut poll)?;
+        let observation = FrameArtifactObservation::new(
+            descriptor,
+            profile_id,
+            FrameArtifactFileState::new(content_hash, byte_size),
+            source_content_hash,
+        );
+        self.register_artifact(relative_path, &observation)
     }
 
     /// Encode a deterministic incomplete or finalized resumable snapshot.
@@ -1382,7 +1413,8 @@ impl FrameSequenceManifest {
     }
 
     /// Encode and identify a deterministic snapshot while polling at artifact
-    /// boundaries and fixed-size hash chunks.
+    /// boundaries and fixed-size hash chunks. The poll returns `true` to
+    /// continue and `false` to cancel without mutation.
     pub fn snapshot_with_poll(
         &self,
         mut poll: impl FnMut() -> bool,
@@ -1398,7 +1430,8 @@ impl FrameSequenceManifest {
 
     /// Independently re-observe all files named by a finalized manifest.
     /// The callback resolves the root-independent relative names and need not
-    /// decode any image.
+    /// decode any image. The poll returns `true` to continue and `false` to
+    /// cancel.
     pub fn audit_with(
         &self,
         mut poll: impl FnMut() -> bool,
@@ -1412,7 +1445,8 @@ impl FrameSequenceManifest {
 
     /// Verify every expected file and atomically transition to finalized.
     /// Cancellation, missing/stale content, or allocation failure leaves the
-    /// manifest unchanged and resumable.
+    /// manifest unchanged and resumable. The poll returns `true` to continue
+    /// and `false` to cancel.
     pub fn finalize_with(
         &mut self,
         mut poll: impl FnMut() -> bool,
@@ -1438,16 +1472,17 @@ impl FrameSequenceManifest {
         if !poll() {
             return Err(FrameSequenceError::Cancelled);
         }
-        validate_sources(&self.entries, true)?;
+        validate_sources_with_poll(&self.entries, true, poll)?;
         for entry in &self.entries {
             if !poll() {
                 return Err(FrameSequenceError::Cancelled);
             }
-            let completion = entry.completion.ok_or_else(|| {
-                FrameSequenceError::MissingArtifact {
-                    path: entry.relative_path.clone(),
-                }
-            })?;
+            let completion =
+                entry
+                    .completion
+                    .ok_or_else(|| FrameSequenceError::MissingArtifact {
+                        path: entry.relative_path.clone(),
+                    })?;
             let actual = observe(&entry.relative_path).ok_or_else(|| {
                 FrameSequenceError::MissingArtifact {
                     path: entry.relative_path.clone(),
@@ -1485,8 +1520,7 @@ impl FrameSequenceManifest {
         let mut reserved = 0_u64;
         let mut completed = 0_u64;
         for entry in &self.entries {
-            if entry.descriptor.channels.len()
-                > usize::from(self.limits.max_channels_per_artifact)
+            if entry.descriptor.channels.len() > usize::from(self.limits.max_channels_per_artifact)
             {
                 return Err(FrameSequenceError::ResourceLimit {
                     resource: "artifact channels",
@@ -1501,15 +1535,28 @@ impl FrameSequenceManifest {
                     limit: u64::from(self.limits.max_relative_path_bytes),
                 });
             }
-            if entry.relative_path != canonical_relative_path(self.context, &entry.descriptor)? {
+            if entry.relative_path
+                != canonical_relative_path(self.context, &entry.descriptor, entry.source)?
+            {
                 return Err(FrameSequenceError::NonCanonical);
             }
-            reserved = reserved.checked_add(entry.max_bytes).ok_or(
-                FrameSequenceError::SizeOverflow {
-                    context: "reserved output bytes",
-                },
-            )?;
+            reserved =
+                reserved
+                    .checked_add(entry.max_bytes)
+                    .ok_or(FrameSequenceError::SizeOverflow {
+                        context: "reserved output bytes",
+                    })?;
             if let Some(completion) = entry.completion {
+                if completion.file.content_hash == ZERO_HASH {
+                    return Err(FrameSequenceError::PlaceholderIdentity {
+                        field: "artifact content hash",
+                    });
+                }
+                if completion.source_content_hash == Some(ZERO_HASH) {
+                    return Err(FrameSequenceError::PlaceholderIdentity {
+                        field: "source content hash",
+                    });
+                }
                 if completion.file.byte_size == 0 || completion.file.byte_size > entry.max_bytes {
                     return Err(FrameSequenceError::Malformed {
                         field: "completed artifact size",
@@ -1530,10 +1577,7 @@ impl FrameSequenceManifest {
             });
         }
         self.completed_bytes = completed;
-        validate_sources(
-            &self.entries,
-            self.state == FrameSequenceState::Finalized,
-        )?;
+        validate_sources(&self.entries, self.state == FrameSequenceState::Finalized)?;
         if self.state == FrameSequenceState::Finalized
             && self.entries.iter().any(|entry| entry.completion.is_none())
         {
@@ -1541,11 +1585,35 @@ impl FrameSequenceManifest {
                 field: "finalized completeness",
             });
         }
+        self.finalized_encoded_len()?;
         Ok(())
     }
 
     fn encoded_len(&self) -> Result<u64, FrameSequenceError> {
         manifest_encoded_len(self)
+    }
+
+    fn finalized_encoded_len(&self) -> Result<u64, FrameSequenceError> {
+        finalized_manifest_encoded_len(self)
+    }
+
+    fn registration_index(&self, relative_path: &str) -> Result<usize, FrameSequenceError> {
+        if self.state == FrameSequenceState::Finalized {
+            return Err(FrameSequenceError::AlreadyFinalized);
+        }
+        if relative_path.len() > usize::from(self.limits.max_relative_path_bytes) {
+            return Err(FrameSequenceError::ResourceLimit {
+                resource: "relative path bytes",
+                requested: u64::try_from(relative_path.len()).unwrap_or(u64::MAX),
+                limit: u64::from(self.limits.max_relative_path_bytes),
+            });
+        }
+        self.entries
+            .iter()
+            .position(|entry| entry.relative_path == relative_path)
+            .ok_or_else(|| FrameSequenceError::UnexpectedArtifact {
+                path: relative_path.to_owned(),
+            })
     }
 }
 
@@ -1628,7 +1696,23 @@ fn validate_sources(
     entries: &[FrameArtifactEntry],
     require_complete: bool,
 ) -> Result<(), FrameSequenceError> {
+    validate_sources_with_poll(entries, require_complete, &mut || true)
+}
+
+fn validate_sources_with_poll(
+    entries: &[FrameArtifactEntry],
+    require_complete: bool,
+    poll: &mut impl FnMut() -> bool,
+) -> Result<(), FrameSequenceError> {
     for entry in entries {
+        if !poll() {
+            return Err(FrameSequenceError::Cancelled);
+        }
+        if require_complete && entry.completion.is_none() {
+            return Err(FrameSequenceError::MissingArtifact {
+                path: entry.relative_path.clone(),
+            });
+        }
         match (entry.source, entry.completion) {
             (None, Some(completion)) if completion.source_content_hash.is_some() => {
                 return Err(FrameSequenceError::InvalidSource {
@@ -1650,7 +1734,8 @@ fn validate_sources(
                         },
                     )?;
                     match source_entry.completion {
-                        Some(source_completion) if source_completion.file.content_hash == declared => {}
+                        Some(source_completion)
+                            if source_completion.file.content_hash == declared => {}
                         Some(source_completion) => {
                             return Err(FrameSequenceError::SourceHashMismatch {
                                 path: entry.relative_path.clone(),
@@ -1665,10 +1750,6 @@ fn validate_sources(
                         }
                         None => {}
                     }
-                } else if require_complete {
-                    return Err(FrameSequenceError::MissingArtifact {
-                        path: entry.relative_path.clone(),
-                    });
                 }
             }
             _ => {}
@@ -1682,15 +1763,41 @@ fn validate_observation(
     entry: &FrameArtifactEntry,
     observation: &FrameArtifactObservation,
 ) -> Result<(), FrameSequenceError> {
+    if observation.file.content_hash == ZERO_HASH {
+        return Err(FrameSequenceError::PlaceholderIdentity {
+            field: "artifact content hash",
+        });
+    }
+    validate_observation_metadata(
+        context,
+        entry,
+        &observation.descriptor,
+        observation.profile_id,
+        observation.source_content_hash,
+    )
+}
+
+fn validate_observation_metadata(
+    context: FrameSequenceContext,
+    entry: &FrameArtifactEntry,
+    descriptor: &FrameArtifactDescriptor,
+    profile_id: ContentHash,
+    source_content_hash: Option<ContentHash>,
+) -> Result<(), FrameSequenceError> {
     let path = || entry.relative_path.clone();
-    if observation.profile_id != context.profile_id {
+    if source_content_hash == Some(ZERO_HASH) {
+        return Err(FrameSequenceError::PlaceholderIdentity {
+            field: "source content hash",
+        });
+    }
+    if profile_id != context.profile_id {
         return Err(FrameSequenceError::DescriptorMismatch {
             path: path(),
             field: "profile identity",
         });
     }
     let expected = &entry.descriptor;
-    let actual = &observation.descriptor;
+    let actual = descriptor;
     for (mismatch, field) in [
         (actual.key != expected.key, "artifact key"),
         (
@@ -1712,7 +1819,7 @@ fn validate_observation(
             });
         }
     }
-    match (entry.source, observation.source_content_hash) {
+    match (entry.source, source_content_hash) {
         (None, None) | (Some(_), Some(_)) => Ok(()),
         _ => Err(FrameSequenceError::DescriptorMismatch {
             path: path(),
@@ -1721,17 +1828,117 @@ fn validate_observation(
     }
 }
 
+fn validate_artifact_byte_size(
+    entry: &FrameArtifactEntry,
+    byte_size: u64,
+) -> Result<(), FrameSequenceError> {
+    if byte_size == 0 {
+        return Err(FrameSequenceError::EmptyArtifact {
+            path: entry.relative_path.clone(),
+        });
+    }
+    if byte_size > entry.max_bytes {
+        return Err(FrameSequenceError::ResourceLimit {
+            resource: "artifact bytes",
+            requested: byte_size,
+            limit: entry.max_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn hash_artifact_bytes_with_poll(
+    bytes: &[u8],
+    poll: &mut impl FnMut() -> bool,
+) -> Result<ContentHash, FrameSequenceError> {
+    let mut hasher = Blake3::new();
+    for chunk in bytes.chunks(IDENTITY_POLL_BYTES) {
+        if !poll() {
+            return Err(FrameSequenceError::Cancelled);
+        }
+        hasher.update(chunk);
+    }
+    Ok(hasher.finalize())
+}
+
+fn validate_candidate_completion(
+    entries: &[FrameArtifactEntry],
+    candidate_index: usize,
+    candidate: FrameArtifactCompletion,
+) -> Result<(), FrameSequenceError> {
+    let entry = &entries[candidate_index];
+    validate_declared_source_hash(entries, candidate_index, candidate.source_content_hash)?;
+
+    let candidate_key = entry.descriptor.key;
+    for dependent in entries
+        .iter()
+        .filter(|dependent| dependent.source == Some(candidate_key))
+    {
+        if let Some(dependent_completion) = dependent.completion {
+            let declared = dependent_completion.source_content_hash.ok_or(
+                FrameSequenceError::InvalidSource {
+                    key: dependent.descriptor.key,
+                },
+            )?;
+            if declared != candidate.file.content_hash {
+                return Err(FrameSequenceError::SourceHashMismatch {
+                    path: dependent.relative_path.clone(),
+                    expected: candidate.file.content_hash,
+                    actual: declared,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_declared_source_hash(
+    entries: &[FrameArtifactEntry],
+    candidate_index: usize,
+    declared_source_hash: Option<ContentHash>,
+) -> Result<(), FrameSequenceError> {
+    let entry = &entries[candidate_index];
+    if let Some(source) = entry.source {
+        let source_entry = entries
+            .binary_search_by_key(&source, |candidate| candidate.descriptor.key)
+            .ok()
+            .map(|index| &entries[index])
+            .ok_or(FrameSequenceError::InvalidSource {
+                key: entry.descriptor.key,
+            })?;
+        if let Some(source_completion) = source_entry.completion {
+            let declared = declared_source_hash.ok_or(FrameSequenceError::InvalidSource {
+                key: entry.descriptor.key,
+            })?;
+            if declared != source_completion.file.content_hash {
+                return Err(FrameSequenceError::SourceHashMismatch {
+                    path: entry.relative_path.clone(),
+                    expected: source_completion.file.content_hash,
+                    actual: declared,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn canonical_relative_path(
     context: FrameSequenceContext,
     descriptor: &FrameArtifactDescriptor,
+    source: Option<FrameArtifactKey>,
 ) -> Result<String, FrameSequenceError> {
     let directory = descriptor.key.role.directory();
     let extension = descriptor.format.extension();
+    let context_identity = frame_sequence_context_identity(context);
+    let descriptor_identity = frame_artifact_expectation_identity(descriptor, source);
     let required = directory
         .len()
         .checked_add(1 + 64)
+        .and_then(|value| value.checked_add(1 + 9 + 64))
         .and_then(|value| value.checked_add(1 + 6 + 20))
+        .and_then(|value| value.checked_add(9 + 10))
         .and_then(|value| value.checked_add(6 + 16))
+        .and_then(|value| value.checked_add(13 + 64))
         .and_then(|value| value.checked_add(9 + 64))
         .and_then(|value| value.checked_add(1 + extension.len()))
         .ok_or(FrameSequenceError::SizeOverflow {
@@ -1746,20 +1953,97 @@ fn canonical_relative_path(
     path.push_str(directory);
     path.push('/');
     push_hash_hex(&mut path, context.shot_id);
+    path.push_str("/sequence-");
+    push_hash_hex(&mut path, context_identity);
     write!(
         &mut path,
-        "/frame-{:020}-time-{:016x}-profile-",
-        descriptor.key.frame_index, descriptor.frame_time_bits
+        "/frame-{:020}-segment-{:010}-time-{:016x}-expectation-",
+        descriptor.key.frame_index, descriptor.key.segment_index, descriptor.frame_time_bits
     )
     .map_err(|_| FrameSequenceError::AllocationRefused {
         resource: "relative path",
         requested: u64::try_from(required).unwrap_or(u64::MAX),
     })?;
+    push_hash_hex(&mut path, descriptor_identity);
+    path.push_str("-profile-");
     push_hash_hex(&mut path, context.profile_id);
     path.push('.');
     path.push_str(extension);
     debug_assert_eq!(path.len(), required);
     Ok(path)
+}
+
+fn frame_sequence_context_identity(context: FrameSequenceContext) -> ContentHash {
+    let mut hasher = DomainHasher::new(CONTEXT_IDENTITY_DOMAIN);
+    for identity in [
+        context.shot_id,
+        context.trajectory_id,
+        context.render_config_id,
+        context.scene_id,
+        context.build_id,
+        context.profile_id,
+    ] {
+        hasher.update(identity.as_bytes());
+    }
+    hasher.finalize()
+}
+
+fn frame_artifact_expectation_identity(
+    descriptor: &FrameArtifactDescriptor,
+    source: Option<FrameArtifactKey>,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(EXPECTATION_IDENTITY_DOMAIN);
+    hasher.update(&descriptor.key.frame_index.to_le_bytes());
+    hasher.update(&descriptor.key.segment_index.to_le_bytes());
+    hasher.update(&[descriptor.key.role.tag()]);
+    hasher.update(&descriptor.frame_time_bits.to_le_bytes());
+    hasher.update(&[descriptor.format.tag()]);
+    hasher.update(&descriptor.width.to_le_bytes());
+    hasher.update(&descriptor.height.to_le_bytes());
+    hasher.update(
+        &u64::try_from(descriptor.channels.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for channel in &descriptor.channels {
+        hasher.update(
+            &u64::try_from(channel.name.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(channel.name.as_bytes());
+        hasher.update(&[channel.sample_type.tag()]);
+    }
+    match descriptor.sampling {
+        FrameSamplingStats::Uniform { spp } => {
+            hasher.update(&[1]);
+            hasher.update(&spp.to_le_bytes());
+        }
+        FrameSamplingStats::Adaptive {
+            min_spp,
+            max_spp,
+            total_samples,
+            converged_pixels,
+            maximum_sample_pixels,
+        } => {
+            hasher.update(&[2]);
+            hasher.update(&min_spp.to_le_bytes());
+            hasher.update(&max_spp.to_le_bytes());
+            hasher.update(&total_samples.to_le_bytes());
+            hasher.update(&converged_pixels.to_le_bytes());
+            hasher.update(&maximum_sample_pixels.to_le_bytes());
+        }
+    }
+    match source {
+        None => hasher.update(&[0]),
+        Some(source) => {
+            hasher.update(&[1]);
+            hasher.update(&source.frame_index.to_le_bytes());
+            hasher.update(&source.segment_index.to_le_bytes());
+            hasher.update(&[source.role.tag()]);
+        }
+    }
+    hasher.finalize()
 }
 
 fn push_hash_hex(output: &mut String, hash: ContentHash) {
@@ -1771,6 +2055,20 @@ fn push_hash_hex(output: &mut String, hash: ContentHash) {
 }
 
 fn manifest_encoded_len(manifest: &FrameSequenceManifest) -> Result<u64, FrameSequenceError> {
+    manifest_encoded_len_with_poll(manifest, false, &mut || true)
+}
+
+fn finalized_manifest_encoded_len(
+    manifest: &FrameSequenceManifest,
+) -> Result<u64, FrameSequenceError> {
+    manifest_encoded_len_with_poll(manifest, true, &mut || true)
+}
+
+fn manifest_encoded_len_with_poll(
+    manifest: &FrameSequenceManifest,
+    assume_complete: bool,
+    poll: &mut impl FnMut() -> bool,
+) -> Result<u64, FrameSequenceError> {
     let mut bytes = 8_u64
         .checked_add(2 + 1)
         .and_then(|value| value.checked_add(6 * 32))
@@ -1780,12 +2078,15 @@ fn manifest_encoded_len(manifest: &FrameSequenceManifest) -> Result<u64, FrameSe
             context: "manifest fixed header",
         })?;
     for entry in &manifest.entries {
+        if !poll() {
+            return Err(FrameSequenceError::Cancelled);
+        }
         bytes = bytes
             .checked_add(2)
             .and_then(|value| {
                 value.checked_add(u64::try_from(entry.relative_path.len()).unwrap_or(u64::MAX))
             })
-            .and_then(|value| value.checked_add(8 + 1 + 8 + 1 + 4 + 4 + 2))
+            .and_then(|value| value.checked_add(8 + 4 + 1 + 8 + 1 + 4 + 4 + 2))
             .ok_or(FrameSequenceError::SizeOverflow {
                 context: "manifest entry header",
             })?;
@@ -1803,24 +2104,29 @@ fn manifest_encoded_len(manifest: &FrameSequenceManifest) -> Result<u64, FrameSe
         bytes = bytes
             .checked_add(match entry.descriptor.sampling {
                 FrameSamplingStats::Uniform { .. } => 1 + 4,
-                FrameSamplingStats::Adaptive { .. } => 1 + 4 + 4 + 8,
+                FrameSamplingStats::Adaptive { .. } => 1 + 4 + 4 + 8 + 8 + 8,
             })
             .and_then(|value| value.checked_add(8 + 1))
-            .and_then(|value| {
-                value.checked_add(if entry.source.is_some() { 8 + 1 } else { 0 })
-            })
+            .and_then(|value| value.checked_add(if entry.source.is_some() { 8 + 4 + 1 } else { 0 }))
             .and_then(|value| value.checked_add(1))
             .and_then(|value| {
-                value.checked_add(match entry.completion {
-                    None => 0,
-                    Some(completion) => {
-                        32 + 8 + 1 + if completion.source_content_hash.is_some() {
-                            32
-                        } else {
-                            0
+                let completion_bytes = if assume_complete {
+                    32 + 8 + 1 + if entry.source.is_some() { 32 } else { 0 }
+                } else {
+                    match entry.completion {
+                        None => 0,
+                        Some(completion) => {
+                            32 + 8
+                                + 1
+                                + if completion.source_content_hash.is_some() {
+                                    32
+                                } else {
+                                    0
+                                }
                         }
                     }
-                })
+                };
+                value.checked_add(completion_bytes)
             })
             .ok_or(FrameSequenceError::SizeOverflow {
                 context: "manifest entry tail",
@@ -1836,28 +2142,28 @@ fn manifest_encoded_len(manifest: &FrameSequenceManifest) -> Result<u64, FrameSe
     Ok(bytes)
 }
 
+// Keeping the wire fields in one linear order makes the canonical codec
+// easier to compare against `decode_entry` and its encoded-length calculation.
+#[allow(clippy::too_many_lines)]
 fn encode_manifest(
     manifest: &FrameSequenceManifest,
     state: FrameSequenceState,
     poll: &mut impl FnMut() -> bool,
 ) -> Result<Vec<u8>, FrameSequenceError> {
     if state == FrameSequenceState::Finalized {
-        validate_sources(&manifest.entries, true)?;
-        if manifest.entries.iter().any(|entry| entry.completion.is_none()) {
-            return Err(FrameSequenceError::NotFinalized);
-        }
+        validate_sources_with_poll(&manifest.entries, true, poll)?;
     }
-    let required = manifest_encoded_len(manifest)?;
+    let required = manifest_encoded_len_with_poll(manifest, false, poll)?;
     let capacity = usize::try_from(required).map_err(|_| FrameSequenceError::SizeOverflow {
         context: "manifest bytes on this platform",
     })?;
     let mut output = Vec::new();
-    output.try_reserve_exact(capacity).map_err(|_| {
-        FrameSequenceError::AllocationRefused {
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| FrameSequenceError::AllocationRefused {
             resource: "manifest bytes",
             requested: required,
-        }
-    })?;
+        })?;
     output.extend_from_slice(MAGIC);
     push_u16(&mut output, FRAME_SEQUENCE_MANIFEST_VERSION);
     output.push(state.tag());
@@ -1887,6 +2193,7 @@ fn encode_manifest(
         }
         push_short_string(&mut output, &entry.relative_path)?;
         push_u64(&mut output, entry.descriptor.key.frame_index);
+        push_u32(&mut output, entry.descriptor.key.segment_index);
         output.push(entry.descriptor.key.role.tag());
         push_u64(&mut output, entry.descriptor.frame_time_bits);
         output.push(entry.descriptor.format.tag());
@@ -1910,11 +2217,15 @@ fn encode_manifest(
                 min_spp,
                 max_spp,
                 total_samples,
+                converged_pixels,
+                maximum_sample_pixels,
             } => {
                 output.push(2);
                 push_u32(&mut output, min_spp);
                 push_u32(&mut output, max_spp);
                 push_u64(&mut output, total_samples);
+                push_u64(&mut output, converged_pixels);
+                push_u64(&mut output, maximum_sample_pixels);
             }
         }
         push_u64(&mut output, entry.max_bytes);
@@ -1923,6 +2234,7 @@ fn encode_manifest(
             Some(source) => {
                 output.push(1);
                 push_u64(&mut output, source.frame_index);
+                push_u32(&mut output, source.segment_index);
                 output.push(source.role.tag());
             }
         }
@@ -1960,6 +2272,9 @@ fn identity_with_poll(
     Ok(hasher.finalize())
 }
 
+// This mirrors the encoder field-for-field; splitting the wire order across
+// helpers would make compatibility review harder.
+#[allow(clippy::too_many_lines)]
 fn decode_entry(
     reader: &mut Reader<'_>,
     context: FrameSequenceContext,
@@ -1967,6 +2282,7 @@ fn decode_entry(
 ) -> Result<FrameArtifactEntry, FrameSequenceError> {
     let relative_path = reader.short_string(usize::from(limits.max_relative_path_bytes))?;
     let frame_index = reader.u64()?;
+    let segment_index = reader.u32()?;
     let role = FrameArtifactRole::from_tag(reader.u8()?)?;
     let frame_time_bits = reader.u64()?;
     let frame_time_s = f64::from_bits(frame_time_bits);
@@ -2005,6 +2321,8 @@ fn decode_entry(
             min_spp: reader.u32()?,
             max_spp: reader.u32()?,
             total_samples: reader.u64()?,
+            converged_pixels: reader.u64()?,
+            maximum_sample_pixels: reader.u64()?,
         },
         _ => {
             return Err(FrameSequenceError::Malformed {
@@ -2014,6 +2332,7 @@ fn decode_entry(
     };
     let descriptor = FrameArtifactDescriptor::try_new(
         frame_index,
+        segment_index,
         role,
         frame_time_s,
         format,
@@ -2027,6 +2346,7 @@ fn decode_entry(
         0 => None,
         1 => Some(FrameArtifactKey::new(
             reader.u64()?,
+            reader.u32()?,
             FrameArtifactRole::from_tag(reader.u8()?)?,
         )),
         _ => {
@@ -2060,7 +2380,7 @@ fn decode_entry(
             });
         }
     };
-    if relative_path != canonical_relative_path(context, &descriptor)? {
+    if relative_path != canonical_relative_path(context, &descriptor, source)? {
         return Err(FrameSequenceError::NonCanonical);
     }
     Ok(FrameArtifactEntry {
@@ -2161,11 +2481,10 @@ impl<'a> Reader<'a> {
     }
 
     fn string_exact(&mut self, len: usize) -> Result<String, FrameSequenceError> {
-        let text = core::str::from_utf8(self.take(len)?).map_err(|_| {
-            FrameSequenceError::Malformed {
+        let text =
+            core::str::from_utf8(self.take(len)?).map_err(|_| FrameSequenceError::Malformed {
                 field: "UTF-8 string",
-            }
-        })?;
+            })?;
         let mut output = String::new();
         output
             .try_reserve_exact(len)
@@ -2195,6 +2514,8 @@ pub enum FrameSequenceError {
         /// Stable identity field.
         field: &'static str,
     },
+    /// A finalizable sequence must contain at least one expected artifact.
+    EmptySequence,
     /// Frame time was NaN or infinite.
     InvalidFrameTime {
         /// Logical frame index.
@@ -2307,6 +2628,13 @@ pub enum FrameSequenceError {
     Truncated,
     /// Snapshot contained bytes after the complete canonical record.
     TrailingBytes,
+    /// Snapshot bytes did not match the independently supplied identity.
+    IdentityMismatch {
+        /// Identity pinned by the caller.
+        expected: ContentHash,
+        /// Identity computed from the supplied bytes.
+        actual: ContentHash,
+    },
     /// Snapshot used an unsupported schema version.
     UnsupportedVersion {
         /// Observed version.
@@ -2322,36 +2650,113 @@ pub enum FrameSequenceError {
 }
 
 impl fmt::Display for FrameSequenceError {
+    // The exhaustive one-variant/one-message mapping is intentionally linear.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidLimit { field } => write!(formatter, "sequence limit {field} must be nonzero"),
-            Self::PlaceholderIdentity { field } => write!(formatter, "sequence identity {field} is an all-zero placeholder"),
-            Self::InvalidFrameTime { frame_index } => write!(formatter, "frame {frame_index} has a non-finite time"),
-            Self::InvalidDimensions { frame_index } => write!(formatter, "frame {frame_index} has zero dimensions"),
-            Self::InvalidChannelName => formatter.write_str("channel name must be NUL-free and 1..=31 UTF-8 bytes"),
-            Self::DuplicateChannel { frame_index } => write!(formatter, "frame {frame_index} repeats a channel name"),
-            Self::InvalidChannelSet { frame_index } => write!(formatter, "frame {frame_index} has channels incompatible with its role or format"),
-            Self::InvalidSampling => formatter.write_str("sample statistics are inconsistent with the raster"),
-            Self::InvalidArtifactLimit { key } => write!(formatter, "artifact {key:?} has a zero byte reservation"),
-            Self::InvalidSource { key } => write!(formatter, "artifact {key:?} has an invalid source relationship"),
-            Self::DuplicateExpectedArtifact => formatter.write_str("sequence repeats an expected artifact key"),
-            Self::ResourceLimit { resource, requested, limit } => write!(formatter, "{resource} requires {requested}, above limit {limit}"),
-            Self::SizeOverflow { context } => write!(formatter, "size arithmetic overflowed for {context}"),
-            Self::AllocationRefused { resource, requested } => write!(formatter, "allocator refused {requested} units for {resource}"),
-            Self::UnexpectedArtifact { path } => write!(formatter, "artifact path {path:?} is not expected"),
-            Self::DescriptorMismatch { path, field } => write!(formatter, "artifact {path:?} mismatches expected {field}"),
+            Self::InvalidLimit { field } => {
+                write!(formatter, "sequence limit {field} must be nonzero")
+            }
+            Self::PlaceholderIdentity { field } => write!(
+                formatter,
+                "sequence identity {field} is an all-zero placeholder"
+            ),
+            Self::EmptySequence => {
+                formatter.write_str("frame sequence must contain at least one expected artifact")
+            }
+            Self::InvalidFrameTime { frame_index } => {
+                write!(formatter, "frame {frame_index} has a non-finite time")
+            }
+            Self::InvalidDimensions { frame_index } => {
+                write!(formatter, "frame {frame_index} has zero dimensions")
+            }
+            Self::InvalidChannelName => {
+                formatter.write_str("channel name must be NUL-free and 1..=31 UTF-8 bytes")
+            }
+            Self::DuplicateChannel { frame_index } => {
+                write!(formatter, "frame {frame_index} repeats a channel name")
+            }
+            Self::InvalidChannelSet { frame_index } => write!(
+                formatter,
+                "frame {frame_index} has channels incompatible with its role or format"
+            ),
+            Self::InvalidSampling => {
+                formatter.write_str("sample statistics are inconsistent with the raster")
+            }
+            Self::InvalidArtifactLimit { key } => {
+                write!(formatter, "artifact {key:?} has a zero byte reservation")
+            }
+            Self::InvalidSource { key } => write!(
+                formatter,
+                "artifact {key:?} has an invalid source relationship"
+            ),
+            Self::DuplicateExpectedArtifact => {
+                formatter.write_str("sequence repeats an expected artifact key")
+            }
+            Self::ResourceLimit {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                formatter,
+                "{resource} requires {requested}, above limit {limit}"
+            ),
+            Self::SizeOverflow { context } => {
+                write!(formatter, "size arithmetic overflowed for {context}")
+            }
+            Self::AllocationRefused {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "allocator refused {requested} units for {resource}"
+            ),
+            Self::UnexpectedArtifact { path } => {
+                write!(formatter, "artifact path {path:?} is not expected")
+            }
+            Self::DescriptorMismatch { path, field } => {
+                write!(formatter, "artifact {path:?} mismatches expected {field}")
+            }
             Self::EmptyArtifact { path } => write!(formatter, "artifact {path:?} is empty"),
-            Self::ConflictingDuplicate { path } => write!(formatter, "artifact {path:?} conflicts with its completed row"),
-            Self::SourceHashMismatch { path, expected, actual } => write!(formatter, "artifact {path:?} names stale source {actual}, expected {expected}"),
-            Self::MissingArtifact { path } => write!(formatter, "artifact {path:?} is incomplete or missing"),
-            Self::StaleArtifact { path, expected, actual } => write!(formatter, "artifact {path:?} changed from {expected:?} to {actual:?}"),
+            Self::ConflictingDuplicate { path } => write!(
+                formatter,
+                "artifact {path:?} conflicts with its completed row"
+            ),
+            Self::SourceHashMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "artifact {path:?} names stale source {actual}, expected {expected}"
+            ),
+            Self::MissingArtifact { path } => {
+                write!(formatter, "artifact {path:?} is incomplete or missing")
+            }
+            Self::StaleArtifact {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "artifact {path:?} changed from {expected:?} to {actual:?}"
+            ),
             Self::AlreadyFinalized => formatter.write_str("sequence is already finalized"),
             Self::NotFinalized => formatter.write_str("sequence is not complete and finalized"),
             Self::Cancelled => formatter.write_str("sequence operation was cancelled"),
             Self::Truncated => formatter.write_str("sequence snapshot is truncated"),
             Self::TrailingBytes => formatter.write_str("sequence snapshot has trailing bytes"),
-            Self::UnsupportedVersion { version } => write!(formatter, "unsupported frame-sequence manifest version {version}"),
-            Self::Malformed { field } => write!(formatter, "malformed frame-sequence field {field}"),
+            Self::IdentityMismatch { expected, actual } => write!(
+                formatter,
+                "frame-sequence snapshot identity {actual} does not match pinned identity {expected}"
+            ),
+            Self::UnsupportedVersion { version } => write!(
+                formatter,
+                "unsupported frame-sequence manifest version {version}"
+            ),
+            Self::Malformed { field } => {
+                write!(formatter, "malformed frame-sequence field {field}")
+            }
             Self::NonCanonical => formatter.write_str("frame-sequence snapshot is not canonical"),
         }
     }
