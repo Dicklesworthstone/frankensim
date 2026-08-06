@@ -24,10 +24,12 @@ use fs_evidence::{
         SoundSynthesisConfig, SoundSynthesisInput, SoundTerminalPolicy, SoundTrajectoryDisposition,
     },
 };
-use fs_exec::Cx;
+use fs_exec::{Cx, RunId};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_img::{
     CinematicColorConfig, CinematicColorLimits, PngColor, PreviewDither,
+    TEMPORAL_DENOISE_PIPELINE_VERSION, TemporalDenoiseConfig, TemporalDenoiseInput,
+    TemporalDenoiseLimits, TemporalDenoisedFrame, TemporalFrameBoundary, temporal_denoise_rgb,
     transform_cinematic_preview, write_png16,
 };
 use fs_math::det;
@@ -37,7 +39,10 @@ use fs_render::{
     camera::{AnimatedCamera, Aperture, CameraProjection, CutSide, PhysicalCamera},
     conductor::{ConductorOptics, ConductorSurface},
     motion::{ShutterConvention, ShutterDistribution},
-    tracer::render_cinematic_with_aovs,
+    tracer::{
+        MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport,
+        RenderWorkerPool, film_to_exr,
+    },
 };
 use fs_rep_frep::SquatDiscEdgeTreatment;
 
@@ -74,6 +79,12 @@ pub const CRITIQUE_FPS: u32 = 24;
 pub const CRITIQUE_FRAMES: u32 = 192;
 /// Five-millisecond deterministic taper applied at the censored soundtrack end.
 const TERMINAL_FADE_SAMPLE_FRAMES: u32 = 240;
+/// Twenty-millisecond presentation fade suppressing the unmodelled hand-release edge.
+const INITIAL_FADE_SAMPLE_FRAMES: u32 = 960;
+/// Stable caller-ledgered root for animation frame render jobs.
+const CRITIQUE_RENDER_RUN: RunId = RunId(0x4555_4c45_5252_454e);
+/// Stable placement-only seed for the reusable parked render crew.
+const CRITIQUE_RENDER_SCHEDULER_SEED: u64 = 0x5354_5544_494f_5631;
 
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +99,23 @@ pub struct CinematicFixtureConfig {
     pub samples_per_pixel: u32,
     /// Maximum path depth, including dielectric traversal.
     pub max_depth: u32,
+    /// Physical exposure angle at 24 Hz. `180` means a 1/48-second exposure.
+    pub shutter_angle_degrees: u16,
+    /// Reused tile-render worker count. This affects throughput, not image bits.
+    pub render_workers: usize,
+    /// Logical render-tile width in pixels.
+    pub tile_width: u32,
+    /// Logical render-tile height in pixels.
+    pub tile_height: u32,
+    /// Per-frame renderer operation-memory ceiling.
+    pub render_memory_limit_bytes: u64,
+    /// Whether previews use the explicitly biased animation-aware denoiser.
+    pub denoise_previews: bool,
+    /// Persist the full DailyCore AOV EXR rather than three-channel raw beauty.
+    /// Rendering retains DailyCore in memory whenever denoising needs guides.
+    pub retain_full_aov_exr: bool,
+    /// Whether mechanics-derived dry stems use the bounded spatial-audio path.
+    pub spatialize_audio: bool,
     /// Whether to ask `ffmpeg` for a non-authoritative convenience movie.
     pub mux_with_ffmpeg: bool,
     /// `ffmpeg` executable name or path.
@@ -102,6 +130,14 @@ impl Default for CinematicFixtureConfig {
             frames: CRITIQUE_FRAMES,
             samples_per_pixel: 1,
             max_depth: 6,
+            shutter_angle_degrees: 180,
+            render_workers: default_render_workers(),
+            tile_width: 32,
+            tile_height: 32,
+            render_memory_limit_bytes: 4 * 1024 * 1024 * 1024,
+            denoise_previews: true,
+            retain_full_aov_exr: true,
+            spatialize_audio: true,
             mux_with_ffmpeg: true,
             ffmpeg_executable: PathBuf::from("ffmpeg"),
         }
@@ -131,6 +167,30 @@ impl CinematicFixtureConfig {
                 "max_depth must be in 1..=64",
             ));
         }
+        if self.shutter_angle_degrees > 360 {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "shutter_angle_degrees must be in 0..=360",
+            ));
+        }
+        if self.render_workers == 0 || self.render_workers > MAX_RENDER_WORKERS {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "render_workers must be in 1..=256",
+            ));
+        }
+        if self.tile_width == 0
+            || self.tile_height == 0
+            || self.tile_width > MAX_RENDER_TILE_EDGE
+            || self.tile_height > MAX_RENDER_TILE_EDGE
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "tile dimensions must be in 1..=4096",
+            ));
+        }
+        if self.render_memory_limit_bytes == 0 {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "render_memory_limit_bytes must be nonzero",
+            ));
+        }
         if self.mux_with_ffmpeg && (self.width % 2 != 0 || self.height % 2 != 0) {
             return Err(CinematicFixtureError::InvalidConfig(
                 "muxed 4:2:0 video requires even width and height",
@@ -138,6 +198,13 @@ impl CinematicFixtureConfig {
         }
         Ok(())
     }
+}
+
+fn default_render_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(MAX_RENDER_WORKERS)
 }
 
 /// Successful fixture paths and the optional convenience movie.
@@ -167,6 +234,51 @@ struct FixtureAudio {
     artifact: SoundWavArtifact,
     pre_master_peak_fs: f64,
     master_gain_db: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FixtureRenderEvidence {
+    frames: u32,
+    maximum_effective_workers: usize,
+    maximum_peak_memory_bytes: u64,
+    setup_ns: u128,
+    traversal_ns: u128,
+    tile_compute_ns: u128,
+    tile_merge_ns: u128,
+    publication_ns: u128,
+    idle_worker_ns: u128,
+}
+
+impl FixtureRenderEvidence {
+    fn observe(&mut self, report: &RenderExecutionReport) {
+        self.frames += 1;
+        self.maximum_effective_workers = self.maximum_effective_workers.max(report.workers);
+        self.maximum_peak_memory_bytes =
+            self.maximum_peak_memory_bytes.max(report.memory.peak_bytes);
+        self.setup_ns += u128::from(report.setup_ns);
+        self.traversal_ns += u128::from(report.traversal_ns);
+        self.tile_compute_ns += u128::from(report.tile_compute_ns);
+        self.tile_merge_ns += u128::from(report.tile_merge_ns);
+        self.publication_ns += u128::from(report.publication_ns);
+        self.idle_worker_ns += u128::from(report.idle_worker_ns);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FixtureDenoiseEvidence {
+    applied_frames: u32,
+    maximum_retained_bytes: u64,
+    maximum_history_frames: u16,
+}
+
+impl FixtureDenoiseEvidence {
+    fn observe(&mut self, frame: &TemporalDenoisedFrame) {
+        self.applied_frames += 1;
+        self.maximum_retained_bytes = self.maximum_retained_bytes.max(frame.retained_bytes());
+        self.maximum_history_frames = self
+            .maximum_history_frames
+            .max(frame.history_length().iter().copied().max().unwrap_or(0));
+    }
 }
 
 /// Fail-closed fixture refusal; a failed run never publishes the requested root.
@@ -423,90 +535,181 @@ pub fn run_cinematic_fixture(
         DomainHasher::new("org.frankensim.euler-critique.preview-sequence.v1");
     let mut over_range_channels = 0_u64;
     let mut gamut_mapped_pixels = 0_u64;
-    for frame in 0..config.frames {
-        if frame % CRITIQUE_FPS == 0 {
-            progress(&format!("stage=render frame={frame}/{}", config.frames));
-        }
-        let frame_time_s = (f64::from(frame) + 0.5) / f64::from(CRITIQUE_FPS);
-        let previous_time_s = if frame == 0 {
-            frame_time_s
-        } else {
-            frame_time_s - 1.0 / f64::from(CRITIQUE_FPS)
-        };
-        let next_time_s = if frame + 1 == config.frames {
-            frame_time_s
-        } else {
-            frame_time_s + 1.0 / f64::from(CRITIQUE_FPS)
-        };
-        let prepared = scene
-            .prepare_frame(EulerFrameRequest {
+    let mut render_evidence = FixtureRenderEvidence::default();
+    let mut denoise_evidence = FixtureDenoiseEvidence::default();
+    let mut denoise_history: Option<TemporalDenoisedFrame> = None;
+    let denoise_config = TemporalDenoiseConfig::default();
+    let aov_profile = if config.denoise_previews || config.retain_full_aov_exr {
+        CinematicAovProfile::DailyCore
+    } else {
+        CinematicAovProfile::BeautyOnly
+    };
+    let raster_width = usize::try_from(config.width)
+        .map_err(|_| CinematicFixtureError::Pipeline("raster width exceeds usize".into()))?;
+    let raster_height = usize::try_from(config.height)
+        .map_err(|_| CinematicFixtureError::Pipeline("raster height exceeds usize".into()))?;
+    let exposure_duration_s =
+        f64::from(config.shutter_angle_degrees) / 360.0 / f64::from(CRITIQUE_FPS);
+    let pool_execution = RenderExecutionConfig::try_new(
+        config.tile_width,
+        config.tile_height,
+        config.render_workers,
+        config.render_memory_limit_bytes,
+        CRITIQUE_RENDER_RUN,
+    )
+    .map_err(pipeline)?;
+    let render_pool =
+        RenderWorkerPool::new(&pool_execution, cx.mode(), CRITIQUE_RENDER_SCHEDULER_SEED);
+    render_pool.with_parked_crew_local(|renderer| -> Result<(), CinematicFixtureError> {
+        for frame in 0..config.frames {
+            let (frame_time_s, previous_time_s, next_time_s) =
+                frame_reference_times(frame, config.frames);
+            let prepared = scene
+                .prepare_frame(EulerFrameRequest {
+                    frame_time_s,
+                    exposure_duration_s,
+                    convention: ShutterConvention::Centered,
+                    distribution: ShutterDistribution::StratifiedCounterV1 {
+                        strata: config.samples_per_pixel,
+                    },
+                    event_policy: ExposureEventPolicy::Refuse,
+                    cut_side: CutSide::After,
+                })
+                .map_err(pipeline)?;
+            if prepared.segments().len() != 1 {
+                return Err(CinematicFixtureError::Pipeline(format!(
+                    "frame {frame} exposure unexpectedly resolved to {} segments",
+                    prepared.segments().len()
+                )));
+            }
+            let provenance = CinematicAovProvenance::try_new(
+                u64::from(frame),
                 frame_time_s,
-                exposure_duration_s: 0.0,
-                convention: ShutterConvention::Centered,
-                distribution: ShutterDistribution::UniformCounterV1,
-                event_policy: ExposureEventPolicy::Refuse,
-                cut_side: CutSide::After,
-            })
+                previous_time_s,
+                next_time_s,
+                trajectory_receipt.artifact_identity(),
+                scene.scene_identity(),
+                composition_identity,
+            )
             .map_err(pipeline)?;
-        if prepared.segments().len() != 1 {
-            return Err(CinematicFixtureError::Pipeline(format!(
-                "zero-width frame {frame} unexpectedly resolved to {} segments",
-                prepared.segments().len()
-            )));
-        }
-        let provenance = CinematicAovProvenance::try_new(
-            u64::from(frame),
-            frame_time_s,
-            previous_time_s,
-            next_time_s,
-            trajectory_receipt.artifact_identity(),
-            scene.scene_identity(),
-            composition_identity,
-        )
-        .map_err(pipeline)?;
-        let film = render_cinematic_with_aovs(
-            scene.scene(),
-            scene.camera(),
-            prepared.cut_side(),
-            cx,
-            &render_settings,
-            prepared.segments()[0].shutter(),
-            CinematicAovConfig::new(
-                CinematicAovProfile::DailyCore,
-                provenance,
-                CinematicAovLimits::default(),
-            ),
-        )
-        .map_err(pipeline)?;
-        let exr = film.to_exr().map_err(pipeline)?;
-        raw_sequence.update(hash_domain("frame", &exr).as_bytes());
-        write_new(&raw_directory.join(format!("frame-{frame:06}.exr")), &exr)?;
+            let frame_execution = RenderExecutionConfig::try_new(
+                config.tile_width,
+                config.tile_height,
+                config.render_workers,
+                config.render_memory_limit_bytes,
+                CRITIQUE_RENDER_RUN.derive(
+                    "org.frankensim.euler-critique.render-frame.v1",
+                    u64::from(frame),
+                ),
+            )
+            .map_err(pipeline)?;
+            let output = renderer
+                .render_cinematic_with_aovs(
+                    scene.scene(),
+                    scene.camera(),
+                    prepared.cut_side(),
+                    cx,
+                    &render_settings,
+                    prepared.segments()[0].shutter(),
+                    CinematicAovConfig::new(aov_profile, provenance, CinematicAovLimits::default()),
+                    &frame_execution,
+                )
+                .map_err(pipeline)?;
+            progress(&format!(
+                concat!(
+                    "stage=render frame={}/{} workers={} tiles={} ",
+                    "traversal_ms={:.3} compute_ms={:.3} merge_ms={:.3} peak_mib={:.3}"
+                ),
+                frame + 1,
+                config.frames,
+                output.report.workers,
+                output.report.layout.tile_count(),
+                output.report.traversal_ns as f64 / 1.0e6,
+                output.report.tile_compute_ns as f64 / 1.0e6,
+                output.report.tile_merge_ns as f64 / 1.0e6,
+                output.report.memory.peak_bytes as f64 / (1024.0 * 1024.0),
+            ));
+            render_evidence.observe(&output.report);
+            let film = output.film;
+            let exr = if config.retain_full_aov_exr {
+                film.to_exr().map_err(pipeline)?
+            } else {
+                film_to_exr(film.beauty()).map_err(pipeline)?
+            };
+            raw_sequence.update(hash_domain("frame", &exr).as_bytes());
+            write_new(&raw_directory.join(format!("frame-{frame:06}.exr")), &exr)?;
+            drop(exr);
 
-        let [red, green, blue] = film.beauty().to_linear_srgb();
-        let mut color = CinematicColorConfig::reference_srgb_16();
-        color.exposure_ev = 1;
-        color.dither = PreviewDither::Disabled;
-        let preview = transform_cinematic_preview(
-            config.width,
-            config.height,
-            [&red, &green, &blue],
-            color,
-            CinematicColorLimits::reference_4k(),
-        )
-        .map_err(pipeline)?;
-        over_range_channels += preview.metadata().over_range_linear_channels();
-        gamut_mapped_pixels += preview.metadata().gamut_mapped_pixels();
-        let samples = preview.samples().as_u16().ok_or_else(|| {
-            CinematicFixtureError::Pipeline("16-bit color pipeline returned 8-bit samples".into())
-        })?;
-        let png =
-            write_png16(config.width, config.height, PngColor::Rgb, samples).map_err(pipeline)?;
-        preview_sequence.update(hash_domain("frame", &png).as_bytes());
-        write_new(
-            &preview_directory.join(format!("frame-{frame:06}.png")),
-            &png,
-        )?;
-    }
+            let [red, green, blue] = film.beauty().to_linear_srgb();
+            let mut color = CinematicColorConfig::reference_srgb_16();
+            color.exposure_ev = 1;
+            color.dither = PreviewDither::Disabled;
+            let preview = if config.denoise_previews {
+                let guides = film.denoise_guides().map_err(pipeline)?;
+                let denoised = temporal_denoise_rgb(
+                    TemporalDenoiseInput {
+                        frame_index: u64::from(frame),
+                        width: raster_width,
+                        height: raster_height,
+                        red: &red,
+                        green: &green,
+                        blue: &blue,
+                        motion_prev_x: guides.motion_prev_x(),
+                        motion_prev_y: guides.motion_prev_y(),
+                        axial_depth_m: guides.axial_depth_m(),
+                        normal_x: guides.normal_x(),
+                        normal_y: guides.normal_y(),
+                        normal_z: guides.normal_z(),
+                        primary_coverage: guides.primary_coverage(),
+                        variance_luminance: guides.variance_luminance(),
+                        object_ids: None,
+                        material_ids: None,
+                    },
+                    denoise_history.as_ref(),
+                    TemporalFrameBoundary::Continuous,
+                    denoise_config,
+                    TemporalDenoiseLimits::reference_4k(),
+                )
+                .map_err(pipeline)?;
+                let [denoised_red, denoised_green, denoised_blue] = denoised.linear_rgb();
+                let preview = transform_cinematic_preview(
+                    config.width,
+                    config.height,
+                    [denoised_red, denoised_green, denoised_blue],
+                    color,
+                    CinematicColorLimits::reference_4k(),
+                )
+                .map_err(pipeline)?;
+                denoise_evidence.observe(&denoised);
+                denoise_history = Some(denoised);
+                preview
+            } else {
+                transform_cinematic_preview(
+                    config.width,
+                    config.height,
+                    [&red, &green, &blue],
+                    color,
+                    CinematicColorLimits::reference_4k(),
+                )
+                .map_err(pipeline)?
+            };
+            over_range_channels += preview.metadata().over_range_linear_channels();
+            gamut_mapped_pixels += preview.metadata().gamut_mapped_pixels();
+            let samples = preview.samples().as_u16().ok_or_else(|| {
+                CinematicFixtureError::Pipeline(
+                    "16-bit color pipeline returned 8-bit samples".into(),
+                )
+            })?;
+            let png = write_png16(config.width, config.height, PngColor::Rgb, samples)
+                .map_err(pipeline)?;
+            preview_sequence.update(hash_domain("frame", &png).as_bytes());
+            write_new(
+                &preview_directory.join(format!("frame-{frame:06}.png")),
+                &png,
+            )?;
+        }
+        Ok(())
+    })?;
     let raw_sequence_identity = raw_sequence.finalize();
     let preview_sequence_identity = preview_sequence.finalize();
     progress("stage=render complete");
@@ -551,6 +754,8 @@ pub fn run_cinematic_fixture(
         audio.master_gain_db,
         over_range_channels,
         gamut_mapped_pixels,
+        &render_evidence,
+        &denoise_evidence,
         &mux,
     );
     write_new(&manifest_path, manifest.as_bytes())?;
@@ -587,6 +792,23 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CinematicFixtureError> {
     file.write_all(bytes)?;
     file.flush()?;
     Ok(())
+}
+
+fn frame_reference_times(frame: u32, frames: u32) -> (f64, f64, f64) {
+    debug_assert!(frames > 0 && frame < frames);
+    let frame_duration_s = 1.0 / f64::from(CRITIQUE_FPS);
+    let frame_time_s = (f64::from(frame) + 0.5) * frame_duration_s;
+    let previous_time_s = if frame == 0 {
+        0.0
+    } else {
+        frame_time_s - frame_duration_s
+    };
+    let next_time_s = if frame + 1 == frames {
+        f64::from(frames) * frame_duration_s
+    } else {
+        frame_time_s + frame_duration_s
+    };
+    (frame_time_s, previous_time_s, next_time_s)
 }
 
 fn mechanics_configuration_identity(
@@ -632,7 +854,16 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
     hasher.update(&config.samples_per_pixel.to_le_bytes());
     hasher.update(&config.max_depth.to_le_bytes());
-    hasher.update(b"zero-width-shutter;daily-core-aov;aces-srgb16;exposure-ev-plus-1");
+    hasher.update(&config.shutter_angle_degrees.to_le_bytes());
+    if config.denoise_previews {
+        let identity = TemporalDenoiseConfig::default()
+            .identity()
+            .expect("default temporal denoiser configuration is valid");
+        hasher.update(identity.as_bytes());
+    } else {
+        hasher.update(b"temporal-denoise-disabled");
+    }
+    hasher.update(b"centered-stratified-shutter-v1;daily-core-aov;aces-srgb16;exposure-ev-plus-1");
     hasher.finalize()
 }
 
@@ -702,7 +933,7 @@ fn critique_camera(duration_s: f64) -> Result<AnimatedCamera, fs_render::camera:
         eye,
         target,
         GeomVec3::new(0.0, 0.0, 1.0),
-        CameraProjection::try_half_tangent(0.38)?,
+        CameraProjection::try_half_tangent(0.25)?,
         target.delta_from(eye).norm(),
         Aperture::try_circular(0.0)?,
     )?;
@@ -961,6 +1192,7 @@ fn build_audio(
             stems.len()
         )));
     }
+    apply_initial_fade(&mut stems, INITIAL_FADE_SAMPLE_FRAMES)?;
     apply_terminal_fade(&mut stems, TERMINAL_FADE_SAMPLE_FRAMES)?;
     let mut mix = AudioDryMixSpec {
         disc: StemGainPan {
@@ -1045,6 +1277,28 @@ fn apply_terminal_fade(
     Ok(())
 }
 
+fn apply_initial_fade(
+    stems: &mut [crate::ModalStemFrame],
+    fade_sample_frames: u32,
+) -> Result<(), CinematicFixtureError> {
+    let fade_frames = usize::try_from(fade_sample_frames)
+        .map_err(|_| CinematicFixtureError::Pipeline("initial fade length overflow".into()))?;
+    if fade_frames < 2 || fade_frames > stems.len() {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "initial fade length {fade_frames} is incompatible with {} stem frames",
+            stems.len()
+        )));
+    }
+    let denominator = (fade_frames - 1) as f64;
+    for (index, frame) in stems[..fade_frames].iter_mut().enumerate() {
+        let gain = index as f64 / denominator;
+        frame.disc_fs *= gain;
+        frame.glass_plate_fs *= gain;
+        frame.base_assembly_fs *= gain;
+    }
+    Ok(())
+}
+
 fn mux_movie(
     config: &CinematicFixtureConfig,
     output_directory: &Path,
@@ -1105,6 +1359,8 @@ fn fixture_manifest(
     audio_master_gain_db: f64,
     over_range_channels: u64,
     gamut_mapped_pixels: u64,
+    render: &FixtureRenderEvidence,
+    denoise: &FixtureDenoiseEvidence,
     mux: &MuxOutcome,
 ) -> String {
     let first_sample = run
@@ -1140,9 +1396,11 @@ fn fixture_manifest(
             "{{\n",
             "  \"schema\": \"frankensim-euler-cinematic-critique-v1\",\n",
             "  \"authority\": \"simulation-derived-visualization-and-physically-informed-sound\",\n",
-            "  \"video\": {{\"width\": {}, \"height\": {}, \"frames\": {}, \"fps\": {}, \"duration_s\": {:.9}, \"spp\": {}, \"max_depth\": {}, \"exposure_ev\": 1, \"raw_sequence_identity\": \"{}\", \"preview_sequence_identity\": \"{}\", \"over_range_linear_channels\": {}, \"gamut_mapped_pixels\": {}}},\n",
+            "  \"video\": {{\"width\": {}, \"height\": {}, \"frames\": {}, \"fps\": {}, \"duration_s\": {:.9}, \"spp\": {}, \"max_depth\": {}, \"shutter_angle_degrees\": {}, \"shutter_duration_s\": {:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"denoise_requested\": {}, \"raw_exr_profile\": \"{}\", \"exposure_ev\": 1, \"raw_sequence_identity\": \"{}\", \"preview_sequence_identity\": \"{}\", \"over_range_linear_channels\": {}, \"gamut_mapped_pixels\": {}}},\n",
+            "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {}, \"maximum_effective_workers\": {}, \"tile_width\": {}, \"tile_height\": {}, \"memory_limit_bytes\": {}, \"maximum_peak_memory_bytes\": {}, \"measured_frames\": {}, \"timing_ns\": {{\"setup\": {}, \"traversal\": {}, \"tile_compute_sum\": {}, \"tile_merge_sum\": {}, \"publication\": {}, \"idle_worker_capacity\": {}}}}},\n",
+            "  \"denoise\": {{\"requested\": {}, \"applied_frames\": {}, \"pipeline\": \"{}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {}, \"maximum_history_frames\": {}}},\n",
             "  \"mechanics\": {{\"model\": \"closed-profile-reduced-coupled-runner\", \"timestep_s\": {:.9e}, \"sample_count\": {}, \"retained_time_s\": {:.9}, \"terminal\": \"{:?}\", \"initial_rate_selection\": \"rounded gravity-scale estimate; not fitted or calibrated\", \"first_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"last_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"energy\": {{\"initial_total_j\": {:.17e}, \"final_total_j\": {:.17e}, \"defect_j\": {:.17e}, \"relative_defect\": {:.17e}}}, \"trajectory_identity\": \"{}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"pre_master_peak_fs\": {:.17e}, \"master_gain_db\": {:.9}, \"terminal_fade_sample_frames\": {}, \"mix_policy\": \"single explicit content-derived digital mastering gain, peak target 0.45 FS, no limiter\"}},\n",
+            "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"pre_master_peak_fs\": {:.17e}, \"master_gain_db\": {:.9}, \"initial_fade_sample_frames\": {}, \"terminal_fade_sample_frames\": {}, \"mix_policy\": \"endpoint presentation fades followed by one explicit content-derived digital mastering gain, peak target 0.45 FS, no limiter\"}},\n",
             "  \"mux\": {},\n",
             "  \"no_claims\": [\"preview timestep and endpoint phase have not been convergence-qualified; inspect the published energy defect\", \"initial rates use a thin-disc gravity scale outside that oracle's admitted geometry for this squat specimen\", \"reduced tangential contact has gross sliding but no static-stick solve\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"digital mastering gain is presentation normalization and is not a sound-pressure-level prediction\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"low-sample preview is intended for motion and composition critique, not final image quality\"]\n",
             "}}\n"
@@ -1154,10 +1412,40 @@ fn fixture_manifest(
         duration_s,
         config.samples_per_pixel,
         config.max_depth,
+        config.shutter_angle_degrees,
+        f64::from(config.shutter_angle_degrees) / 360.0 / f64::from(CRITIQUE_FPS),
+        config.denoise_previews,
+        if config.retain_full_aov_exr {
+            "daily-core-aov-float"
+        } else {
+            "linear-srgb-beauty-float"
+        },
         raw_sequence_identity.to_hex(),
         preview_sequence_identity.to_hex(),
         over_range_channels,
         gamut_mapped_pixels,
+        config.render_workers,
+        render.maximum_effective_workers,
+        config.tile_width,
+        config.tile_height,
+        config.render_memory_limit_bytes,
+        render.maximum_peak_memory_bytes,
+        render.frames,
+        render.setup_ns,
+        render.traversal_ns,
+        render.tile_compute_ns,
+        render.tile_merge_ns,
+        render.publication_ns,
+        render.idle_worker_ns,
+        config.denoise_previews,
+        denoise.applied_frames,
+        if config.denoise_previews {
+            TEMPORAL_DENOISE_PIPELINE_VERSION
+        } else {
+            "disabled"
+        },
+        denoise.maximum_retained_bytes,
+        denoise.maximum_history_frames,
         timestep_s,
         run.samples.len(),
         run.checkpoint.time_s,
@@ -1177,6 +1465,7 @@ fn fixture_manifest(
         wav_identity.to_hex(),
         audio_pre_master_peak_fs,
         audio_master_gain_db,
+        INITIAL_FADE_SAMPLE_FRAMES,
         TERMINAL_FADE_SAMPLE_FRAMES,
         mux_json,
     )
@@ -1211,6 +1500,11 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.frames, 8 * CRITIQUE_FPS);
         assert_eq!((config.width, config.height), (320, 180));
+        assert_eq!(config.shutter_angle_degrees, 180);
+        assert!(config.render_workers > 0);
+        assert!(config.denoise_previews);
+        assert!(config.retain_full_aov_exr);
+        assert!(config.spatialize_audio);
     }
 
     #[test]
@@ -1221,6 +1515,42 @@ mod tests {
             config.validate(),
             Err(CinematicFixtureError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn execution_and_shutter_bounds_are_enforced() {
+        let mut config = CinematicFixtureConfig::default();
+        config.shutter_angle_degrees = 361;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(_))
+        ));
+        config.shutter_angle_degrees = 180;
+        config.render_workers = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(_))
+        ));
+        config.render_workers = 1;
+        config.tile_width = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn boundary_reference_times_cover_finite_shutters() {
+        let half_frame_s = 0.5 / f64::from(CRITIQUE_FPS);
+        let (first, previous, next) = frame_reference_times(0, CRITIQUE_FRAMES);
+        assert!((first - half_frame_s).abs() <= f64::EPSILON);
+        assert_eq!(previous, 0.0);
+        assert!(next > first);
+
+        let (last, previous, next) = frame_reference_times(CRITIQUE_FRAMES - 1, CRITIQUE_FRAMES);
+        assert!(previous < last);
+        assert_eq!(next, 8.0);
+        assert!(last + half_frame_s <= next + f64::EPSILON);
     }
 
     #[test]
@@ -1238,5 +1568,22 @@ mod tests {
         assert_eq!(stems[1].disc_fs, 1.0);
         assert_eq!(stems[2].disc_fs, 0.5);
         assert_eq!(stems[3], crate::ModalStemFrame::default());
+    }
+
+    #[test]
+    fn initial_fade_starts_at_zero_and_preserves_suffix() {
+        let mut stems = vec![
+            crate::ModalStemFrame {
+                disc_fs: 1.0,
+                glass_plate_fs: 2.0,
+                base_assembly_fs: 3.0,
+            };
+            4
+        ];
+        apply_initial_fade(&mut stems, 3).unwrap();
+        assert_eq!(stems[0], crate::ModalStemFrame::default());
+        assert_eq!(stems[1].disc_fs, 0.5);
+        assert_eq!(stems[2].disc_fs, 1.0);
+        assert_eq!(stems[3].disc_fs, 1.0);
     }
 }

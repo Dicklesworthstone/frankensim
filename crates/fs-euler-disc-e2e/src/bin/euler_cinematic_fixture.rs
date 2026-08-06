@@ -30,6 +30,31 @@ fn run() -> Result<(), String> {
             "--max-depth" => {
                 config.max_depth = parse(&next_value(&mut args, "--max-depth")?, "max-depth")?
             }
+            "--shutter-angle" => {
+                config.shutter_angle_degrees =
+                    parse(&next_value(&mut args, "--shutter-angle")?, "shutter-angle")?
+            }
+            "--workers" => {
+                config.render_workers = parse(&next_value(&mut args, "--workers")?, "workers")?
+            }
+            "--tile-width" => {
+                config.tile_width = parse(&next_value(&mut args, "--tile-width")?, "tile-width")?
+            }
+            "--tile-height" => {
+                config.tile_height = parse(&next_value(&mut args, "--tile-height")?, "tile-height")?
+            }
+            "--render-memory-mib" => {
+                let mib: u64 = parse(
+                    &next_value(&mut args, "--render-memory-mib")?,
+                    "render-memory-mib",
+                )?;
+                config.render_memory_limit_bytes = mib
+                    .checked_mul(1024 * 1024)
+                    .ok_or_else(|| "render-memory-mib overflows bytes".to_owned())?;
+            }
+            "--no-denoise" => config.denoise_previews = false,
+            "--beauty-only-exr" => config.retain_full_aov_exr = false,
+            "--dry-audio" => config.spatialize_audio = false,
             "--no-mux" => config.mux_with_ffmpeg = false,
             "--ffmpeg" => {
                 config.ffmpeg_executable = PathBuf::from(next_value(&mut args, "--ffmpeg")?)
@@ -37,7 +62,10 @@ fn run() -> Result<(), String> {
             "--help" | "-h" => {
                 println!(
                     "Usage: euler_cinematic_fixture [--output DIR] [--width PX] [--height PX] \
-                     [--frames 192..288] [--spp N] [--max-depth N] [--no-mux] [--ffmpeg PATH]"
+                     [--frames 192..288] [--spp N] [--max-depth N] [--shutter-angle 0..360] \
+                     [--workers N] [--tile-width PX] [--tile-height PX] \
+                     [--render-memory-mib MIB] [--no-denoise] [--beauty-only-exr] [--dry-audio] \
+                     [--no-mux] [--ffmpeg PATH]"
                 );
                 return Ok(());
             }

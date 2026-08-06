@@ -46,6 +46,7 @@ pub mod render_sharding;
 pub mod render_trajectory;
 pub mod render_trajectory_codec;
 pub mod rolling_contact;
+pub mod spatial_audio;
 pub mod specimen;
 pub mod tangential_contact;
 pub mod timeline_resampling;
@@ -105,6 +106,15 @@ pub use render_trajectory_codec::{
     EulerRenderTrajectoryArtifact, MAX_RENDER_TRAJECTORY_ARTIFACT_BYTES,
     MAX_RENDER_TRAJECTORY_TEXT_BYTES, MAX_RENDER_TRAJECTORY_TOTAL_TRANSITIONS,
     RenderTrajectoryCodecBudget, RenderTrajectoryCodecError, RenderTrajectoryCodecReceipt,
+};
+pub use spatial_audio::{
+    ListenerPose, ListenerPoseTrack, MAX_SPATIAL_AUDIO_ROOM_IR_TAPS,
+    MAX_SPATIAL_AUDIO_SAMPLE_RATE_HZ, MAX_SPATIAL_AUDIO_SOURCES, MicrophoneDirectivity,
+    OfflineSpatializer, SPATIAL_AUDIO_ALGORITHM_VERSION, SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES,
+    SourcePositionTrack, SpatialAudioAuthority, SpatialAudioBudget, SpatialAudioConfig,
+    SpatialAudioDiagnostics, SpatialAudioError, SpatialAudioOutput, SpatialAudioRenderInput,
+    SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal, SpatialOutputHorizon,
+    SpatialStemComponent, StereoRoomImpulseResponse, bypass_dry_stereo,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,
