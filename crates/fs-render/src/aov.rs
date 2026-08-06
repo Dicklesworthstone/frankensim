@@ -47,6 +47,13 @@ pub const CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION: u32 = 1;
 /// Domain for complete cinematic AOV configuration identities.
 pub const CINEMATIC_AOV_CONFIG_IDENTITY_DOMAIN: &str =
     "org.frankensim.render.cinematic-aov-config.v1";
+/// Frozen interpretation of every cinematic AOV channel.
+pub const CINEMATIC_AOV_CHANNEL_SEMANTICS: &str = "R,G,B=linear-sRGB;albedo=linear-sRGB-reflectance;normal,normal_geom=world-unit-vector;depth.Z=axial-metres;primary.coverage=primary-hit-fraction;variance.Y=unbiased-raw-CIE-Y-sample-variance;motion.prev=target-minus-current-raster-pixels;IDs=exact-palette-index;samples=count;invalid=zero";
+/// Frozen invalid-pixel interpretation shared by the exporter and independent
+/// artifact verifiers.
+pub const CINEMATIC_AOV_INVALID_SEMANTICS: &str = "zero-with-diagnostic.validity-bitmask-final-profile;daily-core-surface-validity-is-primary.coverage-greater-than-zero";
+/// Meaning of palette index zero in every cinematic AOV profile.
+pub const CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS: &str = "0=background-or-unavailable";
 
 pub(crate) const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
 const STRING_ATTRIBUTE_TYPE: &str = "string";
@@ -72,6 +79,16 @@ pub enum CinematicAovProfile {
 }
 
 impl CinematicAovProfile {
+    /// Stable machine-readable profile code written to cinematic EXR headers.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::BeautyOnly => "beauty-only-v1",
+            Self::DailyCore => "daily-core-v1",
+            Self::FinalDiagnostic => "final-diagnostic-v1",
+        }
+    }
+
     /// Number of single-precision EXR channels in this exact profile.
     #[must_use]
     pub const fn float_channel_count(self) -> u32 {
@@ -90,50 +107,76 @@ impl CinematicAovProfile {
         matches!(self, Self::FinalDiagnostic)
     }
 
-    const fn name(self) -> &'static str {
+    /// Exact channel metadata in canonical EXR wire order.
+    ///
+    /// The returned slice is static and allocation-free. Names and storage
+    /// types exactly match the `channels` header emitted by this module; L6
+    /// consumers may therefore reconstruct frame expectations without
+    /// copying fs-render's private schema.
+    #[must_use]
+    pub const fn exr_channel_layout(self) -> &'static [(&'static str, PixelType)] {
         match self {
-            Self::BeautyOnly => "beauty-only-v1",
-            Self::DailyCore => "daily-core-v1",
-            Self::FinalDiagnostic => "final-diagnostic-v1",
+            Self::BeautyOnly => &BEAUTY_ONLY_EXR_CHANNEL_LAYOUT,
+            Self::DailyCore => &DAILY_CORE_EXR_CHANNEL_LAYOUT,
+            Self::FinalDiagnostic => &FINAL_DIAGNOSTIC_EXR_CHANNEL_LAYOUT,
         }
-    }
-
-    fn exr_channel_layout(self) -> &'static [(&'static str, PixelType)] {
-        &CINEMATIC_AOV_CHANNEL_LAYOUT[..self.float_channel_count() as usize]
     }
 }
 
-const CINEMATIC_AOV_CHANNEL_LAYOUT: [(&str, PixelType); 30] = [
-    ("R", PixelType::Float),
-    ("G", PixelType::Float),
+const BEAUTY_ONLY_EXR_CHANNEL_LAYOUT: [(&str, PixelType); 3] = [
     ("B", PixelType::Float),
-    ("albedo.R", PixelType::Float),
-    ("albedo.G", PixelType::Float),
+    ("G", PixelType::Float),
+    ("R", PixelType::Float),
+];
+
+const DAILY_CORE_EXR_CHANNEL_LAYOUT: [(&str, PixelType); 14] = [
+    ("B", PixelType::Float),
+    ("G", PixelType::Float),
+    ("R", PixelType::Float),
     ("albedo.B", PixelType::Float),
+    ("albedo.G", PixelType::Float),
+    ("albedo.R", PixelType::Float),
+    ("depth.Z", PixelType::Float),
+    ("motion.prev.X", PixelType::Float),
+    ("motion.prev.Y", PixelType::Float),
     ("normal.X", PixelType::Float),
     ("normal.Y", PixelType::Float),
     ("normal.Z", PixelType::Float),
-    ("depth.Z", PixelType::Float),
     ("primary.coverage", PixelType::Float),
     ("variance.Y", PixelType::Float),
+];
+
+const FINAL_DIAGNOSTIC_EXR_CHANNEL_LAYOUT: [(&str, PixelType); 30] = [
+    ("B", PixelType::Float),
+    ("G", PixelType::Float),
+    ("R", PixelType::Float),
+    ("albedo.B", PixelType::Float),
+    ("albedo.G", PixelType::Float),
+    ("albedo.R", PixelType::Float),
+    ("depth.Z", PixelType::Float),
+    ("diagnostic.validity", PixelType::Float),
+    ("direct.B", PixelType::Float),
+    ("direct.G", PixelType::Float),
+    ("direct.R", PixelType::Float),
+    ("emission.B", PixelType::Float),
+    ("emission.G", PixelType::Float),
+    ("emission.R", PixelType::Float),
+    ("id.material", PixelType::Float),
+    ("id.object", PixelType::Float),
+    ("indirect.B", PixelType::Float),
+    ("indirect.G", PixelType::Float),
+    ("indirect.R", PixelType::Float),
     ("motion.prev.X", PixelType::Float),
     ("motion.prev.Y", PixelType::Float),
+    ("normal.X", PixelType::Float),
+    ("normal.Y", PixelType::Float),
+    ("normal.Z", PixelType::Float),
     ("normal_geom.X", PixelType::Float),
     ("normal_geom.Y", PixelType::Float),
     ("normal_geom.Z", PixelType::Float),
-    ("direct.R", PixelType::Float),
-    ("direct.G", PixelType::Float),
-    ("direct.B", PixelType::Float),
-    ("indirect.R", PixelType::Float),
-    ("indirect.G", PixelType::Float),
-    ("indirect.B", PixelType::Float),
-    ("emission.R", PixelType::Float),
-    ("emission.G", PixelType::Float),
-    ("emission.B", PixelType::Float),
-    ("id.object", PixelType::Float),
-    ("id.material", PixelType::Float),
+    ("primary.coverage", PixelType::Float),
     ("samples", PixelType::Float),
-    ("diagnostic.validity", PixelType::Float),
+    ("variance.Y", PixelType::Float),
 ];
 
 /// Explicit retained/export-memory and palette admission limits.
@@ -482,6 +525,7 @@ struct CommonPixel {
     accepted_count: u32,
     primary_count: u32,
     albedo_count: u32,
+    // Retained in the v2 checkpoint wire schema; admission keeps it zero.
     authored_shading_normal_count: u32,
     previous_motion_count: u32,
 }
@@ -527,10 +571,6 @@ impl CommonPixel {
                 "normal",
             )?;
             next.depth_sum_m = checked_add(next.depth_sum_m, primary.depth_m, "depth.Z")?;
-            if primary.has_authored_shading_normal {
-                next.authored_shading_normal_count =
-                    checked_increment(next.authored_shading_normal_count)?;
-            }
             if let Some(albedo) = primary.albedo_linear_rgb {
                 validate_vec("albedo", albedo)?;
                 add3(&mut next.albedo_sum, albedo, "albedo")?;
@@ -667,7 +707,11 @@ pub struct CinematicAovPalette {
 }
 
 impl CinematicAovPalette {
-    pub(crate) fn from_scene(
+    /// Derive the exact sorted object/material identity tables used by the
+    /// cinematic AOV exporter from an admitted scene.  Callers cannot supply
+    /// replacement palette rows: the same scene primitives that are traced
+    /// define the metadata oracle.
+    pub fn try_from_scene(
         scene: &Scene,
         limits: CinematicAovLimits,
         include_id_channels: bool,
@@ -1072,17 +1116,15 @@ fn cinematic_exr_attributes(
         "frankensim.aov.schemaVersion",
         CINEMATIC_AOV_SEMANTICS_VERSION.to_string(),
     );
-    push("frankensim.aov.profile", config.profile.name().to_string());
+    push("frankensim.aov.profile", config.profile.code().to_string());
     push("frankensim.aov.configHash", config.identity.to_hex());
     push(
         "frankensim.aov.channelSemantics",
-        "R,G,B=linear-sRGB;albedo=linear-sRGB-reflectance;normal,normal_geom=world-unit-vector;depth.Z=axial-metres;primary.coverage=primary-hit-fraction;variance.Y=unbiased-raw-CIE-Y-sample-variance;motion.prev=target-minus-current-raster-pixels;IDs=exact-palette-index;samples=count;invalid=zero"
-            .to_string(),
+        CINEMATIC_AOV_CHANNEL_SEMANTICS.to_string(),
     );
     push(
         "frankensim.aov.invalidSemantics",
-        "zero-with-diagnostic.validity-bitmask-final-profile;daily-core-surface-validity-is-primary.coverage-greater-than-zero"
-            .to_string(),
+        CINEMATIC_AOV_INVALID_SEMANTICS.to_string(),
     );
     push(
         "frankensim.aov.materialDomain",
@@ -1178,9 +1220,7 @@ fn cinematic_exr_attributes(
     );
     push(
         "frankensim.render.versions",
-        format!(
-            "tracer={TRACER_BIT_SEMANTICS_VERSION};motionTracer={MOTION_TRACER_BIT_SEMANTICS_VERSION};cinematicCamera={CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION};dielectric={DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION};lighting={LIGHTING_TRACER_BIT_SEMANTICS_VERSION};motionVector={MOTION_VECTOR_SEMANTICS_VERSION};chartBackend={CHART_BACKEND_BIT_SEMANTICS_VERSION};category={CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION};albedo={CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION}"
-        ),
+        cinematic_render_semantics_versions(),
     );
     push(
         "frankensim.aov.objectPalette",
@@ -1192,7 +1232,7 @@ fn cinematic_exr_attributes(
     );
     push(
         "frankensim.aov.paletteZero",
-        "0=background-or-unavailable".to_string(),
+        CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS.to_string(),
     );
     Ok(attributes)
 }
@@ -1824,8 +1864,13 @@ const MAX_U64_DECIMAL_BYTES: u64 = 20;
 const CONTENT_HASH_HEX_BYTES: u64 = 64;
 const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-fn export_metadata_payload_bound(
-    binding: &CinematicAovRenderBinding,
+/// Conservative logical EXR metadata allocation bound for exact cinematic
+/// object/material palettes. This is the producer's own admission formula;
+/// coordinators can call it before allocating the canonical palette strings
+/// without duplicating constants that could drift from the renderer.
+pub fn cinematic_export_metadata_payload_bound(
+    object_entries: usize,
+    material_entries: usize,
 ) -> Result<u64, CinematicAovError> {
     let object_entry_bytes = 1_u64
         .checked_add(MAX_PALETTE_INDEX_DECIMAL_BYTES)
@@ -1835,17 +1880,26 @@ fn export_metadata_payload_bound(
         .checked_add(MAX_PALETTE_INDEX_DECIMAL_BYTES)
         .and_then(|bytes| bytes.checked_add(1 + CONTENT_HASH_HEX_BYTES))
         .ok_or(CinematicAovError::SizeOverflow)?;
-    u64::try_from(binding.palette.object_ids.len())
+    u64::try_from(object_entries)
         .ok()
         .and_then(|count| count.checked_mul(object_entry_bytes))
         .and_then(|object_bytes| {
-            u64::try_from(binding.palette.material_identities.len())
+            u64::try_from(material_entries)
                 .ok()
                 .and_then(|count| count.checked_mul(material_entry_bytes))
                 .and_then(|material_bytes| object_bytes.checked_add(material_bytes))
         })
         .and_then(|palette_bytes| palette_bytes.checked_add(FIXED_EXPORT_METADATA_BOUND_BYTES))
         .ok_or(CinematicAovError::SizeOverflow)
+}
+
+fn export_metadata_payload_bound(
+    binding: &CinematicAovRenderBinding,
+) -> Result<u64, CinematicAovError> {
+    cinematic_export_metadata_payload_bound(
+        binding.palette.object_ids.len(),
+        binding.palette.material_identities.len(),
+    )
 }
 
 fn export_metadata_payload_bytes(
@@ -1982,7 +2036,8 @@ fn checked_increment(value: u32) -> Result<u32, CinematicAovError> {
 fn validate_primary(primary: AlignedAovPrimary) -> Result<(), CinematicAovError> {
     validate_vec("normal_geom", primary.geometric_normal_world)?;
     validate_vec("normal", primary.shading_normal_world)?;
-    if !primary.depth_m.is_finite() || primary.depth_m <= 0.0 {
+    if primary.has_authored_shading_normal || !primary.depth_m.is_finite() || primary.depth_m <= 0.0
+    {
         return Err(CinematicAovError::InvalidPrimary);
     }
     Ok(())
@@ -2070,9 +2125,6 @@ fn validity_mask(common: CommonPixel, final_diagnostic: FinalPixel) -> u32 {
     }
     if common.albedo_count != 0 {
         mask |= validity::ALBEDO;
-    }
-    if common.authored_shading_normal_count != 0 {
-        mask |= validity::AUTHORED_SHADING_NORMAL;
     }
     if common.previous_motion_count != 0 {
         mask |= validity::PREVIOUS_MOTION;
@@ -2200,10 +2252,11 @@ fn validate_exr_channel_schema(
 ) -> Result<(), CinematicAovError> {
     let layout = profile.exr_channel_layout();
     if channels.len() != layout.len()
-        || channels
-            .iter()
-            .zip(layout)
-            .any(|(channel, (name, ty))| channel.name != *name || channel.ty != *ty)
+        || layout.iter().any(|(name, ty)| {
+            !channels
+                .iter()
+                .any(|channel| channel.name == *name && channel.ty == *ty)
+        })
     {
         return Err(CinematicAovError::InternalChannelCount);
     }
@@ -2241,50 +2294,88 @@ fn float_channel(
     })
 }
 
-fn encode_object_palette(values: &[u64]) -> Result<String, CinematicAovError> {
-    let required = values
-        .iter()
-        .enumerate()
-        .try_fold("0=unavailable".len(), |bytes, (zero_based, value)| {
-            let one_based = u64::try_from(zero_based.checked_add(1)?).ok()?;
-            bytes
+/// Canonical EXR metadata value mapping exact one-based indices to object IDs.
+///
+/// Callers remain responsible for supplying the sorted, unique palette used by
+/// the admitted scene. This encoder is public so an independent finalizer can
+/// reconstruct the producer's frozen wire value instead of trusting it.
+pub fn encode_object_palette(values: &[u64]) -> Result<String, CinematicAovError> {
+    encode_object_palette_with_poll(values, || true)
+}
+
+/// Encode the canonical object palette while polling both the sizing and
+/// writing passes. The callback returns `true` to continue.
+pub fn encode_object_palette_with_poll(
+    values: &[u64],
+    mut poll: impl FnMut() -> bool,
+) -> Result<String, CinematicAovError> {
+    poll_aov(&mut poll)?;
+    let mut required = "0=unavailable".len();
+    for (zero_based, value) in values.iter().enumerate() {
+        poll_aov(&mut poll)?;
+        let one_based = u64::try_from(
+            zero_based
                 .checked_add(1)
-                .and_then(|total| total.checked_add(decimal_digits(one_based)))
-                .and_then(|total| total.checked_add(1))
-                .and_then(|total| total.checked_add(decimal_digits(*value)))
-        })
-        .ok_or(CinematicAovError::SizeOverflow)?;
+                .ok_or(CinematicAovError::SizeOverflow)?,
+        )
+        .map_err(|_| CinematicAovError::SizeOverflow)?;
+        required = required
+            .checked_add(1)
+            .and_then(|total| total.checked_add(decimal_digits(one_based)))
+            .and_then(|total| total.checked_add(1))
+            .and_then(|total| total.checked_add(decimal_digits(*value)))
+            .ok_or(CinematicAovError::SizeOverflow)?;
+    }
     let mut encoded = String::new();
     encoded
         .try_reserve_exact(required)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
     encoded.push_str("0=unavailable");
     for (zero_based, value) in values.iter().enumerate() {
+        poll_aov(&mut poll)?;
         write!(&mut encoded, ";{}={value}", zero_based + 1)
             .map_err(|_| CinematicAovError::AllocationRefused)?;
     }
+    poll_aov(&mut poll)?;
     debug_assert_eq!(encoded.len(), required);
     Ok(encoded)
 }
 
-fn encode_material_palette(values: &[ContentHash]) -> Result<String, CinematicAovError> {
-    let required = values
-        .iter()
-        .enumerate()
-        .try_fold("0=unavailable".len(), |bytes, (zero_based, _)| {
-            let one_based = u64::try_from(zero_based.checked_add(1)?).ok()?;
-            bytes
+/// Canonical EXR metadata value mapping exact one-based indices to material
+/// content identities.
+pub fn encode_material_palette(values: &[ContentHash]) -> Result<String, CinematicAovError> {
+    encode_material_palette_with_poll(values, || true)
+}
+
+/// Encode the canonical material palette while polling both the sizing and
+/// writing passes. The callback returns `true` to continue.
+pub fn encode_material_palette_with_poll(
+    values: &[ContentHash],
+    mut poll: impl FnMut() -> bool,
+) -> Result<String, CinematicAovError> {
+    poll_aov(&mut poll)?;
+    let mut required = "0=unavailable".len();
+    for (zero_based, _) in values.iter().enumerate() {
+        poll_aov(&mut poll)?;
+        let one_based = u64::try_from(
+            zero_based
                 .checked_add(1)
-                .and_then(|total| total.checked_add(decimal_digits(one_based)))
-                .and_then(|total| total.checked_add(1 + CONTENT_HASH_HEX_BYTES as usize))
-        })
-        .ok_or(CinematicAovError::SizeOverflow)?;
+                .ok_or(CinematicAovError::SizeOverflow)?,
+        )
+        .map_err(|_| CinematicAovError::SizeOverflow)?;
+        required = required
+            .checked_add(1)
+            .and_then(|total| total.checked_add(decimal_digits(one_based)))
+            .and_then(|total| total.checked_add(1 + CONTENT_HASH_HEX_BYTES as usize))
+            .ok_or(CinematicAovError::SizeOverflow)?;
+    }
     let mut encoded = String::new();
     encoded
         .try_reserve_exact(required)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
     encoded.push_str("0=unavailable");
     for (zero_based, value) in values.iter().enumerate() {
+        poll_aov(&mut poll)?;
         write!(&mut encoded, ";{}=", zero_based + 1)
             .map_err(|_| CinematicAovError::AllocationRefused)?;
         for byte in value.as_bytes() {
@@ -2292,8 +2383,27 @@ fn encode_material_palette(values: &[ContentHash]) -> Result<String, CinematicAo
             encoded.push(char::from(LOWER_HEX_DIGITS[usize::from(byte & 0x0f)]));
         }
     }
+    poll_aov(&mut poll)?;
     debug_assert_eq!(encoded.len(), required);
     Ok(encoded)
+}
+
+fn poll_aov(poll: &mut impl FnMut() -> bool) -> Result<(), CinematicAovError> {
+    if poll() {
+        Ok(())
+    } else {
+        Err(CinematicAovError::Tracer(
+            crate::tracer::TracerError::Cancelled,
+        ))
+    }
+}
+
+/// Canonical version vector for all bit-affecting cinematic render semantics.
+#[must_use]
+pub fn cinematic_render_semantics_versions() -> String {
+    format!(
+        "tracer={TRACER_BIT_SEMANTICS_VERSION};motionTracer={MOTION_TRACER_BIT_SEMANTICS_VERSION};cinematicCamera={CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION};dielectric={DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION};lighting={LIGHTING_TRACER_BIT_SEMANTICS_VERSION};motionVector={MOTION_VECTOR_SEMANTICS_VERSION};chartBackend={CHART_BACKEND_BIT_SEMANTICS_VERSION};category={CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION};albedo={CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION}"
+    )
 }
 
 fn decimal_digits(mut value: u64) -> usize {
@@ -2356,6 +2466,105 @@ mod tests {
             .unwrap(),
             CinematicAovLimits::default(),
         )
+    }
+
+    fn emitted_profile_exr(profile: CinematicAovProfile) -> fs_img::DecodedExr {
+        let config = config(profile);
+        let binding = CinematicAovRenderBinding {
+            settings: Settings {
+                width: 1,
+                height: 1,
+                spp: 1,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 17,
+            },
+            shutter: ShutterInterval::try_from_canonical_parts(
+                1.0,
+                1.0,
+                ShutterConvention::Centered,
+                ShutterDistribution::UniformCounterV1,
+            )
+            .unwrap(),
+            shot_id: 9,
+            cut_side: CutSide::After,
+            palette: CinematicAovPalette {
+                object_ids: Vec::new(),
+                material_identities: Vec::new(),
+            },
+            continuity_fingerprint: hash("continuity"),
+            adaptive_policy: None,
+        };
+        let sample = AlignedAovSample {
+            beauty_xyz: [0.25, 0.5, 0.75],
+            direct_xyz: [0.1, 0.2, 0.3],
+            indirect_xyz: [0.05, 0.1, 0.15],
+            emission_xyz: [0.01, 0.02, 0.03],
+            pixel_jitter: [0.5, 0.5],
+            absolute_sample: 0,
+            primary: None,
+        };
+        let mut common_pixel = CommonPixel::EMPTY;
+        common_pixel.push(sample).unwrap();
+        let mut final_pixel = FinalPixel::EMPTY;
+        final_pixel.push(sample).unwrap();
+        let common = [common_pixel];
+        let final_diagnostic = [final_pixel];
+        let channels = build_exr_channels(
+            profile,
+            1,
+            |_| sample.beauty_xyz,
+            |_| 1,
+            profile.has_common().then_some(common.as_slice()),
+            profile.has_final().then_some(final_diagnostic.as_slice()),
+        )
+        .unwrap();
+        let attributes =
+            cinematic_exr_attributes(config, &binding, "uniform", "1".to_string()).unwrap();
+        let bytes = fs_img::write_exr_with_attributes(1, 1, &channels, &attributes).unwrap();
+        fs_img::read_exr(&bytes).unwrap()
+    }
+
+    #[test]
+    fn g0_public_profile_metadata_exactly_matches_emitted_exr_headers() {
+        const BEAUTY_CODE: &str = CinematicAovProfile::BeautyOnly.code();
+        const BEAUTY_LAYOUT: &[(&str, PixelType)] =
+            CinematicAovProfile::BeautyOnly.exr_channel_layout();
+        assert_eq!(BEAUTY_CODE, "beauty-only-v1");
+        assert_eq!(BEAUTY_LAYOUT.len(), 3);
+
+        for (profile, expected_code) in [
+            (CinematicAovProfile::BeautyOnly, "beauty-only-v1"),
+            (CinematicAovProfile::DailyCore, "daily-core-v1"),
+            (CinematicAovProfile::FinalDiagnostic, "final-diagnostic-v1"),
+        ] {
+            let layout = profile.exr_channel_layout();
+            assert_eq!(profile.code(), expected_code);
+            assert_eq!(layout.len(), profile.float_channel_count() as usize);
+            assert!(
+                layout.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "public EXR layout for {expected_code} is not in canonical wire order"
+            );
+            assert!(
+                layout.iter().all(|(_, ty)| *ty == PixelType::Float),
+                "{expected_code} exposed a non-FLOAT channel"
+            );
+
+            let decoded = emitted_profile_exr(profile);
+            assert_eq!(decoded.channels.len(), layout.len());
+            for (emitted, (expected_name, expected_type)) in decoded.channels.iter().zip(layout) {
+                assert_eq!(emitted.name.as_str(), *expected_name);
+                assert_eq!(emitted.ty, *expected_type);
+            }
+            let profile_attribute = decoded
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == "frankensim.aov.profile")
+                .expect("cinematic EXR must retain its profile code");
+            assert_eq!(profile_attribute.ty, STRING_ATTRIBUTE_TYPE);
+            assert_eq!(profile_attribute.value, expected_code.as_bytes());
+        }
     }
 
     #[test]
@@ -2500,6 +2709,34 @@ mod tests {
     }
 
     #[test]
+    fn g0_v2_refuses_the_reserved_authored_shading_normal_path() {
+        let primary = AlignedAovPrimary {
+            primitive_index: 0,
+            object_palette_index: 1,
+            material_palette_index: 1,
+            albedo_linear_rgb: Some([0.1, 0.2, 0.3]),
+            geometric_normal_world: [0.0, 0.0, 1.0],
+            shading_normal_world: [0.0, 0.0, 1.0],
+            has_authored_shading_normal: true,
+            depth_m: 1.0,
+            previous_motion_pixels: None,
+        };
+        let sample = AlignedAovSample {
+            beauty_xyz: [0.0; 3],
+            direct_xyz: [0.0; 3],
+            indirect_xyz: [0.0; 3],
+            emission_xyz: [0.0; 3],
+            pixel_jitter: [0.5, 0.5],
+            absolute_sample: 0,
+            primary: Some(primary),
+        };
+
+        let mut pixel = CommonPixel::EMPTY;
+        assert_eq!(pixel.push(sample), Err(CinematicAovError::InvalidPrimary));
+        assert_eq!(pixel, CommonPixel::EMPTY, "refusal is transactional");
+    }
+
+    #[test]
     fn g0_float_channel_refuses_finite_f64_that_overflows_exr_float() {
         assert_eq!(
             float_channel("R", 1, |_| f64::MAX),
@@ -2515,5 +2752,80 @@ mod tests {
         );
         let boundary = float_channel("R", 1, |_| f64::from(f32::MAX)).unwrap();
         assert_eq!(boundary.data, [f32::MAX]);
+    }
+
+    #[test]
+    fn g0_pollable_palette_encoders_match_unconditional_bytes() {
+        let object_ids = [1, 10, u64::MAX];
+        let unconditional_objects = encode_object_palette(&object_ids).unwrap();
+        let mut object_polls = 0_usize;
+        let pollable_objects = encode_object_palette_with_poll(&object_ids, || {
+            object_polls += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(pollable_objects, unconditional_objects);
+        assert_eq!(
+            pollable_objects,
+            "0=unavailable;1=1;2=10;3=18446744073709551615"
+        );
+        assert_eq!(object_polls, 2 * object_ids.len() + 2);
+
+        let material_ids = [hash("material-a"), hash("material-b"), hash("material-c")];
+        let unconditional_materials = encode_material_palette(&material_ids).unwrap();
+        let mut material_polls = 0_usize;
+        let pollable_materials = encode_material_palette_with_poll(&material_ids, || {
+            material_polls += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(pollable_materials, unconditional_materials);
+        assert_eq!(material_polls, 2 * material_ids.len() + 2);
+    }
+
+    #[test]
+    fn g4_pollable_palette_encoders_refuse_cancellation_without_a_result() {
+        let object_ids = [7, 11];
+        let final_poll = 2 * object_ids.len() + 2;
+        let mut object_polls = 0_usize;
+        assert_eq!(
+            encode_object_palette_with_poll(&object_ids, || {
+                object_polls += 1;
+                object_polls < final_poll
+            }),
+            Err(CinematicAovError::Tracer(
+                crate::tracer::TracerError::Cancelled
+            ))
+        );
+        assert_eq!(object_polls, final_poll);
+
+        assert_eq!(
+            encode_material_palette_with_poll(&[hash("material")], || false),
+            Err(CinematicAovError::Tracer(
+                crate::tracer::TracerError::Cancelled
+            ))
+        );
+    }
+
+    #[test]
+    fn g0_public_metadata_bound_uses_the_exact_conservative_formula() {
+        assert_eq!(cinematic_export_metadata_payload_bound(0, 0), Ok(65_536));
+        assert_eq!(
+            cinematic_export_metadata_payload_bound(2, 3),
+            Ok(65_536 + 2 * 30 + 3 * 74)
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn g0_public_metadata_bound_refuses_64_bit_count_overflow() {
+        assert_eq!(
+            cinematic_export_metadata_payload_bound(usize::MAX, 0),
+            Err(CinematicAovError::SizeOverflow)
+        );
+        assert_eq!(
+            cinematic_export_metadata_payload_bound(0, usize::MAX),
+            Err(CinematicAovError::SizeOverflow)
+        );
     }
 }

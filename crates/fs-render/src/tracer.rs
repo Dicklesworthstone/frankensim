@@ -5706,7 +5706,7 @@ pub fn render_cinematic_adaptive_with_aovs(
         camera_path,
     )?;
     let capture_ids = config.captures_ids();
-    let palette = CinematicAovPalette::from_scene(scene, config.limits(), capture_ids, cx)?;
+    let palette = CinematicAovPalette::try_from_scene(scene, config.limits(), capture_ids, cx)?;
     let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
     let pixel_count = checked_pixel_len(settings.width, settings.height)?;
     // This constructor performs the complete AOV pixel and retained-memory
@@ -5861,7 +5861,8 @@ pub fn render_cinematic_range_with_aovs(
         camera_path,
     )?;
     let capture_ids = film.config().captures_ids();
-    let palette = CinematicAovPalette::from_scene(scene, film.config().limits(), capture_ids, cx)?;
+    let palette =
+        CinematicAovPalette::try_from_scene(scene, film.config().limits(), capture_ids, cx)?;
     let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
     validate_binding(
         film,
