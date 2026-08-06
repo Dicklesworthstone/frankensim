@@ -30,8 +30,8 @@
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
 use crate::aov::{
     AdaptiveAovAccumulator, AdaptiveCinematicAovFilm, AlignedAovPrimary, AlignedAovSample,
-    CinematicAovError, CinematicAovFilm, CinematicAovPalette, adaptive_render_binding,
-    render_binding, validate_binding, validate_reference_times,
+    CinematicAovError, CinematicAovFilm, CinematicAovPalette, MAX_EXACT_F32_INTEGER,
+    adaptive_render_binding, render_binding, validate_binding, validate_reference_times,
 };
 use crate::camera::{
     AnimatedCamera, CameraError, CameraExposure, CutSide, KeyframeFocus, LensSample,
@@ -155,6 +155,10 @@ pub struct PrimaryTraceHit {
     pub primitive_index: usize,
     /// Exact world-space hit shaded by the beauty path.
     pub hit: Hit,
+    /// Face-forwarded world-space surface frame actually consumed by the
+    /// current beauty integrator. This remains separate from the backend's
+    /// pre-face-forward `Hit::shading_normal` diagnostic.
+    pub beauty_shading_normal_world: Vec3,
     /// Deterministic identity of the complete material value on that primitive.
     pub material_identity: ContentHash,
     /// Stable local-space identity and correspondence for instanced geometry.
@@ -5702,15 +5706,19 @@ pub fn render_cinematic_adaptive_with_aovs(
         camera_path,
     )?;
     let capture_ids = config.captures_ids();
-    let palette = CinematicAovPalette::from_scene(scene, config.limits(), capture_ids)?;
+    let palette = CinematicAovPalette::from_scene(scene, config.limits(), capture_ids, cx)?;
     let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
     let pixel_count = checked_pixel_len(settings.width, settings.height)?;
+    // This constructor performs the complete AOV pixel and retained-memory
+    // admission before the larger adaptive beauty allocation below. A request
+    // outside its declared resource envelope therefore fails without first
+    // consuming the very memory it refused.
+    let mut aov =
+        AdaptiveAovAccumulator::try_new(settings.width, settings.height, settings.spp, config)?;
     let state_bytes =
         adaptive_state_bytes(pixel_count).map_err(|_| CinematicAovError::AllocationRefused)?;
     let mut beauty_state = AdaptiveRenderState::try_new(pixel_count, state_bytes)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
-    let mut aov =
-        AdaptiveAovAccumulator::try_new(settings.width, settings.height, settings.spp, config)?;
     let key = [
         (settings.seed & 0xffff_ffff) as u32,
         (settings.seed >> 32) as u32,
@@ -5801,6 +5809,7 @@ pub fn render_cinematic_adaptive_with_aovs(
             *settings,
             shutter,
             exposure.shot_id(),
+            cut_side,
             palette,
             continuity_fingerprint,
             policy,
@@ -5828,6 +5837,15 @@ pub fn render_cinematic_range_with_aovs(
     shutter: ShutterInterval,
 ) -> Result<(), CinematicAovError> {
     cx.checkpoint().map_err(TracerError::from)?;
+    // A committed AOV prefix is resumable only inside the sample ceiling
+    // carried by `Settings`. Refuse before scene/camera admission so a
+    // successful public render cannot later become uncheckpointable.
+    if to > settings.spp {
+        return Err(TracerError::InvalidInput.into());
+    }
+    if film.config().captures_ids() && to > MAX_EXACT_F32_INTEGER {
+        return Err(CinematicAovError::InexactSampleCount { samples: to });
+    }
     let exposure = camera
         .admit_shutter(cx, shutter, cut_side)
         .map_err(TracerError::from)?;
@@ -5843,13 +5861,14 @@ pub fn render_cinematic_range_with_aovs(
         camera_path,
     )?;
     let capture_ids = film.config().captures_ids();
-    let palette = CinematicAovPalette::from_scene(scene, film.config().limits(), capture_ids)?;
+    let palette = CinematicAovPalette::from_scene(scene, film.config().limits(), capture_ids, cx)?;
     let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
     validate_binding(
         film,
         *settings,
         shutter,
         exposure.shot_id(),
+        cut_side,
         &palette,
         continuity_fingerprint,
     )?;
@@ -5857,7 +5876,7 @@ pub fn render_cinematic_range_with_aovs(
         return Ok(());
     }
 
-    let mut staged = film.try_clone_for_stage()?;
+    let mut staged = film.try_clone_for_stage(cx)?;
     let key = [
         (settings.seed & 0xffff_ffff) as u32,
         (settings.seed >> 32) as u32,
@@ -5936,6 +5955,7 @@ pub fn render_cinematic_range_with_aovs(
             *settings,
             shutter,
             exposure.shot_id(),
+            cut_side,
             palette,
             continuity_fingerprint,
         ));
@@ -5978,10 +5998,7 @@ fn prepare_aligned_aov_primary(
         }
     };
     let geometric_normal_world = aov_unit_normal(primary.hit.normal)?;
-    let (shading_normal_world, has_authored_shading_normal) = match primary.hit.shading_normal {
-        Some(normal) => (aov_unit_normal(Some(normal))?, true),
-        None => (geometric_normal_world, false),
-    };
+    let shading_normal_world = aov_unit_normal(Some(primary.beauty_shading_normal_world))?;
     let albedo_linear_rgb = match primitive.material {
         Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
             let rgb = reflectance.rgb();
@@ -6035,7 +6052,11 @@ fn prepare_aligned_aov_primary(
         albedo_linear_rgb,
         geometric_normal_world,
         shading_normal_world,
-        has_authored_shading_normal,
+        // The v1 beauty integrator shades with its face-forwarded geometric
+        // frame, not the backend-authored shading normal. Keep the authored
+        // validity bit clear until a transport-correct shading-normal design
+        // is implemented.
+        has_authored_shading_normal: false,
         depth_m,
         previous_motion_pixels,
     }))
@@ -6629,6 +6650,7 @@ fn trace_path(
             &hit,
         )?;
         let prim = &scene.primitives[prim_idx];
+        let frame = surface_frame(&hit, &ray)?;
         if capture_primary && depth == 0 {
             let material_identity = prim.material.content_identity();
             let surface = instance_hit
@@ -6640,11 +6662,11 @@ fn trace_path(
             primary = Some(PrimaryTraceHit {
                 primitive_index: prim_idx,
                 hit,
+                beauty_shading_normal_world: frame.oriented,
                 material_identity,
                 surface,
             });
         }
-        let frame = surface_frame(&hit, &ray)?;
         let n = frame.oriented;
         if let Some((spec, scale)) = &prim.emission {
             // MIS weight against NEE for this light, seen from the

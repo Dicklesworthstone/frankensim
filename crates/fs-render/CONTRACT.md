@@ -157,11 +157,14 @@ differentiable lift). Pure Rust throughout.
   allocate nor carry these planes. `CinematicAovConfig` freezes one profile,
   L6-supplied finite ordered current/previous/next frame times and nonzero
   trajectory, scene, and composition assertions, plus explicit pixel, retained
-  payload, EXR-plane, and palette limits. Those supplied identities are retained
-  provenance assertions, not scene or trajectory authority minted from borrowed
-  renderer data. `BeautyOnly` exports the three linear-sRGB beauty channels;
-  `DailyCore` additionally exports linear-sRGB reflectance albedo, world-unit
-  shading normal, axial-metre depth, `primary.coverage`, unbiased raw CIE-Y
+  payload, EXR-plane, EXR-metadata, EXR-encoder-scratch, encoded-EXR-output,
+  and palette limits. Every limit is part of configuration identity and uniform
+  checkpoint state. Those supplied identities are retained provenance
+  assertions, not scene or trajectory authority minted from borrowed renderer
+  data. `BeautyOnly` exports the three linear-sRGB beauty channels;
+  `DailyCore` additionally exports linear-sRGB reflectance albedo, the
+  normalized face-forwarded world-space surface frame actually consumed by
+  beauty, axial-metre depth, `primary.coverage`, unbiased raw CIE-Y
   sample variance, and previous-minus-current raster-pixel motion (14 `FLOAT`
   channels total); `FinalDiagnostic` additionally exports world-unit geometric
   normal, direct/indirect/emission linear-sRGB beauty splits, object/material
@@ -170,8 +173,11 @@ differentiable lift). Pure Rust throughout.
   primary hits; no primary hit produces zero surface values and zero
   `primary.coverage`. `primary.coverage` is the primary-hit fraction, so it is
   the DailyCore validity indicator; FinalDiagnostic additionally names valid
-  primary, albedo, authored shading-normal, previous-motion, object-ID,
-  material-ID, and contribution-split observations in its bit mask. Palette
+  primary, albedo, previous-motion, object-ID, material-ID, and
+  contribution-split observations in its bit mask. The authored-shading-normal
+  validity bit is reserved and remains clear in AOV semantics v2 because the
+  beauty transport does not yet consume backend-authored shading normals.
+  Palette
   index zero always means background or unavailable; nonzero object IDs and
   material content hashes are stored losslessly in sorted EXR metadata palettes.
   Final categorical IDs select the accepted primary closest to the pixel centre,
@@ -191,27 +197,63 @@ differentiable lift). Pure Rust throughout.
   and is not an authority-bearing content identity. `render_cinematic_adaptive_with_aovs`
   retains the adaptive film's exact per-pixel terminal prefix and matching AOV
   observations. AOV samples never participate in the adaptive stopping decision
-  and cannot change its terminal count; adaptive `samples` exports the actual
-  per-pixel count.
+  and cannot change its terminal count. `FinalDiagnostic` exports the actual
+  per-pixel count in `samples`; narrower frozen profiles retain counts
+  internally and set `frankensim.render.spp=per-pixel-unexported-by-profile`
+  instead of naming a nonexistent channel.
 
   `to_exr` emits deterministic `FLOAT` planes and raw-estimate metadata naming
   the AOV schema/profile/configuration hash, channel and invalid-value
   semantics, material domain, frame/provenance assertions, render sampler and
-  strategy, uniform or adaptive sample mode and policy, renderer versions, and
-  exact palettes. The `frankensim.aov.authority=raw-estimate` marker is
+  strategy, uniform or adaptive sample mode and policy, exact shutter
+  convention/distribution/strata, renderer versions, and exact palettes. The
+  `frankensim.aov.authority=raw-estimate` marker is
   intentional: these images do not certify material truth, target-frame
   visibility, physical trajectory truth, mechanical state, or an image-error
   bound. Retained-payload admission covers owned beauty/AOV accumulator payloads
   (and the uniform progressive full-frame staging copy); export admission covers
-  uncompressed `f32` plane storage. Neither limit covers allocator overhead,
-  metadata strings, EXR encoder scratch, encoded output, process RSS, or
-  throughput.
+  four independently refused logical categories: uncompressed `f32` plane
+  storage, channel-descriptor plus metadata payloads, EXR canonical-order
+  reference scratch, and the exact encoded EXR artifact length. Scene-sized
+  palette metadata is bounded before construction; the encoder sizes a 4K
+  layout without allocating its planes, reserves its output once, and returns
+  no partial artifact on refusal. The public defaults admit the 30-channel 4K
+  profile (995,328,000 plane bytes and an encoded artifact below 1 GiB), while
+  preserving distinct ceilings so callers can choose a smaller profile or
+  envelope. These logical payload limits do not claim allocator bookkeeping,
+  allocator usable-size rounding, process RSS, or throughput; the current
+  returned-`Vec` path necessarily holds staged planes and encoded output
+  concurrently during finalization.
 
-  There is currently no AOV-specific pending/resume state, checkpoint codec,
-  checkpoint restore, shard specification, shard result, or shard merge API.
-  The existing checkpoint and uniform-shard surfaces apply to their legacy RGB
-  films only and must not be represented as persistence or distributed merge
-  support for cinematic AOV films.
+  Progressive uniform `CinematicAovFilm` state has a distinct `FSRAOVC1`
+  checkpoint codec; legacy `FSRCP001` bytes remain unchanged. The AOV codec
+  streams at most 64 KiB payload chunks plus one 32-byte seal under an explicit
+  encoded-byte ceiling. It stores every raw beauty/AOV accumulator field,
+  committed uniform sample prefix, exact profile/configuration/provenance,
+  all four export ceilings, settings, shutter/shot/cut-side binding, sorted
+  palettes, and the process-local
+  continuity fingerprint field-by-field in little-endian form. Restore checks
+  the domain-separated seal, exact profile-dependent length, semantic versions,
+  canonical finite values, count relationships, palette ordering/ranges, and
+  render binding before publishing a film. The caller must also supply the
+  independently expected complete AOV configuration and exact uniform render
+  binding, including its committed sample prefix; an internally coherent
+  checkpoint for another job or an older prefix is refused.
+  Restoring a committed prefix and
+  continuing through `render_cinematic_range_with_aovs` is bitwise equivalent
+  to straight-through accumulation. The seal detects accidental corruption or
+  unresealed substitution; it provides neither authentication nor adversarial
+  integrity, and the supplied L6 identities
+  retain their assertion-only authority. Because a direct chart currently has
+  no content identity, its continuity guard contains a process-local allocation
+  address and a cross-process chart resume correctly refuses rather than
+  pretending identity.
+
+  There is currently no AOV-specific tile-pending state, adaptive checkpoint
+  codec/resume state, shard specification, shard result, or shard merge API.
+  The existing tracer checkpoint and uniform-shard surfaces still apply only to
+  their legacy RGB films and must not be represented as adaptive persistence or
+  distributed merge support for cinematic AOV films.
 
 - `tracer` crash-recovery codec (bead `frankensim-h7xu5.5.3`):
   `PendingRender` and `PendingAdaptiveRender` stream a schema-versioned,

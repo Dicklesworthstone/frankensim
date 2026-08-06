@@ -67,6 +67,34 @@ fn quad() -> TriMesh {
     )
 }
 
+fn backface_quad() -> TriMesh {
+    TriMesh::new(
+        vec![
+            [-0.75, -0.75, 0.0],
+            [0.75, -0.75, 0.0],
+            [0.75, 0.75, 0.0],
+            [-0.75, 0.75, 0.0],
+        ],
+        vec![[0, 2, 1], [0, 3, 2]],
+    )
+}
+
+fn left_pixel_quad() -> TriMesh {
+    // At z=0 with the 2x1 test camera, the left pixel footprint spans
+    // x in [-1, 0) and y in [-0.5, 0.5]. Keep the right edge just below zero
+    // so every sub-pixel sample in pixel 0 hits and every sample in pixel 1
+    // misses, including a hypothetical zero jitter value.
+    TriMesh::new(
+        vec![
+            [-1.1, -0.75, 0.0],
+            [-1.0e-9, -0.75, 0.0],
+            [-1.0e-9, 0.75, 0.0],
+            [-1.1, 0.75, 0.0],
+        ],
+        vec![[0, 1, 2], [0, 2, 3]],
+    )
+}
+
 fn scene(animated: bool) -> Scene {
     let geometry = SharedGeometry::mesh(quad());
     let shape = if animated {
@@ -198,6 +226,26 @@ fn config_with_times(
 
 fn config(profile: CinematicAovProfile) -> CinematicAovConfig {
     config_with_times(profile, 0.0, 0.5, 1.0)
+}
+
+fn config_with_limits(
+    profile: CinematicAovProfile,
+    limits: CinematicAovLimits,
+) -> CinematicAovConfig {
+    CinematicAovConfig::new(
+        profile,
+        CinematicAovProvenance::try_new(
+            12,
+            0.5,
+            0.0,
+            1.0,
+            hash("trajectory"),
+            hash("scene"),
+            hash("composition"),
+        )
+        .unwrap(),
+        limits,
+    )
 }
 
 fn assert_film_bits_eq(left: &Film, right: &Film) {
@@ -386,6 +434,10 @@ fn g0_final_exr_round_trip_has_exact_channels_palettes_and_units() {
         b"raw-estimate"
     );
     assert_eq!(
+        attribute(&decoded, "frankensim.render.shutter").value,
+        b"convention=front-loaded;distribution=stratified-counter-v1;strata=1024"
+    );
+    assert_eq!(
         attribute(&decoded, "frankensim.aov.objectPalette").value,
         b"0=unavailable;1=101"
     );
@@ -494,8 +546,12 @@ fn g0_every_profile_has_its_exact_frozen_channel_schema() {
 #[test]
 fn g0_true_background_exports_finite_zero_surface_aovs_and_zero_ids() {
     let mut background = scene(false);
-    background.primitives.clear();
-    background.lights.clear();
+    // Retain the admitted rectangular emitter at x=9 while removing the
+    // camera-facing primitive. The primary ray therefore observes a genuine
+    // black background without violating the tracer's finite-emitter
+    // admission contract.
+    background.primitives.remove(0);
+    background.lights[0].prim = 0;
     let camera = camera(&background);
     let film = with_cx(|cx| {
         render_cinematic_with_aovs(
@@ -530,10 +586,91 @@ fn g0_true_background_exports_finite_zero_surface_aovs_and_zero_ids() {
         attribute(&decoded, "frankensim.aov.objectPalette").value,
         b"0=unavailable"
     );
-    assert_eq!(
-        attribute(&decoded, "frankensim.aov.materialPalette").value,
-        b"0=unavailable"
+    assert!(
+        attribute(&decoded, "frankensim.aov.materialPalette")
+            .value
+            .starts_with(b"0=unavailable;1="),
+        "the off-camera emitter remains in the exact scene palette"
     );
+}
+
+#[test]
+fn g0_foreground_background_edge_keeps_every_aov_on_its_beauty_pixel() {
+    let mut scene = scene(true);
+    let stationary = RigidTransformTrajectory::try_new(vec![
+        TransformKeyframe::try_new(0.0, RigidTransform::identity(), [0.0, 0.0, 0.0]).unwrap(),
+        TransformKeyframe::try_new(1.0, RigidTransform::identity(), [0.0, 0.0, 0.0]).unwrap(),
+    ])
+    .unwrap();
+    scene.primitives[0].shape = Shape::AnimatedInstance(
+        AnimatedGeometryInstance::try_new(
+            101,
+            hash("left-pixel-geometry"),
+            SharedGeometry::mesh(left_pixel_quad()),
+            stationary,
+        )
+        .unwrap(),
+    );
+    let camera = camera(&scene);
+    let mut edge_settings = settings(4);
+    edge_settings.width = 2;
+    let film = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &edge_settings,
+            shutter(),
+            config(CinematicAovProfile::FinalDiagnostic),
+        )
+        .unwrap()
+    });
+    assert_eq!(film.beauty().width, 2);
+    assert_eq!(film.beauty().height, 1);
+    assert_eq!(film.primary_count(0), Some(4));
+    assert_eq!(film.primary_count(1), Some(0));
+
+    let decoded = fs_img::read_exr(&film.to_exr().unwrap()).unwrap();
+    assert!(decoded.channels.iter().all(|plane| {
+        plane.data.len() == 2 && plane.data.iter().all(|sample| sample.is_finite())
+    }));
+    assert_eq!(channel(&decoded, "samples").data, [4.0, 4.0]);
+    assert_eq!(channel(&decoded, "primary.coverage").data, [1.0, 0.0]);
+    assert_eq!(channel(&decoded, "id.object").data, [1.0, 0.0]);
+    assert_eq!(channel(&decoded, "id.material").data, [1.0, 0.0]);
+    assert!(channel(&decoded, "depth.Z").data[0] > 0.0);
+    assert_eq!(channel(&decoded, "depth.Z").data[1], 0.0);
+    for name in [
+        "albedo.R",
+        "albedo.G",
+        "albedo.B",
+        "normal.Z",
+        "normal_geom.Z",
+    ] {
+        let plane = &channel(&decoded, name).data;
+        assert_ne!(plane[0], 0.0, "foreground {name} must be populated");
+        assert_eq!(plane[1], 0.0, "background {name} leaked across the edge");
+    }
+    for name in ["R", "G", "B", "emission.R", "emission.G", "emission.B"] {
+        assert_eq!(
+            channel(&decoded, name).data[1],
+            0.0,
+            "background {name} leaked across the edge"
+        );
+    }
+    assert!(
+        ["R", "G", "B"]
+            .into_iter()
+            .any(|name| channel(&decoded, name).data[0] != 0.0),
+        "foreground beauty must be present at pixel 0"
+    );
+    let foreground_validity = channel(&decoded, "diagnostic.validity").data[0] as u32;
+    let background_validity = channel(&decoded, "diagnostic.validity").data[1] as u32;
+    assert_ne!(foreground_validity & validity::PRIMARY, 0);
+    assert_ne!(foreground_validity & validity::OBJECT_ID, 0);
+    assert_ne!(foreground_validity & validity::MATERIAL_ID, 0);
+    assert_eq!(background_validity, validity::CONTRIBUTION_SPLIT);
 }
 
 #[test]
@@ -663,9 +800,58 @@ fn g3_adaptive_aovs_preserve_the_exact_uniform_prefix_and_export_terminal_counts
         b"4"
     );
     let adaptive_policy =
-        std::str::from_utf8(&attribute(&decoded, "frankensim.render.adaptivePolicy").value)
-            .unwrap();
+        std::str::from_utf8(&attribute(&decoded, "frankensim.render.adaptive").value).unwrap();
     assert!(adaptive_policy.starts_with("version=1;minimum=2;batch=1;"));
+
+    let daily = with_cx(|cx| {
+        render_cinematic_adaptive_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &maximum,
+            policy,
+            shutter(),
+            config(CinematicAovProfile::DailyCore),
+        )
+        .unwrap()
+    });
+    let daily = fs_img::read_exr(&daily.to_exr().unwrap()).unwrap();
+    assert!(
+        daily
+            .channels
+            .iter()
+            .all(|channel| channel.name != "samples")
+    );
+    assert_eq!(
+        attribute(&daily, "frankensim.render.spp").value,
+        b"per-pixel-unexported-by-profile"
+    );
+}
+
+#[test]
+fn g0_shading_normal_matches_the_face_forwarded_beauty_frame() {
+    let mut scene = scene(false);
+    scene.primitives[0].shape = Shape::Mesh(backface_quad());
+    scene.primitives[0].emission = None;
+    let camera = camera(&scene);
+    let film = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings(1),
+            shutter(),
+            config(CinematicAovProfile::FinalDiagnostic),
+        )
+        .unwrap()
+    });
+    let decoded = fs_img::read_exr(&film.to_exr().unwrap()).unwrap();
+    assert!(channel(&decoded, "normal.Z").data[0] > 0.999);
+    assert!(channel(&decoded, "normal_geom.Z").data[0] < -0.999);
+    let mask = channel(&decoded, "diagnostic.validity").data[0] as u32;
+    assert_eq!(mask & validity::AUTHORED_SHADING_NORMAL, 0);
 }
 
 #[test]
@@ -760,21 +946,7 @@ fn g3_progressive_ranges_equal_straight_through_and_mismatch_rolls_back() {
             shutter(),
         )
         .unwrap();
-        render_cinematic_range_with_aovs(
-            &scene,
-            &camera,
-            CutSide::After,
-            cx,
-            &settings,
-            &mut progressive,
-            2,
-            4,
-            shutter(),
-        )
-        .unwrap();
     });
-    assert_film_bits_eq(straight.beauty(), progressive.beauty());
-    assert_eq!(straight.to_exr().unwrap(), progressive.to_exr().unwrap());
 
     let before = progressive.to_exr().unwrap();
     let changed_camera = camera_at(&scene, Point3::new(0.125, 0.0, 2.0));
@@ -786,8 +958,8 @@ fn g3_progressive_ranges_equal_straight_through_and_mismatch_rolls_back() {
             cx,
             &settings,
             &mut progressive,
-            4,
-            5,
+            2,
+            3,
             shutter(),
         )
     });
@@ -808,13 +980,33 @@ fn g3_progressive_ranges_equal_straight_through_and_mismatch_rolls_back() {
             cx,
             &settings,
             &mut progressive,
-            4,
-            5,
+            2,
+            3,
             shutter(),
         )
     });
     assert_eq!(error, Err(CinematicAovError::ProgressiveBindingMismatch));
     assert_eq!(progressive.to_exr().unwrap(), before);
+
+    scene.primitives[0].material = Material::Lambertian {
+        reflectance: lift_rgb([0.7, 0.4, 0.2]),
+    };
+    with_cx(|cx| {
+        render_cinematic_range_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            2,
+            4,
+            shutter(),
+        )
+        .unwrap();
+    });
+    assert_film_bits_eq(straight.beauty(), progressive.beauty());
+    assert_eq!(straight.to_exr().unwrap(), progressive.to_exr().unwrap());
 }
 
 #[test]
@@ -906,4 +1098,78 @@ fn g0_direct_mesh_object_identity_and_motion_are_unavailable_not_forged() {
     assert_eq!(mask & validity::PREVIOUS_MOTION, 0);
     assert_ne!(mask & validity::PRIMARY, 0);
     assert_ne!(mask & validity::MATERIAL_ID, 0);
+}
+
+#[test]
+fn g0_each_export_buffer_category_has_an_independent_fail_closed_ceiling() {
+    let scene = scene(true);
+    let camera = camera(&scene);
+    let defaults = CinematicAovLimits::default();
+    let limits = |planes, metadata, scratch, output| {
+        CinematicAovLimits::try_new(
+            defaults.max_pixels(),
+            defaults.max_retained_bytes(),
+            planes,
+            metadata,
+            scratch,
+            output,
+            defaults.max_palette_entries(),
+        )
+        .unwrap()
+    };
+    let render = |limits| {
+        with_cx(|cx| {
+            render_cinematic_with_aovs(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings(1),
+                shutter(),
+                config_with_limits(CinematicAovProfile::FinalDiagnostic, limits),
+            )
+            .unwrap()
+        })
+    };
+
+    assert!(matches!(
+        render(limits(
+            1,
+            defaults.max_export_metadata_bytes(),
+            defaults.max_exr_encoder_scratch_bytes(),
+            defaults.max_encoded_exr_bytes(),
+        ))
+        .to_exr(),
+        Err(CinematicAovError::ExportMemoryLimit { .. })
+    ));
+    assert!(matches!(
+        render(limits(
+            defaults.max_export_plane_bytes(),
+            1,
+            defaults.max_exr_encoder_scratch_bytes(),
+            defaults.max_encoded_exr_bytes(),
+        ))
+        .to_exr(),
+        Err(CinematicAovError::ExportMetadataMemoryLimit { .. })
+    ));
+    assert!(matches!(
+        render(limits(
+            defaults.max_export_plane_bytes(),
+            defaults.max_export_metadata_bytes(),
+            1,
+            defaults.max_encoded_exr_bytes(),
+        ))
+        .to_exr(),
+        Err(CinematicAovError::ExrEncoderScratchLimit { .. })
+    ));
+    assert!(matches!(
+        render(limits(
+            defaults.max_export_plane_bytes(),
+            defaults.max_export_metadata_bytes(),
+            defaults.max_exr_encoder_scratch_bytes(),
+            1,
+        ))
+        .to_exr(),
+        Err(CinematicAovError::EncodedExrMemoryLimit { .. })
+    ));
 }
