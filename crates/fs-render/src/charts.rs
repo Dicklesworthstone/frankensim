@@ -75,6 +75,25 @@ pub struct Hit {
     pub steps: u32,
 }
 
+/// A triangle hit together with the stable local-surface witness needed to
+/// identify and reproject the same point on immutable mesh geometry.
+///
+/// `barycentric` is ordered like the triangle's three vertex indices. The
+/// original triangle index, rather than BVH leaf order, is the feature
+/// identity. This payload is deliberately separate from [`Hit`] so existing
+/// shading callers can retain their compact API while AOV/motion consumers do
+/// not have to reverse-engineer correspondence from a world-space point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshHit {
+    /// Geometric hit data in the mesh's current coordinate system.
+    pub hit: Hit,
+    /// Index into [`TriMesh::triangles`].
+    pub triangle_index: u32,
+    /// Barycentric weights `[w0, w1, w2]`, summing to one up to binary64
+    /// evaluation error.
+    pub barycentric: [f64; 3],
+}
+
 /// Structured admission/execution failures for the public NURBS ray path. A
 /// malformed chart or impossible request is not a geometric miss.
 #[derive(Debug, Clone, PartialEq)]
@@ -2031,7 +2050,17 @@ impl TriMesh {
     /// Closest triangle intersection (Möller–Trumbore through the BVH).
     #[must_use]
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
-        match self.intersect_impl(None, ray) {
+        match self.intersect_surface_impl(None, ray) {
+            Ok(hit) => hit.map(|hit| hit.hit),
+            Err(_) => unreachable!("no cancellation context was supplied"),
+        }
+    }
+
+    /// Closest triangle intersection retaining original-triangle and
+    /// barycentric correspondence.
+    #[must_use]
+    pub fn intersect_surface(&self, ray: &Ray) -> Option<MeshHit> {
+        match self.intersect_surface_impl(None, ray) {
             Ok(hit) => hit,
             Err(_) => unreachable!("no cancellation context was supplied"),
         }
@@ -2039,14 +2068,25 @@ impl TriMesh {
 
     /// Cancellable closest triangle intersection for production render paths.
     pub fn intersect_with_cx(&self, cx: &Cx<'_>, ray: &Ray) -> Result<Option<Hit>, Cancelled> {
-        self.intersect_impl(Some(cx), ray)
+        self.intersect_surface_impl(Some(cx), ray)
+            .map(|hit| hit.map(|hit| hit.hit))
     }
 
-    fn intersect_impl(
+    /// Cancellable closest triangle intersection retaining local-surface
+    /// correspondence for motion vectors and categorical AOVs.
+    pub fn intersect_surface_with_cx(
+        &self,
+        cx: &Cx<'_>,
+        ray: &Ray,
+    ) -> Result<Option<MeshHit>, Cancelled> {
+        self.intersect_surface_impl(Some(cx), ray)
+    }
+
+    fn intersect_surface_impl(
         &self,
         cx: Option<&Cx<'_>>,
         input_ray: &Ray,
-    ) -> Result<Option<Hit>, Cancelled> {
+    ) -> Result<Option<MeshHit>, Cancelled> {
         if let Some(cx) = cx {
             cx.checkpoint()?;
         }
@@ -2056,7 +2096,7 @@ impl TriMesh {
         if self.nodes.is_empty() {
             return Ok(None);
         }
-        let mut best: Option<Hit> = None;
+        let mut best: Option<MeshHit> = None;
         let mut stack = vec![0u32];
         let mut visits = 0u32;
         while let Some(id) = stack.pop() {
@@ -2065,7 +2105,12 @@ impl TriMesh {
             }
             visits += 1;
             let node = &self.nodes[id as usize];
-            if !slab_hit(&ray, node.lo, node.hi, best.map_or(f64::INFINITY, |h| h.t)) {
+            if !slab_hit(
+                &ray,
+                node.lo,
+                node.hi,
+                best.map_or(f64::INFINITY, |hit| hit.hit.t),
+            ) {
                 continue;
             }
             if node.leaf {
@@ -2078,9 +2123,11 @@ impl TriMesh {
                         cx.checkpoint()?;
                     }
                     if let Some(mut hit) = candidate
-                        && best.as_ref().is_none_or(|b| hit.t < b.t)
+                        && best
+                            .as_ref()
+                            .is_none_or(|current| mesh_hit_precedes(hit, *current))
                     {
-                        hit.steps = visits;
+                        hit.hit.steps = visits;
                         best = Some(hit);
                     }
                 }
@@ -2092,47 +2139,63 @@ impl TriMesh {
         if let Some(cx) = cx {
             cx.checkpoint()?;
         }
-        Ok(best.and_then(|mut hit| {
-            let parameter_t = hit.t / parameter_scale;
+        Ok(best.and_then(|mut mesh_hit| {
+            let parameter_t = mesh_hit.hit.t / parameter_scale;
             if !parameter_t.is_finite() || parameter_t <= 0.0 {
                 return None;
             }
-            hit.t = parameter_t;
-            hit.point = input_ray.at(parameter_t);
-            if !hit.point.x.is_finite() || !hit.point.y.is_finite() || !hit.point.z.is_finite() {
+            mesh_hit.hit.t = parameter_t;
+            mesh_hit.hit.point = input_ray.at(parameter_t);
+            if !mesh_hit.hit.point.x.is_finite()
+                || !mesh_hit.hit.point.y.is_finite()
+                || !mesh_hit.hit.point.z.is_finite()
+            {
                 return None;
             }
-            Some(hit)
+            Some(mesh_hit)
         }))
     }
 
     /// Closest hit without BVH pruning, for parity/falsifier diagnostics.
     #[must_use]
     pub fn intersect_bruteforce(&self, input_ray: &Ray) -> Option<Hit> {
+        self.intersect_surface_bruteforce(input_ray)
+            .map(|hit| hit.hit)
+    }
+
+    /// Closest unaccelerated hit retaining the same local-surface witness as
+    /// [`Self::intersect_surface`]. This is a parity/falsifier diagnostic.
+    #[must_use]
+    pub fn intersect_surface_bruteforce(&self, input_ray: &Ray) -> Option<MeshHit> {
         let (ray, parameter_scale) = scaled_parameter_ray(input_ray)?;
         let mut best = None;
         for triangle in 0..self.triangles.len() as u32 {
             if let Some(hit) = self.tri_hit(&ray, triangle)
-                && best.as_ref().is_none_or(|current: &Hit| hit.t < current.t)
+                && best
+                    .as_ref()
+                    .is_none_or(|current: &MeshHit| mesh_hit_precedes(hit, *current))
             {
                 best = Some(hit);
             }
         }
-        best.and_then(|mut hit| {
-            let parameter_t = hit.t / parameter_scale;
+        best.and_then(|mut mesh_hit| {
+            let parameter_t = mesh_hit.hit.t / parameter_scale;
             if !parameter_t.is_finite() || parameter_t <= 0.0 {
                 return None;
             }
-            hit.t = parameter_t;
-            hit.point = input_ray.at(parameter_t);
-            if !hit.point.x.is_finite() || !hit.point.y.is_finite() || !hit.point.z.is_finite() {
+            mesh_hit.hit.t = parameter_t;
+            mesh_hit.hit.point = input_ray.at(parameter_t);
+            if !mesh_hit.hit.point.x.is_finite()
+                || !mesh_hit.hit.point.y.is_finite()
+                || !mesh_hit.hit.point.z.is_finite()
+            {
                 return None;
             }
-            Some(hit)
+            Some(mesh_hit)
         })
     }
 
-    fn tri_hit(&self, ray: &Ray, ti: u32) -> Option<Hit> {
+    fn tri_hit(&self, ray: &Ray, ti: u32) -> Option<MeshHit> {
         let t = self.triangles[ti as usize];
         let a = self.vertices[t[0] as usize];
         let b = self.vertices[t[1] as usize];
@@ -2167,19 +2230,34 @@ impl TriMesh {
             let normal = (nn > 1e-12).then(|| Vec3::new(n[0] / nn, n[1] / nn, n[2] / nn));
             let dp_du = Vec3::new(e1[0], e1[1], e1[2]);
             let dp_dv = Vec3::new(e2[0], e2[1], e2[2]);
-            Hit {
-                t: tt,
-                point: ray.at(tt),
-                normal,
-                shading_normal: normal,
-                tangent_u: normalize_gradient(dp_du),
-                tangent_v: normalize_gradient(dp_dv),
-                dp_du: Some(dp_du),
-                dp_dv: Some(dp_dv),
-                steps: 0,
+            let canonical_zero = |value: f64| if value == 0.0 { 0.0 } else { value };
+            MeshHit {
+                hit: Hit {
+                    t: tt,
+                    point: ray.at(tt),
+                    normal,
+                    shading_normal: normal,
+                    tangent_u: normalize_gradient(dp_du),
+                    tangent_v: normalize_gradient(dp_dv),
+                    dp_du: Some(dp_du),
+                    dp_dv: Some(dp_dv),
+                    steps: 0,
+                },
+                triangle_index: ti,
+                barycentric: [
+                    canonical_zero(1.0 - u - v),
+                    canonical_zero(u),
+                    canonical_zero(v),
+                ],
             }
         })
     }
+}
+
+#[allow(clippy::float_cmp)] // Exact-distance ties have a specified feature-ID tie-break.
+fn mesh_hit_precedes(candidate: MeshHit, current: MeshHit) -> bool {
+    candidate.hit.t < current.hit.t
+        || (candidate.hit.t == current.hit.t && candidate.triangle_index < current.triangle_index)
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {

@@ -346,16 +346,34 @@ impl GeometryInstance {
                     }
                     termination => return Err(InstanceError::BackendFailure(termination)),
                 };
-                (hit, InstanceBackendAudit::Chart(trace_audit))
+                (
+                    hit.map(|hit| (hit, InstanceSurfaceFeature::ChartUnavailable)),
+                    InstanceBackendAudit::Chart(trace_audit),
+                )
             }
-            SharedGeometry::Mesh(mesh) => (
-                mesh.intersect_with_cx(cx, &local_ray)?,
-                InstanceBackendAudit::Mesh {
-                    bvh_fingerprint: mesh.bvh_fingerprint(),
-                },
-            ),
+            SharedGeometry::Mesh(mesh) => {
+                let hit = mesh
+                    .intersect_surface_with_cx(cx, &local_ray)?
+                    .map(|mesh_hit| {
+                        (
+                            mesh_hit.hit,
+                            InstanceSurfaceFeature::MeshTriangle {
+                                triangle_index: mesh_hit.triangle_index,
+                                barycentric: mesh_hit.barycentric,
+                            },
+                        )
+                    });
+                (
+                    hit,
+                    InstanceBackendAudit::Mesh {
+                        bvh_fingerprint: mesh.bvh_fingerprint(),
+                    },
+                )
+            }
         };
-        let Some(local_hit) = hit.filter(|hit| hit.t > 0.0 && hit.t <= t_max) else {
+        let Some((local_hit, surface_feature)) =
+            hit.filter(|(hit, _)| hit.t > 0.0 && hit.t <= t_max)
+        else {
             return Ok(None);
         };
         let world_hit = transform_hit(self.transform, local_hit)?;
@@ -364,6 +382,8 @@ impl GeometryInstance {
             object_id: self.object_id,
             geometry_identity: self.geometry_identity,
             frame_identity: self.frame_identity(),
+            local_hit,
+            surface_feature,
             hit: world_hit,
             backend_audit: audit,
         }))
@@ -382,6 +402,26 @@ pub enum InstanceBackendAudit {
     },
 }
 
+/// Stable local feature witness retained by an instance hit.
+///
+/// A mesh triangle index is stable for one immutable ordered mesh artifact and
+/// its barycentric coordinates reconstruct the same local point. Generic
+/// charts do not currently expose a stable surface parameter, so their object
+/// and material identities remain usable while temporal correspondence is
+/// explicitly unavailable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InstanceSurfaceFeature {
+    /// The chart backend has no admitted stable surface parameterization.
+    ChartUnavailable,
+    /// Original mesh triangle and its local barycentric point.
+    MeshTriangle {
+        /// Index into the immutable mesh's triangle array.
+        triangle_index: u32,
+        /// Weights ordered like that triangle's three vertex indices.
+        barycentric: [f64; 3],
+    },
+}
+
 /// Closest world-space hit with stable object and geometry identities.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InstanceHit {
@@ -391,6 +431,11 @@ pub struct InstanceHit {
     pub geometry_identity: ContentHash,
     /// Identity of object, geometry, and current transform.
     pub frame_identity: ContentHash,
+    /// Complete local-space hit used to map the same rigid material point at
+    /// another pose. Local geometric and shading normals remain distinct.
+    pub local_hit: Hit,
+    /// Backend-specific stable feature witness, or an explicit chart refusal.
+    pub surface_feature: InstanceSurfaceFeature,
     /// World-space hit with unchanged ray parameter.
     pub hit: Hit,
     /// Authority/audit from the local backend.

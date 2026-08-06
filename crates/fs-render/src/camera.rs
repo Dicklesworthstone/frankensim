@@ -634,6 +634,29 @@ pub struct PhysicalCamera {
     exposure: ExposureMetadata,
 }
 
+/// Projection of a world point through the deterministic optical centre.
+///
+/// This is the geometric reprojection model used by motion vectors. It is
+/// intentionally independent of a stochastic thin-lens sample: aperture blur
+/// is not object motion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OpticalCenterProjection {
+    /// The point is in front of the camera. NDC uses `+x` right and `+y` up;
+    /// values outside `[-1, 1]` are valid off-screen projections.
+    InFront {
+        /// Normalized device coordinates.
+        ndc_xy: [f64; 2],
+        /// Positive axial camera depth in metres.
+        depth_m: f64,
+    },
+    /// The point lies on or behind the lens plane and has no perspective
+    /// raster correspondence.
+    BehindCamera {
+        /// Nonpositive signed axial camera depth in metres.
+        signed_depth_m: f64,
+    },
+}
+
 #[derive(Clone, Copy)]
 struct CameraBasis {
     forward: Vec3,
@@ -822,6 +845,46 @@ impl PhysicalCamera {
     #[must_use]
     pub const fn exposure_metadata(&self) -> ExposureMetadata {
         self.exposure
+    }
+
+    /// Project a finite world point through the optical centre into NDC.
+    ///
+    /// `aspect_ratio = width / height` is explicit. The legacy zero-half-tan
+    /// center-ray fixture is not an invertible image projection and therefore
+    /// refuses here. Thin-lens aperture state does not affect this mapping.
+    pub fn project_from_optical_center(
+        &self,
+        world_point: Point3,
+        aspect_ratio: f64,
+    ) -> Result<OpticalCenterProjection, CameraError> {
+        ensure_point_finite(world_point)?;
+        let half_tan = self.projection.vertical_half_tan();
+        if !aspect_ratio.is_finite()
+            || aspect_ratio <= 0.0
+            || !half_tan.is_finite()
+            || half_tan <= 0.0
+        {
+            return Err(CameraError::InvalidProjection);
+        }
+        let from_eye = world_point.delta_from(self.eye);
+        ensure_vec_finite(from_eye)?;
+        let depth_m = from_eye.dot(self.forward);
+        if !depth_m.is_finite() {
+            return Err(CameraError::InvalidProjection);
+        }
+        if depth_m <= 0.0 {
+            return Ok(OpticalCenterProjection::BehindCamera {
+                signed_depth_m: canonical_zero(depth_m),
+            });
+        }
+        let ndc_xy = [
+            (from_eye.dot(self.right) / depth_m) / aspect_ratio / half_tan,
+            (from_eye.dot(self.up) / depth_m) / half_tan,
+        ];
+        if ndc_xy.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(CameraError::InvalidProjection);
+        }
+        Ok(OpticalCenterProjection::InFront { ndc_xy, depth_m })
     }
 
     /// Generate a ray from horizontal and vertical tangent offsets. A pinhole
@@ -1093,6 +1156,35 @@ pub struct CameraExposure<'a> {
     close_s: f64,
 }
 
+/// One evaluated camera plus the continuous-shot identity that owns it.
+/// Temporal reprojection compares this identity to refuse vectors across hard
+/// cuts rather than interpreting a cut as extreme camera velocity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluatedCamera {
+    shot_id: u64,
+    camera: PhysicalCamera,
+}
+
+impl EvaluatedCamera {
+    /// Stable nonzero continuous-shot identity.
+    #[must_use]
+    pub const fn shot_id(&self) -> u64 {
+        self.shot_id
+    }
+
+    /// Exact camera evaluated at the requested time.
+    #[must_use]
+    pub const fn camera(&self) -> &PhysicalCamera {
+        &self.camera
+    }
+
+    /// Consume the tag and return its evaluated camera.
+    #[must_use]
+    pub fn into_camera(self) -> PhysicalCamera {
+        self.camera
+    }
+}
+
 impl CameraExposure<'_> {
     /// Shot identity owning the complete exposure.
     #[must_use]
@@ -1231,6 +1323,18 @@ impl AnimatedCamera {
         absolute_time_s: f64,
         cut_side: CutSide,
     ) -> Result<PhysicalCamera, CameraError> {
+        self.evaluate_with_shot(cx, absolute_time_s, cut_side)
+            .map(EvaluatedCamera::into_camera)
+    }
+
+    /// Evaluate one exact time and retain the owning continuous-shot identity.
+    /// At an exact cut, `cut_side` selects both the pose and returned identity.
+    pub fn evaluate_with_shot(
+        &self,
+        cx: &Cx<'_>,
+        absolute_time_s: f64,
+        cut_side: CutSide,
+    ) -> Result<EvaluatedCamera, CameraError> {
         cx.checkpoint()?;
         if !absolute_time_s.is_finite() {
             return Err(CameraError::NonFiniteInput);
@@ -1252,7 +1356,10 @@ impl AnimatedCamera {
         }
         let camera = chosen.evaluate(absolute_time_s)?;
         cx.checkpoint()?;
-        Ok(camera)
+        Ok(EvaluatedCamera {
+            shot_id: chosen.shot_id,
+            camera,
+        })
     }
 }
 

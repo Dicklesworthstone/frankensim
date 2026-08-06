@@ -37,6 +37,8 @@ pub mod motion;
 #[cfg(feature = "chart-backends")]
 pub mod motion_bounds;
 #[cfg(feature = "chart-backends")]
+pub mod motion_vectors;
+#[cfg(feature = "chart-backends")]
 pub mod temporal_accumulation;
 
 #[cfg(feature = "tracer")]
