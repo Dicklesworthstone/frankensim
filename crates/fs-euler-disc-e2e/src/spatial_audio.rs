@@ -1273,9 +1273,9 @@ fn deposit(
                     return Ok(());
                 }
                 return Err(SpatialAudioError::ResourceLimit {
-                        resource: "fractional-delay lower output index",
-                        requested: lower as u64,
-                        limit: output.len().saturating_sub(1) as u64,
+                    resource: "fractional-delay lower output index",
+                    requested: lower as u64,
+                    limit: output.len().saturating_sub(1) as u64,
                 });
             };
             lower_accumulator.add(left * lower_weight, right * lower_weight);
@@ -1288,9 +1288,9 @@ fn deposit(
                         return Ok(());
                     }
                     return Err(SpatialAudioError::ResourceLimit {
-                            resource: "fractional-delay upper output index",
-                            requested: upper as u64,
-                            limit: output.len().saturating_sub(1) as u64,
+                        resource: "fractional-delay upper output index",
+                        requested: upper as u64,
+                        limit: output.len().saturating_sub(1) as u64,
                     });
                 };
                 upper_accumulator.add(left * fraction, right * fraction);
@@ -1887,6 +1887,75 @@ mod tests {
         assert_eq!(first_nonzero(far.samples()), 2);
         assert_eq!(first_nonzero(faster.samples()), 1);
         assert!(near.diagnostics().sample_peak_fs > far.diagnostics().sample_peak_fs);
+    }
+
+    #[test]
+    fn source_gain_is_applied_once_and_bound_into_input_identity() {
+        let cfg = config(8, 8.0, SpatialDelayPolicy::IntegerCeiling);
+        let unity = render_single_with_gain(
+            cfg,
+            &[1.0],
+            SourcePositionTrack::Static([-1.0, 0.0, 0.0]),
+            ListenerPoseTrack::Static(listener_at([0.0; 3])),
+            None,
+            1.0,
+        )
+        .unwrap();
+        let quarter = render_single_with_gain(
+            cfg,
+            &[1.0],
+            SourcePositionTrack::Static([-1.0, 0.0, 0.0]),
+            ListenerPoseTrack::Static(listener_at([0.0; 3])),
+            None,
+            0.25,
+        )
+        .unwrap();
+        assert_eq!(
+            quarter.samples()[1].left_fs,
+            unity.samples()[1].left_fs * 0.25
+        );
+        assert_ne!(quarter.input_identity(), unity.input_identity());
+        assert_ne!(quarter.output_identity(), unity.output_identity());
+    }
+
+    #[test]
+    fn clamped_horizon_is_identity_bound_and_reports_discarded_delay_and_ir_tail() {
+        with_cx(false, |cx| {
+            let room = StereoRoomImpulseResponse::try_new(
+                8,
+                vec![1.0, 0.5, 0.25],
+                vec![1.0, 0.5, 0.25],
+                SpatialAudioAuthority::Artistic,
+                cx,
+            )
+            .unwrap();
+            let preserve_cfg = config(8, 8.0, SpatialDelayPolicy::IntegerCeiling);
+            let preserved = render_single(
+                preserve_cfg,
+                &[1.0],
+                SourcePositionTrack::Static([0.0, 0.0, 1.0]),
+                ListenerPoseTrack::Static(listener_at([0.0; 3])),
+                Some(&room),
+            )
+            .unwrap();
+            let mut clamp_cfg = preserve_cfg;
+            clamp_cfg.output_horizon = SpatialOutputHorizon::ClampToInputFrames;
+            let clamped = render_single(
+                clamp_cfg,
+                &[1.0],
+                SourcePositionTrack::Static([0.0, 0.0, 1.0]),
+                ListenerPoseTrack::Static(listener_at([0.0; 3])),
+                Some(&room),
+            )
+            .unwrap();
+            assert_eq!(preserved.samples().len(), 4);
+            assert_eq!(clamped.samples().len(), 1);
+            assert_eq!(clamped.diagnostics().natural_final_output_frames, 4);
+            assert_eq!(clamped.diagnostics().discarded_tail_frames, 3);
+            assert_eq!(clamped.diagnostics().final_output_frames, 1);
+            assert_ne!(clamped.config_identity(), preserved.config_identity());
+            assert_ne!(clamped.output_identity(), preserved.output_identity());
+        });
     }
 
     #[test]
