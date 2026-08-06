@@ -18,16 +18,14 @@ use fs_euler_disc_e2e::{
 };
 use fs_evidence::{
     cinematic_budget::{
-        CinematicBudgetError, CinematicBudgetRepair, CinematicQualityProfile,
-        CinematicQualityTier, CinematicResourceAvailability, CinematicResourceDeficit,
-        CinematicResourceEstimate, CinematicResourceKind, ResourceLimitSource,
-        admit_cinematic_budget,
+        CinematicBudgetError, CinematicBudgetRepair, CinematicQualityProfile, CinematicQualityTier,
+        CinematicResourceAvailability, CinematicResourceDeficit, CinematicResourceEstimate,
+        CinematicResourceKind, ResourceLimitSource, admit_cinematic_budget,
     },
     cinematic_config::{CinematicConfig, CinematicMuxRequest},
     cinematic_config_codec::{
-        CINEMATIC_CONFIG_DOCUMENT_SCHEMA, MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES,
-        CinematicAssetAccessError, CinematicAssetDeclaration, CinematicConfigDocument,
-        CinematicConfigDocumentError,
+        CINEMATIC_CONFIG_DOCUMENT_SCHEMA, CinematicAssetAccessError, CinematicAssetDeclaration,
+        CinematicConfigDocument, CinematicConfigDocumentError, MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES,
     },
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -109,7 +107,11 @@ impl CinematicMode {
     const fn needs_resources(self) -> bool {
         matches!(
             self,
-            Self::Storyboard | Self::Daily | Self::Representative4kFrame | Self::Final | Self::Resume
+            Self::Storyboard
+                | Self::Daily
+                | Self::Representative4kFrame
+                | Self::Final
+                | Self::Resume
         )
     }
 
@@ -188,7 +190,9 @@ impl AvailabilityBuilder {
                     "cinematic-resource-flag-missing",
                     "arguments.resources",
                     format!("resource admission is missing `{flag}`"),
-                    vec![format!("supply `{flag}` together with all five resource facts")],
+                    vec![format!(
+                        "supply `{flag}` together with all five resource facts"
+                    )],
                 ),
             ));
         }
@@ -197,9 +201,7 @@ impl AvailabilityBuilder {
             free_storage_bytes: self.free_storage_bytes.unwrap_or(0),
             wall_time_available_s: self.wall_time_available_s.unwrap_or(0),
             worker_capacity: self.worker_capacity.unwrap_or(0),
-            measured_camera_paths_per_second: self
-                .measured_camera_paths_per_second
-                .unwrap_or(0),
+            measured_camera_paths_per_second: self.measured_camera_paths_per_second.unwrap_or(0),
         }))
     }
 }
@@ -351,15 +353,21 @@ fn run_cinematic_with_gate_request(
 
 fn parse_request(arguments: &[String]) -> Result<CinematicRequest, Failure> {
     let Some(mode_name) = arguments.first() else {
-        return Err(usage_failure(CinematicMode::Inspect, "a cinematic mode is required"));
+        return Err(usage_failure(
+            CinematicMode::Inspect,
+            "a cinematic mode is required",
+        ));
     };
     let mode = CinematicMode::parse(mode_name)
-        .ok_or_else(|| usage_failure(CinematicMode::Inspect, "the cinematic mode is unknown"))?;
+        .ok_or_else(|| usage_failure(CinematicMode::Unknown, "the cinematic mode is unknown"))?;
     let Some(config) = arguments.get(1) else {
         return Err(usage_failure(mode, "a cinematic config path is required"));
     };
     if config.is_empty() || config.starts_with('-') {
-        return Err(usage_failure(mode, "the cinematic config operand is invalid"));
+        return Err(usage_failure(
+            mode,
+            "the cinematic config operand is invalid",
+        ));
     }
 
     let mut trajectory = None;
@@ -382,12 +390,8 @@ fn parse_request(arguments: &[String]) -> Result<CinematicRequest, Failure> {
                 index += 2;
             }
             "--memory-bytes" if availability.memory_bytes.is_none() => {
-                availability.memory_bytes = Some(parse_u64_flag(
-                    arguments,
-                    index,
-                    mode,
-                    "--memory-bytes",
-                )?);
+                availability.memory_bytes =
+                    Some(parse_u64_flag(arguments, index, mode, "--memory-bytes")?);
                 index += 2;
             }
             "--free-storage-bytes" if availability.free_storage_bytes.is_none() => {
@@ -400,21 +404,13 @@ fn parse_request(arguments: &[String]) -> Result<CinematicRequest, Failure> {
                 index += 2;
             }
             "--wall-time-s" if availability.wall_time_available_s.is_none() => {
-                availability.wall_time_available_s = Some(parse_u64_flag(
-                    arguments,
-                    index,
-                    mode,
-                    "--wall-time-s",
-                )?);
+                availability.wall_time_available_s =
+                    Some(parse_u64_flag(arguments, index, mode, "--wall-time-s")?);
                 index += 2;
             }
             "--workers" if availability.worker_capacity.is_none() => {
-                availability.worker_capacity = Some(parse_u16_flag(
-                    arguments,
-                    index,
-                    mode,
-                    "--workers",
-                )?);
+                availability.worker_capacity =
+                    Some(parse_u16_flag(arguments, index, mode, "--workers")?);
                 index += 2;
             }
             "--paths-per-second" if availability.measured_camera_paths_per_second.is_none() => {
@@ -500,10 +496,7 @@ fn usage_failure(mode: CinematicMode, message: &str) -> Failure {
     )
 }
 
-fn build_static_plan(
-    request: &CinematicRequest,
-    cx: &Cx<'_>,
-) -> Result<StaticPlan, Failure> {
+fn build_static_plan(request: &CinematicRequest, cx: &Cx<'_>) -> Result<StaticPlan, Failure> {
     checkpoint(request.mode, cx)?;
     let config_bytes = read_bounded_file(
         &request.config_path,
@@ -561,16 +554,24 @@ fn build_static_plan(
     let base = request
         .config_path
         .parent()
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let base = base.canonicalize().map_err(|_| {
+        Failure::one(
+            exit::INPUT,
+            Diagnostic::new(
+                request.mode,
+                "cinematic-config-base-unavailable",
+                "config",
+                "the configuration directory could not be resolved",
+                vec!["provide a readable configuration in an existing directory".to_owned()],
+            ),
+        )
+    })?;
     let mut aggregate_asset_bytes = 0u64;
     let config = document
         .admit_with_asset_resolver(|_, _, declaration| {
-            resolve_asset(
-                base,
-                declaration,
-                &mut aggregate_asset_bytes,
-                cx,
-            )
+            resolve_asset(&base, declaration, &mut aggregate_asset_bytes, cx)
         })
         .map_err(|error| document_failure(request.mode, error))?;
     checkpoint(request.mode, cx)?;
@@ -629,7 +630,13 @@ fn resolve_asset(
     if !is_safe_relative(relative) {
         return Err(CinematicAssetAccessError::Unavailable);
     }
-    let path = base.join(relative);
+    let path = base
+        .join(relative)
+        .canonicalize()
+        .map_err(|_| CinematicAssetAccessError::Unavailable)?;
+    if !path.starts_with(base) {
+        return Err(CinematicAssetAccessError::Unavailable);
+    }
     let metadata = path
         .metadata()
         .map_err(|_| CinematicAssetAccessError::Unavailable)?;
@@ -646,12 +653,13 @@ fn resolve_asset(
     if next > MAX_CINEMATIC_TOTAL_ASSET_BYTES {
         return Err(CinematicAssetAccessError::TooLarge);
     }
-    let result = read_file_bytes(&path, MAX_CINEMATIC_ASSET_BYTES, cx).map_err(|kind| match kind {
-        ReadFailure::Cancelled => CinematicAssetAccessError::Cancelled,
-        ReadFailure::Unavailable => CinematicAssetAccessError::Unavailable,
-        ReadFailure::TooLarge => CinematicAssetAccessError::TooLarge,
-        ReadFailure::Capacity => CinematicAssetAccessError::Capacity,
-    })?;
+    let result =
+        read_file_bytes(&path, MAX_CINEMATIC_ASSET_BYTES, cx).map_err(|kind| match kind {
+            ReadFailure::Cancelled => CinematicAssetAccessError::Cancelled,
+            ReadFailure::Unavailable => CinematicAssetAccessError::Unavailable,
+            ReadFailure::TooLarge => CinematicAssetAccessError::TooLarge,
+            ReadFailure::Capacity => CinematicAssetAccessError::Capacity,
+        })?;
     *aggregate = aggregate
         .checked_add(result.len() as u64)
         .ok_or(CinematicAssetAccessError::TooLarge)?;
@@ -682,10 +690,7 @@ fn read_file_bytes(path: &Path, maximum: u64, cx: &Cx<'_>) -> Result<Vec<u8>, Re
         return Err(ReadFailure::Cancelled);
     }
     let mut file = File::open(path).map_err(|_| ReadFailure::Unavailable)?;
-    let declared = file
-        .metadata()
-        .map_err(|_| ReadFailure::Unavailable)?
-        .len();
+    let declared = file.metadata().map_err(|_| ReadFailure::Unavailable)?.len();
     if declared > maximum {
         return Err(ReadFailure::TooLarge);
     }
@@ -748,13 +753,7 @@ fn read_bounded_file(
         };
         Failure::one(
             exit::INPUT,
-            Diagnostic::new(
-                mode,
-                code,
-                field,
-                message,
-                vec![repair.to_owned()],
-            ),
+            Diagnostic::new(mode, code, field, message, vec![repair.to_owned()]),
         )
     })
 }
@@ -791,18 +790,21 @@ fn verify_trajectory(
             ),
         )
     })?;
-    let byte_len = file.metadata().map_err(|_| {
-        Failure::one(
-            exit::INPUT,
-            Diagnostic::new(
-                mode,
-                "cinematic-trajectory-unavailable",
-                "trajectory",
-                "the trajectory artifact metadata could not be read",
-                vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
-            ),
-        )
-    })?.len();
+    let byte_len = file
+        .metadata()
+        .map_err(|_| {
+            Failure::one(
+                exit::INPUT,
+                Diagnostic::new(
+                    mode,
+                    "cinematic-trajectory-unavailable",
+                    "trajectory",
+                    "the trajectory artifact metadata could not be read",
+                    vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
+                ),
+            )
+        })?
+        .len();
     if byte_len > MAX_CINEMATIC_TRAJECTORY_BYTES {
         return Err(Failure::one(
             exit::INPUT,
@@ -811,7 +813,10 @@ fn verify_trajectory(
                 "cinematic-trajectory-too-large",
                 "trajectory",
                 "the trajectory artifact exceeds the CLI inspection ceiling",
-                vec!["provide a bounded trajectory artifact or raise the versioned CLI envelope".to_owned()],
+                vec![
+                    "provide a bounded trajectory artifact or raise the versioned CLI envelope"
+                        .to_owned(),
+                ],
             )
             .with_resource("bytes", byte_len, MAX_CINEMATIC_TRAJECTORY_BYTES),
         ));
@@ -820,22 +825,26 @@ fn verify_trajectory(
         max_artifact_bytes: MAX_CINEMATIC_TRAJECTORY_BYTES,
         ..RenderTrajectoryCodecBudget::DEFAULT
     };
-    let artifact = EulerRenderTrajectoryArtifact::read_from(&mut file, budget, cx).map_err(|_| {
-        if cx.is_cancel_requested() {
-            cancelled(mode)
-        } else {
-            Failure::one(
-                exit::INPUT,
-                Diagnostic::new(
-                    mode,
-                    "cinematic-trajectory-refused",
-                    "trajectory",
-                    "the trajectory codec refused the artifact",
-                    vec!["reproduce or repair the canonical trajectory artifact and retry".to_owned()],
-                ),
-            )
-        }
-    })?;
+    let artifact =
+        EulerRenderTrajectoryArtifact::read_from(&mut file, budget, cx).map_err(|_| {
+            if cx.is_cancel_requested() {
+                cancelled(mode)
+            } else {
+                Failure::one(
+                    exit::INPUT,
+                    Diagnostic::new(
+                        mode,
+                        "cinematic-trajectory-refused",
+                        "trajectory",
+                        "the trajectory codec refused the artifact",
+                        vec![
+                            "reproduce or repair the canonical trajectory artifact and retry"
+                                .to_owned(),
+                        ],
+                    ),
+                )
+            }
+        })?;
     let receipt = artifact.receipt();
     if receipt.artifact_identity() != expected.identity() {
         return Err(Failure::one(
@@ -1003,9 +1012,7 @@ fn budget_deficit_diagnostic(
         (CinematicResourceKind::SequenceWallTimeSeconds, ResourceLimitSource::HostAvailability) => {
             ("host-sequence-time", "resources.wall_time_s", "seconds")
         }
-        (CinematicResourceKind::Workers, _) => {
-            ("host-workers", "resources.workers", "workers")
-        }
+        (CinematicResourceKind::Workers, _) => ("host-workers", "resources.workers", "workers"),
     };
     Diagnostic::new(
         mode,
@@ -1021,7 +1028,10 @@ fn budget_deficit_diagnostic(
         },
         field,
         "the conservative cinematic estimate exceeds an explicit limit",
-        repairs.iter().map(|repair| repair_name(*repair).to_owned()).collect(),
+        repairs
+            .iter()
+            .map(|repair| repair_name(*repair).to_owned())
+            .collect(),
     )
     .with_resource(unit, deficit.required, deficit.available)
 }
@@ -1154,7 +1164,10 @@ fn format_plan(json: bool, plan: &StaticPlan, status: &str, dependency: Option<&
             "configured_trajectory_artifact_identity",
             plan.config.input().trajectory.identity(),
         ),
-        ("trajectory_partition_identity", plan.config.trajectory_identity()),
+        (
+            "trajectory_partition_identity",
+            plan.config.trajectory_identity(),
+        ),
         ("image_identity", plan.config.image_identity()),
         ("audio_identity", plan.config.audio_identity()),
         ("mux_identity", plan.config.mux_identity()),
@@ -1264,11 +1277,9 @@ fn format_diagnostic(json: bool, diagnostic: &Diagnostic) -> String {
             escape_text(&diagnostic.field_path),
             escape_text(&diagnostic.message),
         );
-        if let (Some(unit), Some(required), Some(available)) = (
-            diagnostic.unit,
-            diagnostic.required,
-            diagnostic.available,
-        ) {
+        if let (Some(unit), Some(required), Some(available)) =
+            (diagnostic.unit, diagnostic.required, diagnostic.available)
+        {
             let _ = writeln!(
                 out,
                 "RESOURCE unit={unit} required={required} available={available}"
@@ -1289,17 +1300,12 @@ fn format_diagnostic(json: bool, diagnostic: &Diagnostic) -> String {
     push_json_string(&mut out, &diagnostic.field_path);
     out.push_str(",\"message\":");
     push_json_string(&mut out, &diagnostic.message);
-    if let (Some(unit), Some(required), Some(available)) = (
-        diagnostic.unit,
-        diagnostic.required,
-        diagnostic.available,
-    ) {
+    if let (Some(unit), Some(required), Some(available)) =
+        (diagnostic.unit, diagnostic.required, diagnostic.available)
+    {
         out.push_str(",\"unit\":");
         push_json_string(&mut out, unit);
-        let _ = write!(
-            out,
-            ",\"required\":{required},\"available\":{available}"
-        );
+        let _ = write!(out, ",\"required\":{required},\"available\":{available}");
     }
     out.push_str(",\"ranked_fixes\":[");
     for (index, repair) in diagnostic.repairs.iter().enumerate() {

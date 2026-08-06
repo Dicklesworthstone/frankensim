@@ -15,8 +15,8 @@ use fs_blake3::ContentHash;
 
 use crate::{
     cinematic_budget::{
-        CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION, CinematicBudgetError,
-        CinematicQualityProfile, CinematicQualityTier,
+        CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION, CinematicBudgetError, CinematicQualityProfile,
+        CinematicQualityTier,
     },
     cinematic_config::{
         CINEMATIC_CONFIG_SCHEMA_VERSION, CinematicArtifactRoot, CinematicAssetBinding,
@@ -27,8 +27,7 @@ use crate::{
 };
 
 /// Exact reconstructible document schema accepted by v1 readers.
-pub const CINEMATIC_CONFIG_DOCUMENT_SCHEMA: &str =
-    "frankensim.cinematic-config-document.v1";
+pub const CINEMATIC_CONFIG_DOCUMENT_SCHEMA: &str = "frankensim.cinematic-config-document.v1";
 /// Maximum complete UTF-8 document bytes.
 pub const MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Maximum physical lines, including comments and blanks.
@@ -149,8 +148,8 @@ impl CinematicConfigDocument {
                 maximum: MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES,
             });
         }
-        let source = core::str::from_utf8(bytes)
-            .map_err(|_| CinematicConfigDocumentError::InvalidUtf8)?;
+        let source =
+            core::str::from_utf8(bytes).map_err(|_| CinematicConfigDocumentError::InvalidUtf8)?;
         Self::from_str(source)
     }
 
@@ -188,22 +187,33 @@ impl CinematicConfigDocument {
             }
             match key {
                 "material_asset" => {
-                    push_asset_declaration(
-                        &mut materials,
-                        value,
-                        "material_asset",
-                        line_number,
-                    )?;
+                    push_asset_declaration(&mut materials, value, "material_asset", line_number)?;
                 }
                 "light_asset" => {
                     push_asset_declaration(&mut lights, value, "light_asset", line_number)?;
                 }
-                "schema" | "quality_profile" | "units" | "seed" | "capabilities"
-                | "render_budget_profile" | "audio_budget_profile" | "trajectory"
-                | "timeline" | "camera" | "scene_geometry" | "instance_mapping"
-                | "renderer" | "image_pipeline" | "audio_excitation" | "sound_model"
-                | "microphone" | "room" | "environment_asset" | "artifact_namespace"
-                | "artifact_root" | "mux" => {
+                "schema"
+                | "quality_profile"
+                | "units"
+                | "seed"
+                | "capabilities"
+                | "render_budget_profile"
+                | "audio_budget_profile"
+                | "trajectory"
+                | "timeline"
+                | "camera"
+                | "scene_geometry"
+                | "instance_mapping"
+                | "renderer"
+                | "image_pipeline"
+                | "audio_excitation"
+                | "sound_model"
+                | "microphone"
+                | "room"
+                | "environment_asset"
+                | "artifact_namespace"
+                | "artifact_root"
+                | "mux" => {
                     if unique.insert(key.to_owned(), value.to_owned()).is_some() {
                         return Err(CinematicConfigDocumentError::DuplicateField {
                             field: key.to_owned(),
@@ -225,10 +235,8 @@ impl CinematicConfigDocument {
         if schema != CINEMATIC_CONFIG_DOCUMENT_SCHEMA {
             return Err(CinematicConfigDocumentError::UnsupportedSchema);
         }
-        let quality_profile = parse_quality_profile(&take_required(
-            &mut unique,
-            "quality_profile",
-        )?)?;
+        let quality_profile =
+            parse_quality_profile(&take_required(&mut unique, "quality_profile")?)?;
         let units = parse_units(&take_required(&mut unique, "units")?)?;
         let seed = parse_u64(&take_required(&mut unique, "seed")?, "seed")?;
         let capabilities = parse_capabilities(&take_required(&mut unique, "capabilities")?)?;
@@ -359,9 +367,7 @@ impl CinematicConfigDocument {
     }
 
     /// Frozen named quality profile selected by the complete document.
-    pub fn quality_profile(
-        &self,
-    ) -> Result<CinematicQualityProfile, CinematicConfigDocumentError> {
+    pub fn quality_profile(&self) -> Result<CinematicQualityProfile, CinematicConfigDocumentError> {
         let profile = CinematicQualityProfile::canonical(self.quality_profile)
             .map_err(CinematicConfigDocumentError::Budget)?;
         let expected = profile.identity();
@@ -371,9 +377,7 @@ impl CinematicConfigDocument {
             ("audio_budget_profile", self.audio_budget_profile),
         ] {
             if reference.identity() != expected || reference.version() != expected_version {
-                return Err(CinematicConfigDocumentError::BudgetProfileMismatch {
-                    field,
-                });
+                return Err(CinematicConfigDocumentError::BudgetProfileMismatch { field });
             }
         }
         Ok(profile)
@@ -519,11 +523,7 @@ impl CinematicConfigDocument {
             "artifact_namespace",
             self.artifact_root.logical_namespace(),
         );
-        push_line(
-            &mut out,
-            "artifact_root",
-            self.artifact_root.locator_hint(),
-        );
+        push_line(&mut out, "artifact_root", self.artifact_root.locator_hint());
         push_line(&mut out, "mux", &mux_text(self.mux_request));
         out
     }
@@ -564,9 +564,8 @@ where
         &CinematicAssetDeclaration,
     ) -> Result<Vec<u8>, CinematicAssetAccessError>,
 {
-    let bytes = resolve(class, index, declaration).map_err(|kind| {
-        CinematicConfigDocumentError::AssetAccess { class, index, kind }
-    })?;
+    let bytes = resolve(class, index, declaration)
+        .map_err(|kind| CinematicConfigDocumentError::AssetAccess { class, index, kind })?;
     let binding = CinematicAssetBinding::from_bytes(
         &bytes,
         declaration.interpretation,
@@ -707,9 +706,7 @@ fn parse_units(value: &str) -> Result<CinematicConfigUnits, CinematicConfigDocum
     }
 }
 
-fn parse_capabilities(
-    value: &str,
-) -> Result<CinematicCapabilities, CinematicConfigDocumentError> {
+fn parse_capabilities(value: &str) -> Result<CinematicCapabilities, CinematicConfigDocumentError> {
     let mut bits = 0u32;
     for capability in value.split(',') {
         let bit = match capability {
@@ -744,11 +741,10 @@ fn capabilities_name(capabilities: CinematicCapabilities) -> &'static str {
         bits if bits == CinematicCapabilities::RENDER | CinematicCapabilities::AUDIO => {
             "render,audio"
         }
-        bits
-            if bits
-                == CinematicCapabilities::RENDER
-                    | CinematicCapabilities::AUDIO
-                    | CinematicCapabilities::QUARANTINED_MUX =>
+        bits if bits
+            == CinematicCapabilities::RENDER
+                | CinematicCapabilities::AUDIO
+                | CinematicCapabilities::QUARANTINED_MUX =>
         {
             "render,audio,quarantined-mux"
         }
@@ -811,9 +807,7 @@ fn parse_interpretation(value: &str) -> Option<CinematicAssetInterpretation> {
         "spectral-reflectance" => Some(CinematicAssetInterpretation::SpectralReflectance),
         "spectral-emission" => Some(CinematicAssetInterpretation::SpectralEmission),
         "linear-scene-texture" => Some(CinematicAssetInterpretation::LinearSceneTexture),
-        "display-referred-texture" => {
-            Some(CinematicAssetInterpretation::DisplayReferredTexture)
-        }
+        "display-referred-texture" => Some(CinematicAssetInterpretation::DisplayReferredTexture),
         "geometry-meters" => Some(CinematicAssetInterpretation::GeometryMeters),
         "acoustic-impulse-response-si" => {
             Some(CinematicAssetInterpretation::AcousticImpulseResponseSi)
@@ -829,9 +823,7 @@ const fn interpretation_name(value: CinematicAssetInterpretation) -> &'static st
         CinematicAssetInterpretation::LinearSceneTexture => "linear-scene-texture",
         CinematicAssetInterpretation::DisplayReferredTexture => "display-referred-texture",
         CinematicAssetInterpretation::GeometryMeters => "geometry-meters",
-        CinematicAssetInterpretation::AcousticImpulseResponseSi => {
-            "acoustic-impulse-response-si"
-        }
+        CinematicAssetInterpretation::AcousticImpulseResponseSi => "acoustic-impulse-response-si",
     }
 }
 
@@ -860,18 +852,15 @@ fn parse_hash(
     value: &str,
     field: &'static str,
 ) -> Result<ContentHash, CinematicConfigDocumentError> {
-    let hash = ContentHash::from_hex(value)
-        .ok_or(CinematicConfigDocumentError::InvalidField { field })?;
+    let hash =
+        ContentHash::from_hex(value).ok_or(CinematicConfigDocumentError::InvalidField { field })?;
     if hash.as_bytes().iter().all(|byte| *byte == 0) {
         return Err(CinematicConfigDocumentError::InvalidField { field });
     }
     Ok(hash)
 }
 
-fn parse_u32(
-    value: &str,
-    field: &'static str,
-) -> Result<u32, CinematicConfigDocumentError> {
+fn parse_u32(value: &str, field: &'static str) -> Result<u32, CinematicConfigDocumentError> {
     if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
         return Err(CinematicConfigDocumentError::InvalidField { field });
     }
@@ -882,10 +871,7 @@ fn parse_u32(
         .ok_or(CinematicConfigDocumentError::InvalidField { field })
 }
 
-fn parse_u64(
-    value: &str,
-    field: &'static str,
-) -> Result<u64, CinematicConfigDocumentError> {
+fn parse_u64(value: &str, field: &'static str) -> Result<u64, CinematicConfigDocumentError> {
     if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
         return Err(CinematicConfigDocumentError::InvalidField { field });
     }
