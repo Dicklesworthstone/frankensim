@@ -25,12 +25,20 @@ pub use cinematic_color::{
 
 pub use denoise::{DenoiseParams, LabeledPlane, PixelProvenance, atrous_denoise, mse};
 pub use exr::{
-    Channel, DecodedExr, ExrAttribute, ExrWriteLimits, ExrWriteRequirements, PixelType,
-    SOURCE_ARTIFACT_HASH_ATTRIBUTE, exr_write_requirements, exr_write_requirements_for_layout,
-    f16_bits_to_f32, f32_to_f16_bits, read_exr, write_exr, write_exr_with_attributes,
+    Channel, DecodedExr, ExrAttribute, ExrInspectLimits, ExrInspectedAttribute,
+    ExrInspectedChannel, ExrInspection, ExrRawFrameSemanticLimits, ExrWriteLimits,
+    ExrWriteRequirements, PixelType, SOURCE_ARTIFACT_HASH_ATTRIBUTE, exr_write_requirements,
+    exr_write_requirements_for_layout, f16_bits_to_f32, f32_to_f16_bits, inspect_exr,
+    inspect_exr_with_poll, read_exr, validate_exr_raw_frame_payload,
+    validate_exr_raw_frame_payload_against, validate_exr_raw_frame_payload_against_with_poll,
+    validate_exr_raw_frame_payload_with_poll, verify_exr_float_channel_constant,
+    verify_exr_float_channel_constant_with_poll, write_exr, write_exr_with_attributes,
     write_exr_with_attributes_budgeted,
 };
-pub use png::{DecodedPng, PngColor, read_png, write_png8, write_png16};
+pub use png::{
+    DecodedPng, PngColor, PngInspectLimits, PngInspection, inspect_png, inspect_png_with_poll,
+    read_png, write_png8, write_png16,
+};
 pub use sequence::{
     ContentHash, ExpectedFrameArtifact, FRAME_SEQUENCE_MANIFEST_VERSION, FrameArtifactDescriptor,
     FrameArtifactEntry, FrameArtifactFileState, FrameArtifactFormat, FrameArtifactKey,
@@ -89,6 +97,11 @@ pub enum ImgError {
         /// Stable description of the overflowing quantity.
         context: &'static str,
     },
+    /// Caller cancellation was observed at a documented bounded poll point.
+    Cancelled {
+        /// Stable operation name for diagnostics.
+        operation: &'static str,
+    },
 }
 
 impl fmt::Display for ImgError {
@@ -125,6 +138,7 @@ impl fmt::Display for ImgError {
             ImgError::SizeOverflow { context } => {
                 write!(f, "image size arithmetic overflowed for {context}")
             }
+            ImgError::Cancelled { operation } => write!(f, "{operation} was cancelled"),
         }
     }
 }

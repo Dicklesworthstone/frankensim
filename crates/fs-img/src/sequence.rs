@@ -532,16 +532,61 @@ impl FrameArtifactDescriptor {
         if channels.is_empty() {
             return Err(FrameSequenceError::InvalidChannelSet { frame_index });
         }
-        channels.sort_unstable_by(|left, right| match format {
-            FrameArtifactFormat::OpenExr => left.name.cmp(&right.name),
-            FrameArtifactFormat::Png8 | FrameArtifactFormat::Png16 => png_channel_rank(&left.name)
-                .cmp(&png_channel_rank(&right.name))
-                .then_with(|| left.name.cmp(&right.name)),
-        });
+        channels.sort_unstable_by(|left, right| channel_order(format, left, right));
         if channels.windows(2).any(|pair| pair[0].name == pair[1].name) {
             return Err(FrameSequenceError::DuplicateChannel { frame_index });
         }
         validate_format_channels(role, format, &channels, frame_index)?;
+        sampling.validate(width, height)?;
+        let canonical_time = if frame_time_s == 0.0 {
+            0.0
+        } else {
+            frame_time_s
+        };
+        Ok(Self {
+            key: FrameArtifactKey::new(frame_index, segment_index, role),
+            frame_time_bits: canonical_time.to_bits(),
+            format,
+            width,
+            height,
+            channels,
+            sampling,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_from_canonical_wire_with_poll(
+        frame_index: u64,
+        segment_index: u32,
+        role: FrameArtifactRole,
+        frame_time_s: f64,
+        format: FrameArtifactFormat,
+        width: u32,
+        height: u32,
+        channels: Vec<FrameChannel>,
+        sampling: FrameSamplingStats,
+        poll: &mut impl FnMut() -> bool,
+    ) -> Result<Self, FrameSequenceError> {
+        if !frame_time_s.is_finite() {
+            return Err(FrameSequenceError::InvalidFrameTime { frame_index });
+        }
+        if width == 0 || height == 0 {
+            return Err(FrameSequenceError::InvalidDimensions { frame_index });
+        }
+        if channels.is_empty() {
+            return Err(FrameSequenceError::InvalidChannelSet { frame_index });
+        }
+        for pair in channels.windows(2) {
+            poll_or_cancel(poll)?;
+            match channel_order(format, &pair[0], &pair[1]) {
+                core::cmp::Ordering::Less => {}
+                core::cmp::Ordering::Equal => {
+                    return Err(FrameSequenceError::DuplicateChannel { frame_index });
+                }
+                core::cmp::Ordering::Greater => return Err(FrameSequenceError::NonCanonical),
+            }
+        }
+        validate_format_channels_with_poll(role, format, &channels, frame_index, poll)?;
         sampling.validate(width, height)?;
         let canonical_time = if frame_time_s == 0.0 {
             0.0
@@ -619,19 +664,50 @@ fn png_channel_rank(name: &str) -> u8 {
     }
 }
 
+fn channel_order(
+    format: FrameArtifactFormat,
+    left: &FrameChannel,
+    right: &FrameChannel,
+) -> core::cmp::Ordering {
+    match format {
+        FrameArtifactFormat::OpenExr => left.name.cmp(&right.name),
+        FrameArtifactFormat::Png8 | FrameArtifactFormat::Png16 => png_channel_rank(&left.name)
+            .cmp(&png_channel_rank(&right.name))
+            .then_with(|| left.name.cmp(&right.name)),
+    }
+}
+
 fn validate_format_channels(
     role: FrameArtifactRole,
     format: FrameArtifactFormat,
     channels: &[FrameChannel],
     frame_index: u64,
 ) -> Result<(), FrameSequenceError> {
+    validate_format_channels_with_poll(role, format, channels, frame_index, &mut || true)
+}
+
+fn validate_format_channels_with_poll(
+    role: FrameArtifactRole,
+    format: FrameArtifactFormat,
+    channels: &[FrameChannel],
+    frame_index: u64,
+    poll: &mut impl FnMut() -> bool,
+) -> Result<(), FrameSequenceError> {
     let types_match = match format {
-        FrameArtifactFormat::OpenExr => channels.iter().all(|channel| {
-            matches!(
-                channel.sample_type,
-                FrameChannelType::Float16 | FrameChannelType::Float32
-            )
-        }),
+        FrameArtifactFormat::OpenExr => {
+            let mut types_match = true;
+            for channel in channels {
+                poll_or_cancel(poll)?;
+                if !matches!(
+                    channel.sample_type,
+                    FrameChannelType::Float16 | FrameChannelType::Float32
+                ) {
+                    types_match = false;
+                    break;
+                }
+            }
+            types_match
+        }
         FrameArtifactFormat::Png8 => png_channels_match(channels, FrameChannelType::Uint8),
         FrameArtifactFormat::Png16 => png_channels_match(channels, FrameChannelType::Uint16),
     };
@@ -685,28 +761,7 @@ impl ExpectedFrameArtifact {
         max_bytes: u64,
         source: Option<FrameArtifactKey>,
     ) -> Result<Self, FrameSequenceError> {
-        if max_bytes == 0 {
-            return Err(FrameSequenceError::InvalidArtifactLimit {
-                key: descriptor.key,
-            });
-        }
-        match (descriptor.key.role, source) {
-            (FrameArtifactRole::RawMaster, None) => {}
-            (FrameArtifactRole::RawMaster, Some(_)) | (_, None) => {
-                return Err(FrameSequenceError::InvalidSource {
-                    key: descriptor.key,
-                });
-            }
-            (_, Some(source))
-                if source.frame_index == descriptor.key.frame_index
-                    && source.segment_index == descriptor.key.segment_index
-                    && source.role.rank() < descriptor.key.role.rank() => {}
-            _ => {
-                return Err(FrameSequenceError::InvalidSource {
-                    key: descriptor.key,
-                });
-            }
-        }
+        validate_expected_artifact(&descriptor, max_bytes, source)?;
         Ok(Self {
             descriptor,
             max_bytes,
@@ -730,6 +785,36 @@ impl ExpectedFrameArtifact {
     #[must_use]
     pub const fn source(&self) -> Option<FrameArtifactKey> {
         self.source
+    }
+}
+
+fn validate_expected_artifact(
+    descriptor: &FrameArtifactDescriptor,
+    max_bytes: u64,
+    source: Option<FrameArtifactKey>,
+) -> Result<(), FrameSequenceError> {
+    if max_bytes == 0 {
+        return Err(FrameSequenceError::InvalidArtifactLimit {
+            key: descriptor.key,
+        });
+    }
+    match (descriptor.key.role, source) {
+        (FrameArtifactRole::RawMaster, None) => Ok(()),
+        (FrameArtifactRole::RawMaster, Some(_)) | (_, None) => {
+            Err(FrameSequenceError::InvalidSource {
+                key: descriptor.key,
+            })
+        }
+        (_, Some(source))
+            if source.frame_index == descriptor.key.frame_index
+                && source.segment_index == descriptor.key.segment_index
+                && source.role.rank() < descriptor.key.role.rank() =>
+        {
+            Ok(())
+        }
+        _ => Err(FrameSequenceError::InvalidSource {
+            key: descriptor.key,
+        }),
     }
 }
 
@@ -1022,6 +1107,23 @@ impl FrameSequenceManifest {
         limits: FrameSequenceLimits,
         available_output_bytes: u64,
     ) -> Result<Self, FrameSequenceError> {
+        Self::try_new_with_poll(context, expected, limits, available_output_bytes, || true)
+    }
+
+    /// Admit a complete expected sequence with bounded cancellation polling.
+    ///
+    /// The callback is consulted before and after canonical sorting, for every
+    /// artifact and channel-size pass, during source validation, and while
+    /// computing the final-manifest reservation. It returns `true` to continue
+    /// and `false` to refuse without publishing a partial manifest.
+    pub fn try_new_with_poll(
+        context: FrameSequenceContext,
+        expected: Vec<ExpectedFrameArtifact>,
+        limits: FrameSequenceLimits,
+        available_output_bytes: u64,
+        mut poll: impl FnMut() -> bool,
+    ) -> Result<Self, FrameSequenceError> {
+        poll_or_cancel(&mut poll)?;
         validate_limits(limits)?;
         if expected.is_empty() {
             return Err(FrameSequenceError::EmptySequence);
@@ -1040,12 +1142,14 @@ impl FrameSequenceManifest {
             });
         }
         let mut expected = expected;
+        poll_or_cancel(&mut poll)?;
         expected.sort_unstable_by_key(|artifact| artifact.descriptor.key);
-        if expected
-            .windows(2)
-            .any(|pair| pair[0].descriptor.key == pair[1].descriptor.key)
-        {
-            return Err(FrameSequenceError::DuplicateExpectedArtifact);
+        poll_or_cancel(&mut poll)?;
+        for pair in expected.windows(2) {
+            poll_or_cancel(&mut poll)?;
+            if pair[0].descriptor.key == pair[1].descriptor.key {
+                return Err(FrameSequenceError::DuplicateExpectedArtifact);
+            }
         }
 
         let mut entries = Vec::new();
@@ -1057,6 +1161,7 @@ impl FrameSequenceManifest {
         })?;
         let mut reserved_bytes = 0_u64;
         for artifact in expected {
+            poll_or_cancel(&mut poll)?;
             let channel_count =
                 u16::try_from(artifact.descriptor.channels.len()).map_err(|_| {
                     FrameSequenceError::ResourceLimit {
@@ -1071,6 +1176,9 @@ impl FrameSequenceManifest {
                     requested: u64::from(channel_count),
                     limit: u64::from(limits.max_channels_per_artifact),
                 });
+            }
+            for _ in &artifact.descriptor.channels {
+                poll_or_cancel(&mut poll)?;
             }
             let relative_path =
                 canonical_relative_path(context, &artifact.descriptor, artifact.source)?;
@@ -1094,7 +1202,7 @@ impl FrameSequenceManifest {
                 completion: None,
             });
         }
-        validate_sources(&entries, false)?;
+        validate_sources_with_poll(&entries, false, &mut poll)?;
         admit_storage(
             reserved_bytes,
             limits.max_output_bytes,
@@ -1107,7 +1215,8 @@ impl FrameSequenceManifest {
             state: FrameSequenceState::Incomplete,
             completed_bytes: 0,
         };
-        manifest.finalized_encoded_len()?;
+        manifest_encoded_len_with_poll(&manifest, true, &mut poll)?;
+        poll_or_cancel(&mut poll)?;
         Ok(manifest)
     }
 
@@ -1124,6 +1233,40 @@ impl FrameSequenceManifest {
         admission_limits: FrameSequenceLimits,
         available_output_bytes: u64,
     ) -> Result<Self, FrameSequenceError> {
+        Self::decode_snapshot_with_poll(
+            bytes,
+            expected_identity,
+            admission_limits,
+            available_output_bytes,
+            || true,
+        )
+    }
+
+    /// Decode and re-admit a strict canonical snapshot with bounded
+    /// cancellation polling.
+    ///
+    /// The callback is consulted before identity hashing and allocations, at
+    /// every decoded artifact and channel, throughout structural validation,
+    /// during canonical re-encoding, and while comparing canonical bytes. It
+    /// returns `true` to continue and `false` to refuse with
+    /// [`FrameSequenceError::Cancelled`]. Admission errors that can be
+    /// established without traversing the snapshot retain precedence and do
+    /// not invoke the callback.
+    ///
+    /// # Errors
+    /// Returns the same strict identity, grammar, canonicality, and resource
+    /// errors as [`Self::decode_snapshot`], plus cancellation at the documented
+    /// poll points. No partially decoded manifest is published.
+    // Keeping the strict wire order and its poll boundaries together makes
+    // cancellation review less error-prone than splitting the codec state.
+    #[allow(clippy::too_many_lines)]
+    pub fn decode_snapshot_with_poll(
+        bytes: &[u8],
+        expected_identity: ContentHash,
+        admission_limits: FrameSequenceLimits,
+        available_output_bytes: u64,
+        mut poll: impl FnMut() -> bool,
+    ) -> Result<Self, FrameSequenceError> {
         validate_limits(admission_limits)?;
         let byte_len =
             u64::try_from(bytes.len()).map_err(|_| FrameSequenceError::SizeOverflow {
@@ -1136,14 +1279,15 @@ impl FrameSequenceManifest {
                 limit: admission_limits.max_manifest_bytes,
             });
         }
-        let mut never_cancel = || true;
-        let actual_identity = identity_with_poll(bytes, &mut never_cancel)?;
+        poll_or_cancel(&mut poll)?;
+        let actual_identity = identity_with_poll(bytes, &mut poll)?;
         if actual_identity != expected_identity {
             return Err(FrameSequenceError::IdentityMismatch {
                 expected: expected_identity,
                 actual: actual_identity,
             });
         }
+        poll_or_cancel(&mut poll)?;
         let mut reader = Reader::new(bytes);
         if reader.take(8)? != MAGIC {
             return Err(FrameSequenceError::Malformed { field: "magic" });
@@ -1171,10 +1315,8 @@ impl FrameSequenceManifest {
         validate_nested_limits(limits, admission_limits)?;
         let entry_count = reader.u32()?;
         if entry_count > limits.max_artifacts {
-            return Err(FrameSequenceError::ResourceLimit {
-                resource: "artifact count",
-                requested: u64::from(entry_count),
-                limit: u64::from(limits.max_artifacts),
+            return Err(FrameSequenceError::Malformed {
+                field: "artifact count exceeds embedded limit",
             });
         }
         let encoded_completed_bytes = reader.u64()?;
@@ -1182,6 +1324,7 @@ impl FrameSequenceManifest {
             usize::try_from(entry_count).map_err(|_| FrameSequenceError::SizeOverflow {
                 context: "artifact count on this platform",
             })?;
+        poll_or_cancel(&mut poll)?;
         let mut entries = Vec::new();
         entries.try_reserve_exact(entry_count_usize).map_err(|_| {
             FrameSequenceError::AllocationRefused {
@@ -1190,7 +1333,13 @@ impl FrameSequenceManifest {
             }
         })?;
         for _ in 0..entry_count_usize {
-            entries.push(decode_entry(&mut reader, context, limits)?);
+            poll_or_cancel(&mut poll)?;
+            entries.push(decode_entry_with_poll(
+                &mut reader,
+                context,
+                limits,
+                &mut poll,
+            )?);
         }
         if !reader.is_empty() {
             return Err(FrameSequenceError::TrailingBytes);
@@ -1202,18 +1351,19 @@ impl FrameSequenceManifest {
             state,
             completed_bytes: 0,
         };
-        manifest.validate_structure()?;
+        poll_or_cancel(&mut poll)?;
+        manifest.validate_structure_with_poll(&mut poll)?;
         if manifest.completed_bytes != encoded_completed_bytes {
             return Err(FrameSequenceError::Malformed {
                 field: "completed byte total",
             });
         }
-        manifest.admit_remaining_storage(available_output_bytes)?;
-        if manifest.encoded_len()? != byte_len {
+        manifest.admit_remaining_storage_with_poll(available_output_bytes, &mut poll)?;
+        if manifest_encoded_len_with_poll(&manifest, false, &mut poll)? != byte_len {
             return Err(FrameSequenceError::NonCanonical);
         }
-        let canonical = encode_manifest(&manifest, manifest.state, &mut never_cancel)?;
-        if canonical.as_slice() != bytes {
+        let canonical = encode_manifest(&manifest, manifest.state, &mut poll)?;
+        if !bytes_equal_with_poll(&canonical, bytes, &mut poll)? {
             return Err(FrameSequenceError::NonCanonical);
         }
         Ok(manifest)
@@ -1291,7 +1441,25 @@ impl FrameSequenceManifest {
         &self,
         available_output_bytes: u64,
     ) -> Result<(), FrameSequenceError> {
-        let remaining = self.remaining_reserved_bytes()?;
+        self.admit_remaining_storage_with_poll(available_output_bytes, &mut || true)
+    }
+
+    fn admit_remaining_storage_with_poll(
+        &self,
+        available_output_bytes: u64,
+        poll: &mut impl FnMut() -> bool,
+    ) -> Result<(), FrameSequenceError> {
+        let mut remaining = 0_u64;
+        for entry in &self.entries {
+            poll_or_cancel(poll)?;
+            if entry.completion.is_none() {
+                remaining = remaining.checked_add(entry.max_bytes).ok_or(
+                    FrameSequenceError::SizeOverflow {
+                        context: "remaining reserved bytes",
+                    },
+                )?;
+            }
+        }
         if remaining > available_output_bytes {
             return Err(FrameSequenceError::ResourceLimit {
                 resource: "available output bytes",
@@ -1499,7 +1667,10 @@ impl FrameSequenceManifest {
         Ok(())
     }
 
-    fn validate_structure(&mut self) -> Result<(), FrameSequenceError> {
+    fn validate_structure_with_poll(
+        &mut self,
+        poll: &mut impl FnMut() -> bool,
+    ) -> Result<(), FrameSequenceError> {
         if self.entries.is_empty() {
             return Err(FrameSequenceError::EmptySequence);
         }
@@ -1510,16 +1681,16 @@ impl FrameSequenceManifest {
                 limit: u64::from(self.limits.max_artifacts),
             });
         }
-        if self
-            .entries
-            .windows(2)
-            .any(|pair| pair[0].descriptor.key >= pair[1].descriptor.key)
-        {
-            return Err(FrameSequenceError::NonCanonical);
+        for pair in self.entries.windows(2) {
+            poll_or_cancel(poll)?;
+            if pair[0].descriptor.key >= pair[1].descriptor.key {
+                return Err(FrameSequenceError::NonCanonical);
+            }
         }
         let mut reserved = 0_u64;
         let mut completed = 0_u64;
         for entry in &self.entries {
+            poll_or_cancel(poll)?;
             if entry.descriptor.channels.len() > usize::from(self.limits.max_channels_per_artifact)
             {
                 return Err(FrameSequenceError::ResourceLimit {
@@ -1536,7 +1707,12 @@ impl FrameSequenceManifest {
                 });
             }
             if entry.relative_path
-                != canonical_relative_path(self.context, &entry.descriptor, entry.source)?
+                != canonical_relative_path_with_poll(
+                    self.context,
+                    &entry.descriptor,
+                    entry.source,
+                    poll,
+                )?
             {
                 return Err(FrameSequenceError::NonCanonical);
             }
@@ -1577,20 +1753,23 @@ impl FrameSequenceManifest {
             });
         }
         self.completed_bytes = completed;
-        validate_sources(&self.entries, self.state == FrameSequenceState::Finalized)?;
-        if self.state == FrameSequenceState::Finalized
-            && self.entries.iter().any(|entry| entry.completion.is_none())
-        {
-            return Err(FrameSequenceError::Malformed {
-                field: "finalized completeness",
-            });
+        validate_sources_with_poll(
+            &self.entries,
+            self.state == FrameSequenceState::Finalized,
+            poll,
+        )?;
+        if self.state == FrameSequenceState::Finalized {
+            for entry in &self.entries {
+                poll_or_cancel(poll)?;
+                if entry.completion.is_none() {
+                    return Err(FrameSequenceError::Malformed {
+                        field: "finalized completeness",
+                    });
+                }
+            }
         }
-        self.finalized_encoded_len()?;
+        manifest_encoded_len_with_poll(self, true, poll)?;
         Ok(())
-    }
-
-    fn encoded_len(&self) -> Result<u64, FrameSequenceError> {
-        manifest_encoded_len(self)
     }
 
     fn finalized_encoded_len(&self) -> Result<u64, FrameSequenceError> {
@@ -1690,13 +1869,6 @@ fn admit_storage(
         });
     }
     Ok(())
-}
-
-fn validate_sources(
-    entries: &[FrameArtifactEntry],
-    require_complete: bool,
-) -> Result<(), FrameSequenceError> {
-    validate_sources_with_poll(entries, require_complete, &mut || true)
 }
 
 fn validate_sources_with_poll(
@@ -1927,10 +2099,20 @@ fn canonical_relative_path(
     descriptor: &FrameArtifactDescriptor,
     source: Option<FrameArtifactKey>,
 ) -> Result<String, FrameSequenceError> {
+    canonical_relative_path_with_poll(context, descriptor, source, &mut || true)
+}
+
+fn canonical_relative_path_with_poll(
+    context: FrameSequenceContext,
+    descriptor: &FrameArtifactDescriptor,
+    source: Option<FrameArtifactKey>,
+    poll: &mut impl FnMut() -> bool,
+) -> Result<String, FrameSequenceError> {
     let directory = descriptor.key.role.directory();
     let extension = descriptor.format.extension();
     let context_identity = frame_sequence_context_identity(context);
-    let descriptor_identity = frame_artifact_expectation_identity(descriptor, source);
+    let descriptor_identity =
+        frame_artifact_expectation_identity_with_poll(descriptor, source, poll)?;
     let required = directory
         .len()
         .checked_add(1 + 64)
@@ -1944,6 +2126,7 @@ fn canonical_relative_path(
         .ok_or(FrameSequenceError::SizeOverflow {
             context: "relative path length",
         })?;
+    poll_or_cancel(poll)?;
     let mut path = String::new();
     path.try_reserve_exact(required)
         .map_err(|_| FrameSequenceError::AllocationRefused {
@@ -1988,10 +2171,11 @@ fn frame_sequence_context_identity(context: FrameSequenceContext) -> ContentHash
     hasher.finalize()
 }
 
-fn frame_artifact_expectation_identity(
+fn frame_artifact_expectation_identity_with_poll(
     descriptor: &FrameArtifactDescriptor,
     source: Option<FrameArtifactKey>,
-) -> ContentHash {
+    poll: &mut impl FnMut() -> bool,
+) -> Result<ContentHash, FrameSequenceError> {
     let mut hasher = DomainHasher::new(EXPECTATION_IDENTITY_DOMAIN);
     hasher.update(&descriptor.key.frame_index.to_le_bytes());
     hasher.update(&descriptor.key.segment_index.to_le_bytes());
@@ -2006,6 +2190,7 @@ fn frame_artifact_expectation_identity(
             .to_le_bytes(),
     );
     for channel in &descriptor.channels {
+        poll_or_cancel(poll)?;
         hasher.update(
             &u64::try_from(channel.name.len())
                 .unwrap_or(u64::MAX)
@@ -2043,7 +2228,7 @@ fn frame_artifact_expectation_identity(
             hasher.update(&[source.role.tag()]);
         }
     }
-    hasher.finalize()
+    Ok(hasher.finalize())
 }
 
 fn push_hash_hex(output: &mut String, hash: ContentHash) {
@@ -2052,10 +2237,6 @@ fn push_hash_hex(output: &mut String, hash: ContentHash) {
         output.push(char::from(HEX[usize::from(byte >> 4)]));
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-}
-
-fn manifest_encoded_len(manifest: &FrameSequenceManifest) -> Result<u64, FrameSequenceError> {
-    manifest_encoded_len_with_poll(manifest, false, &mut || true)
 }
 
 fn finalized_manifest_encoded_len(
@@ -2091,6 +2272,7 @@ fn manifest_encoded_len_with_poll(
                 context: "manifest entry header",
             })?;
         for channel in &entry.descriptor.channels {
+            poll_or_cancel(poll)?;
             bytes = bytes
                 .checked_add(1)
                 .and_then(|value| {
@@ -2157,6 +2339,7 @@ fn encode_manifest(
     let capacity = usize::try_from(required).map_err(|_| FrameSequenceError::SizeOverflow {
         context: "manifest bytes on this platform",
     })?;
+    poll_or_cancel(poll)?;
     let mut output = Vec::new();
     output
         .try_reserve_exact(capacity)
@@ -2204,6 +2387,7 @@ fn encode_manifest(
             u16::try_from(entry.descriptor.channels.len()).unwrap_or(u16::MAX),
         );
         for channel in &entry.descriptor.channels {
+            poll_or_cancel(poll)?;
             output.push(u8::try_from(channel.name.len()).unwrap_or(u8::MAX));
             output.extend_from_slice(channel.name.as_bytes());
             output.push(channel.sample_type.tag());
@@ -2272,14 +2456,44 @@ fn identity_with_poll(
     Ok(hasher.finalize())
 }
 
+fn bytes_equal_with_poll(
+    left: &[u8],
+    right: &[u8],
+    poll: &mut impl FnMut() -> bool,
+) -> Result<bool, FrameSequenceError> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left_chunk, right_chunk) in left
+        .chunks(IDENTITY_POLL_BYTES)
+        .zip(right.chunks(IDENTITY_POLL_BYTES))
+    {
+        poll_or_cancel(poll)?;
+        if left_chunk != right_chunk {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn poll_or_cancel(poll: &mut impl FnMut() -> bool) -> Result<(), FrameSequenceError> {
+    if poll() {
+        Ok(())
+    } else {
+        Err(FrameSequenceError::Cancelled)
+    }
+}
+
 // This mirrors the encoder field-for-field; splitting the wire order across
 // helpers would make compatibility review harder.
 #[allow(clippy::too_many_lines)]
-fn decode_entry(
+fn decode_entry_with_poll(
     reader: &mut Reader<'_>,
     context: FrameSequenceContext,
     limits: FrameSequenceLimits,
+    poll: &mut impl FnMut() -> bool,
 ) -> Result<FrameArtifactEntry, FrameSequenceError> {
+    poll_or_cancel(poll)?;
     let relative_path = reader.short_string(usize::from(limits.max_relative_path_bytes))?;
     let frame_index = reader.u64()?;
     let segment_index = reader.u32()?;
@@ -2294,12 +2508,9 @@ fn decode_entry(
     let height = reader.u32()?;
     let channel_count = reader.u16()?;
     if channel_count == 0 || channel_count > limits.max_channels_per_artifact {
-        return Err(FrameSequenceError::ResourceLimit {
-            resource: "artifact channels",
-            requested: u64::from(channel_count),
-            limit: u64::from(limits.max_channels_per_artifact),
-        });
+        return Err(FrameSequenceError::InvalidChannelSet { frame_index });
     }
+    poll_or_cancel(poll)?;
     let mut channels = Vec::new();
     channels
         .try_reserve_exact(usize::from(channel_count))
@@ -2308,6 +2519,7 @@ fn decode_entry(
             requested: u64::from(channel_count),
         })?;
     for _ in 0..channel_count {
+        poll_or_cancel(poll)?;
         let name_len = usize::from(reader.u8()?);
         let name = reader.string_exact(name_len)?;
         channels.push(FrameChannel::try_new(
@@ -2330,7 +2542,8 @@ fn decode_entry(
             });
         }
     };
-    let descriptor = FrameArtifactDescriptor::try_new(
+    poll_or_cancel(poll)?;
+    let descriptor = FrameArtifactDescriptor::try_from_canonical_wire_with_poll(
         frame_index,
         segment_index,
         role,
@@ -2340,6 +2553,7 @@ fn decode_entry(
         height,
         channels,
         sampling,
+        poll,
     )?;
     let max_bytes = reader.u64()?;
     let source = match reader.u8()? {
@@ -2355,7 +2569,7 @@ fn decode_entry(
             });
         }
     };
-    ExpectedFrameArtifact::try_new(descriptor.clone(), max_bytes, source)?;
+    validate_expected_artifact(&descriptor, max_bytes, source)?;
     let completion = match reader.u8()? {
         0 => None,
         1 => {
@@ -2380,7 +2594,7 @@ fn decode_entry(
             });
         }
     };
-    if relative_path != canonical_relative_path(context, &descriptor, source)? {
+    if relative_path != canonical_relative_path_with_poll(context, &descriptor, source, poll)? {
         return Err(FrameSequenceError::NonCanonical);
     }
     Ok(FrameArtifactEntry {
@@ -2471,10 +2685,8 @@ impl<'a> Reader<'a> {
     fn short_string(&mut self, max_len: usize) -> Result<String, FrameSequenceError> {
         let len = usize::from(self.u16()?);
         if len > max_len {
-            return Err(FrameSequenceError::ResourceLimit {
-                resource: "relative path bytes",
-                requested: u64::try_from(len).unwrap_or(u64::MAX),
-                limit: u64::try_from(max_len).unwrap_or(u64::MAX),
+            return Err(FrameSequenceError::Malformed {
+                field: "relative path length exceeds embedded limit",
             });
         }
         self.string_exact(len)
@@ -2763,3 +2975,379 @@ impl fmt::Display for FrameSequenceError {
 }
 
 impl std::error::Error for FrameSequenceError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_hash(label: &[u8]) -> ContentHash {
+        hash_bytes(label)
+    }
+
+    fn fixture_context() -> FrameSequenceContext {
+        FrameSequenceContext::try_new(
+            fixture_hash(b"poll-decode-shot"),
+            fixture_hash(b"poll-decode-trajectory"),
+            fixture_hash(b"poll-decode-render-config"),
+            fixture_hash(b"poll-decode-scene"),
+            fixture_hash(b"poll-decode-build"),
+            fixture_hash(b"poll-decode-profile"),
+        )
+        .expect("fixture identities are non-placeholder")
+    }
+
+    fn expected_fixture(artifact_count: u32) -> Vec<ExpectedFrameArtifact> {
+        let mut expected = Vec::new();
+        expected
+            .try_reserve_exact(
+                usize::try_from(artifact_count).expect("fixture count fits this platform"),
+            )
+            .expect("small test fixture allocation");
+        for frame_index in 0..artifact_count {
+            let descriptor = FrameArtifactDescriptor::try_new(
+                u64::from(frame_index),
+                0,
+                FrameArtifactRole::RawMaster,
+                f64::from(frame_index) / 24.0,
+                FrameArtifactFormat::OpenExr,
+                1,
+                1,
+                vec![
+                    FrameChannel::try_new("R", FrameChannelType::Float32).expect("fixture channel"),
+                ],
+                FrameSamplingStats::Uniform { spp: 1 },
+            )
+            .expect("fixture descriptor");
+            expected.push(
+                ExpectedFrameArtifact::try_new(descriptor, 16, None).expect("fixture expectation"),
+            );
+        }
+        expected
+    }
+
+    fn snapshot_fixture(
+        artifact_count: u32,
+    ) -> (
+        FrameSequenceManifest,
+        FrameSequenceSnapshot,
+        FrameSequenceLimits,
+        u64,
+    ) {
+        let expected = expected_fixture(artifact_count);
+        let available_output_bytes = u64::from(artifact_count) * 16;
+        let limits = FrameSequenceLimits::try_new(
+            artifact_count,
+            4,
+            512,
+            4 * 1024 * 1024,
+            available_output_bytes,
+        )
+        .expect("fixture limits");
+        let manifest = FrameSequenceManifest::try_new(
+            fixture_context(),
+            expected,
+            limits,
+            available_output_bytes,
+        )
+        .expect("fixture manifest");
+        let snapshot = manifest.snapshot().expect("fixture snapshot");
+        (manifest, snapshot, limits, available_output_bytes)
+    }
+
+    #[test]
+    fn g0_pollable_constructor_matches_compatibility_wrapper() {
+        let artifact_count = 4;
+        let available_output_bytes = u64::from(artifact_count) * 16;
+        let limits = FrameSequenceLimits::try_new(
+            artifact_count,
+            4,
+            512,
+            4 * 1024 * 1024,
+            available_output_bytes,
+        )
+        .expect("fixture limits");
+
+        let expected = FrameSequenceManifest::try_new(
+            fixture_context(),
+            expected_fixture(artifact_count),
+            limits,
+            available_output_bytes,
+        )
+        .expect("compatibility constructor");
+        let mut polls = 0_u64;
+        let actual = FrameSequenceManifest::try_new_with_poll(
+            fixture_context(),
+            expected_fixture(artifact_count),
+            limits,
+            available_output_bytes,
+            || {
+                polls += 1;
+                true
+            },
+        )
+        .expect("pollable constructor");
+
+        assert_eq!(actual, expected);
+        assert!(
+            polls > u64::from(artifact_count),
+            "construction must poll beyond the per-artifact pass"
+        );
+    }
+
+    #[test]
+    fn g4_pollable_constructor_cancels_deterministically_mid_construction() {
+        let artifact_count = 8;
+        let available_output_bytes = u64::from(artifact_count) * 16;
+        let limits = FrameSequenceLimits::try_new(
+            artifact_count,
+            4,
+            512,
+            4 * 1024 * 1024,
+            available_output_bytes,
+        )
+        .expect("fixture limits");
+        let mut total_polls = 0_u64;
+        FrameSequenceManifest::try_new_with_poll(
+            fixture_context(),
+            expected_fixture(artifact_count),
+            limits,
+            available_output_bytes,
+            || {
+                total_polls += 1;
+                true
+            },
+        )
+        .expect("baseline construction");
+        assert!(
+            total_polls > 8,
+            "fixture must cross several construction phases"
+        );
+
+        let fail_at = total_polls / 2;
+        assert!(
+            fail_at > 3,
+            "failure point must occur after canonical sorting"
+        );
+        let mut calls = 0_u64;
+        let error = FrameSequenceManifest::try_new_with_poll(
+            fixture_context(),
+            expected_fixture(artifact_count),
+            limits,
+            available_output_bytes,
+            || {
+                calls += 1;
+                calls != fail_at
+            },
+        )
+        .expect_err("a false midpoint poll must cancel construction");
+
+        assert_eq!(error, FrameSequenceError::Cancelled);
+        assert_eq!(calls, fail_at);
+    }
+
+    #[test]
+    fn g0_constructor_artifact_limit_is_exact_and_refuses_before_sorting() {
+        let artifact_count = 2;
+        let available_output_bytes = u64::from(artifact_count) * 16;
+        let exact_limits = FrameSequenceLimits::try_new(
+            artifact_count,
+            4,
+            512,
+            4 * 1024 * 1024,
+            available_output_bytes,
+        )
+        .expect("exact fixture limits");
+        FrameSequenceManifest::try_new_with_poll(
+            fixture_context(),
+            expected_fixture(artifact_count),
+            exact_limits,
+            available_output_bytes,
+            || true,
+        )
+        .expect("the exact artifact ceiling must pass");
+
+        let tight_limits = FrameSequenceLimits::try_new(
+            artifact_count - 1,
+            exact_limits.max_channels_per_artifact(),
+            exact_limits.max_relative_path_bytes(),
+            exact_limits.max_manifest_bytes(),
+            exact_limits.max_output_bytes(),
+        )
+        .expect("tight limits remain nonzero");
+        let mut polls = 0_u32;
+        let error = FrameSequenceManifest::try_new_with_poll(
+            fixture_context(),
+            expected_fixture(artifact_count),
+            tight_limits,
+            available_output_bytes,
+            || {
+                polls += 1;
+                true
+            },
+        )
+        .expect_err("one artifact above the ceiling must refuse");
+
+        assert_eq!(
+            error,
+            FrameSequenceError::ResourceLimit {
+                resource: "artifact count",
+                requested: u64::from(artifact_count),
+                limit: u64::from(artifact_count - 1),
+            }
+        );
+        assert_eq!(polls, 1, "count refusal must precede canonical sorting");
+    }
+
+    #[test]
+    fn g0_pollable_decode_preserves_valid_and_truncated_results() {
+        let (manifest, snapshot, limits, available_output_bytes) = snapshot_fixture(1);
+        let mut polls = 0_u64;
+        let decoded = FrameSequenceManifest::decode_snapshot_with_poll(
+            snapshot.bytes(),
+            snapshot.identity(),
+            limits,
+            available_output_bytes,
+            || {
+                polls += 1;
+                true
+            },
+        )
+        .expect("valid snapshot must decode");
+        assert_eq!(decoded, manifest);
+        assert!(polls > 1, "decode must poll beyond the identity hash");
+        assert_eq!(
+            FrameSequenceManifest::decode_snapshot(
+                snapshot.bytes(),
+                snapshot.identity(),
+                limits,
+                available_output_bytes,
+            )
+            .expect("compatibility wrapper must decode"),
+            manifest
+        );
+
+        for prefix_len in 0..snapshot.bytes().len() {
+            let prefix = &snapshot.bytes()[..prefix_len];
+            let prefix_identity =
+                identity_with_poll(prefix, &mut || true).expect("non-cancelling prefix identity");
+            assert_eq!(
+                FrameSequenceManifest::decode_snapshot_with_poll(
+                    prefix,
+                    prefix_identity,
+                    limits,
+                    available_output_bytes,
+                    || true,
+                )
+                .expect_err("every strict prefix must refuse"),
+                FrameSequenceError::Truncated,
+                "prefix {prefix_len} of {} bytes",
+                snapshot.bytes().len()
+            );
+        }
+    }
+
+    #[test]
+    fn g4_pollable_decode_cancels_across_bounded_phases() {
+        let (_, snapshot, limits, available_output_bytes) = snapshot_fixture(192);
+        assert!(
+            snapshot.bytes().len() > IDENTITY_POLL_BYTES,
+            "fixture must exercise multiple identity-hash chunks"
+        );
+
+        let mut total_polls = 0_u64;
+        FrameSequenceManifest::decode_snapshot_with_poll(
+            snapshot.bytes(),
+            snapshot.identity(),
+            limits,
+            available_output_bytes,
+            || {
+                total_polls += 1;
+                true
+            },
+        )
+        .expect("baseline decode");
+        assert!(total_polls > u64::from(limits.max_artifacts()));
+
+        let mut failure_points = vec![1, 2, 3, total_polls / 2, total_polls];
+        failure_points.sort_unstable();
+        failure_points.dedup();
+        for fail_at in failure_points {
+            let mut calls = 0_u64;
+            let error = FrameSequenceManifest::decode_snapshot_with_poll(
+                snapshot.bytes(),
+                snapshot.identity(),
+                limits,
+                available_output_bytes,
+                || {
+                    calls += 1;
+                    calls != fail_at
+                },
+            )
+            .expect_err("false poll must cancel decode");
+            assert_eq!(error, FrameSequenceError::Cancelled);
+            assert_eq!(calls, fail_at);
+        }
+    }
+
+    #[test]
+    fn g4_manifest_budget_refuses_before_polling_or_allocation() {
+        let (_, snapshot, limits, available_output_bytes) = snapshot_fixture(1);
+        let byte_limit = u64::try_from(snapshot.bytes().len())
+            .expect("fixture length fits u64")
+            .checked_sub(1)
+            .expect("snapshot is nonempty");
+        let tight_limits = FrameSequenceLimits::try_new(
+            limits.max_artifacts(),
+            limits.max_channels_per_artifact(),
+            limits.max_relative_path_bytes(),
+            byte_limit,
+            limits.max_output_bytes(),
+        )
+        .expect("tight limits remain nonzero");
+        let mut polls = 0_u32;
+        let error = FrameSequenceManifest::decode_snapshot_with_poll(
+            snapshot.bytes(),
+            snapshot.identity(),
+            tight_limits,
+            available_output_bytes,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .expect_err("over-budget input must refuse before work");
+        assert!(matches!(
+            error,
+            FrameSequenceError::ResourceLimit {
+                resource: "manifest bytes",
+                requested,
+                limit,
+            } if requested == limit + 1
+        ));
+        assert_eq!(polls, 0);
+    }
+
+    #[test]
+    fn g0_embedded_artifact_count_violation_is_corruption_not_resource_refusal() {
+        let (_, snapshot, limits, available_output_bytes) = snapshot_fixture(1);
+        let mut hostile = snapshot.into_bytes();
+        const ENTRY_COUNT_OFFSET: usize = 8 + 2 + 1 + 6 * 32 + 4 + 2 + 2 + 8 + 8;
+        hostile[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4].copy_from_slice(&2_u32.to_le_bytes());
+        let hostile_identity =
+            identity_with_poll(&hostile, &mut || true).expect("hostile snapshot identity");
+
+        assert_eq!(
+            FrameSequenceManifest::decode_snapshot_with_poll(
+                &hostile,
+                hostile_identity,
+                limits,
+                available_output_bytes,
+                || true,
+            )
+            .expect_err("embedded count above its own limit must refuse as corruption"),
+            FrameSequenceError::Malformed {
+                field: "artifact count exceeds embedded limit",
+            }
+        );
+    }
+}

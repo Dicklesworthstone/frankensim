@@ -10,6 +10,8 @@
 //! The reader covers exactly OUR writer's subset (round-trips + ledger
 //! artifact loading) and rejects everything else with structured errors —
 //! it is not a general PNG decoder (documented no-claim).
+//! The bounded structural inspector verifies the canonical chunk and stored-
+//! deflate grammar without retaining decoded pixels.
 
 use crate::ImgError;
 
@@ -54,7 +56,10 @@ impl PngColor {
 /// CRC-32 (IEEE 802.3, reflected 0xEDB88320) — the PNG chunk checksum.
 #[must_use]
 pub fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
+    !crc32_update(0xFFFF_FFFF, bytes)
+}
+
+fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
     for &b in bytes {
         crc ^= u32::from(b);
         for _ in 0..8 {
@@ -62,23 +67,43 @@ pub fn crc32(bytes: &[u8]) -> u32 {
             crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
         }
     }
-    !crc
+    crc
 }
 
 /// Adler-32 — the zlib stream checksum.
 #[must_use]
 pub fn adler32(bytes: &[u8]) -> u32 {
-    const MOD: u32 = 65_521;
-    let (mut a, mut b) = (1u32, 0u32);
-    for chunk in bytes.chunks(5000) {
-        for &x in chunk {
-            a += u32::from(x);
-            b += a;
-        }
-        a %= MOD;
-        b %= MOD;
+    let mut state = Adler32State::new();
+    state.update(bytes);
+    state.finish()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Adler32State {
+    a: u32,
+    b: u32,
+}
+
+impl Adler32State {
+    const fn new() -> Self {
+        Self { a: 1, b: 0 }
     }
-    (b << 16) | a
+
+    fn update(&mut self, bytes: &[u8]) {
+        const MOD: u32 = 65_521;
+        for chunk in bytes.chunks(5000) {
+            for &x in chunk {
+                self.a += u32::from(x);
+                self.b += self.a;
+            }
+            self.a %= MOD;
+            self.b %= MOD;
+        }
+    }
+
+    const fn finish(self) -> u32 {
+        (self.b << 16) | self.a
+    }
 }
 
 /// Wrap raw bytes in a zlib stream of STORED deflate blocks.
@@ -344,6 +369,48 @@ pub struct DecodedPng {
     pub bytes: Vec<u8>,
 }
 
+/// Caller-owned byte ceilings for structural PNG inspection.
+///
+/// Inspection retains no decoded pixels. `max_decoded_bytes` bounds the
+/// logical interleaved sample bytes described by IHDR, excluding the one-byte
+/// None-filter prefix on each encoded scanline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngInspectLimits {
+    /// Maximum encoded artifact bytes accepted at entry.
+    pub max_input_bytes: u64,
+    /// Maximum logical decoded interleaved sample bytes.
+    pub max_decoded_bytes: u64,
+}
+
+impl PngInspectLimits {
+    /// Unlimited ceilings for callers that already enforce an outer budget.
+    pub const UNBOUNDED: Self = Self {
+        max_input_bytes: u64::MAX,
+        max_decoded_bytes: u64::MAX,
+    };
+}
+
+/// Structural facts for a PNG in the exact subset emitted by this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngInspection {
+    /// Pixel width.
+    pub width: u32,
+    /// Pixel height.
+    pub height: u32,
+    /// Sample bit depth, 8 or 16.
+    pub depth: u8,
+    /// Packed color layout.
+    pub color: PngColor,
+    /// Complete encoded artifact length.
+    pub input_bytes: u64,
+    /// Interleaved sample bytes in one decoded row.
+    pub scanline_bytes: u64,
+    /// Total logical decoded interleaved sample bytes.
+    pub decoded_bytes: u64,
+    /// Total uncompressed zlib payload bytes, including row filter prefixes.
+    pub filtered_bytes: u64,
+}
+
 impl DecodedPng {
     /// 16-bit samples (only valid when `depth == 16`).
     #[must_use]
@@ -437,6 +504,360 @@ fn parse_ihdr(data: &[u8]) -> Result<(u32, u32, u8, PngColor), ImgError> {
         });
     }
     Ok((w, h, depth, color))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PngChunkRef<'a> {
+    kind: &'a [u8],
+    data: &'a [u8],
+    expected_crc: u32,
+    next_pos: usize,
+}
+
+fn png_inspect_continue(
+    poll: &mut impl FnMut() -> bool,
+    operation: &'static str,
+) -> Result<(), ImgError> {
+    if poll() {
+        Ok(())
+    } else {
+        Err(ImgError::Cancelled { operation })
+    }
+}
+
+fn admit_png_inspect_bytes(
+    resource: &'static str,
+    requested: u64,
+    limit: u64,
+) -> Result<(), ImgError> {
+    if requested > limit {
+        Err(ImgError::ResourceLimit {
+            resource,
+            requested,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn read_chunk_ref(bytes: &[u8], pos: usize) -> Result<PngChunkRef<'_>, ImgError> {
+    let header = checked_range(bytes, pos, 8, "truncated chunk header")?;
+    let data_len = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
+    let kind = &header[4..8];
+    let data_start = pos.checked_add(8).ok_or_else(|| ImgError::Malformed {
+        what: "PNG chunk offset overflow".to_string(),
+    })?;
+    let data = checked_range(bytes, data_start, data_len, "truncated chunk data")?;
+    let crc_start = data_start
+        .checked_add(data_len)
+        .ok_or_else(|| ImgError::Malformed {
+            what: "PNG chunk length overflow".to_string(),
+        })?;
+    let crc_bytes = checked_range(bytes, crc_start, 4, "truncated chunk crc")?;
+    let next_pos = crc_start
+        .checked_add(4)
+        .ok_or_else(|| ImgError::Malformed {
+            what: "PNG chunk offset overflow".to_string(),
+        })?;
+    Ok(PngChunkRef {
+        kind,
+        data,
+        expected_crc: u32::from_be_bytes(crc_bytes.try_into().expect("4 bytes")),
+        next_pos,
+    })
+}
+
+fn require_png_chunk(chunk: PngChunkRef<'_>, expected: [u8; 4]) -> Result<(), ImgError> {
+    if chunk.kind == expected {
+        Ok(())
+    } else {
+        Err(ImgError::Malformed {
+            what: format!(
+                "canonical PNG expected chunk {:?}, found {:?}",
+                String::from_utf8_lossy(&expected),
+                String::from_utf8_lossy(chunk.kind)
+            ),
+        })
+    }
+}
+
+fn verify_chunk_crc_with_poll(
+    chunk: PngChunkRef<'_>,
+    poll: &mut impl FnMut() -> bool,
+) -> Result<(), ImgError> {
+    const POLL_BYTES: usize = 64 * 1024;
+    png_inspect_continue(poll, "PNG structural inspection")?;
+    let mut crc = crc32_update(0xFFFF_FFFF, chunk.kind);
+    for bytes in chunk.data.chunks(POLL_BYTES) {
+        png_inspect_continue(poll, "PNG structural inspection")?;
+        crc = crc32_update(crc, bytes);
+    }
+    let actual = !crc;
+    if actual != chunk.expected_crc {
+        return Err(ImgError::Malformed {
+            what: format!(
+                "PNG {:?} chunk CRC mismatch",
+                String::from_utf8_lossy(chunk.kind)
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn inspect_canonical_zlib(
+    zlib: &[u8],
+    expected_filtered_bytes: u64,
+    row_stride: u64,
+    poll: &mut impl FnMut() -> bool,
+) -> Result<(), ImgError> {
+    const POLL_BYTES: usize = 64 * 1024;
+    if take_png(zlib, 0, 2)? != [0x78, 0x01] {
+        return Err(ImgError::Unsupported {
+            what: "PNG IDAT must use the canonical 0x78 0x01 zlib header".to_string(),
+        });
+    }
+    let mut pos = 2usize;
+    let mut raw_offset = 0u64;
+    let mut adler = Adler32State::new();
+    loop {
+        png_inspect_continue(poll, "PNG structural inspection")?;
+        let header = *zlib.get(pos).ok_or_else(|| ImgError::Malformed {
+            what: "truncated deflate block".to_string(),
+        })?;
+        if header & 0x06 != 0 {
+            return Err(ImgError::Unsupported {
+                what: "compressed deflate blocks are outside the canonical writer subset"
+                    .to_string(),
+            });
+        }
+        if header & 0xF8 != 0 {
+            return Err(ImgError::Malformed {
+                what: format!("nonzero padding bits in stored-deflate header {header:#04x}"),
+            });
+        }
+        let bfinal = header & 1 == 1;
+        let block_header = take_png(zlib, pos + 1, 4)?;
+        let len = u16::from_le_bytes(block_header[..2].try_into().expect("2 bytes"));
+        let nlen = u16::from_le_bytes(block_header[2..].try_into().expect("2 bytes"));
+        if nlen != !len {
+            return Err(ImgError::Malformed {
+                what: "stored-deflate NLEN mismatch".to_string(),
+            });
+        }
+        let remaining =
+            expected_filtered_bytes
+                .checked_sub(raw_offset)
+                .ok_or(ImgError::SizeOverflow {
+                    context: "PNG filtered-byte accounting",
+                })?;
+        let canonical_len = remaining.min(u64::from(u16::MAX));
+        if u64::from(len) != canonical_len {
+            return Err(ImgError::Malformed {
+                what: format!(
+                    "stored-deflate block at raw byte {raw_offset} has length {len}; canonical length is {canonical_len}"
+                ),
+            });
+        }
+        if bfinal != (canonical_len == remaining) {
+            return Err(ImgError::Malformed {
+                what: format!(
+                    "stored-deflate final-block marker is noncanonical at raw byte {raw_offset}"
+                ),
+            });
+        }
+        let data_start = pos.checked_add(5).ok_or(ImgError::SizeOverflow {
+            context: "PNG deflate block offset",
+        })?;
+        let data = take_png(zlib, data_start, usize::from(len))?;
+        let block_end = raw_offset
+            .checked_add(u64::from(len))
+            .ok_or(ImgError::SizeOverflow {
+                context: "PNG filtered-byte accounting",
+            })?;
+
+        let remainder = raw_offset % row_stride;
+        let mut filter_offset = if remainder == 0 {
+            raw_offset
+        } else {
+            raw_offset
+                .checked_add(row_stride - remainder)
+                .ok_or(ImgError::SizeOverflow {
+                    context: "PNG filter-byte offset",
+                })?
+        };
+        while filter_offset < block_end {
+            let in_block = usize::try_from(filter_offset - raw_offset).map_err(|_| {
+                ImgError::SizeOverflow {
+                    context: "PNG filter-byte offset on this platform",
+                }
+            })?;
+            if data[in_block] != 0 {
+                return Err(ImgError::Unsupported {
+                    what: format!(
+                        "filter type {} on scanline {} (canonical writer emits None)",
+                        data[in_block],
+                        filter_offset / row_stride
+                    ),
+                });
+            }
+            filter_offset =
+                filter_offset
+                    .checked_add(row_stride)
+                    .ok_or(ImgError::SizeOverflow {
+                        context: "PNG filter-byte offset",
+                    })?;
+        }
+
+        for bytes in data.chunks(POLL_BYTES) {
+            png_inspect_continue(poll, "PNG structural inspection")?;
+            adler.update(bytes);
+        }
+        raw_offset = block_end;
+        pos = data_start
+            .checked_add(usize::from(len))
+            .ok_or(ImgError::SizeOverflow {
+                context: "PNG deflate block offset",
+            })?;
+        if bfinal {
+            break;
+        }
+    }
+    if raw_offset != expected_filtered_bytes {
+        return Err(ImgError::Malformed {
+            what: format!(
+                "PNG filtered payload is {raw_offset} bytes; expected {expected_filtered_bytes}"
+            ),
+        });
+    }
+    let trailer = take_png(zlib, pos, 4)?;
+    let expected_adler = u32::from_be_bytes(trailer.try_into().expect("4 bytes"));
+    if adler.finish() != expected_adler {
+        return Err(ImgError::Malformed {
+            what: "PNG zlib Adler-32 mismatch".to_string(),
+        });
+    }
+    if pos + 4 != zlib.len() {
+        return Err(ImgError::Malformed {
+            what: "trailing bytes after PNG zlib Adler-32".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn take_png(bytes: &[u8], pos: usize, len: usize) -> Result<&[u8], ImgError> {
+    checked_range(bytes, pos, len, "truncated PNG stored-deflate stream")
+}
+
+/// Strictly inspect a PNG emitted by this crate without retaining decoded
+/// pixels. This convenience entry point never observes cancellation.
+///
+/// # Errors
+/// Returns [`ImgError`] for budget refusal, malformed or noncanonical
+/// structure, or an unsupported PNG feature.
+pub fn inspect_png(bytes: &[u8], limits: PngInspectLimits) -> Result<PngInspection, ImgError> {
+    inspect_png_with_poll(bytes, limits, || true)
+}
+
+/// Strictly inspect a PNG emitted by this crate without retaining decoded
+/// pixels, polling before bounded chunk and stored-deflate units. `poll`
+/// returns `true` to continue and `false` to cancel.
+///
+/// The exact canonical writer subset is enforced: `IHDR`, `sRGB`, one
+/// `IDAT`, and `IEND` in that order; exact CRCs; canonical stored-deflate
+/// framing; None filters; exact Adler-32; and exact EOF.
+///
+/// # Errors
+/// Returns [`ImgError`] for cancellation, budget refusal, malformed or
+/// noncanonical structure, or an unsupported PNG feature.
+pub fn inspect_png_with_poll(
+    bytes: &[u8],
+    limits: PngInspectLimits,
+    mut poll: impl FnMut() -> bool,
+) -> Result<PngInspection, ImgError> {
+    png_inspect_continue(&mut poll, "PNG structural inspection")?;
+    let input_bytes = u64::try_from(bytes.len()).map_err(|_| ImgError::SizeOverflow {
+        context: "PNG input bytes",
+    })?;
+    admit_png_inspect_bytes("PNG input", input_bytes, limits.max_input_bytes)?;
+    if bytes.get(..8) != Some(&SIGNATURE) {
+        return Err(ImgError::Malformed {
+            what: "missing PNG signature".to_string(),
+        });
+    }
+
+    let ihdr = read_chunk_ref(bytes, 8)?;
+    require_png_chunk(ihdr, *b"IHDR")?;
+    verify_chunk_crc_with_poll(ihdr, &mut poll)?;
+    let (width, height, depth, color) = parse_ihdr(ihdr.data)?;
+    let bytes_per_sample = u64::from(depth / 8);
+    let scanline_bytes = u64::from(width)
+        .checked_mul(color.channels() as u64)
+        .and_then(|bytes| bytes.checked_mul(bytes_per_sample))
+        .ok_or(ImgError::SizeOverflow {
+            context: "PNG decoded scanline bytes",
+        })?;
+    let decoded_bytes =
+        scanline_bytes
+            .checked_mul(u64::from(height))
+            .ok_or(ImgError::SizeOverflow {
+                context: "PNG decoded sample bytes",
+            })?;
+    admit_png_inspect_bytes(
+        "PNG decoded samples",
+        decoded_bytes,
+        limits.max_decoded_bytes,
+    )?;
+    let row_stride = scanline_bytes
+        .checked_add(1)
+        .ok_or(ImgError::SizeOverflow {
+            context: "PNG filtered scanline bytes",
+        })?;
+    let filtered_bytes =
+        row_stride
+            .checked_mul(u64::from(height))
+            .ok_or(ImgError::SizeOverflow {
+                context: "PNG filtered bytes",
+            })?;
+
+    let srgb = read_chunk_ref(bytes, ihdr.next_pos)?;
+    require_png_chunk(srgb, *b"sRGB")?;
+    if srgb.data != [0] {
+        return Err(ImgError::Unsupported {
+            what: "canonical PNG sRGB rendering intent must be perceptual (0)".to_string(),
+        });
+    }
+    verify_chunk_crc_with_poll(srgb, &mut poll)?;
+
+    let idat = read_chunk_ref(bytes, srgb.next_pos)?;
+    require_png_chunk(idat, *b"IDAT")?;
+    let iend = read_chunk_ref(bytes, idat.next_pos)?;
+    require_png_chunk(iend, *b"IEND")?;
+    if !iend.data.is_empty() {
+        return Err(ImgError::Malformed {
+            what: "PNG IEND length must be zero".to_string(),
+        });
+    }
+    if iend.next_pos != bytes.len() {
+        return Err(ImgError::Malformed {
+            what: "trailing bytes after canonical PNG IEND".to_string(),
+        });
+    }
+
+    verify_chunk_crc_with_poll(idat, &mut poll)?;
+    inspect_canonical_zlib(idat.data, filtered_bytes, row_stride, &mut poll)?;
+    verify_chunk_crc_with_poll(iend, &mut poll)?;
+    Ok(PngInspection {
+        width,
+        height,
+        depth,
+        color,
+        input_bytes,
+        scanline_bytes,
+        decoded_bytes,
+        filtered_bytes,
+    })
 }
 
 /// Decode a PNG produced by [`write_png8`]/[`write_png16`]. Structured
@@ -573,6 +994,177 @@ mod tests {
         let bytes = write_png16(w, h, PngColor::Rgba, &px).unwrap();
         let decoded = read_png(&bytes).unwrap();
         assert_eq!(decoded.samples16(), px);
+    }
+
+    fn inspected_png_fixture() -> Vec<u8> {
+        let (width, height) = (17u32, 5u32);
+        let samples = (0..width * height * 4)
+            .map(|index| (index.wrapping_mul(257) % 65_521) as u16)
+            .collect::<Vec<_>>();
+        write_png16(width, height, PngColor::Rgba, &samples).unwrap()
+    }
+
+    fn find_chunk_pos(bytes: &[u8], expected: [u8; 4]) -> usize {
+        let mut pos = 8usize;
+        loop {
+            let chunk = read_chunk_ref(bytes, pos).unwrap();
+            if chunk.kind == expected {
+                return pos;
+            }
+            assert_ne!(chunk.kind, b"IEND", "chunk not found");
+            pos = chunk.next_pos;
+        }
+    }
+
+    fn rewrite_chunk_crc(bytes: &mut [u8], pos: usize) {
+        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let crc_start = pos + 8 + len;
+        let crc = crc32(&bytes[pos + 4..crc_start]).to_be_bytes();
+        bytes[crc_start..crc_start + 4].copy_from_slice(&crc);
+    }
+
+    #[test]
+    fn strict_png_inspection_retains_no_pixels_and_is_exactly_budgeted() {
+        let bytes = inspected_png_fixture();
+        let inspected = inspect_png(&bytes, PngInspectLimits::UNBOUNDED).unwrap();
+        assert_eq!(
+            (
+                inspected.width,
+                inspected.height,
+                inspected.depth,
+                inspected.color
+            ),
+            (17, 5, 16, PngColor::Rgba)
+        );
+        assert_eq!(inspected.scanline_bytes, 17 * 4 * 2);
+        assert_eq!(inspected.decoded_bytes, inspected.scanline_bytes * 5);
+        assert_eq!(inspected.filtered_bytes, (inspected.scanline_bytes + 1) * 5);
+        assert_eq!(inspected.input_bytes, bytes.len() as u64);
+
+        let exact = PngInspectLimits {
+            max_input_bytes: inspected.input_bytes,
+            max_decoded_bytes: inspected.decoded_bytes,
+        };
+        assert!(
+            inspect_png(&bytes, exact).is_ok(),
+            "equality must be admitted"
+        );
+        assert!(matches!(
+            inspect_png(
+                &bytes,
+                PngInspectLimits {
+                    max_input_bytes: inspected.input_bytes - 1,
+                    ..exact
+                }
+            ),
+            Err(ImgError::ResourceLimit {
+                resource: "PNG input",
+                ..
+            })
+        ));
+        assert!(matches!(
+            inspect_png(
+                &bytes,
+                PngInspectLimits {
+                    max_decoded_bytes: inspected.decoded_bytes - 1,
+                    ..exact
+                }
+            ),
+            Err(ImgError::ResourceLimit {
+                resource: "PNG decoded samples",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn strict_png_inspection_rejects_noncanonical_blocks_filters_and_eof() {
+        let bytes = inspected_png_fixture();
+        let idat_pos = find_chunk_pos(&bytes, *b"IDAT");
+        let srgb_pos = find_chunk_pos(&bytes, *b"sRGB");
+        let idat_data_start = idat_pos + 8;
+
+        let mut wrong_chunk_order = bytes.clone();
+        wrong_chunk_order[srgb_pos + 4..srgb_pos + 8].copy_from_slice(b"gAMA");
+        rewrite_chunk_crc(&mut wrong_chunk_order, srgb_pos);
+        assert!(matches!(
+            inspect_png(&wrong_chunk_order, PngInspectLimits::UNBOUNDED),
+            Err(ImgError::Malformed { what }) if what.contains("expected chunk")
+        ));
+
+        let mut bad_block = bytes.clone();
+        let len_pos = idat_data_start + 3;
+        let len = u16::from_le_bytes(bad_block[len_pos..len_pos + 2].try_into().unwrap());
+        let shorter = len - 1;
+        bad_block[len_pos..len_pos + 2].copy_from_slice(&shorter.to_le_bytes());
+        bad_block[len_pos + 2..len_pos + 4].copy_from_slice(&(!shorter).to_le_bytes());
+        rewrite_chunk_crc(&mut bad_block, idat_pos);
+        assert!(matches!(
+            inspect_png(&bad_block, PngInspectLimits::UNBOUNDED),
+            Err(ImgError::Malformed { what }) if what.contains("canonical length")
+        ));
+
+        let mut bad_filter = bytes.clone();
+        let first_raw_byte = idat_data_start + 2 + 5;
+        bad_filter[first_raw_byte] = 1;
+        rewrite_chunk_crc(&mut bad_filter, idat_pos);
+        assert!(matches!(
+            inspect_png(&bad_filter, PngInspectLimits::UNBOUNDED),
+            Err(ImgError::Unsupported { what }) if what.contains("filter type 1")
+        ));
+
+        let mut bad_adler = bytes.clone();
+        bad_adler[first_raw_byte + 1] ^= 1;
+        rewrite_chunk_crc(&mut bad_adler, idat_pos);
+        assert!(matches!(
+            inspect_png(&bad_adler, PngInspectLimits::UNBOUNDED),
+            Err(ImgError::Malformed { what }) if what.contains("Adler-32")
+        ));
+
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(matches!(
+            inspect_png(&trailing, PngInspectLimits::UNBOUNDED),
+            Err(ImgError::Malformed { what }) if what.contains("trailing bytes")
+        ));
+    }
+
+    #[test]
+    fn strict_png_inspection_cancels_at_bounded_units() {
+        let samples = vec![7u8; 30_000 * 3];
+        let bytes = write_png8(30_000, 1, PngColor::Rgb, &samples).unwrap();
+        let mut total_polls = 0usize;
+        inspect_png_with_poll(&bytes, PngInspectLimits::UNBOUNDED, || {
+            total_polls += 1;
+            true
+        })
+        .unwrap();
+        assert!(total_polls > 10, "fixture must cross multiple poll units");
+
+        let cancel_at = total_polls / 2;
+        let mut observed = 0usize;
+        let result = inspect_png_with_poll(&bytes, PngInspectLimits::UNBOUNDED, || {
+            observed += 1;
+            observed < cancel_at
+        });
+        assert!(matches!(
+            result,
+            Err(ImgError::Cancelled {
+                operation: "PNG structural inspection"
+            })
+        ));
+        assert_eq!(observed, cancel_at);
+    }
+
+    #[test]
+    fn strict_png_inspection_rejects_every_truncated_prefix() {
+        let bytes = inspected_png_fixture();
+        for end in 0..bytes.len() {
+            assert!(
+                inspect_png(&bytes[..end], PngInspectLimits::UNBOUNDED).is_err(),
+                "truncated prefix of {end} bytes was admitted"
+            );
+        }
     }
 
     #[test]
