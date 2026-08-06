@@ -56,9 +56,10 @@ pub enum DenoisePolicy {
 pub enum AovPreset {
     /// XYZ beauty only.
     BeautyXyz = 0,
-    /// Beauty, albedo, normal, depth, variance, and motion.
+    /// Beauty, albedo, normal, depth, primary coverage, variance, and motion.
     DailyCore = 1,
-    /// Daily core plus direct, indirect, emission, object ID, and sample count.
+    /// Daily core plus geometric normal, direct, indirect, emission, object and
+    /// material IDs, sample count, and validity.
     FinalDiagnostic = 2,
 }
 
@@ -66,8 +67,8 @@ impl AovPreset {
     const fn float_channels(self) -> u64 {
         match self {
             Self::BeautyXyz => 3,
-            Self::DailyCore => 13,
-            Self::FinalDiagnostic => 20,
+            Self::DailyCore => 14,
+            Self::FinalDiagnostic => 30,
         }
     }
 }
