@@ -57,6 +57,11 @@ fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 fs-alloc = { path = "../fs-alloc" }
 
+[[bin]]
+name = "euler_cinematic_fixture"
+path = "src/bin/euler_cinematic_fixture.rs"
+required-features = ["cinematic-render"]
+
 [[test]]
 name = "render_scene_bridge"
 required-features = ["cinematic-render"]

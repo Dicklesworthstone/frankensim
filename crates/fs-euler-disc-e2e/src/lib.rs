@@ -16,6 +16,8 @@ pub mod base_response;
 pub mod baseline;
 #[cfg(feature = "cinematic-finalization")]
 pub mod cinematic_finalize;
+#[cfg(feature = "cinematic-render")]
+pub mod cinematic_fixture;
 #[cfg(feature = "cinematic-orchestration")]
 pub mod cinematic_job;
 pub mod contact_dynamics;
