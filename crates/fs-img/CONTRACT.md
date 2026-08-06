@@ -1,12 +1,14 @@
 # fs-img — CONTRACT
 
-In-house image plumbing (plan §10.5): PNG and OpenEXR writers/readers, an
-à-trous denoiser whose outputs are permanently labeled biased, and
-deterministic film/display transforms. Everything is pure Rust from first
-principles — no image, compression, or color-management crates (P1).
+In-house image plumbing (plan §10.5): PNG and OpenEXR writers/readers,
+single-frame and animation-aware denoisers whose outputs are permanently
+labeled biased, and deterministic film/display transforms. Everything is pure
+Rust from first principles — no image, compression, or color-management crates
+(P1).
 
-Ambition tags: PNG/EXR subset writers [S]; denoiser (SVGF-lineage single
-frame) [S]; film transforms [S].
+Ambition tags: PNG/EXR subset writers [S]; single-frame denoiser
+(SVGF-lineage) [S]; animation-aware temporal denoiser [F]; film transforms
+[S].
 
 ## Purpose and layer
 
@@ -45,6 +47,31 @@ own** outputs, not the world's files.
   `atrous_denoise(noisy, albedo?, params)` — iterated 5×5 B3-spline à-trous
   convolution with edge-stopping weights; the result is PERMANENTLY tagged
   `BiasedDenoised`. `mse` is the improvement metric.
+- `TemporalDenoiseInput` supplies aligned row-major scene-linear RGB,
+  previous-minus-current raster-pixel motion, positive axial-metre depth,
+  world-unit shading normal, primary coverage, raw-luminance variance, and
+  optional stable nonzero `u64` object/material IDs. Background is represented
+  by zero coverage and zero depth, normal, motion, and optional IDs.
+  `temporal_denoise_rgb` consumes that raw frame plus an optional immediately
+  preceding `TemporalDenoisedFrame`. `TemporalFrameBoundary::Cut` and the first
+  frame reset history; continuous calls require exact successor frame index,
+  dimensions, config identity, and optional-guide layout. Version-one
+  `NearestPixelCenterV1` adds target-minus-current `motion.prev` to the current
+  integer pixel centre, resolves the nearest previous pixel with upward
+  half-pixel ties, and rejects off-raster results. Reprojection additionally
+  rejects coverage, depth, normal, stable-ID, and nonfinite disagreement.
+  Accepted history is 3x3-neighborhood clamped, combined under both
+  variance-derived and history-length-derived weight ceilings, and followed by
+  joint-RGB 5x5 B3-spline à-trous refinement with shared channel weights.
+  `TemporalDenoisedFrame` has private fields and no public constructor or raw
+  conversion. Its planar `linear_rgb()` slices feed the existing cinematic
+  color transform without a full-frame repack. Its only provenance is
+  `BiasedTemporalDenoisedV1 { config_identity }`; exact versioned canonical
+  config bytes travel with every history result.
+- `TemporalDenoiseLimits` admits pixels and exact newly allocated
+  result-plus-spatial-scratch bytes before allocation. `reference_4k()` covers
+  3840x2160 with both optional ID planes. Borrowed current inputs and borrowed
+  previous history remain separately caller-budgeted.
 - `film`: `exposure`, `white_balance`, `hable_filmic` (Hable/Uncharted 2
   operator, W = 11.2), `srgb_encode` (via `fs_math::det::pow`), `quantize8`,
   `display_transform` (the legacy full chain, HDR f32 → display u8).
@@ -142,7 +169,10 @@ own** outputs, not the world's files.
    Custom EXR attribute payloads, including NUL and non-UTF-8 bytes, round-trip
    exactly; built-in names cannot be shadowed.
 3. **The bias label cannot be dropped**: `atrous_denoise` output is always
-   `BiasedDenoised`; there is no API to relabel a plane `RawEstimate`.
+   `BiasedDenoised`; `temporal_denoise_rgb` returns only the private-field
+   `TemporalDenoisedFrame` whose sole provenance is
+   `BiasedTemporalDenoisedV1`. Neither API can relabel output as
+   `RawEstimate`.
 4. **Structured rejection**: readers never decode garbage silently — every
    checksum (CRC-32, Adler-32) is verified, every length is bounds-checked,
    truncation at any byte fails.
@@ -167,6 +197,15 @@ own** outputs, not the world's files.
    for the fixed data window.
    Scratch accounting is logical reference payload, not allocator bookkeeping;
    caller-owned channel planes and attribute payloads remain caller-budgeted.
+10. **Temporal history fails closed**: only an immediately preceding,
+    shape/config/guide-compatible biased result can contribute across a
+    continuous boundary. Cuts ignore history. Per-pixel off-raster,
+    surface/background, coverage, depth, normal, ID, or numeric disagreement
+    restarts history at one instead of inventing correspondence.
+11. **Temporal allocation admission**: frame dimensions and every plane are
+    validated before allocation. Checked exact retained-plus-scratch bytes are
+    compared with `TemporalDenoiseLimits::max_new_bytes`; all vectors use
+    fallible reservation. No partially constructed frame is published.
 
 ## Error model
 
@@ -185,6 +224,10 @@ structured errors for admitted defects.
 resource overruns, conflicting retries, missing or stale observations,
 noncanonical snapshots, unsupported versions, and cancellation without
 partially committing a manifest transition.
+`TemporalDenoiseError` separately reports invalid configuration, dimensions,
+plane shapes and indexed guide samples, missing reset or noncontiguous frame
+order, continuous-history shape/config/guide-layout disagreement, exact pixel
+or new-memory limit overruns, size overflow, and allocation refusal.
 
 ## Determinism class
 
@@ -194,6 +237,13 @@ fixed traversal order and uses `f64::exp`; it is run-to-run deterministic on
 a given target and documented as cross-ISA reproducible only to the extent
 `f64::exp` is (edge-stopping weights; the *tagged bias* is the honest
 qualifier, not the last ulp).
+
+The animation-aware denoiser has fixed row-major traversal, frozen
+nearest-pixel reprojection/tie behavior, and shared RGB weights. Repeated
+execution on the same target is bit-exact. Like the single-frame denoiser, its
+edge weights use platform `f64::exp`/`sqrt`; it makes no cross-ISA last-bit
+claim. Version and exact canonical parameter identity are retained in the
+biased result.
 
 The cinematic pipeline is also D0: its tone curves use frozen arithmetic,
 sRGB uses deterministic `fs-math`, dither is a specified SplitMix64-derived
@@ -213,6 +263,10 @@ those operations between frames; this module does not claim intra-frame image
 codec or transform cancellation latency. Frame-sequence snapshot, audit, and
 finalization APIs instead poll at artifact boundaries and bounded identity-hash
 chunks, with the atomic state semantics specified above.
+
+Temporal denoising validates and admits one bounded frame before allocation and
+has no `Cx` dependency. Callers cancel between frames; version one makes no
+intra-frame cancellation-latency claim.
 
 ## Unsafe boundary
 
@@ -269,6 +323,13 @@ non-finite/shape/pixel/memory refusal, visible negative/over-range counts,
 raw-input immutability, deterministic seed-sensitive dither with exact
 endpoints, local/non-wrapping bloom and constant-field interiors, exact
 working-byte accounting, and direct 8/16-bit PNG round trips.
+
+The h7xu5.6.2 temporal-denoiser G0/G3/G5 cases cover static-noise reduction;
+moving identity edges without rejected-history trails; depth, normal, coverage,
+disocclusion, and off-raster rejection; exact cut reset; malformed/nonfinite
+guides and frame-order refusal; deterministic replay; gray neutrality and
+constant-hue preservation under shared RGB weights; exact memory/pixel limit
+boundaries; canonical config identity; and the permanently biased result type.
 
 The h7xu5.6.4 frame-sequence suite must additionally name and exercise:
 
@@ -340,7 +401,20 @@ The h7xu5.6.4 frame-sequence suite must additionally name and exercise:
 - **The denoiser is biased, and says so in the type system.** Its output
   must never be used as ground truth in a comparison; the Gauntlet compares
   raw estimates.
+- **Temporal denoising is not physical or statistical authority.** AOV motion,
+  depth, normals, coverage, IDs, and variance are caller assertions at this
+  layer. Nearest-pixel reprojection is a frozen practical reconstruction, not
+  visibility proof; the variance plane is a blend heuristic without a
+  sample-count confidence certificate. Filtering does not recover omitted
+  transport, geometry, frequency content, or an unbiased estimator, and it
+  must never feed adaptive stopping or mechanics validation.
+- **No universal ghosting/convergence claim.** The rejection gates,
+  neighborhood clamp, and history ceiling reduce known failure modes but do not
+  prove perceptual quality for arbitrary motion, transparency, specular paths,
+  topology changes, rolling shutter, or malformed correspondences. Cuts and
+  unavailable stable guides must reset or reject history rather than weaken
+  the contract.
 - **`sips` oracle is dev-only.** External validation runs where macOS is
   available; CI relies on the structural + round-trip suites.
-- No SIMD, no threading — planes at preview sizes; performance is not a
-  claim here.
+- No SIMD or threading. The 4K memory envelope is admission capacity, not a
+  throughput, latency, or interactive-performance claim.

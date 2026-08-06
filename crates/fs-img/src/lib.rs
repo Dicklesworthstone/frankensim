@@ -1,7 +1,7 @@
 //! fs-img: in-house image plumbing (plan §10.5) — PNG and OpenEXR
-//! writers/readers, an à-trous denoiser whose outputs are PERMANENTLY
-//! labeled biased, and deterministic film/display transforms. Pure Rust
-//! (P1), byte-exact deterministic encodes (P2).
+//! writers/readers, single-frame and animation-aware denoisers whose outputs
+//! are PERMANENTLY labeled biased, and deterministic film/display transforms.
+//! Pure Rust (P1), byte-exact deterministic encodes (P2).
 //!
 //! Layer: L5 (LUMEN). Runtime deps: `std`, fs-blake3 (typed frame-sequence
 //! identities), and fs-math (deterministic `pow`/`exp` for display transforms).
@@ -11,6 +11,7 @@ pub mod exr;
 pub mod film;
 pub mod png;
 pub mod sequence;
+pub mod temporal_denoise;
 
 mod cinematic_color;
 
@@ -46,6 +47,12 @@ pub use sequence::{
     FrameSamplingStats, FrameSequenceContext, FrameSequenceError, FrameSequenceLimits,
     FrameSequenceManifest, FrameSequenceSeal, FrameSequenceSnapshot, FrameSequenceState,
     RegistrationOutcome,
+};
+pub use temporal_denoise::{
+    MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS, TEMPORAL_DENOISE_CONFIG_CANONICAL_BYTES,
+    TEMPORAL_DENOISE_PIPELINE_VERSION, TemporalDenoiseConfig, TemporalDenoiseConfigIdentity,
+    TemporalDenoiseError, TemporalDenoiseInput, TemporalDenoiseLimits, TemporalDenoiseProvenance,
+    TemporalDenoisedFrame, TemporalFrameBoundary, TemporalReprojection, temporal_denoise_rgb,
 };
 
 use core::fmt;
