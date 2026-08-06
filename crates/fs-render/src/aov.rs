@@ -1201,8 +1201,7 @@ impl AdaptiveCinematicAovFilm {
         if let Some(common) = &self.common {
             for (pixel, state) in common.iter().enumerate() {
                 if state.accepted_count != self.beauty.sample_counts()[pixel]
-                    || state.mean_y.to_bits()
-                        != self.beauty.running_means_xyz()[pixel][1].to_bits()
+                    || state.mean_y.to_bits() != self.beauty.running_means_xyz()[pixel][1].to_bits()
                     || state.m2_y.to_bits() != self.beauty.m2_xyz()[pixel][1].to_bits()
                 {
                     return Err(CinematicAovError::SampleAlignmentMismatch);

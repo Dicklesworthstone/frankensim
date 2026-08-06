@@ -5705,8 +5705,8 @@ pub fn render_cinematic_adaptive_with_aovs(
     let palette = CinematicAovPalette::from_scene(scene, config.limits(), capture_ids)?;
     let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
     let pixel_count = checked_pixel_len(settings.width, settings.height)?;
-    let state_bytes = adaptive_state_bytes(pixel_count)
-        .map_err(|_| CinematicAovError::AllocationRefused)?;
+    let state_bytes =
+        adaptive_state_bytes(pixel_count).map_err(|_| CinematicAovError::AllocationRefused)?;
     let mut beauty_state = AdaptiveRenderState::try_new(pixel_count, state_bytes)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
     let mut aov =
