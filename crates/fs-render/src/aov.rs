@@ -138,6 +138,7 @@ const CINEMATIC_AOV_CHANNEL_LAYOUT: [(&str, PixelType); 30] = [
 
 /// Explicit retained/export-memory and palette admission limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_field_names)] // `max_` distinguishes every public ceiling
 pub struct CinematicAovLimits {
     max_pixels: u64,
     max_retained_bytes: u64,
@@ -1047,6 +1048,7 @@ impl CinematicAovFilm {
     }
 }
 
+#[allow(clippy::too_many_lines)] // one frozen metadata schema remains reviewable in wire order
 fn cinematic_exr_attributes(
     config: CinematicAovConfig,
     binding: &CinematicAovRenderBinding,
@@ -1820,6 +1822,7 @@ const FIXED_EXPORT_METADATA_BOUND_BYTES: u64 = 64 * 1024;
 const MAX_PALETTE_INDEX_DECIMAL_BYTES: u64 = 8;
 const MAX_U64_DECIMAL_BYTES: u64 = 20;
 const CONTENT_HASH_HEX_BYTES: u64 = 64;
+const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 fn export_metadata_payload_bound(
     binding: &CinematicAovRenderBinding,
@@ -2187,6 +2190,14 @@ fn build_exr_channels(
             |pixel| f64::from(validity_mask(common[pixel], final_diagnostic[pixel])),
         )?);
     }
+    validate_exr_channel_schema(profile, &channels)?;
+    Ok(channels)
+}
+
+fn validate_exr_channel_schema(
+    profile: CinematicAovProfile,
+    channels: &[Channel],
+) -> Result<(), CinematicAovError> {
     let layout = profile.exr_channel_layout();
     if channels.len() != layout.len()
         || channels
@@ -2196,7 +2207,7 @@ fn build_exr_channels(
     {
         return Err(CinematicAovError::InternalChannelCount);
     }
-    Ok(channels)
+    Ok(())
 }
 
 fn float_channel(
@@ -2273,13 +2284,12 @@ fn encode_material_palette(values: &[ContentHash]) -> Result<String, CinematicAo
         .try_reserve_exact(required)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
     encoded.push_str("0=unavailable");
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     for (zero_based, value) in values.iter().enumerate() {
         write!(&mut encoded, ";{}=", zero_based + 1)
             .map_err(|_| CinematicAovError::AllocationRefused)?;
         for byte in value.as_bytes() {
-            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            encoded.push(char::from(LOWER_HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(LOWER_HEX_DIGITS[usize::from(byte & 0x0f)]));
         }
     }
     debug_assert_eq!(encoded.len(), required);

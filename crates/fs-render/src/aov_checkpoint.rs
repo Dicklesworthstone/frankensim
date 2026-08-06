@@ -7,6 +7,8 @@
 //! floating-point order. The codec owns no filesystem policy: callers stream
 //! the sealed bytes into a transactional artifact store.
 
+#[allow(clippy::wildcard_imports)]
+// private codec is intentionally coupled to its parent state
 use super::*;
 use crate::motion::{ShutterConvention, ShutterDistribution};
 use crate::tracer::{FilmTimeMode, Sampler};
@@ -322,6 +324,7 @@ impl CinematicAovFilm {
     /// Restore a complete canonical checkpoint transactionally. No partially
     /// decoded film escapes on refusal. A later progressive append still
     /// revalidates the current scene/camera palette and continuity guard.
+    #[allow(clippy::too_many_lines)] // one linear decoder mirrors the canonical wire schema
     pub fn restore_checkpoint(
         expected: CinematicAovCheckpointExpectation,
         bytes: &[u8],
@@ -845,12 +848,10 @@ fn checkpoint_byte_len_fields(
 }
 
 fn require_exact_length(actual: u64, expected: u64) -> Result<(), CinematicAovCheckpointError> {
-    if actual < expected {
-        Err(CinematicAovCheckpointError::Truncated)
-    } else if actual > expected {
-        Err(CinematicAovCheckpointError::TrailingBytes)
-    } else {
-        Ok(())
+    match actual.cmp(&expected) {
+        core::cmp::Ordering::Less => Err(CinematicAovCheckpointError::Truncated),
+        core::cmp::Ordering::Greater => Err(CinematicAovCheckpointError::TrailingBytes),
+        core::cmp::Ordering::Equal => Ok(()),
     }
 }
 
@@ -964,6 +965,7 @@ fn validate_checkpoint_structure(
     Ok(())
 }
 
+#[allow(clippy::float_cmp)] // canonical checkpoint zero is an exact state invariant
 fn validate_checkpoint_state(
     film: &CinematicAovFilm,
     cx: &Cx<'_>,
@@ -1000,6 +1002,7 @@ fn validate_checkpoint_state(
     Ok(())
 }
 
+#[allow(clippy::float_cmp)] // canonical sums/count-zero relationships are bit-exact
 fn validate_common(
     value: CommonPixel,
     expected_samples: u32,
@@ -1031,6 +1034,7 @@ fn validate_common(
     Ok(())
 }
 
+#[allow(clippy::float_cmp)] // canonical absent-state vectors are exact zeros
 fn validate_final(
     value: FinalPixel,
     common: CommonPixel,
@@ -1042,13 +1046,7 @@ fn validate_final(
     require_canonical_finite(value.indirect_xyz_sum, "indirect contribution")?;
     require_canonical_finite(value.emission_xyz_sum, "emission contribution")?;
     let nearest = value.nearest_primary;
-    if !nearest.present {
-        if nearest != CategoricalPrimary::NONE || common.primary_count != 0 {
-            return Err(CinematicAovCheckpointError::InvalidState {
-                field: "absent categorical primary",
-            });
-        }
-    } else {
+    if nearest.present {
         let palette = palette.ok_or(CinematicAovCheckpointError::InvalidState {
             field: "categorical palette",
         })?;
@@ -1066,6 +1064,10 @@ fn validate_final(
                 field: "categorical primary",
             });
         }
+    } else if nearest != CategoricalPrimary::NONE || common.primary_count != 0 {
+        return Err(CinematicAovCheckpointError::InvalidState {
+            field: "absent categorical primary",
+        });
     }
     if common.primary_count == 0 && value.geometric_normal_sum != [0.0; 3] {
         return Err(CinematicAovCheckpointError::InvalidState {

@@ -5770,7 +5770,7 @@ pub fn render_cinematic_adaptive_with_aovs(
                         &palette,
                         capture_ids,
                         absolute_time_s,
-                        traced.primary,
+                        traced.primary.as_ref(),
                     )?;
                     aov.push(
                         pixel as usize,
@@ -5927,7 +5927,7 @@ pub fn render_cinematic_range_with_aovs(
                         &palette,
                         capture_ids,
                         absolute_time_s,
-                        traced.primary,
+                        traced.primary.as_ref(),
                     )?;
                     staged.push(
                         pixel as usize,
@@ -5976,7 +5976,7 @@ fn prepare_aligned_aov_primary(
     palette: &CinematicAovPalette,
     capture_ids: bool,
     absolute_time_s: f64,
-    primary: Option<PrimaryTraceHit>,
+    primary: Option<&PrimaryTraceHit>,
 ) -> Result<Option<AlignedAovPrimary>, CinematicAovError> {
     let Some(primary) = primary else {
         return Ok(None);
