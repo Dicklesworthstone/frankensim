@@ -218,6 +218,187 @@ pub struct ResampledAudioEvent {
     pub bracket_end_sample_position: f64,
 }
 
+/// Validate an externally supplied event-placement receipt against its audio
+/// horizon.
+///
+/// This is the allocation-free counterpart of the construction performed by
+/// [`plan_events`]. It checks the source authority split, sample-coordinate
+/// bracket, exact offset/weight rule, and recomputed centroid. The source-grid
+/// origin is intentionally not an argument, so the affine source-to-audio
+/// transform is checked through bracket deltas, where that origin cancels.
+///
+/// The returned [`AudioResamplingError::InvalidEvent`] uses event index zero;
+/// callers validating a sequence should attach their own stable sequence
+/// coordinate to the refusal.
+pub fn validate_resampled_audio_event(
+    receipt: &ResampledAudioEvent,
+    total_audio_frames: u64,
+) -> Result<(), AudioResamplingError> {
+    let invalid = |field| AudioResamplingError::InvalidEvent { event: 0, field };
+    let source = receipt.source;
+
+    if total_audio_frames == 0 {
+        return Err(invalid("nonzero master audio horizon"));
+    }
+    if source.measure != ContactEventMeasure::TimingOnly {
+        return Err(invalid("timing-only source event measure"));
+    }
+    if !source.time_s.is_finite()
+        || !source.bracket_start_s.is_finite()
+        || !source.bracket_end_s.is_finite()
+    {
+        return Err(invalid("finite source event positions"));
+    }
+    if source.bracket_start_s > source.time_s || source.time_s > source.bracket_end_s {
+        return Err(invalid("source event bracket contains event time"));
+    }
+    if source.physical_impulse_n_s != ModalComponentValues::ZERO {
+        return Err(invalid("timing-only physical impulse must remain zero"));
+    }
+    if source.kind == ContactTransitionKind::Opening && source.artistic.is_some() {
+        return Err(invalid("opening cannot acquire artistic reimpact impulse"));
+    }
+    let artistic_impulse = source
+        .artistic
+        .map_or(ModalComponentValues::ZERO, |artistic| artistic.impulse_n_s);
+    if source.artistic.is_some_and(|artistic| {
+        artistic
+            .stream_identity
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+    }) {
+        return Err(invalid("nonzero artistic event stream identity"));
+    }
+    if !components_finite(artistic_impulse) {
+        return Err(invalid("finite artistic event impulse"));
+    }
+
+    let positions = [
+        receipt.requested_sample_position,
+        receipt.bracket_start_sample_position,
+        receipt.bracket_end_sample_position,
+    ];
+    if positions
+        .into_iter()
+        .any(|position| !sample_position_in_closed_horizon(position, total_audio_frames))
+    {
+        return Err(invalid("event positions within master audio range"));
+    }
+    if receipt.bracket_start_sample_position > receipt.requested_sample_position
+        || receipt.requested_sample_position > receipt.bracket_end_sample_position
+    {
+        return Err(invalid("sample bracket contains requested event"));
+    }
+    if !sample_bracket_delta_matches_source(receipt, true)
+        || !sample_bracket_delta_matches_source(receipt, false)
+    {
+        return Err(invalid("source and sample bracket arithmetic"));
+    }
+
+    let requested = receipt.requested_sample_position;
+    let floor = requested.floor();
+    let fraction = requested - floor;
+    let floor_offset = floor as u64;
+    let has_artistic_impulse = max_abs_components(artistic_impulse) != 0.0;
+    let (left, right, left_weight, right_weight, centroid_error) = if has_artistic_impulse {
+        let right_candidate = floor_offset.checked_add(1);
+        if floor_offset >= total_audio_frames
+            || (fraction > 0.0 && right_candidate.is_none_or(|right| right >= total_audio_frames))
+        {
+            return Err(AudioResamplingError::EventOutsideRepresentableRange { event: 0 });
+        }
+        let right = if fraction > 0.0 {
+            Some(
+                right_candidate
+                    .ok_or(AudioResamplingError::EventOutsideRepresentableRange { event: 0 })?,
+            )
+        } else {
+            None
+        };
+        let left_weight = 1.0 - fraction;
+        let right_weight = fraction;
+        let centroid = floor_offset as f64 * left_weight
+            + right.map_or(0.0, |offset| offset as f64 * right_weight);
+        (
+            Some(floor_offset),
+            right,
+            left_weight,
+            right_weight,
+            centroid - requested,
+        )
+    } else {
+        (
+            (floor_offset < total_audio_frames).then_some(floor_offset),
+            None,
+            0.0,
+            0.0,
+            0.0,
+        )
+    };
+
+    if receipt.left_frame_offset != left || receipt.right_frame_offset != right {
+        return Err(invalid("event placement offsets"));
+    }
+    if receipt.left_weight.to_bits() != left_weight.to_bits()
+        || receipt.right_weight.to_bits() != right_weight.to_bits()
+    {
+        return Err(invalid("event placement weights"));
+    }
+    if receipt.centroid_error_frames.to_bits() != centroid_error.to_bits() {
+        return Err(invalid("event placement centroid"));
+    }
+    Ok(())
+}
+
+fn sample_position_in_closed_horizon(position: f64, total_audio_frames: u64) -> bool {
+    // `u64::MAX as f64` rounds upward to 2^64. Rejecting that exclusive bound
+    // before the saturating float-to-integer cast avoids admitting 2^64 as the
+    // endpoint of a `u64::MAX` horizon.
+    if !position.is_finite()
+        || position < 0.0
+        || position >= u64::MAX as f64
+        || total_audio_frames == 0
+    {
+        return false;
+    }
+    let whole = position.floor() as u64;
+    whole < total_audio_frames
+        || (whole == total_audio_frames && position.to_bits() == (whole as f64).to_bits())
+}
+
+fn sample_bracket_delta_matches_source(receipt: &ResampledAudioEvent, start: bool) -> bool {
+    let (sample_position, source_time_s) = if start {
+        (
+            receipt.bracket_start_sample_position,
+            receipt.source.bracket_start_s,
+        )
+    } else {
+        (
+            receipt.bracket_end_sample_position,
+            receipt.source.bracket_end_s,
+        )
+    };
+    let actual_delta = sample_position - receipt.requested_sample_position;
+    let expected_delta =
+        (source_time_s - receipt.source.time_s) * f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    if !actual_delta.is_finite() || !expected_delta.is_finite() {
+        return false;
+    }
+
+    // Each endpoint can move by at most one snap tolerance. The roundoff term
+    // covers the independent mul-add evaluations used by `plan_events` without
+    // turning this into an approximate placement check: offsets, weights, and
+    // centroid remain exact bit comparisons above.
+    let scale = sample_position
+        .abs()
+        .max(receipt.requested_sample_position.abs())
+        .max(expected_delta.abs())
+        .max(1.0);
+    let tolerance = 2.0 * EVENT_SAMPLE_SNAP_TOLERANCE_FRAMES + 64.0 * f64::EPSILON * scale;
+    (actual_delta - expected_delta).abs() <= tolerance
+}
+
 /// Immutable restart point. Absolute indexing reproduces all FIR halo and RNG state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioResamplingCheckpoint {
@@ -2595,10 +2776,169 @@ impl CompensatedSum {
 mod tests {
     use super::*;
 
+    fn receipt_with_artistic_impulse(has_artistic_impulse: bool) -> ResampledAudioEvent {
+        let artistic = has_artistic_impulse.then_some(crate::ArtisticEventExcitation {
+            stream_identity: ContentHash([0x5a; 32]),
+            impulse_n_s: ModalComponentValues {
+                disc: 0.25,
+                glass_plate: 0.0,
+                base_assembly: 0.0,
+            },
+        });
+        ResampledAudioEvent {
+            source: AudioExcitationEvent {
+                source_sample_index: 7,
+                kind: ContactTransitionKind::Reimpact,
+                time_s: 0.25,
+                bracket_start_s: 0.249,
+                bracket_end_s: 0.251,
+                measure: ContactEventMeasure::TimingOnly,
+                physical_impulse_n_s: ModalComponentValues::ZERO,
+                artistic,
+            },
+            requested_sample_position: 12_000.25,
+            left_frame_offset: Some(12_000),
+            right_frame_offset: has_artistic_impulse.then_some(12_001),
+            left_weight: if has_artistic_impulse { 0.75 } else { 0.0 },
+            right_weight: if has_artistic_impulse { 0.25 } else { 0.0 },
+            centroid_error_frames: 0.0,
+            bracket_start_sample_position: 11_952.25,
+            bracket_end_sample_position: 12_048.25,
+        }
+    }
+
+    fn assert_invalid_receipt(receipt: &ResampledAudioEvent, field: &'static str) {
+        assert_eq!(
+            validate_resampled_audio_event(receipt, 48_000),
+            Err(AudioResamplingError::InvalidEvent { event: 0, field })
+        );
+    }
+
     fn assert_close(actual: f64, expected: f64, tolerance: f64) {
         assert!(
             (actual - expected).abs() <= tolerance,
             "actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
+        );
+    }
+
+    #[test]
+    fn g0_external_event_receipt_accepts_exact_constructor_semantics() {
+        let timing_only = receipt_with_artistic_impulse(false);
+        validate_resampled_audio_event(&timing_only, 48_000).unwrap();
+
+        let artistic = receipt_with_artistic_impulse(true);
+        validate_resampled_audio_event(&artistic, 48_000).unwrap();
+
+        let mut exclusive_endpoint = timing_only;
+        exclusive_endpoint.source.time_s = 1.0;
+        exclusive_endpoint.source.bracket_start_s = 1.0;
+        exclusive_endpoint.source.bracket_end_s = 1.0;
+        exclusive_endpoint.requested_sample_position = 48_000.0;
+        exclusive_endpoint.left_frame_offset = None;
+        exclusive_endpoint.bracket_start_sample_position = 48_000.0;
+        exclusive_endpoint.bracket_end_sample_position = 48_000.0;
+        validate_resampled_audio_event(&exclusive_endpoint, 48_000).unwrap();
+    }
+
+    #[test]
+    fn g0_external_event_receipt_rejects_bad_positions_and_brackets() {
+        let valid = receipt_with_artistic_impulse(false);
+
+        let mut bad = valid.clone();
+        bad.requested_sample_position = f64::NAN;
+        assert_invalid_receipt(&bad, "event positions within master audio range");
+
+        bad = valid.clone();
+        bad.bracket_start_sample_position = -1.0;
+        assert_invalid_receipt(&bad, "event positions within master audio range");
+
+        bad = valid.clone();
+        bad.bracket_end_sample_position = 48_001.0;
+        assert_invalid_receipt(&bad, "event positions within master audio range");
+
+        bad = valid.clone();
+        bad.requested_sample_position = u64::MAX as f64;
+        assert_eq!(
+            validate_resampled_audio_event(&bad, u64::MAX),
+            Err(AudioResamplingError::InvalidEvent {
+                event: 0,
+                field: "event positions within master audio range",
+            })
+        );
+
+        bad = valid.clone();
+        bad.bracket_start_sample_position = 12_001.0;
+        assert_invalid_receipt(&bad, "sample bracket contains requested event");
+
+        bad = valid.clone();
+        bad.bracket_start_sample_position -= 1.0;
+        assert_invalid_receipt(&bad, "source and sample bracket arithmetic");
+
+        bad = valid;
+        bad.source.bracket_start_s = 0.26;
+        assert_invalid_receipt(&bad, "source event bracket contains event time");
+    }
+
+    #[test]
+    fn g0_external_event_receipt_rejects_invalid_source_authority() {
+        let valid = receipt_with_artistic_impulse(false);
+
+        let mut bad = valid.clone();
+        bad.source.physical_impulse_n_s.disc = 1.0;
+        assert_invalid_receipt(&bad, "timing-only physical impulse must remain zero");
+
+        bad = receipt_with_artistic_impulse(true);
+        bad.source.kind = ContactTransitionKind::Opening;
+        assert_invalid_receipt(&bad, "opening cannot acquire artistic reimpact impulse");
+
+        bad = receipt_with_artistic_impulse(true);
+        bad.source.artistic.as_mut().unwrap().impulse_n_s.disc = f64::INFINITY;
+        assert_invalid_receipt(&bad, "finite artistic event impulse");
+
+        bad = receipt_with_artistic_impulse(true);
+        bad.source.artistic.as_mut().unwrap().stream_identity = ContentHash([0; 32]);
+        assert_invalid_receipt(&bad, "nonzero artistic event stream identity");
+
+        bad = valid;
+        bad.source.time_s = f64::NEG_INFINITY;
+        assert_invalid_receipt(&bad, "finite source event positions");
+    }
+
+    #[test]
+    fn g0_external_event_receipt_rejects_noncanonical_placement_arithmetic() {
+        let timing_only = receipt_with_artistic_impulse(false);
+        let artistic = receipt_with_artistic_impulse(true);
+
+        let mut bad = timing_only.clone();
+        bad.right_frame_offset = Some(12_001);
+        assert_invalid_receipt(&bad, "event placement offsets");
+
+        bad = timing_only;
+        bad.left_weight = 1.0;
+        assert_invalid_receipt(&bad, "event placement weights");
+
+        bad = artistic.clone();
+        bad.right_frame_offset = None;
+        assert_invalid_receipt(&bad, "event placement offsets");
+
+        bad = artistic.clone();
+        bad.right_weight = 0.0;
+        assert_invalid_receipt(&bad, "event placement weights");
+
+        bad = artistic.clone();
+        bad.centroid_error_frames = f64::EPSILON;
+        assert_invalid_receipt(&bad, "event placement centroid");
+
+        bad = artistic;
+        bad.source.time_s = 1.0;
+        bad.source.bracket_start_s = 1.0;
+        bad.source.bracket_end_s = 1.0;
+        bad.requested_sample_position = 48_000.0;
+        bad.bracket_start_sample_position = 48_000.0;
+        bad.bracket_end_sample_position = 48_000.0;
+        assert_eq!(
+            validate_resampled_audio_event(&bad, 48_000),
+            Err(AudioResamplingError::EventOutsideRepresentableRange { event: 0 })
         );
     }
 

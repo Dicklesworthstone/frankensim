@@ -25,6 +25,15 @@ render-checkpoint-ledger = ["cinematic-render", "dep:fs-ledger"]
 # frontier tracer and the immutable Design Ledger artifact store. The ledger
 # is not a shared scheduler or multi-process writer.
 render-sharding-ledger = ["render-checkpoint-ledger"]
+# [F] Read-only final bundle verification composes the canonical render plan,
+# image-sequence grammar, strict image inspectors, and audio artifact codec.
+# It implies sharding because that plan is the independent expected-frame
+# inventory; the finalizer never treats a producer manifest as its oracle.
+cinematic-finalization = ["render-sharding-ledger"]
+# [F] Deterministic film-specific orchestration over the typed render plan and
+# existing checked artifact boundaries. This is deliberately not a generic
+# workflow engine; concrete AOV/temporal producers remain separately gated.
+cinematic-orchestration = ["render-sharding-ledger"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
@@ -36,6 +45,7 @@ fs-flux = { path = "../fs-flux" }
 fs-geom = { path = "../fs-geom" }
 fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }
+fs-img = { path = "../fs-img" }
 fs-ledger = { path = "../fs-ledger", optional = true }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
@@ -47,9 +57,6 @@ fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 fs-alloc = { path = "../fs-alloc" }
 
-[dev-dependencies]
-fs-img = { path = "../fs-img" }
-
 [[test]]
 name = "render_scene_bridge"
 required-features = ["cinematic-render"]
@@ -57,6 +64,10 @@ required-features = ["cinematic-render"]
 [[test]]
 name = "render_checkpoint"
 required-features = ["render-checkpoint-ledger"]
+
+[[test]]
+name = "cinematic_finalize"
+required-features = ["cinematic-finalization"]
 
 [lints]
 workspace = true

@@ -1597,6 +1597,98 @@ claims only; they do not establish concurrent scheduler-claim arbitration,
 render convergence, 4K capacity, or scientific authority beyond the source
 trajectory.
 
+## Cinematic finalization gate v1
+
+The opt-in `cinematic-finalization` feature provides the read-only terminal
+integrity gate for the current uniform fixed-SPP sharded cinematic path. A
+`CinematicFinalizationPlan` reconstructs the expected frame, segment, role,
+format, dimensions, channels, sampling, source-lineage, configuration, build,
+profile, clock, cut, and audio-event contract from the admitted composition,
+quality profile, brief, `EulerUniformRenderPlan`, exact `EulerCinematicScene`,
+original prepared exposures, and independently retained audio expectations.
+The scene, not a caller-provided palette or scalar shot assertion, supplies the
+sorted object/material palette and each segment's admitted camera exposure and
+shot identity. Producer completion flags and the produced sequence inventory
+are inputs to check, never the oracle that defines success.
+
+The constructor accepts only a complete zero-based master range. A partial
+quality-profile range is refused because pairing it with the brief's complete
+WAV, clock endpoints, cuts, and event table would silently produce a false A/V
+alignment claim; a future partial-range path needs its own typed range clock.
+The configuration's render/audio budget references must bind the exact quality
+profile identity and identity-schema version, its timeline must bind the exact
+brief identity and version, and the render plan, sound configuration, scene,
+trajectory, and prepared exposures must agree at their available typed
+identity boundaries.
+
+`verify_cinematic_bundle` consumes explicit persisted bytes and external pins;
+it opens no path and mutates neither the bundle nor its artifacts. It strictly
+decodes the finalized sequence, checks canonical order and complete inventory,
+then verifies each frame's byte count and content hash before inspecting EXR or
+PNG structure. Raw EXRs must match the exact dimensions, AOV layout and
+custom-attribute set, finite payload constraints, and validity-bit domain
+reconstructed by the plan; an unexpected vendor attribute is not silently
+accepted. Final-diagnostic raw masters additionally prove the exact uniform
+sample count from the per-pixel `samples` plane, one-based object/material IDs
+within the scene-derived palette lengths, the reserved v2 validity bit clear,
+and exact per-pixel validity relations for IDs, primary coverage, and sample
+contribution. Profiles without those planes prove only their exact renderer
+SPP declaration and may not promote themselves to final delivery. Derived artifacts must retain their expected
+raw-source lineage. Independently pinned authority records must bind each
+artifact to its expected role, source, transformation, configuration, and
+disclosures. The audio side checks canonical manifest bytes and identity,
+source-signal/channel-layout/mix identities, strict float32 WAV structure and
+sample count, exact video/audio clocks, a synchronization marker at every cut
+boundary (not a distinct cut-flag receipt), and
+the ordered canonical resampled-event receipts. Sequence, audio-manifest, WAV,
+alignment, event, and authority identities remain distinct; one digest cannot
+stand in for another proof obligation.
+
+The report has five closed dispositions: `Pass`, `Incomplete` for absent or
+unfinished required evidence, `Refused` for explicit resource or cancellation
+boundaries, `Corrupt` for malformed, noncanonical, truncated, or hash-
+inconsistent bytes, and `Incompatible` for well-formed artifacts that disagree
+with the independent plan. Verification order, first-divergence coordinate,
+ranked repair advice, verified counts, retained no-claims, and the report's
+domain-separated identity are deterministic. Only `Pass` for an admitted
+`Final4k` target sets `final_delivery_eligible`; that bit is artifact-delivery
+eligibility, not scientific, release, or aesthetic authority.
+
+Aggregate and per-codec byte/cardinality ceilings are checked before
+image-sized materialization, arithmetic is checked, authority envelopes have
+a fixed 64-KiB parser ceiling in addition to the caller ceiling, palette strings are shared
+between frame expectations, and image, hash, manifest, receipt, inventory, and
+event traversals poll the supplied `Cx` at declared intervals; canonical sorts
+are cardinality-capped and poll immediately before and after sorting.
+Verifier-owned bundle indexes reserve fallibly and borrow artifact bytes rather
+than duplicating them. Cancellation or an insufficient caller budget returns `Refused` without
+changing input bytes or publishing a replacement artifact. Focused G0 tests
+cover the canonical
+contracts and boundary cases; G3 hostile fixtures mutate pins, lineage,
+inventory, headers, payloads, clocks, cuts, and events; G4 covers bounded
+resource refusal and cancellation; and G5 covers stable report bytes and
+identity for equal inputs. Tiny real EXR/PNG/WAV/sequence E2E fixtures exercise
+the cross-codec composition, but are not 4K throughput or visual-quality
+evidence.
+
+V1 reconstructs only the existing `EulerUniformRenderPlan`. That plan carries
+neither the quality profile's adaptive stopping result nor a receipt proving
+the requested number of temporal shutter samples. Consequently its production
+constructor always returns `NonFinal`, including for a nominal 3840x2160
+`Final4k` profile: a passing report is useful integrity evidence but
+`final_delivery_eligible` remains false. V1 does not serialize an adaptive
+film, admit an adaptive sharding plan, or certify adaptive stopping, estimator
+convergence, temporal accumulation completion, or a per-pixel sampling
+optimum. Palette material hashes are renderer material identities, not measured
+material truth. Exact source-signal and event-receipt integrity also does not
+prove that any event made an audible causal contribution to the encoded
+waveform. Nor does the gate independently resolve the composition's abstract
+camera/geometry asset references into the supplied scene; it binds both exact
+inputs and verifies all identity relations currently exposed by their typed
+APIs. More generally, byte integrity and internal compatibility do not
+establish physical fidelity, acoustic validity, perceptual quality, material
+calibration, experimental agreement, mechanism truth, or aesthetic approval.
+
 ## No-claim boundaries
 
 The binding v1 statements are:

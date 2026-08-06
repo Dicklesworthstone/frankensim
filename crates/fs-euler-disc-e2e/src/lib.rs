@@ -14,6 +14,10 @@ pub mod audio_excitation;
 pub mod audio_resampling;
 pub mod base_response;
 pub mod baseline;
+#[cfg(feature = "cinematic-finalization")]
+pub mod cinematic_finalize;
+#[cfg(feature = "cinematic-orchestration")]
+pub mod cinematic_job;
 pub mod contact_dynamics;
 #[cfg(feature = "scientific-contract")]
 pub mod contract;
