@@ -29,6 +29,7 @@ use fs_render::camera::{
     AnimatedCamera, Aperture, CameraKeyframe, CameraProjection, CameraShot, CutSide, PhysicalCamera,
 };
 use fs_render::charts::TriMesh;
+use fs_render::conductor::{ConductorOptics, ConductorProvenance, ConductorSurface};
 use fs_render::dielectric::{CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance};
 use fs_render::instances::SharedGeometry;
 use fs_render::motion::{ShutterConvention, ShutterDistribution};
@@ -947,6 +948,216 @@ fn g3_event_crossing_stays_as_two_explicit_weighted_films() {
                 .render_frame(beauty_request, &settings, cx)
                 .expect("beauty excludes configured marker")
                 .xyz
+        );
+    });
+}
+
+#[test]
+fn e2e_representative_conductors_bind_identity_and_render_distinctly() {
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, None, false, Vec::new(), cx);
+        let surface = ConductorSurface::try_rough(0.12).expect("valid conductor roughness");
+        let tungsten_optics = ConductorOptics::representative_tungsten();
+        let stainless_optics = ConductorOptics::representative_stainless_steel();
+        assert_ne!(
+            tungsten_optics.provenance(),
+            stainless_optics.provenance(),
+            "the representative presets must retain distinct provenance"
+        );
+
+        let mut tungsten_config = config();
+        tungsten_config.light.linear_rgb = [1.0, 1.0, 1.0];
+        tungsten_config.disc_material = EulerMaterialStyle::Conductor {
+            optics: tungsten_optics,
+            surface,
+        };
+        let mut stainless_config = tungsten_config.clone();
+        stainless_config.disc_material = EulerMaterialStyle::Conductor {
+            optics: stainless_optics,
+            surface,
+        };
+
+        let tungsten =
+            EulerCinematicScene::try_build(&artifact, &specimen, tungsten_config.clone(), cx)
+                .expect("representative tungsten scene");
+        let tungsten_replay =
+            EulerCinematicScene::try_build(&artifact, &specimen, tungsten_config, cx)
+                .expect("replayed representative tungsten scene");
+        let stainless =
+            EulerCinematicScene::try_build(&artifact, &specimen, stainless_config.clone(), cx)
+                .expect("representative stainless-steel scene");
+        let stainless_replay =
+            EulerCinematicScene::try_build(&artifact, &specimen, stainless_config, cx)
+                .expect("replayed representative stainless-steel scene");
+
+        assert_eq!(tungsten.scene_identity(), tungsten_replay.scene_identity());
+        assert_eq!(
+            stainless.scene_identity(),
+            stainless_replay.scene_identity()
+        );
+        assert_eq!(
+            tungsten.source_configuration_identity(),
+            tungsten_replay.source_configuration_identity()
+        );
+        assert_eq!(
+            stainless.source_configuration_identity(),
+            stainless_replay.source_configuration_identity()
+        );
+        assert_ne!(
+            tungsten.source_configuration_identity(),
+            stainless.source_configuration_identity(),
+            "changing only the conductor optical preset must invalidate configuration identity"
+        );
+        assert_ne!(
+            tungsten.scene_identity(),
+            stainless.scene_identity(),
+            "changing only the conductor optical preset must invalidate scene identity"
+        );
+        assert_eq!(
+            tungsten.source_trajectory_identity(),
+            stainless.source_trajectory_identity(),
+            "material look development must not alter the mechanics trajectory"
+        );
+        assert_eq!(
+            tungsten.preview_mesh_receipt(),
+            stainless.preview_mesh_receipt(),
+            "material look development must not alter the derived disc geometry"
+        );
+
+        let tungsten_indices = tungsten.primitive_indices();
+        let stainless_indices = stainless.primitive_indices();
+        let tungsten_material = tungsten.scene().primitives[tungsten_indices.disc].material;
+        let stainless_material = stainless.scene().primitives[stainless_indices.disc].material;
+        let tungsten_provenance: ConductorProvenance = match tungsten_material {
+            Material::Conductor {
+                optics,
+                surface: found_surface,
+            } => {
+                assert_eq!(optics, tungsten_optics);
+                assert_eq!(found_surface, surface);
+                optics.provenance()
+            }
+            other => panic!("Euler disc did not retain tungsten conductor material: {other:?}"),
+        };
+        let stainless_provenance: ConductorProvenance = match stainless_material {
+            Material::Conductor {
+                optics,
+                surface: found_surface,
+            } => {
+                assert_eq!(optics, stainless_optics);
+                assert_eq!(found_surface, surface);
+                optics.provenance()
+            }
+            other => {
+                panic!("Euler disc did not retain stainless-steel conductor material: {other:?}")
+            }
+        };
+        assert_eq!(tungsten_provenance, tungsten_optics.provenance());
+        assert_eq!(stainless_provenance, stainless_optics.provenance());
+        assert_ne!(
+            tungsten_material.content_identity(),
+            stainless_material.content_identity(),
+            "different optical tables must produce different tracer-material identities"
+        );
+        for (label, tungsten_index, stainless_index) in [
+            (
+                "base plate",
+                tungsten_indices.base_plate,
+                stainless_indices.base_plate,
+            ),
+            (
+                "housing",
+                tungsten_indices.housing,
+                stainless_indices.housing,
+            ),
+            ("light", tungsten_indices.light, stainless_indices.light),
+        ] {
+            assert_eq!(
+                tungsten.scene().primitives[tungsten_index]
+                    .material
+                    .content_identity(),
+                stainless.scene().primitives[stainless_index]
+                    .material
+                    .content_identity(),
+                "the {label} material changed in a conductor-only comparison"
+            );
+        }
+
+        let settings = euler_scene_smoke_settings(12, 8);
+        let request = frame_request(ExposureEventPolicy::Refuse);
+        let tungsten_film = tungsten
+            .render_frame(request, &settings, cx)
+            .expect("production tungsten render");
+        let tungsten_film_replay = tungsten_replay
+            .render_frame(request, &settings, cx)
+            .expect("replayed production tungsten render");
+        let stainless_film = stainless
+            .render_frame(request, &settings, cx)
+            .expect("production stainless-steel render");
+        let stainless_film_replay = stainless_replay
+            .render_frame(request, &settings, cx)
+            .expect("replayed production stainless-steel render");
+        assert_film_bits_eq(
+            &tungsten_film,
+            &tungsten_film_replay,
+            "representative tungsten render was not exactly replayable",
+        );
+        assert_film_bits_eq(
+            &stainless_film,
+            &stainless_film_replay,
+            "representative stainless-steel render was not exactly replayable",
+        );
+
+        for (label, film) in [
+            ("tungsten", &tungsten_film),
+            ("stainless steel", &stainless_film),
+        ] {
+            let mut absolute_energy = 0.0_f64;
+            for (pixel_index, pixel) in film.xyz.iter().enumerate() {
+                for (channel, value) in pixel.iter().copied().enumerate() {
+                    assert!(
+                        value.is_finite(),
+                        "{label} render produced a non-finite value at pixel={pixel_index} channel={channel}: {value}"
+                    );
+                    absolute_energy += value.abs();
+                }
+            }
+            assert!(
+                absolute_energy > 1.0e-8,
+                "{label} conductor render was black; absolute_energy={absolute_energy:.17e}"
+            );
+        }
+
+        let mut differing_pixels = 0_usize;
+        let mut total_absolute_delta = 0.0_f64;
+        let mut comparison_energy = 0.0_f64;
+        for (tungsten_pixel, stainless_pixel) in tungsten_film.xyz.iter().zip(&stainless_film.xyz) {
+            let pixel_delta = tungsten_pixel
+                .iter()
+                .zip(stainless_pixel)
+                .map(|(tungsten, stainless)| (tungsten - stainless).abs())
+                .sum::<f64>();
+            let pixel_energy = tungsten_pixel
+                .iter()
+                .zip(stainless_pixel)
+                .map(|(tungsten, stainless)| tungsten.abs().max(stainless.abs()))
+                .sum::<f64>();
+            assert!(pixel_delta.is_finite() && pixel_energy.is_finite());
+            if tungsten_pixel
+                .iter()
+                .zip(stainless_pixel)
+                .any(|(tungsten, stainless)| tungsten.to_bits() != stainless.to_bits())
+            {
+                differing_pixels += 1;
+            }
+            total_absolute_delta += pixel_delta;
+            comparison_energy += pixel_energy;
+        }
+        let normalized_l1_delta = total_absolute_delta / comparison_energy.max(f64::MIN_POSITIVE);
+        assert!(
+            differing_pixels > 0 && normalized_l1_delta > 1.0e-8,
+            "representative tungsten and stainless steel must render distinguishably under the same neutral light; differing_pixels={differing_pixels}, normalized_l1_delta={normalized_l1_delta:.17e}"
         );
     });
 }

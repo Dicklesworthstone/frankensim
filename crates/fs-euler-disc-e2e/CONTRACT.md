@@ -1409,8 +1409,15 @@ strict path-local LIFO entry/exit semantics. Encountered reversed winding,
 non-nested overlap, or escape from a declared closed medium refuses rather than
 silently choosing an index of refraction. This local runtime check is not a
 global watertightness, orientation, or non-overlap certificate for the mesh.
-Conductor optics, layered engraving/brushing, environment lighting, measured
-material fitting, and final studio look development remain downstream
+`EulerMaterialStyle::Conductor` carries the L5 renderer's validated complex-IOR
+optics and isotropic roughness without deriving either from the mechanics
+material. Representative tungsten and stainless-steel presets bind their
+distinct provenance and exact optical/material identities into the Euler
+configuration and scene while leaving trajectory, contact geometry, mass, and
+preview mesh unchanged. They are uncalibrated look-development starting points,
+not predictions of a product, alloy, oxide/passive film, machining, or finish.
+Layered engraving, anisotropic brushing, environment lighting, measured
+specimen fitting, and final studio look development remain downstream
 capabilities. Difficult focused caustics can converge slowly in the current
 unidirectional tracer; it has no bidirectional or manifold-light-transport
 claim, and straight shadow rays do not pretend to refract through intervening

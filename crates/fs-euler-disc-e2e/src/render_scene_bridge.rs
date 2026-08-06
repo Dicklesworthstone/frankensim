@@ -19,6 +19,7 @@ use fs_render::animated_instances::{
 };
 use fs_render::camera::{AnimatedCamera, CameraError, CutSide, KeyframeFocus};
 use fs_render::charts::TriMesh;
+use fs_render::conductor::{ConductorOptics, ConductorSurface};
 use fs_render::dielectric::{
     BeerLambertParameters, DielectricGlass, DielectricSurface, GlassProvenance,
 };
@@ -131,6 +132,14 @@ pub enum EulerMaterialStyle {
         linear_rgb: [f64; 3],
         /// Positive isotropic microfacet roughness.
         alpha: f64,
+    },
+    /// Opaque spectral metal with exact complex-IOR Fresnel and an isotropic
+    /// single-scattering GGX surface.
+    Conductor {
+        /// Validated complex-index table and its source provenance.
+        optics: ConductorOptics,
+        /// Validated isotropic GGX roughness.
+        surface: ConductorSurface,
     },
     /// Homogeneous spectral dielectric with smooth or rough transmission.
     Dielectric {
@@ -1391,6 +1400,10 @@ fn validate_style(style: EulerMaterialStyle, field: &'static str) -> Result<(), 
                 return Err(EulerSceneError::InvalidConfig(field));
             }
         }
+        EulerMaterialStyle::Conductor { .. } => {
+            // Conductor fields are private validated value types, so no
+            // malformed optical state can be constructed here.
+        }
         EulerMaterialStyle::Dielectric { .. } => {
             // Dielectric fields are private validated value types, so no
             // malformed optical state can be constructed here.
@@ -1944,6 +1957,9 @@ fn material(style: EulerMaterialStyle) -> Material {
             reflectance: lift_rgb(linear_rgb),
             alpha,
         },
+        EulerMaterialStyle::Conductor { optics, surface } => {
+            Material::Conductor { optics, surface }
+        }
         EulerMaterialStyle::Dielectric { glass, surface } => {
             Material::Dielectric { glass, surface }
         }
@@ -2389,6 +2405,17 @@ fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
                     hasher.update(&alpha.to_bits().to_le_bytes());
                 }
             }
+        }
+        EulerMaterialStyle::Conductor { optics, surface } => {
+            // Tags 0--2 remain frozen for existing Euler configurations.
+            // Bind the generic L5 material identity so changes to optical,
+            // Fresnel, or roughness semantics invalidate this L6 scene.
+            hasher.update(&[3]);
+            hasher.update(
+                Material::Conductor { optics, surface }
+                    .content_identity()
+                    .as_bytes(),
+            );
         }
     }
 }
