@@ -27,7 +27,7 @@ use fs_evidence::{
     cinematic_config_codec::{
         CINEMATIC_CONFIG_DOCUMENT_SCHEMA, MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES,
         CinematicAssetAccessError, CinematicAssetDeclaration, CinematicConfigDocument,
-        CinematicConfigDocumentError, CinematicDocumentAssetClass,
+        CinematicConfigDocumentError,
     },
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -622,7 +622,7 @@ fn resolve_asset(
     aggregate: &mut u64,
     cx: &Cx<'_>,
 ) -> Result<Vec<u8>, CinematicAssetAccessError> {
-    if cx.is_cancelled() {
+    if cx.checkpoint().is_err() {
         return Err(CinematicAssetAccessError::Cancelled);
     }
     let relative = Path::new(declaration.locator_hint());
@@ -678,7 +678,7 @@ enum ReadFailure {
 }
 
 fn read_file_bytes(path: &Path, maximum: u64, cx: &Cx<'_>) -> Result<Vec<u8>, ReadFailure> {
-    if cx.is_cancelled() {
+    if cx.checkpoint().is_err() {
         return Err(ReadFailure::Cancelled);
     }
     let mut file = File::open(path).map_err(|_| ReadFailure::Unavailable)?;
@@ -696,7 +696,7 @@ fn read_file_bytes(path: &Path, maximum: u64, cx: &Cx<'_>) -> Result<Vec<u8>, Re
         .map_err(|_| ReadFailure::Capacity)?;
     let mut tile = [0u8; READ_TILE_BYTES];
     loop {
-        if cx.is_cancelled() {
+        if cx.checkpoint().is_err() {
             return Err(ReadFailure::Cancelled);
         }
         let count = file.read(&mut tile).map_err(|_| ReadFailure::Unavailable)?;
@@ -821,7 +821,7 @@ fn verify_trajectory(
         ..RenderTrajectoryCodecBudget::DEFAULT
     };
     let artifact = EulerRenderTrajectoryArtifact::read_from(&mut file, budget, cx).map_err(|_| {
-        if cx.is_cancelled() {
+        if cx.is_cancel_requested() {
             cancelled(mode)
         } else {
             Failure::one(
@@ -860,7 +860,7 @@ fn verify_trajectory(
 }
 
 fn checkpoint(mode: CinematicMode, cx: &Cx<'_>) -> Result<(), Failure> {
-    if cx.is_cancelled() {
+    if cx.checkpoint().is_err() {
         Err(cancelled(mode))
     } else {
         Ok(())
