@@ -21,7 +21,7 @@ use fs_evidence::{
         ListenerFrame, ListenerPose, SOUND_MASTER_SAMPLE_RATE_HZ, SOUND_SYNTHESIS_SCHEMA_VERSION,
         SoundAmplitudeReference, SoundChannelLayout, SoundExcitationChannel,
         SoundExcitationControl, SoundModalComponent, SoundModelAssumption, SoundRoomResponse,
-        SoundSynthesisConfig, SoundSynthesisInput, SoundTerminalPolicy, SoundTrajectoryDisposition,
+    SoundSynthesisConfig, SoundSynthesisInput, SoundTerminalPolicy, SoundTrajectoryDisposition,
     },
 };
 use fs_exec::{Cx, RunId};
@@ -58,7 +58,7 @@ use crate::{
     RenderBaseModeState, RenderChannelAvailability, RenderMassProperties, RenderTrajectory,
     RenderTrajectoryAuthority, RenderTrajectoryCodecBudget, RenderTrajectoryMetadata,
     RenderUnitSystem, RenderWorldFrame, RepresentativeDiscMaterial, SoundWavArtifact, StemGainPan,
-    WavMetadata, WavSampleEncoding,
+    StereoSample, WavMetadata, WavSampleEncoding,
     coupled_runner::{
         CoupledChannelFactors, CoupledControls, CoupledInitialState, CoupledTerminal,
         run_closed_profile_reduced,
@@ -69,6 +69,10 @@ use crate::{
         EulerSceneConfig, EulerTessellationConfig, euler_scene_smoke_settings,
     },
     representative_modal_preset,
+    ListenerPose as SpatialListenerPose, ListenerPoseTrack, MicrophoneDirectivity,
+    OfflineSpatializer, SourcePositionTrack, SpatialAudioAuthority, SpatialAudioBudget,
+    SpatialAudioConfig, SpatialAudioOutput, SpatialAudioRenderInput, SpatialAudioSource,
+    SpatialDelayPolicy, SpatialMonoSignal, SpatialOutputHorizon, SpatialStemComponent,
     specimen::DiscProfileSpec,
     timeline_resampling::ExposureEventPolicy,
 };
@@ -234,6 +238,19 @@ struct FixtureAudio {
     artifact: SoundWavArtifact,
     pre_master_peak_fs: f64,
     master_gain_db: f64,
+    spatialization: Option<FixtureSpatialAudioEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FixtureSpatialAudioEvidence {
+    config_identity: ContentHash,
+    input_identity: ContentHash,
+    raw_output_identity: ContentHash,
+    mastered_output_identity: ContentHash,
+    authority: SpatialAudioAuthority,
+    maximum_distance_m: f64,
+    maximum_delay_frames: f64,
+    discarded_tail_frames: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1209,48 +1226,99 @@ fn build_audio(
         },
         master_gain_db: 0.0,
     };
-    let provisional =
-        mix_dry_modal_stems(&stems, mix, AudioArtifactBudget::DEFAULT, cx).map_err(pipeline)?;
-    let provisional_meters =
-        measure_audio(&provisional, AudioArtifactBudget::DEFAULT, cx).map_err(pipeline)?;
+    let spatialized = config
+        .spatialize_audio
+        .then(|| {
+            spatialize_fixture_audio(
+                trajectory,
+                &stems,
+                sound.receipt().configuration_identity,
+                cx,
+            )
+        })
+        .transpose()?;
+    let provisional_meters = if let Some(output) = &spatialized {
+        measure_audio(output.samples(), AudioArtifactBudget::DEFAULT, cx).map_err(pipeline)?
+    } else {
+        let provisional =
+            mix_dry_modal_stems(&stems, mix, AudioArtifactBudget::DEFAULT, cx).map_err(pipeline)?;
+        measure_audio(&provisional, AudioArtifactBudget::DEFAULT, cx).map_err(pipeline)?
+    };
     let provisional_peak = provisional_meters
         .sample_peak_fs
         .max(provisional_meters.true_peak_estimate_fs);
-    drop(provisional);
     const TARGET_PEAK_FS: f64 = 0.45;
     if provisional_peak <= f64::MIN_POSITIVE {
         return Err(CinematicFixtureError::Pipeline(
             "mechanics-derived sound is silent and cannot be mastered".into(),
         ));
     }
-    mix.master_gain_db =
+    let master_gain_db =
         20.0 * det::ln(TARGET_PEAK_FS / provisional_peak) / core::f64::consts::LN_10;
-    if !(-120.0..=120.0).contains(&mix.master_gain_db) {
+    if !(-120.0..=120.0).contains(&master_gain_db) {
         return Err(CinematicFixtureError::Pipeline(format!(
             "mechanics-derived sound needs {:.3} dB mastering gain, beyond the admitted range",
-            mix.master_gain_db
+            master_gain_db
         )));
     }
-    let artifact = SoundWavArtifact::try_build(
-        &sound,
-        AudioMasterSource::DryModalStems {
-            frames: &stems,
-            mix,
-            source_synthesis: sound.receipt(),
-        },
-        WavSampleEncoding::Float32,
-        WavMetadata::try_new(Some(
-            "FrankenSim Euler-disc mechanics-driven critique preview; uncalibrated".to_owned(),
-        ))
-        .map_err(pipeline)?,
-        AudioArtifactBudget::DEFAULT,
-        cx,
-    )
-    .map_err(pipeline)?;
+    mix.master_gain_db = master_gain_db;
+    let (artifact, spatialization) = if let Some(output) = spatialized {
+        let mastered = apply_stereo_master_gain(output.samples(), master_gain_db, cx)?;
+        let mastered_output_identity = mastered_spatial_output_identity(&output, master_gain_db);
+        let artifact = SoundWavArtifact::try_build(
+            &sound,
+            AudioMasterSource::SpatializedStereo {
+                frames: &mastered,
+                spatialization_identity: mastered_output_identity,
+                source_synthesis: sound.receipt(),
+            },
+            WavSampleEncoding::Float32,
+            WavMetadata::try_new(Some(
+                "FrankenSim Euler-disc mechanics-driven spatial critique preview; uncalibrated"
+                    .to_owned(),
+            ))
+            .map_err(pipeline)?,
+            AudioArtifactBudget::DEFAULT,
+            cx,
+        )
+        .map_err(pipeline)?;
+        let diagnostics = output.diagnostics();
+        let evidence = FixtureSpatialAudioEvidence {
+            config_identity: output.config_identity(),
+            input_identity: output.input_identity(),
+            raw_output_identity: output.output_identity(),
+            mastered_output_identity,
+            authority: output.authority(),
+            maximum_distance_m: diagnostics.maximum_distance_m,
+            maximum_delay_frames: diagnostics.maximum_delay_frames,
+            discarded_tail_frames: diagnostics.discarded_tail_frames,
+        };
+        (artifact, Some(evidence))
+    } else {
+        let artifact = SoundWavArtifact::try_build(
+            &sound,
+            AudioMasterSource::DryModalStems {
+                frames: &stems,
+                mix,
+                source_synthesis: sound.receipt(),
+            },
+            WavSampleEncoding::Float32,
+            WavMetadata::try_new(Some(
+                "FrankenSim Euler-disc mechanics-driven dry critique preview; uncalibrated"
+                    .to_owned(),
+            ))
+            .map_err(pipeline)?,
+            AudioArtifactBudget::DEFAULT,
+            cx,
+        )
+        .map_err(pipeline)?;
+        (artifact, None)
+    };
     Ok(FixtureAudio {
         artifact,
         pre_master_peak_fs: provisional_peak,
-        master_gain_db: mix.master_gain_db,
+        master_gain_db,
+        spatialization,
     })
 }
 

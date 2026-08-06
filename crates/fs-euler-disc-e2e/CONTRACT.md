@@ -1162,6 +1162,90 @@ artifact is a model-derived modal drive, not calibrated pressure, radiated
 acoustic energy, absolute SPL, room response, structural/acoustic coupling, or
 physical validation.
 
+`spatial_audio` v1 is the deterministic offline stereo transform between dry
+modal/source frames and `audio_artifact`. It accepts an ordered, bounded set of
+identified mono point sources. A source may borrow generic mono samples or one
+disc/glass/base field directly from `ModalStemFrame`, so the cinematic path does
+not copy three full-rate stem arrays. Every source declares a finite
+nonnegative linear gain, static or one-per-frame world position `[m]`, and
+`PhysicallyParameterized` or `Artistic` parameter provenance. Listener input is
+likewise static or one pose per emission frame, with finite position `[m]` and
+unit, mutually orthogonal forward/right axes. All sources, per-frame tracks,
+and the listener have one exact nonzero common frame horizon; mismatches refuse.
+
+Propagation uses the declared sample rate and positive finite speed of sound.
+For distance `d`, the frozen attenuation law is
+`d_min / max(d,d_min)` with positive finite `d_min`; it cannot boost above one.
+At exact source/listener coincidence, v1 freezes zero delay, centred pan,
+front-axis microphone gain, and clamped unit attenuation rather than inventing
+a direction or dividing by zero. `IntegerCeiling` places an arrival at
+`n + ceil(d fs/c)` and therefore never advances it; `LinearFloorCeil` splits it
+between the adjacent sampled arrival frames. The latter is a causal sampled
+linear interpolator, not a band-limited fractional-delay filter. Source and
+listener poses are evaluated at emission time. V1 does not reconstruct a
+retarded listener pose or Doppler shift.
+
+The stereo law is fixed equal-power panning:
+`L=sqrt((1-p)/2)`, `R=sqrt((1+p)/2)`, where `p` is the source direction dotted
+with the listener's right axis and clamped to `[-1,1]`. Microphone directivity
+is either omnidirectional or a first-order cardioid with an explicit rear-axis
+amplitude floor in `[0,1]`; it is not an HRTF or head model. Contributions are
+accumulated in caller order with deterministic compensated sums. The explicit
+source gain is applied exactly once before attenuation, directivity, and pan;
+there is no inferred stem balance, normalization, compressor, limiter, hidden
+gain, or clipping. Any nonfinite input/derived value or final sample above the
+declared absolute ceiling refuses the whole transaction.
+
+`PreserveTail` publishes the complete sampled propagation tail and optional
+room-response tail. `ClampToInputFrames` instead publishes exactly the common
+input horizon, deterministically discarding deposits and convolution output at
+or beyond that exclusive boundary. This choice is bound into configuration
+identity. Diagnostics retain both the published count and the complete natural
+final count plus discarded-tail count, so a clamped prefix cannot be relabelled
+as an untruncated result. Each call is a fresh offline transaction: cuts/reset
+are expressed by starting a new call, and v1 never carries a delay line or room
+tail implicitly across calls.
+
+An optional stereo room impulse response owns equal-length finite left/right
+taps at an exact sample rate and derives its identity from rate, authority, and
+every tap bit. Its rate and tap count must agree with the renderer and its
+budget. Convolution is deterministic and channel-wise; it is a pure response,
+so tap zero must explicitly contain any desired direct path. No gain
+normalization or hidden dry signal is added. A room response marked `Artistic`
+makes the output `Artistic`; otherwise authority is the conservative
+combination of configuration, every source, and the optional response.
+
+Configuration identity binds the algorithm version, exact sample rate, speed
+of sound, minimum distance, delay and output-horizon policies, microphone law,
+parameter authority, and all resource/amplitude ceilings. Input identity binds
+that configuration, ordered upstream identities, selected modal fields, source
+gains, every sample bit, every resolved source/listener pose, and optional room
+identity. Output identity additionally binds exact stereo sample bits, final
+authority, and room identity. The distinct dry-bypass transaction validates
+rate, identity, budgets, finiteness, and amplitude, then copies already-stereo
+frames bit-for-bit (including signed zero) without invoking any spatial law.
+
+Sources, total input frames, output frames, room taps, owned sample bytes, and a
+checked deterministic work estimate have explicit caller ceilings plus hard
+source/rate/tap limits. Owned buffers use fallible reservation. Admission,
+source traversal, accumulation finalization, convolution, validation, and
+identity traversal poll the supplied `Cx` at no more than 256 frames/taps
+between checkpoints. Output, identities, and diagnostics publish only after
+all work and a final checkpoint succeed; refusal or cancellation exposes no
+partial result.
+
+Focused G0/G3/G4/G5 evidence covers static and moving left/right geometry,
+centred balance, near/far attenuation, listener motion, co-location clamping,
+speed-of-sound delay scaling, rear microphone response, integer/fractional
+impulses, room tails and rate/identity checks, preserve-versus-clamp horizon
+identity and diagnostics, unity/non-unity source gains, modal stem selection,
+exact dry bypass, nonfinite/clipping refusal, pre- and in-work cancellation,
+and bit-stable replay. Even with that evidence, output is a deterministic
+presentation transform, not BEM, HRTF, occlusion/diffraction, measured room
+acoustics, calibrated pressure, radiated power, absolute SPL, or perceptual
+validation. `PhysicallyParameterized` records input provenance only and does
+not promote those no-claims.
+
 `audio_artifact` v1 turns complete modal or separately spatialized samples into
 the deterministic stereo artifact consumed by the cinematic finalizer. Its
 production format surface is deliberately narrow: RIFF/WAVE at exactly 48 kHz
