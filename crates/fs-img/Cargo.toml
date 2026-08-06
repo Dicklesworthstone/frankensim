@@ -11,6 +11,7 @@ description = "In-house PNG/OpenEXR writers and readers, bias-labeled a-trous de
 layer = "L5"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]

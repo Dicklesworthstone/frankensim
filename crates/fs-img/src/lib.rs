@@ -10,6 +10,7 @@ pub mod denoise;
 pub mod exr;
 pub mod film;
 pub mod png;
+pub mod sequence;
 
 mod cinematic_color;
 
@@ -30,6 +31,13 @@ pub use exr::{
     write_exr_with_attributes_budgeted,
 };
 pub use png::{DecodedPng, PngColor, read_png, write_png8, write_png16};
+pub use sequence::{
+    FRAME_SEQUENCE_MANIFEST_VERSION, ContentHash, ExpectedFrameArtifact, FrameArtifactDescriptor,
+    FrameArtifactFileState, FrameArtifactFormat, FrameArtifactKey, FrameArtifactObservation,
+    FrameArtifactRole, FrameChannel, FrameChannelType, FrameSamplingStats, FrameSequenceContext,
+    FrameSequenceError, FrameSequenceLimits, FrameSequenceManifest, FrameSequenceSeal,
+    FrameSequenceState, RegistrationOutcome,
+};
 
 use core::fmt;
 
