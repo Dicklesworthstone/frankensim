@@ -70,6 +70,18 @@ telemetry/legacy correlation.
   audio, mux, and composition identities provide minimal safe invalidation:
   camera/material changes do not invalidate trajectory/audio, room changes do
   not invalidate images, and trajectory changes invalidate every consumer.
+- `cinematic_config_codec::CinematicConfigDocument` is the reconstructible,
+  closed v1 transport for that composition. It admits at most 1 MiB and 4,096
+  physical lines, rejects unknown/duplicate/missing fields and noncanonical
+  integers, binds both budget references to the exact named quality-profile
+  identity, canonicalizes order-insensitive material/light declarations, and
+  emits a no-trailing-newline canonical fixed point that remains inside the
+  same byte ceiling. Asset admission enforces explicit per-asset and aggregate
+  returned-byte envelopes before hashing, polls a caller checkpoint at 64 KiB
+  hash tiles, compares the domain-separated byte identity, and mints no
+  `CinematicConfig` after access, size, identity, or cancellation refusal.
+  Locator acquisition and its cancellation strategy remain the resolver's
+  responsibility; locator strings carry no authority.
 - `cinematic_sound::SoundSynthesisConfig` is the fail-closed input and receipt
   boundary for the reference soundtrack. Schema v3 reuses the cinematic
   authority and rational-clock types, requires exact 48 kHz stereo timing
@@ -838,6 +850,12 @@ composition identity vector, missing Five Explicits, unknown versions, stale
 asset bytes, duplicate assets, mux capability admission, and one-field
 trajectory/camera/material/room/timeline/render-budget/audio-budget invalidation
 matrices including proof that unused mux capability does not churn artifacts.
+`tests/cinematic_config_codec.rs` covers full document round trips and
+authoritative re-entry, order/comment/relocation invariance, exact byte and
+line ceilings, strict field paths without source-value disclosure, both named
+budget bindings, stale/unavailable asset refusal at canonical indexes,
+per-asset and aggregate exact/one-short envelopes, cancellation during tiled
+asset hashing, and mux capability coupling.
 `tests/cinematic_sound.rs` covers all three authority tiers, calibrated-pressure
 promotion gates, exact 24 fps/48 kHz endpoints, stereo and camera-relative
 listener admission, modal frequency/damping/gain, dimensioned source controls,

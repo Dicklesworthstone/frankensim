@@ -16,7 +16,7 @@ const IMAGE_DOMAIN: &str = "org.frankensim.cinematic-config.image.v1";
 const AUDIO_DOMAIN: &str = "org.frankensim.cinematic-config.audio.v1";
 const MUX_DOMAIN: &str = "org.frankensim.cinematic-config.mux.v1";
 const COMPOSITION_DOMAIN: &str = "org.frankensim.cinematic-config.composition.v1";
-const ASSET_BYTES_DOMAIN: &str = "org.frankensim.cinematic-config.asset-bytes.v1";
+pub(crate) const ASSET_BYTES_DOMAIN: &str = "org.frankensim.cinematic-config.asset-bytes.v1";
 
 /// Semantic role prevents cross-wiring equal-shaped references.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -121,7 +121,7 @@ pub struct CinematicAssetBinding {
 }
 
 impl CinematicAssetBinding {
-    fn from_identity(
+    pub(crate) fn from_identity(
         content_identity: ContentHash,
         interpretation: CinematicAssetInterpretation,
         version: u32,

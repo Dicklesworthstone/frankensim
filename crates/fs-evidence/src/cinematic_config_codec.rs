@@ -5,13 +5,14 @@
 //! complete v1 document instead: every component reference, named quality
 //! profile, interpreted external asset, output namespace, and optional mux
 //! request is retained. Asset identities are still not trusted from text;
-//! admission resolves the declared locator, hashes the returned bytes through
-//! [`CinematicAssetBinding::from_bytes`], and compares the expected identity.
+//! admission resolves the declared locator, hashes the returned bytes in
+//! cancellation-bounded tiles using the same asset-identity domain, and
+//! compares the expected identity.
 
 use core::fmt;
 use std::collections::BTreeMap;
 
-use fs_blake3::ContentHash;
+use fs_blake3::{ContentHash, DomainHasher};
 
 use crate::{
     cinematic_budget::{
@@ -19,10 +20,10 @@ use crate::{
         CinematicQualityTier,
     },
     cinematic_config::{
-        CINEMATIC_CONFIG_SCHEMA_VERSION, CinematicArtifactRoot, CinematicAssetBinding,
-        CinematicAssetInterpretation, CinematicCapabilities, CinematicComponentRef,
-        CinematicComponentRole, CinematicConfig, CinematicConfigError, CinematicConfigInput,
-        CinematicConfigUnits, CinematicMuxCodec, CinematicMuxRequest,
+        ASSET_BYTES_DOMAIN, CINEMATIC_CONFIG_SCHEMA_VERSION, CinematicArtifactRoot,
+        CinematicAssetBinding, CinematicAssetInterpretation, CinematicCapabilities,
+        CinematicComponentRef, CinematicComponentRole, CinematicConfig, CinematicConfigError,
+        CinematicConfigInput, CinematicConfigUnits, CinematicMuxCodec, CinematicMuxRequest,
     },
 };
 
@@ -34,6 +35,12 @@ pub const MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_CINEMATIC_CONFIG_DOCUMENT_LINES: usize = 4_096;
 /// Maximum declarations in either order-insensitive asset class.
 pub const MAX_CINEMATIC_CONFIG_DOCUMENT_ASSETS_PER_CLASS: usize = 1_024;
+/// Default maximum bytes returned for one resolved external asset.
+pub const MAX_CINEMATIC_RESOLVED_ASSET_BYTES: usize = 256 * 1024 * 1024;
+/// Default maximum bytes returned across all resolved external assets.
+pub const MAX_CINEMATIC_RESOLVED_ASSET_TOTAL_BYTES: usize = 1024 * 1024 * 1024;
+/// Maximum bytes hashed between caller cancellation checkpoints.
+pub const CINEMATIC_ASSET_HASH_TILE_BYTES: usize = 64 * 1_024;
 
 const MAX_LOCATOR_BYTES: usize = 1_024;
 
@@ -71,6 +78,33 @@ pub enum CinematicAssetAccessError {
     TooLarge,
     /// The resolver could not reserve bounded storage.
     Capacity,
+}
+
+/// Explicit post-resolution byte envelope enforced before asset hashing.
+///
+/// The resolver owns its I/O allocation strategy. This budget prevents bytes
+/// returned by that caller from entering configuration admission or hashing
+/// outside a declared per-asset and aggregate bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CinematicAssetAdmissionBudget {
+    /// Maximum returned bytes for one declaration.
+    pub max_asset_bytes: usize,
+    /// Maximum returned bytes across material, light, and environment assets.
+    pub max_total_asset_bytes: usize,
+}
+
+impl CinematicAssetAdmissionBudget {
+    /// Default CLI-scale envelope.
+    pub const DEFAULT: Self = Self {
+        max_asset_bytes: MAX_CINEMATIC_RESOLVED_ASSET_BYTES,
+        max_total_asset_bytes: MAX_CINEMATIC_RESOLVED_ASSET_TOTAL_BYTES,
+    };
+}
+
+impl Default for CinematicAssetAdmissionBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Expected asset identity plus its interpretation and relocatable hint.
@@ -187,10 +221,10 @@ impl CinematicConfigDocument {
             }
             match key {
                 "material_asset" => {
-                    push_asset_declaration(&mut materials, value, "material_asset", line_number)?;
+                    push_asset_declaration(&mut materials, value, "material_asset")?;
                 }
                 "light_asset" => {
-                    push_asset_declaration(&mut lights, value, "light_asset", line_number)?;
+                    push_asset_declaration(&mut lights, value, "light_asset")?;
                 }
                 "schema"
                 | "quality_profile"
@@ -308,13 +342,23 @@ impl CinematicConfigDocument {
         let environment_asset = parse_asset_declaration(
             &take_required(&mut unique, "environment_asset")?,
             "environment_asset",
-            0,
         )?;
-        let artifact_root = CinematicArtifactRoot::try_new(
-            take_required(&mut unique, "artifact_namespace")?,
-            take_required(&mut unique, "artifact_root")?,
-        )
-        .map_err(CinematicConfigDocumentError::Config)?;
+        let artifact_namespace = take_required(&mut unique, "artifact_namespace")?;
+        let artifact_locator = take_required(&mut unique, "artifact_root")?;
+        let artifact_root = CinematicArtifactRoot::try_new(artifact_namespace, artifact_locator)
+            .map_err(|error| match error {
+                CinematicConfigError::InvalidArtifactNamespace => {
+                    CinematicConfigDocumentError::InvalidField {
+                        field: "artifact_namespace",
+                    }
+                }
+                CinematicConfigError::InvalidLocator => {
+                    CinematicConfigDocumentError::InvalidField {
+                        field: "artifact_root",
+                    }
+                }
+                other => CinematicConfigDocumentError::Config(other),
+            })?;
         let mux_request = parse_mux(&take_required(&mut unique, "mux")?)?;
         if matches!(mux_request, CinematicMuxRequest::QuarantinedAdapter { .. })
             && capabilities.bits() & CinematicCapabilities::QUARANTINED_MUX == 0
@@ -417,8 +461,15 @@ impl CinematicConfigDocument {
 
     /// Resolve every external asset, verify expected byte identities, and
     /// re-enter the authoritative [`CinematicConfig::try_new`] constructor.
-    pub fn admit_with_asset_resolver<F>(
+    ///
+    /// The resolver owns cancellation while acquiring bytes. After return,
+    /// `checkpoint` is called before every 64 KiB identity-hash tile and once
+    /// after the final (including empty) tile sequence. A checkpoint refusal
+    /// publishes no admitted configuration.
+    pub fn admit_with_asset_resolver<F, C>(
         &self,
+        budget: CinematicAssetAdmissionBudget,
+        mut checkpoint: C,
         mut resolve: F,
     ) -> Result<CinematicConfig, CinematicConfigDocumentError>
     where
@@ -427,22 +478,39 @@ impl CinematicConfigDocument {
             usize,
             &CinematicAssetDeclaration,
         ) -> Result<Vec<u8>, CinematicAssetAccessError>,
+        C: FnMut() -> Result<(), CinematicAssetAccessError>,
     {
+        if budget.max_asset_bytes == 0
+            || budget.max_total_asset_bytes == 0
+            || budget.max_asset_bytes > budget.max_total_asset_bytes
+        {
+            return Err(CinematicConfigDocumentError::InvalidAssetBudget);
+        }
         self.quality_profile()?;
+        let mut resolved_bytes = 0usize;
         let material_assets = resolve_assets(
             CinematicDocumentAssetClass::Material,
             &self.material_assets,
+            budget,
+            &mut resolved_bytes,
+            &mut checkpoint,
             &mut resolve,
         )?;
         let light_assets = resolve_assets(
             CinematicDocumentAssetClass::Light,
             &self.light_assets,
+            budget,
+            &mut resolved_bytes,
+            &mut checkpoint,
             &mut resolve,
         )?;
         let environment_asset = resolve_asset(
             CinematicDocumentAssetClass::Environment,
             0,
             &self.environment_asset,
+            budget,
+            &mut resolved_bytes,
+            &mut checkpoint,
             &mut resolve,
         )?;
         CinematicConfig::try_new(CinematicConfigInput {
@@ -473,7 +541,9 @@ impl CinematicConfigDocument {
     }
 
     /// Canonical complete document text. Declaration order and insignificant
-    /// input whitespace/comments do not affect this representation.
+    /// input whitespace/comments do not affect this representation. The final
+    /// record has no trailing newline, keeping canonicalization closed at the
+    /// exact public byte ceiling.
     #[must_use]
     pub fn to_canonical_text(&self) -> String {
         let mut out = String::new();
@@ -525,13 +595,18 @@ impl CinematicConfigDocument {
         );
         push_line(&mut out, "artifact_root", self.artifact_root.locator_hint());
         push_line(&mut out, "mux", &mux_text(self.mux_request));
+        let trailing = out.pop();
+        debug_assert_eq!(trailing, Some('\n'));
         out
     }
 }
 
-fn resolve_assets<F>(
+fn resolve_assets<F, C>(
     class: CinematicDocumentAssetClass,
     declarations: &[CinematicAssetDeclaration],
+    budget: CinematicAssetAdmissionBudget,
+    resolved_bytes: &mut usize,
+    checkpoint: &mut C,
     resolve: &mut F,
 ) -> Result<Vec<CinematicAssetBinding>, CinematicConfigDocumentError>
 where
@@ -540,21 +615,33 @@ where
         usize,
         &CinematicAssetDeclaration,
     ) -> Result<Vec<u8>, CinematicAssetAccessError>,
+    C: FnMut() -> Result<(), CinematicAssetAccessError>,
 {
     let mut assets = Vec::new();
     assets
         .try_reserve_exact(declarations.len())
         .map_err(|_| CinematicConfigDocumentError::Capacity)?;
     for (index, declaration) in declarations.iter().enumerate() {
-        assets.push(resolve_asset(class, index, declaration, resolve)?);
+        assets.push(resolve_asset(
+            class,
+            index,
+            declaration,
+            budget,
+            resolved_bytes,
+            checkpoint,
+            resolve,
+        )?);
     }
     Ok(assets)
 }
 
-fn resolve_asset<F>(
+fn resolve_asset<F, C>(
     class: CinematicDocumentAssetClass,
     index: usize,
     declaration: &CinematicAssetDeclaration,
+    budget: CinematicAssetAdmissionBudget,
+    resolved_bytes: &mut usize,
+    checkpoint: &mut C,
     resolve: &mut F,
 ) -> Result<CinematicAssetBinding, CinematicConfigDocumentError>
 where
@@ -563,11 +650,41 @@ where
         usize,
         &CinematicAssetDeclaration,
     ) -> Result<Vec<u8>, CinematicAssetAccessError>,
+    C: FnMut() -> Result<(), CinematicAssetAccessError>,
 {
     let bytes = resolve(class, index, declaration)
         .map_err(|kind| CinematicConfigDocumentError::AssetAccess { class, index, kind })?;
-    let binding = CinematicAssetBinding::from_bytes(
-        &bytes,
+    let next_total = resolved_bytes.checked_add(bytes.len()).ok_or(
+        CinematicConfigDocumentError::AssetAccess {
+            class,
+            index,
+            kind: CinematicAssetAccessError::TooLarge,
+        },
+    )?;
+    if bytes.len() > budget.max_asset_bytes || next_total > budget.max_total_asset_bytes {
+        return Err(CinematicConfigDocumentError::AssetAccess {
+            class,
+            index,
+            kind: CinematicAssetAccessError::TooLarge,
+        });
+    }
+    *resolved_bytes = next_total;
+    let mut hasher = DomainHasher::new(ASSET_BYTES_DOMAIN);
+    for tile in bytes.chunks(CINEMATIC_ASSET_HASH_TILE_BYTES) {
+        checkpoint().map_err(|kind| CinematicConfigDocumentError::AssetAccess {
+            class,
+            index,
+            kind,
+        })?;
+        hasher.update(tile);
+    }
+    checkpoint().map_err(|kind| CinematicConfigDocumentError::AssetAccess {
+        class,
+        index,
+        kind,
+    })?;
+    let binding = CinematicAssetBinding::from_identity(
+        hasher.finalize(),
         declaration.interpretation,
         declaration.version,
         declaration.locator_hint.clone(),
@@ -594,12 +711,11 @@ fn push_asset_declaration(
     output: &mut Vec<CinematicAssetDeclaration>,
     value: &str,
     field: &'static str,
-    line: usize,
 ) -> Result<(), CinematicConfigDocumentError> {
     if output.len() >= MAX_CINEMATIC_CONFIG_DOCUMENT_ASSETS_PER_CLASS {
         return Err(CinematicConfigDocumentError::TooManyAssets { field });
     }
-    output.push(parse_asset_declaration(value, field, line)?);
+    output.push(parse_asset_declaration(value, field)?);
     Ok(())
 }
 
@@ -623,7 +739,6 @@ fn parse_component(
 fn parse_asset_declaration(
     value: &str,
     field: &'static str,
-    _line: usize,
 ) -> Result<CinematicAssetDeclaration, CinematicConfigDocumentError> {
     let mut parts = value.splitn(4, ':');
     let interpretation = parts
@@ -861,7 +976,10 @@ fn parse_hash(
 }
 
 fn parse_u32(value: &str, field: &'static str) -> Result<u32, CinematicConfigDocumentError> {
-    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
         return Err(CinematicConfigDocumentError::InvalidField { field });
     }
     value
@@ -872,7 +990,10 @@ fn parse_u32(value: &str, field: &'static str) -> Result<u32, CinematicConfigDoc
 }
 
 fn parse_u64(value: &str, field: &'static str) -> Result<u64, CinematicConfigDocumentError> {
-    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
         return Err(CinematicConfigDocumentError::InvalidField { field });
     }
     value
@@ -956,6 +1077,8 @@ pub enum CinematicConfigDocumentError {
     },
     /// A bounded output allocation failed.
     Capacity,
+    /// The caller supplied a zero or internally inconsistent asset envelope.
+    InvalidAssetBudget,
     /// Underlying quality-profile admission refused.
     Budget(CinematicBudgetError),
     /// Underlying composition-schema admission refused.
@@ -983,6 +1106,7 @@ impl CinematicConfigDocumentError {
             Self::AssetAccess { .. } => "cinematic-document-asset-access",
             Self::AssetIdentityMismatch { .. } => "cinematic-document-asset-identity-mismatch",
             Self::Capacity => "cinematic-document-capacity",
+            Self::InvalidAssetBudget => "cinematic-document-invalid-asset-budget",
             Self::Budget(error) => error.code(),
             Self::Config(error) => error.code(),
         }
@@ -1010,6 +1134,7 @@ impl CinematicConfigDocumentError {
             Self::UnsupportedSchema => "config.schema".to_owned(),
             Self::Budget(_) => "config.quality_profile".to_owned(),
             Self::Config(_) => "config".to_owned(),
+            Self::InvalidAssetBudget => "config.assets".to_owned(),
             Self::DocumentTooLarge { .. }
             | Self::InvalidUtf8
             | Self::TooManyLines

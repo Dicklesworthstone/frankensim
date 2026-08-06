@@ -58,6 +58,21 @@ fn profile_identity_binds_every_budget_and_quality_field() {
     let baseline =
         CinematicQualityProfile::canonical(CinematicQualityTier::Final4k).expect("canonical final");
     let baseline_identity = baseline.identity();
+    let encoded = baseline
+        .canonical_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        encoded,
+        "010003000f0000700800001800000000000000f000000000010000000400001000e8030000020210002000200040004000000000000000020000008051010000000000001a4f00000000000000000040000000000000800c000000",
+        "v1 profile layout and explicit enum tags are a compatibility boundary",
+    );
+    assert_eq!(
+        baseline_identity.to_hex(),
+        "fad299a8bd59ce85bbedced35212e408ad1be28c4a34a6e21d8085458ac4af04",
+        "domain-separated v1 profile identity is a known-answer vector",
+    );
 
     let mutations: Vec<Mutation> = vec![
         |p| p.first_frame = 1,
@@ -84,9 +99,8 @@ fn profile_identity_binds_every_budget_and_quality_field() {
         assert_ne!(baseline_identity, changed.identity());
     }
 
-    let storyboard =
-        CinematicQualityProfile::canonical(CinematicQualityTier::StoryboardSmoke)
-            .expect("canonical storyboard");
+    let storyboard = CinematicQualityProfile::canonical(CinematicQualityTier::StoryboardSmoke)
+        .expect("canonical storyboard");
     for mutate in [
         (|p: &mut CinematicQualityProfileInput| p.width_pixels -= 1) as Mutation,
         |p: &mut CinematicQualityProfileInput| p.height_pixels -= 1,
@@ -97,7 +111,11 @@ fn profile_identity_binds_every_budget_and_quality_field() {
         assert_ne!(storyboard.identity(), changed.identity());
     }
 
-    assert_eq!(baseline.identity(), baseline.identity(), "identity is stable");
+    assert_eq!(
+        baseline.identity(),
+        baseline.identity(),
+        "identity is stable"
+    );
 }
 
 #[test]

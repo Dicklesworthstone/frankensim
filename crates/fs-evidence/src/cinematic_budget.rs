@@ -29,13 +29,13 @@ const AUDIO_BYTES_PER_SAMPLE: u64 = 4;
 #[repr(u8)]
 pub enum CinematicQualityTier {
     /// Cheap story/camera/synchronization smoke preview.
-    StoryboardSmoke,
+    StoryboardSmoke = 0,
     /// Full-timeline 1080p creative daily.
-    Daily1080p,
+    Daily1080p = 1,
     /// One representative 4K frame used to qualify the final configuration.
-    Qualification4kFrame,
+    Qualification4kFrame = 2,
     /// Full 4K image-master sequence.
-    Final4k,
+    Final4k = 3,
 }
 
 /// Denoising disposition. Final raw estimates are never overwritten.
@@ -43,11 +43,11 @@ pub enum CinematicQualityTier {
 #[repr(u8)]
 pub enum DenoisePolicy {
     /// No denoising.
-    Disabled,
+    Disabled = 0,
     /// Preview-only denoising; output is a biased visualization.
-    PreviewBiased,
+    PreviewBiased = 1,
     /// Preserve raw masters and emit denoising only as a separate derivative.
-    SeparateBiasedDerivative,
+    SeparateBiasedDerivative = 2,
 }
 
 /// Frozen AOV bundles with a deterministic float-channel count.
@@ -55,11 +55,11 @@ pub enum DenoisePolicy {
 #[repr(u8)]
 pub enum AovPreset {
     /// XYZ beauty only.
-    BeautyXyz,
+    BeautyXyz = 0,
     /// Beauty, albedo, normal, depth, variance, and motion.
-    DailyCore,
+    DailyCore = 1,
     /// Daily core plus direct, indirect, emission, object ID, and sample count.
-    FinalDiagnostic,
+    FinalDiagnostic = 2,
 }
 
 impl AovPreset {

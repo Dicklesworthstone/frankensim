@@ -7,7 +7,8 @@ use fs_evidence::{
     },
     cinematic_config::{CinematicAssetBinding, CinematicAssetInterpretation},
     cinematic_config_codec::{
-        CINEMATIC_CONFIG_DOCUMENT_SCHEMA, CinematicAssetAccessError, CinematicConfigDocument,
+        CINEMATIC_ASSET_HASH_TILE_BYTES, CINEMATIC_CONFIG_DOCUMENT_SCHEMA,
+        CinematicAssetAccessError, CinematicAssetAdmissionBudget, CinematicConfigDocument,
         CinematicConfigDocumentError, CinematicDocumentAssetClass,
         MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES, MAX_CINEMATIC_CONFIG_DOCUMENT_LINES,
     },
@@ -137,7 +138,7 @@ fn complete_document_round_trips_and_reenters_authoritative_config() {
     assert_eq!(decoded, document);
 
     let config = decoded
-        .admit_with_asset_resolver(resolve)
+        .admit_with_asset_resolver(CinematicAssetAdmissionBudget::DEFAULT, || Ok(()), resolve)
         .expect("asset-backed config admission");
     assert_eq!(config.input().seed, Some(7));
     assert_eq!(
@@ -150,31 +151,47 @@ fn complete_document_round_trips_and_reenters_authoritative_config() {
 
 #[test]
 fn comments_declaration_order_and_locator_relocation_do_not_change_composition() {
-    let first = CinematicConfigDocument::from_str(&document_text(
+    let source = document_text(
         CinematicQualityTier::StoryboardSmoke,
         "assets/steel.spectrum",
         "assets/tungsten.spectrum",
         "none",
-    ))
-    .expect("first document");
-    let reordered = document_text(
+    );
+    let first = CinematicConfigDocument::from_str(&source).expect("first document");
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    let first_material = lines
+        .iter()
+        .position(|line| line.starts_with("material_asset="))
+        .expect("first material line");
+    let second_material = lines
+        .iter()
+        .rposition(|line| line.starts_with("material_asset="))
+        .expect("second material line");
+    lines.swap(first_material, second_material);
+    let seed = lines
+        .iter()
+        .position(|line| line.starts_with("seed="))
+        .map(|index| lines.remove(index))
+        .expect("seed line");
+    lines.insert(0, seed);
+    lines.insert(1, "# order and comments carry no semantics".to_owned());
+    let reordered = lines.join("\n");
+    let reordered = CinematicConfigDocument::from_str(&reordered).expect("reordered document");
+    assert_eq!(first.to_canonical_text(), reordered.to_canonical_text());
+
+    let relocated = CinematicConfigDocument::from_str(&document_text(
         CinematicQualityTier::StoryboardSmoke,
         "relocated/steel.spectrum",
         "relocated/tungsten.spectrum",
         "none",
-    )
-    .replace(
-        "schema=frankensim.cinematic-config-document.v1\n",
-        "# relocation must be operational only\nseed=7\nschema=frankensim.cinematic-config-document.v1\n",
-    )
-    .replacen("seed=7\n", "", 1);
-    let second = CinematicConfigDocument::from_str(&reordered).expect("reordered document");
+    ))
+    .expect("relocated document");
 
     let first = first
-        .admit_with_asset_resolver(resolve)
+        .admit_with_asset_resolver(CinematicAssetAdmissionBudget::DEFAULT, || Ok(()), resolve)
         .expect("first admit");
-    let second = second
-        .admit_with_asset_resolver(resolve)
+    let second = relocated
+        .admit_with_asset_resolver(CinematicAssetAdmissionBudget::DEFAULT, || Ok(()), resolve)
         .expect("second admit");
     assert_eq!(first.trajectory_identity(), second.trajectory_identity());
     assert_eq!(first.image_identity(), second.image_identity());
@@ -208,6 +225,41 @@ fn closed_grammar_reports_stable_non_disclosing_field_paths() {
         CinematicConfigDocument::from_str(&missing),
         Err(CinematicConfigDocumentError::MissingField { field }) if field == "room"
     ));
+
+    let signed_seed = valid.replace("seed=7\n", "seed=+7\n");
+    assert_eq!(
+        CinematicConfigDocument::from_str(&signed_seed),
+        Err(CinematicConfigDocumentError::InvalidField { field: "seed" })
+    );
+
+    let invalid_namespace = valid.replace(
+        "artifact_namespace=euler/reference-v1",
+        "artifact_namespace=Euler/reference-v1",
+    );
+    let error = CinematicConfigDocument::from_str(&invalid_namespace)
+        .expect_err("invalid logical namespace");
+    assert_eq!(error.field_path(), "config.artifact_namespace");
+
+    let invalid_root = valid.replace(
+        "artifact_root=artifacts/euler/reference-v1",
+        "artifact_root=artifacts/\u{7f}",
+    );
+    let error =
+        CinematicConfigDocument::from_str(&invalid_root).expect_err("invalid artifact root");
+    assert_eq!(error.field_path(), "config.artifact_root");
+
+    assert_eq!(
+        CinematicConfigDocumentError::DocumentTooLarge {
+            bytes: MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES + 1,
+            maximum: MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES,
+        }
+        .field_path(),
+        "config"
+    );
+    assert_eq!(
+        CinematicConfigDocumentError::InvalidAssetBudget.field_path(),
+        "config.assets"
+    );
 }
 
 #[test]
@@ -220,29 +272,29 @@ fn named_profile_must_match_both_versioned_budget_references() {
     );
     let storyboard = CinematicQualityProfile::canonical(CinematicQualityTier::StoryboardSmoke)
         .expect("storyboard profile");
-    let wrong = source.replacen(
-        &format!(
-            "render_budget_profile={}:{}",
-            CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION,
-            CinematicQualityProfile::canonical(CinematicQualityTier::Final4k)
-                .expect("final profile")
-                .identity()
-                .to_hex()
-        ),
-        &format!(
-            "render_budget_profile={}:{}",
-            CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION,
-            storyboard.identity().to_hex()
-        ),
-        1,
-    );
-    let error = CinematicConfigDocument::from_str(&wrong).expect_err("profile mismatch");
-    assert_eq!(
-        error,
-        CinematicConfigDocumentError::BudgetProfileMismatch {
-            field: "render_budget_profile"
-        }
-    );
+    let final_identity = CinematicQualityProfile::canonical(CinematicQualityTier::Final4k)
+        .expect("final profile")
+        .identity();
+    for field in ["render_budget_profile", "audio_budget_profile"] {
+        let wrong = source.replacen(
+            &format!(
+                "{field}={}:{}",
+                CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION,
+                final_identity.to_hex()
+            ),
+            &format!(
+                "{field}={}:{}",
+                CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION,
+                storyboard.identity().to_hex()
+            ),
+            1,
+        );
+        let error = CinematicConfigDocument::from_str(&wrong).expect_err("profile mismatch");
+        assert_eq!(
+            error,
+            CinematicConfigDocumentError::BudgetProfileMismatch { field }
+        );
+    }
 }
 
 #[test]
@@ -256,13 +308,17 @@ fn stale_or_unavailable_asset_bytes_refuse_at_the_canonical_asset_index() {
     .expect("document");
 
     let stale = document
-        .admit_with_asset_resolver(|class, index, declaration| {
-            if class == CinematicDocumentAssetClass::Material && index == 0 {
-                Ok(b"substituted bytes".to_vec())
-            } else {
-                resolve(class, index, declaration)
-            }
-        })
+        .admit_with_asset_resolver(
+            CinematicAssetAdmissionBudget::DEFAULT,
+            || Ok(()),
+            |class, index, declaration| {
+                if class == CinematicDocumentAssetClass::Material && index == 0 {
+                    Ok(b"substituted bytes".to_vec())
+                } else {
+                    resolve(class, index, declaration)
+                }
+            },
+        )
         .expect_err("stale bytes");
     assert!(matches!(
         stale,
@@ -273,13 +329,17 @@ fn stale_or_unavailable_asset_bytes_refuse_at_the_canonical_asset_index() {
     ));
 
     let unavailable = document
-        .admit_with_asset_resolver(|class, index, declaration| {
-            if class == CinematicDocumentAssetClass::Environment {
-                Err(CinematicAssetAccessError::Unavailable)
-            } else {
-                resolve(class, index, declaration)
-            }
-        })
+        .admit_with_asset_resolver(
+            CinematicAssetAdmissionBudget::DEFAULT,
+            || Ok(()),
+            |class, index, declaration| {
+                if class == CinematicDocumentAssetClass::Environment {
+                    Err(CinematicAssetAccessError::Unavailable)
+                } else {
+                    resolve(class, index, declaration)
+                }
+            },
+        )
         .expect_err("missing environment");
     assert!(matches!(
         unavailable,
@@ -293,6 +353,30 @@ fn stale_or_unavailable_asset_bytes_refuse_at_the_canonical_asset_index() {
 
 #[test]
 fn byte_and_line_ceilings_fail_before_unbounded_parsing() {
+    let mut exact = document_text(
+        CinematicQualityTier::StoryboardSmoke,
+        "assets/steel.spectrum",
+        "assets/tungsten.spectrum",
+        "none",
+    );
+    while exact.ends_with('\n') {
+        exact.pop();
+    }
+    let padding = MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES - exact.len();
+    assert!(padding >= 2);
+    exact.push('\n');
+    exact.push('#');
+    exact.extend(core::iter::repeat_n('x', padding - 2));
+    assert_eq!(exact.len(), MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES);
+    let exact = CinematicConfigDocument::from_str(&exact).expect("exact byte ceiling admits");
+    let canonical = exact.to_canonical_text();
+    assert!(canonical.len() <= MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES);
+    assert!(!canonical.ends_with('\n'));
+    assert_eq!(
+        CinematicConfigDocument::from_str(&canonical).expect("canonical fixed point"),
+        exact
+    );
+
     let oversized = vec![b'x'; MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES + 1];
     assert!(matches!(
         CinematicConfigDocument::from_bytes(&oversized),
@@ -304,6 +388,110 @@ fn byte_and_line_ceilings_fail_before_unbounded_parsing() {
         CinematicConfigDocument::from_str(&too_many_lines),
         Err(CinematicConfigDocumentError::TooManyLines)
     );
+}
+
+#[test]
+fn asset_byte_envelope_is_enforced_before_hashing_and_composition_admission() {
+    let document = CinematicConfigDocument::from_str(&document_text(
+        CinematicQualityTier::StoryboardSmoke,
+        "assets/steel.spectrum",
+        "assets/tungsten.spectrum",
+        "none",
+    ))
+    .expect("document");
+    let exact_total = MATERIAL_A.len() + MATERIAL_B.len() + LIGHT.len() + ENVIRONMENT.len();
+    let exact_largest = [
+        MATERIAL_A.len(),
+        MATERIAL_B.len(),
+        LIGHT.len(),
+        ENVIRONMENT.len(),
+    ]
+    .into_iter()
+    .max()
+    .expect("assets");
+    let exact = CinematicAssetAdmissionBudget {
+        max_asset_bytes: exact_largest,
+        max_total_asset_bytes: exact_total,
+    };
+    document
+        .admit_with_asset_resolver(exact, || Ok(()), resolve)
+        .expect("exact envelope admits");
+
+    let one_asset_short = CinematicAssetAdmissionBudget {
+        max_asset_bytes: exact_largest - 1,
+        max_total_asset_bytes: exact_total,
+    };
+    assert!(matches!(
+        document.admit_with_asset_resolver(one_asset_short, || Ok(()), resolve),
+        Err(CinematicConfigDocumentError::AssetAccess {
+            kind: CinematicAssetAccessError::TooLarge,
+            ..
+        })
+    ));
+
+    let aggregate_short = CinematicAssetAdmissionBudget {
+        max_asset_bytes: exact_largest,
+        max_total_asset_bytes: exact_total - 1,
+    };
+    assert!(matches!(
+        document.admit_with_asset_resolver(aggregate_short, || Ok(()), resolve),
+        Err(CinematicConfigDocumentError::AssetAccess {
+            kind: CinematicAssetAccessError::TooLarge,
+            ..
+        })
+    ));
+    assert_eq!(
+        document.admit_with_asset_resolver(
+            CinematicAssetAdmissionBudget {
+                max_asset_bytes: 0,
+                max_total_asset_bytes: exact_total,
+            },
+            || Ok(()),
+            resolve,
+        ),
+        Err(CinematicConfigDocumentError::InvalidAssetBudget)
+    );
+}
+
+#[test]
+fn asset_identity_hashing_observes_bounded_cancellation_checkpoints() {
+    let document = CinematicConfigDocument::from_str(&document_text(
+        CinematicQualityTier::StoryboardSmoke,
+        "assets/steel.spectrum",
+        "assets/tungsten.spectrum",
+        "none",
+    ))
+    .expect("document");
+    let mut checkpoints = 0usize;
+    let error = document
+        .admit_with_asset_resolver(
+            CinematicAssetAdmissionBudget::DEFAULT,
+            || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    Err(CinematicAssetAccessError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+            |class, index, declaration| {
+                if class == CinematicDocumentAssetClass::Material && index == 0 {
+                    Ok(vec![b'x'; CINEMATIC_ASSET_HASH_TILE_BYTES + 1])
+                } else {
+                    resolve(class, index, declaration)
+                }
+            },
+        )
+        .expect_err("cancellation before the second hash tile");
+    assert_eq!(checkpoints, 2);
+    assert!(matches!(
+        error,
+        CinematicConfigDocumentError::AssetAccess {
+            class: CinematicDocumentAssetClass::Material,
+            index: 0,
+            kind: CinematicAssetAccessError::Cancelled,
+        }
+    ));
 }
 
 #[test]
