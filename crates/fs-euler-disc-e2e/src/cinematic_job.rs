@@ -182,9 +182,7 @@ impl CinematicNodeBudget {
             return Err(CinematicJobPlanError::InvalidLimit("node work units"));
         }
         if max_output_bytes == 0 {
-            return Err(CinematicJobPlanError::InvalidLimit(
-                "node output bytes",
-            ));
+            return Err(CinematicJobPlanError::InvalidLimit("node output bytes"));
         }
         Ok(Self {
             work_units,
@@ -421,9 +419,7 @@ impl CinematicJobPlan {
         cx: &Cx<'_>,
     ) -> Result<Self, CinematicJobPlanError> {
         checkpoint_plan(cx)?;
-        if configuration.input().trajectory.identity()
-            != render_plan.source_trajectory_identity()
-        {
+        if configuration.input().trajectory.identity() != render_plan.source_trajectory_identity() {
             return Err(CinematicJobPlanError::Incompatible(
                 "configuration and render trajectory",
             ));
@@ -574,13 +570,13 @@ impl RenderTopology {
                 .map_err(|_| CinematicJobPlanError::ArithmeticOverflow("first shard index"))?;
             let count = usize::try_from(segment.shard_count())
                 .map_err(|_| CinematicJobPlanError::ArithmeticOverflow("shard count"))?;
-            let end = first.checked_add(count).ok_or(
-                CinematicJobPlanError::ArithmeticOverflow("segment shard range"),
-            )?;
-            if end > shards.len() {
-                return Err(CinematicJobPlanError::Incompatible(
+            let end = first
+                .checked_add(count)
+                .ok_or(CinematicJobPlanError::ArithmeticOverflow(
                     "segment shard range",
-                ));
+                ))?;
+            if end > shards.len() {
+                return Err(CinematicJobPlanError::Incompatible("segment shard range"));
             }
             let shard_indices = (first..end).collect();
             let neighbor_segment_indices = plan
@@ -659,9 +655,8 @@ fn build_plan(
             u64::try_from(topology.shards.len())
                 .map_err(|_| CinematicJobPlanError::ArithmeticOverflow("shard node count"))?,
             checked_mul(
-                u64::try_from(topology.segments.len()).map_err(|_| {
-                    CinematicJobPlanError::ArithmeticOverflow("segment node count")
-                })?,
+                u64::try_from(topology.segments.len())
+                    .map_err(|_| CinematicJobPlanError::ArithmeticOverflow("segment node count"))?,
                 2,
                 "segment stages",
             )?,
@@ -968,9 +963,7 @@ fn push_node(
     let mut previous = None;
     for dependency in dependencies {
         if *dependency >= index || previous.is_some_and(|value| value >= *dependency) {
-            return Err(CinematicJobPlanError::Incompatible(
-                "node dependency order",
-            ));
+            return Err(CinematicJobPlanError::Incompatible("node dependency order"));
         }
         previous = Some(*dependency);
     }
@@ -1275,7 +1268,9 @@ impl fmt::Display for CinematicArtifactError {
             Self::NonCanonicalOrder => {
                 formatter.write_str("cinematic snapshot records are not canonical")
             }
-            Self::InvalidSnapshot(reason) => write!(formatter, "invalid cinematic snapshot: {reason}"),
+            Self::InvalidSnapshot(reason) => {
+                write!(formatter, "invalid cinematic snapshot: {reason}")
+            }
             Self::SnapshotLimit {
                 resource,
                 observed,
@@ -1380,9 +1375,9 @@ impl CinematicJobSnapshot {
             CinematicArtifactError::InvalidSnapshot("encoded length exceeds address space")
         })?;
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(capacity).map_err(|_| {
-            CinematicArtifactError::InvalidSnapshot("snapshot allocation refused")
-        })?;
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| CinematicArtifactError::InvalidSnapshot("snapshot allocation refused"))?;
         bytes.extend_from_slice(SNAPSHOT_MAGIC);
         bytes.extend_from_slice(&CINEMATIC_JOB_SCHEMA_VERSION.to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());
@@ -1449,9 +1444,9 @@ impl CinematicJobSnapshot {
         let capacity = usize::try_from(count)
             .map_err(|_| CinematicArtifactError::InvalidSnapshot("record capacity"))?;
         let mut records = Vec::new();
-        records.try_reserve_exact(capacity).map_err(|_| {
-            CinematicArtifactError::InvalidSnapshot("record allocation refused")
-        })?;
+        records
+            .try_reserve_exact(capacity)
+            .map_err(|_| CinematicArtifactError::InvalidSnapshot("record allocation refused"))?;
         for _ in 0..count {
             records.push(decode_snapshot_record(&mut reader)?);
         }
@@ -1537,9 +1532,10 @@ impl<'a> SnapshotReader<'a> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8], CinematicArtifactError> {
-        let end = self.cursor.checked_add(count).ok_or(
-            CinematicArtifactError::InvalidSnapshot("reader overflow"),
-        )?;
+        let end = self
+            .cursor
+            .checked_add(count)
+            .ok_or(CinematicArtifactError::InvalidSnapshot("reader overflow"))?;
         let value = self
             .bytes
             .get(self.cursor..end)
@@ -1582,3 +1578,905 @@ impl<'a> SnapshotReader<'a> {
     }
 }
 
+/// Stable backend failure code. Messages remain bounded and deterministic;
+/// detailed diagnostics belong in the backend's own structured log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CinematicNodeFailure {
+    code: &'static str,
+    retryable: bool,
+}
+
+impl CinematicNodeFailure {
+    /// Validate an ASCII machine code (1..=64 bytes).
+    pub fn try_new(code: &'static str, retryable: bool) -> Result<Self, CinematicArtifactError> {
+        if code.is_empty()
+            || code.len() > 64
+            || !code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(CinematicArtifactError::InvalidSnapshot(
+                "backend failure code",
+            ));
+        }
+        Ok(Self { code, retryable })
+    }
+
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        self.code
+    }
+
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        self.retryable
+    }
+}
+
+/// Result of independently checking a previously published artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CinematicReuseVerdict {
+    Valid,
+    Invalid,
+}
+
+/// Synchronous stage boundary consumed by the deterministic conductor.
+///
+/// Implementations may use existing scoped renderer/audio crews internally,
+/// but every method must return only after those children have drained. In
+/// particular, an unwind may not leave detached work behind. `publish` must
+/// atomically make the exact returned record discoverable by `discover`.
+pub trait CinematicJobBackend {
+    type Staged;
+
+    /// Look up a previously checked publication by exact node identity.
+    fn discover(
+        &mut self,
+        node: &CinematicJobNode,
+        cx: &Cx<'_>,
+    ) -> Result<Option<CinematicPublishedArtifact>, CinematicNodeFailure>;
+
+    /// Run the stage-specific decoder/checker over an existing publication.
+    fn verify_existing(
+        &mut self,
+        node: &CinematicJobNode,
+        artifact: CinematicPublishedArtifact,
+        cx: &Cx<'_>,
+    ) -> Result<CinematicReuseVerdict, CinematicNodeFailure>;
+
+    /// Produce an unpublished candidate.
+    fn stage(
+        &mut self,
+        node: &CinematicJobNode,
+        cx: &Cx<'_>,
+    ) -> Result<Self::Staged, CinematicNodeFailure>;
+
+    /// Describe the exact staged bytes without publishing them.
+    fn describe_staged(&self, staged: &Self::Staged) -> CinematicArtifactDescriptor;
+
+    /// Run the owner-specific checker. Success is necessary but not itself a
+    /// completion record.
+    fn check_staged(
+        &mut self,
+        node: &CinematicJobNode,
+        staged: &Self::Staged,
+        cx: &Cx<'_>,
+    ) -> Result<(), CinematicNodeFailure>;
+
+    /// Atomically publish a checked candidate and return the discoverable
+    /// record. The conductor rejects any changed descriptor.
+    fn publish(
+        &mut self,
+        node: &CinematicJobNode,
+        staged: Self::Staged,
+        cx: &Cx<'_>,
+    ) -> Result<CinematicPublishedArtifact, CinematicNodeFailure>;
+}
+
+/// Stable transition phase for actionable event logs and fault injection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CinematicJobPhase {
+    Reconcile,
+    VerifyExisting,
+    Stage,
+    Check,
+    Publish,
+    Dependency,
+}
+
+/// One bounded, deterministic event. Logical counters are useful progress;
+/// they are not a wall-clock completion promise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CinematicJobEventKind {
+    Reused,
+    ReuseRejected,
+    StageStarted,
+    StageFinished,
+    CheckPassed,
+    Published,
+    Failed,
+    Panicked,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CinematicJobEvent {
+    ordinal: u64,
+    node_identity: ContentHash,
+    job_kind: CinematicJobKind,
+    phase: CinematicJobPhase,
+    kind: CinematicJobEventKind,
+    completed_nodes: u64,
+    remaining_nodes: u64,
+}
+
+impl CinematicJobEvent {
+    #[must_use]
+    pub const fn ordinal(self) -> u64 {
+        self.ordinal
+    }
+
+    #[must_use]
+    pub const fn node_identity(self) -> ContentHash {
+        self.node_identity
+    }
+
+    #[must_use]
+    pub const fn job_kind(self) -> CinematicJobKind {
+        self.job_kind
+    }
+
+    #[must_use]
+    pub const fn phase(self) -> CinematicJobPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> CinematicJobEventKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn completed_nodes(self) -> u64 {
+        self.completed_nodes
+    }
+
+    #[must_use]
+    pub const fn remaining_nodes(self) -> u64 {
+        self.remaining_nodes
+    }
+}
+
+/// Terminal failure attached to its exact node and transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CinematicJobFailureRecord {
+    pub node_identity: ContentHash,
+    pub job_kind: CinematicJobKind,
+    pub phase: CinematicJobPhase,
+    pub failure: CinematicNodeFailure,
+    pub panicked: bool,
+}
+
+/// Monotone logical progress summary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CinematicJobProgress {
+    pub total_nodes: u64,
+    pub completed_nodes: u64,
+    pub reused_nodes: u64,
+    pub executed_nodes: u64,
+    pub failed_nodes: u64,
+    pub blocked_nodes: u64,
+    pub remaining_nodes: u64,
+    pub completed_work_units: u64,
+    pub estimated_remaining_work_units: u64,
+}
+
+/// Honest terminal state of one conductor pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CinematicRunDisposition {
+    Complete,
+    Failed,
+    Cancelled,
+    Refused,
+}
+
+/// Complete pass report. `Complete` is possible only when every current-plan
+/// node has an independently checked publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CinematicRunReport {
+    disposition: CinematicRunDisposition,
+    plan_identity: ContentHash,
+    progress: CinematicJobProgress,
+    events: Vec<CinematicJobEvent>,
+    failures: Vec<CinematicJobFailureRecord>,
+    budget_refusal: Option<BudgetRefusal>,
+    budget_consumption: Option<fs_exec::BudgetConsumption>,
+    snapshot: CinematicJobSnapshot,
+}
+
+impl CinematicRunReport {
+    #[must_use]
+    pub const fn disposition(&self) -> CinematicRunDisposition {
+        self.disposition
+    }
+
+    #[must_use]
+    pub const fn plan_identity(&self) -> ContentHash {
+        self.plan_identity
+    }
+
+    #[must_use]
+    pub const fn progress(&self) -> CinematicJobProgress {
+        self.progress
+    }
+
+    #[must_use]
+    pub fn events(&self) -> &[CinematicJobEvent] {
+        &self.events
+    }
+
+    #[must_use]
+    pub fn failures(&self) -> &[CinematicJobFailureRecord] {
+        &self.failures
+    }
+
+    #[must_use]
+    pub const fn budget_refusal(&self) -> Option<BudgetRefusal> {
+        self.budget_refusal
+    }
+
+    #[must_use]
+    pub const fn budget_consumption(&self) -> Option<fs_exec::BudgetConsumption> {
+        self.budget_consumption
+    }
+
+    #[must_use]
+    pub const fn snapshot(&self) -> &CinematicJobSnapshot {
+        &self.snapshot
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeState {
+    Pending,
+    Reused,
+    Executed,
+    Failed,
+    Blocked,
+}
+
+impl NodeState {
+    fn is_complete(self) -> bool {
+        matches!(self, Self::Reused | Self::Executed)
+    }
+
+    fn rebuilt(self) -> bool {
+        matches!(self, Self::Executed)
+    }
+}
+
+/// Reconcile and execute one plan in canonical topological order.
+///
+/// The prior snapshot is only a bounded lookup hint. A backend discovery pass
+/// also catches the crash window after atomic publication but before snapshot
+/// persistence. Any missing/corrupt/rebuilt dependency forces descendants to
+/// rerun, preventing a stale artifact from entering a new final manifest.
+pub fn run_cinematic_job_plan<B: CinematicJobBackend>(
+    plan: &CinematicJobPlan,
+    prior: Option<&CinematicJobSnapshot>,
+    backend: &mut B,
+    cx: &Cx<'_>,
+) -> CinematicRunReport {
+    let node_count = plan.nodes.len();
+    let mut states = vec![NodeState::Pending; node_count];
+    let mut records = BTreeMap::new();
+    let mut events = Vec::with_capacity(node_count.saturating_mul(8));
+    let mut failures = Vec::new();
+    let prior_records = prior
+        .map(|snapshot| {
+            snapshot
+                .records
+                .iter()
+                .map(|record| (record.node_identity, *record))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut admitted = match AdmittedBudget::admit_ambient(cx, plan.total_work_units) {
+        Ok(admitted) => admitted,
+        Err(refusal) => {
+            return finish_report(
+                plan,
+                CinematicRunDisposition::Refused,
+                &states,
+                &records,
+                events,
+                failures,
+                Some(refusal),
+                None,
+            );
+        }
+    };
+
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if let Err(refusal) = admitted.checkpoint("cinematic-node-boundary", cx) {
+            let disposition = disposition_for_refusal(refusal);
+            return finish_report(
+                plan,
+                disposition,
+                &states,
+                &records,
+                events,
+                failures,
+                Some(refusal),
+                Some(admitted.consumption()),
+            );
+        }
+
+        if node
+            .dependencies
+            .iter()
+            .any(|dependency| !states[*dependency as usize].is_complete())
+        {
+            states[index] = NodeState::Blocked;
+            push_event(
+                &mut events,
+                plan,
+                &states,
+                node,
+                CinematicJobPhase::Dependency,
+                CinematicJobEventKind::Blocked,
+            );
+            continue;
+        }
+        let dependency_rebuilt = node
+            .dependencies
+            .iter()
+            .any(|dependency| states[*dependency as usize].rebuilt());
+
+        if !dependency_rebuilt {
+            let hinted = prior_records.get(&node.identity).copied();
+            let discovered = if hinted.is_some() {
+                Ok(hinted)
+            } else {
+                call_backend(node, CinematicJobPhase::Reconcile, || {
+                    backend.discover(node, cx)
+                })
+            };
+            match discovered {
+                Ok(Some(record)) if record_matches(node, record) => {
+                    if let Err(refusal) = admitted.checkpoint("cinematic-reuse-check", cx) {
+                        let disposition = disposition_for_refusal(refusal);
+                        return finish_report(
+                            plan,
+                            disposition,
+                            &states,
+                            &records,
+                            events,
+                            failures,
+                            Some(refusal),
+                            Some(admitted.consumption()),
+                        );
+                    }
+                    match call_backend(node, CinematicJobPhase::VerifyExisting, || {
+                        backend.verify_existing(node, record, cx)
+                    }) {
+                        Ok(CinematicReuseVerdict::Valid) => {
+                            states[index] = NodeState::Reused;
+                            records.insert(node.identity, record);
+                            push_event(
+                                &mut events,
+                                plan,
+                                &states,
+                                node,
+                                CinematicJobPhase::VerifyExisting,
+                                CinematicJobEventKind::Reused,
+                            );
+                            continue;
+                        }
+                        Ok(CinematicReuseVerdict::Invalid) => push_event(
+                            &mut events,
+                            plan,
+                            &states,
+                            node,
+                            CinematicJobPhase::VerifyExisting,
+                            CinematicJobEventKind::ReuseRejected,
+                        ),
+                        Err(BackendCallError::Failure(failure)) => {
+                            record_failure(
+                                &mut states,
+                                index,
+                                &mut events,
+                                &mut failures,
+                                plan,
+                                node,
+                                CinematicJobPhase::VerifyExisting,
+                                failure,
+                                false,
+                            );
+                            continue;
+                        }
+                        Err(BackendCallError::Panicked) => {
+                            record_failure(
+                                &mut states,
+                                index,
+                                &mut events,
+                                &mut failures,
+                                plan,
+                                node,
+                                CinematicJobPhase::VerifyExisting,
+                                panic_failure(),
+                                true,
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Ok(Some(_)) => push_event(
+                    &mut events,
+                    plan,
+                    &states,
+                    node,
+                    CinematicJobPhase::Reconcile,
+                    CinematicJobEventKind::ReuseRejected,
+                ),
+                Ok(None) => {}
+                Err(BackendCallError::Failure(failure)) => {
+                    record_failure(
+                        &mut states,
+                        index,
+                        &mut events,
+                        &mut failures,
+                        plan,
+                        node,
+                        CinematicJobPhase::Reconcile,
+                        failure,
+                        false,
+                    );
+                    continue;
+                }
+                Err(BackendCallError::Panicked) => {
+                    record_failure(
+                        &mut states,
+                        index,
+                        &mut events,
+                        &mut failures,
+                        plan,
+                        node,
+                        CinematicJobPhase::Reconcile,
+                        panic_failure(),
+                        true,
+                    );
+                    continue;
+                }
+            }
+        } else {
+            push_event(
+                &mut events,
+                plan,
+                &states,
+                node,
+                CinematicJobPhase::Dependency,
+                CinematicJobEventKind::ReuseRejected,
+            );
+        }
+
+        push_event(
+            &mut events,
+            plan,
+            &states,
+            node,
+            CinematicJobPhase::Stage,
+            CinematicJobEventKind::StageStarted,
+        );
+        if let Err(refusal) = admitted.charge_cost("cinematic-stage", node.budget.work_units) {
+            let disposition = disposition_for_refusal(refusal);
+            return finish_report(
+                plan,
+                disposition,
+                &states,
+                &records,
+                events,
+                failures,
+                Some(refusal),
+                Some(admitted.consumption()),
+            );
+        }
+        let staged = match call_backend(node, CinematicJobPhase::Stage, || backend.stage(node, cx))
+        {
+            Ok(staged) => staged,
+            Err(BackendCallError::Failure(failure)) => {
+                record_failure(
+                    &mut states,
+                    index,
+                    &mut events,
+                    &mut failures,
+                    plan,
+                    node,
+                    CinematicJobPhase::Stage,
+                    failure,
+                    false,
+                );
+                continue;
+            }
+            Err(BackendCallError::Panicked) => {
+                record_failure(
+                    &mut states,
+                    index,
+                    &mut events,
+                    &mut failures,
+                    plan,
+                    node,
+                    CinematicJobPhase::Stage,
+                    panic_failure(),
+                    true,
+                );
+                continue;
+            }
+        };
+        push_event(
+            &mut events,
+            plan,
+            &states,
+            node,
+            CinematicJobPhase::Stage,
+            CinematicJobEventKind::StageFinished,
+        );
+        if let Err(refusal) = admitted.checkpoint("cinematic-before-check", cx) {
+            let disposition = disposition_for_refusal(refusal);
+            return finish_report(
+                plan,
+                disposition,
+                &states,
+                &records,
+                events,
+                failures,
+                Some(refusal),
+                Some(admitted.consumption()),
+            );
+        }
+        let descriptor =
+            match std::panic::catch_unwind(AssertUnwindSafe(|| backend.describe_staged(&staged))) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    record_failure(
+                        &mut states,
+                        index,
+                        &mut events,
+                        &mut failures,
+                        plan,
+                        node,
+                        CinematicJobPhase::Check,
+                        panic_failure(),
+                        true,
+                    );
+                    continue;
+                }
+            };
+        if !descriptor_matches(node, descriptor) {
+            record_failure(
+                &mut states,
+                index,
+                &mut events,
+                &mut failures,
+                plan,
+                node,
+                CinematicJobPhase::Check,
+                contract_failure(),
+                false,
+            );
+            continue;
+        }
+        match call_backend(node, CinematicJobPhase::Check, || {
+            backend.check_staged(node, &staged, cx)
+        }) {
+            Ok(()) => {}
+            Err(BackendCallError::Failure(failure)) => {
+                record_failure(
+                    &mut states,
+                    index,
+                    &mut events,
+                    &mut failures,
+                    plan,
+                    node,
+                    CinematicJobPhase::Check,
+                    failure,
+                    false,
+                );
+                continue;
+            }
+            Err(BackendCallError::Panicked) => {
+                record_failure(
+                    &mut states,
+                    index,
+                    &mut events,
+                    &mut failures,
+                    plan,
+                    node,
+                    CinematicJobPhase::Check,
+                    panic_failure(),
+                    true,
+                );
+                continue;
+            }
+        }
+        push_event(
+            &mut events,
+            plan,
+            &states,
+            node,
+            CinematicJobPhase::Check,
+            CinematicJobEventKind::CheckPassed,
+        );
+        if let Err(refusal) = admitted.checkpoint("cinematic-before-publish", cx) {
+            let disposition = disposition_for_refusal(refusal);
+            return finish_report(
+                plan,
+                disposition,
+                &states,
+                &records,
+                events,
+                failures,
+                Some(refusal),
+                Some(admitted.consumption()),
+            );
+        }
+        let published = match call_backend(node, CinematicJobPhase::Publish, || {
+            backend.publish(node, staged, cx)
+        }) {
+            Ok(published) => published,
+            Err(BackendCallError::Failure(failure)) => {
+                record_failure(
+                    &mut states,
+                    index,
+                    &mut events,
+                    &mut failures,
+                    plan,
+                    node,
+                    CinematicJobPhase::Publish,
+                    failure,
+                    false,
+                );
+                continue;
+            }
+            Err(BackendCallError::Panicked) => {
+                record_failure(
+                    &mut states,
+                    index,
+                    &mut events,
+                    &mut failures,
+                    plan,
+                    node,
+                    CinematicJobPhase::Publish,
+                    panic_failure(),
+                    true,
+                );
+                continue;
+            }
+        };
+        if published.descriptor != descriptor || !record_matches(node, published) {
+            record_failure(
+                &mut states,
+                index,
+                &mut events,
+                &mut failures,
+                plan,
+                node,
+                CinematicJobPhase::Publish,
+                contract_failure(),
+                false,
+            );
+            continue;
+        }
+        states[index] = NodeState::Executed;
+        records.insert(node.identity, published);
+        push_event(
+            &mut events,
+            plan,
+            &states,
+            node,
+            CinematicJobPhase::Publish,
+            CinematicJobEventKind::Published,
+        );
+        if let Err(refusal) = admitted.checkpoint("cinematic-after-publish", cx) {
+            let disposition = disposition_for_refusal(refusal);
+            return finish_report(
+                plan,
+                disposition,
+                &states,
+                &records,
+                events,
+                failures,
+                Some(refusal),
+                Some(admitted.consumption()),
+            );
+        }
+    }
+
+    let disposition = if states.iter().all(|state| state.is_complete()) {
+        CinematicRunDisposition::Complete
+    } else {
+        CinematicRunDisposition::Failed
+    };
+    finish_report(
+        plan,
+        disposition,
+        &states,
+        &records,
+        events,
+        failures,
+        None,
+        Some(admitted.consumption()),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum BackendCallError {
+    Failure(CinematicNodeFailure),
+    Panicked,
+}
+
+fn call_backend<T>(
+    _node: &CinematicJobNode,
+    _phase: CinematicJobPhase,
+    call: impl FnOnce() -> Result<T, CinematicNodeFailure>,
+) -> Result<T, BackendCallError> {
+    match std::panic::catch_unwind(AssertUnwindSafe(call)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(failure)) => Err(BackendCallError::Failure(failure)),
+        Err(_) => Err(BackendCallError::Panicked),
+    }
+}
+
+fn descriptor_matches(node: &CinematicJobNode, descriptor: CinematicArtifactDescriptor) -> bool {
+    descriptor.artifact_kind == node.artifact_kind
+        && descriptor.output_identity == node.expected_output_identity
+        && descriptor.content_identity != ZERO_HASH
+        && descriptor.encoded_bytes_hash != ZERO_HASH
+        && descriptor.encoded_bytes > 0
+        && descriptor.encoded_bytes <= node.budget.max_output_bytes
+}
+
+fn record_matches(node: &CinematicJobNode, record: CinematicPublishedArtifact) -> bool {
+    record.node_identity == node.identity && descriptor_matches(node, record.descriptor)
+}
+
+fn panic_failure() -> CinematicNodeFailure {
+    CinematicNodeFailure {
+        code: "backend_panicked",
+        retryable: true,
+    }
+}
+
+fn contract_failure() -> CinematicNodeFailure {
+    CinematicNodeFailure {
+        code: "artifact_contract_mismatch",
+        retryable: false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_failure(
+    states: &mut [NodeState],
+    index: usize,
+    events: &mut Vec<CinematicJobEvent>,
+    failures: &mut Vec<CinematicJobFailureRecord>,
+    plan: &CinematicJobPlan,
+    node: &CinematicJobNode,
+    phase: CinematicJobPhase,
+    failure: CinematicNodeFailure,
+    panicked: bool,
+) {
+    states[index] = NodeState::Failed;
+    failures.push(CinematicJobFailureRecord {
+        node_identity: node.identity,
+        job_kind: node.kind,
+        phase,
+        failure,
+        panicked,
+    });
+    push_event(
+        events,
+        plan,
+        states,
+        node,
+        phase,
+        if panicked {
+            CinematicJobEventKind::Panicked
+        } else {
+            CinematicJobEventKind::Failed
+        },
+    );
+}
+
+fn push_event(
+    events: &mut Vec<CinematicJobEvent>,
+    plan: &CinematicJobPlan,
+    states: &[NodeState],
+    node: &CinematicJobNode,
+    phase: CinematicJobPhase,
+    kind: CinematicJobEventKind,
+) {
+    let completed_nodes = states.iter().filter(|state| state.is_complete()).count() as u64;
+    events.push(CinematicJobEvent {
+        ordinal: events.len() as u64,
+        node_identity: node.identity,
+        job_kind: node.kind,
+        phase,
+        kind,
+        completed_nodes,
+        remaining_nodes: plan.nodes.len() as u64 - completed_nodes,
+    });
+}
+
+fn disposition_for_refusal(refusal: BudgetRefusal) -> CinematicRunDisposition {
+    if matches!(refusal, BudgetRefusal::Cancelled { .. }) {
+        CinematicRunDisposition::Cancelled
+    } else {
+        CinematicRunDisposition::Refused
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_report(
+    plan: &CinematicJobPlan,
+    disposition: CinematicRunDisposition,
+    states: &[NodeState],
+    records: &BTreeMap<ContentHash, CinematicPublishedArtifact>,
+    events: Vec<CinematicJobEvent>,
+    failures: Vec<CinematicJobFailureRecord>,
+    budget_refusal: Option<BudgetRefusal>,
+    budget_consumption: Option<fs_exec::BudgetConsumption>,
+) -> CinematicRunReport {
+    let snapshot = CinematicJobSnapshot::try_new(
+        plan.identity,
+        records.values().copied().collect(),
+        plan.limits,
+    )
+    .expect("current-plan records were preflighted and validated");
+    let progress = progress(plan, states);
+    CinematicRunReport {
+        disposition,
+        plan_identity: plan.identity,
+        progress,
+        events,
+        failures,
+        budget_refusal,
+        budget_consumption,
+        snapshot,
+    }
+}
+
+fn progress(plan: &CinematicJobPlan, states: &[NodeState]) -> CinematicJobProgress {
+    let mut value = CinematicJobProgress {
+        total_nodes: states.len() as u64,
+        ..CinematicJobProgress::default()
+    };
+    for (node, state) in plan.nodes.iter().zip(states) {
+        match state {
+            NodeState::Pending => {}
+            NodeState::Reused => {
+                value.completed_nodes += 1;
+                value.reused_nodes += 1;
+            }
+            NodeState::Executed => {
+                value.completed_nodes += 1;
+                value.executed_nodes += 1;
+                value.completed_work_units = value
+                    .completed_work_units
+                    .saturating_add(node.budget.work_units);
+            }
+            NodeState::Failed => value.failed_nodes += 1,
+            NodeState::Blocked => value.blocked_nodes += 1,
+        }
+    }
+    value.remaining_nodes = value.total_nodes - value.completed_nodes;
+    value.estimated_remaining_work_units = plan
+        .nodes
+        .iter()
+        .zip(states)
+        .filter(|(_, state)| !state.is_complete())
+        .map(|(node, _)| node.budget.work_units)
+        .fold(0_u64, u64::saturating_add);
+    value
+}
