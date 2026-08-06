@@ -288,6 +288,7 @@ fn checked_pixel_count(width: u32, height: u32, channel_count: usize) -> Result<
     Ok(pixel_count)
 }
 
+#[allow(clippy::too_many_lines)] // one checked-size derivation mirrors the wire layout
 fn exr_layout_requirements_impl<'a>(
     width: u32,
     height: u32,
@@ -442,6 +443,7 @@ fn exr_layout_requirements_impl<'a>(
 /// # Errors
 /// [`ImgError`] on input defects, ceiling refusal, allocation refusal, or
 /// checked size overflow.
+#[allow(clippy::too_many_lines)] // one linear encoder keeps admission and wire order reviewable
 pub fn write_exr_with_attributes_budgeted(
     width: u32,
     height: u32,
@@ -999,6 +1001,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one table proves the complete frozen 4K AOV layout
     fn exr_requirements_are_exact_and_budgets_refuse_before_encoding() {
         let channels = vec![
             Channel {
