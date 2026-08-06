@@ -28,7 +28,15 @@
 //! separate); no Russian roulette (fixed depth keeps work deterministic).
 
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
-use crate::camera::{AnimatedCamera, CameraError, CameraExposure, CutSide, LensSample};
+use crate::aov::{
+    AdaptiveAovAccumulator, AdaptiveCinematicAovFilm, AlignedAovPrimary, AlignedAovSample,
+    CinematicAovError, CinematicAovFilm, CinematicAovPalette, adaptive_render_binding,
+    render_binding, validate_binding, validate_reference_times,
+};
+use crate::camera::{
+    AnimatedCamera, CameraError, CameraExposure, CutSide, KeyframeFocus, LensSample,
+    OpticalCenterProjection, PhysicalCamera,
+};
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
 use crate::dielectric::{
     BeerLambertParameters, DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
@@ -38,7 +46,10 @@ use crate::dielectric::{
 use crate::instances::{GeometryInstance, InstanceError, InstanceHit, SharedGeometry};
 use crate::lighting::{AdmittedLighting, EnvironmentMap, LightSample, LightingError};
 use crate::motion::{NormalizedShutterTime, ShutterInterval, TimedRay};
-use crate::motion_vectors::{MotionVectorError, PrimarySurfaceSample};
+use crate::motion_vectors::{
+    MotionEndpoint, MotionFrame, MotionVectorComputation, MotionVectorError, PrimarySurfaceSample,
+    RasterSize, compute_motion_vectors,
+};
 use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, cie_x, cie_y, cie_z, xyz_e_to_d65, xyz_to_linear_srgb,
     y_integral,
@@ -156,6 +167,46 @@ struct PathTraceSample {
     xyz: [f64; 3],
     primary: Option<PrimaryTraceHit>,
     absolute_time_s: Option<f64>,
+    pixel_jitter: [f64; 2],
+    contribution_split: Option<PathContributionSplit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PathContributionSplit {
+    direct_xyz: [f64; 3],
+    indirect_xyz: [f64; 3],
+    emission_xyz: [f64; 3],
+}
+
+#[derive(Clone, Copy)]
+enum PathContributionClass {
+    Direct,
+    Indirect,
+    Emission,
+}
+
+#[derive(Clone, Copy)]
+struct PathContributionRadiance {
+    direct: [f64; PACKET],
+    indirect: [f64; PACKET],
+    emission: [f64; PACKET],
+}
+
+impl PathContributionRadiance {
+    const ZERO: Self = Self {
+        direct: [0.0; PACKET],
+        indirect: [0.0; PACKET],
+        emission: [0.0; PACKET],
+    };
+
+    fn record(&mut self, class: PathContributionClass, lane: usize, value: f64) {
+        let target = match class {
+            PathContributionClass::Direct => &mut self.direct,
+            PathContributionClass::Indirect => &mut self.indirect,
+            PathContributionClass::Emission => &mut self.emission,
+        };
+        target[lane] += value;
+    }
 }
 
 /// One deterministic cinematic beauty sample and its exactly aligned primary
@@ -171,6 +222,12 @@ pub struct CinematicPixelSample {
     pub xyz: [f64; 3],
     /// Absolute shutter time in seconds used by camera and animated geometry.
     pub absolute_time_s: f64,
+    /// Linear-light direct-illumination contribution in CIE XYZ.
+    pub direct_xyz: [f64; 3],
+    /// Linear-light multi-bounce contribution in CIE XYZ.
+    pub indirect_xyz: [f64; 3],
+    /// Camera-visible emitter/environment contribution in CIE XYZ.
+    pub emission_xyz: [f64; 3],
     /// Frontmost accepted surface, or `None` for a background ray.
     pub primary: Option<PrimaryTraceHit>,
 }
@@ -2533,7 +2590,9 @@ pub fn render_cinematic_range(
     to: u32,
     shutter: ShutterInterval,
 ) -> Result<(), TracerError> {
-    let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)?;
     render_range_impl(
         scene,
         cx,
@@ -5578,6 +5637,728 @@ pub fn render_cinematic(
     Ok(film)
 }
 
+/// Render a fresh cinematic beauty film with an exactly aligned opt-in AOV
+/// profile. Legacy [`render_cinematic`] and [`film_to_exr`] behavior is not
+/// changed by this entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_with_aovs(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+    config: crate::aov::CinematicAovConfig,
+) -> Result<CinematicAovFilm, CinematicAovError> {
+    cx.checkpoint().map_err(TracerError::from)?;
+    let mut film = CinematicAovFilm::try_new(settings.width, settings.height, config)?;
+    render_cinematic_range_with_aovs(
+        scene,
+        camera,
+        cut_side,
+        cx,
+        settings,
+        &mut film,
+        0,
+        settings.spp,
+        shutter,
+    )?;
+    Ok(film)
+}
+
+/// Render a fresh deterministic adaptive cinematic film with exactly aligned
+/// denoising and diagnostic AOVs.
+///
+/// Adaptive decisions use only the existing raw XYZ Welford estimator. AOVs
+/// observe, but never alter, the accepted `0..terminal_count` sample prefix for
+/// each pixel. The complete result remains private until every pixel and a
+/// final cancellation checkpoint succeed.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn render_cinematic_adaptive_with_aovs(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    policy: AdaptiveSamplingConfig,
+    shutter: ShutterInterval,
+    config: crate::aov::CinematicAovConfig,
+) -> Result<AdaptiveCinematicAovFilm, CinematicAovError> {
+    cx.checkpoint().map_err(TracerError::from)?;
+    policy.validate_maximum(settings.spp)?;
+    validate_reference_times(config, shutter)?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, requested_mode) = preflight_render(
+        scene,
+        cx,
+        settings,
+        None,
+        0,
+        settings.spp,
+        Some(shutter),
+        camera_path,
+    )?;
+    let capture_ids = config.captures_ids();
+    let palette = CinematicAovPalette::from_scene(scene, config.limits(), capture_ids)?;
+    let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
+    let pixel_count = checked_pixel_len(settings.width, settings.height)?;
+    let state_bytes = adaptive_state_bytes(pixel_count)
+        .map_err(|_| CinematicAovError::AllocationRefused)?;
+    let mut beauty_state = AdaptiveRenderState::try_new(pixel_count, state_bytes)
+        .map_err(|_| CinematicAovError::AllocationRefused)?;
+    let mut aov =
+        AdaptiveAovAccumulator::try_new(settings.width, settings.height, settings.spp, config)?;
+    let key = [
+        (settings.seed & 0xffff_ffff) as u32,
+        (settings.seed >> 32) as u32,
+    ];
+    let sobol =
+        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let kn = 1.0 / y_integral();
+    let capture_primary = config.captures_primary();
+
+    for py in 0..settings.height {
+        cx.checkpoint().map_err(TracerError::from)?;
+        for px in 0..settings.width {
+            let pixel = py
+                .checked_mul(settings.width)
+                .and_then(|row| row.checked_add(px))
+                .ok_or(TracerError::InvalidInput)?;
+            let mut accumulator = AdaptivePixelAccumulator::EMPTY;
+            for sample in 0..settings.spp {
+                cx.checkpoint().map_err(TracerError::from)?;
+                let traced = trace_pixel_sample_with_primary(
+                    scene,
+                    &lighting,
+                    cx,
+                    settings,
+                    kn,
+                    sobol.as_ref(),
+                    key,
+                    pixel,
+                    sample,
+                    Some(shutter),
+                    camera_path,
+                    capture_primary,
+                )?;
+                accumulator.push(traced.xyz)?;
+                if capture_primary {
+                    let split = traced
+                        .contribution_split
+                        .ok_or(CinematicAovError::SampleAlignmentMismatch)?;
+                    let absolute_time_s =
+                        traced.absolute_time_s.ok_or(TracerError::MissingRayTime)?;
+                    let primary = prepare_aligned_aov_primary(
+                        scene,
+                        camera,
+                        exposure,
+                        cut_side,
+                        cx,
+                        settings,
+                        config.provenance(),
+                        &palette,
+                        capture_ids,
+                        absolute_time_s,
+                        traced.primary,
+                    )?;
+                    aov.push(
+                        pixel as usize,
+                        AlignedAovSample {
+                            beauty_xyz: traced.xyz,
+                            direct_xyz: split.direct_xyz,
+                            indirect_xyz: split.indirect_xyz,
+                            emission_xyz: split.emission_xyz,
+                            pixel_jitter: traced.pixel_jitter,
+                            absolute_sample: sample,
+                            primary,
+                        },
+                    )?;
+                }
+                if let Some(decision) = accumulator.decision(policy, settings.spp) {
+                    accumulator.decision = Some(decision);
+                    break;
+                }
+            }
+            let Some(decision) = accumulator.decision else {
+                return Err(CinematicAovError::SampleAlignmentMismatch);
+            };
+            let index = pixel as usize;
+            beauty_state.xyz[index] = accumulator.sum_xyz;
+            beauty_state.mean_xyz[index] = accumulator.mean_xyz;
+            beauty_state.m2_xyz[index] = accumulator.m2_xyz;
+            beauty_state.sample_counts[index] = accumulator.samples;
+            beauty_state.decisions[index] = decision;
+        }
+    }
+    cx.checkpoint().map_err(TracerError::from)?;
+    let beauty = beauty_state.into_film(settings, policy, requested_mode);
+    aov.publish(
+        beauty,
+        adaptive_render_binding(
+            *settings,
+            shutter,
+            exposure.shot_id(),
+            palette,
+            continuity_fingerprint,
+            policy,
+        ),
+    )
+}
+
+/// Transactionally append one absolute sample range to aligned cinematic
+/// beauty and AOV state.
+///
+/// The accepted primary, material, depth, normals, contribution split, and
+/// shutter time all come from the same path traversal. Any cancellation,
+/// geometry refusal, AOV refusal, or allocation failure leaves `film`
+/// unchanged.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn render_cinematic_range_with_aovs(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    film: &mut CinematicAovFilm,
+    from: u32,
+    to: u32,
+    shutter: ShutterInterval,
+) -> Result<(), CinematicAovError> {
+    cx.checkpoint().map_err(TracerError::from)?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, requested_mode) = preflight_render(
+        scene,
+        cx,
+        settings,
+        Some(film.beauty()),
+        from,
+        to,
+        Some(shutter),
+        camera_path,
+    )?;
+    let capture_ids = film.config().captures_ids();
+    let palette = CinematicAovPalette::from_scene(scene, film.config().limits(), capture_ids)?;
+    let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
+    validate_binding(
+        film,
+        *settings,
+        shutter,
+        exposure.shot_id(),
+        &palette,
+        continuity_fingerprint,
+    )?;
+    if to == from {
+        return Ok(());
+    }
+
+    let mut staged = film.try_clone_for_stage()?;
+    let key = [
+        (settings.seed & 0xffff_ffff) as u32,
+        (settings.seed >> 32) as u32,
+    ];
+    let sobol =
+        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let kn = 1.0 / y_integral();
+    let capture_primary = film.config().captures_primary();
+    for py in 0..settings.height {
+        cx.checkpoint().map_err(TracerError::from)?;
+        for px in 0..settings.width {
+            let pixel = py * settings.width + px;
+            for sample in from..to {
+                cx.checkpoint().map_err(TracerError::from)?;
+                let traced = trace_pixel_sample_with_primary(
+                    scene,
+                    &lighting,
+                    cx,
+                    settings,
+                    kn,
+                    sobol.as_ref(),
+                    key,
+                    pixel,
+                    sample,
+                    Some(shutter),
+                    camera_path,
+                    capture_primary,
+                )?;
+                let beauty = &mut staged.beauty_mut().xyz[pixel as usize];
+                beauty[0] += traced.xyz[0];
+                beauty[1] += traced.xyz[1];
+                beauty[2] += traced.xyz[2];
+
+                if capture_primary {
+                    let split = traced
+                        .contribution_split
+                        .ok_or(CinematicAovError::SampleAlignmentMismatch)?;
+                    let absolute_time_s =
+                        traced.absolute_time_s.ok_or(TracerError::MissingRayTime)?;
+                    let primary = prepare_aligned_aov_primary(
+                        scene,
+                        camera,
+                        exposure,
+                        cut_side,
+                        cx,
+                        settings,
+                        film.config().provenance(),
+                        &palette,
+                        capture_ids,
+                        absolute_time_s,
+                        traced.primary,
+                    )?;
+                    staged.push(
+                        pixel as usize,
+                        AlignedAovSample {
+                            beauty_xyz: traced.xyz,
+                            direct_xyz: split.direct_xyz,
+                            indirect_xyz: split.indirect_xyz,
+                            emission_xyz: split.emission_xyz,
+                            pixel_jitter: traced.pixel_jitter,
+                            absolute_sample: sample,
+                            primary,
+                        },
+                    )?;
+                }
+            }
+        }
+    }
+    cx.checkpoint().map_err(TracerError::from)?;
+    staged.beauty_mut().spp_done = to;
+    if staged.beauty().time_mode == FilmTimeMode::Uninitialized {
+        staged.beauty_mut().time_mode = requested_mode;
+    }
+    if staged.binding().is_none() {
+        staged.bind(render_binding(
+            *settings,
+            shutter,
+            exposure.shot_id(),
+            palette,
+            continuity_fingerprint,
+        ));
+    }
+    *film = staged;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_aligned_aov_primary(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    exposure: CameraExposure<'_>,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    provenance: crate::aov::CinematicAovProvenance,
+    palette: &CinematicAovPalette,
+    capture_ids: bool,
+    absolute_time_s: f64,
+    primary: Option<PrimaryTraceHit>,
+) -> Result<Option<AlignedAovPrimary>, CinematicAovError> {
+    let Some(primary) = primary else {
+        return Ok(None);
+    };
+    let primitive = scene
+        .primitives
+        .get(primary.primitive_index)
+        .ok_or(CinematicAovError::InvalidPrimary)?;
+    let physical = camera
+        .evaluate_exposure(cx, exposure, absolute_time_s)
+        .map_err(TracerError::from)?;
+    let depth_m = match physical
+        .project_from_optical_center(primary.hit.point, settings.camera_aspect())
+        .map_err(TracerError::from)?
+    {
+        OpticalCenterProjection::InFront { depth_m, .. } => depth_m,
+        OpticalCenterProjection::BehindCamera { .. } => {
+            return Err(CinematicAovError::InvalidPrimary);
+        }
+    };
+    let geometric_normal_world = aov_unit_normal(primary.hit.normal)?;
+    let (shading_normal_world, has_authored_shading_normal) = match primary.hit.shading_normal {
+        Some(normal) => (aov_unit_normal(Some(normal))?, true),
+        None => (geometric_normal_world, false),
+    };
+    let albedo_linear_rgb = match primitive.material {
+        Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
+            let rgb = reflectance.rgb();
+            if rgb.iter().any(|value| !value.is_finite()) {
+                return Err(CinematicAovError::InvalidPrimary);
+            }
+            Some([
+                rgb[0].clamp(0.0, 1.0),
+                rgb[1].clamp(0.0, 1.0),
+                rgb[2].clamp(0.0, 1.0),
+            ])
+        }
+        Material::Dielectric { .. } => None,
+    };
+    let material_palette_index = if capture_ids {
+        palette.material_index(primary.material_identity)?
+    } else {
+        0
+    };
+    let object_palette_index = if capture_ids {
+        primary
+            .surface
+            .map(|surface| palette.object_index(surface.identity().object_id()))
+            .transpose()?
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let previous_motion_pixels = primary
+        .surface
+        .map(|surface| {
+            aligned_previous_motion(
+                cx,
+                camera,
+                exposure,
+                cut_side,
+                &primitive.shape,
+                surface,
+                provenance,
+                settings,
+                absolute_time_s,
+                physical.clone(),
+            )
+        })
+        .transpose()?
+        .flatten();
+    Ok(Some(AlignedAovPrimary {
+        primitive_index: primary.primitive_index,
+        object_palette_index,
+        material_palette_index,
+        albedo_linear_rgb,
+        geometric_normal_world,
+        shading_normal_world,
+        has_authored_shading_normal,
+        depth_m,
+        previous_motion_pixels,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aligned_previous_motion(
+    cx: &Cx<'_>,
+    camera: &AnimatedCamera,
+    exposure: CameraExposure<'_>,
+    cut_side: CutSide,
+    shape: &Shape,
+    surface: PrimarySurfaceSample,
+    provenance: crate::aov::CinematicAovProvenance,
+    settings: &Settings,
+    absolute_time_s: f64,
+    current_camera: PhysicalCamera,
+) -> Result<Option<[f64; 2]>, CinematicAovError> {
+    let Some(previous) = motion_frame_for_shape(
+        cx,
+        camera,
+        cut_side,
+        shape,
+        provenance.previous_frame_time_s(),
+        None,
+    )?
+    else {
+        return Err(CinematicAovError::InvalidPrimary);
+    };
+    let Some(current) = motion_frame_for_shape(
+        cx,
+        camera,
+        cut_side,
+        shape,
+        absolute_time_s,
+        Some((exposure.shot_id(), current_camera)),
+    )?
+    else {
+        return Err(CinematicAovError::InvalidPrimary);
+    };
+    let Some(next) = motion_frame_for_shape(
+        cx,
+        camera,
+        cut_side,
+        shape,
+        provenance.next_frame_time_s(),
+        None,
+    )?
+    else {
+        return Err(CinematicAovError::InvalidPrimary);
+    };
+    let raster =
+        RasterSize::try_new(settings.width, settings.height).map_err(TracerError::MotionVector)?;
+    match compute_motion_vectors(surface, &previous, &current, &next, raster)
+        .map_err(TracerError::MotionVector)?
+    {
+        MotionVectorComputation::Available(sample) => match sample.previous {
+            MotionEndpoint::Projected {
+                displacement_pixels,
+                ..
+            } => Ok(Some(displacement_pixels)),
+            MotionEndpoint::CameraCut { .. } | MotionEndpoint::BehindCamera { .. } => Ok(None),
+        },
+        MotionVectorComputation::Unavailable { .. } => Ok(None),
+    }
+}
+
+fn motion_frame_for_shape(
+    cx: &Cx<'_>,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    shape: &Shape,
+    absolute_time_s: f64,
+    current_camera: Option<(u64, PhysicalCamera)>,
+) -> Result<Option<MotionFrame>, CinematicAovError> {
+    let (shot_id, physical) = match current_camera {
+        Some(current) => current,
+        None => {
+            let evaluated = camera
+                .evaluate_with_shot(cx, absolute_time_s, cut_side)
+                .map_err(TracerError::from)?;
+            (evaluated.shot_id(), evaluated.into_camera())
+        }
+    };
+    let frame = match shape {
+        Shape::Instance(instance) => {
+            MotionFrame::from_instance(absolute_time_s, shot_id, physical, instance)
+                .map_err(TracerError::MotionVector)?
+        }
+        Shape::AnimatedInstance(instance) => {
+            let evaluated = instance
+                .instance_at(cx, absolute_time_s)
+                .map_err(TracerError::from)?;
+            MotionFrame::from_instance(absolute_time_s, shot_id, physical, &evaluated)
+                .map_err(TracerError::MotionVector)?
+        }
+        Shape::Mesh(_) | Shape::Chart(_) => return Ok(None),
+    };
+    Ok(Some(frame))
+}
+
+fn aov_unit_normal(normal: Option<Vec3>) -> Result<[f64; 3], CinematicAovError> {
+    let normal = normal.ok_or(CinematicAovError::InvalidPrimary)?;
+    let scale = normal.x.abs().max(normal.y.abs()).max(normal.z.abs());
+    if scale == 0.0 || !scale.is_finite() {
+        return Err(CinematicAovError::InvalidPrimary);
+    }
+    let scaled = [normal.x / scale, normal.y / scale, normal.z / scale];
+    let norm =
+        scale * (scaled[0] * scaled[0] + scaled[1] * scaled[1] + scaled[2] * scaled[2]).sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return Err(CinematicAovError::InvalidPrimary);
+    }
+    Ok([normal.x / norm, normal.y / norm, normal.z / norm])
+}
+
+const CINEMATIC_AOV_CONTINUITY_DOMAIN: &str =
+    "org.frankensim.render.cinematic-aov-continuity-guard.v1";
+
+/// Build a process-local progressive-continuity guard from every borrowed
+/// scene and camera value that can affect cinematic path samples. The result is
+/// deliberately not an authority-bearing content identity: direct chart
+/// backends have no general content-addressing contract, so their allocation
+/// address is included only to detect replacement during this process.
+fn cinematic_input_continuity_fingerprint(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cx: &Cx<'_>,
+) -> Result<ContentHash, CinematicAovError> {
+    let mut hasher = DomainHasher::new(CINEMATIC_AOV_CONTINUITY_DOMAIN);
+    hasher.update(&(scene.primitives.len() as u64).to_le_bytes());
+    for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
+        if primitive_index.is_multiple_of(1_024) {
+            cx.checkpoint().map_err(TracerError::from)?;
+        }
+        update_shape_continuity(&mut hasher, &primitive.shape, cx)?;
+        hasher.update(primitive.material.content_identity().as_bytes());
+        match primitive.emission {
+            None => hasher.update(&[0]),
+            Some((spectrum, scale)) => {
+                hasher.update(&[1]);
+                update_continuity_f64s(&mut hasher, spectrum.c);
+                update_continuity_f64(&mut hasher, scale);
+            }
+        }
+    }
+    hasher.update(&(scene.lights.len() as u64).to_le_bytes());
+    for light in &scene.lights {
+        hasher.update(light.identity().as_bytes());
+        hasher.update(&(light.prim as u64).to_le_bytes());
+    }
+    match &scene.environment {
+        None => hasher.update(&[0]),
+        Some(environment) => {
+            hasher.update(&[1]);
+            hasher.update(environment.semantic_hash().as_bytes());
+        }
+    }
+    update_continuity_point(&mut hasher, scene.camera.eye);
+    update_continuity_vec(&mut hasher, scene.camera.forward);
+    update_continuity_vec(&mut hasher, scene.camera.up);
+    update_continuity_f64(&mut hasher, scene.camera.half_tan);
+
+    hasher.update(&(camera.shots().len() as u64).to_le_bytes());
+    for shot in camera.shots() {
+        hasher.update(&shot.shot_id().to_le_bytes());
+        update_continuity_f64(&mut hasher, shot.start_s());
+        update_continuity_f64(&mut hasher, shot.end_s());
+        hasher.update(&(shot.keyframes().len() as u64).to_le_bytes());
+        for keyframe in shot.keyframes() {
+            update_continuity_f64(&mut hasher, keyframe.absolute_time_s());
+            update_physical_camera_continuity(&mut hasher, keyframe.camera());
+            match keyframe.focus() {
+                KeyframeFocus::AxialDistance => hasher.update(&[0]),
+                KeyframeFocus::WorldPoint(point) => {
+                    hasher.update(&[1]);
+                    update_continuity_point(&mut hasher, point);
+                }
+            }
+        }
+    }
+    cx.checkpoint().map_err(TracerError::from)?;
+    Ok(hasher.finalize())
+}
+
+fn update_shape_continuity(
+    hasher: &mut DomainHasher,
+    shape: &Shape,
+    cx: &Cx<'_>,
+) -> Result<(), CinematicAovError> {
+    match shape {
+        Shape::Mesh(mesh) => {
+            hasher.update(&[0]);
+            update_mesh_continuity(hasher, mesh, cx)?;
+        }
+        Shape::Chart(chart) => {
+            hasher.update(&[1]);
+            let address = std::ptr::from_ref::<dyn Chart>(&**chart).cast::<()>() as usize as u64;
+            hasher.update(&address.to_le_bytes());
+        }
+        Shape::Instance(instance) => {
+            hasher.update(&[2]);
+            hasher.update(&instance.object_id().to_le_bytes());
+            hasher.update(instance.geometry_identity().as_bytes());
+            hasher.update(instance.transform().content_identity().as_bytes());
+            update_shared_geometry_continuity(hasher, instance.geometry(), cx)?;
+        }
+        Shape::AnimatedInstance(instance) => {
+            hasher.update(&[3]);
+            hasher.update(&instance.object_id().to_le_bytes());
+            hasher.update(instance.geometry_identity().as_bytes());
+            update_shared_geometry_continuity(hasher, instance.geometry(), cx)?;
+            hasher.update(&(instance.trajectory().keyframes().len() as u64).to_le_bytes());
+            for keyframe in instance.trajectory().keyframes() {
+                update_continuity_f64(&mut *hasher, keyframe.absolute_time_s());
+                hasher.update(keyframe.transform().content_identity().as_bytes());
+                update_continuity_f64s(hasher, keyframe.linear_velocity_m_per_s());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn update_shared_geometry_continuity(
+    hasher: &mut DomainHasher,
+    geometry: &SharedGeometry,
+    cx: &Cx<'_>,
+) -> Result<(), CinematicAovError> {
+    match geometry {
+        SharedGeometry::Mesh(mesh) => {
+            hasher.update(&[0]);
+            update_mesh_continuity(hasher, mesh, cx)
+        }
+        SharedGeometry::Chart(chart) => {
+            hasher.update(&[1]);
+            let address = std::sync::Arc::as_ptr(chart).cast::<()>() as usize as u64;
+            hasher.update(&address.to_le_bytes());
+            Ok(())
+        }
+    }
+}
+
+fn update_mesh_continuity(
+    hasher: &mut DomainHasher,
+    mesh: &TriMesh,
+    cx: &Cx<'_>,
+) -> Result<(), CinematicAovError> {
+    hasher.update(&(mesh.vertices.len() as u64).to_le_bytes());
+    for (index, vertex) in mesh.vertices.iter().enumerate() {
+        if index.is_multiple_of(1_024) {
+            cx.checkpoint().map_err(TracerError::from)?;
+        }
+        update_continuity_f64s(hasher, *vertex);
+    }
+    hasher.update(&(mesh.triangles.len() as u64).to_le_bytes());
+    for triangle in &mesh.triangles {
+        for index in triangle {
+            hasher.update(&index.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &PhysicalCamera) {
+    update_continuity_point(hasher, camera.eye());
+    update_continuity_vec(hasher, camera.forward());
+    update_continuity_vec(hasher, camera.up());
+    update_continuity_vec(hasher, camera.right());
+    let projection = camera.projection();
+    update_continuity_f64(hasher, projection.vertical_half_tan());
+    match (
+        projection.focal_length_m(),
+        projection.sensor_height_m(),
+        projection.vertical_fov_rad(),
+    ) {
+        (Some(focal), Some(sensor), None) => {
+            hasher.update(&[0]);
+            update_continuity_f64(hasher, focal);
+            update_continuity_f64(hasher, sensor);
+        }
+        (None, None, Some(fov)) => {
+            hasher.update(&[1]);
+            update_continuity_f64(hasher, fov);
+        }
+        _ => hasher.update(&[2]),
+    }
+    update_continuity_f64(hasher, camera.focus_distance_m());
+    let aperture = camera.aperture();
+    let aperture_tag = if aperture.is_pinhole() {
+        0
+    } else if aperture.blades().is_some() {
+        2
+    } else {
+        1
+    };
+    hasher.update(&[aperture_tag]);
+    update_continuity_f64(hasher, aperture.radius_m());
+    hasher.update(&[aperture.blades().unwrap_or(0)]);
+    update_continuity_f64(hasher, aperture.rotation_rad().unwrap_or(0.0));
+    let exposure = camera.exposure_metadata();
+    update_continuity_f64(hasher, exposure.sensitivity_iso());
+    update_continuity_f64(hasher, exposure.compensation_ev());
+}
+
+fn update_continuity_point(hasher: &mut DomainHasher, point: Point3) {
+    update_continuity_f64s(hasher, [point.x, point.y, point.z]);
+}
+
+fn update_continuity_vec(hasher: &mut DomainHasher, vector: Vec3) {
+    update_continuity_f64s(hasher, [vector.x, vector.y, vector.z]);
+}
+
+fn update_continuity_f64s<const N: usize>(hasher: &mut DomainHasher, values: [f64; N]) {
+    for value in values {
+        update_continuity_f64(hasher, value);
+    }
+}
+
+fn update_continuity_f64(hasher: &mut DomainHasher, value: f64) {
+    let value = if value == 0.0 { 0.0 } else { value };
+    hasher.update(&value.to_bits().to_le_bytes());
+}
+
 /// Trace one absolute logical cinematic sample and retain the exact primary
 /// hit accepted by the beauty path.
 ///
@@ -5625,9 +6406,13 @@ pub fn trace_cinematic_pixel_sample(
         camera_path,
         true,
     )?;
+    let split = traced.contribution_split.ok_or(TracerError::InvalidInput)?;
     Ok(CinematicPixelSample {
         xyz: traced.xyz,
         absolute_time_s: traced.absolute_time_s.ok_or(TracerError::MissingRayTime)?,
+        direct_xyz: split.direct_xyz,
+        indirect_xyz: split.indirect_xyz,
+        emission_xyz: split.emission_xyz,
         primary: traced.primary,
     })
 }
@@ -5798,6 +6583,7 @@ fn trace_path(
     };
     let mut throughput = [1.0f64; PACKET];
     let mut radiance = [0.0f64; PACKET];
+    let mut contribution_radiance = capture_primary.then_some(PathContributionRadiance::ZERO);
     let mut previous_bsdf: Option<PreviousBsdf> = None;
     let mut prev_origin = ray.origin;
     let mut segment_origin = ray.origin;
@@ -5817,7 +6603,15 @@ fn trace_path(
                 let weight = emissive_hit_weight(s.strategy, previous_bsdf, competing_pdf);
                 let (spectrum, scale) = environment.emission;
                 for (lane, &lambda) in lambdas.iter().enumerate() {
+                    let before = radiance[lane];
                     radiance[lane] += throughput[lane] * spectrum.eval(lambda) * scale * weight;
+                    if let Some(contributions) = &mut contribution_radiance {
+                        contributions.record(
+                            emissive_contribution_class(depth),
+                            lane,
+                            radiance[lane] - before,
+                        );
+                    }
                 }
             }
             break;
@@ -5866,7 +6660,15 @@ fn trace_path(
             };
             let weight = emissive_hit_weight(s.strategy, previous_bsdf, nee_pdf);
             for (k, &l) in lambdas.iter().enumerate() {
+                let before = radiance[k];
                 radiance[k] += throughput[k] * spec.eval(l) * scale * weight;
+                if let Some(contributions) = &mut contribution_radiance {
+                    contributions.record(
+                        emissive_contribution_class(depth),
+                        k,
+                        radiance[k] - before,
+                    );
+                }
             }
             break; // v1: emitters do not reflect
         }
@@ -5976,6 +6778,7 @@ fn trace_path(
                                             }
                                             DirectLightTarget::Environment => 1.0,
                                         };
+                                        let before = radiance[lane];
                                         radiance[lane] += throughput[lane]
                                             * value
                                             * cos_s
@@ -5984,6 +6787,13 @@ fn trace_path(
                                             * emission_scale
                                             / pdf_nee
                                             * weight;
+                                        if let Some(contributions) = &mut contribution_radiance {
+                                            contributions.record(
+                                                direct_contribution_class(depth),
+                                                lane,
+                                                radiance[lane] - before,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -6057,6 +6867,7 @@ fn trace_path(
                                                 l,
                                                 distance_m,
                                             )?;
+                                            let before = radiance[k];
                                             radiance[k] += throughput[k]
                                                 * f
                                                 * cos_s
@@ -6065,6 +6876,14 @@ fn trace_path(
                                                 * escale
                                                 / pdf_nee
                                                 * weight;
+                                            if let Some(contributions) = &mut contribution_radiance
+                                            {
+                                                contributions.record(
+                                                    direct_contribution_class(depth),
+                                                    k,
+                                                    radiance[k] - before,
+                                                );
+                                            }
                                         }
                                     }
                                 } else {
@@ -6072,10 +6891,18 @@ fn trace_path(
                                     // bit-for-bit identical to its frozen path.
                                     for (k, &l) in lambdas.iter().enumerate() {
                                         let f = bsdf_eval(&prim.material, n, wo, wi, l);
+                                        let before = radiance[k];
                                         radiance[k] +=
                                             throughput[k] * f * cos_s * espec.eval(l) * escale
                                                 / pdf_nee
                                                 * weight;
+                                        if let Some(contributions) = &mut contribution_radiance {
+                                            contributions.record(
+                                                direct_contribution_class(depth),
+                                                k,
+                                                radiance[k] - before,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -6157,11 +6984,46 @@ fn trace_path(
         xyz[1] += w * cie_y(l);
         xyz[2] += w * cie_z(l);
     }
+    let contribution_split = contribution_radiance.map(|contributions| PathContributionSplit {
+        direct_xyz: packet_radiance_to_xyz(contributions.direct, &lambdas, kn),
+        indirect_xyz: packet_radiance_to_xyz(contributions.indirect, &lambdas, kn),
+        emission_xyz: packet_radiance_to_xyz(contributions.emission, &lambdas, kn),
+    });
     Ok(PathTraceSample {
         xyz,
         primary,
         absolute_time_s: ray_time.map(|time| time.interval.time_at(time.normalized)),
+        pixel_jitter: [jx, jy],
+        contribution_split,
     })
+}
+
+const fn emissive_contribution_class(depth: u32) -> PathContributionClass {
+    match depth {
+        0 => PathContributionClass::Emission,
+        1 => PathContributionClass::Direct,
+        _ => PathContributionClass::Indirect,
+    }
+}
+
+const fn direct_contribution_class(depth: u32) -> PathContributionClass {
+    if depth == 0 {
+        PathContributionClass::Direct
+    } else {
+        PathContributionClass::Indirect
+    }
+}
+
+fn packet_radiance_to_xyz(radiance: [f64; PACKET], lambdas: &[f64], kn: f64) -> [f64; 3] {
+    let range = LAMBDA_MAX - LAMBDA_MIN;
+    let mut xyz = [0.0; 3];
+    for (k, &lambda) in lambdas.iter().enumerate() {
+        let weight = radiance[k] * range / PACKET as f64 * kn;
+        xyz[0] += weight * cie_x(lambda);
+        xyz[1] += weight * cie_y(lambda);
+        xyz[2] += weight * cie_z(lambda);
+    }
+    xyz
 }
 
 /// Preserve the exact v1 camera arithmetic as one explicit compatibility
