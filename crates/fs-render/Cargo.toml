@@ -77,6 +77,10 @@ name = "checkpoint_battery"
 required-features = ["tracer"]
 
 [[test]]
+name = "aov_battery"
+required-features = ["tracer"]
+
+[[test]]
 name = "diff_battery"
 required-features = ["differentiable"]
 

@@ -42,6 +42,8 @@ pub mod motion_vectors;
 pub mod temporal_accumulation;
 
 #[cfg(feature = "tracer")]
+pub mod aov;
+#[cfg(feature = "tracer")]
 pub mod dielectric;
 #[cfg(feature = "differentiable")]
 pub mod diff;
