@@ -1,12 +1,24 @@
 //! G3/E2E coverage for Design-Ledger-backed Euler render checkpoints.
 
+#[cfg(feature = "cinematic-orchestration")]
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+#[cfg(feature = "cinematic-orchestration")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
+#[cfg(feature = "cinematic-orchestration")]
+use fs_euler_disc_e2e::cinematic_job::{
+    CinematicArtifactDescriptor, CinematicJobBackend, CinematicJobBudgets, CinematicJobKind,
+    CinematicJobLimits, CinematicJobNode, CinematicJobPlan, CinematicJobPlanError,
+    CinematicJobSnapshot, CinematicNodeBudget, CinematicNodeFailure, CinematicPublishedArtifact,
+    CinematicReuseVerdict, CinematicRunDisposition, CinematicRunReport, CinematicStageIdentities,
+    run_cinematic_job_plan,
+};
 use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind};
 use fs_euler_disc_e2e::render_checkpoint::{
     EULER_RENDER_CHECKPOINT_ARTIFACT_KIND, EulerRenderCheckpointError,
@@ -34,6 +46,13 @@ use fs_euler_disc_e2e::{
     RenderSampleDisposition, RenderSupportFeature, RenderTrajectory, RenderTrajectoryAuthority,
     RenderTrajectoryCodecBudget, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
     RenderUnitSystem, RenderWorldFrame,
+};
+#[cfg(feature = "cinematic-orchestration")]
+use fs_evidence::cinematic_config::{
+    CINEMATIC_CONFIG_SCHEMA_VERSION, CinematicArtifactRoot, CinematicAssetBinding,
+    CinematicAssetInterpretation, CinematicCapabilities, CinematicComponentRef,
+    CinematicComponentRole, CinematicConfig, CinematicConfigInput, CinematicConfigUnits,
+    CinematicMuxRequest,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, RunId, StreamKey};
 use fs_geom::{Point3, Vec3 as GeomVec3};
@@ -2301,6 +2320,622 @@ fn g3_independent_workers_exchange_strict_bytes_and_reopened_ledger_replays_exac
                 cx,
             ),
             Err(EulerRenderShardingError::AggregateResultByteLimit { .. })
+        ));
+    });
+}
+
+#[cfg(feature = "cinematic-orchestration")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicCinematicBackendOperation {
+    Discover,
+    Verify,
+    Stage,
+    Check,
+    Publish,
+}
+
+#[cfg(feature = "cinematic-orchestration")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PublicCinematicBackendCall {
+    operation: PublicCinematicBackendOperation,
+    node_identity: ContentHash,
+}
+
+/// Tiny deterministic owner used to exercise the public conductor contract.
+/// It models an atomic content-addressed publication table, not any concrete
+/// renderer/audio implementation.
+#[cfg(feature = "cinematic-orchestration")]
+#[derive(Default)]
+struct PublicCinematicBackend {
+    published: BTreeMap<ContentHash, CinematicPublishedArtifact>,
+    calls: Vec<PublicCinematicBackendCall>,
+    cancel_at_stage: Option<ContentHash>,
+    cancel_gate: Option<Arc<CancelGate>>,
+}
+
+#[cfg(feature = "cinematic-orchestration")]
+impl PublicCinematicBackend {
+    fn record(&mut self, operation: PublicCinematicBackendOperation, node: &CinematicJobNode) {
+        self.calls.push(PublicCinematicBackendCall {
+            operation,
+            node_identity: node.identity(),
+        });
+    }
+
+    fn clear_calls(&mut self) {
+        self.calls.clear();
+    }
+}
+
+#[cfg(feature = "cinematic-orchestration")]
+impl CinematicJobBackend for PublicCinematicBackend {
+    type Staged = CinematicArtifactDescriptor;
+
+    fn discover(
+        &mut self,
+        node: &CinematicJobNode,
+        _snapshot_hint: Option<CinematicPublishedArtifact>,
+        _cx: &Cx<'_>,
+    ) -> Result<Option<CinematicPublishedArtifact>, CinematicNodeFailure> {
+        self.record(PublicCinematicBackendOperation::Discover, node);
+        Ok(self.published.get(&node.identity()).copied())
+    }
+
+    fn verify_existing(
+        &mut self,
+        node: &CinematicJobNode,
+        artifact: CinematicPublishedArtifact,
+        _cx: &Cx<'_>,
+    ) -> Result<CinematicReuseVerdict, CinematicNodeFailure> {
+        self.record(PublicCinematicBackendOperation::Verify, node);
+        Ok(if self.published.get(&node.identity()) == Some(&artifact) {
+            CinematicReuseVerdict::Valid
+        } else {
+            CinematicReuseVerdict::Invalid
+        })
+    }
+
+    fn stage(
+        &mut self,
+        node: &CinematicJobNode,
+        _cx: &Cx<'_>,
+    ) -> Result<Self::Staged, CinematicNodeFailure> {
+        self.record(PublicCinematicBackendOperation::Stage, node);
+        if self.cancel_at_stage == Some(node.identity()) {
+            self.cancel_gate
+                .as_ref()
+                .expect("cancellation hook has a gate")
+                .request();
+        }
+        let content_identity = hash_domain(
+            "org.frankensim.test.public-cinematic-content.v1",
+            node.identity().as_bytes(),
+        );
+        let encoded_bytes_hash = hash_domain(
+            "org.frankensim.test.public-cinematic-bytes.v1",
+            node.identity().as_bytes(),
+        );
+        Ok(CinematicArtifactDescriptor::try_new(
+            node.artifact_kind(),
+            node.expected_output_identity(),
+            content_identity,
+            encoded_bytes_hash,
+            64,
+        )
+        .expect("deterministic public backend descriptor"))
+    }
+
+    fn describe_staged(&self, staged: &Self::Staged) -> CinematicArtifactDescriptor {
+        *staged
+    }
+
+    fn check_staged(
+        &mut self,
+        node: &CinematicJobNode,
+        _staged: &Self::Staged,
+        _cx: &Cx<'_>,
+    ) -> Result<(), CinematicNodeFailure> {
+        self.record(PublicCinematicBackendOperation::Check, node);
+        Ok(())
+    }
+
+    fn publish(
+        &mut self,
+        node: &CinematicJobNode,
+        staged: Self::Staged,
+        _cx: &Cx<'_>,
+    ) -> Result<CinematicPublishedArtifact, CinematicNodeFailure> {
+        self.record(PublicCinematicBackendOperation::Publish, node);
+        let artifact = CinematicPublishedArtifact::try_new(node.identity(), staged)
+            .expect("checked public backend publication");
+        self.published.insert(node.identity(), artifact);
+        Ok(artifact)
+    }
+}
+
+#[cfg(feature = "cinematic-orchestration")]
+fn run_public_cinematic_job(
+    plan: &CinematicJobPlan,
+    prior: Option<&CinematicJobSnapshot>,
+    backend: &mut PublicCinematicBackend,
+    gate: Arc<CancelGate>,
+) -> CinematicRunReport {
+    backend.cancel_gate = Some(Arc::clone(&gate));
+    let pool = ArenaPool::new(ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            gate.as_ref(),
+            arena,
+            StreamKey {
+                seed: 0x5055_424c_4943_4a4f,
+                kernel_id: 0x4349_4e45_4d41_5449,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        run_cinematic_job_plan(plan, prior, backend, &cx)
+    })
+}
+
+#[cfg(feature = "cinematic-orchestration")]
+#[test]
+fn g0_public_cinematic_job_plan_uses_real_render_topology() {
+    with_cx(|cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, cx);
+        let scene = EulerCinematicScene::try_build(&artifact, &specimen, config(), cx)
+            .expect("real Euler scene");
+        let prepared = scene
+            .prepare_frame(request(CutSide::After))
+            .expect("real prepared exposure");
+        let frames = [
+            EulerRenderFrameInput::new(10, &prepared),
+            EulerRenderFrameInput::new(20, &prepared),
+            EulerRenderFrameInput::new(30, &prepared),
+        ];
+        let sequence = identity("public-job-sequence");
+        let mut settings = euler_scene_smoke_settings(2, 2);
+        settings.spp = 1;
+        let render_limits = EulerRenderShardLimits::try_new(3, 3, 1 << 20, 4, 1 << 20, 3 << 20)
+            .expect("render limits");
+        let render_plan = EulerUniformRenderPlan::try_new(
+            &scene,
+            sequence,
+            &frames,
+            settings,
+            2,
+            2,
+            1,
+            1,
+            1,
+            render_limits,
+            cx,
+        )
+        .expect("real render plan");
+
+        let component =
+            |role, hash| CinematicComponentRef::try_new(role, hash, 1).expect("component identity");
+        let asset = |bytes: &'static [u8], interpretation, locator: &str| {
+            CinematicAssetBinding::from_bytes(bytes, interpretation, 1, locator.to_owned())
+                .expect("asset binding")
+        };
+        let configuration = CinematicConfig::try_new(CinematicConfigInput {
+            schema_version: CINEMATIC_CONFIG_SCHEMA_VERSION,
+            units: Some(CinematicConfigUnits::SiMetersKilogramsSecondsRadians),
+            seed: Some(7),
+            capabilities: Some(
+                CinematicCapabilities::try_new(
+                    CinematicCapabilities::RENDER | CinematicCapabilities::AUDIO,
+                )
+                .expect("capabilities"),
+            ),
+            render_budget_profile: Some(component(
+                CinematicComponentRole::RenderBudgetProfile,
+                identity("render-budget"),
+            )),
+            audio_budget_profile: Some(component(
+                CinematicComponentRole::AudioBudgetProfile,
+                identity("audio-budget"),
+            )),
+            trajectory: component(
+                CinematicComponentRole::Trajectory,
+                scene.source_trajectory_identity(),
+            ),
+            timeline: component(CinematicComponentRole::Timeline, sequence),
+            camera: component(CinematicComponentRole::Camera, identity("camera")),
+            scene_geometry: component(
+                CinematicComponentRole::SceneGeometry,
+                identity("scene-geometry"),
+            ),
+            instance_mapping: component(
+                CinematicComponentRole::InstanceMapping,
+                identity("instances"),
+            ),
+            renderer: component(CinematicComponentRole::Renderer, identity("renderer")),
+            image_pipeline: component(
+                CinematicComponentRole::ImagePipeline,
+                identity("image-pipeline"),
+            ),
+            audio_excitation: component(
+                CinematicComponentRole::AudioExcitation,
+                identity("audio-excitation"),
+            ),
+            sound_model: component(CinematicComponentRole::SoundModel, identity("sound-model")),
+            microphone: component(CinematicComponentRole::Microphone, identity("microphone")),
+            room: component(CinematicComponentRole::Room, identity("room")),
+            material_assets: vec![asset(
+                b"metal",
+                CinematicAssetInterpretation::SpectralReflectance,
+                "/fixture/metal",
+            )],
+            light_assets: vec![asset(
+                b"light",
+                CinematicAssetInterpretation::SpectralEmission,
+                "/fixture/light",
+            )],
+            environment_asset: asset(
+                b"environment",
+                CinematicAssetInterpretation::SpectralEmission,
+                "/fixture/environment",
+            ),
+            artifact_root: CinematicArtifactRoot::try_new(
+                "fixture/public-job".to_owned(),
+                "/fixture/output".to_owned(),
+            )
+            .expect("artifact root"),
+            mux_request: CinematicMuxRequest::None,
+        })
+        .expect("cinematic configuration");
+        let stage_identities = CinematicStageIdentities {
+            trajectory: identity("job-stage-trajectory"),
+            render_shard: identity("job-stage-render"),
+            raw_merge: identity("job-stage-merge"),
+            temporal_finish: identity("job-stage-finish"),
+            image_sequence: identity("job-stage-sequence"),
+            audio_controls: identity("job-stage-controls"),
+            audio_excitation: identity("job-stage-excitation"),
+            audio_resampling: identity("job-stage-resampling"),
+            modal_synthesis: identity("job-stage-modal"),
+            audio_master: identity("job-stage-master"),
+            bundle_verifier: identity("job-stage-verifier"),
+            mux_adapter: identity("job-stage-mux"),
+        };
+        let node_budget = CinematicNodeBudget::try_new(1, 1_024).expect("node budget");
+        let job_limits = CinematicJobLimits {
+            max_nodes: 17,
+            max_dependencies_per_node: 3,
+            max_total_dependencies: 23,
+            max_total_output_bytes: 17 * 1_024,
+            max_snapshot_records: 17,
+            max_snapshot_bytes: 1 << 20,
+            max_events: 17 * 5,
+        };
+        let plan = CinematicJobPlan::try_new(
+            &configuration,
+            &render_plan,
+            &scene,
+            &frames,
+            identity("bundle-finalization-expectation"),
+            stage_identities,
+            CinematicJobBudgets::uniform(node_budget),
+            job_limits,
+            cx,
+        )
+        .expect("public cinematic job plan");
+
+        assert_eq!(plan.render_plan_identity(), render_plan.plan_identity());
+        assert_eq!(plan.shot_count(), 1);
+        assert_eq!(plan.nodes().len(), 17);
+        assert_eq!(plan.total_dependencies(), 23);
+        assert_eq!(plan.total_work_units(), 17);
+        assert_eq!(plan.total_output_bytes(), 17 * 1_024);
+        assert_eq!(
+            plan.ready_frontier(&BTreeSet::new())
+                .iter()
+                .map(|node| node.kind())
+                .collect::<Vec<_>>(),
+            vec![CinematicJobKind::Trajectory]
+        );
+        let middle = plan
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind()
+                    == (CinematicJobKind::FinishSegment {
+                        frame_ordinal: 20,
+                        segment_index: 0,
+                    })
+            })
+            .expect("middle finishing node");
+        let parent_kinds = middle
+            .dependencies()
+            .iter()
+            .map(|index| plan.nodes()[*index as usize].kind())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parent_kinds,
+            vec![
+                CinematicJobKind::MergeRawSegment {
+                    frame_ordinal: 10,
+                    segment_index: 0,
+                },
+                CinematicJobKind::MergeRawSegment {
+                    frame_ordinal: 20,
+                    segment_index: 0,
+                },
+                CinematicJobKind::MergeRawSegment {
+                    frame_ordinal: 30,
+                    segment_index: 0,
+                },
+            ]
+        );
+
+        let mut baseline_backend = PublicCinematicBackend::default();
+        let baseline = run_public_cinematic_job(
+            &plan,
+            None,
+            &mut baseline_backend,
+            Arc::new(CancelGate::new_clock_free()),
+        );
+        assert_eq!(baseline.disposition(), CinematicRunDisposition::Complete);
+        assert_eq!(
+            baseline.progress().executed_nodes,
+            baseline.progress().total_nodes
+        );
+
+        let cancellation_target = plan
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == (CinematicJobKind::RenderShard { shard_ordinal: 1 }))
+            .expect("second render shard")
+            .identity();
+        let cancellation_gate = Arc::new(CancelGate::new_clock_free());
+        let mut resumed_backend = PublicCinematicBackend {
+            cancel_at_stage: Some(cancellation_target),
+            ..PublicCinematicBackend::default()
+        };
+        let cancelled = run_public_cinematic_job(
+            &plan,
+            None,
+            &mut resumed_backend,
+            Arc::clone(&cancellation_gate),
+        );
+        assert_eq!(cancelled.disposition(), CinematicRunDisposition::Cancelled);
+        assert!(!cancelled.snapshot().records().is_empty());
+        assert!(
+            cancelled.snapshot().records().len() < plan.nodes().len(),
+            "mid-graph cancellation must retain a proper completed prefix"
+        );
+        assert!(
+            cancelled
+                .snapshot()
+                .records()
+                .iter()
+                .all(|record| record.node_identity() != cancellation_target),
+            "the staged-but-unchecked target must not be published"
+        );
+
+        resumed_backend.cancel_at_stage = None;
+        resumed_backend.clear_calls();
+        let resumed = run_public_cinematic_job(
+            &plan,
+            Some(cancelled.snapshot()),
+            &mut resumed_backend,
+            Arc::new(CancelGate::new_clock_free()),
+        );
+        assert_eq!(resumed.disposition(), CinematicRunDisposition::Complete);
+        assert_eq!(
+            resumed
+                .snapshot()
+                .encode_canonical()
+                .expect("resumed terminal snapshot bytes"),
+            baseline
+                .snapshot()
+                .encode_canonical()
+                .expect("baseline terminal snapshot bytes"),
+            "cancel/resume must converge to the exact uninterrupted terminal state"
+        );
+
+        resumed_backend.clear_calls();
+        let replay = run_public_cinematic_job(
+            &plan,
+            Some(resumed.snapshot()),
+            &mut resumed_backend,
+            Arc::new(CancelGate::new_clock_free()),
+        );
+        assert_eq!(replay.disposition(), CinematicRunDisposition::Complete);
+        assert_eq!(replay.progress().executed_nodes, 0);
+        assert_eq!(replay.progress().reused_nodes, plan.nodes().len() as u64);
+        assert_eq!(resumed_backend.calls.len(), plan.nodes().len() * 2);
+        for (node, calls) in plan
+            .nodes()
+            .iter()
+            .zip(resumed_backend.calls.chunks_exact(2))
+        {
+            assert_eq!(
+                calls,
+                [
+                    PublicCinematicBackendCall {
+                        operation: PublicCinematicBackendOperation::Discover,
+                        node_identity: node.identity(),
+                    },
+                    PublicCinematicBackendCall {
+                        operation: PublicCinematicBackendOperation::Verify,
+                        node_identity: node.identity(),
+                    },
+                ],
+                "terminal replay must discover and independently verify {:?}",
+                node.kind()
+            );
+        }
+
+        let mut split_settings = euler_scene_smoke_settings(2, 2);
+        split_settings.spp = 2;
+        let split_render_limits =
+            EulerRenderShardLimits::try_new(3, 6, 1 << 20, 4, 1 << 20, 6 << 20)
+                .expect("sample-split render limits");
+        let split_render_plan = EulerUniformRenderPlan::try_new(
+            &scene,
+            sequence,
+            &frames,
+            split_settings,
+            2,
+            2,
+            1,
+            1,
+            1,
+            split_render_limits,
+            cx,
+        )
+        .expect("sample-split render plan");
+        assert_eq!(split_render_plan.shards().len(), 6);
+        let first_sample_block = split_render_plan.shards()[0];
+        let second_sample_block = split_render_plan.shards()[1];
+        assert_eq!(first_sample_block.frame_ordinal(), 10);
+        assert_eq!(second_sample_block.frame_ordinal(), 10);
+        assert_eq!(
+            (
+                first_sample_block.tile_start(),
+                first_sample_block.tile_end()
+            ),
+            (
+                second_sample_block.tile_start(),
+                second_sample_block.tile_end()
+            )
+        );
+        assert_eq!(
+            (
+                first_sample_block.sample_start(),
+                first_sample_block.sample_end()
+            ),
+            (0, 1)
+        );
+        assert_eq!(
+            (
+                second_sample_block.sample_start(),
+                second_sample_block.sample_end()
+            ),
+            (1, 2)
+        );
+        let split_job_limits = CinematicJobLimits {
+            max_nodes: 20,
+            max_dependencies_per_node: 3,
+            max_total_dependencies: 29,
+            max_total_output_bytes: 20 * 1_024,
+            max_snapshot_records: 20,
+            max_snapshot_bytes: 1 << 20,
+            max_events: 20 * 5,
+        };
+        let split_plan = CinematicJobPlan::try_new(
+            &configuration,
+            &split_render_plan,
+            &scene,
+            &frames,
+            identity("bundle-finalization-expectation"),
+            stage_identities,
+            CinematicJobBudgets::uniform(node_budget),
+            split_job_limits,
+            cx,
+        )
+        .expect("sample-split cinematic job plan");
+        let split_shards = split_plan
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind(), CinematicJobKind::RenderShard { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(split_shards.len(), 6);
+        assert_eq!(split_shards[0].work().render_frame_ordinal(), Some(10));
+        assert_eq!(split_shards[1].work().render_frame_ordinal(), Some(10));
+        assert_eq!(
+            split_shards[0].work().render_segment_index(),
+            split_shards[1].work().render_segment_index()
+        );
+        assert_eq!(
+            split_shards[0].work().render_tile_start(),
+            split_shards[1].work().render_tile_start()
+        );
+        assert_eq!(
+            split_shards[0].work().render_tiles(),
+            split_shards[1].work().render_tiles()
+        );
+        assert_eq!(split_shards[0].work().samples_per_tile(), 1);
+        assert_eq!(split_shards[1].work().samples_per_tile(), 1);
+
+        let split_gate = Arc::new(CancelGate::new_clock_free());
+        let mut split_backend = PublicCinematicBackend {
+            cancel_at_stage: Some(split_shards[1].identity()),
+            ..PublicCinematicBackend::default()
+        };
+        let split_cancelled = run_public_cinematic_job(
+            &split_plan,
+            None,
+            &mut split_backend,
+            Arc::clone(&split_gate),
+        );
+        assert_eq!(
+            split_cancelled.disposition(),
+            CinematicRunDisposition::Cancelled
+        );
+        let split_progress = split_cancelled.progress();
+        assert_eq!(split_progress.total_render_shards, 6);
+        assert_eq!(split_progress.completed_render_shards, 1);
+        assert_eq!(split_progress.total_render_tiles, 3);
+        assert_eq!(split_progress.completed_render_tiles, 0);
+        assert_eq!(split_progress.total_render_tile_samples, 6);
+        assert_eq!(split_progress.completed_render_tile_samples, 1);
+
+        split_backend.cancel_at_stage = None;
+        let split_resumed = run_public_cinematic_job(
+            &split_plan,
+            Some(split_cancelled.snapshot()),
+            &mut split_backend,
+            Arc::new(CancelGate::new_clock_free()),
+        );
+        assert_eq!(
+            split_resumed.disposition(),
+            CinematicRunDisposition::Complete
+        );
+        assert_eq!(split_resumed.progress().completed_render_shards, 6);
+        assert_eq!(split_resumed.progress().completed_render_tiles, 3);
+        assert_eq!(split_resumed.progress().completed_render_tile_samples, 6);
+
+        let mut one_short = job_limits;
+        one_short.max_dependencies_per_node = 2;
+        assert!(matches!(
+            CinematicJobPlan::try_new(
+                &configuration,
+                &render_plan,
+                &scene,
+                &frames,
+                identity("bundle-finalization-expectation"),
+                stage_identities,
+                CinematicJobBudgets::uniform(node_budget),
+                one_short,
+                cx,
+            ),
+            Err(CinematicJobPlanError::Limit {
+                resource: "dependencies per node",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+        assert!(matches!(
+            CinematicJobPlan::try_new(
+                &configuration,
+                &render_plan,
+                &scene,
+                &frames[..2],
+                identity("bundle-finalization-expectation"),
+                stage_identities,
+                CinematicJobBudgets::uniform(node_budget),
+                job_limits,
+                cx,
+            ),
+            Err(CinematicJobPlanError::Incompatible(
+                "render frame inventory"
+            ))
         ));
     });
 }

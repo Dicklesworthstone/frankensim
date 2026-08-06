@@ -1597,6 +1597,72 @@ claims only; they do not establish concurrent scheduler-claim arbitration,
 render convergence, 4K capacity, or scientific authority beyond the source
 trajectory.
 
+## Deterministic cinematic job conductor v1
+
+The opt-in `cinematic-orchestration` feature owns the smallest film-specific
+dependency graph spanning the pinned trajectory, independent uniform render
+shards, per-segment raw merge, complete temporal-neighbor finishing frontier,
+image-sequence seal, audio controls/excitation/resampling/modal synthesis/WAV,
+independent bundle verification, and optional quarantined mux derivative. It is
+not a general workflow engine. Node identities cover the exact configuration
+partition, implementation/checker identity, stage-local typed inputs, logical
+render work, and sorted dependency identities. The public constructor requires
+the original `EulerCinematicScene` and scene-bound `EulerRenderFrameInput`
+inventory used to build the render plan. It rechecks every prepared-segment
+identity and admits every shutter through the scene's `AnimatedCamera`; the
+resulting `CameraExposure::shot_id` is the sole camera-shot oracle. Temporal
+neighbors are restricted to that same continuous shot, so a hard camera cut
+cannot leak denoising history across the boundary. Bundle verification also
+binds an independent finalization-expectation identity; changing it invalidates
+only bundle verification and muxing. Resource ceilings do not change content
+node identity, but the complete plan identity retains every active-node
+work/output ceiling and graph limit for admission and replay.
+
+Plan construction checks node, dependency, output, event, and snapshot bounds
+before retaining dependency-sized graph storage. The canonical resume snapshot
+is a bounded, self-hashed, fixed-width node-to-artifact index. A snapshot is
+only a lookup hint: reuse additionally requires exact node, artifact-family,
+expected-output, content, byte-hash, and byte-length bindings plus the stage
+owner's independent decoder/checker. The backend discovery seam covers the
+crash window after atomic artifact publication but before snapshot persistence.
+A checked publication that differs from, or lacks, its exact snapshot hint is
+marked recovered: the node remains complete, but every descendant is rebuilt
+because v1 receipts do not yet carry dependency-publication content lineage. A
+missing, corrupt, recovered, or rebuilt node therefore cannot leave a stale
+downstream artifact in the current sequence or bundle.
+
+The conductor polls the caller's `Cx` before and between discovery, staging,
+checking, and publication. A checked candidate does not become complete until
+atomic publication returns the identical bounded descriptor. Cancellation
+after publication retains that exact record for resume; cancellation before
+publication exposes no completion. Backend methods are synchronous structured
+boundaries: any renderer/audio crews they start must be drained before return
+or unwind. Cancellation or deterministic deadline expiry observed while a
+backend returns an error takes precedence over classifying the node as failed,
+so interruption remains resumable rather than becoming a false backend fault.
+Typed failures and contained synchronous panics otherwise block descendants
+while independent completed work remains reusable. Progress reports monotone
+logical nodes, scene-derived shots, frames, event-delimited finished segments,
+render shards, unique frame-segment tiles (complete only after every sample
+shard), tile-sample cells, exact retained path counts, and audio stages, plus an
+estimated remaining-work count. None is a wall-clock ETA or throughput promise.
+
+G0/G3 tests pin canonical topology and parallel frontiers, snapshot codec
+self-verification, checker-before-publish ordering, exact no-work replay,
+camera/material/image, sound/audio, trajectory, mux-only, and
+finalization-expectation invalidation; missing, corrupt, and changed-publication
+rebuilding; oversized-snapshot rejection with live discovery; failure/panic
+containment; retry; pre-stage/check/publish cancellation;
+cancellation/deadline precedence; exact terminal resume; admission refusal;
+sample-split tile progress; and domain progress. A real three-frame
+`EulerUniformRenderPlan` fixture exercises the public scene/prepared-frame
+authority checks, temporal-neighbor translation, public cancellation/resume,
+exact replay, and one-short dependency preflight. The graph names real stage
+contracts but does not claim that the still-separate
+cinematic-AOV shard renderer, temporal denoiser, mux adapter, or final 4K
+qualification exists. Those implementations must land and pass their own
+owner-specific gates before this conductor can produce a film.
+
 ## Cinematic finalization gate v1
 
 The opt-in `cinematic-finalization` feature provides the read-only terminal
