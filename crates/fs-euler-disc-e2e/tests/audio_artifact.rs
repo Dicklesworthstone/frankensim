@@ -565,6 +565,42 @@ fn g0_g3_dry_mix_obeys_pan_gain_order_and_fails_closed() {
             Err(AudioArtifactError::InvalidMix("disc stem")),
         );
 
+        let quiet_stem = [ModalStemFrame {
+            disc_fs: 1.0e-6,
+            glass_plate_fs: 0.0,
+            base_assembly_fs: 0.0,
+        }];
+        let explicit_mastering = AudioDryMixSpec {
+            master_gain_db: 120.0,
+            ..AudioDryMixSpec::NEUTRAL
+        };
+        let mastered = mix_dry_modal_stems(
+            &quiet_stem,
+            explicit_mastering,
+            AudioArtifactBudget::DEFAULT,
+            cx,
+        )
+        .unwrap();
+        assert_close(
+            mastered[0].left_fs,
+            1.0 / 2.0_f64.sqrt(),
+            1.0e-12,
+            "explicit positive master gain",
+        );
+        let excessive_mastering = AudioDryMixSpec {
+            master_gain_db: 120.000_001,
+            ..AudioDryMixSpec::NEUTRAL
+        };
+        assert_eq!(
+            mix_dry_modal_stems(
+                &quiet_stem,
+                excessive_mastering,
+                AudioArtifactBudget::DEFAULT,
+                cx,
+            ),
+            Err(AudioArtifactError::InvalidMix("master gain")),
+        );
+
         let nonfinite = [ModalStemFrame {
             disc_fs: f64::NAN,
             glass_plate_fs: 0.0,

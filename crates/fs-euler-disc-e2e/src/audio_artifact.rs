@@ -258,7 +258,12 @@ impl AudioDryMixSpec {
                 return Err(AudioArtifactError::InvalidMix(field));
             }
         }
-        if !self.master_gain_db.is_finite() || !(-120.0..=24.0).contains(&self.master_gain_db) {
+        // A physically informed, uncalibrated modal source can be many orders
+        // of magnitude below digital full scale. Permit an explicit mastering
+        // gain large enough to make such sources audible; the independent
+        // sample and intersample headroom gate still refuses any over-range
+        // artifact. This is digital presentation gain, never an SPL claim.
+        if !self.master_gain_db.is_finite() || !(-120.0..=120.0).contains(&self.master_gain_db) {
             return Err(AudioArtifactError::InvalidMix("master gain"));
         }
         Ok(())

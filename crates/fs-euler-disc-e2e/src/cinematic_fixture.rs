@@ -163,6 +163,12 @@ enum MuxOutcome {
     Written(PathBuf),
 }
 
+struct FixtureAudio {
+    artifact: SoundWavArtifact,
+    pre_master_peak_fs: f64,
+    master_gain_db: f64,
+}
+
 /// Fail-closed fixture refusal; a failed run never publishes the requested root.
 #[derive(Debug)]
 pub enum CinematicFixtureError {
@@ -498,13 +504,14 @@ pub fn run_cinematic_fixture(
     progress("stage=audio begin");
     let audio = build_audio(&trajectory_artifact, config, cx)?;
     let wav_path = sound_directory.join("master.float32.wav");
-    write_new(&wav_path, audio.wav_bytes())?;
+    write_new(&wav_path, audio.artifact.wav_bytes())?;
     let audio_manifest_path = sound_directory.join("master.manifest.json");
     write_new(
         &audio_manifest_path,
-        audio.manifest().to_manifest_json().as_bytes(),
+        audio.artifact.manifest().to_manifest_json().as_bytes(),
     )?;
     audio
+        .artifact
         .verify(AudioArtifactBudget::DEFAULT, cx)
         .map_err(pipeline)?;
     progress("stage=audio complete");
@@ -529,7 +536,9 @@ pub fn run_cinematic_fixture(
         trajectory_receipt.artifact_identity(),
         raw_sequence_identity,
         preview_sequence_identity,
-        audio.manifest().wav().wav_identity(),
+        audio.artifact.manifest().wav().wav_identity(),
+        audio.pre_master_peak_fs,
+        audio.master_gain_db,
         over_range_channels,
         gamut_mapped_pixels,
         &mux,
@@ -724,7 +733,7 @@ fn build_audio(
     trajectory: &EulerRenderTrajectoryArtifact,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
-) -> Result<SoundWavArtifact, CinematicFixtureError> {
+) -> Result<FixtureAudio, CinematicFixtureError> {
     let audio_frame_count = u64::from(config.frames) * 2_000;
     let controls = EulerControlStream::try_derive(trajectory.trajectory(), cx).map_err(pipeline)?;
     let preset = representative_modal_preset(RepresentativeDiscMaterial::Tungsten);
@@ -967,17 +976,20 @@ fn build_audio(
         .max(provisional_meters.true_peak_estimate_fs);
     drop(provisional);
     const TARGET_PEAK_FS: f64 = 0.45;
-    if provisional_peak > TARGET_PEAK_FS {
-        mix.master_gain_db =
-            20.0 * det::ln(TARGET_PEAK_FS / provisional_peak) / core::f64::consts::LN_10;
-        if mix.master_gain_db < -120.0 {
-            return Err(CinematicFixtureError::Pipeline(format!(
-                "mechanics-derived sound needs {:.3} dB attenuation, beyond the admitted mix range",
-                mix.master_gain_db
-            )));
-        }
+    if provisional_peak <= f64::MIN_POSITIVE {
+        return Err(CinematicFixtureError::Pipeline(
+            "mechanics-derived sound is silent and cannot be mastered".into(),
+        ));
     }
-    SoundWavArtifact::try_build(
+    mix.master_gain_db =
+        20.0 * det::ln(TARGET_PEAK_FS / provisional_peak) / core::f64::consts::LN_10;
+    if !(-120.0..=120.0).contains(&mix.master_gain_db) {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "mechanics-derived sound needs {:.3} dB mastering gain, beyond the admitted range",
+            mix.master_gain_db
+        )));
+    }
+    let artifact = SoundWavArtifact::try_build(
         &sound,
         AudioMasterSource::DryModalStems {
             frames: &stems,
@@ -992,7 +1004,12 @@ fn build_audio(
         AudioArtifactBudget::DEFAULT,
         cx,
     )
-    .map_err(pipeline)
+    .map_err(pipeline)?;
+    Ok(FixtureAudio {
+        artifact,
+        pre_master_peak_fs: provisional_peak,
+        master_gain_db: mix.master_gain_db,
+    })
 }
 
 fn apply_terminal_fade(
@@ -1074,6 +1091,8 @@ fn fixture_manifest(
     raw_sequence_identity: ContentHash,
     preview_sequence_identity: ContentHash,
     wav_identity: ContentHash,
+    audio_pre_master_peak_fs: f64,
+    audio_master_gain_db: f64,
     over_range_channels: u64,
     gamut_mapped_pixels: u64,
     mux: &MuxOutcome,
@@ -1113,9 +1132,9 @@ fn fixture_manifest(
             "  \"authority\": \"simulation-derived-visualization-and-physically-informed-sound\",\n",
             "  \"video\": {{\"width\": {}, \"height\": {}, \"frames\": {}, \"fps\": {}, \"duration_s\": {:.9}, \"spp\": {}, \"max_depth\": {}, \"raw_sequence_identity\": \"{}\", \"preview_sequence_identity\": \"{}\", \"over_range_linear_channels\": {}, \"gamut_mapped_pixels\": {}}},\n",
             "  \"mechanics\": {{\"model\": \"closed-profile-reduced-coupled-runner\", \"timestep_s\": {:.9e}, \"sample_count\": {}, \"retained_time_s\": {:.9}, \"terminal\": \"{:?}\", \"initial_rate_selection\": \"rounded gravity-scale estimate; not fitted or calibrated\", \"first_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"last_qoi\": {{\"inclination_rad\": {:.17e}, \"precession_rad_per_s\": {:.17e}, \"spin_rad_per_s\": {:.17e}}}, \"energy\": {{\"initial_total_j\": {:.17e}, \"final_total_j\": {:.17e}, \"defect_j\": {:.17e}, \"relative_defect\": {:.17e}}}, \"trajectory_identity\": \"{}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"terminal_fade_sample_frames\": {}, \"mix_policy\": \"single static content-derived gain, peak target 0.45 FS, no limiter\"}},\n",
+            "  \"audio\": {{\"sample_rate_hz\": {}, \"wav_identity\": \"{}\", \"calibrated\": false, \"procedural_texture\": false, \"pre_master_peak_fs\": {:.17e}, \"master_gain_db\": {:.9}, \"terminal_fade_sample_frames\": {}, \"mix_policy\": \"single explicit content-derived digital mastering gain, peak target 0.45 FS, no limiter\"}},\n",
             "  \"mux\": {},\n",
-            "  \"no_claims\": [\"preview timestep and endpoint phase have not been convergence-qualified; inspect the published energy defect\", \"initial rates use a thin-disc gravity scale outside that oracle's admitted geometry for this squat specimen\", \"reduced tangential contact has gross sliding but no static-stick solve\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"one-sample-per-pixel preview is intended for motion and composition critique, not final image quality\"]\n",
+            "  \"no_claims\": [\"preview timestep and endpoint phase have not been convergence-qualified; inspect the published energy defect\", \"initial rates use a thin-disc gravity scale outside that oracle's admitted geometry for this squat specimen\", \"reduced tangential contact has gross sliding but no static-stick solve\", \"mechanics and acoustic parameters have not been calibrated to experiment\", \"digital mastering gain is presentation normalization and is not a sound-pressure-level prediction\", \"radial spin fiducial is visualization-only and excluded from specimen, contact, and mass mechanics\", \"one-sample-per-pixel preview is intended for motion and composition critique, not final image quality\"]\n",
             "}}\n"
         ),
         config.width,
@@ -1146,6 +1165,8 @@ fn fixture_manifest(
         trajectory_identity.to_hex(),
         SOUND_MASTER_SAMPLE_RATE_HZ,
         wav_identity.to_hex(),
+        audio_pre_master_peak_fs,
+        audio_master_gain_db,
         TERMINAL_FADE_SAMPLE_FRAMES,
         mux_json,
     )
