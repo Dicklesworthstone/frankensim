@@ -487,12 +487,14 @@ pub fn compute_motion_vectors(
         return Err(MotionVectorError::ForeignCurrentPose);
     }
 
-    let SurfaceCorrespondence::Mesh(surface) = sample.correspondence else {
-        let SurfaceCorrespondence::Unavailable(reason) = sample.correspondence;
-        return Ok(MotionVectorComputation::Unavailable {
-            identity: sample.identity,
-            reason,
-        });
+    let surface = match sample.correspondence {
+        SurfaceCorrespondence::Mesh(surface) => surface,
+        SurfaceCorrespondence::Unavailable(reason) => {
+            return Ok(MotionVectorComputation::Unavailable {
+                identity: sample.identity,
+                reason,
+            });
+        }
     };
 
     let current_world = current.object_to_world.transform_point(surface.local_point);
