@@ -27,6 +27,7 @@ fs-project = { path = "../fs-project" }
 fs-session = { path = "../fs-session" }
 
 [dev-dependencies]
+fs-mbd = { path = "../fs-mbd" }
 fs-qty = { path = "../fs-qty" }
 
 [lints]

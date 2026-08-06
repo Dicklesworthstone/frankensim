@@ -998,6 +998,7 @@ dependencies = [
  "fs-io",
  "fs-ledger",
  "fs-matdb",
+ "fs-mbd",
  "fs-project",
  "fs-qty",
  "fs-session",

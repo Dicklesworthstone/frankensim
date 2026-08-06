@@ -64,6 +64,50 @@ This is a deliberate fail-closed integration seam. Reusing the photovoltaic
 skeleton or emitting placeholder artifacts would turn a CLI-shaped mock into
 a product claim.
 
+### Euler cinematic static admission
+
+The `cinematic` command is the stable user membrane for bead
+`frankensim-h7xu5.8.1`:
+
+```text
+frankensim [--json] cinematic inspect <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run]
+frankensim [--json] cinematic storyboard <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run] <host-resources>
+frankensim [--json] cinematic daily <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run] <host-resources>
+frankensim [--json] cinematic representative-4k-frame <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run] <host-resources>
+frankensim [--json] cinematic final <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run] <host-resources>
+frankensim [--json] cinematic resume <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run] <host-resources>
+frankensim [--json] cinematic verify <config.fscine> --trajectory <artifact> [--dry-run]
+frankensim [--json] cinematic mux <config.fscine> --trajectory <artifact> [--dry-run]
+```
+
+`<host-resources>` is the complete tuple `--memory-bytes`,
+`--free-storage-bytes`, `--wall-time-s`, `--workers`, and
+`--paths-per-second`; a partial tuple refuses. Launch modes require it because
+their named profile estimate is admitted against caller-declared host
+availability. `inspect`, `verify`, and `mux` may omit it and then report
+`resource_admission=not-requested`; that is not a host-capability claim.
+
+The command decodes the complete 1 MiB-capped `.fscine` document, binds both
+budget references to the exact named profile identity, resolves regular-file
+assets relative to the canonical config directory, rejects path escape and
+stale bytes, and hashes admitted assets under per-file and aggregate byte
+ceilings with cancellation checkpoints. `--trajectory` additionally decodes
+the canonical bounded Euler trajectory artifact, checks the configured
+trajectory schema version and exact artifact identity, and leaves the artifact
+reader to validate its distinct wire-codec version. `--run-reduced` records an
+unverified request in the write-free plan; it does not schedule, persist, or
+pretend that the campaign has run.
+
+Every successful inspect/plan admission emits deterministic
+composition/partition identities, the exact profile and estimate (if
+admitted), trajectory verification facts, planned stages, authority, and
+no-claim text without physical locator paths. Static admission never creates
+the configured artifact root. Until their producer Beads land, non-dry
+launch/resume, whole-bundle verify, and mux calls fail closed with the owning
+dependency; storyboard/daily execution belongs to `frankensim-h7xu5.8.3`,
+representative/final/resume to `.8.2`, verification to `.8.4`, and quarantined
+mux to `.8.5`.
+
 ### Geometry import
 
 The library surface exposes `RawGeometryLibrary` and
@@ -248,8 +292,11 @@ continues instead of resetting.
 - text mode emits stable `key=value` result rows and `ERROR`/`FIX` diagnostic
   pairs;
 - exit `0` is success, `2` usage, `3` input I/O/encoding/size, `4` project or
-  run refusal, `5` unavailable product stage or solve stage gap, and `6`
-  budget-exceeded honest partial.
+  run refusal, `5` unavailable product stage or solve stage gap, `6`
+  budget-exceeded honest partial, and `130` explicit cancellation observed
+  before publishing a cinematic result. The older solve driver retains its
+  existing refusal-class cancellation surface; this bead does not silently
+  redefine that separate compatibility boundary.
 
 Diagnostic codes and fix text are machine-facing compatibility surface.
 Human prose may improve without changing a code or exit class.

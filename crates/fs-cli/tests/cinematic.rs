@@ -1,12 +1,21 @@
 //! G0/G3/G4 acceptance tests for cinematic CLI discovery and static admission.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_cli::{exit, run, run_cinematic_with_gate};
+use fs_euler_disc_e2e::{
+    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerRenderTrajectoryArtifact,
+    RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability, RenderContactBranch,
+    RenderMassProperties, RenderSampleDisposition, RenderTrajectory, RenderTrajectoryAuthority,
+    RenderTrajectoryCodecBudget, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
+    RenderUnitSystem, RenderWorldFrame,
+};
 use fs_evidence::{
     cinematic_budget::{
         CINEMATIC_QUALITY_PROFILE_IDENTITY_VERSION, CinematicQualityProfile, CinematicQualityTier,
@@ -14,7 +23,8 @@ use fs_evidence::{
     cinematic_config::{CinematicAssetBinding, CinematicAssetInterpretation},
     cinematic_config_codec::CINEMATIC_CONFIG_DOCUMENT_SCHEMA,
 };
-use fs_exec::CancelGate;
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 const MATERIAL: &[u8] = b"cinematic CLI steel spectrum v1";
 const LIGHT: &[u8] = b"cinematic CLI area-light spectrum v1";
@@ -70,6 +80,108 @@ fn scratch(tag: &str) -> PathBuf {
     path
 }
 
+fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    let pool = ArenaPool::new(ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 7,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        operation(&cx)
+    })
+}
+
+fn write_tiny_trajectory(path: &Path) -> ContentHash {
+    with_cx(|cx| {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0))
+            .expect("mass properties");
+        let orientation =
+            UnitQuaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), 0.35).expect("tilt");
+        let pose = Pose::new(Vec3::new(0.0, 0.0, 0.02), orientation).expect("pose");
+        let state = RigidBodyState::new(pose, Vec3::ZERO, Vec3::ZERO).expect("state");
+        let base = RenderBaseModeState {
+            displacement_m: 0.0,
+            velocity_m_per_s: 0.0,
+        };
+        let sample = RenderTrajectorySampleInput {
+            interval_start_time_s: 0.0,
+            time_s: 0.0,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            center_of_mass_world_m: state.pose().position_world(),
+            orientation_body_to_world: orientation.components(),
+            linear_momentum_world_kg_m_per_s: state.linear_momentum_world(),
+            angular_momentum_body_kg_m2_per_s: state.angular_momentum_body(),
+            symmetry_axis_world: orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+            contact_branch: RenderContactBranch::Open,
+            contact_geometry: None,
+            signed_gap_m: 1.0e-3,
+            interval_contact_active: false,
+            interval_normal_force_n: 0.0,
+            contact_transitions: Vec::new(),
+            base_mode: Some(base),
+            channels: Default::default(),
+            mechanical_energy_j: 0.0,
+            energy_defect_j: 0.0,
+            qois: DerivedEulerQois::from_state(state, mass, 0.0).expect("Euler QoIs"),
+            disposition: RenderSampleDisposition::HorizonCensored,
+            terminal_event: None,
+        };
+        let metadata = RenderTrajectoryMetadata {
+            schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            specimen_profile_identity: id("trajectory-profile"),
+            specimen_chart_identity: id("trajectory-chart"),
+            mass_properties: RenderMassProperties {
+                identity: id("trajectory-mass"),
+                properties: mass,
+            },
+            initial_state: state,
+            initial_base_mode: base,
+            base_model_identity: id("trajectory-base"),
+            base_frame: RenderBaseFrame {
+                origin_world_m: Vec3::ZERO,
+                orientation_base_to_world: UnitQuaternion::IDENTITY,
+            },
+            model_identity: id("trajectory-model"),
+            channel_availability: RenderChannelAvailability::NONE_AVAILABLE,
+            configuration_identity: id("trajectory-configuration"),
+            configuration_fingerprint: 1,
+            timestep_s: 1.0 / 240.0,
+            producer_version: "fs-cli-cinematic-test-v1".to_owned(),
+            applicability: "tiny static-admission fixture only".to_owned(),
+            no_claims: vec!["does not validate physical fidelity".to_owned()],
+            authority: RenderTrajectoryAuthority::SimulationEvidence,
+        };
+        let trajectory = RenderTrajectory::try_new(metadata, vec![sample]).expect("trajectory");
+        let artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+            id("trajectory-campaign"),
+            trajectory,
+            Vec::new(),
+            RenderTrajectoryCodecBudget::DEFAULT,
+            cx,
+        )
+        .expect("trajectory artifact");
+        let expected = artifact.receipt();
+        let mut file = File::create(path).expect("trajectory file");
+        let written = artifact
+            .write_to(&mut file, RenderTrajectoryCodecBudget::DEFAULT, cx)
+            .expect("trajectory bytes");
+        assert_eq!(written, expected);
+        expected.artifact_identity()
+    })
+}
+
 fn profile_name(tier: CinematicQualityTier) -> &'static str {
     match tier {
         CinematicQualityTier::StoryboardSmoke => "storyboard-smoke",
@@ -80,6 +192,22 @@ fn profile_name(tier: CinematicQualityTier) -> &'static str {
 }
 
 fn write_fixture(tag: &str, tier: CinematicQualityTier, mux: bool) -> Fixture {
+    write_fixture_with_trajectory(
+        tag,
+        tier,
+        mux,
+        u32::from(EULER_RENDER_TRAJECTORY_SCHEMA_VERSION),
+        id("trajectory"),
+    )
+}
+
+fn write_fixture_with_trajectory(
+    tag: &str,
+    tier: CinematicQualityTier,
+    mux: bool,
+    trajectory_version: u32,
+    trajectory_identity: ContentHash,
+) -> Fixture {
     let directory = scratch(tag);
     let assets = directory.join("assets");
     std::fs::create_dir_all(&assets).expect("asset directory");
@@ -131,7 +259,7 @@ fn write_fixture(tag: &str, tier: CinematicQualityTier, mux: bool) -> Fixture {
          artifact_root=outputs/{tag}\n\
          mux={mux_request}\n",
         profile_name(tier),
-        component("trajectory"),
+        format!("{trajectory_version}:{}", trajectory_identity.to_hex()),
         component("timeline"),
         component("camera"),
         component("scene-geometry"),
@@ -153,6 +281,26 @@ fn write_fixture(tag: &str, tier: CinematicQualityTier, mux: bool) -> Fixture {
     }
 }
 
+fn attach_tiny_trajectory(fixture: &Fixture) -> (PathBuf, ContentHash) {
+    let trajectory = fixture.directory.join("tiny.fseultrj");
+    let trajectory_identity = write_tiny_trajectory(&trajectory);
+    let source = std::fs::read_to_string(&fixture.config).expect("config source");
+    let source = source.replace(
+        &format!(
+            "trajectory={}:{}",
+            EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            id("trajectory").to_hex()
+        ),
+        &format!(
+            "trajectory={}:{}",
+            EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            trajectory_identity.to_hex()
+        ),
+    );
+    std::fs::write(&fixture.config, source).expect("trajectory-bound config");
+    (trajectory, trajectory_identity)
+}
+
 fn cinematic_args(mode: &str, config: &Path, dry_run: bool, resources: bool) -> Vec<String> {
     let mut arguments = vec![
         "--json".to_owned(),
@@ -170,12 +318,38 @@ fn cinematic_args(mode: &str, config: &Path, dry_run: bool, resources: bool) -> 
     arguments
 }
 
+fn cinematic_existing_args(
+    mode: &str,
+    config: &Path,
+    trajectory: &Path,
+    dry_run: bool,
+    resources: bool,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "--json".to_owned(),
+        "cinematic".to_owned(),
+        mode.to_owned(),
+        config.to_string_lossy().into_owned(),
+        "--trajectory".to_owned(),
+        trajectory.to_string_lossy().into_owned(),
+    ];
+    if dry_run {
+        arguments.push("--dry-run".to_owned());
+    }
+    if resources {
+        arguments.extend(ABUNDANT_RESOURCES.iter().map(|value| (*value).to_owned()));
+    }
+    arguments
+}
+
 #[test]
 fn help_and_strict_trajectory_grammar_are_discoverable() {
     let help = run(["cinematic".to_owned(), "help".to_owned()]);
     assert_eq!(help.exit_code, exit::SUCCESS);
     assert!(help.stdout.contains("representative-4k-frame"));
     assert!(help.stdout.contains(CINEMATIC_CONFIG_DOCUMENT_SCHEMA));
+    assert!(help.stdout.contains("verify/mux"));
+    assert!(help.stdout.contains("--trajectory"));
 
     let fixture = write_fixture("grammar", CinematicQualityTier::StoryboardSmoke, false);
     let missing_source = run([
@@ -185,6 +359,31 @@ fn help_and_strict_trajectory_grammar_are_discoverable() {
     ]);
     assert_eq!(missing_source.exit_code, exit::USAGE);
     assert!(missing_source.stderr.contains("cinematic-cli-usage"));
+
+    let missing_verify_source = run([
+        "cinematic".to_owned(),
+        "verify".to_owned(),
+        fixture.config.to_string_lossy().into_owned(),
+    ]);
+    assert_eq!(missing_verify_source.exit_code, exit::USAGE);
+    assert!(
+        missing_verify_source
+            .stderr
+            .contains("require `--trajectory <artifact>`")
+    );
+
+    let reduced_verify_source = run([
+        "cinematic".to_owned(),
+        "verify".to_owned(),
+        fixture.config.to_string_lossy().into_owned(),
+        "--run-reduced".to_owned(),
+    ]);
+    assert_eq!(reduced_verify_source.exit_code, exit::USAGE);
+    assert!(
+        reduced_verify_source
+            .stderr
+            .contains("`--run-reduced` is not a valid source")
+    );
 
     let conflicting_sources = run([
         "cinematic".to_owned(),
@@ -221,7 +420,7 @@ fn inspect_is_deterministic_and_never_creates_the_artifact_root() {
     assert_eq!(first.exit_code, exit::SUCCESS);
     assert!(first.stdout.contains("\"status\":\"inspected\""));
     assert!(first.stdout.contains("\"would_write\":false"));
-    assert!(first.stdout.contains("scheduled-reduced-campaign"));
+    assert!(first.stdout.contains("requested-reduced-campaign"));
     assert!(first.stderr.is_empty());
     assert!(!fixture.artifact_root.exists());
     assert!(
@@ -229,6 +428,78 @@ fn inspect_is_deterministic_and_never_creates_the_artifact_root() {
             .stdout
             .contains(&fixture.directory.to_string_lossy()[..])
     );
+}
+
+#[test]
+fn inspect_decodes_and_identity_binds_a_real_trajectory_artifact() {
+    let fixture = write_fixture(
+        "inspect-existing-trajectory",
+        CinematicQualityTier::StoryboardSmoke,
+        false,
+    );
+    let (trajectory, trajectory_identity) = attach_tiny_trajectory(&fixture);
+    let arguments = cinematic_existing_args("inspect", &fixture.config, &trajectory, false, false);
+    let first = run(arguments.clone());
+    let second = run(arguments.clone());
+    assert_eq!(first, second);
+    assert_eq!(first.exit_code, exit::SUCCESS, "{}", first.stderr);
+    assert!(first.stdout.contains("\"status\":\"inspected\""));
+    assert!(first.stdout.contains("\"source\":\"verified-artifact\""));
+    assert!(first.stdout.contains("\"verified\":true"));
+    assert!(first.stdout.contains("\"sample_count\":1"));
+    assert!(first.stdout.contains("\"transition_count\":0"));
+    assert!(first.stdout.contains("\"chunk_count\":1"));
+    assert!(
+        first
+            .stdout
+            .contains("\"resource_admission\":\"not-requested\"")
+    );
+    assert!(first.stderr.is_empty());
+    assert!(!fixture.artifact_root.exists());
+    assert!(
+        !first
+            .stdout
+            .contains(&fixture.directory.to_string_lossy()[..])
+    );
+
+    let source = std::fs::read_to_string(&fixture.config).expect("bound config source");
+    let stale = source.replace(
+        &trajectory_identity.to_hex(),
+        &id("wrong-trajectory-artifact").to_hex(),
+    );
+    assert_ne!(
+        stale, source,
+        "fixture must replace the configured identity"
+    );
+    std::fs::write(&fixture.config, stale).expect("stale trajectory reference");
+    let refused = run(arguments);
+    assert_eq!(refused.exit_code, exit::REFUSED);
+    assert!(
+        refused
+            .stderr
+            .contains("cinematic-trajectory-identity-mismatch")
+    );
+    assert!(!refused.stderr.contains(&trajectory.to_string_lossy()[..]));
+    assert!(!fixture.artifact_root.exists());
+}
+
+#[test]
+fn reduced_campaign_still_refuses_an_unsupported_trajectory_schema_reference() {
+    let fixture = write_fixture_with_trajectory(
+        "trajectory-version",
+        CinematicQualityTier::StoryboardSmoke,
+        false,
+        u32::from(EULER_RENDER_TRAJECTORY_SCHEMA_VERSION) + 1,
+        id("trajectory"),
+    );
+    let output = run(cinematic_args("inspect", &fixture.config, false, false));
+    assert_eq!(output.exit_code, exit::REFUSED);
+    assert!(
+        output
+            .stderr
+            .contains("cinematic-trajectory-version-mismatch")
+    );
+    assert!(!fixture.artifact_root.exists());
 }
 
 #[test]
@@ -321,7 +592,7 @@ fn malformed_config_asset_substitution_and_capability_omission_refuse_cleanly() 
     );
     std::fs::write(&stale.material, b"substituted secret bytes").expect("stale asset");
     let output = run(cinematic_args("inspect", &stale.config, false, false));
-    assert_eq!(output.exit_code, exit::INPUT);
+    assert_eq!(output.exit_code, exit::REFUSED);
     assert!(
         output
             .stderr
@@ -411,6 +682,7 @@ fn pre_cancelled_admission_returns_130_without_reading_or_writing() {
         &gate,
     );
     assert_eq!(output.exit_code, exit::CANCELLED);
+    assert!(output.stdout.contains("\"status\":\"cancelled\""));
     assert!(output.stderr.contains("cinematic-cancelled"));
     assert!(!output.stderr.contains("private-config-token"));
     assert!(!artifact_root.exists());
@@ -429,12 +701,30 @@ fn deferred_execution_modes_fail_closed_with_their_owner_beads() {
         CinematicQualityTier::StoryboardSmoke,
         false,
     );
-    let verify = run(cinematic_args("verify", &preview.config, false, false));
+    let storyboard = run(cinematic_args("storyboard", &preview.config, false, true));
+    assert_eq!(storyboard.exit_code, exit::UNAVAILABLE);
+    assert!(storyboard.stdout.contains("frankensim-h7xu5.8.3"));
+
+    let (preview_trajectory, _) = attach_tiny_trajectory(&preview);
+    let verify = run(cinematic_existing_args(
+        "verify",
+        &preview.config,
+        &preview_trajectory,
+        false,
+        false,
+    ));
     assert_eq!(verify.exit_code, exit::UNAVAILABLE);
     assert!(verify.stdout.contains("frankensim-h7xu5.8.4"));
 
     let mux_fixture = write_fixture("deferred-mux", CinematicQualityTier::StoryboardSmoke, true);
-    let mux = run(cinematic_args("mux", &mux_fixture.config, false, false));
+    let (mux_trajectory, _) = attach_tiny_trajectory(&mux_fixture);
+    let mux = run(cinematic_existing_args(
+        "mux",
+        &mux_fixture.config,
+        &mux_trajectory,
+        false,
+        false,
+    ));
     assert_eq!(mux.exit_code, exit::UNAVAILABLE);
     assert!(mux.stdout.contains("frankensim-h7xu5.8.5"));
 

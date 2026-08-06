@@ -3,9 +3,12 @@
 //! This module deliberately stops at a real, write-free plan. The durable job
 //! graph, whole-bundle verifier, and quarantined mux executor have separate
 //! owner Beads; non-dry invocations fail closed until those implementations
-//! land. A successful dry run proves bounded configuration/asset/trajectory
-//! integrity and static resource admission, not render convergence, physical
-//! validation, authenticated host capabilities, or artifact production.
+//! land. A successful inspect/plan admission proves bounded configuration and
+//! asset integrity. It proves trajectory integrity only for `--trajectory`,
+//! and resource admission only when a complete host-resource tuple was
+//! supplied; `--run-reduced` remains explicitly unverified. No invocation
+//! here proves render convergence, physical validation, authenticated host
+//! capabilities, or artifact production.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -13,7 +16,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use fs_euler_disc_e2e::{
-    EULER_RENDER_TRAJECTORY_CODEC_VERSION, EulerRenderTrajectoryArtifact,
+    EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerRenderTrajectoryArtifact,
     RenderTrajectoryCodecBudget,
 };
 use fs_evidence::{
@@ -24,8 +27,10 @@ use fs_evidence::{
     },
     cinematic_config::{CinematicConfig, CinematicMuxRequest},
     cinematic_config_codec::{
-        CINEMATIC_CONFIG_DOCUMENT_SCHEMA, CinematicAssetAccessError, CinematicAssetDeclaration,
-        CinematicConfigDocument, CinematicConfigDocumentError, MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES,
+        CINEMATIC_CONFIG_DOCUMENT_SCHEMA, CinematicAssetAccessError, CinematicAssetAdmissionBudget,
+        CinematicAssetDeclaration, CinematicConfigDocument, CinematicConfigDocumentError,
+        MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES, MAX_CINEMATIC_RESOLVED_ASSET_BYTES,
+        MAX_CINEMATIC_RESOLVED_ASSET_TOTAL_BYTES,
     },
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -41,15 +46,15 @@ pub const CINEMATIC_CLI_CONFIG_SCHEMA: &str = CINEMATIC_CONFIG_DOCUMENT_SCHEMA;
 /// Maximum config bytes accepted by filesystem-backed CLI admission.
 pub const MAX_CINEMATIC_CONFIG_BYTES: u64 = MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES as u64;
 /// Maximum bytes read for one external cinematic asset during static admission.
-pub const MAX_CINEMATIC_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_CINEMATIC_ASSET_BYTES: u64 = MAX_CINEMATIC_RESOLVED_ASSET_BYTES as u64;
 /// Maximum bytes read across all external assets during static admission.
-pub const MAX_CINEMATIC_TOTAL_ASSET_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_CINEMATIC_TOTAL_ASSET_BYTES: u64 = MAX_CINEMATIC_RESOLVED_ASSET_TOTAL_BYTES as u64;
 /// Maximum encoded trajectory bytes admitted by the CLI's inspection seam.
 pub const MAX_CINEMATIC_TRAJECTORY_BYTES: u64 = 1024 * 1024 * 1024;
 
 const READ_TILE_BYTES: usize = 64 * 1024;
-const CINEMATIC_USAGE: &str = "frankensim [--json] cinematic <inspect|storyboard|daily|representative-4k-frame|final|resume|verify|mux> <config.fscine> (--trajectory <artifact>|--run-reduced) [--dry-run] [--memory-bytes <n> --free-storage-bytes <n> --wall-time-s <n> --workers <n> --paths-per-second <n>]";
-const STATIC_AUTHORITY: &str = "bounded-static-composition-and-resource-admission";
+const CINEMATIC_USAGE: &str = "frankensim [--json] cinematic <inspect|storyboard|daily|representative-4k-frame|final|resume|verify|mux> <config.fscine> <trajectory-source> [--dry-run] [--memory-bytes <n> --free-storage-bytes <n> --wall-time-s <n> --workers <n> --paths-per-second <n>]; trajectory-source is --trajectory <artifact> for verify/mux, and either --trajectory <artifact> or --run-reduced for every other mode";
+const STATIC_AUTHORITY: &str = "bounded-static-composition-admission";
 const STATIC_NO_CLAIM: &str = "does not execute or verify a render, produce audio/media artifacts, authenticate declared capabilities, prove render convergence, or validate Euler-disc physics/acoustics";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,11 +123,10 @@ impl CinematicMode {
     const fn downstream_owner(self) -> Option<&'static str> {
         match self {
             Self::Unknown | Self::Inspect => None,
-            Self::Storyboard
-            | Self::Daily
-            | Self::Representative4kFrame
-            | Self::Final
-            | Self::Resume => Some("frankensim-h7xu5.8.2"),
+            Self::Storyboard | Self::Daily => Some("frankensim-h7xu5.8.3"),
+            Self::Representative4kFrame | Self::Final | Self::Resume => {
+                Some("frankensim-h7xu5.8.2")
+            }
             Self::Verify => Some("frankensim-h7xu5.8.4"),
             Self::Mux => Some("frankensim-h7xu5.8.5"),
         }
@@ -345,16 +349,28 @@ fn run_cinematic_with_gate_request(
         );
         build_static_plan(&request, &cx)
     });
+    finish_static_build(request.mode, json, gate, result)
+}
+
+fn finish_static_build(
+    mode: CinematicMode,
+    json: bool,
+    gate: &CancelGate,
+    result: Result<StaticPlan, Failure>,
+) -> CommandOutput {
+    if gate.is_requested() {
+        return format_failure(mode, json, cancelled(mode));
+    }
     match result {
         Ok(plan) => finish_plan(json, plan),
-        Err(failure) => format_failure(request.mode, json, failure),
+        Err(failure) => format_failure(mode, json, failure),
     }
 }
 
 fn parse_request(arguments: &[String]) -> Result<CinematicRequest, Failure> {
     let Some(mode_name) = arguments.first() else {
         return Err(usage_failure(
-            CinematicMode::Inspect,
+            CinematicMode::Unknown,
             "a cinematic mode is required",
         ));
     };
@@ -431,11 +447,21 @@ fn parse_request(arguments: &[String]) -> Result<CinematicRequest, Failure> {
         }
     }
     let trajectory_source = trajectory.ok_or_else(|| {
-        usage_failure(
-            mode,
-            "exactly one of `--trajectory <artifact>` or `--run-reduced` is required",
-        )
+        let message = if matches!(mode, CinematicMode::Verify | CinematicMode::Mux) {
+            "verify and mux require `--trajectory <artifact>`"
+        } else {
+            "exactly one of `--trajectory <artifact>` or `--run-reduced` is required"
+        };
+        usage_failure(mode, message)
     })?;
+    if matches!(mode, CinematicMode::Verify | CinematicMode::Mux)
+        && matches!(&trajectory_source, TrajectorySource::ReducedCampaign)
+    {
+        return Err(usage_failure(
+            mode,
+            "verify and mux consume an existing trajectory artifact; `--run-reduced` is not a valid source for these modes",
+        ));
+    }
     let availability = availability.finish(mode.needs_resources(), mode)?;
     Ok(CinematicRequest {
         mode,
@@ -522,6 +548,24 @@ fn build_static_plan(request: &CinematicRequest, cx: &Cx<'_>) -> Result<StaticPl
     let profile = document
         .quality_profile()
         .map_err(|error| document_failure(request.mode, error))?;
+    validate_trajectory_reference(document.trajectory(), request.mode)?;
+    if request.mode == CinematicMode::Mux
+        && matches!(document.mux_request(), CinematicMuxRequest::None)
+    {
+        return Err(Failure::one(
+            exit::REFUSED,
+            Diagnostic::new(
+                request.mode,
+                "cinematic-mux-not-requested",
+                "config.mux",
+                "mux mode requires an explicit quarantined-adapter request",
+                vec![
+                    "version the configuration with a supported mux request and declared quarantined-mux capability"
+                        .to_owned(),
+                ],
+            ),
+        ));
+    }
     if let Some(required) = request.mode.required_tier()
         && profile.input().tier != required
     {
@@ -570,9 +614,14 @@ fn build_static_plan(request: &CinematicRequest, cx: &Cx<'_>) -> Result<StaticPl
     })?;
     let mut aggregate_asset_bytes = 0u64;
     let config = document
-        .admit_with_asset_resolver(|_, _, declaration| {
-            resolve_asset(&base, declaration, &mut aggregate_asset_bytes, cx)
-        })
+        .admit_with_asset_resolver(
+            CinematicAssetAdmissionBudget::DEFAULT,
+            || {
+                cx.checkpoint()
+                    .map_err(|_| CinematicAssetAccessError::Cancelled)
+            },
+            |_, _, declaration| resolve_asset(&base, declaration, &mut aggregate_asset_bytes, cx),
+        )
         .map_err(|error| document_failure(request.mode, error))?;
     checkpoint(request.mode, cx)?;
 
@@ -581,7 +630,7 @@ fn build_static_plan(request: &CinematicRequest, cx: &Cx<'_>) -> Result<StaticPl
             verify_trajectory(path, document.trajectory(), request.mode, cx)?
         }
         TrajectorySource::ReducedCampaign => TrajectoryFacts {
-            source: "scheduled-reduced-campaign",
+            source: "requested-reduced-campaign",
             verified: false,
             byte_len: None,
             sample_count: None,
@@ -589,23 +638,6 @@ fn build_static_plan(request: &CinematicRequest, cx: &Cx<'_>) -> Result<StaticPl
             chunk_count: None,
         },
     };
-    if request.mode == CinematicMode::Mux
-        && matches!(document.mux_request(), CinematicMuxRequest::None)
-    {
-        return Err(Failure::one(
-            exit::REFUSED,
-            Diagnostic::new(
-                request.mode,
-                "cinematic-mux-not-requested",
-                "config.mux",
-                "mux mode requires an explicit quarantined-adapter request",
-                vec![
-                    "version the configuration with a supported mux request and declared quarantined-mux capability"
-                        .to_owned(),
-                ],
-            ),
-        ));
-    }
     Ok(StaticPlan {
         mode: request.mode,
         profile,
@@ -689,10 +721,21 @@ fn read_file_bytes(path: &Path, maximum: u64, cx: &Cx<'_>) -> Result<Vec<u8>, Re
     if cx.checkpoint().is_err() {
         return Err(ReadFailure::Cancelled);
     }
-    let mut file = File::open(path).map_err(|_| ReadFailure::Unavailable)?;
-    let declared = file.metadata().map_err(|_| ReadFailure::Unavailable)?.len();
+    let metadata = path.metadata().map_err(|_| ReadFailure::Unavailable)?;
+    if !metadata.is_file() {
+        return Err(ReadFailure::Unavailable);
+    }
+    let declared = metadata.len();
     if declared > maximum {
         return Err(ReadFailure::TooLarge);
+    }
+    let mut file = File::open(path).map_err(|_| ReadFailure::Unavailable)?;
+    if !file
+        .metadata()
+        .map_err(|_| ReadFailure::Unavailable)?
+        .is_file()
+    {
+        return Err(ReadFailure::Unavailable);
     }
     let capacity = usize::try_from(declared).map_err(|_| ReadFailure::TooLarge)?;
     let mut output = Vec::new();
@@ -730,10 +773,8 @@ fn read_bounded_file(
     cx: &Cx<'_>,
 ) -> Result<Vec<u8>, Failure> {
     read_file_bytes(path, maximum, cx).map_err(|kind| {
-        if kind == ReadFailure::Cancelled {
-            return cancelled(mode);
-        }
         let (code, message, repair) = match kind {
+            ReadFailure::Cancelled => return cancelled(mode),
             ReadFailure::Unavailable => (
                 "cinematic-input-unavailable",
                 "the input could not be opened or read",
@@ -749,7 +790,6 @@ fn read_bounded_file(
                 "bounded input storage could not be reserved",
                 "reduce input size or make more memory available",
             ),
-            ReadFailure::Cancelled => unreachable!(),
         };
         Failure::one(
             exit::INPUT,
@@ -764,21 +804,7 @@ fn verify_trajectory(
     mode: CinematicMode,
     cx: &Cx<'_>,
 ) -> Result<TrajectoryFacts, Failure> {
-    if expected.version() != u32::from(EULER_RENDER_TRAJECTORY_CODEC_VERSION) {
-        return Err(Failure::one(
-            exit::REFUSED,
-            Diagnostic::new(
-                mode,
-                "cinematic-trajectory-version-mismatch",
-                "config.trajectory",
-                "the trajectory reference version is not the supported artifact codec version",
-                vec![format!(
-                    "set the trajectory reference version to {EULER_RENDER_TRAJECTORY_CODEC_VERSION} after producing that exact codec"
-                )],
-            ),
-        ));
-    }
-    let mut file = File::open(path).map_err(|_| {
+    let metadata = path.metadata().map_err(|_| {
         Failure::one(
             exit::INPUT,
             Diagnostic::new(
@@ -790,21 +816,19 @@ fn verify_trajectory(
             ),
         )
     })?;
-    let byte_len = file
-        .metadata()
-        .map_err(|_| {
-            Failure::one(
-                exit::INPUT,
-                Diagnostic::new(
-                    mode,
-                    "cinematic-trajectory-unavailable",
-                    "trajectory",
-                    "the trajectory artifact metadata could not be read",
-                    vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
-                ),
-            )
-        })?
-        .len();
+    if !metadata.is_file() {
+        return Err(Failure::one(
+            exit::INPUT,
+            Diagnostic::new(
+                mode,
+                "cinematic-trajectory-unavailable",
+                "trajectory",
+                "the trajectory input is not a regular file",
+                vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
+            ),
+        ));
+    }
+    let byte_len = metadata.len();
     if byte_len > MAX_CINEMATIC_TRAJECTORY_BYTES {
         return Err(Failure::one(
             exit::INPUT,
@@ -819,6 +843,45 @@ fn verify_trajectory(
                 ],
             )
             .with_resource("bytes", byte_len, MAX_CINEMATIC_TRAJECTORY_BYTES),
+        ));
+    }
+    let mut file = File::open(path).map_err(|_| {
+        Failure::one(
+            exit::INPUT,
+            Diagnostic::new(
+                mode,
+                "cinematic-trajectory-unavailable",
+                "trajectory",
+                "the trajectory artifact could not be opened",
+                vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
+            ),
+        )
+    })?;
+    if !file
+        .metadata()
+        .map_err(|_| {
+            Failure::one(
+                exit::INPUT,
+                Diagnostic::new(
+                    mode,
+                    "cinematic-trajectory-unavailable",
+                    "trajectory",
+                    "the trajectory artifact metadata could not be read",
+                    vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
+                ),
+            )
+        })?
+        .is_file()
+    {
+        return Err(Failure::one(
+            exit::INPUT,
+            Diagnostic::new(
+                mode,
+                "cinematic-trajectory-unavailable",
+                "trajectory",
+                "the opened trajectory input is not a regular file",
+                vec!["provide a readable canonical Euler trajectory artifact".to_owned()],
+            ),
         ));
     }
     let budget = RenderTrajectoryCodecBudget {
@@ -866,6 +929,27 @@ fn verify_trajectory(
         transition_count: Some(receipt.transition_count()),
         chunk_count: Some(receipt.chunk_count()),
     })
+}
+
+fn validate_trajectory_reference(
+    reference: fs_evidence::cinematic_config::CinematicComponentRef,
+    mode: CinematicMode,
+) -> Result<(), Failure> {
+    if reference.version() == u32::from(EULER_RENDER_TRAJECTORY_SCHEMA_VERSION) {
+        return Ok(());
+    }
+    Err(Failure::one(
+        exit::REFUSED,
+        Diagnostic::new(
+            mode,
+            "cinematic-trajectory-version-mismatch",
+            "config.trajectory",
+            "the trajectory reference version is not the supported trajectory schema version",
+            vec![format!(
+                "set the trajectory reference version to {EULER_RENDER_TRAJECTORY_SCHEMA_VERSION} after producing that exact schema"
+            )],
+        ),
+    ))
 }
 
 fn checkpoint(mode: CinematicMode, cx: &Cx<'_>) -> Result<(), Failure> {
@@ -1074,10 +1158,25 @@ fn finish_plan(json: bool, plan: StaticPlan) -> CommandOutput {
             stderr: String::new(),
         };
     }
-    let dependency = plan
-        .mode
-        .downstream_owner()
-        .expect("every non-inspect execution mode has an owner");
+    let Some(dependency) = plan.mode.downstream_owner() else {
+        return format_failure(
+            plan.mode,
+            json,
+            Failure::one(
+                exit::UNAVAILABLE,
+                Diagnostic::new(
+                    plan.mode,
+                    "cinematic-stage-owner-missing",
+                    "execution.stage",
+                    "the admitted mode has no authoritative execution-stage owner",
+                    vec![
+                        "bind the mode to a concrete producer Bead before enabling execution"
+                            .to_owned(),
+                    ],
+                ),
+            ),
+        );
+    };
     let diagnostic = Diagnostic::new(
         plan.mode,
         "cinematic-stage-unavailable",
@@ -1102,7 +1201,7 @@ fn format_plan(json: bool, plan: &StaticPlan, status: &str, dependency: Option<&
     let profile = plan.profile.input();
     if !json {
         let mut out = format!(
-            "status={status}\ncommand=cinematic\nmode={}\nquality_profile={}\nresolution={}x{}\nfirst_frame={}\nframe_count={}\nspp_floor={}\nspp_ceiling={}\nprofile_identity={}\ncomposition_identity={}\nconfigured_trajectory_artifact_identity={}\ntrajectory_partition_identity={}\nimage_identity={}\naudio_identity={}\nmux_identity={}\nartifact_namespace={}\ntrajectory_source={}\ntrajectory_verified={}\ncapability_authority=caller-declared-unverified\nwould_write=false\nauthority={STATIC_AUTHORITY}\nno_claim={STATIC_NO_CLAIM}\n",
+            "status={status}\ncommand=cinematic\nmode={}\nquality_profile={}\nresolution={}x{}\nfirst_frame={}\nframe_count={}\nspp_floor={}\nspp_ceiling={}\nprofile_identity={}\ncomposition_identity={}\nconfigured_trajectory_artifact_identity={}\ntrajectory_partition_identity={}\nimage_identity={}\naudio_identity={}\nmux_identity={}\nartifact_namespace={}\ntrajectory_source={}\ntrajectory_verified={}\nresource_admission={}\ncapability_authority=caller-declared-unverified\nwould_write=false\nauthority={STATIC_AUTHORITY}\nno_claim={STATIC_NO_CLAIM}\n",
             plan.mode.name(),
             tier_name(profile.tier),
             profile.width_pixels,
@@ -1121,6 +1220,11 @@ fn format_plan(json: bool, plan: &StaticPlan, status: &str, dependency: Option<&
             escape_text(&plan.namespace),
             plan.trajectory.source,
             plan.trajectory.verified,
+            if plan.estimate.is_some() {
+                "admitted"
+            } else {
+                "not-requested"
+            },
         );
         if let Some(estimate) = plan.estimate {
             let _ = write!(
@@ -1211,7 +1315,16 @@ fn format_plan(json: bool, plan: &StaticPlan, status: &str, dependency: Option<&
         }
         push_json_string(&mut out, stage);
     }
-    out.push_str("],\"capability_authority\":\"caller-declared-unverified\",\"would_write\":false");
+    out.push_str("],\"resource_admission\":");
+    push_json_string(
+        &mut out,
+        if plan.estimate.is_some() {
+            "admitted"
+        } else {
+            "not-requested"
+        },
+    );
+    out.push_str(",\"capability_authority\":\"caller-declared-unverified\",\"would_write\":false");
     if let Some(dependency) = dependency {
         out.push_str(",\"dependency\":");
         push_json_string(&mut out, dependency);
@@ -1227,7 +1340,7 @@ fn format_plan(json: bool, plan: &StaticPlan, status: &str, dependency: Option<&
 fn planned_stages(mode: CinematicMode) -> &'static [&'static str] {
     match mode {
         CinematicMode::Unknown => &[],
-        CinematicMode::Inspect => &["config", "assets", "trajectory", "static-budget"],
+        CinematicMode::Inspect => &["config", "assets", "trajectory"],
         CinematicMode::Storyboard
         | CinematicMode::Daily
         | CinematicMode::Representative4kFrame
@@ -1249,15 +1362,20 @@ fn format_failure(mode: CinematicMode, json: bool, failure: Failure) -> CommandO
     for diagnostic in &failure.diagnostics {
         stderr.push_str(&format_diagnostic(json, diagnostic));
     }
+    let status = if failure.exit_code == exit::CANCELLED {
+        "cancelled"
+    } else {
+        "refused"
+    };
     let stdout = if json {
         format!(
-            "{{\"schema\":\"{CINEMATIC_CLI_RESULT_SCHEMA}\",\"command\":\"cinematic\",\"mode\":\"{}\",\"status\":\"refused\",\"finding_count\":{},\"would_write\":false}}\n",
+            "{{\"schema\":\"{CINEMATIC_CLI_RESULT_SCHEMA}\",\"command\":\"cinematic\",\"mode\":\"{}\",\"status\":\"{status}\",\"finding_count\":{},\"would_write\":false}}\n",
             mode.name(),
             failure.diagnostics.len(),
         )
     } else {
         format!(
-            "status=refused\ncommand=cinematic\nmode={}\nfinding_count={}\nwould_write=false\n",
+            "status={status}\ncommand=cinematic\nmode={}\nfinding_count={}\nwould_write=false\n",
             mode.name(),
             failure.diagnostics.len(),
         )
@@ -1390,4 +1508,30 @@ fn escape_text(value: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_build_cancellation_has_priority_over_an_ordinary_refusal() {
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        let ordinary = Failure::one(
+            exit::INPUT,
+            Diagnostic::new(
+                CinematicMode::Inspect,
+                "ordinary-input-refusal",
+                "config",
+                "ordinary refusal",
+                vec!["ordinary repair".to_owned()],
+            ),
+        );
+        let output = finish_static_build(CinematicMode::Inspect, true, &gate, Err(ordinary));
+        assert_eq!(output.exit_code, exit::CANCELLED);
+        assert!(output.stdout.contains("\"status\":\"cancelled\""));
+        assert!(output.stderr.contains("cinematic-cancelled"));
+        assert!(!output.stderr.contains("ordinary-input-refusal"));
+    }
 }
