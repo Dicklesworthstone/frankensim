@@ -8024,34 +8024,6 @@ const fn maximum_spectral_traversals(max_depth: u32) -> u64 {
     max_depth as u64 * PACKET as u64
 }
 
-fn rough_dielectric_microfacet_normal(
-    normal: Vec3,
-    roughness_alpha: f64,
-    microfacet_u: f64,
-    microfacet_v: f64,
-) -> Result<Vec3, TracerError> {
-    let normal_norm = normal.norm();
-    if !normal_norm.is_finite()
-        || normal_norm <= 0.0
-        || !roughness_alpha.is_finite()
-        || !(0.0..1.0).contains(&microfacet_u)
-        || !(0.0..1.0).contains(&microfacet_v)
-    {
-        return Err(TracerError::InvalidInput);
-    }
-    let normal = normal.scale(1.0 / normal_norm);
-    let alpha_squared = roughness_alpha * roughness_alpha;
-    let cos_m_squared =
-        ((1.0 - microfacet_u) / (microfacet_u * (alpha_squared - 1.0) + 1.0)).clamp(0.0, 1.0);
-    let cos_m = cos_m_squared.sqrt();
-    let sin_m = (1.0 - cos_m_squared).max(0.0).sqrt();
-    let phi = 2.0 * PI * microfacet_v;
-    Ok(to_world_all_sphere(
-        normal,
-        [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m],
-    ))
-}
-
 /// Sample one complete dielectric continuation for every wavelength at the
 /// first dispersive boundary. All lanes share the admitted microfacet and
 /// event uniforms as a variance-reducing correlation, but each marginal uses
