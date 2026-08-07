@@ -76,7 +76,6 @@ struct SequenceIdentity {
     scene_hash: String,
     composition: String,
     aov_profile: String,
-    config_hash: String,
 }
 
 impl DailyCoreFrame {
@@ -380,12 +379,16 @@ fn validate_daily_core_attributes(
             path.display()
         ));
     }
+    // The per-frame AOV configuration hash is mandatory integrity metadata,
+    // but it is not a sequence identity: the hash deliberately commits to the
+    // absolute frame index and neighbouring frame times.  Requiring equality
+    // across frames would reject every valid temporal sequence at frame 1.
+    let _frame_config_hash = exr_attribute_string(exr, "frankensim.aov.configHash", path)?;
     Ok(SequenceIdentity {
         source_trajectory: exr_attribute_string(exr, "frankensim.source.trajectory", path)?,
         scene_hash: exr_attribute_string(exr, "frankensim.source.sceneHash", path)?,
         composition: exr_attribute_string(exr, "frankensim.source.composition", path)?,
         aov_profile,
-        config_hash: exr_attribute_string(exr, "frankensim.aov.configHash", path)?,
     })
 }
 
@@ -629,6 +632,41 @@ mod tests {
         attribute.value = 7_u64.to_le_bytes().to_vec();
         decode_daily_core(exr, Path::new("fixture.exr"), 7)
             .expect("matching uint64 metadata must be accepted");
+    }
+
+    #[test]
+    fn consecutive_frames_allow_distinct_frame_bound_aov_config_hashes() {
+        let first = daily_core();
+        let first_identity = validate_daily_core_attributes(&first, Path::new("frame-0.exr"), 0)
+            .expect("first frame provenance");
+
+        let mut second = daily_core();
+        let frame_index = second
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.frame.index")
+            .expect("fixture frame index");
+        frame_index.value = b"1".to_vec();
+        let config_hash = second
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.aov.configHash")
+            .expect("fixture AOV config hash");
+        config_hash.value = b"config-frame-1".to_vec();
+
+        let second_identity = validate_daily_core_attributes(&second, Path::new("frame-1.exr"), 1)
+            .expect("second frame provenance");
+        assert_eq!(first_identity, second_identity);
+    }
+
+    #[test]
+    fn every_frame_still_requires_its_aov_config_hash() {
+        let mut exr = daily_core();
+        exr.attributes
+            .retain(|attribute| attribute.name != "frankensim.aov.configHash");
+        let error = validate_daily_core_attributes(&exr, Path::new("frame-0.exr"), 0)
+            .expect_err("missing per-frame integrity metadata must be refused");
+        assert!(error.contains("missing required attribute frankensim.aov.configHash"));
     }
 
     #[test]

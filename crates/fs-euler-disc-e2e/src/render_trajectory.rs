@@ -487,16 +487,48 @@ impl RenderTrajectory {
         profile: &ResolvedDiscProfile,
         cx: &Cx<'_>,
     ) -> Result<Self, RenderTrajectoryError> {
+        Self::from_reduced_decay_run_tail(
+            run,
+            profile,
+            REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
+            "final eight-second tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff".to_owned(),
+            cx,
+        )
+    }
+
+    /// Build a longer source-bound tail for fixture-internal acoustic preroll.
+    ///
+    /// This keeps the public eight-second visual bridge unchanged. The caller
+    /// must identify the longer tail as an internal warm-start source rather
+    /// than presenting it as the picture trajectory.
+    pub(crate) fn from_reduced_decay_run_with_tail_horizon(
+        run: &ReducedDecayRun,
+        profile: &ResolvedDiscProfile,
+        tail_horizon_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        Self::from_reduced_decay_run_tail(
+            run,
+            profile,
+            tail_horizon_s,
+            format!(
+                "final {tail_horizon_s:.17e}-second internal acoustic-preroll tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff"
+            ),
+            cx,
+        )
+    }
+
+    fn from_reduced_decay_run_tail(
+        run: &ReducedDecayRun,
+        profile: &ResolvedDiscProfile,
+        tail_horizon_s: f64,
+        applicability: String,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RenderTrajectoryError> {
         cx.checkpoint()
             .map_err(|_| RenderTrajectoryError::Cancelled)?;
         let mass = validate_reduced_decay_render_source(run, profile, cx)?;
-        let inputs = reduced_decay_sample_inputs(
-            run,
-            profile,
-            mass,
-            REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
-            cx,
-        )?;
+        let inputs = reduced_decay_sample_inputs(run, profile, mass, tail_horizon_s, cx)?;
         let initial = inputs
             .first()
             .ok_or(RenderTrajectoryError::EmptyTrajectory)?;
@@ -565,8 +597,7 @@ impl RenderTrajectory {
                 "fs-euler-disc-e2e/reduced-decay-render-bridge-v{}",
                 REDUCED_DECAY_RENDER_BRIDGE_VERSION
             ),
-            applicability: "final eight-second tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff"
-                .to_owned(),
+            applicability,
             no_claims: vec![
                 "literature-calibrated analytical trajectory; not a raw measured trajectory"
                     .to_owned(),
@@ -969,6 +1000,7 @@ fn validate_reduced_decay_render_source(
             * run.parameters.mass_kg
             * run.parameters.gravity_m_per_s2
             * run.parameters.radius_m
+            * sample.theta_rad.cos()
             * sample.omega_rad_s;
         let expected_air = bildsten_prefactor
             * BILDSTEN_PUBLISHED_POWER_COEFFICIENT
@@ -1184,6 +1216,7 @@ fn reduced_decay_benchmark_powers(
         * run.parameters.mass_kg
         * run.parameters.gravity_m_per_s2
         * run.parameters.radius_m
+        * theta_rad.cos()
         * omega_rad_s;
     let bildsten_boundary_layer_w = bildsten_prefactor
         * BILDSTEN_PUBLISHED_POWER_COEFFICIENT

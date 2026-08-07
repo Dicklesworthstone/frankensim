@@ -1065,7 +1065,8 @@ fn thorne_bridge_refuses_an_intermediate_state_that_does_not_follow_the_decay_st
             * run.parameters.gravity_m_per_s2
             * run.parameters.radius_m
             * corrupted_theta_rad;
-        sample.powers.published_rolling_w *= sample.omega_rad_s / original_omega_rad_s;
+        sample.powers.published_rolling_w *= (sample.omega_rad_s * corrupted_theta_rad.cos())
+            / (original_omega_rad_s * original_theta_rad.cos());
         sample.powers.bildsten_boundary_layer_w *=
             (corrupted_theta_rad / original_theta_rad).powf(-1.25);
 

@@ -81,8 +81,13 @@ pub const CRITIQUE_FPS: u32 = 24;
 pub const CRITIQUE_FRAMES: u32 = 192;
 /// Five-millisecond deterministic taper applied at the censored soundtrack end.
 const TERMINAL_FADE_SAMPLE_FRAMES: u32 = 240;
-/// Twenty-millisecond presentation fade suppressing the analytical crop boundary.
+/// Twenty-millisecond presentation fade at the published clip onset.
 const INITIAL_FADE_SAMPLE_FRAMES: u32 = 960;
+/// One exact video frame of real source history used to warm the modal state.
+const AUDIO_PREROLL_VIDEO_FRAMES: u32 = 1;
+/// Exact 48 kHz samples in the source-bound modal warm start.
+const AUDIO_PREROLL_SAMPLE_FRAMES: u64 = 2_000;
+const AUDIO_PREROLL_POLICY_ID: &str = "source-bound-final-one-video-frame-modal-warm-start-v1";
 /// Conservative reconstruction ceiling for the sub-100 Hz trajectory-derived
 /// harmonic-one contact modulation and its slowly varying rolling envelope.
 const CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
@@ -312,6 +317,8 @@ struct FixtureAudio {
     chirp_end_hz: f64,
     pre_master_peak_fs: f64,
     master_gain_db: f64,
+    warm_start_source_identity: ContentHash,
+    warm_start_checkpoint_identity: ContentHash,
     spatialization: Option<FixtureSpatialAudioEvidence>,
 }
 
@@ -459,6 +466,15 @@ pub fn run_cinematic_fixture(
     let run = &refinement.coarse;
     let trajectory =
         RenderTrajectory::from_reduced_decay_run(run, &profile, cx).map_err(pipeline)?;
+    let audio_preroll_horizon_s =
+        duration_s + f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
+    let audio_preroll_trajectory = RenderTrajectory::from_reduced_decay_run_with_tail_horizon(
+        run,
+        &profile,
+        audio_preroll_horizon_s,
+        cx,
+    )
+    .map_err(pipeline)?;
     let retained_time_s = trajectory
         .samples()
         .last()
@@ -486,13 +502,24 @@ pub fn run_cinematic_fixture(
         cx,
     )
     .map_err(pipeline)?;
+    let audio_preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+        hash_domain(
+            "org.frankensim.euler-critique.audio-preroll-source.v1",
+            trajectory_artifact.receipt().artifact_identity().as_bytes(),
+        ),
+        audio_preroll_trajectory,
+        Vec::new(),
+        RenderTrajectoryCodecBudget::DEFAULT,
+        cx,
+    )
+    .map_err(pipeline)?;
     progress(&trajectory_diagnostics(&trajectory_artifact));
 
     // Sound construction is much cheaper than path tracing and depends only
     // on the admitted trajectory. Fail here before spending render-hours if a
     // synthesis, mastering, or artifact contract is unsatisfied.
     progress("stage=audio begin");
-    let audio = build_audio(&trajectory_artifact, config, cx)?;
+    let audio = build_audio(&trajectory_artifact, &audio_preroll_artifact, config, cx)?;
     audio
         .artifact
         .verify(AudioArtifactBudget::DEFAULT, cx)
@@ -780,6 +807,8 @@ pub fn run_cinematic_fixture(
         audio.artifact.manifest().wav().wav_identity(),
         audio.modal_parameter_set_identity,
         &audio.modal_parameter_set_disclosure,
+        audio.warm_start_source_identity,
+        audio.warm_start_checkpoint_identity,
         audio.chirp_start_hz,
         audio.chirp_end_hz,
         audio.pre_master_peak_fs,
@@ -1054,13 +1083,173 @@ fn trajectory_body_contact_chirp_bounds(
     Ok((first, previous))
 }
 
+fn map_all_audio_intervals(
+    mapper: &AudioExcitationMapper<'_, '_>,
+    cx: &Cx<'_>,
+) -> Result<Vec<crate::AudioExcitationInterval>, CinematicFixtureError> {
+    let selected_count = mapper.grid().interval_count;
+    let mut mapped = Vec::new();
+    mapped
+        .try_reserve_exact(selected_count)
+        .map_err(|_| CinematicFixtureError::Pipeline("audio interval allocation refused".into()))?;
+    let mut checkpoint = mapper.initial_checkpoint(cx).map_err(pipeline)?;
+    while checkpoint.next_interval_index() < selected_count {
+        let remaining = selected_count - checkpoint.next_interval_index();
+        let chunk_size = remaining.min(65_536);
+        let chunk = mapper
+            .map_next_chunk(
+                &checkpoint,
+                NonZeroUsize::new(chunk_size).expect("positive remaining interval count"),
+                cx,
+            )
+            .map_err(pipeline)?;
+        mapped.extend(chunk.intervals);
+        checkpoint = chunk.successor;
+    }
+    if mapped.len() != selected_count {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "audio mapping retained {} of {selected_count} source intervals",
+            mapped.len()
+        )));
+    }
+    Ok(mapped)
+}
+
+fn fixture_resampling_input(
+    video_clock: CinematicClock,
+    audio_clock: CinematicClock,
+) -> AudioResamplingModelInput {
+    AudioResamplingModelInput {
+        video_clock,
+        audio_clock,
+        declared_source_bandwidth_hz: CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
+        filter: AudioReconstructionFilterSpec {
+            passband_edge_hz: 2_000.0,
+            stopband_edge_hz: 4_800.0,
+            half_length: 128,
+            maximum_passband_ripple_db: 0.1,
+            minimum_stopband_attenuation_db: 80.0,
+            response_grid_intervals: 8_192,
+        },
+        boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+        event_fractional_delay: AudioEventFractionalDelay::LinearTwoBoundaryV1,
+        budget: AudioResamplingBudget::reference_film(),
+    }
+}
+
+fn fixture_timeline_identity(
+    frames: u32,
+    audio_frame_count: u64,
+    warm_start_checkpoint_identity: Option<ContentHash>,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.master-clocks.v2");
+    hasher.update(&CRITIQUE_FPS.to_le_bytes());
+    hasher.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
+    hasher.update(&0_i64.to_le_bytes());
+    hasher.update(&frames.to_le_bytes());
+    hasher.update(&0_i64.to_le_bytes());
+    hasher.update(&audio_frame_count.to_le_bytes());
+    if let Some(identity) = warm_start_checkpoint_identity {
+        hasher.update(AUDIO_PREROLL_POLICY_ID.as_bytes());
+        hasher.update(&AUDIO_PREROLL_SAMPLE_FRAMES.to_le_bytes());
+        hasher.update(identity.as_bytes());
+    } else {
+        hasher.update(b"zero-state-origin");
+    }
+    hasher.finalize()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_fixture_sound(
+    trajectory: &EulerRenderTrajectoryArtifact,
+    mapper: &AudioExcitationMapper<'_, '_>,
+    modal: &crate::ModalSynthesisModel,
+    resampler: &AudioResampler,
+    video_clock: CinematicClock,
+    audio_clock: CinematicClock,
+    timeline_identity: ContentHash,
+    mappings: Vec<SoundExcitationControl>,
+) -> Result<SoundSynthesisConfig, CinematicFixtureError> {
+    let listener = ListenerPose {
+        frame: ListenerFrame::AnimatedCamera,
+        position_m: [0.0, 0.0, 0.0],
+        forward: [0.0, 0.0, -1.0],
+        up: [0.0, 1.0, 0.0],
+    };
+    SoundSynthesisConfig::try_admit(SoundSynthesisInput {
+        schema_version: SOUND_SYNTHESIS_SCHEMA_VERSION,
+        authority: SoundAuthority::PhysicallyInformed,
+        trajectory: component(
+            CinematicComponentRole::Trajectory,
+            trajectory.receipt().artifact_identity(),
+            u32::from(EULER_RENDER_TRAJECTORY_SCHEMA_VERSION),
+        )?,
+        excitation: component(
+            CinematicComponentRole::AudioExcitation,
+            mapper.identity(),
+            AUDIO_EXCITATION_ALGORITHM_VERSION,
+        )?,
+        sound_model: component(
+            CinematicComponentRole::SoundModel,
+            modal.identity(),
+            crate::MODAL_SYNTHESIS_ALGORITHM_VERSION,
+        )?,
+        microphone: component(
+            CinematicComponentRole::Microphone,
+            listener_identity(listener),
+            1,
+        )?,
+        room: component(CinematicComponentRole::Room, dry_room_identity(), 1)?,
+        timeline: component(CinematicComponentRole::Timeline, timeline_identity, 2)?,
+        video_clock,
+        audio_clock,
+        channel_layout: SoundChannelLayout::Stereo,
+        listener,
+        excitation_controls: mappings,
+        modes: modal.modes().to_vec(),
+        room_response: SoundRoomResponse::Dry,
+        amplitude_reference: SoundAmplitudeReference::DigitalFullScale { headroom_db: 6.0 },
+        trajectory_disposition: SoundTrajectoryDisposition::HorizonCensored,
+        terminal_policy: SoundTerminalPolicy::FadeAtLastAccepted {
+            fade_sample_frames: TERMINAL_FADE_SAMPLE_FRAMES,
+        },
+        resampler_identity: resampler.identity(),
+        resampler_version: AUDIO_RESAMPLING_ALGORITHM_VERSION,
+        filter_identity: resampler.filter_identity(),
+        filter_version: AUDIO_RECONSTRUCTION_FILTER_VERSION,
+        assumptions: vec![
+            SoundModelAssumption::LinearModalSuperposition,
+            SoundModelAssumption::TimeInvariantDamping,
+            SoundModelAssumption::DeclaredExcitationCompleteness,
+            SoundModelAssumption::DeclaredRoomResponse,
+        ],
+        calibration: None,
+    })
+    .map_err(pipeline)
+}
+
 fn build_audio(
     trajectory: &EulerRenderTrajectoryArtifact,
+    preroll_trajectory: &EulerRenderTrajectoryArtifact,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
 ) -> Result<FixtureAudio, CinematicFixtureError> {
     let (audio_frame_count, video_clock, audio_clock) = fixture_master_clocks(config.frames)?;
+    let preroll_video_frames = config
+        .frames
+        .checked_add(AUDIO_PREROLL_VIDEO_FRAMES)
+        .ok_or_else(|| CinematicFixtureError::Pipeline("audio preroll frame overflow".into()))?;
+    let (preroll_audio_frame_count, preroll_video_clock, preroll_audio_clock) =
+        fixture_master_clocks(preroll_video_frames)?;
+    if preroll_audio_frame_count.checked_sub(audio_frame_count) != Some(AUDIO_PREROLL_SAMPLE_FRAMES)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio preroll is not exactly one 24 Hz frame at 48 kHz".into(),
+        ));
+    }
     let controls = EulerControlStream::try_derive(trajectory.trajectory(), cx).map_err(pipeline)?;
+    let preroll_controls =
+        EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
     let (chirp_start_hz, chirp_end_hz) = trajectory_body_contact_chirp_bounds(trajectory)?;
     if chirp_end_hz >= CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ {
         return Err(CinematicFixtureError::Pipeline(format!(
@@ -1103,10 +1292,13 @@ fn build_audio(
                 .to_owned(),
             calibration: None,
             model: ModalSynthesisModelInput {
-            sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
-            modes: preset.modes().to_vec(),
-            budget: ModalSynthesisBudget::reference_film(audio_frame_count),
-        },
+                sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
+                modes: preset.modes().to_vec(),
+                // One model admits both the warm-start source horizon and the
+                // rebased published crop. Its identity therefore binds the
+                // longer of those two exact clocks.
+                budget: ModalSynthesisBudget::reference_film(preroll_audio_frame_count),
+            },
         },
         cx,
     )
@@ -1128,7 +1320,7 @@ fn build_audio(
             mappings: mappings.clone(),
             reduction: AudioExcitationReduction::RawIntervals,
             spatial_policy: ContactParticipationPolicy::ContactCoordinates {
-                rules: spatial_rules,
+                rules: spatial_rules.clone(),
             },
             artistic_texture: None,
             budget: AudioExcitationBudget::reference_film(interval_count),
@@ -1136,121 +1328,112 @@ fn build_audio(
         cx,
     )
     .map_err(pipeline)?;
-    let selected_count = mapper.grid().interval_count;
-    let mut mapped_intervals = Vec::new();
-    mapped_intervals
-        .try_reserve_exact(selected_count)
-        .map_err(|_| CinematicFixtureError::Pipeline("audio interval allocation refused".into()))?;
-    let mut map_checkpoint = mapper.initial_checkpoint(cx).map_err(pipeline)?;
-    while map_checkpoint.next_interval_index() < selected_count {
-        let remaining = selected_count - map_checkpoint.next_interval_index();
-        let chunk_size = remaining.min(65_536);
-        let chunk = mapper
-            .map_next_chunk(
-                &map_checkpoint,
-                NonZeroUsize::new(chunk_size).expect("positive remaining interval count"),
-                cx,
-            )
-            .map_err(pipeline)?;
-        mapped_intervals.extend(chunk.intervals);
-        map_checkpoint = chunk.successor;
-    }
-    if mapped_intervals.len() != selected_count {
-        return Err(CinematicFixtureError::Pipeline(format!(
-            "audio mapping retained {} of {selected_count} source intervals",
-            mapped_intervals.len()
-        )));
-    }
-
-    let resampler = AudioResampler::try_new(
-        &mapper,
+    let preroll_interval_count = preroll_controls.audio().len();
+    let preroll_mapper = AudioExcitationMapper::try_new(
+        preroll_trajectory,
+        &preroll_controls,
         &modal,
-        mapped_intervals,
-        AudioResamplingModelInput {
-            video_clock,
-            audio_clock,
-            declared_source_bandwidth_hz: CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
-            filter: AudioReconstructionFilterSpec {
-                passband_edge_hz: 2_000.0,
-                stopband_edge_hz: 4_800.0,
-                half_length: 128,
-                maximum_passband_ripple_db: 0.1,
-                minimum_stopband_attenuation_db: 80.0,
-                response_grid_intervals: 8_192,
+        AudioExcitationModelInput {
+            mappings: mappings.clone(),
+            reduction: AudioExcitationReduction::RawIntervals,
+            spatial_policy: ContactParticipationPolicy::ContactCoordinates {
+                rules: spatial_rules,
             },
-            boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
-            event_fractional_delay: AudioEventFractionalDelay::LinearTwoBoundaryV1,
-            budget: AudioResamplingBudget::reference_film(),
+            artistic_texture: None,
+            budget: AudioExcitationBudget::reference_film(preroll_interval_count),
         },
         cx,
     )
     .map_err(pipeline)?;
-    let timeline_identity = {
-        let mut hasher = DomainHasher::new("org.frankensim.euler-critique.master-clocks.v1");
-        hasher.update(&CRITIQUE_FPS.to_le_bytes());
-        hasher.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
-        hasher.update(&0_i64.to_le_bytes());
-        hasher.update(&config.frames.to_le_bytes());
-        hasher.update(&0_i64.to_le_bytes());
-        hasher.update(&audio_frame_count.to_le_bytes());
+    let mapped_intervals = map_all_audio_intervals(&mapper, cx)?;
+    let preroll_mapped_intervals = map_all_audio_intervals(&preroll_mapper, cx)?;
+    let resampler = AudioResampler::try_new(
+        &mapper,
+        &modal,
+        mapped_intervals,
+        fixture_resampling_input(video_clock, audio_clock),
+        cx,
+    )
+    .map_err(pipeline)?;
+    let preroll_resampler = AudioResampler::try_new(
+        &preroll_mapper,
+        &modal,
+        preroll_mapped_intervals,
+        fixture_resampling_input(preroll_video_clock, preroll_audio_clock),
+        cx,
+    )
+    .map_err(pipeline)?;
+    let preroll_sound = admit_fixture_sound(
+        preroll_trajectory,
+        &preroll_mapper,
+        &modal,
+        &preroll_resampler,
+        preroll_video_clock,
+        preroll_audio_clock,
+        fixture_timeline_identity(preroll_video_frames, preroll_audio_frame_count, None),
+        mappings.clone(),
+    )?;
+    preroll_mapper
+        .validate_sound_configuration(&preroll_sound)
+        .map_err(pipeline)?;
+    modal
+        .validate_sound_configuration(&preroll_sound)
+        .map_err(pipeline)?;
+    preroll_resampler
+        .validate_sound_configuration(&preroll_sound)
+        .map_err(pipeline)?;
+    let preroll_chunk = preroll_resampler
+        .resample_next_chunk(
+            &preroll_sound,
+            &preroll_resampler.initial_checkpoint(cx).map_err(pipeline)?,
+            NonZeroUsize::new(
+                usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+                    .expect("audio preroll frame count is representable as usize"),
+            )
+            .expect("nonzero audio preroll"),
+            cx,
+        )
+        .map_err(pipeline)?;
+    let zero_modal_checkpoint = modal.initial_checkpoint(cx).map_err(pipeline)?;
+    let warmed = preroll_chunk
+        .synthesize_modal(&modal, &zero_modal_checkpoint, cx)
+        .map_err(pipeline)?;
+    if warmed.successor.next_sample_frame() != AUDIO_PREROLL_SAMPLE_FRAMES {
+        return Err(CinematicFixtureError::Pipeline(
+            "modal warm start did not consume the exact preroll".into(),
+        ));
+    }
+    let warmed_source_checkpoint_identity = warmed.successor.identity();
+    let mut modal_checkpoint = modal
+        .rebase_checkpoint(&warmed.successor, 0, cx)
+        .map_err(pipeline)?;
+    let warm_start_source_identity = preroll_trajectory.receipt().artifact_identity();
+    let warm_start_checkpoint_identity = {
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-critique.modal-warm-start-binding.v1");
+        hasher.update(AUDIO_PREROLL_POLICY_ID.as_bytes());
+        hasher.update(&AUDIO_PREROLL_SAMPLE_FRAMES.to_le_bytes());
+        hasher.update(warm_start_source_identity.as_bytes());
+        hasher.update(preroll_resampler.identity().as_bytes());
+        hasher.update(preroll_chunk.identity.as_bytes());
+        hasher.update(warmed_source_checkpoint_identity.as_bytes());
+        hasher.update(modal_checkpoint.identity().as_bytes());
         hasher.finalize()
     };
-    let listener = ListenerPose {
-        frame: ListenerFrame::AnimatedCamera,
-        position_m: [0.0, 0.0, 0.0],
-        forward: [0.0, 0.0, -1.0],
-        up: [0.0, 1.0, 0.0],
-    };
-    let sound = SoundSynthesisConfig::try_admit(SoundSynthesisInput {
-        schema_version: SOUND_SYNTHESIS_SCHEMA_VERSION,
-        authority: SoundAuthority::PhysicallyInformed,
-        trajectory: component(
-            CinematicComponentRole::Trajectory,
-            trajectory.receipt().artifact_identity(),
-            u32::from(EULER_RENDER_TRAJECTORY_SCHEMA_VERSION),
-        )?,
-        excitation: component(
-            CinematicComponentRole::AudioExcitation,
-            mapper.identity(),
-            AUDIO_EXCITATION_ALGORITHM_VERSION,
-        )?,
-        sound_model: component(
-            CinematicComponentRole::SoundModel,
-            modal.identity(),
-            crate::MODAL_SYNTHESIS_ALGORITHM_VERSION,
-        )?,
-        microphone: component(
-            CinematicComponentRole::Microphone,
-            listener_identity(listener),
-            1,
-        )?,
-        room: component(CinematicComponentRole::Room, dry_room_identity(), 1)?,
-        timeline: component(CinematicComponentRole::Timeline, timeline_identity, 1)?,
+    let sound = admit_fixture_sound(
+        trajectory,
+        &mapper,
+        &modal,
+        &resampler,
         video_clock,
         audio_clock,
-        channel_layout: SoundChannelLayout::Stereo,
-        listener,
-        excitation_controls: mappings,
-        modes: modal.modes().to_vec(),
-        room_response: SoundRoomResponse::Dry,
-        amplitude_reference: SoundAmplitudeReference::DigitalFullScale { headroom_db: 6.0 },
-        trajectory_disposition: SoundTrajectoryDisposition::HorizonCensored,
-        terminal_policy: SoundTerminalPolicy::FadeAtLastAccepted {
-            fade_sample_frames: TERMINAL_FADE_SAMPLE_FRAMES,
-        },
-        resampler_identity: resampler.identity(),
-        resampler_version: AUDIO_RESAMPLING_ALGORITHM_VERSION,
-        filter_identity: resampler.filter_identity(),
-        filter_version: AUDIO_RECONSTRUCTION_FILTER_VERSION,
-        assumptions: vec![
-            SoundModelAssumption::LinearModalSuperposition,
-            SoundModelAssumption::TimeInvariantDamping,
-            SoundModelAssumption::DeclaredExcitationCompleteness,
-            SoundModelAssumption::DeclaredRoomResponse,
-        ],
-        calibration: None,
-    })
-    .map_err(pipeline)?;
+        fixture_timeline_identity(
+            config.frames,
+            audio_frame_count,
+            Some(warm_start_checkpoint_identity),
+        ),
+        mappings,
+    )?;
     mapper
         .validate_sound_configuration(&sound)
         .map_err(pipeline)?;
@@ -1266,7 +1449,6 @@ fn build_audio(
         .try_reserve_exact(audio_frame_count as usize)
         .map_err(|_| CinematicFixtureError::Pipeline("audio stem allocation refused".into()))?;
     let mut resampling_checkpoint = resampler.initial_checkpoint(cx).map_err(pipeline)?;
-    let mut modal_checkpoint = modal.initial_checkpoint(cx).map_err(pipeline)?;
     while resampling_checkpoint.next_audio_frame_offset() < audio_frame_count {
         let remaining = audio_frame_count - resampling_checkpoint.next_audio_frame_offset();
         let chunk_frames = usize::try_from(remaining.min(65_536))
@@ -1415,6 +1597,8 @@ fn build_audio(
         chirp_end_hz,
         pre_master_peak_fs: provisional_peak,
         master_gain_db,
+        warm_start_source_identity,
+        warm_start_checkpoint_identity,
         spatialization,
     })
 }
@@ -1814,6 +1998,8 @@ fn fixture_manifest(
     wav_identity: ContentHash,
     modal_parameter_set_identity: ContentHash,
     modal_parameter_set_disclosure: &str,
+    audio_warm_start_source_identity: ContentHash,
+    audio_warm_start_checkpoint_identity: ContentHash,
     chirp_start_hz: f64,
     chirp_end_hz: f64,
     audio_pre_master_peak_fs: f64,
@@ -1917,9 +2103,9 @@ fn fixture_manifest(
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
             "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"claim\": \"single dt/dt2 consistency pair for the encoded analytical model; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"published rolling work rate times uncalibrated 2 N/W transfer\", \"contact_phase\": \"body-contact azimuth; harmonic one; instantaneous rate Omega*cos(theta)\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
+            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"published rolling work rate times uncalibrated 2 N/W transfer\", \"contact_phase\": \"body-contact azimuth; harmonic one; instantaneous rate Omega*cos(theta)\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"modal_warm_start_policy\": \"{warm_start_policy}\", \"modal_warm_start_sample_frames\": {warm_start_frames}, \"modal_warm_start_source_identity\": \"{warm_start_source_identity}\", \"modal_warm_start_checkpoint_identity\": \"{warm_start_checkpoint_identity}\", \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the harmonic-one contact shape, modal frequencies, damping, masses, radiation gains, and rolling-power-to-force transfer are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the 256 Hz reconstruction ceiling is a conservative authored assumption, not a certified bandlimit of cropped piecewise-linear controls\", \"modal state starts from rest at the cropped eight-second boundary; acoustic prehistory is not reconstructed and the initial fade suppresses that authored startup\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the harmonic-one contact shape, modal frequencies, damping, masses, radiation gains, and rolling-power-to-force transfer are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the 256 Hz reconstruction ceiling is a conservative authored assumption, not a certified bandlimit of cropped piecewise-linear controls\", \"modal state is warmed by the final one-video-frame (2000-sample) source-bound prehistory before the published crop; earlier acoustic history is not reconstructed and the initial fade remains a presentation taper\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,
@@ -2022,6 +2208,10 @@ fn fixture_manifest(
         audio_bandwidth = CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
         modal_identity = modal_parameter_set_identity.to_hex(),
         modal_disclosure = modal_disclosure,
+        warm_start_policy = AUDIO_PREROLL_POLICY_ID,
+        warm_start_frames = AUDIO_PREROLL_SAMPLE_FRAMES,
+        warm_start_source_identity = audio_warm_start_source_identity.to_hex(),
+        warm_start_checkpoint_identity = audio_warm_start_checkpoint_identity.to_hex(),
         pre_master_peak = audio_pre_master_peak_fs,
         master_gain = audio_master_gain_db,
         initial_fade = INITIAL_FADE_SAMPLE_FRAMES,
@@ -2075,6 +2265,17 @@ mod tests {
             );
             operation(&cx)
         })
+    }
+
+    fn stereo_rms(samples: &[StereoSample]) -> f64 {
+        assert!(!samples.is_empty());
+        let sum_of_squares = samples.iter().fold(0.0, |sum, sample| {
+            sample.left_fs.mul_add(
+                sample.left_fs,
+                sample.right_fs.mul_add(sample.right_fs, sum),
+            )
+        });
+        (sum_of_squares / (2 * samples.len()) as f64).sqrt()
     }
 
     #[test]
@@ -2345,13 +2546,45 @@ mod tests {
                 cx,
             )
             .unwrap();
+            let preroll_trajectory = RenderTrajectory::from_reduced_decay_run_with_tail_horizon(
+                &refinement.coarse,
+                &profile,
+                f64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS),
+                cx,
+            )
+            .unwrap();
+            let preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+                hash_domain(
+                    "org.frankensim.euler-critique.audio-regression-preroll.v1",
+                    artifact.receipt().artifact_identity().as_bytes(),
+                ),
+                preroll_trajectory,
+                Vec::new(),
+                RenderTrajectoryCodecBudget::DEFAULT,
+                cx,
+            )
+            .unwrap();
 
+            let mut expected_warm_start = None;
             for spatialize_audio in [true, false] {
                 let mut config = CinematicFixtureConfig::default();
                 config.spatialize_audio = spatialize_audio;
-                let audio = build_audio(&artifact, &config, cx).unwrap();
+                let audio = build_audio(&artifact, &preroll_artifact, &config, cx).unwrap();
                 assert!(audio.pre_master_peak_fs.is_finite());
                 assert!(audio.pre_master_peak_fs > 0.0);
+                assert_eq!(
+                    audio.warm_start_source_identity,
+                    preroll_artifact.receipt().artifact_identity()
+                );
+                let warm_start = (
+                    audio.warm_start_source_identity,
+                    audio.warm_start_checkpoint_identity,
+                );
+                if let Some(expected) = expected_warm_start {
+                    assert_eq!(warm_start, expected);
+                } else {
+                    expected_warm_start = Some(warm_start);
+                }
                 // This exact mechanics-driven source motivated the expanded
                 // presentation-gain range. Preserve the physical 2 N/W force
                 // mapping and normalize only at the explicitly non-SPL master.
@@ -2364,6 +2597,33 @@ mod tests {
                     audio.artifact.manifest().wav().sample_frame_count(),
                     u64::from(CRITIQUE_FRAMES) * 2_000
                 );
+                let decoded = crate::decode_stereo_wav(
+                    audio.artifact.wav_bytes(),
+                    AudioArtifactBudget::DEFAULT,
+                    cx,
+                )
+                .unwrap();
+                assert_eq!(decoded.samples.len(), CRITIQUE_FRAMES as usize * 2_000);
+                assert!(
+                    decoded.samples.iter().all(|sample| {
+                        sample.left_fs.is_finite() && sample.right_fs.is_finite()
+                    })
+                );
+                let startup_rms = stereo_rms(&decoded.samples[..480]);
+                let post_fade_rms = stereo_rms(&decoded.samples[960..4_800]);
+                let startup_ratio = startup_rms / post_fade_rms;
+                eprintln!(
+                    "spatialize_audio={spatialize_audio} modal_warm_start_frames={AUDIO_PREROLL_SAMPLE_FRAMES} startup_0_10ms_rms_fs={startup_rms:.9e} post_fade_20_100ms_rms_fs={post_fade_rms:.9e} startup_ratio={startup_ratio:.9}"
+                );
+                assert!(startup_rms > 0.0);
+                assert!(post_fade_rms > 0.0);
+                assert!(
+                    startup_rms <= post_fade_rms,
+                    "warm-started onset overshot the 20-100 ms reference: {startup_rms:.9e} > {post_fade_rms:.9e} FS"
+                );
+                let terminal = decoded.samples.last().unwrap();
+                assert_eq!(terminal.left_fs, 0.0);
+                assert_eq!(terminal.right_fs, 0.0);
                 audio
                     .artifact
                     .verify(AudioArtifactBudget::DEFAULT, cx)

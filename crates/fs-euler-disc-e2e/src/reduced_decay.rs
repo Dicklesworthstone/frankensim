@@ -40,7 +40,7 @@ pub const MAX_SMALL_ANGLE_THETA_RAD: f64 = 0.2;
 /// `4 sqrt(mu rho) g^(5/4) R^(11/4) theta^(-5/4)` [W].
 pub const BILDSTEN_PUBLISHED_POWER_COEFFICIENT: f64 = 4.0;
 /// Stable model identity retained in every numerical-reference run.
-pub const REDUCED_DECAY_MODEL_ID: &str = "euler-disc-small-angle-late-stage-v1";
+pub const REDUCED_DECAY_MODEL_ID: &str = "euler-disc-small-angle-late-stage-v2";
 /// Fixed bisection count for the encoded-model channel-crossover diagnostic.
 pub const CHANNEL_CROSSOVER_BISECTION_STEPS: u32 = 64;
 /// Source identity for the Thorne et al. steel-on-glass benchmark declaration.
@@ -156,11 +156,10 @@ impl DryContourChannel {
 
 /// Direct source-bound rolling-power closure.
 ///
-/// This channel evaluates `Phi_roll = mu m g R Omega` exactly. It is kept
-/// separate from [`DryContourChannel`] because routing the same coefficient
-/// through [`ConstantContourForce`] would multiply by the generic contour
-/// speed `R Omega cos(theta)` and silently change the declared equation. Like
-/// the boundary-layer channel, this is energy-only and supplies no wrench.
+/// This channel evaluates the rolling term in Thorne et al. Eq. 5,
+/// `Phi_roll = mu m g R cos(theta) Omega`, exactly. It remains separate from
+/// [`DryContourChannel`] because it is a source-bound analytical power closure,
+/// not a generic force law or a resolved contact wrench.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishedRollingPowerChannel {
     /// Literature or declaration identity for this exact closure.
@@ -180,9 +179,17 @@ impl PublishedRollingPowerChannel {
         mass_kg: f64,
         gravity_m_per_s2: f64,
         radius_m: f64,
+        theta_rad: f64,
         omega_rad_s: f64,
     ) -> Result<f64, ReducedDecayError> {
-        let power = self.coefficient_mu * mass_kg * gravity_m_per_s2 * radius_m * omega_rad_s;
+        let cos_theta = theta_rad.cos();
+        if !(cos_theta.is_finite() && cos_theta > 0.0) {
+            return Err(ReducedDecayError::NonFiniteDerived {
+                field: "published_rolling.cos_theta",
+            });
+        }
+        let power =
+            self.coefficient_mu * mass_kg * gravity_m_per_s2 * radius_m * cos_theta * omega_rad_s;
         if !(power.is_finite() && power > 0.0) {
             return Err(ReducedDecayError::NonFiniteDerived {
                 field: "published_rolling.power_w",
@@ -1123,6 +1130,7 @@ fn powers_at(
             input.mass_kg,
             input.gravity_m_per_s2,
             input.radius_m,
+            theta_rad,
             omega_rad_s,
         )?
     } else {

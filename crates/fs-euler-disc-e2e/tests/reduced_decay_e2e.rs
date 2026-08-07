@@ -376,7 +376,7 @@ fn e2e_reduced_decay_runner_output_is_structured_and_deterministic() {
     let second = structured_runner_output(&run, &refinement).expect("structured output");
     assert_eq!(first, second);
     assert!(
-        first.starts_with("schema=reduced-decay-v1 model_id=euler-disc-small-angle-late-stage-v1 ")
+        first.starts_with("schema=reduced-decay-v1 model_id=euler-disc-small-angle-late-stage-v2 ")
     );
     assert!(first.contains("model_authority=numerical-reference-only"));
     assert!(first.contains("physical_validation=not-claimed"));
@@ -454,6 +454,7 @@ fn e2e_thorne_2026_benchmark_binds_reported_specimen_and_direct_power_laws() {
         * THORNE_2026_STEEL_DISC_MASS_KG
         * STANDARD_GRAVITY_M_PER_S2
         * radius_m
+        * initial.theta_rad.cos()
         * initial.omega_rad_s;
     assert_eq!(
         initial.powers.published_rolling_w.to_bits(),
@@ -461,8 +462,8 @@ fn e2e_thorne_2026_benchmark_binds_reported_specimen_and_direct_power_laws() {
     );
     assert_ne!(
         initial.powers.published_rolling_w.to_bits(),
-        (expected_rolling_w * initial.theta_rad.cos()).to_bits(),
-        "the source-bound channel must not inherit ConstantContourForce's cos(theta) speed"
+        (expected_rolling_w / initial.theta_rad.cos()).to_bits(),
+        "the source-bound Eq. 5 channel must retain its explicit cos(theta) factor"
     );
     let expected_air_w = 4.0
         * STANDARD_GRAVITY_M_PER_S2.powf(1.25)

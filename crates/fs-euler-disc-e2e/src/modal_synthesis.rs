@@ -36,6 +36,8 @@ pub const MAX_MODAL_SPATIAL_PARTICIPATION: f64 = 1.0;
 pub const MODAL_CANCELLATION_POLL_FRAMES: usize = 64;
 
 const MODEL_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-synthesis-model.v2";
+const CHECKPOINT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.euler-cinematic.modal-synthesis-checkpoint.v1";
 const PRESET_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-preset.v1";
 const PRESET_COMPONENT_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-preset-component.v1";
 const PARAMETER_SET_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-parameter-set.v1";
@@ -226,6 +228,24 @@ impl ModalSynthesisCheckpoint {
     #[must_use]
     pub fn states(&self) -> &[ModalModeState] {
         &self.states
+    }
+
+    /// Content identity of the exact model, sample boundary, and modal state.
+    #[must_use]
+    pub(crate) fn identity(&self) -> ContentHash {
+        let mut bytes = Vec::with_capacity(52 + self.states.len() * 20);
+        bytes.extend_from_slice(&MODAL_SYNTHESIS_ALGORITHM_VERSION.to_le_bytes());
+        bytes.extend_from_slice(self.model_identity.as_bytes());
+        bytes.extend_from_slice(&self.next_sample_frame.to_le_bytes());
+        let state_count = u64::try_from(self.states.len())
+            .expect("modal checkpoint state count is representable as u64");
+        bytes.extend_from_slice(&state_count.to_le_bytes());
+        for state in &self.states {
+            bytes.extend_from_slice(&state.mode_id.to_le_bytes());
+            bytes.extend_from_slice(&state.displacement_m.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&state.velocity_m_per_s.to_bits().to_le_bytes());
+        }
+        hash_domain(CHECKPOINT_IDENTITY_DOMAIN, &bytes)
     }
 }
 
@@ -828,6 +848,28 @@ impl ModalSynthesisModel {
             next_sample_frame: 0,
             states,
         })
+    }
+
+    /// Preserve an admitted modal state while rebasing its external sample origin.
+    ///
+    /// This is intended for an explicitly disclosed preroll/crop boundary. It
+    /// does not integrate, extrapolate, or otherwise change any modal coordinate.
+    pub(crate) fn rebase_checkpoint(
+        &self,
+        checkpoint_state: &ModalSynthesisCheckpoint,
+        next_sample_frame: u64,
+        cx: &Cx<'_>,
+    ) -> Result<ModalSynthesisCheckpoint, ModalSynthesisError> {
+        checkpoint(cx)?;
+        self.validate_checkpoint(checkpoint_state)?;
+        let rebased = ModalSynthesisCheckpoint {
+            model_identity: checkpoint_state.model_identity,
+            next_sample_frame,
+            states: checkpoint_state.states.clone(),
+        };
+        self.validate_checkpoint(&rebased)?;
+        checkpoint(cx)?;
+        Ok(rebased)
     }
 
     /// Render one transactional, zero-order-held drive chunk. The input
@@ -2202,5 +2244,53 @@ mod tests {
         assert_eq!(polls, 9, "cancellation must be injected during synthesis");
         assert_eq!(result, Err(ModalSynthesisError::Cancelled));
         assert_eq!(initial, original);
+    }
+
+    #[test]
+    fn checkpoint_rebase_preserves_state_and_binds_the_new_origin() {
+        with_test_cx(|cx| {
+            let preset = representative_modal_preset(RepresentativeDiscMaterial::StainlessSteel);
+            let model = ModalSynthesisModel::try_new(
+                ModalSynthesisModelInput {
+                    sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
+                    modes: preset.modes().to_vec(),
+                    budget: ModalSynthesisBudget::reference_film(4_000),
+                },
+                cx,
+            )
+            .unwrap();
+            let initial = model.initial_checkpoint(cx).unwrap();
+            let drive = vec![
+                ModalDriveFrame {
+                    localized_generalized_force_n: ModalComponentValues {
+                        disc: 1.0,
+                        glass_plate: 0.0,
+                        base_assembly: 0.0,
+                    },
+                    ..ModalDriveFrame::default()
+                };
+                2_000
+            ];
+            let warmed = model
+                .synthesize_chunk(&initial, &drive, ModalSpatialParticipation::Declared, cx)
+                .unwrap()
+                .successor;
+            assert_eq!(warmed.next_sample_frame(), 2_000);
+            assert!(
+                warmed
+                    .states()
+                    .iter()
+                    .any(|state| { state.displacement_m != 0.0 || state.velocity_m_per_s != 0.0 })
+            );
+
+            let rebased = model.rebase_checkpoint(&warmed, 0, cx).unwrap();
+            let replay = model.rebase_checkpoint(&warmed, 0, cx).unwrap();
+            assert_eq!(rebased.next_sample_frame(), 0);
+            assert_eq!(rebased.model_identity(), warmed.model_identity());
+            assert_eq!(rebased.states(), warmed.states());
+            assert_eq!(rebased, replay);
+            assert_eq!(rebased.identity(), replay.identity());
+            assert_ne!(rebased.identity(), warmed.identity());
+        });
     }
 }
