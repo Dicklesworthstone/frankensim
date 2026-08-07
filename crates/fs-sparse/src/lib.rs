@@ -16,6 +16,7 @@
 //! recorded follow-up bead, gated on fs-tilelang + the autotuner.
 
 pub mod bsr;
+pub mod direct;
 mod fma;
 #[cfg(feature = "fnx-interop")]
 pub mod interop;
@@ -27,6 +28,10 @@ pub mod precond;
 pub mod sell;
 
 pub use bsr::Bsr;
+pub use direct::{
+    DirectOrdering, FactorStats, Inertia, LdltError, LdltFactor, LdltOptions, SymbolicLdlt,
+    amd_order,
+};
 #[cfg(feature = "fnx-interop")]
 pub use interop::{InteropError, WEIGHT_KEY, csr_to_graph_snapshot, graph_snapshot_to_csr};
 #[cfg(feature = "fnp-interop")]

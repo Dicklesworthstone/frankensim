@@ -64,6 +64,25 @@ results are machine-specific, not a universal throughput guarantee.
   V-cycle with Chebyshev smoothing and ILU-PCG coarsest solve;
   `operator_complexity()` and `level_sizes` are the memory-honesty
   evidence. `pcg` is a REFERENCE driver (solver stack supersedes it).
+- `direct::{amd_order, DirectOrdering, SymbolicLdlt, LdltFactor, LdltOptions,
+  LdltError, Inertia, FactorStats}` (bead frankensim-fsim-sparse-direct-4a38j)
+  — sparse symmetric direct factorization P·A·Pᵀ = L·D·Lᵀ. `amd_order` is a
+  dependency-free approximate-minimum-degree port (quotient graph,
+  element absorption, ADD approximate external degree; deterministic
+  smallest-index tie-breaks). `SymbolicLdlt::analyze` validates squareness
+  and structural symmetry, orders, builds the elimination tree/postorder and
+  per-column L structures, and certifies fundamental supernodes by EXACT
+  structure comparison — one analysis serves every same-pattern numeric
+  factorization (the (K − σM) shift-ladder contract: factor-per-shift,
+  analyze-once; callers batch right-hand sides per shift). `factor` is
+  multifrontal: per-supernode dense fronts, extend-add of children's Schur
+  updates, and 1×1/2×2 threshold pivoting (Duff–Reid growth bound)
+  RESTRICTED to the fully-summed block, which is pattern-preserving because
+  supernode columns share identical structure. D's block signs yield the
+  Sylvester `Inertia` (the spectrum-slicing no-missed-modes primitive);
+  `FactorStats` records nnz(L), fill ratio, flops, peak front bytes, pivot
+  counts, and max front dimension. `LdltFactor::solve` serves repeated
+  right-hand sides.
 
 ## Invariants
 1. **Cross-format bitwise SpMV equality**: CSR, BSR, and SELL SpMV produce
@@ -106,6 +125,12 @@ instead returns `Ok(None)` for malformed canonical parts and passes through a
 caller checkpoint error as `Err`. SELL tuning parameters are a separate typed
 admission boundary: `Sell::from_csr` returns `SellError::InvalidChunkHeight`
 or `SellError::GeometryOverflow` without arithmetic or indexing panics.
+The direct-factorization stages refuse through typed `LdltError` variants
+carrying stable `FS-SPARSE-DIRECT-*` display codes: non-square input,
+structurally asymmetric patterns (with a witness entry), non-finite values,
+symbolic/numeric pattern mismatch, invalid options, and pivot breakdown.
+Pivot breakdown REFUSES rather than perturbing — a perturbed D would corrupt
+the inertia count downstream certification treats as authority.
 
 ## Determinism class
 **Bit-deterministic cross-ISA by construction**: kernels are fixed-order
@@ -210,6 +235,24 @@ typed `IncompatibleShape` refusal, with the fs-sparse output unchanged.
 `fsci-sparse` remains a development dependency only; this tranche is central
 package-proof pending.
 
+The direct-factorization suites (code-first, see the no-claim entry): in-crate
+`direct::tests` — hand-checked elimination tree; AMD permutation validity on
+path/random/grid graphs; the arrow-matrix fill contrast (natural ordering
+fills catastrophically, AMD stays linear — the scrambled-ordering guard); SPD
+tridiagonal solve + all-positive inertia; the zero-diagonal `[[0,1],[1,0]]`
+fixture requiring a 2×2 pivot WITH its mutation control (2×2 disabled ⇒ named
+`PivotBreakdown`, proving the path is load-bearing); saddle-point KKT inertia
+(3, 2); inertia vs analytic tridiagonal eigenvalue counts across five shifts;
+random symmetric + indefinite solve-residual gates at three densities;
+bitwise repeat-factorization determinism; symbolic-reuse pattern-mismatch
+refusal; named refusals (non-square, asymmetric, non-finite, singular,
+invalid options); empty/singleton matrices. `tests/direct_casebook.rs` — the
+shift-ladder e2e: one analysis of a 10⁴-unknown grid pencil, five interior
+shifts factored with JSON-line evidence rows (nnz, fill, flops, peak front
+bytes, pivot counts, inertia, solve residual, timings), every inertia
+certified against the ANALYTIC grid-Laplacian eigenvalue counts, plus a
+bitwise repeat-determinism stage.
+
 ## FrankenNumpy interop (bead gtql item c, feature `fnp-interop`)
 
 Scout verdict recorded: fnp-ndarray holds only layout metadata; the
@@ -238,10 +281,26 @@ default; the L1 core pulls no constellation crate unless opted in.
   tuned hash-SPA throughput path; wide-matrix memory shape is improved, but no
   speedup claim is made.
 - ILU(0) is sequential (level scheduling recorded); IC(0)-specific
-  symmetric storage is unclaimed (ILU covers SPD use). Supernodal
-  Cholesky deferred per its own scope cap. AMG coarsest solve is
+  symmetric storage is unclaimed (ILU covers SPD use). AMG coarsest solve is
   ILU-PCG (dense direct coarse solve joins solver-stack integration).
   No 1e8-DOF scaling claims yet (release-mode scaling lane).
+- **Direct-factorization scope** (`direct` module): restricted
+  (within-supernode) pivoting is NOT a backward-stability guarantee for
+  adversarial indefinite matrices — a front whose fully-summed block admits
+  no acceptable pivot refuses (`PivotBreakdown`); delayed-pivot migration to
+  the parent front is the recorded follow-up. Numeric values are read from
+  the row of the eliminated column; the input contract is a numerically
+  symmetric matrix (only structural symmetry is verified). Inertia never
+  reports zero eigenvalues: numerically singular pivots refuse instead.
+  AMD v1 omits supervariable merging and dense-row handling (ordering
+  QUALITY/SPEED boundaries, never correctness). Sequential only; no
+  unsymmetric multifrontal, no out-of-core, no GPU, no refactorization with
+  modified values in place. VERIFICATION STATE: the direct battery
+  (unit + property + casebook suites listed below) is code-first — authored
+  and rustfmt-gated but NOT YET EXECUTED, because every repository
+  verification lane (RCH/DSR/local) was halted by the ee preflight guard on
+  2026-08-06; no green-test claim is made until the batch-verification lane
+  runs it.
 - **Interop scope**: `fnx-interop` copies between square CSR adjacency and the
   owned `GraphSnapshot`; `fnp-interop` converts between CSR and the owned dense
   `UFuncArray`, requiring O(nrows·ncols) memory when densifying and losing the
