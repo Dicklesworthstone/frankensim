@@ -491,6 +491,8 @@ impl RenderTrajectory {
             run,
             profile,
             REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
+            0.0,
+            None,
             "final eight-second tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff".to_owned(),
             cx,
         )
@@ -511,6 +513,8 @@ impl RenderTrajectory {
             run,
             profile,
             tail_horizon_s,
+            0.0,
+            None,
             format!(
                 "final {tail_horizon_s:.17e}-second internal acoustic-preroll tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff"
             ),
@@ -518,17 +522,83 @@ impl RenderTrajectory {
         )
     }
 
+    /// Build a causal warm-start source and the following picture/sound crop
+    /// from one phase-continuous reduced-decay bridge.
+    ///
+    /// Both trajectories integrate the same exact inserted crop boundary. The
+    /// source begins one preroll before the published trajectory; the published
+    /// trajectory rebases that boundary to zero without resetting orientation,
+    /// contact phase, translation, or any physical state.
+    pub(crate) fn from_reduced_decay_run_with_causal_preroll(
+        run: &ReducedDecayRun,
+        profile: &ResolvedDiscProfile,
+        preroll_s: f64,
+        published_horizon_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Self), RenderTrajectoryError> {
+        if !(preroll_s.is_finite()
+            && preroll_s > 0.0
+            && published_horizon_s.is_finite()
+            && published_horizon_s > 0.0)
+        {
+            return Err(reduced_decay_bridge_refusal(
+                "causal_preroll_window",
+                "preroll and published horizons must be finite and positive",
+            ));
+        }
+        let source_horizon_s = preroll_s + published_horizon_s;
+        if !source_horizon_s.is_finite() {
+            return Err(reduced_decay_bridge_refusal(
+                "causal_preroll_window",
+                "source horizon overflow",
+            ));
+        }
+        let source = Self::from_reduced_decay_run_tail(
+            run,
+            profile,
+            source_horizon_s,
+            0.0,
+            Some(preroll_s),
+            format!(
+                "final {source_horizon_s:.17e}-second causal picture-and-sound source tail with an exact crop boundary at {preroll_s:.17e} seconds"
+            ),
+            cx,
+        )?;
+        let published = Self::from_reduced_decay_run_tail(
+            run,
+            profile,
+            source_horizon_s,
+            preroll_s,
+            Some(preroll_s),
+            format!(
+                "{published_horizon_s:.17e}-second published picture-and-sound crop following a {preroll_s:.17e}-second causal modal warm start; time is rebased without resetting pose, contact phase, translation, or mechanical state"
+            ),
+            cx,
+        )?;
+        Ok((source, published))
+    }
+
     fn from_reduced_decay_run_tail(
         run: &ReducedDecayRun,
         profile: &ResolvedDiscProfile,
         tail_horizon_s: f64,
+        publish_start_offset_s: f64,
+        required_boundary_offset_s: Option<f64>,
         applicability: String,
         cx: &Cx<'_>,
     ) -> Result<Self, RenderTrajectoryError> {
         cx.checkpoint()
             .map_err(|_| RenderTrajectoryError::Cancelled)?;
         let mass = validate_reduced_decay_render_source(run, profile, cx)?;
-        let inputs = reduced_decay_sample_inputs(run, profile, mass, tail_horizon_s, cx)?;
+        let inputs = reduced_decay_sample_inputs(
+            run,
+            profile,
+            mass,
+            tail_horizon_s,
+            publish_start_offset_s,
+            required_boundary_offset_s,
+            cx,
+        )?;
         let initial = inputs
             .first()
             .ok_or(RenderTrajectoryError::EmptyTrajectory)?;
@@ -550,13 +620,32 @@ impl RenderTrajectory {
         })?;
         let identities = profile.content_identities();
         let model_identity = reduced_decay_model_identity(run);
-        let configuration_identity = reduced_decay_configuration_identity(
+        let source_configuration_identity = reduced_decay_configuration_identity(
             run,
             model_identity,
             identities.profile,
             identities.chart,
             identities.mass_properties,
         );
+        let configuration_identity = if required_boundary_offset_s.is_some()
+            || publish_start_offset_s.to_bits() != 0.0_f64.to_bits()
+        {
+            let mut hasher =
+                DomainHasher::new("org.frankensim.euler-disc.reduced-decay-render-window.v1");
+            hasher.update(source_configuration_identity.as_bytes());
+            hasher.update(&tail_horizon_s.to_bits().to_le_bytes());
+            hasher.update(&publish_start_offset_s.to_bits().to_le_bytes());
+            match required_boundary_offset_s {
+                Some(offset_s) => {
+                    hasher.update(&[1]);
+                    hasher.update(&offset_s.to_bits().to_le_bytes());
+                }
+                None => hasher.update(&[0]),
+            }
+            hasher.finalize()
+        } else {
+            source_configuration_identity
+        };
         let mut fingerprint_bytes = [0_u8; 8];
         fingerprint_bytes.copy_from_slice(&configuration_identity.as_bytes()[..8]);
         let metadata = RenderTrajectoryMetadata {
@@ -1110,6 +1199,7 @@ fn validate_reduced_decay_render_source(
 fn reduced_decay_tail_samples(
     run: &ReducedDecayRun,
     tail_horizon_s: f64,
+    required_boundary_offset_s: Option<f64>,
 ) -> Result<(f64, Vec<ReducedDecaySample>), RenderTrajectoryError> {
     if !(tail_horizon_s.is_finite() && tail_horizon_s > 0.0) {
         return Err(reduced_decay_bridge_refusal(
@@ -1172,10 +1262,75 @@ fn reduced_decay_tail_samples(
         });
     }
     samples.extend_from_slice(&run.samples[first_retained..]);
+    if let Some(offset_s) = required_boundary_offset_s {
+        if !(offset_s.is_finite() && offset_s > 0.0 && offset_s < tail_horizon_s) {
+            return Err(reduced_decay_bridge_refusal(
+                "required_boundary_offset_s",
+                "must be finite and strictly inside the retained tail",
+            ));
+        }
+        let boundary_time_s = time_origin_s + offset_s;
+        match samples.binary_search_by(|sample| sample.time_s.total_cmp(&boundary_time_s)) {
+            Ok(_) => {}
+            Err(index) => {
+                let boundary = interpolated_reduced_decay_sample(run, boundary_time_s)?;
+                samples
+                    .try_reserve(1)
+                    .map_err(|_| RenderTrajectoryError::Capacity {
+                        artifact: "reduced-decay exact crop boundary",
+                        requested: samples.len().saturating_add(1),
+                    })?;
+                samples.insert(index, boundary);
+            }
+        }
+    }
     if samples.is_empty() {
         return Err(RenderTrajectoryError::EmptyTrajectory);
     }
     Ok((time_origin_s, samples))
+}
+
+fn interpolated_reduced_decay_sample(
+    run: &ReducedDecayRun,
+    time_s: f64,
+) -> Result<ReducedDecaySample, RenderTrajectoryError> {
+    if !time_s.is_finite() {
+        return Err(reduced_decay_bridge_refusal(
+            "crop.time_s",
+            "must be finite",
+        ));
+    }
+    let right = run.samples.partition_point(|sample| sample.time_s < time_s);
+    if right < run.samples.len() && run.samples[right].time_s.to_bits() == time_s.to_bits() {
+        return Ok(run.samples[right].clone());
+    }
+    if right == 0 || right >= run.samples.len() {
+        return Err(reduced_decay_bridge_refusal(
+            "crop.time_s",
+            "lies outside the admitted reduced-decay run",
+        ));
+    }
+    let previous = &run.samples[right - 1];
+    let dt_s = time_s - previous.time_s;
+    let energy_slope_j_per_rad =
+        1.5 * run.parameters.mass_kg * run.parameters.gravity_m_per_s2 * run.parameters.radius_m;
+    let theta_rad = previous.theta_rad - previous.powers.total_w() * dt_s / energy_slope_j_per_rad;
+    let (omega_rad_s, powers) = reduced_decay_benchmark_powers(run, theta_rad)?;
+    let work = ChannelWork {
+        dry_contour_j: previous.work.dry_contour_j + previous.powers.dry_contour_w * dt_s,
+        published_rolling_j: previous.work.published_rolling_j
+            + previous.powers.published_rolling_w * dt_s,
+        bildsten_boundary_layer_j: previous.work.bildsten_boundary_layer_j
+            + previous.powers.bildsten_boundary_layer_w * dt_s,
+    };
+    Ok(ReducedDecaySample {
+        time_s,
+        theta_rad,
+        omega_rad_s,
+        energy_j: energy_slope_j_per_rad * theta_rad,
+        powers,
+        work,
+    })
 }
 
 fn reduced_decay_benchmark_powers(
@@ -1250,9 +1405,25 @@ fn reduced_decay_sample_inputs(
     profile: &ResolvedDiscProfile,
     mass: MassProperties,
     tail_horizon_s: f64,
+    publish_start_offset_s: f64,
+    required_boundary_offset_s: Option<f64>,
     cx: &Cx<'_>,
 ) -> Result<Vec<RenderTrajectorySampleInput>, RenderTrajectoryError> {
-    let (time_origin_s, source_samples) = reduced_decay_tail_samples(run, tail_horizon_s)?;
+    if !(publish_start_offset_s.is_finite()
+        && publish_start_offset_s >= 0.0
+        && publish_start_offset_s < tail_horizon_s)
+    {
+        return Err(reduced_decay_bridge_refusal(
+            "publish_start_offset_s",
+            "must be finite and inside the retained tail",
+        ));
+    }
+    let (time_origin_s, source_samples) =
+        reduced_decay_tail_samples(run, tail_horizon_s, required_boundary_offset_s)?;
+    let publish_origin_s = time_origin_s + publish_start_offset_s;
+    let published_horizon_s = tail_horizon_s - publish_start_offset_s;
+    let required_boundary_time_s =
+        required_boundary_offset_s.map(|offset_s| time_origin_s + offset_s);
     let mut inputs = Vec::new();
     inputs
         .try_reserve_exact(source_samples.len())
@@ -1376,9 +1547,15 @@ fn reduced_decay_sample_inputs(
                 format!("sample {index} pose/twist does not recover declared Euler rates"),
             ));
         }
-        let (rolling_work_j, gas_work_j, interval_start_time_s) = if let Some(previous) =
-            previous_sample
-        {
+        if sample.time_s < publish_origin_s {
+            previous_velocity_world_m_per_s = Some(velocity_world_m_per_s);
+            previous_sample = Some(sample);
+            continue;
+        }
+        let first_published_sample = inputs.is_empty();
+        let (rolling_work_j, gas_work_j, interval_start_time_s) = if first_published_sample {
+            (0.0, 0.0, sample.time_s)
+        } else if let Some(previous) = previous_sample {
             (
                 -(sample.work.dry_contour_j + sample.work.published_rolling_j
                     - previous.work.dry_contour_j
@@ -1387,7 +1564,10 @@ fn reduced_decay_sample_inputs(
                 previous.time_s,
             )
         } else {
-            (0.0, 0.0, sample.time_s)
+            return Err(reduced_decay_bridge_refusal(
+                "published_interval",
+                "a noninitial published sample lost its predecessor",
+            ));
         };
         let channels = ChannelOwnership {
             gravity: ChannelWrench::default(),
@@ -1407,17 +1587,29 @@ fn reduced_decay_sample_inputs(
         let energy_defect_j = energy_slope_j_per_rad * run.parameters.initial_theta_rad
             - sample.energy_j
             - sample.work.total_j();
-        let output_time_s = if index == 0 {
+        let output_time_s = if first_published_sample {
             0.0
-        } else if index + 1 == source_samples.len() && time_origin_s > 0.0 {
-            tail_horizon_s
+        } else if required_boundary_time_s
+            .is_some_and(|boundary_s| sample.time_s.to_bits() == boundary_s.to_bits())
+        {
+            required_boundary_offset_s.expect("boundary time has an offset")
+                - publish_start_offset_s
+        } else if index + 1 == source_samples.len()
+            && (time_origin_s > 0.0 || publish_start_offset_s > 0.0)
+        {
+            published_horizon_s
         } else {
-            sample.time_s - time_origin_s
+            sample.time_s - publish_origin_s
         };
-        let output_interval_start_time_s = if index == 0 {
+        let output_interval_start_time_s = if first_published_sample {
             0.0
+        } else if required_boundary_time_s
+            .is_some_and(|boundary_s| interval_start_time_s.to_bits() == boundary_s.to_bits())
+        {
+            required_boundary_offset_s.expect("boundary time has an offset")
+                - publish_start_offset_s
         } else {
-            interval_start_time_s - time_origin_s
+            interval_start_time_s - publish_origin_s
         };
         inputs.push(RenderTrajectorySampleInput {
             interval_start_time_s: output_interval_start_time_s,
@@ -1438,7 +1630,7 @@ fn reduced_decay_sample_inputs(
                 ),
             }),
             signed_gap_m: contact.contact.gap_m,
-            interval_contact_active: index != 0,
+            interval_contact_active: !first_published_sample,
             interval_normal_force_n: 0.0,
             contact_transitions: Vec::new(),
             base_mode: Some(RenderBaseModeState {

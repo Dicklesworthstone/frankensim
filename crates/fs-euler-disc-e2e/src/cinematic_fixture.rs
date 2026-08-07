@@ -464,17 +464,16 @@ pub fn run_cinematic_fixture(
     // evidence for both source-bound loss channels.
     let refinement = thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
     let run = &refinement.coarse;
-    let trajectory =
-        RenderTrajectory::from_reduced_decay_run(run, &profile, cx).map_err(pipeline)?;
-    let audio_preroll_horizon_s =
-        duration_s + f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
-    let audio_preroll_trajectory = RenderTrajectory::from_reduced_decay_run_with_tail_horizon(
-        run,
-        &profile,
-        audio_preroll_horizon_s,
-        cx,
-    )
-    .map_err(pipeline)?;
+    let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
+    let (audio_preroll_trajectory, trajectory) =
+        RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
+            run,
+            &profile,
+            audio_preroll_duration_s,
+            duration_s,
+            cx,
+        )
+        .map_err(pipeline)?;
     let retained_time_s = trajectory
         .samples()
         .last()
@@ -2533,8 +2532,43 @@ mod tests {
             let benchmark = Thorne2026SteelGlassBenchmark::ambient().unwrap();
             let profile = benchmark.resolve_specimen(cx).unwrap();
             let refinement = thorne_2026_refinement_evidence(&benchmark).unwrap();
-            let trajectory =
-                RenderTrajectory::from_reduced_decay_run(&refinement.coarse, &profile, cx).unwrap();
+            let preroll_duration_s =
+                f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
+            let (preroll_trajectory, trajectory) =
+                RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
+                    &refinement.coarse,
+                    &profile,
+                    preroll_duration_s,
+                    f64::from(CRITIQUE_FRAMES) / f64::from(CRITIQUE_FPS),
+                    cx,
+                )
+                .unwrap();
+            let source_crop_boundary = preroll_trajectory
+                .samples()
+                .iter()
+                .find(|sample| sample.input().time_s.to_bits() == preroll_duration_s.to_bits())
+                .expect("causal source retains the exact picture/audio crop boundary");
+            let published_initial = &trajectory.samples()[0];
+            assert_eq!(source_crop_boundary.state(), published_initial.state());
+            assert_eq!(
+                source_crop_boundary.input().qois,
+                published_initial.input().qois
+            );
+            assert_eq!(
+                published_initial.input().time_s.to_bits(),
+                0.0_f64.to_bits()
+            );
+            assert_eq!(
+                published_initial.input().interval_start_time_s.to_bits(),
+                0.0_f64.to_bits()
+            );
+            let initial_channels = published_initial.input().channels;
+            let initial_work_j = initial_channels.gravity.work_j
+                + initial_channels.contact.work_j
+                + initial_channels.rolling.work_j
+                + initial_channels.base.work_j
+                + initial_channels.gas.work_j;
+            assert_eq!(initial_work_j.to_bits(), 0.0_f64.to_bits());
             let artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
                 hash_domain(
                     "org.frankensim.euler-critique.audio-regression.v1",
@@ -2543,13 +2577,6 @@ mod tests {
                 trajectory,
                 Vec::new(),
                 RenderTrajectoryCodecBudget::DEFAULT,
-                cx,
-            )
-            .unwrap();
-            let preroll_trajectory = RenderTrajectory::from_reduced_decay_run_with_tail_horizon(
-                &refinement.coarse,
-                &profile,
-                f64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS),
                 cx,
             )
             .unwrap();
