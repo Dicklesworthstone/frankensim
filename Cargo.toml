@@ -78,6 +78,7 @@ members = [
     "crates/fs-mesh",
     "crates/fs-modal",
     "crates/fs-motion",
+    "crates/fs-plate",
     "crates/fs-mbd",
     "crates/fs-contact",
     "crates/fs-tribo",

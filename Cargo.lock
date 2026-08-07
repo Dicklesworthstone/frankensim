@@ -1806,6 +1806,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-plate"
+version = "0.0.1"
+dependencies = [
+ "fs-material",
+ "fs-modal",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-probe"
 version = "0.0.1"
 dependencies = [

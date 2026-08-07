@@ -1,0 +1,19 @@
+[package]
+name = "fs-plate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Orthotropic thin-plate bending elements (DKT), membrane prestress, offset stiffeners, and certified modal analysis through fs-modal."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-material = { path = "../fs-material" }
+fs-modal = { path = "../fs-modal" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true
