@@ -268,16 +268,20 @@ differentiable lift). Pure Rust throughout.
   address and a cross-process chart resume correctly refuses rather than
   pretending identity.
 
-  Fresh uniform AOV films also have an explicit deterministic tile path:
-  `render_cinematic_with_aovs_execution` and
-  `ParkedRenderScope::render_cinematic_with_aovs`. Each logical tile owns
-  disjoint pixels and accumulates every pixel in ascending absolute-sample
-  order before copying the complete tile into one private full-frame staging
-  film. The path reuses `RenderExecutionConfig`, the ambient `Cx`, the existing
-  operation lease, and the ordinary/parked `RenderPoolRunner`; worker count,
-  stealing, and tile completion order cannot change AOV arithmetic. The fresh
-  path allocates one staged AOV film rather than constructing an empty film and
-  cloning it as the progressive compatibility API must. Cancellation, AOV
+  Fresh uniform and adaptive AOV films have explicit deterministic tile paths:
+  `render_cinematic_with_aovs_execution`,
+  `render_cinematic_adaptive_with_aovs_execution`, and their corresponding
+  `ParkedRenderScope` methods. Each logical tile owns disjoint pixels and
+  accumulates every pixel in ascending absolute-sample order before copying
+  the complete tile into one private full-frame staging film. The adaptive path
+  co-stages its raw XYZ Welford state and AOV observations, and retains only
+  the exact `0..terminal_count` path prefix selected for each pixel; AOV state
+  cannot influence the stopping decision. The paths reuse
+  `RenderExecutionConfig`, the ambient `Cx`, the existing operation lease, and
+  the ordinary/parked `RenderPoolRunner`; worker count, stealing, and tile
+  completion order cannot change estimator, decision, or AOV arithmetic. The
+  fresh paths allocate private staging rather than constructing an empty film
+  and cloning it as the progressive compatibility API must. Cancellation, AOV
   refusal, memory refusal, or a contained worker panic drains the crew and
   publishes no film.
 

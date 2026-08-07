@@ -85,6 +85,42 @@ fn rigid_transform_rejects_invalid_input_and_canonicalizes_quaternion_sign() {
 }
 
 #[test]
+fn transform_and_frame_identities_match_the_legacy_concatenated_preimages() {
+    let transform = z_rotation(core::f64::consts::FRAC_PI_4, [1.25, -2.5, 3.75]);
+    let mut transform_preimage = Vec::with_capacity(56);
+    for value in transform
+        .rotation_xyzw()
+        .into_iter()
+        .chain(transform.translation_m())
+    {
+        transform_preimage.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    let expected_transform = hash_domain(
+        "org.frankensim.render.rigid-transform.v1",
+        &transform_preimage,
+    );
+    assert_eq!(transform.content_identity(), expected_transform);
+
+    let geometry_identity = content("legacy-frame-preimage");
+    let instance = GeometryInstance::try_new(
+        0x0102_0304_0506_0708,
+        geometry_identity,
+        SharedGeometry::mesh(triangle()),
+        transform,
+    )
+    .unwrap();
+    let mut frame_preimage = Vec::with_capacity(72);
+    frame_preimage.extend_from_slice(&instance.object_id().to_le_bytes());
+    frame_preimage.extend_from_slice(geometry_identity.as_bytes());
+    frame_preimage.extend_from_slice(expected_transform.as_bytes());
+    let expected_frame = hash_domain(
+        "org.frankensim.render.geometry-instance.v1",
+        &frame_preimage,
+    );
+    assert_eq!(instance.frame_identity(), expected_frame);
+}
+
+#[test]
 fn inverse_and_composition_round_trip_points_vectors_and_identity() {
     let transform = z_rotation(core::f64::consts::FRAC_PI_2, [1.0, -2.0, 0.5]);
     let inverse = transform.inverse().unwrap();

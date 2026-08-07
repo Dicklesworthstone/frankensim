@@ -26,8 +26,9 @@ use fs_render::tracer::{
     AdaptiveDecision, AdaptiveSamplingConfig, Camera, CinematicAovExecutionError, DirectStrategy,
     Film, Material, Primitive, RectLight, RenderExecutionConfig, RenderExecutionError,
     RenderWorkerPool, Sampler, Scene, Settings, Shape, render_cinematic,
-    render_cinematic_adaptive_with_aovs, render_cinematic_range_with_aovs,
-    render_cinematic_with_aovs, render_cinematic_with_aovs_execution, trace_cinematic_pixel_sample,
+    render_cinematic_adaptive_with_aovs, render_cinematic_adaptive_with_aovs_execution,
+    render_cinematic_range_with_aovs, render_cinematic_with_aovs,
+    render_cinematic_with_aovs_execution, trace_cinematic_pixel_sample,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -524,6 +525,166 @@ fn g5_parallel_aovs_and_exr_are_bit_exact_across_workers_tiles_and_schedules() {
 }
 
 #[test]
+fn g5_parallel_adaptive_aovs_and_guides_are_bit_exact_across_workers_tiles_and_schedules() {
+    let scene = scene(true);
+    let camera = camera(&scene);
+    // This threshold makes every pixel stop at the first legal checkpoint,
+    // exercising a non-ceiling terminal prefix while keeping this G5 test
+    // compact.  The serial implementation remains the exact arithmetic oracle.
+    let policy = AdaptiveSamplingConfig::try_new(2, 1, 1.0e30, 0.0, 0.0).unwrap();
+    for (profile, sampler) in [
+        (CinematicAovProfile::DailyCore, Sampler::Iid),
+        (CinematicAovProfile::FinalDiagnostic, Sampler::OwenSobol),
+    ] {
+        let mut render_settings = settings(4);
+        render_settings.width = 9;
+        render_settings.height = 7;
+        render_settings.sampler = sampler;
+        let aov_config = config(profile);
+        let serial = with_cx(|cx| {
+            render_cinematic_adaptive_with_aovs(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &render_settings,
+                policy,
+                shutter(),
+                aov_config,
+            )
+            .expect("serial adaptive cinematic AOV oracle")
+        });
+        let serial_exr = serial.to_exr().expect("serial adaptive AOV EXR");
+        let serial_guides = serial.denoise_guides().expect("serial adaptive guides");
+        for (tile_width, tile_height, workers) in [(4, 3, 1), (3, 2, 2), (2, 4, 8)] {
+            let mut execution_policy = execution(
+                tile_width,
+                tile_height,
+                workers,
+                64 << 20,
+                0xa051_4000 + workers as u64,
+            );
+            if workers == 8 {
+                execution_policy = execution_policy
+                    .with_quantum_weights(vec![1, 3, 2, 5, 4, 7, 6, 8])
+                    .expect("valid deliberately skewed worker schedule");
+            }
+            let parallel = with_cx(|cx| {
+                render_cinematic_adaptive_with_aovs_execution(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &render_settings,
+                    policy,
+                    shutter(),
+                    aov_config,
+                    &execution_policy,
+                )
+                .expect("tile-parallel adaptive cinematic AOV render")
+            });
+            assert_eq!(
+                parallel.film, serial,
+                "adaptive film/AOV state drifted: profile={profile:?} tile={tile_width}x{tile_height} workers={workers}"
+            );
+            assert_eq!(
+                parallel.film.to_exr().unwrap(),
+                serial_exr,
+                "adaptive AOV EXR bytes drifted: profile={profile:?} tile={tile_width}x{tile_height} workers={workers}"
+            );
+            assert_eq!(
+                parallel.film.denoise_guides().unwrap(),
+                serial_guides,
+                "adaptive denoise guides drifted: profile={profile:?} tile={tile_width}x{tile_height} workers={workers}"
+            );
+            assert!(
+                parallel
+                    .film
+                    .beauty()
+                    .sample_counts()
+                    .iter()
+                    .all(|&count| count == 2)
+            );
+            assert_eq!(parallel.report.staging_film_bytes, serial.retained_bytes());
+            assert_eq!(parallel.report.requested_workers, workers);
+            assert_eq!(
+                parallel.report.executor.declared_run,
+                execution_policy.run_id()
+            );
+            assert_eq!(parallel.report.memory.used_bytes, 0);
+        }
+    }
+}
+
+#[test]
+fn g5_parallel_adaptive_aovs_preserve_heterogeneous_terminal_prefix_guides() {
+    let mut heterogeneous_scene = scene(false);
+    // Pixel zero's footprint spans x in [-1, 0), whereas pixel one is fully
+    // background.  The left half-width emissive patch gives the first pixel a
+    // deterministic hit/miss Monte-Carlo sequence while the right pixel's
+    // exact zero variance reaches the first legal checkpoint.  This exercises
+    // per-pixel sample counts instead of treating the frame ceiling as a
+    // denoiser sample count.
+    heterogeneous_scene.primitives[0].shape = Shape::Mesh(TriMesh::new(
+        vec![
+            [-1.1, -0.75, 0.0],
+            [-0.5, -0.75, 0.0],
+            [-0.5, 0.75, 0.0],
+            [-1.1, 0.75, 0.0],
+        ],
+        vec![[0, 1, 2], [0, 2, 3]],
+    ));
+    let camera = camera(&heterogeneous_scene);
+    let mut render_settings = settings(4);
+    render_settings.width = 2;
+    let policy = AdaptiveSamplingConfig::try_new(2, 1, 0.0, 0.0, 0.0).unwrap();
+    let aov_config = config(CinematicAovProfile::FinalDiagnostic);
+    let serial = with_cx(|cx| {
+        render_cinematic_adaptive_with_aovs(
+            &heterogeneous_scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            policy,
+            shutter(),
+            aov_config,
+        )
+        .expect("serial heterogeneous adaptive AOV oracle")
+    });
+    assert!(
+        serial
+            .beauty()
+            .sample_counts()
+            .windows(2)
+            .any(|counts| counts[0] != counts[1]),
+        "fixture must preserve heterogeneous terminal counts: {:?}",
+        serial.beauty().sample_counts()
+    );
+    let serial_exr = serial.to_exr().unwrap();
+    let serial_guides = serial.denoise_guides().unwrap();
+    let execution_policy = execution(1, 1, 2, 64 << 20, 0xa051_4100);
+    let parallel = with_cx(|cx| {
+        render_cinematic_adaptive_with_aovs_execution(
+            &heterogeneous_scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            policy,
+            shutter(),
+            aov_config,
+            &execution_policy,
+        )
+        .expect("tile-parallel heterogeneous adaptive AOV render")
+    });
+    assert_eq!(parallel.film, serial);
+    assert_eq!(parallel.film.to_exr().unwrap(), serial_exr);
+    assert_eq!(parallel.film.denoise_guides().unwrap(), serial_guides);
+    assert_eq!(parallel.report.staging_film_bytes, serial.retained_bytes());
+}
+
+#[test]
 fn g5_parked_crew_reuses_workers_for_complete_aov_frames() {
     let scene = scene(true);
     let camera = camera(&scene);
@@ -589,6 +750,54 @@ fn g5_parked_crew_reuses_workers_for_complete_aov_frames() {
             assert_eq!(second.film, second_serial);
             assert_eq!(first.report.executor.declared_run, first_policy.run_id());
             assert_eq!(second.report.executor.declared_run, second_policy.run_id());
+        });
+    });
+}
+
+#[test]
+fn g5_parked_crew_reuses_workers_for_adaptive_aov_frames() {
+    let scene = scene(true);
+    let camera = camera(&scene);
+    let mut render_settings = settings(4);
+    render_settings.width = 8;
+    render_settings.height = 6;
+    let policy = AdaptiveSamplingConfig::try_new(2, 1, 1.0e30, 0.0, 0.0).unwrap();
+    let aov_config = config(CinematicAovProfile::FinalDiagnostic);
+    let execution_policy = execution(3, 2, 4, 64 << 20, 0xa051_5001);
+    let serial = with_cx(|cx| {
+        render_cinematic_adaptive_with_aovs(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            policy,
+            shutter(),
+            aov_config,
+        )
+        .unwrap()
+    });
+    with_cx(|cx| {
+        let pool = RenderWorkerPool::new(&execution_policy, cx.mode(), 0xa051_5ced);
+        pool.with_parked_crew_local(|parked| {
+            let parallel = parked
+                .render_cinematic_adaptive_with_aovs(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &render_settings,
+                    policy,
+                    shutter(),
+                    aov_config,
+                    &execution_policy,
+                )
+                .expect("parked adaptive cinematic AOV render");
+            assert_eq!(parallel.film, serial);
+            assert_eq!(
+                parallel.report.executor.declared_run,
+                execution_policy.run_id()
+            );
         });
     });
 }
@@ -690,6 +899,68 @@ fn g4_parallel_aov_refusal_cancellation_and_panic_publish_no_film() {
         panicked,
         Err(CinematicAovExecutionError::Execution(
             RenderExecutionError::Executor(RunError::TilePanicked { .. })
+        ))
+    ));
+}
+
+#[test]
+fn g4_parallel_adaptive_aov_refusal_and_cancellation_publish_no_film() {
+    let healthy_scene = scene(true);
+    let healthy_camera = camera(&healthy_scene);
+    let mut render_settings = settings(4);
+    render_settings.width = 8;
+    render_settings.height = 6;
+    let policy = AdaptiveSamplingConfig::try_new(2, 1, 1.0e30, 0.0, 0.0).unwrap();
+    let aov_config = config(CinematicAovProfile::DailyCore);
+    let one_byte = execution(3, 2, 4, 1, 0xa051_6001);
+    let refused = with_cx(|cx| {
+        render_cinematic_adaptive_with_aovs_execution(
+            &healthy_scene,
+            &healthy_camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            policy,
+            shutter(),
+            aov_config,
+            &one_byte,
+        )
+    });
+    assert!(matches!(
+        refused,
+        Err(CinematicAovExecutionError::Execution(
+            RenderExecutionError::Memory(_)
+        ))
+    ));
+
+    let gate = Arc::new(CancelGate::new());
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let mut cancelling_scene = scene(false);
+    cancelling_scene.primitives[0].shape = Shape::Chart(Box::new(CancellingChart {
+        gate: Arc::clone(&gate),
+        evaluations: Arc::clone(&evaluations),
+        cancel_at: 4,
+    }));
+    let cancelling_camera = camera(&cancelling_scene);
+    let normal_policy = execution(3, 2, 4, 64 << 20, 0xa051_6002);
+    let cancelled = with_gate(&gate, |cx| {
+        render_cinematic_adaptive_with_aovs_execution(
+            &cancelling_scene,
+            &cancelling_camera,
+            CutSide::After,
+            cx,
+            &render_settings,
+            policy,
+            shutter(),
+            aov_config,
+            &normal_policy,
+        )
+    });
+    assert!(evaluations.load(Ordering::SeqCst) >= 4);
+    assert!(matches!(
+        cancelled,
+        Err(CinematicAovExecutionError::Execution(
+            RenderExecutionError::Tracer(_)
         ))
     ));
 }

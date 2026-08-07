@@ -1144,70 +1144,13 @@ impl CinematicAovFilm {
             .common
             .as_deref()
             .ok_or(CinematicAovError::DenoiseGuidesUnavailable)?;
-        let pixel_count = self.beauty.xyz.len();
-        validate_denoise_guide_budget(pixel_count, self.config)?;
-        let motion_prev_x = float_plane(pixel_count, |pixel| {
-            average(
-                common[pixel].previous_motion_sum_pixels[0],
-                common[pixel].previous_motion_count,
-            )
-        })?;
-        let motion_prev_y = float_plane(pixel_count, |pixel| {
-            average(
-                common[pixel].previous_motion_sum_pixels[1],
-                common[pixel].previous_motion_count,
-            )
-        })?;
-        let axial_depth_m = float_plane(pixel_count, |pixel| {
-            average(common[pixel].depth_sum_m, common[pixel].primary_count)
-        })?;
-        let normal_x = float_plane(pixel_count, |pixel| {
-            normalized(common[pixel].shading_normal_sum)[0]
-        })?;
-        let normal_y = float_plane(pixel_count, |pixel| {
-            normalized(common[pixel].shading_normal_sum)[1]
-        })?;
-        let normal_z = float_plane(pixel_count, |pixel| {
-            normalized(common[pixel].shading_normal_sum)[2]
-        })?;
-        let primary_coverage = float_plane(pixel_count, |pixel| {
-            average(
-                f64::from(common[pixel].primary_count),
-                common[pixel].accepted_count,
-            )
-        })?;
-        let variance_luminance = float_plane(pixel_count, |pixel| sample_variance(common[pixel]))?;
-        let categorical_palette_indices = self
-            .final_diagnostic
-            .as_deref()
-            .map(|final_diagnostic| {
-                let mut object = fallible_filled(pixel_count, 0_u64)?;
-                let mut material = fallible_filled(pixel_count, 0_u64)?;
-                for (index, sample) in final_diagnostic.iter().enumerate() {
-                    object[index] = u64::from(sample.nearest_primary.object_palette_index);
-                    material[index] = u64::from(sample.nearest_primary.material_palette_index);
-                }
-                Ok::<_, CinematicAovError>((object, material))
-            })
-            .transpose()?;
-        let (object_palette_indices, material_palette_indices) = categorical_palette_indices
-            .map_or((None, None), |(object, material)| {
-                (Some(object), Some(material))
-            });
-        Ok(CinematicDenoiseGuides {
-            width: self.beauty.width,
-            height: self.beauty.height,
-            motion_prev_x,
-            motion_prev_y,
-            axial_depth_m,
-            normal_x,
-            normal_y,
-            normal_z,
-            primary_coverage,
-            variance_luminance,
-            object_palette_indices,
-            material_palette_indices,
-        })
+        build_denoise_guides(
+            self.beauty.width,
+            self.beauty.height,
+            self.config,
+            common,
+            self.final_diagnostic.as_deref(),
+        )
     }
 
     pub(crate) fn beauty_mut(&mut self) -> &mut Film {
@@ -1429,6 +1372,82 @@ impl CinematicAovFilm {
     }
 }
 
+fn build_denoise_guides(
+    width: u32,
+    height: u32,
+    config: CinematicAovConfig,
+    common: &[CommonPixel],
+    final_diagnostic: Option<&[FinalPixel]>,
+) -> Result<CinematicDenoiseGuides, CinematicAovError> {
+    let pixel_count = checked_pixel_count(width, height)?;
+    if common.len() != pixel_count
+        || final_diagnostic.is_some_and(|plane| plane.len() != pixel_count)
+    {
+        return Err(CinematicAovError::ShapeMismatch);
+    }
+    validate_denoise_guide_budget(pixel_count, config)?;
+    let motion_prev_x = float_plane(pixel_count, |pixel| {
+        average(
+            common[pixel].previous_motion_sum_pixels[0],
+            common[pixel].previous_motion_count,
+        )
+    })?;
+    let motion_prev_y = float_plane(pixel_count, |pixel| {
+        average(
+            common[pixel].previous_motion_sum_pixels[1],
+            common[pixel].previous_motion_count,
+        )
+    })?;
+    let axial_depth_m = float_plane(pixel_count, |pixel| {
+        average(common[pixel].depth_sum_m, common[pixel].primary_count)
+    })?;
+    let normal_x = float_plane(pixel_count, |pixel| {
+        normalized(common[pixel].shading_normal_sum)[0]
+    })?;
+    let normal_y = float_plane(pixel_count, |pixel| {
+        normalized(common[pixel].shading_normal_sum)[1]
+    })?;
+    let normal_z = float_plane(pixel_count, |pixel| {
+        normalized(common[pixel].shading_normal_sum)[2]
+    })?;
+    let primary_coverage = float_plane(pixel_count, |pixel| {
+        average(
+            f64::from(common[pixel].primary_count),
+            common[pixel].accepted_count,
+        )
+    })?;
+    let variance_luminance = float_plane(pixel_count, |pixel| sample_variance(common[pixel]))?;
+    let categorical_palette_indices = final_diagnostic
+        .map(|final_diagnostic| {
+            let mut object = fallible_filled(pixel_count, 0_u64)?;
+            let mut material = fallible_filled(pixel_count, 0_u64)?;
+            for (index, sample) in final_diagnostic.iter().enumerate() {
+                object[index] = u64::from(sample.nearest_primary.object_palette_index);
+                material[index] = u64::from(sample.nearest_primary.material_palette_index);
+            }
+            Ok::<_, CinematicAovError>((object, material))
+        })
+        .transpose()?;
+    let (object_palette_indices, material_palette_indices) = categorical_palette_indices
+        .map_or((None, None), |(object, material)| {
+            (Some(object), Some(material))
+        });
+    Ok(CinematicDenoiseGuides {
+        width,
+        height,
+        motion_prev_x,
+        motion_prev_y,
+        axial_depth_m,
+        normal_x,
+        normal_y,
+        normal_z,
+        primary_coverage,
+        variance_luminance,
+        object_palette_indices,
+        material_palette_indices,
+    })
+}
+
 #[allow(clippy::too_many_lines)] // one frozen metadata schema remains reviewable in wire order
 fn cinematic_exr_attributes(
     config: CinematicAovConfig,
@@ -1616,6 +1635,25 @@ impl AdaptiveCinematicAovFilm {
         self.retained_bytes
     }
 
+    /// Materialize denoising guides aligned to each pixel's exact accepted
+    /// adaptive sample prefix. Consumers must pair the returned raw sample
+    /// variance with [`AdaptiveFilm::sample_counts`] rather than the frame's
+    /// hard sample ceiling.
+    pub fn denoise_guides(&self) -> Result<CinematicDenoiseGuides, CinematicAovError> {
+        self.validate_complete()?;
+        let common = self
+            .common
+            .as_deref()
+            .ok_or(CinematicAovError::DenoiseGuidesUnavailable)?;
+        build_denoise_guides(
+            self.beauty.width(),
+            self.beauty.height(),
+            self.config,
+            common,
+            self.final_diagnostic.as_deref(),
+        )
+    }
+
     /// Encode the adaptive raw estimate with the same frozen AOV schema as the
     /// uniform film. `FinalDiagnostic` exports each pixel's terminal count in
     /// `samples`; narrower profiles retain it internally and name the omission
@@ -1726,12 +1764,12 @@ pub(crate) struct AdaptiveAovAccumulator {
 }
 
 impl AdaptiveAovAccumulator {
-    pub(crate) fn try_new(
+    pub(crate) fn admitted_retained_bytes(
         width: u32,
         height: u32,
         maximum_samples: u32,
         config: CinematicAovConfig,
-    ) -> Result<Self, CinematicAovError> {
+    ) -> Result<(usize, u64), CinematicAovError> {
         let pixel_count = checked_pixel_count(width, height)?;
         let requested_pixels = u64::try_from(pixel_count)
             .map_err(|_| CinematicAovError::InvalidDimensions { width, height })?;
@@ -1753,6 +1791,17 @@ impl AdaptiveAovAccumulator {
                 limit: config.limits.max_retained_bytes,
             });
         }
+        Ok((pixel_count, retained_bytes))
+    }
+
+    pub(crate) fn try_new(
+        width: u32,
+        height: u32,
+        maximum_samples: u32,
+        config: CinematicAovConfig,
+    ) -> Result<Self, CinematicAovError> {
+        let (pixel_count, retained_bytes) =
+            Self::admitted_retained_bytes(width, height, maximum_samples, config)?;
         let common = config
             .profile
             .has_common()
@@ -1771,6 +1820,64 @@ impl AdaptiveAovAccumulator {
             final_diagnostic,
             retained_bytes,
         })
+    }
+
+    pub(crate) fn copy_fresh_tile(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        tile: &CinematicAovTileAccumulator,
+        mut poll: impl FnMut() -> bool,
+    ) -> Result<(), CinematicAovError> {
+        let source_width = usize::try_from(width).map_err(|_| CinematicAovError::SizeOverflow)?;
+        let source_height = usize::try_from(height).map_err(|_| CinematicAovError::SizeOverflow)?;
+        let expected = source_width
+            .checked_mul(source_height)
+            .ok_or(CinematicAovError::SizeOverflow)?;
+        let x_end = x
+            .checked_add(width)
+            .filter(|end| *end <= self.width)
+            .ok_or(CinematicAovError::ShapeMismatch)?;
+        let y_end = y
+            .checked_add(height)
+            .filter(|end| *end <= self.height)
+            .ok_or(CinematicAovError::ShapeMismatch)?;
+        if x_end < x || y_end < y || tile.len() != expected {
+            return Err(CinematicAovError::ShapeMismatch);
+        }
+        if self.common.is_some() != tile.common.is_some()
+            || self.final_diagnostic.is_some() != tile.final_diagnostic.is_some()
+        {
+            return Err(CinematicAovError::ShapeMismatch);
+        }
+
+        let frame_width = self.width as usize;
+        let destination_x = x as usize;
+        let destination_y = y as usize;
+        for row in 0..source_height {
+            if !poll() {
+                return Err(CinematicAovError::Tracer(
+                    crate::tracer::TracerError::Cancelled,
+                ));
+            }
+            let source_start = row * source_width;
+            let source_end = source_start + source_width;
+            let destination_start = (destination_y + row) * frame_width + destination_x;
+            let destination_end = destination_start + source_width;
+            if let (Some(destination), Some(source)) = (&mut self.common, &tile.common) {
+                destination[destination_start..destination_end]
+                    .copy_from_slice(&source[source_start..source_end]);
+            }
+            if let (Some(destination), Some(source)) =
+                (&mut self.final_diagnostic, &tile.final_diagnostic)
+            {
+                destination[destination_start..destination_end]
+                    .copy_from_slice(&source[source_start..source_end]);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn push(

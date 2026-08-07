@@ -48,7 +48,8 @@ own** outputs, not the world's files.
   convolution with edge-stopping weights; the result is PERMANENTLY tagged
   `BiasedDenoised`. `mse` is the improvement metric.
 - `TemporalDenoiseInput` supplies aligned row-major scene-linear RGB,
-  a positive uniform Monte Carlo sample count,
+  a positive uniform Monte Carlo sample count or an exact positive per-pixel
+  adaptive count plane bounded by the declared frame ceiling,
   previous-minus-current raster-pixel motion, positive axial-metre depth,
   world-unit shading normal, primary coverage, raw-luminance variance, and
   optional stable `u64` object/material IDs. Nonzero values are exact equality
@@ -63,9 +64,10 @@ own** outputs, not the world's files.
   integer pixel centre, resolves the nearest previous pixel with upward
   half-pixel ties, and rejects off-raster results. Reprojection additionally
   rejects coverage, depth, normal, stable-ID, and nonfinite disagreement.
-  Accepted history is 3x3-neighborhood clamped, combined under both
-  sample-variance/count-derived and history-length-derived weight ceilings, and followed by
-  joint-RGB 5x5 B3-spline à-trous refinement with shared channel weights.
+  Accepted history is 3x3-neighborhood clamped, combined under both the exact
+  per-pixel sample-variance/count-derived and history-length-derived weight
+  ceilings, and followed by joint-RGB 5x5 B3-spline à-trous refinement with
+  shared channel weights.
   `TemporalDenoisedFrame` has private fields and no public constructor or raw
   conversion. Its planar `linear_rgb()` slices feed the existing cinematic
   color transform without a full-frame repack. Its only provenance is

@@ -6,7 +6,7 @@
 use core::fmt;
 use std::sync::Arc;
 
-use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::{Cancelled, Cx};
 use fs_geom::{Chart, Point3, Vec3};
 
@@ -151,11 +151,11 @@ impl RigidTransform {
     /// Content identity of this canonical placement alone.
     #[must_use]
     pub fn content_identity(self) -> ContentHash {
-        let mut bytes = Vec::with_capacity(56);
+        let mut hasher = DomainHasher::new(TRANSFORM_DOMAIN);
         for value in self.rotation_xyzw.into_iter().chain(self.translation_m) {
-            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+            hasher.update(&value.to_bits().to_le_bytes());
         }
-        hash_domain(TRANSFORM_DOMAIN, &bytes)
+        hasher.finalize()
     }
 
     fn world_to_local_ray(self, ray: &Ray) -> Result<Ray, InstanceError> {
@@ -285,11 +285,11 @@ impl GeometryInstance {
     /// Frame identity binds object, immutable geometry, and placement.
     #[must_use]
     pub fn frame_identity(&self) -> ContentHash {
-        let mut bytes = Vec::with_capacity(72);
-        bytes.extend_from_slice(&self.object_id.to_le_bytes());
-        bytes.extend_from_slice(self.geometry_identity.as_bytes());
-        bytes.extend_from_slice(self.transform.content_identity().as_bytes());
-        hash_domain(INSTANCE_DOMAIN, &bytes)
+        let mut hasher = DomainHasher::new(INSTANCE_DOMAIN);
+        hasher.update(&self.object_id.to_le_bytes());
+        hasher.update(self.geometry_identity.as_bytes());
+        hasher.update(self.transform.content_identity().as_bytes());
+        hasher.finalize()
     }
 
     /// Intersect one placed object, preserving chart authority/audit.

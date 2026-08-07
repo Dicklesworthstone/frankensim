@@ -76,7 +76,7 @@ use fs_rand::qmc::Sobol;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -1028,6 +1028,12 @@ pub const MAX_RENDER_TILE_EDGE: u32 = 4_096;
 pub const MAX_RENDER_WORKERS: usize = 256;
 const RENDER_TILE_KERNEL: &str = "fs-render/spectral-film-tile-v1";
 const CINEMATIC_AOV_TILE_KERNEL: &str = "fs-render/cinematic-aov-tile-v1";
+/// Independent tile program identity for the adaptive cinematic AOV path.
+///
+/// The adaptive stop decision remains local to each pixel and uses only the
+/// raw XYZ Welford state.  The co-staged AOV tile observes that same accepted
+/// prefix, but is deliberately not part of this kernel's decision identity.
+const ADAPTIVE_CINEMATIC_AOV_TILE_KERNEL: &str = "fs-render/adaptive-cinematic-aov-tile-v1";
 const PENDING_ADAPTIVE_RENDER_TILE_KERNEL: &str =
     "fs-render/pending-adaptive-spectral-film-tile-v1";
 
@@ -1452,6 +1458,32 @@ impl ParkedRenderScope<'_> {
         )
     }
 
+    /// Render a fresh adaptive cinematic-camera film with AOVs aligned to each
+    /// pixel's exact accepted sample prefix on this already parked crew.
+    ///
+    /// As with the serial oracle, denoising and diagnostic AOVs observe the
+    /// Welford-selected prefix but cannot affect its stopping decision.  No
+    /// state becomes public unless every tile drains successfully.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cinematic_adaptive_with_aovs(
+        &self,
+        scene: &Scene,
+        camera: &AnimatedCamera,
+        cut_side: CutSide,
+        cx: &Cx<'_>,
+        settings: &Settings,
+        policy: AdaptiveSamplingConfig,
+        shutter: ShutterInterval,
+        config: CinematicAovConfig,
+        execution: &RenderExecutionConfig,
+    ) -> Result<AdaptiveCinematicAovExecutionOutput, CinematicAovExecutionError> {
+        self.validate_job(cx, execution)
+            .map_err(CinematicAovExecutionError::Execution)?;
+        render_cinematic_adaptive_with_aovs_execution_impl(
+            scene, camera, cut_side, cx, settings, policy, shutter, config, execution, self.pool,
+        )
+    }
+
     /// Render a fresh static adaptive film on the parked crew.
     pub fn render_adaptive(
         &self,
@@ -1857,6 +1889,18 @@ pub struct RenderExecutionOutput {
 pub struct CinematicAovExecutionOutput {
     /// Complete private-until-success beauty and aligned AOV state.
     pub film: CinematicAovFilm,
+    /// Tile, scheduling, timing, and memory evidence.
+    pub report: RenderExecutionReport,
+}
+
+/// Fully published adaptive cinematic AOV film plus the deterministic tile
+/// execution evidence.  Each AOV sample is aligned to that pixel's terminal
+/// Welford-selected prefix; `report` is observational and does not enter the
+/// raw estimator or adaptive decision semantics.
+#[derive(Debug, PartialEq)]
+pub struct AdaptiveCinematicAovExecutionOutput {
+    /// Complete private-until-success adaptive beauty and aligned AOV state.
+    pub film: AdaptiveCinematicAovFilm,
     /// Tile, scheduling, timing, and memory evidence.
     pub report: RenderExecutionReport,
 }
@@ -3137,6 +3181,7 @@ struct ParallelCinematicAovKernel<'run, 'assets> {
     settings: &'run Settings,
     config: CinematicAovConfig,
     palette: &'run CinematicAovPalette,
+    albedo_cache: &'run AovAlbedoCache,
     staging: &'run Mutex<CinematicAovFilm>,
     failures: &'run Mutex<Option<(u64, CinematicAovTileFailure)>>,
     layout: RenderTileLayout,
@@ -3275,6 +3320,7 @@ impl ParallelCinematicAovKernel<'_, '_> {
                             self.settings,
                             self.config.provenance(),
                             self.palette,
+                            self.albedo_cache,
                             capture_ids,
                             absolute_time_s,
                             traced.primary.as_ref(),
@@ -3419,6 +3465,293 @@ impl AdaptiveRenderState {
             semantics_version: ADAPTIVE_SAMPLING_SEMANTICS_VERSION,
             time_mode,
         }
+    }
+}
+
+/// Private all-or-nothing state for one adaptive cinematic AOV render.
+///
+/// A single mutex protects the beauty Welford state and its corresponding AOV
+/// planes at tile publication.  Tiles own disjoint pixels, so lock ordering
+/// cannot alter arithmetic; the mutex only prevents a partially copied tile
+/// from ever becoming a public result after cancellation or failure.
+struct AdaptiveCinematicAovStaging {
+    beauty: AdaptiveRenderState,
+    aov: AdaptiveAovAccumulator,
+}
+
+struct ParallelAdaptiveCinematicAovKernel<'run, 'assets> {
+    scene: &'assets Scene,
+    lighting: &'run AdmittedLighting<'assets>,
+    camera: &'assets AnimatedCamera,
+    exposure: CameraExposure<'assets>,
+    cut_side: CutSide,
+    settings: &'run Settings,
+    policy: AdaptiveSamplingConfig,
+    config: CinematicAovConfig,
+    palette: &'run CinematicAovPalette,
+    albedo_cache: &'run AovAlbedoCache,
+    staging: &'run Mutex<AdaptiveCinematicAovStaging>,
+    failures: &'run Mutex<Option<(u64, CinematicAovTileFailure)>>,
+    layout: RenderTileLayout,
+    shutter: ShutterInterval,
+    camera_path: CameraPath<'assets>,
+    sobol: Option<&'run Sobol>,
+    compute_ns: &'run AtomicU64,
+    merge_ns: &'run AtomicU64,
+}
+
+impl ParallelAdaptiveCinematicAovKernel<'_, '_> {
+    fn fail(&self, tile: u64, failure: CinematicAovTileFailure) -> ControlFlow<Cancelled, ()> {
+        let mut recorded = self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if recorded
+            .as_ref()
+            .is_none_or(|(recorded_tile, _)| tile < *recorded_tile)
+        {
+            *recorded = Some((tile, failure));
+        }
+        ControlFlow::Break(Cancelled)
+    }
+
+    fn aov_error(&self, tile: u64, error: CinematicAovError) -> ControlFlow<Cancelled, ()> {
+        if matches!(error, CinematicAovError::Tracer(TracerError::Cancelled)) {
+            ControlFlow::Break(Cancelled)
+        } else {
+            self.fail(tile, CinematicAovTileFailure::Aov(error))
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_tile(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, ()> {
+        if cx.checkpoint().is_err() {
+            return ControlFlow::Break(Cancelled);
+        }
+        let Some(bounds) = self.layout.bounds(tile) else {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Internal("adaptive AOV tile outside planned layout"),
+            );
+        };
+        let Some(pixel_count) = bounds
+            .width
+            .checked_mul(bounds.height)
+            .and_then(|count| usize::try_from(count).ok())
+        else {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Internal("adaptive AOV tile pixel count overflow"),
+            );
+        };
+        let mut aov_pixels =
+            match CinematicAovTileAccumulator::try_new(pixel_count, self.config.profile()) {
+                Ok(pixels) => pixels,
+                Err(error) => return self.aov_error(tile, error),
+            };
+        let mut adaptive_pixels = Vec::new();
+        if adaptive_pixels.try_reserve_exact(pixel_count).is_err() {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Aov(CinematicAovError::AllocationRefused),
+            );
+        }
+
+        let compute_started = Instant::now();
+        let key = [
+            (self.settings.seed & 0xffff_ffff) as u32,
+            (self.settings.seed >> 32) as u32,
+        ];
+        let kn = 1.0 / y_integral();
+        let capture_primary = self.config.captures_primary();
+        let capture_ids = self.config.captures_ids();
+        for py in bounds.y..bounds.y + bounds.height {
+            if cx.checkpoint().is_err() {
+                atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                return ControlFlow::Break(Cancelled);
+            }
+            for px in bounds.x..bounds.x + bounds.width {
+                let Some(pixel) = py
+                    .checked_mul(self.settings.width)
+                    .and_then(|row| row.checked_add(px))
+                else {
+                    atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                    return self.fail(
+                        tile,
+                        CinematicAovTileFailure::Internal(
+                            "adaptive AOV pixel identity overflow after preflight",
+                        ),
+                    );
+                };
+                let local_pixel = adaptive_pixels.len();
+                let mut accumulator = AdaptivePixelAccumulator::EMPTY;
+                for sample in 0..self.settings.spp {
+                    if cx.checkpoint().is_err() {
+                        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                        return ControlFlow::Break(Cancelled);
+                    }
+                    let traced = match trace_pixel_sample_with_primary(
+                        self.scene,
+                        self.lighting,
+                        cx,
+                        self.settings,
+                        kn,
+                        self.sobol,
+                        key,
+                        pixel,
+                        sample,
+                        Some(self.shutter),
+                        self.camera_path,
+                        capture_primary,
+                    ) {
+                        Ok(traced) => traced,
+                        Err(TracerError::Cancelled) => {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return ControlFlow::Break(Cancelled);
+                        }
+                        Err(error) => {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return self.aov_error(tile, CinematicAovError::Tracer(error));
+                        }
+                    };
+                    if let Err(error) = accumulator.push(traced.xyz) {
+                        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                        return self.aov_error(tile, CinematicAovError::Adaptive(error));
+                    }
+                    let aligned = if capture_primary {
+                        let Some(split) = traced.contribution_split else {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return self
+                                .aov_error(tile, CinematicAovError::SampleAlignmentMismatch);
+                        };
+                        let Some(absolute_time_s) = traced.absolute_time_s else {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return self.aov_error(
+                                tile,
+                                CinematicAovError::Tracer(TracerError::MissingRayTime),
+                            );
+                        };
+                        let primary = match prepare_aligned_aov_primary(
+                            self.scene,
+                            self.camera,
+                            self.exposure,
+                            self.cut_side,
+                            cx,
+                            self.settings,
+                            self.config.provenance(),
+                            self.palette,
+                            self.albedo_cache,
+                            capture_ids,
+                            absolute_time_s,
+                            traced.primary.as_ref(),
+                        ) {
+                            Ok(primary) => primary,
+                            Err(error) => {
+                                atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                                return self.aov_error(tile, error);
+                            }
+                        };
+                        Some(AlignedAovSample {
+                            beauty_xyz: traced.xyz,
+                            direct_xyz: split.direct_xyz,
+                            indirect_xyz: split.indirect_xyz,
+                            emission_xyz: split.emission_xyz,
+                            pixel_jitter: traced.pixel_jitter,
+                            absolute_sample: sample,
+                            primary,
+                        })
+                    } else {
+                        None
+                    };
+                    if let Err(error) = aov_pixels.push(local_pixel, traced.xyz, aligned) {
+                        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                        return self.aov_error(tile, error);
+                    }
+                    if let Some(decision) = accumulator.decision(self.policy, self.settings.spp) {
+                        accumulator.decision = Some(decision);
+                        break;
+                    }
+                }
+                if accumulator.decision.is_none() {
+                    atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                    return self.fail(
+                        tile,
+                        CinematicAovTileFailure::Internal(
+                            "adaptive AOV pixel had no terminal decision",
+                        ),
+                    );
+                }
+                adaptive_pixels.push(accumulator);
+            }
+        }
+        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+        if adaptive_pixels.len() != pixel_count {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Internal("adaptive AOV tile accumulator length mismatch"),
+            );
+        }
+        if cx.checkpoint().is_err() {
+            return ControlFlow::Break(Cancelled);
+        }
+
+        let mut staging = self
+            .staging
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let merge_started = Instant::now();
+        let mut source_offset = 0usize;
+        for py in bounds.y..bounds.y + bounds.height {
+            if cx.checkpoint().is_err() {
+                atomic_saturating_add(self.merge_ns, elapsed_ns(merge_started));
+                return ControlFlow::Break(Cancelled);
+            }
+            let destination = py as usize * self.settings.width as usize + bounds.x as usize;
+            for column in 0..bounds.width as usize {
+                let pixel = adaptive_pixels[source_offset + column];
+                let index = destination + column;
+                staging.beauty.xyz[index] = pixel.sum_xyz;
+                staging.beauty.mean_xyz[index] = pixel.mean_xyz;
+                staging.beauty.m2_xyz[index] = pixel.m2_xyz;
+                staging.beauty.sample_counts[index] = pixel.samples;
+                let Some(decision) = pixel.decision else {
+                    atomic_saturating_add(self.merge_ns, elapsed_ns(merge_started));
+                    return self.fail(
+                        tile,
+                        CinematicAovTileFailure::Internal(
+                            "adaptive AOV pixel lost terminal decision before merge",
+                        ),
+                    );
+                };
+                staging.beauty.decisions[index] = decision;
+            }
+            source_offset += bounds.width as usize;
+        }
+        let copied = staging.aov.copy_fresh_tile(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            &aov_pixels,
+            || cx.checkpoint().is_ok(),
+        );
+        atomic_saturating_add(self.merge_ns, elapsed_ns(merge_started));
+        match copied {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => self.aov_error(tile, error),
+        }
+    }
+}
+
+impl TileKernel for ParallelAdaptiveCinematicAovKernel<'_, '_> {
+    type Out = ();
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new(ADAPTIVE_CINEMATIC_AOV_TILE_KERNEL, self.layout.tile_count())
+    }
+
+    fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, Self::Out> {
+        self.run_tile(tile, cx)
     }
 }
 
@@ -4388,6 +4721,7 @@ fn render_cinematic_with_aovs_execution_impl<R: RenderPoolRunner>(
         });
     }
 
+    let albedo_cache = AovAlbedoCache::try_new(scene.primitives.len(), config.captures_primary())?;
     let max_tile_pixels_u64 = u64::from(execution.tile_width.min(settings.width))
         .checked_mul(u64::from(execution.tile_height.min(settings.height)))
         .ok_or(RenderExecutionError::Internal(
@@ -4435,6 +4769,7 @@ fn render_cinematic_with_aovs_execution_impl<R: RenderPoolRunner>(
         settings,
         config,
         palette: &palette,
+        albedo_cache: &albedo_cache,
         staging: &staging,
         failures: &failures,
         layout,
@@ -4515,6 +4850,263 @@ fn render_cinematic_with_aovs_execution_impl<R: RenderPoolRunner>(
     let memory = lease.receipt();
     debug_assert_eq!(film.beauty().xyz.len(), pixel_count);
     Ok(CinematicAovExecutionOutput {
+        film,
+        report: RenderExecutionReport {
+            layout,
+            requested_workers: execution.workers,
+            workers: active_workers,
+            attempt_index: 1,
+            retained_film_bytes: 0,
+            staging_film_bytes,
+            tile_scratch_envelope_bytes,
+            sampler_state_bytes: sobol_bytes,
+            progress_state_bytes: 0,
+            setup_ns,
+            traversal_ns,
+            tile_compute_ns,
+            tile_merge_ns,
+            publication_ns,
+            idle_worker_ns,
+            executor,
+            memory,
+        },
+    })
+}
+
+/// Tile-parallel adaptive cinematic render with AOVs co-staged against the
+/// exact per-pixel accepted path prefix.  The serial adaptive-AOV API remains
+/// the arithmetic oracle; this function changes only execution topology.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn render_cinematic_adaptive_with_aovs_execution_impl<R: RenderPoolRunner>(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    policy: AdaptiveSamplingConfig,
+    shutter: ShutterInterval,
+    config: CinematicAovConfig,
+    execution: &RenderExecutionConfig,
+    runner: &R,
+) -> Result<AdaptiveCinematicAovExecutionOutput, CinematicAovExecutionError> {
+    let setup_started = Instant::now();
+    cx.checkpoint().map_err(RenderExecutionError::from)?;
+    policy
+        .validate_maximum(settings.spp)
+        .map_err(CinematicAovError::Adaptive)?;
+    validate_reference_times(config, shutter)?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)
+        .map_err(RenderExecutionError::from)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, requested_mode) = preflight_render(
+        scene,
+        cx,
+        settings,
+        None,
+        0,
+        settings.spp,
+        Some(shutter),
+        camera_path,
+    )
+    .map_err(RenderExecutionError::from)?;
+    let capture_ids = config.captures_ids();
+    let palette = CinematicAovPalette::try_from_scene(scene, config.limits(), capture_ids, cx)?;
+    let albedo_cache = AovAlbedoCache::try_new(scene.primitives.len(), config.captures_primary())?;
+    let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
+    let layout = RenderTileLayout::try_new(
+        settings.width,
+        settings.height,
+        execution.tile_width,
+        execution.tile_height,
+    )
+    .map_err(RenderExecutionError::Config)?;
+    let lease = OperationMemoryLease::bounded(execution.memory_limit_bytes);
+    let (pixel_count, staging_film_bytes) = AdaptiveAovAccumulator::admitted_retained_bytes(
+        settings.width,
+        settings.height,
+        settings.spp,
+        config,
+    )?;
+    let beauty_state_bytes = adaptive_state_bytes(pixel_count)?;
+    let aov_only_bytes = staging_film_bytes.checked_sub(beauty_state_bytes).ok_or(
+        RenderExecutionError::Internal("adaptive cinematic AOV staging byte accounting underflow"),
+    )?;
+    let staging_charge = lease
+        .reserve(
+            "render-adaptive-cinematic-aov-staging-film",
+            staging_film_bytes,
+        )
+        .map_err(RenderExecutionError::Memory)?;
+    let staging = AdaptiveCinematicAovStaging {
+        beauty: AdaptiveRenderState::try_new(pixel_count, beauty_state_bytes)?,
+        aov: AdaptiveAovAccumulator::try_new(
+            settings.width,
+            settings.height,
+            settings.spp,
+            config,
+        )?,
+    };
+
+    let max_tile_pixels_u64 = u64::from(execution.tile_width.min(settings.width))
+        .checked_mul(u64::from(execution.tile_height.min(settings.height)))
+        .ok_or(RenderExecutionError::Internal(
+            "adaptive cinematic AOV tile scratch pixel envelope overflow",
+        ))?;
+    let max_tile_pixels = usize::try_from(max_tile_pixels_u64).map_err(|_| {
+        RenderExecutionError::Internal("adaptive cinematic AOV tile scratch length overflow")
+    })?;
+    let active_worker_ceiling = u64::try_from(execution.workers)
+        .unwrap_or(u64::MAX)
+        .min(layout.tile_count());
+    let per_tile_scratch_bytes =
+        CinematicAovTileAccumulator::retained_bytes(max_tile_pixels, config.profile())?
+            .checked_add(
+                u64::try_from(max_tile_pixels)
+                    .ok()
+                    .and_then(|pixels| {
+                        pixels.checked_mul(size_of::<AdaptivePixelAccumulator>() as u64)
+                    })
+                    .ok_or(RenderExecutionError::Internal(
+                        "adaptive cinematic AOV adaptive tile scratch byte overflow",
+                    ))?,
+            )
+            .ok_or(RenderExecutionError::Internal(
+                "adaptive cinematic AOV tile scratch byte envelope overflow",
+            ))?;
+    let tile_scratch_envelope_bytes = per_tile_scratch_bytes
+        .checked_mul(active_worker_ceiling)
+        .ok_or(RenderExecutionError::Internal(
+            "adaptive cinematic AOV tile scratch worker envelope overflow",
+        ))?;
+    let tile_scratch_charge = lease
+        .reserve(
+            "render-adaptive-cinematic-aov-tile-scratch-envelope",
+            tile_scratch_envelope_bytes,
+        )
+        .map_err(RenderExecutionError::Memory)?;
+    let sobol_bytes = if settings.sampler == Sampler::OwenSobol {
+        3_u64 * size_of::<[u32; 32]>() as u64
+    } else {
+        0
+    };
+    let sobol_charge = (sobol_bytes != 0)
+        .then(|| {
+            lease.reserve(
+                "render-adaptive-cinematic-aov-sobol-directions",
+                sobol_bytes,
+            )
+        })
+        .transpose()
+        .map_err(RenderExecutionError::Memory)?;
+    let sobol =
+        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let staging = Mutex::new(staging);
+    let failures = Mutex::new(None);
+    let compute_ns = AtomicU64::new(0);
+    let merge_ns = AtomicU64::new(0);
+    let kernel = ParallelAdaptiveCinematicAovKernel {
+        scene,
+        lighting: &lighting,
+        camera,
+        exposure,
+        cut_side,
+        settings,
+        policy,
+        config,
+        palette: &palette,
+        albedo_cache: &albedo_cache,
+        staging: &staging,
+        failures: &failures,
+        layout,
+        shutter,
+        camera_path,
+        sobol: sobol.as_ref(),
+        compute_ns: &compute_ns,
+        merge_ns: &merge_ns,
+    };
+    let setup_ns = elapsed_ns(setup_started);
+    let traversal_started = Instant::now();
+    let (outcome, executor) = runner.run_render(cx, &kernel, execution.run_id, &lease);
+    let traversal_ns = elapsed_ns(traversal_started);
+    let failure = failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match outcome {
+        Err(RunError::Cancelled { .. }) => {
+            if let Some((_tile, failure)) = failure {
+                return Err(match failure {
+                    CinematicAovTileFailure::Aov(error) => CinematicAovExecutionError::Aov(error),
+                    CinematicAovTileFailure::Internal(detail) => {
+                        CinematicAovExecutionError::Execution(RenderExecutionError::Internal(
+                            detail,
+                        ))
+                    }
+                });
+            }
+            return Err(CinematicAovExecutionError::Execution(
+                RenderExecutionError::Tracer(TracerError::Cancelled),
+            ));
+        }
+        Err(error) => {
+            return Err(CinematicAovExecutionError::Execution(
+                RenderExecutionError::Executor(error),
+            ));
+        }
+        Ok(()) => {
+            if failure.is_some() {
+                return Err(CinematicAovExecutionError::Execution(
+                    RenderExecutionError::Internal(
+                        "adaptive cinematic AOV tile failure disagreed with executor outcome",
+                    ),
+                ));
+            }
+        }
+    }
+    cx.checkpoint().map_err(RenderExecutionError::from)?;
+    drop(kernel);
+    let staging = staging.into_inner().map_err(|_| {
+        CinematicAovExecutionError::Execution(RenderExecutionError::Internal(
+            "successful adaptive cinematic AOV staging mutex was poisoned",
+        ))
+    })?;
+    let tile_compute_ns = compute_ns.load(Ordering::Relaxed);
+    let tile_merge_ns = merge_ns.load(Ordering::Relaxed);
+    let active_workers = executor.tiles_by_worker.len();
+    let idle_worker_ns = traversal_ns
+        .saturating_mul(active_workers as u64)
+        .saturating_sub(tile_compute_ns.saturating_add(tile_merge_ns));
+    drop(sobol);
+    drop(sobol_charge);
+    drop(tile_scratch_charge);
+    // Publication transfers the adaptive beauty state and aligned AOV planes
+    // to the returned film, so this operation lease no longer owns them.
+    drop(staging_charge);
+    let memory = lease.receipt();
+    let publication_started = Instant::now();
+    let beauty = staging.beauty.into_film(settings, policy, requested_mode);
+    let film = staging.aov.publish(
+        beauty,
+        adaptive_render_binding(
+            *settings,
+            shutter,
+            exposure.shot_id(),
+            cut_side,
+            palette,
+            continuity_fingerprint,
+            policy,
+        ),
+    )?;
+    let publication_ns = elapsed_ns(publication_started);
+    debug_assert_eq!(film.beauty().xyz_sums().len(), pixel_count);
+    debug_assert_eq!(
+        film.retained_bytes(),
+        aov_only_bytes.saturating_add(beauty_state_bytes),
+        "AOV retained-byte contract must continue to include adaptive beauty state"
+    );
+    Ok(AdaptiveCinematicAovExecutionOutput {
         film,
         report: RenderExecutionReport {
             layout,
@@ -6252,6 +6844,32 @@ pub fn render_cinematic_with_aovs_execution(
     )
 }
 
+/// Render a fresh adaptive cinematic-camera film with exactly aligned AOVs
+/// under an explicit deterministic tile policy.
+///
+/// This is the parallel counterpart of
+/// [`render_cinematic_adaptive_with_aovs`].  It retains every pixel's exact
+/// accepted `0..terminal_count` prefix, then publishes raw beauty and AOVs
+/// only after all tiles have drained and the final cancellation checkpoint has
+/// succeeded.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_adaptive_with_aovs_execution(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    policy: AdaptiveSamplingConfig,
+    shutter: ShutterInterval,
+    config: CinematicAovConfig,
+    execution: &RenderExecutionConfig,
+) -> Result<AdaptiveCinematicAovExecutionOutput, CinematicAovExecutionError> {
+    let pool = build_render_pool(execution, cx.mode(), settings.seed);
+    render_cinematic_adaptive_with_aovs_execution_impl(
+        scene, camera, cut_side, cx, settings, policy, shutter, config, execution, &pool,
+    )
+}
+
 /// Render a fresh static adaptive film with explicit deterministic tile
 /// execution. The existing uniform APIs remain the final-quality fallback and
 /// bitwise oracle.
@@ -6469,6 +7087,7 @@ pub fn render_cinematic_adaptive_with_aovs(
     )?;
     let capture_ids = config.captures_ids();
     let palette = CinematicAovPalette::try_from_scene(scene, config.limits(), capture_ids, cx)?;
+    let albedo_cache = AovAlbedoCache::try_new(scene.primitives.len(), config.captures_primary())?;
     let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
     let pixel_count = checked_pixel_len(settings.width, settings.height)?;
     // This constructor performs the complete AOV pixel and retained-memory
@@ -6530,6 +7149,7 @@ pub fn render_cinematic_adaptive_with_aovs(
                         settings,
                         config.provenance(),
                         &palette,
+                        &albedo_cache,
                         capture_ids,
                         absolute_time_s,
                         traced.primary.as_ref(),
@@ -6639,6 +7259,8 @@ pub fn render_cinematic_range_with_aovs(
         return Ok(());
     }
 
+    let albedo_cache =
+        AovAlbedoCache::try_new(scene.primitives.len(), film.config().captures_primary())?;
     let mut staged = film.try_clone_for_stage(cx)?;
     let key = [
         (settings.seed & 0xffff_ffff) as u32,
@@ -6688,6 +7310,7 @@ pub fn render_cinematic_range_with_aovs(
                         settings,
                         film.config().provenance(),
                         &palette,
+                        &albedo_cache,
                         capture_ids,
                         absolute_time_s,
                         traced.primary.as_ref(),
@@ -6727,6 +7350,60 @@ pub fn render_cinematic_range_with_aovs(
     Ok(())
 }
 
+type CachedAovAlbedo = Result<Option<[f64; 3]>, ()>;
+
+/// Per-render lazy cache for the scene-linear albedo guide.
+///
+/// `LiftedSpectrum::rgb` performs the deterministic 80-bin spectral round
+/// trip.  The material is immutable for a render, so repeating that work for
+/// every primary sample only burns cycles; caching its exact `f64` result does
+/// not change estimator or guide bits.  Lazy initialization preserves the
+/// previous fail-closed behavior for invalid materials that are never hit.
+struct AovAlbedoCache {
+    by_primitive: Vec<OnceLock<CachedAovAlbedo>>,
+}
+
+impl AovAlbedoCache {
+    fn try_new(primitive_count: usize, enabled: bool) -> Result<Self, CinematicAovError> {
+        let count = if enabled { primitive_count } else { 0 };
+        let mut by_primitive = Vec::new();
+        by_primitive
+            .try_reserve_exact(count)
+            .map_err(|_| CinematicAovError::AllocationRefused)?;
+        by_primitive.resize_with(count, OnceLock::new);
+        Ok(Self { by_primitive })
+    }
+
+    fn get(
+        &self,
+        primitive_index: usize,
+        material: Material,
+    ) -> Result<Option<[f64; 3]>, CinematicAovError> {
+        let slot = self
+            .by_primitive
+            .get(primitive_index)
+            .ok_or(CinematicAovError::InvalidPrimary)?;
+        match *slot.get_or_init(|| match material {
+            Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
+                let rgb = reflectance.rgb();
+                if rgb.iter().any(|value| !value.is_finite()) {
+                    Err(())
+                } else {
+                    Ok(Some([
+                        rgb[0].clamp(0.0, 1.0),
+                        rgb[1].clamp(0.0, 1.0),
+                        rgb[2].clamp(0.0, 1.0),
+                    ]))
+                }
+            }
+            Material::Conductor { .. } | Material::Dielectric { .. } => Ok(None),
+        }) {
+            Ok(albedo) => Ok(albedo),
+            Err(()) => Err(CinematicAovError::InvalidPrimary),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_aligned_aov_primary(
     scene: &Scene,
@@ -6737,6 +7414,7 @@ fn prepare_aligned_aov_primary(
     settings: &Settings,
     provenance: crate::aov::CinematicAovProvenance,
     palette: &CinematicAovPalette,
+    albedo_cache: &AovAlbedoCache,
     capture_ids: bool,
     absolute_time_s: f64,
     primary: Option<&PrimaryTraceHit>,
@@ -6762,20 +7440,7 @@ fn prepare_aligned_aov_primary(
     };
     let geometric_normal_world = aov_unit_normal(primary.hit.normal)?;
     let shading_normal_world = aov_unit_normal(Some(primary.beauty_shading_normal_world))?;
-    let albedo_linear_rgb = match primitive.material {
-        Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
-            let rgb = reflectance.rgb();
-            if rgb.iter().any(|value| !value.is_finite()) {
-                return Err(CinematicAovError::InvalidPrimary);
-            }
-            Some([
-                rgb[0].clamp(0.0, 1.0),
-                rgb[1].clamp(0.0, 1.0),
-                rgb[2].clamp(0.0, 1.0),
-            ])
-        }
-        Material::Conductor { .. } | Material::Dielectric { .. } => None,
-    };
+    let albedo_linear_rgb = albedo_cache.get(primary.primitive_index, primitive.material)?;
     let material_palette_index = if capture_ids {
         palette.material_index(primary.material_identity)?
     } else {
@@ -7423,6 +8088,49 @@ fn mesh_projection_bounds(mesh: &TriMesh, axis: Vec3) -> Option<(f64, f64, f64)>
     ))
 }
 
+/// Projection bounds for two axes in one vertex-memory pass.
+///
+/// Each axis keeps the same row order and `min`/`max` arithmetic as two calls
+/// to `mesh_projection_bounds`; only the redundant vertex load and unused
+/// coordinate-scale reductions are removed.
+fn mesh_projection_bounds_pair(
+    mesh: &TriMesh,
+    first_axis: Vec3,
+    second_axis: Vec3,
+) -> Option<((f64, f64), (f64, f64))> {
+    let mut first_minimum = f64::INFINITY;
+    let mut first_maximum = f64::NEG_INFINITY;
+    let mut second_minimum = f64::INFINITY;
+    let mut second_maximum = f64::NEG_INFINITY;
+    for &vertex in &mesh.vertices {
+        let point = mesh_vertex(vertex);
+        let first_projection = point.dot(first_axis);
+        let second_projection = point.dot(second_axis);
+        if !point.x.is_finite()
+            || !point.y.is_finite()
+            || !point.z.is_finite()
+            || !first_projection.is_finite()
+            || !second_projection.is_finite()
+        {
+            return None;
+        }
+        first_minimum = first_minimum.min(first_projection);
+        first_maximum = first_maximum.max(first_projection);
+        second_minimum = second_minimum.min(second_projection);
+        second_maximum = second_maximum.max(second_projection);
+    }
+    (first_minimum.is_finite()
+        && first_maximum.is_finite()
+        && first_maximum > first_minimum
+        && second_minimum.is_finite()
+        && second_maximum.is_finite()
+        && second_maximum > second_minimum)
+        .then_some((
+            (first_minimum, first_maximum),
+            (second_minimum, second_maximum),
+        ))
+}
+
 fn triangle_unit_normal(mesh: &TriMesh, triangle_index: u32) -> Option<Vec3> {
     let triangle = *mesh.triangles.get(usize::try_from(triangle_index).ok()?)?;
     let a = mesh_vertex(*mesh.vertices.get(usize::try_from(triangle[0]).ok()?)?);
@@ -7498,10 +8206,8 @@ fn mesh_face_has_admitted_thin_axis(
     }
     let candidate_width = maximum - minimum;
     let (tangent, bitangent) = basis_all_sphere(face_axis);
-    let Some((tangent_minimum, tangent_maximum, _)) = mesh_projection_bounds(mesh, tangent) else {
-        return false;
-    };
-    let Some((bitangent_minimum, bitangent_maximum, _)) = mesh_projection_bounds(mesh, bitangent)
+    let Some(((tangent_minimum, tangent_maximum), (bitangent_minimum, bitangent_maximum))) =
+        mesh_projection_bounds_pair(mesh, tangent, bitangent)
     else {
         return false;
     };
@@ -10728,6 +11434,25 @@ mod tests {
     }
 
     #[test]
+    fn paired_mesh_projection_scan_preserves_sequential_bound_bits() {
+        let mesh = chamfered_plate_face_mesh();
+        let first_axis = unit(Vec3::new(0.3, -0.4, 0.5));
+        let second_axis = unit(Vec3::new(-0.2, 0.7, 0.1));
+        let first = mesh_projection_bounds(&mesh, first_axis).unwrap();
+        let second = mesh_projection_bounds(&mesh, second_axis).unwrap();
+        let paired = mesh_projection_bounds_pair(&mesh, first_axis, second_axis).unwrap();
+
+        assert_eq!(
+            [paired.0.0.to_bits(), paired.0.1.to_bits()],
+            [first.0.to_bits(), first.1.to_bits()]
+        );
+        assert_eq!(
+            [paired.1.0.to_bits(), paired.1.1.to_bits()],
+            [second.0.to_bits(), second.1.to_bits()]
+        );
+    }
+
+    #[test]
     fn slab_nee_admits_chamfered_plate_faces_only_on_the_thin_axis() {
         with_test_cx(|cx| {
             let scene = Scene {
@@ -10938,6 +11663,31 @@ mod tests {
                 "an opaque-first straight shadow must remove the slab NEE competitor"
             );
         });
+    }
+
+    #[test]
+    fn aov_albedo_cache_preserves_direct_spectral_round_trip_bits() {
+        let reflectance = lift_rgb([0.2, 0.4, 0.8]);
+        let material = Material::Lambertian { reflectance };
+        let direct = reflectance.rgb().map(|value| value.clamp(0.0, 1.0));
+        let cache = AovAlbedoCache::try_new(2, true).unwrap();
+        let first = cache.get(0, material).unwrap().unwrap();
+        let second = cache.get(0, material).unwrap().unwrap();
+
+        assert_eq!(first.map(f64::to_bits), direct.map(f64::to_bits));
+        assert_eq!(second.map(f64::to_bits), direct.map(f64::to_bits));
+        assert_eq!(
+            cache
+                .get(
+                    1,
+                    Material::Dielectric {
+                        glass: DielectricGlass::representative_crown(),
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                )
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

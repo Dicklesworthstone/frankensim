@@ -191,10 +191,15 @@ impl Default for TemporalDenoiseLimits {
 pub struct TemporalDenoiseInput<'a> {
     /// Zero-based or segment-local monotonically increasing frame index.
     pub frame_index: u64,
-    /// Uniform raw Monte Carlo samples contributing to every pixel estimate.
+    /// Uniform raw Monte Carlo samples contributing to every pixel estimate,
+    /// or the hard sample ceiling when `sample_counts_per_pixel` is present.
     /// `variance_luminance` is a sample variance, so the denoiser divides it
-    /// by this count before using it as variance of the pixel mean.
+    /// by the exact count before using it as variance of the pixel mean.
     pub samples_per_pixel: u32,
+    /// Optional exact row-major per-pixel raw sample counts from an adaptive
+    /// renderer. Every count must be in `1..=samples_per_pixel`. When absent,
+    /// the uniform `samples_per_pixel` count applies to every pixel.
+    pub sample_counts_per_pixel: Option<&'a [u32]>,
     /// Raster width.
     pub width: usize,
     /// Raster height.
@@ -527,7 +532,7 @@ pub fn temporal_denoise_rgb(
     let previous = previous.filter(|_| use_history);
     for index in 0..pixel_count {
         let current_rgb = [input.red[index], input.green[index], input.blue[index]];
-        let current_variance = input.variance_luminance[index] / input.samples_per_pixel as f32;
+        let current_variance = input.variance_luminance[index] / sample_count(input, index) as f32;
         let Some(history) = previous else {
             for channel in 0..3 {
                 rgb[channel][index] = current_rgb[channel];
@@ -720,6 +725,30 @@ fn validate_input(input: TemporalDenoiseInput<'_>) -> Result<usize, TemporalDeno
                 field,
                 expected: pixel_count,
                 got: len,
+            });
+        }
+    }
+    if let Some(sample_counts) = input.sample_counts_per_pixel {
+        if sample_counts.len() != pixel_count {
+            return Err(TemporalDenoiseError::Shape {
+                field: "sample_counts_per_pixel",
+                expected: pixel_count,
+                got: sample_counts.len(),
+            });
+        }
+        if let Some((index, &samples)) = sample_counts
+            .iter()
+            .enumerate()
+            .find(|(_, samples)| **samples == 0 || **samples > input.samples_per_pixel)
+        {
+            return Err(TemporalDenoiseError::InvalidSample {
+                field: "sample_counts_per_pixel",
+                index,
+                reason: if samples == 0 {
+                    "zero"
+                } else {
+                    "above-sample-ceiling"
+                },
             });
         }
     }
@@ -1045,7 +1074,7 @@ fn clamp_history_rgb(
         }
     }
     let mean_variance =
-        f64::from(input.variance_luminance[center]) / f64::from(input.samples_per_pixel);
+        f64::from(input.variance_luminance[center]) / f64::from(sample_count(input, center));
     let expansion = f64::from(config.neighborhood_clamp_stddev) * mean_variance.sqrt();
     // Clamp the history vector along the line from the current sample instead
     // of clipping channels independently. One shared factor preserves gray
@@ -1069,6 +1098,12 @@ fn clamp_history_rgb(
             + factor * (f64::from(history_rgb[channel]) - f64::from(center_rgb[channel])))
             as f32
     })
+}
+
+fn sample_count(input: TemporalDenoiseInput<'_>, index: usize) -> u32 {
+    input
+        .sample_counts_per_pixel
+        .map_or(input.samples_per_pixel, |counts| counts[index])
 }
 
 fn spatial_atrous_pass(
@@ -1234,6 +1269,7 @@ mod tests {
     struct Fixture {
         frame_index: u64,
         samples_per_pixel: u32,
+        sample_counts_per_pixel: Option<Vec<u32>>,
         width: usize,
         height: usize,
         red: Vec<f32>,
@@ -1257,6 +1293,7 @@ mod tests {
             Self {
                 frame_index,
                 samples_per_pixel: 1,
+                sample_counts_per_pixel: None,
                 width,
                 height,
                 red: vec![rgb[0]; count],
@@ -1279,6 +1316,7 @@ mod tests {
             TemporalDenoiseInput {
                 frame_index: self.frame_index,
                 samples_per_pixel: self.samples_per_pixel,
+                sample_counts_per_pixel: self.sample_counts_per_pixel.as_deref(),
                 width: self.width,
                 height: self.height,
                 red: &self.red,
@@ -1539,6 +1577,40 @@ mod tests {
                 field: "samples_per_pixel"
             })
         );
+        let mut malformed_counts = valid.clone();
+        malformed_counts.samples_per_pixel = 8;
+        malformed_counts.sample_counts_per_pixel = Some(vec![2; 3]);
+        assert_eq!(
+            run(
+                &malformed_counts,
+                None,
+                TemporalFrameBoundary::Continuous,
+                TemporalDenoiseConfig::default()
+            ),
+            Err(TemporalDenoiseError::Shape {
+                field: "sample_counts_per_pixel",
+                expected: 4,
+                got: 3,
+            })
+        );
+        for (samples, reason) in [(0, "zero"), (9, "above-sample-ceiling")] {
+            let mut invalid_counts = valid.clone();
+            invalid_counts.samples_per_pixel = 8;
+            invalid_counts.sample_counts_per_pixel = Some(vec![2, samples, 2, 2]);
+            assert_eq!(
+                run(
+                    &invalid_counts,
+                    None,
+                    TemporalFrameBoundary::Continuous,
+                    TemporalDenoiseConfig::default()
+                ),
+                Err(TemporalDenoiseError::InvalidSample {
+                    field: "sample_counts_per_pixel",
+                    index: 1,
+                    reason,
+                })
+            );
+        }
         assert_eq!(
             run(
                 &valid,
@@ -1628,6 +1700,24 @@ mod tests {
                 field: "object_ids"
             })
         );
+    }
+
+    #[test]
+    fn adaptive_sample_counts_scale_each_pixels_estimator_variance_exactly() {
+        let mut fixture = Fixture::surface(2, 1, 0, [0.2; 3]);
+        fixture.samples_per_pixel = 8;
+        fixture.sample_counts_per_pixel = Some(vec![2, 8]);
+        fixture.variance = vec![8.0, 8.0];
+
+        let result = run(
+            &fixture,
+            None,
+            TemporalFrameBoundary::Cut,
+            TemporalDenoiseConfig::default(),
+        )
+        .expect("valid heterogeneous adaptive counts");
+
+        assert_eq!(result.estimate_variance, [4.0, 1.0]);
     }
 
     #[test]

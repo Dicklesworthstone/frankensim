@@ -1931,6 +1931,79 @@ struct BvhNode {
     leaf: bool,
 }
 
+/// One 128-byte Apple cache line of `u32` entries, covering ordinary
+/// median-split mesh BVHs without a per-ray allocation.
+///
+/// Larger or externally supplied trees retain the same LIFO traversal order by
+/// spilling only entries above this inline segment.
+const BVH_INLINE_STACK_CAPACITY: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BvhTraversalStackExhausted;
+
+/// A LIFO BVH traversal stack that avoids a heap allocation for ordinary mesh
+/// rays while retaining a fallible escape hatch for unusually deep trees.
+struct BvhTraversalStack<const INLINE_CAPACITY: usize> {
+    inline: [u32; INLINE_CAPACITY],
+    inline_len: usize,
+    // Entries here are newer than every inline entry, so popping spill first
+    // preserves the existing right-then-left child traversal exactly.
+    spill: Option<Vec<u32>>,
+}
+
+impl<const INLINE_CAPACITY: usize> BvhTraversalStack<INLINE_CAPACITY> {
+    fn new(root: u32) -> Result<Self, BvhTraversalStackExhausted> {
+        let mut stack = Self {
+            inline: [0; INLINE_CAPACITY],
+            inline_len: 0,
+            spill: None,
+        };
+        stack.try_push(root)?;
+        Ok(stack)
+    }
+
+    fn try_push(&mut self, id: u32) -> Result<(), BvhTraversalStackExhausted> {
+        if let Some(spill) = &mut self.spill {
+            spill
+                .try_reserve(1)
+                .map_err(|_| BvhTraversalStackExhausted)?;
+            spill.push(id);
+            return Ok(());
+        }
+        if self.inline_len < INLINE_CAPACITY {
+            self.inline[self.inline_len] = id;
+            self.inline_len += 1;
+            return Ok(());
+        }
+
+        let mut spill = Vec::new();
+        spill
+            .try_reserve(1)
+            .map_err(|_| BvhTraversalStackExhausted)?;
+        spill.push(id);
+        self.spill = Some(spill);
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<u32> {
+        if let Some(spill) = &mut self.spill
+            && let Some(id) = spill.pop()
+        {
+            return Some(id);
+        }
+        if self.inline_len == 0 {
+            return None;
+        }
+        self.inline_len -= 1;
+        Some(self.inline[self.inline_len])
+    }
+
+    #[cfg(test)]
+    const fn spilled(&self) -> bool {
+        self.spill.is_some()
+    }
+}
+
 impl TriMesh {
     /// Build with the deterministic median-split BVH.
     #[must_use]
@@ -2105,7 +2178,13 @@ impl TriMesh {
             return Ok(None);
         }
         let mut best: Option<MeshHit> = None;
-        let mut stack = vec![0u32];
+        let mut stack = match BvhTraversalStack::<BVH_INLINE_STACK_CAPACITY>::new(0) {
+            Ok(stack) => stack,
+            // There is no resource-error channel on the legacy mesh API.
+            // Refuse to return a partial traversal hit rather than panicking
+            // or silently dropping a child.
+            Err(BvhTraversalStackExhausted) => return Ok(None),
+        };
         let mut visits = 0u32;
         while let Some(id) = stack.pop() {
             if let Some(cx) = cx {
@@ -2140,8 +2219,12 @@ impl TriMesh {
                     }
                 }
             } else {
-                stack.push(node.b);
-                stack.push(node.a);
+                if stack.try_push(node.b).is_err() || stack.try_push(node.a).is_err() {
+                    // The legacy API cannot report a failed spill reservation.
+                    // Returning no hit is the fail-closed outcome: a partial
+                    // traversal must never certify a potentially farther hit.
+                    return Ok(None);
+                }
             }
         }
         if let Some(cx) = cx {
@@ -2568,6 +2651,122 @@ mod tests {
             assert_eq!(mesh.bvh_fingerprint(), mesh.calculate_bvh_fingerprint());
             assert_eq!(mesh.clone().bvh_fingerprint(), mesh.bvh_fingerprint());
         }
+    }
+
+    #[test]
+    fn bvh_traversal_stack_preserves_lifo_order_inline_and_after_spill() {
+        let mut inline = BvhTraversalStack::<4>::new(10).expect("inline root fits");
+        for id in [11, 12, 13] {
+            inline.try_push(id).expect("inline entry fits");
+        }
+        assert!(!inline.spilled());
+        assert_eq!(
+            [
+                inline.pop(),
+                inline.pop(),
+                inline.pop(),
+                inline.pop(),
+                inline.pop()
+            ],
+            [Some(13), Some(12), Some(11), Some(10), None]
+        );
+
+        let mut spilled = BvhTraversalStack::<2>::new(10).expect("inline root fits");
+        spilled.try_push(11).expect("second inline entry fits");
+        spilled.try_push(12).expect("fallible heap spill succeeds");
+        spilled.try_push(13).expect("later spill entry succeeds");
+        assert!(spilled.spilled());
+        assert_eq!(
+            [
+                spilled.pop(),
+                spilled.pop(),
+                spilled.pop(),
+                spilled.pop(),
+                spilled.pop(),
+            ],
+            [Some(13), Some(12), Some(11), Some(10), None]
+        );
+    }
+
+    #[test]
+    fn deep_bvh_retains_exact_hit_payload_and_visit_audit() {
+        // Four triangles per leaf gives this mesh a ten-level left descent.
+        // The const-generic stack test above exercises spill without requiring
+        // an impractically large mesh to exceed the production inline capacity.
+        let triangle_count = 4_096;
+        let mesh = TriMesh::new(
+            vec![[-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 1.0, 2.0]],
+            vec![[0, 1, 2]; triangle_count],
+        );
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(0.0, 0.0, 1.0),
+        };
+
+        let accelerated = mesh
+            .intersect_surface(&ray)
+            .expect("the repeated triangle mesh is hit");
+        let brute_force = mesh
+            .intersect_surface_bruteforce(&ray)
+            .expect("the repeated triangle mesh is hit without the BVH");
+
+        assert_eq!(accelerated.triangle_index, brute_force.triangle_index);
+        assert_eq!(accelerated.hit.t.to_bits(), brute_force.hit.t.to_bits());
+        assert_eq!(
+            [
+                accelerated.hit.point.x.to_bits(),
+                accelerated.hit.point.y.to_bits(),
+                accelerated.hit.point.z.to_bits(),
+            ],
+            [
+                brute_force.hit.point.x.to_bits(),
+                brute_force.hit.point.y.to_bits(),
+                brute_force.hit.point.z.to_bits(),
+            ]
+        );
+        assert_eq!(
+            accelerated.barycentric.map(f64::to_bits),
+            brute_force.barycentric.map(f64::to_bits)
+        );
+        assert_eq!(
+            accelerated.hit.normal.map(|normal| [
+                normal.x.to_bits(),
+                normal.y.to_bits(),
+                normal.z.to_bits(),
+            ]),
+            brute_force.hit.normal.map(|normal| [
+                normal.x.to_bits(),
+                normal.y.to_bits(),
+                normal.z.to_bits(),
+            ])
+        );
+        let vector_bits = |vector: Option<Vec3>| {
+            vector.map(|value| [value.x.to_bits(), value.y.to_bits(), value.z.to_bits()])
+        };
+        assert_eq!(
+            vector_bits(accelerated.hit.shading_normal),
+            vector_bits(brute_force.hit.shading_normal)
+        );
+        assert_eq!(
+            vector_bits(accelerated.hit.tangent_u),
+            vector_bits(brute_force.hit.tangent_u)
+        );
+        assert_eq!(
+            vector_bits(accelerated.hit.tangent_v),
+            vector_bits(brute_force.hit.tangent_v)
+        );
+        assert_eq!(
+            vector_bits(accelerated.hit.dp_du),
+            vector_bits(brute_force.hit.dp_du)
+        );
+        assert_eq!(
+            vector_bits(accelerated.hit.dp_dv),
+            vector_bits(brute_force.hit.dp_dv)
+        );
+        assert_eq!(
+            accelerated.hit.steps, 11,
+            "the first accepted leaf retains the legacy left-first visit audit"
+        );
     }
 
     #[test]
