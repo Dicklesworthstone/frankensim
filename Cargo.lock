@@ -119,6 +119,58 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 [[package]]
 name = "asupersync"
 version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76304753492160ffd546b203c5488366dee7530274799747f5f7b370dd4730e7"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "bincode-next",
+ "chacha20poly1305",
+ "crc32fast",
+ "crossbeam-queue",
+ "franken-decision 0.3.10",
+ "franken-evidence 0.3.10",
+ "franken-kernel 0.3.10",
+ "futures-lite",
+ "getrandom 0.4.3",
+ "hashbrown 0.17.1",
+ "hex",
+ "hmac",
+ "js-sys",
+ "libc",
+ "memchr",
+ "nix",
+ "nkeys",
+ "parking_lot",
+ "pin-project",
+ "polling",
+ "prost",
+ "rmp-serde",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.11.0",
+ "signal-hook",
+ "slab",
+ "smallvec",
+ "socket2",
+ "subtle",
+ "sysinfo",
+ "tempfile",
+ "thiserror",
+ "unicode-normalization",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys",
+ "xattr",
+ "zeroize",
+]
+
+[[package]]
+name = "asupersync"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -127,9 +179,9 @@ dependencies = [
  "chacha20poly1305",
  "crc32fast",
  "crossbeam-queue",
- "franken-decision",
- "franken-evidence",
- "franken-kernel",
+ "franken-decision 0.4.0",
+ "franken-evidence 0.4.0",
+ "franken-kernel 0.4.0",
  "futures-lite",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",
@@ -173,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.10"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -764,15 +816,36 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "franken-decision"
 version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69ebbe3cb66f3d9c4f780ff9d7f03d666b770d5cf8c2cbec20d64dd2c4efd394"
 dependencies = [
- "franken-evidence",
- "franken-kernel",
+ "franken-evidence 0.3.10",
+ "franken-kernel 0.3.10",
+ "serde",
+]
+
+[[package]]
+name = "franken-decision"
+version = "0.4.0"
+dependencies = [
+ "franken-evidence 0.4.0",
+ "franken-kernel 0.4.0",
  "serde",
 ]
 
 [[package]]
 name = "franken-evidence"
 version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b88c812fbe5a25cad64e4bbe4bed49e1a5e8951e4c84d7778d7414bb85cdc46"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "franken-evidence"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -781,6 +854,15 @@ dependencies = [
 [[package]]
 name = "franken-kernel"
 version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd75a2ab20875a185f2f9231f46561de802556f69fee2025c43091a12630ae92"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "franken-kernel"
+version = "0.4.0"
 dependencies = [
  "serde",
 ]
@@ -964,7 +1046,7 @@ version = "0.0.1"
 name = "fs-cheb"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-casebook",
  "fs-exec",
@@ -1038,7 +1120,7 @@ dependencies = [
 name = "fs-constraint"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -1051,7 +1133,7 @@ dependencies = [
 name = "fs-contact"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -1244,7 +1326,7 @@ dependencies = [
 name = "fs-exec"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-obs",
@@ -1345,7 +1427,7 @@ dependencies = [
 name = "fs-flywheel-e2e"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-adjoint",
  "fs-alloc",
  "fs-asbuilt",
@@ -1409,7 +1491,7 @@ version = "0.0.1"
 name = "fs-geocon"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-constraint",
  "fs-evidence",
@@ -1426,7 +1508,7 @@ dependencies = [
 name = "fs-geom"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -1597,7 +1679,7 @@ dependencies = [
 name = "fs-marquee"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-adjoint",
  "fs-alloc",
  "fs-cutfem",
@@ -1648,7 +1730,7 @@ version = "0.0.1"
 name = "fs-mesh"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-exec",
  "fs-geom",
@@ -1728,7 +1810,7 @@ dependencies = [
 name = "fs-opdsl"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-ad",
  "fs-alloc",
  "fs-blake3",
@@ -1752,7 +1834,7 @@ dependencies = [
 name = "fs-opt"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-exec",
@@ -1790,7 +1872,7 @@ dependencies = [
 name = "fs-plan"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-conduction",
@@ -1864,7 +1946,7 @@ dependencies = [
 name = "fs-query"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -1919,7 +2001,7 @@ dependencies = [
 name = "fs-render"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-ad",
  "fs-alloc",
  "fs-blake3",
@@ -1940,7 +2022,7 @@ dependencies = [
 name = "fs-rep-frep"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -1954,7 +2036,7 @@ dependencies = [
 name = "fs-rep-mesh"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -1977,7 +2059,7 @@ dependencies = [
 name = "fs-rep-nurbs"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-ad",
  "fs-alloc",
  "fs-evidence",
@@ -1991,7 +2073,7 @@ dependencies = [
 name = "fs-rep-sdf"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -2004,7 +2086,7 @@ dependencies = [
 name = "fs-rep-voxel"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fnx-classes",
  "fnx-runtime",
  "fs-alloc",
@@ -2092,7 +2174,7 @@ dependencies = [
 name = "fs-selfknow-e2e"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-adjoint",
  "fs-evidence",
  "fs-iface",
@@ -2227,7 +2309,7 @@ dependencies = [
 name = "fs-surrogate"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -2304,7 +2386,7 @@ dependencies = [
 name = "fs-topo"
 version = "0.0.1"
 dependencies = [
- "asupersync",
+ "asupersync 0.4.0",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -2560,7 +2642,7 @@ dependencies = [
 name = "fsqlite"
 version = "0.2.0"
 dependencies = [
- "asupersync",
+ "asupersync 0.3.10",
  "fsqlite-core",
  "fsqlite-error",
  "fsqlite-ext-fts5",
@@ -2601,7 +2683,7 @@ dependencies = [
 name = "fsqlite-core"
 version = "0.2.0"
 dependencies = [
- "asupersync",
+ "asupersync 0.3.10",
  "blake3",
  "foldhash",
  "fsqlite-ast",
@@ -2707,7 +2789,7 @@ dependencies = [
 name = "fsqlite-mvcc"
 version = "0.2.0"
 dependencies = [
- "asupersync",
+ "asupersync 0.3.10",
  "blake3",
  "crc32c",
  "crossbeam-epoch",
@@ -2742,7 +2824,7 @@ name = "fsqlite-pager"
 version = "0.2.0"
 dependencies = [
  "argon2",
- "asupersync",
+ "asupersync 0.3.10",
  "blake3",
  "bumpalo",
  "chacha20poly1305",
@@ -2792,7 +2874,7 @@ dependencies = [
 name = "fsqlite-types"
 version = "0.2.0"
 dependencies = [
- "asupersync",
+ "asupersync 0.3.10",
  "bitflags",
  "blake3",
  "fsqlite-error",
@@ -2810,7 +2892,7 @@ dependencies = [
 name = "fsqlite-vdbe"
 version = "0.2.0"
 dependencies = [
- "asupersync",
+ "asupersync 0.3.10",
  "crossbeam-deque",
  "fsqlite-ast",
  "fsqlite-btree",
@@ -2832,7 +2914,7 @@ name = "fsqlite-vfs"
 version = "0.2.0"
 dependencies = [
  "advisory-lock",
- "asupersync",
+ "asupersync 0.3.10",
  "fsqlite-error",
  "fsqlite-observability",
  "fsqlite-types",
@@ -2848,7 +2930,7 @@ dependencies = [
 name = "fsqlite-wal"
 version = "0.2.0"
 dependencies = [
- "asupersync",
+ "asupersync 0.3.10",
  "blake3",
  "crc32c",
  "fsqlite-error",

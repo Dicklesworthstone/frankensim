@@ -9,6 +9,7 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
+    fmt::Write as FmtWrite,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -28,7 +29,7 @@ use fs_render::{
         CINEMATIC_AOV_CHANNEL_SEMANTICS, CINEMATIC_AOV_INVALID_SEMANTICS,
         CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS, CINEMATIC_AOV_SEMANTICS_VERSION, CinematicAovProfile,
     },
-    tracer::MATERIAL_CONTENT_IDENTITY_DOMAIN,
+    tracer::{ADAPTIVE_SAMPLING_SEMANTICS_VERSION, MATERIAL_CONTENT_IDENTITY_DOMAIN},
 };
 
 const FINAL_DIAGNOSTIC_CHANNELS: &[(&str, PixelType)] =
@@ -50,6 +51,12 @@ struct Cli {
     frame_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Command {
+    Denoise(Cli),
+    InspectSamples(PathBuf),
+}
+
 #[derive(Debug)]
 struct FinalDiagnosticFrame {
     width: u32,
@@ -65,6 +72,7 @@ struct FinalDiagnosticFrame {
     normal_z: Vec<f32>,
     primary_coverage: Vec<f32>,
     variance_luminance: Vec<f32>,
+    sample_counts: Vec<u32>,
     object_ids: Vec<u64>,
     material_ids: Vec<u64>,
     sequence_identity: SequenceIdentity,
@@ -79,7 +87,9 @@ struct SequenceIdentity {
     scene_hash: String,
     composition: String,
     aov_profile: String,
-    samples_per_pixel: u32,
+    sample_mode: String,
+    sample_ceiling: u32,
+    adaptive_policy: Option<String>,
     object_palette: String,
     material_palette: String,
     object_palette_entries: u64,
@@ -106,7 +116,8 @@ impl FinalDiagnosticFrame {
     fn temporal_input(&self, frame_index: u64) -> TemporalDenoiseInput<'_> {
         TemporalDenoiseInput {
             frame_index,
-            samples_per_pixel: self.sequence_identity.samples_per_pixel,
+            samples_per_pixel: self.sequence_identity.sample_ceiling,
+            sample_counts_per_pixel: Some(&self.sample_counts),
             width: self.width as usize,
             height: self.height as usize,
             red: &self.red,
@@ -134,8 +145,13 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let cli = parse_cli(std::env::args().skip(1))?;
-    run_cli(&cli, |message| eprintln!("status=progress {message}"))
+    match parse_cli(std::env::args().skip(1))? {
+        Command::Denoise(cli) => run_cli(&cli, |message| eprintln!("status=progress {message}")),
+        Command::InspectSamples(path) => {
+            print!("{}", inspect_sample_counts(&path)?);
+            Ok(())
+        }
+    }
 }
 
 fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
@@ -346,10 +362,246 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleCountSummary {
+    histogram: BTreeMap<u32, u64>,
+    pixels: u64,
+    total_samples: u64,
+    minimum: u32,
+    maximum: u32,
+    at_ceiling_spp_pixels: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PixelCrop {
+    x_min: u32,
+    x_max: u32,
+    y_min: u32,
+    y_max: u32,
+}
+
+fn inspect_sample_counts(path: &Path) -> Result<String, String> {
+    let (decoded, encoded_identity) = read_final_diagnostic_exr(path)?;
+    let frame_index = exr_attribute_u64(&decoded, "frankensim.frame.index", path)?;
+    let frame = decode_final_diagnostic(decoded, path, frame_index)?;
+    sample_inspection_report(&frame, frame_index, encoded_identity)
+}
+
+/// Emit stable, whitespace-delimited records. Integer numerator/denominator
+/// pairs are the exact mean and fraction evidence; decimal fields are only
+/// convenient renderings of those ratios. Quantiles use the one-based nearest-
+/// rank definition over exact integer sample counts. A count equal to the SPP
+/// ceiling does not imply nonconvergence: the samples plane cannot recover the
+/// renderer's `AdaptiveDecision`, including an error-threshold decision made at
+/// the final checkpoint.
+fn sample_inspection_report(
+    frame: &FinalDiagnosticFrame,
+    frame_index: u64,
+    encoded_identity: ContentHash,
+) -> Result<String, String> {
+    let expected_pixels = usize::try_from(u64::from(frame.width) * u64::from(frame.height))
+        .map_err(|_| "sample inspection raster size does not fit usize".to_owned())?;
+    if frame.sample_counts.len() != expected_pixels {
+        return Err(format!(
+            "sample inspection plane has {} pixels; expected {expected_pixels}",
+            frame.sample_counts.len()
+        ));
+    }
+    let ceiling = frame.sequence_identity.sample_ceiling;
+    let full = summarize_sample_counts(frame.sample_counts.iter().copied(), ceiling)?;
+    let adaptive_policy = frame
+        .sequence_identity
+        .adaptive_policy
+        .as_deref()
+        .unwrap_or("none");
+    let mut report = String::new();
+    writeln!(
+        report,
+        "record=metadata schema=frankensim-euler-sample-inspection-v1 source_identity={} frame={} width={} height={} sample_mode={} sample_ceiling={} adaptive_policy={} quantile_method=nearest-rank adaptive_decision=unavailable-from-samples-plane",
+        encoded_identity.to_hex(),
+        frame_index,
+        frame.width,
+        frame.height,
+        frame.sequence_identity.sample_mode,
+        ceiling,
+        adaptive_policy,
+    )
+    .expect("writing to a String cannot fail");
+    append_sample_summary(&mut report, "record=summary scope=full", &full);
+    for (&samples, &pixels) in &full.histogram {
+        writeln!(
+            report,
+            "record=histogram scope=full spp={samples} pixels={pixels} fraction_numerator={pixels} fraction_denominator={} fraction={:.9}",
+            full.pixels,
+            pixels as f64 / full.pixels as f64,
+        )
+        .expect("writing to a String cannot fail");
+    }
+    // These normalized crops are the canonical 320x180 calibration regions
+    // used by the Euler-disc look-development matrix. Scaling their half-open
+    // bounds makes the same named evidence available at 960p and 4K.
+    for (name, crop) in [
+        (
+            "disc",
+            reference_crop(frame.width, frame.height, 108, 212, 54, 118),
+        ),
+        (
+            "front_glass",
+            reference_crop(frame.width, frame.height, 10, 230, 105, 173),
+        ),
+        (
+            "right_glass",
+            reference_crop(frame.width, frame.height, 190, 290, 65, 165),
+        ),
+        (
+            "background",
+            reference_crop(frame.width, frame.height, 0, 100, 0, 40),
+        ),
+    ] {
+        let summary = summarize_crop(&frame.sample_counts, frame.width, crop, ceiling)?;
+        let prefix = format!(
+            "record=crop name={name} x_min={} x_max={} y_min={} y_max={}",
+            crop.x_min, crop.x_max, crop.y_min, crop.y_max
+        );
+        append_sample_summary(&mut report, &prefix, &summary);
+    }
+    Ok(report)
+}
+
+fn summarize_sample_counts(
+    counts: impl IntoIterator<Item = u32>,
+    ceiling: u32,
+) -> Result<SampleCountSummary, String> {
+    let mut histogram = BTreeMap::<u32, u64>::new();
+    let mut pixels = 0_u64;
+    let mut total_samples = 0_u64;
+    let mut minimum = u32::MAX;
+    let mut maximum = 0_u32;
+    let mut at_ceiling_spp_pixels = 0_u64;
+    for samples in counts {
+        if samples == 0 || samples > ceiling {
+            return Err(format!(
+                "sample inspection encountered count {samples} outside 1..={ceiling}"
+            ));
+        }
+        pixels = pixels
+            .checked_add(1)
+            .ok_or_else(|| "sample inspection pixel count overflowed u64".to_owned())?;
+        total_samples = total_samples
+            .checked_add(u64::from(samples))
+            .ok_or_else(|| "sample inspection total sample count overflowed u64".to_owned())?;
+        let bin = histogram.entry(samples).or_insert(0);
+        *bin = bin
+            .checked_add(1)
+            .ok_or_else(|| "sample inspection histogram count overflowed u64".to_owned())?;
+        minimum = minimum.min(samples);
+        maximum = maximum.max(samples);
+        at_ceiling_spp_pixels += u64::from(samples == ceiling);
+    }
+    if pixels == 0 {
+        return Err("sample inspection region is empty".to_owned());
+    }
+    Ok(SampleCountSummary {
+        histogram,
+        pixels,
+        total_samples,
+        minimum,
+        maximum,
+        at_ceiling_spp_pixels,
+    })
+}
+
+fn summarize_crop(
+    counts: &[u32],
+    raster_width: u32,
+    crop: PixelCrop,
+    ceiling: u32,
+) -> Result<SampleCountSummary, String> {
+    let width = usize::try_from(raster_width)
+        .map_err(|_| "sample inspection raster width does not fit usize".to_owned())?;
+    let x_min = crop.x_min as usize;
+    let x_max = crop.x_max as usize;
+    let y_min = crop.y_min as usize;
+    let y_max = crop.y_max as usize;
+    let crop_counts = (y_min..y_max).flat_map(|y| {
+        let row = y * width;
+        counts[row + x_min..row + x_max].iter().copied()
+    });
+    summarize_sample_counts(crop_counts, ceiling)
+}
+
+fn reference_crop(
+    width: u32,
+    height: u32,
+    reference_x_min: u32,
+    reference_x_max: u32,
+    reference_y_min: u32,
+    reference_y_max: u32,
+) -> PixelCrop {
+    const REFERENCE_WIDTH: u64 = 320;
+    const REFERENCE_HEIGHT: u64 = 180;
+    debug_assert!(reference_x_min < reference_x_max && reference_x_max <= 320);
+    debug_assert!(reference_y_min < reference_y_max && reference_y_max <= 180);
+    let x_min = (u64::from(width) * u64::from(reference_x_min) / REFERENCE_WIDTH) as u32;
+    let x_max = (u64::from(width) * u64::from(reference_x_max)).div_ceil(REFERENCE_WIDTH) as u32;
+    let y_min = (u64::from(height) * u64::from(reference_y_min) / REFERENCE_HEIGHT) as u32;
+    let y_max = (u64::from(height) * u64::from(reference_y_max)).div_ceil(REFERENCE_HEIGHT) as u32;
+    PixelCrop {
+        x_min,
+        x_max: x_max.max(x_min + 1).min(width),
+        y_min,
+        y_max: y_max.max(y_min + 1).min(height),
+    }
+}
+
+fn append_sample_summary(report: &mut String, prefix: &str, summary: &SampleCountSummary) {
+    writeln!(
+        report,
+        "{prefix} pixels={} total_samples={} mean_numerator={} mean_denominator={} mean_spp={:.9} min_spp={} p10_spp={} p25_spp={} p50_spp={} p75_spp={} p90_spp={} p95_spp={} p99_spp={} max_spp={} at_ceiling_spp_pixels={} at_ceiling_spp_fraction_numerator={} at_ceiling_spp_fraction_denominator={} at_ceiling_spp_fraction={:.9}",
+        summary.pixels,
+        summary.total_samples,
+        summary.total_samples,
+        summary.pixels,
+        summary.total_samples as f64 / summary.pixels as f64,
+        summary.minimum,
+        nearest_rank_quantile(summary, 10, 100),
+        nearest_rank_quantile(summary, 25, 100),
+        nearest_rank_quantile(summary, 50, 100),
+        nearest_rank_quantile(summary, 75, 100),
+        nearest_rank_quantile(summary, 90, 100),
+        nearest_rank_quantile(summary, 95, 100),
+        nearest_rank_quantile(summary, 99, 100),
+        summary.maximum,
+        summary.at_ceiling_spp_pixels,
+        summary.at_ceiling_spp_pixels,
+        summary.pixels,
+        summary.at_ceiling_spp_pixels as f64 / summary.pixels as f64,
+    )
+    .expect("writing to a String cannot fail");
+}
+
+fn nearest_rank_quantile(summary: &SampleCountSummary, numerator: u64, denominator: u64) -> u32 {
+    debug_assert!(numerator > 0 && numerator <= denominator);
+    let rank = (summary.pixels * numerator).div_ceil(denominator);
+    let mut cumulative = 0_u64;
+    for (&samples, &pixels) in &summary.histogram {
+        cumulative += pixels;
+        if cumulative >= rank {
+            return samples;
+        }
+    }
+    summary.maximum
+}
+
 fn read_final_diagnostic(
     path: &Path,
     expected_frame: u64,
 ) -> Result<(FinalDiagnosticFrame, ContentHash), String> {
+    let (decoded, encoded_identity) = read_final_diagnostic_exr(path)?;
+    decode_final_diagnostic(decoded, path, expected_frame).map(|frame| (frame, encoded_identity))
+}
+
+fn read_final_diagnostic_exr(path: &Path) -> Result<(DecodedExr, ContentHash), String> {
     let length = fs::metadata(path)
         .map_err(|error| format!("inspect input {}: {error}", path.display()))?
         .len();
@@ -379,7 +631,7 @@ fn read_final_diagnostic(
     let decoded = read_exr(&bytes)
         .map_err(|error| format!("decode FinalDiagnostic EXR {}: {error}", path.display()))?;
     drop(bytes);
-    decode_final_diagnostic(decoded, path, expected_frame).map(|frame| (frame, encoded_identity))
+    Ok((decoded, encoded_identity))
 }
 
 fn decode_final_diagnostic(
@@ -437,9 +689,9 @@ fn decode_final_diagnostic(
         ));
     }
     let primary_coverage = take_plane(&mut planes, "primary.coverage", path)?;
-    validate_uniform_sample_plane(
+    let sample_counts = exact_sample_counts(
         take_plane(&mut planes, "samples", path)?,
-        sequence_identity.samples_per_pixel,
+        &sequence_identity,
         path,
     )?;
     let object_ids = exact_palette_indices(
@@ -470,6 +722,7 @@ fn decode_final_diagnostic(
         normal_z: take_plane(&mut planes, "normal.Z", path)?,
         primary_coverage,
         variance_luminance: take_plane(&mut planes, "variance.Y", path)?,
+        sample_counts,
         object_ids,
         material_ids,
         sequence_identity,
@@ -477,21 +730,38 @@ fn decode_final_diagnostic(
     })
 }
 
-fn validate_uniform_sample_plane(
+fn exact_sample_counts(
     values: Vec<f32>,
-    samples_per_pixel: u32,
+    sequence: &SequenceIdentity,
     path: &Path,
-) -> Result<(), String> {
-    let expected = samples_per_pixel as f32;
+) -> Result<Vec<u32>, String> {
+    let mut counts = Vec::new();
+    counts
+        .try_reserve_exact(values.len())
+        .map_err(|_| format!("allocate sample-count plane for {}", path.display()))?;
     for (index, value) in values.into_iter().enumerate() {
-        if value.to_bits() != expected.to_bits() {
+        let samples = value as u32;
+        if !value.is_finite()
+            || value < 1.0
+            || value > sequence.sample_ceiling as f32
+            || samples as f32 != value
+        {
             return Err(format!(
-                "FinalDiagnostic EXR {} samples plane disagrees with uniform header SPP at sample {index}: value={value}, header={samples_per_pixel}",
-                path.display()
+                "FinalDiagnostic EXR {} samples plane has invalid exact count at sample {index}: value={value}, ceiling={}",
+                path.display(),
+                sequence.sample_ceiling,
             ));
         }
+        if sequence.sample_mode == "uniform" && samples != sequence.sample_ceiling {
+            return Err(format!(
+                "FinalDiagnostic EXR {} samples plane disagrees with uniform header SPP at sample {index}: value={value}, header={}",
+                path.display(),
+                sequence.sample_ceiling,
+            ));
+        }
+        counts.push(samples);
     }
-    Ok(())
+    Ok(counts)
 }
 
 fn take_plane(
@@ -613,38 +883,63 @@ fn validate_final_diagnostic_attributes(
     // across frames would reject every valid temporal sequence at frame 1.
     let _frame_config_hash = content_hash_attribute(exr, "frankensim.aov.configHash", path)?;
     let sample_mode = exr_attribute_string(exr, "frankensim.render.sampleMode", path)?;
-    if sample_mode != "uniform" {
+    if sample_mode != "uniform" && sample_mode != "adaptive" {
         return Err(format!(
-            "FinalDiagnostic EXR {} declares unsupported sample mode {sample_mode:?}; expected \"uniform\"",
+            "FinalDiagnostic EXR {} declares unsupported sample mode {sample_mode:?}; expected \"uniform\" or \"adaptive\"",
             path.display()
         ));
     }
-    let samples_per_pixel = u32::try_from(exr_attribute_u64(exr, "frankensim.render.spp", path)?)
-        .map_err(|_| {
+    let sample_ceiling = u32::try_from(exr_attribute_u64(
+        exr,
+        "frankensim.render.sppCeiling",
+        path,
+    )?)
+    .map_err(|_| {
         format!(
-            "FinalDiagnostic EXR {} render sample count exceeds u32",
+            "FinalDiagnostic EXR {} render sample ceiling exceeds u32",
             path.display()
         )
     })?;
-    if samples_per_pixel == 0 {
+    if sample_ceiling == 0 {
         return Err(format!(
-            "FinalDiagnostic EXR {} render sample count must be positive",
+            "FinalDiagnostic EXR {} render sample ceiling must be positive",
             path.display()
         ));
     }
-    if u64::from(samples_per_pixel) > MAX_EXACT_F32_INTEGER {
+    if u64::from(sample_ceiling) > MAX_EXACT_F32_INTEGER {
         return Err(format!(
-            "FinalDiagnostic EXR {} render sample count {samples_per_pixel} exceeds exact FLOAT integer ceiling {MAX_EXACT_F32_INTEGER}",
+            "FinalDiagnostic EXR {} render sample ceiling {sample_ceiling} exceeds exact FLOAT integer ceiling {MAX_EXACT_F32_INTEGER}",
             path.display()
         ));
     }
-    let samples_per_pixel_ceiling = exr_attribute_u64(exr, "frankensim.render.sppCeiling", path)?;
-    if samples_per_pixel_ceiling != u64::from(samples_per_pixel) {
-        return Err(format!(
-            "FinalDiagnostic EXR {} uniform render SPP {samples_per_pixel} disagrees with SPP ceiling {samples_per_pixel_ceiling}",
-            path.display()
-        ));
-    }
+    let rendered_spp = exr_attribute_string(exr, "frankensim.render.spp", path)?;
+    let adaptive_policy = if sample_mode == "uniform" {
+        let samples_per_pixel = rendered_spp.parse::<u32>().map_err(|_| {
+            format!(
+                "FinalDiagnostic EXR {} uniform render SPP is not canonical u32",
+                path.display()
+            )
+        })?;
+        if samples_per_pixel.to_string() != rendered_spp || samples_per_pixel != sample_ceiling {
+            return Err(format!(
+                "FinalDiagnostic EXR {} uniform render SPP {rendered_spp:?} disagrees with SPP ceiling {sample_ceiling}",
+                path.display()
+            ));
+        }
+        None
+    } else {
+        if rendered_spp != "per-pixel-channel" {
+            return Err(format!(
+                "FinalDiagnostic EXR {} adaptive render SPP must be \"per-pixel-channel\"; got {rendered_spp:?}",
+                path.display()
+            ));
+        }
+        Some(validate_adaptive_policy_attribute(
+            exr,
+            sample_ceiling,
+            path,
+        )?)
+    };
     let (object_palette, object_palette_entries) =
         canonical_object_palette(exr, "frankensim.aov.objectPalette", path)?;
     let (material_palette, material_palette_entries) =
@@ -661,7 +956,9 @@ fn validate_final_diagnostic_attributes(
         scene_hash: content_hash_attribute(exr, "frankensim.source.sceneHash", path)?,
         composition: content_hash_attribute(exr, "frankensim.source.composition", path)?,
         aov_profile,
-        samples_per_pixel,
+        sample_mode,
+        sample_ceiling,
+        adaptive_policy,
         object_palette,
         material_palette,
         object_palette_entries,
@@ -674,6 +971,81 @@ fn validate_final_diagnostic_attributes(
         max_depth: exr_attribute_u64(exr, "frankensim.render.maxDepth", path)?,
         render_versions: nonempty_string_attribute(exr, "frankensim.render.versions", path)?,
     })
+}
+
+fn validate_adaptive_policy_attribute(
+    exr: &DecodedExr,
+    sample_ceiling: u32,
+    path: &Path,
+) -> Result<String, String> {
+    let policy = exr_attribute_string(exr, "frankensim.render.adaptive", path)?;
+    let mut fields = policy.split(';');
+    let version = fields
+        .next()
+        .and_then(|field| field.strip_prefix("version="));
+    let minimum = fields
+        .next()
+        .and_then(|field| field.strip_prefix("minimum="));
+    let batch = fields.next().and_then(|field| field.strip_prefix("batch="));
+    let absolute = fields
+        .next()
+        .and_then(|field| field.strip_prefix("absolute="));
+    let relative = fields
+        .next()
+        .and_then(|field| field.strip_prefix("relative="));
+    let dark_floor = fields
+        .next()
+        .and_then(|field| field.strip_prefix("darkFloor="));
+    if fields.next().is_some()
+        || canonical_u32(version) != Some(ADAPTIVE_SAMPLING_SEMANTICS_VERSION)
+    {
+        return Err(invalid_adaptive_policy(path));
+    }
+    let minimum = canonical_u32(minimum).ok_or_else(|| invalid_adaptive_policy(path))?;
+    let batch = canonical_u32(batch).ok_or_else(|| invalid_adaptive_policy(path))?;
+    if minimum < 2 || minimum > sample_ceiling || batch == 0 {
+        return Err(invalid_adaptive_policy(path));
+    }
+    for value in [absolute, relative, dark_floor] {
+        let value = value.ok_or_else(|| invalid_adaptive_policy(path))?;
+        let bits = canonical_f64_string_bits(value).ok_or_else(|| invalid_adaptive_policy(path))?;
+        if f64::from_bits(bits) < 0.0 {
+            return Err(invalid_adaptive_policy(path));
+        }
+    }
+    Ok(policy)
+}
+
+fn canonical_u32(value: Option<&str>) -> Option<u32> {
+    let value = value?;
+    let parsed = value.parse::<u32>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+fn canonical_f64_string_bits(encoded: &str) -> Option<u64> {
+    let (_, hex_bits) = encoded.split_once("@0x")?;
+    if hex_bits.len() != 16
+        || !hex_bits
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let bits = u64::from_str_radix(hex_bits, 16).ok()?;
+    let value = f64::from_bits(bits);
+    if !value.is_finite() {
+        return None;
+    }
+    let canonical = if value == 0.0 { 0.0 } else { value };
+    (encoded == format!("{canonical}@0x{:016x}", canonical.to_bits()))
+        .then_some(canonical.to_bits())
+}
+
+fn invalid_adaptive_policy(path: &Path) -> String {
+    format!(
+        "FinalDiagnostic EXR {} attribute frankensim.render.adaptive is not the canonical adaptive policy grammar",
+        path.display()
+    )
 }
 
 fn nonempty_string_attribute(exr: &DecodedExr, name: &str, path: &Path) -> Result<String, String> {
@@ -759,26 +1131,7 @@ fn validate_timing_continuity(
 
 fn canonical_f64_bits_attribute(exr: &DecodedExr, name: &str, path: &Path) -> Result<u64, String> {
     let encoded = exr_attribute_string(exr, name, path)?;
-    let (_, hex_bits) = encoded
-        .split_once("@0x")
-        .ok_or_else(|| invalid_f64_attribute(path, name))?;
-    if hex_bits.len() != 16
-        || !hex_bits
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err(invalid_f64_attribute(path, name));
-    }
-    let bits = u64::from_str_radix(hex_bits, 16).map_err(|_| invalid_f64_attribute(path, name))?;
-    let value = f64::from_bits(bits);
-    if !value.is_finite() {
-        return Err(invalid_f64_attribute(path, name));
-    }
-    let canonical = if value == 0.0 { 0.0 } else { value };
-    if encoded != format!("{canonical}@0x{:016x}", canonical.to_bits()) {
-        return Err(invalid_f64_attribute(path, name));
-    }
-    Ok(canonical.to_bits())
+    canonical_f64_string_bits(&encoded).ok_or_else(|| invalid_f64_attribute(path, name))
 }
 
 fn invalid_f64_attribute(path: &Path, name: &str) -> String {
@@ -1043,6 +1396,11 @@ fn offline_preview_manifest(
     render_contract.update(source.strategy.as_bytes());
     render_contract.update(&source.max_depth.to_le_bytes());
     render_contract.update(source.render_versions.as_bytes());
+    render_contract.update(source.sample_mode.as_bytes());
+    render_contract.update(&source.sample_ceiling.to_le_bytes());
+    if let Some(policy) = &source.adaptive_policy {
+        render_contract.update(policy.as_bytes());
+    }
     let render_contract_identity = render_contract.finalize();
     let mut derivative =
         DomainHasher::new("org.frankensim.euler-critique.offline-denoised-preview-sequence.v1");
@@ -1056,11 +1414,15 @@ fn offline_preview_manifest(
     derivative.update(&dimensions.0.to_le_bytes());
     derivative.update(&dimensions.1.to_le_bytes());
     let derivative_identity = derivative.finalize();
+    let adaptive_policy_json = source
+        .adaptive_policy
+        .as_ref()
+        .map_or_else(|| "null".to_owned(), |policy| format!("\"{policy}\""));
 
     Ok(format!(
         concat!(
             "{{\n",
-            "  \"schema\": \"frankensim-euler-offline-denoise-v1\",\n",
+            "  \"schema\": \"frankensim-euler-offline-denoise-v2\",\n",
             "  \"authority\": \"biased-display-derivative-not-raw-estimate\",\n",
             "  \"publication\": \"single-writer-staged-directory-rename\",\n",
             "  \"frame_start\": {},\n",
@@ -1072,7 +1434,9 @@ fn offline_preview_manifest(
             "  \"source_composition_identity\": \"{}\",\n",
             "  \"source_aov_profile\": \"{}\",\n",
             "  \"source_aov_semantics_version\": {},\n",
-            "  \"source_samples_per_pixel\": {},\n",
+            "  \"source_sample_mode\": \"{}\",\n",
+            "  \"source_sample_ceiling\": {},\n",
+            "  \"source_adaptive_policy\": {},\n",
             "  \"source_object_palette_entries\": {},\n",
             "  \"source_material_palette_entries\": {},\n",
             "  \"source_object_palette_identity\": \"{}\",\n",
@@ -1095,7 +1459,9 @@ fn offline_preview_manifest(
         source.composition,
         source.aov_profile,
         CINEMATIC_AOV_SEMANTICS_VERSION,
-        source.samples_per_pixel,
+        source.sample_mode,
+        source.sample_ceiling,
+        adaptive_policy_json,
         source.object_palette_entries,
         source.material_palette_entries,
         object_palette_identity.to_hex(),
@@ -1155,7 +1521,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
+fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut input = None;
     let mut output = None;
     let mut frame_start = None;
@@ -1163,6 +1529,26 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
+            "--inspect-samples" => {
+                if input.is_some()
+                    || output.is_some()
+                    || frame_start.is_some()
+                    || frame_count.is_some()
+                {
+                    return Err(format!(
+                        "--inspect-samples cannot be combined with denoise arguments\n{}",
+                        usage()
+                    ));
+                }
+                let path = PathBuf::from(next_value(&mut args, "--inspect-samples")?);
+                if let Some(extra) = args.next() {
+                    return Err(format!(
+                        "unexpected argument after --inspect-samples EXR: {extra}\n{}",
+                        usage()
+                    ));
+                }
+                return Ok(Command::InspectSamples(path));
+            }
             "--input" => input = Some(PathBuf::from(next_value(&mut args, "--input")?)),
             "--output" => output = Some(PathBuf::from(next_value(&mut args, "--output")?)),
             "--frame-start" => {
@@ -1196,7 +1582,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             cli.frame_start
         ));
     }
-    Ok(cli)
+    Ok(Command::Denoise(cli))
 }
 
 fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -1211,7 +1597,7 @@ fn parse_u64(value: &str, name: &str) -> Result<u64, String> {
 }
 
 const fn usage() -> &'static str {
-    "Usage: euler_cinematic_denoise --input DIR --output DIR --frame-start N --frame-count N"
+    "Usage:\n  euler_cinematic_denoise --input DIR --output DIR --frame-start N --frame-count N\n  euler_cinematic_denoise --inspect-samples EXR"
 }
 
 #[cfg(test)]
@@ -1330,6 +1716,10 @@ mod tests {
             .expect("FinalDiagnostic");
         assert_eq!(frame.temporal_input(42).frame_index, 42);
         assert_eq!(frame.temporal_input(42).samples_per_pixel, 16);
+        assert_eq!(
+            frame.temporal_input(42).sample_counts_per_pixel,
+            Some(&[16, 16][..])
+        );
         assert_eq!(frame.temporal_input(42).red, &[1.0, 2.0]);
         assert_eq!(frame.temporal_input(42).variance_luminance, &[1.0, 2.0]);
         assert_eq!(frame.temporal_input(42).object_ids, Some(&[1, 2][..]));
@@ -1575,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_or_zero_sample_metadata_is_refused() {
+    fn adaptive_sample_metadata_and_exact_count_plane_are_admitted() {
         let mut adaptive = final_diagnostic();
         adaptive
             .attributes
@@ -1583,27 +1973,129 @@ mod tests {
             .find(|attribute| attribute.name == "frankensim.render.sampleMode")
             .expect("fixture sample mode")
             .value = b"adaptive".to_vec();
-        let error = validate_final_diagnostic_attributes(&adaptive, Path::new("adaptive.exr"), 0)
-            .expect_err("adaptive sample semantics are not supported by this variance bridge");
-        assert!(error.contains("unsupported sample mode"));
-
-        let mut zero = final_diagnostic();
-        zero.attributes
-            .iter_mut()
-            .find(|attribute| attribute.name == "frankensim.render.spp")
-            .expect("fixture SPP")
-            .value = b"0".to_vec();
-        let error = validate_final_diagnostic_attributes(&zero, Path::new("zero.exr"), 0)
-            .expect_err("zero SPP must be refused");
-        assert!(error.contains("sample count must be positive"));
-
-        let mut inexact = final_diagnostic();
-        inexact
+        adaptive
             .attributes
             .iter_mut()
             .find(|attribute| attribute.name == "frankensim.render.spp")
             .expect("fixture SPP")
-            .value = b"16777217".to_vec();
+            .value = b"per-pixel-channel".to_vec();
+        adaptive.attributes.push(ExrAttribute {
+            name: "frankensim.render.adaptive".to_owned(),
+            ty: "string".to_owned(),
+            value: b"version=1;minimum=2;batch=2;absolute=0@0x0000000000000000;relative=0.1@0x3fb999999999999a;darkFloor=0.01@0x3f847ae147ae147b".to_vec(),
+        });
+        adaptive
+            .channels
+            .iter_mut()
+            .find(|channel| channel.name == "samples")
+            .expect("fixture samples plane")
+            .data[1] = 8.0;
+        let frame = decode_final_diagnostic(adaptive, Path::new("adaptive.exr"), 0)
+            .expect("canonical adaptive metadata and count plane");
+        assert_eq!(frame.sequence_identity.sample_mode, "adaptive");
+        assert_eq!(frame.sequence_identity.sample_ceiling, 16);
+        assert_eq!(frame.sample_counts, [16, 8]);
+        assert_eq!(
+            frame.temporal_input(0).sample_counts_per_pixel,
+            Some(&[16, 8][..])
+        );
+    }
+
+    #[test]
+    fn sample_inspection_statistics_are_exact_and_use_nearest_rank_quantiles() {
+        let summary = summarize_sample_counts([2, 2, 2, 2, 8, 8, 16, 16].into_iter(), 16)
+            .expect("valid exact sample counts");
+        assert_eq!(summary.pixels, 8);
+        assert_eq!(summary.total_samples, 56);
+        assert_eq!(summary.minimum, 2);
+        assert_eq!(summary.maximum, 16);
+        assert_eq!(summary.at_ceiling_spp_pixels, 2);
+        assert_eq!(summary.histogram, BTreeMap::from([(2, 4), (8, 2), (16, 2)]));
+        assert_eq!(nearest_rank_quantile(&summary, 10, 100), 2);
+        assert_eq!(nearest_rank_quantile(&summary, 50, 100), 2);
+        assert_eq!(nearest_rank_quantile(&summary, 75, 100), 8);
+        assert_eq!(nearest_rank_quantile(&summary, 99, 100), 16);
+    }
+
+    #[test]
+    fn sample_inspection_report_exposes_exact_ratios_histogram_and_fixed_crops() {
+        let frame = decode_final_diagnostic(final_diagnostic(), Path::new("fixture.exr"), 0)
+            .expect("FinalDiagnostic fixture");
+        let report =
+            sample_inspection_report(&frame, 0, hash_domain("sample-inspection-test", b"fixture"))
+                .expect("sample inspection report");
+        assert!(
+            report.starts_with("record=metadata schema=frankensim-euler-sample-inspection-v1 ")
+        );
+        assert!(report.contains("adaptive_decision=unavailable-from-samples-plane"));
+        assert!(report.contains(
+            "record=summary scope=full pixels=2 total_samples=32 mean_numerator=32 mean_denominator=2 mean_spp=16.000000000"
+        ));
+        assert!(report.contains(
+            "at_ceiling_spp_pixels=2 at_ceiling_spp_fraction_numerator=2 at_ceiling_spp_fraction_denominator=2 at_ceiling_spp_fraction=1.000000000"
+        ));
+        assert!(report.contains(
+            "record=histogram scope=full spp=16 pixels=2 fraction_numerator=2 fraction_denominator=2 fraction=1.000000000"
+        ));
+        assert!(report.contains("record=crop name=disc x_min=0 x_max=2 y_min=0 y_max=1 pixels=2"));
+        assert!(
+            report
+                .contains("record=crop name=front_glass x_min=0 x_max=2 y_min=0 y_max=1 pixels=2")
+        );
+        assert!(
+            report
+                .contains("record=crop name=right_glass x_min=1 x_max=2 y_min=0 y_max=1 pixels=1")
+        );
+        assert!(
+            report.contains("record=crop name=background x_min=0 x_max=1 y_min=0 y_max=1 pixels=1")
+        );
+    }
+
+    #[test]
+    fn calibration_crops_scale_exactly_from_320p_to_960p() {
+        assert_eq!(
+            reference_crop(960, 540, 108, 212, 54, 118),
+            PixelCrop {
+                x_min: 324,
+                x_max: 636,
+                y_min: 162,
+                y_max: 354,
+            }
+        );
+        assert_eq!(
+            reference_crop(960, 540, 10, 230, 105, 173),
+            PixelCrop {
+                x_min: 30,
+                x_max: 690,
+                y_min: 315,
+                y_max: 519,
+            }
+        );
+    }
+
+    #[test]
+    fn zero_or_inexact_sample_ceiling_is_refused() {
+        let mut zero = final_diagnostic();
+        for name in ["frankensim.render.spp", "frankensim.render.sppCeiling"] {
+            zero.attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == name)
+                .expect("fixture SPP")
+                .value = b"0".to_vec();
+        }
+        let error = validate_final_diagnostic_attributes(&zero, Path::new("zero.exr"), 0)
+            .expect_err("zero SPP must be refused");
+        assert!(error.contains("sample ceiling must be positive"));
+
+        let mut inexact = final_diagnostic();
+        for name in ["frankensim.render.spp", "frankensim.render.sppCeiling"] {
+            inexact
+                .attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == name)
+                .expect("fixture SPP")
+                .value = b"16777217".to_vec();
+        }
         let error = validate_final_diagnostic_attributes(&inexact, Path::new("inexact.exr"), 0)
             .expect_err("SPP beyond exact FLOAT integer range must be refused");
         assert!(error.contains("exceeds exact FLOAT integer ceiling"));
@@ -1697,6 +2189,49 @@ mod tests {
         )
         .expect_err("a mid-sequence cut must be explicit rather than silently temporal");
         assert!(error.contains("sequential denoising must begin at frame 0"));
+    }
+
+    #[test]
+    fn cli_admits_one_read_only_sample_inspection_or_the_legacy_denoise_mode() {
+        assert_eq!(
+            parse_cli(
+                ["--inspect-samples", "frame-000096.exr"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .expect("sample inspection command"),
+            Command::InspectSamples(PathBuf::from("frame-000096.exr"))
+        );
+        assert_eq!(
+            parse_cli(
+                [
+                    "--input",
+                    "raw",
+                    "--output",
+                    "preview",
+                    "--frame-start",
+                    "0",
+                    "--frame-count",
+                    "2",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+            )
+            .expect("legacy denoise command"),
+            Command::Denoise(Cli {
+                input: PathBuf::from("raw"),
+                output: PathBuf::from("preview"),
+                frame_start: 0,
+                frame_count: 2,
+            })
+        );
+        let error = parse_cli(
+            ["--inspect-samples", "frame.exr", "--frame-count", "1"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect_err("inspection must remain one-file read-only mode");
+        assert!(error.contains("unexpected argument after --inspect-samples EXR"));
     }
 
     #[test]

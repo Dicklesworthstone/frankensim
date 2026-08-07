@@ -40,8 +40,9 @@ use crate::{
     render_motion_bridge::EulerRenderMotionBridge,
     render_scene_bridge::{
         EulerCinematicScene, EulerEnvironmentStyle, EulerFrameRequest, EulerMaterialStyle,
-        EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec, EulerSupportSurfaceSpec,
-        EulerTessellationConfig, euler_scene_smoke_settings,
+        EulerPreviewMeshReceipt, EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec,
+        EulerSupportSurfaceSpec, EulerTessellationConfig, MAX_EULER_ARC_SUBDIVISIONS,
+        MAX_EULER_AZIMUTHAL_SEGMENTS, euler_scene_smoke_settings,
     },
     representative_modal_preset,
     timeline_resampling::{EventEvaluationSide, ExposureEventPolicy},
@@ -60,15 +61,18 @@ use fs_evidence::{
 use fs_exec::{Cx, RunId};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_img::{
-    CinematicColorConfig, CinematicColorLimits, PngColor, PreviewDither,
-    TEMPORAL_DENOISE_PIPELINE_VERSION, TemporalDenoiseConfig, TemporalDenoiseInput,
+    Channel, CinematicColorConfig, CinematicColorLimits, ExrAttribute, PixelType, PngColor,
+    PreviewDither, TEMPORAL_DENOISE_PIPELINE_VERSION, TemporalDenoiseConfig, TemporalDenoiseInput,
     TemporalDenoiseLimits, TemporalDenoisedFrame, TemporalFrameBoundary, temporal_denoise_rgb,
-    transform_cinematic_preview, write_png16,
+    transform_cinematic_preview, write_exr_with_attributes, write_png16,
 };
 use fs_math::det;
 use fs_mbd::Vec3;
 use fs_render::{
-    aov::{CinematicAovConfig, CinematicAovLimits, CinematicAovProfile, CinematicAovProvenance},
+    aov::{
+        CinematicAovConfig, CinematicAovLimits, CinematicAovProfile, CinematicAovProvenance,
+        cinematic_render_semantics_versions,
+    },
     camera::{AnimatedCamera, Aperture, CameraProjection, CutSide, PhysicalCamera},
     conductor::{ConductorOptics, ConductorSurface},
     dielectric::{DielectricGlass, DielectricSurface},
@@ -77,8 +81,9 @@ use fs_render::{
         ShutterInterval,
     },
     tracer::{
+        ADAPTIVE_SAMPLING_SEMANTICS_VERSION, AdaptiveFilm, AdaptiveSamplingConfig,
         MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport,
-        RenderWorkerPool, film_to_exr,
+        RenderWorkerPool, Settings, film_to_exr,
     },
 };
 
@@ -176,8 +181,56 @@ pub enum CinematicFrameWindow {
     },
 }
 
+/// Explicit deterministic raw-estimator stopping policy for production renders.
+///
+/// The thresholds are the per-channel raw-XYZ dispersion proxies defined by
+/// [`AdaptiveSamplingConfig`]. They are not confidence intervals, perceptual
+/// image-error bounds, or denoiser controls. The hard maximum remains an
+/// explicit part of the policy so an adaptive request can never become
+/// unbounded work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CinematicAdaptiveSamplingConfig {
+    /// First per-pixel sample count at which convergence may be declared.
+    pub minimum_samples_per_pixel: u32,
+    /// Hard per-pixel path ceiling.
+    pub maximum_samples_per_pixel: u32,
+    /// Number of additional samples between deterministic decisions.
+    pub decision_batch_samples: u32,
+    /// Per-channel absolute raw-XYZ dispersion allowance.
+    pub absolute_error: f64,
+    /// Per-channel relative raw-XYZ dispersion allowance.
+    pub relative_error: f64,
+    /// Lower raw-XYZ scale used by the relative term for dark channels.
+    pub dark_floor: f64,
+}
+
+impl CinematicAdaptiveSamplingConfig {
+    fn policy(self) -> Result<AdaptiveSamplingConfig, CinematicFixtureError> {
+        AdaptiveSamplingConfig::try_new(
+            self.minimum_samples_per_pixel,
+            self.decision_batch_samples,
+            self.absolute_error,
+            self.relative_error,
+            self.dark_floor,
+        )
+        .map_err(pipeline)
+    }
+
+    fn canonical(self) -> Result<Self, CinematicFixtureError> {
+        let policy = self.policy()?;
+        Ok(Self {
+            minimum_samples_per_pixel: policy.minimum_samples(),
+            maximum_samples_per_pixel: self.maximum_samples_per_pixel,
+            decision_batch_samples: policy.batch_samples(),
+            absolute_error: policy.absolute_error(),
+            relative_error: policy.relative_error(),
+            dark_floor: policy.dark_floor(),
+        })
+    }
+}
+
 /// Bounded settings for one watchable critique artifact.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CinematicFixtureConfig {
     /// Display and raw-master width in pixels.
     pub width: u32,
@@ -189,10 +242,21 @@ pub struct CinematicFixtureConfig {
     pub frame_window: CinematicFrameWindow,
     /// Uniform path-tracing samples per pixel.
     pub samples_per_pixel: u32,
+    /// Optional deterministic variance-targeted raw sampling policy.
+    ///
+    /// Beauty, retained AOVs, and denoising guides all observe each pixel's
+    /// exact accepted sample prefix. The raw EXR and manifest retain the
+    /// authoritative per-pixel counts; denoising remains a biased display
+    /// derivative and cannot affect the stopping decision.
+    pub adaptive_sampling: Option<CinematicAdaptiveSamplingConfig>,
     /// Caller-selected independent scramble salt for replicated raw renders.
     pub render_seed_salt: u64,
     /// Maximum path depth, including dielectric traversal.
     pub max_depth: u32,
+    /// Render-only samples around the disc's complete revolution.
+    pub azimuthal_segments: u32,
+    /// Render-only equal-angle chords used for each circular meridian arc.
+    pub arc_subdivisions_per_arc: u32,
     /// Physical exposure angle at 24 Hz. `180` means a 1/48-second exposure.
     pub shutter_angle_degrees: u16,
     /// Reused tile-render worker count. This affects throughput, not image bits.
@@ -226,8 +290,11 @@ impl Default for CinematicFixtureConfig {
             frames: CRITIQUE_FRAMES,
             frame_window: CinematicFrameWindow::Full,
             samples_per_pixel: 1,
+            adaptive_sampling: None,
             render_seed_salt: 0,
             max_depth: 6,
+            azimuthal_segments: 1_024,
+            arc_subdivisions_per_arc: 128,
             shutter_angle_degrees: 180,
             render_workers: default_render_workers(),
             tile_width: 32,
@@ -266,9 +333,52 @@ impl CinematicFixtureConfig {
                 "samples_per_pixel must be in 1..=4096",
             ));
         }
+        if let Some(adaptive) = self.adaptive_sampling {
+            if adaptive.minimum_samples_per_pixel < 2 || adaptive.minimum_samples_per_pixel > 4_096
+            {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "adaptive minimum samples per pixel must be in 2..=4096",
+                ));
+            }
+            if adaptive.maximum_samples_per_pixel < adaptive.minimum_samples_per_pixel
+                || adaptive.maximum_samples_per_pixel > 4_096
+            {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "adaptive maximum samples per pixel must be in minimum..=4096",
+                ));
+            }
+            if adaptive.decision_batch_samples == 0 {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "adaptive decision batch samples must be nonzero",
+                ));
+            }
+            if [
+                adaptive.absolute_error,
+                adaptive.relative_error,
+                adaptive.dark_floor,
+            ]
+            .into_iter()
+            .any(|value| !value.is_finite() || value < 0.0)
+            {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "adaptive error controls must be finite and nonnegative",
+                ));
+            }
+            adaptive.policy()?;
+        }
         if self.max_depth == 0 || self.max_depth > 64 {
             return Err(CinematicFixtureError::InvalidConfig(
                 "max_depth must be in 1..=64",
+            ));
+        }
+        if !(8..=MAX_EULER_AZIMUTHAL_SEGMENTS).contains(&self.azimuthal_segments) {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "azimuthal_segments must be in 8..=4096",
+            ));
+        }
+        if !(1..=MAX_EULER_ARC_SUBDIVISIONS).contains(&self.arc_subdivisions_per_arc) {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "arc_subdivisions_per_arc must be in 1..=1024",
             ));
         }
         if self.shutter_angle_degrees > 360 {
@@ -301,6 +411,19 @@ impl CinematicFixtureConfig {
             ));
         }
         Ok(())
+    }
+
+    fn render_sample_ceiling(&self) -> u32 {
+        self.adaptive_sampling
+            .map_or(self.samples_per_pixel, |policy| {
+                policy.maximum_samples_per_pixel
+            })
+    }
+
+    fn adaptive_policy(&self) -> Result<Option<AdaptiveSamplingConfig>, CinematicFixtureError> {
+        self.adaptive_sampling
+            .map(CinematicAdaptiveSamplingConfig::policy)
+            .transpose()
     }
 
     fn render_frame_range(&self) -> Result<core::ops::Range<u32>, CinematicFixtureError> {
@@ -502,6 +625,286 @@ impl FixtureRenderEvidence {
         self.tile_merge_ns += u128::from(report.tile_merge_ns);
         self.publication_ns += u128::from(report.publication_ns);
         self.idle_worker_ns += u128::from(report.idle_worker_ns);
+    }
+}
+
+/// Compact copy of the scene builder's render-only preview-mesh receipt.
+///
+/// Keeping this separate from [`CinematicFixtureConfig`] ensures the manifest
+/// records what the scene builder actually admitted and emitted, rather than
+/// merely echoing the requested tessellation controls.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FixturePreviewMeshEvidence {
+    azimuthal_segments: u32,
+    arc_subdivisions_per_arc: u32,
+    vertex_count: usize,
+    triangle_count: usize,
+    maximum_meridian_chord_error_m: f64,
+    maximum_azimuthal_chord_error_m: f64,
+}
+
+impl FixturePreviewMeshEvidence {
+    fn from_receipt(receipt: EulerPreviewMeshReceipt) -> Self {
+        Self {
+            azimuthal_segments: receipt.azimuthal_segments,
+            arc_subdivisions_per_arc: receipt.arc_subdivisions_per_arc,
+            vertex_count: receipt.vertex_count,
+            triangle_count: receipt.triangle_count,
+            maximum_meridian_chord_error_m: receipt.maximum_meridian_chord_error_m,
+            maximum_azimuthal_chord_error_m: receipt.maximum_azimuthal_chord_error_m,
+        }
+    }
+
+    fn manifest_json(self) -> String {
+        format!(
+            concat!(
+                "{{\"authority\":\"render-only chordal approximation\",",
+                "\"azimuthal_segments\":{},\"arc_subdivisions_per_arc\":{},",
+                "\"vertex_count\":{},\"triangle_count\":{},",
+                "\"maximum_meridian_chord_error_m\":{:.17e},",
+                "\"maximum_azimuthal_chord_error_m\":{:.17e}}}"
+            ),
+            self.azimuthal_segments,
+            self.arc_subdivisions_per_arc,
+            self.vertex_count,
+            self.triangle_count,
+            self.maximum_meridian_chord_error_m,
+            self.maximum_azimuthal_chord_error_m,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixtureAdaptiveFrameEvidence {
+    frame: u32,
+    pixels: u64,
+    minimum_samples: u32,
+    maximum_samples: u32,
+    total_samples: u64,
+    converged_pixels: u64,
+    maximum_sample_pixels: u64,
+    sample_count_identity: ContentHash,
+}
+
+/// Exact summaries derived from the published adaptive films.
+///
+/// The raw EXR retains every per-pixel count in its `samples` channel. This
+/// structure keeps compact manifest evidence plus content identities for those
+/// row-major maps; it never upgrades the raw dispersion proxy into an image
+/// error certificate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FixtureAdaptiveSamplingEvidence {
+    frames: Vec<FixtureAdaptiveFrameEvidence>,
+    pixels: u64,
+    minimum_samples: u32,
+    maximum_samples: u32,
+    total_samples: u64,
+    converged_pixels: u64,
+    maximum_sample_pixels: u64,
+}
+
+impl FixtureAdaptiveSamplingEvidence {
+    fn observe(
+        &mut self,
+        frame: u32,
+        film: &AdaptiveFilm,
+        policy: CinematicAdaptiveSamplingConfig,
+    ) -> Result<ContentHash, CinematicFixtureError> {
+        if self
+            .frames
+            .last()
+            .is_some_and(|previous| previous.frame >= frame)
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "adaptive frame evidence was not observed in strictly increasing order".into(),
+            ));
+        }
+        let admitted_policy = policy.policy()?;
+        if film.maximum_samples() != policy.maximum_samples_per_pixel
+            || film.policy() != admitted_policy
+            || film.semantics_version() != ADAPTIVE_SAMPLING_SEMANTICS_VERSION
+        {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "adaptive frame {frame} estimator provenance does not match its fixture policy"
+            )));
+        }
+        let summary = film.summary();
+        let expected_pixels = u64::from(film.width())
+            .checked_mul(u64::from(film.height()))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline(
+                    "adaptive frame pixel-count product overflowed".into(),
+                )
+            })?;
+        if summary.pixels != expected_pixels
+            || summary.converged_pixels + summary.maximum_sample_pixels != summary.pixels
+            || summary.minimum_samples < policy.minimum_samples_per_pixel
+            || summary.maximum_samples > policy.maximum_samples_per_pixel
+            || film.sample_counts().len() != usize::try_from(expected_pixels).unwrap_or(usize::MAX)
+        {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                concat!(
+                    "adaptive frame {} published inconsistent sample-count evidence: ",
+                    "pixels={} expected={} min={} max={} converged={} ceiling={}"
+                ),
+                frame,
+                summary.pixels,
+                expected_pixels,
+                summary.minimum_samples,
+                summary.maximum_samples,
+                summary.converged_pixels,
+                summary.maximum_sample_pixels,
+            )));
+        }
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-critique.adaptive-sample-count-frame.v1");
+        hasher.update(&frame.to_le_bytes());
+        hasher.update(&film.width().to_le_bytes());
+        hasher.update(&film.height().to_le_bytes());
+        for samples in film.sample_counts() {
+            hasher.update(&samples.to_le_bytes());
+        }
+        let sample_count_identity = hasher.finalize();
+        let evidence = FixtureAdaptiveFrameEvidence {
+            frame,
+            pixels: summary.pixels,
+            minimum_samples: summary.minimum_samples,
+            maximum_samples: summary.maximum_samples,
+            total_samples: summary.total_samples,
+            converged_pixels: summary.converged_pixels,
+            maximum_sample_pixels: summary.maximum_sample_pixels,
+            sample_count_identity,
+        };
+        self.pixels = self.pixels.checked_add(evidence.pixels).ok_or_else(|| {
+            CinematicFixtureError::Pipeline("adaptive rendered-pixel count overflowed".into())
+        })?;
+        self.total_samples = self
+            .total_samples
+            .checked_add(evidence.total_samples)
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("adaptive total path count overflowed".into())
+            })?;
+        self.converged_pixels = self
+            .converged_pixels
+            .checked_add(evidence.converged_pixels)
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("adaptive converged-pixel count overflowed".into())
+            })?;
+        self.maximum_sample_pixels = self
+            .maximum_sample_pixels
+            .checked_add(evidence.maximum_sample_pixels)
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline(
+                    "adaptive maximum-sample pixel count overflowed".into(),
+                )
+            })?;
+        self.minimum_samples = if self.frames.is_empty() {
+            evidence.minimum_samples
+        } else {
+            self.minimum_samples.min(evidence.minimum_samples)
+        };
+        self.maximum_samples = self.maximum_samples.max(evidence.maximum_samples);
+        self.frames.push(evidence);
+        Ok(sample_count_identity)
+    }
+
+    fn validate_complete(
+        &self,
+        config: &CinematicFixtureConfig,
+        rendered_frames: &core::ops::Range<u32>,
+    ) -> Result<(), CinematicFixtureError> {
+        let Some(policy) = config.adaptive_sampling else {
+            if self.frames.is_empty() {
+                return Ok(());
+            }
+            return Err(CinematicFixtureError::Pipeline(
+                "uniform render unexpectedly retained adaptive sample evidence".into(),
+            ));
+        };
+        if self.frames.len() != rendered_frames.len()
+            || self.frames.first().map(|frame| frame.frame) != Some(rendered_frames.start)
+            || self.frames.last().map(|frame| frame.frame) != Some(rendered_frames.end - 1)
+            || self.converged_pixels + self.maximum_sample_pixels != self.pixels
+            || self.minimum_samples < policy.minimum_samples_per_pixel
+            || self.maximum_samples > policy.maximum_samples_per_pixel
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "adaptive sample evidence did not cover the exact rendered frame window".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn sequence_identity(&self) -> ContentHash {
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-critique.adaptive-sample-count-sequence.v1");
+        for frame in &self.frames {
+            hasher.update(&frame.frame.to_le_bytes());
+            hasher.update(frame.sample_count_identity.as_bytes());
+        }
+        hasher.finalize()
+    }
+
+    fn manifest_json(&self, policy: CinematicAdaptiveSamplingConfig) -> String {
+        use core::fmt::Write as _;
+
+        let policy = policy
+            .canonical()
+            .expect("validated adaptive evidence retains a canonical policy");
+
+        let mut frames = String::from("[");
+        for (index, frame) in self.frames.iter().enumerate() {
+            if index != 0 {
+                frames.push(',');
+            }
+            let _ = write!(
+                frames,
+                concat!(
+                    "{{\"frame\":{},\"pixels\":{},\"minimum_spp\":{},",
+                    "\"maximum_spp\":{},\"total_paths\":{},",
+                    "\"error_threshold_pixels\":{},\"maximum_spp_pixels\":{},",
+                    "\"sample_count_identity\":\"{}\"}}"
+                ),
+                frame.frame,
+                frame.pixels,
+                frame.minimum_samples,
+                frame.maximum_samples,
+                frame.total_samples,
+                frame.converged_pixels,
+                frame.maximum_sample_pixels,
+                frame.sample_count_identity.to_hex(),
+            );
+        }
+        frames.push(']');
+        format!(
+            concat!(
+                "{{\"mode\":\"adaptive-raw-xyz-dispersion-v1\",",
+                "\"minimum_spp\":{},\"maximum_spp\":{},\"decision_batch_spp\":{},",
+                "\"absolute_error_xyz\":{:.17e},\"relative_error_xyz\":{:.17e},",
+                "\"dark_floor_xyz\":{:.17e},\"sample_count_channel\":\"samples\",",
+                "\"rendered_frames\":{},\"rendered_pixels\":{},",
+                "\"actual_minimum_spp\":{},\"actual_maximum_spp\":{},",
+                "\"total_paths\":{},\"error_threshold_pixels\":{},",
+                "\"maximum_spp_pixels\":{},\"sample_count_sequence_identity\":\"{}\",",
+                "\"frames\":{},",
+                "\"claim\":\"raw per-channel XYZ dispersion stopping; not a confidence interval, perceptual error bound, denoiser decision, or physical-validation claim\"}}"
+            ),
+            policy.minimum_samples_per_pixel,
+            policy.maximum_samples_per_pixel,
+            policy.decision_batch_samples,
+            policy.absolute_error,
+            policy.relative_error,
+            policy.dark_floor,
+            self.frames.len(),
+            self.pixels,
+            self.minimum_samples,
+            self.maximum_samples,
+            self.total_samples,
+            self.converged_pixels,
+            self.maximum_sample_pixels,
+            self.sequence_identity().to_hex(),
+            frames,
+        )
     }
 }
 
@@ -1008,13 +1411,14 @@ pub fn run_cinematic_fixture(
     progress("stage=render begin");
     let camera = critique_camera(duration_s).map_err(pipeline)?;
     let mut scene_config = EulerSceneConfig::reference(camera);
-    // At the 4K critique framing, the default preview mesh leaves roughly
-    // eight display pixels per azimuthal facet. Increase the actual intersected
-    // render geometry so glossy highlights follow matching geometric normals
-    // instead of relying on an uncorrected shading-normal approximation.
+    // The cinematic defaults increase the actual intersected render geometry
+    // so glossy highlights follow matching geometric normals instead of
+    // relying on an uncorrected shading-normal approximation. Explicit config
+    // controls allow profiling lower-cost render-only approximations without
+    // altering the specimen, mechanics, or production defaults.
     scene_config.tessellation = EulerTessellationConfig {
-        azimuthal_segments: 1_024,
-        arc_subdivisions_per_arc: 128,
+        azimuthal_segments: config.azimuthal_segments,
+        arc_subdivisions_per_arc: config.arc_subdivisions_per_arc,
     };
     scene_config.show_spin_fiducial = true;
     scene_config.disc_material = EulerMaterialStyle::Conductor {
@@ -1060,8 +1464,12 @@ pub fn run_cinematic_fixture(
     });
     let scene = EulerCinematicScene::try_build(&trajectory_artifact, &profile, scene_config, cx)
         .map_err(pipeline)?;
+    let preview_mesh_evidence =
+        FixturePreviewMeshEvidence::from_receipt(scene.preview_mesh_receipt());
+    let render_sample_ceiling = config.render_sample_ceiling();
+    let adaptive_policy = config.adaptive_policy()?;
     let mut base_render_settings = euler_scene_smoke_settings(config.width, config.height);
-    base_render_settings.spp = config.samples_per_pixel;
+    base_render_settings.spp = render_sample_ceiling;
     base_render_settings.max_depth = config.max_depth;
     let composition_identity = composition_identity(config, scene.scene_identity());
     let mut raw_sequence = DomainHasher::new("org.frankensim.euler-critique.raw-sequence.v1");
@@ -1070,6 +1478,7 @@ pub fn run_cinematic_fixture(
     let mut over_range_channels = 0_u64;
     let mut gamut_mapped_pixels = 0_u64;
     let mut render_evidence = FixtureRenderEvidence::default();
+    let mut adaptive_sampling_evidence = FixtureAdaptiveSamplingEvidence::default();
     let mut denoise_evidence = FixtureDenoiseEvidence::default();
     let mut denoise_history: Option<TemporalDenoisedFrame> = None;
     let denoise_config = TemporalDenoiseConfig::default();
@@ -1116,7 +1525,7 @@ pub fn run_cinematic_fixture(
                     // closes on the analytical validity cutoff at exactly 8 s.
                     convention: ShutterConvention::BackLoaded,
                     distribution: ShutterDistribution::StratifiedCounterV1 {
-                        strata: config.samples_per_pixel,
+                        strata: render_sample_ceiling,
                     },
                     event_policy: ExposureEventPolicy::Refuse,
                     cut_side: CutSide::After,
@@ -1149,100 +1558,219 @@ pub fn run_cinematic_fixture(
                 ),
             )
             .map_err(pipeline)?;
-            let output = renderer
-                .render_cinematic_with_aovs(
-                    scene.scene(),
-                    scene.camera(),
-                    prepared.cut_side(),
-                    cx,
-                    &render_settings,
-                    prepared.segments()[0].shutter(),
-                    CinematicAovConfig::new(aov_profile, provenance, CinematicAovLimits::default()),
-                    &frame_execution,
+            let color = critique_color_config();
+            let (exr, preview, report, sampling_progress) = if let Some(policy) = adaptive_policy {
+                let adaptive_config = config
+                    .adaptive_sampling
+                    .expect("validated adaptive policy retains its fixture configuration");
+                let output = renderer
+                    .render_cinematic_adaptive_with_aovs(
+                        scene.scene(),
+                        scene.camera(),
+                        prepared.cut_side(),
+                        cx,
+                        &render_settings,
+                        policy,
+                        prepared.segments()[0].shutter(),
+                        CinematicAovConfig::new(
+                            aov_profile,
+                            provenance,
+                            CinematicAovLimits::default(),
+                        ),
+                        &frame_execution,
+                    )
+                    .map_err(pipeline)?;
+                let film = output.film;
+                let summary = film.beauty().summary();
+                let sample_count_identity =
+                    adaptive_sampling_evidence.observe(frame, film.beauty(), adaptive_config)?;
+                let [red, green, blue] = film.beauty().to_linear_srgb();
+                let preview = if config.denoise_previews {
+                    let guides = film.denoise_guides().map_err(pipeline)?;
+                    let denoise_boundary = if denoise_history.is_none() && frame != 0 {
+                        TemporalFrameBoundary::Cut
+                    } else {
+                        TemporalFrameBoundary::Continuous
+                    };
+                    let denoised = temporal_denoise_rgb(
+                        TemporalDenoiseInput {
+                            frame_index: u64::from(frame),
+                            samples_per_pixel: render_settings.spp,
+                            sample_counts_per_pixel: Some(film.beauty().sample_counts()),
+                            width: raster_width,
+                            height: raster_height,
+                            red: &red,
+                            green: &green,
+                            blue: &blue,
+                            motion_prev_x: guides.motion_prev_x(),
+                            motion_prev_y: guides.motion_prev_y(),
+                            axial_depth_m: guides.axial_depth_m(),
+                            normal_x: guides.normal_x(),
+                            normal_y: guides.normal_y(),
+                            normal_z: guides.normal_z(),
+                            primary_coverage: guides.primary_coverage(),
+                            variance_luminance: guides.variance_luminance(),
+                            object_ids: guides.object_palette_indices(),
+                            material_ids: guides.material_palette_indices(),
+                        },
+                        denoise_history.as_ref(),
+                        denoise_boundary,
+                        denoise_config,
+                        TemporalDenoiseLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?;
+                    let [denoised_red, denoised_green, denoised_blue] = denoised.linear_rgb();
+                    let preview = transform_cinematic_preview(
+                        config.width,
+                        config.height,
+                        [denoised_red, denoised_green, denoised_blue],
+                        color,
+                        CinematicColorLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?;
+                    denoise_evidence.observe(&denoised);
+                    denoise_history = Some(denoised);
+                    preview
+                } else {
+                    transform_cinematic_preview(
+                        config.width,
+                        config.height,
+                        [&red, &green, &blue],
+                        color,
+                        CinematicColorLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?
+                };
+                let exr = if config.retain_full_aov_exr {
+                    film.to_exr().map_err(pipeline)?
+                } else {
+                    adaptive_beauty_to_exr(
+                        film.beauty(),
+                        [red, green, blue],
+                        adaptive_config,
+                        render_settings,
+                        provenance,
+                        sample_count_identity,
+                    )?
+                };
+                let sampling_progress = format!(
+                    concat!(
+                        "sampling=adaptive min_spp={} max_spp={} total_paths={} ",
+                        "error_threshold_pixels={} maximum_spp_pixels={}"
+                    ),
+                    summary.minimum_samples,
+                    summary.maximum_samples,
+                    summary.total_samples,
+                    summary.converged_pixels,
+                    summary.maximum_sample_pixels,
+                );
+                (exr, preview, output.report, sampling_progress)
+            } else {
+                let output = renderer
+                    .render_cinematic_with_aovs(
+                        scene.scene(),
+                        scene.camera(),
+                        prepared.cut_side(),
+                        cx,
+                        &render_settings,
+                        prepared.segments()[0].shutter(),
+                        CinematicAovConfig::new(
+                            aov_profile,
+                            provenance,
+                            CinematicAovLimits::default(),
+                        ),
+                        &frame_execution,
+                    )
+                    .map_err(pipeline)?;
+                let film = output.film;
+                let exr = if config.retain_full_aov_exr {
+                    film.to_exr().map_err(pipeline)?
+                } else {
+                    film_to_exr(film.beauty()).map_err(pipeline)?
+                };
+                let [red, green, blue] = film.beauty().to_linear_srgb();
+                let preview = if config.denoise_previews {
+                    let guides = film.denoise_guides().map_err(pipeline)?;
+                    let denoise_boundary = if denoise_history.is_none() && frame != 0 {
+                        TemporalFrameBoundary::Cut
+                    } else {
+                        TemporalFrameBoundary::Continuous
+                    };
+                    let denoised = temporal_denoise_rgb(
+                        TemporalDenoiseInput {
+                            frame_index: u64::from(frame),
+                            samples_per_pixel: config.samples_per_pixel,
+                            sample_counts_per_pixel: None,
+                            width: raster_width,
+                            height: raster_height,
+                            red: &red,
+                            green: &green,
+                            blue: &blue,
+                            motion_prev_x: guides.motion_prev_x(),
+                            motion_prev_y: guides.motion_prev_y(),
+                            axial_depth_m: guides.axial_depth_m(),
+                            normal_x: guides.normal_x(),
+                            normal_y: guides.normal_y(),
+                            normal_z: guides.normal_z(),
+                            primary_coverage: guides.primary_coverage(),
+                            variance_luminance: guides.variance_luminance(),
+                            object_ids: guides.object_palette_indices(),
+                            material_ids: guides.material_palette_indices(),
+                        },
+                        denoise_history.as_ref(),
+                        denoise_boundary,
+                        denoise_config,
+                        TemporalDenoiseLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?;
+                    let [denoised_red, denoised_green, denoised_blue] = denoised.linear_rgb();
+                    let preview = transform_cinematic_preview(
+                        config.width,
+                        config.height,
+                        [denoised_red, denoised_green, denoised_blue],
+                        color,
+                        CinematicColorLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?;
+                    denoise_evidence.observe(&denoised);
+                    denoise_history = Some(denoised);
+                    preview
+                } else {
+                    transform_cinematic_preview(
+                        config.width,
+                        config.height,
+                        [&red, &green, &blue],
+                        color,
+                        CinematicColorLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?
+                };
+                (
+                    exr,
+                    preview,
+                    output.report,
+                    format!("sampling=uniform spp={}", config.samples_per_pixel),
                 )
-                .map_err(pipeline)?;
+            };
             progress(&format!(
                 concat!(
                     "stage=render frame={}/{} workers={} tiles={} ",
-                    "traversal_ms={:.3} compute_ms={:.3} merge_ms={:.3} peak_mib={:.3}"
+                    "traversal_ms={:.3} compute_ms={:.3} merge_ms={:.3} peak_mib={:.3} {}"
                 ),
                 frame - render_frame_range.start + 1,
                 render_frame_range.len(),
-                output.report.workers,
-                output.report.layout.tile_count(),
-                output.report.traversal_ns as f64 / 1.0e6,
-                output.report.tile_compute_ns as f64 / 1.0e6,
-                output.report.tile_merge_ns as f64 / 1.0e6,
-                output.report.memory.peak_bytes as f64 / (1024.0 * 1024.0),
+                report.workers,
+                report.layout.tile_count(),
+                report.traversal_ns as f64 / 1.0e6,
+                report.tile_compute_ns as f64 / 1.0e6,
+                report.tile_merge_ns as f64 / 1.0e6,
+                report.memory.peak_bytes as f64 / (1024.0 * 1024.0),
+                sampling_progress,
             ));
-            render_evidence.observe(&output.report);
-            let film = output.film;
-            let exr = if config.retain_full_aov_exr {
-                film.to_exr().map_err(pipeline)?
-            } else {
-                film_to_exr(film.beauty()).map_err(pipeline)?
-            };
+            render_evidence.observe(&report);
             raw_sequence.update(hash_domain("frame", &exr).as_bytes());
             write_new(&raw_directory.join(format!("frame-{frame:06}.exr")), &exr)?;
             drop(exr);
-
-            let [red, green, blue] = film.beauty().to_linear_srgb();
-            let color = critique_color_config();
-            let preview = if config.denoise_previews {
-                let guides = film.denoise_guides().map_err(pipeline)?;
-                let denoise_boundary = if denoise_history.is_none() && frame != 0 {
-                    TemporalFrameBoundary::Cut
-                } else {
-                    TemporalFrameBoundary::Continuous
-                };
-                let denoised = temporal_denoise_rgb(
-                    TemporalDenoiseInput {
-                        frame_index: u64::from(frame),
-                        samples_per_pixel: config.samples_per_pixel,
-                        width: raster_width,
-                        height: raster_height,
-                        red: &red,
-                        green: &green,
-                        blue: &blue,
-                        motion_prev_x: guides.motion_prev_x(),
-                        motion_prev_y: guides.motion_prev_y(),
-                        axial_depth_m: guides.axial_depth_m(),
-                        normal_x: guides.normal_x(),
-                        normal_y: guides.normal_y(),
-                        normal_z: guides.normal_z(),
-                        primary_coverage: guides.primary_coverage(),
-                        variance_luminance: guides.variance_luminance(),
-                        object_ids: guides.object_palette_indices(),
-                        material_ids: guides.material_palette_indices(),
-                    },
-                    denoise_history.as_ref(),
-                    denoise_boundary,
-                    denoise_config,
-                    TemporalDenoiseLimits::reference_4k(),
-                )
-                .map_err(pipeline)?;
-                let [denoised_red, denoised_green, denoised_blue] = denoised.linear_rgb();
-                let preview = transform_cinematic_preview(
-                    config.width,
-                    config.height,
-                    [denoised_red, denoised_green, denoised_blue],
-                    color,
-                    CinematicColorLimits::reference_4k(),
-                )
-                .map_err(pipeline)?;
-                denoise_evidence.observe(&denoised);
-                denoise_history = Some(denoised);
-                preview
-            } else {
-                transform_cinematic_preview(
-                    config.width,
-                    config.height,
-                    [&red, &green, &blue],
-                    color,
-                    CinematicColorLimits::reference_4k(),
-                )
-                .map_err(pipeline)?
-            };
             over_range_channels += preview.metadata().over_range_linear_channels();
             gamut_mapped_pixels += preview.metadata().gamut_mapped_pixels();
             let samples = preview.samples().as_u16().ok_or_else(|| {
@@ -1260,6 +1788,7 @@ pub fn run_cinematic_fixture(
         }
         Ok(())
     })?;
+    adaptive_sampling_evidence.validate_complete(config, &render_frame_range)?;
     let raw_sequence_identity = raw_sequence.finalize();
     let preview_sequence_identity = preview_sequence.finalize();
     progress("stage=render complete");
@@ -1303,6 +1832,8 @@ pub fn run_cinematic_fixture(
         over_range_channels,
         gamut_mapped_pixels,
         &render_evidence,
+        preview_mesh_evidence,
+        &adaptive_sampling_evidence,
         &denoise_evidence,
         audio.spatialization.as_ref(),
         &mux,
@@ -1342,6 +1873,147 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CinematicFixtureError> {
     file.write_all(bytes)?;
     file.flush()?;
     Ok(())
+}
+
+fn adaptive_beauty_to_exr(
+    film: &AdaptiveFilm,
+    rgb: [Vec<f32>; 3],
+    policy: CinematicAdaptiveSamplingConfig,
+    settings: Settings,
+    provenance: CinematicAovProvenance,
+    sample_count_identity: ContentHash,
+) -> Result<Vec<u8>, CinematicFixtureError> {
+    let policy = policy.canonical()?;
+    let pixel_count = film.sample_counts().len();
+    if rgb.iter().any(|plane| plane.len() != pixel_count) {
+        return Err(CinematicFixtureError::Pipeline(
+            "adaptive RGB and sample-count planes have different shapes".into(),
+        ));
+    }
+    let mut samples = Vec::new();
+    samples.try_reserve_exact(pixel_count).map_err(|_| {
+        CinematicFixtureError::Pipeline(
+            "adaptive EXR sample-count channel allocation refused".into(),
+        )
+    })?;
+    for count in film.sample_counts() {
+        // The fixture ceiling is 4096, so every count is exactly representable
+        // in the float channel used by the frozen fs-img EXR subset.
+        #[allow(clippy::cast_precision_loss)]
+        samples.push(*count as f32);
+    }
+    let [red, green, blue] = rgb;
+    let channels = [
+        Channel {
+            name: "R".to_owned(),
+            ty: PixelType::Float,
+            data: red,
+        },
+        Channel {
+            name: "G".to_owned(),
+            ty: PixelType::Float,
+            data: green,
+        },
+        Channel {
+            name: "B".to_owned(),
+            ty: PixelType::Float,
+            data: blue,
+        },
+        Channel {
+            name: "samples".to_owned(),
+            ty: PixelType::Float,
+            data: samples,
+        },
+    ];
+    let string_attribute = |name: &str, value: String| ExrAttribute {
+        name: name.to_owned(),
+        ty: "string".to_owned(),
+        value: value.into_bytes(),
+    };
+    let attributes = [
+        string_attribute("frankensim.aov.authority", "raw-estimate".to_owned()),
+        string_attribute(
+            "frankensim.aov.profile",
+            "fixture-beauty-plus-samples-v1".to_owned(),
+        ),
+        string_attribute(
+            "frankensim.frame.index",
+            provenance.frame_index().to_string(),
+        ),
+        string_attribute(
+            "frankensim.frame.timeSeconds",
+            format!("0x{:016x}", provenance.frame_time_s().to_bits()),
+        ),
+        string_attribute(
+            "frankensim.frame.previousTimeS",
+            format!("0x{:016x}", provenance.previous_frame_time_s().to_bits()),
+        ),
+        string_attribute(
+            "frankensim.frame.nextTimeS",
+            format!("0x{:016x}", provenance.next_frame_time_s().to_bits()),
+        ),
+        string_attribute(
+            "frankensim.source.trajectory",
+            provenance.source_trajectory_identity().to_hex(),
+        ),
+        string_attribute(
+            "frankensim.source.sceneHash",
+            provenance.scene_identity().to_hex(),
+        ),
+        string_attribute(
+            "frankensim.source.composition",
+            provenance.composition_identity().to_hex(),
+        ),
+        string_attribute("frankensim.render.sampleMode", "adaptive".to_owned()),
+        string_attribute("frankensim.render.seed", settings.seed.to_string()),
+        string_attribute(
+            "frankensim.render.sampler",
+            match settings.sampler {
+                fs_render::tracer::Sampler::Iid => "iid-philox",
+                fs_render::tracer::Sampler::OwenSobol => "owen-sobol",
+            }
+            .to_owned(),
+        ),
+        string_attribute(
+            "frankensim.render.strategy",
+            match settings.strategy {
+                fs_render::tracer::DirectStrategy::NeeOnly => "nee-only",
+                fs_render::tracer::DirectStrategy::BsdfOnly => "bsdf-only",
+                fs_render::tracer::DirectStrategy::Mis => "mis",
+            }
+            .to_owned(),
+        ),
+        string_attribute("frankensim.render.maxDepth", settings.max_depth.to_string()),
+        string_attribute("frankensim.render.spp", "per-pixel-channel".to_owned()),
+        string_attribute(
+            "frankensim.render.sppCeiling",
+            policy.maximum_samples_per_pixel.to_string(),
+        ),
+        string_attribute(
+            "frankensim.render.adaptive",
+            format!(
+                concat!(
+                    "version={};minimum={};batch={};",
+                    "absolute=0x{:016x};relative=0x{:016x};darkFloor=0x{:016x}"
+                ),
+                ADAPTIVE_SAMPLING_SEMANTICS_VERSION,
+                policy.minimum_samples_per_pixel,
+                policy.decision_batch_samples,
+                policy.absolute_error.to_bits(),
+                policy.relative_error.to_bits(),
+                policy.dark_floor.to_bits(),
+            ),
+        ),
+        string_attribute(
+            "frankensim.render.sampleCounts",
+            sample_count_identity.to_hex(),
+        ),
+        string_attribute(
+            "frankensim.render.versions",
+            cinematic_render_semantics_versions(),
+        ),
+    ];
+    write_exr_with_attributes(film.width(), film.height(), &channels, &attributes).map_err(pipeline)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1388,7 +2060,18 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
     hasher.update(&config.height.to_le_bytes());
     hasher.update(&config.frames.to_le_bytes());
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
-    hasher.update(&config.samples_per_pixel.to_le_bytes());
+    hasher.update(&config.render_sample_ceiling().to_le_bytes());
+    if let Some(policy) = config.adaptive_sampling {
+        let admitted = policy
+            .policy()
+            .expect("validated fixture configuration retains an admitted adaptive policy");
+        hasher.update(b"adaptive-raw-xyz-dispersion-v1");
+        hasher.update(&admitted.minimum_samples().to_le_bytes());
+        hasher.update(&admitted.batch_samples().to_le_bytes());
+        hasher.update(&admitted.absolute_error().to_bits().to_le_bytes());
+        hasher.update(&admitted.relative_error().to_bits().to_le_bytes());
+        hasher.update(&admitted.dark_floor().to_bits().to_le_bytes());
+    }
     hasher.update(&config.max_depth.to_le_bytes());
     hasher.update(&config.shutter_angle_degrees.to_le_bytes());
     hasher.update(
@@ -1789,6 +2472,7 @@ fn fixture_output_convergence_evidence(
         })?;
         Ok(())
     };
+    let render_sample_ceiling = config.render_sample_ceiling();
     for frame in 0..config.frames {
         cx.checkpoint()
             .map_err(|_| CinematicFixtureError::Cancelled)?;
@@ -1798,13 +2482,13 @@ fn fixture_output_convergence_evidence(
             exposure_duration_s,
             ShutterConvention::BackLoaded,
             ShutterDistribution::StratifiedCounterV1 {
-                strata: config.samples_per_pixel,
+                strata: render_sample_ceiling,
             },
             shot,
         )
         .map_err(pipeline)?;
         let frame_seed = frame_render_seed(base_render_seed, config.render_seed_salt, frame);
-        let strata = usize::try_from(config.samples_per_pixel).map_err(|_| {
+        let strata = usize::try_from(render_sample_ceiling).map_err(|_| {
             CinematicFixtureError::Pipeline("shutter stratum count exceeds usize".into())
         })?;
         let mut visited_strata = vec![false; strata];
@@ -1812,9 +2496,9 @@ fn fixture_output_convergence_evidence(
         // permutation of every temporal stratum. Pixel zero is therefore a
         // bounded exact subset of renderer timestamps that covers the complete
         // partition; the explicit boundaries below close each stratum.
-        for sample in 0..config.samples_per_pixel {
+        for sample in 0..render_sample_ceiling {
             let normalized = shutter.sample_for_stream(frame_seed, 0, u64::from(sample));
-            let stratum = (normalized.value() * f64::from(config.samples_per_pixel)).floor();
+            let stratum = (normalized.value() * f64::from(render_sample_ceiling)).floor();
             if !(stratum.is_finite() && stratum >= 0.0 && stratum < strata as f64) {
                 return Err(CinematicFixtureError::Pipeline(format!(
                     "frame {frame} renderer shutter sample escaped its temporal strata"
@@ -1840,9 +2524,9 @@ fn fixture_output_convergence_evidence(
                 "frame {frame} renderer shutter samples left a temporal stratum uncovered"
             )));
         }
-        for boundary in 0..=config.samples_per_pixel {
+        for boundary in 0..=render_sample_ceiling {
             let normalized = NormalizedShutterTime::try_new(
-                f64::from(boundary) / f64::from(config.samples_per_pixel),
+                f64::from(boundary) / f64::from(render_sample_ceiling),
             )
             .map_err(pipeline)?;
             compare_at_time(shutter.time_at(normalized))?;
@@ -3799,6 +4483,8 @@ fn fixture_manifest(
     over_range_channels: u64,
     gamut_mapped_pixels: u64,
     render: &FixtureRenderEvidence,
+    preview_mesh: FixturePreviewMeshEvidence,
+    adaptive_sampling: &FixtureAdaptiveSamplingEvidence,
     denoise: &FixtureDenoiseEvidence,
     spatialization: Option<&FixtureSpatialAudioEvidence>,
     mux: &MuxOutcome,
@@ -3874,11 +4560,24 @@ fn fixture_manifest(
         .literature_specimen
         .as_ref()
         .expect("source-bound fixture run retains its specimen declaration");
-    let raw_profile = if config.retain_full_aov_exr {
+    let raw_profile = if config.adaptive_sampling.is_some() && config.retain_full_aov_exr {
+        "adaptive-final-diagnostic-aov-float"
+    } else if config.adaptive_sampling.is_some() {
+        "adaptive-linear-srgb-beauty-plus-sample-count-float"
+    } else if config.retain_full_aov_exr {
         "final-diagnostic-aov-float"
     } else {
         "linear-srgb-beauty-float"
     };
+    let sampling_json = config.adaptive_sampling.map_or_else(
+        || {
+            format!(
+                "{{\"mode\":\"uniform\",\"samples_per_pixel\":{}}}",
+                config.samples_per_pixel
+            )
+        },
+        |policy| adaptive_sampling.manifest_json(policy),
+    );
     let denoise_pipeline = if config.denoise_previews {
         TEMPORAL_DENOISE_PIPELINE_VERSION
     } else {
@@ -3887,14 +4586,16 @@ fn fixture_manifest(
     let modal_disclosure = json_escape(modal_parameter_set_disclosure);
     let output_convergence_json = output_convergence.manifest_json();
     let audio_convergence_json = audio_convergence.manifest_json();
+    let preview_mesh_json = preview_mesh.manifest_json();
     format!(
         concat!(
             "{{\n",
-            "  \"schema\": \"frankensim-euler-cinematic-critique-v4\",\n",
+            "  \"schema\": \"frankensim-euler-cinematic-critique-v6\",\n",
             "  \"authority\": \"source-bound analytical simulation visualization; physically informed but uncalibrated synthesis; artistic spatial presentation\",\n",
-            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
+            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"sampling\": {sampling}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
             "  \"timeline\": {{\"video_pts_convention\": \"encoded-frame-start\", \"video_first_pts_s\": 0.00000000000000000e0, \"video_final_pts_s\": {video_final_pts:.17e}, \"video_frame_interval_s\": {frame_interval:.17e}, \"audio_first_sample_time_s\": 0.00000000000000000e0, \"audio_video_clock_origins_aligned\": true, \"shutter_close_convention\": \"mechanics-frame-end\", \"first_shutter_close_time_s\": {first_shutter_close:.17e}, \"final_shutter_close_time_s\": {final_shutter_close:.17e}, \"note\": \"encoded PTS is distinct from the mechanics time at which each back-loaded shutter closes\"}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
+            "  \"preview_mesh\": {preview_mesh},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
             "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"published_source_timestep_s\": {source_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"output_consistency\": {output_convergence}, \"claim\": \"single admitted dt/dt2 consistency pair for terminal time, encoded interval impulse, renderer-stratum pose, and body-contact chirp; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
             "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
@@ -3914,7 +4615,8 @@ fn fixture_manifest(
         frame_interval = 1.0 / f64::from(CRITIQUE_FPS),
         first_shutter_close = 1.0 / f64::from(CRITIQUE_FPS),
         final_shutter_close = f64::from(config.frames) / f64::from(CRITIQUE_FPS),
-        spp = config.samples_per_pixel,
+        spp = config.render_sample_ceiling(),
+        sampling = sampling_json,
         seed_salt = config.render_seed_salt,
         max_depth = config.max_depth,
         shutter_angle = config.shutter_angle_degrees,
@@ -3943,6 +4645,7 @@ fn fixture_manifest(
         merge_ns = render.tile_merge_ns,
         publication_ns = render.publication_ns,
         idle_ns = render.idle_worker_ns,
+        preview_mesh = preview_mesh_json,
         denoised_frames = denoise.applied_frames,
         denoise_pipeline = denoise_pipeline,
         denoise_bytes = denoise.maximum_retained_bytes,
@@ -4088,11 +4791,252 @@ mod tests {
         assert_eq!(config.frame_window, CinematicFrameWindow::Full);
         assert_eq!(config.render_seed_salt, 0);
         assert_eq!((config.width, config.height), (320, 180));
+        assert_eq!(config.azimuthal_segments, 1_024);
+        assert_eq!(config.arc_subdivisions_per_arc, 128);
         assert_eq!(config.shutter_angle_degrees, 180);
         assert!(config.render_workers > 0);
         assert!(config.denoise_previews);
         assert!(config.retain_full_aov_exr);
         assert!(config.spatialize_audio);
+        assert_eq!(config.adaptive_sampling, None);
+        assert_eq!(config.render_sample_ceiling(), config.samples_per_pixel);
+    }
+
+    #[test]
+    fn render_tessellation_controls_are_bounded_without_changing_production_defaults() {
+        let mut config = CinematicFixtureConfig::default();
+        config.azimuthal_segments = 8;
+        config.arc_subdivisions_per_arc = 1;
+        config.validate().unwrap();
+        config.azimuthal_segments = MAX_EULER_AZIMUTHAL_SEGMENTS;
+        config.arc_subdivisions_per_arc = MAX_EULER_ARC_SUBDIVISIONS;
+        config.validate().unwrap();
+
+        config.azimuthal_segments = 7;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(
+                "azimuthal_segments must be in 8..=4096"
+            ))
+        ));
+        config.azimuthal_segments = 8;
+        config.arc_subdivisions_per_arc = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(
+                "arc_subdivisions_per_arc must be in 1..=1024"
+            ))
+        ));
+    }
+
+    #[test]
+    fn preview_mesh_manifest_reports_admitted_resolution_counts_and_errors() {
+        let manifest = FixturePreviewMeshEvidence {
+            azimuthal_segments: 512,
+            arc_subdivisions_per_arc: 64,
+            vertex_count: 33_280,
+            triangle_count: 65_536,
+            maximum_meridian_chord_error_m: 1.25e-7,
+            maximum_azimuthal_chord_error_m: 2.5e-7,
+        }
+        .manifest_json();
+        assert!(manifest.contains("\"authority\":\"render-only chordal approximation\""));
+        assert!(manifest.contains("\"azimuthal_segments\":512"));
+        assert!(manifest.contains("\"arc_subdivisions_per_arc\":64"));
+        assert!(manifest.contains("\"vertex_count\":33280"));
+        assert!(manifest.contains("\"triangle_count\":65536"));
+        assert!(manifest.contains(&format!(
+            "\"maximum_meridian_chord_error_m\":{:.17e}",
+            1.25e-7
+        )));
+        assert!(manifest.contains(&format!(
+            "\"maximum_azimuthal_chord_error_m\":{:.17e}",
+            2.5e-7
+        )));
+    }
+
+    fn adaptive_fixture_config() -> CinematicFixtureConfig {
+        let mut config = CinematicFixtureConfig::default();
+        config.denoise_previews = false;
+        config.retain_full_aov_exr = false;
+        config.adaptive_sampling = Some(CinematicAdaptiveSamplingConfig {
+            minimum_samples_per_pixel: 8,
+            maximum_samples_per_pixel: 64,
+            decision_batch_samples: 4,
+            absolute_error: 1.0e-4,
+            relative_error: 0.02,
+            dark_floor: 1.0e-5,
+        });
+        config
+    }
+
+    #[test]
+    fn adaptive_policy_is_explicit_bounded_and_canonical() {
+        let config = adaptive_fixture_config();
+        config.validate().unwrap();
+        assert_eq!(config.render_sample_ceiling(), 64);
+        let policy = config.adaptive_policy().unwrap().unwrap();
+        assert_eq!(policy.minimum_samples(), 8);
+        assert_eq!(policy.batch_samples(), 4);
+        assert_eq!(policy.absolute_error().to_bits(), 1.0e-4_f64.to_bits());
+        assert_eq!(policy.relative_error().to_bits(), 0.02_f64.to_bits());
+        assert_eq!(policy.dark_floor().to_bits(), 1.0e-5_f64.to_bits());
+
+        let mut negative_zero = config;
+        let adaptive = negative_zero.adaptive_sampling.as_mut().unwrap();
+        adaptive.absolute_error = -0.0;
+        adaptive.relative_error = -0.0;
+        adaptive.dark_floor = -0.0;
+        negative_zero.validate().unwrap();
+        let canonical = negative_zero.adaptive_policy().unwrap().unwrap();
+        assert_eq!(canonical.absolute_error().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(canonical.relative_error().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(canonical.dark_floor().to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn adaptive_policy_accepts_final_diagnostic_aovs_and_count_aware_denoising() {
+        let mut final_diagnostic = adaptive_fixture_config();
+        final_diagnostic.retain_full_aov_exr = true;
+        final_diagnostic.validate().unwrap();
+
+        let mut denoised = adaptive_fixture_config();
+        denoised.denoise_previews = true;
+        denoised.validate().unwrap();
+
+        let mut final_diagnostic_and_denoised = adaptive_fixture_config();
+        final_diagnostic_and_denoised.retain_full_aov_exr = true;
+        final_diagnostic_and_denoised.denoise_previews = true;
+        final_diagnostic_and_denoised.validate().unwrap();
+    }
+
+    #[test]
+    fn adaptive_policy_refuses_invalid_controls() {
+        let mut below_minimum = adaptive_fixture_config();
+        below_minimum
+            .adaptive_sampling
+            .as_mut()
+            .unwrap()
+            .maximum_samples_per_pixel = 7;
+        assert!(below_minimum.validate().is_err());
+
+        let mut non_finite = adaptive_fixture_config();
+        non_finite
+            .adaptive_sampling
+            .as_mut()
+            .unwrap()
+            .relative_error = f64::NAN;
+        assert!(non_finite.validate().is_err());
+    }
+
+    #[test]
+    fn adaptive_raw_artifact_exports_exact_counts_and_manifest_evidence() {
+        use fs_render::{
+            lighting::EnvironmentMap,
+            tracer::{
+                Camera, DirectStrategy, RenderExecutionConfig, Sampler, Scene, Settings,
+                render_adaptive_with_execution,
+            },
+        };
+
+        let scene = Scene {
+            primitives: Vec::new(),
+            lights: Vec::new(),
+            environment: Some(
+                EnvironmentMap::try_from_linear_srgb(4, 2, vec![[0.25, 0.5, 0.75]; 8], 1.0)
+                    .unwrap(),
+            ),
+            camera: Camera {
+                eye: Point3::new(0.0, 0.0, 0.0),
+                forward: GeomVec3::new(1.0, 0.0, 0.0),
+                up: GeomVec3::new(0.0, 1.0, 0.0),
+                half_tan: 0.5,
+            },
+        };
+        let adaptive = CinematicAdaptiveSamplingConfig {
+            minimum_samples_per_pixel: 2,
+            maximum_samples_per_pixel: 4,
+            decision_batch_samples: 1,
+            absolute_error: 1.0e30,
+            relative_error: 0.0,
+            dark_floor: 0.0,
+        };
+        let settings = Settings {
+            width: 2,
+            height: 1,
+            spp: adaptive.maximum_samples_per_pixel,
+            max_depth: 1,
+            sampler: Sampler::Iid,
+            strategy: DirectStrategy::Mis,
+            seed: 0x4144_4150_5449_5645,
+        };
+        let execution =
+            RenderExecutionConfig::try_new(1, 1, 1, 64 * 1024 * 1024, RunId(0x4144_4150_5449_5645))
+                .unwrap();
+        let output = with_test_cx(|cx| {
+            render_adaptive_with_execution(
+                &scene,
+                cx,
+                &settings,
+                adaptive.policy().unwrap(),
+                &execution,
+            )
+            .unwrap()
+        });
+        assert_eq!(output.film.sample_counts(), [2, 2]);
+
+        let mut evidence = FixtureAdaptiveSamplingEvidence::default();
+        let count_identity = evidence.observe(17, &output.film, adaptive).unwrap();
+        let mut config = adaptive_fixture_config();
+        config.adaptive_sampling = Some(adaptive);
+        evidence.validate_complete(&config, &(17..18)).unwrap();
+
+        let provenance = CinematicAovProvenance::try_new(
+            17,
+            17.0 / 24.0,
+            16.0 / 24.0,
+            18.0 / 24.0,
+            hash_domain("adaptive-test-trajectory", b"trajectory"),
+            hash_domain("adaptive-test-scene", b"scene"),
+            hash_domain("adaptive-test-composition", b"composition"),
+        )
+        .unwrap();
+        let rgb = output.film.to_linear_srgb();
+        let exr = adaptive_beauty_to_exr(
+            &output.film,
+            rgb,
+            adaptive,
+            settings,
+            provenance,
+            count_identity,
+        )
+        .unwrap();
+        let decoded = fs_img::read_exr(&exr).unwrap();
+        let samples = decoded
+            .channels
+            .iter()
+            .find(|channel| channel.name == "samples")
+            .unwrap();
+        assert_eq!(samples.data, [2.0, 2.0]);
+        assert!(decoded.attributes.iter().any(|attribute| {
+            attribute.name == "frankensim.render.sampleCounts"
+                && attribute.value == count_identity.to_hex().as_bytes()
+        }));
+
+        let manifest = evidence.manifest_json(adaptive);
+        assert!(manifest.contains("\"mode\":\"adaptive-raw-xyz-dispersion-v1\""));
+        assert!(manifest.contains("\"actual_minimum_spp\":2"));
+        assert!(manifest.contains("\"actual_maximum_spp\":2"));
+        assert!(manifest.contains("\"total_paths\":4"));
+        assert!(manifest.contains(&count_identity.to_hex()));
+
+        let mut mismatched_policy = adaptive;
+        mismatched_policy.maximum_samples_per_pixel = 3;
+        assert!(
+            FixtureAdaptiveSamplingEvidence::default()
+                .observe(17, &output.film, mismatched_policy)
+                .is_err()
+        );
     }
 
     #[test]
