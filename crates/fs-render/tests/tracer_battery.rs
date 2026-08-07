@@ -639,14 +639,14 @@ fn fnv(bytes: &[u8]) -> u64 {
     acc
 }
 
-/// Frozen 2026-07-12 at the committed 872c tree: 24×24, 8 spp,
-/// depth 4, MIS + iid Philox, seed 7 — the first shaded COLOR image.
-/// FNV-1a over the EXR bytes. That original surface was verified debug +
-/// release on aarch64 (M4 Pro) and x86-64 (ts2 5995WX). Bead 8ll9 now records
-/// an explicit fs-render:chart-backend-bits=2 dependency; current-tree replay
-/// in all four quadrants remains mandatory before closeout. Re-freeze only per
-/// docs/GOLDEN_POLICY.md.
-const CORNELL_GOLDEN: u64 = 0x6ed8_706b_08d1_642e;
+/// Re-frozen 2026-08-06 for tracer bit-semantics v2: reflective GGX moved
+/// from NDF sampling to a matched isotropic visible-normal sampler. The BSDF
+/// integral is unchanged in expectation, but deterministic sample directions,
+/// PDFs, MIS weights, image bits, and variance deliberately changed. Fixture:
+/// 24×24, 8 spp, depth 4, MIS + iid Philox, seed 7; FNV-1a over the EXR bytes.
+/// This freeze also records the current chart-backend-bits=10 dependency.
+/// Re-freeze only per docs/GOLDEN_POLICY.md.
+const CORNELL_GOLDEN: u64 = 0xe89b_e51c_b59b_21cc;
 
 /// ACCEPTANCE (2): the Cornell-class fixture matches the frozen
 /// reference image hash in deterministic mode.

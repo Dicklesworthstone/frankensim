@@ -520,9 +520,9 @@ default chart backend surface. Its primal silhouette and hit decisions use the
 same `Chart`/certified-sphere-trace backend; dual lanes lift those decisions by
 the implicit hit equation.
 
-`tracer` (bead 872c) gates the spectral path tracer v1
+`tracer` (bead 872c) gates the spectral path tracer
 (chart-backends + fs-rand + fs-img): hero-wavelength (4-packet)
-NEE+MIS path integration, Lambertian + legacy reflective GGX with spectral
+NEE+MIS path integration, Lambertian + reflective GGX with spectral
 reflectance, exact-Fresnel spectral conductors, and provenance-bearing
 smooth/rough spectral dielectric glass
 (the `spectral` module's bounded sigmoid lift; round-trip RGB error
@@ -550,13 +550,16 @@ the separate source/provenance hashes retain container lineage without changing
 the sampling stream. Both NEE and BSDF-hit paths include the same selection
 probability in their solid-angle PDFs. At a lighting-v1 path's final permitted
 bounce, NEE has weight one because no competing BSDF continuation is evaluated.
-The exact legacy one-rectangle/no-environment branch retains its original draws,
-grazing cutoff, estimator, and image bits.
-Current no-claims: no volumetric coupling, no Russian roulette, GGX samples the
-NDF (VNDF is a recorded follow-up), conductor and dielectric GGX are
-single-scattering without multiple-scattering compensation, and emitters do not
-reflect. On the first
-dispersive dielectric event, the shared
+The exact legacy one-rectangle/no-environment lighting branch retains its
+original light-selection draws and estimator. Tracer bit-semantics v2
+deliberately changes reflective GGX sample/PDF bits from NDF sampling to
+isotropic visible-normal sampling while preserving the same BSDF integral in
+expectation.
+Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
+and conductor sampling is isotropic-only, rough dielectric sampling remains an
+NDF-plus-Fresnel-branch path, conductor and dielectric GGX are single-scattering
+without multiple-scattering compensation, and emitters do not reflect. On the
+first dispersive dielectric event, the shared
 four-wavelength geometric packet collapses once to its uniformly selected hero
 lane with the matching factor-four estimator weight; companion lanes are zeroed
 instead of being biased along the hero wavelength's refracted direction.
@@ -588,18 +591,21 @@ NEE with target-medium attenuation; cancellation; and bitwise progressive
 replay. Inline analytic tests add independent Fresnel, Snell/critical-angle,
 signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
 grazing, pole-frame, adjacent-IOR, and one-time dispersive packet-collapse
-fixtures. The pre-existing Cornell tracer battery remains byte-stable and is
-the opaque-path non-regression gate.
+fixtures. The Cornell tracer battery is deliberately re-frozen when tracer bit
+semantics change and remains the opaque-path non-regression gate.
 
 `conductor` and `tracer` inline tests plus the Euler scene-bridge E2E fixture
 (feature `tracer`, and `cinematic-render` downstream) cover complex-Fresnel
 known answers and an independent real-form grid, normal/grazing/common-index
 relations, complete-table and wavelength refusal, exact-knot interpolation,
 packet permutation, source/material fingerprint sensitivity, roughness bounds,
-GGX sampling/PDF agreement including the south-pole frame, reciprocity,
-active-incident-medium dependence, a numerical no-energy-gain furnace, exact
-replay, and visibly distinct representative tungsten/stainless renders under
-one neutral light. The Cornell golden remains the legacy-material bit gate.
+GGX visible-normal sampling/PDF agreement at grazing incidence and both pole
+frames, directional-PDF mass versus sampler acceptance, reciprocity,
+active-incident-medium dependence, a numerical no-energy-gain furnace, an
+independent equal-expectation furnace check, equal-draw grazing variance against
+the former NDF sampler, exact replay, and visibly distinct representative
+tungsten/stainless renders under one neutral light. The Cornell golden remains
+the legacy-material bit gate.
 
 `lighting` inline tests and `tests/lighting_battery.rs` (feature `tracer`) cover
 rectangle admission and identity order, zero/duplicate emitters, exact

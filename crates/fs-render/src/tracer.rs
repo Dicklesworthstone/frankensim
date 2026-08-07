@@ -97,7 +97,7 @@ pub use sharding::{
 /// Philox/Sobol stream keying, the BSDF forms, the CMF/adaptation
 /// constants it inherits from `spectral`, and the EXR channel layout.
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 2;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -8359,36 +8359,214 @@ mod tests {
     }
 
     #[test]
-    fn conductor_sampling_matches_pdf_at_north_and_south_poles() {
-        let material = Material::Conductor {
-            optics: ConductorOptics::representative_tungsten(),
-            surface: ConductorSurface::try_rough(0.2).unwrap(),
-        };
+    fn ggx_visible_normal_sampling_matches_pdf_at_grazing_and_both_poles() {
+        let materials = [
+            Material::Ggx {
+                reflectance: lift_rgb([0.72; 3]),
+                alpha: 0.2,
+            },
+            Material::Conductor {
+                optics: ConductorOptics::representative_tungsten(),
+                surface: ConductorSurface::try_rough(0.2).unwrap(),
+            },
+        ];
         let near_south = Vec3::new(2.0e-5, -3.0e-5, -1.0);
         let near_south = near_south.scale(1.0 / near_south.norm());
-        for normal in [
-            Vec3::new(0.0, 0.0, 1.0),
-            Vec3::new(0.0, 0.0, -1.0),
-            near_south,
-        ] {
-            let mut accepted = 0_usize;
-            for (u1, u2) in [(0.01, 0.0), (0.08, 0.17), (0.21, 0.43), (0.55, 0.79)] {
-                let Some((wi, sampled_pdf)) = bsdf_sample(&material, normal, normal, u1, u2) else {
-                    continue;
-                };
-                accepted += 1;
-                assert!(wi.x.is_finite() && wi.y.is_finite() && wi.z.is_finite());
-                assert!((wi.norm() - 1.0).abs() <= 2.0e-12);
-                assert!(normal.dot(wi) > 0.0);
-                let evaluated_pdf = bsdf_pdf(&material, normal, normal, wi);
-                let tolerance = 2.0e-12 * sampled_pdf.abs().max(1.0);
-                assert!(
-                    (evaluated_pdf - sampled_pdf).abs() <= tolerance,
-                    "conductor sample/PDF mismatch at normal={normal:?}: sampled={sampled_pdf:.17e}, evaluated={evaluated_pdf:.17e}"
-                );
+        for material in materials {
+            for normal in [
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                near_south,
+            ] {
+                let (tangent, _) = basis_all_sphere(normal);
+                for cos_o in [1.0, 0.08] {
+                    let sin_o = (1.0_f64 - cos_o * cos_o).sqrt();
+                    let wo = Vec3::new(
+                        tangent.x * sin_o + normal.x * cos_o,
+                        tangent.y * sin_o + normal.y * cos_o,
+                        tangent.z * sin_o + normal.z * cos_o,
+                    );
+                    let mut accepted = 0_usize;
+                    for (u1, u2) in [
+                        (0.0, 0.0),
+                        (0.01, 0.13),
+                        (0.08, 0.17),
+                        (0.21, 0.43),
+                        (0.55, 0.79),
+                        (0.93, 0.97),
+                    ] {
+                        let Some((wi, sampled_pdf)) = bsdf_sample(&material, normal, wo, u1, u2)
+                        else {
+                            continue;
+                        };
+                        accepted += 1;
+                        assert!(wi.x.is_finite() && wi.y.is_finite() && wi.z.is_finite());
+                        assert!((wi.norm() - 1.0).abs() <= 3.0e-12);
+                        assert!(normal.dot(wi) > 0.0);
+                        let evaluated_pdf = bsdf_pdf(&material, normal, wo, wi);
+                        let tolerance = 4.0e-12 * sampled_pdf.abs().max(1.0);
+                        assert!(
+                            (evaluated_pdf - sampled_pdf).abs() <= tolerance,
+                            "GGX VNDF sample/PDF mismatch at normal={normal:?}, cos_o={cos_o}: sampled={sampled_pdf:.17e}, evaluated={evaluated_pdf:.17e}"
+                        );
+                    }
+                    assert!(
+                        accepted >= 4,
+                        "too few admitted VNDF samples at normal={normal:?}, cos_o={cos_o}: {accepted}"
+                    );
+                }
             }
-            assert!(accepted >= 3, "too few admitted samples at {normal:?}");
         }
+    }
+
+    #[test]
+    fn ggx_visible_normal_directional_pdf_integrates_to_its_acceptance_mass() {
+        const SIDE: u32 = 512;
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let cos_o = 0.08_f64;
+        let wo = Vec3::new((1.0 - cos_o * cos_o).sqrt(), 0.0, cos_o);
+        let material = Material::Ggx {
+            reflectance: lift_rgb([0.72; 3]),
+            alpha: 0.12,
+        };
+
+        let mut pdf_sum = 0.0;
+        let mut accepted = 0_u64;
+        for y in 0..SIDE {
+            let z = (f64::from(y) + 0.5) / f64::from(SIDE);
+            let radial = (1.0 - z * z).sqrt();
+            for x in 0..SIDE {
+                let azimuth = 2.0 * PI * (f64::from(x) + 0.5) / f64::from(SIDE);
+                let wi = Vec3::new(radial * det::cos(azimuth), radial * det::sin(azimuth), z);
+                pdf_sum += bsdf_pdf(&material, normal, wo, wi);
+
+                let u1 = (f64::from(x) + 0.5) / f64::from(SIDE);
+                let u2 = (f64::from(y) + 0.5) / f64::from(SIDE);
+                if bsdf_sample(&material, normal, wo, u1, u2).is_some() {
+                    accepted += 1;
+                }
+            }
+        }
+        let samples = f64::from(SIDE * SIDE);
+        let integrated_mass = pdf_sum * (2.0 * PI) / samples;
+        let sampled_mass = accepted as f64 / samples;
+        assert!((0.0..=1.0).contains(&integrated_mass));
+        assert!((0.0..=1.0).contains(&sampled_mass));
+        assert!(
+            (integrated_mass - sampled_mass).abs() <= 4.0e-3,
+            "VNDF reflection density mass disagrees with sampler acceptance: integral={integrated_mass:.9}, sampled={sampled_mass:.9}"
+        );
+    }
+
+    fn sample_ggx_ndf_reflection_for_comparison(
+        n: Vec3,
+        wo: Vec3,
+        alpha: f64,
+        u1: f64,
+        u2: f64,
+    ) -> Option<(Vec3, f64)> {
+        let alpha_squared = alpha * alpha;
+        let cos_m_squared = ((1.0 - u1) / (u1 * (alpha_squared - 1.0) + 1.0)).clamp(0.0, 1.0);
+        let cos_m = cos_m_squared.sqrt();
+        let sin_m = (1.0 - cos_m_squared).sqrt();
+        let phi = 2.0 * PI * u2;
+        let m = to_world_all_sphere(n, [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m]);
+        let wo_dot_m = wo.dot(m);
+        if wo_dot_m <= 0.0 {
+            return None;
+        }
+        let wi = Vec3::new(
+            2.0 * wo_dot_m * m.x - wo.x,
+            2.0 * wo_dot_m * m.y - wo.y,
+            2.0 * wo_dot_m * m.z - wo.z,
+        );
+        if n.dot(wi) <= 0.0 {
+            return None;
+        }
+        let pdf = ggx_d(alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wo_dot_m);
+        (pdf > 0.0).then_some((wi, pdf))
+    }
+
+    fn conductor_furnace_sample(
+        material: &Material,
+        normal: Vec3,
+        wo: Vec3,
+        sample: Option<(Vec3, f64)>,
+    ) -> f64 {
+        let Some((wi, pdf)) = sample else {
+            return 0.0;
+        };
+        opaque_bsdf_eval(material, normal, wo, wi, 550.0, None).unwrap() * normal.dot(wi) / pdf
+    }
+
+    #[test]
+    fn ggx_vndf_reduces_equal_cost_grazing_conductor_variance_without_bias() {
+        const SAMPLES: u32 = 1 << 16;
+        const REFERENCE_SIDE: u32 = 512;
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let cos_o = 0.08_f64;
+        let wo = Vec3::new((1.0 - cos_o * cos_o).sqrt(), 0.0, cos_o);
+        let alpha = 0.12;
+        let material = Material::Conductor {
+            optics: ConductorOptics::representative_tungsten(),
+            surface: ConductorSurface::try_rough(alpha).unwrap(),
+        };
+        let mut ndf = AdaptivePixelAccumulator::EMPTY;
+        let mut vndf = AdaptivePixelAccumulator::EMPTY;
+        for sample in 0..SAMPLES {
+            let draws = philox4x32_10(
+                [sample, 0x766e_6466, 0x6767_7802, 0],
+                [0x4752_415a, 0x494e_475f],
+            );
+            let u1 = u32_unit(draws[0]);
+            let u2 = u32_unit(draws[1]);
+            let ndf_sample = conductor_furnace_sample(
+                &material,
+                normal,
+                wo,
+                sample_ggx_ndf_reflection_for_comparison(normal, wo, alpha, u1, u2),
+            );
+            let vndf_sample = conductor_furnace_sample(
+                &material,
+                normal,
+                wo,
+                bsdf_sample(&material, normal, wo, u1, u2),
+            );
+            ndf.push([ndf_sample; 3]).unwrap();
+            vndf.push([vndf_sample; 3]).unwrap();
+        }
+
+        let mut reference = 0.0;
+        for y in 0..REFERENCE_SIDE {
+            for x in 0..REFERENCE_SIDE {
+                let u1 = (f64::from(x) + 0.5) / f64::from(REFERENCE_SIDE);
+                let u2 = (f64::from(y) + 0.5) / f64::from(REFERENCE_SIDE);
+                let (wi, _) = cosine_sample(normal, u1, u2);
+                reference += opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None).unwrap() * PI;
+            }
+        }
+        reference /= f64::from(REFERENCE_SIDE * REFERENCE_SIDE);
+
+        let ndf_mean = ndf.mean_xyz()[0];
+        let vndf_mean = vndf.mean_xyz()[0];
+        let ndf_error = (ndf_mean - reference).abs();
+        let vndf_error = (vndf_mean - reference).abs();
+        let ndf_variance = ndf.sample_variance_xyz()[0];
+        let vndf_variance = vndf.sample_variance_xyz()[0];
+        assert!(
+            ndf_error <= 1.5e-2 && vndf_error <= 1.5e-2,
+            "GGX estimators disagree with the independent furnace integral: reference={reference:.9}, NDF={:.9}, VNDF={:.9}",
+            ndf_mean,
+            vndf_mean,
+        );
+        assert!(
+            vndf_variance < 0.35 * ndf_variance,
+            "VNDF did not materially reduce equal-cost grazing variance: NDF={ndf_variance:.9e}, VNDF={vndf_variance:.9e}"
+        );
+        eprintln!(
+            "GGX grazing furnace: reference={reference:.9}, NDF_mean={:.9}, VNDF_mean={:.9}, NDF_variance={ndf_variance:.9e}, VNDF_variance={vndf_variance:.9e}",
+            ndf_mean, vndf_mean,
+        );
     }
 
     #[test]
@@ -8853,11 +9031,7 @@ fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
                 return 0.0;
             }
             let m = hsum.scale(1.0 / hn);
-            let wom = wo.dot(m);
-            if wom <= 0.0 {
-                return 0.0;
-            }
-            ggx_d(*alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom)
+            ggx_vndf_reflection_pdf(*alpha, n, wo, m)
         }
         Material::Conductor { surface, .. } => {
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
@@ -8866,11 +9040,7 @@ fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
                 return 0.0;
             }
             let m = hsum.scale(1.0 / hn);
-            let wom = wo.dot(m);
-            if wom <= 0.0 {
-                return 0.0;
-            }
-            ggx_d(surface.roughness_alpha(), n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom)
+            ggx_vndf_reflection_pdf(surface.roughness_alpha(), n, wo, m)
         }
         Material::Dielectric { .. } => 0.0,
     }
@@ -8882,64 +9052,18 @@ fn bsdf_sample(mat: &Material, n: Vec3, wo: Vec3, u1: f64, u2: f64) -> Option<(V
             let (wi, pdf) = cosine_sample(n, u1, u2);
             (pdf > 0.0).then_some((wi, pdf))
         }
-        Material::Ggx { alpha, .. } => {
-            // Sample the half-vector from D(m)·cos m (standard GGX NDF
-            // sampling; VNDF is a recorded follow-up).
-            let a2 = alpha * alpha;
-            let cos_m2 = ((1.0 - u1) / (u1 * (a2 - 1.0) + 1.0)).clamp(0.0, 1.0);
-            let cos_m = cos_m2.sqrt();
-            let sin_m = (1.0 - cos_m2).max(0.0).sqrt();
-            let phi = 2.0 * PI * u2;
-            let m = to_world(n, [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m]);
-            let wom = wo.dot(m);
-            if wom <= 0.0 {
-                return None;
-            }
-            let wi = Vec3::new(
-                2.0 * wom * m.x - wo.x,
-                2.0 * wom * m.y - wo.y,
-                2.0 * wom * m.z - wo.z,
-            );
-            if n.dot(wi) <= 0.0 {
-                return None;
-            }
-            let pdf = ggx_d(*alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom);
-            (pdf > 0.0).then_some((wi, pdf))
-        }
+        Material::Ggx { alpha, .. } => sample_ggx_vndf_reflection(n, wo, *alpha, u1, u2),
         Material::Conductor { surface, .. } => {
-            // Retain the tracer's established GGX NDF sampler while using an
-            // all-sphere Duff basis for this new path. The legacy GGX branch
-            // remains byte-compatible, including its historical basis.
-            let alpha = surface.roughness_alpha();
-            let a2 = alpha * alpha;
-            let cos_m2 = ((1.0 - u1) / (u1 * (a2 - 1.0) + 1.0)).clamp(0.0, 1.0);
-            let cos_m = cos_m2.sqrt();
-            let sin_m = (1.0 - cos_m2).max(0.0).sqrt();
-            let phi = 2.0 * PI * u2;
-            let m = to_world_conductor(n, [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m]);
-            let wom = wo.dot(m);
-            if wom <= 0.0 {
-                return None;
-            }
-            let wi = Vec3::new(
-                2.0 * wom * m.x - wo.x,
-                2.0 * wom * m.y - wo.y,
-                2.0 * wom * m.z - wo.z,
-            );
-            if n.dot(wi) <= 0.0 {
-                return None;
-            }
-            let pdf = ggx_d(alpha, n.dot(m)) * n.dot(m).max(0.0) / (4.0 * wom);
-            (pdf > 0.0).then_some((wi, pdf))
+            sample_ggx_vndf_reflection(n, wo, surface.roughness_alpha(), u1, u2)
         }
         Material::Dielectric { .. } => None,
     }
 }
 
-fn basis_conductor(normal: Vec3) -> (Vec3, Vec3) {
-    // Duff et al.'s cancellation-free all-sphere ONB. This specifically
-    // avoids the legacy Frisvad cap shortcut's sample/PDF mismatch near the
-    // south pole without changing any established material stream.
+/// Duff et al.'s cancellation-free all-sphere basis. Unlike the legacy
+/// Lambertian basis, this remains well conditioned at both poles and is used
+/// by the view-dependent GGX sampler for every reflective microfacet material.
+fn basis_all_sphere(normal: Vec3) -> (Vec3, Vec3) {
     let sign = if normal.z < 0.0 { -1.0 } else { 1.0 };
     let a = -1.0 / (sign + normal.z);
     let b = normal.x * normal.y * a;
@@ -8953,13 +9077,120 @@ fn basis_conductor(normal: Vec3) -> (Vec3, Vec3) {
     )
 }
 
-fn to_world_conductor(normal: Vec3, local: [f64; 3]) -> Vec3 {
-    let (tangent, bitangent) = basis_conductor(normal);
+fn to_world_all_sphere(normal: Vec3, local: [f64; 3]) -> Vec3 {
+    let (tangent, bitangent) = basis_all_sphere(normal);
     Vec3::new(
         tangent.x * local[0] + bitangent.x * local[1] + normal.x * local[2],
         tangent.y * local[0] + bitangent.y * local[1] + normal.y * local[2],
         tangent.z * local[0] + bitangent.z * local[1] + normal.z * local[2],
     )
+}
+
+/// Directional density induced by isotropic GGX visible-normal sampling.
+///
+/// The sampled microfacet density is
+/// `D(m) G1(wo) (wo·m) / (n·wo)`. Reflection contributes the Jacobian
+/// `1 / (4 wo·m)`, so the two dot products cancel. Samples whose reflected
+/// direction falls below the macrosurface are rejected by the caller; the
+/// remaining directional density is therefore intentionally sub-normalized by
+/// exactly that rejection probability.
+fn ggx_vndf_reflection_pdf(alpha: f64, n: Vec3, wo: Vec3, m: Vec3) -> f64 {
+    let cos_o = n.dot(wo);
+    if cos_o <= 0.0 || wo.dot(m) <= 0.0 {
+        return 0.0;
+    }
+    ggx_d(alpha, n.dot(m)) * smith_g1(alpha, cos_o) / (4.0 * cos_o)
+}
+
+/// Sample Heitz's isotropic GGX distribution of visible normals and reflect
+/// `wo` about the selected microfacet ("Sampling the GGX Distribution of
+/// Visible Normals", JCGT 2018). This uses exactly the existing two BSDF
+/// uniform dimensions, so determinism and cancellation checkpoints are
+/// unchanged while the estimator's sample/PDF bits deliberately change.
+fn sample_ggx_vndf_reflection(
+    n: Vec3,
+    wo: Vec3,
+    alpha: f64,
+    u1: f64,
+    u2: f64,
+) -> Option<(Vec3, f64)> {
+    let cos_o = n.dot(wo);
+    if !alpha.is_finite()
+        || alpha <= 0.0
+        || cos_o <= 0.0
+        || !u1.is_finite()
+        || !u2.is_finite()
+        || !(0.0..=1.0).contains(&u1)
+        || !(0.0..=1.0).contains(&u2)
+    {
+        return None;
+    }
+
+    let (tangent, bitangent) = basis_all_sphere(n);
+    let local_wo = [tangent.dot(wo), bitangent.dot(wo), cos_o];
+
+    // Stretch the view so isotropic GGX becomes a unit-roughness problem.
+    let stretched = [alpha * local_wo[0], alpha * local_wo[1], local_wo[2]];
+    let inverse_stretched_norm = 1.0
+        / (stretched[0] * stretched[0] + stretched[1] * stretched[1] + stretched[2] * stretched[2])
+            .sqrt();
+    let view = stretched.map(|component| component * inverse_stretched_norm);
+
+    // Orthonormal frame around the stretched view direction.
+    let lensq = view[0] * view[0] + view[1] * view[1];
+    let frame_1 = if lensq > 0.0 {
+        let inverse_len = 1.0 / lensq.sqrt();
+        [-view[1] * inverse_len, view[0] * inverse_len, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let frame_2 = [
+        view[1] * frame_1[2] - view[2] * frame_1[1],
+        view[2] * frame_1[0] - view[0] * frame_1[2],
+        view[0] * frame_1[1] - view[1] * frame_1[0],
+    ];
+
+    // Uniform disk sample warped onto the visible projected GGX hemisphere.
+    let radius = u1.sqrt();
+    let phi = 2.0 * PI * u2;
+    let disk_1 = radius * det::cos(phi);
+    let mut disk_2 = radius * det::sin(phi);
+    let blend = 0.5 * (1.0 + view[2]);
+    disk_2 = (1.0 - blend) * (1.0 - disk_1 * disk_1).max(0.0).sqrt() + blend * disk_2;
+    let projected = (1.0 - disk_1 * disk_1 - disk_2 * disk_2).max(0.0).sqrt();
+    let stretched_normal = [
+        disk_1 * frame_1[0] + disk_2 * frame_2[0] + projected * view[0],
+        disk_1 * frame_1[1] + disk_2 * frame_2[1] + projected * view[1],
+        disk_1 * frame_1[2] + disk_2 * frame_2[2] + projected * view[2],
+    ];
+
+    // Undo the stretch and normalize back into the macrosurface frame.
+    let unstretched = [
+        alpha * stretched_normal[0],
+        alpha * stretched_normal[1],
+        stretched_normal[2].max(0.0),
+    ];
+    let inverse_normal_len = 1.0
+        / (unstretched[0] * unstretched[0]
+            + unstretched[1] * unstretched[1]
+            + unstretched[2] * unstretched[2])
+            .sqrt();
+    let local_m = unstretched.map(|component| component * inverse_normal_len);
+    let m = to_world_all_sphere(n, local_m);
+    let wo_dot_m = wo.dot(m);
+    if wo_dot_m <= 0.0 {
+        return None;
+    }
+    let wi = Vec3::new(
+        2.0 * wo_dot_m * m.x - wo.x,
+        2.0 * wo_dot_m * m.y - wo.y,
+        2.0 * wo_dot_m * m.z - wo.z,
+    );
+    if n.dot(wi) <= 0.0 {
+        return None;
+    }
+    let pdf = ggx_vndf_reflection_pdf(alpha, n, wo, m);
+    (pdf > 0.0 && pdf.is_finite()).then_some((wi, pdf))
 }
 
 // ---- vector helpers (fs-geom's Vec3 has no cross) ---------------------
