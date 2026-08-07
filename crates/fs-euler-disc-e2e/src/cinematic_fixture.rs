@@ -1878,13 +1878,13 @@ fn fixture_manifest(
             "{{\n",
             "  \"schema\": \"frankensim-euler-cinematic-critique-v2\",\n",
             "  \"authority\": \"source-bound analytical simulation visualization; physically informed but uncalibrated synthesis; artistic spatial presentation\",\n",
-            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"terminal_cutoff_in_final_shutter\": true, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": 1, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
+            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": 1, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
-            "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"claim\": \"single dt/dt2 consistency pair for the encoded analytical model; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"published rolling work rate times uncalibrated 2 N/W transfer\", \"contact_phase\": \"body-contact azimuth; harmonic one; instantaneous rate Omega*cos(theta)\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"declared_source_bandwidth_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
+            "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"claim\": \"single dt/dt2 consistency pair for the encoded analytical model; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
+            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"published rolling work rate times uncalibrated 2 N/W transfer\", \"contact_phase\": \"body-contact azimuth; harmonic one; instantaneous rate Omega*cos(theta)\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the harmonic-one contact shape, modal frequencies, damping, masses, radiation gains, and rolling-power-to-force transfer are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the harmonic-one contact shape, modal frequencies, damping, masses, radiation gains, and rolling-power-to-force transfer are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the 256 Hz reconstruction ceiling is a conservative authored assumption, not a certified bandlimit of cropped piecewise-linear controls\", \"modal state starts from rest at the cropped eight-second boundary; acoustic prehistory is not reconstructed and the initial fade suppresses that authored startup\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,
@@ -1901,6 +1901,8 @@ fn fixture_manifest(
         shutter_angle = config.shutter_angle_degrees,
         shutter_duration =
             f64::from(config.shutter_angle_degrees) / 360.0 / f64::from(CRITIQUE_FPS),
+        first_shutter_open = 1.0 / f64::from(CRITIQUE_FPS)
+            - f64::from(config.shutter_angle_degrees) / 360.0 / f64::from(CRITIQUE_FPS),
         seed_version = CRITIQUE_FRAME_SEED_SCHEDULE_VERSION,
         denoise_requested = config.denoise_previews,
         raw_profile = raw_profile,
@@ -1932,6 +1934,21 @@ fn fixture_manifest(
         thickness = specimen.thickness_m,
         mass = specimen.mass_kg,
         fillet = specimen.outer_fillet_radius_m,
+        gravity = run.parameters.gravity_m_per_s2,
+        source_initial_theta = run.parameters.initial_theta_rad,
+        air_density = run
+            .provenance
+            .bildsten_density_kg_per_m3
+            .expect("source-bound run retains air density"),
+        air_viscosity = run
+            .provenance
+            .bildsten_dynamic_viscosity_pa_s
+            .expect("source-bound run retains air viscosity"),
+        bildsten_prefactor = run
+            .provenance
+            .bildsten_dimensionless_prefactor
+            .expect("source-bound run retains Bildsten prefactor"),
+        maximum_steps = run.parameters.maximum_steps,
         coarse_dt = run.parameters.timestep_s,
         fine_dt = refinement.fine.parameters.timestep_s,
         source_samples = run.samples.len(),
@@ -2037,9 +2054,14 @@ mod tests {
     }
 
     #[test]
-    fn sound_contract_frame_range_is_enforced() {
+    fn source_bound_fixture_requires_exact_eight_second_frame_count() {
         let mut config = CinematicFixtureConfig::default();
         config.frames = 191;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(_))
+        ));
+        config.frames = 193;
         assert!(matches!(
             config.validate(),
             Err(CinematicFixtureError::InvalidConfig(_))
@@ -2129,21 +2151,23 @@ mod tests {
     }
 
     #[test]
-    fn boundary_reference_times_cover_finite_shutters() {
-        let trajectory_start_s = 5.0e-5;
-        let trajectory_end_s = 7.999_999_999_988_025;
-        let half_shutter_s = 0.25 / f64::from(CRITIQUE_FPS);
+    fn back_loaded_frame_references_close_final_shutter_at_cutoff() {
+        let trajectory_start_s = 0.0;
+        let trajectory_end_s = 8.0;
+        let exposure_s = 0.5 / f64::from(CRITIQUE_FPS);
         for frame in 0..CRITIQUE_FRAMES {
             let (frame_time_s, previous_time_s, next_time_s) =
                 frame_reference_times(frame, CRITIQUE_FRAMES, trajectory_start_s, trajectory_end_s);
             assert!(trajectory_start_s <= previous_time_s);
-            assert!(previous_time_s <= frame_time_s - half_shutter_s);
-            assert!(frame_time_s + half_shutter_s <= next_time_s);
+            assert!(previous_time_s <= frame_time_s - exposure_s);
+            assert!(frame_time_s <= next_time_s);
             assert!(next_time_s <= trajectory_end_s);
             if frame == 0 {
                 assert_eq!(previous_time_s, trajectory_start_s);
+                assert_eq!(frame_time_s - exposure_s, 1.0 / 48.0);
             }
             if frame + 1 == CRITIQUE_FRAMES {
+                assert_eq!(frame_time_s, trajectory_end_s);
                 assert_eq!(next_time_s, trajectory_end_s);
             }
         }
