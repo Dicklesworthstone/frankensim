@@ -92,12 +92,13 @@ pub use control_stream::{
 };
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
-    MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseFrame,
-    RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
-    RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
-    RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
-    RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
-    RenderTrajectorySample, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE,
+    REDUCED_DECAY_RENDER_TAIL_HORIZON_S, RenderBaseFrame, RenderBaseModeState,
+    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry, RenderContactTransition,
+    RenderMassProperties, RenderNumericalRefusalReason, RenderSampleDisposition,
+    RenderSupportFeature, RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority,
+    RenderTrajectoryError, RenderTrajectoryMetadata, RenderTrajectorySample,
+    RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
 };
 pub use render_trajectory_codec::{
     EULER_RENDER_TRAJECTORY_ARTIFACT_IDENTITY_DOMAIN,

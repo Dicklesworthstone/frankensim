@@ -195,7 +195,7 @@ pub struct DerivedEulerQois {
     pub precession_rad_per_s: f64,
     /// Residual axial spin after removing precession [rad/s].
     pub spin_rad_per_s: f64,
-    /// Finite-difference precession acceleration [rad/s^2].
+    /// Precession acceleration derived from the admitted motion law [rad/s^2].
     pub precession_acceleration_rad_per_s2: f64,
 }
 
@@ -989,6 +989,24 @@ fn validate_reduced_decay_render_source(
                 return Err(reduced_decay_bridge_refusal(
                     "sample.time_or_theta_order",
                     format!("sample {index} is not a bounded descending step"),
+                ));
+            }
+            let time_to_cutoff_s = (previous.theta_rad - run.parameters.validity_cutoff_theta_rad)
+                * energy_slope_j_per_rad
+                / previous.powers.total_w();
+            let expected_dt_s = run.parameters.timestep_s.min(time_to_cutoff_s);
+            let expected_theta_rad = if time_to_cutoff_s <= run.parameters.timestep_s {
+                run.parameters.validity_cutoff_theta_rad
+            } else {
+                previous.theta_rad
+                    - previous.powers.total_w() * expected_dt_s / energy_slope_j_per_rad
+            };
+            if !scalar_close(dt_s, expected_dt_s)
+                || !scalar_close(sample.theta_rad, expected_theta_rad)
+            {
+                return Err(reduced_decay_bridge_refusal(
+                    "sample.integration_step",
+                    format!("sample {index} does not follow the admitted left-boundary decay step"),
                 ));
             }
             let rolling_increment =

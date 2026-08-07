@@ -1006,6 +1006,46 @@ fn thorne_tail_is_grounded_horizon_censored_and_contains_the_terminal_chirp() {
 }
 
 #[test]
+fn thorne_bridge_refuses_an_intermediate_state_that_does_not_follow_the_decay_step() {
+    with_cx(|cx| {
+        let benchmark = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
+        let profile = benchmark
+            .resolve_specimen(cx)
+            .expect("source-bound specimen");
+        let mut run =
+            run_thorne_2026_steel_glass_benchmark(&benchmark).expect("source-bound decay");
+        let index = run.samples.len() / 2;
+        let previous_theta_rad = run.samples[index - 1].theta_rad;
+        let original_theta_rad = run.samples[index].theta_rad;
+        let corrupted_theta_rad = 0.5 * (previous_theta_rad + original_theta_rad);
+        let sample = &mut run.samples[index];
+        let original_omega_rad_s = sample.omega_rad_s;
+        sample.theta_rad = corrupted_theta_rad;
+        sample.omega_rad_s = (4.0 * run.parameters.gravity_m_per_s2
+            / (run.parameters.radius_m * corrupted_theta_rad.sin()))
+        .sqrt();
+        sample.energy_j = 1.5
+            * run.parameters.mass_kg
+            * run.parameters.gravity_m_per_s2
+            * run.parameters.radius_m
+            * corrupted_theta_rad;
+        sample.powers.published_rolling_w *= sample.omega_rad_s / original_omega_rad_s;
+        sample.powers.bildsten_boundary_layer_w *=
+            (corrupted_theta_rad / original_theta_rad).powf(-1.25);
+
+        let error = RenderTrajectory::from_reduced_decay_run(&run, &profile, cx)
+            .expect_err("a forged intermediate inclination must be refused");
+        assert!(matches!(
+            error,
+            RenderTrajectoryError::ReducedDecayBridgeRefusal {
+                field: "sample.integration_step",
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
 fn thorne_bridge_replays_exactly_and_phase_rates_match_rigid_state() {
     with_cx(|cx| {
         let benchmark = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
@@ -1022,7 +1062,7 @@ fn thorne_bridge_replays_exactly_and_phase_rates_match_rigid_state() {
         let mass = first.metadata().mass_properties.properties;
         let mut precession_phase_rad = 0.0_f64;
         let mut spin_phase_rad = 0.0_f64;
-        let mut previous = None;
+        let mut previous: Option<&RenderTrajectorySampleInput> = None;
         for (index, retained) in first.samples().iter().enumerate() {
             let input = retained.input();
             if let Some(previous_input) = previous {

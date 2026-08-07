@@ -98,6 +98,7 @@ fn e2e_reduced_decay_air_only_recovers_four_ninths_reference_exponent() {
     let mut low = input(None, Some(1.2));
     low.initial_theta_rad = 0.03;
     low.validity_cutoff_theta_rad = 1.0e-5;
+    low.maximum_steps = 200_000;
     let mut high = low.clone();
     high.initial_theta_rad = 0.06;
     let low_run = run_reduced_decay(&low).expect("air-only low run");
@@ -109,6 +110,8 @@ fn e2e_reduced_decay_air_only_recovers_four_ninths_reference_exponent() {
         high_run.final_sample().expect("high final sample").time_s,
     );
     assert!((exponent - 4.0 / 9.0).abs() < 0.01, "got {exponent}");
+    assert_eq!(low_run.terminal, ReducedDecayTerminal::ValidityCutoff);
+    assert_eq!(high_run.terminal, ReducedDecayTerminal::ValidityCutoff);
     assert_eq!(
         low_run
             .final_sample()
@@ -378,7 +381,7 @@ fn e2e_reduced_decay_runner_output_is_structured_and_deterministic() {
     assert!(first.contains("model_authority=numerical-reference-only"));
     assert!(first.contains("physical_validation=not-claimed"));
     assert!(first.contains("small_angle_oracle_source_id=synthetic/small-angle-oracle-v1"));
-    assert!(first.contains("dry_authority=SyntheticFixture"));
+    assert!(first.contains("dry_authority=Some(SyntheticFixture)"));
     assert!(first.contains("bildsten_source_id=synthetic/bildsten-energy-only"));
     assert!(first.contains("terminal=ValidityCutoff"));
     assert!(first.contains("dry_work_j="));
