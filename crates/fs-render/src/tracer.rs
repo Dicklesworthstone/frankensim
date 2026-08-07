@@ -111,7 +111,7 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 3;
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 4;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";

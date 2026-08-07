@@ -87,7 +87,7 @@ const INITIAL_FADE_SAMPLE_FRAMES: u32 = 960;
 const AUDIO_PREROLL_VIDEO_FRAMES: u32 = 1;
 /// Exact 48 kHz samples in the source-bound modal warm start.
 const AUDIO_PREROLL_SAMPLE_FRAMES: u64 = 2_000;
-const AUDIO_PREROLL_POLICY_ID: &str = "source-bound-final-one-video-frame-modal-warm-start-v1";
+const AUDIO_PREROLL_POLICY_ID: &str = "source-bound-causal-one-video-frame-modal-warm-start-v2";
 /// Conservative reconstruction ceiling for the sub-100 Hz trajectory-derived
 /// harmonic-one contact modulation and its slowly varying rolling envelope.
 const CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
