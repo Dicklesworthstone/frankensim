@@ -232,15 +232,17 @@ differentiable lift). Pure Rust throughout.
   returned-`Vec` path necessarily holds staged planes and encoded output
   concurrently during finalization.
 
-  `CinematicAovFilm::denoise_guides` exposes the retained `DailyCore` guide
-  subset as owned row-major `f32` planes: previous-frame motion, axial depth,
-  shading normal, primary coverage, and raw-luminance variance. It uses the
-  exact same averaging, normal normalization, finite narrowing, invalid
-  background-zero convention, and signed-zero canonicalization as EXR export;
-  the focused battery compares every returned plane bit-for-bit with its
-  decoded EXR counterpart. `BeautyOnly` refuses because it retained no primary
-  observations. Stable IDs are intentionally omitted rather than converting
-  per-frame palette indices into a stronger identity claim.
+  `CinematicAovFilm::denoise_guides` exposes the retained guide subset as owned
+  row-major planes: previous-frame motion, axial depth, shading normal, primary
+  coverage, and raw-luminance variance. `FinalDiagnostic` additionally exposes
+  the exact nearest-primary object/material palette indices as optional `u64`
+  categorical labels; `DailyCore` leaves those labels unavailable. The palette
+  and scene binding make the indices sequence-stable only while that exact
+  binding is preserved. The bridge uses the same averaging, normal
+  normalization, finite narrowing, invalid background-zero convention, and
+  signed-zero canonicalization as EXR export; the focused battery compares
+  every returned plane bit-for-bit with its decoded EXR counterpart.
+  `BeautyOnly` refuses because it retained no primary observations.
 
   Progressive uniform `CinematicAovFilm` state has a distinct `FSRAOVC1`
   checkpoint codec; legacy `FSRCP001` bytes remain unchanged. The AOV codec
@@ -368,6 +370,23 @@ differentiable lift). Pure Rust throughout.
   finite and nonnegative over the admitted grazing/roughness grid. Homogeneous
   attenuation composes as `T(L1 + L2) = T(L1) T(L2)` to floating-point
   tolerance.
+- The smooth parallel-slab direct-light specialization is an unbiased raw
+  estimator, not a straight-through visibility shortcut. For a finite sampled
+  rectangle point it solves the two-interface Snell connection, differentiates
+  the slab's direction-dependent lateral displacement to obtain
+  `dA_light/dOmega_source`, and converts the light's original area density into
+  the connected source solid-angle density. For an environment, equal ambient
+  media and parallel interfaces make the external angular map the identity.
+  Both paths apply the two exact Fresnel BTDF radiance factors and physical
+  Beer-Lambert length. MIS compares the NEE density with the opaque BSDF density
+  times both sampled transmission-event probabilities; the reciprocal weights
+  partition unity. Reverse MIS replays the exact forward straight shadow-ray
+  spawn from the retained opaque-source geometric normal. Its competing NEE
+  density is zero unless that ray first meets the same admitted local slab face
+  pair; an unsupported first hit on that same slab remains a typed refusal.
+  Failure to classify an ordinary sampled dielectric path as this optional slab
+  proposal does not forbid BSDF transport or invent an NEE competitor: it keeps
+  normal delta-emitter MIS semantics and therefore unit weight.
 - Sampling is deterministic: analytic and low-discrepancy helpers are
   stateless, while stochastic render paths use explicitly keyed counter-based
   streams rather than ambient mutable RNG state.
@@ -409,7 +428,9 @@ tracer returns `TracerError`, preserving cancellation,
 invalid dimensions/film buffers/progressive ranges, backend refusal,
 uncertified traces, missing normals, invalid/colliding rigid instances,
 dielectric evaluation refusal, LIFO medium-stack mismatch/overflow, and a miss
-while still inside a declared closed medium.
+while still inside a declared closed medium. A transparent blocker outside the
+admitted smooth homogeneous parallel-slab NEE class returns
+`UnsupportedSlabNee`; it is never silently reclassified as opaque visibility.
 Instance construction rejects zero identities, invalid transforms, and any
 scene count that cannot fit the canonical identity encoding;
 intersection rejects malformed rays, non-positive/non-finite limits,
@@ -547,9 +568,12 @@ solid angles and a two-level row/column CDF, so selection is logarithmic in map
 dimensions; rotation is around world +Y, with increasing columns running from
 +X toward +Z. A semantic pixel hash drives deterministic sample ordering while
 the separate source/provenance hashes retain container lineage without changing
-the sampling stream. Both NEE and BSDF-hit paths include the same selection
-probability in their solid-angle PDFs. At a lighting-v1 path's final permitted
-bounce, NEE has weight one because no competing BSDF continuation is evaluated.
+  the sampling stream. Both NEE and BSDF-hit paths include the same selection
+  probability in their solid-angle PDFs and use one shared `1e-9` rectangle
+  grazing-support boundary, including the formerly mismatched `1e-12..1e-9`
+  band. This support repair is lighting tracer bit-semantics v2. At a
+  lighting-v1 path's final permitted bounce, NEE has weight one because no
+  competing BSDF continuation is evaluated.
 The exact legacy one-rectangle/no-environment lighting branch retains its
 original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
@@ -570,7 +594,14 @@ Current-vertex NEE uses each lane's native competing BSDF density.
 Absorption uses unshifted physical segment length. Smooth events have zero
 solid-angle query density and receive delta-correct MIS treatment. A strict
 path-local stack mutates only after sampled transmission and supports nested,
-closed, consistently outward-oriented media.
+  closed, consistently outward-oriented media. Opaque-source direct lighting has
+  one additional exact specialization when its first shadow hit supplies two
+  smooth, homogeneous, locally parallel, piecewise-planar instanced-mesh face
+  witnesses satisfying the mesh thin-axis support admission: finite rectangles use the refracted endpoint
+connection and area/solid-angle Jacobian, while environment samples use the
+unchanged external direction. Geometry is checked again on the connected ray;
+rough, nonparallel, non-slab, overlapping, and nested direct-light cases refuse
+rather than being treated as opaque or undeviating.
 
 ## Conformance tests
 
@@ -598,6 +629,16 @@ grazing, pole-frame, adjacent-IOR, packet retention at nondispersive boundaries,
 one-time dispersive fan-out, and wavelength-straddled TIR support fixtures. The Cornell tracer
 battery is deliberately re-frozen when tracer bit
 semantics change and remains the opaque-path non-regression gate.
+Inline slab-NEE tests additionally pin the equal-IOR reduction, the closed-form
+normal-incidence paraxial Jacobian, an independent finite-difference ray
+differential, reciprocal MIS weights including both Fresnel event
+  probabilities, two-interface plus post-slab visibility, and typed refusal of
+  rough, wedge/nonparallel, nested, smooth chart/sphere, and chamfer/side-face
+  cases while admitting the central thin-axis faces of a beveled plate. Reverse-MIS
+  regressions prove that a finite-edge straight miss and an opaque first blocker
+  produce zero competing NEE density and therefore unit BSDF weight. Lighting
+  tests pin identical forward/reverse rectangle support within and above the old
+  grazing mismatch band.
 
 `conductor` and `tracer` inline tests plus the Euler scene-bridge E2E fixture
 (feature `tracer`, and `cinematic-render` downstream) cover complex-Fresnel
@@ -784,12 +825,21 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   preset fidelity, camera-start-inside-medium support, arbitrary overlapping
   media, or a topology certificate. GGX transmission is single-scattering and
   does not claim multiple-scattering furnace closure at appreciable roughness.
-  Shadow rays stop at the first intervening surface rather than travelling
-  undeviated through glass. Difficult focused caustics therefore remain a
-  slow-convergence case for this unidirectional integrator; no
-  bidirectional/manifold transport, denoising, or unbiased firefly-clamping
-  claim is made. Fixed-metric, representability-aware ray offsets are robust
-  engineering, not a certified positional-error enclosure.
+  Outside the explicitly checked smooth homogeneous local parallel-face-pair
+  specialization on an instanced mesh face satisfying thin-axis support admission, shadow rays
+  stop at the first intervening surface; they never
+  travel undeviated through glass. Curved, wedged, rough, layered, overlapping,
+  and nested specular connections are refused by that estimator, not
+  approximated. Difficult focused caustics therefore remain a slow-convergence
+  case for this unidirectional integrator; no general bidirectional/manifold
+  transport, denoising, or unbiased firefly-clamping claim is made.
+  The support-face/thin-axis extent check, two instanced triangle witnesses,
+  and path-local probes do not constitute
+  a global closed-solid, planarity, thickness-uniformity, or topology
+  certificate; support is deliberately limited to the locally observed planar
+  face pair.
+  Fixed-metric, representability-aware ray offsets are robust engineering, not
+  a certified positional-error enclosure.
 - Conductor support is homogeneous, opaque, non-polarizing geometric optics
   with isotropic single-scattering GGX. The representative presets do not claim
   material identification, alloy/lot or product calibration, a measured finish,

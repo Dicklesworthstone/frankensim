@@ -48,10 +48,13 @@ own** outputs, not the world's files.
   convolution with edge-stopping weights; the result is PERMANENTLY tagged
   `BiasedDenoised`. `mse` is the improvement metric.
 - `TemporalDenoiseInput` supplies aligned row-major scene-linear RGB,
+  a positive uniform Monte Carlo sample count,
   previous-minus-current raster-pixel motion, positive axial-metre depth,
   world-unit shading normal, primary coverage, raw-luminance variance, and
-  optional stable nonzero `u64` object/material IDs. Background is represented
-  by zero coverage and zero depth, normal, motion, and optional IDs.
+  optional stable `u64` object/material IDs. Nonzero values are exact equality
+  labels; zero means background or an identity unavailable from the producer.
+  Background is represented by zero coverage and zero depth, normal, motion,
+  and optional IDs.
   `temporal_denoise_rgb` consumes that raw frame plus an optional immediately
   preceding `TemporalDenoisedFrame`. `TemporalFrameBoundary::Cut` and the first
   frame reset history; continuous calls require exact successor frame index,
@@ -61,12 +64,12 @@ own** outputs, not the world's files.
   half-pixel ties, and rejects off-raster results. Reprojection additionally
   rejects coverage, depth, normal, stable-ID, and nonfinite disagreement.
   Accepted history is 3x3-neighborhood clamped, combined under both
-  variance-derived and history-length-derived weight ceilings, and followed by
+  sample-variance/count-derived and history-length-derived weight ceilings, and followed by
   joint-RGB 5x5 B3-spline à-trous refinement with shared channel weights.
   `TemporalDenoisedFrame` has private fields and no public constructor or raw
   conversion. Its planar `linear_rgb()` slices feed the existing cinematic
   color transform without a full-frame repack. Its only provenance is
-  `BiasedTemporalDenoisedV1 { config_identity }`; exact versioned canonical
+  `BiasedTemporalDenoisedV2 { config_identity }`; exact versioned canonical
   config bytes travel with every history result.
 - `TemporalDenoiseLimits` admits pixels and exact newly allocated
   result-plus-spatial-scratch bytes before allocation. `reference_4k()` covers
@@ -171,7 +174,7 @@ own** outputs, not the world's files.
 3. **The bias label cannot be dropped**: `atrous_denoise` output is always
    `BiasedDenoised`; `temporal_denoise_rgb` returns only the private-field
    `TemporalDenoisedFrame` whose sole provenance is
-   `BiasedTemporalDenoisedV1`. Neither API can relabel output as
+   `BiasedTemporalDenoisedV2`. Neither API can relabel output as
    `RawEstimate`.
 4. **Structured rejection**: readers never decode garbage silently — every
    checksum (CRC-32, Adler-32) is verified, every length is bounds-checked,
@@ -402,10 +405,11 @@ The h7xu5.6.4 frame-sequence suite must additionally name and exercise:
   must never be used as ground truth in a comparison; the Gauntlet compares
   raw estimates.
 - **Temporal denoising is not physical or statistical authority.** AOV motion,
-  depth, normals, coverage, IDs, and variance are caller assertions at this
+  depth, normals, coverage, IDs, sample count, and variance are caller assertions at this
   layer. Nearest-pixel reprojection is a frozen practical reconstruction, not
-  visibility proof; the variance plane is a blend heuristic without a
-  sample-count confidence certificate. Filtering does not recover omitted
+  visibility proof; dividing the declared sample variance by the declared
+  uniform sample count gives a pixel-mean variance heuristic, not a confidence
+  certificate. Filtering does not recover omitted
   transport, geometry, frequency content, or an unbiased estimator, and it
   must never feed adaptive stopping or mechanics validation.
 - **No universal ghosting/convergence claim.** The rejection gates,

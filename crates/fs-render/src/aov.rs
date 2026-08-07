@@ -920,9 +920,10 @@ impl CinematicAovRenderBinding {
 ///
 /// Values use exactly the same averaging, unit-normal normalization,
 /// background-zero convention, finite `f32` conversion, and signed-zero
-/// canonicalization as the corresponding cinematic EXR channels. Object and
-/// material IDs deliberately remain absent: `DailyCore` can drive the temporal
-/// denoiser without upgrading palette indices into stable external IDs.
+/// canonicalization as the corresponding cinematic EXR channels. The
+/// `FinalDiagnostic` profile additionally exposes its exact nearest-primary
+/// object and material palette indices as sequence-stable equality labels.
+/// `DailyCore` retains `None` because it does not store categorical samples.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CinematicDenoiseGuides {
     width: u32,
@@ -935,6 +936,8 @@ pub struct CinematicDenoiseGuides {
     normal_z: Vec<f32>,
     primary_coverage: Vec<f32>,
     variance_luminance: Vec<f32>,
+    object_palette_indices: Option<Vec<u64>>,
+    material_palette_indices: Option<Vec<u64>>,
 }
 
 impl CinematicDenoiseGuides {
@@ -996,6 +999,24 @@ impl CinematicDenoiseGuides {
     #[must_use]
     pub fn variance_luminance(&self) -> &[f32] {
         &self.variance_luminance
+    }
+
+    /// Nearest-primary object palette indices, when retained by
+    /// [`CinematicAovProfile::FinalDiagnostic`]. Zero denotes background or an
+    /// unavailable instance identity. Consumers requiring a complete object
+    /// guide must fail closed if a covered sample is zero.
+    #[must_use]
+    pub fn object_palette_indices(&self) -> Option<&[u64]> {
+        self.object_palette_indices.as_deref()
+    }
+
+    /// Nearest-primary material palette indices, when retained by
+    /// [`CinematicAovProfile::FinalDiagnostic`]. Zero denotes background;
+    /// covered samples are nonzero. The sorted scene palette and scene identity
+    /// make these exact equality labels stable across one admitted sequence.
+    #[must_use]
+    pub fn material_palette_indices(&self) -> Option<&[u64]> {
+        self.material_palette_indices.as_deref()
     }
 }
 
@@ -1111,10 +1132,12 @@ impl CinematicAovFilm {
             .map(|sample| sample.primary_count)
     }
 
-    /// Materialize the `DailyCore` denoising guide subset as owned planar
-    /// `f32` buffers. This is an estimate bridge, not a denoising or image-error
-    /// claim. A beauty-only profile refuses because it retained no surface
-    /// observations from which guides could be reconstructed.
+    /// Materialize the retained denoising guide subset as owned planar buffers.
+    /// `FinalDiagnostic` also carries exact categorical object/material labels;
+    /// `DailyCore` leaves those optional labels unavailable. This is an estimate
+    /// bridge, not a denoising or image-error claim. A beauty-only profile
+    /// refuses because it retained no surface observations from which guides
+    /// could be reconstructed.
     pub fn denoise_guides(&self) -> Result<CinematicDenoiseGuides, CinematicAovError> {
         self.validate_complete()?;
         let common = self
@@ -1154,6 +1177,23 @@ impl CinematicAovFilm {
             )
         })?;
         let variance_luminance = float_plane(pixel_count, |pixel| sample_variance(common[pixel]))?;
+        let categorical_palette_indices = self
+            .final_diagnostic
+            .as_deref()
+            .map(|final_diagnostic| {
+                let mut object = fallible_filled(pixel_count, 0_u64)?;
+                let mut material = fallible_filled(pixel_count, 0_u64)?;
+                for (index, sample) in final_diagnostic.iter().enumerate() {
+                    object[index] = u64::from(sample.nearest_primary.object_palette_index);
+                    material[index] = u64::from(sample.nearest_primary.material_palette_index);
+                }
+                Ok::<_, CinematicAovError>((object, material))
+            })
+            .transpose()?;
+        let (object_palette_indices, material_palette_indices) = categorical_palette_indices
+            .map_or((None, None), |(object, material)| {
+                (Some(object), Some(material))
+            });
         Ok(CinematicDenoiseGuides {
             width: self.beauty.width,
             height: self.beauty.height,
@@ -1165,6 +1205,8 @@ impl CinematicAovFilm {
             normal_z,
             primary_coverage,
             variance_luminance,
+            object_palette_indices,
+            material_palette_indices,
         })
     }
 
@@ -2161,11 +2203,21 @@ fn validate_denoise_guide_budget(
     pixel_count: usize,
     config: CinematicAovConfig,
 ) -> Result<u64, CinematicAovError> {
-    const GUIDE_PLANES: u64 = 8;
+    const FLOAT_GUIDE_PLANES: u64 = 8;
     let plane_bytes = u64::try_from(pixel_count)
         .ok()
-        .and_then(|pixels| pixels.checked_mul(GUIDE_PLANES))
+        .and_then(|pixels| pixels.checked_mul(FLOAT_GUIDE_PLANES))
         .and_then(|samples| samples.checked_mul(size_of::<f32>() as u64))
+        .and_then(|bytes| {
+            if config.profile.has_final() {
+                u64::try_from(pixel_count)
+                    .ok()
+                    .and_then(|pixels| pixels.checked_mul(2 * size_of::<u64>() as u64))
+                    .and_then(|id_bytes| bytes.checked_add(id_bytes))
+            } else {
+                Some(bytes)
+            }
+        })
         .ok_or(CinematicAovError::SizeOverflow)?;
     if plane_bytes > config.limits.max_export_plane_bytes {
         return Err(CinematicAovError::ExportMemoryLimit {

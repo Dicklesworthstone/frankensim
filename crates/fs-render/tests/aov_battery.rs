@@ -713,6 +713,16 @@ fn g0_owned_denoise_guides_are_exact_exr_planes_with_background_zeros() {
     let guides = film.denoise_guides().unwrap();
     let decoded = fs_img::read_exr(&film.to_exr().unwrap()).unwrap();
     assert_eq!((guides.width(), guides.height()), (1, 1));
+    assert_eq!(
+        guides.object_palette_indices(),
+        None,
+        "DailyCore must not invent categorical guide authority"
+    );
+    assert_eq!(
+        guides.material_palette_indices(),
+        None,
+        "DailyCore must not invent categorical guide authority"
+    );
     for (guide, exr_name) in [
         (guides.motion_prev_x(), "motion.prev.X"),
         (guides.motion_prev_y(), "motion.prev.Y"),
@@ -759,6 +769,49 @@ fn g0_owned_denoise_guides_are_exact_exr_planes_with_background_zeros() {
     ] {
         assert!(plane.iter().all(|value| value.to_bits() == 0));
     }
+
+    let final_film = with_cx(|cx| {
+        render_cinematic_with_aovs(
+            &foreground_scene,
+            &foreground_camera,
+            CutSide::After,
+            cx,
+            &settings(3),
+            shutter(),
+            config(CinematicAovProfile::FinalDiagnostic),
+        )
+        .unwrap()
+    });
+    let final_guides = final_film.denoise_guides().unwrap();
+    let final_exr = fs_img::read_exr(&final_film.to_exr().unwrap()).unwrap();
+    let expected_material_indices = channel(&final_exr, "id.material")
+        .data
+        .iter()
+        .map(|&value| u64::from(value as u32))
+        .collect::<Vec<_>>();
+    let expected_object_indices = channel(&final_exr, "id.object")
+        .data
+        .iter()
+        .map(|&value| u64::from(value as u32))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        final_guides.object_palette_indices(),
+        Some(expected_object_indices.as_slice()),
+        "FinalDiagnostic object labels must be the exact exported palette indices"
+    );
+    assert_eq!(
+        final_guides.material_palette_indices(),
+        Some(expected_material_indices.as_slice()),
+        "FinalDiagnostic denoise labels must be the exact exported palette indices"
+    );
+    assert!(
+        expected_object_indices.iter().all(|&index| index != 0),
+        "the covered fixture pixel must have an object label"
+    );
+    assert!(
+        expected_material_indices.iter().all(|&index| index != 0),
+        "the covered fixture pixel must have a material label"
+    );
 
     let beauty_only = with_cx(|cx| {
         render_cinematic_with_aovs(

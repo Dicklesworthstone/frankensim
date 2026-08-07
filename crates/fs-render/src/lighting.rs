@@ -28,8 +28,10 @@ const ENVIRONMENT_SEMANTICS_VERSION: u32 = 1;
 const ENVIRONMENT_IMPORTER_VERSION: u32 = 1;
 const RECTANGULARITY_TOLERANCE: f64 = 1.0e-10;
 const PLANE_DISTANCE_TOLERANCE: f64 = 1.0e-12;
-const LEGACY_RECTANGLE_COSINE_CUTOFF: f64 = 1.0e-9;
-const MULTI_LIGHT_RECTANGLE_COSINE_CUTOFF: f64 = 1.0e-12;
+/// Shared support boundary for rectangle NEE samples and reverse MIS PDFs.
+/// Keeping one predicate is required for MIS: a technique must never receive
+/// weight on a direction that its forward sampler cannot produce.
+const RECTANGLE_COSINE_CUTOFF: f64 = 1.0e-9;
 const SPECTRAL_LUT_EDGE: usize = 9;
 
 /// Admission failures for rectangular and environment lighting.
@@ -731,14 +733,7 @@ impl<'a> AdmittedLighting<'a> {
         if self.candidates.len() == 1
             && let LightKind::Rectangle(light_index) = self.candidates[0].kind
         {
-            return self.sample_rectangle(
-                light_index,
-                origin,
-                u1,
-                u2,
-                1.0,
-                LEGACY_RECTANGLE_COSINE_CUTOFF,
-            );
+            return self.sample_rectangle(light_index, origin, u1, u2, 1.0);
         }
         let total_weight = self.total_weight(origin);
         if total_weight <= 0.0 || !total_weight.is_finite() {
@@ -780,14 +775,9 @@ impl<'a> AdmittedLighting<'a> {
         selection_probability: f64,
     ) -> Option<LightSample> {
         match candidate.kind {
-            LightKind::Rectangle(light_index) => self.sample_rectangle(
-                light_index,
-                origin,
-                u1,
-                u2,
-                selection_probability,
-                MULTI_LIGHT_RECTANGLE_COSINE_CUTOFF,
-            ),
+            LightKind::Rectangle(light_index) => {
+                self.sample_rectangle(light_index, origin, u1, u2, selection_probability)
+            }
             LightKind::Environment => {
                 let mut sample = self.environment?.sample(u1, u2)?;
                 sample.pdf_solid_angle *= selection_probability;
@@ -803,7 +793,6 @@ impl<'a> AdmittedLighting<'a> {
         u1: f64,
         u2: f64,
         selection_probability: f64,
-        cosine_cutoff: f64,
     ) -> Option<LightSample> {
         let light = self.rectangles.get(light_index)?;
         let point = light
@@ -817,7 +806,7 @@ impl<'a> AdmittedLighting<'a> {
         }
         let direction_unit = direction.scale(1.0 / distance_squared.sqrt());
         let cosine = light.normal().dot(direction_unit).abs();
-        if cosine <= cosine_cutoff {
+        if cosine <= RECTANGLE_COSINE_CUTOFF {
             return None;
         }
         let conditional_pdf = distance_squared / (cosine * light.area());
@@ -849,7 +838,7 @@ impl<'a> AdmittedLighting<'a> {
         }
         let direction = direction.scale(1.0 / distance_squared.sqrt());
         let cosine = light.normal().dot(direction).abs();
-        if cosine <= 1.0e-12 {
+        if cosine <= RECTANGLE_COSINE_CUTOFF {
             0.0
         } else {
             let conditional_pdf = distance_squared / (cosine * light.area());
@@ -1317,22 +1306,41 @@ mod tests {
     }
 
     #[test]
-    fn g5_single_rectangle_preserves_the_legacy_grazing_nee_cutoff() {
+    fn g0_rectangle_forward_and_reverse_share_the_grazing_support_boundary() {
         let light = rectangle(-0.5, 3, 4.0);
         let lights = [light];
         let admitted = AdmittedLighting::try_new(&lights, None).unwrap();
+        // This direction has cosine around 1e-10: it lay in the old mismatch
+        // band where reverse-PDF evaluation admitted support down to 1e-12
+        // but the forward rectangle sampler stopped at 1e-9.
         let origin = Point3::new(1.0e10, 0.0, 0.0);
         assert!(
             admitted.sample(origin, 0.5, 0.5).is_none(),
-            "the frozen tracer-v1 NEE path discarded rectangle samples with cosine <= 1e-9"
+            "forward rectangle sampling unexpectedly admitted an unsupported grazing direction"
         );
         let hit = light
             .corner
             .offset(light.edge_u.scale(0.5))
             .offset(light.edge_v.scale(0.5));
-        assert!(
-            admitted.rect_mixture_pdf(0, origin, hit) > 0.0,
-            "the independent tracer-v1 BSDF-hit PDF used its original 1e-12 cutoff"
+        assert_eq!(
+            admitted.rect_mixture_pdf(0, origin, hit).to_bits(),
+            0.0_f64.to_bits(),
+            "reverse rectangle PDF must have exactly the forward sampler's support"
+        );
+
+        let supported_origin = Point3::new(1.0e8, 0.0, 0.0);
+        let forward = admitted
+            .sample(supported_origin, 0.5, 0.5)
+            .expect("direction above the shared cutoff must be sampled");
+        let LightSample::Rectangle(forward) = forward else {
+            panic!("single-rectangle rig selected an environment")
+        };
+        assert_eq!(
+            forward.pdf_solid_angle.to_bits(),
+            admitted
+                .rect_mixture_pdf(0, supported_origin, hit)
+                .to_bits(),
+            "forward and reverse rectangle densities diverged above their shared cutoff"
         );
     }
 

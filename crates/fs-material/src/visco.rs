@@ -474,7 +474,7 @@ pub fn lower_to_prony(
     let w_lo = two_pi * f_lo;
     let w_hi = two_pi * f_hi;
     // Relaxation ladder spanning the band with half-decade margins.
-    const MARGIN: f64 = 3.16227766016838; // √10
+    const MARGIN: f64 = 10.0; // one decade each side (broad fractional kernels)
     let tau_hi = MARGIN / w_lo;
     let tau_lo = 1.0 / (w_hi * MARGIN);
     let taus: Vec<f64> = (0..n_terms)
@@ -500,13 +500,17 @@ pub fn lower_to_prony(
     let mut rhs = vec![0.0f64; rows];
     for (i, &w) in omegas.iter().enumerate() {
         let (fe, fi) = fz.modulus(w);
-        rhs[i] = fe - fz.e0;
-        rhs[m_samples + i] = fi;
+        // Relative weighting: the certificate is a RELATIVE modulus error,
+        // and |E″| ≪ |E′| for lightly damped materials — unweighted LS
+        // would sacrifice the loss part (measured: 2.5% vs 1.x% sup error).
+        let weight = 1.0 / det::sqrt(fe * fe + fi * fi);
+        rhs[i] = (fe - fz.e0) * weight;
+        rhs[m_samples + i] = fi * weight;
         for (j, &tau) in taus.iter().enumerate() {
             let wt = w * tau;
             let den = 1.0 + wt * wt;
-            a[i * n_terms + j] = wt * wt / den;
-            a[(m_samples + i) * n_terms + j] = wt / den;
+            a[i * n_terms + j] = wt * wt / den * weight;
+            a[(m_samples + i) * n_terms + j] = wt / den * weight;
         }
     }
     let coeffs = nnls(&a, &rhs, rows, n_terms);
@@ -738,12 +742,18 @@ mod tests {
             assert!((ep - ep_want).abs() < 1e-6 * ep_want);
             assert!((epp - epp_want).abs() < 1e-6 * epp_want.max(1.0));
         }
-        let eta_peak = gm.loss_factor(1.0 / tau);
+        // η peaks at ωτ = √(E∞/(E∞+E1)) — NOT at ωτ = 1, which is where
+        // E″ peaks — with η_max = E1/(2√(E∞(E∞+E1))).
+        let wt_star = det::sqrt(e_inf / (e_inf + e1));
+        let eta_peak = gm.loss_factor(wt_star / tau);
         let eta_max_want = e1 / (2.0 * det::sqrt(e_inf * (e_inf + e1)));
         assert!(
             (eta_peak - eta_max_want).abs() < 1e-12 * eta_max_want,
             "peak loss {eta_peak} vs closed form {eta_max_want}"
         );
+        // And it is a maximum: neighbors are lower.
+        assert!(gm.loss_factor(1.5 * wt_star / tau) < eta_peak);
+        assert!(gm.loss_factor(0.6 * wt_star / tau) < eta_peak);
     }
 
     #[test]
@@ -880,6 +890,8 @@ mod tests {
                         * (det::ln(2.0 * core::f64::consts::PI * 2.0e5)
                             - det::ln(2.0 * core::f64::consts::PI * 20.0)),
             );
+            // exp(ln(...)) can land one ulp outside the stored band edge.
+            let w = w.clamp(lowered.band.0, lowered.band.1);
             let eta_f = fz.loss_factor(w);
             let eta_l = lowered.loss_factor_checked(w).expect("in band");
             assert!(

@@ -1,7 +1,9 @@
 //! Deterministic animation-aware RGB denoising.
 //!
 //! The filter consumes raw RGB plus aligned motion/visibility guides and an
-//! optional result from the immediately preceding frame.  Its public result
+//! optional result from the immediately preceding frame. Spatial color weights
+//! widen with the measured Monte Carlo luminance variance so isolated noisy
+//! energy is filtered instead of being mistaken for a stable scene edge. Its public result
 //! type has private fields and is always biased: there is deliberately no
 //! constructor or conversion that can relabel filtered pixels as a raw
 //! estimator.  Motion is `previous - current` in raster pixels, matching the
@@ -12,7 +14,7 @@ use core::fmt;
 use std::mem::size_of;
 
 /// Frozen implementation/version identity for temporal denoising.
-pub const TEMPORAL_DENOISE_PIPELINE_VERSION: &str = "fs-img-temporal-rgb-nearest-reprojection-v1";
+pub const TEMPORAL_DENOISE_PIPELINE_VERSION: &str = "fs-img-temporal-rgb-nearest-reprojection-v2";
 
 /// Exact byte length of a canonical temporal-denoiser configuration.
 pub const TEMPORAL_DENOISE_CONFIG_CANONICAL_BYTES: usize = 48;
@@ -20,8 +22,8 @@ pub const TEMPORAL_DENOISE_CONFIG_CANONICAL_BYTES: usize = 48;
 /// Largest supported number of spatial à-trous passes.
 pub const MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS: u8 = 8;
 
-const CONFIG_MAGIC: [u8; 8] = *b"FSTDNV1\0";
-const CONFIG_VERSION: u16 = 1;
+const CONFIG_MAGIC: [u8; 8] = *b"FSTDNV2\0";
+const CONFIG_VERSION: u16 = 2;
 const B3: [f64; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 
 /// Frozen mapping from current pixels to the previous raster.
@@ -182,12 +184,17 @@ impl Default for TemporalDenoiseLimits {
 ///
 /// Every plane is row-major with exactly `width * height` elements. Surface
 /// guides are valid when coverage is positive. Background pixels use zero
-/// depth, zero normal, zero motion, and zero optional IDs. If an optional ID
-/// plane is supplied, positive-coverage samples must use nonzero stable IDs.
+/// depth, zero normal, zero motion, and zero optional IDs. In an optional ID
+/// plane, zero on a covered sample means that identity is unavailable; only
+/// pairs of nonzero values act as exact categorical equality evidence.
 #[derive(Clone, Copy, Debug)]
 pub struct TemporalDenoiseInput<'a> {
     /// Zero-based or segment-local monotonically increasing frame index.
     pub frame_index: u64,
+    /// Uniform raw Monte Carlo samples contributing to every pixel estimate.
+    /// `variance_luminance` is a sample variance, so the denoiser divides it
+    /// by this count before using it as variance of the pixel mean.
+    pub samples_per_pixel: u32,
     /// Raster width.
     pub width: usize,
     /// Raster height.
@@ -214,11 +221,11 @@ pub struct TemporalDenoiseInput<'a> {
     pub primary_coverage: &'a [f32],
     /// Nonnegative raw luminance variance proxy.
     pub variance_luminance: &'a [f32],
-    /// Optional nonzero stable object IDs for covered samples; zero for
-    /// background.
+    /// Optional stable object IDs. Zero means background or unavailable;
+    /// nonzero values are exact equality labels.
     pub object_ids: Option<&'a [u64]>,
-    /// Optional nonzero stable material IDs for covered samples; zero for
-    /// background.
+    /// Optional stable material IDs. Zero means background or unavailable;
+    /// nonzero values are exact equality labels.
     pub material_ids: Option<&'a [u64]>,
 }
 
@@ -227,7 +234,7 @@ pub struct TemporalDenoiseInput<'a> {
 pub enum TemporalDenoiseProvenance {
     /// Animation-aware temporal and spatial filtering was applied. The pixels
     /// are biased and must never serve as a raw/converged estimator.
-    BiasedTemporalDenoisedV1 {
+    BiasedTemporalDenoisedV2 {
         /// Exact versioned configuration identity.
         config_identity: TemporalDenoiseConfigIdentity,
     },
@@ -305,7 +312,7 @@ impl TemporalDenoisedFrame {
     /// Permanent biased provenance. There is no raw relabeling surface.
     #[must_use]
     pub const fn provenance(&self) -> TemporalDenoiseProvenance {
-        TemporalDenoiseProvenance::BiasedTemporalDenoisedV1 {
+        TemporalDenoiseProvenance::BiasedTemporalDenoisedV2 {
             config_identity: self.config_identity,
         }
     }
@@ -520,7 +527,7 @@ pub fn temporal_denoise_rgb(
     let previous = previous.filter(|_| use_history);
     for index in 0..pixel_count {
         let current_rgb = [input.red[index], input.green[index], input.blue[index]];
-        let current_variance = input.variance_luminance[index];
+        let current_variance = input.variance_luminance[index] / input.samples_per_pixel as f32;
         let Some(history) = previous else {
             for channel in 0..3 {
                 rgb[channel][index] = current_rgb[channel];
@@ -577,7 +584,14 @@ pub fn temporal_denoise_rgb(
         try_filled(pixel_count, 0.0_f32, "spatial blue scratch")?,
     ];
     for iteration in 0..config.spatial_iterations {
-        spatial_atrous_pass(input, &rgb, &mut scratch, config, iteration);
+        spatial_atrous_pass(
+            input,
+            &rgb,
+            &estimate_variance,
+            &mut scratch,
+            config,
+            iteration,
+        );
         core::mem::swap(&mut rgb, &mut scratch);
     }
 
@@ -669,6 +683,11 @@ fn invalid_config<T>(field: &'static str) -> Result<T, TemporalDenoiseError> {
 #[allow(clippy::too_many_lines)] // one fixed plane/guide grammar, validated in refusal order
 #[allow(clippy::float_cmp)] // zero is the exact documented invalid/background sentinel
 fn validate_input(input: TemporalDenoiseInput<'_>) -> Result<usize, TemporalDenoiseError> {
+    if input.samples_per_pixel == 0 {
+        return Err(TemporalDenoiseError::InvalidConfig {
+            field: "samples_per_pixel",
+        });
+    }
     if input.width == 0 || input.height == 0 {
         return Err(TemporalDenoiseError::InvalidDimensions {
             width: input.width,
@@ -789,12 +808,6 @@ fn validate_input(input: TemporalDenoiseInput<'_>) -> Result<usize, TemporalDeno
                 .sum::<f64>();
             if !(0.9801..=1.0201).contains(&normal_length_squared) {
                 return invalid_sample("normal", index, "covered sample must be unit length");
-            }
-            if input.object_ids.is_some_and(|ids| ids[index] == 0) {
-                return invalid_sample("object_ids", index, "covered sample must be nonzero");
-            }
-            if input.material_ids.is_some_and(|ids| ids[index] == 0) {
-                return invalid_sample("material_ids", index, "covered sample must be nonzero");
             }
         }
     }
@@ -917,12 +930,12 @@ fn guides_match_history(
         return false;
     }
     if let (Some(current_ids), Some(previous_ids)) = (input.object_ids, &previous.object_ids)
-        && current_ids[current] != previous_ids[old]
+        && categorical_ids_conflict(current_ids[current], previous_ids[old])
     {
         return false;
     }
     if let (Some(current_ids), Some(previous_ids)) = (input.material_ids, &previous.material_ids)
-        && current_ids[current] != previous_ids[old]
+        && categorical_ids_conflict(current_ids[current], previous_ids[old])
     {
         return false;
     }
@@ -970,14 +983,18 @@ fn guides_match_current(
     }
     if input
         .object_ids
-        .is_some_and(|ids| ids[center] != ids[sample])
+        .is_some_and(|ids| categorical_ids_conflict(ids[center], ids[sample]))
         || input
             .material_ids
-            .is_some_and(|ids| ids[center] != ids[sample])
+            .is_some_and(|ids| categorical_ids_conflict(ids[center], ids[sample]))
     {
         return false;
     }
     true
+}
+
+fn categorical_ids_conflict(left: u64, right: u64) -> bool {
+    left != 0 && right != 0 && left != right
 }
 
 fn coverage_matches(left: f32, right: f32, tolerance: f32) -> bool {
@@ -1027,8 +1044,9 @@ fn clamp_history_rgb(
             }
         }
     }
-    let expansion = f64::from(config.neighborhood_clamp_stddev)
-        * f64::from(input.variance_luminance[center]).sqrt();
+    let mean_variance =
+        f64::from(input.variance_luminance[center]) / f64::from(input.samples_per_pixel);
+    let expansion = f64::from(config.neighborhood_clamp_stddev) * mean_variance.sqrt();
     // Clamp the history vector along the line from the current sample instead
     // of clipping channels independently. One shared factor preserves gray
     // neutrality and constant-hue lines while still entering every component's
@@ -1056,6 +1074,7 @@ fn clamp_history_rgb(
 fn spatial_atrous_pass(
     input: TemporalDenoiseInput<'_>,
     current: &[Vec<f32>; 3],
+    estimate_variance: &[f32],
     next: &mut [Vec<f32>; 3],
     config: TemporalDenoiseConfig,
     iteration: u8,
@@ -1084,7 +1103,17 @@ fn spatial_atrous_pass(
                     .map(|(left, right)| f64::from(left) - f64::from(right))
                     .map(|difference| difference * difference)
                     .sum::<f64>();
-                let weight = weight_x * weight_y * (-difference_squared / sigma_squared).exp();
+                // `estimate_variance` is the sample-count-adjusted variance of
+                // the pixel mean. Three times the center/sample sum is a
+                // joint-RGB noise scale: noisy estimates admit compatible
+                // neighbors, while converged color edges still use the
+                // configured absolute sigma floor. Geometry and identity guides
+                // above remain hard edge stops in both cases.
+                let noise_scale_squared = 3.0
+                    * (f64::from(estimate_variance[center]) + f64::from(estimate_variance[sample]));
+                let color_scale_squared = sigma_squared + noise_scale_squared;
+                let weight =
+                    weight_x * weight_y * (-difference_squared / color_scale_squared).exp();
                 for (channel, sum) in accumulated.iter_mut().enumerate() {
                     *sum += weight * f64::from(current[channel][sample]);
                 }
@@ -1190,9 +1219,21 @@ fn canonical_f32_bits(value: f32) -> u32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn zero_categorical_id_is_unavailable_not_an_equality_or_conflict_claim() {
+        for (left, right) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            assert!(
+                !categorical_ids_conflict(left, right),
+                "{left} versus {right}"
+            );
+        }
+        assert!(categorical_ids_conflict(1, 2));
+    }
+
     #[derive(Clone)]
     struct Fixture {
         frame_index: u64,
+        samples_per_pixel: u32,
         width: usize,
         height: usize,
         red: Vec<f32>,
@@ -1215,6 +1256,7 @@ mod tests {
             let count = width * height;
             Self {
                 frame_index,
+                samples_per_pixel: 1,
                 width,
                 height,
                 red: vec![rgb[0]; count],
@@ -1236,6 +1278,7 @@ mod tests {
         fn input(&self) -> TemporalDenoiseInput<'_> {
             TemporalDenoiseInput {
                 frame_index: self.frame_index,
+                samples_per_pixel: self.samples_per_pixel,
                 width: self.width,
                 height: self.height,
                 red: &self.red,
@@ -1323,6 +1366,39 @@ mod tests {
                 .history_length()
                 .iter()
                 .all(|&length| length == 2)
+        );
+    }
+
+    #[test]
+    fn measured_variance_prevents_a_firefly_from_becoming_a_color_edge() {
+        let mut noisy = Fixture::surface(9, 9, 0, [0.2, 0.2, 0.2]);
+        let center = 4 * 9 + 4;
+        noisy.red[center] = 4.0;
+        noisy.green[center] = 4.0;
+        noisy.blue[center] = 4.0;
+        noisy.variance[center] = 16.0;
+        let config = TemporalDenoiseConfig {
+            spatial_iterations: 2,
+            ..TemporalDenoiseConfig::default()
+        };
+
+        let filtered = run(&noisy, None, TemporalFrameBoundary::Cut, config).unwrap();
+        let filtered_center = filtered.linear_rgb()[0][center];
+        assert!(
+            filtered_center < 1.0,
+            "high measured variance must not preserve a {filtered_center} firefly as a color edge"
+        );
+        assert!(
+            filtered.linear_rgb()[0]
+                .iter()
+                .all(|&value| value.is_finite() && value >= 0.0)
+        );
+
+        noisy.variance.fill(0.0);
+        let stable_edge = run(&noisy, None, TemporalFrameBoundary::Cut, config).unwrap();
+        assert!(
+            stable_edge.linear_rgb()[0][center] > 3.9,
+            "without variance evidence the same contrast remains a protected color feature"
         );
     }
 
@@ -1450,6 +1526,19 @@ mod tests {
         );
 
         let valid = Fixture::surface(2, 2, 0, [0.2; 3]);
+        let mut zero_samples = valid.clone();
+        zero_samples.samples_per_pixel = 0;
+        assert_eq!(
+            run(
+                &zero_samples,
+                None,
+                TemporalFrameBoundary::Continuous,
+                TemporalDenoiseConfig::default()
+            ),
+            Err(TemporalDenoiseError::InvalidConfig {
+                field: "samples_per_pixel"
+            })
+        );
         assert_eq!(
             run(
                 &valid,
@@ -1631,7 +1720,7 @@ mod tests {
         let output = run(&fixture, None, TemporalFrameBoundary::Continuous, config).unwrap();
         assert_eq!(
             output.provenance(),
-            TemporalDenoiseProvenance::BiasedTemporalDenoisedV1 {
+            TemporalDenoiseProvenance::BiasedTemporalDenoisedV2 {
                 config_identity: config.identity().unwrap()
             }
         );

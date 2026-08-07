@@ -2055,7 +2055,7 @@ impl TriMesh {
         id
     }
 
-    /// Closest triangle intersection (Möller–Trumbore through the BVH).
+    /// Closest watertight triangle intersection through the BVH.
     #[must_use]
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         match self.intersect_surface_impl(None, ray) {
@@ -2208,32 +2208,79 @@ impl TriMesh {
         let a = self.vertices[t[0] as usize];
         let b = self.vertices[t[1] as usize];
         let c = self.vertices[t[2] as usize];
-        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
         let d = [ray.dir.x, ray.dir.y, ray.dir.z];
-        let p = cross(d, e2);
-        let det = dot(e1, p);
-        if det.abs() < 1e-14 {
+        let o = [ray.origin.x, ray.origin.y, ray.origin.z];
+
+        // Woop/Benthin/Wald's shear-space test evaluates every shared edge
+        // with the same two endpoint expressions (up to an exact sign flip).
+        // Unlike an independently rounded Moller-Trumbore barycentric test,
+        // adjacent triangles therefore cannot both reject a ray on their
+        // common edge and open a numerical crack in a closed dielectric.
+        let abs_d = [d[0].abs(), d[1].abs(), d[2].abs()];
+        let kz = if abs_d[0] > abs_d[1] {
+            if abs_d[0] > abs_d[2] { 0 } else { 2 }
+        } else if abs_d[1] > abs_d[2] {
+            1
+        } else {
+            2
+        };
+        if d[kz] == 0.0 {
             return None;
         }
-        let inv = 1.0 / det;
-        let s = [
-            ray.origin.x - a[0],
-            ray.origin.y - a[1],
-            ray.origin.z - a[2],
+        let mut kx = (kz + 1) % 3;
+        let mut ky = (kx + 1) % 3;
+        if d[kz] < 0.0 {
+            core::mem::swap(&mut kx, &mut ky);
+        }
+        let shear_x = d[kx] / d[kz];
+        let shear_y = d[ky] / d[kz];
+        let scale_z = 1.0 / d[kz];
+        let sheared = |vertex: [f64; 3]| {
+            let translated = [vertex[0] - o[0], vertex[1] - o[1], vertex[2] - o[2]];
+            [
+                translated[kx] - shear_x * translated[kz],
+                translated[ky] - shear_y * translated[kz],
+                translated[kz] * scale_z,
+            ]
+        };
+        let pa = sheared(a);
+        let pb = sheared(b);
+        let pc = sheared(c);
+        let edge_a = pb[0] * pc[1] - pb[1] * pc[0];
+        let edge_b = pc[0] * pa[1] - pc[1] * pa[0];
+        let edge_c = pa[0] * pb[1] - pa[1] * pb[0];
+        if [edge_a, edge_b, edge_c]
+            .into_iter()
+            .any(|edge| !edge.is_finite())
+        {
+            return None;
+        }
+        let has_negative = edge_a < 0.0 || edge_b < 0.0 || edge_c < 0.0;
+        let has_positive = edge_a > 0.0 || edge_b > 0.0 || edge_c > 0.0;
+        if has_negative && has_positive {
+            return None;
+        }
+        let determinant = edge_a + edge_b + edge_c;
+        if !determinant.is_finite() || determinant == 0.0 {
+            return None;
+        }
+        let scaled_t = edge_a * pa[2] + edge_b * pb[2] + edge_c * pc[2];
+        if !scaled_t.is_finite()
+            || (determinant > 0.0 && scaled_t <= 0.0)
+            || (determinant < 0.0 && scaled_t >= 0.0)
+        {
+            return None;
+        }
+        let inverse_determinant = 1.0 / determinant;
+        let tt = scaled_t * inverse_determinant;
+        let barycentric = [
+            edge_a * inverse_determinant,
+            edge_b * inverse_determinant,
+            edge_c * inverse_determinant,
         ];
-        let u = dot(s, p) * inv;
-        if !(0.0..=1.0).contains(&u) {
-            return None;
-        }
-        let q = cross(s, e1);
-        let v = dot(d, q) * inv;
-        let uv = u + v;
-        if v < 0.0 || uv > 1.0 {
-            return None;
-        }
-        let tt = dot(e2, q) * inv;
         (tt > 0.0).then(|| {
+            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
             let n = cross(e1, e2);
             let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             let normal = (nn > 1e-12).then(|| Vec3::new(n[0] / nn, n[1] / nn, n[2] / nn));
@@ -2254,9 +2301,9 @@ impl TriMesh {
                 },
                 triangle_index: ti,
                 barycentric: [
-                    canonical_zero(1.0 - uv),
-                    canonical_zero(u),
-                    canonical_zero(v),
+                    canonical_zero(barycentric[0]),
+                    canonical_zero(barycentric[1]),
+                    canonical_zero(barycentric[2]),
                 ],
             }
         })
@@ -2275,10 +2322,6 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 #[allow(clippy::float_cmp)] // Zero direction is an exact parallel-slab case.
@@ -2467,6 +2510,50 @@ pub fn trace_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watertight_triangle_test_does_not_open_a_shared_edge() {
+        // Duplicate the shared-edge vertices just as separately generated box
+        // faces do.  Coordinate identity, rather than index identity, is what
+        // must keep a closed dielectric watertight to ray traversal.
+        let mesh = TriMesh::new(
+            vec![
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        );
+
+        for coordinate in [-0.75_f64, -0.125, 0.0, 0.375, 0.75] {
+            for x in [coordinate.next_down(), coordinate, coordinate.next_up()] {
+                let ray = Ray {
+                    origin: Point3::new(0.0, 0.0, 0.0),
+                    dir: Vec3::new(x, coordinate, 1.0),
+                };
+                let accelerated = mesh
+                    .intersect_surface(&ray)
+                    .expect("a shared edge and either adjacent side remain covered");
+                let brute_force = mesh
+                    .intersect_surface_bruteforce(&ray)
+                    .expect("the unaccelerated traversal retains the same coverage");
+
+                assert_eq!(accelerated.triangle_index, brute_force.triangle_index);
+                assert_eq!(accelerated.hit.t.to_bits(), brute_force.hit.t.to_bits());
+                assert!(accelerated.barycentric.into_iter().all(f64::is_finite));
+                assert!(
+                    accelerated
+                        .barycentric
+                        .into_iter()
+                        .all(|weight| weight >= 0.0)
+                );
+                assert!((accelerated.barycentric.into_iter().sum::<f64>() - 1.0).abs() <= 2e-15);
+            }
+        }
+    }
 
     #[test]
     fn bvh_fingerprint_cache_matches_layout_after_construction_and_clone() {
