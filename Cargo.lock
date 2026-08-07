@@ -1675,6 +1675,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-modal"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-math",
+ "fs-sparse",
+ "fsci-linalg",
+]
+
+[[package]]
 name = "fs-motion"
 version = "0.0.1"
 dependencies = [
