@@ -39,15 +39,10 @@ fn triad(a: &mut [f64], b: &[f64], c: &[f64], s: f64) {
     debug_assert_eq!(a.len(), b.len());
     debug_assert_eq!(a.len(), c.len());
 
-    let unrolled_len = a.len() / TRIAD_UNROLL * TRIAD_UNROLL;
-    let (a_head, a_tail) = a.split_at_mut(unrolled_len);
-    let (b_head, b_tail) = b.split_at(unrolled_len);
-    let (c_head, c_tail) = c.split_at(unrolled_len);
-    for ((a_chunk, b_chunk), c_chunk) in a_head
-        .chunks_exact_mut(TRIAD_UNROLL)
-        .zip(b_head.chunks_exact(TRIAD_UNROLL))
-        .zip(c_head.chunks_exact(TRIAD_UNROLL))
-    {
+    let (a_head, a_tail) = a.as_chunks_mut::<TRIAD_UNROLL>();
+    let (b_head, b_tail) = b.as_chunks::<TRIAD_UNROLL>();
+    let (c_head, c_tail) = c.as_chunks::<TRIAD_UNROLL>();
+    for ((a_chunk, b_chunk), c_chunk) in a_head.iter_mut().zip(b_head).zip(c_head) {
         a_chunk[0] = b_chunk[0] + s * c_chunk[0];
         a_chunk[1] = b_chunk[1] + s * c_chunk[1];
         a_chunk[2] = b_chunk[2] + s * c_chunk[2];
