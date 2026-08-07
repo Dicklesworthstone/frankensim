@@ -9,6 +9,7 @@ use core::fmt;
 use fs_couple::StableId;
 use fs_mbd::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_rep_frep::AxisymmetricSupportAuthority;
+use fs_tribo::InputAuthority;
 
 use crate::contact_dynamics::ProfileContactGeometry;
 
@@ -118,6 +119,8 @@ pub enum CurvatureMetadata {
     Known {
         /// Stable identity of the curvature query/result.
         curvature_identity: StableId,
+        /// Geometry owner's explicit authority; downstream laws may not promote it.
+        authority: InputAuthority,
         /// First principal curvature in m⁻¹.
         first_principal_m_inverse: f64,
         /// Second principal curvature in m⁻¹.

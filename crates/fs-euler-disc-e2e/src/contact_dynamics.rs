@@ -20,7 +20,8 @@ use fs_exec::Cx;
 use fs_geom::{Chart, Point3, Vec3 as GeomVec3};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_rep_frep::{
-    AxisymmetricChart, AxisymmetricMassError, AxisymmetricMassProperties,
+    AxisymmetricChart, AxisymmetricCurvatureError, AxisymmetricIdentity, AxisymmetricMassError,
+    AxisymmetricMassProperties, AxisymmetricPrincipalCurvatureEstimate,
     AxisymmetricSupportAuthority, AxisymmetricSupportError,
 };
 use fs_tribo::{
@@ -74,6 +75,20 @@ pub enum ContactDynamicsError {
     ProfileMassRefusal { detail: AxisymmetricMassError },
     /// The actual profile's support query refused publication, including cancellation.
     ProfileSupportRefusal { detail: AxisymmetricSupportError },
+    /// The selected profile support has no publishable local principal-curvature pair.
+    ///
+    /// Sharp joins, axis points, cancellation, and invalid retained geometry are
+    /// all refusals here; the production patch path never guesses a smoothing
+    /// radius for them.
+    ProfileCurvatureRefusal { detail: AxisymmetricCurvatureError },
+    /// Repeated support selection for curvature disagreed with the support
+    /// feature used to construct the contact arm.
+    ProfileSupportCurvatureFeatureMismatch {
+        /// Feature selected by the support query used for the contact arm.
+        support_feature: usize,
+        /// Feature selected by the curvature query's guarded support replay.
+        curvature_feature: usize,
+    },
     /// The retained legacy cylinder declaration disagrees with the chart that
     /// actually supplies profile mass, inertia, and support.
     ProfileControlMismatch {
@@ -286,6 +301,24 @@ pub struct ProfileContactGeometry {
     pub support_authority: AxisymmetricSupportAuthority,
     /// Profile-derived mass and centroidal principal inertia used by the run.
     pub mass_properties: AxisymmetricMassProperties,
+}
+
+/// One coherent profile support plus its locally resolved smooth curvature.
+///
+/// The curvature API independently replays support selection from the same
+/// body-frame direction before evaluating local differential geometry. The
+/// feature equality check in [`profile_contact_patch_geometry`] prevents a
+/// contact arm from being paired with curvature from another feature. For the
+/// horizontal planar base owned by this module, these disc curvatures are also
+/// the relative-gap curvatures because the base contributes zero curvature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileContactPatchGeometry {
+    /// Support point, mass properties, feature, and support authority.
+    pub support: ProfileContactGeometry,
+    /// Smooth local principal-curvature magnitudes and Estimate authority.
+    pub curvature: AxisymmetricPrincipalCurvatureEstimate,
+    /// Stable semantic identity of the exact resolved profile.
+    pub profile_identity: AxisymmetricIdentity,
 }
 
 /// Static-friction feasibility evaluated from the solved contact impulse.
@@ -541,7 +574,61 @@ pub fn profile_contact_geometry(
     })
 }
 
-fn profile_mass_to_mbd(
+/// Resolves support and smooth principal curvature for a production contact patch.
+///
+/// Unlike [`profile_contact_geometry`], this entry point refuses sharp joins,
+/// axis points, and all other locations where the profile owner cannot publish
+/// a single local curvature pair. It intentionally calls the guarded
+/// selected-support curvature API rather than evaluating curvature at a
+/// caller-supplied point. Mass properties are recomputed from this same chart
+/// and the supplied density so stale mass/centroid data cannot be paired with
+/// the resolved support and curvature.
+pub fn profile_contact_patch_geometry(
+    chart: &AxisymmetricChart,
+    density_kg_per_m3: f64,
+    pose: Pose,
+    cx: &Cx<'_>,
+) -> Result<ProfileContactPatchGeometry, ContactDynamicsError> {
+    let mass = chart
+        .mass_properties(density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    profile_contact_patch_geometry_from_mass(chart, mass, pose, cx)
+}
+
+pub(crate) fn profile_contact_patch_geometry_from_mass(
+    chart: &AxisymmetricChart,
+    mass: AxisymmetricMassProperties,
+    pose: Pose,
+    cx: &Cx<'_>,
+) -> Result<ProfileContactPatchGeometry, ContactDynamicsError> {
+    let support = profile_contact_geometry(chart, mass, pose, cx)?;
+    let body_ground_direction = world_to_body(pose.orientation(), GROUND_NORMAL)?;
+    let curvature = chart
+        .principal_curvatures_at_support_direction(
+            GeomVec3::new(
+                body_ground_direction.x,
+                body_ground_direction.y,
+                body_ground_direction.z,
+            ),
+            cx,
+        )
+        .map_err(|detail| ContactDynamicsError::ProfileCurvatureRefusal { detail })?;
+    if curvature.source_feature != support.support_source_feature {
+        return Err(
+            ContactDynamicsError::ProfileSupportCurvatureFeatureMismatch {
+                support_feature: support.support_source_feature,
+                curvature_feature: curvature.source_feature,
+            },
+        );
+    }
+    Ok(ProfileContactPatchGeometry {
+        support,
+        curvature,
+        profile_identity: chart.construction_certificate().identity,
+    })
+}
+
+pub(crate) fn profile_mass_to_mbd(
     mass: AxisymmetricMassProperties,
 ) -> Result<MassProperties, ContactDynamicsError> {
     finite_scalar(mass.mass, "profile_mass")?;

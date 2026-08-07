@@ -1,13 +1,17 @@
 use fs_euler_disc_e2e::{
     CONTACT_NO_CLAIM_BOUNDARY, ContactDiscGeometry as DiscGeometry, ContactDynamicsError,
     ContactDynamicsInput, ContactTermination, ProfileContactDynamicsInput, contact_geometry,
-    profile_contact_geometry, refine_profile_timestep_by_two, refine_timestep_by_two,
-    run_contact_dynamics, run_profile_contact_dynamics, small_angle_rolling_profile_initializer,
-    state_at_ground_contact, state_at_profile_ground_contact,
+    profile_contact_geometry, profile_contact_patch_geometry, refine_profile_timestep_by_two,
+    refine_timestep_by_two, run_contact_dynamics, run_profile_contact_dynamics,
+    small_angle_rolling_profile_initializer, state_at_ground_contact,
+    state_at_profile_ground_contact,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3};
-use fs_rep_frep::{AxisymmetricChart, AxisymmetricMassError, SquatDiscEdgeTreatment};
+use fs_rep_frep::{
+    AxisymmetricChart, AxisymmetricCurvatureAuthority, AxisymmetricCurvatureError,
+    AxisymmetricMassError, AxisymmetricSupportAuthority, SquatDiscEdgeTreatment,
+};
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn assert_close(actual: f64, expected: f64, tolerance: f64) {
@@ -489,6 +493,105 @@ fn sharp_and_one_millimetre_fillet_have_distinct_oblique_profile_contacts_and_ru
         .expect("filleted oblique profile evolution");
         assert!(!sharp_run.steps.is_empty());
         assert!(!filleted_run.steps.is_empty());
+    });
+}
+
+#[test]
+fn one_millimetre_fillet_patch_curvature_is_profile_native_and_frame_equivariant() {
+    with_cx(false, |cx| {
+        let chart = AxisymmetricChart::squat_disc(
+            0.038,
+            0.006,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        )
+        .expect("physical 1 mm fillet");
+        let inclination_rad = 0.55;
+        let about_y = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), inclination_rad)
+            .expect("finite y tilt");
+        let about_x = UnitQuaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), -inclination_rad)
+            .expect("finite x tilt");
+        let first_pose = Pose::new(Vec3::ZERO, about_y).expect("finite first pose");
+        let transformed_pose =
+            Pose::new(Vec3::new(0.2, -0.1, 0.0), about_x).expect("finite transformed pose");
+
+        let first = profile_contact_patch_geometry(&chart, 7_800.0, first_pose, cx)
+            .expect("fillet support is locally smooth");
+        let repeated = profile_contact_patch_geometry(&chart, 7_800.0, first_pose, cx)
+            .expect("deterministic repeated profile query");
+        let transformed = profile_contact_patch_geometry(&chart, 7_800.0, transformed_pose, cx)
+            .expect("in-plane transformed fillet support is locally smooth");
+
+        assert_eq!(
+            first, repeated,
+            "deterministic mode must replay bit-for-bit"
+        );
+        assert_eq!(first.profile_identity, transformed.profile_identity);
+        assert_eq!(
+            first.support.support_source_feature,
+            first.curvature.source_feature
+        );
+        assert_eq!(
+            transformed.support.support_source_feature,
+            transformed.curvature.source_feature
+        );
+        assert_eq!(
+            first.support.support_authority,
+            AxisymmetricSupportAuthority::Estimate
+        );
+        assert_eq!(
+            first.curvature.authority,
+            AxisymmetricCurvatureAuthority::Estimate
+        );
+        assert_close(first.curvature.meridional_m_inverse, 1_000.0, 1.0e-9);
+        assert_close(
+            transformed.curvature.meridional_m_inverse,
+            first.curvature.meridional_m_inverse,
+            1.0e-9,
+        );
+        assert_close(
+            transformed.curvature.azimuthal_m_inverse,
+            first.curvature.azimuthal_m_inverse,
+            1.0e-12,
+        );
+        assert!(first.curvature.uncertainty_m_inverse > 0.0);
+        let first_arm = first.support.contact.radius_world_m;
+        let transformed_arm = transformed.support.contact.radius_world_m;
+        assert_close(
+            first_arm.x.hypot(first_arm.y),
+            transformed_arm.x.hypot(transformed_arm.y),
+            1.0e-14,
+        );
+        assert_close(first_arm.z, transformed_arm.z, 1.0e-14);
+        assert_close(
+            transformed.support.contact.point_world_m.x
+                - transformed.support.contact.radius_world_m.x,
+            0.2,
+            1.0e-14,
+        );
+        assert_close(
+            transformed.support.contact.point_world_m.y
+                - transformed.support.contact.radius_world_m.y,
+            -0.1,
+            1.0e-14,
+        );
+    });
+}
+
+#[test]
+fn sharp_profile_patch_refuses_nonsmooth_curvature_without_guessing_a_radius() {
+    with_cx(false, |cx| {
+        let chart = AxisymmetricChart::squat_disc(0.038, 0.006, SquatDiscEdgeTreatment::Sharp)
+            .expect("physical sharp disc");
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
+            .expect("finite tilted orientation");
+        let pose = Pose::new(Vec3::ZERO, orientation).expect("finite sharp support pose");
+
+        match profile_contact_patch_geometry(&chart, 7_800.0, pose, cx) {
+            Err(ContactDynamicsError::ProfileCurvatureRefusal {
+                detail: AxisymmetricCurvatureError::NonsmoothFeatureBoundary { .. },
+            }) => {}
+            other => panic!("expected typed nonsmooth-curvature refusal, got {other:?}"),
+        }
     });
 }
 

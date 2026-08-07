@@ -8,6 +8,7 @@ mod patch_kinematics;
 use fs_couple::StableId;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_rep_frep::AxisymmetricSupportAuthority;
+use fs_tribo::InputAuthority;
 use patch_kinematics::{
     Creepage, CurvatureMetadata, MovingOneModeBaseState, MovingOneModePatchBridgeInput,
     OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata, PatchKinematicThresholds,
@@ -71,6 +72,7 @@ fn input(
             gap_uncertainty_m: 0.0,
             curvature: CurvatureMetadata::Known {
                 curvature_identity: id("curvature-rim"),
+                authority: InputAuthority::SyntheticFixture,
                 first_principal_m_inverse: 1.0,
                 second_principal_m_inverse: 0.0,
                 uncertainty_m_inverse: 1.0e-3,

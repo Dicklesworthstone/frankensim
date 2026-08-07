@@ -9,8 +9,10 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind};
 use fs_euler_disc_e2e::profile_contact_geometry;
 use fs_euler_disc_e2e::render_scene_bridge::{
-    EulerCinematicScene, EulerDebugOverlay, EulerFrameRequest, EulerMaterialStyle, EulerSceneError,
-    EulerSceneLengthUnit, EulerTessellationConfig, euler_scene_smoke_settings,
+    EULER_STUDIO_ENVIRONMENT_HEIGHT, EULER_STUDIO_ENVIRONMENT_WIDTH, EulerCinematicScene,
+    EulerDebugOverlay, EulerEnvironmentStyle, EulerFrameRequest, EulerMaterialStyle,
+    EulerSceneError, EulerSceneLengthUnit, EulerStudioEnvironmentSpec, EulerTessellationConfig,
+    MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE, euler_scene_smoke_settings,
 };
 use fs_euler_disc_e2e::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 use fs_euler_disc_e2e::{
@@ -528,6 +530,7 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
         let specimen = specimen(cx);
         let artifact = artifact(&specimen, None, false, Vec::new(), cx);
         let scene_config = config();
+        assert_eq!(scene_config.environment, EulerEnvironmentStyle::None);
         let first = EulerCinematicScene::try_build(&artifact, &specimen, scene_config.clone(), cx)
             .expect("first scene build");
         let replay = EulerCinematicScene::try_build(&artifact, &specimen, scene_config.clone(), cx)
@@ -733,6 +736,168 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
             AnimatedCamera::try_new(vec![prior_shot, current_shot]).expect("shot history");
         EulerCinematicScene::try_build(&artifact, &specimen, extra_history, cx)
             .expect("camera gaps and poses outside the trajectory horizon are irrelevant");
+    });
+}
+
+#[test]
+fn g0_opt_in_studio_environment_is_identity_bound_and_propagates_to_static_scenes() {
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, None, false, Vec::new(), cx);
+        let reference_config = config();
+        let reference =
+            EulerCinematicScene::try_build(&artifact, &specimen, reference_config.clone(), cx)
+                .expect("reference black-world scene");
+        assert!(reference.scene().environment.is_none());
+
+        let mut studio_config = reference_config;
+        studio_config.environment =
+            EulerEnvironmentStyle::StudioGradient(EulerStudioEnvironmentSpec::SOFT_NEUTRAL);
+        let studio =
+            EulerCinematicScene::try_build(&artifact, &specimen, studio_config.clone(), cx)
+                .expect("native studio environment");
+        let replay =
+            EulerCinematicScene::try_build(&artifact, &specimen, studio_config.clone(), cx)
+                .expect("deterministic studio replay");
+        assert_ne!(reference.scene_identity(), studio.scene_identity());
+        assert_ne!(
+            reference.source_configuration_identity(),
+            studio.source_configuration_identity()
+        );
+        assert_eq!(studio.scene_identity(), replay.scene_identity());
+        assert_eq!(
+            studio.source_configuration_identity(),
+            replay.source_configuration_identity()
+        );
+
+        let environment = studio
+            .scene()
+            .environment
+            .as_ref()
+            .expect("configured environment must be present");
+        assert_eq!(environment.width(), EULER_STUDIO_ENVIRONMENT_WIDTH);
+        assert_eq!(environment.height(), EULER_STUDIO_ENVIRONMENT_HEIGHT);
+        assert!(!environment.is_black());
+        assert_eq!(
+            environment.semantic_hash(),
+            replay
+                .scene()
+                .environment
+                .as_ref()
+                .expect("replayed environment")
+                .semantic_hash()
+        );
+        let static_scene = studio
+            .static_scene_at(STEP_S, CutSide::After, cx)
+            .expect("static scene with studio environment");
+        assert_eq!(
+            static_scene
+                .environment
+                .as_ref()
+                .expect("static environment")
+                .semantic_hash(),
+            environment.semantic_hash(),
+            "static materialization must retain the exact animated-scene environment"
+        );
+
+        for (label, changed_spec) in [
+            (
+                "overhead",
+                EulerStudioEnvironmentSpec {
+                    overhead_linear_rgb: [0.21, 0.26, 0.36],
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "horizon",
+                EulerStudioEnvironmentSpec {
+                    horizon_linear_rgb: [0.60, 0.49, 0.34],
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "floor",
+                EulerStudioEnvironmentSpec {
+                    floor_linear_rgb: [0.025, 0.018, 0.015],
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "scale",
+                EulerStudioEnvironmentSpec {
+                    radiance_scale: 0.80,
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+        ] {
+            let mut changed_config = studio_config.clone();
+            changed_config.environment = EulerEnvironmentStyle::StudioGradient(changed_spec);
+            let changed = EulerCinematicScene::try_build(&artifact, &specimen, changed_config, cx)
+                .unwrap_or_else(|error| panic!("changed {label} environment: {error}"));
+            assert_ne!(
+                studio.source_configuration_identity(),
+                changed.source_configuration_identity(),
+                "{label} must affect configuration identity"
+            );
+            assert_ne!(
+                studio.scene_identity(),
+                changed.scene_identity(),
+                "{label} must affect scene identity"
+            );
+        }
+    });
+}
+
+#[test]
+fn g0_studio_environment_rejects_nonfinite_negative_and_unbounded_inputs() {
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, None, false, Vec::new(), cx);
+        for (label, invalid_spec) in [
+            (
+                "nonfinite overhead",
+                EulerStudioEnvironmentSpec {
+                    overhead_linear_rgb: [f64::NAN, 0.26, 0.36],
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "negative horizon",
+                EulerStudioEnvironmentSpec {
+                    horizon_linear_rgb: [-0.01, 0.48, 0.34],
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "unbounded floor",
+                EulerStudioEnvironmentSpec {
+                    floor_linear_rgb: [0.025, 0.018, 1.01],
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "zero radiance",
+                EulerStudioEnvironmentSpec {
+                    radiance_scale: 0.0,
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+            (
+                "unbounded radiance",
+                EulerStudioEnvironmentSpec {
+                    radiance_scale: MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE + 0.01,
+                    ..EulerStudioEnvironmentSpec::SOFT_NEUTRAL
+                },
+            ),
+        ] {
+            let mut invalid_config = config();
+            invalid_config.environment = EulerEnvironmentStyle::StudioGradient(invalid_spec);
+            let result = EulerCinematicScene::try_build(&artifact, &specimen, invalid_config, cx);
+            assert!(
+                matches!(result, Err(EulerSceneError::InvalidConfig("environment"))),
+                "{label} must refuse before allocating or rendering"
+            );
+        }
     });
 }
 

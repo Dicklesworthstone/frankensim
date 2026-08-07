@@ -14,6 +14,7 @@
 use core::{f64::consts::TAU, fmt};
 
 use fs_blake3::{ContentHash, hash_domain};
+use fs_evidence::cinematic::DeclaredAcousticCalibrationReceipt;
 use fs_evidence::cinematic_sound::{
     MAX_SOUND_MODE_DAMPING_RATIO, MAX_SOUND_MODE_PARTICIPATION, MAX_SOUND_MODE_RADIATION_GAIN,
     MAX_SOUND_MODES, MIN_SOUND_MODE_MASS_KG, SOUND_MASTER_SAMPLE_RATE_HZ,
@@ -37,6 +38,11 @@ pub const MODAL_CANCELLATION_POLL_FRAMES: usize = 64;
 const MODEL_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-synthesis-model.v2";
 const PRESET_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-preset.v1";
 const PRESET_COMPONENT_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-preset-component.v1";
+const PARAMETER_SET_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.modal-parameter-set.v1";
+/// Exact version of the admitted Euler modal-parameter-set identity.
+pub const EULER_MODAL_PARAMETER_SET_VERSION: u32 = 1;
+/// Maximum UTF-8 disclosure size accepted by one modal parameter set.
+pub const MAX_EULER_MODAL_DISCLOSURE_BYTES: usize = 1_024;
 const COEFFICIENT_TAYLOR_TERMS: usize = 18;
 const SMALL_STEP_MATRIX_NORM_LIMIT: f64 = 0.125;
 
@@ -283,12 +289,192 @@ pub struct ModalSynthesisChunk {
     pub successor: ModalSynthesisCheckpoint,
 }
 
-/// Provenance tier attached to built-in auditory parameter sets.
+/// Provenance tier attached to Euler auditory parameter sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModalPresetAuthority {
     /// Plausible hand-authored values for rendering, not measurements or fits.
     RepresentativeUncalibrated,
+    /// The caller declares that the parameters came from measurements.
+    ///
+    /// This is provenance, not authentication, calibration, validation, or a
+    /// sound-pressure authority promotion.
+    DeclaredMeasured,
 }
+
+/// Caller-supplied binding to a separately verified calibration declaration.
+///
+/// Admission checks only that `verification_identity` is nonzero and binds all
+/// receipt fields into the parameter-set identity. This module does not execute
+/// a verifier, authenticate either identity, inspect measurement bytes, or
+/// establish that the calibration applies to the specimen and rig.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallerVerifiedCalibrationBinding {
+    /// Structurally admitted external calibration declaration.
+    pub receipt: DeclaredAcousticCalibrationReceipt,
+    /// Caller-supplied identity of the separate verification result.
+    pub verification_identity: ContentHash,
+}
+
+/// Complete input for one provenance-bearing Euler modal parameter set.
+///
+/// The embedded model input is admitted through
+/// [`ModalSynthesisModel::try_new`], so mode canonicalization and every
+/// numerical invariant stay owned by the production modal runtime.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EulerModalParameterSetInput {
+    /// Parameter provenance; this never promotes sound authority by itself.
+    pub authority: ModalPresetAuthority,
+    /// Exact specimen artifact identity. Zero is invalid.
+    pub specimen_identity: ContentHash,
+    /// Exact support/rig artifact identity. Zero is invalid.
+    pub rig_identity: ContentHash,
+    /// Nonempty, bounded, single-line disclosure shown with the parameter set.
+    pub disclosure: String,
+    /// Optional caller assertion that an external calibration receipt was
+    /// separately verified. Only `DeclaredMeasured` may carry it.
+    pub calibration: Option<CallerVerifiedCalibrationBinding>,
+    /// Complete sampled modal runtime input.
+    pub model: ModalSynthesisModelInput,
+}
+
+/// Immutable admitted modal parameter set plus its prepared synthesis model.
+///
+/// The set identity binds provenance, specimen, rig, disclosure, the complete
+/// prepared model identity, and every optional calibration-binding field.
+#[derive(Debug, Clone)]
+pub struct EulerModalParameterSet {
+    identity: ContentHash,
+    authority: ModalPresetAuthority,
+    specimen_identity: ContentHash,
+    rig_identity: ContentHash,
+    disclosure: String,
+    calibration: Option<CallerVerifiedCalibrationBinding>,
+    model: ModalSynthesisModel,
+}
+
+impl EulerModalParameterSet {
+    /// Validate provenance and prepare the embedded production modal model.
+    pub fn try_admit(
+        input: EulerModalParameterSetInput,
+        cx: &Cx<'_>,
+    ) -> Result<Self, EulerModalParameterSetError> {
+        if is_zero_hash(input.specimen_identity) {
+            return Err(EulerModalParameterSetError::InvalidIdentity("specimen"));
+        }
+        if is_zero_hash(input.rig_identity) {
+            return Err(EulerModalParameterSetError::InvalidIdentity("rig"));
+        }
+        if input.disclosure.is_empty()
+            || input.disclosure.trim() != input.disclosure
+            || input.disclosure.len() > MAX_EULER_MODAL_DISCLOSURE_BYTES
+            || input.disclosure.chars().any(char::is_control)
+        {
+            return Err(EulerModalParameterSetError::InvalidDisclosure);
+        }
+        if input
+            .calibration
+            .is_some_and(|binding| is_zero_hash(binding.verification_identity))
+        {
+            return Err(EulerModalParameterSetError::InvalidIdentity(
+                "calibration-verification",
+            ));
+        }
+        if input.authority == ModalPresetAuthority::RepresentativeUncalibrated
+            && input.calibration.is_some()
+        {
+            return Err(EulerModalParameterSetError::UnexpectedCalibrationBinding);
+        }
+
+        let model = ModalSynthesisModel::try_new(input.model, cx)
+            .map_err(EulerModalParameterSetError::InvalidModel)?;
+        let identity = modal_parameter_set_identity(
+            input.authority,
+            input.specimen_identity,
+            input.rig_identity,
+            &input.disclosure,
+            input.calibration,
+            model.identity(),
+        );
+        Ok(Self {
+            identity,
+            authority: input.authority,
+            specimen_identity: input.specimen_identity,
+            rig_identity: input.rig_identity,
+            disclosure: input.disclosure,
+            calibration: input.calibration,
+            model,
+        })
+    }
+
+    /// Content identity of the complete admitted parameter set.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Declared parameter provenance, never an acoustic-authority promotion.
+    #[must_use]
+    pub const fn authority(&self) -> ModalPresetAuthority {
+        self.authority
+    }
+
+    /// Exact specimen artifact identity.
+    #[must_use]
+    pub const fn specimen_identity(&self) -> ContentHash {
+        self.specimen_identity
+    }
+
+    /// Exact support/rig artifact identity.
+    #[must_use]
+    pub const fn rig_identity(&self) -> ContentHash {
+        self.rig_identity
+    }
+
+    /// Binding human-facing disclosure.
+    #[must_use]
+    pub fn disclosure(&self) -> &str {
+        &self.disclosure
+    }
+
+    /// Optional caller-supplied external verification binding.
+    #[must_use]
+    pub const fn calibration(&self) -> Option<CallerVerifiedCalibrationBinding> {
+        self.calibration
+    }
+
+    /// Prepared production modal model admitted from this exact set.
+    #[must_use]
+    pub const fn model(&self) -> &ModalSynthesisModel {
+        &self.model
+    }
+
+    /// Consume the provenance wrapper and return its prepared model.
+    #[must_use]
+    pub fn into_model(self) -> ModalSynthesisModel {
+        self.model
+    }
+}
+
+/// Typed refusal from modal parameter-set provenance or model admission.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EulerModalParameterSetError {
+    /// A required content identity was all zeroes.
+    InvalidIdentity(&'static str),
+    /// Disclosure was empty, padded, multiline/control-bearing, or oversized.
+    InvalidDisclosure,
+    /// An uncalibrated representative set attempted to carry calibration.
+    UnexpectedCalibrationBinding,
+    /// The production modal runtime refused the sampled model.
+    InvalidModel(ModalSynthesisError),
+}
+
+impl fmt::Display for EulerModalParameterSetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for EulerModalParameterSetError {}
 
 /// Disc material choice for the representative Euler assembly preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1804,6 +1990,39 @@ fn preset_identity(material: RepresentativeDiscMaterial, modes: &[SoundMode]) ->
     bytes.extend_from_slice(b"representative-uncalibrated-v1");
     encode_modes(&mut bytes, modes);
     hash_domain(PRESET_IDENTITY_DOMAIN, &bytes)
+}
+
+fn modal_parameter_set_identity(
+    authority: ModalPresetAuthority,
+    specimen_identity: ContentHash,
+    rig_identity: ContentHash,
+    disclosure: &str,
+    calibration: Option<CallerVerifiedCalibrationBinding>,
+    model_identity: ContentHash,
+) -> ContentHash {
+    let mut bytes = Vec::with_capacity(256 + disclosure.len());
+    push_u32(&mut bytes, EULER_MODAL_PARAMETER_SET_VERSION);
+    bytes.push(match authority {
+        ModalPresetAuthority::RepresentativeUncalibrated => 1,
+        ModalPresetAuthority::DeclaredMeasured => 2,
+    });
+    bytes.extend_from_slice(specimen_identity.as_bytes());
+    bytes.extend_from_slice(rig_identity.as_bytes());
+    push_u64(&mut bytes, disclosure.len() as u64);
+    bytes.extend_from_slice(disclosure.as_bytes());
+    bytes.extend_from_slice(model_identity.as_bytes());
+    match calibration {
+        None => bytes.push(0),
+        Some(binding) => {
+            bytes.push(1);
+            bytes.extend_from_slice(binding.receipt.dataset_identity().as_bytes());
+            bytes.extend_from_slice(binding.receipt.method_identity().as_bytes());
+            bytes.extend_from_slice(binding.receipt.validity_identity().as_bytes());
+            push_u32(&mut bytes, binding.receipt.version());
+            bytes.extend_from_slice(binding.verification_identity.as_bytes());
+        }
+    }
+    hash_domain(PARAMETER_SET_IDENTITY_DOMAIN, &bytes)
 }
 
 fn encode_modes(bytes: &mut Vec<u8>, modes: &[SoundMode]) {

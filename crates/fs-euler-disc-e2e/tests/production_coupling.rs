@@ -34,12 +34,15 @@ use fs_euler_disc_e2e::production_coupling::{
 use fs_euler_disc_e2e::rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput, RollingContactState,
 };
+use fs_euler_disc_e2e::specimen::DiscProfileSpec;
 use fs_euler_disc_e2e::tangential_contact::{
     EulerTangentialContactAdapter, TangentialContactLane, TangentialContactRequest,
 };
 use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseInput, ContactLoadScope, LevelSupportInput, MovingContactLoad,
+    state_at_profile_ground_contact,
 };
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_flux::Vec3 as FluxVec3;
 use fs_flux::{
     ApplicabilityEnvelope, ClosedRange, ContributionFamily, CorrelationIdentity,
@@ -48,6 +51,7 @@ use fs_flux::{
     ReducedAeroComponents, ReducedAeroModel, RoughnessPolicy, SlipPolicy, SurfaceRoughness,
 };
 use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
+use fs_rep_frep::{AxisymmetricCurvatureError, AxisymmetricMassProperties, SquatDiscEdgeTreatment};
 use fs_solid::{
     AssemblyBudget, DampingModel, ShellIdentity, ShellMaterial, ShellNode, ShellPlate, ShellSupport,
 };
@@ -63,6 +67,38 @@ use fs_tribo::{ApplicabilityRange, InputAuthority, InterfaceMedium, InterfaceSys
 
 fn id(value: &str) -> StableId {
     StableId::new(value).expect("synthetic fixture identity")
+}
+
+fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        operation(&Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x5052_4f46_494c_45,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        ))
+    })
+}
+
+fn profile_mbd_mass(profile: AxisymmetricMassProperties) -> MassProperties {
+    MassProperties::new(
+        profile.mass,
+        Vec3::ZERO,
+        Vec3::new(
+            profile.principal_inertia.transverse,
+            profile.principal_inertia.transverse,
+            profile.principal_inertia.axial,
+        ),
+    )
+    .expect("profile mass is a valid centroidal rigid-body mass")
 }
 
 fn mass() -> MassProperties {
@@ -136,6 +172,7 @@ fn patch_input() -> MovingOneModePatchKinematicsInput {
             gap_uncertainty_m: 0.0,
             curvature: CurvatureMetadata::Known {
                 curvature_identity: id("synthetic/relative-gap-curvature"),
+                authority: InputAuthority::SyntheticFixture,
                 first_principal_m_inverse: 25.0,
                 second_principal_m_inverse: 25.0,
                 uncertainty_m_inverse: 1.0e-6,
@@ -503,25 +540,21 @@ fn request_for_checkpoint(
     input
 }
 
-#[test]
-fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() {
+#[allow(clippy::too_many_lines)] // One fixture keeps every cross-channel identity mutually consistent.
+fn production_request_template() -> (
+    ProductionCouplingStepInput,
+    NormalPatchView,
+    PartialSlipInterface,
+) {
     let kinematics = compute_moving_one_mode_patch_kinematics(patch_input())
         .expect("synthetic moving-base patch");
     let normal = normal_input(kinematics.clone());
     let normal_outcome = evaluate_normal_contact(&normal).expect("synthetic normal");
-    assert!(matches!(
-        normal_outcome,
-        EulerNormalContactOutcome::Active(_)
-    ));
     let EulerNormalContactOutcome::Active(active) = normal_outcome else {
-        return;
+        panic!("penetrated synthetic patch must be active");
     };
-    assert!(matches!(
-        active.generic.receipt,
-        NormalPatchReceipt::Point(_)
-    ));
     let NormalPatchReceipt::Point(point) = active.generic.receipt else {
-        return;
+        panic!("synthetic fixture must retain point-normal units");
     };
     let normal_view = NormalPatchView::new(
         "synthetic/rim-patch",
@@ -541,32 +574,6 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         NormalPatchAuthority::SyntheticFixture,
     )
     .expect("tangent interface");
-    let adapter = tangential_adapter();
-    let model = ProductionCouplingModel {
-        identity: ProductionCouplingIdentity {
-            case_id: "synthetic/production-case".into(),
-            configuration_id: "synthetic/production-config".into(),
-            world_frame_id: "synthetic/world".into(),
-        },
-        disc_mass_properties: mass(),
-        gravity: Gravity::ZERO,
-        base_port: base_port(),
-        tangential_adapter: adapter.clone(),
-    };
-    let checkpoint = model
-        .initial_checkpoint(
-            disc_state(),
-            NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
-            adapter
-                .initial_state(&normal_view, &interface, 4)
-                .expect("tangent checkpoint"),
-            RollingContactState::zero(),
-            GasChannelState::ExteriorFreeGas(
-                EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
-                    .expect("air checkpoint"),
-            ),
-        )
-        .expect("production checkpoint");
     let request = ProductionCouplingStepInput {
         expected_checkpoint_version: 0,
         duration_s: 1.0e-6,
@@ -648,6 +655,38 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         base_load_progress_start: 0.0,
         base_load_progress_end: 0.0,
     };
+    (request, normal_view, interface)
+}
+
+#[test]
+fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() {
+    let (request, normal_view, interface) = production_request_template();
+    let adapter = tangential_adapter();
+    let model = ProductionCouplingModel {
+        identity: ProductionCouplingIdentity {
+            case_id: "synthetic/production-case".into(),
+            configuration_id: "synthetic/production-config".into(),
+            world_frame_id: "synthetic/world".into(),
+        },
+        disc_mass_properties: mass(),
+        gravity: Gravity::ZERO,
+        base_port: base_port(),
+        tangential_adapter: adapter.clone(),
+    };
+    let checkpoint = model
+        .initial_checkpoint(
+            disc_state(),
+            NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
+            adapter
+                .initial_state(&normal_view, &interface, 4)
+                .expect("tangent checkpoint"),
+            RollingContactState::zero(),
+            GasChannelState::ExteriorFreeGas(
+                EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                    .expect("air checkpoint"),
+            ),
+        )
+        .expect("production checkpoint");
     let (next, receipt) = model
         .step(&checkpoint, &request)
         .expect("synthetic composition");
@@ -846,4 +885,265 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         checkpoint.committed_version, 0,
         "refusals cannot mutate checkpoint"
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One vertical slice proves the same resolved patch reaches both laws.
+fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipts() {
+    with_cx(|cx| {
+        let profile = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        }
+        .resolve(7_800.0, cx)
+        .expect("resolved physical 1 mm fillet");
+        let disc_mass_properties = profile_mbd_mass(profile.mass_properties);
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.55)
+            .expect("finite tilted orientation");
+        let grounded = state_at_profile_ground_contact(
+            &profile.chart,
+            7_800.0,
+            orientation,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            cx,
+        )
+        .expect("profile-native ground state");
+        let penetrated_pose = Pose::new(
+            grounded
+                .pose()
+                .position_world()
+                .sub(Vec3::new(0.0, 0.0, 1.0e-6)),
+            grounded.pose().orientation(),
+        )
+        .expect("finite compliant-contact pose");
+        let penetrated_state = RigidBodyState::new(
+            penetrated_pose,
+            grounded.linear_momentum_world(),
+            grounded.angular_momentum_body(),
+        )
+        .expect("finite compliant-contact state");
+        let adapter = tangential_adapter();
+        let model = ProductionCouplingModel {
+            identity: ProductionCouplingIdentity {
+                case_id: "synthetic/production-case".into(),
+                configuration_id: "synthetic/production-config".into(),
+                world_frame_id: "synthetic/world".into(),
+            },
+            disc_mass_properties,
+            gravity: Gravity::ZERO,
+            base_port: base_port(),
+            tangential_adapter: adapter.clone(),
+        };
+        let (mut request, _, interface) = production_request_template();
+        request.normal.geometry = EulerNormalGeometry::EllipticParaboloid;
+        let resolved = model
+            .bind_initial_horizontal_plane_axisymmetric_profile_contact(
+                &mut request,
+                &profile,
+                penetrated_state,
+                cx,
+            )
+            .expect("smooth profile binds production patch input");
+        assert_eq!(
+            resolved.support.support_source_feature,
+            resolved.curvature.source_feature
+        );
+        assert!(
+            (resolved.curvature.meridional_m_inverse - 1_000.0).abs() <= 1.0e-9,
+            "1 mm circular fillet must supply its actual meridional curvature"
+        );
+        assert_eq!(
+            request.rolling.contact_arm_world_m,
+            resolved.support.contact.radius_world_m
+        );
+        let CurvatureMetadata::Known {
+            curvature_identity,
+            authority,
+            first_principal_m_inverse,
+            second_principal_m_inverse,
+            uncertainty_m_inverse,
+        } = &request.patch.patch.curvature
+        else {
+            panic!("smooth profile must publish curvature metadata");
+        };
+        assert!(
+            curvature_identity
+                .as_str()
+                .contains("principal-curvature-v1")
+        );
+        assert_eq!(*authority, InputAuthority::Estimated);
+        assert_eq!(
+            first_principal_m_inverse.to_bits(),
+            resolved.curvature.meridional_m_inverse.to_bits()
+        );
+        assert_eq!(
+            second_principal_m_inverse.to_bits(),
+            resolved.curvature.azimuthal_m_inverse.to_bits()
+        );
+        assert_eq!(
+            uncertainty_m_inverse.to_bits(),
+            resolved.curvature.uncertainty_m_inverse.to_bits()
+        );
+
+        let kinematics = compute_moving_one_mode_patch_kinematics(request.patch.clone())
+            .expect("profile-native moving-base patch");
+        let mut initial_normal = request.normal.clone();
+        initial_normal.kinematics = kinematics;
+        let EulerNormalContactOutcome::Active(active) =
+            evaluate_normal_contact(&initial_normal).expect("elliptic profile normal response")
+        else {
+            panic!("penetrated profile patch must have active normal response");
+        };
+        let NormalPatchReceipt::Point(point) = &active.generic.receipt else {
+            panic!("elliptic profile contact must retain point-resultant units");
+        };
+        let (longitudinal, lateral) = point
+            .elliptic_patch_axes
+            .map_or((point.patch_radius_m, point.patch_radius_m), |axes| {
+                (axes.semi_major_axis_m, axes.semi_minor_axis_m)
+            });
+        let normal_view = NormalPatchView::new(
+            request.patch.patch.patch_identity.as_str(),
+            request.normal.material.material_card_id.clone(),
+            request.normal.material.source_id.clone(),
+            NormalPatchAuthority::SyntheticFixture,
+            point.normal_force_n,
+            longitudinal,
+            lateral,
+            point.pressure.second_moment_m2,
+        )
+        .expect("profile-derived normal view");
+        let checkpoint = model
+            .initial_checkpoint(
+                penetrated_state,
+                NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
+                adapter
+                    .initial_state(&normal_view, &interface, 4)
+                    .expect("profile tangential checkpoint"),
+                RollingContactState::zero(),
+                GasChannelState::ExteriorFreeGas(
+                    EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                        .expect("air checkpoint"),
+                ),
+            )
+            .expect("profile production checkpoint");
+        let first_request = request.clone();
+        let mut repeated_request = production_request_template().0;
+        repeated_request.normal.geometry = EulerNormalGeometry::EllipticParaboloid;
+        let repeated_resolved = model
+            .bind_horizontal_plane_axisymmetric_profile_contact(
+                &mut repeated_request,
+                &profile,
+                &checkpoint,
+                cx,
+            )
+            .expect("deterministic repeated profile binding");
+        assert_eq!(resolved, repeated_resolved);
+        assert_eq!(first_request, repeated_request);
+
+        let first = model
+            .step(&checkpoint, &first_request)
+            .expect("profile-native production step");
+        let replay = model
+            .step(&checkpoint, &repeated_request)
+            .expect("deterministic profile-native replay");
+        assert_eq!(first, replay);
+        let (_, receipt) = first;
+        assert_eq!(
+            receipt.patch_kinematics.patch.curvature,
+            first_request.patch.patch.curvature
+        );
+        assert_eq!(
+            receipt.normal.curvature.authority,
+            InputAuthority::Estimated
+        );
+        assert_eq!(
+            receipt.rolling.step.generic.patch_authority,
+            InputAuthority::Estimated
+        );
+        assert!(matches!(
+            receipt.normal.generic.receipt,
+            NormalPatchReceipt::Point(_)
+        ));
+
+        let mut stale_mass_profile = profile.clone();
+        stale_mass_profile.mass_properties.mass *= 2.0;
+        stale_mass_profile
+            .mass_properties
+            .principal_inertia
+            .transverse *= 2.0;
+        stale_mass_profile.mass_properties.principal_inertia.axial *= 2.0;
+        let stale_mass_model = ProductionCouplingModel {
+            identity: model.identity.clone(),
+            disc_mass_properties: profile_mbd_mass(stale_mass_profile.mass_properties),
+            gravity: Gravity::ZERO,
+            base_port: base_port(),
+            tangential_adapter: adapter.clone(),
+        };
+        let mut stale_mass_request = production_request_template().0;
+        let stale_mass_request_before = stale_mass_request.clone();
+        assert_eq!(
+            stale_mass_model.bind_initial_horizontal_plane_axisymmetric_profile_contact(
+                &mut stale_mass_request,
+                &stale_mass_profile,
+                penetrated_state,
+                cx,
+            ),
+            Err(ProductionCouplingError::ResolvedProfileMassMismatch),
+            "even a model copied from forged cached mass must not make it authoritative"
+        );
+        assert_eq!(stale_mass_request, stale_mass_request_before);
+
+        let mut stale_density_profile = profile.clone();
+        stale_density_profile.density_kg_per_m3 *= 0.5;
+        let mut stale_density_request = production_request_template().0;
+        let stale_density_request_before = stale_density_request.clone();
+        assert_eq!(
+            model.bind_initial_horizontal_plane_axisymmetric_profile_contact(
+                &mut stale_density_request,
+                &stale_density_profile,
+                penetrated_state,
+                cx,
+            ),
+            Err(ProductionCouplingError::ResolvedProfileMassMismatch),
+            "retained density and cached mass must describe the same resolved solid"
+        );
+        assert_eq!(stale_density_request, stale_density_request_before);
+
+        let sharp = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            edge_treatment: SquatDiscEdgeTreatment::Sharp,
+        }
+        .resolve(7_800.0, cx)
+        .expect("resolved physical sharp profile");
+        let sharp_model = ProductionCouplingModel {
+            identity: model.identity.clone(),
+            disc_mass_properties: profile_mbd_mass(sharp.mass_properties),
+            gravity: Gravity::ZERO,
+            base_port: base_port(),
+            tangential_adapter: adapter,
+        };
+        let mut sharp_request = production_request_template().0;
+        let sharp_request_before = sharp_request.clone();
+        assert!(matches!(
+            sharp_model.bind_initial_horizontal_plane_axisymmetric_profile_contact(
+                &mut sharp_request,
+                &sharp,
+                penetrated_state,
+                cx,
+            ),
+            Err(ProductionCouplingError::ProfileContact(
+                fs_euler_disc_e2e::ContactDynamicsError::ProfileCurvatureRefusal {
+                    detail: AxisymmetricCurvatureError::NonsmoothFeatureBoundary { .. }
+                }
+            ))
+        ));
+        assert_eq!(
+            sharp_request, sharp_request_before,
+            "nonsmooth profile refusal must not partially rewrite the step input"
+        );
+    });
 }

@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_euler_disc_e2e::cinematic_fixture::{CinematicFixtureConfig, run_cinematic_fixture};
+use fs_euler_disc_e2e::cinematic_fixture::{
+    CinematicFixtureConfig, CinematicFrameWindow, run_cinematic_fixture,
+};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
 fn main() {
@@ -19,6 +21,8 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut config = CinematicFixtureConfig::default();
     let mut output = PathBuf::from("target/euler-cinematic-fixture");
+    let mut frame_start = None;
+    let mut frame_count = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -26,7 +30,25 @@ fn run() -> Result<(), String> {
             "--width" => config.width = parse(&next_value(&mut args, "--width")?, "width")?,
             "--height" => config.height = parse(&next_value(&mut args, "--height")?, "height")?,
             "--frames" => config.frames = parse(&next_value(&mut args, "--frames")?, "frames")?,
+            "--frame-start" => {
+                frame_start = Some(parse(
+                    &next_value(&mut args, "--frame-start")?,
+                    "frame-start",
+                )?)
+            }
+            "--frame-count" => {
+                frame_count = Some(parse(
+                    &next_value(&mut args, "--frame-count")?,
+                    "frame-count",
+                )?)
+            }
             "--spp" => config.samples_per_pixel = parse(&next_value(&mut args, "--spp")?, "spp")?,
+            "--render-seed-salt" => {
+                config.render_seed_salt = parse(
+                    &next_value(&mut args, "--render-seed-salt")?,
+                    "render-seed-salt",
+                )?
+            }
             "--max-depth" => {
                 config.max_depth = parse(&next_value(&mut args, "--max-depth")?, "max-depth")?
             }
@@ -62,7 +84,8 @@ fn run() -> Result<(), String> {
             "--help" | "-h" => {
                 println!(
                     "Usage: euler_cinematic_fixture [--output DIR] [--width PX] [--height PX] \
-                     [--frames 192..288] [--spp N] [--max-depth N] [--shutter-angle 0..360] \
+                     [--frames 192..288] [--frame-start N --frame-count N --no-mux] \
+                     [--spp N] [--render-seed-salt N] [--max-depth N] [--shutter-angle 0..360] \
                      [--workers N] [--tile-width PX] [--tile-height PX] \
                      [--render-memory-mib MIB] [--no-denoise] [--beauty-only-exr] [--dry-audio] \
                      [--no-mux] [--ffmpeg PATH]"
@@ -70,6 +93,18 @@ fn run() -> Result<(), String> {
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {argument}")),
+        }
+    }
+    match (frame_start, frame_count) {
+        (None, None) => {}
+        (Some(first_frame), Some(frame_count)) => {
+            config.frame_window = CinematicFrameWindow::Range {
+                first_frame,
+                frame_count,
+            };
+        }
+        _ => {
+            return Err("--frame-start and --frame-count must be supplied together".to_owned());
         }
     }
 

@@ -1117,8 +1117,6 @@ fn preflight(
     validate_memory_budget(
         direct_output_frames,
         final_output_frames,
-        natural_final_output_frames,
-        discarded_tail_frames,
         input.room_ir.is_some(),
         spatializer.config.budget,
     )?;
@@ -1135,6 +1133,8 @@ fn preflight(
         frame_count,
         direct_output_frames,
         final_output_frames,
+        natural_final_output_frames,
+        discarded_tail_frames,
         maximum_distance_m,
         maximum_delay_frames,
         minimum_distance_clamp_count,
@@ -2167,6 +2167,18 @@ mod tests {
                 field: "spatial source sample",
                 index: 0,
             }
+        );
+        assert_eq!(
+            render_single_with_gain(
+                config(8, 8.0, SpatialDelayPolicy::IntegerCeiling),
+                &[1.0],
+                SourcePositionTrack::Static([0.0, 0.0, 1.0]),
+                ListenerPoseTrack::Static(listener_at([0.0; 3])),
+                None,
+                f64::INFINITY,
+            )
+            .unwrap_err(),
+            SpatialAudioError::InvalidConfig("finite nonnegative source gain")
         );
 
         let mut cfg = config(8, 8.0, SpatialDelayPolicy::IntegerCeiling);

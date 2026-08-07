@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, Point3, Vec3};
+use fs_math::det;
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
 use fs_render::animated_instances::{
     AnimatedGeometryInstance, AnimatedInstanceError, RigidTransformTrajectory, TransformKeyframe,
@@ -24,6 +25,7 @@ use fs_render::dielectric::{
     BeerLambertParameters, DielectricGlass, DielectricSurface, GlassProvenance,
 };
 use fs_render::instances::{GeometryInstance, InstanceError, RigidTransform, SharedGeometry};
+use fs_render::lighting::{EnvironmentMap, LightingError};
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
 use fs_render::motion_bounds::{
     FiniteLocalAabb, MotionBoundsError, conservative_trajectory_swept_aabb,
@@ -69,6 +71,16 @@ pub const MAX_EULER_PREVIEW_TRIANGLES: usize = 2_000_000;
 pub const MAX_EULER_AZIMUTHAL_SEGMENTS: u32 = 4_096;
 /// Maximum chord subdivisions accepted for one circular meridian arc.
 pub const MAX_EULER_ARC_SUBDIVISIONS: u32 = 1_024;
+/// Fixed native studio-map width. The generated map is intentionally small,
+/// bounded, and independent of output resolution.
+pub const EULER_STUDIO_ENVIRONMENT_WIDTH: u32 = 256;
+/// Fixed native studio-map height paired with
+/// [`EULER_STUDIO_ENVIRONMENT_WIDTH`].
+pub const EULER_STUDIO_ENVIRONMENT_HEIGHT: u32 = 128;
+/// Largest accepted multiplier for native studio-environment radiance.
+pub const MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE: f64 = 16.0;
+
+const EULER_STUDIO_ENVIRONMENT_SEMANTICS_VERSION: u16 = 1;
 
 const CONTACT_BASE_ALIGNMENT_TOLERANCE_M: f64 = 1.0e-10;
 const CONTACT_NORMAL_ALIGNMENT_TOLERANCE: f64 = 1.0e-10;
@@ -224,6 +236,54 @@ pub struct EulerRectLightSpec {
     pub radiance_scale: f64,
 }
 
+/// Bounded parameters for the native world-Z-up studio environment.
+///
+/// The three colors are scene-linear sRGB radiances before the common scale.
+/// The procedural map is a visualization input only; it carries no calibrated
+/// illuminance or real-studio claim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EulerStudioEnvironmentSpec {
+    /// Cool overhead fill at world `+Z`.
+    pub overhead_linear_rgb: [f64; 3],
+    /// Broad horizon fill around world `Z = 0`.
+    pub horizon_linear_rgb: [f64; 3],
+    /// Darker floor-side fill at world `-Z`.
+    pub floor_linear_rgb: [f64; 3],
+    /// Common finite multiplier in `(0, 16]`.
+    pub radiance_scale: f64,
+}
+
+impl EulerStudioEnvironmentSpec {
+    /// Warm-neutral studio sweep with a cool overhead reflection.
+    pub const SOFT_NEUTRAL: Self = Self {
+        overhead_linear_rgb: [0.20, 0.26, 0.36],
+        horizon_linear_rgb: [0.60, 0.48, 0.34],
+        floor_linear_rgb: [0.025, 0.018, 0.014],
+        radiance_scale: 0.75,
+    };
+}
+
+impl Default for EulerStudioEnvironmentSpec {
+    fn default() -> Self {
+        Self::SOFT_NEUTRAL
+    }
+}
+
+/// Optional environment appearance for an Euler cinematic scene.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EulerEnvironmentStyle {
+    /// Preserve the historical black-world/reference-rig behavior.
+    None,
+    /// Generate a bounded native linear-sRGB lat-long studio gradient.
+    StudioGradient(EulerStudioEnvironmentSpec),
+}
+
+impl Default for EulerEnvironmentStyle {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Optional diagnostic geometry kept outside the beauty-object set.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EulerDebugOverlay {
@@ -258,6 +318,9 @@ pub struct EulerSceneConfig {
     pub housing_material: EulerMaterialStyle,
     /// One static softbox.
     pub light: EulerRectLightSpec,
+    /// Optional native studio fill/background. Reference scenes remain `None`
+    /// so existing scene and configuration identities do not change silently.
+    pub environment: EulerEnvironmentStyle,
     /// Validated animated physical camera.
     pub camera: AnimatedCamera,
     /// Positive declared near-depth requirement (m). The ray tracer itself has
@@ -313,6 +376,7 @@ impl EulerSceneConfig {
                 linear_rgb: [1.0, 0.96, 0.90],
                 radiance_scale: 24.0,
             },
+            environment: EulerEnvironmentStyle::None,
             camera,
             camera_near_m: 0.01,
             camera_far_m: 2.0,
@@ -592,6 +656,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
         let housing_material = material(config.housing_material);
         let light_spectrum = lift_rgb(config.light.linear_rgb);
         let light_emission = (light_spectrum, config.light.radiance_scale);
+        let environment = build_environment(config.environment, cx)?;
 
         let mut primitives = vec![
             Primitive {
@@ -653,7 +718,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                     prim: light_index,
                     emission: light_emission,
                 }],
-                environment: None,
+                environment,
                 camera: legacy_camera,
             },
             camera: config.camera,
@@ -1171,7 +1236,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                 prim: self.scene.lights[0].prim,
                 emission: self.scene.lights[0].emission,
             }],
-            environment: None,
+            environment: self.scene.environment.clone(),
             camera: legacy_camera(&physical),
         })
     }
@@ -1307,6 +1372,8 @@ pub enum EulerSceneError {
     Motion(RenderMotionBridgeError),
     /// Spectral tracer refused.
     Tracer(TracerError),
+    /// Native environment-map construction refused.
+    Lighting(LightingError),
     /// Explicit tile-render execution, memory admission, or tracer execution
     /// refused while retaining its structured renderer diagnostic.
     RenderExecution(RenderExecutionError),
@@ -1349,6 +1416,12 @@ impl From<RenderMotionBridgeError> for EulerSceneError {
 impl From<TracerError> for EulerSceneError {
     fn from(error: TracerError) -> Self {
         Self::Tracer(error)
+    }
+}
+
+impl From<LightingError> for EulerSceneError {
+    fn from(error: LightingError) -> Self {
+        Self::Lighting(error)
     }
 }
 
@@ -1410,6 +1483,7 @@ fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
     validate_style(config.plate_material, "plate_material")?;
     validate_style(config.housing_material, "housing_material")?;
     validate_light(config.light)?;
+    validate_environment(config.environment)?;
     let beauty_ids = [
         config.object_ids.disc,
         config.object_ids.base_plate,
@@ -1491,6 +1565,26 @@ fn validate_light(light: EulerRectLightSpec) -> Result<(), EulerSceneError> {
         || geom_cross(light.edge_u_world_m, light.edge_v_world_m).norm() <= 0.0
     {
         return Err(EulerSceneError::InvalidConfig("light"));
+    }
+    Ok(())
+}
+
+fn validate_environment(environment: EulerEnvironmentStyle) -> Result<(), EulerSceneError> {
+    let EulerEnvironmentStyle::StudioGradient(spec) = environment else {
+        return Ok(());
+    };
+    for linear_rgb in [
+        spec.overhead_linear_rgb,
+        spec.horizon_linear_rgb,
+        spec.floor_linear_rgb,
+    ] {
+        validate_linear_rgb(linear_rgb, "environment")?;
+    }
+    if !spec.radiance_scale.is_finite()
+        || spec.radiance_scale <= 0.0
+        || spec.radiance_scale > MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE
+    {
+        return Err(EulerSceneError::InvalidConfig("environment"));
     }
     Ok(())
 }
@@ -2012,6 +2106,57 @@ fn material(style: EulerMaterialStyle) -> Material {
     }
 }
 
+fn build_environment(
+    style: EulerEnvironmentStyle,
+    cx: &Cx<'_>,
+) -> Result<Option<EnvironmentMap>, EulerSceneError> {
+    let EulerEnvironmentStyle::StudioGradient(spec) = style else {
+        return Ok(None);
+    };
+    let pixel_count = (EULER_STUDIO_ENVIRONMENT_WIDTH as usize)
+        .checked_mul(EULER_STUDIO_ENVIRONMENT_HEIGHT as usize)
+        .ok_or(EulerSceneError::Capacity("studio environment pixels"))?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(pixel_count)
+        .map_err(|_| EulerSceneError::Capacity("studio environment pixels"))?;
+
+    // EnvironmentMap's lat-long parameterization is Y-up, whereas the Euler
+    // artifact is explicitly Z-up. Evaluate each texel-center direction and
+    // grade by its world Z component so the studio sweep respects the artifact
+    // frame instead of silently turning the gradient sideways.
+    for row in 0..EULER_STUDIO_ENVIRONMENT_HEIGHT {
+        checkpoint(cx)?;
+        let theta = core::f64::consts::PI * (f64::from(row) + 0.5)
+            / f64::from(EULER_STUDIO_ENVIRONMENT_HEIGHT);
+        let sin_theta = det::sin(theta);
+        for column in 0..EULER_STUDIO_ENVIRONMENT_WIDTH {
+            let phi = core::f64::consts::TAU * (f64::from(column) + 0.5)
+                / f64::from(EULER_STUDIO_ENVIRONMENT_WIDTH);
+            let world_z = (sin_theta * det::sin(phi)).clamp(-1.0, 1.0);
+            let magnitude = world_z.abs();
+            let blend = magnitude * magnitude * (3.0 - 2.0 * magnitude);
+            let endpoint = if world_z >= 0.0 {
+                spec.overhead_linear_rgb
+            } else {
+                spec.floor_linear_rgb
+            };
+            pixels.push(core::array::from_fn(|channel| {
+                (spec.radiance_scale
+                    * ((1.0 - blend) * spec.horizon_linear_rgb[channel]
+                        + blend * endpoint[channel])) as f32
+            }));
+        }
+    }
+
+    Ok(Some(EnvironmentMap::try_from_linear_srgb(
+        EULER_STUDIO_ENVIRONMENT_WIDTH,
+        EULER_STUDIO_ENVIRONMENT_HEIGHT,
+        pixels,
+        0.0,
+    )?))
+}
+
 fn box_mesh(half_x: f64, half_y: f64, z_min: f64, z_max: f64) -> TriMesh {
     box_mesh_bounds(-half_x, half_x, -half_y, half_y, z_min, z_max)
 }
@@ -2433,6 +2578,7 @@ fn scene_identity(
     hash_material(&mut hasher, config.plate_material);
     hash_material(&mut hasher, config.housing_material);
     hash_light(&mut hasher, config.light);
+    hash_environment(&mut hasher, config.environment);
     hash_camera(&mut hasher, &config.camera);
     hasher.update(&config.camera_near_m.to_bits().to_le_bytes());
     hasher.update(&config.camera_far_m.to_bits().to_le_bytes());
@@ -2470,6 +2616,7 @@ fn configuration_identity(config: &EulerSceneConfig) -> ContentHash {
     hash_material(&mut hasher, config.plate_material);
     hash_material(&mut hasher, config.housing_material);
     hash_light(&mut hasher, config.light);
+    hash_environment(&mut hasher, config.environment);
     hash_camera(&mut hasher, &config.camera);
     hasher.update(&config.camera_near_m.to_bits().to_le_bytes());
     hasher.update(&config.camera_far_m.to_bits().to_le_bytes());
@@ -2597,6 +2744,26 @@ fn hash_light(hasher: &mut DomainHasher, light: EulerRectLightSpec) {
     ] {
         hasher.update(&value.to_bits().to_le_bytes());
     }
+}
+
+fn hash_environment(hasher: &mut DomainHasher, style: EulerEnvironmentStyle) {
+    let EulerEnvironmentStyle::StudioGradient(spec) = style else {
+        // Preserve the complete pre-environment byte stream for the historical
+        // reference configuration. Opting in is explicitly identity-changing.
+        return;
+    };
+    hasher.update(&[0xe1]);
+    hasher.update(&EULER_STUDIO_ENVIRONMENT_SEMANTICS_VERSION.to_le_bytes());
+    hasher.update(&EULER_STUDIO_ENVIRONMENT_WIDTH.to_le_bytes());
+    hasher.update(&EULER_STUDIO_ENVIRONMENT_HEIGHT.to_le_bytes());
+    for linear_rgb in [
+        spec.overhead_linear_rgb,
+        spec.horizon_linear_rgb,
+        spec.floor_linear_rgb,
+    ] {
+        hash_linear_rgb(hasher, linear_rgb);
+    }
+    hasher.update(&spec.radiance_scale.to_bits().to_le_bytes());
 }
 
 fn hash_camera(hasher: &mut DomainHasher, camera: &AnimatedCamera) {

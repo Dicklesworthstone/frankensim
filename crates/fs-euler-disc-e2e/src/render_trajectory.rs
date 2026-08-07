@@ -4,15 +4,26 @@
 //! It deliberately does not encode or decode an artifact; canonical transport,
 //! content identity, and replay belong to the later trajectory-codec layer.
 
-use core::fmt;
+use core::{f64::consts::TAU, fmt};
 
-use fs_blake3::ContentHash;
+use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_exec::Cx;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
+use crate::contact_dynamics::{
+    profile_contact_geometry, profile_mass_to_mbd, profile_state_at_ground_contact,
+};
 use crate::coupled_runner::{
     ChannelOwnership, ChannelWrench, ContactTransitionKind, CoupledContactBranch,
     CoupledNumericalRefusalReason, CoupledRun, CoupledSample, CoupledTerminal, qois,
 };
+use crate::reduced_decay::{
+    BILDSTEN_PUBLISHED_POWER_COEFFICIENT, ChannelPowers, ChannelWork, REDUCED_DECAY_MODEL_ID,
+    ReducedDecayRun, ReducedDecaySample, ReducedDecayTerminal,
+    THORNE_2026_DECLARED_AIR_VISCOSITY_PA_S, THORNE_2026_FITTED_ROLLING_COEFFICIENT,
+    THORNE_2026_SOURCE_ID,
+};
+use crate::specimen::ResolvedDiscProfile;
 
 /// Exact schema version admitted by [`RenderTrajectory::try_new`].
 pub const EULER_RENDER_TRAJECTORY_SCHEMA_VERSION: u16 = 1;
@@ -22,12 +33,27 @@ pub const MAX_RENDER_TRAJECTORY_SAMPLES: usize = 10_000_000;
 pub const MAX_RENDER_TRANSITIONS_PER_SAMPLE: usize = 64;
 /// Resource ceiling for mandatory no-claim declarations.
 pub const MAX_RENDER_TRAJECTORY_NO_CLAIMS: usize = 64;
+/// Exact deterministic convention for the reduced-decay render bridge.
+pub const REDUCED_DECAY_RENDER_BRIDGE_VERSION: u32 = 1;
+/// Cinematic tail retained by the default reduced-decay bridge [s].
+///
+/// The source run is slightly longer than eight seconds. Rebasing its final
+/// eight seconds to `t = 0` keeps the positive-cutoff chirp inside an
+/// eight-second film without changing coefficients or time-scaling motion.
+pub const REDUCED_DECAY_RENDER_TAIL_HORIZON_S: f64 = 8.0;
 
 const UNIT_TOLERANCE: f64 = 1.0e-12;
 const DERIVED_QOI_TOLERANCE: f64 = 1.0e-9;
 const MAX_TEXT_BYTES: usize = 1024;
 const INTERVAL_END_ULP_TOLERANCE: u64 = 32;
 const TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES: usize = 1_024;
+const REDUCED_DECAY_MODEL_IDENTITY_DOMAIN: &str =
+    "org.frankensim.euler-disc.reduced-decay-render-model.v1";
+const REDUCED_DECAY_CONFIGURATION_IDENTITY_DOMAIN: &str =
+    "org.frankensim.euler-disc.reduced-decay-render-configuration.v1";
+const REDUCED_DECAY_BASE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.euler-disc.reduced-decay-static-base.v1";
+const REDUCED_DECAY_PHASE_CONVENTION: &str = "q=Rz(precession)*Ry(theta)*Rz(spin); phi_dot=Omega; psi_dot=-Omega*cos(theta); theta_dot=-Phi/dE_dtheta; trapezoidal-phase-v1";
 
 /// Frozen v1 world-frame convention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -432,6 +458,124 @@ impl RenderTrajectory {
         Self::try_new(metadata, inputs)
     }
 
+    /// Build a grounded animation trajectory from an admitted late-stage
+    /// reduced-decay run and the exact resolved filleted specimen.
+    ///
+    /// The bridge integrates the declared precession and residual-spin phases
+    /// with `phi_dot = Omega` and `psi_dot = -Omega cos(theta)`. The inclination
+    /// rate comes from the retained dissipation divided by `dE/dtheta`; all
+    /// three rates are included in the rigid twist before principal-body
+    /// angular momentum is formed. Every pose is placed on the actual profile
+    /// support through `profile_state_at_ground_contact`. The final
+    /// [`REDUCED_DECAY_RENDER_TAIL_HORIZON_S`] seconds are rebased to `t = 0`;
+    /// an exact crop-boundary sample follows the source integrator's
+    /// left-boundary power law, so no physical coefficient or clock is changed.
+    ///
+    /// Rolling and Bildsten losses are retained only as interval work. No
+    /// force/torque is invented for either energy-only closure. Reaching the
+    /// positive validity cutoff is published as horizon censoring, never as a
+    /// `theta = 0`, contact-loss, or localized physical terminal event.
+    pub fn from_reduced_decay_run(
+        run: &ReducedDecayRun,
+        profile: &ResolvedDiscProfile,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        cx.checkpoint()
+            .map_err(|_| RenderTrajectoryError::Cancelled)?;
+        let mass = validate_reduced_decay_render_source(run, profile, cx)?;
+        let inputs = reduced_decay_sample_inputs(
+            run,
+            profile,
+            mass,
+            REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
+            cx,
+        )?;
+        let initial = inputs
+            .first()
+            .ok_or(RenderTrajectoryError::EmptyTrajectory)?;
+        let initial_orientation =
+            checked_unit_quaternion(initial.orientation_body_to_world, 0, false)?;
+        let initial_state = RigidBodyState::new(
+            Pose::new(initial.center_of_mass_world_m, initial_orientation).map_err(|error| {
+                RenderTrajectoryError::ReducedDecayBridgeRefusal {
+                    field: "initial_pose",
+                    detail: error.to_string(),
+                }
+            })?,
+            initial.linear_momentum_world_kg_m_per_s,
+            initial.angular_momentum_body_kg_m2_per_s,
+        )
+        .map_err(|error| RenderTrajectoryError::ReducedDecayBridgeRefusal {
+            field: "initial_state",
+            detail: error.to_string(),
+        })?;
+        let identities = profile.content_identities();
+        let model_identity = reduced_decay_model_identity(run);
+        let configuration_identity = reduced_decay_configuration_identity(
+            run,
+            model_identity,
+            identities.profile,
+            identities.chart,
+            identities.mass_properties,
+        );
+        let mut fingerprint_bytes = [0_u8; 8];
+        fingerprint_bytes.copy_from_slice(&configuration_identity.as_bytes()[..8]);
+        let metadata = RenderTrajectoryMetadata {
+            schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            specimen_profile_identity: identities.profile,
+            specimen_chart_identity: identities.chart,
+            mass_properties: RenderMassProperties {
+                identity: identities.mass_properties,
+                properties: mass,
+            },
+            initial_state,
+            initial_base_mode: RenderBaseModeState {
+                displacement_m: 0.0,
+                velocity_m_per_s: 0.0,
+            },
+            base_model_identity: hash_domain(
+                REDUCED_DECAY_BASE_IDENTITY_DOMAIN,
+                b"static-rigid-z-up-ground-plane-no-base-dynamics",
+            ),
+            base_frame: RenderBaseFrame {
+                origin_world_m: Vec3::ZERO,
+                orientation_base_to_world: UnitQuaternion::IDENTITY,
+            },
+            model_identity,
+            channel_availability: RenderChannelAvailability {
+                gravity: false,
+                contact: false,
+                rolling: true,
+                base: false,
+                gas: true,
+            },
+            configuration_identity,
+            configuration_fingerprint: u64::from_le_bytes(fingerprint_bytes),
+            timestep_s: run.parameters.timestep_s,
+            producer_version: format!(
+                "fs-euler-disc-e2e/reduced-decay-render-bridge-v{}",
+                REDUCED_DECAY_RENDER_BRIDGE_VERSION
+            ),
+            applicability: "final eight-second tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff"
+                .to_owned(),
+            no_claims: vec![
+                "literature-calibrated analytical trajectory; not a raw measured trajectory"
+                    .to_owned(),
+                "Bildsten gas loss is energy-only; no aerodynamic wrench or exact full-FSI prefactor validation"
+                    .to_owned(),
+                "validity cutoff is horizon censoring; no theta-zero, loss-of-contact, or terminal-event claim"
+                    .to_owned(),
+                "ground contact is kinematic profile support; no resolved normal-force or contact-patch claim"
+                    .to_owned(),
+                "not a configuration, design, specimen, or target-ranking claim".to_owned(),
+            ],
+            authority: RenderTrajectoryAuthority::SimulationEvidence,
+        };
+        Self::try_new(metadata, inputs)
+    }
+
     /// Validate metadata, all samples, cross-sample time/event rules, and the
     /// final terminal/censor placement.
     pub fn try_new(
@@ -623,6 +767,14 @@ pub enum RenderTrajectoryError {
     RunnerCheckpointMismatch,
     /// A runner sample's redundant accepted-state diagnostic was inconsistent.
     RunnerSampleMismatch(usize),
+    /// A source-bound reduced-decay run, profile, or derived bridge quantity
+    /// contradicted the bridge contract.
+    ReducedDecayBridgeRefusal {
+        /// Stable semantic field or invariant.
+        field: &'static str,
+        /// Upstream or numerical detail.
+        detail: String,
+    },
 }
 
 impl fmt::Display for RenderTrajectoryError {
@@ -632,6 +784,725 @@ impl fmt::Display for RenderTrajectoryError {
 }
 
 impl std::error::Error for RenderTrajectoryError {}
+
+fn reduced_decay_bridge_refusal(
+    field: &'static str,
+    detail: impl Into<String>,
+) -> RenderTrajectoryError {
+    RenderTrajectoryError::ReducedDecayBridgeRefusal {
+        field,
+        detail: detail.into(),
+    }
+}
+
+fn validate_reduced_decay_render_source(
+    run: &ReducedDecayRun,
+    profile: &ResolvedDiscProfile,
+    cx: &Cx<'_>,
+) -> Result<MassProperties, RenderTrajectoryError> {
+    let provenance = &run.provenance;
+    if provenance.model_id != REDUCED_DECAY_MODEL_ID
+        || provenance.small_angle_oracle_source_id != THORNE_2026_SOURCE_ID
+        || provenance.model_authority != "literature-calibrated-analytical"
+        || provenance.physical_validation != "no-raw-trajectory-or-full-fsi-validation-claimed"
+        || provenance.published_rolling_source_id.as_deref() != Some(THORNE_2026_SOURCE_ID)
+        || provenance.bildsten_source_id.as_deref() != Some(THORNE_2026_SOURCE_ID)
+        || provenance
+            .published_rolling_coefficient_mu
+            .map(f64::to_bits)
+            != Some(THORNE_2026_FITTED_ROLLING_COEFFICIENT.to_bits())
+        || provenance.bildsten_dynamic_viscosity_pa_s.map(f64::to_bits)
+            != Some(THORNE_2026_DECLARED_AIR_VISCOSITY_PA_S.to_bits())
+        || provenance
+            .bildsten_dimensionless_prefactor
+            .map(f64::to_bits)
+            != Some(1.0_f64.to_bits())
+    {
+        return Err(reduced_decay_bridge_refusal(
+            "provenance",
+            "run is not the exact source-bound Thorne 2026 analytical model",
+        ));
+    }
+    let density_kg_per_m3 = provenance.bildsten_density_kg_per_m3.ok_or_else(|| {
+        reduced_decay_bridge_refusal("provenance.bildsten_density_kg_per_m3", "missing")
+    })?;
+    if !(density_kg_per_m3.is_finite() && density_kg_per_m3 > 0.0) {
+        return Err(reduced_decay_bridge_refusal(
+            "provenance.bildsten_density_kg_per_m3",
+            "must be finite and positive",
+        ));
+    }
+    let specimen = provenance
+        .literature_specimen
+        .as_ref()
+        .ok_or_else(|| reduced_decay_bridge_refusal("provenance.literature_specimen", "missing"))?;
+    if specimen.source_id != THORNE_2026_SOURCE_ID || profile.spec != specimen.profile_spec() {
+        return Err(reduced_decay_bridge_refusal(
+            "resolved_profile.spec",
+            "resolved profile does not match the source-bound filleted specimen",
+        ));
+    }
+    if run.parameters.mass_kg.to_bits() != specimen.mass_kg.to_bits()
+        || run.parameters.radius_m.to_bits() != (0.5 * specimen.diameter_m).to_bits()
+        || profile.dimensions.outer_radius_m.to_bits() != run.parameters.radius_m.to_bits()
+        || profile.dimensions.thickness_m.to_bits() != specimen.thickness_m.to_bits()
+        || !scalar_close(profile.mass_properties.mass, specimen.mass_kg)
+    {
+        return Err(reduced_decay_bridge_refusal(
+            "resolved_profile.mass_or_dimensions",
+            "profile geometry/mass and reduced-decay parameters disagree",
+        ));
+    }
+    for (field, value) in [
+        ("parameters.mass_kg", run.parameters.mass_kg),
+        ("parameters.radius_m", run.parameters.radius_m),
+        (
+            "parameters.gravity_m_per_s2",
+            run.parameters.gravity_m_per_s2,
+        ),
+        (
+            "parameters.initial_theta_rad",
+            run.parameters.initial_theta_rad,
+        ),
+        (
+            "parameters.validity_cutoff_theta_rad",
+            run.parameters.validity_cutoff_theta_rad,
+        ),
+        ("parameters.timestep_s", run.parameters.timestep_s),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(reduced_decay_bridge_refusal(
+                field,
+                "must be finite and positive",
+            ));
+        }
+    }
+    if run.parameters.initial_theta_rad <= run.parameters.validity_cutoff_theta_rad
+        || run.parameters.maximum_steps == 0
+        || run.terminal != ReducedDecayTerminal::ValidityCutoff
+        || run.samples.is_empty()
+        || run.samples.len()
+            > usize::try_from(run.parameters.maximum_steps)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1)
+    {
+        return Err(reduced_decay_bridge_refusal(
+            "run.bounds_or_terminal",
+            "run must be a nonempty bounded validity-cutoff trajectory",
+        ));
+    }
+
+    let energy_slope_j_per_rad =
+        1.5 * run.parameters.mass_kg * run.parameters.gravity_m_per_s2 * run.parameters.radius_m;
+    let rolling_coefficient = provenance.published_rolling_coefficient_mu.ok_or_else(|| {
+        reduced_decay_bridge_refusal("provenance.published_rolling_coefficient_mu", "missing")
+    })?;
+    let viscosity_pa_s = provenance.bildsten_dynamic_viscosity_pa_s.ok_or_else(|| {
+        reduced_decay_bridge_refusal("provenance.bildsten_dynamic_viscosity_pa_s", "missing")
+    })?;
+    let bildsten_prefactor = provenance.bildsten_dimensionless_prefactor.ok_or_else(|| {
+        reduced_decay_bridge_refusal("provenance.bildsten_dimensionless_prefactor", "missing")
+    })?;
+    let mut previous: Option<&ReducedDecaySample> = None;
+    for (index, sample) in run.samples.iter().enumerate() {
+        if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
+            cx.checkpoint()
+                .map_err(|_| RenderTrajectoryError::Cancelled)?;
+        }
+        for (field, value) in [
+            ("sample.time_s", sample.time_s),
+            ("sample.theta_rad", sample.theta_rad),
+            ("sample.omega_rad_s", sample.omega_rad_s),
+            ("sample.energy_j", sample.energy_j),
+            ("sample.powers.dry_contour_w", sample.powers.dry_contour_w),
+            (
+                "sample.powers.published_rolling_w",
+                sample.powers.published_rolling_w,
+            ),
+            (
+                "sample.powers.bildsten_boundary_layer_w",
+                sample.powers.bildsten_boundary_layer_w,
+            ),
+            ("sample.work.dry_contour_j", sample.work.dry_contour_j),
+            (
+                "sample.work.published_rolling_j",
+                sample.work.published_rolling_j,
+            ),
+            (
+                "sample.work.bildsten_boundary_layer_j",
+                sample.work.bildsten_boundary_layer_j,
+            ),
+        ] {
+            if !value.is_finite() {
+                return Err(reduced_decay_bridge_refusal(
+                    field,
+                    format!("sample {index} is non-finite"),
+                ));
+            }
+        }
+        if sample.time_s < 0.0
+            || sample.theta_rad <= 0.0
+            || sample.powers.dry_contour_w != 0.0
+            || sample.work.dry_contour_j != 0.0
+            || sample.powers.published_rolling_w <= 0.0
+            || sample.powers.bildsten_boundary_layer_w <= 0.0
+            || sample.work.published_rolling_j < 0.0
+            || sample.work.bildsten_boundary_layer_j < 0.0
+        {
+            return Err(reduced_decay_bridge_refusal(
+                "sample.channel_domain",
+                format!("sample {index} contradicts the benchmark channel domains"),
+            ));
+        }
+        let expected_omega = (4.0 * run.parameters.gravity_m_per_s2
+            / (run.parameters.radius_m * sample.theta_rad.sin()))
+        .sqrt();
+        let expected_energy = energy_slope_j_per_rad * sample.theta_rad;
+        let expected_rolling = rolling_coefficient
+            * run.parameters.mass_kg
+            * run.parameters.gravity_m_per_s2
+            * run.parameters.radius_m
+            * sample.omega_rad_s;
+        let expected_air = bildsten_prefactor
+            * BILDSTEN_PUBLISHED_POWER_COEFFICIENT
+            * (viscosity_pa_s * density_kg_per_m3).sqrt()
+            * run.parameters.gravity_m_per_s2.powf(1.25)
+            * run.parameters.radius_m.powf(2.75)
+            * sample.theta_rad.powf(-1.25);
+        if !scalar_close(sample.omega_rad_s, expected_omega)
+            || !scalar_close(sample.energy_j, expected_energy)
+            || !scalar_close(sample.powers.published_rolling_w, expected_rolling)
+            || !scalar_close(sample.powers.bildsten_boundary_layer_w, expected_air)
+        {
+            return Err(reduced_decay_bridge_refusal(
+                "sample.reduced_equations",
+                format!("sample {index} does not satisfy the retained analytical equations"),
+            ));
+        }
+        if let Some(previous) = previous {
+            let dt_s = sample.time_s - previous.time_s;
+            if !(dt_s.is_finite()
+                && dt_s > 0.0
+                && dt_s <= advance_nonnegative_ulps(run.parameters.timestep_s, 32))
+                || sample.theta_rad >= previous.theta_rad
+            {
+                return Err(reduced_decay_bridge_refusal(
+                    "sample.time_or_theta_order",
+                    format!("sample {index} is not a bounded descending step"),
+                ));
+            }
+            let rolling_increment =
+                sample.work.published_rolling_j - previous.work.published_rolling_j;
+            let gas_increment =
+                sample.work.bildsten_boundary_layer_j - previous.work.bildsten_boundary_layer_j;
+            if !scalar_close(
+                rolling_increment,
+                previous.powers.published_rolling_w * dt_s,
+            ) || !scalar_close(
+                gas_increment,
+                previous.powers.bildsten_boundary_layer_w * dt_s,
+            ) {
+                return Err(reduced_decay_bridge_refusal(
+                    "sample.interval_work",
+                    format!("sample {index} work does not close against left-boundary power"),
+                ));
+            }
+        } else if sample.time_s.to_bits() != 0.0_f64.to_bits()
+            || sample.theta_rad.to_bits() != run.parameters.initial_theta_rad.to_bits()
+            || sample.work.total_j() != 0.0
+        {
+            return Err(reduced_decay_bridge_refusal(
+                "sample.initial",
+                "initial sample must be the exact zero-time, zero-work initial state",
+            ));
+        }
+        previous = Some(sample);
+    }
+    let final_sample = run
+        .samples
+        .last()
+        .ok_or(RenderTrajectoryError::EmptyTrajectory)?;
+    if final_sample.theta_rad.to_bits() != run.parameters.validity_cutoff_theta_rad.to_bits() {
+        return Err(reduced_decay_bridge_refusal(
+            "sample.final_theta_rad",
+            "final sample does not equal the positive validity cutoff",
+        ));
+    }
+    let closure = energy_slope_j_per_rad * run.parameters.initial_theta_rad
+        - final_sample.energy_j
+        - final_sample.work.total_j();
+    if !scalar_close(closure, run.energy_closure_residual_j) {
+        return Err(reduced_decay_bridge_refusal(
+            "energy_closure_residual_j",
+            "run-level energy residual does not match the retained samples",
+        ));
+    }
+    profile_mass_to_mbd(profile.mass_properties).map_err(|error| {
+        reduced_decay_bridge_refusal("resolved_profile.mass_properties", error.to_string())
+    })
+}
+
+fn reduced_decay_tail_samples(
+    run: &ReducedDecayRun,
+    tail_horizon_s: f64,
+) -> Result<(f64, Vec<ReducedDecaySample>), RenderTrajectoryError> {
+    if !(tail_horizon_s.is_finite() && tail_horizon_s > 0.0) {
+        return Err(reduced_decay_bridge_refusal(
+            "tail_horizon_s",
+            "must be finite and positive",
+        ));
+    }
+    let final_sample = run
+        .samples
+        .last()
+        .ok_or(RenderTrajectoryError::EmptyTrajectory)?;
+    let time_origin_s = (final_sample.time_s - tail_horizon_s).max(0.0);
+    let first_retained = run
+        .samples
+        .partition_point(|sample| sample.time_s < time_origin_s);
+    if first_retained >= run.samples.len() {
+        return Err(reduced_decay_bridge_refusal(
+            "tail_horizon_s",
+            "crop origin lies beyond the final retained sample",
+        ));
+    }
+    let needs_boundary = first_retained > 0
+        && run.samples[first_retained].time_s.to_bits() != time_origin_s.to_bits();
+    let requested = run
+        .samples
+        .len()
+        .saturating_sub(first_retained)
+        .saturating_add(usize::from(needs_boundary));
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(requested)
+        .map_err(|_| RenderTrajectoryError::Capacity {
+            artifact: "reduced-decay cropped source samples",
+            requested,
+        })?;
+    if needs_boundary {
+        let previous = &run.samples[first_retained - 1];
+        let dt_s = time_origin_s - previous.time_s;
+        let energy_slope_j_per_rad = 1.5
+            * run.parameters.mass_kg
+            * run.parameters.gravity_m_per_s2
+            * run.parameters.radius_m;
+        let theta_rad =
+            previous.theta_rad - previous.powers.total_w() * dt_s / energy_slope_j_per_rad;
+        let (omega_rad_s, powers) = reduced_decay_benchmark_powers(run, theta_rad)?;
+        let work = ChannelWork {
+            dry_contour_j: previous.work.dry_contour_j + previous.powers.dry_contour_w * dt_s,
+            published_rolling_j: previous.work.published_rolling_j
+                + previous.powers.published_rolling_w * dt_s,
+            bildsten_boundary_layer_j: previous.work.bildsten_boundary_layer_j
+                + previous.powers.bildsten_boundary_layer_w * dt_s,
+        };
+        samples.push(ReducedDecaySample {
+            time_s: time_origin_s,
+            theta_rad,
+            omega_rad_s,
+            energy_j: energy_slope_j_per_rad * theta_rad,
+            powers,
+            work,
+        });
+    }
+    samples.extend_from_slice(&run.samples[first_retained..]);
+    if samples.is_empty() {
+        return Err(RenderTrajectoryError::EmptyTrajectory);
+    }
+    Ok((time_origin_s, samples))
+}
+
+fn reduced_decay_benchmark_powers(
+    run: &ReducedDecayRun,
+    theta_rad: f64,
+) -> Result<(f64, ChannelPowers), RenderTrajectoryError> {
+    if !(theta_rad.is_finite() && theta_rad > 0.0) {
+        return Err(reduced_decay_bridge_refusal(
+            "crop.theta_rad",
+            "interpolated inclination must be finite and positive",
+        ));
+    }
+    let rolling_coefficient = run
+        .provenance
+        .published_rolling_coefficient_mu
+        .ok_or_else(|| {
+            reduced_decay_bridge_refusal("provenance.published_rolling_coefficient_mu", "missing")
+        })?;
+    let density_kg_per_m3 = run.provenance.bildsten_density_kg_per_m3.ok_or_else(|| {
+        reduced_decay_bridge_refusal("provenance.bildsten_density_kg_per_m3", "missing")
+    })?;
+    let viscosity_pa_s = run
+        .provenance
+        .bildsten_dynamic_viscosity_pa_s
+        .ok_or_else(|| {
+            reduced_decay_bridge_refusal("provenance.bildsten_dynamic_viscosity_pa_s", "missing")
+        })?;
+    let bildsten_prefactor = run
+        .provenance
+        .bildsten_dimensionless_prefactor
+        .ok_or_else(|| {
+            reduced_decay_bridge_refusal("provenance.bildsten_dimensionless_prefactor", "missing")
+        })?;
+    let omega_rad_s = (4.0 * run.parameters.gravity_m_per_s2
+        / (run.parameters.radius_m * theta_rad.sin()))
+    .sqrt();
+    let published_rolling_w = rolling_coefficient
+        * run.parameters.mass_kg
+        * run.parameters.gravity_m_per_s2
+        * run.parameters.radius_m
+        * omega_rad_s;
+    let bildsten_boundary_layer_w = bildsten_prefactor
+        * BILDSTEN_PUBLISHED_POWER_COEFFICIENT
+        * (viscosity_pa_s * density_kg_per_m3).sqrt()
+        * run.parameters.gravity_m_per_s2.powf(1.25)
+        * run.parameters.radius_m.powf(2.75)
+        * theta_rad.powf(-1.25);
+    if !omega_rad_s.is_finite()
+        || !published_rolling_w.is_finite()
+        || !bildsten_boundary_layer_w.is_finite()
+        || published_rolling_w <= 0.0
+        || bildsten_boundary_layer_w <= 0.0
+    {
+        return Err(reduced_decay_bridge_refusal(
+            "crop.powers",
+            "interpolated source-bound rates are outside their finite positive domain",
+        ));
+    }
+    Ok((
+        omega_rad_s,
+        ChannelPowers {
+            dry_contour_w: 0.0,
+            published_rolling_w,
+            bildsten_boundary_layer_w,
+        },
+    ))
+}
+
+fn reduced_decay_sample_inputs(
+    run: &ReducedDecayRun,
+    profile: &ResolvedDiscProfile,
+    mass: MassProperties,
+    tail_horizon_s: f64,
+    cx: &Cx<'_>,
+) -> Result<Vec<RenderTrajectorySampleInput>, RenderTrajectoryError> {
+    let (time_origin_s, source_samples) = reduced_decay_tail_samples(run, tail_horizon_s)?;
+    let mut inputs = Vec::new();
+    inputs
+        .try_reserve_exact(source_samples.len())
+        .map_err(|_| RenderTrajectoryError::Capacity {
+            artifact: "reduced-decay render trajectory samples",
+            requested: source_samples.len(),
+        })?;
+    let energy_slope_j_per_rad =
+        1.5 * run.parameters.mass_kg * run.parameters.gravity_m_per_s2 * run.parameters.radius_m;
+    let inertia = mass.principal_inertia_body();
+    let mut precession_phase_rad = 0.0_f64;
+    let mut spin_phase_rad = 0.0_f64;
+    let mut center_xy_m = (0.0_f64, 0.0_f64);
+    let mut previous_velocity_world_m_per_s: Option<Vec3> = None;
+    let mut previous_sample: Option<&ReducedDecaySample> = None;
+    for (index, sample) in source_samples.iter().enumerate() {
+        if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
+            cx.checkpoint()
+                .map_err(|_| RenderTrajectoryError::Cancelled)?;
+        }
+        let spin_rate_rad_per_s = -sample.omega_rad_s * sample.theta_rad.cos();
+        if let Some(previous) = previous_sample {
+            let dt_s = sample.time_s - previous.time_s;
+            let previous_spin_rate = -previous.omega_rad_s * previous.theta_rad.cos();
+            precession_phase_rad = wrapped_phase(
+                precession_phase_rad + 0.5 * (previous.omega_rad_s + sample.omega_rad_s) * dt_s,
+            );
+            spin_phase_rad = wrapped_phase(
+                spin_phase_rad + 0.5 * (previous_spin_rate + spin_rate_rad_per_s) * dt_s,
+            );
+        }
+        let orientation =
+            reduced_decay_orientation(precession_phase_rad, sample.theta_rad, spin_phase_rad)?;
+        let theta_rate_rad_per_s = -sample.powers.total_w() / energy_slope_j_per_rad;
+        let tilt_axis_world =
+            Vec3::new(-precession_phase_rad.sin(), precession_phase_rad.cos(), 0.0);
+        let symmetry_axis_world = orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+        let omega_world_rad_per_s = Vec3::new(0.0, 0.0, sample.omega_rad_s)
+            .add(tilt_axis_world.scale(theta_rate_rad_per_s))
+            .add(symmetry_axis_world.scale(spin_rate_rad_per_s));
+        let omega_body_rad_per_s = orientation.rotate_world_to_body(omega_world_rad_per_s);
+        let angular_momentum_body = Vec3::new(
+            inertia.x * omega_body_rad_per_s.x,
+            inertia.y * omega_body_rad_per_s.y,
+            inertia.z * omega_body_rad_per_s.z,
+        );
+        let provisional = profile_state_at_ground_contact(
+            &profile.chart,
+            profile.mass_properties,
+            orientation,
+            Vec3::ZERO,
+            angular_momentum_body,
+            cx,
+        )
+        .map_err(|error| {
+            reduced_decay_bridge_refusal("profile_state_at_ground_contact", error.to_string())
+        })?;
+        let provisional_contact = profile_contact_geometry(
+            &profile.chart,
+            profile.mass_properties,
+            provisional.pose(),
+            cx,
+        )
+        .map_err(|error| {
+            reduced_decay_bridge_refusal("profile_contact_geometry", error.to_string())
+        })?;
+        let velocity_world_m_per_s = omega_world_rad_per_s
+            .cross(provisional_contact.contact.radius_world_m)
+            .scale(-1.0);
+        if let (Some(previous), Some(previous_velocity)) =
+            (previous_sample, previous_velocity_world_m_per_s)
+        {
+            let dt_s = sample.time_s - previous.time_s;
+            center_xy_m.0 += 0.5 * (previous_velocity.x + velocity_world_m_per_s.x) * dt_s;
+            center_xy_m.1 += 0.5 * (previous_velocity.y + velocity_world_m_per_s.y) * dt_s;
+        }
+        let linear_momentum_world = velocity_world_m_per_s.scale(mass.mass());
+        let grounded = profile_state_at_ground_contact(
+            &profile.chart,
+            profile.mass_properties,
+            orientation,
+            linear_momentum_world,
+            angular_momentum_body,
+            cx,
+        )
+        .map_err(|error| {
+            reduced_decay_bridge_refusal("profile_state_at_ground_contact", error.to_string())
+        })?;
+        let grounded_position = grounded.pose().position_world();
+        let pose = Pose::new(
+            Vec3::new(center_xy_m.0, center_xy_m.1, grounded_position.z),
+            orientation,
+        )
+        .map_err(|error| {
+            reduced_decay_bridge_refusal("translated_ground_pose", error.to_string())
+        })?;
+        let state = RigidBodyState::new(pose, linear_momentum_world, angular_momentum_body)
+            .map_err(|error| reduced_decay_bridge_refusal("grounded_state", error.to_string()))?;
+        let contact =
+            profile_contact_geometry(&profile.chart, profile.mass_properties, state.pose(), cx)
+                .map_err(|error| {
+                    reduced_decay_bridge_refusal("profile_contact_geometry", error.to_string())
+                })?;
+        let precession_acceleration_rad_per_s2 = -0.5 * sample.omega_rad_s * sample.theta_rad.cos()
+            / sample.theta_rad.sin()
+            * theta_rate_rad_per_s;
+        let qois = DerivedEulerQois {
+            inclination_rad: sample.theta_rad,
+            precession_rad_per_s: sample.omega_rad_s,
+            spin_rad_per_s: spin_rate_rad_per_s,
+            precession_acceleration_rad_per_s2,
+        };
+        let derived =
+            DerivedEulerQois::from_state(state, mass, precession_acceleration_rad_per_s2)?;
+        if !scalar_close(qois.inclination_rad, derived.inclination_rad)
+            || !scalar_close(qois.precession_rad_per_s, derived.precession_rad_per_s)
+            || !scalar_close(qois.spin_rad_per_s, derived.spin_rad_per_s)
+        {
+            return Err(reduced_decay_bridge_refusal(
+                "phase_rate_qoi_consistency",
+                format!("sample {index} pose/twist does not recover declared Euler rates"),
+            ));
+        }
+        let (rolling_work_j, gas_work_j, interval_start_time_s) = if let Some(previous) =
+            previous_sample
+        {
+            (
+                -(sample.work.dry_contour_j + sample.work.published_rolling_j
+                    - previous.work.dry_contour_j
+                    - previous.work.published_rolling_j),
+                -(sample.work.bildsten_boundary_layer_j - previous.work.bildsten_boundary_layer_j),
+                previous.time_s,
+            )
+        } else {
+            (0.0, 0.0, sample.time_s)
+        };
+        let channels = ChannelOwnership {
+            gravity: ChannelWrench::default(),
+            contact: ChannelWrench::default(),
+            rolling: ChannelWrench {
+                force_world_n: Vec3::ZERO,
+                torque_world_nm: Vec3::ZERO,
+                work_j: rolling_work_j,
+            },
+            base: ChannelWrench::default(),
+            gas: ChannelWrench {
+                force_world_n: Vec3::ZERO,
+                torque_world_nm: Vec3::ZERO,
+                work_j: gas_work_j,
+            },
+        };
+        let energy_defect_j = energy_slope_j_per_rad * run.parameters.initial_theta_rad
+            - sample.energy_j
+            - sample.work.total_j();
+        let output_time_s = if index == 0 {
+            0.0
+        } else if index + 1 == source_samples.len() && time_origin_s > 0.0 {
+            tail_horizon_s
+        } else {
+            sample.time_s - time_origin_s
+        };
+        let output_interval_start_time_s = if index == 0 {
+            0.0
+        } else {
+            interval_start_time_s - time_origin_s
+        };
+        inputs.push(RenderTrajectorySampleInput {
+            interval_start_time_s: output_interval_start_time_s,
+            time_s: output_time_s,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            center_of_mass_world_m: state.pose().position_world(),
+            orientation_body_to_world: orientation.components(),
+            linear_momentum_world_kg_m_per_s: state.linear_momentum_world(),
+            angular_momentum_body_kg_m2_per_s: state.angular_momentum_body(),
+            symmetry_axis_world,
+            contact_branch: RenderContactBranch::Closed,
+            contact_geometry: Some(RenderContactGeometry {
+                point_world_m: contact.contact.point_world_m,
+                normal_world: Vec3::new(0.0, 0.0, 1.0),
+                support_feature: RenderSupportFeature::ProfileFeature(
+                    contact.support_source_feature,
+                ),
+            }),
+            signed_gap_m: contact.contact.gap_m,
+            interval_contact_active: index != 0,
+            interval_normal_force_n: 0.0,
+            contact_transitions: Vec::new(),
+            base_mode: Some(RenderBaseModeState {
+                displacement_m: 0.0,
+                velocity_m_per_s: 0.0,
+            }),
+            channels,
+            mechanical_energy_j: sample.energy_j,
+            energy_defect_j,
+            qois,
+            disposition: if index + 1 == source_samples.len() {
+                RenderSampleDisposition::HorizonCensored
+            } else {
+                RenderSampleDisposition::Continue
+            },
+            terminal_event: None,
+        });
+        previous_velocity_world_m_per_s = Some(velocity_world_m_per_s);
+        previous_sample = Some(sample);
+    }
+    cx.checkpoint()
+        .map_err(|_| RenderTrajectoryError::Cancelled)?;
+    Ok(inputs)
+}
+
+fn reduced_decay_orientation(
+    precession_phase_rad: f64,
+    theta_rad: f64,
+    spin_phase_rad: f64,
+) -> Result<UnitQuaternion, RenderTrajectoryError> {
+    UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), precession_phase_rad)
+        .and_then(|orientation| orientation.right_exp(Vec3::new(0.0, theta_rad, 0.0)))
+        .and_then(|orientation| orientation.right_exp(Vec3::new(0.0, 0.0, spin_phase_rad)))
+        .map_err(|error| reduced_decay_bridge_refusal("orientation", error.to_string()))
+}
+
+fn wrapped_phase(phase_rad: f64) -> f64 {
+    phase_rad.rem_euclid(TAU)
+}
+
+fn reduced_decay_model_identity(run: &ReducedDecayRun) -> ContentHash {
+    let mut hasher = DomainHasher::new(REDUCED_DECAY_MODEL_IDENTITY_DOMAIN);
+    hasher.update(&REDUCED_DECAY_RENDER_BRIDGE_VERSION.to_le_bytes());
+    hash_text(&mut hasher, REDUCED_DECAY_PHASE_CONVENTION);
+    hash_text(&mut hasher, run.provenance.model_id);
+    hash_text(&mut hasher, &run.provenance.small_angle_oracle_source_id);
+    hash_text(&mut hasher, run.provenance.model_authority);
+    hash_text(&mut hasher, run.provenance.physical_validation);
+    for value in [
+        run.parameters.mass_kg,
+        run.parameters.radius_m,
+        run.parameters.gravity_m_per_s2,
+        run.parameters.initial_theta_rad,
+        run.parameters.validity_cutoff_theta_rad,
+        run.parameters.timestep_s,
+        run.provenance
+            .published_rolling_coefficient_mu
+            .unwrap_or(f64::NAN),
+        run.provenance
+            .bildsten_density_kg_per_m3
+            .unwrap_or(f64::NAN),
+        run.provenance
+            .bildsten_dynamic_viscosity_pa_s
+            .unwrap_or(f64::NAN),
+        run.provenance
+            .bildsten_dimensionless_prefactor
+            .unwrap_or(f64::NAN),
+    ] {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+    hasher.update(&run.parameters.maximum_steps.to_le_bytes());
+    if let Some(specimen) = &run.provenance.literature_specimen {
+        hash_text(&mut hasher, &specimen.source_id);
+        for value in [
+            specimen.diameter_m,
+            specimen.thickness_m,
+            specimen.mass_kg,
+            specimen.outer_fillet_radius_m,
+        ] {
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    hasher.finalize()
+}
+
+fn reduced_decay_configuration_identity(
+    run: &ReducedDecayRun,
+    model_identity: ContentHash,
+    profile_identity: ContentHash,
+    chart_identity: ContentHash,
+    mass_identity: ContentHash,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(REDUCED_DECAY_CONFIGURATION_IDENTITY_DOMAIN);
+    hasher.update(model_identity.as_bytes());
+    hasher.update(profile_identity.as_bytes());
+    hasher.update(chart_identity.as_bytes());
+    hasher.update(mass_identity.as_bytes());
+    hasher.update(
+        &u64::try_from(run.samples.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for sample in &run.samples {
+        for value in [
+            sample.time_s,
+            sample.theta_rad,
+            sample.omega_rad_s,
+            sample.energy_j,
+            sample.powers.dry_contour_w,
+            sample.powers.published_rolling_w,
+            sample.powers.bildsten_boundary_layer_w,
+            sample.work.dry_contour_j,
+            sample.work.published_rolling_j,
+            sample.work.bildsten_boundary_layer_j,
+        ] {
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    hasher.update(&run.energy_closure_residual_j.to_bits().to_le_bytes());
+    hasher.update(&[match run.terminal {
+        ReducedDecayTerminal::ValidityCutoff => 1,
+        ReducedDecayTerminal::StepBudgetExhausted => 2,
+    }]);
+    hasher.finalize()
+}
+
+fn hash_text(hasher: &mut DomainHasher, value: &str) {
+    hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
 
 fn coupled_sample_input(
     sample: &CoupledSample,

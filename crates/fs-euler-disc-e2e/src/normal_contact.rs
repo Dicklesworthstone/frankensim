@@ -14,7 +14,7 @@ use fs_contact::normal_patch::{
     NormalPatchRequest,
 };
 use fs_mbd::Vec3;
-use fs_tribo::InterfaceSystemRef;
+use fs_tribo::{InputAuthority, InterfaceSystemRef};
 
 use crate::patch_kinematics::{CurvatureMetadata, PatchContactStatus, PatchKinematics};
 
@@ -110,6 +110,8 @@ pub struct EulerNormalContactInput {
 pub struct CurvatureResolution {
     /// Geometry-owner curvature identity.
     pub curvature_identity: String,
+    /// Geometry owner's authority, retained independently of material-card authority.
+    pub authority: InputAuthority,
     /// First caller-supplied relative-gap principal curvature in 1/m.
     pub first_principal_m_inverse: f64,
     /// Second caller-supplied relative-gap principal curvature in 1/m.
@@ -415,6 +417,7 @@ fn resolve_curvature(
     // surface chart nor authority to manufacture the missing base curvature.
     let CurvatureMetadata::Known {
         curvature_identity,
+        authority,
         first_principal_m_inverse,
         second_principal_m_inverse,
         uncertainty_m_inverse,
@@ -480,6 +483,7 @@ fn resolve_curvature(
     }
     Ok(CurvatureResolution {
         curvature_identity: curvature_identity.as_str().to_owned(),
+        authority: *authority,
         first_principal_m_inverse: first,
         second_principal_m_inverse: second,
         uncertainty_m_inverse: uncertainty,

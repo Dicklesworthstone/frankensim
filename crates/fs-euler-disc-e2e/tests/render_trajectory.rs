@@ -1,21 +1,60 @@
 //! G0/G3 checks for animation-grade Euler trajectory semantics.
 
+use core::f64::consts::{PI, TAU};
+
+use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_euler_disc_e2e::coupled_runner::{
     ChannelOwnership, ContactTransitionKind, CoupledControls, CoupledFactors, CoupledInitialState,
     CoupledRun, run_closed_reduced,
 };
-use fs_euler_disc_e2e::{
-    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseFrame, RenderBaseModeState,
-    RenderChannelAvailability, RenderContactBranch, RenderContactGeometry, RenderContactTransition,
-    RenderMassProperties, RenderNumericalRefusalReason, RenderSampleDisposition,
-    RenderSupportFeature, RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority,
-    RenderTrajectoryError, RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem,
-    RenderWorldFrame,
+use fs_euler_disc_e2e::reduced_decay::{
+    ReducedDecayRun, THORNE_2026_RENDER_VALIDITY_CUTOFF_THETA_RAD, Thorne2026SteelGlassBenchmark,
+    run_thorne_2026_steel_glass_benchmark,
 };
+use fs_euler_disc_e2e::{
+    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
+    RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability, RenderContactBranch,
+    RenderContactGeometry, RenderContactTransition, RenderMassProperties,
+    RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature,
+    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
+    RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+};
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 const THETA: f64 = 0.35;
+
+fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    let pool = ArenaPool::new(ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x5448_4f52_4e45_3236,
+                kernel_id: 0x5245_4e44,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        operation(&cx)
+    })
+}
+
+fn thorne_trajectory(cx: &Cx<'_>) -> (ReducedDecayRun, RenderTrajectory) {
+    let benchmark = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
+    let profile = benchmark
+        .resolve_specimen(cx)
+        .expect("source-bound specimen");
+    let run = run_thorne_2026_steel_glass_benchmark(&benchmark).expect("source-bound decay");
+    let trajectory = RenderTrajectory::from_reduced_decay_run(&run, &profile, cx)
+        .expect("grounded cinematic trajectory");
+    (run, trajectory)
+}
 
 fn identity(label: &str) -> ContentHash {
     hash_domain("org.frankensim.test.render-trajectory.v1", label.as_bytes())
@@ -887,4 +926,176 @@ fn prohibited_reimpact_root_is_a_complete_numerical_refusal_sample() {
         RenderTrajectory::from_coupled_run(runner_metadata(&resumed), &resumed).unwrap_err(),
         RenderTrajectoryError::EmptyTrajectory
     );
+}
+
+#[test]
+fn thorne_tail_is_grounded_horizon_censored_and_contains_the_terminal_chirp() {
+    with_cx(|cx| {
+        let (run, trajectory) = thorne_trajectory(cx);
+        let source_final = run.final_sample().expect("source cutoff");
+        assert!(source_final.time_s > REDUCED_DECAY_RENDER_TAIL_HORIZON_S);
+        let samples = trajectory.samples();
+        let first = samples.first().expect("cinematic start").input();
+        let final_sample = samples.last().expect("cinematic cutoff").input();
+        assert_eq!(first.time_s.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            final_sample.time_s.to_bits(),
+            REDUCED_DECAY_RENDER_TAIL_HORIZON_S.to_bits()
+        );
+        assert_eq!(
+            final_sample.qois.inclination_rad.to_bits(),
+            THORNE_2026_RENDER_VALIDITY_CUTOFF_THETA_RAD.to_bits()
+        );
+        assert_eq!(
+            final_sample.disposition,
+            RenderSampleDisposition::HorizonCensored
+        );
+        assert!(final_sample.terminal_event.is_none());
+
+        let last_shutter_end_s = REDUCED_DECAY_RENDER_TAIL_HORIZON_S - 1.0 / 96.0;
+        let visible_late_sample = samples
+            .iter()
+            .rev()
+            .find(|sample| sample.input().time_s <= last_shutter_end_s)
+            .expect("sample visible in the final shutter")
+            .input();
+        assert!(visible_late_sample.qois.inclination_rad < 0.006);
+        assert!(visible_late_sample.qois.precession_rad_per_s > 400.0);
+
+        for (index, retained) in samples.iter().enumerate() {
+            let input = retained.input();
+            assert_eq!(input.contact_branch, RenderContactBranch::Closed);
+            let contact = input.contact_geometry.expect("kinematic ground support");
+            assert!(contact.point_world_m.z.abs() < 1.0e-10);
+            assert!(input.signed_gap_m <= 0.0);
+            assert!(input.signed_gap_m.abs() < 1.0e-10);
+            assert_eq!(input.interval_contact_active, index != 0);
+            assert_eq!(input.interval_normal_force_n, 0.0);
+            for channel in [input.channels.rolling, input.channels.gas] {
+                assert_eq!(channel.force_world_n, Vec3::ZERO);
+                assert_eq!(channel.torque_world_nm, Vec3::ZERO);
+                assert!(channel.work_j <= 0.0);
+            }
+        }
+        assert!(trajectory.metadata().no_claims.iter().any(|claim| {
+            claim.contains("not a raw measured trajectory")
+                && !claim.contains("validated raw trajectory")
+        }));
+        assert!(
+            trajectory
+                .metadata()
+                .no_claims
+                .iter()
+                .any(|claim| claim.contains("full-FSI"))
+        );
+        assert!(
+            trajectory
+                .metadata()
+                .no_claims
+                .iter()
+                .any(|claim| claim.contains("no theta-zero"))
+        );
+        assert!(
+            trajectory
+                .metadata()
+                .no_claims
+                .iter()
+                .any(|claim| claim.contains("not a configuration") && claim.contains("ranking"))
+        );
+    });
+}
+
+#[test]
+fn thorne_bridge_replays_exactly_and_phase_rates_match_rigid_state() {
+    with_cx(|cx| {
+        let benchmark = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
+        let profile = benchmark
+            .resolve_specimen(cx)
+            .expect("source-bound specimen");
+        let run = run_thorne_2026_steel_glass_benchmark(&benchmark).expect("source-bound decay");
+        let first = RenderTrajectory::from_reduced_decay_run(&run, &profile, cx)
+            .expect("first deterministic bridge");
+        let replay = RenderTrajectory::from_reduced_decay_run(&run, &profile, cx)
+            .expect("replayed deterministic bridge");
+        assert_eq!(first, replay);
+
+        let mass = first.metadata().mass_properties.properties;
+        let mut precession_phase_rad = 0.0_f64;
+        let mut spin_phase_rad = 0.0_f64;
+        let mut previous = None;
+        for (index, retained) in first.samples().iter().enumerate() {
+            let input = retained.input();
+            if let Some(previous_input) = previous {
+                let dt_s = input.time_s - previous_input.time_s;
+                precession_phase_rad = (precession_phase_rad
+                    + 0.5
+                        * (previous_input.qois.precession_rad_per_s
+                            + input.qois.precession_rad_per_s)
+                        * dt_s)
+                    .rem_euclid(TAU);
+                spin_phase_rad = (spin_phase_rad
+                    + 0.5
+                        * (previous_input.qois.spin_rad_per_s + input.qois.spin_rad_per_s)
+                        * dt_s)
+                    .rem_euclid(TAU);
+            }
+            let expected_orientation =
+                UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), precession_phase_rad)
+                    .and_then(|orientation| {
+                        orientation.right_exp(Vec3::new(0.0, input.qois.inclination_rad, 0.0))
+                    })
+                    .and_then(|orientation| {
+                        orientation.right_exp(Vec3::new(0.0, 0.0, spin_phase_rad))
+                    })
+                    .expect("independent Euler composition");
+            if index % 10_000 == 0 || index + 1 == first.samples().len() {
+                for (actual, expected) in retained
+                    .state()
+                    .pose()
+                    .orientation()
+                    .components()
+                    .into_iter()
+                    .zip(expected_orientation.components())
+                {
+                    assert_close(actual, expected);
+                }
+            }
+
+            let orientation = retained.state().pose().orientation();
+            let angular_velocity_world = orientation.rotate_body_to_world(
+                mass.angular_velocity_body(retained.state().angular_momentum_body()),
+            );
+            let symmetry_axis_world = input.symmetry_axis_world;
+            let tilt_axis_world =
+                Vec3::new(-precession_phase_rad.sin(), precession_phase_rad.cos(), 0.0);
+            let residual = angular_velocity_world
+                .sub(Vec3::new(0.0, 0.0, input.qois.precession_rad_per_s))
+                .sub(symmetry_axis_world.scale(input.qois.spin_rad_per_s));
+            let theta_rate_from_state = residual.dot(tilt_axis_world);
+            let theta_rate_from_qoi = -2.0
+                * input.qois.precession_acceleration_rad_per_s2
+                * input.qois.inclination_rad.tan()
+                / input.qois.precession_rad_per_s;
+            assert_close(theta_rate_from_state, theta_rate_from_qoi);
+            assert!(
+                residual
+                    .sub(tilt_axis_world.scale(theta_rate_from_state))
+                    .norm_squared()
+                    < 1.0e-18
+            );
+
+            let contact = input.contact_geometry.expect("closed support");
+            let radius_body = retained
+                .state()
+                .pose()
+                .point_body_from_world(contact.point_world_m)
+                .expect("body support point");
+            let body_contact_azimuth = radius_body.y.atan2(radius_body.x);
+            let expected_body_contact_azimuth = -spin_phase_rad;
+            let phase_error =
+                (body_contact_azimuth - expected_body_contact_azimuth + PI).rem_euclid(TAU) - PI;
+            assert!(phase_error.abs() < 1.0e-9);
+            previous = Some(input);
+        }
+    });
 }

@@ -64,6 +64,7 @@ fn kinematics(
             gap_uncertainty_m: 1.0e-7,
             curvature: CurvatureMetadata::Known {
                 curvature_identity: id("curvature/rim-v1"),
+                authority: InputAuthority::SyntheticFixture,
                 first_principal_m_inverse: first_curvature_m_inverse,
                 second_principal_m_inverse: second_curvature_m_inverse,
                 uncertainty_m_inverse: 0.01,
@@ -187,6 +188,7 @@ fn sphere_closing_maps_hertz_scale_force_and_application_point() {
         panic!("active contact expected");
     };
     close(active.curvature.reporting_radius_m, 0.1);
+    assert_eq!(active.curvature.authority, InputAuthority::SyntheticFixture);
     close(active.application_point_world_m.x, 1.0);
     close(active.application_point_world_m.z, -1.0e-4);
     let expected_force = (4.0 / 3.0) * 2.0e9 * 0.1_f64.sqrt() * (1.0e-4_f64).powf(1.5);

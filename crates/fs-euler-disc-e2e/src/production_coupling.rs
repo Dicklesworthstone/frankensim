@@ -8,7 +8,10 @@ use core::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_contact::normal_patch::{NormalPatchEmbedState, NormalPatchPort, NormalPatchReceipt};
+use fs_couple::StableId;
+use fs_exec::Cx;
 use fs_mbd::{Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
+use fs_rep_frep::{AxisymmetricCurvatureAuthority, AxisymmetricIdentity};
 use fs_tribo::{
     InputAuthority,
     partial_slip::{NormalPatchAuthority, NormalPatchView},
@@ -23,6 +26,10 @@ use crate::{
     base_response::{
         ReducedBaseCheckpoint, ReducedBasePort, ReducedBaseStepInput, ReducedBaseStepProposal,
     },
+    contact_dynamics::{
+        ContactDynamicsError, ProfileContactPatchGeometry,
+        profile_contact_patch_geometry_from_mass, profile_mass_to_mbd,
+    },
     external_air::{
         EulerDiscBodyFrame, EulerDiscExteriorState, EulerExternalAirCandidate,
         EulerExternalAirInput, EulerExternalAirWorkProposal, EulerExternalAirWorkState,
@@ -34,12 +41,13 @@ use crate::{
     },
     patch_kinematics::{
         CurvatureMetadata, MovingOneModePatchKinematicsInput, PatchContactStatus, PatchKinematics,
-        PatchKinematicsError, compute_moving_one_mode_patch_kinematics,
+        PatchKinematicsError, ProfileSupportKinematics, compute_moving_one_mode_patch_kinematics,
     },
     rolling_contact::{
         RollingContactError, RollingContactInput, RollingContactProposal, RollingContactState,
         commit_rolling_contact, prepare_rolling_contact,
     },
+    specimen::ResolvedDiscProfile,
     tangential_contact::{
         EulerTangentialContactAdapter, TangentialContactError, TangentialContactReceipt,
         TangentialContactRequest, TangentialContactState,
@@ -174,6 +182,83 @@ pub struct ProductionCouplingStepInput {
     pub base_load_progress_end: f64,
 }
 
+/// Binds one accepted rigid/profile state to the horizontal-plane production patch.
+///
+/// This is the profile-native bridge into [`ProductionCouplingStepInput`]. It
+/// resolves the support arm and smooth principal curvatures from the same
+/// body-frame ground direction, replaces the stale rigid-body/mass fields, and
+/// aligns the one-mode base counterpart beneath that support point. The caller
+/// still owns material cards and must select an [`crate::normal_contact::EulerNormalGeometry`]
+/// compatible with the returned principal-curvature pair. No smoothing radius
+/// or desired experimental ranking is inferred here.
+///
+/// `base_vertical_displacement_m` and `base_vertical_velocity_m_per_s` must be
+/// the values from the accepted base checkpoint that will be passed to
+/// [`ProductionCouplingModel::step`]. The step owner replaces them from its
+/// private checkpoint before evaluation; passing the same accepted values here
+/// keeps classification and the reconstructed moving counterpart coherent.
+fn bind_horizontal_plane_axisymmetric_profile_contact_input(
+    input: &mut ProductionCouplingStepInput,
+    resolved: ProfileContactPatchGeometry,
+    disc_mass_properties: MassProperties,
+    disc_state: RigidBodyState,
+    base_vertical_displacement_m: f64,
+    base_vertical_velocity_m_per_s: f64,
+) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+    if !base_vertical_displacement_m.is_finite() || !base_vertical_velocity_m_per_s.is_finite() {
+        return Err(ProductionCouplingError::InvalidInput {
+            field: "profile base mode",
+        });
+    }
+    let profile_support = &resolved.support;
+    let mut support_kinematics =
+        ProfileSupportKinematics::from_profile_contact_geometry(*profile_support);
+    support_kinematics.gap_m -= base_vertical_displacement_m;
+    if !support_kinematics.gap_m.is_finite() {
+        return Err(ProductionCouplingError::InvalidInput {
+            field: "profile moving-base gap",
+        });
+    }
+    let curvature_identity = StableId::new(format!(
+        "axisymmetric/{:016x}/feature-{}/principal-curvature-v1/{:016x}-{:016x}-{:016x}",
+        resolved.profile_identity.0,
+        resolved.curvature.source_feature,
+        resolved.curvature.meridional_m_inverse.to_bits(),
+        resolved.curvature.azimuthal_m_inverse.to_bits(),
+        resolved.curvature.uncertainty_m_inverse.to_bits(),
+    ))
+    .map_err(|_| ProductionCouplingError::InvalidInput {
+        field: "profile curvature identity",
+    })?;
+    input.patch.bridge.profile_support = support_kinematics;
+    input.patch.bridge.disc_state = disc_state;
+    input.patch.bridge.disc_mass_properties = disc_mass_properties;
+    input
+        .patch
+        .bridge
+        .base_mode
+        .undeformed_contact_point_world_m = Vec3::new(
+        profile_support.contact.point_world_m.x,
+        profile_support.contact.point_world_m.y,
+        0.0,
+    );
+    input.patch.bridge.base_mode.vertical_displacement_m = base_vertical_displacement_m;
+    input.patch.bridge.base_mode.vertical_velocity_m_per_s = base_vertical_velocity_m_per_s;
+    input.patch.bridge.normal_world = Vec3::new(0.0, 0.0, 1.0);
+    input.patch.patch.source_feature = profile_support.support_source_feature;
+    input.patch.patch.curvature = CurvatureMetadata::Known {
+        curvature_identity,
+        authority: match resolved.curvature.authority {
+            AxisymmetricCurvatureAuthority::Estimate => InputAuthority::Estimated,
+        },
+        first_principal_m_inverse: resolved.curvature.meridional_m_inverse,
+        second_principal_m_inverse: resolved.curvature.azimuthal_m_inverse,
+        uncertainty_m_inverse: resolved.curvature.uncertainty_m_inverse,
+    };
+    input.rolling.contact_arm_world_m = profile_support.contact.radius_world_m;
+    Ok(resolved)
+}
+
 /// Published mechanical result and retained Estimate-only boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionCouplingReceipt {
@@ -251,6 +336,20 @@ pub enum ProductionCouplingError {
     InputIdentityMismatch { field: &'static str },
     /// Invalid outer scalar or identity.
     InvalidInput { field: &'static str },
+    /// Profile support/curvature or profile-derived mass refused publication.
+    ProfileContact(ContactDynamicsError),
+    /// Profile-derived mass/inertia disagrees with the immutable mechanics model.
+    ProfileModelMassMismatch,
+    /// Cached resolved mass properties disagree with a fresh evaluation of the
+    /// retained chart at the retained density.
+    ResolvedProfileMassMismatch,
+    /// A supposedly resolved specimen no longer matches its retained chart identity.
+    ResolvedProfileIdentityMismatch {
+        /// Identity retained by the resolved specimen.
+        profile_identity: AxisymmetricIdentity,
+        /// Identity retained by the specimen's actual chart.
+        chart_identity: AxisymmetricIdentity,
+    },
     /// The profile/moving-base bridge could not form one patch.
     Patch(PatchKinematicsError),
     /// Nonsmooth/unavailable curvature cannot be silently approximated.
@@ -288,6 +387,127 @@ impl fmt::Display for ProductionCouplingError {
 impl std::error::Error for ProductionCouplingError {}
 
 impl ProductionCouplingModel {
+    /// Resolves the initial smooth profile patch against this model's zero-version base state.
+    ///
+    /// The immutable mechanics mass must exactly match the mass derived from
+    /// `profile`; this prevents a real profile patch from
+    /// being advanced by a stale synthetic rigid-body model. This initializer
+    /// exists because constructing the first tangential checkpoint requires the
+    /// same profile-native normal patch that the first coupled step will use.
+    pub fn bind_initial_horizontal_plane_axisymmetric_profile_contact(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        validate_identity(&self.identity)?;
+        let base_state = self.base_port.initial_checkpoint();
+        let (resolved, disc_mass_properties) =
+            self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
+        let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
+            input,
+            resolved,
+            disc_mass_properties,
+            disc_state,
+            base_state.modal_displacement_m(),
+            base_state.modal_velocity_m_per_s(),
+        )?;
+        input.expected_checkpoint_version = 0;
+        Ok(resolved)
+    }
+
+    /// Rebuilds one smooth profile patch directly from an accepted coupled checkpoint.
+    ///
+    /// Base displacement/velocity and rigid-body state come from the private,
+    /// integrity-checked checkpoint, so callers cannot accidentally classify
+    /// contact with stale base motion. The horizontal base contributes zero
+    /// relative-gap curvature.
+    pub fn bind_horizontal_plane_axisymmetric_profile_contact(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        checkpoint: &ProductionCouplingCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        validate_identity(&self.identity)?;
+        if checkpoint.identity != self.identity {
+            return Err(ProductionCouplingError::CheckpointMismatch);
+        }
+        if checkpoint.checkpoint_fingerprint
+            != production_checkpoint_fingerprint(
+                &checkpoint.identity,
+                checkpoint.committed_version,
+                checkpoint.disc_state,
+                &checkpoint.normal_state,
+                &checkpoint.tangential_state,
+                &checkpoint.rolling_state,
+                &checkpoint.gas_channel_state,
+                &checkpoint.base_state,
+            )
+        {
+            return Err(ProductionCouplingError::CheckpointIntegrityMismatch);
+        }
+        let (resolved, disc_mass_properties) =
+            self.resolve_axisymmetric_profile_contact(profile, checkpoint.disc_state, cx)?;
+        let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
+            input,
+            resolved,
+            disc_mass_properties,
+            checkpoint.disc_state,
+            checkpoint.base_state.modal_displacement_m(),
+            checkpoint.base_state.modal_velocity_m_per_s(),
+        )?;
+        input.expected_checkpoint_version = checkpoint.committed_version;
+        Ok(resolved)
+    }
+
+    fn resolve_axisymmetric_profile_contact(
+        &self,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        cx: &Cx<'_>,
+    ) -> Result<(ProfileContactPatchGeometry, MassProperties), ProductionCouplingError> {
+        let chart_identity = profile.chart.construction_certificate().identity;
+        if profile.identity != chart_identity {
+            return Err(ProductionCouplingError::ResolvedProfileIdentityMismatch {
+                profile_identity: profile.identity,
+                chart_identity,
+            });
+        }
+        // `ResolvedDiscProfile` is publicly constructible, so its cached mass
+        // cannot be treated as an admission token. Re-evaluate the same chart
+        // and density at every public binding boundary before using either the
+        // cached properties or a mechanics model that may have copied them.
+        // This is deterministic exact-formula work over the profile segments;
+        // a future sealed admitted-profile token may cache it without weakening
+        // this trust boundary.
+        let recomputed_mass_properties = profile
+            .chart
+            .mass_properties(profile.density_kg_per_m3, cx)
+            .map_err(|detail| {
+                ProductionCouplingError::ProfileContact(ContactDynamicsError::ProfileMassRefusal {
+                    detail,
+                })
+            })?;
+        if profile.mass_properties != recomputed_mass_properties {
+            return Err(ProductionCouplingError::ResolvedProfileMassMismatch);
+        }
+        let resolved = profile_contact_patch_geometry_from_mass(
+            &profile.chart,
+            recomputed_mass_properties,
+            disc_state.pose(),
+            cx,
+        )
+        .map_err(ProductionCouplingError::ProfileContact)?;
+        let disc_mass_properties = profile_mass_to_mbd(resolved.support.mass_properties)
+            .map_err(ProductionCouplingError::ProfileContact)?;
+        if disc_mass_properties != self.disc_mass_properties {
+            return Err(ProductionCouplingError::ProfileModelMassMismatch);
+        }
+        Ok((resolved, disc_mass_properties))
+    }
+
     /// Validates immutable identities and creates one complete initial checkpoint.
     pub fn initial_checkpoint(
         &self,
@@ -646,6 +866,7 @@ fn rolling_patch_receipt(
         return Err(ProductionCouplingError::UnsupportedLineNormalContact);
     };
     let CurvatureMetadata::Known {
+        authority,
         first_principal_m_inverse,
         second_principal_m_inverse,
         ..
@@ -657,7 +878,7 @@ fn rolling_patch_receipt(
         patch.patch.patch_identity.as_str(),
         normal.material_card_id.clone(),
         normal.material_source_id.clone(),
-        InputAuthority::Estimated,
+        *authority,
         receipt.normal_force_n,
         receipt.patch_radius_m,
         PatchCurvature::Principal {

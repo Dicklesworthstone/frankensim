@@ -4,12 +4,17 @@ use core::f64::consts::TAU;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
+use fs_euler_disc_e2e::modal_synthesis::{
+    CallerVerifiedCalibrationBinding, EulerModalParameterSet, EulerModalParameterSetError,
+    EulerModalParameterSetInput, MAX_EULER_MODAL_DISCLOSURE_BYTES,
+};
 use fs_euler_disc_e2e::{
     MAX_MODAL_SPATIAL_PARTICIPATION, ModalComponentValues, ModalCouplingClass, ModalDriveFrame,
     ModalPresetAuthority, ModalSpatialParticipation, ModalSynthesisBudget, ModalSynthesisError,
     ModalSynthesisModel, ModalSynthesisModelInput, RepresentativeDiscMaterial,
     representative_modal_preset,
 };
+use fs_evidence::cinematic::DeclaredAcousticCalibrationReceipt;
 use fs_evidence::cinematic_sound::{SoundModalComponent, SoundMode, SoundModeParticipation};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_math::det;
@@ -100,6 +105,56 @@ fn build(modes: Vec<SoundMode>, budget: ModalSynthesisBudget) -> ModalSynthesisM
         )
         .unwrap()
     })
+}
+
+fn calibration_binding(
+    dataset: &str,
+    method: &str,
+    validity: &str,
+    version: u32,
+    verification: &str,
+) -> CallerVerifiedCalibrationBinding {
+    CallerVerifiedCalibrationBinding {
+        receipt: DeclaredAcousticCalibrationReceipt::try_new(
+            identity(dataset),
+            identity(method),
+            identity(validity),
+            version,
+        )
+        .unwrap(),
+        verification_identity: identity(verification),
+    }
+}
+
+fn measured_parameter_input() -> EulerModalParameterSetInput {
+    EulerModalParameterSetInput {
+        authority: ModalPresetAuthority::DeclaredMeasured,
+        specimen_identity: identity("measured-specimen"),
+        rig_identity: identity("measured-rig"),
+        disclosure: "caller-declared measured modal parameters; admission does not authenticate measurements"
+            .to_owned(),
+        calibration: Some(calibration_binding(
+            "calibration-dataset",
+            "calibration-method",
+            "calibration-validity",
+            1,
+            "calibration-verification",
+        )),
+        model: ModalSynthesisModelInput {
+            sample_rate_hz: 48_000,
+            modes: vec![
+                mode(2, SoundModalComponent::GlassPlate, 1_200.0, 0.03),
+                mode(1, SoundModalComponent::Disc, 500.0, 0.01),
+            ],
+            budget: generous_budget(256),
+        },
+    }
+}
+
+fn admit_parameter_set(
+    input: EulerModalParameterSetInput,
+) -> Result<EulerModalParameterSet, EulerModalParameterSetError> {
+    with_cx(false, |cx| EulerModalParameterSet::try_admit(input, cx))
 }
 
 fn drive(force: ModalComponentValues, impulse: ModalComponentValues) -> ModalDriveFrame {
@@ -841,6 +896,209 @@ fn g0_representative_presets_are_distinct_complete_and_honestly_labeled() {
         render(&tungsten_model).mixed_samples_fs,
         render(&stainless_model).mixed_samples_fs
     );
+}
+
+#[test]
+fn g0_measured_parameter_set_prepares_the_production_model_without_promoting_authority() {
+    let first = admit_parameter_set(measured_parameter_input()).unwrap();
+    let replay = admit_parameter_set(measured_parameter_input()).unwrap();
+    assert_eq!(first.identity(), replay.identity());
+    assert_eq!(first.model().identity(), replay.model().identity());
+    assert_eq!(first.authority(), ModalPresetAuthority::DeclaredMeasured);
+    assert_eq!(first.specimen_identity(), identity("measured-specimen"));
+    assert_eq!(first.rig_identity(), identity("measured-rig"));
+    assert!(first.disclosure().contains("does not authenticate"));
+    assert_eq!(first.model().modes()[0].mode_id, 1);
+    assert_eq!(first.model().modes()[1].mode_id, 2);
+    assert_eq!(
+        first.calibration().unwrap().verification_identity,
+        identity("calibration-verification")
+    );
+
+    let mut permuted = measured_parameter_input();
+    permuted.model.modes.reverse();
+    let permuted = admit_parameter_set(permuted).unwrap();
+    assert_eq!(first.identity(), permuted.identity());
+    assert_eq!(first.model().identity(), permuted.model().identity());
+
+    let model_identity = first.model().identity();
+    assert_eq!(first.into_model().identity(), model_identity);
+}
+
+#[test]
+fn g3_parameter_set_refuses_empty_malformed_and_nonfinite_inputs() {
+    let zero = ContentHash([0; 32]);
+    let mut input = measured_parameter_input();
+    input.specimen_identity = zero;
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::InvalidIdentity("specimen")
+    );
+
+    let mut input = measured_parameter_input();
+    input.rig_identity = zero;
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::InvalidIdentity("rig")
+    );
+
+    for disclosure in [
+        String::new(),
+        " padded".to_owned(),
+        "two\nlines".to_owned(),
+        "x".repeat(MAX_EULER_MODAL_DISCLOSURE_BYTES + 1),
+    ] {
+        let mut input = measured_parameter_input();
+        input.disclosure = disclosure;
+        assert_eq!(
+            admit_parameter_set(input).unwrap_err(),
+            EulerModalParameterSetError::InvalidDisclosure
+        );
+    }
+
+    let mut input = measured_parameter_input();
+    input.calibration.as_mut().unwrap().verification_identity = zero;
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::InvalidIdentity("calibration-verification")
+    );
+
+    let mut input = measured_parameter_input();
+    input.authority = ModalPresetAuthority::RepresentativeUncalibrated;
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::UnexpectedCalibrationBinding
+    );
+
+    let mut input = measured_parameter_input();
+    input.model.modes.clear();
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::InvalidModel(ModalSynthesisError::EmptyModes)
+    );
+
+    let mut input = measured_parameter_input();
+    input.model.modes[0].frequency_hz = f64::NAN;
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::InvalidModel(ModalSynthesisError::InvalidMode {
+            mode_id: 2,
+            field: "frequency_hz",
+        })
+    );
+
+    let mut input = measured_parameter_input();
+    input.model.budget.maximum_total_energy_j = f64::INFINITY;
+    assert_eq!(
+        admit_parameter_set(input).unwrap_err(),
+        EulerModalParameterSetError::InvalidModel(ModalSynthesisError::InvalidBudget(
+            "maximum_total_energy_j"
+        ))
+    );
+}
+
+#[test]
+fn g3_parameter_set_identity_binds_every_provenance_and_model_field() {
+    let mut uncalibrated = measured_parameter_input();
+    uncalibrated.calibration = None;
+    let baseline = admit_parameter_set(uncalibrated.clone()).unwrap();
+    let baseline_identity = baseline.identity();
+
+    let mutations: [fn(&mut EulerModalParameterSetInput); 22] = [
+        |input| input.authority = ModalPresetAuthority::RepresentativeUncalibrated,
+        |input| input.specimen_identity = identity("other-specimen"),
+        |input| input.rig_identity = identity("other-rig"),
+        |input| input.disclosure.push('.'),
+        |input| input.model.sample_rate_hz = 44_100,
+        |input| input.model.budget.maximum_total_sample_frames *= 2,
+        |input| input.model.budget.maximum_chunk_sample_frames /= 2,
+        |input| input.model.budget.maximum_abs_displacement_m *= 0.5,
+        |input| input.model.budget.maximum_abs_velocity_m_per_s *= 0.5,
+        |input| input.model.budget.maximum_mode_energy_j *= 0.5,
+        |input| input.model.budget.maximum_total_energy_j *= 0.5,
+        |input| input.model.budget.maximum_abs_output_fs *= 0.5,
+        |input| input.model.modes[0].mode_id = 3,
+        |input| input.model.modes[0].component = SoundModalComponent::BaseAssembly,
+        |input| input.model.modes[0].frequency_hz += 1.0,
+        |input| input.model.modes[0].damping_ratio += 0.001,
+        |input| input.model.modes[0].modal_mass_kg *= 2.0,
+        |input| input.model.modes[0].source_participation.disc = 0.25,
+        |input| input.model.modes[0].source_participation.glass_plate = 0.75,
+        |input| input.model.modes[0].source_participation.base_assembly = 0.5,
+        |input| input.model.modes[0].radiation_gain_fs_s_per_m *= 0.5,
+        |input| input.model.modes[0].material_identity = identity("other-material"),
+    ];
+    for mutate in mutations {
+        let mut changed = uncalibrated.clone();
+        mutate(&mut changed);
+        let changed = admit_parameter_set(changed).unwrap();
+        assert_ne!(baseline_identity, changed.identity());
+    }
+    let mut changed = uncalibrated.clone();
+    changed.model.modes[0].base_identity = identity("other-base");
+    assert_ne!(
+        baseline_identity,
+        admit_parameter_set(changed).unwrap().identity()
+    );
+
+    let mut with_calibration = uncalibrated.clone();
+    with_calibration.calibration = measured_parameter_input().calibration;
+    let calibration_baseline = admit_parameter_set(with_calibration.clone()).unwrap();
+    assert_ne!(baseline_identity, calibration_baseline.identity());
+
+    let calibration_mutations: [fn(&mut EulerModalParameterSetInput); 5] = [
+        |input| {
+            input.calibration = Some(calibration_binding(
+                "other-dataset",
+                "calibration-method",
+                "calibration-validity",
+                1,
+                "calibration-verification",
+            ));
+        },
+        |input| {
+            input.calibration = Some(calibration_binding(
+                "calibration-dataset",
+                "other-method",
+                "calibration-validity",
+                1,
+                "calibration-verification",
+            ));
+        },
+        |input| {
+            input.calibration = Some(calibration_binding(
+                "calibration-dataset",
+                "calibration-method",
+                "other-validity",
+                1,
+                "calibration-verification",
+            ));
+        },
+        |input| {
+            input.calibration = Some(calibration_binding(
+                "calibration-dataset",
+                "calibration-method",
+                "calibration-validity",
+                2,
+                "calibration-verification",
+            ));
+        },
+        |input| {
+            input.calibration = Some(calibration_binding(
+                "calibration-dataset",
+                "calibration-method",
+                "calibration-validity",
+                1,
+                "other-verification",
+            ));
+        },
+    ];
+    for mutate in calibration_mutations {
+        let mut changed = with_calibration.clone();
+        mutate(&mut changed);
+        let changed = admit_parameter_set(changed).unwrap();
+        assert_ne!(calibration_baseline.identity(), changed.identity());
+    }
 }
 
 #[test]

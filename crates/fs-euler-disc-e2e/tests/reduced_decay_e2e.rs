@@ -4,12 +4,23 @@
 //! checks of the stated reduced equations. They are not independent emergence,
 //! experimental agreement, or physical validation.
 
+use fs_euler_disc_e2e::reduced_decay::{
+    THORNE_2026_AMBIENT_AIR_DENSITY_KG_PER_M3, THORNE_2026_DECLARED_AIR_VISCOSITY_PA_S,
+    THORNE_2026_FITTED_ROLLING_COEFFICIENT, THORNE_2026_SOURCE_ID,
+    THORNE_2026_STEEL_DISC_DIAMETER_M, THORNE_2026_STEEL_DISC_FILLET_RADIUS_M,
+    THORNE_2026_STEEL_DISC_MASS_KG, THORNE_2026_STEEL_DISC_THICKNESS_M,
+    THORNE_2026_VACUUM_AIR_DENSITY_KG_PER_M3, Thorne2026SteelGlassBenchmark,
+    run_thorne_2026_steel_glass_benchmark, thorne_2026_channel_crossover_diagnostic,
+    thorne_2026_refinement_evidence,
+};
+use fs_euler_disc_e2e::specimen::DiscProfileSpec;
 use fs_euler_disc_e2e::{
     BildstenBoundaryLayerChannel, ChannelCrossoverDiagnostic, ChannelCrossoverNotComparable,
     DryContourChannel, ReducedDecayError, ReducedDecayInput, ReducedDecayTerminal,
     STANDARD_GRAVITY_M_PER_S2, channel_crossover_diagnostic, refinement_evidence,
     run_reduced_decay, structured_runner_output,
 };
+use fs_rep_frep::SquatDiscEdgeTreatment;
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn dry_channel(force_n: f64) -> DryContourChannel {
@@ -400,4 +411,152 @@ fn e2e_reduced_decay_distinguishes_oracle_and_bildsten_sources() {
             field: "small_angle_oracle_source_id"
         })
     ));
+}
+
+#[test]
+fn e2e_thorne_2026_benchmark_binds_reported_specimen_and_direct_power_laws() {
+    let benchmark = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
+    assert_eq!(benchmark.specimen.source_id, THORNE_2026_SOURCE_ID);
+    assert_eq!(
+        benchmark.specimen.diameter_m.to_bits(),
+        THORNE_2026_STEEL_DISC_DIAMETER_M.to_bits()
+    );
+    assert_eq!(
+        benchmark.specimen.thickness_m.to_bits(),
+        THORNE_2026_STEEL_DISC_THICKNESS_M.to_bits()
+    );
+    assert_eq!(
+        benchmark.specimen.mass_kg.to_bits(),
+        THORNE_2026_STEEL_DISC_MASS_KG.to_bits()
+    );
+    assert_eq!(
+        benchmark.specimen.outer_fillet_radius_m.to_bits(),
+        THORNE_2026_STEEL_DISC_FILLET_RADIUS_M.to_bits()
+    );
+    assert!(matches!(
+        benchmark.specimen.profile_spec(),
+        DiscProfileSpec::SolidCylinder {
+            outer_radius_m,
+            thickness_m,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius },
+        } if outer_radius_m.to_bits() == (0.5 * THORNE_2026_STEEL_DISC_DIAMETER_M).to_bits()
+            && thickness_m.to_bits() == THORNE_2026_STEEL_DISC_THICKNESS_M.to_bits()
+            && radius.to_bits() == THORNE_2026_STEEL_DISC_FILLET_RADIUS_M.to_bits()
+    ));
+
+    let run = run_thorne_2026_steel_glass_benchmark(&benchmark).expect("benchmark run");
+    let initial = run.samples.first().expect("initial sample");
+    let radius_m = 0.5 * THORNE_2026_STEEL_DISC_DIAMETER_M;
+    let expected_rolling_w = THORNE_2026_FITTED_ROLLING_COEFFICIENT
+        * THORNE_2026_STEEL_DISC_MASS_KG
+        * STANDARD_GRAVITY_M_PER_S2
+        * radius_m
+        * initial.omega_rad_s;
+    assert_eq!(
+        initial.powers.published_rolling_w.to_bits(),
+        expected_rolling_w.to_bits()
+    );
+    assert_ne!(
+        initial.powers.published_rolling_w.to_bits(),
+        (expected_rolling_w * initial.theta_rad.cos()).to_bits(),
+        "the source-bound channel must not inherit ConstantContourForce's cos(theta) speed"
+    );
+    let expected_air_w = 4.0
+        * STANDARD_GRAVITY_M_PER_S2.powf(1.25)
+        * radius_m.powf(2.75)
+        * (THORNE_2026_DECLARED_AIR_VISCOSITY_PA_S * THORNE_2026_AMBIENT_AIR_DENSITY_KG_PER_M3)
+            .sqrt()
+        * initial.theta_rad.powf(-1.25);
+    assert!((initial.powers.bildsten_boundary_layer_w / expected_air_w - 1.0).abs() < 1.0e-12);
+    assert_eq!(initial.powers.dry_contour_w, 0.0);
+    assert_eq!(
+        run.provenance.model_authority,
+        "literature-calibrated-analytical"
+    );
+    assert_eq!(
+        run.provenance.physical_validation,
+        "no-raw-trajectory-or-full-fsi-validation-claimed"
+    );
+    assert_eq!(run.terminal, ReducedDecayTerminal::ValidityCutoff);
+    assert!(
+        run.final_sample().expect("cutoff sample").time_s > 8.0,
+        "the source run must cover the complete eight-second presentation horizon"
+    );
+}
+
+#[test]
+fn e2e_thorne_2026_crossover_and_ambient_vacuum_direction_match_the_declared_model() {
+    let ambient = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
+    let vacuum = Thorne2026SteelGlassBenchmark::partial_vacuum().expect("vacuum benchmark");
+    let crossover =
+        thorne_2026_channel_crossover_diagnostic(&ambient).expect("published-channel crossover");
+    assert!(matches!(
+        crossover,
+        ChannelCrossoverDiagnostic::AtInclination { theta_rad }
+            if (theta_rad - 0.03).abs() < 0.01
+    ));
+
+    let ambient_run =
+        run_thorne_2026_steel_glass_benchmark(&ambient).expect("ambient benchmark run");
+    let vacuum_run = run_thorne_2026_steel_glass_benchmark(&vacuum).expect("vacuum benchmark run");
+    let ambient_initial = ambient_run.samples.first().expect("ambient initial sample");
+    let vacuum_initial = vacuum_run.samples.first().expect("vacuum initial sample");
+    assert_eq!(
+        ambient_initial.powers.published_rolling_w.to_bits(),
+        vacuum_initial.powers.published_rolling_w.to_bits()
+    );
+    assert!(
+        ambient_initial.powers.bildsten_boundary_layer_w
+            > vacuum_initial.powers.bildsten_boundary_layer_w
+    );
+    assert!(
+        ambient_run.final_sample().expect("ambient final").time_s
+            < vacuum_run.final_sample().expect("vacuum final").time_s,
+        "lower gas density must lengthen the declared model's decay from the same initial state"
+    );
+    let density_ratio =
+        THORNE_2026_AMBIENT_AIR_DENSITY_KG_PER_M3 / THORNE_2026_VACUUM_AIR_DENSITY_KG_PER_M3;
+    let power_ratio = ambient_initial.powers.bildsten_boundary_layer_w
+        / vacuum_initial.powers.bildsten_boundary_layer_w;
+    assert!((power_ratio - density_ratio.sqrt()).abs() < 1.0e-12);
+}
+
+#[test]
+fn e2e_thorne_2026_refinement_preserves_both_published_channels() {
+    let benchmark = Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark");
+    let evidence = thorne_2026_refinement_evidence(&benchmark).expect("benchmark refinement");
+    assert_eq!(
+        evidence.coarse.terminal,
+        ReducedDecayTerminal::ValidityCutoff
+    );
+    assert_eq!(evidence.fine.terminal, ReducedDecayTerminal::ValidityCutoff);
+    assert_eq!(
+        evidence.fine.parameters.timestep_s.to_bits(),
+        (0.5 * evidence.coarse.parameters.timestep_s).to_bits()
+    );
+    let coarse = evidence.coarse.final_sample().expect("coarse cutoff");
+    let fine = evidence.fine.final_sample().expect("fine cutoff");
+    assert!(coarse.work.published_rolling_j > 0.0);
+    assert!(coarse.work.bildsten_boundary_layer_j > 0.0);
+    assert!(fine.work.published_rolling_j > 0.0);
+    assert!(fine.work.bildsten_boundary_layer_j > 0.0);
+    assert!(evidence.terminal_time_difference_s < 1.0e-4);
+    assert!(evidence.total_work_difference_j < 1.0e-12);
+    assert!((coarse.work.published_rolling_j - fine.work.published_rolling_j).abs() < 3.0e-7);
+    assert!(
+        (coarse.work.bildsten_boundary_layer_j - fine.work.bildsten_boundary_layer_j).abs()
+            < 3.0e-7
+    );
+    assert_eq!(
+        evidence.coarse.provenance.model_authority,
+        "literature-calibrated-analytical"
+    );
+    assert_eq!(
+        evidence
+            .fine
+            .provenance
+            .published_rolling_source_id
+            .as_deref(),
+        Some(THORNE_2026_SOURCE_ID)
+    );
 }
