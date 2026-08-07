@@ -46,6 +46,13 @@ const UNIT_TOLERANCE: f64 = 1.0e-12;
 const DERIVED_QOI_TOLERANCE: f64 = 1.0e-9;
 const MAX_TEXT_BYTES: usize = 1024;
 const INTERVAL_END_ULP_TOLERANCE: u64 = 32;
+// A tail bridge may rebase a producer clock by subtracting its source-time
+// origin from each endpoint.  At sub-second output times that subtraction can
+// leave a few femtoseconds of cancellation residue, far larger than 32 ULPs
+// of a `1e-4 s` endpoint but still only bounded binary64 rounding noise.  Do
+// not extend this allowance to large clocks: their existing endpoint-ULP
+// bound remains the authority, including near `f64::MAX`.
+const SUBSECOND_REBASED_CLOCK_TOLERANCE_S: f64 = INTERVAL_END_ULP_TOLERANCE as f64 * f64::EPSILON;
 const TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES: usize = 1_024;
 const REDUCED_DECAY_MODEL_IDENTITY_DOMAIN: &str =
     "org.frankensim.euler-disc.reduced-decay-render-model.v1";
@@ -981,11 +988,7 @@ fn validate_reduced_decay_render_source(
         }
         if let Some(previous) = previous {
             let dt_s = sample.time_s - previous.time_s;
-            if !(dt_s.is_finite()
-                && dt_s > 0.0
-                && dt_s <= advance_nonnegative_ulps(run.parameters.timestep_s, 32))
-                || sample.theta_rad >= previous.theta_rad
-            {
+            if !(dt_s.is_finite() && dt_s > 0.0) || sample.theta_rad >= previous.theta_rad {
                 return Err(reduced_decay_bridge_refusal(
                     "sample.time_or_theta_order",
                     format!("sample {index} is not a bounded descending step"),
@@ -1001,7 +1004,19 @@ fn validate_reduced_decay_render_source(
                 previous.theta_rad
                     - previous.powers.total_w() * expected_dt_s / energy_slope_j_per_rad
             };
-            if !scalar_close(dt_s, expected_dt_s)
+            // `time_s` is accumulated by repeated floating-point addition in
+            // the producer. Subtracting adjacent late samples therefore has an
+            // error measured in ULPs of the *absolute clock*, not ULPs of the
+            // small fixed timestep. Retain a bounded endpoint-scale allowance
+            // while still checking the exact left-boundary step model below.
+            let time_difference_tolerance_s = 32.0
+                * f64::EPSILON
+                * previous
+                    .time_s
+                    .abs()
+                    .max(sample.time_s.abs())
+                    .max(expected_dt_s.abs());
+            if (dt_s - expected_dt_s).abs() > time_difference_tolerance_s
                 || !scalar_close(sample.theta_rad, expected_theta_rad)
             {
                 return Err(reduced_decay_bridge_refusal(
@@ -1709,7 +1724,10 @@ fn validate_sample(
     }
     let declared_end_s = input.interval_start_time_s + metadata.timestep_s;
     let maximum_end_s = advance_nonnegative_ulps(declared_end_s, INTERVAL_END_ULP_TOLERANCE);
-    if input.time_s > maximum_end_s {
+    let accepted_subsecond_rebase_residue = declared_end_s.is_finite()
+        && declared_end_s.abs() < 1.0
+        && input.time_s - declared_end_s <= SUBSECOND_REBASED_CLOCK_TOLERANCE_S;
+    if input.time_s > maximum_end_s && !accepted_subsecond_rebase_residue {
         return Err(RenderTrajectoryError::IntervalExceedsDeclaredTimestep(
             index,
         ));

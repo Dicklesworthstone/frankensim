@@ -23,8 +23,8 @@ use crate::{
     AudioReconstructionFilterSpec, AudioResampler, AudioResamplingBoundaryPolicy,
     AudioResamplingBudget, AudioResamplingModelInput, ContactModeShape, ContactParticipationPolicy,
     EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerControlStream, EulerRenderTrajectoryArtifact,
-    ListenerPose as SpatialListenerPose, ListenerPoseTrack, MicrophoneDirectivity,
-    ModalPresetAuthority, ModalSynthesisBudget, ModalSynthesisModelInput,
+    ListenerPose as SpatialListenerPose, ListenerPoseTrack, MAX_AUDIO_MASTER_GAIN_DB,
+    MicrophoneDirectivity, ModalPresetAuthority, ModalSynthesisBudget, ModalSynthesisModelInput,
     ModeContactParticipationRule, OfflineSpatializer, RenderTrajectory,
     RenderTrajectoryCodecBudget, RepresentativeDiscMaterial, SoundWavArtifact, SourcePositionTrack,
     SpatialAudioAuthority, SpatialAudioBudget, SpatialAudioConfig, SpatialAudioOutput,
@@ -37,7 +37,7 @@ use crate::{
     },
     render_scene_bridge::{
         EulerCinematicScene, EulerEnvironmentStyle, EulerFrameRequest, EulerMaterialStyle,
-        EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec, EulerTessellationConfig,
+        EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec,
         euler_scene_smoke_settings,
     },
     representative_modal_preset,
@@ -95,7 +95,7 @@ const CRITIQUE_FRAME_SEED_SCHEDULE_VERSION: u16 = 1;
 /// World-space camera/listener origin shared by picture and spatial sound.
 const CRITIQUE_CAMERA_EYE_M: [f64; 3] = [0.24, -0.30, 0.18];
 /// World-space look target shared by picture and spatial sound.
-const CRITIQUE_CAMERA_TARGET_M: [f64; 3] = [0.0, 0.0, 0.025];
+const CRITIQUE_CAMERA_TARGET_M: [f64; 3] = [0.0, 0.0, 0.010];
 /// Artistic near-field reference distance for the desk-scale stereo preview.
 ///
 /// The spatializer's distance gain is `reference / max(distance, reference)`.
@@ -488,6 +488,17 @@ pub fn run_cinematic_fixture(
     .map_err(pipeline)?;
     progress(&trajectory_diagnostics(&trajectory_artifact));
 
+    // Sound construction is much cheaper than path tracing and depends only
+    // on the admitted trajectory. Fail here before spending render-hours if a
+    // synthesis, mastering, or artifact contract is unsatisfied.
+    progress("stage=audio begin");
+    let audio = build_audio(&trajectory_artifact, config, cx)?;
+    audio
+        .artifact
+        .verify(AudioArtifactBudget::DEFAULT, cx)
+        .map_err(pipeline)?;
+    progress("stage=audio complete");
+
     fs::create_dir(&staging_directory)?;
     let trajectory_directory = staging_directory.join("trajectory");
     let raw_directory = staging_directory.join("raw");
@@ -511,14 +522,17 @@ pub fn run_cinematic_fixture(
         )
         .map_err(pipeline)?;
     trajectory_file.flush()?;
+    let wav_path = sound_directory.join("master.float32.wav");
+    write_new(&wav_path, audio.artifact.wav_bytes())?;
+    let audio_manifest_path = sound_directory.join("master.manifest.json");
+    write_new(
+        &audio_manifest_path,
+        audio.artifact.manifest().to_manifest_json().as_bytes(),
+    )?;
 
     progress("stage=render begin");
     let camera = critique_camera(duration_s).map_err(pipeline)?;
     let mut scene_config = EulerSceneConfig::reference(camera);
-    scene_config.tessellation = EulerTessellationConfig {
-        azimuthal_segments: 64,
-        arc_subdivisions_per_arc: 8,
-    };
     scene_config.show_spin_fiducial = true;
     scene_config.disc_material = EulerMaterialStyle::Conductor {
         optics: ConductorOptics::representative_stainless_steel(),
@@ -582,16 +596,16 @@ pub fn run_cinematic_fixture(
             let mut render_settings = base_render_settings;
             render_settings.seed =
                 frame_render_seed(base_render_settings.seed, config.render_seed_salt, frame);
-            let (frame_time_s, previous_time_s, next_time_s) =
-                frame_reference_times(frame, config.frames, trajectory_start_s, trajectory_end_s);
+            let frame_times =
+                frame_timeline_times(frame, config.frames, trajectory_start_s, trajectory_end_s);
             let prepared = scene
                 .prepare_frame(EulerFrameRequest {
-                    frame_time_s,
+                    frame_time_s: frame_times.shutter_close_time_s,
                     exposure_duration_s,
                     // Treat each image as the exposure ending at its video
-                    // frame boundary. The final shutter therefore closes on
-                    // the analytical validity cutoff at exactly 8 s without
-                    // retiming or extrapolating the mechanics.
+                    // interval's mechanics boundary. Encoded presentation time
+                    // remains at the interval start, while the final shutter
+                    // closes on the analytical validity cutoff at exactly 8 s.
                     convention: ShutterConvention::BackLoaded,
                     distribution: ShutterDistribution::StratifiedCounterV1 {
                         strata: config.samples_per_pixel,
@@ -608,9 +622,9 @@ pub fn run_cinematic_fixture(
             }
             let provenance = CinematicAovProvenance::try_new(
                 u64::from(frame),
-                frame_time_s,
-                previous_time_s,
-                next_time_s,
+                frame_times.presentation_time_s,
+                frame_times.previous_presentation_time_s,
+                frame_times.next_presentation_time_s,
                 trajectory_receipt.artifact_identity(),
                 scene.scene_identity(),
                 composition_identity,
@@ -743,21 +757,6 @@ pub fn run_cinematic_fixture(
     let preview_sequence_identity = preview_sequence.finalize();
     progress("stage=render complete");
 
-    progress("stage=audio begin");
-    let audio = build_audio(&trajectory_artifact, config, cx)?;
-    let wav_path = sound_directory.join("master.float32.wav");
-    write_new(&wav_path, audio.artifact.wav_bytes())?;
-    let audio_manifest_path = sound_directory.join("master.manifest.json");
-    write_new(
-        &audio_manifest_path,
-        audio.artifact.manifest().to_manifest_json().as_bytes(),
-    )?;
-    audio
-        .artifact
-        .verify(AudioArtifactBudget::DEFAULT, cx)
-        .map_err(pipeline)?;
-    progress("stage=audio complete");
-
     let movie_path = staging_directory.join("euler-disc-critique.mkv");
     let mux = if config.mux_with_ffmpeg {
         progress("stage=mux begin");
@@ -829,25 +828,45 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CinematicFixtureError> {
     Ok(())
 }
 
-fn frame_reference_times(
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FixtureFrameTimelineTimes {
+    presentation_time_s: f64,
+    previous_presentation_time_s: f64,
+    next_presentation_time_s: f64,
+    shutter_close_time_s: f64,
+}
+
+fn frame_timeline_times(
     frame: u32,
     frames: u32,
     trajectory_start_s: f64,
     trajectory_end_s: f64,
-) -> (f64, f64, f64) {
+) -> FixtureFrameTimelineTimes {
     debug_assert!(frames > 0 && frame < frames);
-    let frame_duration_s = 1.0 / f64::from(CRITIQUE_FPS);
-    let frame_time_s = (f64::from(frame) + 1.0) * frame_duration_s;
-    // AOV motion vectors evaluate both references, so keep them inside the
-    // producer's admitted trajectory without loosening the renderer's
-    // no-extrapolation contract.
-    let previous_time_s = (frame_time_s - frame_duration_s).max(trajectory_start_s);
-    let next_time_s = (frame_time_s + frame_duration_s).min(trajectory_end_s);
-    (frame_time_s, previous_time_s, next_time_s)
+    let fps = f64::from(CRITIQUE_FPS);
+    let presentation_time_s = f64::from(frame) / fps;
+    let shutter_close_time_s = (f64::from(frame) + 1.0) / fps;
+    // Motion-vector references use encoded presentation timestamps. The next
+    // presentation boundary also encloses this frame's back-loaded shutter.
+    let previous_presentation_time_s = if frame == 0 {
+        trajectory_start_s
+    } else {
+        (f64::from(frame) - 1.0) / fps
+    }
+    .max(trajectory_start_s);
+    let next_presentation_time_s = shutter_close_time_s.min(trajectory_end_s);
+    debug_assert!(trajectory_start_s <= presentation_time_s);
+    debug_assert!(shutter_close_time_s <= trajectory_end_s);
+    FixtureFrameTimelineTimes {
+        presentation_time_s,
+        previous_presentation_time_s,
+        next_presentation_time_s,
+        shutter_close_time_s,
+    }
 }
 
 fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> ContentHash {
-    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.composition.v2");
+    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.composition.v3");
     hasher.update(scene.as_bytes());
     hasher.update(&config.width.to_le_bytes());
     hasher.update(&config.height.to_le_bytes());
@@ -872,7 +891,7 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
         hasher.update(b"temporal-denoise-disabled");
     }
     hasher.update(
-        b"back-loaded-frame-boundary-stratified-shutter-v1;daily-core-aov;aces-srgb16;exposure-ev-plus-1",
+        b"encoded-pts-frame-start-v1;back-loaded-shutter-close-at-frame-end-v2;daily-core-aov;aces-srgb16;exposure-ev-plus-1",
     );
     hasher.finalize()
 }
@@ -963,7 +982,7 @@ fn critique_camera(duration_s: f64) -> Result<AnimatedCamera, fs_render::camera:
         eye,
         target,
         GeomVec3::new(0.0, 0.0, 1.0),
-        CameraProjection::try_half_tangent(0.25)?,
+        CameraProjection::try_half_tangent(0.28)?,
         target.delta_from(eye).norm(),
         Aperture::try_circular(0.0)?,
     )?;
@@ -1040,7 +1059,7 @@ fn build_audio(
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
 ) -> Result<FixtureAudio, CinematicFixtureError> {
-    let audio_frame_count = u64::from(config.frames) * 2_000;
+    let (audio_frame_count, video_clock, audio_clock) = fixture_master_clocks(config.frames)?;
     let controls = EulerControlStream::try_derive(trajectory.trajectory(), cx).map_err(pipeline)?;
     let (chirp_start_hz, chirp_end_hz) = trajectory_body_contact_chirp_bounds(trajectory)?;
     if chirp_end_hz >= CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ {
@@ -1143,23 +1162,6 @@ fn build_audio(
         )));
     }
 
-    let video_clock = CinematicClock::try_new(
-        CinematicClockDomain::Video,
-        CRITIQUE_FPS,
-        1,
-        0,
-        i64::from(config.frames),
-    )
-    .map_err(pipeline)?;
-    let audio_clock = CinematicClock::try_new(
-        CinematicClockDomain::Audio,
-        SOUND_MASTER_SAMPLE_RATE_HZ,
-        1,
-        0,
-        i64::try_from(audio_frame_count)
-            .map_err(|_| CinematicFixtureError::Pipeline("audio clock overflow".into()))?,
-    )
-    .map_err(pipeline)?;
     let resampler = AudioResampler::try_new(
         &mapper,
         &modal,
@@ -1344,7 +1346,7 @@ fn build_audio(
     }
     let master_gain_db =
         20.0 * det::ln(TARGET_PEAK_FS / provisional_peak) / core::f64::consts::LN_10;
-    if !(-120.0..=120.0).contains(&master_gain_db) {
+    if !(-MAX_AUDIO_MASTER_GAIN_DB..=MAX_AUDIO_MASTER_GAIN_DB).contains(&master_gain_db) {
         return Err(CinematicFixtureError::Pipeline(format!(
             "mechanics-derived sound needs {:.3} dB mastering gain, beyond the admitted range",
             master_gain_db
@@ -1415,6 +1417,38 @@ fn build_audio(
         master_gain_db,
         spatialization,
     })
+}
+
+fn fixture_master_clocks(
+    frames: u32,
+) -> Result<(u64, CinematicClock, CinematicClock), CinematicFixtureError> {
+    if SOUND_MASTER_SAMPLE_RATE_HZ % CRITIQUE_FPS != 0 {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio/video master rates do not have an integral frame ratio".into(),
+        ));
+    }
+    let audio_frames_per_video_frame = SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS;
+    let audio_frame_count = u64::from(frames)
+        .checked_mul(u64::from(audio_frames_per_video_frame))
+        .ok_or_else(|| CinematicFixtureError::Pipeline("audio frame count overflow".into()))?;
+    let video_clock = CinematicClock::try_new(
+        CinematicClockDomain::Video,
+        CRITIQUE_FPS,
+        1,
+        0,
+        i64::from(frames),
+    )
+    .map_err(pipeline)?;
+    let audio_clock = CinematicClock::try_new(
+        CinematicClockDomain::Audio,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        1,
+        0,
+        i64::try_from(audio_frame_count)
+            .map_err(|_| CinematicFixtureError::Pipeline("audio clock overflow".into()))?,
+    )
+    .map_err(pipeline)?;
+    Ok((audio_frame_count, video_clock, audio_clock))
 }
 
 fn spatialize_fixture_audio(
@@ -1879,6 +1913,7 @@ fn fixture_manifest(
             "  \"schema\": \"frankensim-euler-cinematic-critique-v2\",\n",
             "  \"authority\": \"source-bound analytical simulation visualization; physically informed but uncalibrated synthesis; artistic spatial presentation\",\n",
             "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": 1, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
+            "  \"timeline\": {{\"video_pts_convention\": \"encoded-frame-start\", \"video_first_pts_s\": 0.00000000000000000e0, \"video_final_pts_s\": {video_final_pts:.17e}, \"video_frame_interval_s\": {frame_interval:.17e}, \"audio_first_sample_time_s\": 0.00000000000000000e0, \"audio_video_clock_origins_aligned\": true, \"shutter_close_convention\": \"mechanics-frame-end\", \"first_shutter_close_time_s\": {first_shutter_close:.17e}, \"final_shutter_close_time_s\": {final_shutter_close:.17e}, \"note\": \"encoded PTS is distinct from the mechanics time at which each back-loaded shutter closes\"}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
             "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"claim\": \"single dt/dt2 consistency pair for the encoded analytical model; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
@@ -1895,6 +1930,10 @@ fn fixture_manifest(
         complete = complete_sequence,
         fps = CRITIQUE_FPS,
         duration = duration_s,
+        video_final_pts = f64::from(config.frames - 1) / f64::from(CRITIQUE_FPS),
+        frame_interval = 1.0 / f64::from(CRITIQUE_FPS),
+        first_shutter_close = 1.0 / f64::from(CRITIQUE_FPS),
+        final_shutter_close = f64::from(config.frames) / f64::from(CRITIQUE_FPS),
         spp = config.samples_per_pixel,
         seed_salt = config.render_seed_salt,
         max_depth = config.max_depth,
@@ -2151,26 +2190,51 @@ mod tests {
     }
 
     #[test]
-    fn back_loaded_frame_references_close_final_shutter_at_cutoff() {
+    fn encoded_pts_and_back_loaded_shutter_use_distinct_times_in_one_frame_interval() {
         let trajectory_start_s = 0.0;
         let trajectory_end_s = 8.0;
         let exposure_s = 0.5 / f64::from(CRITIQUE_FPS);
         for frame in 0..CRITIQUE_FRAMES {
-            let (frame_time_s, previous_time_s, next_time_s) =
-                frame_reference_times(frame, CRITIQUE_FRAMES, trajectory_start_s, trajectory_end_s);
-            assert!(trajectory_start_s <= previous_time_s);
-            assert!(previous_time_s <= frame_time_s - exposure_s);
-            assert!(frame_time_s <= next_time_s);
-            assert!(next_time_s <= trajectory_end_s);
+            let times =
+                frame_timeline_times(frame, CRITIQUE_FRAMES, trajectory_start_s, trajectory_end_s);
+            let expected_pts_s = f64::from(frame) / f64::from(CRITIQUE_FPS);
+            let expected_shutter_close_s = (f64::from(frame) + 1.0) / f64::from(CRITIQUE_FPS);
+            let shutter_open_s = times.shutter_close_time_s - exposure_s;
+            assert_eq!(times.presentation_time_s, expected_pts_s);
+            assert_eq!(times.shutter_close_time_s, expected_shutter_close_s);
+            assert!(trajectory_start_s <= times.previous_presentation_time_s);
+            assert!(times.previous_presentation_time_s <= times.presentation_time_s);
+            assert!(times.presentation_time_s <= shutter_open_s);
+            assert!(shutter_open_s <= times.shutter_close_time_s);
+            assert!(times.shutter_close_time_s <= times.next_presentation_time_s);
+            assert!(times.next_presentation_time_s <= trajectory_end_s);
             if frame == 0 {
-                assert_eq!(previous_time_s, trajectory_start_s);
-                assert_eq!(frame_time_s - exposure_s, 1.0 / 48.0);
+                assert_eq!(times.presentation_time_s, 0.0);
+                assert_eq!(times.previous_presentation_time_s, 0.0);
+                assert_eq!(shutter_open_s, 1.0 / 48.0);
+                assert_eq!(times.shutter_close_time_s, 1.0 / 24.0);
+                assert_eq!(times.next_presentation_time_s, 1.0 / 24.0);
             }
             if frame + 1 == CRITIQUE_FRAMES {
-                assert_eq!(frame_time_s, trajectory_end_s);
-                assert_eq!(next_time_s, trajectory_end_s);
+                assert_eq!(times.presentation_time_s, 191.0 / 24.0);
+                assert_eq!(times.shutter_close_time_s, trajectory_end_s);
+                assert_eq!(times.next_presentation_time_s, trajectory_end_s);
             }
         }
+    }
+
+    #[test]
+    fn audio_and_encoded_video_master_clocks_share_the_zero_origin() {
+        let (audio_frames, video_clock, audio_clock) =
+            fixture_master_clocks(CRITIQUE_FRAMES).unwrap();
+        assert_eq!(video_clock.start_tick(), 0);
+        assert_eq!(audio_clock.start_tick(), 0);
+        assert_eq!(video_clock.end_tick_exclusive(), i64::from(CRITIQUE_FRAMES));
+        assert_eq!(audio_frames, u64::from(CRITIQUE_FRAMES) * 2_000);
+        assert_eq!(
+            audio_clock.end_tick_exclusive(),
+            i64::try_from(audio_frames).unwrap()
+        );
     }
 
     #[test]
@@ -2260,5 +2324,51 @@ mod tests {
         assert_eq!(faded[3].right_fs, -0.5);
         assert_eq!(faded[4].left_fs.to_bits(), 0.0_f64.to_bits());
         assert_eq!(faded[4].right_fs, 0.0);
+    }
+
+    #[test]
+    fn source_bound_audio_is_audible_and_admitted_before_rendering() {
+        with_test_cx(|cx| {
+            let benchmark = Thorne2026SteelGlassBenchmark::ambient().unwrap();
+            let profile = benchmark.resolve_specimen(cx).unwrap();
+            let refinement = thorne_2026_refinement_evidence(&benchmark).unwrap();
+            let trajectory =
+                RenderTrajectory::from_reduced_decay_run(&refinement.coarse, &profile, cx).unwrap();
+            let artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+                hash_domain(
+                    "org.frankensim.euler-critique.audio-regression.v1",
+                    b"source-bound-eight-second-tail",
+                ),
+                trajectory,
+                Vec::new(),
+                RenderTrajectoryCodecBudget::DEFAULT,
+                cx,
+            )
+            .unwrap();
+
+            for spatialize_audio in [true, false] {
+                let mut config = CinematicFixtureConfig::default();
+                config.spatialize_audio = spatialize_audio;
+                let audio = build_audio(&artifact, &config, cx).unwrap();
+                assert!(audio.pre_master_peak_fs.is_finite());
+                assert!(audio.pre_master_peak_fs > 0.0);
+                // This exact mechanics-driven source motivated the expanded
+                // presentation-gain range. Preserve the physical 2 N/W force
+                // mapping and normalize only at the explicitly non-SPL master.
+                assert!(audio.master_gain_db > 120.0);
+                assert!(audio.master_gain_db <= MAX_AUDIO_MASTER_GAIN_DB);
+                let meters = audio.artifact.manifest().meters();
+                let peak = meters.sample_peak_fs.max(meters.true_peak_estimate_fs);
+                assert!(peak > 0.40 && peak <= 0.46, "stored peak {peak}");
+                assert_eq!(
+                    audio.artifact.manifest().wav().sample_frame_count(),
+                    u64::from(CRITIQUE_FRAMES) * 2_000
+                );
+                audio
+                    .artifact
+                    .verify(AudioArtifactBudget::DEFAULT, cx)
+                    .unwrap();
+            }
+        });
     }
 }

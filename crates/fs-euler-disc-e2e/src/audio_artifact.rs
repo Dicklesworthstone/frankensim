@@ -34,6 +34,14 @@ pub const AUDIO_ARTIFACT_CANCELLATION_POLL_FRAMES: usize = 1_024;
 pub const AUDIO_ARTIFACT_CANCELLATION_POLL_BYTES: usize = 64 * 1_024;
 /// Four-times oversampling used by the declared intersample-peak estimate.
 pub const AUDIO_TRUE_PEAK_OVERSAMPLE_FACTOR: usize = 4;
+/// Largest explicit post-mix presentation gain admitted by the dry mixer.
+///
+/// Physically informed but uncalibrated modal velocities can sit many orders
+/// of magnitude below digital full scale. This bound permits their explicit
+/// normalization without changing the mechanics-to-force mapping. Independent
+/// sample and intersample headroom gates still refuse any over-range artifact;
+/// this is never an SPL or acoustic-pressure claim.
+pub const MAX_AUDIO_MASTER_GAIN_DB: f64 = 180.0;
 
 const WAV_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.wav.v1";
 const WAV_METADATA_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.wav-metadata.v1";
@@ -258,12 +266,10 @@ impl AudioDryMixSpec {
                 return Err(AudioArtifactError::InvalidMix(field));
             }
         }
-        // A physically informed, uncalibrated modal source can be many orders
-        // of magnitude below digital full scale. Permit an explicit mastering
-        // gain large enough to make such sources audible; the independent
-        // sample and intersample headroom gate still refuses any over-range
-        // artifact. This is digital presentation gain, never an SPL claim.
-        if !self.master_gain_db.is_finite() || !(-120.0..=120.0).contains(&self.master_gain_db) {
+        if !self.master_gain_db.is_finite()
+            || !(-MAX_AUDIO_MASTER_GAIN_DB..=MAX_AUDIO_MASTER_GAIN_DB)
+                .contains(&self.master_gain_db)
+        {
             return Err(AudioArtifactError::InvalidMix("master gain"));
         }
         Ok(())

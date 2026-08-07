@@ -7,9 +7,9 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_euler_disc_e2e::{
     AudioArtifactBudget, AudioArtifactError, AudioArtifactRole, AudioDryMixSpec, AudioMasterSource,
-    AudioSignalPath, ModalStemFrame, SoundWavArtifact, StemGainPan, StereoSample, WavMetadata,
-    WavSampleEncoding, decode_stereo_wav, encode_stereo_wav, measure_audio, mix_dry_modal_stems,
-    verify_wav_against_manifest,
+    AudioSignalPath, MAX_AUDIO_MASTER_GAIN_DB, ModalStemFrame, SoundWavArtifact, StemGainPan,
+    StereoSample, WavMetadata, WavSampleEncoding, decode_stereo_wav, encode_stereo_wav,
+    measure_audio, mix_dry_modal_stems, verify_wav_against_manifest,
 };
 use fs_evidence::{
     cinematic::{CinematicClock, CinematicClockDomain, CinematicDeliverableError, SoundAuthority},
@@ -566,12 +566,12 @@ fn g0_g3_dry_mix_obeys_pan_gain_order_and_fails_closed() {
         );
 
         let quiet_stem = [ModalStemFrame {
-            disc_fs: 1.0e-6,
+            disc_fs: 1.0e-9,
             glass_plate_fs: 0.0,
             base_assembly_fs: 0.0,
         }];
         let explicit_mastering = AudioDryMixSpec {
-            master_gain_db: 120.0,
+            master_gain_db: MAX_AUDIO_MASTER_GAIN_DB,
             ..AudioDryMixSpec::NEUTRAL
         };
         let mastered = mix_dry_modal_stems(
@@ -588,7 +588,7 @@ fn g0_g3_dry_mix_obeys_pan_gain_order_and_fails_closed() {
             "explicit positive master gain",
         );
         let excessive_mastering = AudioDryMixSpec {
-            master_gain_db: 120.000_001,
+            master_gain_db: MAX_AUDIO_MASTER_GAIN_DB + 0.000_001,
             ..AudioDryMixSpec::NEUTRAL
         };
         assert_eq!(

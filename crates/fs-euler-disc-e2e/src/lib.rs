@@ -56,9 +56,9 @@ pub use audio_artifact::{
     AUDIO_ARTIFACT_SCHEMA_VERSION, AUDIO_TRUE_PEAK_OVERSAMPLE_FACTOR, AudioArtifactBudget,
     AudioArtifactError, AudioArtifactManifest, AudioArtifactRole, AudioChannelLayoutReceipt,
     AudioDryMixSpec, AudioMasterSource, AudioMeters, AudioSignalPath, DecodedStereoWav,
-    EULER_WAV_CODEC_VERSION, MAX_WAV_COMMENT_BYTES, SoundWavArtifact, StemGainPan, StereoSample,
-    WavCodecReceipt, WavMetadata, WavSampleEncoding, decode_stereo_wav, encode_stereo_wav,
-    measure_audio, mix_dry_modal_stems, verify_wav_against_manifest,
+    EULER_WAV_CODEC_VERSION, MAX_AUDIO_MASTER_GAIN_DB, MAX_WAV_COMMENT_BYTES, SoundWavArtifact,
+    StemGainPan, StereoSample, WavCodecReceipt, WavMetadata, WavSampleEncoding, decode_stereo_wav,
+    encode_stereo_wav, measure_audio, mix_dry_modal_stems, verify_wav_against_manifest,
 };
 pub use audio_excitation::{
     AUDIO_EXCITATION_ALGORITHM_VERSION, AUDIO_EXCITATION_CANCELLATION_POLL_INTERVALS,

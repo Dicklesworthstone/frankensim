@@ -333,6 +333,36 @@ fn interval_clock_base_frame_and_contact_activity_contracts_refuse_contradiction
     RenderTrajectory::try_new(runner_shaped_metadata, vec![runner_shaped])
         .expect("producer-shaped full step remains admitted at a large absolute clock");
 
+    // The cinematic bridge rebases each endpoint independently.  This pair
+    // comes from the exact source-clock arithmetic used by its Thorne tail;
+    // cancellation leaves a few fs above `start + timestep` at a small
+    // output time.  It is a binary64 clock residue, not an overlong physical
+    // interval, and must remain admissible.
+    let source_run = run_thorne_2026_steel_glass_benchmark(
+        &Thorne2026SteelGlassBenchmark::ambient().expect("ambient benchmark"),
+    )
+    .expect("source-bound reduced decay");
+    let source_final_time_s = source_run.final_sample().expect("source cutoff").time_s;
+    let source_origin_s = source_final_time_s - REDUCED_DECAY_RENDER_TAIL_HORIZON_S;
+    let first_retained = source_run
+        .samples
+        .partition_point(|source| source.time_s < source_origin_s);
+    let source_interval_start_s = source_run.samples[first_retained + 1].time_s - source_origin_s;
+    let source_interval_end_s = source_run.samples[first_retained + 2].time_s - source_origin_s;
+    assert!(
+        source_interval_end_s > source_interval_start_s + source_run.parameters.timestep_s,
+        "regression requires the independent-rebase cancellation residue"
+    );
+    let mut rebased = sample(
+        source_interval_end_s,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    rebased.interval_start_time_s = source_interval_start_s;
+    let mut rebased_metadata = metadata();
+    rebased_metadata.timestep_s = source_run.parameters.timestep_s;
+    RenderTrajectory::try_new(rebased_metadata, vec![rebased])
+        .expect("bounded sub-second rebase residue remains admissible");
+
     let infinity_bits = f64::INFINITY.to_bits();
     let mut near_maximum = sample(f64::MAX, RenderSampleDisposition::HorizonCensored);
     near_maximum.interval_start_time_s = 0.0;
@@ -1015,6 +1045,12 @@ fn thorne_bridge_refuses_an_intermediate_state_that_does_not_follow_the_decay_st
         let mut run =
             run_thorne_2026_steel_glass_benchmark(&benchmark).expect("source-bound decay");
         let index = run.samples.len() / 2;
+        assert!(
+            index >= 313,
+            "the source run must exercise the accumulated-clock horizon that previously rejected sample 313"
+        );
+        RenderTrajectory::from_reduced_decay_run(&run, &profile, cx)
+            .expect("the unmodified source run must admit across the accumulated-clock horizon");
         let previous_theta_rad = run.samples[index - 1].theta_rad;
         let original_theta_rad = run.samples[index].theta_rad;
         let corrupted_theta_rad = 0.5 * (previous_theta_rad + original_theta_rad);

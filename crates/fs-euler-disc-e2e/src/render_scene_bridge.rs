@@ -52,7 +52,7 @@ use crate::specimen::{ResolvedDiscProfile, ResolvedDiscProfileIdentities};
 use crate::timeline_resampling::{EventEvaluationSide, ExposureEventPolicy};
 
 /// Version of the scene-composition, asset-binding, and preview-mesh policy.
-pub const EULER_RENDER_SCENE_BRIDGE_VERSION: u16 = 1;
+pub const EULER_RENDER_SCENE_BRIDGE_VERSION: u16 = 2;
 /// Domain for the COM-centered preview mesh's complete canonical input.
 pub const EULER_PREVIEW_MESH_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.euler-preview-mesh.v1";
@@ -90,6 +90,11 @@ const SPIN_FIDUCIAL_HALF_WIDTH_M: f64 = 0.00075;
 const SPIN_FIDUCIAL_LIFT_M: f64 = 0.00005;
 const SPIN_FIDUCIAL_THICKNESS_M: f64 = 0.00015;
 const SPIN_FIDUCIAL_LINEAR_RGB: [f64; 3] = [0.95, 0.18, 0.03];
+// These visual-only chamfers preserve the declared outer apparatus dimensions
+// while replacing mathematically sharp manufactured edges with bounded planar
+// bevels that can carry a physically plausible grazing highlight.
+const GLASS_PLATE_BEVEL_M: f64 = 0.00075;
+const HOUSING_BEVEL_M: f64 = 0.001;
 
 /// Stable default object identity for the animated disc.
 pub const EULER_DISC_OBJECT_ID: u64 = 0x4555_4c45_525f_0001;
@@ -124,8 +129,7 @@ pub struct EulerTessellationConfig {
 }
 
 impl EulerTessellationConfig {
-    /// Bounded interactive-quality default; 4K qualification may select a
-    /// finer admitted configuration and receives its own identity.
+    /// Bounded reference-quality default suitable for native-4K qualification.
     pub const DEFAULT: Self = Self {
         azimuthal_segments: 256,
         arc_subdivisions_per_arc: 32,
@@ -572,11 +576,12 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             disc.trajectory().clone(),
         )?;
 
-        let plate_mesh = box_mesh(
+        let plate_mesh = beveled_box_mesh(
             0.5 * config.base.plate_width_m,
             0.5 * config.base.plate_depth_m,
             -config.base.plate_thickness_m,
             0.0,
+            GLASS_PLATE_BEVEL_M,
         );
         let plate_geometry_identity = box_identity(
             b"animated-base-plate",
@@ -585,6 +590,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                 config.base.plate_depth_m,
                 config.base.plate_thickness_m,
                 0.0,
+                GLASS_PLATE_BEVEL_M,
             ],
         );
         let plate = AnimatedGeometryInstance::try_new(
@@ -603,16 +609,18 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                 config.base.housing_depth_m,
                 housing_bottom,
                 housing_top,
+                HOUSING_BEVEL_M,
             ],
         );
         let housing = GeometryInstance::try_new(
             config.object_ids.housing,
             housing_geometry_identity,
-            SharedGeometry::mesh(box_mesh(
+            SharedGeometry::mesh(beveled_box_mesh(
                 0.5 * config.base.housing_width_m,
                 0.5 * config.base.housing_depth_m,
                 housing_bottom,
                 housing_top,
+                HOUSING_BEVEL_M,
             )),
             nominal_base_transform(artifact)?,
         )?;
@@ -1463,6 +1471,22 @@ fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
             return Err(EulerSceneError::InvalidConfig(field));
         }
     }
+    if config.base.plate_width_m <= 2.0 * GLASS_PLATE_BEVEL_M
+        || config.base.plate_depth_m <= 2.0 * GLASS_PLATE_BEVEL_M
+        || config.base.plate_thickness_m <= 2.0 * GLASS_PLATE_BEVEL_M
+    {
+        return Err(EulerSceneError::InvalidConfig(
+            "plate dimensions must contain the visual bevel",
+        ));
+    }
+    if config.base.housing_width_m <= 2.0 * HOUSING_BEVEL_M
+        || config.base.housing_depth_m <= 2.0 * HOUSING_BEVEL_M
+        || config.base.housing_height_m <= 2.0 * HOUSING_BEVEL_M
+    {
+        return Err(EulerSceneError::InvalidConfig(
+            "housing dimensions must contain the visual bevel",
+        ));
+    }
     if !config.base.housing_gap_m.is_finite() || config.base.housing_gap_m < 0.0 {
         return Err(EulerSceneError::InvalidConfig("housing_gap_m"));
     }
@@ -2161,6 +2185,178 @@ fn box_mesh(half_x: f64, half_y: f64, z_min: f64, z_max: f64) -> TriMesh {
     box_mesh_bounds(-half_x, half_x, -half_y, half_y, z_min, z_max)
 }
 
+fn beveled_box_mesh(half_x: f64, half_y: f64, z_min: f64, z_max: f64, bevel_m: f64) -> TriMesh {
+    debug_assert!(half_x.is_finite() && half_x > bevel_m);
+    debug_assert!(half_y.is_finite() && half_y > bevel_m);
+    debug_assert!(z_min.is_finite() && z_max.is_finite());
+    debug_assert!(z_max - z_min > 2.0 * bevel_m);
+    debug_assert!(bevel_m.is_finite() && bevel_m > 0.0);
+
+    let x_limits = [-half_x, half_x];
+    let y_limits = [-half_y, half_y];
+    let z_limits = [z_min, z_max];
+    let x_insets = [-half_x + bevel_m, half_x - bevel_m];
+    let y_insets = [-half_y + bevel_m, half_y - bevel_m];
+    let z_insets = [z_min + bevel_m, z_max - bevel_m];
+    let center = [0.0, 0.0, 0.5 * (z_min + z_max)];
+    let mut vertices = Vec::with_capacity(96);
+    let mut triangles = Vec::with_capacity(44);
+
+    // Six retained principal faces.
+    for side in 0..2 {
+        push_oriented_quad(
+            &mut vertices,
+            &mut triangles,
+            [
+                [x_limits[side], y_insets[0], z_insets[0]],
+                [x_limits[side], y_insets[1], z_insets[0]],
+                [x_limits[side], y_insets[1], z_insets[1]],
+                [x_limits[side], y_insets[0], z_insets[1]],
+            ],
+            center,
+        );
+        push_oriented_quad(
+            &mut vertices,
+            &mut triangles,
+            [
+                [x_insets[0], y_limits[side], z_insets[0]],
+                [x_insets[1], y_limits[side], z_insets[0]],
+                [x_insets[1], y_limits[side], z_insets[1]],
+                [x_insets[0], y_limits[side], z_insets[1]],
+            ],
+            center,
+        );
+        push_oriented_quad(
+            &mut vertices,
+            &mut triangles,
+            [
+                [x_insets[0], y_insets[0], z_limits[side]],
+                [x_insets[1], y_insets[0], z_limits[side]],
+                [x_insets[1], y_insets[1], z_limits[side]],
+                [x_insets[0], y_insets[1], z_limits[side]],
+            ],
+            center,
+        );
+    }
+
+    // Twelve 45-degree edge faces.
+    for x_side in 0..2 {
+        for y_side in 0..2 {
+            push_oriented_quad(
+                &mut vertices,
+                &mut triangles,
+                [
+                    [x_limits[x_side], y_insets[y_side], z_insets[0]],
+                    [x_insets[x_side], y_limits[y_side], z_insets[0]],
+                    [x_insets[x_side], y_limits[y_side], z_insets[1]],
+                    [x_limits[x_side], y_insets[y_side], z_insets[1]],
+                ],
+                center,
+            );
+        }
+    }
+    for x_side in 0..2 {
+        for z_side in 0..2 {
+            push_oriented_quad(
+                &mut vertices,
+                &mut triangles,
+                [
+                    [x_limits[x_side], y_insets[0], z_insets[z_side]],
+                    [x_insets[x_side], y_insets[0], z_limits[z_side]],
+                    [x_insets[x_side], y_insets[1], z_limits[z_side]],
+                    [x_limits[x_side], y_insets[1], z_insets[z_side]],
+                ],
+                center,
+            );
+        }
+    }
+    for y_side in 0..2 {
+        for z_side in 0..2 {
+            push_oriented_quad(
+                &mut vertices,
+                &mut triangles,
+                [
+                    [x_insets[0], y_limits[y_side], z_insets[z_side]],
+                    [x_insets[0], y_insets[y_side], z_limits[z_side]],
+                    [x_insets[1], y_insets[y_side], z_limits[z_side]],
+                    [x_insets[1], y_limits[y_side], z_insets[z_side]],
+                ],
+                center,
+            );
+        }
+    }
+
+    // Eight triangular corner facets close the chamfered solid.
+    for x_side in 0..2 {
+        for y_side in 0..2 {
+            for z_side in 0..2 {
+                push_oriented_triangle(
+                    &mut vertices,
+                    &mut triangles,
+                    [
+                        [x_limits[x_side], y_insets[y_side], z_insets[z_side]],
+                        [x_insets[x_side], y_limits[y_side], z_insets[z_side]],
+                        [x_insets[x_side], y_insets[y_side], z_limits[z_side]],
+                    ],
+                    center,
+                );
+            }
+        }
+    }
+
+    debug_assert_eq!(vertices.len(), 96);
+    debug_assert_eq!(triangles.len(), 44);
+    TriMesh::new(vertices, triangles)
+}
+
+fn push_oriented_quad(
+    vertices: &mut Vec<[f64; 3]>,
+    triangles: &mut Vec<[u32; 3]>,
+    mut face: [[f64; 3]; 4],
+    center: [f64; 3],
+) {
+    orient_face_outward(&mut face, center);
+    let base = u32::try_from(vertices.len()).expect("scene mesh vertex count fits u32");
+    vertices.extend(face);
+    triangles.push([base, base + 1, base + 2]);
+    triangles.push([base, base + 2, base + 3]);
+}
+
+fn push_oriented_triangle(
+    vertices: &mut Vec<[f64; 3]>,
+    triangles: &mut Vec<[u32; 3]>,
+    mut face: [[f64; 3]; 3],
+    center: [f64; 3],
+) {
+    orient_face_outward(&mut face, center);
+    let base = u32::try_from(vertices.len()).expect("scene mesh vertex count fits u32");
+    vertices.extend(face);
+    triangles.push([base, base + 1, base + 2]);
+}
+
+fn orient_face_outward<const N: usize>(face: &mut [[f64; 3]; N], center: [f64; 3]) {
+    debug_assert!(N >= 3);
+    let edge_a = Vec3::new(
+        face[1][0] - face[0][0],
+        face[1][1] - face[0][1],
+        face[1][2] - face[0][2],
+    );
+    let edge_b = Vec3::new(
+        face[2][0] - face[0][0],
+        face[2][1] - face[0][1],
+        face[2][2] - face[0][2],
+    );
+    let normal = geom_cross(edge_a, edge_b);
+    let outward = Vec3::new(
+        face[0][0] - center[0],
+        face[0][1] - center[1],
+        face[0][2] - center[2],
+    );
+    if normal.dot(outward) < 0.0 {
+        face[1..].reverse();
+    }
+}
+
 fn box_mesh_bounds(
     x_min: f64,
     x_max: f64,
@@ -2269,8 +2465,8 @@ fn radial_strip_identity(
     hasher.finalize()
 }
 
-fn box_identity(label: &[u8], values: [f64; 4]) -> ContentHash {
-    let mut hasher = DomainHasher::new("org.frankensim.fs-euler-disc-e2e.scene-box.v1");
+fn box_identity(label: &[u8], values: [f64; 5]) -> ContentHash {
+    let mut hasher = DomainHasher::new("org.frankensim.fs-euler-disc-e2e.scene-beveled-box.v2");
     hasher.update(label);
     for value in values {
         hasher.update(&value.to_bits().to_le_bytes());
@@ -2853,5 +3049,49 @@ pub const fn euler_scene_smoke_settings(width: u32, height: u32) -> Settings {
         sampler: Sampler::OwenSobol,
         strategy: DirectStrategy::Mis,
         seed: 0x4555_4c45_525f_5343,
+    }
+}
+
+#[cfg(test)]
+mod bevel_tests {
+    use super::*;
+
+    #[test]
+    fn g0_beveled_box_preserves_outer_bounds_and_outward_winding() {
+        let mesh = beveled_box_mesh(0.10, 0.09, -0.025, 0.0, 0.001);
+        assert_eq!(mesh.vertices.len(), 96);
+        assert_eq!(mesh.triangles.len(), 44);
+
+        let mut minimum = [f64::INFINITY; 3];
+        let mut maximum = [f64::NEG_INFINITY; 3];
+        for vertex in &mesh.vertices {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex[axis]);
+                maximum[axis] = maximum[axis].max(vertex[axis]);
+            }
+        }
+        assert_eq!(minimum, [-0.10, -0.09, -0.025]);
+        assert_eq!(maximum, [0.10, 0.09, 0.0]);
+
+        let center = [0.0, 0.0, -0.0125];
+        for triangle in &mesh.triangles {
+            let a = mesh.vertices[triangle[0] as usize];
+            let b = mesh.vertices[triangle[1] as usize];
+            let c = mesh.vertices[triangle[2] as usize];
+            let edge_a = Vec3::new(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+            let edge_b = Vec3::new(c[0] - a[0], c[1] - a[1], c[2] - a[2]);
+            let normal = geom_cross(edge_a, edge_b);
+            let centroid = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            let outward = Vec3::new(
+                centroid[0] - center[0],
+                centroid[1] - center[1],
+                centroid[2] - center[2],
+            );
+            assert!(normal.dot(outward) > 0.0, "inward or degenerate triangle");
+        }
     }
 }

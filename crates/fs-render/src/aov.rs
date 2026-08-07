@@ -1853,7 +1853,7 @@ pub enum CinematicAovError {
     PaletteMismatch,
     /// Progressive append changed settings, shutter, shot, profile, or palette.
     ProgressiveBindingMismatch,
-    /// Frame reference times do not enclose the complete beauty shutter.
+    /// Frame presentation/reference times do not enclose the complete beauty shutter.
     ReferenceTimesDoNotCoverShutter,
     /// A public or restored plane shape disagreed with the raster.
     ShapeMismatch,
@@ -2001,8 +2001,10 @@ pub(crate) fn validate_reference_times(
     shutter: ShutterInterval,
 ) -> Result<(), CinematicAovError> {
     let provenance = config.provenance;
+    // Presentation PTS may name the start of a frame interval and therefore
+    // precede a back-loaded shutter. The neighboring motion references still
+    // have to enclose the complete exposure, and PTS may not follow its close.
     if provenance.previous_frame_time_s > shutter.open_s()
-        || provenance.frame_time_s < shutter.open_s()
         || provenance.frame_time_s > shutter.close_s()
         || provenance.next_frame_time_s < shutter.close_s()
     {
@@ -2792,6 +2794,34 @@ mod tests {
             .unwrap(),
             CinematicAovLimits::default(),
         )
+    }
+
+    #[test]
+    fn g0_frame_start_presentation_time_may_precede_a_covered_back_loaded_shutter() {
+        let frame_duration_s = 1.0 / 24.0;
+        let shutter = ShutterInterval::try_from_canonical_parts(
+            frame_duration_s / 2.0,
+            frame_duration_s,
+            ShutterConvention::BackLoaded,
+            ShutterDistribution::UniformCounterV1,
+        )
+        .unwrap();
+        let config = CinematicAovConfig::new(
+            CinematicAovProfile::DailyCore,
+            CinematicAovProvenance::try_new(
+                0,
+                0.0,
+                0.0,
+                frame_duration_s,
+                hash("trajectory"),
+                hash("scene"),
+                hash("composition"),
+            )
+            .unwrap(),
+            CinematicAovLimits::default(),
+        );
+
+        assert_eq!(validate_reference_times(config, shutter), Ok(()));
     }
 
     fn emitted_profile_exr(profile: CinematicAovProfile) -> fs_img::DecodedExr {
