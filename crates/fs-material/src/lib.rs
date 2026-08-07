@@ -22,6 +22,7 @@ pub mod hyper;
 pub mod identifiability;
 pub mod plastic;
 pub mod tensor;
+pub mod visco;
 
 pub use calibrate::{CalibrationFit, calibrate_bilinear};
 pub use elastic::{IsotropicElastic, OrthotropicElastic};
