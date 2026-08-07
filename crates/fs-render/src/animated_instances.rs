@@ -450,6 +450,7 @@ mod tests {
 
     use super::*;
     use crate::charts::TriMesh;
+    use crate::instances::InstanceBackendAudit;
     use crate::motion::{
         NormalizedShutterTime, ShotTimeBounds, ShutterConvention, ShutterDistribution,
     };
@@ -644,6 +645,7 @@ mod tests {
                 vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
                 vec![[0, 1, 2]],
             );
+            let bvh_fingerprint = mesh.bvh_fingerprint();
             let geometry = SharedGeometry::mesh(mesh);
             let identity = hash_domain("org.frankensim.test.animated-instance", b"triangle");
             let trajectory = RigidTransformTrajectory::try_new(vec![
@@ -666,12 +668,15 @@ mod tests {
             let hit = animated.intersect(cx, &ray, 4.0, 1.0e-9).unwrap().unwrap();
             assert_eq!(hit.object_id, 17);
             assert_eq!(hit.geometry_identity, identity);
+            assert_eq!(
+                hit.backend_audit,
+                InstanceBackendAudit::Mesh { bvh_fingerprint }
+            );
             assert!((hit.hit.t - 2.0).abs() < 2.0e-12);
             assert!((hit.hit.point.x - 1.0).abs() < 2.0e-12);
-            assert_eq!(
-                hit.frame_identity,
-                animated.instance_at(cx, 1.0).unwrap().frame_identity()
-            );
+            let timed_instance = animated.instance_at(cx, 1.0).unwrap();
+            assert!(timed_instance.geometry().ptr_eq(animated.geometry()));
+            assert_eq!(hit.frame_identity, timed_instance.frame_identity());
 
             let outside = TimedRay::at_normalized(
                 *ray.spatial(),

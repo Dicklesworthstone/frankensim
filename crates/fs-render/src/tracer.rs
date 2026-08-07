@@ -111,7 +111,7 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 3;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -186,6 +186,26 @@ struct PathContributionSplit {
     emission_xyz: [f64; 3],
 }
 
+impl PathContributionSplit {
+    const ZERO: Self = Self {
+        direct_xyz: [0.0; 3],
+        indirect_xyz: [0.0; 3],
+        emission_xyz: [0.0; 3],
+    };
+
+    fn add_assign(&mut self, other: Self) {
+        add_xyz(&mut self.direct_xyz, other.direct_xyz);
+        add_xyz(&mut self.indirect_xyz, other.indirect_xyz);
+        add_xyz(&mut self.emission_xyz, other.emission_xyz);
+    }
+}
+
+fn add_xyz(target: &mut [f64; 3], value: [f64; 3]) {
+    for channel in 0..3 {
+        target[channel] += value[channel];
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PathContributionClass {
     Direct,
@@ -253,6 +273,7 @@ struct MediumEntry {
     glass: DielectricGlass,
 }
 
+#[derive(Clone, Copy)]
 struct MediumStack {
     entries: [Option<MediumEntry>; MAX_MEDIUM_STACK_DEPTH],
     len: usize,
@@ -334,6 +355,30 @@ struct DielectricPathSample {
 }
 
 #[derive(Clone, Copy)]
+struct DielectricLaneContinuation {
+    direction: Vec3,
+    weight: f64,
+    pdf: f64,
+    delta: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SpectralPathState {
+    ray: Ray,
+    throughput: [f64; PACKET],
+    previous_bsdf: Option<PreviousBsdf>,
+    prev_origin: Point3,
+    segment_origin: Point3,
+    medium_stack: MediumStack,
+    rng: PathRng,
+    next_depth: u32,
+    /// `None` is the unsplit four-wavelength packet. Once a wavelength-
+    /// dependent transmission is sampled, each continuation owns exactly one
+    /// active lane and can never split again.
+    active_lane: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
 enum DirectLightTarget {
     Rectangle {
         primitive_index: usize,
@@ -362,6 +407,7 @@ enum CameraPath<'a> {
 /// The per-draw uniform stream: Philox keyed by (pixel, sample,
 /// dimension). Counter-based — random access, no state shared between
 /// pixels/samples/workers.
+#[derive(Clone, Copy)]
 struct PathRng {
     pixel: u32,
     sample: u32,
@@ -7093,6 +7139,7 @@ fn trace_pixel_sample_with_primary(
         ray_time,
         camera_path,
         capture_primary,
+        None,
     )
 }
 
@@ -7148,9 +7195,10 @@ fn trace_path(
     ray_time: Option<PathTime>,
     camera_path: CameraPath<'_>,
     capture_primary: bool,
+    resume: Option<SpectralPathState>,
 ) -> Result<PathTraceSample, TracerError> {
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
-    let mut rng = PathRng {
+    let rng = PathRng {
         pixel,
         sample,
         dim: 1,
@@ -7159,44 +7207,67 @@ fn trace_path(
     // Hero wavelengths: one stratified draw covers the packet.
     let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
     let lambdas = hero_wavelengths(hero, PACKET, LAMBDA_MIN, LAMBDA_MAX);
-    // Camera ray. Keep the legacy branch expression-for-expression compatible;
-    // the opt-in cinematic branch owns separate lens dimensions and evaluates
-    // at the same absolute time already carried by animated geometry.
-    let px = pixel % s.width;
-    let py = pixel / s.width;
-    let (w, h) = (f64::from(s.width), f64::from(s.height));
-    let mut ray = match camera_path {
-        CameraPath::Legacy => {
-            let ndc_x =
-                (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * scene.camera.half_tan;
-            let ndc_y = (1.0 - 2.0 * (f64::from(py) + jy) / h) * scene.camera.half_tan;
-            legacy_camera_ray(&scene.camera, ndc_x, ndc_y)
-        }
-        CameraPath::Cinematic { camera, exposure } => {
-            let time = ray_time.ok_or(TracerError::MissingRayTime)?;
-            let physical =
-                camera.evaluate_exposure(cx, exposure, time.interval.time_at(time.normalized))?;
-            let half_tan = physical.projection().vertical_half_tan();
-            let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
-            let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
-            physical.generate_ray_from_tangent_offsets(
-                cx,
-                x_tan,
-                y_tan,
-                camera_lens_sample(key, pixel, sample)?,
-            )?
+    let state = if let Some(state) = resume {
+        state
+    } else {
+        // Camera ray. Keep the legacy branch expression-for-expression compatible;
+        // the opt-in cinematic branch owns separate lens dimensions and evaluates
+        // at the same absolute time already carried by animated geometry.
+        let px = pixel % s.width;
+        let py = pixel / s.width;
+        let (w, h) = (f64::from(s.width), f64::from(s.height));
+        let ray = match camera_path {
+            CameraPath::Legacy => {
+                let ndc_x = (2.0 * (f64::from(px) + jx) / w - 1.0)
+                    * s.camera_aspect()
+                    * scene.camera.half_tan;
+                let ndc_y = (1.0 - 2.0 * (f64::from(py) + jy) / h) * scene.camera.half_tan;
+                legacy_camera_ray(&scene.camera, ndc_x, ndc_y)
+            }
+            CameraPath::Cinematic { camera, exposure } => {
+                let time = ray_time.ok_or(TracerError::MissingRayTime)?;
+                let physical = camera.evaluate_exposure(
+                    cx,
+                    exposure,
+                    time.interval.time_at(time.normalized),
+                )?;
+                let half_tan = physical.projection().vertical_half_tan();
+                let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
+                let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
+                physical.generate_ray_from_tangent_offsets(
+                    cx,
+                    x_tan,
+                    y_tan,
+                    camera_lens_sample(key, pixel, sample)?,
+                )?
+            }
+        };
+        SpectralPathState {
+            ray,
+            throughput: [1.0; PACKET],
+            previous_bsdf: None,
+            prev_origin: ray.origin,
+            segment_origin: ray.origin,
+            medium_stack: MediumStack::new(),
+            rng,
+            next_depth: 0,
+            active_lane: None,
         }
     };
-    let mut throughput = [1.0f64; PACKET];
     let mut radiance = [0.0f64; PACKET];
     let mut contribution_radiance = capture_primary.then_some(PathContributionRadiance::ZERO);
-    let mut previous_bsdf: Option<PreviousBsdf> = None;
-    let mut prev_origin = ray.origin;
-    let mut segment_origin = ray.origin;
-    let mut medium_stack = MediumStack::new();
-    let mut packet_collapsed = false;
+    let mut resumed_xyz = [0.0; 3];
+    let mut resumed_contribution_split = capture_primary.then_some(PathContributionSplit::ZERO);
     let mut primary = None;
-    for depth in 0..s.max_depth {
+    let mut ray = state.ray;
+    let mut throughput = state.throughput;
+    let mut previous_bsdf = state.previous_bsdf;
+    let mut prev_origin = state.prev_origin;
+    let mut segment_origin = state.segment_origin;
+    let mut medium_stack = state.medium_stack;
+    let mut rng = state.rng;
+    let active_lane = state.active_lane;
+    for depth in state.next_depth..s.max_depth {
         cx.checkpoint()?;
         let Some(intersection) = intersect(scene, cx, &ray, ray_time)? else {
             if let Some(active) = medium_stack.last() {
@@ -7281,15 +7352,12 @@ fn trace_path(
         }
 
         let dielectric_boundary = match prim.material {
-            Material::Dielectric { glass, .. } => {
-                collapse_dispersive_packet(&mut throughput, &mut packet_collapsed, glass);
-                Some(boundary_media(
-                    prim_idx,
-                    glass,
-                    frame.entering,
-                    &medium_stack,
-                )?)
-            }
+            Material::Dielectric { glass, .. } => Some(boundary_media(
+                prim_idx,
+                glass,
+                frame.entering,
+                &medium_stack,
+            )?),
             Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => None,
         };
 
@@ -7307,11 +7375,7 @@ fn trace_path(
                             let wi = direct.direction;
                             let cos_s = n.dot(wi).abs();
                             let wo = ray.dir.scale(-1.0);
-                            let eta_i = medium_ior(boundary.incident, lambdas[0])?;
-                            let eta_t = medium_ior(boundary.transmitted, lambdas[0])?;
-                            let evaluation =
-                                evaluate_rough_dielectric(n, wo, wi, eta_i, eta_t, alpha)?;
-                            if evaluation.value > 0.0 && evaluation.pdf > 0.0 && cos_s > 0.0 {
+                            if cos_s > 0.0 {
                                 let shadow = Ray {
                                     origin: dielectric_spawn_origin(hit.point, frame.geometric, wi),
                                     dir: wi,
@@ -7334,24 +7398,10 @@ fn trace_path(
                                 };
                                 if visible {
                                     let pdf_nee = direct.pdf_solid_angle;
-                                    let weight = match s.strategy {
-                                        DirectStrategy::Mis
-                                            if depth + 1 == s.max_depth
-                                                && !lighting.is_legacy_compatibility_path() =>
-                                        {
-                                            1.0
-                                        }
-                                        DirectStrategy::Mis => {
-                                            balance_heuristic(1, pdf_nee, 1, evaluation.pdf)
-                                        }
-                                        DirectStrategy::NeeOnly => 1.0,
-                                        DirectStrategy::BsdfOnly => {
-                                            return Err(TracerError::InvalidInput);
-                                        }
-                                    };
-                                    let shadow_medium = match evaluation.event {
-                                        DielectricEvent::Reflection => boundary.incident,
-                                        DielectricEvent::Transmission => boundary.transmitted,
+                                    let shadow_medium = if n.dot(wi) > 0.0 {
+                                        boundary.incident
+                                    } else {
+                                        boundary.transmitted
                                     };
                                     if matches!(direct.target, DirectLightTarget::Environment)
                                         && shadow_medium.is_some()
@@ -7375,6 +7425,35 @@ fn trace_path(
                                             n, wo, wi, eta_i, eta_t, alpha,
                                         )?
                                         .value;
+                                        if value <= 0.0 {
+                                            continue;
+                                        }
+                                        let proposal_lane = active_lane.unwrap_or(0);
+                                        let competing_pdf = rough_dielectric_proposal_pdf(
+                                            n,
+                                            wo,
+                                            wi,
+                                            alpha,
+                                            &boundary,
+                                            &lambdas,
+                                            proposal_lane,
+                                            lane,
+                                        )?;
+                                        let weight = match s.strategy {
+                                            DirectStrategy::Mis
+                                                if depth + 1 == s.max_depth
+                                                    && !lighting.is_legacy_compatibility_path() =>
+                                            {
+                                                1.0
+                                            }
+                                            DirectStrategy::Mis => {
+                                                balance_heuristic(1, pdf_nee, 1, competing_pdf)
+                                            }
+                                            DirectStrategy::NeeOnly => 1.0,
+                                            DirectStrategy::BsdfOnly => {
+                                                return Err(TracerError::InvalidInput);
+                                            }
+                                        };
                                         let attenuation = match direct.target {
                                             DirectLightTarget::Rectangle { distance_m, .. } => {
                                                 medium_transmittance(
@@ -7533,6 +7612,7 @@ fn trace_path(
         match prim.material {
             Material::Dielectric { surface, .. } => {
                 let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
+                let proposal_lane = active_lane.unwrap_or(0);
                 let event_sample = if surface.is_delta() {
                     u1
                 } else {
@@ -7544,6 +7624,7 @@ fn trace_path(
                     surface,
                     &boundary,
                     &lambdas,
+                    proposal_lane,
                     u1,
                     u2,
                     event_sample,
@@ -7551,6 +7632,87 @@ fn trace_path(
                 else {
                     break;
                 };
+                if should_split_dispersive_transmission(
+                    active_lane,
+                    sampled.event,
+                    &boundary,
+                    &lambdas,
+                )? {
+                    let continuations = sample_dispersive_transmission_lanes(
+                        n,
+                        wo,
+                        surface,
+                        &boundary,
+                        &lambdas,
+                        proposal_lane,
+                        u1,
+                        u2,
+                        sampled.event_probability,
+                    )?;
+                    if continuations[proposal_lane].is_none() {
+                        return Err(TracerError::InvalidInput);
+                    }
+                    // Each suffix runs to completion before the next fixed
+                    // lane, so at most two states are live. `active_lane`
+                    // prevents recursive children from splitting again.
+                    for (lane, continuation) in continuations.into_iter().enumerate() {
+                        let Some(continuation) = continuation else {
+                            continue;
+                        };
+                        if throughput[lane].to_bits() == 0.0_f64.to_bits()
+                            || continuation.weight.to_bits() == 0.0_f64.to_bits()
+                        {
+                            continue;
+                        }
+                        let mut child_medium_stack = medium_stack;
+                        apply_medium_transition(&mut child_medium_stack, boundary.transition)?;
+                        let mut child_throughput = [0.0; PACKET];
+                        child_throughput[lane] = throughput[lane] * continuation.weight;
+                        let child = trace_path(
+                            scene,
+                            lighting,
+                            cx,
+                            s,
+                            kn,
+                            pixel,
+                            sample,
+                            jx,
+                            jy,
+                            ul,
+                            ray_time,
+                            camera_path,
+                            capture_primary,
+                            Some(SpectralPathState {
+                                ray: Ray {
+                                    origin: dielectric_spawn_origin(
+                                        hit.point,
+                                        frame.geometric,
+                                        continuation.direction,
+                                    ),
+                                    dir: continuation.direction,
+                                },
+                                throughput: child_throughput,
+                                previous_bsdf: Some(PreviousBsdf {
+                                    pdf: continuation.pdf,
+                                    delta: continuation.delta,
+                                }),
+                                prev_origin: hit.point,
+                                segment_origin: hit.point,
+                                medium_stack: child_medium_stack,
+                                rng,
+                                next_depth: depth + 1,
+                                active_lane: Some(lane),
+                            }),
+                        )?;
+                        add_xyz(&mut resumed_xyz, child.xyz);
+                        if let Some(total) = &mut resumed_contribution_split {
+                            total.add_assign(
+                                child.contribution_split.ok_or(TracerError::InvalidInput)?,
+                            );
+                        }
+                    }
+                    break;
+                }
                 for (lane, weight) in sampled.weights.into_iter().enumerate() {
                     throughput[lane] *= weight;
                 }
@@ -7607,10 +7769,16 @@ fn trace_path(
         xyz[1] += w * cie_y(l);
         xyz[2] += w * cie_z(l);
     }
-    let contribution_split = contribution_radiance.map(|contributions| PathContributionSplit {
-        direct_xyz: packet_radiance_to_xyz(contributions.direct, &lambdas, kn),
-        indirect_xyz: packet_radiance_to_xyz(contributions.indirect, &lambdas, kn),
-        emission_xyz: packet_radiance_to_xyz(contributions.emission, &lambdas, kn),
+    add_xyz(&mut xyz, resumed_xyz);
+    let contribution_split = contribution_radiance.map(|contributions| {
+        let mut split = PathContributionSplit {
+            direct_xyz: packet_radiance_to_xyz(contributions.direct, &lambdas, kn),
+            indirect_xyz: packet_radiance_to_xyz(contributions.indirect, &lambdas, kn),
+            emission_xyz: packet_radiance_to_xyz(contributions.emission, &lambdas, kn),
+        };
+        split
+            .add_assign(resumed_contribution_split.expect("captured recursive contribution split"));
+        split
     });
     Ok(PathTraceSample {
         xyz,
@@ -7828,18 +7996,235 @@ fn attenuate_segment(
     Ok(())
 }
 
-fn collapse_dispersive_packet(
-    throughput: &mut [f64; PACKET],
-    packet_collapsed: &mut bool,
-    glass: DielectricGlass,
-) {
-    if glass.ior().is_dispersive() && !*packet_collapsed {
-        throughput[0] *= PACKET as f64;
-        for lane in &mut throughput[1..] {
-            *lane = 0.0;
+fn boundary_direction_is_wavelength_dependent(
+    boundary: &BoundaryMedia,
+    lambdas: &[f64],
+) -> Result<bool, TracerError> {
+    let Some((&first, remaining)) = lambdas.split_first() else {
+        return Err(TracerError::InvalidInput);
+    };
+    let first_ratio =
+        medium_ior(boundary.incident, first)? / medium_ior(boundary.transmitted, first)?;
+    for &lambda in remaining {
+        let ratio =
+            medium_ior(boundary.incident, lambda)? / medium_ior(boundary.transmitted, lambda)?;
+        if ratio.to_bits() != first_ratio.to_bits() {
+            return Ok(true);
         }
-        *packet_collapsed = true;
     }
+    Ok(false)
+}
+
+fn should_split_dispersive_transmission(
+    active_lane: Option<usize>,
+    event: DielectricEvent,
+    boundary: &BoundaryMedia,
+    lambdas: &[f64],
+) -> Result<bool, TracerError> {
+    if active_lane.is_some() || event != DielectricEvent::Transmission {
+        return Ok(false);
+    }
+    boundary_direction_is_wavelength_dependent(boundary, lambdas)
+}
+
+#[cfg(test)]
+const fn maximum_spectral_traversals(max_depth: u32) -> u64 {
+    max_depth as u64 * PACKET as u64
+}
+
+fn rough_dielectric_microfacet_normal(
+    normal: Vec3,
+    roughness_alpha: f64,
+    microfacet_u: f64,
+    microfacet_v: f64,
+) -> Result<Vec3, TracerError> {
+    let normal_norm = normal.norm();
+    if !normal_norm.is_finite()
+        || normal_norm <= 0.0
+        || !roughness_alpha.is_finite()
+        || !(0.0..1.0).contains(&microfacet_u)
+        || !(0.0..1.0).contains(&microfacet_v)
+    {
+        return Err(TracerError::InvalidInput);
+    }
+    let normal = normal.scale(1.0 / normal_norm);
+    let alpha_squared = roughness_alpha * roughness_alpha;
+    let cos_m_squared =
+        ((1.0 - microfacet_u) / (microfacet_u * (alpha_squared - 1.0) + 1.0)).clamp(0.0, 1.0);
+    let cos_m = cos_m_squared.sqrt();
+    let sin_m = (1.0 - cos_m_squared).max(0.0).sqrt();
+    let phi = 2.0 * PI * microfacet_v;
+    Ok(to_world_all_sphere(
+        normal,
+        [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m],
+    ))
+}
+
+/// Density of the actual rough-dielectric proposal used by the packet split.
+/// Reflection has one wavelength-independent direction map. Transmission maps
+/// the shared sampled micro-normal through the target lane's Snell law while
+/// retaining the proposal lane's Fresnel branch probability.
+#[allow(clippy::too_many_arguments)]
+fn rough_dielectric_proposal_pdf(
+    normal: Vec3,
+    wo: Vec3,
+    wi: Vec3,
+    roughness_alpha: f64,
+    boundary: &BoundaryMedia,
+    lambdas: &[f64],
+    proposal_lane: usize,
+    target_lane: usize,
+) -> Result<f64, TracerError> {
+    let proposal_lambda = *lambdas
+        .get(proposal_lane)
+        .ok_or(TracerError::InvalidInput)?;
+    let target_lambda = *lambdas.get(target_lane).ok_or(TracerError::InvalidInput)?;
+    let proposal_eta_i = medium_ior(boundary.incident, proposal_lambda)?;
+    let proposal_eta_t = medium_ior(boundary.transmitted, proposal_lambda)?;
+    if normal.dot(wi) > 0.0 {
+        return Ok(evaluate_rough_dielectric(
+            normal,
+            wo,
+            wi,
+            proposal_eta_i,
+            proposal_eta_t,
+            roughness_alpha,
+        )?
+        .pdf);
+    }
+
+    let target_eta_i = medium_ior(boundary.incident, target_lambda)?;
+    let target_eta_t = medium_ior(boundary.transmitted, target_lambda)?;
+    let target_evaluation =
+        evaluate_rough_dielectric(normal, wo, wi, target_eta_i, target_eta_t, roughness_alpha)?;
+    if target_evaluation.pdf <= 0.0 || proposal_lane == target_lane {
+        return Ok(target_evaluation.pdf);
+    }
+    let normal = unit(normal);
+    let wo = unit(wo);
+    let wi = unit(wi);
+    let eta = target_eta_t / target_eta_i;
+    let half_sum = Vec3::new(wo.x + eta * wi.x, wo.y + eta * wi.y, wo.z + eta * wi.z);
+    let half_norm = half_sum.norm();
+    if !half_norm.is_finite() || half_norm <= 0.0 {
+        return Ok(0.0);
+    }
+    let mut micro_normal = half_sum.scale(1.0 / half_norm);
+    if normal.dot(micro_normal) < 0.0 {
+        micro_normal = micro_normal.scale(-1.0);
+    }
+    let incident_cosine = wo.dot(micro_normal).clamp(0.0, 1.0);
+    let target_fresnel = fresnel_dielectric(incident_cosine, target_eta_i, target_eta_t)?;
+    let target_probability = 1.0 - target_fresnel.reflectance;
+    if target_probability <= 0.0 {
+        return Ok(0.0);
+    }
+    let proposal_fresnel = fresnel_dielectric(incident_cosine, proposal_eta_i, proposal_eta_t)?;
+    let proposal_probability = 1.0 - proposal_fresnel.reflectance;
+    Ok(target_evaluation.pdf * proposal_probability / target_probability)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_dispersive_transmission_lanes(
+    normal: Vec3,
+    wo: Vec3,
+    surface: DielectricSurface,
+    boundary: &BoundaryMedia,
+    lambdas: &[f64],
+    proposal_lane: usize,
+    microfacet_u: f64,
+    microfacet_v: f64,
+    proposal_event_probability: f64,
+) -> Result<[Option<DielectricLaneContinuation>; PACKET], TracerError> {
+    if lambdas.len() != PACKET
+        || proposal_lane >= PACKET
+        || !proposal_event_probability.is_finite()
+        || proposal_event_probability <= 0.0
+        || proposal_event_probability > 1.0
+    {
+        return Err(TracerError::InvalidInput);
+    }
+    let rough_micro_normal = surface
+        .roughness_alpha()
+        .map(|alpha| rough_dielectric_microfacet_normal(normal, alpha, microfacet_u, microfacet_v))
+        .transpose()?;
+    let incident_cosine =
+        rough_micro_normal.map(|micro_normal| admitted_unit_dot(wo, micro_normal).clamp(0.0, 1.0));
+    let mut continuations = [None; PACKET];
+    for (lane, &lambda) in lambdas.iter().enumerate() {
+        let eta_i = medium_ior(boundary.incident, lambda)?;
+        let eta_t = medium_ior(boundary.transmitted, lambda)?;
+        if let Some(alpha) = surface.roughness_alpha() {
+            let fresnel = fresnel_dielectric(
+                incident_cosine.ok_or(TracerError::InvalidInput)?,
+                eta_i,
+                eta_t,
+            )?;
+            let lane_probability = 1.0 - fresnel.reflectance;
+            if lane_probability <= 0.0 {
+                continue;
+            }
+            let Some(sample) = sample_rough_dielectric(
+                normal,
+                wo,
+                eta_i,
+                eta_t,
+                alpha,
+                microfacet_u,
+                microfacet_v,
+                FORCED_TRANSMISSION_EVENT_SAMPLE,
+            )?
+            else {
+                continue;
+            };
+            if sample.event != DielectricEvent::Transmission {
+                continue;
+            }
+            let (weight, pdf) = if lane == proposal_lane {
+                (sample.radiance_weight, sample.pdf)
+            } else {
+                (
+                    sample.radiance_weight * lane_probability / proposal_event_probability,
+                    sample.pdf * proposal_event_probability / lane_probability,
+                )
+            };
+            if !weight.is_finite() || weight < 0.0 || !pdf.is_finite() || pdf < 0.0 {
+                return Err(TracerError::InvalidInput);
+            }
+            continuations[lane] = Some(DielectricLaneContinuation {
+                direction: sample.direction,
+                weight,
+                pdf: if sample.delta { 0.0 } else { pdf },
+                delta: sample.delta,
+            });
+        } else {
+            let sample = sample_smooth_dielectric(
+                normal,
+                wo,
+                eta_i,
+                eta_t,
+                FORCED_TRANSMISSION_EVENT_SAMPLE,
+            )?;
+            if sample.event != DielectricEvent::Transmission {
+                continue;
+            }
+            let weight = if lane == proposal_lane {
+                sample.radiance_weight
+            } else {
+                sample.radiance_weight * sample.probability / proposal_event_probability
+            };
+            if !weight.is_finite() || weight < 0.0 {
+                return Err(TracerError::InvalidInput);
+            }
+            continuations[lane] = Some(DielectricLaneContinuation {
+                direction: sample.direction,
+                weight,
+                pdf: 0.0,
+                delta: true,
+            });
+        }
+    }
+    Ok(continuations)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7849,18 +8234,22 @@ fn sample_dielectric_path(
     surface: DielectricSurface,
     boundary: &BoundaryMedia,
     lambdas: &[f64],
+    proposal_lane: usize,
     microfacet_u: f64,
     microfacet_v: f64,
     event_sample: f64,
 ) -> Result<Option<DielectricPathSample>, TracerError> {
-    let hero_eta_i = medium_ior(boundary.incident, lambdas[0])?;
-    let hero_eta_t = medium_ior(boundary.transmitted, lambdas[0])?;
+    let proposal_lambda = *lambdas
+        .get(proposal_lane)
+        .ok_or(TracerError::InvalidInput)?;
+    let proposal_eta_i = medium_ior(boundary.incident, proposal_lambda)?;
+    let proposal_eta_t = medium_ior(boundary.transmitted, proposal_lambda)?;
     if let Some(alpha) = surface.roughness_alpha() {
         let Some(sample) = sample_rough_dielectric(
             normal,
             wo,
-            hero_eta_i,
-            hero_eta_t,
+            proposal_eta_i,
+            proposal_eta_t,
             alpha,
             microfacet_u,
             microfacet_v,
@@ -7868,6 +8257,17 @@ fn sample_dielectric_path(
         )?
         else {
             return Ok(None);
+        };
+        let micro_normal =
+            rough_dielectric_microfacet_normal(normal, alpha, microfacet_u, microfacet_v)?;
+        let proposal_fresnel = fresnel_dielectric(
+            admitted_unit_dot(wo, micro_normal).clamp(0.0, 1.0),
+            proposal_eta_i,
+            proposal_eta_t,
+        )?;
+        let event_probability = match sample.event {
+            DielectricEvent::Reflection => proposal_fresnel.reflectance,
+            DielectricEvent::Transmission => 1.0 - proposal_fresnel.reflectance,
         };
         let mut weights = [0.0; PACKET];
         if sample.delta {
@@ -7887,13 +8287,15 @@ fn sample_dielectric_path(
         return Ok(Some(DielectricPathSample {
             direction: sample.direction,
             event: sample.event,
+            event_probability,
             pdf: if sample.delta { 0.0 } else { sample.pdf },
             delta: sample.delta,
             weights,
         }));
     }
 
-    let sample = sample_smooth_dielectric(normal, wo, hero_eta_i, hero_eta_t, event_sample)?;
+    let sample =
+        sample_smooth_dielectric(normal, wo, proposal_eta_i, proposal_eta_t, event_sample)?;
     let mut weights = [0.0; PACKET];
     // The dielectric sampler has already admitted and normalized this frame.
     // Clamp the independently recomputed cosine so a final binary64 ulp above
@@ -7914,6 +8316,7 @@ fn sample_dielectric_path(
     Ok(Some(DielectricPathSample {
         direction: sample.direction,
         event: sample.event,
+        event_probability: sample.probability,
         pdf: 0.0,
         delta: true,
         weights,
@@ -8305,6 +8708,7 @@ fn instance_object_id(shape: &Shape) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dielectric::{BeerLambertAbsorption, CauchyIor};
     use crate::spectral::lift_rgb;
 
     #[test]
@@ -8704,25 +9108,341 @@ mod tests {
         assert!(local_negative.z < -RAY_EPS);
     }
 
-    #[test]
-    fn dispersive_packet_collapses_to_the_weighted_hero_lane_exactly_once() {
-        let glass = DielectricGlass::representative_crown();
-        assert!(glass.ior().is_dispersive());
-        let mut throughput = [1.0, 2.0, 3.0, 4.0];
-        let mut collapsed = false;
+    fn test_entry_boundary(glass: DielectricGlass) -> BoundaryMedia {
+        BoundaryMedia {
+            incident: None,
+            transmitted: Some(glass),
+            transition: MediumTransition::Enter(MediumEntry {
+                boundary_primitive: 7,
+                glass,
+            }),
+        }
+    }
 
-        collapse_dispersive_packet(&mut throughput, &mut collapsed, glass);
-        assert!(collapsed);
-        assert_eq!(
-            throughput.map(f64::to_bits),
-            [4.0, 0.0, 0.0, 0.0].map(f64::to_bits)
+    fn test_oblique_wo() -> Vec3 {
+        let raw = Vec3::new(0.6, 0.0, 0.8);
+        raw.scale(1.0 / raw.norm())
+    }
+
+    fn assert_relative_close(observed: f64, expected: f64, tolerance: f64, context: &str) {
+        assert!(
+            (observed - expected).abs() <= tolerance * observed.abs().max(expected.abs()).max(1.0),
+            "{context}: observed={observed:.17e}, expected={expected:.17e}"
         );
+    }
 
-        collapse_dispersive_packet(&mut throughput, &mut collapsed, glass);
+    #[test]
+    fn dispersive_split_is_unbiased_deterministic_and_uses_lane_snell_directions() {
+        let boundary = test_entry_boundary(DielectricGlass::representative_crown());
+        let lambdas = hero_wavelengths(411.25, PACKET, LAMBDA_MIN, LAMBDA_MAX);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = test_oblique_wo();
+        let reflected = sample_dielectric_path(
+            normal,
+            wo,
+            DielectricSurface::SMOOTH,
+            &boundary,
+            &lambdas,
+            0,
+            0.2,
+            0.7,
+            0.0,
+        )
+        .unwrap()
+        .unwrap();
+        let transmitted = sample_dielectric_path(
+            normal,
+            wo,
+            DielectricSurface::SMOOTH,
+            &boundary,
+            &lambdas,
+            0,
+            0.2,
+            0.7,
+            FORCED_TRANSMISSION_EVENT_SAMPLE,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reflected.event, DielectricEvent::Reflection);
+        assert_eq!(transmitted.event, DielectricEvent::Transmission);
+        let split = sample_dispersive_transmission_lanes(
+            normal,
+            wo,
+            DielectricSurface::SMOOTH,
+            &boundary,
+            &lambdas,
+            0,
+            0.2,
+            0.7,
+            transmitted.event_probability,
+        )
+        .unwrap();
+        let replay = sample_dispersive_transmission_lanes(
+            normal,
+            wo,
+            DielectricSurface::SMOOTH,
+            &boundary,
+            &lambdas,
+            0,
+            0.2,
+            0.7,
+            transmitted.event_probability,
+        )
+        .unwrap();
+        for lane in 0..PACKET {
+            let continuation = split[lane].unwrap();
+            let replayed = replay[lane].unwrap();
+            assert_eq!(continuation.direction, replayed.direction);
+            assert_eq!(continuation.weight.to_bits(), replayed.weight.to_bits());
+            let eta_i = medium_ior(boundary.incident, lambdas[lane]).unwrap();
+            let eta_t = medium_ior(boundary.transmitted, lambdas[lane]).unwrap();
+            let fresnel = fresnel_dielectric(normal.dot(wo), eta_i, eta_t).unwrap();
+            let expected = fresnel.reflectance
+                + (1.0 - fresnel.reflectance) * (eta_i / eta_t) * (eta_i / eta_t);
+            let observed = reflected.event_probability * reflected.weights[lane]
+                + transmitted.event_probability * continuation.weight;
+            assert_relative_close(observed, expected, 4.0e-14, "smooth split expectation");
+        }
+        assert_ne!(
+            split[0].unwrap().direction.x.to_bits(),
+            split[3].unwrap().direction.x.to_bits(),
+            "dispersive companions followed one refracted direction"
+        );
+    }
+
+    #[test]
+    fn rough_split_proposal_replays_bsdf_and_children_cannot_resplit() {
+        let boundary = test_entry_boundary(DielectricGlass::representative_crown());
+        let lambdas = hero_wavelengths(437.0, PACKET, LAMBDA_MIN, LAMBDA_MAX);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = test_oblique_wo();
+        let sampled = sample_dielectric_path(
+            normal,
+            wo,
+            DielectricSurface::POLISHED,
+            &boundary,
+            &lambdas,
+            0,
+            0.31,
+            0.67,
+            FORCED_TRANSMISSION_EVENT_SAMPLE,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sampled.event, DielectricEvent::Transmission);
+        assert!(
+            should_split_dispersive_transmission(None, sampled.event, &boundary, &lambdas).unwrap()
+        );
+        let split = sample_dispersive_transmission_lanes(
+            normal,
+            wo,
+            DielectricSurface::POLISHED,
+            &boundary,
+            &lambdas,
+            0,
+            0.31,
+            0.67,
+            sampled.event_probability,
+        )
+        .unwrap();
+        for lane in 0..PACKET {
+            assert!(
+                !should_split_dispersive_transmission(
+                    Some(lane),
+                    DielectricEvent::Transmission,
+                    &boundary,
+                    &lambdas,
+                )
+                .unwrap(),
+                "rough monochromatic child lane {lane} was allowed to split again"
+            );
+            let continuation = split[lane].unwrap();
+            let eta_i = medium_ior(boundary.incident, lambdas[lane]).unwrap();
+            let eta_t = medium_ior(boundary.transmitted, lambdas[lane]).unwrap();
+            let evaluation = evaluate_rough_dielectric(
+                normal,
+                wo,
+                continuation.direction,
+                eta_i,
+                eta_t,
+                DielectricSurface::POLISHED.roughness_alpha().unwrap(),
+            )
+            .unwrap();
+            let proposal_pdf = rough_dielectric_proposal_pdf(
+                normal,
+                wo,
+                continuation.direction,
+                DielectricSurface::POLISHED.roughness_alpha().unwrap(),
+                &boundary,
+                &lambdas,
+                0,
+                lane,
+            )
+            .unwrap();
+            assert_relative_close(proposal_pdf, continuation.pdf, 2.0e-12, "proposal PDF");
+            assert_relative_close(
+                continuation.weight,
+                evaluation.value * normal.dot(continuation.direction).abs() / proposal_pdf,
+                2.0e-12,
+                "rough split sample/PDF replay",
+            );
+        }
+    }
+
+    #[test]
+    fn split_work_is_bounded_and_nondispersive_boundaries_retain_packet_bits() {
+        for max_depth in 0..64_u32 {
+            let bound = maximum_spectral_traversals(max_depth);
+            assert!(u64::from(max_depth) <= bound);
+            for split_depth in 0..max_depth {
+                let prefix = u64::from(split_depth + 1);
+                let suffix = u64::from(max_depth - split_depth - 1);
+                for children in 0..=PACKET as u64 {
+                    assert!(prefix + children * suffix <= bound);
+                }
+            }
+        }
+
+        let glass = DielectricGlass::new(
+            CauchyIor::try_constant(1.52).unwrap(),
+            BeerLambertAbsorption::CLEAR,
+            GlassProvenance::Custom,
+        );
+        let boundary = test_entry_boundary(glass);
+        let lambdas = hero_wavelengths(463.0, PACKET, LAMBDA_MIN, LAMBDA_MAX);
+        assert!(!boundary_direction_is_wavelength_dependent(&boundary, &lambdas).unwrap());
+        assert!(
+            !should_split_dispersive_transmission(
+                None,
+                DielectricEvent::Transmission,
+                &boundary,
+                &lambdas,
+            )
+            .unwrap()
+        );
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = test_oblique_wo();
+        let first = sample_dielectric_path(
+            normal,
+            wo,
+            DielectricSurface::POLISHED,
+            &boundary,
+            &lambdas,
+            0,
+            0.23,
+            0.71,
+            FORCED_TRANSMISSION_EVENT_SAMPLE,
+        )
+        .unwrap()
+        .unwrap();
+        let last = sample_dielectric_path(
+            normal,
+            wo,
+            DielectricSurface::POLISHED,
+            &boundary,
+            &lambdas,
+            PACKET - 1,
+            0.23,
+            0.71,
+            FORCED_TRANSMISSION_EVENT_SAMPLE,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.direction, last.direction);
+        assert_eq!(first.pdf.to_bits(), last.pdf.to_bits());
         assert_eq!(
-            throughput.map(f64::to_bits),
-            [4.0, 0.0, 0.0, 0.0].map(f64::to_bits),
-            "a later dispersive boundary must not apply the estimator weight twice"
+            first.weights.map(f64::to_bits),
+            last.weights.map(f64::to_bits)
+        );
+    }
+
+    #[test]
+    fn four_lane_split_reduces_equal_sample_chroma_variance_without_mean_shift() {
+        const SAMPLES: u32 = 4_096;
+        let boundary = test_entry_boundary(DielectricGlass::representative_crown());
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = test_oblique_wo();
+        let mut collapsed = AdaptivePixelAccumulator::EMPTY;
+        let mut split_accumulator = AdaptivePixelAccumulator::EMPTY;
+        for sample_index in 0..SAMPLES {
+            let hero = LAMBDA_MIN
+                + (f64::from(sample_index) + 0.5) / f64::from(SAMPLES) * (LAMBDA_MAX - LAMBDA_MIN);
+            let lambdas = hero_wavelengths(hero, PACKET, LAMBDA_MIN, LAMBDA_MAX);
+            let draw = philox4x32_10(
+                [sample_index, 0x7370_6c69, 0x745f_7633, 0],
+                [0x4c41_4e45, 0x5350_4c49],
+            );
+            let sampled = sample_dielectric_path(
+                normal,
+                wo,
+                DielectricSurface::SMOOTH,
+                &boundary,
+                &lambdas,
+                0,
+                0.2,
+                0.7,
+                u32_unit(draw[0]),
+            )
+            .unwrap()
+            .unwrap();
+            let mut old_xyz = [0.0; 3];
+            let mut split_xyz = [0.0; 3];
+            if sampled.event == DielectricEvent::Reflection {
+                for lane in 0..PACKET {
+                    let basis = [
+                        cie_x(lambdas[lane]),
+                        cie_y(lambdas[lane]),
+                        cie_z(lambdas[lane]),
+                    ];
+                    for channel in 0..3 {
+                        old_xyz[channel] += sampled.weights[lane] * basis[channel];
+                        split_xyz[channel] += sampled.weights[lane] * basis[channel];
+                    }
+                }
+            } else {
+                let continuations = sample_dispersive_transmission_lanes(
+                    normal,
+                    wo,
+                    DielectricSurface::SMOOTH,
+                    &boundary,
+                    &lambdas,
+                    0,
+                    0.2,
+                    0.7,
+                    sampled.event_probability,
+                )
+                .unwrap();
+                old_xyz = [
+                    PACKET as f64 * sampled.weights[0] * cie_x(lambdas[0]),
+                    PACKET as f64 * sampled.weights[0] * cie_y(lambdas[0]),
+                    PACKET as f64 * sampled.weights[0] * cie_z(lambdas[0]),
+                ];
+                for lane in 0..PACKET {
+                    let weight = continuations[lane].unwrap().weight;
+                    split_xyz[0] += weight * cie_x(lambdas[lane]);
+                    split_xyz[1] += weight * cie_y(lambdas[lane]);
+                    split_xyz[2] += weight * cie_z(lambdas[lane]);
+                }
+            }
+            collapsed.push(old_xyz).unwrap();
+            split_accumulator.push(split_xyz).unwrap();
+        }
+        for channel in 0..3 {
+            let mean_gap =
+                (collapsed.mean_xyz()[channel] - split_accumulator.mean_xyz()[channel]).abs();
+            let conservative_standard_error = ((collapsed.sample_variance_xyz()[channel]
+                + split_accumulator.sample_variance_xyz()[channel])
+                / f64::from(SAMPLES))
+            .sqrt();
+            assert!(mean_gap <= 5.0 * conservative_standard_error);
+        }
+        let old_chroma_variance =
+            collapsed.sample_variance_xyz()[0] + collapsed.sample_variance_xyz()[2];
+        let split_chroma_variance =
+            split_accumulator.sample_variance_xyz()[0] + split_accumulator.sample_variance_xyz()[2];
+        assert!(
+            split_chroma_variance < 0.4 * old_chroma_variance,
+            "split chroma variance was not materially lower: old={old_chroma_variance:.9e}, split={split_chroma_variance:.9e}"
         );
     }
 

@@ -1916,6 +1916,8 @@ pub struct TriMesh {
     pub triangles: Vec<[u32; 3]>,
     nodes: Vec<BvhNode>,
     order: Vec<u32>,
+    // Any future BVH rebuild or refit must refresh this cached layout receipt.
+    bvh_fingerprint: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1938,6 +1940,7 @@ impl TriMesh {
             triangles,
             nodes: Vec::new(),
             order: Vec::new(),
+            bvh_fingerprint: 0,
         };
         mesh.order = (0..mesh.triangles.len() as u32).collect();
         if !mesh.triangles.is_empty() {
@@ -1946,6 +1949,7 @@ impl TriMesh {
             mesh.build(&mut order, 0, n);
             mesh.order = order;
         }
+        mesh.bvh_fingerprint = mesh.calculate_bvh_fingerprint();
         mesh
     }
 
@@ -1953,7 +1957,11 @@ impl TriMesh {
     /// geometry content address; equality is compact regression evidence that
     /// the same ordered input retained its bounds, child topology, and leaf order.
     #[must_use]
-    pub fn bvh_fingerprint(&self) -> u64 {
+    pub const fn bvh_fingerprint(&self) -> u64 {
+        self.bvh_fingerprint
+    }
+
+    fn calculate_bvh_fingerprint(&self) -> u64 {
         let mut acc = 0xcbf2_9ce4_8422_2325u64;
         let mut feed = |bytes: &[u8]| {
             for &byte in bytes {
@@ -2459,6 +2467,21 @@ pub fn trace_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bvh_fingerprint_cache_matches_layout_after_construction_and_clone() {
+        let meshes = [
+            TriMesh::new(Vec::new(), Vec::new()),
+            TriMesh::new(
+                vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+                vec![[0, 1, 2]],
+            ),
+        ];
+        for mesh in meshes {
+            assert_eq!(mesh.bvh_fingerprint(), mesh.calculate_bvh_fingerprint());
+            assert_eq!(mesh.clone().bvh_fingerprint(), mesh.bvh_fingerprint());
+        }
+    }
 
     #[test]
     fn scaled_cross_normalization_survives_finite_tangent_overflow_scale() {

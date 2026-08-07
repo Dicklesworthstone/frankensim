@@ -559,10 +559,14 @@ Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, rough dielectric sampling remains an
 NDF-plus-Fresnel-branch path, conductor and dielectric GGX are single-scattering
 without multiple-scattering compensation, and emitters do not reflect. On the
-first dispersive dielectric event, the shared
+first sampled transmission through a dispersive dielectric, the shared
 four-wavelength geometric packet collapses once to its uniformly selected hero
 lane with the matching factor-four estimator weight; companion lanes are zeroed
 instead of being biased along the hero wavelength's refracted direction.
+Current-vertex NEE and sampled reflection retain all four lanes because their
+geometric directions are wavelength-independent; this preserves the same
+spectral transport while avoiding a gratuitous fourfold reduction in spectral
+samples on camera-visible glass reflections.
 Absorption uses unshifted physical segment length. Smooth events have zero
 solid-angle query density and receive delta-correct MIS treatment. A strict
 path-local stack mutates only after sampled transmission and supports nested,
@@ -590,8 +594,9 @@ reversed-winding and non-LIFO transactional refusal; finite rough transmitted
 NEE with target-medium attenuation; cancellation; and bitwise progressive
 replay. Inline analytic tests add independent Fresnel, Snell/critical-angle,
 signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
-grazing, pole-frame, adjacent-IOR, and one-time dispersive packet-collapse
-fixtures. The Cornell tracer battery is deliberately re-frozen when tracer bit
+grazing, pole-frame, adjacent-IOR, reflected-packet retention, and one-time
+post-transmission dispersive packet-collapse fixtures. The Cornell tracer
+battery is deliberately re-frozen when tracer bit
 semantics change and remains the opaque-path non-regression gate.
 
 `conductor` and `tracer` inline tests plus the Euler scene-bridge E2E fixture

@@ -106,6 +106,7 @@ fn inverse_and_composition_round_trip_points_vectors_and_identity() {
 fn identity_mesh_instance_matches_direct_hit_and_transforms_differentials() {
     with_cx(|cx| {
         let mesh = triangle();
+        let bvh_fingerprint = mesh.bvh_fingerprint();
         let ray = Ray {
             origin: Point3::new(0.0, 0.0, 2.0),
             dir: Vec3::new(0.0, 0.0, -1.0),
@@ -121,10 +122,10 @@ fn identity_mesh_instance_matches_direct_hit_and_transforms_differentials() {
         let placed = instance.intersect(cx, &ray, 4.0, 1.0e-9).unwrap().unwrap();
         assert_eq!(direct, placed.hit);
         assert_eq!(placed.object_id, 1);
-        assert!(matches!(
+        assert_eq!(
             placed.backend_audit,
-            InstanceBackendAudit::Mesh { .. }
-        ));
+            InstanceBackendAudit::Mesh { bvh_fingerprint }
+        );
         assert!(placed.hit.tangent_u.is_some() && placed.hit.dp_du.is_some());
     });
 }
