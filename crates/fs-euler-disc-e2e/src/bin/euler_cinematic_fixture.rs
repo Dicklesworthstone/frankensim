@@ -84,7 +84,7 @@ fn run() -> Result<(), String> {
             "--help" | "-h" => {
                 println!(
                     "Usage: euler_cinematic_fixture [--output DIR] [--width PX] [--height PX] \
-                     [--frames 192..288] [--frame-start N --frame-count N --no-mux] \
+                     [--frames 192] [--frame-start N --frame-count N --no-mux] \
                      [--spp N] [--render-seed-salt N] [--max-depth N] [--shutter-angle 0..360] \
                      [--workers N] [--tile-width PX] [--tile-height PX] \
                      [--render-memory-mib MIB] [--no-denoise] [--beauty-only-exr] [--dry-audio] \
