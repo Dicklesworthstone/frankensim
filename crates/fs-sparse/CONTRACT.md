@@ -78,7 +78,9 @@ results are machine-specific, not a universal throughput guarantee.
   multifrontal: per-supernode dense fronts, extend-add of children's Schur
   updates, and 1×1/2×2 threshold pivoting (Duff–Reid growth bound)
   RESTRICTED to the fully-summed block, which is pattern-preserving because
-  supernode columns share identical structure. D's block signs yield the
+  supernode columns share identical structure; a column with no acceptable
+  pivot DELAYS to its parent front inside the update matrix and is
+  eliminated there (`FactorStats::pivots_delayed`). D's block signs yield the
   Sylvester `Inertia` (the spectrum-slicing no-missed-modes primitive);
   `FactorStats` records nnz(L), fill ratio, flops, peak front bytes, pivot
   counts, and max front dimension. `LdltFactor::solve` serves repeated
@@ -235,7 +237,8 @@ typed `IncompatibleShape` refusal, with the fs-sparse output unchanged.
 `fsci-sparse` remains a development dependency only; this tranche is central
 package-proof pending.
 
-The direct-factorization suites (code-first, see the no-claim entry): in-crate
+The direct-factorization suites (executed green 2026-08-06, 36 lib + 3
+casebook tests): in-crate
 `direct::tests` — hand-checked elimination tree; AMD permutation validity on
 path/random/grid graphs; the arrow-matrix fill contrast (natural ordering
 fills catastrophically, AMD stays linear — the scrambled-ordering guard); SPD
@@ -248,10 +251,11 @@ bitwise repeat-factorization determinism; symbolic-reuse pattern-mismatch
 refusal; named refusals (non-square, asymmetric, non-finite, singular,
 invalid options); empty/singleton matrices. `tests/direct_casebook.rs` — the
 shift-ladder e2e: one analysis of a 10⁴-unknown grid pencil, five interior
-shifts factored with JSON-line evidence rows (nnz, fill, flops, peak front
-bytes, pivot counts, inertia, solve residual, timings), every inertia
-certified against the ANALYTIC grid-Laplacian eigenvalue counts, plus a
-bitwise repeat-determinism stage.
+nonsingular shifts factored with JSON-line evidence rows (nnz, fill, flops,
+peak front bytes, 1×1/2×2/delayed pivot counts, inertia, solve residual,
+timings), every inertia certified against the ANALYTIC grid-Laplacian
+eigenvalue counts; an exactly singular shift (σ = 4, an eigenvalue of the
+fixture) proving the named refusal; and a bitwise repeat-determinism stage.
 
 ## FrankenNumpy interop (bead gtql item c, feature `fnp-interop`)
 
@@ -284,23 +288,28 @@ default; the L1 core pulls no constellation crate unless opted in.
   symmetric storage is unclaimed (ILU covers SPD use). AMG coarsest solve is
   ILU-PCG (dense direct coarse solve joins solver-stack integration).
   No 1e8-DOF scaling claims yet (release-mode scaling lane).
-- **Direct-factorization scope** (`direct` module): restricted
-  (within-supernode) pivoting is NOT a backward-stability guarantee for
-  adversarial indefinite matrices — a front whose fully-summed block admits
-  no acceptable pivot refuses (`PivotBreakdown`); delayed-pivot migration to
-  the parent front is the recorded follow-up. Numeric values are read from
-  the row of the eliminated column; the input contract is a numerically
-  symmetric matrix (only structural symmetry is verified). Inertia never
-  reports zero eigenvalues: numerically singular pivots refuse instead.
-  AMD v1 omits supervariable merging and dense-row handling (ordering
-  QUALITY/SPEED boundaries, never correctness). Sequential only; no
-  unsymmetric multifrontal, no out-of-core, no GPU, no refactorization with
-  modified values in place. VERIFICATION STATE: the direct battery
-  (unit + property + casebook suites listed below) is code-first — authored
-  and rustfmt-gated but NOT YET EXECUTED, because every repository
-  verification lane (RCH/DSR/local) was halted by the ee preflight guard on
-  2026-08-06; no green-test claim is made until the batch-verification lane
-  runs it.
+- **Direct-factorization scope** (`direct` module): pivoting is restricted
+  to each front's fully-summed block, with DELAYED-PIVOT migration to the
+  parent front when no acceptable pivot exists (the MA57/MUMPS mechanism;
+  tested on exactly-zero-diagonal shifted fixtures that width-1 supernodes
+  cannot pivot locally). This is robustness machinery, not a formal
+  backward-stability theorem for adversarial indefinite matrices; the
+  Duff–Reid growth bound (`pivot_threshold`) is the stability knob. A column
+  that remains unpivotable at a ROOT front refuses (`PivotBreakdown`) —
+  demonstrated on an exactly singular shift (a grid-Laplacian eigenvalue),
+  where refusing is mandatory because a perturbed factorization would
+  fabricate an inertia certificate. Numeric values are read from the row of
+  the eliminated column; the input contract is a numerically symmetric
+  matrix (only structural symmetry is verified). Inertia never reports zero
+  eigenvalues: numerically singular pivots refuse instead. `FactorStats`
+  reports ACTUAL nnz(L)/fill (delays add fill beyond the symbolic
+  prediction, which `SymbolicLdlt::nnz_l` still states for the no-delay
+  case). AMD v1 omits supervariable merging and dense-row handling
+  (ordering QUALITY/SPEED boundaries, never correctness). Sequential only;
+  no unsymmetric multifrontal, no out-of-core, no GPU, no refactorization
+  with modified values in place. Determinism is bitwise across repeat runs
+  on one host (tested); cross-ISA goldens are not yet recorded for this
+  module.
 - **Interop scope**: `fnx-interop` copies between square CSR adjacency and the
   owned `GraphSnapshot`; `fnp-interop` converts between CSR and the owned dense
   `UFuncArray`, requiring O(nrows·ncols) memory when densifying and losing the

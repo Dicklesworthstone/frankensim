@@ -25,12 +25,15 @@
 //!    1×1 and symmetric 2×2 pivots), and passes the Schur complement to its
 //!    assembly-tree parent.
 //!
-//! Pivot breakdown REFUSES with a named error instead of perturbing: a
-//! perturbed factorization would silently corrupt the inertia count that
-//! downstream certification treats as authority (refusal-not-clamp,
-//! workspace law). Delayed pivots (migrating a failed column to the parent
-//! front) are the recorded follow-up; restricted pivoting is not a backward
-//! stability guarantee for adversarial indefinite inputs.
+//! DELAYED PIVOTS make restricted pivoting complete: a fully-summed column
+//! with no acceptable pivot migrates inside the update matrix to its parent
+//! front, where more of the matrix has accumulated and 2×2 partners exist
+//! (the MA57/MUMPS mechanism). Width-1 supernodes with exactly zero
+//! diagonals — e.g. (K − σM) at a shift that zeroes the diagonal — factor
+//! correctly this way. Only a column that remains unpivotable at a ROOT
+//! front refuses with a named error instead of perturbing: a perturbed
+//! factorization would silently corrupt the inertia count that downstream
+//! certification treats as authority (refusal-not-clamp, workspace law).
 //!
 //! Determinism: every stage is sequential with index-ordered tie-breaking —
 //! repeat factorization of the same matrix is bitwise identical (tested).
@@ -108,7 +111,12 @@ pub struct FactorStats {
     pub pivots_1x1: usize,
     /// Count of 2×2 pivots taken.
     pub pivots_2x2: usize,
-    /// Largest frontal matrix dimension encountered.
+    /// Column-delay events: a fully-summed column with no acceptable pivot
+    /// migrated to its parent front and was eliminated there (a column
+    /// delayed through several ancestors counts once per hop).
+    pub pivots_delayed: usize,
+    /// Largest frontal matrix dimension encountered (delays widen ancestor
+    /// fronts, so this can exceed the symbolic prediction).
     pub max_front_dim: usize,
 }
 
@@ -148,10 +156,10 @@ pub enum LdltError {
         /// Name of the offending option field.
         field: &'static str,
     },
-    /// No acceptable 1×1 or 2×2 pivot exists inside a supernode's
-    /// fully-summed block: the matrix is numerically singular there, or
-    /// restricted pivoting is insufficient for it (delayed pivots are the
-    /// recorded follow-up). The factorization REFUSES rather than perturbs.
+    /// No acceptable 1×1 or 2×2 pivot exists in a ROOT front's fully-summed
+    /// block after delayed-pivot migration: the matrix is numerically
+    /// singular (or beyond the threshold's reach). The factorization
+    /// REFUSES rather than perturbs.
     PivotBreakdown {
         /// Column in the ORIGINAL index space where elimination stopped.
         orig_col: usize,
@@ -226,6 +234,7 @@ impl std::error::Error for LdltError {}
 /// error; [`SymbolicLdlt::analyze`] refuses with a typed error first).
 #[must_use]
 #[allow(clippy::needless_range_loop)] // index-parallel arrays throughout
+#[allow(clippy::too_many_lines)] // one quotient-graph elimination loop; splitting hides invariants
 pub fn amd_order(a: &Csr) -> Vec<usize> {
     assert_eq!(a.nrows(), a.ncols(), "amd_order: matrix must be square");
     let n = a.nrows();
@@ -458,8 +467,8 @@ impl SymbolicLdlt {
             let width = j - start + 1;
             let panel: Vec<usize> = colstruct[start][width - 1..].to_vec();
             let id = snodes.len();
-            for c in start..=j {
-                snode_of[c] = id;
+            for slot in &mut snode_of[start..=j] {
+                *slot = id;
             }
             snodes.push(SnodeSym {
                 col_start: start,
@@ -524,12 +533,16 @@ impl SymbolicLdlt {
     /// 1×1/2×2 blocks. Refuses (never perturbs) on pivot breakdown.
     #[allow(clippy::too_many_lines)] // one coherent numeric pipeline; splitting obscures the data flow
     pub fn factor(&self, a: &Csr, opts: &LdltOptions) -> Result<LdltFactor, LdltError> {
-        if !(opts.pivot_threshold > 0.0 && opts.pivot_threshold <= 0.5) {
+        // NaN thresholds fail the finiteness test, so both gates fail closed.
+        if !opts.pivot_threshold.is_finite()
+            || opts.pivot_threshold <= 0.0
+            || opts.pivot_threshold > 0.5
+        {
             return Err(LdltError::InvalidOptions {
                 field: "pivot_threshold must be in (0, 0.5]",
             });
         }
-        if !(opts.zero_pivot_rel > 0.0) {
+        if !opts.zero_pivot_rel.is_finite() || opts.zero_pivot_rel <= 0.0 {
             return Err(LdltError::InvalidOptions {
                 field: "zero_pivot_rel must be positive",
             });
@@ -565,8 +578,10 @@ impl SymbolicLdlt {
             supernodes: self.snodes.len(),
             pivots_1x1: 0,
             pivots_2x2: 0,
+            pivots_delayed: 0,
             max_front_dim: 0,
         };
+        let mut nnz_l_actual = 0usize;
         let mut inertia = Inertia {
             positive: 0,
             negative: 0,
@@ -575,32 +590,59 @@ impl SymbolicLdlt {
         let mut updates: Vec<Option<Update>> = vec![None; self.snodes.len()];
         let mut live_update_bytes = 0usize;
 
+        // Scratch var→local-position map, stamped and reset per supernode so
+        // the factorization stays O(front work), not O(n · supernodes).
+        let mut pos = vec![usize::MAX; n];
+
         for (sid, sym) in self.snodes.iter().enumerate() {
             let w = sym.width;
-            let p = sym.panel.len();
-            let m = w + p;
+            // DELAYED PIVOTS: fully-summed columns of this front are the
+            // supernode's own block columns PLUS any columns a descendant
+            // failed to pivot and passed upward inside its update matrix
+            // (recognizable as update vars below `col_start` — every
+            // non-delayed update row is a struct row, which is ≥ col_start).
+            // A delayed column is fully summed here because its remaining
+            // structure was contained in the child front, which the assembly
+            // tree embeds in this one.
+            let mut delayed: Vec<usize> = Vec::new();
+            for &ch in &sym.children {
+                if let Some(up) = updates[ch].as_ref() {
+                    delayed.extend(up.vars.iter().copied().filter(|&v| v < sym.col_start));
+                }
+            }
+            delayed.sort_unstable();
+            let mut fs: Vec<usize> = delayed;
+            fs.extend(sym.col_start..sym.col_start + w);
+            let wf = fs.len();
+            let m = wf + sym.panel.len();
             stats.max_front_dim = stats.max_front_dim.max(m);
-            // Front variables (elimination-order ids), ascending: block ∪ panel.
-            let mut front: Vec<usize> = Vec::with_capacity(m);
-            front.extend(sym.col_start..sym.col_start + w);
-            front.extend(sym.panel.iter().copied());
+            // Local layout: fully-summed columns first, then panel rows.
+            let mut front_local: Vec<usize> = fs;
+            front_local.extend(sym.panel.iter().copied());
+            for (idx, &v) in front_local.iter().enumerate() {
+                pos[v] = idx;
+            }
             let mut f = vec![0.0f64; m * m];
             let front_bytes = m * m * 8;
             stats.peak_front_bytes = stats.peak_front_bytes.max(front_bytes + live_update_bytes);
 
-            // Scatter original entries of the block columns (values read
+            // Scatter original entries of the OWN block columns (values read
             // from the row of the eliminated column; the input contract is a
-            // numerically symmetric matrix).
-            for c in 0..w {
-                let j = sym.col_start + c;
+            // numerically symmetric matrix). Delayed columns are NOT
+            // rescattered: their original entries already entered the
+            // descendant front and travel here inside its update matrix.
+            for j in sym.col_start..sym.col_start + w {
+                let c = pos[j];
                 let orig = self.perm[j];
                 let (cols, vals) = a.row(orig);
                 for (&oc, &v) in cols.iter().zip(vals) {
                     let pi = self.iperm[oc];
                     if pi >= j {
-                        let li = front
-                            .binary_search(&pi)
-                            .expect("symbolic invariant: neighbor outside front");
+                        let li = pos[pi];
+                        assert!(
+                            li != usize::MAX,
+                            "symbolic invariant: neighbor outside front"
+                        );
                         f[li + c * m] += v;
                         if li != c {
                             f[c + li * m] += v;
@@ -608,17 +650,21 @@ impl SymbolicLdlt {
                     }
                 }
             }
-            // Extend-add the children's Schur updates.
+            // Extend-add the children's Schur updates (delayed rows/columns
+            // included — their labels are in this front by construction).
             for &ch in &sym.children {
                 let up = updates[ch].take().expect("child update consumed twice");
                 live_update_bytes -= up.data.len() * 8;
                 let map: Vec<usize> = up
                     .vars
                     .iter()
-                    .map(|v| {
-                        front
-                            .binary_search(v)
-                            .expect("assembly invariant: child var outside parent front")
+                    .map(|&v| {
+                        let li = pos[v];
+                        assert!(
+                            li != usize::MAX,
+                            "assembly invariant: child var outside parent front"
+                        );
+                        li
                     })
                     .collect();
                 let q = up.vars.len();
@@ -629,13 +675,16 @@ impl SymbolicLdlt {
                     }
                 }
             }
+            for &v in &front_local {
+                pos[v] = usize::MAX;
+            }
 
-            // Factor the fully-summed w×w block with restricted pivoting.
-            let mut local2var = front.clone();
-            let mut dblocks: Vec<DBlock> = Vec::with_capacity(w);
+            // Factor the fully-summed block with restricted pivoting.
+            let mut local2var = front_local;
+            let mut dblocks: Vec<DBlock> = Vec::new();
             let mut k = 0usize;
-            while k < w {
-                let choice = choose_pivot(&f, m, w, k, opts, zero_tol);
+            while k < wf {
+                let choice = choose_pivot(&f, m, wf, k, opts, zero_tol);
                 match choice {
                     PivotChoice::One(q) => {
                         if q != k {
@@ -714,53 +763,83 @@ impl SymbolicLdlt {
                             }
                         }
                         stats.flops += 2 * ((m - k) as u64) * ((m - k) as u64);
+                        // The intra-pair coupling lives in D, not L: the
+                        // 2×2 block is eliminated jointly, so L's strict
+                        // lower entry inside the pair is exactly zero.
+                        f[(k + 1) + k * m] = 0.0;
+                        f[k + (k + 1) * m] = 0.0;
                         k += 2;
                     }
                     PivotChoice::Fail { best_abs, required } => {
-                        return Err(LdltError::PivotBreakdown {
-                            orig_col: self.perm[local2var[k]],
-                            permuted_col: local2var[k],
-                            best_abs,
-                            required,
-                            two_by_two_enabled: opts.allow_2x2,
-                        });
+                        if sym.parent == NONE {
+                            // No parent front exists to absorb the columns:
+                            // the matrix is numerically singular (or beyond
+                            // the threshold's reach). Refuse, never perturb.
+                            return Err(LdltError::PivotBreakdown {
+                                orig_col: self.perm[local2var[k]],
+                                permuted_col: local2var[k],
+                                best_abs,
+                                required,
+                                two_by_two_enabled: opts.allow_2x2,
+                            });
+                        }
+                        // Delay every remaining fully-summed column to the
+                        // parent front (no further mass can arrive in THIS
+                        // front, so re-scanning here cannot succeed).
+                        break;
                     }
                 }
             }
+            let k_elim = k;
+            let delayed_here = wf - k_elim;
+            stats.pivots_delayed += delayed_here;
 
-            // Harvest L (unit-diagonal dense trapezoid, col-major m×w).
-            let mut l = vec![0.0f64; m * w];
-            for c in 0..w {
+            // Harvest L: unit-diagonal dense trapezoid, col-major m×k_elim.
+            let mut l = vec![0.0f64; m * k_elim];
+            for c in 0..k_elim {
                 l[c + c * m] = 1.0;
                 for i in c + 1..m {
                     l[i + c * m] = f[i + c * m];
                 }
+                nnz_l_actual += m - c;
             }
-            // Schur complement → parent update. A root supernode provably
-            // has an empty panel (struct(last col) empty ⟺ no etree parent).
-            debug_assert!(sym.parent != NONE || p == 0, "root supernode with panel");
-            if sym.parent != NONE {
-                let mut data = vec![0.0f64; p * p];
-                for cj in 0..p {
-                    for ri in 0..p {
-                        data[ri + cj * p] = f[(w + ri) + (w + cj) * m];
+            // Remaining rows: delayed columns (if any) then panel.
+            let remaining = m - k_elim;
+            // Schur complement (plus any delayed rows/columns) → parent
+            // update. A root supernode provably has an empty panel, and its
+            // delay path returned above, so remaining == 0 there.
+            debug_assert!(
+                sym.parent != NONE || remaining == 0,
+                "root left residual rows"
+            );
+            if sym.parent != NONE && remaining > 0 {
+                let mut data = vec![0.0f64; remaining * remaining];
+                for cj in 0..remaining {
+                    for ri in 0..remaining {
+                        data[ri + cj * remaining] = f[(k_elim + ri) + (k_elim + cj) * m];
                     }
                 }
                 live_update_bytes += data.len() * 8;
                 stats.peak_front_bytes = stats.peak_front_bytes.max(live_update_bytes);
                 updates[sid] = Some(Update {
-                    vars: sym.panel.clone(),
+                    vars: local2var[k_elim..].to_vec(),
                     data,
                 });
             }
             snodes_num.push(SnodeNum {
-                block_vars: local2var[..w].to_vec(),
-                panel_vars: local2var[w..].to_vec(),
+                block_vars: local2var[..k_elim].to_vec(),
+                panel_vars: local2var[k_elim..].to_vec(),
                 l,
                 d: dblocks,
             });
         }
 
+        stats.nnz_l = nnz_l_actual;
+        stats.fill_ratio = if a.nnz() == 0 {
+            1.0
+        } else {
+            stats.nnz_l as f64 / a.nnz() as f64
+        };
         Ok(LdltFactor {
             n,
             perm: self.perm.clone(),
@@ -810,8 +889,8 @@ fn etree(ladj: &[Vec<usize>]) -> Vec<usize> {
     let n = ladj.len();
     let mut parent = vec![NONE; n];
     let mut ancestor = vec![NONE; n];
-    for i in 0..n {
-        for &j in &ladj[i] {
+    for (i, lower) in ladj.iter().enumerate() {
+        for &j in lower {
             let mut t = j;
             while ancestor[t] != NONE && ancestor[t] != i {
                 let next = ancestor[t];
@@ -1041,8 +1120,8 @@ impl LdltFactor {
             v.extend(s.panel_vars.iter().map(|&i| y[i]));
             for k in 0..w {
                 let vk = v[k];
-                for i in k + 1..m {
-                    v[i] = s.l[i + k * m].mul_add(-vk, v[i]);
+                for (i, vi) in v.iter_mut().enumerate().skip(k + 1) {
+                    *vi = s.l[i + k * m].mul_add(-vk, *vi);
                 }
             }
             for (k, &i) in s.block_vars.iter().enumerate() {
@@ -1081,8 +1160,8 @@ impl LdltFactor {
             v.extend(s.panel_vars.iter().map(|&i| y[i]));
             for k in (0..w).rev() {
                 let mut acc = v[k];
-                for i in k + 1..m {
-                    acc = s.l[i + k * m].mul_add(-v[i], acc);
+                for (i, &vi) in v.iter().enumerate().skip(k + 1) {
+                    acc = s.l[i + k * m].mul_add(-vi, acc);
                 }
                 v[k] = acc;
             }

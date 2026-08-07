@@ -94,7 +94,10 @@ fn shift_ladder_casebook_with_certified_inertia() {
 
     // Interior shifts spanning the spectrum (0, 8); K − σI is INDEFINITE at
     // every interior shift — this exercises exactly what shift-invert needs.
-    let shifts = [0.05, 0.5, 2.0, 4.0, 7.0];
+    // σ = 4.0 is deliberately EXCLUDED here: it is an exact eigenvalue of
+    // this fixture (λ = 4 whenever i + j = s + 1), so K − 4I is singular —
+    // that case gets its own refusal gate below.
+    let shifts = [0.05, 0.5, 2.0, 3.97, 7.0];
     let mut prev_below = 0usize;
     for &sigma in &shifts {
         let a = shifted(&k, sigma);
@@ -134,7 +137,7 @@ fn shift_ladder_casebook_with_certified_inertia() {
 
         let st = f.stats();
         println!(
-            "{{\"suite\":\"fs-sparse-direct-casebook\",\"stage\":\"factor\",\"sigma\":{sigma},\"nnz_a\":{},\"nnz_l\":{},\"fill_ratio\":{:.3},\"flops\":{},\"peak_front_bytes\":{},\"max_front_dim\":{},\"pivots_1x1\":{},\"pivots_2x2\":{},\"inertia_pos\":{},\"inertia_neg\":{},\"analytic_below\":{below},\"solve_resid\":{resid:.3e},\"factor_ms\":{factor_ms:.1}}}",
+            "{{\"suite\":\"fs-sparse-direct-casebook\",\"stage\":\"factor\",\"sigma\":{sigma},\"nnz_a\":{},\"nnz_l\":{},\"fill_ratio\":{:.3},\"flops\":{},\"peak_front_bytes\":{},\"max_front_dim\":{},\"pivots_1x1\":{},\"pivots_2x2\":{},\"pivots_delayed\":{},\"inertia_pos\":{},\"inertia_neg\":{},\"analytic_below\":{below},\"solve_resid\":{resid:.3e},\"factor_ms\":{factor_ms:.1}}}",
             st.nnz_a,
             st.nnz_l,
             st.fill_ratio,
@@ -143,10 +146,34 @@ fn shift_ladder_casebook_with_certified_inertia() {
             st.max_front_dim,
             st.pivots_1x1,
             st.pivots_2x2,
+            st.pivots_delayed,
             inertia.positive,
             inertia.negative,
         );
     }
+}
+
+#[test]
+fn exactly_singular_shift_refuses_instead_of_perturbing() {
+    // σ = 4.0 is an exact eigenvalue of the grid Laplacian (λ = 4 whenever
+    // i + j = s + 1), so K − 4I is exactly singular. The factorization must
+    // REFUSE with the named breakdown — a perturbed factorization would
+    // fabricate an inertia certificate at a shift where none exists.
+    let s = 30;
+    let k = laplacian_2d(s);
+    let a = shifted(&k, 4.0);
+    let sym = SymbolicLdlt::analyze(&k, DirectOrdering::Amd).expect("analyze");
+    let err = sym
+        .factor(&a, &LdltOptions::default())
+        .expect_err("singular shift must refuse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("FS-SPARSE-DIRECT-PIVOT-BREAKDOWN"),
+        "expected named breakdown, got {msg}"
+    );
+    println!(
+        "{{\"suite\":\"fs-sparse-direct-casebook\",\"stage\":\"singular-refusal\",\"sigma\":4.0,\"verdict\":\"refused\",\"code\":\"FS-SPARSE-DIRECT-PIVOT-BREAKDOWN\"}}"
+    );
 }
 
 #[test]
