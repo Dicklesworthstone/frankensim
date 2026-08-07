@@ -558,15 +558,15 @@ expectation.
 Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, rough dielectric sampling remains an
 NDF-plus-Fresnel-branch path, conductor and dielectric GGX are single-scattering
-without multiple-scattering compensation, and emitters do not reflect. On the
-first sampled transmission through a dispersive dielectric, the shared
-four-wavelength geometric packet collapses once to its uniformly selected hero
-lane with the matching factor-four estimator weight; companion lanes are zeroed
-instead of being biased along the hero wavelength's refracted direction.
-Current-vertex NEE and sampled reflection retain all four lanes because their
-geometric directions are wavelength-independent; this preserves the same
-spectral transport while avoiding a gratuitous fourfold reduction in spectral
-samples on camera-visible glass reflections.
+without multiple-scattering compensation, and emitters do not reflect. At the
+first wavelength-dependent dielectric boundary, the shared packet fans out once
+into four single-wavelength continuations. Every lane samples its own complete
+Fresnel event, Snell direction, throughput, and directional PDF from correlated
+uniforms; this retains transmission support when one wavelength undergoes TIR
+and another does not. A child lane cannot split again, fixed lane-order
+accumulation is deterministic, and the path-work bound is at most four times the
+declared maximum depth. Wavelength-independent boundaries retain the packet.
+Current-vertex NEE uses each lane's native competing BSDF density.
 Absorption uses unshifted physical segment length. Smooth events have zero
 solid-angle query density and receive delta-correct MIS treatment. A strict
 path-local stack mutates only after sampled transmission and supports nested,
@@ -594,8 +594,8 @@ reversed-winding and non-LIFO transactional refusal; finite rough transmitted
 NEE with target-medium attenuation; cancellation; and bitwise progressive
 replay. Inline analytic tests add independent Fresnel, Snell/critical-angle,
 signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
-grazing, pole-frame, adjacent-IOR, reflected-packet retention, and one-time
-post-transmission dispersive packet-collapse fixtures. The Cornell tracer
+grazing, pole-frame, adjacent-IOR, packet retention at nondispersive boundaries,
+one-time dispersive fan-out, and wavelength-straddled TIR support fixtures. The Cornell tracer
 battery is deliberately re-frozen when tracer bit
 semantics change and remains the opaque-path non-regression gate.
 
