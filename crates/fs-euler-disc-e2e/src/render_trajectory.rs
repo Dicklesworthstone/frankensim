@@ -26,7 +26,7 @@ use crate::reduced_decay::{
 use crate::specimen::ResolvedDiscProfile;
 
 /// Exact schema version admitted by [`RenderTrajectory::try_new`].
-pub const EULER_RENDER_TRAJECTORY_SCHEMA_VERSION: u16 = 1;
+pub const EULER_RENDER_TRAJECTORY_SCHEMA_VERSION: u16 = 3;
 /// Resource ceiling for retained samples in one in-memory trajectory.
 pub const MAX_RENDER_TRAJECTORY_SAMPLES: usize = 10_000_000;
 /// Resource ceiling for localized transitions attached to one sample.
@@ -34,7 +34,7 @@ pub const MAX_RENDER_TRANSITIONS_PER_SAMPLE: usize = 64;
 /// Resource ceiling for mandatory no-claim declarations.
 pub const MAX_RENDER_TRAJECTORY_NO_CLAIMS: usize = 64;
 /// Exact deterministic convention for the reduced-decay render bridge.
-pub const REDUCED_DECAY_RENDER_BRIDGE_VERSION: u32 = 1;
+pub const REDUCED_DECAY_RENDER_BRIDGE_VERSION: u32 = 3;
 /// Cinematic tail retained by the default reduced-decay bridge [s].
 ///
 /// The source run is slightly longer than eight seconds. Rebasing its final
@@ -55,12 +55,13 @@ const INTERVAL_END_ULP_TOLERANCE: u64 = 32;
 const SUBSECOND_REBASED_CLOCK_TOLERANCE_S: f64 = INTERVAL_END_ULP_TOLERANCE as f64 * f64::EPSILON;
 const TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES: usize = 1_024;
 const REDUCED_DECAY_MODEL_IDENTITY_DOMAIN: &str =
-    "org.frankensim.euler-disc.reduced-decay-render-model.v1";
+    "org.frankensim.euler-disc.reduced-decay-render-model.v2";
 const REDUCED_DECAY_CONFIGURATION_IDENTITY_DOMAIN: &str =
-    "org.frankensim.euler-disc.reduced-decay-render-configuration.v1";
+    "org.frankensim.euler-disc.reduced-decay-render-configuration.v2";
 const REDUCED_DECAY_BASE_IDENTITY_DOMAIN: &str =
     "org.frankensim.euler-disc.reduced-decay-static-base.v1";
 const REDUCED_DECAY_PHASE_CONVENTION: &str = "q=Rz(precession)*Ry(theta)*Rz(spin); phi_dot=Omega; psi_dot=-Omega*cos(theta); theta_dot=-Phi/dE_dtheta; trapezoidal-phase-v1";
+const REDUCED_DECAY_CONTACT_REACTION_CONVENTION: &str = "positive-duration intervals carry N_bar=m*(g+(v_z1-v_z0)/dt) as a separately available base-normal load; full contact wrench/work remains unavailable; initial point carries no interval data; no resolved torque, tangential traction, subinterval force history, or contact patch";
 
 /// Frozen v1 world-frame convention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,12 +108,36 @@ pub struct RenderChannelAvailability {
     pub gravity: bool,
     /// Aggregate contact wrench/work payloads are present.
     pub contact: bool,
+    /// Exact sampling rule for the independently retained base-normal scalar.
+    ///
+    /// This is intentionally not a boolean: a first accepted-subinterval
+    /// midpoint is useful contact diagnostics, but it is not a duration mean
+    /// and must not be used as an acoustic force measure.
+    pub normal_force_sampling: RenderNormalForceSampling,
     /// Reduced rolling-resistance wrench/work payloads are present.
     pub rolling: bool,
     /// Reduced-base damping-channel payloads are present.
     pub base: bool,
     /// Exterior-gas body wrench/work payloads are present.
     pub gas: bool,
+}
+
+/// Exact sampling rule for [`RenderTrajectorySampleInput::interval_normal_force_n`].
+///
+/// The explicit tag prevents consumers from guessing semantics from the
+/// presence of full contact channels. In particular, a normal-only midpoint
+/// can never be promoted to an interval mean for sound synthesis.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RenderNormalForceSampling {
+    /// No normal-load scalar is authoritative; its encoded value must be zero.
+    Unavailable = 0,
+    /// The scalar is the representative normal reaction at the first accepted
+    /// contact subinterval midpoint. It is diagnostic-only unless a full
+    /// contact wrench provides a separate duration mean.
+    FirstAcceptedSubintervalMidpoint = 1,
+    /// The scalar is the mean base-normal reaction over the accepted interval.
+    IntervalMean = 2,
 }
 
 /// Nominal rigid frame of the reduced base plane.
@@ -135,6 +160,7 @@ impl RenderChannelAvailability {
     pub const ALL_AVAILABLE: Self = Self {
         gravity: true,
         contact: true,
+        normal_force_sampling: RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint,
         rolling: true,
         base: true,
         gas: true,
@@ -144,6 +170,7 @@ impl RenderChannelAvailability {
     pub const NONE_AVAILABLE: Self = Self {
         gravity: false,
         contact: false,
+        normal_force_sampling: RenderNormalForceSampling::Unavailable,
         rolling: false,
         base: false,
         gas: false,
@@ -351,9 +378,10 @@ pub struct RenderTrajectorySampleInput {
     /// is not inferred from force magnitude because a localized root may have
     /// zero penetration and zero force.
     pub interval_contact_active: bool,
-    /// Normal load evaluated at the midpoint of the first accepted subinterval
-    /// [N]. When an event splits the interval this is not its mean load; use the
-    /// duration-weighted contact-channel force for interval controls.
+    /// Producer-declared normal load for the preceding interval [N]. Its exact
+    /// sampling rule is `metadata.channel_availability.normal_force_sampling`.
+    /// Consumers must never infer interval-mean authority from this scalar's
+    /// magnitude or from unrelated channel availability.
     pub interval_normal_force_n: f64,
     /// Chronological localized transitions in the preceding interval.
     pub contact_transitions: Vec<RenderContactTransition>,
@@ -479,9 +507,13 @@ impl RenderTrajectory {
     /// left-boundary power law, so no physical coefficient or clock is changed.
     ///
     /// Rolling and Bildsten losses are retained only as interval work. No
-    /// force/torque is invented for either energy-only closure. Reaching the
-    /// positive validity cutoff is published as horizon censoring, never as a
-    /// `theta = 0`, contact-loss, or localized physical terminal event.
+    /// force/torque is invented for either energy-only closure. Each
+    /// positive-duration interval carries the mean base-normal reaction
+    /// required by exact endpoint vertical impulse balance. This is a
+    /// kinematic reconstruction, not a resolved contact force history.
+    /// Reaching the positive validity cutoff is published as horizon
+    /// censoring, never as a `theta = 0`, contact-loss, or localized physical
+    /// terminal event.
     pub fn from_reduced_decay_run(
         run: &ReducedDecayRun,
         profile: &ResolvedDiscProfile,
@@ -492,6 +524,7 @@ impl RenderTrajectory {
             profile,
             REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
             0.0,
+            REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
             None,
             "final eight-second tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff".to_owned(),
             cx,
@@ -514,6 +547,7 @@ impl RenderTrajectory {
             profile,
             tail_horizon_s,
             0.0,
+            tail_horizon_s,
             None,
             format!(
                 "final {tail_horizon_s:.17e}-second internal acoustic-preroll tail of the Thorne et al. 2026 source-bound small-angle analytical steel-on-glass decay, rebased without time scaling and ending at a positive validity cutoff"
@@ -558,6 +592,7 @@ impl RenderTrajectory {
             profile,
             source_horizon_s,
             0.0,
+            source_horizon_s,
             Some(preroll_s),
             format!(
                 "final {source_horizon_s:.17e}-second causal picture-and-sound source tail with an exact crop boundary at {preroll_s:.17e} seconds"
@@ -569,6 +604,7 @@ impl RenderTrajectory {
             profile,
             source_horizon_s,
             preroll_s,
+            published_horizon_s,
             Some(preroll_s),
             format!(
                 "{published_horizon_s:.17e}-second published picture-and-sound crop following a {preroll_s:.17e}-second causal modal warm start; time is rebased without resetting pose, contact phase, translation, or mechanical state"
@@ -583,6 +619,7 @@ impl RenderTrajectory {
         profile: &ResolvedDiscProfile,
         tail_horizon_s: f64,
         publish_start_offset_s: f64,
+        published_horizon_s: f64,
         required_boundary_offset_s: Option<f64>,
         applicability: String,
         cx: &Cx<'_>,
@@ -596,6 +633,7 @@ impl RenderTrajectory {
             mass,
             tail_horizon_s,
             publish_start_offset_s,
+            published_horizon_s,
             required_boundary_offset_s,
             cx,
         )?;
@@ -627,25 +665,20 @@ impl RenderTrajectory {
             identities.chart,
             identities.mass_properties,
         );
-        let configuration_identity = if required_boundary_offset_s.is_some()
-            || publish_start_offset_s.to_bits() != 0.0_f64.to_bits()
-        {
-            let mut hasher =
-                DomainHasher::new("org.frankensim.euler-disc.reduced-decay-render-window.v1");
-            hasher.update(source_configuration_identity.as_bytes());
-            hasher.update(&tail_horizon_s.to_bits().to_le_bytes());
-            hasher.update(&publish_start_offset_s.to_bits().to_le_bytes());
-            match required_boundary_offset_s {
-                Some(offset_s) => {
-                    hasher.update(&[1]);
-                    hasher.update(&offset_s.to_bits().to_le_bytes());
-                }
-                None => hasher.update(&[0]),
+        let mut configuration_hasher =
+            DomainHasher::new("org.frankensim.euler-disc.reduced-decay-render-window.v3");
+        configuration_hasher.update(source_configuration_identity.as_bytes());
+        configuration_hasher.update(&tail_horizon_s.to_bits().to_le_bytes());
+        configuration_hasher.update(&publish_start_offset_s.to_bits().to_le_bytes());
+        configuration_hasher.update(&published_horizon_s.to_bits().to_le_bytes());
+        match required_boundary_offset_s {
+            Some(offset_s) => {
+                configuration_hasher.update(&[1]);
+                configuration_hasher.update(&offset_s.to_bits().to_le_bytes());
             }
-            hasher.finalize()
-        } else {
-            source_configuration_identity
-        };
+            None => configuration_hasher.update(&[0]),
+        }
+        let configuration_identity = configuration_hasher.finalize();
         let mut fingerprint_bytes = [0_u8; 8];
         fingerprint_bytes.copy_from_slice(&configuration_identity.as_bytes()[..8]);
         let metadata = RenderTrajectoryMetadata {
@@ -675,6 +708,7 @@ impl RenderTrajectory {
             channel_availability: RenderChannelAvailability {
                 gravity: false,
                 contact: false,
+                normal_force_sampling: RenderNormalForceSampling::IntervalMean,
                 rolling: true,
                 base: false,
                 gas: true,
@@ -694,7 +728,9 @@ impl RenderTrajectory {
                     .to_owned(),
                 "validity cutoff is horizon censoring; no theta-zero, loss-of-contact, or terminal-event claim"
                     .to_owned(),
-                "ground contact is kinematic profile support; no resolved normal-force or contact-patch claim"
+                "ground contact is kinematic profile support; the separately available normal load is only the kinematically implied interval mean required by endpoint vertical impulse balance under gravity-plus-support closure, not a resolved subinterval force history or measured force"
+                    .to_owned(),
+                "the full contact wrench/work channel remains unavailable; no contact-torque, angular-impulse, tangential-traction, pressure-patch, deformation, or acoustic-radiation claim is made"
                     .to_owned(),
                 "not a configuration, design, specimen, or target-ranking claim".to_owned(),
             ],
@@ -795,11 +831,11 @@ impl RenderTrajectory {
 pub enum RenderTrajectoryError {
     /// A cancellation-aware admission caller requested an early stop.
     Cancelled,
-    /// Only the exact v1 schema is currently accepted.
+    /// Only the exact v3 schema is currently accepted.
     UnsupportedSchemaVersion(u16),
-    /// Only right-handed `+z`-up coordinates are admitted by v1.
+    /// Only right-handed `+z`-up coordinates are admitted by v3.
     UnsupportedWorldFrame(RenderWorldFrame),
-    /// Only SI/radians are admitted by v1.
+    /// Only SI/radians are admitted by v3.
     UnsupportedUnits(RenderUnitSystem),
     /// The reduced base frame was non-finite or its local `+z` did not align
     /// with the frozen world `+z` axis.
@@ -876,6 +912,9 @@ pub enum RenderTrajectoryError {
         /// Stable channel name.
         channel: &'static str,
     },
+    /// Full contact-wrench authority was declared without its required normal
+    /// load diagnostic.
+    InvalidChannelAvailability(&'static str),
     /// Redundant QoIs did not agree with authoritative state/mass properties.
     DerivedQoiMismatch(usize),
     /// Authoritative-state QoI derivation refused.
@@ -1406,6 +1445,7 @@ fn reduced_decay_sample_inputs(
     mass: MassProperties,
     tail_horizon_s: f64,
     publish_start_offset_s: f64,
+    published_horizon_s: f64,
     required_boundary_offset_s: Option<f64>,
     cx: &Cx<'_>,
 ) -> Result<Vec<RenderTrajectorySampleInput>, RenderTrajectoryError> {
@@ -1418,10 +1458,26 @@ fn reduced_decay_sample_inputs(
             "must be finite and inside the retained tail",
         ));
     }
+    let reconstructed_horizon_s = tail_horizon_s - publish_start_offset_s;
+    let horizon_tolerance_s = 32.0
+        * f64::EPSILON
+        * published_horizon_s
+            .abs()
+            .max(reconstructed_horizon_s.abs())
+            .max(1.0);
+    if !(published_horizon_s.is_finite()
+        && published_horizon_s > 0.0
+        && reconstructed_horizon_s.is_finite()
+        && (published_horizon_s - reconstructed_horizon_s).abs() <= horizon_tolerance_s)
+    {
+        return Err(reduced_decay_bridge_refusal(
+            "published_horizon_s",
+            "must be finite, positive, and agree with the retained source window within bounded roundoff",
+        ));
+    }
     let (time_origin_s, source_samples) =
         reduced_decay_tail_samples(run, tail_horizon_s, required_boundary_offset_s)?;
     let publish_origin_s = time_origin_s + publish_start_offset_s;
-    let published_horizon_s = tail_horizon_s - publish_start_offset_s;
     let required_boundary_time_s =
         required_boundary_offset_s.map(|offset_s| time_origin_s + offset_s);
     let mut inputs = Vec::new();
@@ -1439,6 +1495,7 @@ fn reduced_decay_sample_inputs(
     let mut center_xy_m = (0.0_f64, 0.0_f64);
     let mut previous_velocity_world_m_per_s: Option<Vec3> = None;
     let mut previous_sample: Option<&ReducedDecaySample> = None;
+    let mut previous_published_velocity_world_m_per_s: Option<Vec3> = None;
     for (index, sample) in source_samples.iter().enumerate() {
         if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
             cx.checkpoint()
@@ -1569,21 +1626,6 @@ fn reduced_decay_sample_inputs(
                 "a noninitial published sample lost its predecessor",
             ));
         };
-        let channels = ChannelOwnership {
-            gravity: ChannelWrench::default(),
-            contact: ChannelWrench::default(),
-            rolling: ChannelWrench {
-                force_world_n: Vec3::ZERO,
-                torque_world_nm: Vec3::ZERO,
-                work_j: rolling_work_j,
-            },
-            base: ChannelWrench::default(),
-            gas: ChannelWrench {
-                force_world_n: Vec3::ZERO,
-                torque_world_nm: Vec3::ZERO,
-                work_j: gas_work_j,
-            },
-        };
         let energy_defect_j = energy_slope_j_per_rad * run.parameters.initial_theta_rad
             - sample.energy_j
             - sample.work.total_j();
@@ -1611,6 +1653,55 @@ fn reduced_decay_sample_inputs(
         } else {
             interval_start_time_s - publish_origin_s
         };
+        let retained_velocity_world_m_per_s =
+            state.center_of_mass_velocity_world(mass).map_err(|error| {
+                reduced_decay_bridge_refusal("grounded_velocity", error.to_string())
+            })?;
+        let mean_normal_reaction_n = if first_published_sample {
+            0.0
+        } else {
+            let previous_velocity = previous_published_velocity_world_m_per_s.ok_or_else(|| {
+                reduced_decay_bridge_refusal(
+                    "kinematically_implied_mean_normal_reaction_n",
+                    "a noninitial published sample lost its predecessor velocity",
+                )
+            })?;
+            let dt_s = output_time_s - output_interval_start_time_s;
+            if !dt_s.is_finite() || dt_s <= 0.0 {
+                return Err(reduced_decay_bridge_refusal(
+                    "kinematically_implied_mean_normal_reaction_n",
+                    format!("sample {index} has invalid published interval duration {dt_s:.17e} s"),
+                ));
+            }
+            let vertical_acceleration_m_per_s2 =
+                (retained_velocity_world_m_per_s.z - previous_velocity.z) / dt_s;
+            let reaction_n =
+                mass.mass() * (run.parameters.gravity_m_per_s2 + vertical_acceleration_m_per_s2);
+            if !reaction_n.is_finite() || reaction_n < 0.0 {
+                return Err(reduced_decay_bridge_refusal(
+                    "kinematically_implied_mean_normal_reaction_n",
+                    format!(
+                        "sample {index} requires inadmissible interval-mean reaction {reaction_n:.17e} N"
+                    ),
+                ));
+            }
+            reaction_n
+        };
+        let channels = ChannelOwnership {
+            gravity: ChannelWrench::default(),
+            contact: ChannelWrench::default(),
+            rolling: ChannelWrench {
+                force_world_n: Vec3::ZERO,
+                torque_world_nm: Vec3::ZERO,
+                work_j: rolling_work_j,
+            },
+            base: ChannelWrench::default(),
+            gas: ChannelWrench {
+                force_world_n: Vec3::ZERO,
+                torque_world_nm: Vec3::ZERO,
+                work_j: gas_work_j,
+            },
+        };
         inputs.push(RenderTrajectorySampleInput {
             interval_start_time_s: output_interval_start_time_s,
             time_s: output_time_s,
@@ -1631,7 +1722,7 @@ fn reduced_decay_sample_inputs(
             }),
             signed_gap_m: contact.contact.gap_m,
             interval_contact_active: !first_published_sample,
-            interval_normal_force_n: 0.0,
+            interval_normal_force_n: mean_normal_reaction_n,
             contact_transitions: Vec::new(),
             base_mode: Some(RenderBaseModeState {
                 displacement_m: 0.0,
@@ -1648,6 +1739,7 @@ fn reduced_decay_sample_inputs(
             },
             terminal_event: None,
         });
+        previous_published_velocity_world_m_per_s = Some(retained_velocity_world_m_per_s);
         previous_velocity_world_m_per_s = Some(velocity_world_m_per_s);
         previous_sample = Some(sample);
     }
@@ -1675,6 +1767,7 @@ fn reduced_decay_model_identity(run: &ReducedDecayRun) -> ContentHash {
     let mut hasher = DomainHasher::new(REDUCED_DECAY_MODEL_IDENTITY_DOMAIN);
     hasher.update(&REDUCED_DECAY_RENDER_BRIDGE_VERSION.to_le_bytes());
     hash_text(&mut hasher, REDUCED_DECAY_PHASE_CONVENTION);
+    hash_text(&mut hasher, REDUCED_DECAY_CONTACT_REACTION_CONVENTION);
     hash_text(&mut hasher, run.provenance.model_id);
     hash_text(&mut hasher, &run.provenance.small_angle_oracle_source_id);
     hash_text(&mut hasher, run.provenance.model_authority);
@@ -1861,6 +1954,14 @@ fn validate_metadata(metadata: &RenderTrajectoryMetadata) -> Result<(), RenderTr
     }
     if metadata.units != RenderUnitSystem::SiRadians {
         return Err(RenderTrajectoryError::UnsupportedUnits(metadata.units));
+    }
+    if metadata.channel_availability.contact
+        && metadata.channel_availability.normal_force_sampling
+            == RenderNormalForceSampling::Unavailable
+    {
+        return Err(RenderTrajectoryError::InvalidChannelAvailability(
+            "contact requires non-unavailable normal_force_sampling",
+        ));
     }
     for (name, identity) in [
         (
@@ -2089,6 +2190,14 @@ fn validate_contact(
     )?;
     if input.interval_normal_force_n < 0.0 {
         return Err(RenderTrajectoryError::NegativeNormalForce(index));
+    }
+    if metadata.channel_availability.normal_force_sampling == RenderNormalForceSampling::Unavailable
+        && input.interval_normal_force_n != 0.0
+    {
+        return Err(RenderTrajectoryError::UnavailableChannelHasData {
+            sample: index,
+            channel: "normal_force_sampling",
+        });
     }
     if metadata.channel_availability.contact {
         let base_axis_world = metadata

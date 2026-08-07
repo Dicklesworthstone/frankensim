@@ -20,10 +20,10 @@ use crate::{
         DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
         MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE, RenderBaseFrame,
         RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
-        RenderContactTransition, RenderMassProperties, RenderNumericalRefusalReason,
-        RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
-        RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
-        RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+        RenderContactTransition, RenderMassProperties, RenderNormalForceSampling,
+        RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature,
+        RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
+        RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
     },
     timeline_resampling::{
         DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,
@@ -31,7 +31,7 @@ use crate::{
 };
 
 /// Canonical wire-schema version.
-pub const EULER_RENDER_TRAJECTORY_CODEC_VERSION: u16 = 1;
+pub const EULER_RENDER_TRAJECTORY_CODEC_VERSION: u16 = 3;
 /// Frozen chunking policy. Every non-final chunk has exactly this many samples.
 pub const EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK: usize = 1_024;
 /// Hard transport ceiling. Streaming paths do not allocate this amount.
@@ -44,13 +44,13 @@ pub const MAX_RENDER_TRAJECTORY_TOTAL_TRANSITIONS: usize =
 
 /// Domain for the complete canonical artifact identity.
 pub const EULER_RENDER_TRAJECTORY_ARTIFACT_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.render-trajectory-artifact.v1";
+    "org.frankensim.fs-euler-disc-e2e.render-trajectory-artifact.v3";
 /// Domain for the embedded pre-trailer integrity fingerprint.
 pub const EULER_RENDER_TRAJECTORY_PAYLOAD_FINGERPRINT_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.render-trajectory-payload.v1";
+    "org.frankensim.fs-euler-disc-e2e.render-trajectory-payload.v3";
 /// Domain for independently checked sample-chunk integrity.
 pub const EULER_RENDER_TRAJECTORY_CHUNK_FINGERPRINT_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.render-trajectory-chunk.v1";
+    "org.frankensim.fs-euler-disc-e2e.render-trajectory-chunk.v3";
 
 const MAGIC: &[u8; 8] = b"FSEULTRJ";
 const FLOAT_POLICY_RAW_IEEE754_LE: u8 = 1;
@@ -385,7 +385,7 @@ pub enum RenderTrajectoryCodecError {
     InvalidMagic,
     /// The wire schema is unsupported.
     UnsupportedCodecVersion(u16),
-    /// A pinned semantic/consumer version or policy did not match v1.
+    /// A pinned semantic/consumer version or policy did not match v3.
     ContractMismatch(&'static str),
     /// A closed enum, boolean, option, or reserved field used another value.
     InvalidTag {
@@ -773,6 +773,7 @@ fn availability_bits(value: RenderChannelAvailability) -> u8 {
         | (u8::from(value.rolling) << 2)
         | (u8::from(value.base) << 3)
         | (u8::from(value.gas) << 4)
+        | ((value.normal_force_sampling as u8) << 5)
 }
 
 const fn contact_branch_tag(value: RenderContactBranch) -> u8 {
@@ -1553,15 +1554,27 @@ fn decode_availability_bits(
     bits: u8,
     field: &'static str,
 ) -> Result<RenderChannelAvailability, RenderTrajectoryCodecError> {
-    if bits & !0x1f != 0 {
+    if bits & !0x7f != 0 {
         return Err(RenderTrajectoryCodecError::InvalidTag {
             field,
             tag: u64::from(bits),
         });
     }
+    let normal_force_sampling = match bits >> 5 {
+        0 => RenderNormalForceSampling::Unavailable,
+        1 => RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint,
+        2 => RenderNormalForceSampling::IntervalMean,
+        tag => {
+            return Err(RenderTrajectoryCodecError::InvalidTag {
+                field,
+                tag: u64::from(tag),
+            });
+        }
+    };
     Ok(RenderChannelAvailability {
         gravity: bits & 1 != 0,
         contact: bits & 2 != 0,
+        normal_force_sampling,
         rolling: bits & 4 != 0,
         base: bits & 8 != 0,
         gas: bits & 16 != 0,

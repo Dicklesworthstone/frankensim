@@ -1,46 +1,46 @@
-//! Offline, sequential denoising of Euler-disc DailyCore EXR frames.
+//! Offline, sequential denoising of Euler-disc FinalDiagnostic EXR frames.
 //!
 //! This command is deliberately a bounded display-derivative producer. It
-//! admits only the 14 float planes of the `DailyCore` AOV profile at no more
-//! than 3840x2160, keeps only the immediately preceding biased denoise frame,
-//! and never relabels its PNGs as raw render estimates.
+//! admits only the 30 float planes of the `FinalDiagnostic` AOV profile at no
+//! more than 3840x2160, uses its material palette indices as exact denoising
+//! edge labels, keeps only the immediately preceding biased denoise frame, and
+//! never relabels its PNGs as raw render estimates.
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
 
+use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_euler_disc_e2e::cinematic_fixture::critique_color_config;
 use fs_img::{
     Channel, CinematicColorConfig, CinematicColorLimits, DecodedExr, ExrAttribute,
-    ExrInspectLimits, PixelType, PngColor, PreviewDither, TemporalDenoiseConfig,
-    TemporalDenoiseInput, TemporalDenoiseLimits, TemporalDenoisedFrame, TemporalFrameBoundary,
-    inspect_exr, read_exr, temporal_denoise_rgb, transform_cinematic_preview, write_png16,
+    ExrInspectLimits, PixelType, PngColor, TEMPORAL_DENOISE_PIPELINE_VERSION,
+    TemporalDenoiseConfig, TemporalDenoiseInput, TemporalDenoiseLimits, TemporalDenoisedFrame,
+    TemporalFrameBoundary, inspect_exr, read_exr, temporal_denoise_rgb,
+    transform_cinematic_preview, write_png16,
+};
+use fs_render::{
+    aov::{
+        CINEMATIC_AOV_CHANNEL_SEMANTICS, CINEMATIC_AOV_INVALID_SEMANTICS,
+        CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS, CINEMATIC_AOV_SEMANTICS_VERSION, CinematicAovProfile,
+    },
+    tracer::MATERIAL_CONTENT_IDENTITY_DOMAIN,
 };
 
-const DAILY_CORE_CHANNELS: [&str; 14] = [
-    "B",
-    "G",
-    "R",
-    "albedo.B",
-    "albedo.G",
-    "albedo.R",
-    "depth.Z",
-    "motion.prev.X",
-    "motion.prev.Y",
-    "normal.X",
-    "normal.Y",
-    "normal.Z",
-    "primary.coverage",
-    "variance.Y",
-];
+const FINAL_DIAGNOSTIC_CHANNELS: &[(&str, PixelType)] =
+    CinematicAovProfile::FinalDiagnostic.exr_channel_layout();
 const MAX_4K_PIXELS: u64 = 3_840 * 2_160;
-const MAX_DAILY_CORE_DECODED_BYTES: u64 = MAX_4K_PIXELS * DAILY_CORE_CHANNELS.len() as u64 * 4;
-const MAX_DAILY_CORE_ENCODED_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FINAL_DIAGNOSTIC_DECODED_BYTES: u64 =
+    MAX_4K_PIXELS * FINAL_DIAGNOSTIC_CHANNELS.len() as u64 * 4;
+const MAX_FINAL_DIAGNOSTIC_ENCODED_BYTES: u64 = 1_024 * 1_024 * 1_024;
 const MAX_EXR_HEADER_BYTES: u64 = 1024 * 1024;
 const MAX_EXR_METADATA_BYTES: u64 = 1024 * 1024;
-const DAILY_CORE_PROFILE: &str = "daily-core-v1";
+const MAX_EXACT_F32_INTEGER: u64 = 1 << 24;
+const FINAL_DIAGNOSTIC_PROFILE: &str = CinematicAovProfile::FinalDiagnostic.code();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cli {
@@ -51,7 +51,7 @@ struct Cli {
 }
 
 #[derive(Debug)]
-struct DailyCoreFrame {
+struct FinalDiagnosticFrame {
     width: u32,
     height: u32,
     red: Vec<f32>,
@@ -65,7 +65,10 @@ struct DailyCoreFrame {
     normal_z: Vec<f32>,
     primary_coverage: Vec<f32>,
     variance_luminance: Vec<f32>,
+    object_ids: Vec<u64>,
+    material_ids: Vec<u64>,
     sequence_identity: SequenceIdentity,
+    timing: FrameTiming,
 }
 
 /// Header values which must name one coherent raw-render sequence before the
@@ -76,12 +79,34 @@ struct SequenceIdentity {
     scene_hash: String,
     composition: String,
     aov_profile: String,
+    samples_per_pixel: u32,
+    object_palette: String,
+    material_palette: String,
+    object_palette_entries: u64,
+    material_palette_entries: u64,
+    shot_id: u64,
+    cut_side: String,
+    shutter: String,
+    sampler: String,
+    strategy: String,
+    max_depth: u64,
+    render_versions: String,
 }
 
-impl DailyCoreFrame {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameTiming {
+    frame_time_bits: u64,
+    previous_time_bits: u64,
+    next_time_bits: u64,
+    shutter_open_bits: u64,
+    shutter_close_bits: u64,
+}
+
+impl FinalDiagnosticFrame {
     fn temporal_input(&self, frame_index: u64) -> TemporalDenoiseInput<'_> {
         TemporalDenoiseInput {
             frame_index,
+            samples_per_pixel: self.sequence_identity.samples_per_pixel,
             width: self.width as usize,
             height: self.height as usize,
             red: &self.red,
@@ -95,8 +120,8 @@ impl DailyCoreFrame {
             normal_z: &self.normal_z,
             primary_coverage: &self.primary_coverage,
             variance_luminance: &self.variance_luminance,
-            object_ids: None,
-            material_ids: None,
+            object_ids: Some(&self.object_ids),
+            material_ids: Some(&self.material_ids),
         }
     }
 }
@@ -117,6 +142,12 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
     if !cli.input.is_dir() {
         return Err(format!("input is not a directory: {}", cli.input.display()));
     }
+    if cli.frame_start != 0 {
+        return Err(format!(
+            "sequential denoising must begin at frame 0; frame-start {} would create an unlabelled temporal-history cut",
+            cli.frame_start
+        ));
+    }
     let frame_end = cli
         .frame_start
         .checked_add(cli.frame_count)
@@ -124,169 +155,244 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
     if cli.frame_count == 0 {
         return Err("frame-count must be positive".to_owned());
     }
-    fs::create_dir_all(&cli.output)
-        .map_err(|error| format!("create output directory {}: {error}", cli.output.display()))?;
-    if !cli.output.is_dir() {
-        return Err(format!(
-            "output is not a directory: {}",
-            cli.output.display()
-        ));
-    }
-
-    // Refuse an entire range before computing: a rerun can never overwrite a
-    // prior preview, and no later frame is rendered after this preflight fails.
-    for frame in cli.frame_start..frame_end {
-        let output = preview_path(&cli.output, frame);
-        match fs::metadata(&output) {
-            Ok(_) => {
-                return Err(format!(
-                    "refusing to overwrite existing output: {}",
-                    output.display()
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("inspect output {}: {error}", output.display())),
-        }
-    }
+    require_absent(&cli.output, "final output")?;
+    let staging_output = staging_output_path(&cli.output)?;
+    require_absent(&staging_output, "staging output")?;
+    let output_parent = cli
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(output_parent).map_err(|error| {
+        format!(
+            "create output parent directory {}: {error}",
+            output_parent.display()
+        )
+    })?;
+    fs::create_dir(&staging_output).map_err(|error| {
+        format!(
+            "create staging output directory {}: {error}",
+            staging_output.display()
+        )
+    })?;
 
     progress(&format!(
-        "stage=denoise begin input={} output={} frame_start={} frame_count={}",
+        "stage=denoise begin input={} output={} staging_output={} frame_start={} frame_count={}",
         cli.input.display(),
         cli.output.display(),
+        staging_output.display(),
         cli.frame_start,
         cli.frame_count,
     ));
-    let mut color = CinematicColorConfig::reference_srgb_16();
-    color.exposure_ev = 1;
-    color.dither = PreviewDither::Disabled;
+    let color = critique_color_config();
     let denoise_config = TemporalDenoiseConfig::default();
     let mut history: Option<TemporalDenoisedFrame> = None;
     let mut expected_dimensions: Option<(u32, u32)> = None;
     let mut expected_sequence: Option<SequenceIdentity> = None;
+    let mut previous_timing: Option<FrameTiming> = None;
+    let mut raw_sequence =
+        DomainHasher::new("org.frankensim.euler-critique.offline-denoise.raw-input-sequence.v1");
+    let mut preview_sequence = DomainHasher::new(
+        "org.frankensim.euler-critique.offline-denoise.preview-output-sequence.v1",
+    );
 
-    for (ordinal, frame) in (cli.frame_start..frame_end).enumerate() {
-        let input_path = raw_path(&cli.input, frame);
-        progress(&format!(
-            "stage=denoise frame={}/{} absolute_frame={} action=read path={}",
-            ordinal + 1,
-            cli.frame_count,
-            frame,
-            input_path.display(),
-        ));
-        let raw = read_daily_core(&input_path, frame)?;
-        let dimensions = (raw.width, raw.height);
-        if let Some(expected) = expected_dimensions {
-            if dimensions != expected {
-                return Err(format!(
-                    "frame continuity violation at absolute frame {frame}: dimensions {}x{} differ from {}x{}",
-                    dimensions.0, dimensions.1, expected.0, expected.1
-                ));
+    let denoise_result = (|| -> Result<(), String> {
+        for (ordinal, frame) in (cli.frame_start..frame_end).enumerate() {
+            let input_path = raw_path(&cli.input, frame);
+            progress(&format!(
+                "stage=denoise frame={}/{} absolute_frame={} action=read path={}",
+                ordinal + 1,
+                cli.frame_count,
+                frame,
+                input_path.display(),
+            ));
+            let (raw, encoded_identity) = read_final_diagnostic(&input_path, frame)?;
+            raw_sequence.update(encoded_identity.as_bytes());
+            let dimensions = (raw.width, raw.height);
+            if let Some(expected) = expected_dimensions {
+                if dimensions != expected {
+                    return Err(format!(
+                        "frame continuity violation at absolute frame {frame}: dimensions {}x{} differ from {}x{}",
+                        dimensions.0, dimensions.1, expected.0, expected.1
+                    ));
+                }
+            } else {
+                expected_dimensions = Some(dimensions);
             }
-        } else {
-            expected_dimensions = Some(dimensions);
-        }
-        if let Some(expected) = &expected_sequence {
-            if raw.sequence_identity != *expected {
-                return Err(format!(
-                    "frame continuity violation at absolute frame {frame}: EXR provenance identity differs from the first requested frame"
-                ));
+            if let Some(expected) = &expected_sequence {
+                if raw.sequence_identity != *expected {
+                    return Err(format!(
+                        "frame continuity violation at absolute frame {frame}: EXR provenance identity differs from the first requested frame"
+                    ));
+                }
+            } else {
+                expected_sequence = Some(raw.sequence_identity.clone());
             }
-        } else {
-            expected_sequence = Some(raw.sequence_identity.clone());
-        }
+            validate_timing_continuity(previous_timing, raw.timing, frame)?;
+            previous_timing = Some(raw.timing);
 
-        let boundary = if ordinal == 0 {
-            TemporalFrameBoundary::Cut
-        } else {
-            TemporalFrameBoundary::Continuous
-        };
-        let denoised = temporal_denoise_rgb(
-            raw.temporal_input(frame),
-            history.as_ref(),
-            boundary,
-            denoise_config,
-            TemporalDenoiseLimits::reference_4k(),
-        )
-        .map_err(|error| format!("temporal denoise frame {frame}: {error}"))?;
-        // The denoised history owns the only guides needed by the next frame;
-        // release this frame's raw AOV planes before allocating display data.
-        drop(raw);
-        let [red, green, blue] = denoised.linear_rgb();
-        let preview = transform_cinematic_preview(
-            dimensions.0,
-            dimensions.1,
-            [red, green, blue],
-            color,
-            CinematicColorLimits::reference_4k(),
-        )
-        .map_err(|error| format!("display transform frame {frame}: {error}"))?;
-        let samples = preview.samples().as_u16().ok_or_else(|| {
-            "reference 16-bit colour configuration returned non-16-bit preview".to_owned()
-        })?;
-        let png = write_png16(dimensions.0, dimensions.1, PngColor::Rgb, samples)
-            .map_err(|error| format!("PNG16 encode frame {frame}: {error}"))?;
-        let output_path = preview_path(&cli.output, frame);
-        write_new(&output_path, &png)?;
-        progress(&format!(
-            "stage=denoise frame={}/{} absolute_frame={} boundary={} action=wrote path={} bytes={}",
-            ordinal + 1,
-            cli.frame_count,
-            frame,
-            match boundary {
-                TemporalFrameBoundary::Cut => "cut",
-                TemporalFrameBoundary::Continuous => "continuous",
-            },
-            output_path.display(),
-            png.len(),
+            let boundary = if ordinal == 0 {
+                TemporalFrameBoundary::Cut
+            } else {
+                TemporalFrameBoundary::Continuous
+            };
+            let denoised = temporal_denoise_rgb(
+                raw.temporal_input(frame),
+                history.as_ref(),
+                boundary,
+                denoise_config,
+                TemporalDenoiseLimits::reference_4k(),
+            )
+            .map_err(|error| format!("temporal denoise frame {frame}: {error}"))?;
+            // The denoised history owns the only guides needed by the next frame;
+            // release this frame's raw AOV planes before allocating display data.
+            drop(raw);
+            let [red, green, blue] = denoised.linear_rgb();
+            let preview = transform_cinematic_preview(
+                dimensions.0,
+                dimensions.1,
+                [red, green, blue],
+                color,
+                CinematicColorLimits::reference_4k(),
+            )
+            .map_err(|error| format!("display transform frame {frame}: {error}"))?;
+            let samples = preview.samples().as_u16().ok_or_else(|| {
+                "reference 16-bit colour configuration returned non-16-bit preview".to_owned()
+            })?;
+            let png = write_png16(dimensions.0, dimensions.1, PngColor::Rgb, samples)
+                .map_err(|error| format!("PNG16 encode frame {frame}: {error}"))?;
+            preview_sequence.update(hash_domain("frame", &png).as_bytes());
+            let output_path = preview_path(&staging_output, frame);
+            write_new(&output_path, &png)?;
+            progress(&format!(
+                "stage=denoise frame={}/{} absolute_frame={} boundary={} action=wrote path={} bytes={}",
+                ordinal + 1,
+                cli.frame_count,
+                frame,
+                match boundary {
+                    TemporalFrameBoundary::Cut => "cut",
+                    TemporalFrameBoundary::Continuous => "continuous",
+                },
+                output_path.display(),
+                png.len(),
+            ));
+            history = Some(denoised);
+        }
+        Ok(())
+    })();
+    if let Err(error) = denoise_result {
+        return Err(format!(
+            "{error}; incomplete staged output was preserved at {}",
+            staging_output.display()
         ));
-        history = Some(denoised);
     }
+    let sequence_identity = expected_sequence.as_ref().ok_or_else(|| {
+        format!(
+            "denoiser produced no sequence identity; incomplete staged output was preserved at {}",
+            staging_output.display()
+        )
+    })?;
+    let dimensions = expected_dimensions.ok_or_else(|| {
+        format!(
+            "denoiser produced no raster dimensions; incomplete staged output was preserved at {}",
+            staging_output.display()
+        )
+    })?;
+    let manifest = offline_preview_manifest(
+        cli,
+        sequence_identity,
+        dimensions,
+        raw_sequence.finalize(),
+        preview_sequence.finalize(),
+        color,
+        denoise_config,
+    )
+    .map_err(|error| {
+        format!(
+            "{error}; incomplete staged output was preserved at {}",
+            staging_output.display()
+        )
+    })?;
+    write_new(
+        &staging_output.join("denoise-manifest.json"),
+        manifest.as_bytes(),
+    )
+    .map_err(|error| {
+        format!(
+            "{error}; incomplete staged output was preserved at {}",
+            staging_output.display()
+        )
+    })?;
+    // This CLI is a single-writer producer. Under that declared operating
+    // contract, the complete sequence becomes visible with one same-filesystem
+    // directory rename; failures retain only the explicitly incomplete staging
+    // path. The second check diagnoses accidental ordinary reuse, but is not a
+    // cross-process no-replace primitive.
+    require_absent(&cli.output, "final output")?;
+    fs::rename(&staging_output, &cli.output).map_err(|error| {
+        format!(
+            "publish complete preview sequence {} as {}: {error}; complete staged output remains at {}",
+            staging_output.display(),
+            cli.output.display(),
+            staging_output.display()
+        )
+    })?;
     progress(&format!(
-        "stage=denoise complete frame_start={} frame_count={}",
-        cli.frame_start, cli.frame_count
+        "stage=denoise complete output={} frame_start={} frame_count={}",
+        cli.output.display(),
+        cli.frame_start,
+        cli.frame_count
     ));
     Ok(())
 }
 
-fn read_daily_core(path: &Path, expected_frame: u64) -> Result<DailyCoreFrame, String> {
+fn read_final_diagnostic(
+    path: &Path,
+    expected_frame: u64,
+) -> Result<(FinalDiagnosticFrame, ContentHash), String> {
     let length = fs::metadata(path)
         .map_err(|error| format!("inspect input {}: {error}", path.display()))?
         .len();
-    if length > MAX_DAILY_CORE_ENCODED_BYTES {
+    if length > MAX_FINAL_DIAGNOSTIC_ENCODED_BYTES {
         return Err(format!(
-            "DailyCore EXR {} is {length} bytes; maximum encoded input is {MAX_DAILY_CORE_ENCODED_BYTES} bytes",
+            "FinalDiagnostic EXR {} is {length} bytes; maximum encoded input is {MAX_FINAL_DIAGNOSTIC_ENCODED_BYTES} bytes",
             path.display()
         ));
     }
     let bytes =
         fs::read(path).map_err(|error| format!("read input {}: {error}", path.display()))?;
+    let encoded_identity = hash_domain(
+        "org.frankensim.euler-critique.final-diagnostic-frame.v1",
+        &bytes,
+    );
     let inspection = inspect_exr(
         &bytes,
         ExrInspectLimits {
-            max_input_bytes: MAX_DAILY_CORE_ENCODED_BYTES,
+            max_input_bytes: MAX_FINAL_DIAGNOSTIC_ENCODED_BYTES,
             max_header_bytes: MAX_EXR_HEADER_BYTES,
-            max_decoded_bytes: MAX_DAILY_CORE_DECODED_BYTES,
+            max_decoded_bytes: MAX_FINAL_DIAGNOSTIC_DECODED_BYTES,
             max_metadata_bytes: MAX_EXR_METADATA_BYTES,
         },
     )
-    .map_err(|error| format!("inspect DailyCore EXR {}: {error}", path.display()))?;
+    .map_err(|error| format!("inspect FinalDiagnostic EXR {}: {error}", path.display()))?;
     validate_dimensions(inspection.width, inspection.height, path)?;
     let decoded = read_exr(&bytes)
-        .map_err(|error| format!("decode DailyCore EXR {}: {error}", path.display()))?;
+        .map_err(|error| format!("decode FinalDiagnostic EXR {}: {error}", path.display()))?;
     drop(bytes);
-    decode_daily_core(decoded, path, expected_frame)
+    decode_final_diagnostic(decoded, path, expected_frame).map(|frame| (frame, encoded_identity))
 }
 
-fn decode_daily_core(
+fn decode_final_diagnostic(
     exr: DecodedExr,
     path: &Path,
     expected_frame: u64,
-) -> Result<DailyCoreFrame, String> {
+) -> Result<FinalDiagnosticFrame, String> {
     validate_dimensions(exr.width, exr.height, path)?;
-    let sequence_identity = validate_daily_core_attributes(&exr, path, expected_frame)?;
+    let sequence_identity = validate_final_diagnostic_attributes(&exr, path, expected_frame)?;
+    let timing = validate_frame_timing(&exr, path)?;
     let pixels = usize::try_from(u64::from(exr.width) * u64::from(exr.height)).map_err(|_| {
         format!(
-            "DailyCore EXR {} pixel count does not fit usize",
+            "FinalDiagnostic EXR {} pixel count does not fit usize",
             path.display()
         )
     })?;
@@ -294,42 +400,63 @@ fn decode_daily_core(
     for Channel { name, ty, data } in exr.channels {
         if ty != PixelType::Float {
             return Err(format!(
-                "DailyCore EXR {} channel {name} is not FLOAT",
+                "FinalDiagnostic EXR {} channel {name} is not FLOAT",
                 path.display()
             ));
         }
         if data.len() != pixels {
             return Err(format!(
-                "DailyCore EXR {} channel {name} has {} samples; expected {pixels}",
+                "FinalDiagnostic EXR {} channel {name} has {} samples; expected {pixels}",
                 path.display(),
                 data.len()
             ));
         }
         if planes.insert(name.clone(), data).is_some() {
             return Err(format!(
-                "DailyCore EXR {} contains duplicate channel {name}",
+                "FinalDiagnostic EXR {} contains duplicate channel {name}",
                 path.display()
             ));
         }
     }
-    for name in DAILY_CORE_CHANNELS {
+    for &(name, _) in FINAL_DIAGNOSTIC_CHANNELS {
         if !planes.contains_key(name) {
             return Err(format!(
-                "DailyCore EXR {} is missing required channel {name}",
+                "FinalDiagnostic EXR {} is missing required channel {name}",
                 path.display()
             ));
         }
     }
-    if let Some((unexpected, _)) = planes
-        .iter()
-        .find(|(name, _)| !DAILY_CORE_CHANNELS.contains(&name.as_str()))
-    {
+    if let Some((unexpected, _)) = planes.iter().find(|(name, _)| {
+        !FINAL_DIAGNOSTIC_CHANNELS
+            .iter()
+            .any(|(expected, _)| *expected == name.as_str())
+    }) {
         return Err(format!(
-            "DailyCore EXR {} contains unexpected channel {unexpected}",
+            "FinalDiagnostic EXR {} contains unexpected channel {unexpected}",
             path.display()
         ));
     }
-    Ok(DailyCoreFrame {
+    let primary_coverage = take_plane(&mut planes, "primary.coverage", path)?;
+    validate_uniform_sample_plane(
+        take_plane(&mut planes, "samples", path)?,
+        sequence_identity.samples_per_pixel,
+        path,
+    )?;
+    let object_ids = exact_palette_indices(
+        "id.object",
+        take_plane(&mut planes, "id.object", path)?,
+        &primary_coverage,
+        sequence_identity.object_palette_entries,
+        path,
+    )?;
+    let material_ids = exact_palette_indices(
+        "id.material",
+        take_plane(&mut planes, "id.material", path)?,
+        &primary_coverage,
+        sequence_identity.material_palette_entries,
+        path,
+    )?;
+    Ok(FinalDiagnosticFrame {
         width: exr.width,
         height: exr.height,
         blue: take_plane(&mut planes, "B", path)?,
@@ -341,10 +468,30 @@ fn decode_daily_core(
         normal_x: take_plane(&mut planes, "normal.X", path)?,
         normal_y: take_plane(&mut planes, "normal.Y", path)?,
         normal_z: take_plane(&mut planes, "normal.Z", path)?,
-        primary_coverage: take_plane(&mut planes, "primary.coverage", path)?,
+        primary_coverage,
         variance_luminance: take_plane(&mut planes, "variance.Y", path)?,
+        object_ids,
+        material_ids,
         sequence_identity,
+        timing,
     })
+}
+
+fn validate_uniform_sample_plane(
+    values: Vec<f32>,
+    samples_per_pixel: u32,
+    path: &Path,
+) -> Result<(), String> {
+    let expected = samples_per_pixel as f32;
+    for (index, value) in values.into_iter().enumerate() {
+        if value.to_bits() != expected.to_bits() {
+            return Err(format!(
+                "FinalDiagnostic EXR {} samples plane disagrees with uniform header SPP at sample {index}: value={value}, header={samples_per_pixel}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn take_plane(
@@ -354,28 +501,109 @@ fn take_plane(
 ) -> Result<Vec<f32>, String> {
     planes.remove(name).ok_or_else(|| {
         format!(
-            "DailyCore EXR {} lost validated required channel {name} during reconstruction",
+            "FinalDiagnostic EXR {} lost validated required channel {name} during reconstruction",
             path.display()
         )
     })
 }
 
-fn validate_daily_core_attributes(
+fn exact_palette_indices(
+    channel: &'static str,
+    values: Vec<f32>,
+    primary_coverage: &[f32],
+    maximum_palette_index: u64,
+    path: &Path,
+) -> Result<Vec<u64>, String> {
+    if values.len() != primary_coverage.len() {
+        return Err(format!(
+            "FinalDiagnostic EXR {} {channel} and coverage plane lengths differ",
+            path.display()
+        ));
+    }
+    let mut indices = Vec::new();
+    indices.try_reserve_exact(values.len()).map_err(|_| {
+        format!(
+            "allocate {channel} palette indices for FinalDiagnostic EXR {}",
+            path.display()
+        )
+    })?;
+    for (index, value) in values.into_iter().enumerate() {
+        if !value.is_finite()
+            || value < 0.0
+            || value >= MAX_EXACT_F32_INTEGER as f32
+            || value.fract() != 0.0
+        {
+            return Err(format!(
+                "FinalDiagnostic EXR {} {channel} sample {index} is not an exact nonnegative f32 integer palette index: {value}",
+                path.display()
+            ));
+        }
+        let palette_index = value as u64;
+        if palette_index > maximum_palette_index {
+            return Err(format!(
+                "FinalDiagnostic EXR {} {channel} sample {index} references palette index {palette_index} above declared maximum {maximum_palette_index}",
+                path.display()
+            ));
+        }
+        let covered = primary_coverage[index] > 0.0;
+        if !covered && palette_index != 0 {
+            return Err(format!(
+                "FinalDiagnostic EXR {} {channel} sample {index} disagrees with primary coverage",
+                path.display()
+            ));
+        }
+        indices.push(palette_index);
+    }
+    Ok(indices)
+}
+
+fn validate_final_diagnostic_attributes(
     exr: &DecodedExr,
     path: &Path,
     expected_frame: u64,
 ) -> Result<SequenceIdentity, String> {
+    require_string_attribute(exr, "frankensim.aov.authority", "raw-estimate", path)?;
+    require_string_attribute(
+        exr,
+        "frankensim.aov.schemaVersion",
+        &CINEMATIC_AOV_SEMANTICS_VERSION.to_string(),
+        path,
+    )?;
+    require_string_attribute(
+        exr,
+        "frankensim.aov.channelSemantics",
+        CINEMATIC_AOV_CHANNEL_SEMANTICS,
+        path,
+    )?;
+    require_string_attribute(
+        exr,
+        "frankensim.aov.invalidSemantics",
+        CINEMATIC_AOV_INVALID_SEMANTICS,
+        path,
+    )?;
+    require_string_attribute(
+        exr,
+        "frankensim.aov.materialDomain",
+        MATERIAL_CONTENT_IDENTITY_DOMAIN,
+        path,
+    )?;
+    require_string_attribute(
+        exr,
+        "frankensim.aov.paletteZero",
+        CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS,
+        path,
+    )?;
     let frame_index = exr_attribute_u64(exr, "frankensim.frame.index", path)?;
     if frame_index != expected_frame {
         return Err(format!(
-            "DailyCore EXR {} declares frame index {frame_index}; expected {expected_frame}",
+            "FinalDiagnostic EXR {} declares frame index {frame_index}; expected {expected_frame}",
             path.display()
         ));
     }
     let aov_profile = exr_attribute_string(exr, "frankensim.aov.profile", path)?;
-    if aov_profile != DAILY_CORE_PROFILE {
+    if aov_profile != FINAL_DIAGNOSTIC_PROFILE {
         return Err(format!(
-            "DailyCore EXR {} declares AOV profile {aov_profile:?}; expected {DAILY_CORE_PROFILE:?}",
+            "FinalDiagnostic EXR {} declares AOV profile {aov_profile:?}; expected {FINAL_DIAGNOSTIC_PROFILE:?}",
             path.display()
         ));
     }
@@ -383,27 +611,316 @@ fn validate_daily_core_attributes(
     // but it is not a sequence identity: the hash deliberately commits to the
     // absolute frame index and neighbouring frame times.  Requiring equality
     // across frames would reject every valid temporal sequence at frame 1.
-    let _frame_config_hash = exr_attribute_string(exr, "frankensim.aov.configHash", path)?;
+    let _frame_config_hash = content_hash_attribute(exr, "frankensim.aov.configHash", path)?;
+    let sample_mode = exr_attribute_string(exr, "frankensim.render.sampleMode", path)?;
+    if sample_mode != "uniform" {
+        return Err(format!(
+            "FinalDiagnostic EXR {} declares unsupported sample mode {sample_mode:?}; expected \"uniform\"",
+            path.display()
+        ));
+    }
+    let samples_per_pixel = u32::try_from(exr_attribute_u64(exr, "frankensim.render.spp", path)?)
+        .map_err(|_| {
+        format!(
+            "FinalDiagnostic EXR {} render sample count exceeds u32",
+            path.display()
+        )
+    })?;
+    if samples_per_pixel == 0 {
+        return Err(format!(
+            "FinalDiagnostic EXR {} render sample count must be positive",
+            path.display()
+        ));
+    }
+    if u64::from(samples_per_pixel) > MAX_EXACT_F32_INTEGER {
+        return Err(format!(
+            "FinalDiagnostic EXR {} render sample count {samples_per_pixel} exceeds exact FLOAT integer ceiling {MAX_EXACT_F32_INTEGER}",
+            path.display()
+        ));
+    }
+    let samples_per_pixel_ceiling = exr_attribute_u64(exr, "frankensim.render.sppCeiling", path)?;
+    if samples_per_pixel_ceiling != u64::from(samples_per_pixel) {
+        return Err(format!(
+            "FinalDiagnostic EXR {} uniform render SPP {samples_per_pixel} disagrees with SPP ceiling {samples_per_pixel_ceiling}",
+            path.display()
+        ));
+    }
+    let (object_palette, object_palette_entries) =
+        canonical_object_palette(exr, "frankensim.aov.objectPalette", path)?;
+    let (material_palette, material_palette_entries) =
+        canonical_material_palette(exr, "frankensim.aov.materialPalette", path)?;
+    let cut_side = nonempty_string_attribute(exr, "frankensim.render.cutSide", path)?;
+    if cut_side != "before" && cut_side != "after" {
+        return Err(format!(
+            "FinalDiagnostic EXR {} has unsupported cut side {cut_side:?}",
+            path.display()
+        ));
+    }
     Ok(SequenceIdentity {
-        source_trajectory: exr_attribute_string(exr, "frankensim.source.trajectory", path)?,
-        scene_hash: exr_attribute_string(exr, "frankensim.source.sceneHash", path)?,
-        composition: exr_attribute_string(exr, "frankensim.source.composition", path)?,
+        source_trajectory: content_hash_attribute(exr, "frankensim.source.trajectory", path)?,
+        scene_hash: content_hash_attribute(exr, "frankensim.source.sceneHash", path)?,
+        composition: content_hash_attribute(exr, "frankensim.source.composition", path)?,
         aov_profile,
+        samples_per_pixel,
+        object_palette,
+        material_palette,
+        object_palette_entries,
+        material_palette_entries,
+        shot_id: exr_attribute_u64(exr, "frankensim.render.shotId", path)?,
+        cut_side,
+        shutter: nonempty_string_attribute(exr, "frankensim.render.shutter", path)?,
+        sampler: nonempty_string_attribute(exr, "frankensim.render.sampler", path)?,
+        strategy: nonempty_string_attribute(exr, "frankensim.render.strategy", path)?,
+        max_depth: exr_attribute_u64(exr, "frankensim.render.maxDepth", path)?,
+        render_versions: nonempty_string_attribute(exr, "frankensim.render.versions", path)?,
     })
+}
+
+fn nonempty_string_attribute(exr: &DecodedExr, name: &str, path: &Path) -> Result<String, String> {
+    let value = exr_attribute_string(exr, name, path)?;
+    if value.is_empty() {
+        return Err(format!(
+            "FinalDiagnostic EXR {} attribute {name} must not be empty",
+            path.display()
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_frame_timing(exr: &DecodedExr, path: &Path) -> Result<FrameTiming, String> {
+    let timing = FrameTiming {
+        frame_time_bits: canonical_f64_bits_attribute(exr, "frankensim.frame.timeSeconds", path)?,
+        previous_time_bits: canonical_f64_bits_attribute(
+            exr,
+            "frankensim.frame.previousTimeS",
+            path,
+        )?,
+        next_time_bits: canonical_f64_bits_attribute(exr, "frankensim.frame.nextTimeS", path)?,
+        shutter_open_bits: canonical_f64_bits_attribute(
+            exr,
+            "frankensim.render.shutterOpenS",
+            path,
+        )?,
+        shutter_close_bits: canonical_f64_bits_attribute(
+            exr,
+            "frankensim.render.shutterCloseS",
+            path,
+        )?,
+    };
+    let frame = f64::from_bits(timing.frame_time_bits);
+    let previous = f64::from_bits(timing.previous_time_bits);
+    let next = f64::from_bits(timing.next_time_bits);
+    let shutter_open = f64::from_bits(timing.shutter_open_bits);
+    let shutter_close = f64::from_bits(timing.shutter_close_bits);
+    if previous < 0.0
+        || previous > frame
+        || frame > next
+        || previous > shutter_open
+        || shutter_open > shutter_close
+        || frame > shutter_close
+        || shutter_close > next
+    {
+        return Err(format!(
+            "FinalDiagnostic EXR {} frame/motion/shutter times are not coherently ordered",
+            path.display()
+        ));
+    }
+    Ok(timing)
+}
+
+fn validate_timing_continuity(
+    previous: Option<FrameTiming>,
+    current: FrameTiming,
+    frame_index: u64,
+) -> Result<(), String> {
+    if frame_index == 0 {
+        if current.frame_time_bits != 0 || current.previous_time_bits != 0 {
+            return Err(
+                "frame continuity violation at absolute frame 0: presentation and previous-reference clocks must begin at canonical +0"
+                    .to_owned(),
+            );
+        }
+        return Ok(());
+    }
+    let previous = previous.ok_or_else(|| {
+        format!(
+            "frame continuity violation at absolute frame {frame_index}: prior timing is unavailable"
+        )
+    })?;
+    if current.frame_time_bits != previous.next_time_bits
+        || current.previous_time_bits != previous.frame_time_bits
+    {
+        return Err(format!(
+            "frame continuity violation at absolute frame {frame_index}: presentation/motion-reference clocks do not link exactly to the preceding frame"
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_f64_bits_attribute(exr: &DecodedExr, name: &str, path: &Path) -> Result<u64, String> {
+    let encoded = exr_attribute_string(exr, name, path)?;
+    let (_, hex_bits) = encoded
+        .split_once("@0x")
+        .ok_or_else(|| invalid_f64_attribute(path, name))?;
+    if hex_bits.len() != 16
+        || !hex_bits
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(invalid_f64_attribute(path, name));
+    }
+    let bits = u64::from_str_radix(hex_bits, 16).map_err(|_| invalid_f64_attribute(path, name))?;
+    let value = f64::from_bits(bits);
+    if !value.is_finite() {
+        return Err(invalid_f64_attribute(path, name));
+    }
+    let canonical = if value == 0.0 { 0.0 } else { value };
+    if encoded != format!("{canonical}@0x{:016x}", canonical.to_bits()) {
+        return Err(invalid_f64_attribute(path, name));
+    }
+    Ok(canonical.to_bits())
+}
+
+fn invalid_f64_attribute(path: &Path, name: &str) -> String {
+    format!(
+        "FinalDiagnostic EXR {} attribute {name} is not a finite canonical decimal@0xIEEE754 value",
+        path.display()
+    )
+}
+
+fn require_string_attribute(
+    exr: &DecodedExr,
+    name: &str,
+    expected: &str,
+    path: &Path,
+) -> Result<(), String> {
+    let value = exr_attribute_string(exr, name, path)?;
+    if value != expected {
+        return Err(format!(
+            "FinalDiagnostic EXR {} attribute {name} is {value:?}; expected frozen value {expected:?}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_object_palette(
+    exr: &DecodedExr,
+    name: &str,
+    path: &Path,
+) -> Result<(String, u64), String> {
+    let value = exr_attribute_string(exr, name, path)?;
+    let mut rows = value.split(';');
+    if rows.next() != Some("0=unavailable") {
+        return Err(invalid_palette(path, name));
+    }
+    let mut count = 0_u64;
+    let mut previous = None;
+    for row in rows {
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid_palette(path, name))?;
+        if count >= MAX_EXACT_F32_INTEGER {
+            return Err(invalid_palette(path, name));
+        }
+        let (index, object_id) = row
+            .split_once('=')
+            .ok_or_else(|| invalid_palette(path, name))?;
+        if !is_canonical_decimal(index) || index.parse::<u64>().ok() != Some(count) {
+            return Err(invalid_palette(path, name));
+        }
+        if !is_canonical_decimal(object_id) {
+            return Err(invalid_palette(path, name));
+        }
+        let object_id = object_id
+            .parse::<u64>()
+            .map_err(|_| invalid_palette(path, name))?;
+        if object_id == 0 || previous.is_some_and(|prior| object_id <= prior) {
+            return Err(invalid_palette(path, name));
+        }
+        previous = Some(object_id);
+    }
+    Ok((value, count))
+}
+
+fn canonical_material_palette(
+    exr: &DecodedExr,
+    name: &str,
+    path: &Path,
+) -> Result<(String, u64), String> {
+    let value = exr_attribute_string(exr, name, path)?;
+    let mut rows = value.split(';');
+    if rows.next() != Some("0=unavailable") {
+        return Err(invalid_palette(path, name));
+    }
+    let mut count = 0_u64;
+    let mut previous: Option<&str> = None;
+    for row in rows {
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid_palette(path, name))?;
+        if count >= MAX_EXACT_F32_INTEGER {
+            return Err(invalid_palette(path, name));
+        }
+        let (index, material_hash) = row
+            .split_once('=')
+            .ok_or_else(|| invalid_palette(path, name))?;
+        if !is_canonical_decimal(index)
+            || index.parse::<u64>().ok() != Some(count)
+            || !is_canonical_content_hash(material_hash)
+            || previous.is_some_and(|prior| material_hash <= prior)
+        {
+            return Err(invalid_palette(path, name));
+        }
+        previous = Some(material_hash);
+    }
+    Ok((value, count))
+}
+
+fn invalid_palette(path: &Path, name: &str) -> String {
+    format!(
+        "FinalDiagnostic EXR {} attribute {name} is not the producer's canonical sorted one-based palette grammar",
+        path.display()
+    )
+}
+
+fn is_canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn content_hash_attribute(exr: &DecodedExr, name: &str, path: &Path) -> Result<String, String> {
+    let value = exr_attribute_string(exr, name, path)?;
+    if !is_canonical_content_hash(&value) {
+        return Err(format!(
+            "FinalDiagnostic EXR {} attribute {name} is not a nonzero canonical 64-digit lowercase content hash",
+            path.display()
+        ));
+    }
+    Ok(value)
+}
+
+fn is_canonical_content_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && value.bytes().any(|byte| byte != b'0')
 }
 
 fn exr_attribute_string(exr: &DecodedExr, name: &str, path: &Path) -> Result<String, String> {
     let attribute = required_exr_attribute(exr, name, path)?;
     if attribute.ty != "string" {
         return Err(format!(
-            "DailyCore EXR {} attribute {name} has type {:?}; expected string",
+            "FinalDiagnostic EXR {} attribute {name} has type {:?}; expected string",
             path.display(),
             attribute.ty
         ));
     }
     String::from_utf8(attribute.value.clone()).map_err(|_| {
         format!(
-            "DailyCore EXR {} attribute {name} is not valid UTF-8 string data",
+            "FinalDiagnostic EXR {} attribute {name} is not valid UTF-8 string data",
             path.display()
         )
     })
@@ -415,28 +932,28 @@ fn exr_attribute_u64(exr: &DecodedExr, name: &str, path: &Path) -> Result<u64, S
         "string" => std::str::from_utf8(&attribute.value)
             .map_err(|_| {
                 format!(
-                    "DailyCore EXR {} attribute {name} is not valid UTF-8 string data",
+                    "FinalDiagnostic EXR {} attribute {name} is not valid UTF-8 string data",
                     path.display()
                 )
             })?
             .parse::<u64>()
             .map_err(|_| {
                 format!(
-                    "DailyCore EXR {} attribute {name} is not a decimal u64",
+                    "FinalDiagnostic EXR {} attribute {name} is not a decimal u64",
                     path.display()
                 )
             }),
         "uint64" => {
             let bytes: [u8; 8] = attribute.value.as_slice().try_into().map_err(|_| {
                 format!(
-                    "DailyCore EXR {} attribute {name} uint64 payload is not exactly eight bytes",
+                    "FinalDiagnostic EXR {} attribute {name} uint64 payload is not exactly eight bytes",
                     path.display()
                 )
             })?;
             Ok(u64::from_le_bytes(bytes))
         }
         ty => Err(format!(
-            "DailyCore EXR {} attribute {name} has type {ty:?}; expected string or uint64",
+            "FinalDiagnostic EXR {} attribute {name} has type {ty:?}; expected string or uint64",
             path.display()
         )),
     }
@@ -453,13 +970,13 @@ fn required_exr_attribute<'a>(
         .filter(|attribute| attribute.name == name);
     let attribute = found.next().ok_or_else(|| {
         format!(
-            "DailyCore EXR {} is missing required attribute {name}",
+            "FinalDiagnostic EXR {} is missing required attribute {name}",
             path.display()
         )
     })?;
     if found.next().is_some() {
         return Err(format!(
-            "DailyCore EXR {} has duplicate required attribute {name}",
+            "FinalDiagnostic EXR {} has duplicate required attribute {name}",
             path.display()
         ));
     }
@@ -471,13 +988,13 @@ fn validate_dimensions(width: u32, height: u32, path: &Path) -> Result<(), Strin
         .checked_mul(u64::from(height))
         .ok_or_else(|| {
             format!(
-                "DailyCore EXR {} dimension product overflows",
+                "FinalDiagnostic EXR {} dimension product overflows",
                 path.display()
             )
         })?;
-    if width == 0 || height == 0 || pixels > MAX_4K_PIXELS {
+    if width == 0 || height == 0 || width > 3_840 || height > 2_160 || pixels > MAX_4K_PIXELS {
         return Err(format!(
-            "DailyCore EXR {} dimensions {}x{} exceed the bounded 4K envelope",
+            "FinalDiagnostic EXR {} dimensions {}x{} exceed the bounded 4K envelope",
             path.display(),
             width,
             height,
@@ -486,12 +1003,143 @@ fn validate_dimensions(width: u32, height: u32, path: &Path) -> Result<(), Strin
     Ok(())
 }
 
+fn offline_preview_manifest(
+    cli: &Cli,
+    source: &SequenceIdentity,
+    dimensions: (u32, u32),
+    raw_sequence_identity: ContentHash,
+    preview_sequence_identity: ContentHash,
+    color: CinematicColorConfig,
+    denoise: TemporalDenoiseConfig,
+) -> Result<String, String> {
+    let denoise_config = denoise
+        .identity()
+        .map_err(|error| format!("identify temporal denoiser configuration: {error}"))?;
+    let denoise_config_identity = hash_domain(
+        "org.frankensim.euler-critique.temporal-denoise-config.v1",
+        denoise_config.as_bytes(),
+    );
+    let color_bytes = color
+        .canonical_bytes()
+        .map_err(|error| format!("identify cinematic color configuration: {error}"))?;
+    let color_identity = hash_domain(
+        "org.frankensim.euler-critique.display-color-config.v1",
+        &color_bytes,
+    );
+    let object_palette_identity = hash_domain(
+        "org.frankensim.euler-critique.object-palette.v1",
+        source.object_palette.as_bytes(),
+    );
+    let material_palette_identity = hash_domain(
+        "org.frankensim.euler-critique.material-palette.v1",
+        source.material_palette.as_bytes(),
+    );
+    let mut render_contract =
+        DomainHasher::new("org.frankensim.euler-critique.source-render-contract.v1");
+    render_contract.update(&source.shot_id.to_le_bytes());
+    render_contract.update(source.cut_side.as_bytes());
+    render_contract.update(source.shutter.as_bytes());
+    render_contract.update(source.sampler.as_bytes());
+    render_contract.update(source.strategy.as_bytes());
+    render_contract.update(&source.max_depth.to_le_bytes());
+    render_contract.update(source.render_versions.as_bytes());
+    let render_contract_identity = render_contract.finalize();
+    let mut derivative =
+        DomainHasher::new("org.frankensim.euler-critique.offline-denoised-preview-sequence.v1");
+    derivative.update(raw_sequence_identity.as_bytes());
+    derivative.update(preview_sequence_identity.as_bytes());
+    derivative.update(denoise_config_identity.as_bytes());
+    derivative.update(color_identity.as_bytes());
+    derivative.update(render_contract_identity.as_bytes());
+    derivative.update(&cli.frame_start.to_le_bytes());
+    derivative.update(&cli.frame_count.to_le_bytes());
+    derivative.update(&dimensions.0.to_le_bytes());
+    derivative.update(&dimensions.1.to_le_bytes());
+    let derivative_identity = derivative.finalize();
+
+    Ok(format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"frankensim-euler-offline-denoise-v1\",\n",
+            "  \"authority\": \"biased-display-derivative-not-raw-estimate\",\n",
+            "  \"publication\": \"single-writer-staged-directory-rename\",\n",
+            "  \"frame_start\": {},\n",
+            "  \"frame_count\": {},\n",
+            "  \"width\": {},\n",
+            "  \"height\": {},\n",
+            "  \"source_trajectory_identity\": \"{}\",\n",
+            "  \"source_scene_identity\": \"{}\",\n",
+            "  \"source_composition_identity\": \"{}\",\n",
+            "  \"source_aov_profile\": \"{}\",\n",
+            "  \"source_aov_semantics_version\": {},\n",
+            "  \"source_samples_per_pixel\": {},\n",
+            "  \"source_object_palette_entries\": {},\n",
+            "  \"source_material_palette_entries\": {},\n",
+            "  \"source_object_palette_identity\": \"{}\",\n",
+            "  \"source_material_palette_identity\": \"{}\",\n",
+            "  \"source_raw_sequence_identity\": \"{}\",\n",
+            "  \"source_render_contract_identity\": \"{}\",\n",
+            "  \"temporal_pipeline_version\": \"{}\",\n",
+            "  \"temporal_config_identity\": \"{}\",\n",
+            "  \"display_color_config_identity\": \"{}\",\n",
+            "  \"preview_sequence_identity\": \"{}\",\n",
+            "  \"derivative_identity\": \"{}\"\n",
+            "}}\n"
+        ),
+        cli.frame_start,
+        cli.frame_count,
+        dimensions.0,
+        dimensions.1,
+        source.source_trajectory,
+        source.scene_hash,
+        source.composition,
+        source.aov_profile,
+        CINEMATIC_AOV_SEMANTICS_VERSION,
+        source.samples_per_pixel,
+        source.object_palette_entries,
+        source.material_palette_entries,
+        object_palette_identity.to_hex(),
+        material_palette_identity.to_hex(),
+        raw_sequence_identity.to_hex(),
+        render_contract_identity.to_hex(),
+        TEMPORAL_DENOISE_PIPELINE_VERSION,
+        denoise_config_identity.to_hex(),
+        color_identity.to_hex(),
+        preview_sequence_identity.to_hex(),
+        derivative_identity.to_hex(),
+    ))
+}
+
 fn raw_path(input: &Path, frame: u64) -> PathBuf {
     input.join(format!("frame-{frame:06}.exr"))
 }
 
 fn preview_path(output: &Path, frame: u64) -> PathBuf {
     output.join(format!("frame-{frame:06}.png"))
+}
+
+fn staging_output_path(output: &Path) -> Result<PathBuf, String> {
+    let file_name = output.file_name().ok_or_else(|| {
+        format!(
+            "output must name a directory rather than a filesystem root: {}",
+            output.display()
+        )
+    })?;
+    let mut staging_name = OsString::from(".");
+    staging_name.push(file_name);
+    staging_name.push(format!(".incomplete-{}", std::process::id()));
+    Ok(output.with_file_name(staging_name))
+}
+
+fn require_absent(path: &Path, purpose: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(format!(
+            "refusing to overwrite existing {purpose}: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("inspect {purpose} {}: {error}", path.display())),
+    }
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -542,6 +1190,12 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     if cli.frame_count == 0 {
         return Err("frame-count must be positive".to_owned());
     }
+    if cli.frame_start != 0 {
+        return Err(format!(
+            "sequential denoising must begin at frame 0; frame-start {} would create an unlabelled temporal-history cut",
+            cli.frame_start
+        ));
+    }
     Ok(cli)
 }
 
@@ -564,13 +1218,29 @@ const fn usage() -> &'static str {
 mod tests {
     use super::*;
 
-    fn daily_core() -> DecodedExr {
-        let channels = DAILY_CORE_CHANNELS
+    fn set_attribute(exr: &mut DecodedExr, name: &str, value: &str) {
+        exr.attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == name)
+            .unwrap_or_else(|| panic!("fixture attribute {name}"))
+            .value = value.as_bytes().to_vec();
+    }
+
+    fn final_diagnostic() -> DecodedExr {
+        let channels = FINAL_DIAGNOSTIC_CHANNELS
             .iter()
-            .map(|name| Channel {
+            .map(|(name, ty)| Channel {
                 name: (*name).to_owned(),
-                ty: PixelType::Float,
-                data: vec![1.0, 2.0],
+                ty: *ty,
+                data: match *name {
+                    "samples" => vec![16.0, 16.0],
+                    "primary.coverage" => vec![1.0, 1.0],
+                    "motion.prev.X" | "motion.prev.Y" | "normal.X" | "normal.Y" => {
+                        vec![0.0, 0.0]
+                    }
+                    "normal.Z" => vec![1.0, 1.0],
+                    _ => vec![1.0, 2.0],
+                },
             })
             .collect();
         DecodedExr {
@@ -578,12 +1248,71 @@ mod tests {
             height: 1,
             channels,
             attributes: [
+                ("frankensim.aov.authority", "raw-estimate"),
+                (
+                    "frankensim.aov.schemaVersion",
+                    "2",
+                ),
+                (
+                    "frankensim.aov.channelSemantics",
+                    CINEMATIC_AOV_CHANNEL_SEMANTICS,
+                ),
+                (
+                    "frankensim.aov.invalidSemantics",
+                    CINEMATIC_AOV_INVALID_SEMANTICS,
+                ),
+                (
+                    "frankensim.aov.materialDomain",
+                    MATERIAL_CONTENT_IDENTITY_DOMAIN,
+                ),
+                (
+                    "frankensim.aov.paletteZero",
+                    CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS,
+                ),
+                (
+                    "frankensim.aov.objectPalette",
+                    "0=unavailable;1=101;2=202",
+                ),
+                (
+                    "frankensim.aov.materialPalette",
+                    "0=unavailable;1=5555555555555555555555555555555555555555555555555555555555555555;2=6666666666666666666666666666666666666666666666666666666666666666",
+                ),
                 ("frankensim.frame.index", "0"),
-                ("frankensim.source.trajectory", "trajectory-a"),
-                ("frankensim.source.sceneHash", "scene-a"),
-                ("frankensim.source.composition", "composition-a"),
-                ("frankensim.aov.profile", DAILY_CORE_PROFILE),
-                ("frankensim.aov.configHash", "config-a"),
+                ("frankensim.frame.timeSeconds", "0@0x0000000000000000"),
+                ("frankensim.frame.previousTimeS", "0@0x0000000000000000"),
+                ("frankensim.frame.nextTimeS", "1@0x3ff0000000000000"),
+                (
+                    "frankensim.source.trajectory",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                (
+                    "frankensim.source.sceneHash",
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+                (
+                    "frankensim.source.composition",
+                    "3333333333333333333333333333333333333333333333333333333333333333",
+                ),
+                ("frankensim.aov.profile", FINAL_DIAGNOSTIC_PROFILE),
+                (
+                    "frankensim.aov.configHash",
+                    "4444444444444444444444444444444444444444444444444444444444444444",
+                ),
+                ("frankensim.render.sampleMode", "uniform"),
+                ("frankensim.render.spp", "16"),
+                ("frankensim.render.sppCeiling", "16"),
+                ("frankensim.render.shotId", "7"),
+                ("frankensim.render.cutSide", "after"),
+                (
+                    "frankensim.render.shutter",
+                    "convention=back-loaded;distribution=stratified-counter-v1;strata=16",
+                ),
+                ("frankensim.render.shutterOpenS", "0@0x0000000000000000"),
+                ("frankensim.render.shutterCloseS", "1@0x3ff0000000000000"),
+                ("frankensim.render.sampler", "sobol-owen-v1"),
+                ("frankensim.render.strategy", "next-event-mis"),
+                ("frankensim.render.maxDepth", "8"),
+                ("frankensim.render.versions", "fixture-v1"),
             ]
             .into_iter()
             .map(|(name, value)| ExrAttribute {
@@ -596,33 +1325,37 @@ mod tests {
     }
 
     #[test]
-    fn daily_core_schema_reconstructs_exact_denoise_planes() {
-        let frame =
-            decode_daily_core(daily_core(), Path::new("fixture.exr"), 0).expect("DailyCore");
+    fn final_diagnostic_schema_reconstructs_exact_denoise_planes_and_ids() {
+        let frame = decode_final_diagnostic(final_diagnostic(), Path::new("fixture.exr"), 0)
+            .expect("FinalDiagnostic");
         assert_eq!(frame.temporal_input(42).frame_index, 42);
+        assert_eq!(frame.temporal_input(42).samples_per_pixel, 16);
         assert_eq!(frame.temporal_input(42).red, &[1.0, 2.0]);
         assert_eq!(frame.temporal_input(42).variance_luminance, &[1.0, 2.0]);
+        assert_eq!(frame.temporal_input(42).object_ids, Some(&[1, 2][..]));
+        assert_eq!(frame.temporal_input(42).material_ids, Some(&[1, 2][..]));
     }
 
     #[test]
-    fn missing_daily_core_plane_refuses_before_denoising() {
-        let mut exr = daily_core();
+    fn missing_final_diagnostic_plane_refuses_before_denoising() {
+        let mut exr = final_diagnostic();
         exr.channels
             .retain(|channel| channel.name != "motion.prev.Y");
-        let error = decode_daily_core(exr, Path::new("fixture.exr"), 0).expect_err("missing plane");
+        let error =
+            decode_final_diagnostic(exr, Path::new("fixture.exr"), 0).expect_err("missing plane");
         assert!(error.contains("missing required channel motion.prev.Y"));
     }
 
     #[test]
     fn header_frame_index_must_match_the_absolute_requested_frame() {
-        let error = decode_daily_core(daily_core(), Path::new("fixture.exr"), 1)
+        let error = decode_final_diagnostic(final_diagnostic(), Path::new("fixture.exr"), 1)
             .expect_err("mismatched metadata must refuse temporal history");
         assert!(error.contains("declares frame index 0; expected 1"));
     }
 
     #[test]
     fn uint64_frame_index_attribute_is_accepted_when_it_matches() {
-        let mut exr = daily_core();
+        let mut exr = final_diagnostic();
         let attribute = exr
             .attributes
             .iter_mut()
@@ -630,17 +1363,18 @@ mod tests {
             .expect("fixture frame index");
         attribute.ty = "uint64".to_owned();
         attribute.value = 7_u64.to_le_bytes().to_vec();
-        decode_daily_core(exr, Path::new("fixture.exr"), 7)
+        decode_final_diagnostic(exr, Path::new("fixture.exr"), 7)
             .expect("matching uint64 metadata must be accepted");
     }
 
     #[test]
     fn consecutive_frames_allow_distinct_frame_bound_aov_config_hashes() {
-        let first = daily_core();
-        let first_identity = validate_daily_core_attributes(&first, Path::new("frame-0.exr"), 0)
-            .expect("first frame provenance");
+        let first = final_diagnostic();
+        let first_identity =
+            validate_final_diagnostic_attributes(&first, Path::new("frame-0.exr"), 0)
+                .expect("first frame provenance");
 
-        let mut second = daily_core();
+        let mut second = final_diagnostic();
         let frame_index = second
             .attributes
             .iter_mut()
@@ -652,21 +1386,266 @@ mod tests {
             .iter_mut()
             .find(|attribute| attribute.name == "frankensim.aov.configHash")
             .expect("fixture AOV config hash");
-        config_hash.value = b"config-frame-1".to_vec();
+        config_hash.value =
+            b"5555555555555555555555555555555555555555555555555555555555555555".to_vec();
 
-        let second_identity = validate_daily_core_attributes(&second, Path::new("frame-1.exr"), 1)
-            .expect("second frame provenance");
+        let second_identity =
+            validate_final_diagnostic_attributes(&second, Path::new("frame-1.exr"), 1)
+                .expect("second frame provenance");
         assert_eq!(first_identity, second_identity);
     }
 
     #[test]
+    fn frame_and_motion_reference_clocks_link_exactly_across_the_sequence() {
+        let first = decode_final_diagnostic(final_diagnostic(), Path::new("frame-0.exr"), 0)
+            .expect("first frame");
+        validate_timing_continuity(None, first.timing, 0).expect("canonical clock origin");
+
+        let mut second_exr = final_diagnostic();
+        set_attribute(&mut second_exr, "frankensim.frame.index", "1");
+        set_attribute(
+            &mut second_exr,
+            "frankensim.frame.timeSeconds",
+            "1@0x3ff0000000000000",
+        );
+        set_attribute(
+            &mut second_exr,
+            "frankensim.frame.previousTimeS",
+            "0@0x0000000000000000",
+        );
+        set_attribute(
+            &mut second_exr,
+            "frankensim.frame.nextTimeS",
+            "2@0x4000000000000000",
+        );
+        set_attribute(
+            &mut second_exr,
+            "frankensim.render.shutterOpenS",
+            "1@0x3ff0000000000000",
+        );
+        set_attribute(
+            &mut second_exr,
+            "frankensim.render.shutterCloseS",
+            "2@0x4000000000000000",
+        );
+        let second = decode_final_diagnostic(second_exr.clone(), Path::new("frame-1.exr"), 1)
+            .expect("second frame");
+        validate_timing_continuity(Some(first.timing), second.timing, 1)
+            .expect("exact current/previous/next linkage");
+
+        set_attribute(
+            &mut second_exr,
+            "frankensim.frame.previousTimeS",
+            "1@0x3ff0000000000000",
+        );
+        let second = decode_final_diagnostic(second_exr, Path::new("frame-1.exr"), 1)
+            .expect("locally ordered but wrongly linked frame");
+        let error = validate_timing_continuity(Some(first.timing), second.timing, 1)
+            .expect_err("wrong motion-reference clock must break sequence admission");
+        assert!(error.contains("do not link exactly"));
+    }
+
+    #[test]
+    fn noncanonical_or_incoherent_f64_clock_metadata_is_refused() {
+        let mut noncanonical = final_diagnostic();
+        set_attribute(
+            &mut noncanonical,
+            "frankensim.frame.nextTimeS",
+            "1.0@0x3ff0000000000000",
+        );
+        let error = decode_final_diagnostic(noncanonical, Path::new("frame-0.exr"), 0)
+            .expect_err("noncanonical clock string");
+        assert!(error.contains("finite canonical decimal@0xIEEE754"));
+
+        let mut incoherent = final_diagnostic();
+        set_attribute(
+            &mut incoherent,
+            "frankensim.render.shutterCloseS",
+            "2@0x4000000000000000",
+        );
+        let error = decode_final_diagnostic(incoherent, Path::new("frame-0.exr"), 0)
+            .expect_err("shutter beyond next motion reference");
+        assert!(error.contains("times are not coherently ordered"));
+    }
+
+    #[test]
     fn every_frame_still_requires_its_aov_config_hash() {
-        let mut exr = daily_core();
+        let mut exr = final_diagnostic();
         exr.attributes
             .retain(|attribute| attribute.name != "frankensim.aov.configHash");
-        let error = validate_daily_core_attributes(&exr, Path::new("frame-0.exr"), 0)
+        let error = validate_final_diagnostic_attributes(&exr, Path::new("frame-0.exr"), 0)
             .expect_err("missing per-frame integrity metadata must be refused");
         assert!(error.contains("missing required attribute frankensim.aov.configHash"));
+    }
+
+    #[test]
+    fn content_hashes_must_be_canonical_nonzero_lowercase_sha256_values() {
+        for invalid in [
+            "0".repeat(64),
+            "a".repeat(63),
+            "A".repeat(64),
+            format!("{}g", "a".repeat(63)),
+        ] {
+            let mut exr = final_diagnostic();
+            let hash = exr
+                .attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == "frankensim.source.trajectory")
+                .expect("fixture trajectory hash");
+            hash.value = invalid.into_bytes();
+            let error = validate_final_diagnostic_attributes(&exr, Path::new("frame-0.exr"), 0)
+                .expect_err("noncanonical content hash must be refused");
+            assert!(error.contains("nonzero canonical 64-digit lowercase content hash"));
+        }
+    }
+
+    #[test]
+    fn frozen_aov_semantics_are_required_before_variance_is_interpreted() {
+        for (attribute_name, replacement) in [
+            ("frankensim.aov.authority", "filtered-estimate"),
+            ("frankensim.aov.schemaVersion", "1"),
+            ("frankensim.aov.channelSemantics", "variance.Y=unknown"),
+            ("frankensim.aov.invalidSemantics", "nan"),
+            ("frankensim.aov.materialDomain", "unknown-material-domain"),
+            ("frankensim.aov.paletteZero", "0=object"),
+        ] {
+            let mut exr = final_diagnostic();
+            exr.attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == attribute_name)
+                .expect("fixture semantic attribute")
+                .value = replacement.as_bytes().to_vec();
+            let error = validate_final_diagnostic_attributes(&exr, Path::new("frame-0.exr"), 0)
+                .expect_err("changed AOV semantics must be refused");
+            assert!(error.contains("expected frozen value"));
+        }
+    }
+
+    #[test]
+    fn palettes_are_canonical_sequence_identity_and_bound_id_ranges() {
+        let first =
+            validate_final_diagnostic_attributes(&final_diagnostic(), Path::new("frame-0.exr"), 0)
+                .expect("first identity");
+        let mut remapped = final_diagnostic();
+        remapped
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.aov.objectPalette")
+            .expect("fixture object palette")
+            .value = b"0=unavailable;1=102;2=202".to_vec();
+        let remapped_identity =
+            validate_final_diagnostic_attributes(&remapped, Path::new("frame-0.exr"), 0)
+                .expect("canonical but remapped identity");
+        assert_ne!(first, remapped_identity);
+
+        let mut malformed = final_diagnostic();
+        malformed
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.aov.objectPalette")
+            .expect("fixture object palette")
+            .value = b"0=unavailable;2=101;1=202".to_vec();
+        let error = validate_final_diagnostic_attributes(&malformed, Path::new("frame-0.exr"), 0)
+            .expect_err("noncanonical palette grammar must be refused");
+        assert!(error.contains("canonical sorted one-based palette grammar"));
+
+        let mut out_of_range = final_diagnostic();
+        out_of_range
+            .channels
+            .iter_mut()
+            .find(|channel| channel.name == "id.object")
+            .expect("fixture object IDs")
+            .data[1] = 3.0;
+        let error = decode_final_diagnostic(out_of_range, Path::new("frame-0.exr"), 0)
+            .expect_err("ID beyond the declared palette must be refused");
+        assert!(error.contains("above declared maximum 2"));
+    }
+
+    #[test]
+    fn uniform_header_spp_must_match_every_sample_plane_value() {
+        let mut exr = final_diagnostic();
+        exr.channels
+            .iter_mut()
+            .find(|channel| channel.name == "samples")
+            .expect("fixture samples plane")
+            .data[1] = 15.0;
+        let error = decode_final_diagnostic(exr, Path::new("fixture.exr"), 0)
+            .expect_err("sample-count mismatch must be refused");
+        assert!(error.contains("samples plane disagrees with uniform header SPP"));
+    }
+
+    #[test]
+    fn adaptive_or_zero_sample_metadata_is_refused() {
+        let mut adaptive = final_diagnostic();
+        adaptive
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.render.sampleMode")
+            .expect("fixture sample mode")
+            .value = b"adaptive".to_vec();
+        let error = validate_final_diagnostic_attributes(&adaptive, Path::new("adaptive.exr"), 0)
+            .expect_err("adaptive sample semantics are not supported by this variance bridge");
+        assert!(error.contains("unsupported sample mode"));
+
+        let mut zero = final_diagnostic();
+        zero.attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.render.spp")
+            .expect("fixture SPP")
+            .value = b"0".to_vec();
+        let error = validate_final_diagnostic_attributes(&zero, Path::new("zero.exr"), 0)
+            .expect_err("zero SPP must be refused");
+        assert!(error.contains("sample count must be positive"));
+
+        let mut inexact = final_diagnostic();
+        inexact
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "frankensim.render.spp")
+            .expect("fixture SPP")
+            .value = b"16777217".to_vec();
+        let error = validate_final_diagnostic_attributes(&inexact, Path::new("inexact.exr"), 0)
+            .expect_err("SPP beyond exact FLOAT integer range must be refused");
+        assert!(error.contains("exceeds exact FLOAT integer ceiling"));
+    }
+
+    #[test]
+    fn dimensions_enforce_each_native_4k_axis_not_only_pixel_product() {
+        assert!(validate_dimensions(3_840, 2_160, Path::new("4k.exr")).is_ok());
+        assert!(validate_dimensions(7_680, 1_080, Path::new("too-wide.exr")).is_err());
+        assert!(validate_dimensions(1_920, 4_320, Path::new("too-tall.exr")).is_err());
+    }
+
+    #[test]
+    fn categorical_identity_planes_must_agree_with_primary_coverage() {
+        let mut exr = final_diagnostic();
+        exr.channels
+            .iter_mut()
+            .find(|channel| channel.name == "id.object")
+            .expect("fixture object IDs")
+            .data[0] = 0.0;
+        decode_final_diagnostic(exr, Path::new("fixture.exr"), 0)
+            .expect("zero object ID is an admitted unavailable identity on covered raw meshes");
+
+        let mut exr = final_diagnostic();
+        exr.channels
+            .iter_mut()
+            .find(|channel| channel.name == "primary.coverage")
+            .expect("fixture coverage")
+            .data[0] = 0.0;
+        let error = decode_final_diagnostic(exr, Path::new("fixture.exr"), 0)
+            .expect_err("background pixels cannot name an object identity");
+        assert!(error.contains("id.object sample 0 disagrees with primary coverage"));
+
+        let mut exr = final_diagnostic();
+        exr.channels
+            .iter_mut()
+            .find(|channel| channel.name == "id.material")
+            .expect("fixture material IDs")
+            .data[1] = 1.5;
+        let error = decode_final_diagnostic(exr, Path::new("fixture.exr"), 0)
+            .expect_err("fractional categorical identity must be refused");
+        assert!(error.contains("is not an exact nonnegative f32 integer palette index"));
     }
 
     #[test]
@@ -701,5 +1680,35 @@ mod tests {
         )
         .expect_err("zero count");
         assert_eq!(error, "frame-count must be positive");
+
+        let error = parse_cli(
+            [
+                "--input",
+                "raw",
+                "--output",
+                "preview",
+                "--frame-start",
+                "3",
+                "--frame-count",
+                "4",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("a mid-sequence cut must be explicit rather than silently temporal");
+        assert!(error.contains("sequential denoising must begin at frame 0"));
+    }
+
+    #[test]
+    fn staging_directory_is_a_sibling_explicitly_marked_incomplete() {
+        let output = Path::new("renders/final-preview");
+        let staging = staging_output_path(output).expect("staging path");
+        assert_eq!(staging.parent(), output.parent());
+        let name = staging
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 fixture name");
+        assert!(name.starts_with(".final-preview.incomplete-"));
+        assert_ne!(staging, output);
     }
 }

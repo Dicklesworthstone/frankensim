@@ -21,27 +21,30 @@ use crate::{
     AudioEventFractionalDelay, AudioExcitationBudget, AudioExcitationMapper,
     AudioExcitationModelInput, AudioExcitationReduction, AudioMasterSource,
     AudioReconstructionFilterSpec, AudioResampler, AudioResamplingBoundaryPolicy,
-    AudioResamplingBudget, AudioResamplingModelInput, ContactModeShape, ContactParticipationPolicy,
+    AudioResamplingBudget, AudioResamplingChunk, AudioResamplingCrop, AudioResamplingModelInput,
+    ContactModeShape, ContactParticipationPolicy, DerivedEulerQois,
     EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerControlStream, EulerRenderTrajectoryArtifact,
     ListenerPose as SpatialListenerPose, ListenerPoseTrack, MAX_AUDIO_MASTER_GAIN_DB,
-    MicrophoneDirectivity, ModalPresetAuthority, ModalSynthesisBudget, ModalSynthesisModelInput,
-    ModeContactParticipationRule, OfflineSpatializer, RenderTrajectory,
-    RenderTrajectoryCodecBudget, RepresentativeDiscMaterial, SoundWavArtifact, SourcePositionTrack,
-    SpatialAudioAuthority, SpatialAudioBudget, SpatialAudioConfig, SpatialAudioOutput,
-    SpatialAudioRenderInput, SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal,
-    SpatialOutputHorizon, SpatialStemComponent, StemGainPan, StereoSample, WavMetadata,
-    WavSampleEncoding, measure_audio, mix_dry_modal_stems,
+    MicrophoneDirectivity, ModalPresetAuthority, ModalStemFrame, ModalSynthesisBudget,
+    ModalSynthesisModel, ModalSynthesisModelInput, ModeContactParticipationRule,
+    OfflineSpatializer, RenderNormalForceSampling, RenderTrajectory, RenderTrajectoryCodecBudget,
+    RepresentativeDiscMaterial, SoundWavArtifact, SourcePositionTrack, SpatialAudioAuthority,
+    SpatialAudioBudget, SpatialAudioConfig, SpatialAudioOutput, SpatialAudioRenderInput,
+    SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal, SpatialOutputHorizon,
+    SpatialStemComponent, StemGainPan, StereoSample, WavMetadata, WavSampleEncoding, measure_audio,
+    mix_dry_modal_stems,
     reduced_decay::{
-        ReducedDecayRun, RefinementEvidence, Thorne2026SteelGlassBenchmark,
+        ReducedDecayError, ReducedDecayRun, RefinementEvidence, Thorne2026SteelGlassBenchmark,
         thorne_2026_refinement_evidence,
     },
+    render_motion_bridge::EulerRenderMotionBridge,
     render_scene_bridge::{
         EulerCinematicScene, EulerEnvironmentStyle, EulerFrameRequest, EulerMaterialStyle,
-        EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec,
-        euler_scene_smoke_settings,
+        EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec, EulerSupportSurfaceSpec,
+        EulerTessellationConfig, euler_scene_smoke_settings,
     },
     representative_modal_preset,
-    timeline_resampling::ExposureEventPolicy,
+    timeline_resampling::{EventEvaluationSide, ExposureEventPolicy},
 };
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_evidence::{
@@ -68,7 +71,11 @@ use fs_render::{
     aov::{CinematicAovConfig, CinematicAovLimits, CinematicAovProfile, CinematicAovProvenance},
     camera::{AnimatedCamera, Aperture, CameraProjection, CutSide, PhysicalCamera},
     conductor::{ConductorOptics, ConductorSurface},
-    motion::{ShutterConvention, ShutterDistribution},
+    dielectric::{DielectricGlass, DielectricSurface},
+    motion::{
+        NormalizedShutterTime, ShotTimeBounds, ShutterConvention, ShutterDistribution,
+        ShutterInterval,
+    },
     tracer::{
         MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport,
         RenderWorkerPool, film_to_exr,
@@ -87,7 +94,24 @@ const INITIAL_FADE_SAMPLE_FRAMES: u32 = 960;
 const AUDIO_PREROLL_VIDEO_FRAMES: u32 = 1;
 /// Exact 48 kHz samples in the source-bound modal warm start.
 const AUDIO_PREROLL_SAMPLE_FRAMES: u64 = 2_000;
-const AUDIO_PREROLL_POLICY_ID: &str = "source-bound-causal-one-video-frame-modal-warm-start-v2";
+/// The production film compares the original benchmark's quarter-step against
+/// its eighth-step solution. The earlier dt/dt2 pair did not satisfy the
+/// preregistered mechanics-to-audio drive convergence gate.
+const CINEMATIC_MECHANICS_COARSE_REFINEMENT_FACTOR: u32 = 4;
+/// Frozen display exposure shared by in-process and offline critique previews
+/// and declared verbatim in the fixture manifest.
+pub const CRITIQUE_EXPOSURE_EV: i32 = 0;
+
+/// Exact display finishing used by both in-process and offline previews.
+#[must_use]
+pub fn critique_color_config() -> CinematicColorConfig {
+    let mut color = CinematicColorConfig::reference_srgb_16();
+    color.exposure_ev = CRITIQUE_EXPOSURE_EV;
+    color.dither = PreviewDither::Disabled;
+    color
+}
+const AUDIO_PREROLL_POLICY_ID: &str =
+    "source-bound-one-video-frame-continuous-fir-and-modal-preroll-v3";
 /// Conservative reconstruction ceiling for the sub-100 Hz trajectory-derived
 /// harmonic-one contact modulation and its slowly varying rolling envelope.
 const CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
@@ -98,16 +122,40 @@ const CRITIQUE_RENDER_SCHEDULER_SEED: u64 = 0x5354_5544_494f_5631;
 /// Bit-affecting version of the absolute-frame render-seed schedule.
 const CRITIQUE_FRAME_SEED_SCHEDULE_VERSION: u16 = 1;
 /// World-space camera/listener origin shared by picture and spatial sound.
-const CRITIQUE_CAMERA_EYE_M: [f64; 3] = [0.24, -0.30, 0.18];
+const CRITIQUE_CAMERA_EYE_M: [f64; 3] = [0.18, -0.24, 0.12];
 /// World-space look target shared by picture and spatial sound.
-const CRITIQUE_CAMERA_TARGET_M: [f64; 3] = [0.0, 0.0, 0.010];
+const CRITIQUE_CAMERA_TARGET_M: [f64; 3] = [0.0, 0.0, 0.008];
 /// Artistic near-field reference distance for the desk-scale stereo preview.
 ///
 /// The spatializer's distance gain is `reference / max(distance, reference)`.
 /// Keeping this just below the camera-to-subject distance preserves a modest
 /// distance cue without needlessly spending roughly 18 dB of the bounded
 /// mechanics-to-digital mastering range on a five-centimetre reference.
-const CRITIQUE_SPATIAL_REFERENCE_DISTANCE_M: f64 = 0.4;
+const CRITIQUE_SPATIAL_REFERENCE_DISTANCE_M: f64 = 0.28;
+
+// These output-space gates are fixed before evaluating the dt/dt/2 pair. They
+// test whether refinement materially changes the quantities consumed by this
+// exact picture-and-sound fixture; they are not experimental validation or an
+// asymptotic convergence-order claim.
+const OUTPUT_CONVERGENCE_RELATIVE_IMPULSE_LIMIT: f64 = 1.0e-3;
+const OUTPUT_CONVERGENCE_COM_LIMIT_M: f64 = 1.0e-5;
+const OUTPUT_CONVERGENCE_ORIENTATION_LIMIT_RAD: f64 = 1.0e-3;
+const OUTPUT_CONVERGENCE_CHIRP_ABSOLUTE_LIMIT_HZ: f64 = 0.1;
+const OUTPUT_CONVERGENCE_CHIRP_RELATIVE_LIMIT: f64 = 1.0e-3;
+const OUTPUT_CONVERGENCE_TERMINAL_TIME_ABSOLUTE_LIMIT_S: f64 = 1.0e-4;
+const OUTPUT_CONVERGENCE_TERMINAL_TIME_RELATIVE_LIMIT: f64 = 2.0e-5;
+const OUTPUT_CONVERGENCE_IMPULSE_ROUNDOFF_PER_INTERVAL: f64 = 64.0;
+
+// These audio-output gates were fixed before evaluating the dt/dt/2 pair.
+// Drive is compared before modal synthesis; raw component stems are compared
+// before fades, spatialization, mixing, or mastering. They establish only one
+// encoded-model output-consistency pair, never acoustic or experimental truth.
+const AUDIO_CONVERGENCE_DRIVE_NRMSE_LIMIT: f64 = 1.0e-3;
+const AUDIO_CONVERGENCE_DRIVE_NORMALIZED_PEAK_LIMIT: f64 = 5.0e-3;
+const AUDIO_CONVERGENCE_STEM_NRMSE_LIMIT: f64 = 1.0e-2;
+const AUDIO_CONVERGENCE_STEM_NORMALIZED_PEAK_LIMIT: f64 = 2.0e-2;
+const AUDIO_CONVERGENCE_DRIVE_NORMALIZATION_FRACTION: f64 = 1.0e-12;
+const AUDIO_CONVERGENCE_STEM_FLOOR_FS: f64 = 1.0e-12;
 
 /// Absolute frame selection for an affordable still or contiguous lookdev shot.
 ///
@@ -157,8 +205,10 @@ pub struct CinematicFixtureConfig {
     pub render_memory_limit_bytes: u64,
     /// Whether previews use the explicitly biased animation-aware denoiser.
     pub denoise_previews: bool,
-    /// Persist the full DailyCore AOV EXR rather than three-channel raw beauty.
-    /// Rendering retains DailyCore in memory whenever denoising needs guides.
+    /// Persist the full FinalDiagnostic AOV EXR rather than three-channel raw
+    /// beauty. Denoising still retains FinalDiagnostic guides in memory when
+    /// disk retention is disabled, so this switch cannot silently weaken edge
+    /// identity.
     pub retain_full_aov_exr: bool,
     /// Whether mechanics-derived dry stems use the bounded spatial-audio path.
     pub spatialize_audio: bool,
@@ -319,7 +369,100 @@ struct FixtureAudio {
     master_gain_db: f64,
     warm_start_source_identity: ContentHash,
     warm_start_checkpoint_identity: ContentHash,
+    source_sound_configuration_identity: ContentHash,
+    published_trajectory_identity: ContentHash,
+    crop_resampler_identity: ContentHash,
+    crop_first_source_audio_frame: u64,
+    crop_end_source_audio_frame: u64,
+    convergence: FixtureAudioConvergenceEvidence,
     spatialization: Option<FixtureSpatialAudioEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FixtureAudioConvergenceEvidence {
+    full_audio_frame_count: u64,
+    published_audio_frame_count: u64,
+    mode_count: usize,
+    drive_normalization_floor_n: f64,
+    localized_drive_nrmse: f64,
+    localized_drive_normalized_peak: f64,
+    distributed_drive_nrmse: f64,
+    distributed_drive_normalized_peak: f64,
+    maximum_drive_nrmse: f64,
+    maximum_drive_normalized_peak: f64,
+    cropped_stem_nrmse: f64,
+    cropped_stem_normalized_peak: f64,
+    crop_first_source_audio_frame: u64,
+    crop_end_source_audio_frame: u64,
+    coarse_crop_identity: ContentHash,
+    fine_crop_identity: ContentHash,
+    coarse_crop_binding_identity: ContentHash,
+    fine_crop_binding_identity: ContentHash,
+}
+
+impl FixtureAudioConvergenceEvidence {
+    fn diagnostics(self) -> String {
+        format!(
+            concat!(
+                "stage=audio timestep_convergence source=fine-dt2 full_frames={} ",
+                "published_frames={} modes={} drive_nrmse={:.6e} ",
+                "drive_peak_rel={:.6e} stem_nrmse={:.6e} stem_peak_rel={:.6e}"
+            ),
+            self.full_audio_frame_count,
+            self.published_audio_frame_count,
+            self.mode_count,
+            self.maximum_drive_nrmse,
+            self.maximum_drive_normalized_peak,
+            self.cropped_stem_nrmse,
+            self.cropped_stem_normalized_peak,
+        )
+    }
+
+    fn manifest_json(self) -> String {
+        format!(
+            concat!(
+                "{{\"comparison\":\"coarse-dt versus fine-dt2 on one shared continuous 48 kHz preroll clock; fine-dt2 alone is published\",",
+                "\"full_audio_frame_count\":{},\"published_audio_frame_count\":{},\"mode_count\":{},",
+                "\"drive\":{{\"normalization_floor_n\":{:.17e},",
+                "\"localized_nrmse\":{:.17e},\"localized_normalized_peak\":{:.17e},",
+                "\"distributed_nrmse\":{:.17e},\"distributed_normalized_peak\":{:.17e},",
+                "\"maximum_nrmse\":{:.17e},\"nrmse_limit\":{:.17e},",
+                "\"maximum_normalized_peak\":{:.17e},\"normalized_peak_limit\":{:.17e}}},",
+                "\"raw_cropped_stems\":{{\"normalization_floor_fs\":{:.17e},",
+                "\"nrmse\":{:.17e},\"nrmse_limit\":{:.17e},",
+                "\"normalized_peak\":{:.17e},\"normalized_peak_limit\":{:.17e}}},",
+                "\"crop_source_range\":{{\"first_audio_frame\":{},\"end_audio_frame\":{}}},",
+                "\"identities\":{{\"coarse_crop\":\"{}\",\"fine_crop\":\"{}\",",
+                "\"coarse_crop_binding\":\"{}\",\"fine_crop_binding\":\"{}\"}},",
+                "\"artistic_localized_impulses\":\"exact all-zero in both members\",",
+                "\"comparison_stage\":\"pre-fade, pre-spatialization, pre-mix, pre-master\",",
+                "\"claim\":\"one fixed-gate output-consistency pair for the encoded reduced mechanics and declared uncalibrated modal model; not asymptotic convergence, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experiment\"}}"
+            ),
+            self.full_audio_frame_count,
+            self.published_audio_frame_count,
+            self.mode_count,
+            self.drive_normalization_floor_n,
+            self.localized_drive_nrmse,
+            self.localized_drive_normalized_peak,
+            self.distributed_drive_nrmse,
+            self.distributed_drive_normalized_peak,
+            self.maximum_drive_nrmse,
+            AUDIO_CONVERGENCE_DRIVE_NRMSE_LIMIT,
+            self.maximum_drive_normalized_peak,
+            AUDIO_CONVERGENCE_DRIVE_NORMALIZED_PEAK_LIMIT,
+            AUDIO_CONVERGENCE_STEM_FLOOR_FS,
+            self.cropped_stem_nrmse,
+            AUDIO_CONVERGENCE_STEM_NRMSE_LIMIT,
+            self.cropped_stem_normalized_peak,
+            AUDIO_CONVERGENCE_STEM_NORMALIZED_PEAK_LIMIT,
+            self.crop_first_source_audio_frame,
+            self.crop_end_source_audio_frame,
+            self.coarse_crop_identity.to_hex(),
+            self.fine_crop_identity.to_hex(),
+            self.coarse_crop_binding_identity.to_hex(),
+            self.fine_crop_binding_identity.to_hex(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -379,6 +522,255 @@ impl FixtureDenoiseEvidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FixtureOutputConvergenceEvidence {
+    shutter_pose_sample_count: usize,
+    shutter_exact_renderer_sample_count: usize,
+    shutter_stratum_boundary_sample_count: usize,
+    shutter_interpolation_knot_sample_count: usize,
+    shutter_interpolation_midpoint_sample_count: usize,
+    terminal_time_difference_s: f64,
+    terminal_time_relative_difference: f64,
+    coarse_preroll_normal_impulse_n_s: f64,
+    fine_preroll_normal_impulse_n_s: f64,
+    preroll_normal_impulse_relative_difference: f64,
+    coarse_source_normal_impulse_n_s: f64,
+    fine_source_normal_impulse_n_s: f64,
+    source_normal_impulse_relative_difference: f64,
+    coarse_published_normal_impulse_n_s: f64,
+    fine_published_normal_impulse_n_s: f64,
+    published_normal_impulse_relative_difference: f64,
+    maximum_cumulative_normal_impulse_difference_n_s: f64,
+    maximum_cumulative_normal_impulse_relative_difference: f64,
+    maximum_impulse_identity_residual_n_s: f64,
+    maximum_impulse_identity_tolerance_n_s: f64,
+    maximum_center_of_mass_difference_m: f64,
+    maximum_orientation_difference_rad: f64,
+    maximum_chirp_difference_hz: f64,
+    maximum_relative_chirp_difference: f64,
+}
+
+impl FixtureOutputConvergenceEvidence {
+    fn diagnostics(self) -> String {
+        format!(
+            concat!(
+                "stage=mechanics output_convergence source=fine-dt2 ",
+                "shutter_queries={} exact_renderer_samples={} stratum_boundaries={} ",
+                "interpolation_knots={} interpolation_midpoints={} ",
+                "terminal_time_difference_s={:.6e} terminal_time_difference_rel={:.6e} ",
+                "preroll_impulse_rel={:.6e} source_impulse_rel={:.6e} ",
+                "published_impulse_rel={:.6e} cumulative_impulse_rel={:.6e} ",
+                "impulse_identity_residual_n_s={:.6e} impulse_identity_tolerance_n_s={:.6e} ",
+                "com_difference_m={:.6e} orientation_difference_rad={:.6e} ",
+                "chirp_difference_hz={:.6e} chirp_difference_rel={:.6e}"
+            ),
+            self.shutter_pose_sample_count,
+            self.shutter_exact_renderer_sample_count,
+            self.shutter_stratum_boundary_sample_count,
+            self.shutter_interpolation_knot_sample_count,
+            self.shutter_interpolation_midpoint_sample_count,
+            self.terminal_time_difference_s,
+            self.terminal_time_relative_difference,
+            self.preroll_normal_impulse_relative_difference,
+            self.source_normal_impulse_relative_difference,
+            self.published_normal_impulse_relative_difference,
+            self.maximum_cumulative_normal_impulse_relative_difference,
+            self.maximum_impulse_identity_residual_n_s,
+            self.maximum_impulse_identity_tolerance_n_s,
+            self.maximum_center_of_mass_difference_m,
+            self.maximum_orientation_difference_rad,
+            self.maximum_chirp_difference_hz,
+            self.maximum_relative_chirp_difference,
+        )
+    }
+
+    fn manifest_json(self) -> String {
+        format!(
+            concat!(
+                "{{\"comparison\":\"coarse-dt versus fine-dt2; fine-dt2 is the published picture-and-sound source\",",
+                "\"shutter_pose_query_count\":{},",
+                "\"shutter_exact_renderer_sample_count\":{},",
+                "\"shutter_stratum_boundary_sample_count\":{},",
+                "\"shutter_interpolation_knot_sample_count\":{},",
+                "\"shutter_interpolation_midpoint_sample_count\":{},",
+                "\"shutter_sampling\":\"one exact pixel-zero renderer sample per temporal stratum and all stratum boundaries, plus exhaustive coarse/fine union-knot and adjacent midpoint coverage inside every exposure; not exact all-ray jitter coverage\",",
+                "\"terminal_time\":{{\"absolute_difference_s\":{:.17e},",
+                "\"absolute_limit_s\":{:.17e},\"relative_difference\":{:.17e},",
+                "\"relative_limit\":{:.17e}}},",
+                "\"normal_impulse\":{{\"coarse_preroll_n_s\":{:.17e},\"fine_preroll_n_s\":{:.17e},",
+                "\"preroll_relative_difference\":{:.17e},\"coarse_source_n_s\":{:.17e},",
+                "\"fine_source_n_s\":{:.17e},\"source_relative_difference\":{:.17e},",
+                "\"coarse_published_n_s\":{:.17e},",
+                "\"fine_published_n_s\":{:.17e},\"published_relative_difference\":{:.17e},",
+                "\"maximum_cumulative_difference_n_s\":{:.17e},",
+                "\"maximum_cumulative_relative_difference\":{:.17e},",
+                "\"maximum_identity_residual_n_s\":{:.17e},",
+                "\"maximum_identity_tolerance_n_s\":{:.17e},",
+                "\"relative_difference_limit\":{:.17e}}},",
+                "\"motion\":{{\"maximum_center_of_mass_difference_m\":{:.17e},",
+                "\"center_of_mass_limit_m\":{:.17e},",
+                "\"maximum_orientation_geodesic_difference_rad\":{:.17e},",
+                "\"orientation_limit_rad\":{:.17e}}},",
+                "\"chirp\":{{\"maximum_difference_hz\":{:.17e},",
+                "\"absolute_limit_hz\":{:.17e},\"maximum_relative_difference\":{:.17e},",
+                "\"relative_limit\":{:.17e}}},",
+                "\"claim\":\"one output-consistency pair for this encoded reduced model; not an asymptotic-order certificate, contact-law validation, acoustic calibration, or experimental validation\"}}"
+            ),
+            self.shutter_pose_sample_count,
+            self.shutter_exact_renderer_sample_count,
+            self.shutter_stratum_boundary_sample_count,
+            self.shutter_interpolation_knot_sample_count,
+            self.shutter_interpolation_midpoint_sample_count,
+            self.terminal_time_difference_s,
+            OUTPUT_CONVERGENCE_TERMINAL_TIME_ABSOLUTE_LIMIT_S,
+            self.terminal_time_relative_difference,
+            OUTPUT_CONVERGENCE_TERMINAL_TIME_RELATIVE_LIMIT,
+            self.coarse_preroll_normal_impulse_n_s,
+            self.fine_preroll_normal_impulse_n_s,
+            self.preroll_normal_impulse_relative_difference,
+            self.coarse_source_normal_impulse_n_s,
+            self.fine_source_normal_impulse_n_s,
+            self.source_normal_impulse_relative_difference,
+            self.coarse_published_normal_impulse_n_s,
+            self.fine_published_normal_impulse_n_s,
+            self.published_normal_impulse_relative_difference,
+            self.maximum_cumulative_normal_impulse_difference_n_s,
+            self.maximum_cumulative_normal_impulse_relative_difference,
+            self.maximum_impulse_identity_residual_n_s,
+            self.maximum_impulse_identity_tolerance_n_s,
+            OUTPUT_CONVERGENCE_RELATIVE_IMPULSE_LIMIT,
+            self.maximum_center_of_mass_difference_m,
+            OUTPUT_CONVERGENCE_COM_LIMIT_M,
+            self.maximum_orientation_difference_rad,
+            OUTPUT_CONVERGENCE_ORIENTATION_LIMIT_RAD,
+            self.maximum_chirp_difference_hz,
+            OUTPUT_CONVERGENCE_CHIRP_ABSOLUTE_LIMIT_HZ,
+            self.maximum_relative_chirp_difference,
+            OUTPUT_CONVERGENCE_CHIRP_RELATIVE_LIMIT,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FixtureImpulseAudit {
+    cumulative_at_queries_n_s: Vec<f64>,
+    total_n_s: f64,
+    identity_residual_n_s: f64,
+    identity_tolerance_n_s: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CompensatedSum {
+    sum: f64,
+    correction: f64,
+}
+
+impl CompensatedSum {
+    fn add(&mut self, value: f64) {
+        let corrected = value - self.correction;
+        let next = self.sum + corrected;
+        self.correction = (next - self.sum) - corrected;
+        self.sum = next;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SymmetricErrorAccumulator {
+    sample_count: u64,
+    coarse_squared: CompensatedSum,
+    fine_squared: CompensatedSum,
+    difference_squared: CompensatedSum,
+    coarse_peak: f64,
+    fine_peak: f64,
+    difference_peak: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RelativeErrorMetrics {
+    nrmse: f64,
+    normalized_peak: f64,
+}
+
+impl SymmetricErrorAccumulator {
+    fn observe(&mut self, coarse: f64, fine: f64) -> Result<(), CinematicFixtureError> {
+        if !(coarse.is_finite() && fine.is_finite()) {
+            return Err(CinematicFixtureError::Pipeline(
+                "audio convergence encountered a non-finite sample".into(),
+            ));
+        }
+        let difference = coarse - fine;
+        let coarse_squared = coarse * coarse;
+        let fine_squared = fine * fine;
+        let difference_squared = difference * difference;
+        if !(difference.is_finite()
+            && coarse_squared.is_finite()
+            && fine_squared.is_finite()
+            && difference_squared.is_finite())
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "audio convergence metric arithmetic overflowed".into(),
+            ));
+        }
+        self.sample_count = self.sample_count.checked_add(1).ok_or_else(|| {
+            CinematicFixtureError::Pipeline("audio convergence sample count overflow".into())
+        })?;
+        self.coarse_squared.add(coarse_squared);
+        self.fine_squared.add(fine_squared);
+        self.difference_squared.add(difference_squared);
+        self.coarse_peak = self.coarse_peak.max(coarse.abs());
+        self.fine_peak = self.fine_peak.max(fine.abs());
+        self.difference_peak = self.difference_peak.max(difference.abs());
+        Ok(())
+    }
+
+    fn metrics(self, floor: f64) -> Result<RelativeErrorMetrics, CinematicFixtureError> {
+        if self.sample_count == 0 {
+            return Err(CinematicFixtureError::Pipeline(
+                "audio convergence metric has no samples".into(),
+            ));
+        }
+        if !(floor.is_finite() && floor > 0.0) {
+            return Err(CinematicFixtureError::Pipeline(
+                "audio convergence normalization floor must be finite and positive".into(),
+            ));
+        }
+        let count = self.sample_count as f64;
+        let coarse_rms = (self.coarse_squared.sum / count).sqrt();
+        let fine_rms = (self.fine_squared.sum / count).sqrt();
+        let difference_rms = (self.difference_squared.sum / count).sqrt();
+        let rms_scale = coarse_rms.max(fine_rms).max(floor);
+        let peak_scale = self.coarse_peak.max(self.fine_peak).max(floor);
+        let metrics = RelativeErrorMetrics {
+            nrmse: difference_rms / rms_scale,
+            normalized_peak: self.difference_peak / peak_scale,
+        };
+        if !(metrics.nrmse.is_finite()
+            && metrics.nrmse >= 0.0
+            && metrics.normalized_peak.is_finite()
+            && metrics.normalized_peak >= 0.0)
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "audio convergence produced an invalid normalized metric".into(),
+            ));
+        }
+        Ok(metrics)
+    }
+}
+
+struct FixtureAudioCandidate {
+    resampler: AudioResampler,
+    source_sound: SoundSynthesisConfig,
+    excitation_identity: ContentHash,
+    source_trajectory_identity: ContentHash,
+}
+
+struct FixtureAudioPairOutput {
+    fine_stems: Vec<ModalStemFrame>,
+    fine_sound: SoundSynthesisConfig,
+    fine_crop: AudioResamplingCrop,
+    convergence: FixtureAudioConvergenceEvidence,
+}
+
 /// Fail-closed fixture refusal; a failed run never publishes the requested root.
 #[derive(Debug)]
 pub enum CinematicFixtureError {
@@ -420,6 +812,19 @@ impl From<std::io::Error> for CinematicFixtureError {
     }
 }
 
+fn cinematic_thorne_2026_refinement_evidence(
+    benchmark: &Thorne2026SteelGlassBenchmark,
+) -> Result<RefinementEvidence, ReducedDecayError> {
+    let mut refined = benchmark.clone();
+    refined.decay.timestep_s /= f64::from(CINEMATIC_MECHANICS_COARSE_REFINEMENT_FACTOR);
+    refined.decay.maximum_steps = refined
+        .decay
+        .maximum_steps
+        .checked_mul(CINEMATIC_MECHANICS_COARSE_REFINEMENT_FACTOR)
+        .ok_or(ReducedDecayError::RefinementStepBudgetOverflow)?;
+    thorne_2026_refinement_evidence(&refined)
+}
+
 /// Produce one complete critique clip. The concrete staged implementation is
 /// kept here rather than hidden behind a workflow engine.
 pub fn run_cinematic_fixture(
@@ -458,22 +863,43 @@ pub fn run_cinematic_fixture(
     progress("stage=mechanics begin");
     let benchmark = Thorne2026SteelGlassBenchmark::ambient().map_err(pipeline)?;
     let profile = benchmark.resolve_specimen(cx).map_err(pipeline)?;
-    // Reuse the coarse member of the dt/dt/2 comparison as the picture and
-    // sound source. This avoids executing the identical coarse run twice while
-    // ensuring every published clip carries current encoded-model refinement
-    // evidence for both source-bound loss channels.
-    let refinement = thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
-    let run = &refinement.coarse;
+    let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
     let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
-    let (audio_preroll_trajectory, trajectory) =
+    let (coarse_audio_preroll_trajectory, coarse_trajectory) =
         RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
-            run,
+            &refinement.coarse,
             &profile,
             audio_preroll_duration_s,
             duration_s,
             cx,
         )
         .map_err(pipeline)?;
+    let (audio_preroll_trajectory, trajectory) =
+        RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
+            &refinement.fine,
+            &profile,
+            audio_preroll_duration_s,
+            duration_s,
+            cx,
+        )
+        .map_err(pipeline)?;
+    let output_convergence = fixture_output_convergence_evidence(
+        &coarse_audio_preroll_trajectory,
+        &coarse_trajectory,
+        &audio_preroll_trajectory,
+        &trajectory,
+        config,
+        &refinement,
+        audio_preroll_duration_s,
+        duration_s,
+        cx,
+    )?;
+    progress(&output_convergence.diagnostics());
+    // Once the fixed mechanics gate passes, retain the coarse full-preroll
+    // source only through the pre-master audio gate. The coarse published
+    // picture trajectory has served its sole comparison purpose.
+    drop(coarse_trajectory);
+    let run = &refinement.fine;
     let retained_time_s = trajectory
         .samples()
         .last()
@@ -512,13 +938,36 @@ pub fn run_cinematic_fixture(
         cx,
     )
     .map_err(pipeline)?;
+    let coarse_audio_preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+        hash_domain(
+            "org.frankensim.euler-critique.coarse-audio-convergence-source.v1",
+            coarse_audio_preroll_trajectory
+                .metadata()
+                .configuration_identity
+                .as_bytes(),
+        ),
+        coarse_audio_preroll_trajectory,
+        Vec::new(),
+        RenderTrajectoryCodecBudget::DEFAULT,
+        cx,
+    )
+    .map_err(pipeline)?;
     progress(&trajectory_diagnostics(&trajectory_artifact));
 
     // Sound construction is much cheaper than path tracing and depends only
     // on the admitted trajectory. Fail here before spending render-hours if a
     // synthesis, mastering, or artifact contract is unsatisfied.
     progress("stage=audio begin");
-    let audio = build_audio(&trajectory_artifact, &audio_preroll_artifact, config, cx)?;
+    let audio = build_audio(
+        &trajectory_artifact,
+        &coarse_audio_preroll_artifact,
+        &audio_preroll_artifact,
+        run.parameters.gravity_m_per_s2,
+        config,
+        cx,
+    )?;
+    progress(&audio.convergence.diagnostics());
+    drop(coarse_audio_preroll_artifact);
     audio
         .artifact
         .verify(AudioArtifactBudget::DEFAULT, cx)
@@ -559,23 +1008,56 @@ pub fn run_cinematic_fixture(
     progress("stage=render begin");
     let camera = critique_camera(duration_s).map_err(pipeline)?;
     let mut scene_config = EulerSceneConfig::reference(camera);
+    // At the 4K critique framing, the default preview mesh leaves roughly
+    // eight display pixels per azimuthal facet. Increase the actual intersected
+    // render geometry so glossy highlights follow matching geometric normals
+    // instead of relying on an uncorrected shading-normal approximation.
+    scene_config.tessellation = EulerTessellationConfig {
+        azimuthal_segments: 1_024,
+        arc_subdivisions_per_arc: 128,
+    };
     scene_config.show_spin_fiducial = true;
     scene_config.disc_material = EulerMaterialStyle::Conductor {
         optics: ConductorOptics::representative_stainless_steel(),
         surface: ConductorSurface::try_rough(0.12).map_err(pipeline)?,
     };
+    // The product plate is polished glass, not a visibly frosted surface. The
+    // reference scene's rough-GGX convenience preset creates rare, extremely
+    // bright microfacet paths at practical cinematic sample counts. Use the
+    // physically defensible ideal-polished limit here; this changes only the
+    // visual material model and never the mechanics/contact base.
+    scene_config.plate_material = EulerMaterialStyle::Dielectric {
+        glass: DielectricGlass::representative_crown(),
+        surface: DielectricSurface::SMOOTH,
+    };
+    scene_config.support_surface = Some(EulerSupportSurfaceSpec {
+        // Cover the full two-metre camera range so the finite tabletop edge
+        // cannot cut a black chevron through the background of the hero shot.
+        // Scaling this box does not add triangles or alter the mechanical base.
+        width_m: 4.0,
+        depth_m: 4.0,
+        thickness_m: 0.02,
+        gap_below_housing_m: 0.0,
+        material: EulerMaterialStyle::Lambertian {
+            linear_rgb: [0.07, 0.055, 0.045],
+        },
+    });
     // Keep the emitter above the camera frustum while retaining a broad,
     // downward-facing studio source. The reference light otherwise appears as
     // a distracting white bar across the top of this particular composition.
     scene_config.light = EulerRectLightSpec {
-        corner_world_m: Point3::new(-0.09, 0.06, 0.24),
-        edge_u_world_m: GeomVec3::new(0.18, 0.0, 0.0),
-        edge_v_world_m: GeomVec3::new(0.0, -0.12, 0.0),
+        corner_world_m: Point3::new(-0.175, 0.075, 0.22),
+        edge_u_world_m: GeomVec3::new(0.24, 0.0, 0.0),
+        edge_v_world_m: GeomVec3::new(0.0, -0.18, 0.0),
         linear_rgb: [1.0, 0.96, 0.90],
-        radiance_scale: 48.0,
+        radiance_scale: 24.0,
     };
-    scene_config.environment =
-        EulerEnvironmentStyle::StudioGradient(EulerStudioEnvironmentSpec::SOFT_NEUTRAL);
+    scene_config.environment = EulerEnvironmentStyle::StudioGradient(EulerStudioEnvironmentSpec {
+        overhead_linear_rgb: [0.12, 0.16, 0.24],
+        horizon_linear_rgb: [0.22, 0.15, 0.10],
+        floor_linear_rgb: [0.012, 0.009, 0.007],
+        radiance_scale: 0.35,
+    });
     let scene = EulerCinematicScene::try_build(&trajectory_artifact, &profile, scene_config, cx)
         .map_err(pipeline)?;
     let mut base_render_settings = euler_scene_smoke_settings(config.width, config.height);
@@ -592,7 +1074,7 @@ pub fn run_cinematic_fixture(
     let mut denoise_history: Option<TemporalDenoisedFrame> = None;
     let denoise_config = TemporalDenoiseConfig::default();
     let aov_profile = if config.denoise_previews || config.retain_full_aov_exr {
-        CinematicAovProfile::DailyCore
+        CinematicAovProfile::FinalDiagnostic
     } else {
         CinematicAovProfile::BeautyOnly
     };
@@ -705,9 +1187,7 @@ pub fn run_cinematic_fixture(
             drop(exr);
 
             let [red, green, blue] = film.beauty().to_linear_srgb();
-            let mut color = CinematicColorConfig::reference_srgb_16();
-            color.exposure_ev = 1;
-            color.dither = PreviewDither::Disabled;
+            let color = critique_color_config();
             let preview = if config.denoise_previews {
                 let guides = film.denoise_guides().map_err(pipeline)?;
                 let denoise_boundary = if denoise_history.is_none() && frame != 0 {
@@ -718,6 +1198,7 @@ pub fn run_cinematic_fixture(
                 let denoised = temporal_denoise_rgb(
                     TemporalDenoiseInput {
                         frame_index: u64::from(frame),
+                        samples_per_pixel: config.samples_per_pixel,
                         width: raster_width,
                         height: raster_height,
                         red: &red,
@@ -731,8 +1212,8 @@ pub fn run_cinematic_fixture(
                         normal_z: guides.normal_z(),
                         primary_coverage: guides.primary_coverage(),
                         variance_luminance: guides.variance_luminance(),
-                        object_ids: None,
-                        material_ids: None,
+                        object_ids: guides.object_palette_indices(),
+                        material_ids: guides.material_palette_indices(),
                     },
                     denoise_history.as_ref(),
                     denoise_boundary,
@@ -800,6 +1281,8 @@ pub fn run_cinematic_fixture(
         duration_s,
         run,
         &refinement,
+        &output_convergence,
+        &audio.convergence,
         &trajectory_artifact,
         raw_sequence_identity,
         preview_sequence_identity,
@@ -808,6 +1291,11 @@ pub fn run_cinematic_fixture(
         &audio.modal_parameter_set_disclosure,
         audio.warm_start_source_identity,
         audio.warm_start_checkpoint_identity,
+        audio.source_sound_configuration_identity,
+        audio.published_trajectory_identity,
+        audio.crop_resampler_identity,
+        audio.crop_first_source_audio_frame,
+        audio.crop_end_source_audio_frame,
         audio.chirp_start_hz,
         audio.chirp_end_hz,
         audio.pre_master_peak_fs,
@@ -894,7 +1382,7 @@ fn frame_timeline_times(
 }
 
 fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> ContentHash {
-    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.composition.v3");
+    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.composition.v4");
     hasher.update(scene.as_bytes());
     hasher.update(&config.width.to_le_bytes());
     hasher.update(&config.height.to_le_bytes());
@@ -919,7 +1407,12 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
         hasher.update(b"temporal-denoise-disabled");
     }
     hasher.update(
-        b"encoded-pts-frame-start-v1;back-loaded-shutter-close-at-frame-end-v2;daily-core-aov;aces-srgb16;exposure-ev-plus-1",
+        b"encoded-pts-frame-start-v1;back-loaded-shutter-close-at-frame-end-v2;cinematic-aov;display-color-config-canonical-v1",
+    );
+    hasher.update(
+        &critique_color_config()
+            .canonical_bytes()
+            .expect("the frozen critique display configuration is valid"),
     );
     hasher.finalize()
 }
@@ -993,6 +1486,749 @@ fn trajectory_diagnostics(artifact: &EulerRenderTrajectoryArtifact) -> String {
         last.qois.precession_rad_per_s,
         last.qois.spin_rad_per_s,
     )
+}
+
+fn fixture_output_convergence_evidence(
+    coarse_source: &RenderTrajectory,
+    coarse_published: &RenderTrajectory,
+    fine_source: &RenderTrajectory,
+    fine_published: &RenderTrajectory,
+    config: &CinematicFixtureConfig,
+    refinement: &RefinementEvidence,
+    preroll_duration_s: f64,
+    published_duration_s: f64,
+    cx: &Cx<'_>,
+) -> Result<FixtureOutputConvergenceEvidence, CinematicFixtureError> {
+    let gravity_m_per_s2 = refinement.fine.parameters.gravity_m_per_s2;
+    let coarse_dt_s = coarse_published.metadata().timestep_s;
+    let fine_dt_s = fine_published.metadata().timestep_s;
+    let timestep_scale = coarse_dt_s.abs().max(f64::MIN_POSITIVE);
+    if coarse_source.metadata().timestep_s.to_bits() != coarse_dt_s.to_bits()
+        || fine_source.metadata().timestep_s.to_bits() != fine_dt_s.to_bits()
+        || refinement.coarse.parameters.timestep_s.to_bits() != coarse_dt_s.to_bits()
+        || refinement.fine.parameters.timestep_s.to_bits() != fine_dt_s.to_bits()
+        || (coarse_dt_s - 2.0 * fine_dt_s).abs() > 8.0 * f64::EPSILON * timestep_scale
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "output convergence requires one exact dt/dt2 source pair; coarse={coarse_dt_s:.17e}s fine={fine_dt_s:.17e}s"
+        )));
+    }
+    if coarse_published.metadata().mass_properties.properties
+        != fine_published.metadata().mass_properties.properties
+        || coarse_source.metadata().mass_properties.properties
+            != fine_source.metadata().mass_properties.properties
+        || coarse_source.metadata().mass_properties.properties
+            != coarse_published.metadata().mass_properties.properties
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "output convergence trajectories do not share exact mass properties".into(),
+        ));
+    }
+    if !(gravity_m_per_s2.is_finite()
+        && gravity_m_per_s2 > 0.0
+        && refinement.coarse.parameters.gravity_m_per_s2.to_bits() == gravity_m_per_s2.to_bits()
+        && preroll_duration_s.is_finite()
+        && preroll_duration_s > 0.0
+        && published_duration_s.is_finite()
+        && published_duration_s > 0.0)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "output convergence horizons and gravity must be finite and positive".into(),
+        ));
+    }
+    let coarse_terminal_time_s = refinement
+        .coarse
+        .samples
+        .last()
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline(
+                "output convergence coarse run has no terminal sample".into(),
+            )
+        })?
+        .time_s;
+    let fine_terminal_time_s = refinement
+        .fine
+        .samples
+        .last()
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline(
+                "output convergence fine run has no terminal sample".into(),
+            )
+        })?
+        .time_s;
+    if !(coarse_terminal_time_s.is_finite()
+        && coarse_terminal_time_s > 0.0
+        && fine_terminal_time_s.is_finite()
+        && fine_terminal_time_s > 0.0)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "output convergence terminal times must be finite and positive".into(),
+        ));
+    }
+    let terminal_time_difference_s = (coarse_terminal_time_s - fine_terminal_time_s).abs();
+    if terminal_time_difference_s.to_bits() != refinement.terminal_time_difference_s.to_bits() {
+        return Err(CinematicFixtureError::Pipeline(
+            "output convergence terminal-time evidence does not match its retained endpoints"
+                .into(),
+        ));
+    }
+    let terminal_time_relative_difference = terminal_time_difference_s
+        / coarse_terminal_time_s
+            .abs()
+            .max(fine_terminal_time_s.abs())
+            .max(f64::MIN_POSITIVE);
+    let source_duration_s = preroll_duration_s + published_duration_s;
+    for (label, trajectory, expected_duration_s) in [
+        ("coarse source", coarse_source, source_duration_s),
+        ("coarse published", coarse_published, published_duration_s),
+        ("fine source", fine_source, source_duration_s),
+        ("fine published", fine_published, published_duration_s),
+    ] {
+        require_trajectory_horizon(label, trajectory, expected_duration_s)?;
+    }
+    if coarse_source
+        .samples()
+        .last()
+        .expect("validated trajectory is nonempty")
+        .input()
+        .disposition
+        != fine_source
+            .samples()
+            .last()
+            .expect("validated trajectory is nonempty")
+            .input()
+            .disposition
+        || coarse_published
+            .samples()
+            .last()
+            .expect("validated trajectory is nonempty")
+            .input()
+            .disposition
+            != fine_published
+                .samples()
+                .last()
+                .expect("validated trajectory is nonempty")
+                .input()
+                .disposition
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "output convergence trajectories end with different disposition classes".into(),
+        ));
+    }
+
+    let frame_boundary_times_s = (0..=config.frames)
+        .map(|frame| f64::from(frame) / f64::from(CRITIQUE_FPS))
+        .collect::<Vec<_>>();
+    let coarse_source_impulse =
+        fixture_impulse_audit(coarse_source, &[preroll_duration_s], gravity_m_per_s2, cx)?;
+    let fine_source_impulse =
+        fixture_impulse_audit(fine_source, &[preroll_duration_s], gravity_m_per_s2, cx)?;
+    let coarse_published_impulse = fixture_impulse_audit(
+        coarse_published,
+        &frame_boundary_times_s,
+        gravity_m_per_s2,
+        cx,
+    )?;
+    let fine_published_impulse = fixture_impulse_audit(
+        fine_published,
+        &frame_boundary_times_s,
+        gravity_m_per_s2,
+        cx,
+    )?;
+    for (label, audit) in [
+        ("coarse source", &coarse_source_impulse),
+        ("fine source", &fine_source_impulse),
+        ("coarse published", &coarse_published_impulse),
+        ("fine published", &fine_published_impulse),
+    ] {
+        if audit.identity_residual_n_s > audit.identity_tolerance_n_s {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "{label} normal-impulse identity residual {:.17e} N s exceeds its {:.17e} N s roundoff allowance",
+                audit.identity_residual_n_s, audit.identity_tolerance_n_s
+            )));
+        }
+    }
+
+    let mass_kg = fine_published.metadata().mass_properties.properties.mass();
+    let preroll_impulse_scale_n_s = (mass_kg * gravity_m_per_s2 * preroll_duration_s).abs();
+    let source_impulse_scale_n_s = (mass_kg * gravity_m_per_s2 * source_duration_s).abs();
+    let published_impulse_scale_n_s = (mass_kg * gravity_m_per_s2 * published_duration_s).abs();
+    let coarse_preroll_normal_impulse_n_s = coarse_source_impulse.cumulative_at_queries_n_s[0];
+    let fine_preroll_normal_impulse_n_s = fine_source_impulse.cumulative_at_queries_n_s[0];
+    let preroll_normal_impulse_relative_difference = scaled_absolute_difference(
+        coarse_preroll_normal_impulse_n_s,
+        fine_preroll_normal_impulse_n_s,
+        preroll_impulse_scale_n_s,
+    );
+    let source_normal_impulse_relative_difference = scaled_absolute_difference(
+        coarse_source_impulse.total_n_s,
+        fine_source_impulse.total_n_s,
+        source_impulse_scale_n_s,
+    );
+    let published_normal_impulse_relative_difference = scaled_absolute_difference(
+        coarse_published_impulse.total_n_s,
+        fine_published_impulse.total_n_s,
+        published_impulse_scale_n_s,
+    );
+    let maximum_cumulative_normal_impulse_difference_n_s = coarse_published_impulse
+        .cumulative_at_queries_n_s
+        .iter()
+        .zip(&fine_published_impulse.cumulative_at_queries_n_s)
+        .map(|(coarse, fine)| (coarse - fine).abs())
+        .fold(0.0_f64, f64::max);
+    let maximum_cumulative_normal_impulse_relative_difference =
+        maximum_cumulative_normal_impulse_difference_n_s
+            / fine_published_impulse
+                .total_n_s
+                .abs()
+                .max(published_impulse_scale_n_s)
+                .max(f64::MIN_POSITIVE);
+
+    let coarse_motion = EulerRenderMotionBridge::new(coarse_published);
+    let fine_motion = EulerRenderMotionBridge::new(fine_published);
+    let coarse_last_time_s = coarse_published
+        .samples()
+        .last()
+        .expect("validated trajectory is nonempty")
+        .input()
+        .time_s;
+    let fine_last_time_s = fine_published
+        .samples()
+        .last()
+        .expect("validated trajectory is nonempty")
+        .input()
+        .time_s;
+    let pose_query_horizon_tolerance_s = 32.0 * f64::EPSILON * published_duration_s.max(1.0);
+    let mass = fine_published.metadata().mass_properties.properties;
+    let exposure_duration_s =
+        f64::from(config.shutter_angle_degrees) / 360.0 / f64::from(CRITIQUE_FPS);
+    let shot = ShotTimeBounds::try_new(0.0, published_duration_s).map_err(pipeline)?;
+    let base_render_seed = euler_scene_smoke_settings(config.width, config.height).seed;
+    let interpolation_knot_capacity = coarse_published
+        .samples()
+        .len()
+        .checked_add(fine_published.samples().len())
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline("shutter interpolation knot count overflow".into())
+        })?;
+    let mut interpolation_knots_s = Vec::new();
+    interpolation_knots_s
+        .try_reserve_exact(interpolation_knot_capacity)
+        .map_err(|_| {
+            CinematicFixtureError::Pipeline("shutter interpolation knot allocation refused".into())
+        })?;
+    interpolation_knots_s.extend(
+        coarse_published
+            .samples()
+            .iter()
+            .map(|sample| sample.input().time_s),
+    );
+    interpolation_knots_s.extend(
+        fine_published
+            .samples()
+            .iter()
+            .map(|sample| sample.input().time_s),
+    );
+    interpolation_knots_s.sort_by(f64::total_cmp);
+    interpolation_knots_s.dedup_by(|left, right| left.to_bits() == right.to_bits());
+    let mut maximum_center_of_mass_difference_m = 0.0_f64;
+    let mut maximum_orientation_difference_rad = 0.0_f64;
+    let mut maximum_chirp_difference_hz = 0.0_f64;
+    let mut maximum_relative_chirp_difference = 0.0_f64;
+    let mut shutter_pose_sample_count = 0_usize;
+    let mut shutter_exact_renderer_sample_count = 0_usize;
+    let mut shutter_stratum_boundary_sample_count = 0_usize;
+    let mut shutter_interpolation_knot_sample_count = 0_usize;
+    let mut shutter_interpolation_midpoint_sample_count = 0_usize;
+    let mut compare_at_time = |time_s: f64| -> Result<(), CinematicFixtureError> {
+        let coarse_time_s = canonicalize_terminal_query_time_s(
+            time_s,
+            coarse_last_time_s,
+            pose_query_horizon_tolerance_s,
+        );
+        let fine_time_s = canonicalize_terminal_query_time_s(
+            time_s,
+            fine_last_time_s,
+            pose_query_horizon_tolerance_s,
+        );
+        let coarse = coarse_motion
+            .sample_at_time(coarse_time_s, EventEvaluationSide::RightLimit)
+            .map_err(pipeline)?;
+        let fine = fine_motion
+            .sample_at_time(fine_time_s, EventEvaluationSide::RightLimit)
+            .map_err(pipeline)?;
+        let coarse_pose = coarse.timeline_sample().state.pose();
+        let fine_pose = fine.timeline_sample().state.pose();
+        let position_delta = coarse_pose.position_world().sub(fine_pose.position_world());
+        let center_of_mass_difference_m = position_delta.norm_squared().sqrt();
+        let orientation_difference_rad = quaternion_geodesic_difference_rad(
+            coarse_pose.orientation().components(),
+            fine_pose.orientation().components(),
+        );
+        if !(center_of_mass_difference_m.is_finite()
+            && center_of_mass_difference_m >= 0.0
+            && orientation_difference_rad.is_finite()
+            && orientation_difference_rad >= 0.0)
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "output convergence encountered a non-finite or negative pose difference".into(),
+            ));
+        }
+        maximum_center_of_mass_difference_m =
+            maximum_center_of_mass_difference_m.max(center_of_mass_difference_m);
+        maximum_orientation_difference_rad =
+            maximum_orientation_difference_rad.max(orientation_difference_rad);
+        let coarse_chirp_hz = body_contact_chirp_hz(coarse.timeline_sample().state, mass)?;
+        let fine_chirp_hz = body_contact_chirp_hz(fine.timeline_sample().state, mass)?;
+        let chirp_difference_hz = (coarse_chirp_hz - fine_chirp_hz).abs();
+        maximum_chirp_difference_hz = maximum_chirp_difference_hz.max(chirp_difference_hz);
+        maximum_relative_chirp_difference = maximum_relative_chirp_difference
+            .max(chirp_difference_hz / fine_chirp_hz.abs().max(f64::MIN_POSITIVE));
+        shutter_pose_sample_count = shutter_pose_sample_count.checked_add(1).ok_or_else(|| {
+            CinematicFixtureError::Pipeline("shutter convergence query count overflow".into())
+        })?;
+        Ok(())
+    };
+    for frame in 0..config.frames {
+        cx.checkpoint()
+            .map_err(|_| CinematicFixtureError::Cancelled)?;
+        let close_s = f64::from(frame + 1) / f64::from(CRITIQUE_FPS);
+        let shutter = ShutterInterval::resolve(
+            close_s,
+            exposure_duration_s,
+            ShutterConvention::BackLoaded,
+            ShutterDistribution::StratifiedCounterV1 {
+                strata: config.samples_per_pixel,
+            },
+            shot,
+        )
+        .map_err(pipeline)?;
+        let frame_seed = frame_render_seed(base_render_seed, config.render_seed_salt, frame);
+        let strata = usize::try_from(config.samples_per_pixel).map_err(|_| {
+            CinematicFixtureError::Pipeline("shutter stratum count exceeds usize".into())
+        })?;
+        let mut visited_strata = vec![false; strata];
+        // For any fixed pixel, consecutive sample identities 0..SPP form a
+        // permutation of every temporal stratum. Pixel zero is therefore a
+        // bounded exact subset of renderer timestamps that covers the complete
+        // partition; the explicit boundaries below close each stratum.
+        for sample in 0..config.samples_per_pixel {
+            let normalized = shutter.sample_for_stream(frame_seed, 0, u64::from(sample));
+            let stratum = (normalized.value() * f64::from(config.samples_per_pixel)).floor();
+            if !(stratum.is_finite() && stratum >= 0.0 && stratum < strata as f64) {
+                return Err(CinematicFixtureError::Pipeline(format!(
+                    "frame {frame} renderer shutter sample escaped its temporal strata"
+                )));
+            }
+            let stratum = stratum as usize;
+            if core::mem::replace(&mut visited_strata[stratum], true) {
+                return Err(CinematicFixtureError::Pipeline(format!(
+                    "frame {frame} renderer shutter samples did not form a stratum permutation"
+                )));
+            }
+            compare_at_time(shutter.time_at(normalized))?;
+            shutter_exact_renderer_sample_count = shutter_exact_renderer_sample_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    CinematicFixtureError::Pipeline(
+                        "exact renderer shutter sample count overflow".into(),
+                    )
+                })?;
+        }
+        if visited_strata.iter().any(|visited| !visited) {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "frame {frame} renderer shutter samples left a temporal stratum uncovered"
+            )));
+        }
+        for boundary in 0..=config.samples_per_pixel {
+            let normalized = NormalizedShutterTime::try_new(
+                f64::from(boundary) / f64::from(config.samples_per_pixel),
+            )
+            .map_err(pipeline)?;
+            compare_at_time(shutter.time_at(normalized))?;
+            shutter_stratum_boundary_sample_count = shutter_stratum_boundary_sample_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    CinematicFixtureError::Pipeline(
+                        "shutter stratum boundary count overflow".into(),
+                    )
+                })?;
+        }
+        let first_internal_knot =
+            interpolation_knots_s.partition_point(|time_s| *time_s <= shutter.open_s());
+        let end_internal_knot =
+            interpolation_knots_s.partition_point(|time_s| *time_s < shutter.close_s());
+        let internal_knots = &interpolation_knots_s[first_internal_knot..end_internal_knot];
+        for time_s in internal_knots.iter().copied() {
+            compare_at_time(time_s)?;
+            shutter_interpolation_knot_sample_count = shutter_interpolation_knot_sample_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    CinematicFixtureError::Pipeline(
+                        "shutter interpolation knot sample count overflow".into(),
+                    )
+                })?;
+        }
+        let mut left_time_s = shutter.open_s();
+        for right_time_s in internal_knots
+            .iter()
+            .copied()
+            .chain(core::iter::once(shutter.close_s()))
+        {
+            if right_time_s > left_time_s {
+                let midpoint_s = 0.5_f64.mul_add(right_time_s - left_time_s, left_time_s);
+                compare_at_time(midpoint_s)?;
+                shutter_interpolation_midpoint_sample_count =
+                    shutter_interpolation_midpoint_sample_count
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            CinematicFixtureError::Pipeline(
+                                "shutter interpolation midpoint sample count overflow".into(),
+                            )
+                        })?;
+            }
+            left_time_s = right_time_s;
+        }
+    }
+
+    let evidence = FixtureOutputConvergenceEvidence {
+        shutter_pose_sample_count,
+        shutter_exact_renderer_sample_count,
+        shutter_stratum_boundary_sample_count,
+        shutter_interpolation_knot_sample_count,
+        shutter_interpolation_midpoint_sample_count,
+        terminal_time_difference_s,
+        terminal_time_relative_difference,
+        coarse_preroll_normal_impulse_n_s,
+        fine_preroll_normal_impulse_n_s,
+        preroll_normal_impulse_relative_difference,
+        coarse_source_normal_impulse_n_s: coarse_source_impulse.total_n_s,
+        fine_source_normal_impulse_n_s: fine_source_impulse.total_n_s,
+        source_normal_impulse_relative_difference,
+        coarse_published_normal_impulse_n_s: coarse_published_impulse.total_n_s,
+        fine_published_normal_impulse_n_s: fine_published_impulse.total_n_s,
+        published_normal_impulse_relative_difference,
+        maximum_cumulative_normal_impulse_difference_n_s,
+        maximum_cumulative_normal_impulse_relative_difference,
+        maximum_impulse_identity_residual_n_s: [
+            coarse_source_impulse.identity_residual_n_s,
+            fine_source_impulse.identity_residual_n_s,
+            coarse_published_impulse.identity_residual_n_s,
+            fine_published_impulse.identity_residual_n_s,
+        ]
+        .into_iter()
+        .fold(0.0_f64, f64::max),
+        maximum_impulse_identity_tolerance_n_s: [
+            coarse_source_impulse.identity_tolerance_n_s,
+            fine_source_impulse.identity_tolerance_n_s,
+            coarse_published_impulse.identity_tolerance_n_s,
+            fine_published_impulse.identity_tolerance_n_s,
+        ]
+        .into_iter()
+        .fold(0.0_f64, f64::max),
+        maximum_center_of_mass_difference_m,
+        maximum_orientation_difference_rad,
+        maximum_chirp_difference_hz,
+        maximum_relative_chirp_difference,
+    };
+    admit_fixture_output_convergence(evidence)?;
+    Ok(evidence)
+}
+
+fn require_trajectory_horizon(
+    label: &str,
+    trajectory: &RenderTrajectory,
+    expected_duration_s: f64,
+) -> Result<(), CinematicFixtureError> {
+    let samples = trajectory.samples();
+    let first_time_s = samples
+        .first()
+        .expect("validated trajectory is nonempty")
+        .input()
+        .time_s;
+    let last_time_s = samples
+        .last()
+        .expect("validated trajectory is nonempty")
+        .input()
+        .time_s;
+    let tolerance_s = 32.0 * f64::EPSILON * expected_duration_s.max(1.0);
+    if first_time_s.abs() > tolerance_s || (last_time_s - expected_duration_s).abs() > tolerance_s {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "{label} horizon [{first_time_s:.17e}, {last_time_s:.17e}] s does not match [0, {expected_duration_s:.17e}] s"
+        )));
+    }
+    Ok(())
+}
+
+fn fixture_impulse_audit(
+    trajectory: &RenderTrajectory,
+    query_times_s: &[f64],
+    gravity_m_per_s2: f64,
+    cx: &Cx<'_>,
+) -> Result<FixtureImpulseAudit, CinematicFixtureError> {
+    let controls = EulerControlStream::try_derive(trajectory, cx).map_err(pipeline)?;
+    let intervals = controls.audio();
+    let mut interval_measures_n_s = Vec::new();
+    interval_measures_n_s
+        .try_reserve_exact(intervals.len())
+        .map_err(|_| {
+            CinematicFixtureError::Pipeline("normal-impulse audit allocation refused".into())
+        })?;
+    for interval in intervals {
+        let full_contact_mean_available = interval.channels.contact.available().is_some();
+        let declared_scalar_is_interval_mean =
+            interval.normal_force_sampling == RenderNormalForceSampling::IntervalMean;
+        if !full_contact_mean_available && !declared_scalar_is_interval_mean {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "normal-impulse audit requires a full-contact duration mean or an IntervalMean scalar at source sample {}",
+                interval.source_sample_index
+            )));
+        }
+        let mean_normal_force_n = interval.mean_base_normal_contact_force_n.ok_or_else(|| {
+            CinematicFixtureError::Pipeline(format!(
+                "normal-impulse audit is missing the mean normal load at source sample {}",
+                interval.source_sample_index
+            ))
+        })?;
+        let measure_n_s = mean_normal_force_n * interval.duration_s;
+        if !(mean_normal_force_n.is_finite()
+            && mean_normal_force_n >= 0.0
+            && measure_n_s.is_finite()
+            && measure_n_s >= 0.0)
+        {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "normal-impulse audit found an invalid interval measure at source sample {}",
+                interval.source_sample_index
+            )));
+        }
+        interval_measures_n_s.push(measure_n_s);
+    }
+    let first_time_s = controls
+        .visualization()
+        .first()
+        .expect("validated control stream is nonempty")
+        .time_s;
+    let last_time_s = controls
+        .visualization()
+        .last()
+        .expect("validated control stream is nonempty")
+        .time_s;
+    let horizon_tolerance_s = 32.0 * f64::EPSILON * (last_time_s - first_time_s).abs().max(1.0);
+    let mut canonical_query_times_s = Vec::new();
+    canonical_query_times_s
+        .try_reserve_exact(query_times_s.len())
+        .map_err(|_| {
+            CinematicFixtureError::Pipeline("normal-impulse query allocation refused".into())
+        })?;
+    let mut previous_query_s = None;
+    for (query_index, query_time_s) in query_times_s.iter().copied().enumerate() {
+        let canonical_query_time_s =
+            canonicalize_terminal_query_time_s(query_time_s, last_time_s, horizon_tolerance_s);
+        if !canonical_query_time_s.is_finite()
+            || canonical_query_time_s < first_time_s
+            || canonical_query_time_s > last_time_s
+            || previous_query_s.is_some_and(|previous| canonical_query_time_s < previous)
+        {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "normal-impulse query {query_index} at {query_time_s:.17e}s is outside the ordered trajectory horizon"
+            )));
+        }
+        canonical_query_times_s.push(canonical_query_time_s);
+        previous_query_s = Some(canonical_query_time_s);
+    }
+
+    let mut completed = CompensatedSum::default();
+    let mut interval_index = 0_usize;
+    let mut cumulative_at_queries_n_s = Vec::new();
+    cumulative_at_queries_n_s
+        .try_reserve_exact(query_times_s.len())
+        .map_err(|_| {
+            CinematicFixtureError::Pipeline("cumulative-impulse audit allocation refused".into())
+        })?;
+    for query_time_s in &canonical_query_times_s {
+        while interval_index < intervals.len()
+            && intervals[interval_index].end_time_s <= *query_time_s
+        {
+            completed.add(interval_measures_n_s[interval_index]);
+            interval_index += 1;
+        }
+        let mut cumulative_n_s = completed.sum;
+        if let Some(interval) = intervals.get(interval_index) {
+            if interval.start_time_s < *query_time_s {
+                let overlap_s = (*query_time_s).min(interval.end_time_s) - interval.start_time_s;
+                let mean_normal_force_n = interval
+                    .mean_base_normal_contact_force_n
+                    .expect("validated interval retains a mean normal load");
+                cumulative_n_s += mean_normal_force_n * overlap_s;
+            }
+        }
+        cumulative_at_queries_n_s.push(cumulative_n_s);
+    }
+
+    let mut total = CompensatedSum::default();
+    for measure_n_s in &interval_measures_n_s {
+        total.add(*measure_n_s);
+    }
+    let first_velocity_z_m_per_s = controls
+        .visualization()
+        .first()
+        .expect("validated control stream is nonempty")
+        .center_of_mass_velocity_world_m_per_s
+        .z;
+    let last_velocity_z_m_per_s = controls
+        .visualization()
+        .last()
+        .expect("validated control stream is nonempty")
+        .center_of_mass_velocity_world_m_per_s
+        .z;
+    let mass_kg = trajectory.metadata().mass_properties.properties.mass();
+    let horizon_s = last_time_s - first_time_s;
+    let expected_n_s = mass_kg
+        * (gravity_m_per_s2 * horizon_s + last_velocity_z_m_per_s - first_velocity_z_m_per_s);
+    let identity_residual_n_s = (total.sum - expected_n_s).abs();
+    let identity_scale_n_s = total
+        .sum
+        .abs()
+        .max(expected_n_s.abs())
+        .max((mass_kg * gravity_m_per_s2 * horizon_s).abs())
+        .max(f64::MIN_POSITIVE);
+    let identity_tolerance_n_s = OUTPUT_CONVERGENCE_IMPULSE_ROUNDOFF_PER_INTERVAL
+        * f64::EPSILON
+        * (intervals.len().max(1) as f64)
+        * identity_scale_n_s;
+    Ok(FixtureImpulseAudit {
+        cumulative_at_queries_n_s,
+        total_n_s: total.sum,
+        identity_residual_n_s,
+        identity_tolerance_n_s,
+    })
+}
+
+fn canonicalize_terminal_query_time_s(
+    query_time_s: f64,
+    last_time_s: f64,
+    horizon_tolerance_s: f64,
+) -> f64 {
+    if query_time_s > last_time_s && query_time_s - last_time_s <= horizon_tolerance_s {
+        last_time_s
+    } else {
+        query_time_s
+    }
+}
+
+fn scaled_absolute_difference(coarse: f64, fine: f64, physical_scale: f64) -> f64 {
+    (coarse - fine).abs() / fine.abs().max(physical_scale.abs()).max(f64::MIN_POSITIVE)
+}
+
+fn quaternion_geodesic_difference_rad(coarse_wxyz: [f64; 4], fine_wxyz: [f64; 4]) -> f64 {
+    let absolute_dot = coarse_wxyz
+        .iter()
+        .zip(fine_wxyz)
+        .map(|(coarse, fine)| coarse * fine)
+        .sum::<f64>()
+        .abs()
+        .clamp(0.0, 1.0);
+    2.0 * det::acos(absolute_dot)
+}
+
+fn body_contact_chirp_hz(
+    state: fs_mbd::RigidBodyState,
+    mass: fs_mbd::MassProperties,
+) -> Result<f64, CinematicFixtureError> {
+    let qois = DerivedEulerQois::from_state(state, mass, 0.0).map_err(pipeline)?;
+    let frequency_hz =
+        qois.precession_rad_per_s * det::cos(qois.inclination_rad) / core::f64::consts::TAU;
+    if !(frequency_hz.is_finite() && frequency_hz > 0.0) {
+        return Err(CinematicFixtureError::Pipeline(
+            "output convergence produced an invalid body-contact chirp frequency".into(),
+        ));
+    }
+    Ok(frequency_hz)
+}
+
+fn admit_fixture_output_convergence(
+    evidence: FixtureOutputConvergenceEvidence,
+) -> Result<(), CinematicFixtureError> {
+    let finite_nonnegative = [
+        evidence.terminal_time_difference_s,
+        evidence.terminal_time_relative_difference,
+        evidence.coarse_preroll_normal_impulse_n_s,
+        evidence.fine_preroll_normal_impulse_n_s,
+        evidence.preroll_normal_impulse_relative_difference,
+        evidence.coarse_source_normal_impulse_n_s,
+        evidence.fine_source_normal_impulse_n_s,
+        evidence.source_normal_impulse_relative_difference,
+        evidence.coarse_published_normal_impulse_n_s,
+        evidence.fine_published_normal_impulse_n_s,
+        evidence.published_normal_impulse_relative_difference,
+        evidence.maximum_cumulative_normal_impulse_difference_n_s,
+        evidence.maximum_cumulative_normal_impulse_relative_difference,
+        evidence.maximum_impulse_identity_residual_n_s,
+        evidence.maximum_impulse_identity_tolerance_n_s,
+        evidence.maximum_center_of_mass_difference_m,
+        evidence.maximum_orientation_difference_rad,
+        evidence.maximum_chirp_difference_hz,
+        evidence.maximum_relative_chirp_difference,
+    ];
+    if finite_nonnegative
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+        || evidence.shutter_pose_sample_count == 0
+        || evidence
+            .shutter_exact_renderer_sample_count
+            .checked_add(evidence.shutter_stratum_boundary_sample_count)
+            .and_then(|count| count.checked_add(evidence.shutter_interpolation_knot_sample_count))
+            .and_then(|count| {
+                count.checked_add(evidence.shutter_interpolation_midpoint_sample_count)
+            })
+            != Some(evidence.shutter_pose_sample_count)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "output-space dt/dt2 convergence evidence is non-finite, negative, empty, or internally inconsistent"
+                .into(),
+        ));
+    }
+    let impulse_maximum = evidence
+        .preroll_normal_impulse_relative_difference
+        .max(evidence.source_normal_impulse_relative_difference)
+        .max(evidence.published_normal_impulse_relative_difference)
+        .max(evidence.maximum_cumulative_normal_impulse_relative_difference);
+    if evidence.terminal_time_difference_s > OUTPUT_CONVERGENCE_TERMINAL_TIME_ABSOLUTE_LIMIT_S
+        || evidence.terminal_time_relative_difference
+            > OUTPUT_CONVERGENCE_TERMINAL_TIME_RELATIVE_LIMIT
+        || impulse_maximum > OUTPUT_CONVERGENCE_RELATIVE_IMPULSE_LIMIT
+        || evidence.maximum_center_of_mass_difference_m > OUTPUT_CONVERGENCE_COM_LIMIT_M
+        || evidence.maximum_orientation_difference_rad > OUTPUT_CONVERGENCE_ORIENTATION_LIMIT_RAD
+        || evidence.maximum_chirp_difference_hz > OUTPUT_CONVERGENCE_CHIRP_ABSOLUTE_LIMIT_HZ
+        || evidence.maximum_relative_chirp_difference > OUTPUT_CONVERGENCE_CHIRP_RELATIVE_LIMIT
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            concat!(
+                "output-space dt/dt2 convergence refused: terminal_s={terminal:.17e} ",
+                "(limit {terminal_limit:.17e}), terminal_rel={terminal_relative:.17e} ",
+                "(limit {terminal_relative_limit:.17e}), impulse_rel={impulse_maximum:.17e} ",
+                "(limit {impulse_limit:.17e}), com_m={com:.17e} (limit {com_limit:.17e}), ",
+                "orientation_rad={orientation:.17e} (limit {orientation_limit:.17e}), ",
+                "chirp_hz={chirp:.17e} (limit {chirp_limit:.17e}), ",
+                "chirp_rel={chirp_relative:.17e} (limit {chirp_relative_limit:.17e})"
+            ),
+            terminal = evidence.terminal_time_difference_s,
+            terminal_limit = OUTPUT_CONVERGENCE_TERMINAL_TIME_ABSOLUTE_LIMIT_S,
+            terminal_relative = evidence.terminal_time_relative_difference,
+            terminal_relative_limit = OUTPUT_CONVERGENCE_TERMINAL_TIME_RELATIVE_LIMIT,
+            impulse_maximum = impulse_maximum,
+            impulse_limit = OUTPUT_CONVERGENCE_RELATIVE_IMPULSE_LIMIT,
+            com = evidence.maximum_center_of_mass_difference_m,
+            com_limit = OUTPUT_CONVERGENCE_COM_LIMIT_M,
+            orientation = evidence.maximum_orientation_difference_rad,
+            orientation_limit = OUTPUT_CONVERGENCE_ORIENTATION_LIMIT_RAD,
+            chirp = evidence.maximum_chirp_difference_hz,
+            chirp_limit = OUTPUT_CONVERGENCE_CHIRP_ABSOLUTE_LIMIT_HZ,
+            chirp_relative = evidence.maximum_relative_chirp_difference,
+            chirp_relative_limit = OUTPUT_CONVERGENCE_CHIRP_RELATIVE_LIMIT,
+        )));
+    }
+    Ok(())
 }
 
 fn critique_camera(duration_s: f64) -> Result<AnimatedCamera, fs_render::camera::CameraError> {
@@ -1141,7 +2377,7 @@ fn fixture_timeline_identity(
     audio_frame_count: u64,
     warm_start_checkpoint_identity: Option<ContentHash>,
 ) -> ContentHash {
-    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.master-clocks.v2");
+    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.master-clocks.v3");
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
     hasher.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
     hasher.update(&0_i64.to_le_bytes());
@@ -1161,9 +2397,10 @@ fn fixture_timeline_identity(
 #[allow(clippy::too_many_arguments)]
 fn admit_fixture_sound(
     trajectory: &EulerRenderTrajectoryArtifact,
-    mapper: &AudioExcitationMapper<'_, '_>,
-    modal: &crate::ModalSynthesisModel,
-    resampler: &AudioResampler,
+    excitation_identity: ContentHash,
+    modal: &ModalSynthesisModel,
+    resampler_identity: ContentHash,
+    filter_identity: ContentHash,
     video_clock: CinematicClock,
     audio_clock: CinematicClock,
     timeline_identity: ContentHash,
@@ -1185,7 +2422,7 @@ fn admit_fixture_sound(
         )?,
         excitation: component(
             CinematicComponentRole::AudioExcitation,
-            mapper.identity(),
+            excitation_identity,
             AUDIO_EXCITATION_ALGORITHM_VERSION,
         )?,
         sound_model: component(
@@ -1199,7 +2436,7 @@ fn admit_fixture_sound(
             1,
         )?,
         room: component(CinematicComponentRole::Room, dry_room_identity(), 1)?,
-        timeline: component(CinematicComponentRole::Timeline, timeline_identity, 2)?,
+        timeline: component(CinematicComponentRole::Timeline, timeline_identity, 3)?,
         video_clock,
         audio_clock,
         channel_layout: SoundChannelLayout::Stereo,
@@ -1212,9 +2449,9 @@ fn admit_fixture_sound(
         terminal_policy: SoundTerminalPolicy::FadeAtLastAccepted {
             fade_sample_frames: TERMINAL_FADE_SAMPLE_FRAMES,
         },
-        resampler_identity: resampler.identity(),
+        resampler_identity,
         resampler_version: AUDIO_RESAMPLING_ALGORITHM_VERSION,
-        filter_identity: resampler.filter_identity(),
+        filter_identity,
         filter_version: AUDIO_RECONSTRUCTION_FILTER_VERSION,
         assumptions: vec![
             SoundModelAssumption::LinearModalSuperposition,
@@ -1227,9 +2464,634 @@ fn admit_fixture_sound(
     .map_err(pipeline)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_fixture_audio_candidate(
+    source: &EulerRenderTrajectoryArtifact,
+    modal: &ModalSynthesisModel,
+    mappings: &[SoundExcitationControl],
+    spatial_rules: &[ModeContactParticipationRule],
+    video_clock: CinematicClock,
+    audio_clock: CinematicClock,
+    video_frame_count: u32,
+    audio_frame_count: u64,
+    cx: &Cx<'_>,
+) -> Result<FixtureAudioCandidate, CinematicFixtureError> {
+    let controls = EulerControlStream::try_derive(source.trajectory(), cx).map_err(pipeline)?;
+    let interval_count = controls.audio().len();
+    let mapper = AudioExcitationMapper::try_new(
+        source,
+        &controls,
+        modal,
+        AudioExcitationModelInput {
+            mappings: mappings.to_vec(),
+            reduction: AudioExcitationReduction::RawIntervals,
+            spatial_policy: ContactParticipationPolicy::ContactCoordinates {
+                rules: spatial_rules.to_vec(),
+            },
+            // The convergence comparison must not contain a stochastic or
+            // authored impulse bank that can obscure mechanics refinement.
+            artistic_texture: None,
+            budget: AudioExcitationBudget::reference_film(interval_count),
+        },
+        cx,
+    )
+    .map_err(pipeline)?;
+    let intervals = map_all_audio_intervals(&mapper, cx)?;
+    let resampler = AudioResampler::try_new(
+        &mapper,
+        modal,
+        intervals,
+        fixture_resampling_input(video_clock, audio_clock),
+        cx,
+    )
+    .map_err(pipeline)?;
+    if resampler.total_audio_frames() != audio_frame_count {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "audio candidate admitted {} frames, expected {audio_frame_count}",
+            resampler.total_audio_frames()
+        )));
+    }
+    let excitation_identity = mapper.identity();
+    let source_sound = admit_fixture_sound(
+        source,
+        excitation_identity,
+        modal,
+        resampler.identity(),
+        resampler.filter_identity(),
+        video_clock,
+        audio_clock,
+        fixture_timeline_identity(video_frame_count, audio_frame_count, None),
+        mappings.to_vec(),
+    )?;
+    mapper
+        .validate_sound_configuration(&source_sound)
+        .map_err(pipeline)?;
+    modal
+        .validate_sound_configuration(&source_sound)
+        .map_err(pipeline)?;
+    resampler
+        .validate_sound_configuration(&source_sound)
+        .map_err(pipeline)?;
+    Ok(FixtureAudioCandidate {
+        resampler,
+        source_sound,
+        excitation_identity,
+        source_trajectory_identity: source.receipt().artifact_identity(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_audio_pair_progress(
+    stage: &'static str,
+    expected_start: u64,
+    expected_end: u64,
+    coarse_start: u64,
+    coarse_end: u64,
+    coarse_successor: u64,
+    fine_start: u64,
+    fine_end: u64,
+    fine_successor: u64,
+) -> Result<(), CinematicFixtureError> {
+    if coarse_start != expected_start
+        || coarse_end != expected_end
+        || coarse_successor != expected_end
+        || fine_start != expected_start
+        || fine_end != expected_end
+        || fine_successor != expected_end
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "{stage} coarse/fine checkpoint range mismatch: expected [{expected_start},{expected_end}), coarse [{coarse_start},{coarse_end}) -> {coarse_successor}, fine [{fine_start},{fine_end}) -> {fine_successor}"
+        )));
+    }
+    Ok(())
+}
+
+fn observe_resampled_drive_pair(
+    coarse: &AudioResamplingChunk,
+    fine: &AudioResamplingChunk,
+    mode_count: usize,
+    localized: &mut [SymmetricErrorAccumulator],
+    distributed: &mut [SymmetricErrorAccumulator; 3],
+) -> Result<(), CinematicFixtureError> {
+    if mode_count == 0 || localized.len() != mode_count {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio convergence requires one accumulator per canonical mode".into(),
+        ));
+    }
+    if coarse.drive_frames.len() != fine.drive_frames.len() {
+        return Err(CinematicFixtureError::Pipeline(
+            "coarse/fine resampled drive frame counts differ".into(),
+        ));
+    }
+    let expected_localized = coarse
+        .drive_frames
+        .len()
+        .checked_mul(mode_count)
+        .ok_or_else(|| CinematicFixtureError::Pipeline("localized drive length overflow".into()))?;
+    if coarse.preparticipated_localized_force_n.len() != expected_localized
+        || fine.preparticipated_localized_force_n.len() != expected_localized
+        || coarse.preparticipated_localized_impulse_n_s.len() != expected_localized
+        || fine.preparticipated_localized_impulse_n_s.len() != expected_localized
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "coarse/fine localized drive arrays do not match expected row-major length {expected_localized}"
+        )));
+    }
+    if coarse
+        .preparticipated_localized_impulse_n_s
+        .iter()
+        .chain(&fine.preparticipated_localized_impulse_n_s)
+        .any(|value| !value.is_finite() || *value != 0.0)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio convergence requires exact all-zero localized impulse banks in both members"
+                .into(),
+        ));
+    }
+    for (index, (&coarse_force, &fine_force)) in coarse
+        .preparticipated_localized_force_n
+        .iter()
+        .zip(&fine.preparticipated_localized_force_n)
+        .enumerate()
+    {
+        localized[index % mode_count].observe(coarse_force, fine_force)?;
+    }
+    for (coarse_frame, fine_frame) in coarse.drive_frames.iter().zip(&fine.drive_frames) {
+        let coarse_values = coarse_frame.distributed_generalized_force_n;
+        let fine_values = fine_frame.distributed_generalized_force_n;
+        for (accumulator, (coarse_value, fine_value)) in distributed.iter_mut().zip([
+            (coarse_values.disc, fine_values.disc),
+            (coarse_values.glass_plate, fine_values.glass_plate),
+            (coarse_values.base_assembly, fine_values.base_assembly),
+        ]) {
+            accumulator.observe(coarse_value, fine_value)?;
+        }
+    }
+    Ok(())
+}
+
+fn observe_stem_pair(
+    coarse: &[ModalStemFrame],
+    fine: &[ModalStemFrame],
+    stems: &mut [SymmetricErrorAccumulator; 3],
+) -> Result<(), CinematicFixtureError> {
+    if coarse.len() != fine.len() {
+        return Err(CinematicFixtureError::Pipeline(
+            "coarse/fine raw modal stem frame counts differ".into(),
+        ));
+    }
+    for (coarse_frame, fine_frame) in coarse.iter().zip(fine) {
+        for (accumulator, (coarse_value, fine_value)) in stems.iter_mut().zip([
+            (coarse_frame.disc_fs, fine_frame.disc_fs),
+            (coarse_frame.glass_plate_fs, fine_frame.glass_plate_fs),
+            (coarse_frame.base_assembly_fs, fine_frame.base_assembly_fs),
+        ]) {
+            accumulator.observe(coarse_value, fine_value)?;
+        }
+    }
+    Ok(())
+}
+
+fn maximum_error_metrics(
+    accumulators: &[SymmetricErrorAccumulator],
+    floor: f64,
+) -> Result<RelativeErrorMetrics, CinematicFixtureError> {
+    if accumulators.is_empty() {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio convergence metric bank is empty".into(),
+        ));
+    }
+    let mut maximum = RelativeErrorMetrics {
+        nrmse: 0.0,
+        normalized_peak: 0.0,
+    };
+    for accumulator in accumulators {
+        let metric = accumulator.metrics(floor)?;
+        maximum.nrmse = maximum.nrmse.max(metric.nrmse);
+        maximum.normalized_peak = maximum.normalized_peak.max(metric.normalized_peak);
+    }
+    Ok(maximum)
+}
+
+fn enforce_audio_convergence_thresholds(
+    localized: RelativeErrorMetrics,
+    distributed: RelativeErrorMetrics,
+    stems: RelativeErrorMetrics,
+) -> Result<(), CinematicFixtureError> {
+    let drive_nrmse = localized.nrmse.max(distributed.nrmse);
+    let drive_peak = localized.normalized_peak.max(distributed.normalized_peak);
+    if drive_nrmse > AUDIO_CONVERGENCE_DRIVE_NRMSE_LIMIT
+        || drive_peak > AUDIO_CONVERGENCE_DRIVE_NORMALIZED_PEAK_LIMIT
+        || stems.nrmse > AUDIO_CONVERGENCE_STEM_NRMSE_LIMIT
+        || stems.normalized_peak > AUDIO_CONVERGENCE_STEM_NORMALIZED_PEAK_LIMIT
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            concat!(
+                "pre-master audio dt/dt2 convergence refused: drive NRMSE {drive_nrmse:.17e} ",
+                "(limit {drive_nrmse_limit:.17e}), drive normalized peak {drive_peak:.17e} ",
+                "(limit {drive_peak_limit:.17e}), raw cropped stem NRMSE {stem_nrmse:.17e} ",
+                "(limit {stem_nrmse_limit:.17e}), raw cropped stem normalized peak ",
+                "{stem_peak:.17e} (limit {stem_peak_limit:.17e})"
+            ),
+            drive_nrmse = drive_nrmse,
+            drive_nrmse_limit = AUDIO_CONVERGENCE_DRIVE_NRMSE_LIMIT,
+            drive_peak = drive_peak,
+            drive_peak_limit = AUDIO_CONVERGENCE_DRIVE_NORMALIZED_PEAK_LIMIT,
+            stem_nrmse = stems.nrmse,
+            stem_nrmse_limit = AUDIO_CONVERGENCE_STEM_NRMSE_LIMIT,
+            stem_peak = stems.normalized_peak,
+            stem_peak_limit = AUDIO_CONVERGENCE_STEM_NORMALIZED_PEAK_LIMIT,
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continuous_audio_crop_binding_identity(
+    source_trajectory_identity: ContentHash,
+    published_trajectory_identity: ContentHash,
+    source_sound_configuration_identity: ContentHash,
+    full_resampler_identity: ContentHash,
+    crop: AudioResamplingCrop,
+    first_chunk_identity: ContentHash,
+    crop_start_resampling_checkpoint_identity: ContentHash,
+    crop_start_modal_checkpoint_identity: ContentHash,
+    end_resampling_checkpoint_identity: ContentHash,
+    end_modal_checkpoint_identity: ContentHash,
+) -> ContentHash {
+    let mut hasher =
+        DomainHasher::new("org.frankensim.euler-critique.continuous-audio-crop-binding.v3");
+    hasher.update(AUDIO_PREROLL_POLICY_ID.as_bytes());
+    hasher.update(source_trajectory_identity.as_bytes());
+    hasher.update(published_trajectory_identity.as_bytes());
+    hasher.update(source_sound_configuration_identity.as_bytes());
+    hasher.update(full_resampler_identity.as_bytes());
+    hasher.update(crop.identity().as_bytes());
+    hasher.update(&crop.first_source_audio_frame().to_le_bytes());
+    hasher.update(&crop.end_source_audio_frame().to_le_bytes());
+    hasher.update(first_chunk_identity.as_bytes());
+    hasher.update(crop_start_resampling_checkpoint_identity.as_bytes());
+    hasher.update(crop_start_modal_checkpoint_identity.as_bytes());
+    hasher.update(end_resampling_checkpoint_identity.as_bytes());
+    hasher.update(end_modal_checkpoint_identity.as_bytes());
+    hasher.finalize()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn synthesize_audio_convergence_pair(
+    coarse_source: &EulerRenderTrajectoryArtifact,
+    fine_source: &EulerRenderTrajectoryArtifact,
+    fine_published: &EulerRenderTrajectoryArtifact,
+    coarse: &FixtureAudioCandidate,
+    fine: &FixtureAudioCandidate,
+    modal: &ModalSynthesisModel,
+    mappings: &[SoundExcitationControl],
+    full_audio_frame_count: u64,
+    published_video_frame_count: u32,
+    published_audio_frame_count: u64,
+    output_video_clock: CinematicClock,
+    output_audio_clock: CinematicClock,
+    drive_normalization_floor_n: f64,
+    cx: &Cx<'_>,
+) -> Result<FixtureAudioPairOutput, CinematicFixtureError> {
+    if !(drive_normalization_floor_n.is_finite() && drive_normalization_floor_n > 0.0) {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio convergence force floor must be finite and positive".into(),
+        ));
+    }
+    if full_audio_frame_count.checked_sub(published_audio_frame_count)
+        != Some(AUDIO_PREROLL_SAMPLE_FRAMES)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio convergence full and published horizons do not share the exact preroll".into(),
+        ));
+    }
+    let mode_count = modal.modes().len();
+    if mode_count == 0 {
+        return Err(CinematicFixtureError::Pipeline(
+            "audio convergence modal bank is empty".into(),
+        ));
+    }
+    let mut localized = vec![SymmetricErrorAccumulator::default(); mode_count];
+    let mut distributed = [SymmetricErrorAccumulator::default(); 3];
+    let mut stem_errors = [SymmetricErrorAccumulator::default(); 3];
+
+    let coarse_initial_resampling = coarse.resampler.initial_checkpoint(cx).map_err(pipeline)?;
+    let fine_initial_resampling = fine.resampler.initial_checkpoint(cx).map_err(pipeline)?;
+    let coarse_initial_modal = modal.initial_checkpoint(cx).map_err(pipeline)?;
+    let fine_initial_modal = modal.initial_checkpoint(cx).map_err(pipeline)?;
+    let preroll_chunk_frames = NonZeroUsize::new(
+        usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+            .expect("audio preroll frame count is representable as usize"),
+    )
+    .expect("audio preroll is nonzero");
+    let coarse_preroll = coarse
+        .resampler
+        .resample_next_chunk(
+            &coarse.source_sound,
+            &coarse_initial_resampling,
+            preroll_chunk_frames,
+            cx,
+        )
+        .map_err(pipeline)?;
+    let fine_preroll = fine
+        .resampler
+        .resample_next_chunk(
+            &fine.source_sound,
+            &fine_initial_resampling,
+            preroll_chunk_frames,
+            cx,
+        )
+        .map_err(pipeline)?;
+    validate_audio_pair_progress(
+        "resampling preroll",
+        0,
+        AUDIO_PREROLL_SAMPLE_FRAMES,
+        coarse_preroll.diagnostics.start_audio_frame_offset,
+        coarse_preroll.diagnostics.end_audio_frame_offset,
+        coarse_preroll.successor.next_audio_frame_offset(),
+        fine_preroll.diagnostics.start_audio_frame_offset,
+        fine_preroll.diagnostics.end_audio_frame_offset,
+        fine_preroll.successor.next_audio_frame_offset(),
+    )?;
+    observe_resampled_drive_pair(
+        &coarse_preroll,
+        &fine_preroll,
+        mode_count,
+        &mut localized,
+        &mut distributed,
+    )?;
+    let coarse_warmed = coarse_preroll
+        .synthesize_modal(modal, &coarse_initial_modal, cx)
+        .map_err(pipeline)?;
+    let fine_warmed = fine_preroll
+        .synthesize_modal(modal, &fine_initial_modal, cx)
+        .map_err(pipeline)?;
+    validate_audio_pair_progress(
+        "modal preroll",
+        0,
+        AUDIO_PREROLL_SAMPLE_FRAMES,
+        coarse_warmed.diagnostics.start_sample_frame,
+        coarse_warmed.diagnostics.end_sample_frame,
+        coarse_warmed.successor.next_sample_frame(),
+        fine_warmed.diagnostics.start_sample_frame,
+        fine_warmed.diagnostics.end_sample_frame,
+        fine_warmed.successor.next_sample_frame(),
+    )?;
+    let coarse_crop_start_resampling_checkpoint_identity = coarse_preroll.successor.identity();
+    let fine_crop_start_resampling_checkpoint_identity = fine_preroll.successor.identity();
+    let coarse_crop_start_modal_checkpoint_identity = coarse_warmed.successor.identity();
+    let fine_crop_start_modal_checkpoint_identity = fine_warmed.successor.identity();
+    let coarse_first_chunk_identity = coarse_preroll.identity;
+    let fine_first_chunk_identity = fine_preroll.identity;
+    let mut coarse_resampling_checkpoint = coarse_preroll.successor;
+    let mut fine_resampling_checkpoint = fine_preroll.successor;
+    let mut coarse_modal_checkpoint = coarse_warmed.successor;
+    let mut fine_modal_checkpoint = fine_warmed.successor;
+    let published_capacity = usize::try_from(published_audio_frame_count)
+        .map_err(|_| CinematicFixtureError::Pipeline("audio stem length overflow".into()))?;
+    let mut fine_stems = Vec::new();
+    fine_stems
+        .try_reserve_exact(published_capacity)
+        .map_err(|_| CinematicFixtureError::Pipeline("audio stem allocation refused".into()))?;
+
+    while fine_resampling_checkpoint.next_audio_frame_offset() < full_audio_frame_count {
+        let expected_start = fine_resampling_checkpoint.next_audio_frame_offset();
+        if coarse_resampling_checkpoint.next_audio_frame_offset() != expected_start
+            || coarse_modal_checkpoint.next_sample_frame() != expected_start
+            || fine_modal_checkpoint.next_sample_frame() != expected_start
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "coarse/fine audio checkpoints lost lockstep before a chunk".into(),
+            ));
+        }
+        let remaining = full_audio_frame_count - expected_start;
+        let chunk_frames = usize::try_from(remaining.min(65_536))
+            .map_err(|_| CinematicFixtureError::Pipeline("audio chunk length overflow".into()))?;
+        let expected_end = expected_start
+            .checked_add(chunk_frames as u64)
+            .ok_or_else(|| CinematicFixtureError::Pipeline("audio chunk end overflow".into()))?;
+        let maximum_frames =
+            NonZeroUsize::new(chunk_frames).expect("positive remaining audio frame count");
+        let coarse_resampled = coarse
+            .resampler
+            .resample_next_chunk(
+                &coarse.source_sound,
+                &coarse_resampling_checkpoint,
+                maximum_frames,
+                cx,
+            )
+            .map_err(pipeline)?;
+        let fine_resampled = fine
+            .resampler
+            .resample_next_chunk(
+                &fine.source_sound,
+                &fine_resampling_checkpoint,
+                maximum_frames,
+                cx,
+            )
+            .map_err(pipeline)?;
+        validate_audio_pair_progress(
+            "resampling",
+            expected_start,
+            expected_end,
+            coarse_resampled.diagnostics.start_audio_frame_offset,
+            coarse_resampled.diagnostics.end_audio_frame_offset,
+            coarse_resampled.successor.next_audio_frame_offset(),
+            fine_resampled.diagnostics.start_audio_frame_offset,
+            fine_resampled.diagnostics.end_audio_frame_offset,
+            fine_resampled.successor.next_audio_frame_offset(),
+        )?;
+        observe_resampled_drive_pair(
+            &coarse_resampled,
+            &fine_resampled,
+            mode_count,
+            &mut localized,
+            &mut distributed,
+        )?;
+        let coarse_synthesized = coarse_resampled
+            .synthesize_modal(modal, &coarse_modal_checkpoint, cx)
+            .map_err(pipeline)?;
+        let fine_synthesized = fine_resampled
+            .synthesize_modal(modal, &fine_modal_checkpoint, cx)
+            .map_err(pipeline)?;
+        validate_audio_pair_progress(
+            "modal synthesis",
+            expected_start,
+            expected_end,
+            coarse_synthesized.diagnostics.start_sample_frame,
+            coarse_synthesized.diagnostics.end_sample_frame,
+            coarse_synthesized.successor.next_sample_frame(),
+            fine_synthesized.diagnostics.start_sample_frame,
+            fine_synthesized.diagnostics.end_sample_frame,
+            fine_synthesized.successor.next_sample_frame(),
+        )?;
+        observe_stem_pair(
+            &coarse_synthesized.stem_frames,
+            &fine_synthesized.stem_frames,
+            &mut stem_errors,
+        )?;
+        fine_stems.extend(fine_synthesized.stem_frames);
+        coarse_resampling_checkpoint = coarse_resampled.successor;
+        fine_resampling_checkpoint = fine_resampled.successor;
+        coarse_modal_checkpoint = coarse_synthesized.successor;
+        fine_modal_checkpoint = fine_synthesized.successor;
+    }
+    if fine_stems.len() != published_capacity {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "fine modal synthesis retained {} of {published_audio_frame_count} published frames",
+            fine_stems.len()
+        )));
+    }
+    validate_audio_pair_progress(
+        "full-horizon checkpoints",
+        full_audio_frame_count,
+        full_audio_frame_count,
+        coarse_resampling_checkpoint.next_audio_frame_offset(),
+        coarse_modal_checkpoint.next_sample_frame(),
+        coarse_modal_checkpoint.next_sample_frame(),
+        fine_resampling_checkpoint.next_audio_frame_offset(),
+        fine_modal_checkpoint.next_sample_frame(),
+        fine_modal_checkpoint.next_sample_frame(),
+    )?;
+
+    let coarse_crop = coarse
+        .resampler
+        .try_crop(
+            AUDIO_PREROLL_SAMPLE_FRAMES,
+            full_audio_frame_count,
+            output_video_clock,
+            output_audio_clock,
+        )
+        .map_err(pipeline)?;
+    let fine_crop = fine
+        .resampler
+        .try_crop(
+            AUDIO_PREROLL_SAMPLE_FRAMES,
+            full_audio_frame_count,
+            output_video_clock,
+            output_audio_clock,
+        )
+        .map_err(pipeline)?;
+    if coarse_crop.first_source_audio_frame() != fine_crop.first_source_audio_frame()
+        || coarse_crop.end_source_audio_frame() != fine_crop.end_source_audio_frame()
+        || coarse_crop.output_video_clock() != fine_crop.output_video_clock()
+        || coarse_crop.output_audio_clock() != fine_crop.output_audio_clock()
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "coarse/fine typed audio crops do not share an exact range and output clocks".into(),
+        ));
+    }
+    let coarse_end_resampling_checkpoint_identity = coarse_resampling_checkpoint.identity();
+    let fine_end_resampling_checkpoint_identity = fine_resampling_checkpoint.identity();
+    let coarse_end_modal_checkpoint_identity = coarse_modal_checkpoint.identity();
+    let fine_end_modal_checkpoint_identity = fine_modal_checkpoint.identity();
+    let coarse_crop_binding_identity = continuous_audio_crop_binding_identity(
+        coarse.source_trajectory_identity,
+        coarse.source_trajectory_identity,
+        coarse.source_sound.receipt().configuration_identity,
+        coarse.resampler.identity(),
+        coarse_crop,
+        coarse_first_chunk_identity,
+        coarse_crop_start_resampling_checkpoint_identity,
+        coarse_crop_start_modal_checkpoint_identity,
+        coarse_end_resampling_checkpoint_identity,
+        coarse_end_modal_checkpoint_identity,
+    );
+    let fine_crop_binding_identity = continuous_audio_crop_binding_identity(
+        fine.source_trajectory_identity,
+        fine_published.receipt().artifact_identity(),
+        fine.source_sound.receipt().configuration_identity,
+        fine.resampler.identity(),
+        fine_crop,
+        fine_first_chunk_identity,
+        fine_crop_start_resampling_checkpoint_identity,
+        fine_crop_start_modal_checkpoint_identity,
+        fine_end_resampling_checkpoint_identity,
+        fine_end_modal_checkpoint_identity,
+    );
+    let coarse_crop_sound = admit_fixture_sound(
+        coarse_source,
+        coarse.excitation_identity,
+        modal,
+        coarse_crop.identity(),
+        coarse.resampler.filter_identity(),
+        output_video_clock,
+        output_audio_clock,
+        fixture_timeline_identity(
+            published_video_frame_count,
+            published_audio_frame_count,
+            Some(coarse_crop_binding_identity),
+        ),
+        mappings.to_vec(),
+    )?;
+    let fine_crop_sound = admit_fixture_sound(
+        fine_source,
+        fine.excitation_identity,
+        modal,
+        fine_crop.identity(),
+        fine.resampler.filter_identity(),
+        output_video_clock,
+        output_audio_clock,
+        fixture_timeline_identity(
+            published_video_frame_count,
+            published_audio_frame_count,
+            Some(fine_crop_binding_identity),
+        ),
+        mappings.to_vec(),
+    )?;
+    for sound in [&coarse_crop_sound, &fine_crop_sound] {
+        modal
+            .validate_sound_configuration(sound)
+            .map_err(pipeline)?;
+    }
+    coarse
+        .resampler
+        .validate_cropped_sound_configuration(&coarse_crop, &coarse_crop_sound)
+        .map_err(pipeline)?;
+    fine.resampler
+        .validate_cropped_sound_configuration(&fine_crop, &fine_crop_sound)
+        .map_err(pipeline)?;
+
+    let localized_metrics = maximum_error_metrics(&localized, drive_normalization_floor_n)?;
+    let distributed_metrics = maximum_error_metrics(&distributed, drive_normalization_floor_n)?;
+    let stem_metrics = maximum_error_metrics(&stem_errors, AUDIO_CONVERGENCE_STEM_FLOOR_FS)?;
+    enforce_audio_convergence_thresholds(localized_metrics, distributed_metrics, stem_metrics)?;
+    let convergence = FixtureAudioConvergenceEvidence {
+        full_audio_frame_count,
+        published_audio_frame_count,
+        mode_count,
+        drive_normalization_floor_n,
+        localized_drive_nrmse: localized_metrics.nrmse,
+        localized_drive_normalized_peak: localized_metrics.normalized_peak,
+        distributed_drive_nrmse: distributed_metrics.nrmse,
+        distributed_drive_normalized_peak: distributed_metrics.normalized_peak,
+        maximum_drive_nrmse: localized_metrics.nrmse.max(distributed_metrics.nrmse),
+        maximum_drive_normalized_peak: localized_metrics
+            .normalized_peak
+            .max(distributed_metrics.normalized_peak),
+        cropped_stem_nrmse: stem_metrics.nrmse,
+        cropped_stem_normalized_peak: stem_metrics.normalized_peak,
+        crop_first_source_audio_frame: fine_crop.first_source_audio_frame(),
+        crop_end_source_audio_frame: fine_crop.end_source_audio_frame(),
+        coarse_crop_identity: coarse_crop.identity(),
+        fine_crop_identity: fine_crop.identity(),
+        coarse_crop_binding_identity,
+        fine_crop_binding_identity,
+    };
+    Ok(FixtureAudioPairOutput {
+        fine_stems,
+        fine_sound: fine_crop_sound,
+        fine_crop,
+        convergence,
+    })
+}
+
 fn build_audio(
     trajectory: &EulerRenderTrajectoryArtifact,
-    preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    coarse_preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    fine_preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    gravity_m_per_s2: f64,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
 ) -> Result<FixtureAudio, CinematicFixtureError> {
@@ -1246,9 +3108,6 @@ fn build_audio(
             "audio preroll is not exactly one 24 Hz frame at 48 kHz".into(),
         ));
     }
-    let controls = EulerControlStream::try_derive(trajectory.trajectory(), cx).map_err(pipeline)?;
-    let preroll_controls =
-        EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
     let (chirp_start_hz, chirp_end_hz) = trajectory_body_contact_chirp_bounds(trajectory)?;
     if chirp_end_hz >= CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ {
         return Err(CinematicFixtureError::Pipeline(format!(
@@ -1256,12 +3115,19 @@ fn build_audio(
         )));
     }
     let preset = representative_modal_preset(RepresentativeDiscMaterial::StainlessSteel);
-    let spatial_rules = preset
+    let spatial_rules: Vec<ModeContactParticipationRule> = preset
         .modes()
         .iter()
         .map(|mode| ModeContactParticipationRule {
             mode_id: mode.mode_id,
-            shape: if mode.component == SoundModalComponent::Disc {
+            shape: if matches!(
+                mode.component,
+                SoundModalComponent::Disc | SoundModalComponent::GlassPlate
+            ) {
+                // The moving reaction point sweeps both bodies. This compact
+                // harmonic-one ansatz preserves that forcing frequency for
+                // the disc and plate mode families; the base modes retain
+                // their declared spatially distributed participation.
                 ContactModeShape::AzimuthalCosine {
                     harmonic: 1,
                     phase_rad: 0.0,
@@ -1305,174 +3171,88 @@ fn build_audio(
     let modal_parameter_set_identity = modal_parameters.identity();
     let modal_parameter_set_disclosure = modal_parameters.disclosure().to_owned();
     let modal = modal_parameters.into_model();
-    let mappings = vec![SoundExcitationControl {
-        channel: SoundExcitationChannel::RollingSignedWorkRate,
-        target_component: SoundModalComponent::Disc,
-        source_scale: 2.0,
-    }];
-    let interval_count = controls.audio().len();
-    let mapper = AudioExcitationMapper::try_new(
-        trajectory,
-        &controls,
-        &modal,
-        AudioExcitationModelInput {
-            mappings: mappings.clone(),
-            reduction: AudioExcitationReduction::RawIntervals,
-            spatial_policy: ContactParticipationPolicy::ContactCoordinates {
-                rules: spatial_rules.clone(),
-            },
-            artistic_texture: None,
-            budget: AudioExcitationBudget::reference_film(interval_count),
+    // Drive the two contacting bodies from the retained SI normal reaction.
+    // Equal magnitudes and opposite signs encode action/reaction without the
+    // previous arbitrary watts-to-newtons transfer. Absolute acoustic output
+    // remains uncalibrated because modal radiation and the listening rig are
+    // representative rather than measured.
+    let mappings = vec![
+        SoundExcitationControl {
+            channel: SoundExcitationChannel::ContactNormalForce,
+            target_component: SoundModalComponent::Disc,
+            source_scale: 1.0,
         },
-        cx,
-    )
-    .map_err(pipeline)?;
-    let preroll_interval_count = preroll_controls.audio().len();
-    let preroll_mapper = AudioExcitationMapper::try_new(
-        preroll_trajectory,
-        &preroll_controls,
-        &modal,
-        AudioExcitationModelInput {
-            mappings: mappings.clone(),
-            reduction: AudioExcitationReduction::RawIntervals,
-            spatial_policy: ContactParticipationPolicy::ContactCoordinates {
-                rules: spatial_rules,
-            },
-            artistic_texture: None,
-            budget: AudioExcitationBudget::reference_film(preroll_interval_count),
+        SoundExcitationControl {
+            channel: SoundExcitationChannel::ContactNormalForce,
+            target_component: SoundModalComponent::GlassPlate,
+            source_scale: -1.0,
         },
-        cx,
-    )
-    .map_err(pipeline)?;
-    let mapped_intervals = map_all_audio_intervals(&mapper, cx)?;
-    let preroll_mapped_intervals = map_all_audio_intervals(&preroll_mapper, cx)?;
-    let resampler = AudioResampler::try_new(
-        &mapper,
+    ];
+    let coarse_candidate = prepare_fixture_audio_candidate(
+        coarse_preroll_trajectory,
         &modal,
-        mapped_intervals,
-        fixture_resampling_input(video_clock, audio_clock),
-        cx,
-    )
-    .map_err(pipeline)?;
-    let preroll_resampler = AudioResampler::try_new(
-        &preroll_mapper,
-        &modal,
-        preroll_mapped_intervals,
-        fixture_resampling_input(preroll_video_clock, preroll_audio_clock),
-        cx,
-    )
-    .map_err(pipeline)?;
-    let preroll_sound = admit_fixture_sound(
-        preroll_trajectory,
-        &preroll_mapper,
-        &modal,
-        &preroll_resampler,
+        &mappings,
+        &spatial_rules,
         preroll_video_clock,
         preroll_audio_clock,
-        fixture_timeline_identity(preroll_video_frames, preroll_audio_frame_count, None),
-        mappings.clone(),
+        preroll_video_frames,
+        preroll_audio_frame_count,
+        cx,
     )?;
-    preroll_mapper
-        .validate_sound_configuration(&preroll_sound)
-        .map_err(pipeline)?;
-    modal
-        .validate_sound_configuration(&preroll_sound)
-        .map_err(pipeline)?;
-    preroll_resampler
-        .validate_sound_configuration(&preroll_sound)
-        .map_err(pipeline)?;
-    let preroll_chunk = preroll_resampler
-        .resample_next_chunk(
-            &preroll_sound,
-            &preroll_resampler.initial_checkpoint(cx).map_err(pipeline)?,
-            NonZeroUsize::new(
-                usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
-                    .expect("audio preroll frame count is representable as usize"),
-            )
-            .expect("nonzero audio preroll"),
-            cx,
-        )
-        .map_err(pipeline)?;
-    let zero_modal_checkpoint = modal.initial_checkpoint(cx).map_err(pipeline)?;
-    let warmed = preroll_chunk
-        .synthesize_modal(&modal, &zero_modal_checkpoint, cx)
-        .map_err(pipeline)?;
-    if warmed.successor.next_sample_frame() != AUDIO_PREROLL_SAMPLE_FRAMES {
+    let fine_candidate = prepare_fixture_audio_candidate(
+        fine_preroll_trajectory,
+        &modal,
+        &mappings,
+        &spatial_rules,
+        preroll_video_clock,
+        preroll_audio_clock,
+        preroll_video_frames,
+        preroll_audio_frame_count,
+        cx,
+    )?;
+    let mass_kg = trajectory
+        .trajectory()
+        .metadata()
+        .mass_properties
+        .properties
+        .mass();
+    if !(mass_kg.is_finite()
+        && mass_kg > 0.0
+        && gravity_m_per_s2.is_finite()
+        && gravity_m_per_s2 > 0.0)
+    {
         return Err(CinematicFixtureError::Pipeline(
-            "modal warm start did not consume the exact preroll".into(),
+            "audio convergence mass and gravity reference must be finite and positive".into(),
         ));
     }
-    let warmed_source_checkpoint_identity = warmed.successor.identity();
-    let mut modal_checkpoint = modal
-        .rebase_checkpoint(&warmed.successor, 0, cx)
-        .map_err(pipeline)?;
-    let warm_start_source_identity = preroll_trajectory.receipt().artifact_identity();
-    let warm_start_checkpoint_identity = {
-        let mut hasher =
-            DomainHasher::new("org.frankensim.euler-critique.modal-warm-start-binding.v1");
-        hasher.update(AUDIO_PREROLL_POLICY_ID.as_bytes());
-        hasher.update(&AUDIO_PREROLL_SAMPLE_FRAMES.to_le_bytes());
-        hasher.update(warm_start_source_identity.as_bytes());
-        hasher.update(preroll_resampler.identity().as_bytes());
-        hasher.update(preroll_chunk.identity.as_bytes());
-        hasher.update(warmed_source_checkpoint_identity.as_bytes());
-        hasher.update(modal_checkpoint.identity().as_bytes());
-        hasher.finalize()
-    };
-    let sound = admit_fixture_sound(
+    let drive_normalization_floor_n =
+        AUDIO_CONVERGENCE_DRIVE_NORMALIZATION_FRACTION * mass_kg * gravity_m_per_s2;
+    let pair = synthesize_audio_convergence_pair(
+        coarse_preroll_trajectory,
+        fine_preroll_trajectory,
         trajectory,
-        &mapper,
+        &coarse_candidate,
+        &fine_candidate,
         &modal,
-        &resampler,
+        &mappings,
+        preroll_audio_frame_count,
+        config.frames,
+        audio_frame_count,
         video_clock,
         audio_clock,
-        fixture_timeline_identity(
-            config.frames,
-            audio_frame_count,
-            Some(warm_start_checkpoint_identity),
-        ),
-        mappings,
+        drive_normalization_floor_n,
+        cx,
     )?;
-    mapper
-        .validate_sound_configuration(&sound)
-        .map_err(pipeline)?;
-    modal
-        .validate_sound_configuration(&sound)
-        .map_err(pipeline)?;
-    resampler
-        .validate_sound_configuration(&sound)
-        .map_err(pipeline)?;
-
-    let mut stems = Vec::new();
-    stems
-        .try_reserve_exact(audio_frame_count as usize)
-        .map_err(|_| CinematicFixtureError::Pipeline("audio stem allocation refused".into()))?;
-    let mut resampling_checkpoint = resampler.initial_checkpoint(cx).map_err(pipeline)?;
-    while resampling_checkpoint.next_audio_frame_offset() < audio_frame_count {
-        let remaining = audio_frame_count - resampling_checkpoint.next_audio_frame_offset();
-        let chunk_frames = usize::try_from(remaining.min(65_536))
-            .map_err(|_| CinematicFixtureError::Pipeline("audio chunk length overflow".into()))?;
-        let resampled = resampler
-            .resample_next_chunk(
-                &sound,
-                &resampling_checkpoint,
-                NonZeroUsize::new(chunk_frames).expect("positive remaining audio frames"),
-                cx,
-            )
-            .map_err(pipeline)?;
-        let synthesized = resampled
-            .synthesize_modal(&modal, &modal_checkpoint, cx)
-            .map_err(pipeline)?;
-        stems.extend(synthesized.stem_frames);
-        resampling_checkpoint = resampled.successor;
-        modal_checkpoint = synthesized.successor;
-    }
-    if stems.len() as u64 != audio_frame_count {
-        return Err(CinematicFixtureError::Pipeline(format!(
-            "modal synthesis emitted {} of {audio_frame_count} frames",
-            stems.len()
-        )));
-    }
+    let source_sound_configuration_identity =
+        fine_candidate.source_sound.receipt().configuration_identity;
+    let warm_start_source_identity = fine_candidate.source_trajectory_identity;
+    let FixtureAudioPairOutput {
+        fine_stems: mut stems,
+        fine_sound: sound,
+        fine_crop: crop,
+        convergence,
+    } = pair;
+    let warm_start_checkpoint_identity = convergence.fine_crop_binding_identity;
     apply_initial_fade(&mut stems, INITIAL_FADE_SAMPLE_FRAMES)?;
     if !config.spatialize_audio {
         apply_terminal_fade(&mut stems, TERMINAL_FADE_SAMPLE_FRAMES)?;
@@ -1598,6 +3378,12 @@ fn build_audio(
         master_gain_db,
         warm_start_source_identity,
         warm_start_checkpoint_identity,
+        source_sound_configuration_identity,
+        published_trajectory_identity: trajectory.receipt().artifact_identity(),
+        crop_resampler_identity: crop.identity(),
+        crop_first_source_audio_frame: crop.first_source_audio_frame(),
+        crop_end_source_audio_frame: crop.end_source_audio_frame(),
+        convergence,
         spatialization,
     })
 }
@@ -1991,6 +3777,8 @@ fn fixture_manifest(
     duration_s: f64,
     run: &ReducedDecayRun,
     refinement: &RefinementEvidence,
+    output_convergence: &FixtureOutputConvergenceEvidence,
+    audio_convergence: &FixtureAudioConvergenceEvidence,
     trajectory: &EulerRenderTrajectoryArtifact,
     raw_sequence_identity: ContentHash,
     preview_sequence_identity: ContentHash,
@@ -1999,6 +3787,11 @@ fn fixture_manifest(
     modal_parameter_set_disclosure: &str,
     audio_warm_start_source_identity: ContentHash,
     audio_warm_start_checkpoint_identity: ContentHash,
+    audio_source_sound_configuration_identity: ContentHash,
+    audio_published_trajectory_identity: ContentHash,
+    audio_crop_resampler_identity: ContentHash,
+    audio_crop_first_source_frame: u64,
+    audio_crop_end_source_frame: u64,
     chirp_start_hz: f64,
     chirp_end_hz: f64,
     audio_pre_master_peak_fs: f64,
@@ -2082,7 +3875,7 @@ fn fixture_manifest(
         .as_ref()
         .expect("source-bound fixture run retains its specimen declaration");
     let raw_profile = if config.retain_full_aov_exr {
-        "daily-core-aov-float"
+        "final-diagnostic-aov-float"
     } else {
         "linear-srgb-beauty-float"
     };
@@ -2092,19 +3885,21 @@ fn fixture_manifest(
         "disabled"
     };
     let modal_disclosure = json_escape(modal_parameter_set_disclosure);
+    let output_convergence_json = output_convergence.manifest_json();
+    let audio_convergence_json = audio_convergence.manifest_json();
     format!(
         concat!(
             "{{\n",
-            "  \"schema\": \"frankensim-euler-cinematic-critique-v2\",\n",
+            "  \"schema\": \"frankensim-euler-cinematic-critique-v4\",\n",
             "  \"authority\": \"source-bound analytical simulation visualization; physically informed but uncalibrated synthesis; artistic spatial presentation\",\n",
-            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": 1, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
+            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
             "  \"timeline\": {{\"video_pts_convention\": \"encoded-frame-start\", \"video_first_pts_s\": 0.00000000000000000e0, \"video_final_pts_s\": {video_final_pts:.17e}, \"video_frame_interval_s\": {frame_interval:.17e}, \"audio_first_sample_time_s\": 0.00000000000000000e0, \"audio_video_clock_origins_aligned\": true, \"shutter_close_convention\": \"mechanics-frame-end\", \"first_shutter_close_time_s\": {first_shutter_close:.17e}, \"final_shutter_close_time_s\": {final_shutter_close:.17e}, \"note\": \"encoded PTS is distinct from the mechanics time at which each back-loaded shutter closes\"}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
-            "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"claim\": \"single dt/dt2 consistency pair for the encoded analytical model; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"published rolling work rate times uncalibrated 2 N/W transfer\", \"contact_phase\": \"body-contact azimuth; harmonic one; instantaneous rate Omega*cos(theta)\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"modal_warm_start_policy\": \"{warm_start_policy}\", \"modal_warm_start_sample_frames\": {warm_start_frames}, \"modal_warm_start_source_identity\": \"{warm_start_source_identity}\", \"modal_warm_start_checkpoint_identity\": \"{warm_start_checkpoint_identity}\", \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
+            "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"published_source_timestep_s\": {source_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"output_consistency\": {output_convergence}, \"claim\": \"single admitted dt/dt2 consistency pair for terminal time, encoded interval impulse, renderer-stratum pose, and body-contact chirp; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
+            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the harmonic-one contact shape, modal frequencies, damping, masses, radiation gains, and rolling-power-to-force transfer are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the 256 Hz reconstruction ceiling is a conservative authored assumption, not a certified bandlimit of cropped piecewise-linear controls\", \"modal state is warmed by the final one-video-frame (2000-sample) source-bound prehistory before the published crop; earlier acoustic history is not reconstructed and the initial fade remains a presentation taper\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair for terminal time, interval impulse, renderer-stratum pose, body-contact chirp, resampled modal drive, and unmastered modal stems; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the rendered 10 mm glass plate, housing, and support are representative studio apparatus; mechanics uses a static rigid plane and does not simulate the displayed base's compliance, wobble, thickness, mounting, or the paper's 3.2 mm glass-on-butyl rig\", \"the harmonic-one contact shapes, modal frequencies, damping, masses, and radiation gains are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the 256 Hz reconstruction ceiling is a conservative authored assumption, not a certified bandlimit of the interval controls\", \"the centered FIR and modal state both continue through one source-bound video frame (2000 samples) of real prehistory and are then cropped without a new reflection boundary; earlier acoustic history is not reconstructed and the initial fade remains a presentation taper\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,
@@ -2130,6 +3925,7 @@ fn fixture_manifest(
         seed_version = CRITIQUE_FRAME_SEED_SCHEDULE_VERSION,
         denoise_requested = config.denoise_previews,
         raw_profile = raw_profile,
+        exposure_ev = CRITIQUE_EXPOSURE_EV,
         raw_sequence = raw_sequence_identity.to_hex(),
         preview_sequence = preview_sequence_identity.to_hex(),
         over_range = over_range_channels,
@@ -2173,8 +3969,9 @@ fn fixture_manifest(
             .bildsten_dimensionless_prefactor
             .expect("source-bound run retains Bildsten prefactor"),
         maximum_steps = run.parameters.maximum_steps,
-        coarse_dt = run.parameters.timestep_s,
+        coarse_dt = refinement.coarse.parameters.timestep_s,
         fine_dt = refinement.fine.parameters.timestep_s,
+        source_dt = run.parameters.timestep_s,
         source_samples = run.samples.len(),
         source_duration = last_source_sample.time_s,
         tail_samples = trajectory_samples.len(),
@@ -2183,6 +3980,7 @@ fn fixture_manifest(
         cutoff = run.parameters.validity_cutoff_theta_rad,
         refine_time = refinement.terminal_time_difference_s,
         refine_work = refinement.total_work_difference_j,
+        output_convergence = output_convergence_json,
         rolling_mu = run
             .provenance
             .published_rolling_coefficient_mu
@@ -2208,14 +4006,19 @@ fn fixture_manifest(
         modal_identity = modal_parameter_set_identity.to_hex(),
         modal_disclosure = modal_disclosure,
         warm_start_policy = AUDIO_PREROLL_POLICY_ID,
-        warm_start_frames = AUDIO_PREROLL_SAMPLE_FRAMES,
         warm_start_source_identity = audio_warm_start_source_identity.to_hex(),
         warm_start_checkpoint_identity = audio_warm_start_checkpoint_identity.to_hex(),
+        source_sound_configuration_identity = audio_source_sound_configuration_identity.to_hex(),
+        published_trajectory_identity = audio_published_trajectory_identity.to_hex(),
+        crop_resampler_identity = audio_crop_resampler_identity.to_hex(),
+        crop_first_source_frame = audio_crop_first_source_frame,
+        crop_end_source_frame = audio_crop_end_source_frame,
         pre_master_peak = audio_pre_master_peak_fs,
         master_gain = audio_master_gain_db,
         initial_fade = INITIAL_FADE_SAMPLE_FRAMES,
         terminal_fade = TERMINAL_FADE_SAMPLE_FRAMES,
         spatialization = spatialization_json,
+        audio_convergence = audio_convergence_json,
         mux = mux_json,
     )
 }
@@ -2290,6 +4093,39 @@ mod tests {
         assert!(config.denoise_previews);
         assert!(config.retain_full_aov_exr);
         assert!(config.spatialize_audio);
+    }
+
+    #[test]
+    fn impulse_queries_only_canonicalize_terminal_roundoff() {
+        let nominal_terminal_s = 8.0_f64;
+        let retained_terminal_s = f64::from_bits(nominal_terminal_s.to_bits() - 1);
+        let tolerance_s = 32.0 * f64::EPSILON * nominal_terminal_s.max(1.0);
+        assert_eq!(
+            canonicalize_terminal_query_time_s(
+                nominal_terminal_s,
+                retained_terminal_s,
+                tolerance_s,
+            )
+            .to_bits(),
+            retained_terminal_s.to_bits()
+        );
+
+        let interior_query_s = retained_terminal_s - 0.25;
+        assert_eq!(
+            canonicalize_terminal_query_time_s(interior_query_s, retained_terminal_s, tolerance_s,)
+                .to_bits(),
+            interior_query_s.to_bits()
+        );
+        let out_of_horizon_query_s = retained_terminal_s + 2.0 * tolerance_s;
+        assert_eq!(
+            canonicalize_terminal_query_time_s(
+                out_of_horizon_query_s,
+                retained_terminal_s,
+                tolerance_s,
+            )
+            .to_bits(),
+            out_of_horizon_query_s.to_bits()
+        );
     }
 
     #[test]
@@ -2437,6 +4273,65 @@ mod tests {
         );
     }
 
+    fn accumulated_metrics(pairs: &[(f64, f64)], floor: f64) -> RelativeErrorMetrics {
+        let mut accumulator = SymmetricErrorAccumulator::default();
+        for &(coarse, fine) in pairs {
+            accumulator.observe(coarse, fine).unwrap();
+        }
+        accumulator.metrics(floor).unwrap()
+    }
+
+    #[test]
+    fn audio_convergence_identical_zero_signals_pass_fixed_gates() {
+        let identical = accumulated_metrics(&[(0.0, 0.0), (0.0, 0.0)], 1.0e-12);
+        assert_eq!(identical.nrmse.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(identical.normalized_peak.to_bits(), 0.0_f64.to_bits());
+        enforce_audio_convergence_thresholds(identical, identical, identical).unwrap();
+    }
+
+    #[test]
+    fn audio_convergence_rejects_equal_integral_different_drive_envelopes() {
+        let different_envelope = accumulated_metrics(&[(2.0, 0.0), (0.0, 2.0)], 1.0e-12);
+        let identical = accumulated_metrics(&[(1.0, 1.0)], 1.0e-12);
+        assert!(different_envelope.nrmse > AUDIO_CONVERGENCE_DRIVE_NRMSE_LIMIT);
+        assert!(
+            enforce_audio_convergence_thresholds(different_envelope, identical, identical,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn audio_convergence_rejects_raw_stem_amplitude_error_before_mastering() {
+        let amplitude_error = accumulated_metrics(&[(2.0, 1.0), (2.0, 1.0)], 1.0e-12);
+        let identical = accumulated_metrics(&[(1.0, 1.0)], 1.0e-12);
+        assert!(amplitude_error.nrmse > AUDIO_CONVERGENCE_STEM_NRMSE_LIMIT);
+        assert!(
+            enforce_audio_convergence_thresholds(identical, identical, amplitude_error).is_err()
+        );
+    }
+
+    #[test]
+    fn audio_convergence_rejects_checkpoint_range_mismatch() {
+        assert!(
+            validate_audio_pair_progress(
+                "test", 2_000, 4_000, 2_000, 4_000, 4_000, 2_000, 4_001, 4_001
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn audio_convergence_metrics_are_bit_exact_on_replay() {
+        let pairs = [(0.25, 0.20), (-0.5, -0.45), (0.75, 0.70)];
+        let first = accumulated_metrics(&pairs, 1.0e-12);
+        let second = accumulated_metrics(&pairs, 1.0e-12);
+        assert_eq!(first.nrmse.to_bits(), second.nrmse.to_bits());
+        assert_eq!(
+            first.normalized_peak.to_bits(),
+            second.normalized_peak.to_bits()
+        );
+    }
+
     #[test]
     fn terminal_fade_preserves_prefix_and_reaches_zero() {
         let mut stems = vec![
@@ -2531,18 +4426,136 @@ mod tests {
         with_test_cx(|cx| {
             let benchmark = Thorne2026SteelGlassBenchmark::ambient().unwrap();
             let profile = benchmark.resolve_specimen(cx).unwrap();
-            let refinement = thorne_2026_refinement_evidence(&benchmark).unwrap();
+            let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).unwrap();
             let preroll_duration_s =
                 f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
-            let (preroll_trajectory, trajectory) =
+            let published_duration_s = f64::from(CRITIQUE_FRAMES) / f64::from(CRITIQUE_FPS);
+            let (coarse_preroll_trajectory, coarse_trajectory) =
                 RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
                     &refinement.coarse,
                     &profile,
                     preroll_duration_s,
-                    f64::from(CRITIQUE_FRAMES) / f64::from(CRITIQUE_FPS),
+                    published_duration_s,
                     cx,
                 )
                 .unwrap();
+            let (preroll_trajectory, trajectory) =
+                RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
+                    &refinement.fine,
+                    &profile,
+                    preroll_duration_s,
+                    published_duration_s,
+                    cx,
+                )
+                .unwrap();
+            let source_duration_s = preroll_duration_s + published_duration_s;
+            for source in [&coarse_preroll_trajectory, &preroll_trajectory] {
+                assert_eq!(
+                    source
+                        .samples()
+                        .last()
+                        .expect("source trajectory endpoint")
+                        .input()
+                        .time_s
+                        .to_bits(),
+                    source_duration_s.to_bits()
+                );
+            }
+            for published in [&coarse_trajectory, &trajectory] {
+                assert_eq!(
+                    published
+                        .samples()
+                        .last()
+                        .expect("published trajectory endpoint")
+                        .input()
+                        .time_s
+                        .to_bits(),
+                    published_duration_s.to_bits()
+                );
+                let motion = EulerRenderMotionBridge::new(published);
+                motion
+                    .sample_at_time(published_duration_s, EventEvaluationSide::RightLimit)
+                    .expect("the exact exclusive film boundary is an admitted shutter endpoint");
+                assert!(
+                    motion
+                        .sample_at_time(
+                            published_duration_s + 1.0e-9,
+                            EventEvaluationSide::RightLimit,
+                        )
+                        .is_err(),
+                    "the strict motion timeline must still refuse real extrapolation"
+                );
+            }
+            let mut convergence_config = CinematicFixtureConfig::default();
+            convergence_config.samples_per_pixel = 4;
+            let convergence = fixture_output_convergence_evidence(
+                &coarse_preroll_trajectory,
+                &coarse_trajectory,
+                &preroll_trajectory,
+                &trajectory,
+                &convergence_config,
+                &refinement,
+                preroll_duration_s,
+                published_duration_s,
+                cx,
+            )
+            .unwrap();
+            eprintln!("{}", convergence.diagnostics());
+            assert_eq!(
+                convergence.shutter_exact_renderer_sample_count,
+                CRITIQUE_FRAMES as usize * 4
+            );
+            assert_eq!(
+                convergence.shutter_stratum_boundary_sample_count,
+                CRITIQUE_FRAMES as usize * 5
+            );
+            assert!(convergence.shutter_interpolation_knot_sample_count > CRITIQUE_FRAMES as usize);
+            assert_eq!(
+                convergence.shutter_interpolation_midpoint_sample_count,
+                convergence.shutter_interpolation_knot_sample_count + CRITIQUE_FRAMES as usize
+            );
+            assert_eq!(
+                convergence.shutter_pose_sample_count,
+                convergence.shutter_exact_renderer_sample_count
+                    + convergence.shutter_stratum_boundary_sample_count
+                    + convergence.shutter_interpolation_knot_sample_count
+                    + convergence.shutter_interpolation_midpoint_sample_count
+            );
+            assert!(
+                convergence.terminal_time_difference_s
+                    <= OUTPUT_CONVERGENCE_TERMINAL_TIME_ABSOLUTE_LIMIT_S
+            );
+            assert!(
+                convergence.terminal_time_relative_difference
+                    <= OUTPUT_CONVERGENCE_TERMINAL_TIME_RELATIVE_LIMIT
+            );
+            assert!(
+                convergence.maximum_impulse_identity_residual_n_s
+                    <= convergence.maximum_impulse_identity_tolerance_n_s
+            );
+            assert!(
+                convergence.maximum_cumulative_normal_impulse_relative_difference
+                    <= OUTPUT_CONVERGENCE_RELATIVE_IMPULSE_LIMIT
+            );
+            assert!(
+                convergence.maximum_center_of_mass_difference_m <= OUTPUT_CONVERGENCE_COM_LIMIT_M
+            );
+            assert!(
+                convergence.maximum_orientation_difference_rad
+                    <= OUTPUT_CONVERGENCE_ORIENTATION_LIMIT_RAD
+            );
+            assert!(
+                convergence.maximum_chirp_difference_hz
+                    <= OUTPUT_CONVERGENCE_CHIRP_ABSOLUTE_LIMIT_HZ
+            );
+            assert!(
+                convergence.maximum_relative_chirp_difference
+                    <= OUTPUT_CONVERGENCE_CHIRP_RELATIVE_LIMIT
+            );
+            let mut non_finite = convergence;
+            non_finite.maximum_center_of_mass_difference_m = f64::NAN;
+            assert!(admit_fixture_output_convergence(non_finite).is_err());
+            drop(coarse_trajectory);
             let source_crop_boundary = preroll_trajectory
                 .samples()
                 .iter()
@@ -2591,17 +4604,68 @@ mod tests {
                 cx,
             )
             .unwrap();
+            let coarse_preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+                hash_domain(
+                    "org.frankensim.euler-critique.audio-regression-coarse-preroll.v1",
+                    coarse_preroll_trajectory
+                        .metadata()
+                        .configuration_identity
+                        .as_bytes(),
+                ),
+                coarse_preroll_trajectory,
+                Vec::new(),
+                RenderTrajectoryCodecBudget::DEFAULT,
+                cx,
+            )
+            .unwrap();
 
             let mut expected_warm_start = None;
             for spatialize_audio in [true, false] {
                 let mut config = CinematicFixtureConfig::default();
                 config.spatialize_audio = spatialize_audio;
-                let audio = build_audio(&artifact, &preroll_artifact, &config, cx).unwrap();
+                let audio = build_audio(
+                    &artifact,
+                    &coarse_preroll_artifact,
+                    &preroll_artifact,
+                    refinement.fine.parameters.gravity_m_per_s2,
+                    &config,
+                    cx,
+                )
+                .unwrap();
                 assert!(audio.pre_master_peak_fs.is_finite());
                 assert!(audio.pre_master_peak_fs > 0.0);
                 assert_eq!(
                     audio.warm_start_source_identity,
                     preroll_artifact.receipt().artifact_identity()
+                );
+                assert_eq!(
+                    audio.published_trajectory_identity,
+                    artifact.receipt().artifact_identity()
+                );
+                assert_ne!(
+                    audio.warm_start_source_identity, audio.published_trajectory_identity,
+                    "full source and rebased picture trajectory must remain distinct"
+                );
+                assert_eq!(
+                    audio.crop_first_source_audio_frame,
+                    AUDIO_PREROLL_SAMPLE_FRAMES
+                );
+                assert_eq!(
+                    audio.crop_end_source_audio_frame,
+                    u64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES) * 2_000
+                );
+                let synthesis = audio.artifact.manifest().synthesis();
+                assert_eq!(
+                    synthesis.trajectory_identity, audio.warm_start_source_identity,
+                    "WAV provenance must name the full source trajectory that generated the FIR/modal samples"
+                );
+                assert_ne!(
+                    synthesis.configuration_identity, audio.source_sound_configuration_identity,
+                    "published crop configuration must be distinct from the full-horizon source configuration"
+                );
+                assert_ne!(
+                    audio.crop_resampler_identity,
+                    audio.source_sound_configuration_identity
                 );
                 let warm_start = (
                     audio.warm_start_source_identity,
@@ -2612,10 +4676,11 @@ mod tests {
                 } else {
                     expected_warm_start = Some(warm_start);
                 }
-                // This exact mechanics-driven source motivated the expanded
-                // presentation-gain range. Preserve the physical 2 N/W force
-                // mapping and normalize only at the explicitly non-SPL master.
-                assert!(audio.master_gain_db > 120.0);
+                // Content-derived presentation normalization remains
+                // explicitly non-SPL. The source itself is now an SI contact
+                // reaction, so no arbitrary lower bound on mastering gain is
+                // physically meaningful.
+                assert!(audio.master_gain_db.is_finite());
                 assert!(audio.master_gain_db <= MAX_AUDIO_MASTER_GAIN_DB);
                 let meters = audio.artifact.manifest().meters();
                 let peak = meters.sample_peak_fs.max(meters.true_peak_estimate_fs);

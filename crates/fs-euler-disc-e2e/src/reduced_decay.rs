@@ -28,7 +28,7 @@ use crate::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 /// Standard gravitational acceleration [m/s^2].
 pub const STANDARD_GRAVITY_M_PER_S2: f64 = 9.806_65;
 /// Retention bound for deterministic one-shot integration.
-pub const MAX_REDUCED_DECAY_STEPS: u32 = 200_000;
+pub const MAX_REDUCED_DECAY_STEPS: u32 = 800_000;
 /// Declared small-angle applicability ceiling [rad].
 ///
 /// This is an input refusal boundary for the reduced reference, not a

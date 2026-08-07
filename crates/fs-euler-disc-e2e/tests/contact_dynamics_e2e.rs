@@ -781,7 +781,7 @@ fn profile_run_rejects_inconsistent_legacy_geometry_declaration() {
         let mut controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-4, 1);
         controls.initial_state = state;
         assert_ne!(controls.geometry.mass_kg, mass.mass);
-        let input = ProfileContactDynamicsInput {
+        let mut input = ProfileContactDynamicsInput {
             chart,
             density_kg_per_m3,
             controls,

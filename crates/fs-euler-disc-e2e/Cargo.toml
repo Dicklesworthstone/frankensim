@@ -62,6 +62,11 @@ name = "euler_cinematic_fixture"
 path = "src/bin/euler_cinematic_fixture.rs"
 required-features = ["cinematic-render"]
 
+[[bin]]
+name = "euler_cinematic_denoise"
+path = "src/bin/euler_cinematic_denoise.rs"
+required-features = ["cinematic-render"]
+
 [[test]]
 name = "render_scene_bridge"
 required-features = ["cinematic-render"]

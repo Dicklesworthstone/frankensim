@@ -23,7 +23,11 @@ use fs_math::det;
 use crate::modal_synthesis::ModalStemFrame;
 
 /// Version of the sound-artifact manifest and canonical mixing policy.
-pub const AUDIO_ARTIFACT_SCHEMA_VERSION: u16 = 1;
+///
+/// V2 separates synthesis, presentation, and final-artifact authority so an
+/// artistic spatialization cannot inherit a physically-informed synthesis
+/// label in the standalone manifest.
+pub const AUDIO_ARTIFACT_SCHEMA_VERSION: u16 = 2;
 /// Version of the strict RIFF/WAVE subset emitted by this module.
 pub const EULER_WAV_CODEC_VERSION: u16 = 1;
 /// Maximum ASCII bytes in the optional canonical `ICMT` value.
@@ -150,6 +154,39 @@ impl AudioSignalPath {
         match self {
             Self::CanonicalDryStereo => "canonical-dry-stereo",
             Self::SpatializedStereo { .. } => "spatialized-stereo",
+        }
+    }
+
+    const fn presentation_authority(self) -> AudioPresentationAuthority {
+        match self {
+            Self::CanonicalDryStereo => AudioPresentationAuthority::SynthesisBoundCanonicalDryMix,
+            // An identity alone cannot prove the authority of an upstream
+            // spatializer. The artifact boundary therefore assigns the
+            // conservative presentation class admitted for arbitrary supplied
+            // stereo samples.
+            Self::SpatializedStereo { .. } => AudioPresentationAuthority::Artistic,
+        }
+    }
+}
+
+/// Authority of the channel-presentation transform applied after synthesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AudioPresentationAuthority {
+    /// The deterministic canonical dry mix introduces no independent acoustic
+    /// or spatial claim; final authority remains bounded by synthesis.
+    SynthesisBoundCanonicalDryMix,
+    /// Spatial presentation is selected for communication or aesthetics and
+    /// is not a calibrated acoustic prediction.
+    Artistic,
+}
+
+impl AudioPresentationAuthority {
+    /// Stable manifest spelling.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SynthesisBoundCanonicalDryMix => "synthesis-bound-canonical-dry-mix",
+            Self::Artistic => "artistic",
         }
     }
 }
@@ -305,7 +342,9 @@ pub enum AudioMasterSource<'a> {
     },
     /// Stereo samples produced by an optional upstream spatializer.
     SpatializedStereo {
-        /// Already-spatialized stereo frames.
+        /// Already-spatialized stereo frames. Because this boundary receives
+        /// only samples plus an identity, their presentation is conservatively
+        /// classified as artistic even when synthesis is physically informed.
         frames: &'a [StereoSample],
         /// Identity of that transform and its declared listener/room inputs.
         spatialization_identity: ContentHash,
@@ -508,10 +547,33 @@ impl AudioArtifactManifest {
         self.synthesis
     }
 
-    /// Sound authority inherited unchanged from configuration.
+    /// Authority of the mechanics-driven synthesis before channel presentation.
+    #[must_use]
+    pub const fn synthesis_authority(&self) -> SoundAuthority {
+        self.authority
+    }
+
+    /// Compatibility accessor for [`Self::synthesis_authority`].
+    ///
+    /// This is not the final artifact authority when presentation is artistic.
     #[must_use]
     pub const fn authority(&self) -> SoundAuthority {
-        self.authority
+        self.synthesis_authority()
+    }
+
+    /// Authority of the dry-mix or spatial-presentation stage.
+    #[must_use]
+    pub const fn presentation_authority(&self) -> AudioPresentationAuthority {
+        self.channel_layout.path.presentation_authority()
+    }
+
+    /// Conservative authority of the samples as finally presented.
+    #[must_use]
+    pub const fn artifact_authority(&self) -> SoundAuthority {
+        match self.presentation_authority() {
+            AudioPresentationAuthority::SynthesisBoundCanonicalDryMix => self.synthesis_authority(),
+            AudioPresentationAuthority::Artistic => SoundAuthority::Artistic,
+        }
     }
 
     /// Explicit dry/spatialized stereo receipt.
@@ -600,7 +662,9 @@ impl AudioArtifactManifest {
                 "\"excitation_identity\":\"{}\",",
                 "\"sound_model_identity\":\"{}\",",
                 "\"timeline_identity\":\"{}\",",
-                "\"authority\":\"{}\",",
+                "\"synthesis_authority\":\"{}\",",
+                "\"presentation_authority\":\"{}\",",
+                "\"artifact_authority\":\"{}\",",
                 "\"channel_receipt_identity\":\"{}\",",
                 "\"signal_path\":\"{}\",",
                 "\"spatialization_identity\":{},",
@@ -633,7 +697,9 @@ impl AudioArtifactManifest {
             self.synthesis.excitation_identity.to_hex(),
             self.synthesis.sound_model_identity.to_hex(),
             self.synthesis.timeline_identity.to_hex(),
-            self.authority.code(),
+            self.synthesis_authority().code(),
+            self.presentation_authority().code(),
+            self.artifact_authority().code(),
             self.channel_layout.identity.to_hex(),
             self.channel_layout.path.code(),
             spatialization_identity,
@@ -661,7 +727,7 @@ impl AudioArtifactManifest {
             self.audio_end_tick_exclusive,
             self.audio_frames_per_video_frame,
             self.admitted_headroom_db,
-            self.authority == SoundAuthority::Calibrated,
+            self.artifact_authority() == SoundAuthority::Calibrated,
         )
     }
 }

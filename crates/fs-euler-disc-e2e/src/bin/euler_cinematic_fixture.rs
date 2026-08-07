@@ -131,6 +131,7 @@ fn run() -> Result<(), String> {
             "status=complete manifest={}",
             report.manifest_path.display()
         );
+        println!("wav={}", report.wav_path.display());
         if let Some(movie) = report.movie_path {
             println!("movie={}", movie.display());
         }

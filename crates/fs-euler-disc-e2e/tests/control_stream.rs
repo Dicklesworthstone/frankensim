@@ -412,6 +412,64 @@ fn available_zero_and_unavailable_base_gas_remain_distinct() {
 }
 
 #[test]
+fn normal_load_only_authority_drives_mean_control_without_forging_contact_wrench() {
+    let retained = sample(
+        0.0,
+        1.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    let availability = RenderChannelAvailability {
+        gravity: false,
+        contact: false,
+        normal_force_sampling: fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean,
+        rolling: false,
+        base: false,
+        gas: false,
+    };
+    let source = trajectory(vec![retained.clone()], default_base_frame(), availability);
+    with_cx(false, |cx| {
+        let controls = EulerControlStream::try_derive(&source, cx).unwrap();
+        let interval = &controls.audio()[0];
+        assert_eq!(interval.mean_base_normal_contact_force_n, Some(31.0));
+        assert_eq!(
+            interval.normal_force_sampling,
+            fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean
+        );
+        assert_eq!(interval.declared_normal_force_n, 31.0);
+        assert!(matches!(
+            interval.channels.contact,
+            ChannelControl::Unavailable
+        ));
+
+        let coarsened = controls
+            .boxcar_coarsen(NonZeroUsize::new(1).unwrap(), cx)
+            .unwrap();
+        assert_eq!(
+            coarsened.bins()[0].mean_base_normal_contact_force_n,
+            Some(31.0)
+        );
+        assert!(matches!(
+            coarsened.bins()[0].channels.contact,
+            ChannelControl::Unavailable
+        ));
+    });
+
+    let mut unavailable = availability;
+    unavailable.normal_force_sampling = fs_euler_disc_e2e::RenderNormalForceSampling::Unavailable;
+    assert_eq!(
+        RenderTrajectory::try_new(
+            metadata(&retained, default_base_frame(), unavailable),
+            vec![retained]
+        ),
+        Err(RenderTrajectoryError::UnavailableChannelHasData {
+            sample: 0,
+            channel: "normal_force_sampling",
+        })
+    );
+}
+
+#[test]
 fn opening_and_zero_force_reimpact_retain_timing_only_events_and_barriers() {
     let first = sample(
         0.0,

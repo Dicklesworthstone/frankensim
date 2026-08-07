@@ -102,6 +102,8 @@ pub const EULER_DISC_OBJECT_ID: u64 = 0x4555_4c45_525f_0001;
 pub const EULER_BASE_PLATE_OBJECT_ID: u64 = 0x4555_4c45_525f_0002;
 /// Stable default object identity for the static housing.
 pub const EULER_HOUSING_OBJECT_ID: u64 = 0x4555_4c45_525f_0003;
+/// Stable default object identity for the optional studio support surface.
+pub const EULER_SUPPORT_SURFACE_OBJECT_ID: u64 = 0x4555_4c45_525f_0004;
 /// Stable default object identity for an optional diagnostic marker.
 pub const EULER_DEBUG_MARKER_OBJECT_ID: u64 = 0x4555_4c45_525f_00ff;
 /// Stable default object identity for the optional disc-local spin fiducial.
@@ -193,6 +195,21 @@ pub struct EulerBaseVisualSpec {
     pub housing_gap_m: f64,
 }
 
+/// Optional matte studio surface beneath the apparatus.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EulerSupportSurfaceSpec {
+    /// Surface width along base-local x.
+    pub width_m: f64,
+    /// Surface depth along base-local y.
+    pub depth_m: f64,
+    /// Positive thickness below its top face.
+    pub thickness_m: f64,
+    /// Nonnegative separation below the housing bottom.
+    pub gap_below_housing_m: f64,
+    /// Surface appearance.
+    pub material: EulerMaterialStyle,
+}
+
 /// Stable scene instance identities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EulerSceneObjectIds {
@@ -202,6 +219,8 @@ pub struct EulerSceneObjectIds {
     pub base_plate: u64,
     /// Static housing object ID.
     pub housing: u64,
+    /// Optional studio support-surface object ID.
+    pub support_surface: u64,
     /// Optional debug marker object ID.
     pub debug_marker: u64,
     /// Optional visualization-only spin-fiducial object ID.
@@ -214,6 +233,7 @@ impl EulerSceneObjectIds {
         disc: EULER_DISC_OBJECT_ID,
         base_plate: EULER_BASE_PLATE_OBJECT_ID,
         housing: EULER_HOUSING_OBJECT_ID,
+        support_surface: EULER_SUPPORT_SURFACE_OBJECT_ID,
         debug_marker: EULER_DEBUG_MARKER_OBJECT_ID,
         spin_fiducial: EULER_SPIN_FIDUCIAL_OBJECT_ID,
     };
@@ -320,6 +340,8 @@ pub struct EulerSceneConfig {
     pub plate_material: EulerMaterialStyle,
     /// Housing appearance.
     pub housing_material: EulerMaterialStyle,
+    /// Optional finite studio support surface beneath the housing.
+    pub support_surface: Option<EulerSupportSurfaceSpec>,
     /// One static softbox.
     pub light: EulerRectLightSpec,
     /// Optional native studio fill/background. Reference scenes remain `None`
@@ -373,6 +395,7 @@ impl EulerSceneConfig {
                 linear_rgb: [0.055, 0.065, 0.08],
                 alpha: 0.28,
             },
+            support_surface: None,
             light: EulerRectLightSpec {
                 corner_world_m: Point3::new(-0.08, 0.05, 0.16),
                 edge_u_world_m: Vec3::new(0.16, 0.0, 0.0),
@@ -425,6 +448,8 @@ pub struct EulerScenePrimitiveIndices {
     pub base_plate: usize,
     /// Static housing primitive.
     pub housing: usize,
+    /// Optional studio support-surface primitive.
+    pub support_surface: Option<usize>,
     /// Emissive softbox primitive referenced by the sole v1 `Scene::lights` entry.
     pub light: usize,
     /// Optional disc-local spin visualization primitive.
@@ -612,6 +637,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                 HOUSING_BEVEL_M,
             ],
         );
+        let nominal_base = nominal_base_transform(artifact)?;
         let housing = GeometryInstance::try_new(
             config.object_ids.housing,
             housing_geometry_identity,
@@ -622,8 +648,31 @@ impl<'artifact> EulerCinematicScene<'artifact> {
                 housing_top,
                 HOUSING_BEVEL_M,
             )),
-            nominal_base_transform(artifact)?,
+            nominal_base,
         )?;
+        let support_surface = config
+            .support_surface
+            .map(|spec| {
+                let top = housing_bottom - spec.gap_below_housing_m;
+                let bottom = top - spec.thickness_m;
+                let geometry_identity = box_identity(
+                    b"static-support-surface",
+                    [spec.width_m, spec.depth_m, bottom, top, 0.0],
+                );
+                GeometryInstance::try_new(
+                    config.object_ids.support_surface,
+                    geometry_identity,
+                    SharedGeometry::mesh(box_mesh(
+                        0.5 * spec.width_m,
+                        0.5 * spec.depth_m,
+                        bottom,
+                        top,
+                    )),
+                    nominal_base,
+                )
+                .map(|instance| (instance, geometry_identity, material(spec.material)))
+            })
+            .transpose()?;
 
         let subject_bounds_m = subject_bounds(
             artifact,
@@ -649,6 +698,9 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             preview_mesh,
             plate_geometry_identity,
             housing_geometry_identity,
+            support_surface
+                .as_ref()
+                .map(|(_, geometry_identity, _)| *geometry_identity),
             spin_fiducial.as_ref(),
             &config,
         );
@@ -692,6 +744,15 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             });
             index
         });
+        let support_surface_index = support_surface.as_ref().map(|(support, _, material)| {
+            let index = primitives.len();
+            primitives.push(Primitive {
+                shape: Shape::Instance(support.clone()),
+                material: *material,
+                emission: None,
+            });
+            index
+        });
         let light_index = primitives.len();
         primitives.push(Primitive {
             shape: Shape::Mesh(rect_mesh(config.light)),
@@ -710,6 +771,7 @@ impl<'artifact> EulerCinematicScene<'artifact> {
             disc: 0,
             base_plate: 1,
             housing: 2,
+            support_surface: support_surface_index,
             light: light_index,
             spin_fiducial: spin_fiducial_index,
         };
@@ -1490,6 +1552,11 @@ fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
     if !config.base.housing_gap_m.is_finite() || config.base.housing_gap_m < 0.0 {
         return Err(EulerSceneError::InvalidConfig("housing_gap_m"));
     }
+    let housing_top = -config.base.plate_thickness_m - config.base.housing_gap_m;
+    let housing_bottom = housing_top - config.base.housing_height_m;
+    if !housing_top.is_finite() || !housing_bottom.is_finite() || housing_bottom >= housing_top {
+        return Err(EulerSceneError::InvalidConfig("housing derived bounds"));
+    }
     if !config.camera_near_m.is_finite()
         || !config.camera_far_m.is_finite()
         || config.camera_near_m <= 0.0
@@ -1506,6 +1573,37 @@ fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
     validate_style(config.disc_material, "disc_material")?;
     validate_style(config.plate_material, "plate_material")?;
     validate_style(config.housing_material, "housing_material")?;
+    if let Some(support) = config.support_surface {
+        for (field, value) in [
+            ("support width_m", support.width_m),
+            ("support depth_m", support.depth_m),
+            ("support thickness_m", support.thickness_m),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(EulerSceneError::InvalidConfig(field));
+            }
+        }
+        if !support.gap_below_housing_m.is_finite() || support.gap_below_housing_m < 0.0 {
+            return Err(EulerSceneError::InvalidConfig(
+                "support gap_below_housing_m",
+            ));
+        }
+        let support_half_width = 0.5 * support.width_m;
+        let support_half_depth = 0.5 * support.depth_m;
+        let support_top = housing_bottom - support.gap_below_housing_m;
+        let support_bottom = support_top - support.thickness_m;
+        if !support_half_width.is_finite()
+            || support_half_width <= 0.0
+            || !support_half_depth.is_finite()
+            || support_half_depth <= 0.0
+            || !support_top.is_finite()
+            || !support_bottom.is_finite()
+            || support_bottom >= support_top
+        {
+            return Err(EulerSceneError::InvalidConfig("support derived bounds"));
+        }
+        validate_style(support.material, "support material")?;
+    }
     validate_light(config.light)?;
     validate_environment(config.environment)?;
     let beauty_ids = [
@@ -1516,6 +1614,12 @@ fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
     let mut unique = BTreeSet::new();
     if beauty_ids.iter().any(|id| *id == 0 || !unique.insert(*id)) {
         return Err(EulerSceneError::InvalidConfig("object_ids"));
+    }
+    if config.support_surface.is_some()
+        && (config.object_ids.support_surface == 0
+            || !unique.insert(config.object_ids.support_surface))
+    {
+        return Err(EulerSceneError::InvalidConfig("support surface object_id"));
     }
     if let EulerDebugOverlay::ContactMarker { radius_m, .. } = config.debug_overlay {
         if !radius_m.is_finite() || radius_m <= 0.0 {
@@ -2750,6 +2854,7 @@ fn scene_identity(
     preview: EulerPreviewMeshReceipt,
     plate_geometry_identity: ContentHash,
     housing_geometry_identity: ContentHash,
+    support_geometry_identity: Option<ContentHash>,
     spin_fiducial: Option<&EulerSpinFiducialInstance>,
     config: &EulerSceneConfig,
 ) -> ContentHash {
@@ -2768,6 +2873,15 @@ fn scene_identity(
         config.object_ids.housing,
     ] {
         hasher.update(&id.to_le_bytes());
+    }
+    if let Some(identity) = support_geometry_identity {
+        hasher.update(&[0xf2]);
+        hasher.update(&config.object_ids.support_surface.to_le_bytes());
+        hasher.update(identity.as_bytes());
+        let support = config
+            .support_surface
+            .expect("support geometry exists only for an admitted support specification");
+        hash_material(&mut hasher, support.material);
     }
     hash_base_config(&mut hasher, config);
     hash_material(&mut hasher, config.disc_material);
@@ -2807,6 +2921,19 @@ fn configuration_identity(config: &EulerSceneConfig) -> ContentHash {
         config.object_ids.debug_marker,
     ] {
         hasher.update(&id.to_le_bytes());
+    }
+    if let Some(support) = config.support_surface {
+        hasher.update(&[0xf2]);
+        hasher.update(&config.object_ids.support_surface.to_le_bytes());
+        for value in [
+            support.width_m,
+            support.depth_m,
+            support.thickness_m,
+            support.gap_below_housing_m,
+        ] {
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        hash_material(&mut hasher, support.material);
     }
     hash_material(&mut hasher, config.disc_material);
     hash_material(&mut hasher, config.plate_material);

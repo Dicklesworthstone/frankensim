@@ -77,11 +77,12 @@ pub use audio_resampling::{
     AUDIO_RESAMPLING_CANCELLATION_POLL_FRAMES, AUDIO_RESAMPLING_CANCELLATION_POLL_MODES,
     AudioEventFractionalDelay, AudioReconstructionFilterDiagnostics, AudioReconstructionFilterSpec,
     AudioResampler, AudioResamplingBoundaryPolicy, AudioResamplingBudget,
-    AudioResamplingCheckpoint, AudioResamplingChunk, AudioResamplingDiagnostics,
-    AudioResamplingError, AudioResamplingModelInput, AudioVideoAlignment, AudioVideoSyncMarker,
-    EVENT_SAMPLE_SNAP_TOLERANCE_FRAMES, MAX_AUDIO_FILTER_PASSBAND_RIPPLE_DB,
-    MAX_AUDIO_RECONSTRUCTION_FILTER_TAPS, MAX_SOURCE_CLOCK_ALIGNMENT_ERROR_FRAMES,
-    MIN_AUDIO_FILTER_STOPBAND_ATTENUATION_DB, ResampledAudioEvent,
+    AudioResamplingCheckpoint, AudioResamplingChunk, AudioResamplingCrop,
+    AudioResamplingDiagnostics, AudioResamplingError, AudioResamplingModelInput,
+    AudioVideoAlignment, AudioVideoSyncMarker, EVENT_SAMPLE_SNAP_TOLERANCE_FRAMES,
+    MAX_AUDIO_FILTER_PASSBAND_RIPPLE_DB, MAX_AUDIO_RECONSTRUCTION_FILTER_TAPS,
+    MAX_SOURCE_CLOCK_ALIGNMENT_ERROR_FRAMES, MIN_AUDIO_FILTER_STOPBAND_ATTENUATION_DB,
+    ResampledAudioEvent,
 };
 pub use control_stream::{
     AudioControlFilter, AudioControlInterval, AudioVisualCoverage, AudioVisualHorizon,
@@ -95,10 +96,10 @@ pub use render_trajectory::{
     MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE,
     REDUCED_DECAY_RENDER_TAIL_HORIZON_S, RenderBaseFrame, RenderBaseModeState,
     RenderChannelAvailability, RenderContactBranch, RenderContactGeometry, RenderContactTransition,
-    RenderMassProperties, RenderNumericalRefusalReason, RenderSampleDisposition,
-    RenderSupportFeature, RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority,
-    RenderTrajectoryError, RenderTrajectoryMetadata, RenderTrajectorySample,
-    RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    RenderMassProperties, RenderNormalForceSampling, RenderNumericalRefusalReason,
+    RenderSampleDisposition, RenderSupportFeature, RenderTerminalEvent, RenderTrajectory,
+    RenderTrajectoryAuthority, RenderTrajectoryError, RenderTrajectoryMetadata,
+    RenderTrajectorySample, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
 };
 pub use render_trajectory_codec::{
     EULER_RENDER_TRAJECTORY_ARTIFACT_IDENTITY_DOMAIN,

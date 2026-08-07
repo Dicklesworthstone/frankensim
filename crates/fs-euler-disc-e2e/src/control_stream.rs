@@ -13,13 +13,13 @@ use fs_mbd::{Pose, UnitQuaternion, Vec3};
 
 use crate::{
     DerivedEulerQois, RenderBaseModeState, RenderChannelAvailability, RenderContactBranch,
-    RenderContactTransition, RenderSampleDisposition, RenderSupportFeature, RenderTrajectory,
-    RenderTrajectoryAuthority,
+    RenderContactTransition, RenderNormalForceSampling, RenderSampleDisposition,
+    RenderSupportFeature, RenderTrajectory, RenderTrajectoryAuthority,
     coupled_runner::{ChannelOwnership, ChannelWrench, ContactTransitionKind},
 };
 
 /// Schema version for the in-memory raw control semantics.
-pub const EULER_CONTROL_STREAM_SCHEMA_VERSION: u16 = 1;
+pub const EULER_CONTROL_STREAM_SCHEMA_VERSION: u16 = 3;
 
 /// Time semantics of the only downsampling filter implemented here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -32,7 +32,7 @@ pub enum AudioControlFilter {
 /// Why a contact event has no amplitude in this control schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ContactEventMeasure {
-    /// V1 retains only class, time, and a localization bracket. It does not
+    /// V3 retains only class, time, and a localization bracket. It does not
     /// retain an event-specific impulse or resolved force history.
     TimingOnly,
 }
@@ -227,12 +227,16 @@ pub struct AudioControlInterval {
     pub visual_coverage: AudioVisualCoverage,
     /// True when any accepted subinterval used the closed branch.
     pub interval_contact_active: bool,
-    /// `+z_base` component of the duration-weighted mean contact force [N], or
-    /// `None` when the contact channel is unavailable.
+    /// `+z_base` component of the duration-weighted mean contact force [N].
+    /// This comes from the full contact channel when available, otherwise from
+    /// a separately declared normal-load-only source; `None` means neither has
+    /// authority.
     pub mean_base_normal_contact_force_n: Option<f64>,
-    /// Producer diagnostic evaluated at the midpoint of only the first
-    /// accepted subinterval [N]. It is deliberately not named an interval mean.
-    pub first_subinterval_midpoint_normal_force_n: f64,
+    /// Sampling rule of [`Self::declared_normal_force_n`].
+    pub normal_force_sampling: RenderNormalForceSampling,
+    /// Producer-declared normal-load scalar [N]. Its exact meaning is carried
+    /// by [`Self::normal_force_sampling`]; it is never assumed to be a mean.
+    pub declared_normal_force_n: f64,
     /// Exact raw channel controls.
     pub channels: ChannelControlSet,
     /// Exact endpoint center-of-mass velocity [m/s].
@@ -381,10 +385,15 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                     duration_s,
                     sample_index,
                 )?;
+                let normal_force_sampling = metadata.channel_availability.normal_force_sampling;
                 let mean_base_normal_contact_force_n = channels
                     .contact
                     .available()
-                    .map(|channel| channel.mean_force_world_n.dot(base_axis_world));
+                    .map(|contact| contact.mean_force_world_n.dot(base_axis_world))
+                    .or_else(|| {
+                        (normal_force_sampling == RenderNormalForceSampling::IntervalMean)
+                            .then_some(input.interval_normal_force_n)
+                    });
                 if mean_base_normal_contact_force_n.is_some_and(|value| !value.is_finite()) {
                     return Err(ControlStreamError::NonFiniteDerived {
                         sample: sample_index,
@@ -409,7 +418,8 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                     },
                     interval_contact_active: input.interval_contact_active,
                     mean_base_normal_contact_force_n,
-                    first_subinterval_midpoint_normal_force_n: input.interval_normal_force_n,
+                    normal_force_sampling,
+                    declared_normal_force_n: input.interval_normal_force_n,
                     channels,
                     endpoint_center_of_mass_velocity_world_m_per_s: center_velocity,
                     endpoint_angular_velocity_world_rad_per_s: angular_world,
@@ -1229,7 +1239,8 @@ mod tests {
             },
             interval_contact_active: true,
             mean_base_normal_contact_force_n: Some(1.0),
-            first_subinterval_midpoint_normal_force_n: 1.0,
+            normal_force_sampling: RenderNormalForceSampling::IntervalMean,
+            declared_normal_force_n: 1.0,
             channels: ChannelControlSet {
                 gravity: channel,
                 contact: channel,

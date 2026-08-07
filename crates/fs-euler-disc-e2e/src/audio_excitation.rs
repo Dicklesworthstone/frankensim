@@ -28,7 +28,7 @@ use crate::{
 };
 
 /// Version of the source-clock mapping, checkpoint, and identity semantics.
-pub const AUDIO_EXCITATION_ALGORITHM_VERSION: u32 = 1;
+pub const AUDIO_EXCITATION_ALGORITHM_VERSION: u32 = 2;
 /// Largest number of source intervals admitted by one transactional mapping call.
 pub const MAX_AUDIO_EXCITATION_CHUNK_INTERVALS: usize = 65_536;
 /// Largest supported azimuthal harmonic in the compact contact-shape model.
@@ -36,8 +36,8 @@ pub const MAX_AUDIO_EXCITATION_AZIMUTHAL_HARMONIC: u16 = 64;
 /// Maximum delay between cancellation polls while mapping source intervals.
 pub const AUDIO_EXCITATION_CANCELLATION_POLL_INTERVALS: usize = 64;
 
-const MAPPER_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-excitation-mapper.v1";
-const CHUNK_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-excitation-chunk.v1";
+const MAPPER_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-excitation-mapper.v2";
+const CHUNK_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-excitation-chunk.v2";
 const TEXTURE_STREAM_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-texture-stream.v1";
 const EVENT_STREAM_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-event-stream.v1";
 
@@ -53,7 +53,7 @@ pub enum AudioExcitationReduction {
     },
 }
 
-/// Honest reconstruction status attached to every v1 mapped timeline.
+/// Honest reconstruction status attached to every v2 mapped timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AudioExcitationReconstructionStatus {
     /// Interval averages and measures are available, but the result is not an
@@ -351,7 +351,7 @@ pub struct AudioExcitationEvent {
     pub bracket_end_s: f64,
     /// Explicit timing-only upstream measure.
     pub measure: ContactEventMeasure,
-    /// Always zero in v1 because the source retains no event impulse.
+    /// Always zero in v2 because the source retains no event impulse.
     pub physical_impulse_n_s: ModalComponentValues,
     /// Optional separately declared artistic rendering contribution.
     pub artistic: Option<ArtisticEventExcitation>,
@@ -1722,17 +1722,25 @@ fn source_scalar(
     base_normal_world: Vec3,
     interval: usize,
 ) -> Result<SourceScalar, AudioExcitationError> {
-    let (class, unit, retained, mean, measure) = match channel {
+    let (class, unit, available, mean, measure) = match channel {
         SoundExcitationChannel::ContactNormalForce => {
             let retained = source_channel(view.channels.contact);
+            let available = view.mean_base_normal_contact_force_n.is_some();
             let mean = view.mean_base_normal_contact_force_n.unwrap_or(0.0);
-            let measure = retained.map_or(0.0, |value| {
-                value.force_time_measure_world_n_s.dot(base_normal_world)
-            });
+            let measure = retained.map_or_else(
+                || {
+                    if available {
+                        mean * view.duration_s
+                    } else {
+                        0.0
+                    }
+                },
+                |value| value.force_time_measure_world_n_s.dot(base_normal_world),
+            );
             (
                 SourceClass::Contact,
                 SourceUnit::Newton,
-                retained.is_some(),
+                available,
                 mean,
                 measure,
             )
@@ -1751,7 +1759,7 @@ fn source_scalar(
         }
         unsupported => return Err(AudioExcitationError::UnsupportedMapping(unsupported)),
     };
-    if retained && (!mean.is_finite() || !measure.is_finite()) {
+    if available && (!mean.is_finite() || !measure.is_finite()) {
         return Err(AudioExcitationError::NonFinite {
             interval,
             field: "source scalar or measure",
@@ -1760,7 +1768,7 @@ fn source_scalar(
     Ok(SourceScalar {
         class,
         unit,
-        available: retained,
+        available,
         mean,
         measure,
     })

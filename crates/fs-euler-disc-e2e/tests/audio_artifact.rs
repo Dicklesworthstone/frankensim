@@ -975,8 +975,16 @@ fn g3_g5_sound_artifact_binds_eight_second_dry_master_and_spatialized_path() {
             AudioArtifactRole::QuantizedPcm24Derivative,
         );
         assert_eq!(
-            artifact.manifest().authority(),
+            artifact.manifest().synthesis_authority(),
             SoundAuthority::PhysicallyInformed
+        );
+        assert_eq!(
+            artifact.manifest().artifact_authority(),
+            SoundAuthority::PhysicallyInformed,
+        );
+        assert_eq!(
+            artifact.manifest().presentation_authority().code(),
+            "synthesis-bound-canonical-dry-mix",
         );
         assert_eq!(
             artifact.manifest().channel_layout().path(),
@@ -988,6 +996,11 @@ fn g3_g5_sound_artifact_binds_eight_second_dry_master_and_spatialized_path() {
         );
         assert_eq!(artifact.manifest().synthesis(), configuration.receipt());
         let json = artifact.manifest().to_manifest_json();
+        assert!(json.contains("\"schema_version\":2"));
+        assert!(json.contains("\"synthesis_authority\":\"physically-informed\""));
+        assert!(json.contains("\"presentation_authority\":\"synthesis-bound-canonical-dry-mix\""));
+        assert!(json.contains("\"artifact_authority\":\"physically-informed\""));
+        assert!(!json.contains("\"authority\":"));
         assert!(json.contains("\"sample_frames\":384000"));
         assert!(json.contains("\"audio_frames_per_video_frame\":2000"));
         assert!(json.contains("\"artifact_role\":\"quantized-pcm24-derivative\""));
@@ -1066,15 +1079,31 @@ fn g3_g5_sound_artifact_binds_eight_second_dry_master_and_spatialized_path() {
         ));
         assert_eq!(spatialized_artifact.manifest().mix_identity(), None);
         assert_eq!(
+            spatialized_artifact.manifest().synthesis_authority(),
+            SoundAuthority::PhysicallyInformed,
+        );
+        assert_eq!(
+            spatialized_artifact
+                .manifest()
+                .presentation_authority()
+                .code(),
+            "artistic",
+        );
+        assert_eq!(
+            spatialized_artifact.manifest().artifact_authority(),
+            SoundAuthority::Artistic,
+        );
+        assert_eq!(
             spatialized_artifact.manifest().role(),
             AudioArtifactRole::AuthoritativeFloat32Master,
         );
-        assert!(
-            spatialized_artifact
-                .manifest()
-                .to_manifest_json()
-                .contains("\"artifact_role\":\"authoritative-float32-master\"")
-        );
+        let spatialized_json = spatialized_artifact.manifest().to_manifest_json();
+        assert!(spatialized_json.contains("\"artifact_role\":\"authoritative-float32-master\""));
+        assert!(spatialized_json.contains("\"synthesis_authority\":\"physically-informed\""));
+        assert!(spatialized_json.contains("\"presentation_authority\":\"artistic\""));
+        assert!(spatialized_json.contains("\"artifact_authority\":\"artistic\""));
+        assert!(spatialized_json.contains("\"calibrated_acoustic_prediction\":false"));
+        assert!(!spatialized_json.contains("\"authority\":"));
         let spatialized_decoded = spatialized_artifact
             .verify(AudioArtifactBudget::DEFAULT, cx)
             .unwrap();

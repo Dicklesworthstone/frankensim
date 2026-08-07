@@ -9,13 +9,14 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_euler_disc_e2e::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, DerivedEulerQois,
-    EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
-    EulerControlStream, EulerRenderTrajectoryArtifact, EventEvaluationSide, RenderBaseFrame,
-    RenderBaseModeState, RenderChannelAvailability, RenderContactBranch, RenderContactGeometry,
-    RenderContactTransition, RenderMassProperties, RenderSampleDisposition, RenderSupportFeature,
-    RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryCodecBudget,
-    RenderTrajectoryCodecError, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
-    RenderUnitSystem, RenderWorldFrame, TimelineEvent, TimelineResampler, TimelineSampleSource,
+    EULER_RENDER_TRAJECTORY_CODEC_VERSION, EULER_RENDER_TRAJECTORY_SAMPLES_PER_CHUNK,
+    EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerControlStream, EulerRenderTrajectoryArtifact,
+    EventEvaluationSide, RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability,
+    RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
+    RenderNormalForceSampling, RenderSampleDisposition, RenderSupportFeature, RenderTrajectory,
+    RenderTrajectoryAuthority, RenderTrajectoryCodecBudget, RenderTrajectoryCodecError,
+    RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    TimelineEvent, TimelineResampler, TimelineSampleSource,
     coupled_runner::{ChannelOwnership, ChannelWrench, ContactTransitionKind},
     render_motion_bridge::EulerRenderMotionBridge,
 };
@@ -24,6 +25,10 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 const RAW_STEP_BITS: u64 = 0x3fc0_0000_0000_0001;
 const WIRE_HEADER_LEN: usize = 116;
+/// The final four header bytes are terminal disposition, packed availability,
+/// world frame, and units. The 2-bit normal-force tag occupies bits 5..=6 of
+/// this availability byte without changing the fixed header length.
+const WIRE_HEADER_AVAILABILITY_OFFSET: usize = WIRE_HEADER_LEN - 3;
 
 fn wire_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
@@ -327,7 +332,7 @@ fn canonical_roundtrip_is_stable_and_preserves_receipt_and_raw_f64_bits() {
         assert_eq!(receipt.chunk_count(), 1);
         assert_eq!(
             receipt.artifact_identity().to_hex(),
-            "3cc387401adf46b030ace241e112061a0f642ea9018f718320e398640f12c194"
+            "1131c5c1b3ac5f1a39ddefaf73badfe8638a651de875462ff72d97679e8009e6"
         );
 
         let decoded = EulerRenderTrajectoryArtifact::from_canonical_bytes_verified(
@@ -339,6 +344,14 @@ fn canonical_roundtrip_is_stable_and_preserves_receipt_and_raw_f64_bits() {
         .unwrap();
         assert_eq!(decoded.receipt(), receipt);
         assert_eq!(decoded.trajectory(), artifact.trajectory());
+        assert_eq!(
+            decoded
+                .trajectory()
+                .metadata()
+                .channel_availability
+                .normal_force_sampling,
+            RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint
+        );
         assert_eq!(
             decoded.trajectory().samples()[1].input().time_s.to_bits(),
             RAW_STEP_BITS
@@ -365,6 +378,73 @@ fn canonical_roundtrip_is_stable_and_preserves_receipt_and_raw_f64_bits() {
                 .canonical_bytes(RenderTrajectoryCodecBudget::DEFAULT, cx)
                 .unwrap(),
             bytes
+        );
+    });
+}
+
+#[test]
+fn normal_load_only_availability_roundtrips_without_contact_wrench_authority() {
+    with_cx(false, |cx| {
+        let mut first = sample(0.0, 0.0, RenderSampleDisposition::Continue, false);
+        let mut retained = sample(0.0, 1.0, RenderSampleDisposition::HorizonCensored, false);
+        for input in [&mut first, &mut retained] {
+            input.contact_branch = RenderContactBranch::Closed;
+            input.contact_geometry = Some(RenderContactGeometry {
+                point_world_m: Vec3::new(
+                    input.center_of_mass_world_m.x,
+                    input.center_of_mass_world_m.y,
+                    0.0,
+                ),
+                normal_world: Vec3::new(0.0, 0.0, 1.0),
+                support_feature: RenderSupportFeature::ProfileFeature(3),
+            });
+            input.signed_gap_m = 0.0;
+        }
+        retained.interval_contact_active = true;
+        retained.interval_normal_force_n = 12.5;
+        let mut trajectory_metadata = metadata(&first, 1.0);
+        trajectory_metadata.channel_availability = RenderChannelAvailability {
+            gravity: false,
+            contact: false,
+            normal_force_sampling: RenderNormalForceSampling::IntervalMean,
+            rolling: false,
+            base: false,
+            gas: false,
+        };
+        let trajectory = RenderTrajectory::try_new(trajectory_metadata, vec![first, retained])
+            .expect("normal-load-only trajectory");
+        let artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+            identity("normal-load-only-campaign"),
+            trajectory,
+            Vec::new(),
+            RenderTrajectoryCodecBudget::DEFAULT,
+            cx,
+        )
+        .unwrap();
+        let bytes = artifact
+            .canonical_bytes(RenderTrajectoryCodecBudget::DEFAULT, cx)
+            .unwrap();
+        let decoded = EulerRenderTrajectoryArtifact::from_canonical_bytes(
+            &bytes,
+            RenderTrajectoryCodecBudget::DEFAULT,
+            cx,
+        )
+        .unwrap();
+        let availability = decoded.trajectory().metadata().channel_availability;
+        assert!(!availability.contact);
+        assert_eq!(
+            availability.normal_force_sampling,
+            RenderNormalForceSampling::IntervalMean
+        );
+        assert_eq!(
+            decoded.trajectory().samples()[1]
+                .input()
+                .interval_normal_force_n,
+            12.5
+        );
+        assert_eq!(
+            decoded.trajectory().samples()[1].input().channels.contact,
+            ChannelOwnership::default().contact
         );
     });
 }
@@ -515,14 +595,42 @@ fn versions_metadata_events_samples_and_chunk_topology_fail_closed() {
             .unwrap();
 
         let mut unsupported_version = small.clone();
-        unsupported_version[8..10].copy_from_slice(&2u16.to_le_bytes());
+        let unsupported = EULER_RENDER_TRAJECTORY_CODEC_VERSION + 1;
+        unsupported_version[8..10].copy_from_slice(&unsupported.to_le_bytes());
         assert_eq!(
             EulerRenderTrajectoryArtifact::from_canonical_bytes(
                 &unsupported_version,
                 RenderTrajectoryCodecBudget::DEFAULT,
                 cx,
             ),
+            Err(RenderTrajectoryCodecError::UnsupportedCodecVersion(
+                unsupported
+            ))
+        );
+
+        let mut prior_v2 = small.clone();
+        prior_v2[8..10].copy_from_slice(&2_u16.to_le_bytes());
+        assert_eq!(
+            EulerRenderTrajectoryArtifact::from_canonical_bytes(
+                &prior_v2,
+                RenderTrajectoryCodecBudget::DEFAULT,
+                cx,
+            ),
             Err(RenderTrajectoryCodecError::UnsupportedCodecVersion(2))
+        );
+
+        let mut invalid_normal_force_sampling_tag = small.clone();
+        invalid_normal_force_sampling_tag[WIRE_HEADER_AVAILABILITY_OFFSET] = 0b0110_0000;
+        assert_eq!(
+            EulerRenderTrajectoryArtifact::from_canonical_bytes(
+                &invalid_normal_force_sampling_tag,
+                RenderTrajectoryCodecBudget::DEFAULT,
+                cx,
+            ),
+            Err(RenderTrajectoryCodecError::InvalidTag {
+                field: "header.channel_availability",
+                tag: 3,
+            })
         );
 
         let mut metadata_bit_flip = small.clone();

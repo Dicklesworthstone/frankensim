@@ -12,18 +12,66 @@ use fs_euler_disc_e2e::reduced_decay::{
     ReducedDecayRun, THORNE_2026_RENDER_VALIDITY_CUTOFF_THETA_RAD, Thorne2026SteelGlassBenchmark,
     run_thorne_2026_steel_glass_benchmark,
 };
+use fs_euler_disc_e2e::render_trajectory::REDUCED_DECAY_RENDER_BRIDGE_VERSION;
 use fs_euler_disc_e2e::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, REDUCED_DECAY_RENDER_TAIL_HORIZON_S,
     RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability, RenderContactBranch,
     RenderContactGeometry, RenderContactTransition, RenderMassProperties,
-    RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature,
-    RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority, RenderTrajectoryError,
-    RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+    RenderNormalForceSampling, RenderNumericalRefusalReason, RenderSampleDisposition,
+    RenderSupportFeature, RenderTerminalEvent, RenderTrajectory, RenderTrajectoryAuthority,
+    RenderTrajectoryError, RenderTrajectoryMetadata, RenderTrajectorySampleInput, RenderUnitSystem,
+    RenderWorldFrame,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 const THETA: f64 = 0.35;
+
+#[test]
+fn normal_force_sampling_is_explicit_without_guessing_from_channel_presence() {
+    assert_eq!(
+        RenderChannelAvailability::ALL_AVAILABLE.normal_force_sampling,
+        RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint
+    );
+    assert_eq!(
+        RenderChannelAvailability {
+            normal_force_sampling: RenderNormalForceSampling::IntervalMean,
+            ..RenderChannelAvailability::NONE_AVAILABLE
+        }
+        .normal_force_sampling,
+        RenderNormalForceSampling::IntervalMean
+    );
+    assert_eq!(
+        RenderChannelAvailability::NONE_AVAILABLE.normal_force_sampling,
+        RenderNormalForceSampling::Unavailable
+    );
+}
+
+#[test]
+fn contact_authority_requires_an_explicit_normal_force_sampling_rule() {
+    let mut sample = sample(0.0, RenderSampleDisposition::HorizonCensored);
+    let mut contact_without_sampling = metadata();
+    contact_without_sampling.channel_availability = RenderChannelAvailability {
+        contact: true,
+        ..RenderChannelAvailability::NONE_AVAILABLE
+    };
+    assert_eq!(
+        RenderTrajectory::try_new(contact_without_sampling, vec![sample.clone()]),
+        Err(RenderTrajectoryError::InvalidChannelAvailability(
+            "contact requires non-unavailable normal_force_sampling"
+        ))
+    );
+    sample.interval_normal_force_n = 1.0;
+    let mut metadata = metadata();
+    metadata.channel_availability = RenderChannelAvailability::NONE_AVAILABLE;
+    assert_eq!(
+        RenderTrajectory::try_new(metadata, vec![sample]),
+        Err(RenderTrajectoryError::UnavailableChannelHasData {
+            sample: 0,
+            channel: "normal_force_sampling",
+        })
+    );
+}
 
 fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -786,7 +834,7 @@ fn unknown_schema_and_zero_component_identity_refuse() {
             vec![sample(0.01, RenderSampleDisposition::HorizonCensored)]
         )
         .unwrap_err(),
-        RenderTrajectoryError::UnsupportedSchemaVersion(2)
+        RenderTrajectoryError::UnsupportedSchemaVersion(EULER_RENDER_TRAJECTORY_SCHEMA_VERSION + 1)
     );
 
     let mut zero_identity = metadata();
@@ -992,6 +1040,20 @@ fn thorne_tail_is_grounded_horizon_censored_and_contains_the_terminal_chirp() {
         assert!(visible_late_sample.qois.inclination_rad < 0.006);
         assert!(visible_late_sample.qois.precession_rad_per_s > 400.0);
 
+        let metadata = trajectory.metadata();
+        assert!(!metadata.channel_availability.contact);
+        assert_eq!(
+            metadata.channel_availability.normal_force_sampling,
+            RenderNormalForceSampling::IntervalMean
+        );
+        assert_eq!(
+            metadata.producer_version,
+            format!(
+                "fs-euler-disc-e2e/reduced-decay-render-bridge-v{REDUCED_DECAY_RENDER_BRIDGE_VERSION}"
+            )
+        );
+        let mass_properties = metadata.mass_properties.properties;
+        let mass_kg = mass_properties.mass();
         for (index, retained) in samples.iter().enumerate() {
             let input = retained.input();
             assert_eq!(input.contact_branch, RenderContactBranch::Closed);
@@ -1000,7 +1062,40 @@ fn thorne_tail_is_grounded_horizon_censored_and_contains_the_terminal_chirp() {
             assert!(input.signed_gap_m <= 0.0);
             assert!(input.signed_gap_m.abs() < 1.0e-10);
             assert_eq!(input.interval_contact_active, index != 0);
-            assert_eq!(input.interval_normal_force_n, 0.0);
+            assert_eq!(input.channels.contact, ChannelOwnership::default().contact);
+            assert!(input.interval_normal_force_n >= 0.0);
+            if index == 0 {
+                assert_eq!(input.interval_normal_force_n, 0.0);
+            } else {
+                let previous = &samples[index - 1];
+                let dt_s = input.time_s - input.interval_start_time_s;
+                let previous_velocity = previous
+                    .state()
+                    .center_of_mass_velocity_world(mass_properties)
+                    .expect("previous admitted center-of-mass velocity");
+                let velocity = retained
+                    .state()
+                    .center_of_mass_velocity_world(mass_properties)
+                    .expect("admitted center-of-mass velocity");
+                let expected_normal_reaction_n = mass_kg
+                    * (run.parameters.gravity_m_per_s2 + (velocity.z - previous_velocity.z) / dt_s);
+                assert_eq!(
+                    input.interval_normal_force_n.to_bits(),
+                    expected_normal_reaction_n.to_bits(),
+                    "sample {index} did not retain the exact reconstructed mean reaction"
+                );
+                let impulse_residual_n_s = input.interval_normal_force_n * dt_s
+                    - mass_kg * run.parameters.gravity_m_per_s2 * dt_s
+                    - mass_kg * (velocity.z - previous_velocity.z);
+                let impulse_scale = 1.0_f64
+                    .max((input.interval_normal_force_n * dt_s).abs())
+                    .max((mass_kg * run.parameters.gravity_m_per_s2 * dt_s).abs())
+                    .max((mass_kg * (velocity.z - previous_velocity.z)).abs());
+                assert!(
+                    impulse_residual_n_s.abs() <= 16.0 * f64::EPSILON * impulse_scale,
+                    "sample {index} vertical impulse residual {impulse_residual_n_s:.17e} N s"
+                );
+            }
             for channel in [input.channels.rolling, input.channels.gas] {
                 assert_eq!(channel.force_world_n, Vec3::ZERO);
                 assert_eq!(channel.torque_world_nm, Vec3::ZERO);
@@ -1025,6 +1120,15 @@ fn thorne_tail_is_grounded_horizon_censored_and_contains_the_terminal_chirp() {
                 .iter()
                 .any(|claim| claim.contains("no theta-zero"))
         );
+        assert!(trajectory.metadata().no_claims.iter().any(|claim| {
+            claim.contains("kinematically implied")
+                && claim.contains("endpoint vertical impulse balance")
+                && claim.contains("not a resolved subinterval force history")
+        }));
+        assert!(trajectory.metadata().no_claims.iter().any(|claim| {
+            claim.contains("full contact wrench/work channel remains unavailable")
+                && claim.contains("no contact-torque")
+        }));
         assert!(
             trajectory
                 .metadata()
@@ -1032,6 +1136,22 @@ fn thorne_tail_is_grounded_horizon_censored_and_contains_the_terminal_chirp() {
                 .iter()
                 .any(|claim| claim.contains("not a configuration") && claim.contains("ranking"))
         );
+
+        let mut forged_metadata = trajectory.metadata().clone();
+        forged_metadata.channel_availability.normal_force_sampling =
+            RenderNormalForceSampling::Unavailable;
+        let forged_inputs = trajectory
+            .samples()
+            .iter()
+            .map(|sample| sample.input().clone())
+            .collect();
+        assert!(matches!(
+            RenderTrajectory::try_new(forged_metadata, forged_inputs),
+            Err(RenderTrajectoryError::UnavailableChannelHasData {
+                sample: 1,
+                channel: "normal_force_sampling"
+            })
+        ));
     });
 }
 

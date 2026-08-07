@@ -11,8 +11,9 @@ use fs_euler_disc_e2e::profile_contact_geometry;
 use fs_euler_disc_e2e::render_scene_bridge::{
     EULER_STUDIO_ENVIRONMENT_HEIGHT, EULER_STUDIO_ENVIRONMENT_WIDTH, EulerCinematicScene,
     EulerDebugOverlay, EulerEnvironmentStyle, EulerFrameRequest, EulerMaterialStyle,
-    EulerSceneError, EulerSceneLengthUnit, EulerStudioEnvironmentSpec, EulerTessellationConfig,
-    MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE, euler_scene_smoke_settings,
+    EulerSceneError, EulerSceneLengthUnit, EulerStudioEnvironmentSpec, EulerSupportSurfaceSpec,
+    EulerTessellationConfig, MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE,
+    euler_scene_smoke_settings,
 };
 use fs_euler_disc_e2e::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 use fs_euler_disc_e2e::{
@@ -134,14 +135,9 @@ fn assert_adaptive_film_bits_eq(actual: &AdaptiveFilm, expected: &AdaptiveFilm, 
     }
 }
 
-fn assert_closed_outward_box(mesh: &TriMesh, expected_min_m: [f64; 3], expected_max_m: [f64; 3]) {
-    assert_eq!(
-        mesh.vertices.len(),
-        8,
-        "a box must have eight shared corners"
-    );
-    assert_eq!(mesh.triangles.len(), 12, "a box must have twelve triangles");
-
+fn assert_closed_outward_mesh(mesh: &TriMesh, expected_min_m: [f64; 3], expected_max_m: [f64; 3]) {
+    assert!(!mesh.vertices.is_empty());
+    assert!(!mesh.triangles.is_empty());
     let mut actual_min_m = [f64::INFINITY; 3];
     let mut actual_max_m = [f64::NEG_INFINITY; 3];
     for vertex in &mesh.vertices {
@@ -161,7 +157,21 @@ fn assert_closed_outward_box(mesh: &TriMesh, expected_min_m: [f64; 3], expected_
         0.5 * (expected_min_m[1] + expected_max_m[1]),
         0.5 * (expected_min_m[2] + expected_max_m[2]),
     ];
-    let mut undirected_edge_incidence = BTreeMap::<(u32, u32), usize>::new();
+    // Production bevel meshes deliberately duplicate vertices between face
+    // patches. Canonicalize edges by exact coordinates rather than raw vertex
+    // index so this checks the represented surface for cracks, not one storage
+    // layout. All generators here derive shared coordinates through identical
+    // arithmetic, so exact bit keys are intentional.
+    let vertex_key = |vertex: [f64; 3]| {
+        vertex.map(|coordinate| {
+            if coordinate == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                coordinate.to_bits()
+            }
+        })
+    };
+    let mut undirected_edge_incidence = BTreeMap::<([u64; 3], [u64; 3]), usize>::new();
     for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
         for index in triangle {
             assert!(
@@ -169,11 +179,13 @@ fn assert_closed_outward_box(mesh: &TriMesh, expected_min_m: [f64; 3], expected_
                 "triangle {triangle_index} has out-of-range vertex {index}"
             );
         }
-        for [from, to] in [
+        for [from_index, to_index] in [
             [triangle[0], triangle[1]],
             [triangle[1], triangle[2]],
             [triangle[2], triangle[0]],
         ] {
+            let from = vertex_key(mesh.vertices[from_index as usize]);
+            let to = vertex_key(mesh.vertices[to_index as usize]);
             let edge = if from < to { (from, to) } else { (to, from) };
             *undirected_edge_incidence.entry(edge).or_default() += 1;
         }
@@ -201,10 +213,9 @@ fn assert_closed_outward_box(mesh: &TriMesh, expected_min_m: [f64; 3], expected_
             "triangle {triangle_index} is degenerate or not outward-wound: dot={outward_dot:.17e}"
         );
     }
-    assert_eq!(undirected_edge_incidence.len(), 18);
     assert!(
         undirected_edge_incidence.values().all(|count| *count == 2),
-        "every closed-box edge must have exactly two incident triangles: {undirected_edge_incidence:?}"
+        "every represented surface edge must have exactly two incident triangles: {undirected_edge_incidence:?}"
     );
 }
 
@@ -357,7 +368,11 @@ fn sample_at(
         contact_geometry,
         signed_gap_m,
         interval_contact_active,
-        interval_normal_force_n: if transition { 1.0 } else { 0.0 },
+        // This rendering-only fixture declares every mechanical channel
+        // unavailable. Contact branch/event geometry is independent of force
+        // magnitude, so retain the required exact zero instead of inventing an
+        // interval-mean normal-force authority for these scene tests.
+        interval_normal_force_n: 0.0,
         contact_transitions: transitions,
         base_mode: Some(base_mode),
         channels: ChannelOwnership::default(),
@@ -578,6 +593,7 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
         assert_eq!(indices.disc, 0);
         assert_eq!(indices.base_plate, 1);
         assert_eq!(indices.housing, 2);
+        assert_eq!(indices.support_surface, None);
         assert_eq!(indices.light, 3);
         assert_eq!(indices.spin_fiducial, None);
         assert_eq!(first.debug_layer_receipt(), None);
@@ -628,7 +644,7 @@ fn g0_real_filleted_asset_builds_one_deterministic_com_centered_scene() {
             );
             return;
         };
-        assert_closed_outward_box(
+        assert_closed_outward_mesh(
             plate_mesh,
             [
                 -0.5 * scene_config.base.plate_width_m,
@@ -902,6 +918,153 @@ fn g0_studio_environment_rejects_nonfinite_negative_and_unbounded_inputs() {
 }
 
 #[test]
+fn g0_optional_support_surface_is_physical_identity_bound_geometry() {
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, None, false, Vec::new(), cx);
+        let reference_config = config();
+        let reference =
+            EulerCinematicScene::try_build(&artifact, &specimen, reference_config.clone(), cx)
+                .expect("reference scene");
+
+        let mut supported_config = reference_config;
+        supported_config.support_surface = Some(EulerSupportSurfaceSpec {
+            width_m: 1.2,
+            depth_m: 1.0,
+            thickness_m: 0.02,
+            gap_below_housing_m: 0.001,
+            material: EulerMaterialStyle::Lambertian {
+                linear_rgb: [0.07, 0.055, 0.045],
+            },
+        });
+        let supported =
+            EulerCinematicScene::try_build(&artifact, &specimen, supported_config.clone(), cx)
+                .expect("scene on finite support surface");
+        let replay =
+            EulerCinematicScene::try_build(&artifact, &specimen, supported_config.clone(), cx)
+                .expect("support-surface replay");
+
+        let indices = supported.primitive_indices();
+        let support_index = indices.support_surface.expect("support primitive");
+        assert_eq!(support_index, 3);
+        assert_eq!(indices.light, 4);
+        assert_eq!(supported.scene().primitives.len(), 5);
+        assert_ne!(reference.scene_identity(), supported.scene_identity());
+        assert_ne!(
+            reference.source_configuration_identity(),
+            supported.source_configuration_identity()
+        );
+        assert_eq!(supported.scene_identity(), replay.scene_identity());
+        assert_eq!(
+            supported.source_configuration_identity(),
+            replay.source_configuration_identity()
+        );
+
+        let Shape::Instance(support) = &supported.scene().primitives[support_index].shape else {
+            panic!("support surface must be a static geometry instance");
+        };
+        assert_eq!(
+            support.object_id(),
+            supported_config.object_ids.support_surface
+        );
+        let SharedGeometry::Mesh(mesh) = support.geometry() else {
+            panic!("support surface must use explicit closed geometry");
+        };
+        let housing_bottom = -supported_config.base.plate_thickness_m
+            - supported_config.base.housing_gap_m
+            - supported_config.base.housing_height_m;
+        let support_top = housing_bottom - 0.001;
+        assert_closed_outward_mesh(
+            mesh,
+            [-0.6, -0.5, support_top - 0.02],
+            [0.6, 0.5, support_top],
+        );
+        assert!(matches!(
+            supported.scene().primitives[support_index].material,
+            Material::Lambertian { .. }
+        ));
+
+        let mut duplicate_id = supported_config.clone();
+        duplicate_id.object_ids.support_surface = duplicate_id.object_ids.housing;
+        assert!(matches!(
+            EulerCinematicScene::try_build(&artifact, &specimen, duplicate_id, cx),
+            Err(EulerSceneError::InvalidConfig("support surface object_id"))
+        ));
+
+        let admitted_support = supported_config.support_surface.unwrap();
+        let invalid_supports = [
+            (
+                EulerSupportSurfaceSpec {
+                    width_m: 0.0,
+                    ..admitted_support
+                },
+                "support width_m",
+            ),
+            (
+                EulerSupportSurfaceSpec {
+                    depth_m: f64::NAN,
+                    ..admitted_support
+                },
+                "support depth_m",
+            ),
+            (
+                EulerSupportSurfaceSpec {
+                    thickness_m: -0.02,
+                    ..admitted_support
+                },
+                "support thickness_m",
+            ),
+            (
+                EulerSupportSurfaceSpec {
+                    gap_below_housing_m: -0.001,
+                    ..admitted_support
+                },
+                "support gap_below_housing_m",
+            ),
+            (
+                EulerSupportSurfaceSpec {
+                    material: EulerMaterialStyle::Lambertian {
+                        linear_rgb: [0.07, f64::INFINITY, 0.045],
+                    },
+                    ..admitted_support
+                },
+                "support material",
+            ),
+        ];
+        for (support_surface, expected_field) in invalid_supports {
+            let mut invalid_config = supported_config.clone();
+            invalid_config.support_surface = Some(support_surface);
+            assert!(matches!(
+                EulerCinematicScene::try_build(&artifact, &specimen, invalid_config, cx),
+                Err(EulerSceneError::InvalidConfig(field)) if field == expected_field
+            ));
+        }
+
+        for support_surface in [
+            EulerSupportSurfaceSpec {
+                width_m: f64::from_bits(1),
+                ..admitted_support
+            },
+            EulerSupportSurfaceSpec {
+                gap_below_housing_m: f64::MAX,
+                ..admitted_support
+            },
+            EulerSupportSurfaceSpec {
+                thickness_m: f64::from_bits(1),
+                ..admitted_support
+            },
+        ] {
+            let mut invalid_config = supported_config.clone();
+            invalid_config.support_surface = Some(support_surface);
+            assert!(matches!(
+                EulerCinematicScene::try_build(&artifact, &specimen, invalid_config, cx),
+                Err(EulerSceneError::InvalidConfig("support derived bounds"))
+            ));
+        }
+    });
+}
+
+#[test]
 fn g0_spin_fiducial_is_disc_local_identity_bound_and_default_off() {
     with_cx(false, |cx| {
         let specimen = specimen(cx);
@@ -911,6 +1074,7 @@ fn g0_spin_fiducial_is_disc_local_identity_bound_and_default_off() {
             EulerCinematicScene::try_build(&artifact, &specimen, reference_config.clone(), cx)
                 .expect("reference scene");
         assert_eq!(reference.primitive_indices().spin_fiducial, None);
+        assert_eq!(reference.primitive_indices().support_surface, None);
         assert_eq!(reference.scene().primitives.len(), 4);
         assert_eq!(reference.primitive_indices().light, 3);
 

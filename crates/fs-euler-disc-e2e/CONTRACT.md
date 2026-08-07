@@ -821,12 +821,12 @@ one-test checker smoke used to verify the log/receipt schema; it does not replay
 the recorded case, resolve its logical artifacts, or establish physical
 evidence.
 
-## Animation-grade Euler render trajectory v1
+## Animation-grade Euler render trajectory v3
 
 `render_trajectory` defines the accepted public state boundary shared by later
 image and sound pipelines. It exists because `CoupledSample` alone cannot place
 or orient a disc: the complete `RigidBodyState` otherwise survives only in the
-restart checkpoint. The v1 trajectory retains, at every accepted time, the
+restart checkpoint. The v3 trajectory retains, at every accepted time, the
 center-of-mass pose, canonical body-to-world unit quaternion, world linear
 momentum, principal-body angular momentum bound to exact mass properties,
 symmetry-axis diagnostic, contact branch and geometry, localized contact
@@ -840,7 +840,7 @@ Top-level metadata binds the resolved specimen profile and chart, mass
 properties, initial state, base and physics models, full configuration,
 the nominal reduced-base frame, explicit per-channel availability, restart
 fingerprint, fixed timestep, producer version, applicability, and mandatory
-no-claims. V1 admits only right-handed Cartesian `+z`-up world
+no-claims. V3 admits only right-handed Cartesian `+z`-up world
 coordinates and SI/radian units. Those declarations are repeated on each raw
 sample and must match. Quaternion inputs must already be finite unit
 quaternions; admission canonicalizes the `q/-q` double cover. Times are finite,
@@ -865,7 +865,7 @@ exact endpoint reimpact. Across retained adjacent samples, an interval with no
 transition must preserve the preceding endpoint branch, while its first
 transition must be reimpact from open or opening from closed. The first
 positive-duration sample remains explicit preroll: because its segment-start
-branch is not retained, v1 makes no claim that its first transition is bound to
+branch is not retained, v3 makes no claim that its first transition is bound to
 that unavailable state.
 
 The reduced coupled runner now publishes those fields only after an accepted
@@ -881,6 +881,19 @@ mechanics is evolved past that boundary. Restarting that terminal checkpoint
 publishes no duplicate sample. Profile-backed runs poll their execution scope
 before setup and immediately before each checkpoint/sample commit; cancellation
 at either boundary returns a typed refusal and publishes no partial `CoupledRun`.
+
+The source-bound reduced-decay render bridge v2 retains its grounded no-slip
+kinematics and declares a separately available normal-load scalar while the
+aggregate contact wrench/work channel remains unavailable. Its initial
+zero-duration point remains contact-inactive with an exact zero interval
+payload. For every later interval it reconstructs the duration-mean normal
+reaction required by endpoint vertical impulse balance under the reduced
+model's gravity-plus-support vertical-force closure,
+`N_bar = m * (g + (v_z1 - v_z0) / dt)`, and refuses a non-finite or negative
+reaction. This scalar has no associated authoritative torque or work. It is a
+kinematically implied interval quantity, not a resolved contact patch,
+subinterval force history, angular-impulse solution, tangential traction,
+measured force, deformable-contact model, or acoustic-radiation model.
 
 Localization brackets describe evaluated uncertainty bounds, not additional
 accepted states. A terminal event's retained time must exactly equal its final
@@ -903,7 +916,7 @@ configuration binding, uninterrupted-versus-resumed sample equality, a resolved
 1 mm filleted profile, localized terminal admission, prohibited-reimpact
 publication, and refusal-checkpoint restart behavior.
 
-`render_trajectory_codec` v1 is the canonical durable transport for that
+`render_trajectory_codec` v3 is the canonical durable transport for that
 admitted boundary. It binds a caller-supplied nonzero campaign/operation
 content identity, the complete trajectory metadata and raw accepted sample
 inputs, and ordered producer-declared timeline seams. It does not serialize
@@ -948,7 +961,7 @@ when continuity is not warranted, allowing semantically identical uninterrupted
 and checkpoint-resumed trajectories to share canonical bytes when their raw
 accepted states and declared composition are identical.
 
-`control_stream` v1 derives synchronized raw rendering and sound controls from
+`control_stream` v3 derives synchronized raw rendering and sound controls from
 that admitted boundary. `VisualizationControlPoint` is point sampled at an
 exact accepted endpoint and carries the exact pose, center-of-mass velocity,
 body/world angular velocity, symmetry axis, reduced-base pose/velocity,
@@ -956,7 +969,7 @@ post-interval branch, gap, QoIs, and disposition. When and only when the
 endpoint branch is closed, it also carries the exact retained contact point and
 normal in world, disc-body, and displaced-base coordinates together with the
 disc, base, and relative material-point velocities. The reduced base translates
-along its local `+z`; v1 admits only base frames whose local `+z` coincides with
+along its local `+z`; v3 admits only base frames whose local `+z` coincides with
 world `+z`, while allowing a declared origin and yaw so the controls remain
 equivariant under admissible horizontal rigid transforms.
 
@@ -968,10 +981,17 @@ the simulated disc/body under the producer channel convention. The aggregate
 contact channel is not tangential-only work; the reduced-base channel is base
 damping work rather than total contact work into the base; and the exterior-gas
 channel is body work rather than relative gas dissipation. The separately
-retained `interval_normal_force_n` is exposed only under its true meaning: a
-midpoint diagnostic from the first accepted subinterval. Duration-mean normal
-load instead comes from the contact-channel mean force projected onto base
-`+z`. Available numerical zero is never treated as missing.
+retained `interval_normal_force_n` has an explicit
+`RenderNormalForceSampling` tag in `RenderChannelAvailability`: `Unavailable`,
+`FirstAcceptedSubintervalMidpoint`, or `IntervalMean`. The coupled runner uses
+the midpoint tag; reduced-decay bridge v2 uses the documented interval-mean
+tag. Full contact requires a non-unavailable tag, but a normal-only midpoint is
+diagnostic-only and **cannot** be promoted into a sound force measure.
+Duration-mean normal-load authority comes from the full contact-channel mean
+projected onto base `+z` whenever that channel is available, or from the scalar
+only when its tag is `IntervalMean` and full contact is unavailable. Sound mapping
+for `ContactNormalForce` fails closed (unavailable) in every other case.
+Available numerical zero is never treated as missing.
 
 Each audio interval also declares its exact visualization endpoint coverage.
 If the first retained sample owns a positive-duration interval, only its closing
@@ -1016,7 +1036,7 @@ pre-cancellation, and deterministic injected cancellation inside continuity,
 aggregation, post-aggregation, and work-reconciliation loops. These controls
 are neither calibrated sound nor physical validation.
 
-`audio_excitation` v1 maps the admitted control stream into a content-identified,
+`audio_excitation` v2 maps the admitted control stream into a content-identified,
 source-clock generalized-force artifact. Canonically ordered controls may select
 base-local normal contact force or signed aggregate-contact, rolling-resistance,
 reduced-base-damping, and exterior-gas body-work rates. A declared scale converts
@@ -1028,6 +1048,12 @@ dimensionally valid transfer-model proxy; it is not a claim that signed work
 alone determines acoustic phase, an energy-conserving mechanics force, radiated
 energy, calibrated pressure, or absolute SPL.
 
+Normal-force excitation may come either from the full contact-channel mean or
+from the reduced-decay bridge v2 normal-load-only authority. In the latter case
+the force-time measure is exactly the declared interval mean times duration;
+the unavailable aggregate contact wrench/work channel remains unavailable, so
+the mapper does not synthesize contact work or torque from that scalar.
+
 Contact and rolling stems are explicitly localized; base and gas stems are
 explicitly distributed. Azimuthal mode-shape factors derive from exact disc-body
 or displaced-base contact coordinates and apply only to localized stems. Smooth
@@ -1035,7 +1061,7 @@ raw intervals may interpolate exact endpoint factors. A single opening holds the
 exact contact-side start factor and a single reimpact holds the exact contact-side
 end factor; multiple events or missing required event-side geometry refuse rather
 than substituting unity coupling. Because boxcar reduction before a varying
-mode-shape projection does not conserve the spatially weighted measure, v1
+mode-shape projection does not conserve the spatially weighted measure, v2
 refuses `WholeIntervalBoxcarV1` together with nonuniform contact-coordinate
 participation. Static participation remains compatible with measure-first
 boxcar reduction and its event barriers.
@@ -1115,6 +1141,18 @@ not a causal or live-processing latency claim; reflection is a deterministic
 boundary convention, not modeled physical pre-roll or post-roll. Each chunk
 recomputes its global-horizon halo from the immutable complete source payload, so
 chunk size and restart boundaries do not reset filter state.
+
+`AudioResamplingCrop` is the only admitted way to publish a nonzero-offset
+subrange while preserving that global boundary condition. Its half-open source
+range must begin and end on exact video/audio alignment markers, must fit the
+full source horizon, and must have exactly the same duration as its rebased
+output clocks. Its identity binds the complete full-horizon resampler identity,
+both source offsets, and both output clocks. A cropped `SoundSynthesisConfig`
+must name that derived crop identity while retaining the full source
+excitation, modal model, filter, and algorithm versions; an independently
+restarted short-horizon resampler is rejected. This is an exact provenance and
+continuation guarantee for the modeled signal, not a claim that history before
+the retained source preroll is physically reconstructed.
 
 Opening and reimpact events retain their source bracket and requested binary64
 sample coordinate. A tolerance of `1e-9` frame may snap only near-integral
@@ -1475,7 +1513,13 @@ certificate. Mechanics, contact, support, mass, and inertia continue to use the
 original resolved chart rather than the render mesh.
 
 The emitted beauty scene uses stable semantic indices and object IDs for the
-animated disc and base plate, static housing, and one rectangular emitter. A
+animated disc and base plate, static housing, an optional finite studio support
+surface, and one rectangular emitter. The optional support is a closed
+base-local box whose top is declared relative to the housing bottom; its exact
+dimensions, gap, material, geometry identity, and object identity are bound to
+the configuration and scene identities. It is visual studio geometry rather
+than mechanics support, and is deliberately excluded from the animated-subject
+camera-coverage bound. A
 configured contact marker has a separate identity/receipt and is absent from
 all beauty scene and frame APIs; only the explicitly named static diagnostic
 scene/render APIs append it after the beauty primitives. The

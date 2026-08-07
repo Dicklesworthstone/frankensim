@@ -61,6 +61,9 @@ const FILTER_IDENTITY_DOMAIN: &str =
 const SOURCE_PAYLOAD_IDENTITY_DOMAIN: &str =
     "org.frankensim.euler-cinematic.audio-excitation-payload.v1";
 const CHUNK_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-drive-chunk.v1";
+const CROP_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-resampler-crop.v1";
+const CHECKPOINT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.euler-cinematic.audio-resampler-checkpoint.v1";
 const LN_10: f64 = core::f64::consts::LN_10;
 
 /// Boundary extension used by the centered FIR.
@@ -193,6 +196,62 @@ pub struct AudioVideoAlignment {
     pub markers: Vec<AudioVideoSyncMarker>,
     /// Accumulated drift by integer construction; always zero in v1.
     pub endpoint_drift_audio_frames: i64,
+}
+
+/// A rebased output interval from one already-admitted full-horizon resampler.
+///
+/// The source range is half-open in the full resampler's audio-frame offsets.
+/// It may be presented on a new zero-based video/audio clock, but its duration
+/// and both source edges must remain exact video-boundary markers. The crop
+/// identity therefore binds the full source model rather than pretending that
+/// a new cropped model has an independent FIR boundary condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AudioResamplingCrop {
+    full_resampler_identity: ContentHash,
+    first_source_audio_frame: u64,
+    end_source_audio_frame: u64,
+    output_video_clock: CinematicClock,
+    output_audio_clock: CinematicClock,
+    identity: ContentHash,
+}
+
+impl AudioResamplingCrop {
+    /// Identity of the complete source resampler, including its global FIR
+    /// boundary policy and all admitted excitation/model/filter inputs.
+    #[must_use]
+    pub const fn full_resampler_identity(self) -> ContentHash {
+        self.full_resampler_identity
+    }
+
+    /// Inclusive first frame in the full source-audio horizon.
+    #[must_use]
+    pub const fn first_source_audio_frame(self) -> u64 {
+        self.first_source_audio_frame
+    }
+
+    /// Exclusive end frame in the full source-audio horizon.
+    #[must_use]
+    pub const fn end_source_audio_frame(self) -> u64 {
+        self.end_source_audio_frame
+    }
+
+    /// Exact rebased output video clock.
+    #[must_use]
+    pub const fn output_video_clock(self) -> CinematicClock {
+        self.output_video_clock
+    }
+
+    /// Exact rebased output audio clock.
+    #[must_use]
+    pub const fn output_audio_clock(self) -> CinematicClock {
+        self.output_audio_clock
+    }
+
+    /// Domain-separated identity of this crop binding.
+    #[must_use]
+    pub const fn identity(self) -> ContentHash {
+        self.identity
+    }
 }
 
 /// Placement receipt for one timing-only source event.
@@ -418,6 +477,19 @@ impl AudioResamplingCheckpoint {
     pub const fn next_audio_frame_offset(self) -> u64 {
         self.next_audio_frame_offset
     }
+
+    /// Domain-separated identity of this immutable continuation point.
+    ///
+    /// It binds both the complete reconstruction model and its exact successor
+    /// offset; a matching offset from another source model is not resumable.
+    #[must_use]
+    pub fn identity(self) -> ContentHash {
+        let mut hasher = DomainHasher::new(CHECKPOINT_IDENTITY_DOMAIN);
+        hash_u32(&mut hasher, AUDIO_RESAMPLING_ALGORITHM_VERSION);
+        hasher.update(self.model_identity.as_bytes());
+        hash_u64(&mut hasher, self.next_audio_frame_offset);
+        hasher.finalize()
+    }
 }
 
 /// Chunk-local diagnostics suitable for deterministic run logging.
@@ -538,6 +610,8 @@ pub enum AudioResamplingError {
     EventOutsideRepresentableRange { event: usize },
     /// A checkpoint belongs to another model or is outside this timeline.
     InvalidCheckpoint,
+    /// A rebased output range is not an exact, safe binding to this source model.
+    InvalidCrop(&'static str),
     /// Every exact audio frame has been published.
     Complete,
     /// The admitted high-level sound configuration disagrees with this model.
@@ -775,6 +849,36 @@ impl AudioResampler {
         self.audio_frame_period_s
     }
 
+    /// Bind a rebased video/audio output interval to this complete source
+    /// horizon. This does not create a second resampler: callers must continue
+    /// this resampler through the source interval so the global FIR halo stays
+    /// sourced from real prehistory rather than a crop-boundary reflection.
+    pub fn try_crop(
+        &self,
+        first_source_audio_frame: u64,
+        end_source_audio_frame: u64,
+        output_video_clock: CinematicClock,
+        output_audio_clock: CinematicClock,
+    ) -> Result<AudioResamplingCrop, AudioResamplingError> {
+        let identity = crop_identity(
+            self.identity,
+            first_source_audio_frame,
+            end_source_audio_frame,
+            output_video_clock,
+            output_audio_clock,
+        );
+        let crop = AudioResamplingCrop {
+            full_resampler_identity: self.identity,
+            first_source_audio_frame,
+            end_source_audio_frame,
+            output_video_clock,
+            output_audio_clock,
+            identity,
+        };
+        self.validate_crop(crop)?;
+        Ok(crop)
+    }
+
     /// Immutable zero-progress restart point.
     pub fn initial_checkpoint(
         &self,
@@ -790,6 +894,57 @@ impl AudioResampler {
     /// Validate the admitted high-level sound config against exact clocks and
     /// algorithm identities. Spatialization/room fields remain later-stage inputs.
     pub fn validate_sound_configuration(
+        &self,
+        sound: &SoundSynthesisConfig,
+    ) -> Result<(), AudioResamplingError> {
+        self.validate_sound_source_configuration(sound)?;
+        let sound_input = sound.input();
+        if sound_input.resampler_identity != self.identity {
+            return Err(AudioResamplingError::SoundConfigurationMismatch(
+                "resampler or filter identity/version",
+            ));
+        }
+        if sound_input.audio_clock != self.input.audio_clock
+            || sound_input.video_clock != self.input.video_clock
+        {
+            return Err(AudioResamplingError::SoundConfigurationMismatch(
+                "full-horizon audio/video clocks",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate a sound configuration presented on a rebased crop clock.
+    ///
+    /// Unlike [`Self::validate_sound_configuration`], the admitted sound
+    /// configuration must carry the derived crop identity, never the identity
+    /// of an independently restarted short-horizon resampler. The source
+    /// excitation/model/filter checks remain identical to the full-horizon
+    /// path, so cropping cannot weaken their authority binding.
+    pub fn validate_cropped_sound_configuration(
+        &self,
+        crop: &AudioResamplingCrop,
+        sound: &SoundSynthesisConfig,
+    ) -> Result<(), AudioResamplingError> {
+        self.validate_crop(*crop)?;
+        self.validate_sound_source_configuration(sound)?;
+        let sound_input = sound.input();
+        if sound_input.resampler_identity != crop.identity {
+            return Err(AudioResamplingError::SoundConfigurationMismatch(
+                "derived crop resampler identity",
+            ));
+        }
+        if sound_input.audio_clock != crop.output_audio_clock
+            || sound_input.video_clock != crop.output_video_clock
+        {
+            return Err(AudioResamplingError::SoundConfigurationMismatch(
+                "cropped audio/video clocks",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_sound_source_configuration(
         &self,
         sound: &SoundSynthesisConfig,
     ) -> Result<(), AudioResamplingError> {
@@ -809,20 +964,72 @@ impl AudioResampler {
                 "modal identity, version, or modes",
             ));
         }
-        if sound_input.resampler_identity != self.identity
-            || sound_input.resampler_version != AUDIO_RESAMPLING_ALGORITHM_VERSION
+        if sound_input.resampler_version != AUDIO_RESAMPLING_ALGORITHM_VERSION
             || sound_input.filter_identity != self.filter.identity
             || sound_input.filter_version != AUDIO_RECONSTRUCTION_FILTER_VERSION
         {
             return Err(AudioResamplingError::SoundConfigurationMismatch(
-                "resampler or filter identity/version",
+                "source resampler version or filter identity/version",
             ));
         }
-        if sound_input.audio_clock != self.input.audio_clock
-            || sound_input.video_clock != self.input.video_clock
+        Ok(())
+    }
+
+    fn validate_crop(&self, crop: AudioResamplingCrop) -> Result<(), AudioResamplingError> {
+        if crop.full_resampler_identity != self.identity {
+            return Err(AudioResamplingError::InvalidCrop(
+                "full resampler identity does not match source model",
+            ));
+        }
+        let source_duration = crop
+            .end_source_audio_frame
+            .checked_sub(crop.first_source_audio_frame)
+            .filter(|duration| *duration > 0)
+            .ok_or(AudioResamplingError::InvalidCrop(
+                "source range must be nonempty and ordered",
+            ))?;
+        if crop.end_source_audio_frame > self.total_audio_frames {
+            return Err(AudioResamplingError::InvalidCrop(
+                "source range exceeds full audio horizon",
+            ));
+        }
+        if !self
+            .alignment
+            .markers
+            .iter()
+            .any(|marker| marker.audio_frame_offset == crop.first_source_audio_frame)
+            || !self
+                .alignment
+                .markers
+                .iter()
+                .any(|marker| marker.audio_frame_offset == crop.end_source_audio_frame)
         {
-            return Err(AudioResamplingError::SoundConfigurationMismatch(
-                "audio/video clocks",
+            return Err(AudioResamplingError::InvalidCrop(
+                "source range edges must be exact video/audio alignment markers",
+            ));
+        }
+        let (output_duration, _output_alignment, _) = validate_clocks(
+            crop.output_video_clock,
+            crop.output_audio_clock,
+            self.input.budget,
+            &mut || Ok(()),
+        )?;
+        if output_duration != source_duration {
+            return Err(AudioResamplingError::InvalidCrop(
+                "output audio duration differs from source range",
+            ));
+        }
+        if crop.identity
+            != crop_identity(
+                self.identity,
+                crop.first_source_audio_frame,
+                crop.end_source_audio_frame,
+                crop.output_video_clock,
+                crop.output_audio_clock,
+            )
+        {
+            return Err(AudioResamplingError::InvalidCrop(
+                "derived crop identity does not match its exact binding",
             ));
         }
         Ok(())
@@ -2712,6 +2919,23 @@ fn chunk_identity(model_identity: ContentHash, start: u64, end: u64) -> ContentH
     hasher.finalize()
 }
 
+fn crop_identity(
+    full_resampler_identity: ContentHash,
+    first_source_audio_frame: u64,
+    end_source_audio_frame: u64,
+    output_video_clock: CinematicClock,
+    output_audio_clock: CinematicClock,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(CROP_IDENTITY_DOMAIN);
+    hash_u32(&mut hasher, AUDIO_RESAMPLING_ALGORITHM_VERSION);
+    hasher.update(full_resampler_identity.as_bytes());
+    hash_u64(&mut hasher, first_source_audio_frame);
+    hash_u64(&mut hasher, end_source_audio_frame);
+    hash_clock(&mut hasher, output_video_clock);
+    hash_clock(&mut hasher, output_audio_clock);
+    hasher.finalize()
+}
+
 fn hash_clock(hasher: &mut DomainHasher, clock: CinematicClock) {
     hasher.update(&[match clock.domain() {
         CinematicClockDomain::Simulation => 1,
@@ -2775,6 +2999,335 @@ impl CompensatedSum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_blake3::hash_domain;
+    use fs_evidence::{
+        cinematic::SoundAuthority,
+        cinematic_config::{CinematicComponentRef, CinematicComponentRole},
+        cinematic_sound::{
+            ListenerFrame, ListenerPose, SOUND_SYNTHESIS_SCHEMA_VERSION, SoundAmplitudeReference,
+            SoundChannelLayout, SoundExcitationChannel, SoundExcitationControl,
+            SoundModalComponent, SoundModelAssumption, SoundRoomResponse, SoundSynthesisInput,
+            SoundTerminalPolicy, SoundTrajectoryDisposition,
+        },
+    };
+
+    fn test_identity(label: &str) -> ContentHash {
+        hash_domain(
+            "org.frankensim.euler-cinematic.audio-resampling-crop-test.v1",
+            label.as_bytes(),
+        )
+    }
+
+    fn test_mode() -> SoundMode {
+        SoundMode {
+            mode_id: 1,
+            component: SoundModalComponent::Disc,
+            frequency_hz: 440.0,
+            damping_ratio: 0.01,
+            modal_mass_kg: 1.0,
+            source_participation: SoundModeParticipation {
+                disc: 1.0,
+                glass_plate: 0.0,
+                base_assembly: 0.0,
+            },
+            radiation_gain_fs_s_per_m: 1.0,
+            material_identity: test_identity("material"),
+            base_identity: test_identity("base"),
+        }
+    }
+
+    fn test_clocks(video_end: i64) -> (CinematicClock, CinematicClock) {
+        let video = CinematicClock::try_new(
+            CinematicClockDomain::Video,
+            SOUND_MASTER_VIDEO_RATE_HZ,
+            1,
+            0,
+            video_end,
+        )
+        .unwrap();
+        let audio = CinematicClock::try_new(
+            CinematicClockDomain::Audio,
+            SOUND_MASTER_SAMPLE_RATE_HZ,
+            1,
+            0,
+            video_end * i64::from(SOUND_MASTER_SAMPLE_RATE_HZ / SOUND_MASTER_VIDEO_RATE_HZ),
+        )
+        .unwrap();
+        (video, audio)
+    }
+
+    fn test_resampler() -> AudioResampler {
+        let (video_clock, audio_clock) = test_clocks(2);
+        let input = AudioResamplingModelInput {
+            video_clock,
+            audio_clock,
+            declared_source_bandwidth_hz: 1_000.0,
+            filter: AudioReconstructionFilterSpec {
+                passband_edge_hz: 2_000.0,
+                stopband_edge_hz: 4_000.0,
+                half_length: 1,
+                maximum_passband_ripple_db: 0.1,
+                minimum_stopband_attenuation_db: 80.0,
+                response_grid_intervals: 8,
+            },
+            boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+            event_fractional_delay: AudioEventFractionalDelay::LinearTwoBoundaryV1,
+            budget: AudioResamplingBudget::reference_film(),
+        };
+        let (total_audio_frames, alignment, audio_frame_period_s) =
+            validate_clocks(video_clock, audio_clock, input.budget, &mut || Ok(())).unwrap();
+        AudioResampler {
+            identity: test_identity("full-resampler"),
+            filter: FirKernel {
+                coefficients: vec![1.0],
+                identity: test_identity("filter"),
+                diagnostics: AudioReconstructionFilterDiagnostics {
+                    tap_count: 1,
+                    measured_passband_ripple_db: 0.0,
+                    measured_stopband_attenuation_db: 100.0,
+                    intrinsic_group_delay_frames: 0,
+                    group_delay_compensation_frames: 0,
+                    required_lookahead_frames: 0,
+                    published_alignment_offset_frames: 0,
+                },
+            },
+            artistic_filter: None,
+            source_payload_identity: test_identity("source-payload"),
+            excitation_identity: test_identity("excitation"),
+            modal_identity: test_identity("modal"),
+            modes: vec![test_mode()],
+            grid: AudioExcitationGrid {
+                interval_count: 1,
+                start_time_s: 0.0,
+                end_time_s: 2.0 / f64::from(SOUND_MASTER_VIDEO_RATE_HZ),
+                minimum_interval_duration_s: 2.0 / f64::from(SOUND_MASTER_VIDEO_RATE_HZ),
+                maximum_interval_duration_s: 2.0 / f64::from(SOUND_MASTER_VIDEO_RATE_HZ),
+                nominal_mechanics_timestep_s: 2.0 / f64::from(SOUND_MASTER_VIDEO_RATE_HZ),
+                nominal_source_nyquist_ceiling_hz: 6.0,
+                reconstruction: AudioExcitationReconstructionStatus::RequiresBandLimitedResampling,
+            },
+            intervals: Vec::new(),
+            events: Vec::new(),
+            input,
+            alignment,
+            total_audio_frames,
+            audio_frame_period_s,
+            source_start_offset_audio_frames: 0.0,
+        }
+    }
+
+    fn component(
+        role: CinematicComponentRole,
+        identity: ContentHash,
+        version: u32,
+    ) -> CinematicComponentRef {
+        CinematicComponentRef::try_new(role, identity, version).unwrap()
+    }
+
+    fn crop_sound(
+        resampler: &AudioResampler,
+        crop: AudioResamplingCrop,
+        excitation_identity: ContentHash,
+        filter_identity: ContentHash,
+    ) -> SoundSynthesisConfig {
+        SoundSynthesisConfig::try_admit(SoundSynthesisInput {
+            schema_version: SOUND_SYNTHESIS_SCHEMA_VERSION,
+            authority: SoundAuthority::PhysicallyInformed,
+            trajectory: component(
+                CinematicComponentRole::Trajectory,
+                test_identity("trajectory"),
+                1,
+            ),
+            excitation: component(
+                CinematicComponentRole::AudioExcitation,
+                excitation_identity,
+                AUDIO_EXCITATION_ALGORITHM_VERSION,
+            ),
+            sound_model: component(
+                CinematicComponentRole::SoundModel,
+                resampler.modal_identity,
+                MODAL_SYNTHESIS_ALGORITHM_VERSION,
+            ),
+            microphone: component(
+                CinematicComponentRole::Microphone,
+                test_identity("microphone"),
+                1,
+            ),
+            room: component(CinematicComponentRole::Room, test_identity("room"), 1),
+            timeline: component(
+                CinematicComponentRole::Timeline,
+                test_identity("timeline"),
+                1,
+            ),
+            video_clock: crop.output_video_clock(),
+            audio_clock: crop.output_audio_clock(),
+            channel_layout: SoundChannelLayout::Stereo,
+            listener: ListenerPose {
+                frame: ListenerFrame::AnimatedCamera,
+                position_m: [0.0, 0.0, 0.0],
+                forward: [0.0, 0.0, -1.0],
+                up: [0.0, 1.0, 0.0],
+            },
+            excitation_controls: vec![SoundExcitationControl {
+                channel: SoundExcitationChannel::ContactNormalForce,
+                target_component: SoundModalComponent::Disc,
+                source_scale: 1.0,
+            }],
+            modes: resampler.modes.clone(),
+            room_response: SoundRoomResponse::Dry,
+            amplitude_reference: SoundAmplitudeReference::DigitalFullScale { headroom_db: 6.0 },
+            trajectory_disposition: SoundTrajectoryDisposition::HorizonCensored,
+            terminal_policy: SoundTerminalPolicy::FadeAtLastAccepted {
+                fade_sample_frames: 1,
+            },
+            resampler_identity: crop.identity(),
+            resampler_version: AUDIO_RESAMPLING_ALGORITHM_VERSION,
+            filter_identity,
+            filter_version: AUDIO_RECONSTRUCTION_FILTER_VERSION,
+            assumptions: vec![
+                SoundModelAssumption::LinearModalSuperposition,
+                SoundModelAssumption::TimeInvariantDamping,
+                SoundModelAssumption::DeclaredExcitationCompleteness,
+                SoundModelAssumption::DeclaredRoomResponse,
+            ],
+            calibration: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn g0_crop_binds_full_horizon_range_rebased_clocks_and_sound_authority() {
+        let resampler = test_resampler();
+        let (output_video, output_audio) = test_clocks(1);
+        let crop = resampler
+            .try_crop(2_000, 4_000, output_video, output_audio)
+            .unwrap();
+
+        assert_eq!(crop.full_resampler_identity(), resampler.identity());
+        assert_eq!(crop.first_source_audio_frame(), 2_000);
+        assert_eq!(crop.end_source_audio_frame(), 4_000);
+        assert_eq!(crop.output_video_clock(), output_video);
+        assert_eq!(crop.output_audio_clock(), output_audio);
+
+        let same = resampler
+            .try_crop(2_000, 4_000, output_video, output_audio)
+            .unwrap();
+        assert_eq!(crop.identity(), same.identity());
+        let changed_range = resampler
+            .try_crop(0, 2_000, output_video, output_audio)
+            .unwrap();
+        assert_ne!(crop.identity(), changed_range.identity());
+
+        let sound = crop_sound(
+            &resampler,
+            crop,
+            resampler.excitation_identity,
+            resampler.filter_identity(),
+        );
+        resampler
+            .validate_cropped_sound_configuration(&crop, &sound)
+            .unwrap();
+        let mut independently_restarted = test_resampler();
+        independently_restarted.identity = test_identity("independent-short-horizon-resampler");
+        assert_eq!(
+            independently_restarted.validate_cropped_sound_configuration(&crop, &sound),
+            Err(AudioResamplingError::InvalidCrop(
+                "full resampler identity does not match source model"
+            ))
+        );
+        assert_eq!(
+            resampler.validate_sound_configuration(&sound),
+            Err(AudioResamplingError::SoundConfigurationMismatch(
+                "resampler or filter identity/version"
+            ))
+        );
+
+        let wrong_excitation = crop_sound(
+            &resampler,
+            crop,
+            test_identity("other-excitation"),
+            resampler.filter_identity(),
+        );
+        assert_eq!(
+            resampler.validate_cropped_sound_configuration(&crop, &wrong_excitation),
+            Err(AudioResamplingError::SoundConfigurationMismatch(
+                "excitation identity or version"
+            ))
+        );
+        let wrong_filter = crop_sound(
+            &resampler,
+            crop,
+            resampler.excitation_identity,
+            test_identity("other-filter"),
+        );
+        assert_eq!(
+            resampler.validate_cropped_sound_configuration(&crop, &wrong_filter),
+            Err(AudioResamplingError::SoundConfigurationMismatch(
+                "source resampler version or filter identity/version"
+            ))
+        );
+    }
+
+    #[test]
+    fn g0_crop_refuses_non_boundary_duration_and_forged_identity() {
+        let resampler = test_resampler();
+        let (output_video, output_audio) = test_clocks(1);
+        assert_eq!(
+            resampler.try_crop(1, 2_000, output_video, output_audio),
+            Err(AudioResamplingError::InvalidCrop(
+                "source range edges must be exact video/audio alignment markers"
+            ))
+        );
+        let (long_output_video, long_output_audio) = test_clocks(2);
+        assert_eq!(
+            resampler.try_crop(2_000, 4_000, long_output_video, long_output_audio),
+            Err(AudioResamplingError::InvalidCrop(
+                "output audio duration differs from source range"
+            ))
+        );
+
+        let mut crop = resampler
+            .try_crop(2_000, 4_000, output_video, output_audio)
+            .unwrap();
+        crop.identity = test_identity("forged-crop");
+        let sound = crop_sound(
+            &resampler,
+            crop,
+            resampler.excitation_identity,
+            resampler.filter_identity(),
+        );
+        assert_eq!(
+            resampler.validate_cropped_sound_configuration(&crop, &sound),
+            Err(AudioResamplingError::InvalidCrop(
+                "derived crop identity does not match its exact binding"
+            ))
+        );
+    }
+
+    #[test]
+    fn g0_checkpoint_identity_binds_model_and_successor_offset() {
+        let first = AudioResamplingCheckpoint {
+            model_identity: test_identity("model-a"),
+            next_audio_frame_offset: 2_000,
+        };
+        assert_eq!(first.identity(), first.identity());
+        assert_ne!(
+            first.identity(),
+            AudioResamplingCheckpoint {
+                model_identity: test_identity("model-a"),
+                next_audio_frame_offset: 2_001,
+            }
+            .identity()
+        );
+        assert_ne!(
+            first.identity(),
+            AudioResamplingCheckpoint {
+                model_identity: test_identity("model-b"),
+                next_audio_frame_offset: 2_000,
+            }
+            .identity()
+        );
+    }
 
     fn receipt_with_artistic_impulse(has_artistic_impulse: bool) -> ResampledAudioEvent {
         let artistic = has_artistic_impulse.then_some(crate::ArtisticEventExcitation {

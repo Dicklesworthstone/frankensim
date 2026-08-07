@@ -7,10 +7,10 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_euler_disc_e2e::{
     ArtisticTextureConfig, AudioExcitationBudget, AudioExcitationError, AudioExcitationMapper,
     AudioExcitationModelInput, AudioExcitationReconstructionStatus, AudioExcitationReduction,
-    AudioExcitationStems, ContactEventMeasure, ContactModeShape, ContactParticipationPolicy,
-    DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerControlStream,
-    EulerRenderTrajectoryArtifact, ExcitationSourceAvailability, ModalComponentValues,
-    ModalSynthesisBudget, ModalSynthesisModel, ModalSynthesisModelInput,
+    AudioExcitationStems, ChannelControl, ContactEventMeasure, ContactModeShape,
+    ContactParticipationPolicy, DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+    EulerControlStream, EulerRenderTrajectoryArtifact, ExcitationSourceAvailability,
+    ModalComponentValues, ModalSynthesisBudget, ModalSynthesisModel, ModalSynthesisModelInput,
     ModeContactParticipationRule, RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability,
     RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
     RenderNumericalRefusalReason, RenderSampleDisposition, RenderSupportFeature, RenderTrajectory,
@@ -518,6 +518,140 @@ fn g0_all_supported_mappings_preserve_signed_units_stems_and_measures() {
 }
 
 #[test]
+fn g0_normal_load_only_authority_maps_force_and_measure_without_contact_wrench() {
+    let first = sample(
+        0.0,
+        0.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::Continue,
+    );
+    let mut retained = sample(
+        0.0,
+        1.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    retained.interval_normal_force_n = 7.0;
+    let availability = RenderChannelAvailability {
+        gravity: false,
+        contact: false,
+        normal_force_sampling: fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean,
+        rolling: false,
+        base: false,
+        gas: false,
+    };
+
+    with_cx(false, |cx| {
+        let artifact = artifact(vec![first, retained], availability, cx);
+        let controls = EulerControlStream::try_derive(artifact.trajectory(), cx).unwrap();
+        assert!(matches!(
+            controls.audio()[0].channels.contact,
+            ChannelControl::Unavailable
+        ));
+        assert_eq!(
+            controls.audio()[0].mean_base_normal_contact_force_n,
+            Some(7.0)
+        );
+        let modal = modal_model(&[SoundModalComponent::Disc], cx);
+        let mapper = AudioExcitationMapper::try_new(
+            &artifact,
+            &controls,
+            &modal,
+            mapper_input(
+                vec![mapping(
+                    SoundExcitationChannel::ContactNormalForce,
+                    SoundModalComponent::Disc,
+                    1.0,
+                )],
+                1,
+            ),
+            cx,
+        )
+        .unwrap();
+        let chunk = mapper
+            .map_next_chunk(
+                &mapper.initial_checkpoint(cx).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+                cx,
+            )
+            .unwrap();
+        let interval = &chunk.intervals[0];
+        assert_eq!(
+            interval.availability.contact,
+            ExcitationSourceAvailability::Available
+        );
+        assert_eq!(interval.mean_force_stems_n.contact.disc, 7.0);
+        assert_eq!(interval.force_time_stems_n_s.contact.disc, 7.0);
+        assert_eq!(interval.measure_residual_stems_n_s.contact.disc, 0.0);
+    });
+}
+
+#[test]
+fn g0_normal_only_midpoint_fails_closed_for_contact_normal_force_sound() {
+    let first = sample(
+        0.0,
+        0.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::Continue,
+    );
+    let mut retained = sample(
+        0.0,
+        1.0,
+        RenderContactBranch::Closed,
+        RenderSampleDisposition::HorizonCensored,
+    );
+    retained.interval_normal_force_n = 7.0;
+    let availability = RenderChannelAvailability {
+        gravity: false,
+        contact: false,
+        normal_force_sampling:
+            fs_euler_disc_e2e::RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint,
+        rolling: false,
+        base: false,
+        gas: false,
+    };
+
+    with_cx(false, |cx| {
+        let artifact = artifact(vec![first, retained], availability, cx);
+        let controls = EulerControlStream::try_derive(artifact.trajectory(), cx).unwrap();
+        assert_eq!(controls.audio()[0].mean_base_normal_contact_force_n, None);
+        assert_eq!(
+            controls.audio()[0].normal_force_sampling,
+            fs_euler_disc_e2e::RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint
+        );
+        let modal = modal_model(&[SoundModalComponent::Disc], cx);
+        let mapper = AudioExcitationMapper::try_new(
+            &artifact,
+            &controls,
+            &modal,
+            mapper_input(
+                vec![mapping(
+                    SoundExcitationChannel::ContactNormalForce,
+                    SoundModalComponent::Disc,
+                    1.0,
+                )],
+                1,
+            ),
+            cx,
+        )
+        .unwrap();
+        let chunk = mapper
+            .map_next_chunk(
+                &mapper.initial_checkpoint(cx).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(
+            chunk.intervals[0].availability.contact,
+            ExcitationSourceAvailability::Unavailable
+        );
+        assert_eq!(chunk.intervals[0].mean_force_stems_n.contact.disc, 0.0);
+        assert_eq!(chunk.intervals[0].force_time_stems_n_s.contact.disc, 0.0);
+    });
+}
+
+#[test]
 fn g0_available_zero_and_unavailable_sources_remain_distinct() {
     let first = sample(
         0.0,
@@ -534,6 +668,8 @@ fn g0_available_zero_and_unavailable_sources_remain_distinct() {
     let availability = RenderChannelAvailability {
         gravity: true,
         contact: true,
+        normal_force_sampling:
+            fs_euler_disc_e2e::RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint,
         rolling: true,
         base: false,
         gas: false,
