@@ -143,7 +143,7 @@ impl PlateSection {
         let g12 = law.g[0];
         let nu21 = nu12 * e2 / e1;
         let denom = 1.0 - nu12 * nu21;
-        if !(denom > 0.0) || !denom.is_finite() {
+        if !denom.is_finite() || denom <= 0.0 {
             return Err(PlateError::BadSection {
                 what: "1 - nu12*nu21 must be positive (reduced stiffness definiteness)",
             });
@@ -347,7 +347,7 @@ pub fn dkt_stiffness(
     let y31 = y[2] - y[0];
     let twice_area = x21 * y31 - x31 * y21;
     let scale = (x21 * x21 + y21 * y21).max(x31 * x31 + y31 * y31);
-    if !(twice_area.abs() > 1e-14 * scale) {
+    if !twice_area.is_finite() || twice_area.abs() <= 1e-14 * scale {
         return Err(PlateError::DegenerateElement {
             element,
             twice_area,
@@ -484,7 +484,7 @@ pub fn assemble(
 
     let mut kc = Coo::new(free, free);
     let mut mc = Coo::new(free, free);
-    let mut push_sym = |coo: &mut Coo, gr: usize, gc: usize, v: f64| {
+    let push_sym = |coo: &mut Coo, gr: usize, gc: usize, v: f64| {
         if let (Some(r), Some(c)) = (dof_map[gr], dof_map[gc]) {
             coo.push(r, c, v);
         }
@@ -569,7 +569,7 @@ pub fn assemble(
             let (x1, y1) = mesh.nodes[n1];
             let (x2, y2) = mesh.nodes[n2];
             let l = ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)).sqrt();
-            if !(l > 0.0) {
+            if !l.is_finite() || l <= 0.0 {
                 return Err(PlateError::BadStiffener {
                     what: "zero-length stiffener segment",
                 });
@@ -581,7 +581,7 @@ pub fn assemble(
             let kb = [
                 [12.0, 6.0 * l, -12.0, 6.0 * l],
                 [6.0 * l, 4.0 * l * l, -6.0 * l, 2.0 * l * l],
-                [-12.0, -6.0 * l, 12.0, 6.0 * l],
+                [-12.0, -6.0 * l, 12.0, -6.0 * l],
                 [6.0 * l, 2.0 * l * l, -6.0 * l, 4.0 * l * l],
             ];
             let coef = ei / (l * l * l);
@@ -714,7 +714,7 @@ mod tests {
         let mut u = [0.0f64; 9];
         for node in 0..3 {
             let (xi, yi) = (x[node], y[node]);
-            u[3 * node] = 0.5 * (k1 * xi * xi + k2 * yi * yi) + k12 * xi * yi;
+            u[3 * node] = f64::midpoint(k1 * xi * xi, k2 * yi * yi) + k12 * xi * yi;
             u[3 * node + 1] = k1 * xi + k12 * yi;
             u[3 * node + 2] = k2 * yi + k12 * xi;
         }
@@ -958,10 +958,122 @@ mod tests {
         assert!(flat > bare * 0.999, "flat brace sanity: {bare} → {flat}");
         assert!(
             offset > flat * 1.05,
-            "eccentricity must add parallel-axis stiffness: {flat} → {offset}"
+            "eccentricity must add parallel-axis stiffness: bare {bare}, flat {flat} → offset {offset}"
         );
         println!(
             "{{\"suite\":\"fs-plate\",\"case\":\"stiffener-eccentricity\",\"bare\":{bare:.1},\"flat\":{flat:.1},\"offset\":{offset:.1},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn stiffener_terms_isolated_match_rayleigh_scale() {
+        // Term isolation: each stiffener ingredient must act at the scale
+        // first-order Rayleigh analysis predicts for the (1,1) mode with a
+        // quarter-line brace (bending ≤ +1%, torsion ≤ +1%, mass ≤ −1%).
+        // This is the gate that caught a sign error in the Hermite matrix
+        // (an asymmetric K inflated the fundamental 64%).
+        let sec = steel_section();
+        let a = 1.0;
+        let nx = 12;
+        let mesh = PlateMesh::rectangle(a, a, nx, nx);
+        let boundary = PlateMesh::rectangle_boundary(nx, nx);
+        let quarter = nx / 4;
+        let path: Vec<usize> = (0..=nx).map(|i| quarter * (nx + 1) + i).collect();
+        let mk = |inertia: f64, torsion: f64, area: f64| Stiffener {
+            nodes: path.clone(),
+            e: 200e9,
+            g: 80e9,
+            area,
+            inertia,
+            torsion,
+            eccentricity: 0.0,
+            density: 7800.0,
+        };
+        let fundamental = |st: &[Stiffener]| -> f64 {
+            let model = assemble(
+                &mesh,
+                &sec,
+                &boundary,
+                st,
+                &AssemblyOptions {
+                    pretension: 0.0,
+                    support: EdgeSupport::SimplySupported,
+                },
+            )
+            .expect("assemble");
+            let d = sec.d[0];
+            let rho_h = sec.density * sec.thickness;
+            let w11 = ss_omega(d, rho_h, a, a, 1, 1);
+            let rep = modes(
+                &model,
+                (0.25 * w11 * w11, 25.0 * w11 * w11),
+                &SliceOptions::default(),
+            )
+            .expect("modes");
+            rep.modes[0].lambda.sqrt()
+        };
+        let bare = fundamental(&[]);
+        let bend_only = fundamental(&[mk(5.2e-11, 0.0, 1e-12)]);
+        let tors_only = fundamental(&[mk(0.0, 8.8e-11, 1e-12)]);
+        let mass_only = fundamental(&[mk(0.0, 0.0, 2.5e-5)]);
+        assert!(
+            bend_only > bare && bend_only < bare * 1.012,
+            "bending term outside Rayleigh scale: {bare} → {bend_only}"
+        );
+        assert!(
+            tors_only > bare && tors_only < bare * 1.012,
+            "torsion term outside Rayleigh scale: {bare} → {tors_only}"
+        );
+        assert!(
+            mass_only < bare && mass_only > bare * 0.988,
+            "mass term outside Rayleigh scale: {bare} → {mass_only}"
+        );
+        println!(
+            "{{\"suite\":\"fs-plate\",\"case\":\"stiffener-term-isolation\",\"bare\":{bare:.3},\"bend\":{bend_only:.3},\"torsion\":{tors_only:.3},\"mass\":{mass_only:.3},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn clamped_square_matches_leissa() {
+        // Leissa (NASA SP-160) clamped square: λ = ω·a²·√(ρh/D) = 35.992
+        // for the fundamental. Exercises the Clamped BC elimination path.
+        let sec = steel_section();
+        let d = sec.d[0];
+        let rho_h = sec.density * sec.thickness;
+        let a = 1.0;
+        let w1 = 35.992 / (a * a) * (d / rho_h).sqrt();
+        let mut errs = Vec::new();
+        for nx in [10usize, 20] {
+            let mesh = PlateMesh::rectangle(a, a, nx, nx);
+            let boundary = PlateMesh::rectangle_boundary(nx, nx);
+            let model = assemble(
+                &mesh,
+                &sec,
+                &boundary,
+                &[],
+                &AssemblyOptions {
+                    pretension: 0.0,
+                    support: EdgeSupport::Clamped,
+                },
+            )
+            .expect("assemble");
+            // Next clamped mode sits at 73.41/35.99 ≈ 2.04× in ω, so a
+            // (0.5, 2.5)·λ1 window isolates the fundamental... in λ that
+            // next mode is 4.16×λ1, comfortably outside.
+            let rep = modes(
+                &model,
+                (0.5 * w1 * w1, 2.5 * w1 * w1),
+                &SliceOptions::default(),
+            )
+            .expect("modes");
+            assert_eq!(rep.expected, 1, "isolated clamped fundamental at nx={nx}");
+            errs.push((rep.modes[0].lambda.sqrt() - w1).abs() / w1);
+        }
+        assert!(errs[1] < errs[0] / 2.5, "clamped trend: {errs:?}");
+        assert!(errs[1] < 0.02, "clamped fine-mesh error {:.3e}", errs[1]);
+        println!(
+            "{{\"suite\":\"fs-plate\",\"case\":\"clamped-leissa\",\"errors\":[{:.3e},{:.3e}],\"verdict\":\"pass\"}}",
+            errs[0], errs[1]
         );
     }
 
