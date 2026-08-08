@@ -13,8 +13,14 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
 - `PlateSection::{orthotropic, isotropic}` — bending rigidity D from
   engineering constants: `D11 = E1h³/12(1−ν12ν21)` etc., `D33 = G12h³/12`.
   Material axis 1 is the grain (L) axis — the matdb axis-convention
-  contract. SI units (Pa, m, kg/m³); the dimensioned fs-qty front door is a
-  recorded follow-up on the bead.
+  contract. Raw constructors take coherent SI (Pa, m, kg/m³); the `_qty`
+  variants, `Stiffener::qty`, and `AssemblyOptions::qty` are the
+  dimensioned fs-qty front doors (Length/Density/Pressure/Area/
+  SecondMomentOfArea/SurfaceTension), bit-identical to the raw paths and
+  pinned against a hand-computed spruce D-matrix (D11 = 27.2503 N·m,
+  D22 = 2.04378, D12 = 0.715322, D33 = 1.6875 exactly). ν stays a bare
+  ratio (dimensionless); the elastic law keeps fs-material's raw-Pa
+  contract.
 - `PlateMesh::{rectangle, rectangle_boundary}` — structured right-triangle
   meshes; no external mesh formats in v1 (deliberate).
 - `dkt_stiffness` — the 9×9 DKT bending stiffness. DOF convention per node:

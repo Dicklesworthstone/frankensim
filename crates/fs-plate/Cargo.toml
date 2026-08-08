@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-material = { path = "../fs-material" }
 fs-modal = { path = "../fs-modal" }
+fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }
 
 [lints]

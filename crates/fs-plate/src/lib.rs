@@ -39,7 +39,11 @@
 
 use fs_material::elastic::OrthotropicElastic;
 pub use fs_modal::{ModalError, ModePair, SliceOptions, SliceReport};
+pub use fs_qty::{Area as QtyArea, Density, Length, Pressure, SurfaceTension};
 use fs_sparse::{Coo, Csr};
+
+/// Second moment of area, m⁴ (beam bending inertia / torsion constant).
+pub type SecondMomentOfArea = fs_qty::Qty<4, 0, 0, 0, 0, 0>;
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -99,9 +103,10 @@ impl From<ModalError> for PlateError {
 // ---------------------------------------------------------------------------
 
 /// Plate section: bending rigidity matrix D (3×3, Voigt `[κxx, κyy, 2κ...]`
-/// row order `[Mxx, Myy, Mxy]`), thickness, and areal density. SI units
-/// throughout (Pa, m, kg/m³); a dimensioned fs-qty front door is a recorded
-/// follow-up on the bead.
+/// row order `[Mxx, Myy, Mxy]`), thickness, and areal density. Raw fields
+/// are coherent SI (Pa, m, kg/m³); the `_qty` constructors are the
+/// dimensioned front doors that make unit errors unrepresentable at the
+/// boundary.
 #[derive(Debug, Clone, Copy)]
 pub struct PlateSection {
     /// Bending rigidity `[[D11, D12, 0], [D12, D22, 0], [0, 0, D33]]`
@@ -158,6 +163,35 @@ impl PlateSection {
             thickness,
             density,
         })
+    }
+
+    /// Dimensioned front door for [`PlateSection::orthotropic`]: thickness
+    /// and density arrive as `fs_qty` quantities (coherent SI), so a
+    /// caller cannot pass a millimetre thickness or a g/cm³ density
+    /// without an explicit, visible conversion. The elastic law's moduli
+    /// remain `fs_material`'s raw-Pa contract; ν is dimensionless.
+    ///
+    /// # Errors
+    /// [`PlateError::BadSection`] as for [`PlateSection::orthotropic`].
+    pub fn orthotropic_qty(
+        law: &OrthotropicElastic,
+        thickness: Length,
+        density: Density,
+    ) -> Result<PlateSection, PlateError> {
+        PlateSection::orthotropic(law, thickness.value(), density.value())
+    }
+
+    /// Dimensioned front door for [`PlateSection::isotropic`].
+    ///
+    /// # Errors
+    /// [`PlateError::BadSection`] as for [`PlateSection::isotropic`].
+    pub fn isotropic_qty(
+        e: Pressure,
+        nu: f64,
+        thickness: Length,
+        density: Density,
+    ) -> Result<PlateSection, PlateError> {
+        PlateSection::isotropic(e.value(), nu, thickness.value(), density.value())
     }
 
     /// Isotropic convenience: `E`, `ν` with `G = E/2(1+ν)`.
@@ -423,6 +457,35 @@ pub struct Stiffener {
     pub density: f64,
 }
 
+impl Stiffener {
+    /// Dimensioned front door: every constant arrives as an `fs_qty`
+    /// quantity in coherent SI, closing the mm⁴-vs-m⁴ inertia and
+    /// mm-eccentricity error classes at the API boundary.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // mirrors the struct's own field list
+    pub fn qty(
+        nodes: Vec<usize>,
+        e: Pressure,
+        g: Pressure,
+        area: QtyArea,
+        inertia: SecondMomentOfArea,
+        torsion: SecondMomentOfArea,
+        eccentricity: Length,
+        density: Density,
+    ) -> Stiffener {
+        Stiffener {
+            nodes,
+            e: e.value(),
+            g: g.value(),
+            area: area.value(),
+            inertia: inertia.value(),
+            torsion: torsion.value(),
+            eccentricity: eccentricity.value(),
+            density: density.value(),
+        }
+    }
+}
+
 /// Assembled reduced pencil (Dirichlet DOFs eliminated) plus bookkeeping.
 #[derive(Debug, Clone)]
 pub struct PlateModel {
@@ -443,6 +506,18 @@ pub struct AssemblyOptions {
     pub pretension: f64,
     /// Boundary support applied to the caller-supplied boundary nodes.
     pub support: EdgeSupport,
+}
+
+impl AssemblyOptions {
+    /// Dimensioned front door: membrane pre-tension as an `fs_qty` line
+    /// tension (N/m).
+    #[must_use]
+    pub fn qty(pretension: SurfaceTension, support: EdgeSupport) -> AssemblyOptions {
+        AssemblyOptions {
+            pretension: pretension.value(),
+            support,
+        }
+    }
 }
 
 /// Assemble the reduced (K, M) pencil for a plate mesh: DKT bending +
@@ -1244,6 +1319,79 @@ mod tests {
              \"source\":\"Olson & Hazell 1977 via Srivastava 2004 Table 4 + Thinh 2013 Table 1\",\
              \"plate\":\"203x203x1.37mm clamped\",\"rib\":\"6.35x12.7mm central, e=7.035mm\",\
              \"pairs\":[{rows}],\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // the front doors must be BIT-identical
+    fn dimensioned_front_matches_raw_and_pins_spruce_d_matrix() {
+        // Spruce-like constants (the crate's orthotropic fixture). The
+        // qty front doors must be bit-identical to the raw constructors.
+        let law = OrthotropicElastic::new(
+            [12.0e9, 0.9e9, 0.5e9],
+            [0.35, 0.4, 0.4],
+            [0.75e9, 0.6e9, 0.7e9],
+            1.0,
+        )
+        .expect("law");
+        let raw = PlateSection::orthotropic(&law, 0.003, 450.0).expect("raw");
+        let qty = PlateSection::orthotropic_qty(&law, Length::new(0.003), Density::new(450.0))
+            .expect("qty");
+        assert_eq!(raw.d, qty.d);
+        assert_eq!(raw.thickness, qty.thickness);
+        assert_eq!(raw.density, qty.density);
+        // Hand-computed D pins (N·m): with ν21 = 0.35·0.9/12 = 0.02625 and
+        // denom = 1 − 0.35·0.02625 = 0.9908125, h³/12 = 2.25e-9 m³:
+        //   D11 = 12e9·2.25e-9/denom = 27.2503
+        //   D22 = 0.9e9·2.25e-9/denom = 2.04378
+        //   D12 = 0.35·D22           = 0.715322
+        //   D33 = 0.75e9·2.25e-9     = 1.6875 (exact)
+        let pins = [(0usize, 27.2503), (4, 2.04378), (1, 0.715322), (8, 1.6875)];
+        for (idx, want) in pins {
+            assert!(
+                (qty.d[idx] - want).abs() < 5e-4 * want,
+                "D[{idx}] = {} vs hand-computed {want}",
+                qty.d[idx]
+            );
+        }
+        // Isotropic front door.
+        let iso_raw = PlateSection::isotropic(200e9, 0.3, 0.002, 7800.0).expect("iso raw");
+        let iso_qty = PlateSection::isotropic_qty(
+            Pressure::new(200e9),
+            0.3,
+            Length::new(0.002),
+            Density::new(7800.0),
+        )
+        .expect("iso qty");
+        assert_eq!(iso_raw.d, iso_qty.d);
+        // Stiffener and options front doors are field-identical too.
+        let st = Stiffener::qty(
+            vec![0, 1],
+            Pressure::new(200e9),
+            Pressure::new(80e9),
+            QtyArea::new(2.5e-5),
+            SecondMomentOfArea::new(5.2e-11),
+            SecondMomentOfArea::new(8.8e-11),
+            Length::new(0.01),
+            Density::new(7800.0),
+        );
+        assert_eq!(
+            (
+                st.e,
+                st.g,
+                st.area,
+                st.inertia,
+                st.torsion,
+                st.eccentricity,
+                st.density
+            ),
+            (200e9, 80e9, 2.5e-5, 5.2e-11, 8.8e-11, 0.01, 7800.0)
+        );
+        let opts = AssemblyOptions::qty(SurfaceTension::new(2000.0), EdgeSupport::SimplySupported);
+        assert_eq!(opts.pretension, 2000.0);
+        println!(
+            "{{\"suite\":\"fs-plate\",\"case\":\"qty-front-spruce-d-matrix\",\"d11\":{:.4},\"d22\":{:.5},\"d12\":{:.6},\"d33\":{:.4},\"verdict\":\"pass\"}}",
+            qty.d[0], qty.d[4], qty.d[1], qty.d[8]
         );
     }
 
