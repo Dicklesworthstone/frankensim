@@ -45,11 +45,14 @@
 //!
 //! Deferred with recorded triggers (see CONTRACT): wideband directional
 //! FMM acceleration (dense complex LU is the v1 path; the work cap
-//! refuses above [`MAX_DENSE_PANELS`]), exact triangle singular
-//! quadrature beyond the equivalent-disc self terms, spherical-harmonic
-//! directivity coefficient tables (sampled directivity ships now), and a
-//! rigorous condition estimator (the fictitious-frequency contrast is
-//! the recorded diagnostic).
+//! refuses above [`MAX_DENSE_PANELS`]) and exact triangle singular
+//! quadrature beyond the equivalent-disc self terms. Spherical-harmonic
+//! directivity tables ([`directivity_sh_table`]), radiation efficiency
+//! ([`radiation_efficiency`]), and per-solve condition/work-cap
+//! diagnostics (on [`RadiationSolution`]) ship in this module; the
+//! condition number is an honest probe-based LOWER BOUND, not a
+//! rigorous estimator (the fictitious-frequency contrast remains the
+//! physics-level diagnostic).
 
 use fs_la::eigen_complex::lu_complex;
 use fs_math::c64::C64;
@@ -171,6 +174,19 @@ pub struct RadiationSolution {
     pub panels_per_wavelength: f64,
     /// Radiated power W = 1/2 Re SUM p conj(v) A [W].
     pub radiated_power: f64,
+    /// LOWER BOUND on the 1-norm condition number of the assembled
+    /// system, from `||A||_1` times the largest `||A^{-1} b||_1` over a
+    /// fixed set of deterministic unit-1-norm probe solves. A large
+    /// value is a reliable warning (plain CBIE near a fictitious
+    /// frequency measurably inflates it); a small value is NOT a
+    /// conditioning certificate — the probes can miss the worst
+    /// direction. Rigorous estimation (Hager/Higham with adjoint
+    /// solves) is the recorded follow-up.
+    pub condition_lower_bound: f64,
+    /// Work-cap utilization: panel count over [`MAX_DENSE_PANELS`], in
+    /// (0, 1]. The headroom diagnostic the pilot intel asked to surface
+    /// instead of refusing opaquely at the cap.
+    pub dense_cap_utilization: f64,
 }
 
 fn expik(kr: f64) -> C64 {
@@ -312,6 +328,7 @@ pub fn solve_radiation(
     }
 
     let lu = lu_complex(&matrix, n).map_err(|_| HelmholtzError::Singular)?;
+    let condition_lower_bound = condition_lower_bound(&matrix, n, &lu);
     let mut pressure = rhs;
     lu.solve(&mut pressure);
 
@@ -326,7 +343,41 @@ pub fn solve_radiation(
         k,
         panels_per_wavelength: ppw,
         radiated_power,
+        condition_lower_bound,
+        dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
     })
+}
+
+/// Probe-based lower bound on `cond_1(A) = ||A||_1 ||A^{-1}||_1`:
+/// `||A||_1` exactly from the assembled matrix, `||A^{-1}||_1` bounded
+/// below by `||A^{-1} b||_1` over five deterministic canonical columns
+/// (spread across the index range) plus the uniform vector, each with
+/// `||b||_1 = 1`. Cost is O(n^2) per probe against the O(n^3)
+/// factorization already paid.
+fn condition_lower_bound(matrix: &[C64], n: usize, lu: &fs_la::eigen_complex::LuComplex) -> f64 {
+    let mut a_norm1 = 0.0f64;
+    for j in 0..n {
+        let mut col = 0.0;
+        for i in 0..n {
+            col += matrix[i * n + j].abs();
+        }
+        a_norm1 = a_norm1.max(col);
+    }
+    let mut inv_norm1_lb = 0.0f64;
+    let mut probe = |b: Vec<C64>| {
+        let mut x = b;
+        lu.solve(&mut x);
+        let norm1: f64 = x.iter().map(|c| c.abs()).sum();
+        inv_norm1_lb = inv_norm1_lb.max(norm1);
+    };
+    for t in 0..5usize {
+        let j = if n == 1 { 0 } else { t * (n - 1) / 4 };
+        let mut e = vec![C64::ZERO; n];
+        e[j] = C64::ONE;
+        probe(e);
+    }
+    probe(vec![C64::from_re(1.0 / n as f64); n]);
+    a_norm1 * inv_norm1_lb
 }
 
 fn alpha_for(formulation: Formulation, k: f64) -> C64 {
@@ -522,6 +573,275 @@ pub fn baffled_piston_impedance(
         mean_p = mean_p + p_i.scale(ai / total_area);
     }
     Ok(mean_p)
+}
+
+/// Cap on the spherical-harmonic table degree: the projection grid is
+/// `(l_max + 1) x (2 l_max + 1)` far-field evaluations and the
+/// normalized-recurrence Legendre path is validated to this degree.
+pub const MAX_SH_DEGREE: usize = 64;
+
+/// Far-field directivity as spherical-harmonic coefficients: the
+/// rendering-facing table promised to the musical-acoustics program
+/// (runtime stereo/space rendering evaluates `F(direction)` from
+/// `(l_max + 1)^2` complex numbers instead of resampling the BEM
+/// far field).
+///
+/// Convention: orthonormal complex harmonics with Condon–Shortley
+/// phase, `Y_lm(theta, phi) = Pbar_l^m(cos theta) e^{i m phi}` for
+/// `m >= 0` and `Y_{l,-m} = (-1)^m conj(Y_lm)`, where `Pbar` carries
+/// the full `sqrt((2l+1)/(4 pi) (l-m)!/(l+m)!)` normalization inside
+/// the recurrence (no factorial overflow). `F(dir) = SUM a_lm Y_lm`.
+#[derive(Debug, Clone)]
+pub struct DirectivityTable {
+    /// Wavenumber the table was built at [1/m].
+    pub k: f64,
+    /// Maximum spherical-harmonic degree l.
+    pub l_max: usize,
+    /// Coefficients `a_lm`, indexed `l (l + 1) + m` for `m` in
+    /// `-l ..= l` — length `(l_max + 1)^2`.
+    pub coefficients: Vec<C64>,
+    /// `SUM |a_lm|^2` over the quadrature estimate of
+    /// `INT |F|^2 dOmega`: the fraction of far-field power the
+    /// truncated table captures. Near 1 for mesh-resolved fields; a low
+    /// value means the truncation (not the BEM solve) is the limiting
+    /// approximation.
+    pub captured_fraction: f64,
+}
+
+impl DirectivityTable {
+    /// The coefficient `a_lm`.
+    ///
+    /// # Panics
+    /// If `l > l_max` or `|m| > l` (programmer error, not a refusal).
+    #[must_use]
+    pub fn coefficient(&self, l: usize, m: i64) -> C64 {
+        assert!(l <= self.l_max && m.unsigned_abs() as usize <= l);
+        let idx = l * (l + 1);
+        let signed = idx as i64 + m;
+        self.coefficients[usize::try_from(signed).expect("index is non-negative by construction")]
+    }
+
+    /// Per-degree power `SUM_m |a_lm|^2` — the multipole spectrum.
+    #[must_use]
+    pub fn power_by_degree(&self) -> Vec<f64> {
+        let mut out = vec![0.0; self.l_max + 1];
+        for l in 0..=self.l_max {
+            for m in -(l as i64)..=(l as i64) {
+                out[l] += self.coefficient(l, m).norm_sq();
+            }
+        }
+        out
+    }
+
+    /// Evaluate the table at a direction (need not be normalized):
+    /// the far-field amplitude `F` with `p -> F e^{ikr}/r`.
+    #[must_use]
+    pub fn evaluate(&self, direction: [f64; 3]) -> C64 {
+        let len = norm(direction);
+        let x = direction[2] / len;
+        let phi = det::atan2(direction[1], direction[0]);
+        let pbar = norm_assoc_legendre(self.l_max, x);
+        let idx = |l: usize, m: usize| l * (l + 1) / 2 + m;
+        let mut f = C64::ZERO;
+        for l in 0..=self.l_max {
+            // m = 0 term.
+            f = f + self.coefficient(l, 0).scale(pbar[idx(l, 0)]);
+            for m in 1..=l {
+                let e = expik(m as f64 * phi);
+                let y_pos = e.scale(pbar[idx(l, m)]);
+                // Y_{l,-m} = (-1)^m conj(Y_lm).
+                let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                let y_neg = y_pos.conj().scale(sign);
+                f = f
+                    + self.coefficient(l, m as i64) * y_pos
+                    + self.coefficient(l, -(m as i64)) * y_neg;
+            }
+        }
+        f
+    }
+}
+
+/// Project the BEM far field onto spherical harmonics up to `l_max`.
+/// Quadrature is exact for band-limited integrands: Gauss–Legendre in
+/// `cos theta` with `l_max + 1` nodes (degree `2 l_max + 1`
+/// polynomials) times a `2 l_max + 1`-point uniform trapezoid in `phi`
+/// (exact for `e^{i m phi}`, `|m| <= 2 l_max`); the residual truncation
+/// error is reported as `1 - captured_fraction`, not hidden.
+///
+/// # Errors
+/// [`HelmholtzError::BadParameter`] when `l_max` exceeds
+/// [`MAX_SH_DEGREE`].
+pub fn directivity_sh_table(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    l_max: usize,
+) -> Result<DirectivityTable, HelmholtzError> {
+    if l_max > MAX_SH_DEGREE {
+        return Err(HelmholtzError::BadParameter {
+            what: "spherical-harmonic degree exceeds MAX_SH_DEGREE",
+        });
+    }
+    let n_theta = l_max + 1;
+    let n_phi = 2 * l_max + 1;
+    let (nodes, weights) = gauss_legendre(n_theta);
+    let mut dirs = Vec::with_capacity(n_theta * n_phi);
+    for &x in &nodes {
+        let s = (1.0 - x * x).max(0.0).sqrt();
+        for p in 0..n_phi {
+            let phi = 2.0 * core::f64::consts::PI * p as f64 / n_phi as f64;
+            dirs.push([s * det::cos(phi), s * det::sin(phi), x]);
+        }
+    }
+    let f = far_field(surface, solution, medium, &dirs);
+    let w_phi = 2.0 * core::f64::consts::PI / n_phi as f64;
+    let mut coefficients = vec![C64::ZERO; (l_max + 1) * (l_max + 1)];
+    let mut quadrature_power = 0.0f64;
+    let idx = |l: usize, m: usize| l * (l + 1) / 2 + m;
+    for (ti, &x) in nodes.iter().enumerate() {
+        let pbar = norm_assoc_legendre(l_max, x);
+        for p in 0..n_phi {
+            let w = weights[ti] * w_phi;
+            let fval = f[ti * n_phi + p];
+            quadrature_power += fval.norm_sq() * w;
+            let phi = 2.0 * core::f64::consts::PI * p as f64 / n_phi as f64;
+            for l in 0..=l_max {
+                let base = l * (l + 1);
+                coefficients[base] = coefficients[base] + fval.scale(pbar[idx(l, 0)] * w);
+            }
+            for m in 1..=l_max {
+                let e = expik(m as f64 * phi);
+                let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                for l in m..=l_max {
+                    let y_pos = e.scale(pbar[idx(l, m)]);
+                    let y_neg = y_pos.conj().scale(sign);
+                    let base = l * (l + 1);
+                    coefficients[base + m] =
+                        coefficients[base + m] + (fval * y_pos.conj()).scale(w);
+                    coefficients[base - m] =
+                        coefficients[base - m] + (fval * y_neg.conj()).scale(w);
+                }
+            }
+        }
+    }
+    let table_power: f64 = coefficients.iter().map(|c| c.norm_sq()).sum();
+    let captured_fraction = if quadrature_power > 0.0 {
+        table_power / quadrature_power
+    } else {
+        0.0
+    };
+    Ok(DirectivityTable {
+        k: solution.k,
+        l_max,
+        coefficients,
+        captured_fraction,
+    })
+}
+
+/// Radiation efficiency of the solved velocity pattern:
+/// `sigma = W / (1/2 rho c INT |v_n|^2 dS)` — the radiated-power ratio
+/// per structural mode promised to the vibroacoustic-coupling bead.
+/// Oracles: pulsating sphere `sigma = (ka)^2 / (1 + (ka)^2)`,
+/// oscillating (dipole) sphere `sigma = (ka)^4 / (4 + (ka)^4)`.
+///
+/// # Errors
+/// [`HelmholtzError::BadParameter`] when the stored velocity field has
+/// zero or non-finite mean-square (no efficiency is defined).
+pub fn radiation_efficiency(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+) -> Result<f64, HelmholtzError> {
+    let areas = surface.areas();
+    if solution.velocity.len() != areas.len() {
+        return Err(HelmholtzError::ShapeMismatch {
+            what: "solution velocity length must equal the panel count",
+        });
+    }
+    let mut msv = 0.0f64;
+    for (v, &a) in solution.velocity.iter().zip(areas.iter()) {
+        msv += v.norm_sq() * a;
+    }
+    if !(msv > 0.0 && msv.is_finite()) {
+        return Err(HelmholtzError::BadParameter {
+            what: "radiation efficiency needs a nonzero finite velocity field",
+        });
+    }
+    Ok(solution.radiated_power / (0.5 * medium.density * medium.sound_speed * msv))
+}
+
+/// Legendre `P_n(x)` and its derivative by the three-term recurrence.
+fn legendre_pair(n: usize, x: f64) -> (f64, f64) {
+    if n == 0 {
+        return (1.0, 0.0);
+    }
+    let mut p0 = 1.0f64;
+    let mut p1 = x;
+    for l in 2..=n {
+        let lf = l as f64;
+        let p2 = ((2.0 * lf - 1.0) * x * p1 - (lf - 1.0) * p0) / lf;
+        p0 = p1;
+        p1 = p2;
+    }
+    let dp = n as f64 * (x * p1 - p0) / (x * x - 1.0);
+    (p1, dp)
+}
+
+/// Gauss–Legendre nodes and weights on [-1, 1]: cosine initial guesses
+/// refined by a fixed number of Newton steps (deterministic; converges
+/// to machine precision well inside the budget for every degree the
+/// [`MAX_SH_DEGREE`] cap admits).
+fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut nodes = vec![0.0; n];
+    let mut weights = vec![0.0; n];
+    for i in 0..n {
+        let mut x = det::cos(core::f64::consts::PI * (i as f64 + 0.75) / (n as f64 + 0.5));
+        let mut dp = 1.0;
+        for _ in 0..16 {
+            let (p, d) = legendre_pair(n, x);
+            dp = d;
+            let step = p / d;
+            x -= step;
+            if step.abs() < 1e-15 {
+                break;
+            }
+        }
+        nodes[i] = x;
+        weights[i] = 2.0 / ((1.0 - x * x) * dp * dp);
+    }
+    (nodes, weights)
+}
+
+/// Orthonormal (Condon–Shortley) associated Legendre values
+/// `Pbar_l^m(x)` for all `0 <= m <= l <= l_max`, packed at
+/// `l (l + 1) / 2 + m`. The `4 pi` normalization lives inside the
+/// recurrence, so `INT |Pbar_l^m(cos theta) e^{i m phi}|^2 dOmega = 1`
+/// and no factorial ratio is ever formed.
+fn norm_assoc_legendre(l_max: usize, x: f64) -> Vec<f64> {
+    let s = (1.0 - x * x).max(0.0).sqrt();
+    let count = (l_max + 1) * (l_max + 2) / 2;
+    let mut p = vec![0.0f64; count];
+    let idx = |l: usize, m: usize| l * (l + 1) / 2 + m;
+    p[0] = 0.5 / core::f64::consts::PI.sqrt();
+    for m in 1..=l_max {
+        let mf = m as f64;
+        p[idx(m, m)] = -((2.0 * mf + 1.0) / (2.0 * mf)).sqrt() * s * p[idx(m - 1, m - 1)];
+    }
+    for m in 0..l_max {
+        let mf = m as f64;
+        p[idx(m + 1, m)] = (2.0 * mf + 3.0).sqrt() * x * p[idx(m, m)];
+    }
+    for m in 0..=l_max {
+        for l in (m + 2)..=l_max {
+            let lf = l as f64;
+            let mf = m as f64;
+            let a = ((4.0 * lf * lf - 1.0) / (lf * lf - mf * mf)).sqrt();
+            let b = (((lf - 1.0) * (lf - 1.0) - mf * mf) / (4.0 * (lf - 1.0) * (lf - 1.0) - 1.0))
+                .sqrt();
+            p[idx(l, m)] = a * (x * p[idx(l - 1, m)] - b * p[idx(l - 2, m)]);
+        }
+    }
+    p
 }
 
 #[cfg(test)]
@@ -738,7 +1058,8 @@ mod tests {
 
     #[test]
     fn alpha_sign_mutation_degrades_at_interior_resonance() {
-        // MUTATION: alpha = -i/k (the wrong sign under e^{-i omega t}).
+        // MUTATION: alpha = +i/k (the wrong sign under e^{-i omega t}
+        // for this module's HBIE row sign).
         // It must NOT rescue the interior resonance: the correct BM
         // error stays small while the flipped-sign arm degrades like
         // (or worse than) plain CBIE at ka = pi.
@@ -988,5 +1309,330 @@ mod tests {
         for (x, y) in a.pressure.iter().zip(b.pressure.iter()) {
             assert!(x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits());
         }
+        assert!(a.condition_lower_bound.to_bits() == b.condition_lower_bound.to_bits());
+    }
+
+    #[test]
+    fn gauss_legendre_and_normalized_legendre_pin() {
+        // Quadrature identities: SUM w = 2, INT x^2 = 2/3, INT x^10 =
+        // 2/11 (all exact for the node counts used); then the
+        // orthonormality of Pbar under that same rule:
+        // 2 pi INT Pbar_l^m Pbar_l'^m dx = delta_ll'.
+        let (nodes, weights) = gauss_legendre(9);
+        let wsum: f64 = weights.iter().sum();
+        assert!((wsum - 2.0).abs() < 1e-14, "sum of GL weights {wsum}");
+        let x2: f64 = nodes
+            .iter()
+            .zip(weights.iter())
+            .map(|(&x, &w)| w * x * x)
+            .sum();
+        assert!((x2 - 2.0 / 3.0).abs() < 1e-14);
+        let x10: f64 = nodes
+            .iter()
+            .zip(weights.iter())
+            .map(|(&x, &w)| w * det::powi(x, 10))
+            .sum();
+        assert!((x10 - 2.0 / 11.0).abs() < 1e-13);
+        let l_max = 8usize;
+        let (nodes, weights) = gauss_legendre(l_max + 1);
+        let idx = |l: usize, m: usize| l * (l + 1) / 2 + m;
+        for m in 0..=3usize {
+            for la in m..=l_max {
+                for lb in m..=l_max {
+                    let mut acc = 0.0;
+                    for (i, &x) in nodes.iter().enumerate() {
+                        let p = norm_assoc_legendre(l_max, x);
+                        acc += weights[i] * p[idx(la, m)] * p[idx(lb, m)];
+                    }
+                    acc *= 2.0 * core::f64::consts::PI;
+                    let expected = if la == lb { 1.0 } else { 0.0 };
+                    assert!(
+                        (acc - expected).abs() < 1e-12,
+                        "orthonormality (l={la},l'={lb},m={m}): {acc}"
+                    );
+                }
+            }
+        }
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"sh-basis-pins\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn sh_table_concentrates_and_reconstructs() {
+        // Monopole power must land in a_00, dipole power in (l=1, m=0),
+        // the truncation must capture essentially all quadrature power,
+        // and evaluate() must reproduce the sampled far field it was
+        // built from. Repeat construction is bitwise identical.
+        let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
+        let n = surface.centroids().len();
+        let ka = 1.0;
+        let l_max = 8;
+        let mono = solve_radiation(
+            &surface,
+            ka,
+            Medium::air(),
+            &uniform_velocity(n),
+            Formulation::BurtonMiller,
+        )
+        .expect("solve");
+        let t_mono =
+            directivity_sh_table(&surface, &mono, Medium::air(), l_max).expect("monopole table");
+        let spec = t_mono.power_by_degree();
+        let total: f64 = spec.iter().sum();
+        assert!(
+            spec[0] / total > 0.999,
+            "monopole must concentrate at l=0: {:.6}",
+            spec[0] / total
+        );
+        assert!(
+            t_mono.captured_fraction > 0.999,
+            "captured fraction {:.6}",
+            t_mono.captured_fraction
+        );
+        let v_dip: Vec<C64> = surface
+            .normals()
+            .iter()
+            .map(|nrm| C64::from_re(nrm[2]))
+            .collect();
+        let dip = solve_radiation(
+            &surface,
+            ka,
+            Medium::air(),
+            &v_dip,
+            Formulation::BurtonMiller,
+        )
+        .expect("solve");
+        let t_dip =
+            directivity_sh_table(&surface, &dip, Medium::air(), l_max).expect("dipole table");
+        let spec = t_dip.power_by_degree();
+        let total: f64 = spec.iter().sum();
+        let a10 = t_dip.coefficient(1, 0).norm_sq();
+        assert!(
+            a10 / total > 0.99,
+            "dipole must concentrate at (l=1, m=0): {:.6}",
+            a10 / total
+        );
+        // Reconstruction against directly sampled far field at
+        // directions the projection grid never used.
+        let mut dirs = Vec::new();
+        for i in 0..17u32 {
+            let theta = core::f64::consts::PI * (f64::from(i) + 0.37) / 17.0;
+            let phi = 2.61 * f64::from(i);
+            dirs.push([
+                det::sin(theta) * det::cos(phi),
+                det::sin(theta) * det::sin(phi),
+                det::cos(theta),
+            ]);
+        }
+        let direct = far_field(&surface, &dip, Medium::air(), &dirs);
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for (i, d) in dirs.iter().enumerate() {
+            let rec = t_dip.evaluate(*d);
+            num += (rec - direct[i]).norm_sq();
+            den += direct[i].norm_sq();
+        }
+        let rel = (num / den).sqrt();
+        assert!(rel < 1e-3, "SH reconstruction relative L2 error {rel:.2e}");
+        let t_repeat =
+            directivity_sh_table(&surface, &dip, Medium::air(), l_max).expect("repeat table");
+        for (x, y) in t_dip.coefficients.iter().zip(t_repeat.coefficients.iter()) {
+            assert!(x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits());
+        }
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"sh-directivity-table\",\"mono_l0_fraction\":{:.6},\"dip_l1m0_fraction\":{:.6},\"captured_fraction\":{:.6},\"reconstruction_rel\":{rel:.2e},\"verdict\":\"pass\"}}",
+            t_mono.power_by_degree()[0] / t_mono.power_by_degree().iter().sum::<f64>(),
+            a10 / total,
+            t_dip.captured_fraction
+        );
+    }
+
+    #[test]
+    fn radiation_efficiency_matches_sphere_oracles() {
+        use core::fmt::Write as _;
+        // sigma = W / (1/2 rho c INT |v|^2 dS) against the analytic
+        // monopole (ka^2/(1+ka^2)) and dipole (ka^4/(4+ka^4)) sphere
+        // efficiencies. PlainCbie is the accurate arm at these
+        // non-resonant ka (the BM low-ka resistance artifact is the
+        // recorded no-claim).
+        let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
+        let n = surface.centroids().len();
+        let mut rows = String::new();
+        let mut first = true;
+        for &ka in &[0.5, 1.0, 2.0] {
+            let sol = solve_radiation(
+                &surface,
+                ka,
+                Medium::air(),
+                &uniform_velocity(n),
+                Formulation::PlainCbie,
+            )
+            .expect("solve");
+            let sigma = radiation_efficiency(&surface, &sol, Medium::air()).expect("efficiency");
+            let oracle = ka * ka / (1.0 + ka * ka);
+            let rel = (sigma - oracle).abs() / oracle;
+            assert!(
+                rel < 0.05,
+                "monopole efficiency ka={ka}: {sigma:.4} vs {oracle:.4}"
+            );
+            write!(
+                rows,
+                "{}{{\"mode\":\"monopole\",\"ka\":{ka},\"sigma\":{sigma:.4},\"oracle\":{oracle:.4},\"rel\":{rel:.4}}}",
+                if first { "" } else { "," }
+            )
+            .expect("write to String");
+            first = false;
+        }
+        let ka = 1.0;
+        let v_dip: Vec<C64> = surface
+            .normals()
+            .iter()
+            .map(|nrm| C64::from_re(nrm[2]))
+            .collect();
+        let sol = solve_radiation(&surface, ka, Medium::air(), &v_dip, Formulation::PlainCbie)
+            .expect("solve");
+        let sigma = radiation_efficiency(&surface, &sol, Medium::air()).expect("efficiency");
+        let ka4 = det::powi(ka, 4);
+        let oracle = ka4 / (4.0 + ka4);
+        let rel = (sigma - oracle).abs() / oracle;
+        assert!(
+            rel < 0.10,
+            "dipole efficiency ka={ka}: {sigma:.4} vs {oracle:.4} (rel {rel:.4})"
+        );
+        write!(
+            rows,
+            ",{{\"mode\":\"dipole\",\"ka\":{ka},\"sigma\":{sigma:.4},\"oracle\":{oracle:.4},\"rel\":{rel:.4}}}"
+        )
+        .expect("write to String");
+        // Refusal: a zero velocity field has no efficiency.
+        let zero = RadiationSolution {
+            pressure: vec![C64::ZERO; n],
+            velocity: vec![C64::ZERO; n],
+            k: ka,
+            panels_per_wavelength: 10.0,
+            radiated_power: 0.0,
+            condition_lower_bound: 1.0,
+            dense_cap_utilization: 0.01,
+        };
+        assert!(matches!(
+            radiation_efficiency(&surface, &zero, Medium::air()),
+            Err(HelmholtzError::BadParameter { .. })
+        ));
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"radiation-efficiency\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn condition_diagnostic_inflates_at_fictitious_frequency() {
+        // The probe-based lower bound must SEE the interior resonance.
+        // The flat-panel discretization SHIFTS the sphere's first
+        // interior Dirichlet resonance away from the continuum ka = pi
+        // (centroids sit at radius < 1), so the claim is scanned over
+        // the resonance neighborhood: somewhere in ka in [3.0, 3.35]
+        // plain CBIE's bound must spike visibly above Burton-Miller's
+        // at the same ka and above its own off-resonance value.
+        // Measured on this mesh (2026-08-08): the peak ratio vs BM is
+        // ~a few tens near ka ~ 3.2 while at exactly pi it is only
+        // ~1.6x — asserting at a single hardcoded ka would test the
+        // continuum resonance, not the discrete operator actually
+        // solved.
+        let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
+        let n = surface.centroids().len();
+        let cond = |ka: f64, formulation: Formulation| -> f64 {
+            solve_radiation(
+                &surface,
+                ka,
+                Medium::air(),
+                &uniform_velocity(n),
+                formulation,
+            )
+            .expect("solve")
+            .condition_lower_bound
+        };
+        let cbie_off = cond(1.0, Formulation::PlainCbie);
+        // Stage 1: coarse scan locates the discrete resonance.
+        let mut coarse_ka = 0.0f64;
+        let mut coarse_peak = 0.0f64;
+        for step in 0..=14u32 {
+            let ka = 3.0 + 0.025 * f64::from(step);
+            let cbie = cond(ka, Formulation::PlainCbie);
+            assert!(cbie.is_finite());
+            if cbie > coarse_peak {
+                coarse_peak = cbie;
+                coarse_ka = ka;
+            }
+        }
+        // Stage 2: refine — the near-singular spike is much narrower
+        // than the coarse step.
+        let mut best_ka = coarse_ka;
+        let mut peak_cbie = coarse_peak;
+        for step in 0..=20u32 {
+            let ka = coarse_ka - 0.025 + 0.0025 * f64::from(step);
+            let cbie = cond(ka, Formulation::PlainCbie);
+            if cbie > peak_cbie {
+                peak_cbie = cbie;
+                best_ka = ka;
+            }
+        }
+        let bm_at_peak = cond(best_ka, Formulation::BurtonMiller);
+        let bm_off = cond(1.0, Formulation::BurtonMiller);
+        let ratio_vs_bm = peak_cbie / bm_at_peak;
+        assert!(cbie_off >= 1.0 && bm_at_peak >= 1.0 && bm_off >= 1.0);
+        // Measured on this mesh (2026-08-08): peak_cbie ~ 97 at
+        // ka ~ 3.20, bm_at_peak ~ 33 — the 320-panel discretization
+        // regularizes the resonance, so CBIE's bound rises ABOVE BM's
+        // (~2.9x) but not by an order of magnitude. The discriminating
+        // property is RELATIVE: CBIE inflates across the band while
+        // BM stays flat — that contrast is what makes the diagnostic
+        // usable as a fictitious-frequency warning.
+        assert!(
+            ratio_vs_bm > 1.5,
+            "CBIE must exceed BM at the discrete resonance: \
+             ratio {ratio_vs_bm:.1} at ka={best_ka:.4} (cbie {peak_cbie:.1}, bm {bm_at_peak:.1})"
+        );
+        assert!(
+            peak_cbie > 3.0 * cbie_off,
+            "CBIE resonance peak must dominate its own off-resonance value: \
+             {peak_cbie:.1} vs {cbie_off:.1}"
+        );
+        let cbie_spike = peak_cbie / cbie_off;
+        let bm_spike = bm_at_peak / bm_off;
+        assert!(
+            cbie_spike > 2.0 * bm_spike,
+            "the diagnostic must inflate for the resonant arm, not both: \
+             CBIE spike {cbie_spike:.1}x vs BM spike {bm_spike:.1}x"
+        );
+        // The cap-utilization diagnostic is the panel count over the cap.
+        let sol = solve_radiation(
+            &surface,
+            1.0,
+            Medium::air(),
+            &uniform_velocity(n),
+            Formulation::BurtonMiller,
+        )
+        .expect("solve");
+        assert!((sol.dense_cap_utilization - n as f64 / MAX_DENSE_PANELS as f64).abs() < 1e-15);
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"condition-diagnostic\",\"peak_cbie\":{peak_cbie:.1},\"ratio_vs_bm\":{ratio_vs_bm:.1},\"best_ka\":{best_ka:.4},\"cbie_off\":{cbie_off:.1},\"cbie_spike\":{cbie_spike:.1},\"bm_spike\":{bm_spike:.1},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn sh_degree_cap_refuses() {
+        let surface = SpherePanels::icosphere(1.0, 1).expect("icosphere");
+        let n = surface.centroids().len();
+        let sol = solve_radiation(
+            &surface,
+            1.0,
+            Medium::air(),
+            &uniform_velocity(n),
+            Formulation::BurtonMiller,
+        )
+        .expect("solve");
+        let err = directivity_sh_table(&surface, &sol, Medium::air(), MAX_SH_DEGREE + 1)
+            .expect_err("degree cap");
+        assert!(err.to_string().contains("FS-BEM-HELM-BAD-PARAMETER"));
     }
 }
