@@ -149,10 +149,52 @@ function-space roles. No domain solver is a dependency.
   fixed point under fixed vs Aitken relaxation → `FsiResult { converged, steps,
   solution, final_residual }`.
 
+### `vibroacoustic` (bead frankensim-fsim-vibroacoustic-wgkq7)
+
+The crate's first numerical engine: modal structure x rigid-wall-cavity
+x exterior-radiation coupling, frequency domain under `e^{-i omega t}`
+(matching `fs_bem::helmholtz`), hysteretic stiffness `k (1 - i eta)`.
+Sign convention: positive structural deflection points AWAY from the
+cavity (composes with the BEM's outward panel velocities).
+
+- `StructuralModes` (mass-normalized, `fs_modal` convention) /
+  `CavityModes` / `AcousticMedium` — the data carriers; any cavity
+  basis plugs in, `rectangular_cavity_modes` (analytic, with a
+  sufficiency-PROVEN enumeration box — an isotropic heuristic silently
+  dropped axial modes of elongated cavities, executed regression) and
+  `helmholtz_resonator_mode` (lumped lowest mode, `2 (8/3 pi) a` end
+  correction; the psi = 1, Lambda = V presentation is EXACT, proven by
+  the 3-state reduction) ship.
+- `assemble_coupling` — area-integral `C_rq = INT phi_r psi_q dA`,
+  pinned against closed-form sin x cos overlap integrals.
+- `project_radiation_impedance` — panel-space `Z` (`p = Z v`) reduced
+  to modal `Zm` with area weighting on the force side only.
+- `VibroacousticModel::frf` / `frf_truncated` — dense complex coupled
+  solve; every response carries the complete power breakdown with BOTH
+  audit residuals (`input = structural + interface + radiated`,
+  `interface = cavity`) — algebraically exact identities, measured at
+  1e-13.
+- `frf_with_convergence` — truncation error OBSERVED (full vs halved
+  bases) and refused (`FS-COUPLE-VIBRO-TRUNCATION-NOT-CONVERGED`)
+  above the caller tolerance; near-resonance rows are genuinely
+  truncation-sensitive (measured 0.28 on the casebook fixture) and the
+  casebook exposes rather than hides that.
+- `undamped_natural_frequencies` — exact `x = omega^2` linearization
+  (unit-triangular `B`), pinned by the two-oscillator closed form at
+  ~1e-16 across a five-decade coupling sweep, a first-order added-mass
+  falsifier (quartering 4.00), and a multi-mode independent-determinant
+  oracle.
+- `VibroError` — stable `FS-COUPLE-VIBRO-*` refusals.
+
 ## Invariants
 
 - The Dirac interconnection conserves interface power EXACTLY (to roundoff) —
   the G0 law; incompatible ports are refused.
+- Vibroacoustic power identities are exact by derivation and asserted
+  at solver roundoff; the input-balance identity is TAUTOLOGICAL for
+  any consistently assembled system, so the one-sided interface-normal
+  mutation is caught by the `interface == cavity` cross-row residual
+  (measured alarm 2.0 vs 1e-16). Repeat solves are bitwise identical.
 - Every admitted v2 schema has a shape-compatible power contraction, a checked
   watt-dimensional effort/flow product, and energy. Rotational, electrical,
   and chemical PR-2 kinds additionally require angular momentum, electric
@@ -246,6 +288,20 @@ None.
 
 ## Conformance tests
 
+`src/vibroacoustic.rs` unit tests: closed-form overlaps, two-oscillator
+split + dropped-coupling mutation, added-mass first-order falsifier,
+exact energy balance + one-sided normal-flip mutation, reciprocity,
+truncation refusal, cavity/resonator pins (incl. the elongated-cavity
+regression), multi-mode pencil vs independent determinant, refusals,
+determinism. `tests/vibroacoustic_casebook.rs`: the fs-plate ->
+fs-couple -> fs-bem composition — box-with-flexible-top vs independent
+perturbation with the sealed-cavity stiffening direction, coupled FRFs
+with observed per-frequency truncation deltas, and the radiation solve
+whose per-period energies audit GREEN through a real
+`WindowAuditReport` (with the `entropy_on_nonthermal_power_port`
+refusal retained as doctrine: dissipation leaves through THERMAL
+ports).
+
 `tests/couple.rs` (38 cases): v2 scalar-seed migration goldens for all three
 legacy kinds and bitwise whole-result migration of the added-mass fixture;
 rotational/electrical/magnetic/chemical watt-dimensional goldens, required-role
@@ -282,6 +338,16 @@ accelerates over stable fixed relaxation; light added mass converges naively;
 determinism.
 
 ## No-claim boundaries
+
+- `vibroacoustic` is frequency-domain only: time-domain realization is
+  the vector-fitting bead's scope; non-rectangular cavity bases beyond
+  the lumped Helmholtz mode arrive through the same `CavityModes`
+  carrier (numeric Laplacian producers are not shipped here); no
+  modal-density/SEA regime; the casebook's box fixture is validated by
+  independent perturbation and exact power audits, NOT yet by a
+  provenance-pinned measured-mobility publication (recorded open on the
+  bead); `condition`-free dense solves inherit `fs_la::eigen_complex`
+  boundaries.
 
 - The FSI fixture is the classic LINEARIZED added-mass interface map
   (`H(x) = −μx + c`) — enough to reproduce the instability and its fix; a full
