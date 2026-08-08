@@ -1890,6 +1890,20 @@ APIs. More generally, byte integrity and internal compatibility do not
 establish physical fidelity, acoustic validity, perceptual quality, material
 calibration, experimental agreement, mechanism truth, or aesthetic approval.
 
+## Offline cinematic denoising controls
+
+`euler_cinematic_denoise` always treats the first requested frame as a temporal
+history cut. A range beginning after frame zero is admitted only with the
+explicit `--initial-cut` acknowledgement; continuity is then checked strictly
+between every subsequent frame. The CLI exposes only the spatial à-trous pass
+count and scene-linear RGB sigma. Reprojection, history weight/length, and
+coverage, depth, normal, object, and material compatibility remain frozen
+correspondence-safety controls rather than noise-strength knobs. Every output
+is a biased display derivative. In particular, primary-surface guides on glass
+do not certify the motion of reflected or refracted secondary transport, so a
+smoother preview is not evidence of raw-estimator convergence or transport
+correctness.
+
 ## No-claim boundaries
 
 The binding v1 statements are:

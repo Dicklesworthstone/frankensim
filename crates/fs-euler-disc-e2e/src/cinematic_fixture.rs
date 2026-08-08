@@ -293,12 +293,17 @@ impl Default for CinematicFixtureConfig {
             adaptive_sampling: None,
             render_seed_salt: 0,
             max_depth: 6,
-            azimuthal_segments: 1_024,
-            arc_subdivisions_per_arc: 128,
+            // The conservative 4K look-development tier: on the canonical
+            // specimen 512 x 64 retains sub-micrometre meridian and azimuthal
+            // chord errors. The renderer currently uses geometric facet
+            // normals, so the more aggressive 256 x 32 tier is deliberately
+            // not the production default.
+            azimuthal_segments: 512,
+            arc_subdivisions_per_arc: 64,
             shutter_angle_degrees: 180,
             render_workers: default_render_workers(),
-            tile_width: 32,
-            tile_height: 32,
+            tile_width: default_render_tile_edge(),
+            tile_height: default_render_tile_edge(),
             render_memory_limit_bytes: 4 * 1024 * 1024 * 1024,
             denoise_previews: true,
             retain_full_aov_exr: true,
@@ -457,6 +462,18 @@ fn default_render_workers() -> usize {
         .map(NonZeroUsize::get)
         .unwrap_or(1)
         .min(MAX_RENDER_WORKERS)
+}
+
+const fn default_render_tile_edge() -> u32 {
+    // Native M4 profiling found 8 x 8 to be the smallest tier before tile
+    // overhead erased the load-balance gain. Apply that Apple-aarch64 family
+    // policy to M-series hosts while keeping other architectures unchanged;
+    // only the measured M4 host carries performance evidence, not M1-M3 or M5.
+    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        8
+    } else {
+        32
+    }
 }
 
 /// Successful fixture paths and the optional convenience movie.
@@ -4791,10 +4808,12 @@ mod tests {
         assert_eq!(config.frame_window, CinematicFrameWindow::Full);
         assert_eq!(config.render_seed_salt, 0);
         assert_eq!((config.width, config.height), (320, 180));
-        assert_eq!(config.azimuthal_segments, 1_024);
-        assert_eq!(config.arc_subdivisions_per_arc, 128);
+        assert_eq!(config.azimuthal_segments, 512);
+        assert_eq!(config.arc_subdivisions_per_arc, 64);
         assert_eq!(config.shutter_angle_degrees, 180);
         assert!(config.render_workers > 0);
+        assert_eq!(config.tile_width, default_render_tile_edge());
+        assert_eq!(config.tile_height, default_render_tile_edge());
         assert!(config.denoise_previews);
         assert!(config.retain_full_aov_exr);
         assert!(config.spatialize_audio);

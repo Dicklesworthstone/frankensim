@@ -19,10 +19,10 @@ use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_euler_disc_e2e::cinematic_fixture::critique_color_config;
 use fs_img::{
     Channel, CinematicColorConfig, CinematicColorLimits, DecodedExr, ExrAttribute,
-    ExrInspectLimits, PixelType, PngColor, TEMPORAL_DENOISE_PIPELINE_VERSION,
-    TemporalDenoiseConfig, TemporalDenoiseInput, TemporalDenoiseLimits, TemporalDenoisedFrame,
-    TemporalFrameBoundary, inspect_exr, read_exr, temporal_denoise_rgb,
-    transform_cinematic_preview, write_png16,
+    ExrInspectLimits, MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS, PixelType, PngColor,
+    TEMPORAL_DENOISE_PIPELINE_VERSION, TemporalDenoiseConfig, TemporalDenoiseInput,
+    TemporalDenoiseLimits, TemporalDenoisedFrame, TemporalFrameBoundary, inspect_exr, read_exr,
+    temporal_denoise_rgb, transform_cinematic_preview, write_png16,
 };
 use fs_render::{
     aov::{
@@ -43,15 +43,18 @@ const MAX_EXR_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_EXACT_F32_INTEGER: u64 = 1 << 24;
 const FINAL_DIAGNOSTIC_PROFILE: &str = CinematicAovProfile::FinalDiagnostic.code();
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Cli {
     input: PathBuf,
     output: PathBuf,
     frame_start: u64,
     frame_count: u64,
+    initial_cut: bool,
+    denoise_spatial_passes: u8,
+    denoise_spatial_sigma: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Command {
     Denoise(Cli),
     InspectSamples(PathBuf),
@@ -158,12 +161,18 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
     if !cli.input.is_dir() {
         return Err(format!("input is not a directory: {}", cli.input.display()));
     }
-    if cli.frame_start != 0 {
+    if cli.frame_start != 0 && !cli.initial_cut {
         return Err(format!(
-            "sequential denoising must begin at frame 0; frame-start {} would create an unlabelled temporal-history cut",
+            "nonzero frame-start {} requires --initial-cut so missing temporal history is explicit",
             cli.frame_start
         ));
     }
+    let mut denoise_config = TemporalDenoiseConfig::default();
+    denoise_config.spatial_iterations = cli.denoise_spatial_passes;
+    denoise_config.spatial_sigma_rgb = cli.denoise_spatial_sigma;
+    denoise_config
+        .identity()
+        .map_err(|error| format!("invalid denoiser configuration: {error}"))?;
     let frame_end = cli
         .frame_start
         .checked_add(cli.frame_count)
@@ -193,15 +202,16 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
     })?;
 
     progress(&format!(
-        "stage=denoise begin input={} output={} staging_output={} frame_start={} frame_count={}",
+        "stage=denoise begin input={} output={} staging_output={} frame_start={} frame_count={} initial_boundary=cut spatial_passes={} spatial_sigma={}",
         cli.input.display(),
         cli.output.display(),
         staging_output.display(),
         cli.frame_start,
         cli.frame_count,
+        denoise_config.spatial_iterations,
+        denoise_config.spatial_sigma_rgb,
     ));
     let color = critique_color_config();
-    let denoise_config = TemporalDenoiseConfig::default();
     let mut history: Option<TemporalDenoisedFrame> = None;
     let mut expected_dimensions: Option<(u32, u32)> = None;
     let mut expected_sequence: Option<SequenceIdentity> = None;
@@ -244,14 +254,9 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
             } else {
                 expected_sequence = Some(raw.sequence_identity.clone());
             }
-            validate_timing_continuity(previous_timing, raw.timing, frame)?;
+            let boundary = denoise_boundary(ordinal);
+            validate_timing_continuity(previous_timing, raw.timing, frame, boundary)?;
             previous_timing = Some(raw.timing);
-
-            let boundary = if ordinal == 0 {
-                TemporalFrameBoundary::Cut
-            } else {
-                TemporalFrameBoundary::Continuous
-            };
             let denoised = temporal_denoise_rgb(
                 raw.temporal_input(frame),
                 history.as_ref(),
@@ -360,6 +365,14 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
         cli.frame_count
     ));
     Ok(())
+}
+
+const fn denoise_boundary(ordinal: usize) -> TemporalFrameBoundary {
+    if ordinal == 0 {
+        TemporalFrameBoundary::Cut
+    } else {
+        TemporalFrameBoundary::Continuous
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1104,8 +1117,12 @@ fn validate_timing_continuity(
     previous: Option<FrameTiming>,
     current: FrameTiming,
     frame_index: u64,
+    boundary: TemporalFrameBoundary,
 ) -> Result<(), String> {
-    if frame_index == 0 {
+    if boundary == TemporalFrameBoundary::Cut {
+        if frame_index != 0 {
+            return Ok(());
+        }
         if current.frame_time_bits != 0 || current.previous_time_bits != 0 {
             return Err(
                 "frame continuity violation at absolute frame 0: presentation and previous-reference clocks must begin at canonical +0"
@@ -1113,6 +1130,12 @@ fn validate_timing_continuity(
             );
         }
         return Ok(());
+    }
+    if frame_index == 0 {
+        return Err(
+            "frame continuity violation at absolute frame 0: the first requested frame must be a temporal-history cut"
+                .to_owned(),
+        );
     }
     let previous = previous.ok_or_else(|| {
         format!(
@@ -1425,6 +1448,8 @@ fn offline_preview_manifest(
             "  \"schema\": \"frankensim-euler-offline-denoise-v2\",\n",
             "  \"authority\": \"biased-display-derivative-not-raw-estimate\",\n",
             "  \"publication\": \"single-writer-staged-directory-rename\",\n",
+            "  \"initial_boundary\": \"cut\",\n",
+            "  \"nonzero_initial_cut_authorized\": {},\n",
             "  \"frame_start\": {},\n",
             "  \"frame_count\": {},\n",
             "  \"width\": {},\n",
@@ -1444,12 +1469,15 @@ fn offline_preview_manifest(
             "  \"source_raw_sequence_identity\": \"{}\",\n",
             "  \"source_render_contract_identity\": \"{}\",\n",
             "  \"temporal_pipeline_version\": \"{}\",\n",
+            "  \"spatial_iterations\": {},\n",
+            "  \"spatial_sigma_rgb\": {},\n",
             "  \"temporal_config_identity\": \"{}\",\n",
             "  \"display_color_config_identity\": \"{}\",\n",
             "  \"preview_sequence_identity\": \"{}\",\n",
             "  \"derivative_identity\": \"{}\"\n",
             "}}\n"
         ),
+        cli.initial_cut && cli.frame_start != 0,
         cli.frame_start,
         cli.frame_count,
         dimensions.0,
@@ -1469,6 +1497,8 @@ fn offline_preview_manifest(
         raw_sequence_identity.to_hex(),
         render_contract_identity.to_hex(),
         TEMPORAL_DENOISE_PIPELINE_VERSION,
+        denoise.spatial_iterations,
+        denoise.spatial_sigma_rgb,
         denoise_config_identity.to_hex(),
         color_identity.to_hex(),
         preview_sequence_identity.to_hex(),
@@ -1526,6 +1556,9 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut output = None;
     let mut frame_start = None;
     let mut frame_count = None;
+    let mut initial_cut = false;
+    let mut denoise_spatial_passes = None;
+    let mut denoise_spatial_sigma = None;
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1534,6 +1567,9 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
                     || output.is_some()
                     || frame_start.is_some()
                     || frame_count.is_some()
+                    || initial_cut
+                    || denoise_spatial_passes.is_some()
+                    || denoise_spatial_sigma.is_some()
                 {
                     return Err(format!(
                         "--inspect-samples cannot be combined with denoise arguments\n{}",
@@ -1563,23 +1599,48 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
                     "frame-count",
                 )?)
             }
+            "--initial-cut" => initial_cut = true,
+            "--denoise-spatial-passes" => {
+                denoise_spatial_passes = Some(parse_u8(
+                    &next_value(&mut args, "--denoise-spatial-passes")?,
+                    "denoise-spatial-passes",
+                )?)
+            }
+            "--denoise-spatial-sigma" => {
+                denoise_spatial_sigma = Some(parse_positive_f32(
+                    &next_value(&mut args, "--denoise-spatial-sigma")?,
+                    "denoise-spatial-sigma",
+                )?)
+            }
             "--help" | "-h" => return Err(usage().to_owned()),
             _ => return Err(format!("unknown argument: {argument}\n{}", usage())),
         }
     }
+    let defaults = TemporalDenoiseConfig::default();
     let cli = Cli {
         input: input.ok_or_else(|| format!("missing --input\n{}", usage()))?,
         output: output.ok_or_else(|| format!("missing --output\n{}", usage()))?,
         frame_start: frame_start.ok_or_else(|| format!("missing --frame-start\n{}", usage()))?,
         frame_count: frame_count.ok_or_else(|| format!("missing --frame-count\n{}", usage()))?,
+        initial_cut,
+        denoise_spatial_passes: denoise_spatial_passes.unwrap_or(defaults.spatial_iterations),
+        denoise_spatial_sigma: denoise_spatial_sigma.unwrap_or(defaults.spatial_sigma_rgb),
     };
     if cli.frame_count == 0 {
         return Err("frame-count must be positive".to_owned());
     }
-    if cli.frame_start != 0 {
+    if cli.frame_start != 0 && !cli.initial_cut {
         return Err(format!(
-            "sequential denoising must begin at frame 0; frame-start {} would create an unlabelled temporal-history cut",
+            "nonzero frame-start {} requires --initial-cut so missing temporal history is explicit",
             cli.frame_start
+        ));
+    }
+    if cli.denoise_spatial_passes == 0
+        || cli.denoise_spatial_passes > MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS
+    {
+        return Err(format!(
+            "denoise-spatial-passes must be in 1..={MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS}; found {}",
+            cli.denoise_spatial_passes
         ));
     }
     Ok(Command::Denoise(cli))
@@ -1596,8 +1657,24 @@ fn parse_u64(value: &str, name: &str) -> Result<u64, String> {
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
+fn parse_u8(value: &str, name: &str) -> Result<u8, String> {
+    value
+        .parse()
+        .map_err(|_| format!("invalid {name}: {value}"))
+}
+
+fn parse_positive_f32(value: &str, name: &str) -> Result<f32, String> {
+    let parsed: f32 = value
+        .parse()
+        .map_err(|_| format!("invalid {name}: {value}"))?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return Err(format!("{name} must be finite and positive; found {value}"));
+    }
+    Ok(parsed)
+}
+
 const fn usage() -> &'static str {
-    "Usage:\n  euler_cinematic_denoise --input DIR --output DIR --frame-start N --frame-count N\n  euler_cinematic_denoise --inspect-samples EXR"
+    "Usage:\n  euler_cinematic_denoise --input DIR --output DIR --frame-start N --frame-count N [--initial-cut] [--denoise-spatial-passes 1..8] [--denoise-spatial-sigma X]\n  euler_cinematic_denoise --inspect-samples EXR"
 }
 
 #[cfg(test)]
@@ -1789,7 +1866,8 @@ mod tests {
     fn frame_and_motion_reference_clocks_link_exactly_across_the_sequence() {
         let first = decode_final_diagnostic(final_diagnostic(), Path::new("frame-0.exr"), 0)
             .expect("first frame");
-        validate_timing_continuity(None, first.timing, 0).expect("canonical clock origin");
+        validate_timing_continuity(None, first.timing, 0, TemporalFrameBoundary::Cut)
+            .expect("canonical clock origin");
 
         let mut second_exr = final_diagnostic();
         set_attribute(&mut second_exr, "frankensim.frame.index", "1");
@@ -1820,8 +1898,19 @@ mod tests {
         );
         let second = decode_final_diagnostic(second_exr.clone(), Path::new("frame-1.exr"), 1)
             .expect("second frame");
-        validate_timing_continuity(Some(first.timing), second.timing, 1)
-            .expect("exact current/previous/next linkage");
+        validate_timing_continuity(
+            Some(first.timing),
+            second.timing,
+            1,
+            TemporalFrameBoundary::Continuous,
+        )
+        .expect("exact current/previous/next linkage");
+        validate_timing_continuity(None, second.timing, 1, TemporalFrameBoundary::Cut)
+            .expect("an explicitly cut nonzero range validates its first clock locally");
+        let error =
+            validate_timing_continuity(None, second.timing, 1, TemporalFrameBoundary::Continuous)
+                .expect_err("a continuous nonzero frame still requires its exact predecessor");
+        assert!(error.contains("prior timing is unavailable"));
 
         set_attribute(
             &mut second_exr,
@@ -1830,8 +1919,13 @@ mod tests {
         );
         let second = decode_final_diagnostic(second_exr, Path::new("frame-1.exr"), 1)
             .expect("locally ordered but wrongly linked frame");
-        let error = validate_timing_continuity(Some(first.timing), second.timing, 1)
-            .expect_err("wrong motion-reference clock must break sequence admission");
+        let error = validate_timing_continuity(
+            Some(first.timing),
+            second.timing,
+            1,
+            TemporalFrameBoundary::Continuous,
+        )
+        .expect_err("wrong motion-reference clock must break sequence admission");
         assert!(error.contains("do not link exactly"));
     }
 
@@ -2188,7 +2282,39 @@ mod tests {
             .map(str::to_owned),
         )
         .expect_err("a mid-sequence cut must be explicit rather than silently temporal");
-        assert!(error.contains("sequential denoising must begin at frame 0"));
+        assert!(error.contains("requires --initial-cut"));
+
+        assert_eq!(
+            parse_cli(
+                [
+                    "--input",
+                    "raw",
+                    "--output",
+                    "preview",
+                    "--frame-start",
+                    "3",
+                    "--frame-count",
+                    "4",
+                    "--initial-cut",
+                    "--denoise-spatial-passes",
+                    "4",
+                    "--denoise-spatial-sigma",
+                    "0.08",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .expect("an explicitly cut tuning range"),
+            Command::Denoise(Cli {
+                input: PathBuf::from("raw"),
+                output: PathBuf::from("preview"),
+                frame_start: 3,
+                frame_count: 4,
+                initial_cut: true,
+                denoise_spatial_passes: 4,
+                denoise_spatial_sigma: 0.08,
+            })
+        );
     }
 
     #[test]
@@ -2223,6 +2349,9 @@ mod tests {
                 output: PathBuf::from("preview"),
                 frame_start: 0,
                 frame_count: 2,
+                initial_cut: false,
+                denoise_spatial_passes: TemporalDenoiseConfig::default().spatial_iterations,
+                denoise_spatial_sigma: TemporalDenoiseConfig::default().spatial_sigma_rgb,
             })
         );
         let error = parse_cli(
@@ -2232,6 +2361,61 @@ mod tests {
         )
         .expect_err("inspection must remain one-file read-only mode");
         assert!(error.contains("unexpected argument after --inspect-samples EXR"));
+    }
+
+    #[test]
+    fn cli_rejects_invalid_spatial_strength_without_relaxing_temporal_guides() {
+        for (flag, value, expected) in [
+            (
+                "--denoise-spatial-passes",
+                "0",
+                "denoise-spatial-passes must be in",
+            ),
+            (
+                "--denoise-spatial-passes",
+                "9",
+                "denoise-spatial-passes must be in",
+            ),
+            (
+                "--denoise-spatial-sigma",
+                "0",
+                "denoise-spatial-sigma must be finite and positive",
+            ),
+            (
+                "--denoise-spatial-sigma",
+                "NaN",
+                "denoise-spatial-sigma must be finite and positive",
+            ),
+        ] {
+            let error = parse_cli(
+                [
+                    "--input",
+                    "raw",
+                    "--output",
+                    "preview",
+                    "--frame-start",
+                    "0",
+                    "--frame-count",
+                    "1",
+                    flag,
+                    value,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .expect_err("invalid spatial strength must refuse");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn every_requested_range_begins_with_one_explicit_history_cut() {
+        assert_eq!(denoise_boundary(0), TemporalFrameBoundary::Cut);
+        assert_eq!(denoise_boundary(1), TemporalFrameBoundary::Continuous);
+        assert_eq!(
+            denoise_boundary(usize::MAX),
+            TemporalFrameBoundary::Continuous
+        );
     }
 
     #[test]
