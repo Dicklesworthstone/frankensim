@@ -1176,6 +1176,7 @@ dependencies = [
  "fs-bem",
  "fs-iface",
  "fs-la",
+ "fs-material",
  "fs-math",
  "fs-modal",
  "fs-plate",
