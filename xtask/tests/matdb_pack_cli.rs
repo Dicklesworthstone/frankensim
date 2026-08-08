@@ -6937,10 +6937,12 @@ fn tonewood_scalar(pack: &NormalizedPack, property: &str) -> Option<f64> {
 }
 
 /// Longitudinal sound speed gate: c_L = sqrt(E_L/rho) must land inside the
-/// published clear-wood range. FPL-GTR-282 chapter 5 (Vibration Properties)
-/// gives the worked example 12.4 GPa / 480 kg/m^3 -> about 3,800 m/s; clear
-/// dry wood spans roughly 3,000-6,500 m/s longitudinally. A GPa/MPa or
-/// g/cm^3 slip moves c_L by >5x, far outside the window.
+/// published clear-wood range of roughly 3,000-6,500 m/s longitudinally.
+/// NOTE: FPL-GTR-282 chapter 5 (Vibration Properties) prints a worked
+/// example "12.4 GPa / 480 kg/m^3 -> about 3,800 m/s (12,500 ft/s)" that is
+/// internally inconsistent — sqrt(12.4e9/480) = 5,082 m/s — so the window is
+/// anchored to the species-table spread, not that example. A GPa/MPa or
+/// g/cm^3 slip moves c_L by >5x, far outside the window either way.
 fn tonewood_sound_speed_in_range(el_pa: f64, rho_si: f64) -> bool {
     let c = (el_pa / rho_si).sqrt();
     (3_000.0..6_500.0).contains(&c)
@@ -7236,15 +7238,26 @@ fn g2_cli_compiles_instrument_loss_and_string_tranche_with_derived_gates() {
         );
         previous = g;
     }
-    // The thermoelastic peak from the independent TN D-6448 source must
-    // sit at or above the TN D-2893 band (it is the Zener maximum).
+    // Cross-source Zener consistency: the peak height Delta/2 =
+    // alpha^2 E T / (2 rho c) is GEOMETRY-INDEPENDENT, so the TN D-6448
+    // wire-experiment peak (2.6e-3 at 83 Hz) must agree with the
+    // TN D-2893 beam band's low-frequency plateau (2.92e-3 at 15 Hz,
+    // near that geometry's own peak) — measured 11% apart; 30% is the
+    // authored envelope. This replaces an earlier peak-vs-tail check
+    // that a review showed was implied by the window alone.
     let peak = scalar(
         "aluminum-2024-t3-nasa-tn-d6448",
         "loss_factor_thermoelastic_peak",
     );
     assert!(
-        (1.0e-3..5.0e-3).contains(&peak) && peak >= previous,
-        "thermoelastic peak {peak} must dominate the high-frequency tail"
+        (1.0e-3..5.0e-3).contains(&peak),
+        "thermoelastic peak {peak} implausible"
+    );
+    let plateau = scalar("aluminum-2024-t4-damping-nasa-tn-d2893", "loss_factor_15hz");
+    assert!(
+        (peak / plateau - 1.0).abs() < 0.30,
+        "Zener peak height must be geometry-independent across the two \
+         NASA sources: wire {peak:.3e} vs beam plateau {plateau:.3e}"
     );
 
     // Gun-metal bronze specific damping capacity (graph-read survey):

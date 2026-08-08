@@ -6,11 +6,11 @@
 //!
 //! Output contract: every field is deterministic (result values are
 //! hashed with the canonical FNV-1a-64 helper over little-endian f64
-//! bytes) EXCEPT `elapsed_ms` and `estimated_dense_bytes`'s companion
-//! `cap_headroom_panels`, which are run evidence: `elapsed_ms` is
-//! wall-clock and varies per host, `estimated_dense_bytes` is a
-//! deterministic model (3 dense complex matrices, 16 bytes per entry),
-//! not a measured RSS. Rerunning on any host must reproduce every hash
+//! bytes) EXCEPT `elapsed_ms`, which is wall-clock run evidence and
+//! varies per host. `estimated_dense_bytes` is a deterministic model
+//! (3 dense complex matrices, 16 bytes per entry), not a measured RSS,
+//! and `cap_headroom_panels` is the deterministic cap minus panel
+//! count. Rerunning on any host must reproduce every hash
 //! bit-identically; a hash drift is a determinism regression, not
 //! noise.
 

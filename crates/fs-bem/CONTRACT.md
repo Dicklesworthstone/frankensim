@@ -200,7 +200,10 @@ NASA marks it as U.S. Government work with public use permitted.
 5. The spherical-harmonic basis is self-checked: Gauss–Legendre weight
    and moment identities to 1e-13 and normalized associated-Legendre
    orthonormality to 1e-12 under the same quadrature the projection
-   uses.
+   uses. The phase convention is pinned by a genuinely non-axisymmetric
+   falsifier: an x-axis dipole must satisfy `a_(1,-1) = -a_(1,1)`
+   (measured defect 4e-16) and reconstruct at held-out directions —
+   a one-sided Condon–Shortley or conjugation slip cannot survive it.
 6. The condition diagnostic discriminates the resonant arm: CBIE's
    bound inflates across the fictitious-frequency band while
    Burton-Miller's stays flat (measured 20.8x vs 1.4x; asserted > 2x

@@ -639,9 +639,17 @@ impl DirectivityTable {
 
     /// Evaluate the table at a direction (need not be normalized):
     /// the far-field amplitude `F` with `p -> F e^{ikr}/r`.
+    ///
+    /// # Panics
+    /// If the direction is the zero vector or non-finite (programmer
+    /// error, not a refusal).
     #[must_use]
     pub fn evaluate(&self, direction: [f64; 3]) -> C64 {
         let len = norm(direction);
+        assert!(
+            len > 0.0 && len.is_finite(),
+            "direction must be a nonzero finite vector"
+        );
         let x = direction[2] / len;
         let phi = det::atan2(direction[1], direction[0]);
         let pbar = norm_assoc_legendre(self.l_max, x);
@@ -746,6 +754,11 @@ pub fn directivity_sh_table(
 /// per structural mode promised to the vibroacoustic-coupling bead.
 /// Oracles: pulsating sphere `sigma = (ka)^2 / (1 + (ka)^2)`,
 /// oscillating (dipole) sphere `sigma = (ka)^4 / (4 + (ka)^4)`.
+/// The value inherits the accuracy boundary of the solve arm: with
+/// `BurtonMiller` below ka ~ 0.5 the radiated power (and hence sigma)
+/// can even go negative — the documented centroid-quadrature
+/// resistance artifact; use `PlainCbie` below the first interior
+/// resonance.
 ///
 /// # Errors
 /// [`HelmholtzError::BadParameter`] when the stored velocity field has
@@ -1441,6 +1454,11 @@ mod tests {
         }
         let rel = (num / den).sqrt();
         assert!(rel < 1e-3, "SH reconstruction relative L2 error {rel:.2e}");
+        assert!(
+            t_dip.captured_fraction > 0.999,
+            "dipole captured fraction {:.6}",
+            t_dip.captured_fraction
+        );
         let t_repeat =
             directivity_sh_table(&surface, &dip, Medium::air(), l_max).expect("repeat table");
         for (x, y) in t_dip.coefficients.iter().zip(t_repeat.coefficients.iter()) {
@@ -1451,6 +1469,80 @@ mod tests {
             t_mono.power_by_degree()[0] / t_mono.power_by_degree().iter().sum::<f64>(),
             a10 / total,
             t_dip.captured_fraction
+        );
+    }
+
+    #[test]
+    fn off_axis_dipole_pins_nonaxisymmetric_harmonics() {
+        // FALSIFIER for one-sided sign/phase bugs the axisymmetric
+        // fixtures cannot see: an x-axis dipole has
+        // F proportional to sin(theta) cos(phi)
+        //   = sqrt(2 pi / 3) (Y_{1,-1} - Y_{1,1}),
+        // so the table must put its power into (1, +/-1) with the exact
+        // relation a_{1,-1} = -a_{1,1}. A missing Condon-Shortley phase
+        // or a conjugation error in EITHER projection or evaluation
+        // breaks that sign while leaving every m = 0 test green.
+        let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
+        let v_x: Vec<C64> = surface
+            .normals()
+            .iter()
+            .map(|nrm| C64::from_re(nrm[0]))
+            .collect();
+        let sol = solve_radiation(
+            &surface,
+            1.0,
+            Medium::air(),
+            &v_x,
+            Formulation::BurtonMiller,
+        )
+        .expect("solve");
+        let table = directivity_sh_table(&surface, &sol, Medium::air(), 8).expect("table");
+        let spec = table.power_by_degree();
+        let total: f64 = spec.iter().sum();
+        assert!(
+            spec[1] / total > 0.99,
+            "x-dipole power must land at l = 1: {:.6}",
+            spec[1] / total
+        );
+        let a_pos = table.coefficient(1, 1);
+        let a_neg = table.coefficient(1, -1);
+        let a_zero = table.coefficient(1, 0);
+        assert!(
+            a_pos.abs() > 100.0 * a_zero.abs(),
+            "x-dipole must be m = +/-1, not m = 0: |a11| {:.3e} vs |a10| {:.3e}",
+            a_pos.abs(),
+            a_zero.abs()
+        );
+        let sign_defect = (a_neg + a_pos).abs() / a_pos.abs();
+        assert!(
+            sign_defect < 0.01,
+            "a_(1,-1) = -a_(1,1) must hold: relative defect {sign_defect:.2e}"
+        );
+        // Evaluation must reproduce the m != 0 field at held-out
+        // directions (this closes the loop through BOTH conventions).
+        let mut dirs = Vec::new();
+        for i in 0..17u32 {
+            let theta = core::f64::consts::PI * (f64::from(i) + 0.61) / 17.0;
+            let phi = 1.13 * f64::from(i) + 0.4;
+            dirs.push([
+                det::sin(theta) * det::cos(phi),
+                det::sin(theta) * det::sin(phi),
+                det::cos(theta),
+            ]);
+        }
+        let direct = far_field(&surface, &sol, Medium::air(), &dirs);
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for (i, d) in dirs.iter().enumerate() {
+            num += (table.evaluate(*d) - direct[i]).norm_sq();
+            den += direct[i].norm_sq();
+        }
+        let rel = (num / den).sqrt();
+        assert!(rel < 1e-3, "m != 0 reconstruction error {rel:.2e}");
+        assert!(table.captured_fraction > 0.999);
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"off-axis-dipole-sh\",\"l1_fraction\":{:.6},\"sign_defect\":{sign_defect:.2e},\"reconstruction_rel\":{rel:.2e},\"verdict\":\"pass\"}}",
+            spec[1] / total
         );
     }
 
@@ -1539,11 +1631,11 @@ mod tests {
         // the resonance neighborhood: somewhere in ka in [3.0, 3.35]
         // plain CBIE's bound must spike visibly above Burton-Miller's
         // at the same ka and above its own off-resonance value.
-        // Measured on this mesh (2026-08-08): the peak ratio vs BM is
-        // ~a few tens near ka ~ 3.2 while at exactly pi it is only
-        // ~1.6x — asserting at a single hardcoded ka would test the
-        // continuum resonance, not the discrete operator actually
-        // solved.
+        // Measured on this mesh (2026-08-08): the CBIE bound peaks near
+        // ka ~ 3.20 at ~21x its own off-resonance value, while at
+        // exactly pi the cross-arm ratio is only ~1.6x — asserting at a
+        // single hardcoded ka would test the continuum resonance, not
+        // the discrete operator actually solved.
         let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
         let n = surface.centroids().len();
         let cond = |ka: f64, formulation: Formulation| -> f64 {
