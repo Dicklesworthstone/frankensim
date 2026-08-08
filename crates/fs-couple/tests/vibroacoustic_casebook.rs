@@ -142,6 +142,80 @@ fn build_model(
 }
 
 #[test]
+fn acoustic_medium_is_the_gas_primitive_at_room_conditions() {
+    // Doctrine link (owner 2026-08-08): media are DERIVED, not
+    // hardcoded. The fixed AcousticMedium::air() convenience must be
+    // the first-principles fs_material::gas::GasState at 20 C and one
+    // atmosphere, so any parameterized study can swap in a different
+    // temperature, pressure, or gas and the coupled simulation adjusts
+    // automatically.
+    let state = fs_material::gas::GasState::try_new(
+        &fs_material::gas::GasSpec::dry_air_ussa1976(),
+        293.15,
+        101_325.0,
+    )
+    .expect("gas state");
+    let air = AcousticMedium::air();
+    assert!(
+        (state.density - air.rho0).abs() / air.rho0 < 2e-3,
+        "rho: derived {} vs convenience {}",
+        state.density,
+        air.rho0
+    );
+    assert!(
+        (state.sound_speed - air.c0).abs() / air.c0 < 2e-3,
+        "c: derived {} vs convenience {}",
+        state.sound_speed,
+        air.c0
+    );
+    // A derived medium composes into the engine directly: the same
+    // cavity at 700 K (hot-enclosure regime) has a higher sound speed
+    // and a lighter gas, and every downstream mode moves accordingly.
+    let hot = fs_material::gas::GasState::try_new(
+        &fs_material::gas::GasSpec::dry_air_ussa1976(),
+        700.0,
+        101_325.0,
+    )
+    .expect("hot state");
+    let cold_cavity = rectangular_cavity_modes(
+        0.4,
+        0.3,
+        0.25,
+        AcousticMedium {
+            rho0: state.density,
+            c0: state.sound_speed,
+        },
+        0.0,
+        4,
+        &[[0.2, 0.15]],
+    )
+    .expect("cold cavity");
+    let hot_cavity = rectangular_cavity_modes(
+        0.4,
+        0.3,
+        0.25,
+        AcousticMedium {
+            rho0: hot.density,
+            c0: hot.sound_speed,
+        },
+        0.0,
+        4,
+        &[[0.2, 0.15]],
+    )
+    .expect("hot cavity");
+    let ratio = hot_cavity.omegas[1] / cold_cavity.omegas[1];
+    let expected = hot.sound_speed / state.sound_speed;
+    assert!(
+        (ratio - expected).abs() < 1e-12,
+        "cavity modes must scale with the derived sound speed: {ratio} vs {expected}"
+    );
+    println!(
+        "{{\"suite\":\"fs-couple-vibro-casebook\",\"case\":\"gas-primitive-medium\",\"rho_derived\":{:.4},\"c_derived\":{:.2},\"c_700k\":{:.1},\"mode_scaling\":{ratio:.4},\"verdict\":\"pass\"}}",
+        state.density, state.sound_speed, hot.sound_speed
+    );
+}
+
+#[test]
 fn box_with_flexible_top_matches_perturbation_and_stiffens() {
     use core::fmt::Write as _;
     // Plate-dominated coupled roots vs independent first-order

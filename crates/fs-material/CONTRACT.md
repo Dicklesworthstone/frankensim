@@ -47,6 +47,27 @@ homogenization, the P2 milestone.
 - `tensor`: Voigt helpers (deviator, contraction with shear doubling,
   von Mises, Rodrigues rotations) used by the objectivity gates.
 
+### `gas` — first-principles ambient gas state (zdmm1 slice 1)
+
+The universal ambient-medium primitive of the musical-acoustics
+doctrine: `GasState::try_new(&GasSpec, T, p)` derives the COMPLETE
+tuple (density, sound speed, dynamic viscosity, thermal conductivity,
+gamma, specific gas constant, cp, Prandtl, characteristic impedance)
+bottoms-up — ideal gas + Sutherland + a declared conductivity model
+(USSA-1976 empirical air fit or the kinetic-theory Eucken relation).
+`GasSpec::dry_air_ussa1976()` carries the public-domain U.S. Standard
+Atmosphere 1976 constants and reproduces its printed sea-level values
+(rho 1.2250, c 340.294, mu 1.7894e-5) to printed precision; evaluated
+at 20 C it IS the pair the acoustic crates' `air()` conveniences
+hardcode (asserted in the fs-couple casebook). Pr is DERIVED, never an
+input — the emergent ~0.71 for air is the built-in kinetic-theory
+falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
+200..600 K, monotone-worsening) is asserted as the relation's honest
+boundary. Validity window T in [50, 2000] K, p in (0, 1e7] Pa refuses
+outside; the calorically-perfect gamma degrades above ~600 K
+(vibrational excitation, order 1-2% there) — documented as an accuracy
+boundary so hot-enclosure studies evaluate with honest error language.
+
 ## Invariants
 
 1. **Tangent consistency (the merge gate)**: every law's tangent matches

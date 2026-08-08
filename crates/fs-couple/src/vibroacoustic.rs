@@ -167,6 +167,11 @@ pub struct AcousticMedium {
 
 impl AcousticMedium {
     /// Air at roughly 20 degC (matches `fs_bem::helmholtz::Medium::air`).
+    /// These constants are `fs_material::gas::GasState` evaluated at
+    /// (293.15 K, 101325 Pa) — parameterized studies should DERIVE the
+    /// medium from that first-principles primitive (any temperature,
+    /// pressure, or gas) instead of using this fixed convenience; the
+    /// casebook asserts the equivalence.
     #[must_use]
     pub const fn air() -> AcousticMedium {
         AcousticMedium {

@@ -134,7 +134,11 @@ pub struct Medium {
 }
 
 impl Medium {
-    /// Air at roughly 20 degC.
+    /// Air at roughly 20 degC. These constants are
+    /// `fs_material::gas::GasState` evaluated at (293.15 K, 101325 Pa);
+    /// parameterized studies should derive (density, sound_speed) from
+    /// that first-principles primitive for any ambient state instead of
+    /// hardcoding this convenience.
     #[must_use]
     pub const fn air() -> Medium {
         Medium {
