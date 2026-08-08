@@ -389,6 +389,7 @@ impl FactorBelief {
     ///
     /// Entry `(i, j)` with `i <= j` is `sum_{k >= j} u_{i,k} d_k u_{j,k}`
     /// because `U` is upper triangular; the result is mirrored exactly.
+    #[allow(clippy::needless_range_loop)] // packed-triangle index math is the point
     #[must_use]
     pub fn to_dense_covariance(&self) -> Vec<Vec<f64>> {
         let n = self.dim();
@@ -593,6 +594,7 @@ fn receipt_identity(
 /// non-positive innovation variance, non-finite arithmetic, an exhausted
 /// budget, or observed cancellation. A numerical contraction verdict is
 /// never an error: it is reported as [`ContractionState`] data.
+#[allow(clippy::too_many_lines)] // one update protocol: split would scatter the receipt invariants
 pub fn assimilate_scalar(
     prior: &FactorBelief,
     obs: &Observation,
@@ -616,8 +618,8 @@ pub fn assimilate_scalar(
     let mut f = try_f64_vec(n, "factor sensitivity", &mut progress)?;
     for i in 0..n {
         let mut total = h[i];
-        for j in 0..i {
-            total = prior.upper[packed_upper_index(n, j, i)].mul_add(h[j], total);
+        for (j, h_j) in h.iter().enumerate().take(i) {
+            total = prior.upper[packed_upper_index(n, j, i)].mul_add(*h_j, total);
             progress.scalar("factor-update", 1)?;
         }
         if !total.is_finite() {
@@ -733,10 +735,8 @@ pub fn assimilate_scalar(
                     stage: "factor pivot update",
                 });
             }
-            if updated < 0.0 || updated > diag[j] {
-                if first_expanding_pivot.is_none() {
-                    first_expanding_pivot = Some(j);
-                }
+            if (updated < 0.0 || updated > diag[j]) && first_expanding_pivot.is_none() {
+                first_expanding_pivot = Some(j);
             }
             let pivot_ratio = updated / diag[j];
             if pivot_ratio > max_pivot_ratio {
@@ -760,13 +760,13 @@ pub fn assimilate_scalar(
                     stage: "factor column scale",
                 });
             }
-            for i in 0..j {
+            for (i, b_i) in b.iter_mut().enumerate().take(j) {
                 let index = packed_upper_index(n, i, j);
                 let original = upper[index];
-                let updated_entry = lambda.mul_add(b[i], original);
-                b[i] = original.mul_add(g[j], b[i]);
+                let updated_entry = lambda.mul_add(*b_i, original);
+                *b_i = original.mul_add(g[j], *b_i);
                 progress.scalar("factor-update", 4)?;
-                if !updated_entry.is_finite() || !b[i].is_finite() {
+                if !updated_entry.is_finite() || !b_i.is_finite() {
                     return Err(AssimError::NonFiniteComputation {
                         stage: "factor column update",
                     });

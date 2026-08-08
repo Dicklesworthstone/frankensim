@@ -10,7 +10,7 @@ use fs_assimilate::{AssimError, Belief, Observation, point_sensor};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
 const TEST_STREAM: StreamKey = StreamKey {
-    seed: 0x00FA_c708,
+    seed: 0x00FA_C708,
     kernel_id: 0xFA07,
     tile: 1,
     iteration: 0,
@@ -100,7 +100,7 @@ fn max_vec_diff(left: &[f64], right: &[f64]) -> f64 {
 fn g0_single_component_golden_update() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior = FactorBelief::diagonal(vec![1.0], vec![2.0], cx).expect("prior");
+        let prior = FactorBelief::diagonal(vec![1.0], &[2.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0], 3.0, 0.5, "golden-scalar").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         // a = 2.5, K = 0.8, mean' = 2.6, var' = 0.4 exactly in binary64.
@@ -217,7 +217,7 @@ fn g0_diagonal_variances_never_expand_pointwise() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
         let prior =
-            FactorBelief::diagonal(vec![0.0, 0.0, 0.0], vec![3.0, 1.0, 2.0], cx).expect("prior");
+            FactorBelief::diagonal(vec![0.0, 0.0, 0.0], &[3.0, 1.0, 2.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0, 1.0], 0.5, 0.5, "monotone-diag").expect("obs");
         let prior_variances: Vec<f64> = (0..3).map(|i| prior.variance(i).expect("v")).collect();
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
@@ -238,7 +238,7 @@ fn g0_rank_singular_prior_stays_exact_zero_in_singular_direction() {
     with_cx(&gate, Budget::INFINITE, |cx| {
         // Zero variance in component 1: that direction is an exact constant
         // and must survive the update untouched.
-        let prior = FactorBelief::diagonal(vec![0.0, 5.0], vec![2.0, 0.0], cx).expect("prior");
+        let prior = FactorBelief::diagonal(vec![0.0, 5.0], &[2.0, 0.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0], 6.0, 1.0, "singular-prior").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         assert_eq!(result.belief().diag(1), Some(0.0));
@@ -255,7 +255,7 @@ fn g0_illconditioned_prior_never_falsely_refutes() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
         let prior =
-            FactorBelief::diagonal(vec![0.0, 0.0], vec![1.0e10, 1.0e-6], cx).expect("prior");
+            FactorBelief::diagonal(vec![0.0, 0.0], &[1.0e10, 1.0e-6], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0], 0.25, 1.0, "ill-conditioned").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         assert_ne!(
@@ -292,7 +292,7 @@ fn g0_factor_round_trip_reconstructs_validated_covariance() {
 fn g0_receipt_identity_is_deterministic_and_input_sensitive() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior = FactorBelief::diagonal(vec![0.0, 1.0], vec![2.0, 1.0], cx).expect("prior");
+        let prior = FactorBelief::diagonal(vec![0.0, 1.0], &[2.0, 1.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 0.5], 1.5, 0.5, "identity-check").expect("obs");
         let first = assimilate_scalar(&prior, &obs, cx).expect("first");
         let second = assimilate_scalar(&prior, &obs, cx).expect("second");
@@ -308,7 +308,7 @@ fn g0_receipt_identity_is_deterministic_and_input_sensitive() {
 fn g1_repeated_low_noise_updates_track_analytic_variance_recursion() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let mut belief = FactorBelief::diagonal(vec![0.0], vec![4.0], cx).expect("prior");
+        let mut belief = FactorBelief::diagonal(vec![0.0], &[4.0], cx).expect("prior");
         let mut analytic = 4.0_f64;
         for step in 0..8 {
             let obs = Observation::new(vec![1.0], 0.25, 1.0, "low-noise").expect("obs");
@@ -384,7 +384,7 @@ fn g3_state_permutation_is_metamorphic() {
 fn g4_exhausted_poll_quota_cancels_without_partial_output() {
     let gate = CancelGate::new();
     let (prior, obs) = with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior = FactorBelief::diagonal(vec![0.0, 0.0], vec![2.0, 1.0], cx).expect("prior");
+        let prior = FactorBelief::diagonal(vec![0.0, 0.0], &[2.0, 1.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0], 1.0, 0.5, "cancel-probe").expect("obs");
         (prior, obs)
     });
@@ -443,7 +443,7 @@ fn e2e_point_sensor_to_factor_update_to_independent_check() {
 fn g0_deep_subnormal_noise_never_panics_and_stays_decisive_or_unresolved() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior = FactorBelief::diagonal(vec![0.0, 0.0], vec![1.0, 1.0], cx).expect("prior");
+        let prior = FactorBelief::diagonal(vec![0.0, 0.0], &[1.0, 1.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0], 1.0, 1.0e-300, "deep-subnormal").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         // A subnormal-noise update is numerically legal; the receipt must be
@@ -461,9 +461,8 @@ fn g2_high_dynamic_range_metrology_battery() {
         // observed at each channel's own scale. Every update must remain
         // stable and every receipt decisive or honestly unresolved.
         let scales: [f64; 4] = [1.0e-6, 1.0e-2, 1.0e2, 1.0e6];
-        let mut belief =
-            FactorBelief::diagonal(vec![0.0; 4], scales.iter().map(|s| s * s).collect(), cx)
-                .expect("prior");
+        let variances: Vec<f64> = scales.iter().map(|s| s * s).collect();
+        let mut belief = FactorBelief::diagonal(vec![0.0; 4], &variances, cx).expect("prior");
         for (channel, scale) in scales.iter().enumerate() {
             let mut operator = vec![0.0; 4];
             operator[channel] = 1.0;
