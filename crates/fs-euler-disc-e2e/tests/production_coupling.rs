@@ -29,7 +29,7 @@ use fs_euler_disc_e2e::patch_kinematics::{
 use fs_euler_disc_e2e::production_coupling::{
     GasChannelReceipt, GasChannelState, GasChannelStepInput, ProductionCouplingError,
     ProductionCouplingIdentity, ProductionCouplingModel, ProductionCouplingStepInput,
-    SmoothContactTrajectoryTermination,
+    ProductionSurfaceExcitationError, SmoothContactTrajectoryTermination,
 };
 use fs_euler_disc_e2e::rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput, RollingContactState,
@@ -63,6 +63,7 @@ use fs_tribo::rolling_loss::{
     CoulombContourCard, LEINE_STYLE_CONTOUR_LAW_ID, RollingLossApplicability, RollingLossChannel,
     RollingLossLaw, RollingWorkOwnership,
 };
+use fs_tribo::surface_excitation::{SurfaceTraceBoundary, SurfaceTraceMotion, UniformSurfaceTrace};
 use fs_tribo::{ApplicabilityRange, InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn id(value: &str) -> StableId {
@@ -701,6 +702,91 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         ),
         "exterior force must use the checkpoint's +x velocity, not the stale card state"
     );
+
+    let texture_a = UniformSurfaceTrace::new(
+        "synthetic/disc-track",
+        "synthetic/disc-profilometer",
+        InputAuthority::SyntheticFixture,
+        1.0e-5,
+        vec![1.0e-9; 32],
+        SurfaceTraceBoundary::Periodic,
+    )
+    .expect("synthetic disc trace");
+    let texture_b = UniformSurfaceTrace::new(
+        "synthetic/base-track",
+        "synthetic/base-profilometer",
+        InputAuthority::SyntheticFixture,
+        1.0e-5,
+        vec![0.0; 32],
+        SurfaceTraceBoundary::Periodic,
+    )
+    .expect("synthetic base trace");
+    let normal_interface = InterfaceSystemRef::new(
+        "disc->base",
+        "synthetic/normal-history",
+        "synthetic/interface",
+        InputAuthority::SyntheticFixture,
+        InterfaceMedium::Dry,
+    )
+    .expect("normal interface identity");
+    let excitation = receipt
+        .evaluate_surface_excitation(
+            &normal_interface,
+            SurfaceTraceMotion {
+                trace: &texture_a,
+                path_coordinate_m: 1.0e-4,
+                path_speed_m_per_s: 0.5,
+            },
+            SurfaceTraceMotion {
+                trace: &texture_b,
+                path_coordinate_m: 2.0e-4,
+                path_speed_m_per_s: 0.0,
+            },
+            0.0,
+            0.01,
+        )
+        .expect("accepted contact drives reusable surface excitation");
+    let NormalPatchReceipt::Point(normal_receipt) = &receipt.normal.generic.receipt else {
+        panic!("production step admitted only point normal contact")
+    };
+    let expected_major_axis_m = normal_receipt
+        .elliptic_patch_axes
+        .map_or(normal_receipt.patch_radius_m, |axes| axes.semi_major_axis_m);
+    assert_eq!(
+        excitation.projected_half_width_m.to_bits(),
+        expected_major_axis_m.to_bits(),
+        "surface forcing must consume the accepted physical patch, not a sound preset"
+    );
+    assert!(
+        (excitation.normal_force_perturbation_n - normal_receipt.tangent_n_per_m * 1.0e-9).abs()
+            < 1.0e-12
+    );
+    let wrong_interface = InterfaceSystemRef::new(
+        "base->disc",
+        "synthetic/normal-history",
+        "synthetic/interface",
+        InputAuthority::SyntheticFixture,
+        InterfaceMedium::Dry,
+    )
+    .expect("reversed interface fixture");
+    assert!(matches!(
+        receipt.evaluate_surface_excitation(
+            &wrong_interface,
+            SurfaceTraceMotion {
+                trace: &texture_a,
+                path_coordinate_m: 0.0,
+                path_speed_m_per_s: 0.0,
+            },
+            SurfaceTraceMotion {
+                trace: &texture_b,
+                path_coordinate_m: 0.0,
+                path_speed_m_per_s: 0.0,
+            },
+            0.0,
+            0.01,
+        ),
+        Err(ProductionSurfaceExcitationError::InterfaceIdentityMismatch { .. })
+    ));
 
     let thin_air = thin_gap_air();
     let thin_channel_state = AirFilmTransactionState::new(
