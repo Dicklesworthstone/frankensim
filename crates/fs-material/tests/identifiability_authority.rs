@@ -712,12 +712,13 @@ fn retrospective_artifacts(
     )
     .expect("retrospective experiment");
     let experiment_hash = experiment.content_hash().expect("experiment content hash");
+    let experiment_id = experiment.id().clone();
     let split = |id: &str| {
         CalibrationSplit::try_new(
             header(id, "fixture.split"),
             ArtifactRef::new(
                 ArtifactKind::ExperimentArtifact,
-                experiment.id().clone(),
+                experiment_id.clone(),
                 experiment_hash,
             ),
             hash(&format!("preregistration-{id}")),
@@ -2278,12 +2279,12 @@ fn coordinate(name: &str, affine: bool) -> ParameterCoordinate {
     .expect("coordinate fixture")
 }
 
-fn resolved_sources(sources: &[&SourceRef], external_trust: bool) -> SourceResolutionSet {
+fn resolved_sources(sources: &[&SourceRef], use_external_trust: bool) -> SourceResolutionSet {
     SourceResolutionSet::try_new(
         sources
             .iter()
             .map(|source| {
-                let authority = if external_trust {
+                let authority = if use_external_trust {
                     external_trust(&format!("execution-trust-{}", source.key()), source)
                 } else {
                     AuthorityDisposition::ContentVerified
@@ -2435,7 +2436,7 @@ fn claim_sources(claim: &TypedIdentifiabilityClaim) -> Vec<SourceRef> {
 
 fn resolve_owned_sources(
     sources: impl IntoIterator<Item = SourceRef>,
-    external_trust: bool,
+    use_external_trust: bool,
     authority_override: Option<(&SourceKey, AuthorityDisposition)>,
 ) -> SourceResolutionSet {
     let mut unique = BTreeMap::<SourceKey, SourceRef>::new();
@@ -2456,7 +2457,7 @@ fn resolve_owned_sources(
                     .filter(|(key, _)| source.key() == *key)
                     .map(|(_, authority)| authority.clone())
                     .unwrap_or_else(|| {
-                        if external_trust {
+                        if use_external_trust {
                             external_trust(&format!("execution-trust-{}", source.key()), source)
                         } else {
                             AuthorityDisposition::ContentVerified
@@ -5688,9 +5689,10 @@ fn identifiability_problem_identity_bindings_have_exact_mutation_evidence() {
         .iter()
         .map(|(role, value)| (role.clone(), *value))
         .collect::<Vec<_>>();
+    let yield_role = role("yield_stress");
     let (_, yield_witness) = witness_values
         .iter_mut()
-        .find(|(role, _)| role == &role("yield_stress"))
+        .find(|(role, _)| *role == yield_role)
         .expect("yield witness");
     *yield_witness = 2.0e6;
     let witness_variant = IdentifiabilityProblemDocument::try_new(

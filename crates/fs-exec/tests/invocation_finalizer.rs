@@ -245,13 +245,14 @@ fn finalizable_transaction_rejects_nested_output_authority_before_mutation() {
         let mut child = root
             .split_finalizable_child("outer-transaction", scientific, finalization)
             .unwrap();
+        let expected_ancestor = child.id();
         assert!(matches!(
             child.split_child("nested-output", resources(0, 0, 1)),
             Err(InvocationError::TransactionalOutputScopeViolation {
                 ancestor,
                 phase: "nested-output",
                 requested: 1,
-            }) if ancestor == child.id()
+            }) if ancestor == expected_ancestor
         ));
 
         let mut finalizer = child.begin_finalization();

@@ -1988,11 +1988,22 @@ fn verify_completion_witness(
 }
 
 fn completion_placement_identity_is_well_formed(identity: &str) -> bool {
+    // Producer (placement_identity_with_schema):
+    //   fs-exec-tilepool-v{2}-{pinning_intent}-ccd{ccds}x{cores}-mode-{mode}-cfg-{digest}
+    // The invariant must accept exactly that shape: the v2 prefix, a
+    // non-empty descriptor section, the "-cfg-" separator, and the exact
+    // 64-char lowercase-hex BLAKE3 digest. An earlier version of this
+    // check demanded prefix+digest only, so EVERY legitimately minted
+    // witness failed "pool-placement-identity-shape" (kh5tf).
     const PREFIX: &str = "fs-exec-tilepool-v2-";
-    let Some(digest) = identity.strip_prefix(PREFIX) else {
+    let Some(rest) = identity.strip_prefix(PREFIX) else {
         return false;
     };
-    digest.len() == 64
+    let Some((descriptor, digest)) = rest.rsplit_once("-cfg-") else {
+        return false;
+    };
+    !descriptor.is_empty()
+        && digest.len() == 64
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -7289,9 +7300,14 @@ mod tests {
                 });
 
                 entered.wait();
-                let busy = parked
-                    .run_witnessed(&NoAllocation)
-                    .expect("overlap refusal must seal a valid bundle");
+                // Capture, do not assert, while this thread is the barrier
+                // partner: a panic here would otherwise leave the active
+                // run's worker blocked at `release` forever, turning a
+                // clean failure into a suite-hanging join deadlock (kh5tf).
+                let busy = parked.run_witnessed(&NoAllocation);
+                release.wait();
+                let active = active.join().expect("active parked caller");
+                let busy = busy.expect("overlap refusal must seal a valid bundle");
                 busy.verify_bundle().expect("busy refusal bundle");
                 assert!(matches!(
                     busy.outcome(),
@@ -7310,8 +7326,6 @@ mod tests {
                 assert_eq!(busy.witness().entered_crew_callbacks(), 0);
                 assert_eq!(busy.witness().exited_crew_callbacks(), 0);
 
-                release.wait();
-                let active = active.join().expect("active parked caller");
                 active.verify_bundle().expect("active parked bundle");
                 assert_eq!(active.outcome(), &Ok(1));
                 assert_eq!(active.witness().planned_workers(), 1);

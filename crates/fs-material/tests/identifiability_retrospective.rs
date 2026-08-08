@@ -531,11 +531,12 @@ fn study_case(case: &RetrospectiveCaseFixture) -> StudyCaseDocument {
     )
     .expect("protocol fixture");
     let observation_channel = channel(&format!("signal-{}", case.id));
-    let observation = StudyObservation::try_new(
+    let primary_observation = StudyObservation::try_new(
         observation_channel.clone(),
         qoi(case.observation_qoi),
         unit("Pa"),
         QuantitySpec::dimensional(STRESS),
+        source_key("unit-pa"),
         frame.clone(),
         format!("node-{}", case.id),
         "stress-output",
@@ -558,7 +559,7 @@ fn study_case(case: &RetrospectiveCaseFixture) -> StudyCaseDocument {
         ObservationRows::Retrospective(BTreeSet::from([observation(case.observation_row)])),
     )
     .expect("retrospective observation fixture");
-    let mut observations = vec![observation];
+    let mut observations = vec![primary_observation];
     if case.duplicate_row_channel {
         let original = &observations[0];
         observations.push(
@@ -567,6 +568,7 @@ fn study_case(case: &RetrospectiveCaseFixture) -> StudyCaseDocument {
                 original.qoi().clone(),
                 original.unit().clone(),
                 original.quantity(),
+                original.unit_definition().clone(),
                 original.frame().clone(),
                 original.graph_node().to_string(),
                 original.graph_port().to_string(),
@@ -704,6 +706,7 @@ fn try_problem_fixture_with_global_likelihood(
             SourceKind::Preprocessing,
             hash("preprocessing"),
         ),
+        source("unit-pa", SourceKind::UnitDefinition, hash("unit-pa")),
     ];
     let mut registered_sensor_sources = BTreeSet::new();
     for case in &cases {
@@ -888,12 +891,14 @@ fn try_problem_fixture_with_global_likelihood(
         source_key("material"),
         source_key("model"),
         source_key("graph"),
+        None,
         sources,
         parameters,
         Vec::new(),
         admissible_domain,
         cases.iter().map(study_case).collect(),
         influences,
+        Vec::new(),
         Vec::new(),
         joint_noise,
         data_reuse,
@@ -1735,21 +1740,51 @@ fn blind_release_authority_must_agree_with_explicit_concrete_authority() {
             DataReusePolicy::Disjoint,
         )
     };
+    let matching_fixture = make_fixture();
+    let matching_case = &matching_fixture.cases[0];
+    let matching_split_source = source(
+        matching_case.split_key,
+        SourceKind::CalibrationSplit,
+        matching_case
+            .split
+            .content_hash()
+            .expect("split source hashes"),
+    );
     let matching = AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: hash("blind-release-authority-a"),
+        trust_receipt: TrustReceiptRef::blind_release(
+            &matching_split_source,
+            matching_case.split.id().clone(),
+            hash("blind-release-authority-a"),
+        )
+        .expect("matching trust receipt fixture"),
     };
     admit_with_concrete_authority(
-        make_fixture(),
+        matching_fixture,
         BundleMode::Exact,
         vec![(source_key("split-a"), matching)],
     )
     .expect("matching explicit split authority admits");
 
+    let conflicting_fixture = make_fixture();
+    let conflicting_case = &conflicting_fixture.cases[0];
+    let conflicting_split_source = source(
+        conflicting_case.split_key,
+        SourceKind::CalibrationSplit,
+        conflicting_case
+            .split
+            .content_hash()
+            .expect("split source hashes"),
+    );
     let conflicting = AuthorityDisposition::ExternalTrustReceipt {
-        trust_receipt: hash("different-explicit-split-authority"),
+        trust_receipt: TrustReceiptRef::blind_release(
+            &conflicting_split_source,
+            conflicting_case.split.id().clone(),
+            hash("different-explicit-split-authority"),
+        )
+        .expect("conflicting trust receipt fixture"),
     };
     let error = admit_with_concrete_authority(
-        make_fixture(),
+        conflicting_fixture,
         BundleMode::Exact,
         vec![(source_key("split-a"), conflicting)],
     )
