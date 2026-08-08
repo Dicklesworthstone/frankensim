@@ -234,11 +234,32 @@ pub struct GeometryInstance {
     geometry_identity: ContentHash,
     geometry: SharedGeometry,
     transform: RigidTransform,
+    // Static instances are immutable, so their identity belongs at admission
+    // rather than on every successful ray hit. Animated instances deliberately
+    // use the transient constructor below because their interpolated transform
+    // changes for each time query.
+    cached_frame_identity: Option<ContentHash>,
 }
 
 impl GeometryInstance {
     /// Bind a nonzero object ID and caller-supplied immutable-geometry identity.
     pub fn try_new(
+        object_id: u64,
+        geometry_identity: ContentHash,
+        geometry: SharedGeometry,
+        transform: RigidTransform,
+    ) -> Result<Self, InstanceError> {
+        let mut instance =
+            Self::try_new_transient(object_id, geometry_identity, geometry, transform)?;
+        instance.cached_frame_identity = Some(instance.compute_frame_identity());
+        Ok(instance)
+    }
+
+    /// Construct an instance whose placement is expected to be used for only
+    /// one time query. This prevents animated per-ray instances from moving the
+    /// same identity work from a successful-hit path to every ray, including
+    /// misses.
+    pub(crate) fn try_new_transient(
         object_id: u64,
         geometry_identity: ContentHash,
         geometry: SharedGeometry,
@@ -255,6 +276,7 @@ impl GeometryInstance {
             geometry_identity,
             geometry,
             transform,
+            cached_frame_identity: None,
         })
     }
 
@@ -285,6 +307,11 @@ impl GeometryInstance {
     /// Frame identity binds object, immutable geometry, and placement.
     #[must_use]
     pub fn frame_identity(&self) -> ContentHash {
+        self.cached_frame_identity
+            .unwrap_or_else(|| self.compute_frame_identity())
+    }
+
+    fn compute_frame_identity(&self) -> ContentHash {
         let mut hasher = DomainHasher::new(INSTANCE_DOMAIN);
         hasher.update(&self.object_id.to_le_bytes());
         hasher.update(self.geometry_identity.as_bytes());

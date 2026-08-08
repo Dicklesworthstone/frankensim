@@ -607,6 +607,11 @@ struct Candidate {
 #[derive(Debug)]
 pub struct AdmittedLighting<'a> {
     rectangles: &'a [RectLight],
+    // Rectangle emission is immutable after admission, but converting the
+    // lifted spectrum back to RGB is deliberately expensive. Keep the exact
+    // admitted scalar in input order so hot mixture-PDF paths never repeat
+    // that quadrature and original rectangle indices remain O(1).
+    rectangle_luminances: Vec<f64>,
     environment: Option<&'a EnvironmentMap>,
     candidates: Vec<Candidate>,
 }
@@ -653,6 +658,10 @@ impl<'a> AdmittedLighting<'a> {
         let mut rectangle_identity_owners = BTreeMap::new();
         let mut duplicate_rectangle = None;
         let mut primitives = BTreeSet::new();
+        let mut rectangle_luminances = Vec::new();
+        rectangle_luminances
+            .try_reserve_exact(rectangles.len())
+            .map_err(|_| LightingError::EnvironmentTooLarge)?;
         for (light_index, rectangle) in rectangles.iter().enumerate() {
             checkpoint()?;
             let luminance = rectangle.luminance();
@@ -675,6 +684,7 @@ impl<'a> AdmittedLighting<'a> {
             } else {
                 rectangle_identity_owners.insert(identity, light_index);
             }
+            rectangle_luminances.push(luminance);
             ordered_candidates.insert(
                 (identity, 0_u8, light_index),
                 Candidate {
@@ -718,6 +728,7 @@ impl<'a> AdmittedLighting<'a> {
         checkpoint()?;
         Ok(Self {
             rectangles,
+            rectangle_luminances,
             environment,
             candidates,
         })
@@ -823,11 +834,15 @@ impl<'a> AdmittedLighting<'a> {
     /// Full mixture PDF for a BSDF-sampled point on an admitted rectangle.
     #[must_use]
     pub fn rect_mixture_pdf(&self, light_index: usize, origin: Point3, hit_point: Point3) -> f64 {
-        let Some(light) = self.rectangles.get(light_index) else {
+        let Some((light, &luminance)) = self
+            .rectangles
+            .get(light_index)
+            .zip(self.rectangle_luminances.get(light_index))
+        else {
             return 0.0;
         };
         let total = self.total_weight(origin);
-        let weight = self.rectangle_weight(light, origin);
+        let weight = luminance * rectangle_solid_angle(light, origin);
         if total <= 0.0 || weight <= 0.0 {
             return 0.0;
         }
@@ -920,13 +935,12 @@ impl<'a> AdmittedLighting<'a> {
             LightKind::Rectangle(light_index) => self
                 .rectangles
                 .get(light_index)
-                .map_or(0.0, |light| self.rectangle_weight(light, origin)),
+                .zip(self.rectangle_luminances.get(light_index))
+                .map_or(0.0, |(light, luminance)| {
+                    *luminance * rectangle_solid_angle(light, origin)
+                }),
             LightKind::Environment => self.environment.map_or(0.0, |map| map.total_weight),
         }
-    }
-
-    fn rectangle_weight(&self, light: &RectLight, origin: Point3) -> f64 {
-        light.luminance() * rectangle_solid_angle(light, origin)
     }
 }
 
@@ -1371,6 +1385,81 @@ mod tests {
                 b.pdf_solid_angle.to_bits(),
                 "sample={index}"
             );
+        }
+    }
+
+    #[test]
+    fn g5_admitted_rectangle_luminances_match_uncached_bits() {
+        let lights = [rectangle(-2.0, 10, 2.0), rectangle(1.0, 11, 5.0)];
+        let environment = EnvironmentMap::try_from_linear_srgb(
+            2,
+            2,
+            vec![[0.25, 0.5, 1.0], [1.0, 0.5, 0.25], [0.5; 3], [2.0; 3]],
+            0.0,
+        )
+        .unwrap();
+        let admitted = AdmittedLighting::try_new(&lights, Some(&environment)).unwrap();
+
+        assert_eq!(admitted.rectangle_luminances.len(), lights.len());
+        for (light, &cached) in lights.iter().zip(&admitted.rectangle_luminances) {
+            assert_eq!(
+                cached.to_bits(),
+                light.luminance().to_bits(),
+                "admission changed the point-invariant luminance bits"
+            );
+        }
+
+        for origin in [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(-0.75, 0.25, 0.5),
+            Point3::new(3.0, -2.0, -1.0),
+        ] {
+            let direct_weights: Vec<f64> = admitted
+                .candidates
+                .iter()
+                .map(|candidate| match candidate.kind {
+                    LightKind::Rectangle(light_index) => {
+                        lights[light_index].luminance()
+                            * rectangle_solid_angle(&lights[light_index], origin)
+                    }
+                    LightKind::Environment => environment.total_weight,
+                })
+                .collect();
+            for (candidate, direct) in admitted.candidates.iter().zip(&direct_weights) {
+                assert_eq!(
+                    admitted.candidate_weight(*candidate, origin).to_bits(),
+                    direct.to_bits(),
+                    "cached candidate weight diverged for {:?}",
+                    candidate.kind
+                );
+            }
+            let direct_total: f64 = direct_weights.iter().sum();
+            assert_eq!(
+                admitted.total_weight(origin).to_bits(),
+                direct_total.to_bits(),
+                "cached candidate summation changed total-weight bits"
+            );
+
+            for (light_index, light) in lights.iter().enumerate() {
+                let hit_point = light
+                    .corner
+                    .offset(light.edge_u.scale(0.375))
+                    .offset(light.edge_v.scale(0.625));
+                let direction = hit_point.delta_from(origin);
+                let distance_squared = direction.dot(direction);
+                let direction = direction.scale(1.0 / distance_squared.sqrt());
+                let cosine = light.normal().dot(direction).abs();
+                let direct_weight = light.luminance() * rectangle_solid_angle(light, origin);
+                let expected_pdf =
+                    (direct_weight / direct_total) * (distance_squared / (cosine * light.area()));
+                assert_eq!(
+                    admitted
+                        .rect_mixture_pdf(light_index, origin, hit_point)
+                        .to_bits(),
+                    expected_pdf.to_bits(),
+                    "cached reverse PDF changed bits for rectangle {light_index}"
+                );
+            }
         }
     }
 

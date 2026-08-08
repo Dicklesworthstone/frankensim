@@ -2411,11 +2411,11 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 fn slab_hit(ray: &Ray, lo: [f64; 3], hi: [f64; 3], t_best: f64) -> bool {
     let o = [ray.origin.x, ray.origin.y, ray.origin.z];
     let d = [ray.dir.x, ray.dir.y, ray.dir.z];
-    if o.into_iter()
-        .chain(d)
-        .chain(lo)
-        .chain(hi)
-        .any(|value| !value.is_finite())
+    // The only caller supplies the finite, nonzero result of
+    // `scaled_parameter_ray`; keep node validity in the hot loop without
+    // redundantly revalidating the same ray for every visited BVH node.
+    debug_assert!(o.into_iter().chain(d).all(f64::is_finite));
+    if lo.into_iter().chain(hi).any(|value| !value.is_finite())
         || t_best.is_nan()
         || t_best <= 0.0
         || (0..3).any(|axis| lo[axis] > hi[axis])
@@ -2610,6 +2610,10 @@ mod tests {
             ],
             vec![[0, 1, 2], [3, 4, 5]],
         );
+        let point_bits = |point: Point3| [point.x.to_bits(), point.y.to_bits(), point.z.to_bits()];
+        let vector_bits = |vector: Option<Vec3>| {
+            vector.map(|value| [value.x.to_bits(), value.y.to_bits(), value.z.to_bits()])
+        };
 
         for coordinate in [-0.75_f64, -0.125, 0.0, 0.375, 0.75] {
             for x in [coordinate.next_down(), coordinate, coordinate.next_up()] {
@@ -2626,6 +2630,40 @@ mod tests {
 
                 assert_eq!(accelerated.triangle_index, brute_force.triangle_index);
                 assert_eq!(accelerated.hit.t.to_bits(), brute_force.hit.t.to_bits());
+                // G5 parity: BVH traversal preserves the complete hit payload,
+                // including shared-edge and one-ULP-adjacent ownership cases.
+                assert_eq!(
+                    point_bits(accelerated.hit.point),
+                    point_bits(brute_force.hit.point)
+                );
+                assert_eq!(
+                    accelerated.barycentric.map(f64::to_bits),
+                    brute_force.barycentric.map(f64::to_bits)
+                );
+                assert_eq!(
+                    vector_bits(accelerated.hit.normal),
+                    vector_bits(brute_force.hit.normal)
+                );
+                assert_eq!(
+                    vector_bits(accelerated.hit.shading_normal),
+                    vector_bits(brute_force.hit.shading_normal)
+                );
+                assert_eq!(
+                    vector_bits(accelerated.hit.tangent_u),
+                    vector_bits(brute_force.hit.tangent_u)
+                );
+                assert_eq!(
+                    vector_bits(accelerated.hit.tangent_v),
+                    vector_bits(brute_force.hit.tangent_v)
+                );
+                assert_eq!(
+                    vector_bits(accelerated.hit.dp_du),
+                    vector_bits(brute_force.hit.dp_du)
+                );
+                assert_eq!(
+                    vector_bits(accelerated.hit.dp_dv),
+                    vector_bits(brute_force.hit.dp_dv)
+                );
                 assert!(accelerated.barycentric.into_iter().all(f64::is_finite));
                 assert!(
                     accelerated

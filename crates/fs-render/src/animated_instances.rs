@@ -237,7 +237,7 @@ impl AnimatedGeometryInstance {
     ) -> Result<GeometryInstance, AnimatedInstanceError> {
         cx.checkpoint()?;
         let evaluated = self.trajectory.evaluate(absolute_time_s)?;
-        let instance = GeometryInstance::try_new(
+        let instance = GeometryInstance::try_new_transient(
             self.object_id(),
             self.geometry_identity(),
             self.geometry().clone(),
@@ -694,6 +694,34 @@ mod tests {
                 Err(AnimatedInstanceError::Cancelled)
             );
         });
+    }
+
+    #[test]
+    fn g5_transient_and_cached_frame_identities_match_exactly() {
+        let geometry = SharedGeometry::mesh(TriMesh::new(
+            vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        ));
+        let identity = hash_domain("org.frankensim.test.instance-cache", b"triangle");
+        let transform = RigidTransform::try_new(
+            [
+                0.0,
+                0.0,
+                core::f64::consts::FRAC_PI_8.sin(),
+                core::f64::consts::FRAC_PI_8.cos(),
+            ],
+            [1.25, -0.5, 3.0],
+        )
+        .unwrap();
+        let cached = GeometryInstance::try_new(71, identity, geometry.clone(), transform).unwrap();
+        let transient =
+            GeometryInstance::try_new_transient(71, identity, geometry, transform).unwrap();
+
+        assert_eq!(
+            cached.frame_identity().as_bytes(),
+            transient.frame_identity().as_bytes(),
+            "moving immutable identity work to admission must preserve every digest bit"
+        );
     }
 
     #[test]
