@@ -31,6 +31,8 @@
 //! [`iterate_aitken`]. Deterministic; depends only on the neutral `fs-iface`
 //! vocabulary and `fs-qty`'s six-base dimension vector.
 
+pub mod vibroacoustic;
+
 use core::num::NonZeroUsize;
 
 use fs_iface::SpaceType;
@@ -474,8 +476,10 @@ impl PortSchema {
         let pairing_matches_shape = matches!(
             (shape, power_pairing),
             (PortValueShape::Scalar, PowerPairing::ScalarProduct)
-                | (PortValueShape::Vector(_), PowerPairing::EuclideanDot)
-                | (PortValueShape::Tensor { .. }, PowerPairing::EuclideanDot)
+                | (
+                    PortValueShape::Vector(_) | PortValueShape::Tensor { .. },
+                    PowerPairing::EuclideanDot,
+                )
                 | (
                     PortValueShape::Field { .. },
                     PowerPairing::FieldDuality { .. }
@@ -3612,7 +3616,7 @@ impl WindowManifestEntry {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn external(
         contribution_id: StableId,
         exchange_id: StableId,
