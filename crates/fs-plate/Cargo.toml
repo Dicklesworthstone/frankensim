@@ -16,5 +16,12 @@ fs-modal = { path = "../fs-modal" }
 fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }
 
+[dev-dependencies]
+# Consuming demo for the instrument material database (bead zwzey): a
+# spruce top's modes computed from queried fs-matdb values alone.
+fs-blake3 = { path = "../fs-blake3" }
+fs-evidence = { path = "../fs-evidence" }
+fs-matdb = { path = "../fs-matdb" }
+
 [lints]
 workspace = true

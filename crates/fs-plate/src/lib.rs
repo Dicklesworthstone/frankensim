@@ -1395,6 +1395,144 @@ mod tests {
         );
     }
 
+    /// CONSUMING DEMO (bead frankensim-fsim-instrument-matdb-zwzey): a
+    /// quartersawn Sitka-spruce top plate's modes computed from fs-matdb
+    /// values ALONE — every elastic constant and the density flow through
+    /// the fail-closed ClaimSet insertion path (dims + license gates) and
+    /// come back as receipted query answers before they touch fs-plate.
+    /// Source values: FPL-GTR-282 Tables 5-1/5-2/5-3a (the committed
+    /// spruce-sitka-fpl-gtr282 seed pack carries the same rows).
+    #[test]
+    fn spruce_top_modes_from_matdb_values_alone() {
+        use fs_blake3::hash_domain;
+        use fs_evidence::ValidityDomain;
+        use fs_matdb::{
+            ClaimSet, InterpolationPolicy, ObservationDataset, PropertyClaim, PropertyKey,
+            PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+        };
+        use fs_qty::Dims;
+
+        const DIMLESS: Dims = Dims([0, 0, 0, 0, 0, 0]);
+        const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+        const DENSITY: Dims = Dims([-3, 1, 0, 0, 0, 0]);
+
+        let provenance = Provenance {
+            source: "Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, \
+                     Chapter 5, Tables 5-1, 5-2, and 5-3a (Sitka spruce, 12% MC)"
+                .to_string(),
+            license: "Work-of-the-US-Government-Public-Use-Permitted".to_string(),
+            artifact: None,
+        };
+        let mut db = ClaimSet::new();
+        let observation = db
+            .register_observation(ObservationDataset {
+                specimen: "Sitka spruce clear straight-grained specimens, ~12% MC".to_string(),
+                method: "FPL-GTR-282 chapter 5 tabulated averages".to_string(),
+                artifact: hash_domain("fs-plate.demo", b"spruce-sitka-fpl-gtr282"),
+                caveats: "E_L = 1.10 x bending MOE (shear-deflection correction); \
+                          density = 1000 x SG x 1.12 at 12% MC"
+                    .to_string(),
+                provenance: provenance.clone(),
+            })
+            .expect("observation registers");
+        let mut insert = |name: &str, dims: Dims, value: f64| {
+            db.insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained().with("moisture_content", 12.0, 12.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![observation],
+                provenance: provenance.clone(),
+            })
+            .expect("claim inserts through the fail-closed path");
+        };
+        // SI values of the committed seed rows: E_L = 1.10 * 10,800 MPa.
+        insert("young_modulus_longitudinal", PRESSURE, 1.188e10);
+        insert("er_over_el", DIMLESS, 0.078);
+        insert("et_over_el", DIMLESS, 0.043);
+        insert("glr_over_el", DIMLESS, 0.064);
+        insert("glt_over_el", DIMLESS, 0.061);
+        insert("grt_over_el", DIMLESS, 0.003);
+        insert("nu_lr", DIMLESS, 0.372);
+        insert("nu_lt", DIMLESS, 0.467);
+        insert("nu_rt", DIMLESS, 0.435);
+        insert("density", DENSITY, 448.0);
+
+        let at_12pct = QueryPoint::new()
+            .with("moisture_content", 12.0)
+            .expect("finite query point");
+        let mut fetch = |name: &str| -> f64 {
+            let answer = db
+                .query(name, &at_12pct, SelectionPolicy::SingleClaimOnly)
+                .expect("receipted query answers");
+            db.verify_receipt(&answer.receipt)
+                .expect("receipt verifies");
+            answer.evidence.value.value
+        };
+        let el = fetch("young_modulus_longitudinal");
+        let er = el * fetch("er_over_el");
+        let et = el * fetch("et_over_el");
+        let glr = el * fetch("glr_over_el");
+        let glt = el * fetch("glt_over_el");
+        let grt = el * fetch("grt_over_el");
+        let nu_lr = fetch("nu_lr");
+        let nu_lt = fetch("nu_lt");
+        let nu_rt = fetch("nu_rt");
+        let rho = fetch("density");
+
+        // Quartersawn top: material axis 1 = L (grain), axis 2 = R — the
+        // axis-convention contract. g order is (G12, G23, G31).
+        let law =
+            OrthotropicElastic::new([el, er, et], [nu_lr, nu_lt, nu_rt], [glr, grt, glt], 1.0)
+                .expect("spruce compliance is admissible");
+        let sec = PlateSection::orthotropic_qty(&law, Length::new(0.003), Density::new(rho))
+            .expect("section from db values");
+
+        // Guitar-top-proportioned SS rectangle, 0.5 m x 0.4 m x 3 mm.
+        let (a, b) = (0.5, 0.4);
+        let (nx, ny) = (20usize, 16usize);
+        let mesh = PlateMesh::rectangle(a, b, nx, ny);
+        let boundary = PlateMesh::rectangle_boundary(nx, ny);
+        let model = assemble(
+            &mesh,
+            &sec,
+            &boundary,
+            &[],
+            &AssemblyOptions {
+                pretension: 0.0,
+                support: EdgeSupport::SimplySupported,
+            },
+        )
+        .expect("assemble");
+        // Independent cross-check: the orthotropic Navier fundamental from
+        // the SAME queried constants.
+        let pi = std::f64::consts::PI;
+        let (d11, d12, d22, d33) = (sec.d[0], sec.d[1], sec.d[4], sec.d[8]);
+        let ma2 = 1.0 / (a * a);
+        let nb2 = 1.0 / (b * b);
+        let num = d11 * ma2 * ma2 + 2.0 * (d12 + 2.0 * d33) * ma2 * nb2 + d22 * nb2 * nb2;
+        let w11 = pi * pi * (num / (rho * sec.thickness)).sqrt();
+        let rep = modes(
+            &model,
+            (0.5 * w11 * w11, 1.5 * w11 * w11),
+            &SliceOptions::default(),
+        )
+        .expect("modes");
+        assert_eq!(rep.expected, 1, "isolated fundamental");
+        let got = rep.modes[0].lambda.sqrt();
+        let rel = (got - w11).abs() / w11;
+        assert!(
+            rel < 0.05,
+            "db-driven FEM fundamental {got:.2} vs Navier {w11:.2} ({rel:.3})"
+        );
+        println!(
+            "{{\"suite\":\"fs-plate\",\"case\":\"spruce-top-from-matdb\",\"source_pack\":\"spruce-sitka-fpl-gtr282\",\"f1_hz\":{:.2},\"navier_hz\":{:.2},\"rel_err\":{rel:.4},\"receipts_verified\":10,\"verdict\":\"pass\"}}",
+            got / (2.0 * pi),
+            w11 / (2.0 * pi)
+        );
+    }
+
     #[test]
     fn named_refusals_fire() {
         // Degenerate element.

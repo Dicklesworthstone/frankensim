@@ -6879,3 +6879,222 @@ fn g3_cli_retains_prior_admissions_when_later_claim_refuses() {
             .contains("error: matdb pack refused [uncertainty_dims_mismatch]")
     );
 }
+
+const TONEWOOD_SEED_PACKS: [&str; 23] = [
+    "ash-white-fpl-gtr282",
+    "baldcypress-fpl-gtr282",
+    "balsa-fpl-gtr282",
+    "basswood-american-fpl-gtr282",
+    "birch-yellow-fpl-gtr282",
+    "cedar-western-red-fpl-gtr282",
+    "cherry-black-fpl-gtr282",
+    "cottonwood-eastern-fpl-gtr282",
+    "douglas-fir-coast-fpl-gtr282",
+    "hemlock-western-fpl-gtr282",
+    "larch-western-fpl-gtr282",
+    "mahogany-african-fpl-gtr282",
+    "mahogany-honduras-fpl-gtr282",
+    "maple-red-fpl-gtr282",
+    "maple-sugar-fpl-gtr282",
+    "redwood-old-growth-fpl-gtr282",
+    "rosewood-brazilian-fpl-gtr282",
+    "rosewood-indian-fpl-gtr282",
+    "spruce-engelmann-fpl-gtr282",
+    "spruce-sitka-fpl-gtr282",
+    "sweetgum-fpl-gtr282",
+    "walnut-black-fpl-gtr282",
+    "yellow-poplar-fpl-gtr282",
+];
+
+const TONEWOOD_RATIO_PROPERTIES: [&str; 5] = [
+    "et_over_el",
+    "er_over_el",
+    "glr_over_el",
+    "glt_over_el",
+    "grt_over_el",
+];
+
+const TONEWOOD_POISSON_PROPERTIES: [&str; 6] =
+    ["nu_lr", "nu_lt", "nu_rt", "nu_tr", "nu_rl", "nu_tl"];
+
+/// The unique scalar SI value for `property`, or `None` when the pack has
+/// no claim for it (the source printed no value).
+fn tonewood_scalar(pack: &NormalizedPack, property: &str) -> Option<f64> {
+    let claims = pack.claims().claims_for(property);
+    if claims.is_empty() {
+        return None;
+    }
+    assert_eq!(
+        claims.len(),
+        1,
+        "tonewood packs carry one claim per property, got {} for {property}",
+        claims.len()
+    );
+    match &claims[0].1.value {
+        PropertyValue::Scalar { value, .. } => Some(*value),
+        PropertyValue::Curve { .. } => panic!("{property} must be a scalar claim"),
+    }
+}
+
+/// Longitudinal sound speed gate: c_L = sqrt(E_L/rho) must land inside the
+/// published clear-wood range. FPL-GTR-282 chapter 5 (Vibration Properties)
+/// gives the worked example 12.4 GPa / 480 kg/m^3 -> about 3,800 m/s; clear
+/// dry wood spans roughly 3,000-6,500 m/s longitudinally. A GPa/MPa or
+/// g/cm^3 slip moves c_L by >5x, far outside the window.
+fn tonewood_sound_speed_in_range(el_pa: f64, rho_si: f64) -> bool {
+    let c = (el_pa / rho_si).sqrt();
+    (3_000.0..6_500.0).contains(&c)
+}
+
+#[test]
+fn g2_cli_compiles_fpl_gtr282_tonewood_seeds_with_derived_quantity_gates() {
+    let mut complete_orthotropic = 0usize;
+    let mut speed_gated = 0usize;
+    for slug in TONEWOOD_SEED_PACKS {
+        let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+        let out = fixture_dir().join(format!("{slug}.fsmatpk"));
+        let run = run_compiler(&manifest, &out);
+        assert!(
+            run.status.success(),
+            "{slug} refused: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = fs::read(&out).expect("read compiled tonewood pack");
+        let pack = NormalizedPack::from_bytes_verified(
+            NormalizedPack::from_bytes(&bytes)
+                .expect("decode tonewood pack")
+                .content_hash(),
+            &bytes,
+        )
+        .expect("verified tonewood pack");
+        assert_eq!(pack.pack_id(), slug);
+
+        let sg = tonewood_scalar(&pack, "specific_gravity").expect("specific gravity present");
+        assert!(
+            (0.1..1.1).contains(&sg),
+            "{slug}: specific gravity {sg} implausible"
+        );
+        let moe =
+            tonewood_scalar(&pack, "modulus_of_elasticity_bending").expect("bending MOE present");
+        let el = tonewood_scalar(&pack, "young_modulus_longitudinal").expect("E_L present");
+        assert!(
+            (el / moe - 1.10).abs() < 1e-9,
+            "{slug}: E_L must be exactly the 10% shear-corrected bending MOE"
+        );
+        assert!(
+            (3.0e9..25.0e9).contains(&el),
+            "{slug}: E_L = {el:.3e} Pa outside the clear-wood window (unit slip?)"
+        );
+        if let Some(rho) = tonewood_scalar(&pack, "density") {
+            assert!(
+                (300.0..1200.0).contains(&rho),
+                "{slug}: density {rho} kg/m^3 implausible"
+            );
+            assert!(
+                ((rho / (1000.0 * sg * 1.12)) - 1.0).abs() < 1e-9,
+                "{slug}: density must equal the declared 1000*SG*1.12 derivation"
+            );
+            assert!(
+                tonewood_sound_speed_in_range(el, rho),
+                "{slug}: c_L = {:.0} m/s outside 3000-6500 (unit slip?)",
+                (el / rho).sqrt()
+            );
+            speed_gated += 1;
+        }
+        let ratio_count = TONEWOOD_RATIO_PROPERTIES
+            .iter()
+            .filter_map(|p| tonewood_scalar(&pack, p))
+            .inspect(|v| assert!((0.0..0.25).contains(v), "{slug}: ratio {v} implausible"))
+            .count();
+        let nu_count = TONEWOOD_POISSON_PROPERTIES
+            .iter()
+            .filter_map(|p| tonewood_scalar(&pack, p))
+            .inspect(|v| assert!((0.0..1.0).contains(v), "{slug}: Poisson {v} implausible"))
+            .count();
+        if ratio_count >= 4 && nu_count >= 4 {
+            complete_orthotropic += 1;
+        }
+    }
+    assert!(
+        complete_orthotropic >= 21,
+        "expected >=21 complete orthotropic tonewood sets, found {complete_orthotropic}"
+    );
+    assert!(
+        speed_gated >= 18,
+        "expected >=18 density-bearing packs under the sound-speed gate, found {speed_gated}"
+    );
+
+    // The machine-readable axis-convention contract ships beside the data
+    // and names every property family the packs use.
+    let convention = fs::read_to_string(workspace_path(
+        "data/matdb/seed-v1/instrument-axis-convention.tsv",
+    ))
+    .expect("instrument axis-convention file present");
+    assert!(
+        convention.starts_with("frankensim.instrument-axis-convention.v1"),
+        "axis-convention header moved"
+    );
+    for property in TONEWOOD_RATIO_PROPERTIES
+        .iter()
+        .chain(TONEWOOD_POISSON_PROPERTIES.iter())
+        .chain(
+            [
+                "modulus_of_elasticity_bending",
+                "young_modulus_longitudinal",
+                "density",
+                "specific_gravity",
+            ]
+            .iter(),
+        )
+    {
+        assert!(
+            convention.contains(property),
+            "axis-convention file must document {property}"
+        );
+    }
+
+    println!(
+        "{{\"suite\":\"xtask-matdb\",\"case\":\"tonewood-seeds\",\"packs\":{},\"complete_orthotropic\":{complete_orthotropic},\"speed_gated\":{speed_gated},\"verdict\":\"pass\"}}",
+        TONEWOOD_SEED_PACKS.len()
+    );
+}
+
+#[test]
+fn g3_tonewood_unit_swap_mutation_is_caught_by_the_sound_speed_gate() {
+    // MUTATION: a MPa->GPa slip on the modulus rows compiles fine (same
+    // dimensions), so the dims check alone CANNOT catch it. The derived
+    // sound-speed gate must.
+    let source = fs::read_to_string(workspace_path(
+        "data/matdb/seed-v1/spruce-sitka-fpl-gtr282/properties.tsv",
+    ))
+    .expect("read sitka properties");
+    let doctored = source.replace("\tMPa\t", "\tGPa\t");
+    assert_ne!(source, doctored, "the mutation must actually change units");
+    let manifest_text = fs::read_to_string(workspace_path(
+        "data/matdb/seed-v1/spruce-sitka-fpl-gtr282/manifest.tsv",
+    ))
+    .expect("read sitka manifest");
+    let directory = fixture_dir();
+    fs::write(directory.join("properties.tsv"), doctored).expect("write doctored source");
+    let manifest = directory.join("manifest.tsv");
+    fs::write(&manifest, manifest_text).expect("write doctored manifest");
+    let out = directory.join("doctored.fsmatpk");
+    let run = run_compiler(&manifest, &out);
+    assert!(
+        run.status.success(),
+        "the doctored pack must COMPILE (same dims): {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let bytes = fs::read(&out).expect("read doctored pack");
+    let pack = NormalizedPack::from_bytes(&bytes).expect("decode doctored pack");
+    let el = tonewood_scalar(&pack, "young_modulus_longitudinal").expect("E_L present");
+    let rho = tonewood_scalar(&pack, "density").expect("density present");
+    assert!(
+        !tonewood_sound_speed_in_range(el, rho),
+        "the sound-speed gate FAILED to catch a 1000x modulus unit slip"
+    );
+    println!(
+        "{{\"suite\":\"xtask-matdb\",\"case\":\"tonewood-unit-swap-mutation\",\"c_l_m_per_s\":{:.0},\"verdict\":\"caught\"}}",
+        (el / rho).sqrt()
+    );
+}

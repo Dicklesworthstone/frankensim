@@ -1891,6 +1891,9 @@ dependencies = [
 name = "fs-plate"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-matdb",
  "fs-material",
  "fs-modal",
  "fs-qty",
