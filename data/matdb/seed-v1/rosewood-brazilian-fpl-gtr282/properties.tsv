@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	wh-clear-wood	Brazilian rosewood (Dalbergia nigra) clear straight-grained specimens	FPL-GTR-282 chapter 5 tabulated averages (static bending MOE; compression-derived elastic ratios; experimentally determined Poisson ratios)	Average clear straight-grained small-specimen values at approximately 12 percent moisture content; the elastic-ratio and Poisson tables derive from samples of a few species and the source warns values vary within and between species; the source reports representative coefficients of variation separately in its Table 5-6 without per-value confidence metadata, so runtime uncertainty stays Unstated; bending MOE is printed with span-to-depth 14 shear deflection included and the chapter states it may be increased by 10 percent to remove that effect, which is how the derived young_modulus_longitudinal row is computed; axis convention: L longitudinal (grain), R radial, T tangential, matching the instrument-axis-convention file in this directory; Table 5-5a specific gravity is ovendry-weight over green-volume basis, so no 12-percent density is derived for this species
+scalar	moe-bending	wh-clear-wood	modulus_of_elasticity_bending	13000	MPa	constant
+uncertainty	moe-bending	unstated	-	-	-	-
+validity	moe-bending	moisture_content	12	12	%
+scalar	young-modulus-longitudinal	wh-clear-wood	young_modulus_longitudinal	14300.0	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content	12	12	%
+scalar	specific-gravity	wh-clear-wood	specific_gravity	0.8	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	moisture_content	12	12	%

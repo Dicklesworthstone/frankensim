@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	douglas-fir-coast-fpl-gtr282
+redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory); public domain in the United States; retain the report number, chapter, table numbers, and URL
+citation	Forest Products Laboratory (2021), Wood Handbook - Wood as an Engineering Material, General Technical Report FPL-GTR-282, U.S. Department of Agriculture Forest Service, Chapter 5 Mechanical Properties of Wood (C.A. Senalik and B. Kretschmann), Tables 5-1, 5-2, and 5-3a; https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/chapter_05_fpl_gtr282.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
