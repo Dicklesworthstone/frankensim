@@ -278,7 +278,7 @@ impl FactorBelief {
         let mut total = self.diag[component];
         for column in (component + 1)..n {
             let u = self.upper[packed_upper_index(n, component, column)];
-            total = (u * u * self.diag[column]) + total;
+            total += u * u * self.diag[column];
         }
         Some(total)
     }
@@ -289,7 +289,7 @@ impl FactorBelief {
     /// # Errors
     /// Returns [`AssimError`] for mismatched lengths, an empty state, a
     /// non-finite mean, or a negative or non-finite variance.
-    pub fn diagonal(mean: Vec<f64>, variances: Vec<f64>, cx: &Cx<'_>) -> Result<Self, AssimError> {
+    pub fn diagonal(mean: Vec<f64>, variances: &[f64], cx: &Cx<'_>) -> Result<Self, AssimError> {
         if mean.is_empty() {
             return Err(AssimError::EmptyBelief);
         }
