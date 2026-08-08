@@ -17,6 +17,9 @@ fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
+fs-bem = { path = "../fs-bem" }
+fs-modal = { path = "../fs-modal" }
+fs-plate = { path = "../fs-plate" }
 
 [lints]
 workspace = true
