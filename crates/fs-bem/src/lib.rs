@@ -217,6 +217,7 @@ impl From<FmmError> for BemError {
     }
 }
 
+pub mod helmholtz;
 pub mod panel2d;
 pub mod panel3d;
 pub mod wake2d;
