@@ -21,6 +21,7 @@
 #![allow(incomplete_features)]
 
 pub mod chemistry;
+pub mod inference;
 pub mod json;
 pub mod parse;
 pub mod semantic;

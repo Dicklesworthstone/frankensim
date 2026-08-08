@@ -86,6 +86,19 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   binds all three inputs. `MassAmountBasis` records whether a coherent mass/
   amount pair was derived from mass or amount and requires a positive finite
   molar mass.
+- `inference` — the shared inference dimensional core (bead sj31i.7.1) for
+  as-built, assimilation, and OED boundaries: `SlotSchema` (a per-slot
+  `QuantitySpec`, including the affine-temperature kinds), ordered
+  `StateSchema` with canonical bytes, stale-version-refusing decode, and a
+  `fs-qty-inference-core:v1:` content identity; `CovarianceSchema` (entry
+  `(i,j)` carries the checked product of slot dimensions, information
+  entries the checked inverse); `ObservationSchema` (noise variance is the
+  checked square of the reading, residuals inherit the reading);
+  `OperatorSchema` (column `i` carries `output - state(i)` and refuses
+  affine absolute-temperature slots outright); and `DecisionMeasure`
+  (cost/utility with same-kind checked algebra and cross-kind refusal
+  naming both sides). The core defines shared types only and cannot mint
+  domain evidence.
 
 ## Invariants
 - All stored values are coherent SI base units; unit conversion happens ONLY
@@ -133,6 +146,17 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   immutable after validation. Conservation certificates are issued only after
   exact checked arithmetic proves both matrix equalities and bind the exact
   content identities presented to the verifier.
+- Inference-core algebra is closed and checked: covariance entries are the
+  checked product of slot dimensions, information entries the checked
+  inverse, operator columns the checked difference, and noise variance the
+  checked square; every admission refusal names both rendered sides.
+  Absolute-temperature slots cannot pass a linear observation operator —
+  they must first be converted to an explicit temperature difference
+  (`SlotSchema::as_difference`), which changes the semantic kind, never the
+  dimensions. Cost and utility are disjoint decision measures with
+  same-kind algebra only; no default rescues a mixed expression. Schema
+  identities bind the versioned canonical byte image, so slot order and
+  slot semantics both move the hash.
 
 ## Error model
 `DimensionMismatch { op, left, right }`, `DimensionOverflow { op, dims, factor }`,
@@ -204,7 +228,13 @@ immutable chemistry identities, axis/order mismatches, exact elemental/charge
 conservation, and checked multiply/add overflow. Compile-fail doctests prove
 the type-level rejections. The separate `tests/parse_allocation.rs` binary
 wraps `System` with a peak-request probe and proves a one-megabyte byte-refused
-literal never causes a source-sized transient allocation.
+literal never causes a source-sized transient allocation. Inference-core unit
+tests (in-module, bead sj31i.7.1): empty/max/oversized slot admission,
+covariance/information/operator/noise entry algebra, affine-temperature
+operator traps and explicit difference conversion, cross-kind decision-measure
+refusals naming both sides, canonical round trips with stale-version and
+ragged-payload refusals, deterministic schema identity with permutation and
+mutation sensitivity, and unit-rescaling dimension preservation.
 
 ## No-claim boundaries
 - Luminous-intensity (`cd`) dimensions; candela stays out until photometry is
@@ -234,6 +264,12 @@ literal never causes a source-sized transient allocation.
 - Logarithmic acoustic conversion; `AcousticLevel` validates and retains an
   explicit positive physical reference but delegates logarithms to the owning
   acoustics/math layer.
+- The inference core defines the dimensional ROLE algebra (state, covariance,
+  information, observation, operator, residual, cost, utility) and schema
+  identity only. It does not store vectors or matrices, run updates, mint
+  domain evidence, or certify that a producer used the admitted dimensions
+  correctly; `DecisionMeasure` carries decision semantics, not decision
+  quality.
 - Periodic-table lookup, chemical-formula parsing, chemistry/kinetics/
   thermodynamic validity, or reconciliation of opaque species labels with
   caller-supplied elemental/charge tables. A conservation certificate proves
