@@ -13,9 +13,13 @@ use fs_exec::Cx;
 use fs_mbd::{Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
 use fs_rep_frep::{AxisymmetricCurvatureAuthority, AxisymmetricIdentity};
 use fs_tribo::{
-    InputAuthority,
+    InputAuthority, InterfaceSystemRef,
     partial_slip::{NormalPatchAuthority, NormalPatchView},
     rolling_loss::{PatchCurvature, RollingPatchReceipt},
+    surface_excitation::{
+        HertzRoughnessExcitationInput, HertzRoughnessExcitationReceipt, ProjectedHertzFootprint,
+        SurfaceExcitationError, SurfaceTraceMotion, evaluate_hertz_roughness_excitation,
+    },
 };
 
 use crate::{
@@ -283,6 +287,80 @@ pub struct ProductionCouplingReceipt {
     /// This composition retains only source-adapter Estimate authority.
     pub estimate_only: bool,
 }
+
+impl ProductionCouplingReceipt {
+    /// Filter two named surface traces through this accepted Hertz patch.
+    ///
+    /// The normal law supplies the approach, force, consistent tangent, and
+    /// circular/elliptic footprint. The caller still supplies material-frame
+    /// path coordinates and speeds because the contact solver cannot infer a
+    /// texture frame from bulk kinematics. The ordered interface identity must
+    /// exactly match the one used by the accepted normal-contact law.
+    pub fn evaluate_surface_excitation(
+        &self,
+        interface: &InterfaceSystemRef,
+        surface_a: SurfaceTraceMotion<'_>,
+        surface_b: SurfaceTraceMotion<'_>,
+        travel_angle_from_patch_major_rad: f64,
+        maximum_linearized_height_fraction: f64,
+    ) -> Result<HertzRoughnessExcitationReceipt, ProductionSurfaceExcitationError> {
+        let NormalPatchReceipt::Point(normal) = &self.normal.generic.receipt else {
+            return Err(ProductionSurfaceExcitationError::UnsupportedLineContact);
+        };
+        if interface.ordered_system_id() != normal.interface_system_id {
+            return Err(
+                ProductionSurfaceExcitationError::InterfaceIdentityMismatch {
+                    accepted_normal_interface: normal.interface_system_id.clone(),
+                    supplied_interface: interface.ordered_system_id().to_owned(),
+                },
+            );
+        }
+        let (semi_major_axis_m, semi_minor_axis_m) = normal
+            .elliptic_patch_axes
+            .map_or((normal.patch_radius_m, normal.patch_radius_m), |axes| {
+                (axes.semi_major_axis_m, axes.semi_minor_axis_m)
+            });
+        evaluate_hertz_roughness_excitation(HertzRoughnessExcitationInput {
+            interface,
+            surface_a,
+            surface_b,
+            footprint: ProjectedHertzFootprint {
+                semi_major_axis_m,
+                semi_minor_axis_m,
+                travel_angle_from_major_rad: travel_angle_from_patch_major_rad,
+            },
+            nominal_approach_m: normal.approach_m,
+            nominal_normal_force_n: normal.normal_force_n,
+            normal_tangent_n_per_m: normal.tangent_n_per_m,
+            maximum_linearized_height_fraction,
+        })
+        .map_err(ProductionSurfaceExcitationError::Surface)
+    }
+}
+
+/// Refusal while adapting one accepted production contact to surface excitation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProductionSurfaceExcitationError {
+    /// The production composition does not admit line-contact audio forcing.
+    UnsupportedLineContact,
+    /// A trace/interface card was not the ordered system used by normal contact.
+    InterfaceIdentityMismatch {
+        /// Ordered interface retained by the accepted normal response.
+        accepted_normal_interface: String,
+        /// Ordered interface offered with the surface traces.
+        supplied_interface: String,
+    },
+    /// The reusable fs-tribo filtering/linearization leaf refused the query.
+    Surface(SurfaceExcitationError),
+}
+
+impl fmt::Display for ProductionSurfaceExcitationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for ProductionSurfaceExcitationError {}
 
 /// Terminal state of a bounded smooth-contact trajectory attempt.
 ///
