@@ -987,12 +987,14 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-ivl",
+ "fs-obs",
 ]
 
 [[package]]
 name = "fs-bem"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-fmm",
  "fs-geom",
  "fs-la",
