@@ -115,11 +115,13 @@ modal counts inertia-certified through fs-modal.
 - Bending only: NO membrane/in-plane DOFs, so no drilling stabilization is
   needed or present, and in-plane load paths (shear walls, arch action) are
   out of scope. Coupled membrane-bending (curved/arched shells, flat-facet
-  shell assembly) is the recorded follow-up on the bead, triggered by the
-  first curved-geometry consumer.
-- MITC4 quads are NOT implemented (DKT triangles only); the bead retains
-  that item. Structured rectangle meshes only in v1; no external mesh
-  import.
+  shell assembly) is a recorded follow-up (bead kj3s0 closed with this as
+  a trigger-deferred item), triggered by the first curved-geometry
+  consumer.
+- MITC4 quads are NOT implemented (DKT triangles only); trigger-deferred
+  at the kj3s0 close (lands with the first quad-mesh consumer or a DKT
+  validation gap). Structured rectangle meshes only in v1; no external
+  mesh import.
 - The stiffener is a straight Hermite beam on existing plate nodes with
   uniform cross-section: no variable cross-section (vibraphone undercuts),
   no curved braces, no beam shear deformation (Euler-Bernoulli, not
