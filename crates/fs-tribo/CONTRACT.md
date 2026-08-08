@@ -48,6 +48,12 @@ reactions, and residual embedding.
   `2 q'' sqrt(alpha * t / pi) / k`, with `t = traverse_length/slip_speed`.
   Missing properties return a typed `Unknown`, rather than guessed material
   data or a partial temperature result.
+- `surface_excitation` admits named, uniformly sampled finite or periodic
+  surface-height traces and filters them by the exact one-dimensional marginal
+  of an elliptic Hertz pressure footprint. It analytically integrates the
+  piecewise-linear trace and its path derivative, then applies only the
+  explicitly bounded contact tangent `delta_F = k_n delta_h`. It creates no
+  random texture, audio spectrum, or apparatus-specific frequency.
 
 ### Partial-slip return-map rung
 
@@ -111,6 +117,11 @@ material-hysteresis rung would need a disjoint work channel.
   identity reconstructs heat over the caller interval.
 - No mutable material table, hidden state, or unordered material-pair lookup
   exists. Ordered interface and history identities remain explicit.
+- Surface excitation refuses missing texture/source identity, uncovered finite
+  footprints, excessive periodic repetition/work, non-finite kinematics, a
+  height outside the caller's tangent-linearization fraction, and a
+  perturbation that would open the unilateral contact. Both surface sources
+  and authority ceilings remain separate in the receipt.
 
 ## Error model
 
@@ -160,10 +171,14 @@ source-card/patch replay mutation, and a no-target-field source scan.
 
 This crate does not mint material admission, calibration, the upstream
 `fs-matdb::InterfaceSystemCard` query receipt, a flash-temperature error bound
-or thermal-port solution, roughness, adhesion, plasticity, finite-patch partial
+or thermal-port solution, a roughness measurement or statistical roughness
+model, adhesion, plasticity, finite-patch partial
 slip as a resolved contact field, lubrication/EHL, contact geometry evolution,
 wear geometry updates, stop time, Euler-disc ranking, one-millimetre optimum,
-or experimental/video correspondence. Its flash candidate is a declared
+sound pressure, loudness, or experimental/video correspondence. The surface
+trace leaf consumes a caller-supplied one-dimensional profile and a local
+contact tangent; it does not replace a two-dimensional roughness map, nonlinear
+re-solution of contact, structural response, or acoustic radiation. Its flash candidate is a declared
 semi-infinite uniform-flux model-form estimate, not a temperature measurement
 or validation result. A caller may record an estimated or synthetic result,
 but must not promote it based on this crate alone.

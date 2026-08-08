@@ -7,6 +7,8 @@
 pub mod partial_slip;
 /// Solver-independent rolling and contour-deformation loss candidates.
 pub mod rolling_loss;
+/// Deterministic finite-patch filtering of measured surface-height traces.
+pub mod surface_excitation;
 
 use core::fmt;
 
