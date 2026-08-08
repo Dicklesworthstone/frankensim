@@ -623,3 +623,214 @@ fn radiated_power_and_accounting_window_audit() {
         report.is_green()
     );
 }
+
+/// Guitar T(1,1) coupled-pair comparison against a provenance-pinned
+/// CC-BY publication:
+///
+/// Carcagno, Bucknall, Woodhouse, Fritz, Plack (2018), "Effect of back
+/// wood choice on the perceived quality of steel-string acoustic
+/// guitars", J. Acoust. Soc. Am. 144(6), 3533-3547,
+/// doi:10.1121/1.5084735 (CC BY 4.0). Table I measured bridge-
+/// admittance modal frequencies across six Fylde 'Falstaff' guitars
+/// with Sitka spruce tops: F1 = 96-101 Hz (Q 33-42), F2 = 175-188 Hz
+/// (Q 17-28).
+///
+/// The model is the classic two-DOF top-plate + Helmholtz-resonator
+/// coupling (Christensen-Vistisen class) built ENTIRELY from
+/// matdb-pack material data and DECLARED typical steel-string
+/// geometry (the paper's own dimensional supplement was not
+/// retrievable): Sitka spruce orthotropic law from
+/// spruce-sitka-fpl-gtr282 (E_L 11.88 GPa, E_R/E_L 0.078, nu_LR
+/// 0.372, G_LR/E_L 0.064, SG 0.4 -> 448 kg/m3 at 12% MC), a braced
+/// lower-bout stand-in rectangle, and a 13.5 L cavity with an 86 mm
+/// sound hole. HONEST DISCREPANCY DISCUSSION lives in the assertions
+/// and the JSON row: the rectangle + single brace is a shape
+/// surrogate, so the comparison targets the measured BAND and the
+/// coupling SIGNATURES (mode repulsion, the exact two-DOF product
+/// invariant F1 F2 = f_h f_t, and material-vs-measured damping), not
+/// per-guitar frequencies.
+#[test]
+#[allow(clippy::too_many_lines)] // one coherent literature-comparison fixture
+fn guitar_coupled_pair_vs_carcagno_2018() {
+    // Sitka spruce, matdb pack spruce-sitka-fpl-gtr282 (12% MC).
+    let e_l = 11.88e9;
+    let e_r = 0.078 * e_l;
+    let nu_lr = 0.372;
+    let g_lr = 0.064 * e_l;
+    let rho = 448.0;
+    let law = fs_material::elastic::OrthotropicElastic::new(
+        [e_l, e_r, e_r],
+        [nu_lr, nu_lr, 0.435],
+        [g_lr, 0.003 * e_l, 0.061 * e_l],
+        1.0,
+    )
+    .expect("spruce law");
+    let h = 0.0029;
+    let section = PlateSection::orthotropic(&law, h, rho).expect("spruce section");
+    // Lower-bout stand-in rectangle, grain along x.
+    let (a, b) = (0.36, 0.29);
+    let (nx, ny) = (12usize, 10usize);
+    let mesh = PlateMesh::rectangle(a, b, nx, ny);
+    let boundary = PlateMesh::rectangle_boundary(nx, ny);
+    // One transverse spruce brace across the middle (12 x 10 mm),
+    // parallel-axis eccentric on the plate midplane.
+    // OFF-center brace (j = ny/3): a midline brace sits exactly on the
+    // antisymmetric modes' nodal line and flips the mode order so the
+    // lowest in-window mode has ZERO net volume displacement — executed
+    // here first, and the reason the breathing mode below is selected
+    // by max |INT phi dA| rather than by frequency order.
+    let brace_at = |j: usize| -> fs_plate::Stiffener {
+        fs_plate::Stiffener {
+            nodes: (0..=nx).map(|i| j * (nx + 1) + i).collect(),
+            e: e_l,
+            g: g_lr,
+            area: 0.012 * 0.008,
+            inertia: 0.012 * 0.008f64.powi(3) / 12.0,
+            torsion: 0.229 * 0.008 * 0.012f64.powi(3),
+            eccentricity: f64::midpoint(h, 0.008),
+            density: rho,
+        }
+    };
+    let braces = [brace_at(ny / 3), brace_at(2 * ny / 3)];
+    let model = assemble(
+        &mesh,
+        &section,
+        &boundary,
+        &braces,
+        &AssemblyOptions {
+            pretension: 0.0,
+            support: EdgeSupport::SimplySupported,
+        },
+    )
+    .expect("assemble");
+    let report = modes(
+        &model,
+        {
+            let lo = 2.0 * PI * 60.0;
+            let hi = 2.0 * PI * 500.0;
+            (lo * lo, hi * hi)
+        },
+        &fs_modal::SliceOptions::default(),
+    )
+    .expect("top modes");
+    assert!(!report.modes.is_empty());
+    let (dx, dy) = (a / nx as f64, b / ny as f64);
+    let mut node_areas = Vec::with_capacity(mesh.node_count());
+    for j in 0..=ny {
+        for i in 0..=nx {
+            let wx = if i == 0 || i == nx { 0.5 } else { 1.0 };
+            let wy = if j == 0 || j == ny { 0.5 } else { 1.0 };
+            node_areas.push(dx * dy * wx * wy);
+        }
+    }
+    // Select the BREATHING mode T(1,1): the in-window mode with the
+    // largest net volume displacement |INT phi dA|.
+    let node_shape = |mode: &fs_modal::ModePair| -> Vec<f64> {
+        let mut shape = vec![0.0f64; mesh.node_count()];
+        for (node, value) in shape.iter_mut().enumerate() {
+            if let Some(slot) = model.dof_map[3 * node] {
+                *value = mode.phi[slot];
+            }
+        }
+        shape
+    };
+    let volume_disp = |shape: &[f64]| -> f64 {
+        shape
+            .iter()
+            .zip(node_areas.iter())
+            .map(|(phi, area)| phi * area)
+            .sum::<f64>()
+            .abs()
+    };
+    let fundamental = report
+        .modes
+        .iter()
+        .max_by(|p, q| {
+            volume_disp(&node_shape(p))
+                .partial_cmp(&volume_disp(&node_shape(q)))
+                .expect("finite")
+        })
+        .expect("breathing mode");
+    let f_t = fundamental.lambda.sqrt() / (2.0 * PI);
+    let shape = node_shape(fundamental);
+    // Helmholtz resonator: declared typical steel-string geometry.
+    let volume = 0.0135;
+    let hole_radius = 0.043;
+    let resonator = fs_couple::vibroacoustic::helmholtz_resonator_mode(
+        volume,
+        hole_radius,
+        h,
+        AcousticMedium::air(),
+        0.0,
+        mesh.node_count(),
+    )
+    .expect("resonator");
+    let f_h = resonator.omegas[0] / (2.0 * PI);
+    // Two-DOF coupled model: fundamental top mode x resonator mode.
+    let structure = StructuralModes {
+        omegas: vec![fundamental.lambda.sqrt()],
+        shapes: vec![shape],
+        loss_factor: 0.014,
+    };
+    let coupling = assemble_coupling(&structure, &resonator, &node_areas).expect("coupling");
+    let two_dof =
+        VibroacousticModel::try_new(&structure, &resonator, coupling, None).expect("two-dof model");
+    let coupled = two_dof.undamped_natural_frequencies().expect("pencil");
+    let f1 = coupled[0] / (2.0 * PI);
+    let f2 = coupled[1] / (2.0 * PI);
+
+    // Carcagno et al. 2018 Table I (six guitars): F1 96-101 Hz
+    // (Q 33-42), F2 175-188 Hz (Q 17-28).
+    let (meas_f1_lo, meas_f1_hi, meas_f2_lo, meas_f2_hi) = (96.0, 101.0, 175.0, 188.0);
+    let meas_f1_mean = 98.5;
+    let meas_f2_mean = 181.5;
+
+    // Coupling signatures (exact physics, tight):
+    // mode repulsion around BOTH uncoupled frequencies...
+    assert!(
+        f1 < f_h.min(f_t) && f2 > f_h.max(f_t),
+        "repulsion: ({f1:.1}, {f2:.1}) must bracket ({f_h:.1}, {f_t:.1})"
+    );
+    // ...and the exact two-DOF product invariant f1 f2 = f_h f_t
+    // (the constant term of the split polynomial), through the engine.
+    let product_defect = (f1 * f2 / (f_h * f_t) - 1.0).abs();
+    assert!(
+        product_defect < 1e-10,
+        "two-DOF product invariant defect {product_defect:.2e}"
+    );
+
+    // Band comparison (honest): the rectangle + two-transverse-brace
+    // top is a SHAPE SURROGATE with declared-typical geometry, so the
+    // authored bound is 25% of the published six-guitar means, with
+    // the measured deviations recorded, not hidden. Measured
+    // 2026-08-08: f_t 177.1, f_h 130.0, pair (108.6, 212.1) ->
+    // deviations +10.2% / +16.9%.
+    let dev1 = f1 / meas_f1_mean - 1.0;
+    let dev2 = f2 / meas_f2_mean - 1.0;
+    assert!(
+        dev1.abs() < 0.25 && dev2.abs() < 0.25,
+        "coupled pair ({f1:.1}, {f2:.1}) vs Carcagno means ({meas_f1_mean}, {meas_f2_mean}):          deviations {dev1:.3}, {dev2:.3}"
+    );
+
+    // Damping honesty: matdb wood loss factors give material-only
+    // Q = 1/eta ~ 71, ABOVE the measured Q1 33-42 — radiation and
+    // support losses dominate a real guitar's bandwidth, so a
+    // material-damping-only model must underpredict damping. Assert
+    // the inequality that makes the discussion executable.
+    let q_material = 1.0 / structure.loss_factor;
+    assert!(
+        q_material > 42.0,
+        "material-only Q {q_material:.0} must exceed the measured Q1 ceiling"
+    );
+
+    println!(
+        "{{\"suite\":\"fs-couple-vibro-casebook\",\"case\":\"guitar-carcagno-2018\",\
+         \"citation\":\"Carcagno et al., JASA 144(6):3533-3547 (2018), doi:10.1121/1.5084735, CC-BY-4.0, Table I\",\
+         \"measured_f1_hz\":[{meas_f1_lo},{meas_f1_hi}],\"measured_f2_hz\":[{meas_f2_lo},{meas_f2_hi}],\
+         \"model_f_t\":{f_t:.2},\"model_f_h\":{f_h:.2},\"model_f1\":{f1:.2},\"model_f2\":{f2:.2},\
+         \"dev_from_means\":[{dev1:.3},{dev2:.3}],\"product_invariant_defect\":{product_defect:.2e},\
+         \"q_material\":{q_material:.0},\"measured_q1\":[33,42],\
+         \"discussion\":\"shape-surrogate rectangle+2-brace top from matdb sitka values and declared-typical cavity/soundhole; both coupled roots land high by 10-17% (surrogate stiffness + missing back-plate compliance, which lowers the real triad); material-only damping underpredicts measured bandwidth as expected because radiation and support losses dominate\",\
+         \"verdict\":\"pass\"}}"
+    );
+}

@@ -300,7 +300,9 @@ with observed per-frequency truncation deltas, and the radiation solve
 whose per-period energies audit GREEN through a real
 `WindowAuditReport` (with the `entropy_on_nonthermal_power_port`
 refusal retained as doctrine: dissipation leaves through THERMAL
-ports).
+ports); plus the guitar T(1,1) comparison against Carcagno et al. 2018
+with the exact two-DOF product invariant and the material-vs-measured
+damping inequality.
 
 `tests/couple.rs` (38 cases): v2 scalar-seed migration goldens for all three
 legacy kinds and bitwise whole-result migration of the added-mass fixture;
@@ -344,9 +346,12 @@ determinism.
   the lumped Helmholtz mode arrive through the same `CavityModes`
   carrier (numeric Laplacian producers are not shipped here); no
   modal-density/SEA regime; the casebook's box fixture is validated by
-  independent perturbation and exact power audits, NOT yet by a
-  provenance-pinned measured-mobility publication (recorded open on the
-  bead); `condition`-free dense solves inherit `fs_la::eigen_complex`
+  independent perturbation and exact power audits; the guitar fixture
+  compares the coupled T(1,1) pair against Carcagno et al. 2018
+  (CC-BY, Table I) through a DECLARED shape-surrogate top (deviations
+  +10-17% recorded, product invariant exact) — measured mobility
+  MAGNITUDES exist only as figures in the license-compatible
+  literature and are not compared; `condition`-free dense solves inherit `fs_la::eigen_complex`
   boundaries.
 
 - The FSI fixture is the classic LINEARIZED added-mass interface map

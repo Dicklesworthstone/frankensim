@@ -18,6 +18,7 @@ fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
 fs-bem = { path = "../fs-bem" }
+fs-material = { path = "../fs-material" }
 fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
 
