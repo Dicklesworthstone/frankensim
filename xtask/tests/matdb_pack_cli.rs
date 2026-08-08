@@ -7099,3 +7099,262 @@ fn g3_tonewood_unit_swap_mutation_is_caught_by_the_sound_speed_gate() {
         (el / rho).sqrt()
     );
 }
+
+/// The instrument loss-factor and string/metal tranche
+/// (bead frankensim-fsim-instrument-matdb-zwzey, second tranche): every
+/// pack compiles through the fail-closed compiler and its values sit
+/// inside authored plausibility windows, with derived-quantity gates
+/// (sound speed, Poisson consistency, Zener frequency ordering) that
+/// catch unit slips dims checks cannot.
+const INSTRUMENT_TRANCHE2_PACKS: [&str; 12] = [
+    "spruce-sitka-loss-qiu2026",
+    "spruce-norway-danihelova2022",
+    "maple-sycamore-danihelova2022",
+    "aluminum-2024-t4-damping-nasa-tn-d2893",
+    "aluminum-2024-t3-nasa-tn-d6448",
+    "brass-yellow-half-hard-damping-nasa-tn-d1467",
+    "brass-cartridge-c26000-mil-hdbk-698a",
+    "phosphor-bronze-c51000-nist-mono177",
+    "phosphor-bronze-5a-mil-hdbk-698a",
+    "music-wire-nbs-c447",
+    "music-wire-spring-moduli-fuchs-1968",
+    "bronze-gunmetal-damping-rsic508",
+];
+
+#[test]
+#[allow(clippy::too_many_lines)] // one coherent corpus gate
+fn g2_cli_compiles_instrument_loss_and_string_tranche_with_derived_gates() {
+    let mut packs = std::collections::BTreeMap::new();
+    for slug in INSTRUMENT_TRANCHE2_PACKS {
+        let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+        let out = fixture_dir().join(format!("{slug}.fsmatpk"));
+        let run = run_compiler(&manifest, &out);
+        assert!(
+            run.status.success(),
+            "{slug} refused: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = fs::read(&out).expect("read compiled tranche-2 pack");
+        let pack = NormalizedPack::from_bytes_verified(
+            NormalizedPack::from_bytes(&bytes)
+                .expect("decode tranche-2 pack")
+                .content_hash(),
+            &bytes,
+        )
+        .expect("verified tranche-2 pack");
+        assert_eq!(pack.pack_id(), slug);
+        packs.insert(slug, pack);
+    }
+    let scalar = |slug: &str, property: &str| -> f64 {
+        tonewood_scalar(&packs[slug], property)
+            .unwrap_or_else(|| panic!("{slug} must carry {property}"))
+    };
+
+    // Wood loss factors: audio-band tan-delta plausibility window.
+    for (slug, property, lo, hi) in [
+        (
+            "spruce-sitka-loss-qiu2026",
+            "loss_factor_longitudinal",
+            0.005,
+            0.03,
+        ),
+        (
+            "spruce-sitka-loss-qiu2026",
+            "loss_factor_longitudinal_mode5",
+            0.005,
+            0.03,
+        ),
+        (
+            "spruce-norway-danihelova2022",
+            "loss_factor_longitudinal",
+            0.005,
+            0.03,
+        ),
+        (
+            "maple-sycamore-danihelova2022",
+            "loss_factor_longitudinal",
+            0.005,
+            0.03,
+        ),
+    ] {
+        let eta = scalar(slug, property);
+        assert!(
+            (lo..hi).contains(&eta),
+            "{slug}: {property} = {eta} implausible"
+        );
+    }
+    // Log decrement / loss factor internal consistency: eta = theta/pi.
+    for slug in [
+        "spruce-norway-danihelova2022",
+        "maple-sycamore-danihelova2022",
+    ] {
+        let theta = scalar(slug, "log_decrement_longitudinal");
+        let eta = scalar(slug, "loss_factor_longitudinal");
+        assert!(
+            (eta / (theta / core::f64::consts::PI) - 1.0).abs() < 0.02,
+            "{slug}: eta {eta} must equal theta/pi = {}",
+            theta / core::f64::consts::PI
+        );
+    }
+    // Dynamic-modulus wood packs: the same c_L = sqrt(E/rho) gate the
+    // FPL tranche uses (a MPa/GPa slip lands far outside 3000-6500 m/s).
+    for slug in [
+        "spruce-norway-danihelova2022",
+        "maple-sycamore-danihelova2022",
+    ] {
+        let el = scalar(slug, "dynamic_young_modulus_longitudinal");
+        let rho = scalar(slug, "density");
+        assert!(
+            tonewood_sound_speed_in_range(el, rho),
+            "{slug}: c_L = {:.0} m/s outside the clear-wood window",
+            (el / rho).sqrt()
+        );
+    }
+
+    // Aluminum 2024-T4 vacuum damping: Zener thermal relaxation is past
+    // its peak here, so the loss factor must DECREASE monotonically with
+    // frequency — an ordering gate a single-window check cannot provide.
+    let al_band = [
+        ("loss_factor_15hz", 15.18),
+        ("loss_factor_30hz", 30.30),
+        ("loss_factor_70hz", 71.60),
+        ("loss_factor_150hz", 153.2),
+        ("loss_factor_300hz", 306.5),
+        ("loss_factor_700hz", 716.2),
+        ("loss_factor_1500hz", 1572.0),
+    ];
+    let mut previous = f64::INFINITY;
+    for (property, _f) in al_band {
+        let g = scalar("aluminum-2024-t4-damping-nasa-tn-d2893", property);
+        assert!(
+            (3.0e-5..5.0e-3).contains(&g),
+            "aluminum vacuum loss factor {property} = {g} implausible"
+        );
+        assert!(
+            g < previous,
+            "aluminum loss factors must decrease with frequency: {property} = {g}"
+        );
+        previous = g;
+    }
+    // The thermoelastic peak from the independent TN D-6448 source must
+    // sit at or above the TN D-2893 band (it is the Zener maximum).
+    let peak = scalar(
+        "aluminum-2024-t3-nasa-tn-d6448",
+        "loss_factor_thermoelastic_peak",
+    );
+    assert!(
+        (1.0e-3..5.0e-3).contains(&peak) && peak >= previous,
+        "thermoelastic peak {peak} must dominate the high-frequency tail"
+    );
+
+    // Gun-metal bronze specific damping capacity (graph-read survey):
+    // window plus the recorded eta = psi/(2 pi) conversion staying in a
+    // plausible cast-bronze band.
+    // The compiler normalizes the source's percent unit to an SI
+    // fraction, so 1 percent arrives as 0.01.
+    let psi = scalar(
+        "bronze-gunmetal-damping-rsic508",
+        "specific_damping_capacity_5ksi_shear",
+    );
+    assert!(
+        (0.001..0.05).contains(&psi),
+        "gun metal SDC fraction = {psi} implausible"
+    );
+    assert!(
+        (5.0e-4..1.0e-2).contains(&(psi / (2.0 * core::f64::consts::PI))),
+        "gun metal implied loss factor outside the cast-bronze band"
+    );
+
+    // Brass specimen damping (graph-read, air, upper bound): window only.
+    for property in [
+        "specimen_loss_factor_10ksi_50hz",
+        "specimen_loss_factor_10ksi_500hz",
+    ] {
+        let g = scalar("brass-yellow-half-hard-damping-nasa-tn-d1467", property);
+        assert!(
+            (1.0e-3..3.0e-2).contains(&g),
+            "brass specimen loss factor {property} = {g} implausible"
+        );
+    }
+
+    // Metal elastic windows and cross-source consistency.
+    let checks: [(&str, &str, f64, f64); 8] = [
+        (
+            "brass-cartridge-c26000-mil-hdbk-698a",
+            "young_modulus",
+            90.0e9,
+            130.0e9,
+        ),
+        (
+            "brass-cartridge-c26000-mil-hdbk-698a",
+            "density",
+            8_300.0,
+            8_700.0,
+        ),
+        (
+            "phosphor-bronze-c51000-nist-mono177",
+            "young_modulus",
+            90.0e9,
+            130.0e9,
+        ),
+        (
+            "phosphor-bronze-5a-mil-hdbk-698a",
+            "young_modulus",
+            90.0e9,
+            130.0e9,
+        ),
+        (
+            "phosphor-bronze-5a-mil-hdbk-698a",
+            "density",
+            8_700.0,
+            9_000.0,
+        ),
+        (
+            "aluminum-2024-t3-nasa-tn-d6448",
+            "young_modulus",
+            60.0e9,
+            80.0e9,
+        ),
+        (
+            "music-wire-spring-moduli-fuchs-1968",
+            "young_modulus",
+            190.0e9,
+            220.0e9,
+        ),
+        ("music-wire-nbs-c447", "density", 7_700.0, 7_900.0),
+    ];
+    for (slug, property, lo, hi) in checks {
+        let value = scalar(slug, property);
+        assert!(
+            (lo..hi).contains(&value),
+            "{slug}: {property} = {value:.3e} outside [{lo:.1e}, {hi:.1e}] (unit slip?)"
+        );
+    }
+    // Poisson consistency: nu = E/(2G) - 1 must be a physical metal value
+    // wherever a pack carries both moduli.
+    for slug in [
+        "brass-cartridge-c26000-mil-hdbk-698a",
+        "phosphor-bronze-5a-mil-hdbk-698a",
+        "music-wire-spring-moduli-fuchs-1968",
+    ] {
+        let e = scalar(slug, "young_modulus");
+        let g = scalar(slug, "shear_modulus");
+        let nu = e / (2.0 * g) - 1.0;
+        assert!(
+            (0.25..0.40).contains(&nu),
+            "{slug}: derived nu = {nu:.3} unphysical (moduli inconsistent)"
+        );
+    }
+    // The two phosphor-bronze sources must agree within stated spread.
+    let e_nist = scalar("phosphor-bronze-c51000-nist-mono177", "young_modulus");
+    let e_mil = scalar("phosphor-bronze-5a-mil-hdbk-698a", "young_modulus");
+    assert!(
+        ((e_nist - e_mil).abs() / e_nist) < 0.10,
+        "phosphor-bronze sources disagree by more than 10%: {e_nist:.3e} vs {e_mil:.3e}"
+    );
+
+    println!(
+        "{{\"suite\":\"xtask-matdb\",\"case\":\"instrument-tranche2\",\"packs\":{},\"verdict\":\"pass\"}}",
+        INSTRUMENT_TRANCHE2_PACKS.len()
+    );
+}

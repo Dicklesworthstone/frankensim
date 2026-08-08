@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	brass-yellow-half-hard-damping-nasa-tn-d1467
+redistribution	permitted	Work of the US Government (NASA Technical Note); public use permitted; retain report number, author, and URL
+citation	Crandall, S. H. (1962), On Scaling Laws for Material Damping, NASA TN D-1467; https://ntrs.nasa.gov/api/citations/19630001113/downloads/19630001113.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	mono177-cusn-fits	Phosphor bronze C51000 class (Cu-Sn 4.2-5.8 wt pct Sn), annealed	NIST Monograph 177 chapter 20 dynamic (adiabatic) elastic measurements on annealed Cu-Sn at 295 K, composition fits E(GPa) = 128.2 - 2.005 [Sn] (SD 5.7 GPa) and nu = 0.3447 + 0.003459 [Sn] (SD 0.0184)	The modulus row below EVALUATES the source fit at the C51000 mid-range 5.0 wt pct Sn: E = 128.2 - 2.005 x 5.0 = 118.2 GPa (measured points bracket it: 117.19 GPa at 4.21 pct, 121.83 at 4.75, 119.80 at 5.99); the Poisson row pins the nearest measured value 0.344 at 4.26 pct Sn (the fit evaluates to 0.362 at 5 pct with SD 0.0184, recorded here rather than as its own row); the monograph does NOT give Cu-Sn density (the sibling pack phosphor-bronze-5a-mil-hdbk-698a carries the handbook density 8857.6 kg/m3); the printed SDs are curve-fit standard deviations without confidence level or degrees of freedom, so runtime uncertainty stays Unstated
+scalar	young-modulus	mono177-cusn-fits	young_modulus	118200	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	295	295	K
+scalar	poisson-ratio	mono177-cusn-fits	poisson_ratio	0.344	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	295	295	K

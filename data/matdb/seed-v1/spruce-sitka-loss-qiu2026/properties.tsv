@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	qiu-free-free-beam	Sitka spruce (Picea sitchensis) quarter-sawn soundboard beams	Free-free flexural beam resonance with half-power bandwidth loss factors, swept-sine 50-1000 Hz, non-contact magnetic excitation	Fifty 500 x 25 x 3 mm beams cut lengthwise along the grain from one batch of Sitka spruce soundboard stock, conditioned over saturated salt solutions at 25 C to moisture contents from 2 to 12 percent; loss factor eta = 2 zeta from the half-power bandwidth of each flexural mode; the source reports mean first-mode eta of 0.01012, 0.01123, 0.01217, 0.01297, 0.01366, and 0.01424 at 2, 4, 6, 8, 10, and 12 percent moisture content and fifth-mode eta rising from 0.00748 to 0.01134 over the same range; the rows below pin the 12 percent moisture values to match the FPL-GTR-282 elastic packs reference condition; mean first-mode frequency at 12 percent moisture content is 62.36 Hz; the authors state the loss-factor results should be interpreted primarily as indicators of relative moisture-dependent variation within the same experimental framework rather than as definitive absolute damping values, so runtime uncertainty stays Unstated; axis convention: bending about the grain axis (longitudinal), matching the L axis of instrument-axis-convention.tsv
+scalar	loss-factor-longitudinal-mode1	qiu-free-free-beam	loss_factor_longitudinal	0.01424	1	constant
+uncertainty	loss-factor-longitudinal-mode1	unstated	-	-	-	-
+validity	loss-factor-longitudinal-mode1	moisture_content	12	12	%
+validity	loss-factor-longitudinal-mode1	frequency	62.36	62.36	Hz
+scalar	loss-factor-longitudinal-mode5	qiu-free-free-beam	loss_factor_longitudinal_mode5	0.01134	1	constant
+uncertainty	loss-factor-longitudinal-mode5	unstated	-	-	-	-
+validity	loss-factor-longitudinal-mode5	moisture_content	12	12	%

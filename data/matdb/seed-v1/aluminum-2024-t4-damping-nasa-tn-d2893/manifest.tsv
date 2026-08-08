@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	aluminum-2024-t4-damping-nasa-tn-d2893
+redistribution	permitted	Work of the US Government (NASA Technical Note); public use permitted; retain report number, authors, and URL
+citation	Granick, N. and Stern, J. E. (1965), Material Damping of Aluminum by a Resonant-Dwell Technique, NASA TN D-2893, Goddard Space Flight Center; https://ntrs.nasa.gov/api/citations/19650021096/downloads/19650021096.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

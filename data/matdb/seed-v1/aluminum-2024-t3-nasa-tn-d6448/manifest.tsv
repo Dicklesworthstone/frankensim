@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	aluminum-2024-t3-nasa-tn-d6448
+redistribution	permitted	Work of the US Government (NASA Technical Note); public use permitted; retain report number, author, and URL
+citation	Shieh, R. C. (1971), Thermoelastic Damping and Its Effect on Flutter of Stressed Panels Situated in a Supersonic Airflow, NASA TN D-6448, Langley Research Center; https://ntrs.nasa.gov/api/citations/19720003309/downloads/19720003309.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

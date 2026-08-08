@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	phosphor-bronze-c51000-nist-mono177
+redistribution	permitted	Work of the US Government (NIST Monograph, US Government Printing Office, no copyright notice); public domain; retain monograph number, authors, and equation/table numbers
+citation	Simon, N. J., Drexler, E. S., and Reed, R. P. (1992), Properties of Copper and Copper Alloys at Cryogenic Temperatures, NIST Monograph 177, chapter 20 (phosphor bronzes C50100-C52400), equations 20-1 and 20-4, tables 20.1 and 20.6; https://nvlpubs.nist.gov/nistpubs/Legacy/MONO/nistmonograph177.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

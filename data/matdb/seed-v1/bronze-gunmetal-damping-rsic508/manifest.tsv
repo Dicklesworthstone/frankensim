@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	bronze-gunmetal-damping-rsic508
+redistribution	permitted	US Army Redstone Scientific Information Center contract survey report, also indexed as NASA-CR-80143, marked DISTRIBUTION OF THIS DOCUMENT IS UNLIMITED and NTRS distribution PUBLIC; retain report number, author, figure number, and the Birchon attribution the survey itself prints
+citation	Maringer, R. E. (1966), Damping Capacity of Materials, Volume I, RSIC-508, Redstone Scientific Information Center (also NASA-CR-80143), Figure 7 Damping Capacities of Some Non-ferrous Metals (After Birchon); https://ntrs.nasa.gov/api/citations/19670002730/downloads/19670002730.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	mil698a-table-xv-260	Cartridge brass 70 percent (alloy 260, UNS C26000 class, Cu 68.5-71.5 Zn remainder)	MIL-HDBK-698A Table XV wrought-alloy physical properties row 260 at 68 F	Source row verbatim: density 0.308 lb/cu-in at 68 F, modulus of elasticity in tension 16e6 psi, modulus of rigidity 6e6 psi; SI rows below are unit conversions of those printed values (0.308 lb/in3 x 27679.9 = 8525.4 kg/m3; 16e6 psi x 6894.757 Pa/psi = 110316 MPa; 6e6 psi = 41369 MPa); the Poisson row is DERIVED as nu = E/(2G) - 1 = 16/12 - 1 = 0.333 because neither MIL-HDBK-698A nor NBS C447 prints a Poisson ratio for 70-30 brass; corroboration: NBS Circular C447 Table 12 serials 962-963 give E = 14.9e6 psi annealed and 15.5e6 psi cold-drawn for 70-30 brass rod; handbook-secondary tier without confidence semantics, so runtime uncertainty stays Unstated
+scalar	density	mil698a-table-xv-260	density	8525.4	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	293	K
+scalar	young-modulus	mil698a-table-xv-260	young_modulus	110316	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293	293	K
+scalar	shear-modulus	mil698a-table-xv-260	shear_modulus	41369	MPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	293	293	K
+scalar	poisson-ratio-derived	mil698a-table-xv-260	poisson_ratio_derived	0.333	1	constant
+uncertainty	poisson-ratio-derived	unstated	-	-	-	-
+validity	poisson-ratio-derived	temperature	293	293	K
