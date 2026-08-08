@@ -1077,6 +1077,176 @@ mod tests {
         );
     }
 
+    /// Nodal-w samples of a mode shape on the sub-grid of every `step`-th
+    /// node of a `rectangle(nx, ny)` mesh (fixed DOFs sample as 0).
+    fn sample_w(model: &PlateModel, phi: &[f64], nx: usize, ny: usize, step: usize) -> Vec<f64> {
+        let mut out = Vec::new();
+        for j in (0..=ny).step_by(step) {
+            for i in (0..=nx).step_by(step) {
+                let node = j * (nx + 1) + i;
+                out.push(match model.dof_map[3 * node] {
+                    Some(r) => phi[r],
+                    None => 0.0,
+                });
+            }
+        }
+        out
+    }
+
+    /// Modal assurance criterion between two shape samples.
+    fn mac(a: &[f64], b: &[f64]) -> f64 {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na: f64 = a.iter().map(|x| x * x).sum();
+        let nb: f64 = b.iter().map(|x| x * x).sum();
+        dot * dot / (na * nb)
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one coherent literature-case gate
+    fn olson_hazell_stiffened_panel_matches_literature() {
+        // LITERATURE CASE — Olson & Hazell (1977), the classical clamped
+        // square integrally rib-stiffened plate: 203 mm × 203 mm × 1.37 mm,
+        // one central rib 6.35 mm wide × 12.7 mm deep, E = 68.7 GPa,
+        // ν = 0.3, ρ = 2820 kg/m³. Reference frequencies (Hz) as reproduced
+        // in two independent secondary sources (Srivastava, Datta & Sheikh,
+        // Shock and Vibration 11 (2004) 9–19, Table 4; Thinh, Binh & Tu,
+        // Vietnam J. Mech. 35 (2013) 31–50, Table 1):
+        let oh_theory = [718.1, 751.4, 997.4, 1007.1, 1419.8];
+        let oh_experiment = [689.0, 725.0, 961.0, 986.0, 1376.0];
+        let a = 0.203;
+        let h = 1.37e-3;
+        let e_al = 68.7e9;
+        let rho = 2820.0;
+        let sec = PlateSection::isotropic(e_al, 0.3, h, rho).expect("aluminium section");
+        // Rib: rectangle 6.35 × 12.7 mm on one face ⇒ centroid offset from
+        // the plate midplane e = h/2 + d/2. Torsion constant β·a·b³ with
+        // a/b = 2 ⇒ β ≈ 0.229 (Roark). Full-composite parallel-axis model
+        // (EI + EAe²) — the crate's stated eccentricity model.
+        let (bw, bd) = (6.35e-3, 12.7e-3);
+        let rib = |nodes: Vec<usize>| Stiffener {
+            nodes,
+            e: e_al,
+            g: e_al / 2.6,
+            area: bw * bd,
+            inertia: bw * bd * bd * bd / 12.0,
+            torsion: 0.229 * bd * bw * bw * bw,
+            eccentricity: f64::midpoint(h, bd),
+            density: rho,
+        };
+        // Two mesh densities; the coarse node grid is a subset of the fine
+        // one (24 = 2·12), so MAC pairing works on shared nodal w samples.
+        let (nx_c, nx_f) = (12usize, 24usize);
+        let window = {
+            let lo = 2.0 * std::f64::consts::PI * 400.0;
+            let hi = 2.0 * std::f64::consts::PI * 1700.0;
+            (lo * lo, hi * hi)
+        };
+        let run = |nx: usize| -> (Vec<f64>, Vec<Vec<f64>>) {
+            let mesh = PlateMesh::rectangle(a, a, nx, nx);
+            let boundary = PlateMesh::rectangle_boundary(nx, nx);
+            let mid = nx / 2;
+            let path: Vec<usize> = (0..=nx).map(|i| mid * (nx + 1) + i).collect();
+            let model = assemble(
+                &mesh,
+                &sec,
+                &boundary,
+                &[rib(path)],
+                &AssemblyOptions {
+                    pretension: 0.0,
+                    support: EdgeSupport::Clamped,
+                },
+            )
+            .expect("assemble");
+            let rep = modes(&model, window, &SliceOptions::default()).expect("modes");
+            assert!(
+                rep.expected >= 5,
+                "window must certify at least five modes at nx={nx}, got {}",
+                rep.expected
+            );
+            let freqs = rep
+                .modes
+                .iter()
+                .map(|m| m.lambda.sqrt() / (2.0 * std::f64::consts::PI))
+                .collect();
+            let shapes = rep
+                .modes
+                .iter()
+                .map(|m| sample_w(&model, &m.phi, nx, nx, nx / nx_c))
+                .collect();
+            (freqs, shapes)
+        };
+        let (freq_c, shape_c) = run(nx_c);
+        let (freq_f, shape_f) = run(nx_f);
+        // MAC pairing table: pair each of the first five fine-mesh modes
+        // with its best coarse-mesh partner. The pairing must be
+        // order-preserving (no mode crossing between densities) and strong
+        // (MAC ≥ 0.90) — this is what certifies that the frequency rows
+        // below compare like with like, not accidental neighbors.
+        let mut rows = String::new();
+        let mut last_pair = None;
+        for (m, sf) in shape_f.iter().take(5).enumerate() {
+            let (mut best, mut best_mac) = (0usize, -1.0f64);
+            for (c, sc) in shape_c.iter().enumerate() {
+                let v = mac(sf, sc);
+                if v > best_mac {
+                    best = c;
+                    best_mac = v;
+                }
+            }
+            assert!(
+                best_mac >= 0.90,
+                "mode {m}: best coarse MAC {best_mac:.3} below 0.90"
+            );
+            if let Some(prev) = last_pair {
+                assert!(
+                    best > prev,
+                    "MAC pairing must be order-preserving: fine mode {m} pairs to \
+                     coarse {best} after {prev}"
+                );
+            }
+            last_pair = Some(best);
+            let rel_theory = (freq_f[m] - oh_theory[m]).abs() / oh_theory[m];
+            let rel_exp = (freq_f[m] - oh_experiment[m]).abs() / oh_experiment[m];
+            // Authored acceptance: 8% of the Olson–Hazell THEORY column.
+            // The model boundary earns the envelope: bending-only DKT with
+            // a full-composite parallel-axis rib (no membrane DOFs) plus
+            // lumped translational rib mass — the classical eccentric-beam
+            // idealization, not the papers' in-plane-coupled elements.
+            assert!(
+                rel_theory < 0.08,
+                "mode {m}: {:.1} Hz vs Olson–Hazell theory {:.1} Hz ({:.1}%)",
+                freq_f[m],
+                oh_theory[m],
+                100.0 * rel_theory
+            );
+            {
+                use core::fmt::Write as _;
+                write!(
+                    rows,
+                    "{}{{\"mode\":{},\"freq_hz\":{:.1},\"coarse_hz\":{:.1},\"mac\":{:.4},\
+                     \"oh_theory_hz\":{:.1},\"oh_experiment_hz\":{:.1},\
+                     \"rel_err_theory\":{:.4},\"rel_err_experiment\":{:.4}}}",
+                    if m == 0 { "" } else { "," },
+                    m + 1,
+                    freq_f[m],
+                    freq_c[best],
+                    best_mac,
+                    oh_theory[m],
+                    oh_experiment[m],
+                    rel_theory,
+                    rel_exp
+                )
+                .expect("write to String cannot fail");
+            }
+        }
+        println!(
+            "{{\"suite\":\"fs-plate\",\"case\":\"olson-hazell-stiffened-panel\",\
+             \"source\":\"Olson & Hazell 1977 via Srivastava 2004 Table 4 + Thinh 2013 Table 1\",\
+             \"plate\":\"203x203x1.37mm clamped\",\"rib\":\"6.35x12.7mm central, e=7.035mm\",\
+             \"pairs\":[{rows}],\"verdict\":\"pass\"}}"
+        );
+    }
+
     #[test]
     fn named_refusals_fire() {
         // Degenerate element.

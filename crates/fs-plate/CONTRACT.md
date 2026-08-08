@@ -56,6 +56,17 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
 4. Orthotropy is load-bearing: swapping E_L/E_R moves the Navier
    fundamental by 89% on the spruce-like fixture (the wrong-grain-axis
    mutation gate).
+4b. Stiffened-panel literature case: the Olson & Hazell (1977) clamped
+   203×203×1.37 mm plate with one central 6.35×12.7 mm integral rib
+   (E = 68.7 GPa, ν = 0.3, ρ = 2820 kg/m³; reference rows reproduced in
+   Srivastava/Datta/Sheikh 2004 Table 4 and Thinh/Binh/Tu 2013 Table 1).
+   The first five modes MAC-pair order-preservingly across two mesh
+   densities (measured MAC ≥ 0.9997, floor 0.90) and sit within an
+   authored 8% of the Olson–Hazell theory column (measured worst 1.7%,
+   fine mesh: 712.2/762.9/981.7/997.6/1395.4 Hz vs
+   718.1/751.4/997.4/1007.1/1419.8; experiment column recorded in the
+   same JSON row, worst 5.2%). The envelope is authored against the
+   model boundary: bending-only DKT + full-composite parallel-axis rib.
 5. All modal results flow through fs-modal: counts are inertia-certified
    and every eigenvalue carries its M⁻¹-norm residual interval.
 
@@ -88,9 +99,11 @@ with trend assertions; orthotropic Navier + E_L/E_R swap mutation;
 drumhead membrane limit; stiffener eccentricity discrimination in the
 deliberately weak-brace regime (a stiff brace saturates into a line
 support, where extra rigidity is invisible — measured and documented);
-stiffener term isolation against Rayleigh scale; named refusals
-(degenerate element, bad section, bad stiffener). All JSON-line evidence
-rows; all modal counts inertia-certified through fs-modal.
+stiffener term isolation against Rayleigh scale; the Olson–Hazell
+stiffened-panel literature case with a MAC mode-pairing table (two mesh
+densities, order-preserving pairing gate); named refusals (degenerate
+element, bad section, bad stiffener). All JSON-line evidence rows; all
+modal counts inertia-certified through fs-modal.
 
 ## No-claim boundaries
 - Bending only: NO membrane/in-plane DOFs, so no drilling stabilization is
@@ -115,5 +128,8 @@ rows; all modal counts inertia-certified through fs-modal.
 - No damping: pencils are (K, M); the viscoelastic bead supplies per-mode
   loss factors downstream.
 - Validation is against analytic references (Navier, Leissa 35.992,
-  membrane); no measured-instrument (holography) comparison yet — that
-  case joins the instrument-matdb bead's consuming demo.
+  membrane) plus the Olson–Hazell stiffened-panel literature case, whose
+  experiment column (holography-measured) is recorded but gated only
+  through the 8% theory-column envelope. No measured-INSTRUMENT
+  (guitar-top holography) comparison yet — that case joins the
+  instrument-matdb bead's consuming demo.
