@@ -142,11 +142,17 @@ const RECT_LIGHT_GEOMETRY_REL_TOLERANCE: f64 = 1.0e-10;
 const SLAB_PARALLEL_COSINE_TOLERANCE: f64 = 2.0e-10;
 const SLAB_CONNECTION_REL_TOLERANCE: f64 = 2.0e-8;
 const SLAB_CONNECTION_BISECTION_STEPS: usize = 80;
+const PATH_ANIMATED_INSTANCE_CACHE_CAPACITY: usize = 4;
 
-#[derive(Clone, Copy)]
 struct PathTime {
     interval: ShutterInterval,
     normalized: NormalizedShutterTime,
+    cached_animated: [Option<CachedAnimatedInstance>; PATH_ANIMATED_INSTANCE_CACHE_CAPACITY],
+}
+
+struct CachedAnimatedInstance {
+    primitive_index: usize,
+    instance: GeometryInstance,
 }
 
 #[derive(Clone, Copy)]
@@ -7920,10 +7926,33 @@ fn trace_pixel_sample_with_primary(
     // the executor's logical tile/iteration and refusal routing.
     let render_cx = cx.with_stream_seed(settings.seed);
     let (jx, jy, ul) = pixel_dims(settings, sobol, key, pixel, sample)?;
-    let ray_time = shutter.map(|interval| PathTime {
-        interval,
-        normalized: interval.sample_for_stream(settings.seed, u64::from(pixel), u64::from(sample)),
-    });
+    let ray_time = match shutter {
+        Some(interval) => {
+            let normalized =
+                interval.sample_for_stream(settings.seed, u64::from(pixel), u64::from(sample));
+            let absolute_time_s = interval.time_at(normalized);
+            let mut cached_animated = std::array::from_fn(|_| None);
+            let mut cached_count = 0;
+            for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
+                if let Shape::AnimatedInstance(instance) = &primitive.shape {
+                    let Some(slot) = cached_animated.get_mut(cached_count) else {
+                        break;
+                    };
+                    *slot = Some(CachedAnimatedInstance {
+                        primitive_index,
+                        instance: instance.instance_at(&render_cx, absolute_time_s)?,
+                    });
+                    cached_count += 1;
+                }
+            }
+            Some(PathTime {
+                interval,
+                normalized,
+                cached_animated,
+            })
+        }
+        None => None,
+    };
     trace_path(
         scene,
         lighting,
@@ -7935,7 +7964,7 @@ fn trace_pixel_sample_with_primary(
         jx,
         jy,
         ul,
-        ray_time,
+        ray_time.as_ref(),
         camera_path,
         capture_primary,
         None,
@@ -8285,7 +8314,7 @@ fn discover_parallel_slab(
     cx: &Cx<'_>,
     first_ray: &Ray,
     first_hit: SceneIntersection,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
 ) -> Result<ParallelSlab, TracerError> {
     let boundary_primitive = first_hit.primitive_index;
     require_instanced_mesh_face_witness(
@@ -8597,7 +8626,7 @@ fn primitive_is_dielectric(scene: &Scene, primitive_index: usize) -> bool {
 fn trace_parallel_slab_direct_lane(
     scene: &Scene,
     cx: &Cx<'_>,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
     slab: ParallelSlab,
@@ -8835,7 +8864,7 @@ fn trace_parallel_slab_direct_lane(
 fn previous_after_dielectric_sample(
     scene: &Scene,
     cx: &Cx<'_>,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
     previous: Option<PreviousBsdf>,
     previous_origin: Point3,
     medium_stack: &MediumStack,
@@ -8978,7 +9007,7 @@ fn same_local_parallel_face_pair(left: ParallelSlab, right: ParallelSlab) -> boo
 fn replay_forward_slab_eligibility(
     scene: &Scene,
     cx: &Cx<'_>,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
     slab_path: SmoothSlabExit,
     straight_direction: Vec3,
 ) -> Result<Option<ParallelSlab>, TracerError> {
@@ -9030,7 +9059,7 @@ fn completed_slab_rectangle_nee_pdf(
     scene: &Scene,
     lighting: &AdmittedLighting<'_>,
     cx: &Cx<'_>,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
     slab_path: SmoothSlabExit,
     light_index: usize,
     light_point: Point3,
@@ -9097,7 +9126,7 @@ fn completed_slab_rectangle_nee_pdf(
 fn completed_slab_environment_nee_pdf(
     scene: &Scene,
     cx: &Cx<'_>,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
     slab_path: SmoothSlabExit,
     direction: Vec3,
     direct_pdf: f64,
@@ -9195,7 +9224,7 @@ fn trace_path(
     jx: f64,
     jy: f64,
     ul: f64,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
     camera_path: CameraPath<'_>,
     capture_primary: bool,
     resume: Option<SpectralPathState>,
@@ -10447,7 +10476,7 @@ fn intersect(
     scene: &Scene,
     cx: &Cx<'_>,
     ray: &Ray,
-    ray_time: Option<PathTime>,
+    ray_time: Option<&PathTime>,
 ) -> Result<Option<SceneIntersection>, TracerError> {
     let mut best: Option<SceneIntersection> = None;
     for (i, prim) in scene.primitives.iter().enumerate() {
@@ -10493,14 +10522,22 @@ fn intersect(
             }
             Shape::AnimatedInstance(instance) => {
                 let time = ray_time.ok_or(TracerError::MissingRayTime)?;
-                let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
-                instance
-                    .intersect(cx, &timed_ray, 1e4, TRACE_EPS)?
-                    .map(|instance_hit| SceneIntersection {
-                        primitive_index: i,
-                        hit: instance_hit.hit,
-                        instance_hit: Some(instance_hit),
-                    })
+                let instance_hit = if let Some(cached) = time
+                    .cached_animated
+                    .iter()
+                    .flatten()
+                    .find(|cached| cached.primitive_index == i)
+                {
+                    cached.instance.intersect(cx, ray, 1e4, TRACE_EPS)?
+                } else {
+                    let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
+                    instance.intersect(cx, &timed_ray, 1e4, TRACE_EPS)?
+                };
+                instance_hit.map(|instance_hit| SceneIntersection {
+                    primitive_index: i,
+                    hit: instance_hit.hit,
+                    instance_hit: Some(instance_hit),
+                })
             }
         };
         if let Some(candidate) = candidate {

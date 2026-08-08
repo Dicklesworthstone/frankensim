@@ -158,11 +158,10 @@ impl RigidTransform {
         hasher.finalize()
     }
 
-    fn world_to_local_ray(self, ray: &Ray) -> Result<Ray, InstanceError> {
-        let inverse = self.inverse()?;
+    fn transform_ray(self, ray: &Ray) -> Result<Ray, InstanceError> {
         let local = Ray {
-            origin: inverse.transform_point(ray.origin),
-            dir: inverse.transform_vector(ray.dir),
+            origin: self.transform_point(ray.origin),
+            dir: self.transform_vector(ray.dir),
         };
         if [
             local.origin.x,
@@ -234,6 +233,7 @@ pub struct GeometryInstance {
     geometry_identity: ContentHash,
     geometry: SharedGeometry,
     transform: RigidTransform,
+    inverse_transform: RigidTransform,
     // Static instances are immutable, so their identity belongs at admission
     // rather than on every successful ray hit. Animated instances deliberately
     // use the transient constructor below because their interpolated transform
@@ -271,11 +271,13 @@ impl GeometryInstance {
         if geometry_identity.as_bytes().iter().all(|byte| *byte == 0) {
             return Err(InstanceError::InvalidGeometryIdentity);
         }
+        let inverse_transform = transform.inverse()?;
         Ok(Self {
             object_id,
             geometry_identity,
             geometry,
             transform,
+            inverse_transform,
             cached_frame_identity: None,
         })
     }
@@ -351,7 +353,7 @@ impl GeometryInstance {
         {
             return Err(InstanceError::InvalidIntersectionInput);
         }
-        let local_ray = self.transform.world_to_local_ray(world_ray)?;
+        let local_ray = self.inverse_transform.transform_ray(world_ray)?;
         let (hit, audit) = match &self.geometry {
             SharedGeometry::Chart(chart) => {
                 let (hit, trace_audit) =
