@@ -31,6 +31,7 @@ use fs_ivl::Interval;
 mod nonlinear;
 mod robust;
 
+pub mod dimensioned;
 pub mod factor;
 
 pub use nonlinear::{
@@ -1005,6 +1006,10 @@ pub enum AssimError {
         /// Byte count that could not be reserved.
         requested_bytes: u128,
     },
+    /// The dimensional core refused an admission or derivation; the
+    /// structured [`fs_qty::inference::InferenceError`] is retained verbatim
+    /// and names both sides of any mismatch (bead sj31i.7.3).
+    Dimensional(fs_qty::inference::InferenceError),
     /// Finite inputs overflowed or otherwise produced a non-finite intermediate.
     NonFiniteComputation {
         /// Stable computation stage.
@@ -1218,6 +1223,7 @@ impl fmt::Display for AssimError {
                     "assimilation could not reserve {requested_bytes} bytes during {stage}"
                 )
             }
+            Self::Dimensional(error) => write!(f, "dimensional refusal: {error}"),
             Self::NonFiniteComputation { stage } => {
                 write!(f, "assimilation produced a non-finite value during {stage}")
             }
@@ -1230,6 +1236,7 @@ impl std::error::Error for AssimError {
         match self {
             Self::InvocationBudget(error) => Some(error),
             Self::BudgetRefused(refusal) => Some(refusal),
+            Self::Dimensional(error) => Some(error),
             _ => None,
         }
     }

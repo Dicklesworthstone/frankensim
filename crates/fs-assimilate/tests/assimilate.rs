@@ -1557,3 +1557,292 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
         "contract drift: section \"Invariants\" is stale for live symbol \"POLL_POLICY_ID\"; missing fact \"fixed-stride:v3\""
     );
 }
+
+// ---------------------------------------------------------------------------
+// sj31i.7.3 dimensional adoption battery: schema-bound beliefs/observations,
+// H/R algebra, affine traps, receipts, cancellation, and identity mutation.
+// ---------------------------------------------------------------------------
+
+mod dimensioned_adoption {
+    use super::*;
+    use fs_assimilate::dimensioned::{
+        DIMENSIONED_RECEIPT_PREFIX, DimensionedBelief, DimensionedObservation,
+        assimilate_dimensioned,
+    };
+    use fs_qty::Dims;
+    use fs_qty::inference::{InferenceError, SlotSchema, StateSchema};
+    use fs_qty::semantic::{QuantityKind, QuantitySpec, SemanticType, ValueForm};
+
+    const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
+    const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
+    const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
+    const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
+
+    fn slot(dims: Dims) -> SlotSchema {
+        SlotSchema::new(QuantitySpec::dimensional(dims))
+    }
+
+    fn velocity_state() -> StateSchema {
+        StateSchema::try_new(vec![slot(LENGTH), slot(VELOCITY)]).expect("state schema")
+    }
+
+    fn dimensioned_prior(cx: &Cx<'_>) -> DimensionedBelief {
+        let belief = Belief::new(vec![10.0, 1.0], vec![vec![0.5, 0.05], vec![0.05, 0.25]], cx)
+            .expect("prior belief");
+        DimensionedBelief::try_new(velocity_state(), belief).expect("dimensioned prior")
+    }
+
+    #[test]
+    fn dimensioned_update_matches_production_bits_and_binds_schema() {
+        let gate = CancelGate::new();
+        with_stream_cx(
+            &gate,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                let prior = dimensioned_prior(cx);
+                let obs = DimensionedObservation::try_new(
+                    prior.state_schema(),
+                    QuantitySpec::dimensional(LENGTH),
+                    vec![1.0, 0.0],
+                    10.5,
+                    0.2,
+                    "dim-gauge",
+                )
+                .expect("dimensioned observation");
+                let result = assimilate_dimensioned(&prior, &obs, cx).expect("dimensioned update");
+                let raw = assimilate_with_cx(prior.belief(), obs.observation(), cx).expect("raw");
+                assert!(
+                    result
+                        .posterior()
+                        .belief()
+                        .mean()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .eq(raw.mean().iter().map(|v| v.to_bits())),
+                    "dimensioned path runs the production update"
+                );
+                assert_eq!(result.posterior().belief().covariance(), raw.covariance());
+                assert_eq!(result.innovation_dims(), LENGTH);
+                assert!(result.weighted_misfit_after() <= result.weighted_misfit_before() + 1e-12);
+                assert!(
+                    result
+                        .receipt_identity()
+                        .starts_with(DIMENSIONED_RECEIPT_PREFIX)
+                );
+                let replay = assimilate_dimensioned(&prior, &obs, cx).expect("replay");
+                assert_eq!(result.receipt_identity(), replay.receipt_identity());
+            },
+        );
+    }
+
+    #[test]
+    fn dimensioned_admission_refuses_shape_mismatch() {
+        let gate = CancelGate::new();
+        with_stream_cx(
+            &gate,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                let belief = Belief::new(vec![1.0], vec![vec![1.0]], cx).expect("belief");
+                let refusal = DimensionedBelief::try_new(velocity_state(), belief)
+                    .expect_err("schema/belief shape mismatch refuses");
+                assert!(matches!(refusal, AssimError::DimMismatch { .. }));
+                let prior = dimensioned_prior(cx);
+                let refusal = DimensionedObservation::try_new(
+                    prior.state_schema(),
+                    QuantitySpec::dimensional(LENGTH),
+                    vec![1.0],
+                    10.5,
+                    0.2,
+                    "dim-gauge",
+                )
+                .expect_err("short operator refuses");
+                assert!(matches!(refusal, AssimError::DimMismatch { .. }));
+            },
+        );
+    }
+
+    #[test]
+    fn dimensioned_h_r_algebra_is_mechanical() {
+        let gate = CancelGate::new();
+        with_stream_cx(
+            &gate,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                let prior = dimensioned_prior(cx);
+                let obs = DimensionedObservation::try_new(
+                    prior.state_schema(),
+                    QuantitySpec::dimensional(VELOCITY),
+                    vec![0.0, 1.0],
+                    1.25,
+                    0.1,
+                    "dim-speedometer",
+                )
+                .expect("observation");
+                assert_eq!(obs.reading_dims(), VELOCITY);
+                assert_eq!(
+                    obs.noise_variance_dims().expect("noise dims"),
+                    Dims([2, 0, -2, 0, 0, 0])
+                );
+                assert_eq!(
+                    obs.operator_column_dims(0).expect("column"),
+                    Dims([0, 0, -1, 0, 0, 0])
+                );
+                assert_eq!(obs.operator_column_dims(1).expect("column"), Dims::NONE);
+                assert_eq!(obs.gain_dims(0).expect("gain"), TIME);
+                assert_eq!(obs.gain_dims(1).expect("gain"), Dims::NONE);
+                assert_eq!(
+                    prior.covariance_entry_dims(0, 1).expect("covariance"),
+                    Dims([2, 0, -1, 0, 0, 0])
+                );
+                assert_eq!(
+                    prior.information_entry_dims(0, 1).expect("information"),
+                    Dims([-2, 0, 1, 0, 0, 0])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn dimensioned_affine_temperature_trap_and_difference_route() {
+        let gate = CancelGate::new();
+        with_stream_cx(
+            &gate,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                let affine_slot = SlotSchema::new(QuantitySpec::Semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )));
+                let state = StateSchema::try_new(vec![slot(LENGTH), affine_slot]).expect("state");
+                let refusal = DimensionedObservation::try_new(
+                    &state,
+                    QuantitySpec::dimensional(TEMPERATURE),
+                    vec![0.0, 1.0],
+                    300.0,
+                    0.5,
+                    "dim-thermometer",
+                )
+                .expect_err("affine slot through a linear operator refuses");
+                assert!(matches!(
+                    refusal,
+                    AssimError::Dimensional(InferenceError::AffineSlotThroughLinearOperator {
+                        slot: 1
+                    })
+                ));
+
+                let difference_slot = state
+                    .slot(1)
+                    .expect("slot")
+                    .as_difference()
+                    .expect("difference conversion");
+                let difference_state =
+                    StateSchema::try_new(vec![slot(LENGTH), difference_slot]).expect("delta state");
+                let admitted = DimensionedObservation::try_new(
+                    &difference_state,
+                    QuantitySpec::Semantic(SemanticType::new(
+                        QuantityKind::TemperatureDifference,
+                        ValueForm::Static,
+                    )),
+                    vec![0.0, 1.0],
+                    2.5,
+                    0.5,
+                    "dim-thermometer",
+                );
+                assert!(admitted.is_ok());
+                let _ = cx;
+            },
+        );
+    }
+
+    #[test]
+    fn dimensioned_receipt_identity_binds_dimensions_and_policy() {
+        let gate = CancelGate::new();
+        with_stream_cx(
+            &gate,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                let prior = dimensioned_prior(cx);
+                let obs = DimensionedObservation::try_new(
+                    prior.state_schema(),
+                    QuantitySpec::dimensional(LENGTH),
+                    vec![1.0, 0.0],
+                    10.5,
+                    0.2,
+                    "dim-gauge",
+                )
+                .expect("observation");
+                let base = assimilate_dimensioned(&prior, &obs, cx).expect("update");
+
+                // Same numbers, different slot semantics: identity must diverge
+                // because the schema identity is bound into the receipt.
+                let mutated_schema =
+                    StateSchema::try_new(vec![slot(TIME), slot(VELOCITY)]).expect("mutated schema");
+                let mutated_prior =
+                    DimensionedBelief::try_new(mutated_schema, prior.belief().clone())
+                        .expect("mutated prior");
+                let mutated_obs = DimensionedObservation::try_new(
+                    mutated_prior.state_schema(),
+                    QuantitySpec::dimensional(LENGTH),
+                    vec![1.0, 0.0],
+                    10.5,
+                    0.2,
+                    "dim-gauge",
+                )
+                .expect("mutated observation");
+                let mutated =
+                    assimilate_dimensioned(&mutated_prior, &mutated_obs, cx).expect("update");
+                assert_eq!(base.posterior().belief(), mutated.posterior().belief());
+                assert_ne!(base.receipt_identity(), mutated.receipt_identity());
+            },
+        );
+    }
+
+    #[test]
+    fn dimensioned_zero_quota_cancels_without_partial_posterior() {
+        let gate = CancelGate::new();
+        let (prior, obs) = with_stream_cx(
+            &gate,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                (
+                    dimensioned_prior(cx),
+                    DimensionedObservation::try_new(
+                        &velocity_state(),
+                        QuantitySpec::dimensional(LENGTH),
+                        vec![1.0, 0.0],
+                        10.5,
+                        0.2,
+                        "dim-gauge",
+                    )
+                    .expect("observation"),
+                )
+            },
+        );
+        let refusal = with_stream_cx(
+            &gate,
+            Budget::INFINITE.with_poll_quota(0),
+            ExecMode::Deterministic,
+            TEST_STREAM,
+            |cx| {
+                assimilate_dimensioned(&prior, &obs, cx)
+                    .expect_err("zero quota refuses before publication")
+            },
+        );
+        assert!(matches!(
+            refusal,
+            AssimError::Cancelled { .. } | AssimError::BudgetRefused(_)
+        ));
+    }
+}

@@ -32,7 +32,7 @@ pub const SCHEMA_IDENTITY_PREFIX: &str = "fs-qty-inference-core:v1:";
 
 /// Structured refusals of the inference dimensional core. Every mismatch
 /// names both sides; nothing fails by default policy.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceError {
     /// A state schema must carry at least one slot.
     EmptyStateSchema,
@@ -99,7 +99,10 @@ impl core::fmt::Display for InferenceError {
         match self {
             Self::EmptyStateSchema => write!(f, "state schema must carry at least one slot"),
             Self::StateSlotLimit { slots, max } => {
-                write!(f, "state schema slots {slots} exceed the admitted envelope {max}")
+                write!(
+                    f,
+                    "state schema slots {slots} exceed the admitted envelope {max}"
+                )
             }
             Self::SlotOutOfRange { slot, slots } => {
                 write!(f, "slot {slot} is outside a {slots}-slot schema")
@@ -126,7 +129,10 @@ impl core::fmt::Display for InferenceError {
                 write!(f, "decision measure values must be finite")
             }
             Self::StaleSchemaVersion { expected, found } => {
-                write!(f, "schema version {found} is not decodable by version {expected}")
+                write!(
+                    f,
+                    "schema version {found} is not decodable by version {expected}"
+                )
             }
             Self::MalformedSchemaBytes { stage } => {
                 write!(f, "malformed canonical schema bytes during {stage}")
@@ -266,11 +272,7 @@ impl StateSchema {
     /// # Errors
     /// Returns [`InferenceError::DimensionMismatch`] when the supplied
     /// schema's dimensions differ from the slot's.
-    pub fn admit_value(
-        &self,
-        slot: usize,
-        value: QuantitySpec,
-    ) -> Result<(), InferenceError> {
+    pub fn admit_value(&self, slot: usize, value: QuantitySpec) -> Result<(), InferenceError> {
         let slot_schema = self.slot(slot)?;
         let expected = slot_schema.dims();
         let actual = match value {
@@ -309,20 +311,22 @@ impl StateSchema {
     /// [`InferenceError::MalformedSchemaBytes`] for a truncated or ragged
     /// payload.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, InferenceError> {
-        let (&version, rest) = bytes.split_first().ok_or(InferenceError::MalformedSchemaBytes {
-            stage: "schema version",
-        })?;
+        let (&version, rest) = bytes
+            .split_first()
+            .ok_or(InferenceError::MalformedSchemaBytes {
+                stage: "schema version",
+            })?;
         if version != INFERENCE_CORE_SCHEMA_VERSION {
             return Err(InferenceError::StaleSchemaVersion {
                 expected: INFERENCE_CORE_SCHEMA_VERSION,
                 found: version,
             });
         }
-        let (count_bytes, rest) = rest.split_first_chunk::<4>().ok_or(
-            InferenceError::MalformedSchemaBytes {
-                stage: "slot count",
-            },
-        )?;
+        let (count_bytes, rest) =
+            rest.split_first_chunk::<4>()
+                .ok_or(InferenceError::MalformedSchemaBytes {
+                    stage: "slot count",
+                })?;
         let count = u32::from_le_bytes(*count_bytes) as usize;
         if count == 0 || count > MAX_STATE_SLOTS {
             return Err(InferenceError::StateSlotLimit {
@@ -497,10 +501,7 @@ impl OperatorSchema {
     /// # Errors
     /// Returns [`InferenceError::AffineSlotThroughLinearOperator`] when any
     /// state slot is affine absolute temperature.
-    pub fn try_new(
-        output: ObservationSchema,
-        state: StateSchema,
-    ) -> Result<Self, InferenceError> {
+    pub fn try_new(output: ObservationSchema, state: StateSchema) -> Result<Self, InferenceError> {
         for (slot, slot_schema) in state.slots().iter().enumerate() {
             if slot_schema.is_affine_absolute_temperature() {
                 return Err(InferenceError::AffineSlotThroughLinearOperator { slot });
@@ -686,10 +687,7 @@ mod tests {
         let max = StateSchema::try_new(vec![slot(LENGTH); MAX_STATE_SLOTS]).expect("max slots");
         assert_eq!(max.len(), MAX_STATE_SLOTS);
         let over = StateSchema::try_new(vec![slot(LENGTH); MAX_STATE_SLOTS + 1]);
-        assert!(matches!(
-            over,
-            Err(InferenceError::StateSlotLimit { .. })
-        ));
+        assert!(matches!(over, Err(InferenceError::StateSlotLimit { .. })));
         assert!(matches!(
             one.slot(1),
             Err(InferenceError::SlotOutOfRange { slot: 1, slots: 1 })
@@ -698,8 +696,8 @@ mod tests {
 
     #[test]
     fn g0_covariance_and_information_entry_algebra() {
-        let state = StateSchema::try_new(vec![slot(LENGTH), slot(TIME), slot(Dims::NONE)])
-            .expect("state");
+        let state =
+            StateSchema::try_new(vec![slot(LENGTH), slot(TIME), slot(Dims::NONE)]).expect("state");
         let covariance = CovarianceSchema::over(state);
         assert_eq!(
             covariance.entry_dims(0, 0).expect("entry"),
@@ -729,7 +727,11 @@ mod tests {
             Dims([2, 0, -2, 0, 0, 0])
         );
         assert_eq!(velocity.residual_dims(), Dims([1, 0, -1, 0, 0, 0]));
-        assert!(velocity.admit_noise_variance(Dims([2, 0, -2, 0, 0, 0])).is_ok());
+        assert!(
+            velocity
+                .admit_noise_variance(Dims([2, 0, -2, 0, 0, 0]))
+                .is_ok()
+        );
         let refusal = velocity
             .admit_noise_variance(Dims([2, 0, 0, 0, 0, 0]))
             .expect_err("wrong variance dims refuse");
@@ -743,8 +745,14 @@ mod tests {
         let state = StateSchema::try_new(vec![slot(LENGTH), slot(TIME)]).expect("state");
         let output = ObservationSchema::new(QuantitySpec::dimensional(Dims([1, 0, -1, 0, 0, 0])));
         let operator = OperatorSchema::try_new(output, state).expect("operator");
-        assert_eq!(operator.column_dims(0).expect("column"), Dims([0, 0, -1, 0, 0, 0]));
-        assert_eq!(operator.column_dims(1).expect("column"), Dims([1, 0, -2, 0, 0, 0]));
+        assert_eq!(
+            operator.column_dims(0).expect("column"),
+            Dims([0, 0, -1, 0, 0, 0])
+        );
+        assert_eq!(
+            operator.column_dims(1).expect("column"),
+            Dims([1, 0, -2, 0, 0, 0])
+        );
         assert!(operator.admit_column(0, Dims([0, 0, -1, 0, 0, 0])).is_ok());
         assert!(operator.admit_column(0, LENGTH).is_err());
 
@@ -783,7 +791,11 @@ mod tests {
         let cost_b = DecisionMeasure::cost(2.5).expect("cost");
         let utility = DecisionMeasure::utility(3.0).expect("utility");
         assert_eq!(
-            cost_a.checked_add(cost_b).expect("same kind").value().to_bits(),
+            cost_a
+                .checked_add(cost_b)
+                .expect("same kind")
+                .value()
+                .to_bits(),
             4.0_f64.to_bits()
         );
         let refusal = cost_a
@@ -795,7 +807,11 @@ mod tests {
         assert!(DecisionMeasure::cost(f64::NAN).is_err());
         assert!(cost_a.checked_scale(f64::INFINITY).is_err());
         assert_eq!(
-            utility.checked_sub(DecisionMeasure::utility(1.0).expect("u")).expect("same kind").value().to_bits(),
+            utility
+                .checked_sub(DecisionMeasure::utility(1.0).expect("u"))
+                .expect("same kind")
+                .value()
+                .to_bits(),
             2.0_f64.to_bits()
         );
     }
@@ -857,7 +873,11 @@ mod tests {
         let millimeters = units::millimeters(2000.0);
         assert_eq!(meters.value().to_bits(), millimeters.value().to_bits());
         let state = StateSchema::try_new(vec![slot(LENGTH)]).expect("state");
-        assert!(state.admit_value(0, QuantitySpec::dimensional(LENGTH)).is_ok());
+        assert!(
+            state
+                .admit_value(0, QuantitySpec::dimensional(LENGTH))
+                .is_ok()
+        );
         let refusal = state
             .admit_value(0, QuantitySpec::dimensional(TIME))
             .expect_err("time is not length");

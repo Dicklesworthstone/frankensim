@@ -254,8 +254,7 @@ fn g0_rank_singular_prior_stays_exact_zero_in_singular_direction() {
 fn g0_illconditioned_prior_never_falsely_refutes() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior =
-            FactorBelief::diagonal(vec![0.0, 0.0], &[1.0e10, 1.0e-6], cx).expect("prior");
+        let prior = FactorBelief::diagonal(vec![0.0, 0.0], &[1.0e10, 1.0e-6], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0], 0.25, 1.0, "ill-conditioned").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         assert_ne!(

@@ -311,3 +311,59 @@ fn invalid_pathology_metadata_and_precancel_are_refused() {
         ));
     });
 }
+
+// sj31i.7.3: the dimensional core's batch algebra applied to a two-channel
+// robust batch — covariance diagonal dims are the squared reading dims per
+// channel, mechanically.
+#[test]
+fn robust_batch_covariance_dims_follow_the_channel_algebra() {
+    use fs_qty::Dims;
+    use fs_qty::inference::{ObservationSchema, SlotSchema, StateSchema};
+    use fs_qty::semantic::QuantitySpec;
+
+    let length = Dims([1, 0, 0, 0, 0, 0]);
+    let velocity = Dims([1, 0, -1, 0, 0, 0]);
+    let gate = CancelGate::new();
+    with_cx(&gate, |cx| {
+        // Two channels with different reading dimensions: a length gauge
+        // and a speedometer over a [length, velocity] state.
+        let state = StateSchema::try_new(vec![
+            SlotSchema::new(QuantitySpec::dimensional(length)),
+            SlotSchema::new(QuantitySpec::dimensional(velocity)),
+        ])
+        .expect("state schema");
+        let length_reading = ObservationSchema::new(QuantitySpec::dimensional(length));
+        let velocity_reading = ObservationSchema::new(QuantitySpec::dimensional(velocity));
+
+        let batch = ObservationBatch::new(
+            vec![
+                RobustObservation::available(sensor(0, 2, 10.5, 0.2, "gauge-length")),
+                RobustObservation::available(sensor(1, 2, 1.25, 0.1, "gauge-velocity")),
+            ],
+            vec![vec![0.2, 0.0], vec![0.0, 0.1]],
+            cx,
+        )
+        .expect("batch admits");
+        assert_eq!(batch.records().len(), 2);
+
+        // The batch covariance diagonal for channel k carries exactly the
+        // squared reading dimensions of channel k, mechanically derived.
+        assert_eq!(
+            length_reading
+                .noise_variance_dims()
+                .expect("length variance dims"),
+            Dims([2, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            velocity_reading
+                .noise_variance_dims()
+                .expect("velocity variance dims"),
+            Dims([2, 0, -2, 0, 0, 0])
+        );
+        assert_eq!(state.len(), 2);
+        // Cross-channel covariance entries carry the product of the two
+        // reading dimensions.
+        let cross = length.checked_plus(velocity).expect("cross dims");
+        assert_eq!(cross, Dims([2, 0, -1, 0, 0, 0]));
+    });
+}

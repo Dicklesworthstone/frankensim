@@ -130,6 +130,21 @@ linear-Gaussian core of weak-constraint assimilation.
 - `factor::scalar_factor_work_estimate(dim)` — checked construction,
   update-with-receipt, and checker work totals for parent admission
   sealing.
+- `dimensioned::DimensionedBelief` / `dimensioned::DimensionedObservation`
+  — the dimensionally typed front door (bead sj31i.7.3) binding
+  `fs_qty::inference` schemas to the checked belief/observation carriers:
+  covariance and information entry dimensions are derived mechanically
+  from the state schema, operator columns carry `reading - state(i)`,
+  noise variance carries the squared reading, innovations and residuals
+  inherit the reading, gains carry `state(i) - reading`, and affine
+  absolute-temperature state slots are refused through linear operators
+  until explicitly converted to differences.
+- `dimensioned::assimilate_dimensioned` — runs the production scalar
+  updater under the bound schema, verifies the weighted misfit
+  dimensionless by schema algebra, and returns the posterior with a
+  `dimensioned-assimilation:v1:<64 lowercase hex>` receipt identity
+  binding the schema identity, the PSD admission policy version, the
+  execution mode, and the exact posterior bits.
 
 ## Invariants
 
@@ -181,6 +196,14 @@ linear-Gaussian core of weak-constraint assimilation.
 - Factor-path allocation is fallible (`try_reserve_exact` ->
   `AllocationRefused`), the work plan is checked before work begins, and
   polling follows the same scalar strides as the dense path.
+- The dimensioned lane enforces units mechanically: schema/belief shape,
+  operator length, and the misfit quotient are checked before arithmetic;
+  a dimensional refusal is `AssimError::Dimensional` wrapping the typed
+  `fs_qty::inference::InferenceError`, and every mismatch names both
+  rendered sides. The state schema is invariant under the linear update,
+  so the posterior shares the prior schema exactly. The receipt identity
+  binds dimensions and numeric policy: the same posterior bits under a
+  mutated schema produce a different identity.
 - In exact arithmetic, fusing valid observations cannot increase component
   variances and the batch posterior cannot increase the weighted measurement
   misfit. Floating results are checked for finiteness, not interval-certified.
@@ -409,6 +432,15 @@ a high-dynamic-range metrology battery across ten decades of variance; state
 permutation metamorphism; zero-quota cancellation without partial output;
 checked work-plan estimates; and bounded schema-valid structured log emission.
 
+`tests/assimilate.rs` dimensioned battery (bead `sj31i.7.3`): bit-exact match
+with the production update under a bound schema; shape/operator-length
+refusals; mechanical H/R, gain, covariance, and information dimensions;
+affine-temperature traps and the difference-conversion route; receipt identity
+binding to schema and numeric policy (same bits, mutated schema, divergent
+identity); deterministic replay; and zero-quota cancellation without partial
+posterior. `tests/robust.rs` adds the two-channel batch covariance-dimension
+algebra case.
+
 ## No-claim boundaries
 
 - v1 is the LINEAR-GAUSSIAN assimilation with linear observation operators;
@@ -487,6 +519,11 @@ checked work-plan estimates; and bounded schema-valid structured log emission.
   scale heuristic (fixed multiple of epsilon times magnitude and dimension);
   a `Verified` verdict means agreement within that stated tolerance, not a
   proof of bitwise equivalence.
+- The dimensioned lane binds declared schemas to carriers and enforces the
+  dimensional algebra mechanically; it does not prove that a caller's
+  DECLARED schema matches the physical system, and its receipt carries no
+  contraction authority — contraction claims come only from the factor
+  lane's executable receipts.
 - Logical-work totals and fixed poll strides are accounting/cancellation
   semantics, not claims about instructions, wall-clock time, allocation peaks,
   pause/resume state, deadline/cost enforcement, drain latency, or a

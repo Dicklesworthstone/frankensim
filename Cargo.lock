@@ -988,6 +988,7 @@ dependencies = [
  "fs-exec",
  "fs-ivl",
  "fs-obs",
+ "fs-qty",
 ]
 
 [[package]]
@@ -1143,7 +1144,10 @@ dependencies = [
  "fs-ga",
  "fs-geom",
  "fs-ivl",
+ "fs-matdb",
+ "fs-material",
  "fs-motion",
+ "fs-qty",
  "fs-query",
  "fs-tribo",
 ]
@@ -1304,8 +1308,11 @@ dependencies = [
  "fs-img",
  "fs-ir",
  "fs-ledger",
+ "fs-matdb",
+ "fs-material",
  "fs-math",
  "fs-mbd",
+ "fs-qty",
  "fs-rand",
  "fs-render",
  "fs-rep-frep",
