@@ -31,6 +31,8 @@ use fs_ivl::Interval;
 mod nonlinear;
 mod robust;
 
+pub mod factor;
+
 pub use nonlinear::{
     FiniteDifferenceProbe, FiniteDifferenceSettings, LinearizationDisposition,
     NonlinearAssimilation, NonlinearLinearization, NonlinearObservationSpec,
@@ -995,6 +997,14 @@ pub enum AssimError {
     InvertedRegimeBounds,
     /// The innovation covariance was non-positive (degenerate).
     SingularInnovation,
+    /// A checked backing allocation refused before work began; no partial
+    /// belief, factor, or receipt is published.
+    AllocationRefused {
+        /// Stable computation stage that requested the allocation.
+        stage: &'static str,
+        /// Byte count that could not be reserved.
+        requested_bytes: u128,
+    },
     /// Finite inputs overflowed or otherwise produced a non-finite intermediate.
     NonFiniteComputation {
         /// Stable computation stage.
@@ -1198,6 +1208,15 @@ impl fmt::Display for AssimError {
             }
             Self::SingularInnovation => {
                 write!(f, "innovation covariance is non-positive")
+            }
+            Self::AllocationRefused {
+                stage,
+                requested_bytes,
+            } => {
+                write!(
+                    f,
+                    "assimilation could not reserve {requested_bytes} bytes during {stage}"
+                )
             }
             Self::NonFiniteComputation { stage } => {
                 write!(f, "assimilation produced a non-finite value during {stage}")
