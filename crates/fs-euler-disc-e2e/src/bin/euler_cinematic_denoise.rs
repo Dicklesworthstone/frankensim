@@ -50,6 +50,7 @@ struct Cli {
     frame_start: u64,
     frame_count: u64,
     initial_cut: bool,
+    allow_uniform_spp_transition_at: Option<u64>,
     denoise_spatial_passes: u8,
     denoise_spatial_sigma: f32,
 }
@@ -104,6 +105,77 @@ struct SequenceIdentity {
     strategy: String,
     max_depth: u64,
     render_versions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UniformSppTransition {
+    frame: u64,
+    from_spp: u32,
+    to_spp: u32,
+    from_composition: String,
+    to_composition: String,
+    from_shutter: String,
+    to_shutter: String,
+}
+
+fn admit_uniform_spp_transition(
+    frame: u64,
+    from: &SequenceIdentity,
+    to: &SequenceIdentity,
+) -> Result<UniformSppTransition, String> {
+    if from.sample_mode != "uniform"
+        || to.sample_mode != "uniform"
+        || from.adaptive_policy.is_some()
+        || to.adaptive_policy.is_some()
+    {
+        return Err("an authorized SPP transition must remain uniform on both sides".to_owned());
+    }
+    if from.sample_ceiling == to.sample_ceiling {
+        return Err(format!(
+            "authorized SPP transition at absolute frame {frame} did not change uniform SPP"
+        ));
+    }
+    let from_suffix = format!(";strata={}", from.sample_ceiling);
+    let to_suffix = format!(";strata={}", to.sample_ceiling);
+    let from_shutter_family = from.shutter.strip_suffix(&from_suffix).ok_or_else(|| {
+        format!(
+            "authorized SPP transition at absolute frame {frame} has a source shutter that is not bound to its SPP strata"
+        )
+    })?;
+    let to_shutter_family = to.shutter.strip_suffix(&to_suffix).ok_or_else(|| {
+        format!(
+            "authorized SPP transition at absolute frame {frame} has a destination shutter that is not bound to its SPP strata"
+        )
+    })?;
+    if from_shutter_family != to_shutter_family {
+        return Err(format!(
+            "authorized SPP transition at absolute frame {frame} changed shutter semantics beyond the SPP stratum count"
+        ));
+    }
+
+    let mut normalized_from = from.clone();
+    normalized_from.sample_ceiling = 0;
+    normalized_from.composition.clear();
+    normalized_from.shutter = from_shutter_family.to_owned();
+    let mut normalized_to = to.clone();
+    normalized_to.sample_ceiling = 0;
+    normalized_to.composition.clear();
+    normalized_to.shutter = to_shutter_family.to_owned();
+    if normalized_from != normalized_to {
+        return Err(format!(
+            "authorized SPP transition at absolute frame {frame} changed provenance beyond uniform SPP, its composition binding, and the matching shutter stratum count"
+        ));
+    }
+
+    Ok(UniformSppTransition {
+        frame,
+        from_spp: from.sample_ceiling,
+        to_spp: to.sample_ceiling,
+        from_composition: from.composition.clone(),
+        to_composition: to.composition.clone(),
+        from_shutter: from.shutter.clone(),
+        to_shutter: to.shutter.clone(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,7 +286,9 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
     let color = critique_color_config();
     let mut history: Option<TemporalDenoisedFrame> = None;
     let mut expected_dimensions: Option<(u32, u32)> = None;
-    let mut expected_sequence: Option<SequenceIdentity> = None;
+    let mut first_sequence: Option<SequenceIdentity> = None;
+    let mut active_sequence: Option<SequenceIdentity> = None;
+    let mut admitted_spp_transition: Option<UniformSppTransition> = None;
     let mut previous_timing: Option<FrameTiming> = None;
     let mut raw_sequence =
         DomainHasher::new("org.frankensim.euler-critique.offline-denoise.raw-input-sequence.v1");
@@ -245,14 +319,20 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
             } else {
                 expected_dimensions = Some(dimensions);
             }
-            if let Some(expected) = &expected_sequence {
-                if raw.sequence_identity != *expected {
+            if let Some(expected) = &active_sequence {
+                if cli.allow_uniform_spp_transition_at == Some(frame) {
+                    let transition =
+                        admit_uniform_spp_transition(frame, expected, &raw.sequence_identity)?;
+                    active_sequence = Some(raw.sequence_identity.clone());
+                    admitted_spp_transition = Some(transition);
+                } else if raw.sequence_identity != *expected {
                     return Err(format!(
-                        "frame continuity violation at absolute frame {frame}: EXR provenance identity differs from the first requested frame"
+                        "frame continuity violation at absolute frame {frame}: EXR provenance identity differs from the active requested segment"
                     ));
                 }
             } else {
-                expected_sequence = Some(raw.sequence_identity.clone());
+                first_sequence = Some(raw.sequence_identity.clone());
+                active_sequence = Some(raw.sequence_identity.clone());
             }
             let boundary = denoise_boundary(ordinal);
             validate_timing_continuity(previous_timing, raw.timing, frame, boundary)?;
@@ -307,12 +387,18 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
             staging_output.display()
         ));
     }
-    let sequence_identity = expected_sequence.as_ref().ok_or_else(|| {
+    let sequence_identity = first_sequence.as_ref().ok_or_else(|| {
         format!(
             "denoiser produced no sequence identity; incomplete staged output was preserved at {}",
             staging_output.display()
         )
     })?;
+    if cli.allow_uniform_spp_transition_at.is_some() && admitted_spp_transition.is_none() {
+        return Err(format!(
+            "the authorized uniform-SPP transition was not observed; incomplete staged output was preserved at {}",
+            staging_output.display()
+        ));
+    }
     let dimensions = expected_dimensions.ok_or_else(|| {
         format!(
             "denoiser produced no raster dimensions; incomplete staged output was preserved at {}",
@@ -325,6 +411,7 @@ fn run_cli(cli: &Cli, mut progress: impl FnMut(&str)) -> Result<(), String> {
         dimensions,
         raw_sequence.finalize(),
         preview_sequence.finalize(),
+        admitted_spp_transition.as_ref(),
         color,
         denoise_config,
     )
@@ -1385,6 +1472,7 @@ fn offline_preview_manifest(
     dimensions: (u32, u32),
     raw_sequence_identity: ContentHash,
     preview_sequence_identity: ContentHash,
+    spp_transition: Option<&UniformSppTransition>,
     color: CinematicColorConfig,
     denoise: TemporalDenoiseConfig,
 ) -> Result<String, String> {
@@ -1411,7 +1499,7 @@ fn offline_preview_manifest(
         source.material_palette.as_bytes(),
     );
     let mut render_contract =
-        DomainHasher::new("org.frankensim.euler-critique.source-render-contract.v1");
+        DomainHasher::new("org.frankensim.euler-critique.source-render-contract.v2");
     render_contract.update(&source.shot_id.to_le_bytes());
     render_contract.update(source.cut_side.as_bytes());
     render_contract.update(source.shutter.as_bytes());
@@ -1424,9 +1512,19 @@ fn offline_preview_manifest(
     if let Some(policy) = &source.adaptive_policy {
         render_contract.update(policy.as_bytes());
     }
+    if let Some(transition) = spp_transition {
+        render_contract.update(b"authorized-uniform-spp-transition-v1");
+        render_contract.update(&transition.frame.to_le_bytes());
+        render_contract.update(&transition.from_spp.to_le_bytes());
+        render_contract.update(&transition.to_spp.to_le_bytes());
+        render_contract.update(transition.from_composition.as_bytes());
+        render_contract.update(transition.to_composition.as_bytes());
+        render_contract.update(transition.from_shutter.as_bytes());
+        render_contract.update(transition.to_shutter.as_bytes());
+    }
     let render_contract_identity = render_contract.finalize();
     let mut derivative =
-        DomainHasher::new("org.frankensim.euler-critique.offline-denoised-preview-sequence.v1");
+        DomainHasher::new("org.frankensim.euler-critique.offline-denoised-preview-sequence.v2");
     derivative.update(raw_sequence_identity.as_bytes());
     derivative.update(preview_sequence_identity.as_bytes());
     derivative.update(denoise_config_identity.as_bytes());
@@ -1441,11 +1539,32 @@ fn offline_preview_manifest(
         .adaptive_policy
         .as_ref()
         .map_or_else(|| "null".to_owned(), |policy| format!("\"{policy}\""));
+    let spp_transition_json = spp_transition.map_or_else(
+        || "null".to_owned(),
+        |transition| {
+            format!(
+                concat!(
+                    "{{\"frame\":{},\"authority\":\"explicit-cli-opt-in\",",
+                    "\"from_uniform_spp\":{},\"to_uniform_spp\":{},",
+                    "\"from_composition_identity\":\"{}\",",
+                    "\"to_composition_identity\":\"{}\",",
+                    "\"from_shutter\":\"{}\",\"to_shutter\":\"{}\"}}"
+                ),
+                transition.frame,
+                transition.from_spp,
+                transition.to_spp,
+                transition.from_composition,
+                transition.to_composition,
+                transition.from_shutter,
+                transition.to_shutter,
+            )
+        },
+    );
 
     Ok(format!(
         concat!(
             "{{\n",
-            "  \"schema\": \"frankensim-euler-offline-denoise-v2\",\n",
+            "  \"schema\": \"frankensim-euler-offline-denoise-v3\",\n",
             "  \"authority\": \"biased-display-derivative-not-raw-estimate\",\n",
             "  \"publication\": \"single-writer-staged-directory-rename\",\n",
             "  \"initial_boundary\": \"cut\",\n",
@@ -1462,6 +1581,7 @@ fn offline_preview_manifest(
             "  \"source_sample_mode\": \"{}\",\n",
             "  \"source_sample_ceiling\": {},\n",
             "  \"source_adaptive_policy\": {},\n",
+            "  \"authorized_uniform_spp_transition\": {},\n",
             "  \"source_object_palette_entries\": {},\n",
             "  \"source_material_palette_entries\": {},\n",
             "  \"source_object_palette_identity\": \"{}\",\n",
@@ -1490,6 +1610,7 @@ fn offline_preview_manifest(
         source.sample_mode,
         source.sample_ceiling,
         adaptive_policy_json,
+        spp_transition_json,
         source.object_palette_entries,
         source.material_palette_entries,
         object_palette_identity.to_hex(),
@@ -1557,6 +1678,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut frame_start = None;
     let mut frame_count = None;
     let mut initial_cut = false;
+    let mut allow_uniform_spp_transition_at = None;
     let mut denoise_spatial_passes = None;
     let mut denoise_spatial_sigma = None;
     let mut args = args;
@@ -1568,6 +1690,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
                     || frame_start.is_some()
                     || frame_count.is_some()
                     || initial_cut
+                    || allow_uniform_spp_transition_at.is_some()
                     || denoise_spatial_passes.is_some()
                     || denoise_spatial_sigma.is_some()
                 {
@@ -1600,6 +1723,12 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
                 )?)
             }
             "--initial-cut" => initial_cut = true,
+            "--allow-uniform-spp-transition-at" => {
+                allow_uniform_spp_transition_at = Some(parse_u64(
+                    &next_value(&mut args, "--allow-uniform-spp-transition-at")?,
+                    "allow-uniform-spp-transition-at",
+                )?)
+            }
             "--denoise-spatial-passes" => {
                 denoise_spatial_passes = Some(parse_u8(
                     &next_value(&mut args, "--denoise-spatial-passes")?,
@@ -1623,6 +1752,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
         frame_start: frame_start.ok_or_else(|| format!("missing --frame-start\n{}", usage()))?,
         frame_count: frame_count.ok_or_else(|| format!("missing --frame-count\n{}", usage()))?,
         initial_cut,
+        allow_uniform_spp_transition_at,
         denoise_spatial_passes: denoise_spatial_passes.unwrap_or(defaults.spatial_iterations),
         denoise_spatial_sigma: denoise_spatial_sigma.unwrap_or(defaults.spatial_sigma_rgb),
     };
@@ -1633,6 +1763,18 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
         return Err(format!(
             "nonzero frame-start {} requires --initial-cut so missing temporal history is explicit",
             cli.frame_start
+        ));
+    }
+    let frame_end = cli
+        .frame_start
+        .checked_add(cli.frame_count)
+        .ok_or_else(|| "frame range overflows u64".to_owned())?;
+    if let Some(transition_frame) = cli.allow_uniform_spp_transition_at
+        && (transition_frame <= cli.frame_start || transition_frame >= frame_end)
+    {
+        return Err(format!(
+            "allow-uniform-spp-transition-at must identify a frame strictly inside the requested range {}..{}; found {transition_frame}",
+            cli.frame_start, frame_end
         ));
     }
     if cli.denoise_spatial_passes == 0
@@ -1674,7 +1816,7 @@ fn parse_positive_f32(value: &str, name: &str) -> Result<f32, String> {
 }
 
 const fn usage() -> &'static str {
-    "Usage:\n  euler_cinematic_denoise --input DIR --output DIR --frame-start N --frame-count N [--initial-cut] [--denoise-spatial-passes 1..8] [--denoise-spatial-sigma X]\n  euler_cinematic_denoise --inspect-samples EXR"
+    "Usage:\n  euler_cinematic_denoise --input DIR --output DIR --frame-start N --frame-count N [--initial-cut] [--allow-uniform-spp-transition-at FRAME] [--denoise-spatial-passes 1..8] [--denoise-spatial-sigma X]\n  euler_cinematic_denoise --inspect-samples EXR"
 }
 
 #[cfg(test)]
@@ -2094,6 +2236,53 @@ mod tests {
     }
 
     #[test]
+    fn explicit_uniform_spp_transition_changes_only_sampling_bound_identity() {
+        let from =
+            validate_final_diagnostic_attributes(&final_diagnostic(), Path::new("frame-0.exr"), 0)
+                .expect("source identity");
+        let mut higher_spp = final_diagnostic();
+        set_attribute(&mut higher_spp, "frankensim.render.spp", "32");
+        set_attribute(&mut higher_spp, "frankensim.render.sppCeiling", "32");
+        set_attribute(
+            &mut higher_spp,
+            "frankensim.render.shutter",
+            "convention=back-loaded;distribution=stratified-counter-v1;strata=32",
+        );
+        set_attribute(
+            &mut higher_spp,
+            "frankensim.source.composition",
+            "7777777777777777777777777777777777777777777777777777777777777777",
+        );
+        let to = validate_final_diagnostic_attributes(&higher_spp, Path::new("frame-1.exr"), 0)
+            .expect("destination identity");
+        let transition =
+            admit_uniform_spp_transition(1, &from, &to).expect("authorized SPP-only rung");
+        assert_eq!(transition.frame, 1);
+        assert_eq!((transition.from_spp, transition.to_spp), (16, 32));
+
+        let mut changed_scene = to.clone();
+        changed_scene.scene_hash =
+            "8888888888888888888888888888888888888888888888888888888888888888".to_owned();
+        let error = admit_uniform_spp_transition(1, &from, &changed_scene)
+            .expect_err("scene changes must not hide behind an SPP transition");
+        assert!(error.contains("changed provenance beyond uniform SPP"));
+
+        let mut changed_shutter = to.clone();
+        changed_shutter.shutter =
+            "convention=centered;distribution=stratified-counter-v1;strata=32".to_owned();
+        let error = admit_uniform_spp_transition(1, &from, &changed_shutter)
+            .expect_err("shutter semantics must remain fixed");
+        assert!(error.contains("changed shutter semantics beyond"));
+
+        let mut adaptive = to.clone();
+        adaptive.sample_mode = "adaptive".to_owned();
+        adaptive.adaptive_policy = Some("policy".to_owned());
+        let error = admit_uniform_spp_transition(1, &from, &adaptive)
+            .expect_err("adaptive policy changes need a different contract");
+        assert!(error.contains("must remain uniform"));
+    }
+
+    #[test]
     fn sample_inspection_statistics_are_exact_and_use_nearest_rank_quantiles() {
         let summary = summarize_sample_counts([2, 2, 2, 2, 8, 8, 16, 16].into_iter(), 16)
             .expect("valid exact sample counts");
@@ -2309,10 +2498,62 @@ mod tests {
                 frame_start: 3,
                 frame_count: 4,
                 initial_cut: true,
+                allow_uniform_spp_transition_at: None,
                 denoise_spatial_passes: 4,
                 denoise_spatial_sigma: 0.08,
             })
         );
+
+        let transition = parse_cli(
+            [
+                "--input",
+                "raw",
+                "--output",
+                "preview",
+                "--frame-start",
+                "0",
+                "--frame-count",
+                "3",
+                "--allow-uniform-spp-transition-at",
+                "2",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("one explicit SPP transition inside the requested range");
+        assert_eq!(
+            transition,
+            Command::Denoise(Cli {
+                input: PathBuf::from("raw"),
+                output: PathBuf::from("preview"),
+                frame_start: 0,
+                frame_count: 3,
+                initial_cut: false,
+                allow_uniform_spp_transition_at: Some(2),
+                denoise_spatial_passes: TemporalDenoiseConfig::default().spatial_iterations,
+                denoise_spatial_sigma: TemporalDenoiseConfig::default().spatial_sigma_rgb,
+            })
+        );
+        for invalid_frame in ["0", "3"] {
+            let error = parse_cli(
+                [
+                    "--input",
+                    "raw",
+                    "--output",
+                    "preview",
+                    "--frame-start",
+                    "0",
+                    "--frame-count",
+                    "3",
+                    "--allow-uniform-spp-transition-at",
+                    invalid_frame,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .expect_err("transition must be strictly inside the requested range");
+            assert!(error.contains("must identify a frame strictly inside"));
+        }
     }
 
     #[test]
@@ -2348,6 +2589,7 @@ mod tests {
                 frame_start: 0,
                 frame_count: 2,
                 initial_cut: false,
+                allow_uniform_spp_transition_at: None,
                 denoise_spatial_passes: TemporalDenoiseConfig::default().spatial_iterations,
                 denoise_spatial_sigma: TemporalDenoiseConfig::default().spatial_sigma_rgb,
             })
