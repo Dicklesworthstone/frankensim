@@ -17,6 +17,7 @@
 pub mod calibrate;
 pub mod elastic;
 pub mod fiber;
+pub mod gas;
 pub mod graph;
 pub mod hyper;
 pub mod identifiability;
