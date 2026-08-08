@@ -10,18 +10,26 @@
 //! structural modal displacement `b_r` and cavity modal pressure `a_q`:
 //!
 //! structure row r:
-//!   `[omega_r^2 (1 + i eta_s) - omega^2] b_r - SUM_q C_rq a_q
+//!   `[omega_r^2 (1 - i eta_s) - omega^2] b_r - SUM_q C_rq a_q
 //!      - i omega SUM_s Zm_rs b_s = F_r`
 //! cavity row q:
-//!   `[omega_q^2 (1 + i eta_a) - omega^2] a_q
+//!   `[omega_q^2 (1 - i eta_a) - omega^2] a_q
 //!      - (rho0 c0^2 / Lambda_q) omega^2 SUM_r C_rq b_r = 0`
 //!
-//! where `C_rq = INT_S phi_r psi_q dA` over the interface with the
-//! interface normal pointing INTO the cavity (positive plate deflection
-//! compresses the cavity — one normal convention shared by BOTH
-//! projections; using different conventions in the two rows is the
-//! "sign-flipped interface normal" mutation and is caught by the
-//! energy audit), and `Zm` is the exterior radiation impedance matrix
+//! (Under `e^{-i omega t}` the DISSIPATIVE hysteretic stiffness is
+//! `k (1 - i eta)`; the opposite sign pumps energy, and the power
+//! audit below is the executable proof.)
+//!
+//! where `C_rq = INT_S phi_r psi_q dA` over the interface with
+//! positive structural deflection pointing AWAY from the cavity
+//! (toward the exterior — the convention that composes directly with
+//! the BEM's outward panel velocities; the sealed-cavity limit
+//! `omega_q = 0` then gives `a = -(rho0 c0^2 / Lambda) C^T b`:
+//! deflection away from the cavity rarefies it). One convention must
+//! be shared by BOTH rows; an inconsistent flip between them is the
+//! "sign-flipped interface normal" mutation, caught by the
+//! interface-equals-cavity audit residual, not the (tautological)
+//! input balance. `Zm` is the exterior radiation impedance matrix
 //! projected onto the structural modes
 //! ([`project_radiation_impedance`]; produced upstream by
 //! `fs_bem::helmholtz::radiation_impedance_matrix`). Hysteretic loss
@@ -217,33 +225,44 @@ pub fn rectangular_cavity_modes(
     }
     let pi = core::f64::consts::PI;
     // Enumerate a generous index box, sort by omega, truncate.
-    let max_index = {
-        // Enough indices per axis that the box certainly contains the
-        // lowest `count` modes: count modes fit inside index radius
-        // ~ count^(1/3) per axis; use a safe margin.
-        let mut m = 2usize;
-        while (m + 1).pow(3) < 8 * count {
-            m += 1;
-        }
-        m
-    };
-    let mut all: Vec<(f64, usize, usize, usize)> = Vec::new();
-    for l in 0..=max_index {
-        for m in 0..=max_index {
-            for n in 0..=max_index {
-                let k2 =
-                    (l as f64 / lx).powi(2) + (m as f64 / ly).powi(2) + (n as f64 / lz).powi(2);
-                all.push((c0 * pi * k2.sqrt(), l, m, n));
+    // Enumeration box with an explicit SUFFICIENCY proof instead of an
+    // isotropic-count heuristic (which silently dropped the lowest
+    // modes of elongated cavities — executed counterexample in the
+    // tests): any mode OUTSIDE the `0..=max_index` box has, along the
+    // violating axis alone, `omega >= c0 pi (max_index + 1) / L_axis`.
+    // The box is therefore complete for the lowest `count` modes once
+    // that single-axis exclusion bound exceeds the count-th smallest
+    // frequency found INSIDE the box, for every axis (the binding axis
+    // is the longest one); double the box and retry otherwise.
+    let mut max_index = 2usize;
+    let mut all: Vec<(f64, usize, usize, usize)>;
+    loop {
+        all = Vec::with_capacity((max_index + 1).pow(3));
+        for l in 0..=max_index {
+            for m in 0..=max_index {
+                for n in 0..=max_index {
+                    let k2 =
+                        (l as f64 / lx).powi(2) + (m as f64 / ly).powi(2) + (n as f64 / lz).powi(2);
+                    all.push((c0 * pi * k2.sqrt(), l, m, n));
+                }
             }
         }
+        all.sort_by(|p, q| {
+            p.0.partial_cmp(&q.0)
+                .expect("finite frequencies")
+                .then(p.1.cmp(&q.1))
+                .then(p.2.cmp(&q.2))
+                .then(p.3.cmp(&q.3))
+        });
+        if all.len() >= count {
+            let omega_cut = all[count - 1].0;
+            let excluded_floor = c0 * pi * (max_index + 1) as f64 / lx.max(ly).max(lz);
+            if excluded_floor > omega_cut {
+                break;
+            }
+        }
+        max_index *= 2;
     }
-    all.sort_by(|p, q| {
-        p.0.partial_cmp(&q.0)
-            .expect("finite frequencies")
-            .then(p.1.cmp(&q.1))
-            .then(p.2.cmp(&q.2))
-            .then(p.3.cmp(&q.3))
-    });
     all.truncate(count);
     let volume = lx * ly * lz;
     let eps = |k: usize| if k == 0 { 1.0 } else { 2.0 };
@@ -335,9 +354,10 @@ pub fn helmholtz_resonator_mode(
 
 /// Assemble the modal coupling matrix `C_rq = INT_S phi_r psi_q dA` by
 /// the interface quadrature `SUM_i phi_r(i) psi_q(i) A_i`, row-major
-/// `n_s x n_a`. The interface normal convention (into the cavity) is
-/// carried by the SIGN of the structural shapes; use one convention for
-/// every projection touching the same interface.
+/// `n_s x n_a`. The deflection sign convention (positive AWAY from the
+/// cavity, matching the module formulation) is carried by the SIGN of
+/// the structural shapes; use one convention for every projection
+/// touching the same interface.
 ///
 /// # Errors
 /// [`VibroError::ShapeMismatch`] when the sample counts disagree.
@@ -1345,6 +1365,109 @@ mod tests {
         assert_eq!(
             x.power.balance_residual.to_bits(),
             y.power.balance_residual.to_bits()
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use fs_la::eigen_complex::det_complex;
+
+    #[test]
+    fn elongated_cavity_keeps_its_lowest_axial_modes() {
+        // REGRESSION (fresh-eyes review, executed counterexample): the
+        // old isotropic index-box heuristic returned (0,0,1)/(0,1,0)
+        // modes at ~10776 rad/s as the 5th/6th modes of a 1.0 x 0.1 x
+        // 0.1 duct, silently dropping the true (4,0,0) and (5,0,0)
+        // axial modes. The sufficiency-checked box must return the
+        // pure axial ladder omega_l = l pi c0 / lx.
+        let cav = rectangular_cavity_modes(
+            1.0,
+            0.1,
+            0.1,
+            AcousticMedium::air(),
+            0.0,
+            6,
+            &[[0.25, 0.05]],
+        )
+        .expect("elongated cavity");
+        let pi = core::f64::consts::PI;
+        for (l, &omega) in cav.omegas.iter().enumerate() {
+            let expected = l as f64 * pi * 343.0 / 1.0;
+            assert!(
+                (omega - expected).abs() <= 1e-9 * expected.max(1.0),
+                "mode {l}: {omega} vs axial ladder {expected}"
+            );
+        }
+        println!(
+            "{{\"suite\":\"fs-couple-vibro\",\"case\":\"elongated-cavity-regression\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn multi_mode_pencil_roots_zero_the_independent_determinant() {
+        // COVERAGE (fresh-eyes review): every prior pencil test was
+        // 1x1, where the C / C^T index arithmetic collapses. Here a
+        // 2x2 model with four DISTINCT couplings is checked against an
+        // independently assembled determinant of the ORIGINAL
+        // (non-linearized) coupled block matrix
+        //   D(x) = [[Omega_s^2 - x I, -C], [-s_q x C^T, Omega_a^2 - x I]]
+        // — a transpose-index typo in the engine's linearization gives
+        // roots that fail to zero this determinant.
+        let structure = StructuralModes {
+            omegas: vec![100.0, 170.0],
+            shapes: vec![vec![1.0], vec![1.0]],
+            loss_factor: 0.0,
+        };
+        let cavity = CavityModes {
+            omegas: vec![140.0, 260.0],
+            lambdas: vec![0.02, 0.011],
+            interface: vec![vec![1.0], vec![1.0]],
+            loss_factor: 0.0,
+            rho0: 1.204,
+            c0: 343.0,
+        };
+        // Row-major n_s x n_a with four distinct entries.
+        let coupling = vec![2.0e-3, -1.1e-3, 0.7e-3, 1.9e-3];
+        let model = VibroacousticModel::try_new(&structure, &cavity, coupling.clone(), None)
+            .expect("model");
+        let freqs = model.undamped_natural_frequencies().expect("pencil");
+        assert_eq!(freqs.len(), 4);
+        for pair in freqs.windows(2) {
+            assert!(pair[0] <= pair[1], "roots must be ascending");
+        }
+        let rho_c2 = 1.204 * 343.0 * 343.0;
+        let det_at = |x: f64| -> f64 {
+            let n = 4usize;
+            let mut d = vec![C64::ZERO; n * n];
+            for r in 0..2 {
+                d[r * n + r] = C64::from_re(structure.omegas[r] * structure.omegas[r] - x);
+                for q in 0..2 {
+                    d[r * n + (2 + q)] = C64::from_re(-coupling[r * 2 + q]);
+                }
+            }
+            for q in 0..2 {
+                let s_q = rho_c2 / cavity.lambdas[q];
+                d[(2 + q) * n + (2 + q)] = C64::from_re(cavity.omegas[q] * cavity.omegas[q] - x);
+                for r in 0..2 {
+                    d[(2 + q) * n + r] = C64::from_re(-s_q * x * coupling[r * 2 + q]);
+                }
+            }
+            det_complex(&d, n).abs()
+        };
+        // Scale: determinant magnitude away from any root.
+        let scale =
+            det_at(f64::midpoint(freqs[0] * freqs[0], freqs[1] * freqs[1])).max(det_at(1.0));
+        for &f in &freqs {
+            let residual = det_at(f * f) / scale;
+            assert!(
+                residual < 1e-6,
+                "pencil root {f} must zero the independent determinant: {residual:.3e}"
+            );
+        }
+        println!(
+            "{{\"suite\":\"fs-couple-vibro\",\"case\":\"multi-mode-pencil\",\"roots\":{freqs:?},\"verdict\":\"pass\"}}"
         );
     }
 }
