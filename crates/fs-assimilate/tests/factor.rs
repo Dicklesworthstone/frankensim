@@ -43,12 +43,7 @@ fn splitmix(state: &mut u64) -> f64 {
 
 /// Build a dense PSD covariance from a deterministic factor pair and admit
 /// it as a validated `Belief`.
-fn dense_belief(
-    mean: &[f64],
-    diag: &[f64],
-    upper: &[(usize, usize, f64)],
-    cx: &Cx<'_>,
-) -> Belief {
+fn dense_belief(mean: &[f64], diag: &[f64], upper: &[(usize, usize, f64)], cx: &Cx<'_>) -> Belief {
     let n = mean.len();
     let mut cov = vec![vec![0.0; n]; n];
     for (i, row) in cov.iter_mut().enumerate() {
@@ -113,10 +108,18 @@ fn g0_single_component_golden_update() {
         let post_var = result.belief().variance(0).expect("variance");
         assert!((post_var - 0.4).abs() <= 1e-15);
         assert_eq!(result.receipt().state(), ContractionState::Certified);
-        assert_eq!(result.receipt().misfit_verdict(), MisfitVerdict::NonIncreasing);
+        assert_eq!(
+            result.receipt().misfit_verdict(),
+            MisfitVerdict::NonIncreasing
+        );
         assert!((result.receipt().innovation_variance() - 2.5).abs() <= 1e-15);
         assert!(result.receipt().max_pivot_ratio() <= 1.0);
-        assert!(result.receipt().identity().starts_with("scalar-contraction:v1:"));
+        assert!(
+            result
+                .receipt()
+                .identity()
+                .starts_with("scalar-contraction:v1:")
+        );
     });
 }
 
@@ -213,8 +216,8 @@ fn g0_oracle_differential_across_deterministic_priors() {
 fn g0_diagonal_variances_never_expand_pointwise() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior = FactorBelief::diagonal(vec![0.0, 0.0, 0.0], vec![3.0, 1.0, 2.0], cx)
-            .expect("prior");
+        let prior =
+            FactorBelief::diagonal(vec![0.0, 0.0, 0.0], vec![3.0, 1.0, 2.0], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0, 1.0], 0.5, 0.5, "monotone-diag").expect("obs");
         let prior_variances: Vec<f64> = (0..3).map(|i| prior.variance(i).expect("v")).collect();
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
@@ -251,7 +254,8 @@ fn g0_rank_singular_prior_stays_exact_zero_in_singular_direction() {
 fn g0_illconditioned_prior_never_falsely_refutes() {
     let gate = CancelGate::new();
     with_cx(&gate, Budget::INFINITE, |cx| {
-        let prior = FactorBelief::diagonal(vec![0.0, 0.0], vec![1.0e10, 1.0e-6], cx).expect("prior");
+        let prior =
+            FactorBelief::diagonal(vec![0.0, 0.0], vec![1.0e10, 1.0e-6], cx).expect("prior");
         let obs = Observation::new(vec![1.0, 1.0], 0.25, 1.0, "ill-conditioned").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         assert_ne!(
@@ -316,7 +320,10 @@ fn g1_repeated_low_noise_updates_track_analytic_variance_recursion() {
                 "step {step}: variance {computed} vs analytic {analytic}"
             );
             assert_eq!(result.receipt().state(), ContractionState::Certified);
-            assert_eq!(result.receipt().misfit_verdict(), MisfitVerdict::NonIncreasing);
+            assert_eq!(
+                result.receipt().misfit_verdict(),
+                MisfitVerdict::NonIncreasing
+            );
             belief = result.belief().clone();
         }
         assert!(analytic < 4.0);
@@ -423,7 +430,10 @@ fn e2e_point_sensor_to_factor_update_to_independent_check() {
             "observed component variance must contract: {prior_var} -> {post_var}"
         );
         assert!(
-            checked.receipt().identity().starts_with("scalar-contraction:v1:"),
+            checked
+                .receipt()
+                .identity()
+                .starts_with("scalar-contraction:v1:"),
             "receipt identity prefix"
         );
     });
@@ -451,12 +461,9 @@ fn g2_high_dynamic_range_metrology_battery() {
         // observed at each channel's own scale. Every update must remain
         // stable and every receipt decisive or honestly unresolved.
         let scales: [f64; 4] = [1.0e-6, 1.0e-2, 1.0e2, 1.0e6];
-        let mut belief = FactorBelief::diagonal(
-            vec![0.0; 4],
-            scales.iter().map(|s| s * s).collect(),
-            cx,
-        )
-        .expect("prior");
+        let mut belief =
+            FactorBelief::diagonal(vec![0.0; 4], scales.iter().map(|s| s * s).collect(), cx)
+                .expect("prior");
         for (channel, scale) in scales.iter().enumerate() {
             let mut operator = vec![0.0; 4];
             operator[channel] = 1.0;
@@ -517,11 +524,10 @@ fn e2e_log_emission_is_bounded_schema_valid_and_complete() {
         .expect("log emission validates");
         let line = event.to_jsonl();
         fs_obs::validate_line(&line).expect("wire schema");
-        eprintln!("LOG LINE: {line}");
         assert!(line.contains("bierman-ud/v1"));
-        assert!(line.contains("\"contraction\":\"certified\""));
-        assert!(line.contains("\"checker\":\"verified\""));
+        assert!(line.contains("\\\"contraction\\\":\\\"certified\\\""));
+        assert!(line.contains("\\\"checker\\\":\\\"verified\\\""));
         assert!(line.contains("scalar-contraction:v1:"));
-        assert!(line.contains("\"dim\":3"));
+        assert!(line.contains("\\\"dim\\\":3"));
     });
 }

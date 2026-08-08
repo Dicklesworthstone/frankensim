@@ -289,11 +289,7 @@ impl FactorBelief {
     /// # Errors
     /// Returns [`AssimError`] for mismatched lengths, an empty state, a
     /// non-finite mean, or a negative or non-finite variance.
-    pub fn diagonal(
-        mean: Vec<f64>,
-        variances: Vec<f64>,
-        cx: &Cx<'_>,
-    ) -> Result<Self, AssimError> {
+    pub fn diagonal(mean: Vec<f64>, variances: Vec<f64>, cx: &Cx<'_>) -> Result<Self, AssimError> {
         if mean.is_empty() {
             return Err(AssimError::EmptyBelief);
         }
@@ -480,7 +476,15 @@ fn factor_update_work_plan(dim: usize) -> Result<WorkPlan, AssimError> {
 
 fn factor_checker_work_plan(dim: usize) -> Result<WorkPlan, AssimError> {
     let estimate = scalar_factor_work_estimate(dim)?;
-    WorkPlan::checked(0, 0, 0, 8, estimate.independent_check, estimate.construction, 256)
+    WorkPlan::checked(
+        0,
+        0,
+        0,
+        8,
+        estimate.independent_check,
+        estimate.construction,
+        256,
+    )
 }
 
 /// Compensated (Neumaier) dot product; returns the sum and a rounding
@@ -1023,7 +1027,7 @@ pub fn verify_factor_assimilation(
     let reported_post = result.receipt.measurement_variance_posterior();
     let identity_width = (result.receipt.measurement_identity_enclosure().1
         - result.receipt.measurement_identity_enclosure().0)
-    .abs();
+        .abs();
     let identity_consistent = (reported_post - recomputed_identity).abs()
         <= identity_width.max(64.0_f64 * f64::EPSILON * recomputed_identity.abs().max(1.0));
     let receipt_consistent = (result.receipt.innovation_variance() - recomputed_innovation).abs()
@@ -1123,11 +1127,11 @@ pub fn emit_checked_assimilation_log(
 ) -> Result<fs_obs::Event, fs_obs::SchemaError> {
     let receipt = checked.receipt();
     let check = checked.check();
-    let pass = receipt.state() == ContractionState::Certified
-        && check.verdict() == CheckVerdict::Verified;
-    let enclosure_width =
-        (receipt.measurement_identity_enclosure().1 - receipt.measurement_identity_enclosure().0)
-            .abs();
+    let pass =
+        receipt.state() == ContractionState::Certified && check.verdict() == CheckVerdict::Verified;
+    let enclosure_width = (receipt.measurement_identity_enclosure().1
+        - receipt.measurement_identity_enclosure().0)
+        .abs();
     let detail = format!(
         "{{\"dim\":{dim},\"method\":\"bierman-ud/v1\",\
          \"contraction\":\"{}\",\"misfit\":\"{}\",\"checker\":\"{}\",\
