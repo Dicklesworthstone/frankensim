@@ -98,6 +98,38 @@ linear-Gaussian core of weak-constraint assimilation.
 - `AssimError` — structured invalid-state, dimension, bounds, identity,
   empty-input, noise, covariance, innovation, and non-finite-computation
   refusals. It implements `Display` and `Error`.
+- `factor::FactorBelief` — a Gaussian belief carried in `U D U^T` factor
+  form (unit upper `U` packed by rows, exactly non-negative `D`), built by
+  `diagonal` or by `from_belief`'s backward-recurrence factorization with
+  exact zero-pivot handling. `variance` reconstructs one component in
+  `O(n)`; `to_dense_covariance` is the `O(n^3)` oracle-lane reconstruction.
+- `factor::assimilate_scalar(&FactorBelief, &Observation, &Cx) ->
+  FactorAssimilation` — the production scalar substrate (bead sj31i.37):
+  the Thornton-Bierman UD measurement update, `O(n^2)` per scalar
+  observation with `4n` flat fallible scratch, PSD by construction, no
+  square roots. The dense Joseph updater is not consulted on this path.
+- `factor::ContractionReceipt` — the executable per-update evidence:
+  `ContractionState::{Certified, Refuted, Unresolved}`, computed and
+  interval-enclosed innovation variance, maximum pivot ratio, first
+  expanding pivot, prior/posterior measurement-direction variances with
+  the identity enclosure, the checked `MisfitVerdict`, and a
+  `scalar-contraction:v1:<64 lowercase hex>` identity binding the prior
+  factor, the observation, and the verdict.
+- `factor::verify_factor_assimilation(&Belief, &Observation,
+  &FactorAssimilation, &Cx) -> IndependentCheck` — the independent
+  checker: dense Joseph oracle comparison, independent innovation-variance
+  and measurement-identity recomputation, `CheckVerdict::{Verified,
+  Discrepancy}`.
+- `factor::assimilate_belief_scalar_checked` — the composed no-mock lane:
+  factor, stable update, independent check.
+- `factor::emit_checked_assimilation_log` — one bounded `fs-obs`
+  conformance event per checked assimilation carrying dimension, method
+  identity, conditioning indicators, contraction/misfit/checker
+  dispositions, planned work, the receipt root, and the no-claim reason;
+  the emitted line is validated against the wire schema.
+- `factor::scalar_factor_work_estimate(dim)` — checked construction,
+  update-with-receipt, and checker work totals for parent admission
+  sealing.
 
 ## Invariants
 
@@ -124,6 +156,31 @@ linear-Gaussian core of weak-constraint assimilation.
   symmetry, then passes the result through the same full validator as an
   externally supplied `Belief`. It does not silently clip eigenvalues or
   correlations. The checked dense implementation is `O(n^3)`.
+- The factor scalar update (`factor::assimilate_scalar`) is the
+  Thornton-Bierman UD measurement update: `f = U^T h`, `g = D f`,
+  `a_j = a_{j-1} + f_j g_j` with `a_0 = R`, `d'_j = d_j a_{j-1}/a_j`, and
+  an in-place column update of `U` derived from the inner rank-one
+  downdate `D - g g^T / a_n = U~ D' U~^T` (symbolically verified for
+  n = 2, 3 against the direct expansion and differentially tested against
+  the dense Joseph oracle across deterministic priors). It is `O(n^2)`
+  per scalar observation and PSD by construction (`d'_j >= 0` exactly, or
+  the update refuses).
+- In exact arithmetic, `d'_j = d_j a_{j-1}/a_j <= d_j` per pivot and
+  `P_prior - P_posterior = (P h^T)(P h^T)^T / a_n` is rank-one PSD. The
+  receipt enforces the point pivot law on computed values, requires the
+  outward-rounded interval alpha chain to be finite and wholly positive,
+  and requires the interval enclosure of the exact identity
+  `h P' h^T = (h P h^T) R / a_n` to contain the computed posterior
+  measurement variance. `Certified` needs all three; a decisive breach is
+  `Refuted`; indecisive enclosures are `Unresolved`, which advertises no
+  contraction. Outward-rounded interval pivot ratios are never used to
+  certify: a one-ULP outward nudge would make even exact-zero steps
+  straddle 1.
+- The misfit monotonicity law is a checked diagnostic (`MisfitVerdict`)
+  with a computed arithmetic error envelope, not a prose assertion.
+- Factor-path allocation is fallible (`try_reserve_exact` ->
+  `AllocationRefused`), the work plan is checked before work begins, and
+  polling follows the same scalar strides as the dense path.
 - In exact arithmetic, fusing valid observations cannot increase component
   variances and the batch posterior cannot increase the weighted measurement
   misfit. Floating results are checked for finiteness, not interval-certified.
@@ -227,9 +284,9 @@ invalid identities and regimes, non-positive or non-finite noise, dimension
 mismatches, oversized aggregate count/work requests, degenerate innovations,
 and finite-input arithmetic overflow are refused. `WorkPlanOverflow`,
 `WorkPlanExceeded`, `PollQuotaExceedsAmbient`, `InvocationBudget`,
-`BudgetRefused`, and `Cancelled` distinguish planning, accounting,
-compositional-quota, typed invocation, ambient-budget, and
-observed-cancellation failures; no partial belief/candidate is returned.
+`BudgetRefused`, `AllocationRefused`, and `Cancelled` distinguish planning, accounting,
+compositional-quota, typed invocation, ambient-budget, checked-allocation,
+and observed-cancellation failures; no partial belief/candidate is returned.
 Ambient-path entry points (bead sj31i.6) admit `cx.budget()` plus the
 preflighted work plan through `fs_exec::AdmittedBudget` before any work:
 an already-expired deadline (`Budget::ZERO` included), a deadline on a
@@ -341,6 +398,17 @@ demotion with no affine observation or posterior; malformed policy and identity
 refusals; non-finite model/Jacobian and unrepresentable-step refusals; exact
 callback count; and pre-cancellation.
 
+`tests/factor.rs` (bead `sj31i.37`, G0/G1/G2/G3/G4/G5): hand-computed one- and
+two-component goldens; dense-Joseph oracle differential across deterministic
+priors up to dimension 17 with independent-checker verification; exact
+pointwise variance non-expansion; rank-singular prior handling with exact zero
+retention; ill-conditioned and deep-subnormal adversarial cases that must not
+falsely refute; factor round-trip reconstruction; deterministic receipt
+identity and input sensitivity; analytic repeated-low-noise variance recursion;
+a high-dynamic-range metrology battery across ten decades of variance; state
+permutation metamorphism; zero-quota cancellation without partial output;
+checked work-plan estimates; and bounded schema-valid structured log emission.
+
 ## No-claim boundaries
 
 - v1 is the LINEAR-GAUSSIAN assimilation with linear observation operators;
@@ -405,6 +473,20 @@ callback count; and pre-cancellation.
   maps), authenticating calibration receipts, and admitting a validated claim
   are fs-ledger/fs-package integration work; this crate produces the estimated
   candidate and proposed validity domain.
+- The factor substrate (bead sj31i.37) is the independent SCALAR lane:
+  correlated batches, whitening, joint calibration/registration covariance,
+  and block QR are bead sj31i.64 scope, not claimed here. The dense Joseph
+  path remains the production path of `assimilate`/`assimilate_all`; the
+  factor path is a separate public API and does not reroute existing callers.
+- A `Certified` receipt certifies the computed update's contraction evidence
+  — point pivot law, decisive positive interval innovation chain, and the
+  interval-enclosed measurement-direction identity — not a theorem about an
+  arbitrary producer, conditioning guarantees, or `Color::Validated`. An
+  `Unresolved` verdict is an honest no-claim, not a failure.
+- The independent checker's dense-oracle agreement tolerance is a computed
+  scale heuristic (fixed multiple of epsilon times magnitude and dimension);
+  a `Verified` verdict means agreement within that stated tolerance, not a
+  proof of bitwise equivalence.
 - Logical-work totals and fixed poll strides are accounting/cancellation
   semantics, not claims about instructions, wall-clock time, allocation peaks,
   pause/resume state, deadline/cost enforcement, drain latency, or a
