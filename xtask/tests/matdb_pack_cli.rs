@@ -6947,6 +6947,7 @@ fn tonewood_sound_speed_in_range(el_pa: f64, rho_si: f64) -> bool {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one coherent corpus gate
 fn g2_cli_compiles_fpl_gtr282_tonewood_seeds_with_derived_quantity_gates() {
     let mut complete_orthotropic = 0usize;
     let mut speed_gated = 0usize;

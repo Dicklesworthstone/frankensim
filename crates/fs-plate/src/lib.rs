@@ -1403,6 +1403,7 @@ mod tests {
     /// Source values: FPL-GTR-282 Tables 5-1/5-2/5-3a (the committed
     /// spruce-sitka-fpl-gtr282 seed pack carries the same rows).
     #[test]
+    #[allow(clippy::too_many_lines)] // one coherent db-to-modes demo
     fn spruce_top_modes_from_matdb_values_alone() {
         use fs_blake3::hash_domain;
         use fs_evidence::ValidityDomain;
@@ -1462,7 +1463,7 @@ mod tests {
         let at_12pct = QueryPoint::new()
             .with("moisture_content", 12.0)
             .expect("finite query point");
-        let mut fetch = |name: &str| -> f64 {
+        let fetch = |name: &str| -> f64 {
             let answer = db
                 .query(name, &at_12pct, SelectionPolicy::SingleClaimOnly)
                 .expect("receipted query answers");
