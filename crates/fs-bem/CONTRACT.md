@@ -69,6 +69,36 @@ everywhere: this is screening, not a viscous truth source.
   solves; feeds the vibroacoustic-coupling bead.
 - `far_field` — sampled directivity amplitudes (monopole uniform to
   0.00%, dipole cos-theta correlation 1.0000 measured).
+- `directivity_sh_table` / `DirectivityTable` — far field projected
+  onto orthonormal complex spherical harmonics (Condon–Shortley,
+  `Y_{l,-m} = (-1)^m conj(Y_lm)`) up to `l_max <= MAX_SH_DEGREE = 64`
+  by exact band-limited quadrature (Gauss–Legendre x uniform phi);
+  truncation honesty is the reported `captured_fraction`, and
+  `evaluate`/`power_by_degree`/`coefficient` serve the rendering and
+  diagnostics consumers. Measured at ka = 1 on 320 panels: monopole
+  l = 0 fraction and captured fraction > 0.999, dipole (l=1, m=0)
+  fraction > 0.99, reconstruction vs directly sampled far field
+  < 1e-3 relative L2 at held-out directions.
+- `radiation_efficiency` — `sigma = W / (1/2 rho c INT |v_n|^2 dS)`
+  per solved velocity pattern (the per-mode radiated-power ratio).
+  Oracles: monopole `(ka)^2/(1+(ka)^2)` within 5% at ka in
+  {0.5, 1, 2} (PlainCbie arm), dipole `(ka)^4/(4+(ka)^4)` within 10%
+  at ka = 1.
+- Per-solve diagnostics on `RadiationSolution`:
+  `condition_lower_bound` (a probe-based LOWER bound on the 1-norm
+  condition number — a warning signal, not a certificate) and
+  `dense_cap_utilization` (panel count over the dense cap, the
+  headroom the aperture pilot asked for). Measured: plain CBIE's bound
+  spikes ~21x over its own off-resonance value at the DISCRETE first
+  interior resonance (ka ~ 3.20 on the 320-panel sphere — shifted from
+  the continuum pi by the flat-panel discretization) while
+  Burton-Miller's moves ~1.4x.
+- `helmholtz_casebook` binary — the e2e casebook lane: mesh ->
+  Burton-Miller solves -> impedance matrix -> spherical-harmonic table
+  -> radiation efficiency, one JSON line per stage with FNV-1a-64
+  result hashes. Every field is deterministic except `elapsed_ms`
+  (wall-clock run evidence); `estimated_dense_bytes` is a deterministic
+  3 x 16 n^2 model, not a measured RSS.
 - `baffled_piston_impedance` — Rayleigh-integral piston (half-space),
   validated against the Bessel-free small-ka series.
 - `HelmholtzError` — stable `FS-BEM-HELM-*` refusals: bad parameter,
@@ -165,7 +195,16 @@ NASA marks it as U.S. Government work with public use permitted.
 3. Pulsating-sphere impedance within the authored per-arm envelopes
    above; radiated power positive for mesh-resolved velocity fields;
    area-weighted impedance-matrix reciprocity to 0.5% measured.
-4. Repeat solves are bitwise identical.
+4. Repeat solves are bitwise identical, including the condition
+   diagnostic and spherical-harmonic coefficient tables.
+5. The spherical-harmonic basis is self-checked: Gauss–Legendre weight
+   and moment identities to 1e-13 and normalized associated-Legendre
+   orthonormality to 1e-12 under the same quadrature the projection
+   uses.
+6. The condition diagnostic discriminates the resonant arm: CBIE's
+   bound inflates across the fictitious-frequency band while
+   Burton-Miller's stays flat (measured 20.8x vs 1.4x; asserted > 2x
+   separation with the peak found by a coarse-then-refined scan).
 
 ## No-claim boundaries
 
@@ -192,9 +231,14 @@ NASA marks it as U.S. Government work with public use permitted.
   exact singular triangle quadrature is the recorded fix trigger.
   Passivity is claimed only for mesh-resolved velocity fields: a
   quadrupole's true radiated power at ka = 1 sits below the noise floor
-  on the 80-panel fixture (measured, recorded). No FMM acceleration
-  (dense cap 8192 panels), no spherical-harmonic directivity coefficient
-  tables (sampled directivity only), no scattering/incident-field path,
+  on the 80-panel fixture (measured, recorded). `condition_lower_bound`
+  is a LOWER bound from six deterministic probe solves: a large value
+  is a reliable warning, but a small value certifies nothing (a rigorous
+  Hager/Higham estimator needs adjoint solves and is the recorded
+  follow-up). `DirectivityTable` truncation error is reported via
+  `captured_fraction`, never bounded a priori; the table inherits every
+  accuracy boundary of the underlying solve arm. No FMM acceleration
+  (dense cap 8192 panels), no scattering/incident-field path,
   no half-space or impedance boundary conditions, no Bessel-backed
   piston closed form (small-ka series only until the duct bead's special
   functions land).

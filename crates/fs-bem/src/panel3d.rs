@@ -523,6 +523,12 @@ impl LinearOp for FmmOp<'_> {
 /// both the last iterate and complete [`SolveReport`] preserved. A fallible
 /// operator application returns [`ExteriorSolveError::OperatorRefused`] with
 /// its first error and the same diagnostic state.
+#[expect(
+    clippy::result_large_err,
+    reason = "ExteriorSolveError deliberately preserves the last iterate and full \
+              SolveReport as diagnostic state; boxing it is an API break outside \
+              this lane (nightly clippy drift, bead go7a class)"
+)]
 pub fn solve_exterior(
     panels: &SpherePanels,
     u_inf: [f64; 3],

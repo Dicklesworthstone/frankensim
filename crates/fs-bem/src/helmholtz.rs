@@ -615,19 +615,23 @@ impl DirectivityTable {
     /// If `l > l_max` or `|m| > l` (programmer error, not a refusal).
     #[must_use]
     pub fn coefficient(&self, l: usize, m: i64) -> C64 {
-        assert!(l <= self.l_max && m.unsigned_abs() as usize <= l);
-        let idx = l * (l + 1);
-        let signed = idx as i64 + m;
-        self.coefficients[usize::try_from(signed).expect("index is non-negative by construction")]
+        let m_abs = usize::try_from(m.unsigned_abs()).expect("|m| fits in usize");
+        assert!(l <= self.l_max && m_abs <= l);
+        // Index l (l + 1) + m: for the asserted |m| <= l this is
+        // l^2 + (l + m) with both terms non-negative.
+        let offset = usize::try_from(i64::try_from(l).expect("l bounded by MAX_SH_DEGREE") + m)
+            .expect("l + m is non-negative for |m| <= l");
+        self.coefficients[l * l + offset]
     }
 
     /// Per-degree power `SUM_m |a_lm|^2` — the multipole spectrum.
     #[must_use]
     pub fn power_by_degree(&self) -> Vec<f64> {
         let mut out = vec![0.0; self.l_max + 1];
-        for l in 0..=self.l_max {
-            for m in -(l as i64)..=(l as i64) {
-                out[l] += self.coefficient(l, m).norm_sq();
+        for (l, slot) in out.iter_mut().enumerate() {
+            let lm = i64::try_from(l).expect("l bounded by MAX_SH_DEGREE");
+            for m in -lm..=lm {
+                *slot += self.coefficient(l, m).norm_sq();
             }
         }
         out
@@ -652,9 +656,8 @@ impl DirectivityTable {
                 // Y_{l,-m} = (-1)^m conj(Y_lm).
                 let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
                 let y_neg = y_pos.conj().scale(sign);
-                f = f
-                    + self.coefficient(l, m as i64) * y_pos
-                    + self.coefficient(l, -(m as i64)) * y_neg;
+                let ms = i64::try_from(m).expect("m bounded by MAX_SH_DEGREE");
+                f = f + self.coefficient(l, ms) * y_pos + self.coefficient(l, -ms) * y_neg;
             }
         }
         f
@@ -1309,7 +1312,10 @@ mod tests {
         for (x, y) in a.pressure.iter().zip(b.pressure.iter()) {
             assert!(x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits());
         }
-        assert!(a.condition_lower_bound.to_bits() == b.condition_lower_bound.to_bits());
+        assert_eq!(
+            a.condition_lower_bound.to_bits(),
+            b.condition_lower_bound.to_bits()
+        );
     }
 
     #[test]

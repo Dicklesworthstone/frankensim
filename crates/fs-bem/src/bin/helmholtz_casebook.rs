@@ -48,7 +48,15 @@ fn solve_stage(
         velocity,
         Formulation::BurtonMiller,
     )
-    .unwrap_or_else(|e| panic!("casebook solve {label} at ka={ka}: {e}"));
+    .unwrap_or_else(|e| {
+        // A refusal in the fixed casebook configuration is itself a
+        // reportable outcome: emit the structured row and stop.
+        println!(
+            "{{\"suite\":\"fs-bem-helmholtz-casebook\",\"case\":\"solve\",\"mode\":\"{label}\",\
+             \"ka\":{ka},\"verdict\":\"refused\",\"error\":\"{e}\"}}"
+        );
+        std::process::exit(1)
+    });
     let elapsed_ms = start.elapsed().as_secs_f64() * 1e3;
     println!(
         "{{\"suite\":\"fs-bem-helmholtz-casebook\",\"case\":\"solve\",\"mode\":\"{label}\",\

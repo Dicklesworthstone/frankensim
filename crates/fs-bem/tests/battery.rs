@@ -343,7 +343,7 @@ fn bem_006_naca0012_ladson_prestall_envelope() {
     // SHA-256: 8e466706cbdf54b3c778ea2b089c4f52d87686bf7f6b1bd10d224b42c2d06902
     const LADSON_ALPHA_DEG: [f64; 7] = [-4.05, -2.00, 0.05, 1.98, 4.18, 6.20, 8.22];
     const LADSON_CL: [f64; 7] = [-0.4280, -0.2150, 0.0040, 0.2080, 0.4520, 0.6630, 0.8800];
-    let ladson_alpha_rad = LADSON_ALPHA_DEG.map(|alpha| alpha.to_radians());
+    let ladson_alpha_rad = LADSON_ALPHA_DEG.map(f64::to_radians);
     let measured_slope = least_squares_slope(&ladson_alpha_rad, &LADSON_CL);
 
     let model_alpha_rad = [-8.0f64, -4.0, 0.0, 4.0, 8.0].map(f64::to_radians);
