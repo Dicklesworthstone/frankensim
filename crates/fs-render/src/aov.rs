@@ -39,7 +39,9 @@ pub use checkpoint::{
 };
 
 /// Bit-affecting channel, accumulation, invalid-value, and palette semantics.
-pub const CINEMATIC_AOV_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 maps every motion sample to the matching shutter phase one
+/// presentation cadence away rather than directly to neighboring PTS values.
+pub const CINEMATIC_AOV_SEMANTICS_VERSION: u32 = 3;
 /// Deterministic nearest-primary categorical selection semantics.
 pub const CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION: u32 = 1;
 /// Linear-sRGB material-albedo extraction semantics.
@@ -48,7 +50,7 @@ pub const CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION: u32 = 1;
 pub const CINEMATIC_AOV_CONFIG_IDENTITY_DOMAIN: &str =
     "org.frankensim.render.cinematic-aov-config.v1";
 /// Frozen interpretation of every cinematic AOV channel.
-pub const CINEMATIC_AOV_CHANNEL_SEMANTICS: &str = "R,G,B=linear-sRGB;albedo=linear-sRGB-reflectance;normal,normal_geom=world-unit-vector;depth.Z=axial-metres;primary.coverage=primary-hit-fraction;variance.Y=unbiased-raw-CIE-Y-sample-variance;motion.prev=target-minus-current-raster-pixels;IDs=exact-palette-index;samples=count;invalid=zero";
+pub const CINEMATIC_AOV_CHANNEL_SEMANTICS: &str = "R,G,B=linear-sRGB;albedo=linear-sRGB-reflectance;normal,normal_geom=world-unit-vector;depth.Z=axial-metres;primary.coverage=primary-hit-fraction;variance.Y=unbiased-raw-CIE-Y-sample-variance;motion.prev=matched-shutter-phase-one-presentation-cadence-back-target-minus-current-raster-pixels;IDs=exact-palette-index;samples=count;invalid=zero";
 /// Frozen invalid-pixel interpretation shared by the exporter and independent
 /// artifact verifiers.
 pub const CINEMATIC_AOV_INVALID_SEMANTICS: &str = "zero-with-diagnostic.validity-bitmask-final-profile;daily-core-surface-validity-is-primary.coverage-greater-than-zero";
@@ -2889,7 +2891,7 @@ fn poll_aov(poll: &mut impl FnMut() -> bool) -> Result<(), CinematicAovError> {
 #[must_use]
 pub fn cinematic_render_semantics_versions() -> String {
     format!(
-        "tracer={TRACER_BIT_SEMANTICS_VERSION};motionTracer={MOTION_TRACER_BIT_SEMANTICS_VERSION};cinematicCamera={CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION};dielectric={DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION};lighting={LIGHTING_TRACER_BIT_SEMANTICS_VERSION};motionVector={MOTION_VECTOR_SEMANTICS_VERSION};chartBackend={CHART_BACKEND_BIT_SEMANTICS_VERSION};category={CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION};albedo={CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION}"
+        "tracer={TRACER_BIT_SEMANTICS_VERSION};motionTracer={MOTION_TRACER_BIT_SEMANTICS_VERSION};cinematicCamera={CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION};dielectric={DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION};lighting={LIGHTING_TRACER_BIT_SEMANTICS_VERSION};aov={CINEMATIC_AOV_SEMANTICS_VERSION};motionVector={MOTION_VECTOR_SEMANTICS_VERSION};chartBackend={CHART_BACKEND_BIT_SEMANTICS_VERSION};category={CINEMATIC_AOV_CATEGORY_SEMANTICS_VERSION};albedo={CINEMATIC_AOV_ALBEDO_SEMANTICS_VERSION}"
     )
 }
 

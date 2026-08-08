@@ -1101,6 +1101,15 @@ right/`+y` down. Each displacement is explicitly `target - current`, both in
 NDC per declared frame step and pixels per declared frame step. It is neither
 metres per second nor an observed mechanical velocity.
 
+For an aligned cinematic AOV sample, previous-frame transforms and cameras are
+evaluated at the same shutter phase one presentation cadence before that
+sample's absolute mechanics time. The previous presentation timestamp defines
+the cadence; it is not substituted for shutter-sample time. This is
+load-bearing for front- and back-loaded exposures because the temporal denoiser
+consumes the immediately preceding shutter-integrated image, not an image at
+the encoded presentation timestamp. The aligned AOV exports no next-frame
+motion and does not evaluate mechanics beyond a terminal trajectory cut.
+
 The raster extent is explicit and uses the same half-open pixel-edge convention
 as the tracer, including 3840x2160 without a shape-specific path. Off-screen
 in-front projections retain their finite displacement. Points on or behind the

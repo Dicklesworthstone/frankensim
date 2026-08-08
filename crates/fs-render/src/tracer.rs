@@ -76,8 +76,8 @@ use fs_rand::qmc::Sobol;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 mod checkpoint;
@@ -7503,14 +7503,10 @@ fn aligned_previous_motion(
     absolute_time_s: f64,
     current_camera: PhysicalCamera,
 ) -> Result<Option<[f64; 2]>, CinematicAovError> {
-    let Some(previous) = motion_frame_for_shape(
-        cx,
-        camera,
-        cut_side,
-        shape,
-        provenance.previous_frame_time_s(),
-        None,
-    )?
+    let previous_sample_time_s =
+        shutter_aligned_previous_reference_time(provenance, absolute_time_s);
+    let Some(previous) =
+        motion_frame_for_shape(cx, camera, cut_side, shape, previous_sample_time_s, None)?
     else {
         return Err(CinematicAovError::InvalidPrimary);
     };
@@ -7525,17 +7521,10 @@ fn aligned_previous_motion(
     else {
         return Err(CinematicAovError::InvalidPrimary);
     };
-    let Some(next) = motion_frame_for_shape(
-        cx,
-        camera,
-        cut_side,
-        shape,
-        provenance.next_frame_time_s(),
-        None,
-    )?
-    else {
-        return Err(CinematicAovError::InvalidPrimary);
-    };
+    // The aligned AOV exports only previous motion. Supplying the current
+    // frame as the unused next endpoint avoids evaluating beyond a terminal
+    // trajectory cut while preserving the low-level three-frame API.
+    let next = current.clone();
     let raster =
         RasterSize::try_new(settings.width, settings.height).map_err(TracerError::MotionVector)?;
     match compute_motion_vectors(surface, &previous, &current, &next, raster)
@@ -7550,6 +7539,19 @@ fn aligned_previous_motion(
         },
         MotionVectorComputation::Unavailable { .. } => Ok(None),
     }
+}
+
+/// Map one accepted shutter sample to the same shutter phase in the preceding
+/// presentation interval. The provenance times are presentation timestamps,
+/// not necessarily the mechanics times sampled by a front- or back-loaded
+/// exposure. Using the timestamps themselves would therefore over- or
+/// under-shoot the immediately preceding shutter-integrated image.
+fn shutter_aligned_previous_reference_time(
+    provenance: crate::aov::CinematicAovProvenance,
+    absolute_time_s: f64,
+) -> f64 {
+    let previous_cadence_s = provenance.frame_time_s() - provenance.previous_frame_time_s();
+    absolute_time_s - previous_cadence_s
 }
 
 fn motion_frame_for_shape(
@@ -10796,6 +10798,46 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{context}: actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
         );
+    }
+
+    #[test]
+    fn g0_shutter_sample_previous_motion_preserves_phase_across_frame_cadence() {
+        let identity = hash_domain("shutter-aligned-motion-reference-test", b"identity");
+        let provenance = crate::aov::CinematicAovProvenance::try_new(
+            1,
+            1.0 / 24.0,
+            0.0,
+            2.0 / 24.0,
+            identity,
+            identity,
+            identity,
+        )
+        .unwrap();
+        // At 24 fps and a 15-degree back-loaded shutter, frame one covers
+        // [47/576, 48/576]. Its midpoint must map to the same phase in frame
+        // zero [23/576, 24/576].
+        let current_midpoint_s = 47.5 / 576.0;
+        let previous_s = shutter_aligned_previous_reference_time(provenance, current_midpoint_s);
+        assert_near(
+            previous_s,
+            23.5 / 576.0,
+            f64::EPSILON,
+            "previous matched shutter phase",
+        );
+
+        let first_frame = crate::aov::CinematicAovProvenance::try_new(
+            0,
+            0.0,
+            0.0,
+            1.0 / 24.0,
+            identity,
+            identity,
+            identity,
+        )
+        .unwrap();
+        let first_midpoint_s = 23.5 / 576.0;
+        let cut_previous_s = shutter_aligned_previous_reference_time(first_frame, first_midpoint_s);
+        assert_eq!(cut_previous_s.to_bits(), first_midpoint_s.to_bits());
     }
 
     #[test]
