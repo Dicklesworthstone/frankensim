@@ -1690,6 +1690,7 @@ mod tests {
     }
 
     fn final_diagnostic() -> DecodedExr {
+        let schema_version = CINEMATIC_AOV_SEMANTICS_VERSION.to_string();
         let channels = FINAL_DIAGNOSTIC_CHANNELS
             .iter()
             .map(|(name, ty)| Channel {
@@ -1712,10 +1713,7 @@ mod tests {
             channels,
             attributes: [
                 ("frankensim.aov.authority", "raw-estimate"),
-                (
-                    "frankensim.aov.schemaVersion",
-                    "2",
-                ),
+                ("frankensim.aov.schemaVersion", schema_version.as_str()),
                 (
                     "frankensim.aov.channelSemantics",
                     CINEMATIC_AOV_CHANNEL_SEMANTICS,

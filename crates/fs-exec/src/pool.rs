@@ -6995,7 +6995,19 @@ mod tests {
                 "derived-disposition",
             ),
             (
-                |witness| witness.scope.parent_region_id = Some(1),
+                |witness| {
+                    witness.scope.parent_region_id = Some(1);
+                    // Scope feeds call_replay_root, so a forgery that
+                    // re-seals only the top-level root is correctly
+                    // rejected one layer earlier at "call-replay-root".
+                    // Re-seal the intermediate root too so this case
+                    // exercises the scope-identity semantic invariant.
+                    witness.call_replay_root = completion_call_replay_root(
+                        witness.plan_root,
+                        witness.scope,
+                        witness.affine_invocation_permit_root,
+                    );
+                },
                 "scope-identity",
             ),
             (

@@ -5697,6 +5697,12 @@ mod tests {
             child.root = child_receipt_root(child);
         }
         forged.failure = Some(failure);
+        // Mark children[0] as the origin so the forgery passes the
+        // invocation-level "failure-origin-required" and
+        // "failure-origin-matches" gates; the UNMARKED sibling
+        // (children[1]: carries the failure, neither origin nor
+        // inherited) must then trip "failure-origin-marker".
+        forged.failure_origin = Some(forged.children[0].id);
         forged.disposition = InvocationDisposition::Refused;
         forged.root = invocation_receipt_root(&forged);
         assert!(matches!(
@@ -5873,10 +5879,17 @@ mod tests {
         ));
 
         let mut forged_fault = receipt;
+        // Sever the origin link and mark the child as inherited: with the
+        // origin consistent, the child loop reaches the propagation check
+        // and the child's foreign failure trips "failure-propagates-to-root"
+        // instead of the earlier "failure-origin-matches"/"failure-origin-marker"
+        // gates. ResourceExceeded("work") does not require a child origin.
+        forged_fault.failure_origin = None;
         forged_fault.children[0].failure = Some(InvocationError::ExplicitRefusal {
             phase: "forged",
             reason: hash_domain("test.forged-fault", b"different"),
         });
+        forged_fault.children[0].failure_inherited = true;
         forged_fault.children[0].root = child_receipt_root(&forged_fault.children[0]);
         forged_fault.root = invocation_receipt_root(&forged_fault);
         assert!(matches!(
