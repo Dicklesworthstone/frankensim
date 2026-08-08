@@ -336,20 +336,21 @@ fn g3_state_permutation_is_metamorphic() {
         let base = assimilate_scalar(&base_factor, &obs, cx).expect("base update");
 
         // Permutation (0->1, 1->2, 2->0): permuted prior/operator must give
-        // the permuted posterior.
+        // the permuted posterior. The permuted covariance is built DENSELY
+        // (permuting factor entries does not yield an upper factor), and
+        // from_belief re-factors it.
         let perm = [1_usize, 2, 0];
         let permute = |values: &[f64]| -> Vec<f64> { perm.iter().map(|&i| values[i]).collect() };
+        let base_cov = prior.covariance();
+        let n = 3;
+        let mut perm_cov = vec![vec![0.0; n]; n];
+        for a in 0..n {
+            for b in 0..n {
+                perm_cov[a][b] = base_cov[perm[a]][perm[b]];
+            }
+        }
         let perm_mean = permute(&mean);
-        let perm_diag = permute(&diag);
-        let perm_upper: Vec<(usize, usize, f64)> = upper
-            .iter()
-            .map(|&(i, j, v)| {
-                let position = |index: usize| perm.iter().position(|&p| p == index).expect("pos");
-                let (a, b) = (position(i), position(j));
-                if a < b { (a, b, v) } else { (b, a, v) }
-            })
-            .collect();
-        let perm_prior = dense_belief(&perm_mean, &perm_diag, &perm_upper, cx);
+        let perm_prior = Belief::new(perm_mean, perm_cov, cx).expect("permuted prior");
         let perm_operator = permute(obs.operator());
         let perm_obs = Observation::new(perm_operator, obs.value(), obs.noise_var(), "permutation")
             .expect("perm obs");
@@ -358,17 +359,17 @@ fn g3_state_permutation_is_metamorphic() {
 
         let base_dense = base.belief().to_dense_covariance();
         let perm_dense = permuted.belief().to_dense_covariance();
-        let n = 3;
         let mut permuted_back = vec![vec![0.0; n]; n];
         for i in 0..n {
             for j in 0..n {
                 permuted_back[perm[i]][perm[j]] = perm_dense[i][j];
             }
         }
-        assert!(max_cov_diff(&permuted_back, &base_dense) <= 1e-10);
+        let diff = max_cov_diff(&permuted_back, &base_dense);
+        assert!(diff <= 1e-10, "permuted covariance diff {diff}");
         let base_mean = base.belief().mean();
-        let perm_mean_back = permute(permuted.belief().mean());
-        assert!(max_vec_diff(&perm_mean_back, base_mean) <= 1e-12);
+        let base_mean_forward = permute(base_mean);
+        assert!(max_vec_diff(&base_mean_forward, permuted.belief().mean()) <= 1e-12);
     });
 }
 
@@ -439,5 +440,88 @@ fn g0_deep_subnormal_noise_never_panics_and_stays_decisive_or_unresolved() {
         // decisive evidence, never a panic and never a false refutation.
         assert_ne!(result.receipt().state(), ContractionState::Refuted);
         assert!(result.receipt().innovation_variance() > 0.0);
+    });
+}
+
+#[test]
+fn g2_high_dynamic_range_metrology_battery() {
+    let gate = CancelGate::new();
+    with_cx(&gate, Budget::INFINITE, |cx| {
+        // A metrology-scale state: ten decades of variance across channels,
+        // observed at each channel's own scale. Every update must remain
+        // stable and every receipt decisive or honestly unresolved.
+        let scales: [f64; 4] = [1.0e-6, 1.0e-2, 1.0e2, 1.0e6];
+        let mut belief = FactorBelief::diagonal(
+            vec![0.0; 4],
+            scales.iter().map(|s| s * s).collect(),
+            cx,
+        )
+        .expect("prior");
+        for (channel, scale) in scales.iter().enumerate() {
+            let mut operator = vec![0.0; 4];
+            operator[channel] = 1.0;
+            let reading = 0.25 * scale;
+            let noise = (0.05 * scale) * (0.05 * scale);
+            let obs = Observation::new(operator, reading, noise, "metrology").expect("obs");
+            let result = assimilate_scalar(&belief, &obs, cx).expect("update");
+            assert!(
+                result.receipt().state() != ContractionState::Refuted,
+                "channel {channel} (scale {scale:e}) falsely refuted"
+            );
+            let post_var = result.belief().variance(channel).expect("variance");
+            let prior_var = scale * scale;
+            assert!(
+                post_var < prior_var,
+                "channel {channel}: variance must contract ({prior_var:e} -> {post_var:e})"
+            );
+            assert_eq!(
+                result.receipt().misfit_verdict(),
+                MisfitVerdict::NonIncreasing
+            );
+            belief = result.belief().clone();
+        }
+        // The unobserved-scale channels still contract through the shared
+        // update only when correlated; here channels are independent, so
+        // each channel contracts exactly at its own observation.
+        let dense = belief.to_dense_covariance();
+        for (i, scale) in scales.iter().enumerate() {
+            assert!(dense[i][i].is_finite() && dense[i][i] > 0.0);
+            assert!(dense[i][i] < scale * scale);
+        }
+    });
+}
+
+#[test]
+fn e2e_log_emission_is_bounded_schema_valid_and_complete() {
+    let gate = CancelGate::new();
+    with_cx(&gate, Budget::INFINITE, |cx| {
+        let prior = dense_belief(
+            &[0.0, 1.0, -1.0],
+            &[2.0, 1.5, 1.0],
+            &[(0, 1, 0.5), (1, 2, -0.25)],
+            cx,
+        );
+        let obs = point_sensor(1, 3, 2.5, 0.5, "log-sensor").expect("point sensor");
+        let checked = assimilate_belief_scalar_checked(&prior, &obs, cx).expect("checked path");
+        let planned = scalar_factor_work_estimate(3).expect("estimate");
+        let mut emitter = fs_obs::Emitter::new(
+            fs_assimilate::factor::SCALAR_FACTOR_LOG_SUITE,
+            "log-emission-test",
+        );
+        let event = fs_assimilate::factor::emit_checked_assimilation_log(
+            &checked,
+            3,
+            planned.update_with_receipt,
+            &mut emitter,
+        )
+        .expect("log emission validates");
+        let line = event.to_jsonl();
+        fs_obs::validate_line(&line).expect("wire schema");
+        eprintln!("LOG LINE: {line}");
+        assert!(line.contains("bierman-ud/v1"));
+        assert!(line.contains("\"contraction\":\"certified\""));
+        assert!(line.contains("\"checker\":\"verified\""));
+        assert!(line.contains("scalar-contraction:v1:"));
+        assert!(line.contains("\"dim\":3"));
     });
 }

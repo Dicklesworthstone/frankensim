@@ -1096,3 +1096,82 @@ pub fn assimilate_belief_scalar_checked(
         check,
     })
 }
+
+/// Structured log suite identity for the scalar factor lane.
+pub const SCALAR_FACTOR_LOG_SUITE: &str = "fs-assimilate/scalar-factor";
+
+/// Emit the bounded structured log for one checked scalar assimilation.
+///
+/// The detail line carries the bead-mandated fields without unbounded
+/// payloads: state dimension, method identity, conditioning indicators
+/// (innovation enclosure width, max pivot ratio), residual/contraction/
+/// misfit bounds (identity enclosure, misfit verdict), contraction and
+/// checker dispositions, refusal/no-claim reason when the verdict is not
+/// certified, and the content roots that retain prior/observation/verdict.
+/// The event is emitted through `fs_obs` and the line is validated against
+/// the wire schema; a failure event additionally passes the failure-record
+/// lint.
+///
+/// # Errors
+/// Returns [`fs_obs::SchemaError`] when the constructed event or line
+/// violates the observability wire schema.
+pub fn emit_checked_assimilation_log(
+    checked: &CheckedAssimilation,
+    dim: usize,
+    planned_work: u128,
+    emitter: &mut fs_obs::Emitter,
+) -> Result<fs_obs::Event, fs_obs::SchemaError> {
+    let receipt = checked.receipt();
+    let check = checked.check();
+    let pass = receipt.state() == ContractionState::Certified
+        && check.verdict() == CheckVerdict::Verified;
+    let enclosure_width =
+        (receipt.measurement_identity_enclosure().1 - receipt.measurement_identity_enclosure().0)
+            .abs();
+    let detail = format!(
+        "{{\"dim\":{dim},\"method\":\"bierman-ud/v1\",\
+         \"contraction\":\"{}\",\"misfit\":\"{}\",\"checker\":\"{}\",\
+         \"innovation_variance\":{:e},\"identity_enclosure_width\":{:e},\
+         \"max_pivot_ratio\":{:e},\"misfit_before\":{:e},\"misfit_after\":{:e},\
+         \"oracle_max_abs_diff\":{:e},\"oracle_tolerance\":{:e},\
+         \"planned_work\":{planned_work},\"receipt_root\":\"{}\",\
+         \"no_claim\":\"{}\"}}",
+        receipt.state().name(),
+        receipt.misfit_verdict().name(),
+        check.verdict().name(),
+        receipt.innovation_variance(),
+        enclosure_width,
+        receipt.max_pivot_ratio(),
+        receipt.misfit_before(),
+        receipt.misfit_after(),
+        check.max_abs_diff(),
+        check.tolerance(),
+        receipt.identity(),
+        if receipt.state() == ContractionState::Certified {
+            "none"
+        } else {
+            "contraction-not-advertised"
+        },
+    );
+    let event = emitter.emit(
+        if pass {
+            fs_obs::Severity::Info
+        } else {
+            fs_obs::Severity::Error
+        },
+        fs_obs::EventKind::ConformanceCase {
+            suite: SCALAR_FACTOR_LOG_SUITE.to_string(),
+            case: "sensor-update-checked".to_string(),
+            pass,
+            detail,
+            seed: 0,
+        },
+        None,
+    );
+    if !pass {
+        fs_obs::lint_failure_record(&event)?;
+    }
+    let line = event.to_jsonl();
+    fs_obs::validate_line(&line)?;
+    Ok(event)
+}
