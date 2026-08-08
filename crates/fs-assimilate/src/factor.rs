@@ -310,7 +310,7 @@ impl FactorBelief {
             progress.scalar("factor construction", 1)?;
         }
         let mut diag = try_f64_vec(n, "factor diagonal", &mut progress)?;
-        for (index, (target, variance)) in diag.iter_mut().zip(&variances).enumerate() {
+        for (index, (target, variance)) in diag.iter_mut().zip(variances).enumerate() {
             if !variance.is_finite() || *variance < 0.0 {
                 return Err(AssimError::NegativeVariance { index });
             }
