@@ -50,6 +50,31 @@ everywhere: this is screening, not a viscous truth source.
   quasi-steady bound circulation relaxing against wake downwash;
   ledgered traces.
 
+### `helmholtz` (bead frankensim-fsim-helmholtz-bem-k1ryv)
+
+- `solve_radiation(surface, k, medium, velocity, formulation)` — exterior
+  Neumann radiation on a closed panel surface: complex surface pressure,
+  radiated power, panels-per-wavelength diagnostic. Time convention
+  `e^{-i omega t}`, `G = e^{ikr}/(4 pi r)`; with the module's HBIE row
+  sign, the Burton-Miller coupling is `alpha = -i/k` (pinned by the
+  interior-resonance contrast, not by convention label).
+- `Formulation::{PlainCbie, BurtonMiller, BurtonMillerWrongAlphaSign}` —
+  measured roles: PlainCbie is the accurate non-resonant arm (1.7-3.4%
+  on the pulsating sphere across ka in [0.05, 5]); BurtonMiller is the
+  resonance-safe production arm for ka >= 0.5 (1.1-5.2%; 1.7% at the
+  ka = pi fictitious frequency where PlainCbie hits 50%). The wrong-sign
+  arm exists so the mutation fails loudly (measured 3.3x worse at
+  resonance).
+- `radiation_impedance_matrix` — one factorization, n unit-velocity
+  solves; feeds the vibroacoustic-coupling bead.
+- `far_field` — sampled directivity amplitudes (monopole uniform to
+  0.00%, dipole cos-theta correlation 1.0000 measured).
+- `baffled_piston_impedance` — Rayleigh-integral piston (half-space),
+  validated against the Bessel-free small-ka series.
+- `HelmholtzError` — stable `FS-BEM-HELM-*` refusals: bad parameter,
+  too-coarse (< 6 panels/wavelength), dense work cap (8192 panels),
+  shape mismatch, singular.
+
 ## Invariants
 
 1. G0 Gauss identity: the assembled Neumann operator applied to ones
@@ -130,6 +155,18 @@ invalid-input/work/trace refusal; unconverged exterior-solve refusal with
 retained report. The source report is pinned by URL and SHA-256 in the battery;
 NASA marks it as U.S. Government work with public use permitted.
 
+### Helmholtz invariants
+
+1. Kernel formulas are pinned by central-finite-difference tests of G;
+   disc self terms by numerical quadrature of the regularized kernels.
+2. The hypersingular static self entry uses the exact closed-surface
+   identity `N_0[1] = 0` as a discrete row sum, so the same point-panel
+   quadrature appears on both sides and its error cancels.
+3. Pulsating-sphere impedance within the authored per-arm envelopes
+   above; radiated power positive for mesh-resolved velocity fields;
+   area-weighted impedance-matrix reciprocity to 0.5% measured.
+4. Repeat solves are bitwise identical.
+
 ## No-claim boundaries
 
 - 3D LIFTING surfaces (Kutta strips, wake SHEETS) and the fs-vpm
@@ -148,3 +185,16 @@ NASA marks it as U.S. Government work with public use permitted.
 - FMM-accelerated 2D wake convection. The shipped path is a direct all-pairs
   screening kernel with an explicit 1,024-vortex / 1,048,576-pair per-step
   admission ceiling.
+- Helmholtz (`helmholtz` module): BurtonMiller's radiation RESISTANCE
+  below ka ~ 0.5 is NOT resolved by centroid quadrature (measured -9.4
+  vs +1.03 Pa s/m at ka = 0.05 on 320 panels; recorded unasserted in
+  the JSON evidence) — use PlainCbie below the first interior resonance;
+  exact singular triangle quadrature is the recorded fix trigger.
+  Passivity is claimed only for mesh-resolved velocity fields: a
+  quadrupole's true radiated power at ka = 1 sits below the noise floor
+  on the 80-panel fixture (measured, recorded). No FMM acceleration
+  (dense cap 8192 panels), no spherical-harmonic directivity coefficient
+  tables (sampled directivity only), no scattering/incident-field path,
+  no half-space or impedance boundary conditions, no Bessel-backed
+  piston closed form (small-ka series only until the duct bead's special
+  functions land).
