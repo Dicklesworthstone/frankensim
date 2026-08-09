@@ -1012,6 +1012,32 @@ pub struct VisibleDielectricStatePoint {
     reference_distance_m: f64,
 }
 
+/// Data-selected visible optical constitutive family at one material state.
+///
+/// Selection depends only on which complete, admissible property schema the
+/// immutable material card supplies. Material names and chemistry strings are
+/// never inspected. A card that supplies both schemas is ambiguous unless a
+/// pinned per-property selection plan makes exactly one family resolvable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VisibleOpticalStatePoint {
+    /// Opaque complex-index response sampled over the visible band.
+    Conductor(VisibleConductorStatePoint),
+    /// Homogeneous transmitting response with Cauchy dispersion and
+    /// Beer-Lambert absorption.
+    Dielectric(VisibleDielectricStatePoint),
+}
+
+impl VisibleOpticalStatePoint {
+    /// Complete card/state/property-use bundle for the selected family.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        match self {
+            Self::Conductor(state) => state.resolved(),
+            Self::Dielectric(state) => state.resolved(),
+        }
+    }
+}
+
 impl VisibleDielectricStatePoint {
     /// Complete card/state/property-use bundle.
     #[must_use]
@@ -1158,6 +1184,30 @@ pub fn resolve_visible_dielectric_state_point(
         reference_distance_m: value(VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY),
         resolved,
     })
+}
+
+/// Resolve exactly one visible optical constitutive family from card data.
+///
+/// This is the generic material-to-rendering ingress. It admits a family only
+/// when every required property resolves at the caller's exact state point.
+/// Partial schemas never receive defaults, and two simultaneously complete
+/// schemas refuse rather than being selected by material name or call order.
+pub fn resolve_visible_optical_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<VisibleOpticalStatePoint, VisibleOpticalStatePointError> {
+    let conductor = resolve_visible_conductor_state_point(card, point, selection.clone());
+    let dielectric = resolve_visible_dielectric_state_point(card, point, selection);
+    match (conductor, dielectric) {
+        (Ok(conductor), Err(_)) => Ok(VisibleOpticalStatePoint::Conductor(conductor)),
+        (Err(_), Ok(dielectric)) => Ok(VisibleOpticalStatePoint::Dielectric(dielectric)),
+        (Ok(_), Ok(_)) => Err(VisibleOpticalStatePointError::AmbiguousFamilies),
+        (Err(conductor), Err(dielectric)) => Err(VisibleOpticalStatePointError::NoCompleteFamily {
+            conductor: Box::new(conductor),
+            dielectric: Box::new(dielectric),
+        }),
+    }
 }
 
 impl IsotropicSolidStatePoint {
@@ -1380,6 +1430,29 @@ impl fmt::Display for MaterialStatePointError {
 
 impl std::error::Error for MaterialStatePointError {}
 
+/// Typed refusal from data-driven visible optical-family selection.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VisibleOpticalStatePointError {
+    /// Neither supported optical property schema resolved completely.
+    NoCompleteFamily {
+        /// Exact refusal from the complex-index conductor schema.
+        conductor: Box<MaterialStatePointError>,
+        /// Exact refusal from the Cauchy/Beer-Lambert dielectric schema.
+        dielectric: Box<MaterialStatePointError>,
+    },
+    /// Both schemas resolved, so property presence alone cannot select one
+    /// constitutive interpretation without inventing caller intent.
+    AmbiguousFamilies,
+}
+
+impl fmt::Display for VisibleOpticalStatePointError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for VisibleOpticalStatePointError {}
+
 #[cfg(test)]
 mod tests {
     use fs_evidence::ValidityDomain;
@@ -1574,6 +1647,26 @@ mod tests {
         MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "test-visible-dielectric".to_owned(),
+                phase: "solid".to_owned(),
+                process: "polished".to_owned(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn ambiguous_optical_card() -> MaterialCard {
+        let conductor = optical_card(600.0);
+        let dielectric = dielectric_optical_card(0.98);
+        let mut claims = conductor.claims().clone();
+        for (_, claim) in dielectric.claims().claims_ordered() {
+            claims.insert_claim(claim.clone()).unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "test-visible-ambiguous".to_owned(),
                 phase: "solid".to_owned(),
                 process: "polished".to_owned(),
                 revision: 0,
@@ -1859,7 +1952,10 @@ mod tests {
             MaterialPropertySelection::SingleClaimOnly,
         )
         .expect("complete homogeneous dielectric state resolves");
-        assert_eq!(resolved.cauchy_coefficients_si(), [1.49, 4.1e-15, 0.0]);
+        let cauchy = resolved.cauchy_coefficients_si();
+        assert!((cauchy[0] - 1.49).abs() <= 1.0e-15);
+        assert!((cauchy[1] - 4.1e-15).abs() <= 1.0e-30);
+        assert_eq!(cauchy[2], 0.0);
         assert_eq!(
             resolved.reference_transmittance_linear_rgb(),
             [0.98, 0.98, 0.94]
@@ -1876,6 +1972,37 @@ mod tests {
             Err(MaterialStatePointError::InvalidDerived {
                 quantity: "visible_dielectric_reference_transmittance"
             })
+        ));
+    }
+
+    #[test]
+    fn g0_visible_optical_family_is_data_selected_and_ambiguous_cards_refuse() {
+        let conductor = resolve_visible_optical_state_point(
+            &optical_card(600.0),
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("complex-index schema selects conductor optics");
+        assert!(matches!(conductor, VisibleOpticalStatePoint::Conductor(_)));
+
+        let dielectric = resolve_visible_optical_state_point(
+            &dielectric_optical_card(0.98),
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("Cauchy and transmittance schema selects dielectric optics");
+        assert!(matches!(
+            dielectric,
+            VisibleOpticalStatePoint::Dielectric(_)
+        ));
+
+        assert!(matches!(
+            resolve_visible_optical_state_point(
+                &ambiguous_optical_card(),
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(VisibleOpticalStatePointError::AmbiguousFamilies)
         ));
     }
 

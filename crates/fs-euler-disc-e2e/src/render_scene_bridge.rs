@@ -15,7 +15,7 @@ use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, Point3, Vec3};
 use fs_material::state_point::{
     IsotropicElasticStatePoint, IsotropicSolidStatePoint, ResolvedMaterialStatePoint,
-    VisibleConductorStatePoint, VisibleDielectricStatePoint,
+    VisibleConductorStatePoint, VisibleDielectricStatePoint, VisibleOpticalStatePoint,
 };
 use fs_math::det;
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
@@ -206,6 +206,55 @@ pub struct EulerDiscMaterialStateBinding {
 }
 
 impl EulerDiscMaterialStateBinding {
+    /// Bind the data-selected visible optical family to a complete isotropic
+    /// solid state and an explicit isotropic surface roughness.
+    ///
+    /// The material card, not this scene adapter, determines whether the bulk
+    /// response is conducting or transmitting. Both families receive the same
+    /// measured/caller-supplied GGX alpha at this boundary.
+    pub fn try_visible_optical(
+        mechanical: &IsotropicSolidStatePoint,
+        optical: &VisibleOpticalStatePoint,
+        roughness_alpha: f64,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        match optical {
+            VisibleOpticalStatePoint::Conductor(optical) => {
+                Self::try_conductor(mechanical, optical, roughness_alpha, surface_state_identity)
+            }
+            VisibleOpticalStatePoint::Dielectric(optical) => Self::try_dielectric(
+                mechanical,
+                optical,
+                Some(roughness_alpha),
+                surface_state_identity,
+            ),
+        }
+    }
+
+    /// Bind the data-selected visible optical family to the minimal elastic
+    /// state consumed by structural vibration and acoustic radiation.
+    pub fn try_visible_optical_elastic(
+        mechanical: &IsotropicElasticStatePoint,
+        optical: &VisibleOpticalStatePoint,
+        roughness_alpha: f64,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        match optical {
+            VisibleOpticalStatePoint::Conductor(optical) => Self::try_conductor_elastic(
+                mechanical,
+                optical,
+                roughness_alpha,
+                surface_state_identity,
+            ),
+            VisibleOpticalStatePoint::Dielectric(optical) => Self::try_dielectric_elastic(
+                mechanical,
+                optical,
+                Some(roughness_alpha),
+                surface_state_identity,
+            ),
+        }
+    }
+
     /// Resolve an opaque-conductor appearance from evidence-bearing material
     /// state and explicit surface finish.
     ///
@@ -3574,17 +3623,17 @@ mod bevel_tests {
 
 #[cfg(test)]
 mod material_binding_tests {
-    use fs_evidence::{Provenance, UncertaintyModel, ValidityDomain};
+    use fs_evidence::ValidityDomain;
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
-        PropertyValue, QueryPoint,
+        PropertyValue, Provenance, QueryPoint, UncertaintyModel,
     };
     use fs_material::state_point::{
         MaterialPropertySelection, VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
         VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY, VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
         VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
         VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES, resolve_isotropic_elastic_state_point,
-        resolve_visible_dielectric_state_point,
+        resolve_visible_optical_state_point,
     };
     use fs_qty::{Density, Dims, Pressure};
 
@@ -3669,16 +3718,16 @@ mod material_binding_tests {
             MaterialPropertySelection::SingleClaimOnly,
         )
         .unwrap();
-        let optical = resolve_visible_dielectric_state_point(
+        let optical = resolve_visible_optical_state_point(
             &card,
             &point,
             MaterialPropertySelection::SingleClaimOnly,
         )
         .unwrap();
-        let binding = EulerDiscMaterialStateBinding::try_dielectric_elastic(
+        let binding = EulerDiscMaterialStateBinding::try_visible_optical_elastic(
             &elastic,
             &optical,
-            Some(0.08),
+            0.08,
             ContentHash([7; 32]),
         )
         .expect("same-card dielectric binding");
@@ -3692,17 +3741,17 @@ mod material_binding_tests {
         assert_ne!(binding.identity(), ContentHash([0; 32]));
 
         let foreign = dielectric_card("foreign-finish", 0.85);
-        let foreign_optical = resolve_visible_dielectric_state_point(
+        let foreign_optical = resolve_visible_optical_state_point(
             &foreign,
             &point,
             MaterialPropertySelection::SingleClaimOnly,
         )
         .unwrap();
         assert!(matches!(
-            EulerDiscMaterialStateBinding::try_dielectric_elastic(
+            EulerDiscMaterialStateBinding::try_visible_optical_elastic(
                 &elastic,
                 &foreign_optical,
-                None,
+                0.08,
                 ContentHash([7; 32]),
             ),
             Err(EulerSceneError::MaterialStateMismatch(_))
