@@ -98,7 +98,6 @@ use fs_render::{
         cinematic_render_semantics_versions,
     },
     camera::{AnimatedCamera, Aperture, CameraProjection, CutSide, PhysicalCamera},
-    conductor::{ConductorOptics, ConductorSurface},
     dielectric::{DielectricGlass, DielectricSurface},
     motion::{
         NormalizedShutterTime, ShotTimeBounds, ShutterConvention, ShutterDistribution,
@@ -5243,7 +5242,6 @@ fn fixture_manifest(
         relative_residual = relative_energy_defect,
         trajectory_identity = trajectory_identity.to_hex(),
         audio_rate = SOUND_MASTER_SAMPLE_RATE_HZ,
-        wav_identity = wav_identity.to_hex(),
         physical_audio = physical_audio_json,
         chirp_start = chirp_start_hz,
         chirp_end = chirp_end_hz,
