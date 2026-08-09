@@ -32,9 +32,11 @@ pub struct PressureListeningMasterPolicy {
 }
 
 impl PressureListeningMasterPolicy {
-    /// Conservative critique master: about -6.94 dBFS estimated true peak.
+    /// Critique master with a conventional -1 dBFS estimated true-peak ceiling.
+    /// This is one scalar presentation gain; it cannot alter the physical
+    /// pressure waveform, spectral balance, or dynamics.
     pub const CRITIQUE: Self = Self {
-        target_true_peak_fs: 0.45,
+        target_true_peak_fs: 0.891_250_938_133_745_6,
         maximum_absolute_gain_db: 180.0,
     };
 }
@@ -389,8 +391,11 @@ mod tests {
         assert_eq!(master.right_pressure_identity, right.identity);
         assert_eq!(master.wav.sample_frame_count(), 48_000);
         assert!(master.digital_gain_db > 80.0);
-        assert!(master.meters.sample_peak_fs > 0.4);
-        assert!(master.meters.true_peak_estimate_fs <= 0.45 + 1.0e-12);
+        assert!(master.meters.sample_peak_fs > 0.8);
+        assert!(
+            master.meters.true_peak_estimate_fs
+                <= PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs + 1.0e-12
+        );
         assert!(master.meters.integrated_loudness_lufs.is_some());
     }
 

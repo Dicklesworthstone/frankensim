@@ -1589,6 +1589,15 @@ remains linear small-displacement radiation into an infinite rigid baffle; it
 does not include the housing cavity, edge diffraction, room response, or
 two-way radiation impedance.
 
+Plate support is geometry, not an apparatus-name preset. A request may constrain
+the full perimeter or declare three centered-frame pin locations. Three-point
+pins are deterministically resolved to distinct, non-collinear structured-mesh
+nodes under an explicit snap tolerance; the requested locations, resolved node
+indices, and maximum snap error are identity-bound and reported. A pin fixes
+transverse displacement while leaving DKT rotations free. This is an ideal
+kinematic boundary condition, not an elastic foot, housing, or table-impedance
+model; those require explicit mass, stiffness, damping, and contact state.
+
 No-claim boundary: both the legacy body-fixed transfer and the pose-dependent
 directivity realization retain only each structural mode's natural-frequency
 Helmholtz response. The latter applies that narrow-band propagation phase at

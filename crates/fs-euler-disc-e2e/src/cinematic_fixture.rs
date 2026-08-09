@@ -6235,7 +6235,7 @@ fn fixture_manifest(
             "\"digital_gain_fs_per_pa\":{:.17e},\"digital_gain_db\":{:.9},",
             "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
             "\"stereo_rms_fs\":{:.17e},\"integrated_loudness_lufs\":{},",
-            "\"listening_master_policy\":\"single deterministic scalar gain to 0.45 estimated true peak; no EQ, compression, limiter, synthesis preset, or material-name dispatch\"}}"
+            "\"listening_master_policy\":{{\"method\":\"single deterministic scalar pressure-to-digital gain; no EQ, compression, limiter, synthesis preset, or material-name dispatch\",\"target_true_peak_fs\":{:.17e}}}}}"
         ),
         SOUND_MASTER_SAMPLE_RATE_HZ,
         wav_identity.to_hex(),
@@ -6272,6 +6272,7 @@ fn fixture_manifest(
         physical_audio.master.meters.true_peak_estimate_fs,
         physical_audio.master.meters.stereo_rms_fs,
         physical_loudness,
+        PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs,
     );
     format!(
         concat!(
