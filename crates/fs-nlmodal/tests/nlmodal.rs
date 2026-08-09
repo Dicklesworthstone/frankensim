@@ -72,8 +72,10 @@ fn measure_omega(sys: &PortHamiltonian, x0: Vec<f64>, dt: f64, steps: usize) -> 
 fn plate_construction_certificates() {
     let model =
         von_karman_ss_plate(&steel_plate(), &modes_grid(3, 2), &modes_grid(4, 3)).expect("plate");
-    // Quadrature certificate logged, small.
-    assert!(model.quadrature_residual < 1.0e-8);
+    // Quadrature certificate: far BELOW the refusal threshold (an
+    // assert at the threshold itself would be vacuous after expect —
+    // review finding); measured ~1e-13 class.
+    assert!(model.quadrature_residual < 1.0e-10);
     // Symmetry of every channel is verified by assemble (and would
     // refuse otherwise).
     let n = model.storage.omegas.len();
@@ -136,8 +138,9 @@ fn duffing_backbone_matches_perturbation_formula() {
     let sys = assemble(storage, &[0.0], &[0.0]).expect("assemble");
     let dt = 2.0e-6;
     let steps = 40_000;
-    // Amplitudes chosen for relative shifts ~2e-4 and ~8e-4: small
-    // enough for first-order perturbation, large enough to measure.
+    // Amplitudes give first-order relative shifts ~3e-2 and ~1.2e-1
+    // (review-corrected numbers); at the larger one the second-order
+    // backbone term is ~5% of the shift — inside the 10% budget.
     for amp in [2.0e-4, 4.0e-4] {
         let measured = measure_omega(&sys, vec![amp, 0.0], dt, steps);
         let predicted = duffing_backbone(omega0, beta, amp);
@@ -496,6 +499,63 @@ fn plate_cascade_casebook() {
     println!(
         "{{\"suite\":\"fs-nlmodal\",\"case\":\"cascade\",\"fractions\":{fractions:?},\"verdict\":\"pass\"}}"
     );
+}
+
+#[test]
+fn all_zero_channel_constructs() {
+    // Selection-rule parity makes some (stress, disp) combinations
+    // integrate to EXACTLY zero everywhere; such a channel must
+    // construct (with a zero matrix), not spuriously refuse on its
+    // own roundoff scale (review finding: 0.75 "relative" residual).
+    let model = von_karman_ss_plate(
+        &steel_plate(),
+        &[SineMode { m: 1, n: 1 }],
+        &[SineMode { m: 2, n: 1 }],
+    )
+    .expect("all-zero channel must construct");
+    let peak = model.storage.channels[0]
+        .coupling
+        .iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()));
+    // Entries are roundoff-class relative to a physical channel.
+    let phys = von_karman_ss_plate(
+        &steel_plate(),
+        &[SineMode { m: 1, n: 1 }],
+        &[SineMode { m: 1, n: 1 }],
+    )
+    .expect("physical channel");
+    let phys_peak = phys.storage.channels[0]
+        .coupling
+        .iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()));
+    assert!(
+        peak < 1.0e-9 * phys_peak,
+        "zero channel: {peak:.3e} vs {phys_peak:.3e}"
+    );
+}
+
+#[test]
+fn nan_and_duplicates_refused() {
+    // NaN must not slip through comparison gates (review finding).
+    let storage = kirchhoff_carrier_string(&guitar_string(), 2).expect("kc");
+    let mut bad = kirchhoff_carrier_string(&guitar_string(), 2).expect("kc");
+    bad.omegas[0] = f64::NAN;
+    assert!(assemble(bad, &[0.0, 0.0], &[0.0, 0.0]).is_err());
+    let mut bad2 = kirchhoff_carrier_string(&guitar_string(), 2).expect("kc");
+    bad2.channels[0].coupling[0] = f64::NAN;
+    assert!(assemble(bad2, &[0.0, 0.0], &[0.0, 0.0]).is_err());
+    drop(storage);
+    // Duplicate modes double-count physics: refused by name.
+    assert!(matches!(
+        von_karman_ss_plate(
+            &steel_plate(),
+            &[SineMode { m: 1, n: 1 }, SineMode { m: 1, n: 1 }],
+            &[SineMode { m: 1, n: 1 }],
+        ),
+        Err(NlModalError::Parameter {
+            what: "duplicate mode in list"
+        })
+    ));
 }
 
 #[test]

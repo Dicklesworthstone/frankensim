@@ -21,7 +21,9 @@ the crash cascade with structurally exact energy accounting.
   (zetas come from the caller; the visco-damping facility's per-mode
   output slots in here — no second damping representation invented),
   one strike port. REFUSES asymmetric couplings, negative
-  coefficients/damping, non-positive frequencies by name.
+  coefficients/damping, non-positive/non-finite frequencies, and
+  non-finite couplings by name (NaN-proof negated comparisons);
+  duplicate modes in either constructor list are refused.
 - `von_karman_ss_plate` — simply-supported rectangle with ANALYTIC
   sine modes for displacement (mass-normalized) and Airy stress
   (unit-normalized; both are biharmonic eigenfunctions on the SS
@@ -29,10 +31,12 @@ the crash cascade with structurally exact energy accounting.
   `E h / (2 xi_j^4)`. Coupling integrals by Gauss-Legendre quadrature
   whose order SCALES with the highest half-wave sum (a fixed order
   left ~5 points per wave — executed), certified by a second
-  independent order judged against the CHANNEL-scale (entrywise
-  relative comparison falsely refuses analytically-zero
-  selection-rule entries — executed); the residual is returned, not
-  hidden. Stress-mode count is a SEPARATE truncation from the
+  independent order judged against max(channel scale, 1e-12 x global
+  scale) — entrywise relative comparison falsely refuses
+  analytically-zero entries, and an ALL-zero channel's own scale is
+  pure roundoff (both executed); the residual is returned, not
+  hidden. The two orders share the quadrature engine, so the
+  certificate is a CONVERGENCE check, not an independent-route one. Stress-mode count is a SEPARATE truncation from the
   displacement count (both explicit inputs).
 - `kirchhoff_carrier_string` — one diagonal channel
   `E[k,k] = (k pi/L)^2 * 2/(mu L)`, coefficient `E A L / 8`: exactly
@@ -134,8 +138,9 @@ modal energies, leaked fractions, tensor size); typed refusals.
   re-derivation.
 - Literature-value comparisons for internal-resonance energy
   exchange are deferred (measured tables need verified
-  transcription); the executed cross-check is the independent RK4
-  route.
+  transcription); the executed cross-check is an independent
+  INTEGRATOR over the same coded vector field — it validates the
+  stepper, not the tensor physics (review-corrected wording).
 - Damping is per-mode viscous `zeta_k` supplied by the caller;
   frequency-dependent loss models remain the visco-damping
   facility's.
