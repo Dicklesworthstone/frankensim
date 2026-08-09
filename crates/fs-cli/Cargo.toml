@@ -25,11 +25,11 @@ fs-io = { path = "../fs-io" }
 fs-ledger = { path = "../fs-ledger" }
 fs-matdb = { path = "../fs-matdb" }
 fs-project = { path = "../fs-project" }
+fs-qty = { path = "../fs-qty" }
 fs-session = { path = "../fs-session" }
 
 [dev-dependencies]
 fs-mbd = { path = "../fs-mbd" }
-fs-qty = { path = "../fs-qty" }
 
 [lints]
 workspace = true
