@@ -89,7 +89,7 @@ use fs_material::{
         EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
     },
     state_point::{
-        IsotropicElasticStatePoint, MaterialPropertySelection,
+        IsotropicElasticStatePoint, IsotropicSolidStatePoint, MaterialPropertySelection,
         ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
         ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES, OrthotropicElasticStatePoint,
         ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
@@ -642,6 +642,8 @@ pub struct CinematicSupportPlateMaterialConfig {
     pub young_modulus_pa: f64,
     /// Isotropic Poisson ratio.
     pub poisson_ratio: f64,
+    /// Strength limit used only for normal-contact applicability [Pa].
+    pub yield_stress_pa: f64,
     /// Mass-proportional Rayleigh damping coefficient [1/s].
     pub rayleigh_alpha_per_s: f64,
     /// Stiffness-proportional Rayleigh damping coefficient [s].
@@ -677,6 +679,9 @@ impl Default for CinematicSupportPlateMaterialConfig {
             density_kg_m3: 2_500.0,
             young_modulus_pa: 70.0e9,
             poisson_ratio: 0.23,
+            // Conservative declared contact-applicability datum; not a claim
+            // that brittle glass failure is ductile yielding.
+            yield_stress_pa: 40.0e6,
             // Disclosed low-loss estimates, not tuned to a desired recording.
             rayleigh_alpha_per_s: 0.15,
             rayleigh_beta_s: 2.0e-7,
@@ -1069,6 +1074,7 @@ impl CinematicFixtureConfig {
             plate_material.temperature_k,
             plate_material.density_kg_m3,
             plate_material.young_modulus_pa,
+            plate_material.yield_stress_pa,
             plate_material.transmittance_reference_distance_m,
         ]
         .into_iter()
@@ -1306,7 +1312,10 @@ struct FixturePhysicalDiscState {
 }
 
 enum FixtureResolvedElasticState {
-    Isotropic(IsotropicElasticStatePoint),
+    Isotropic {
+        elastic: IsotropicElasticStatePoint,
+        solid: IsotropicSolidStatePoint,
+    },
     Orthotropic {
         state: OrthotropicElasticStatePoint,
         principal_to_specimen: [[f64; 3]; 3],
@@ -1317,7 +1326,7 @@ enum FixtureResolvedElasticState {
 impl FixtureResolvedElasticState {
     fn resolved(&self) -> &ResolvedMaterialStatePoint {
         match self {
-            Self::Isotropic(state) => state.resolved(),
+            Self::Isotropic { elastic, .. } => elastic.resolved(),
             Self::Orthotropic { state, .. } => state.resolved(),
         }
     }
@@ -1325,6 +1334,7 @@ impl FixtureResolvedElasticState {
 
 struct FixturePhysicalPlateState {
     elastic: IsotropicElasticStatePoint,
+    solid: IsotropicSolidStatePoint,
     render_glass: DielectricGlass,
     render_surface: DielectricSurface,
     rayleigh_damping: RayleighDamping,
@@ -1489,14 +1499,20 @@ fn resolve_fixture_physical_disc(
         .with("T", config.temperature_k)
         .map_err(pipeline)?;
     let elastic = match &config.elasticity {
-        CinematicElasticConfig::Isotropic { .. } => FixtureResolvedElasticState::Isotropic(
-            resolve_isotropic_elastic_state_point(
+        CinematicElasticConfig::Isotropic { .. } => FixtureResolvedElasticState::Isotropic {
+            elastic: resolve_isotropic_elastic_state_point(
                 &card,
                 &point,
                 MaterialPropertySelection::SingleClaimOnly,
             )
             .map_err(pipeline)?,
-        ),
+            solid: resolve_isotropic_solid_state_point(
+                &card,
+                &point,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .map_err(pipeline)?,
+        },
         CinematicElasticConfig::Orthotropic {
             principal_to_specimen,
             linear_strain_limit,
@@ -1533,7 +1549,7 @@ fn resolve_fixture_physical_disc(
     let (specimen, equilibrium_phase_state) = match &specimen_config.phase {
         CinematicDiscPhaseConfig::FixedSolidStatePoint => {
             let specimen = match &elastic {
-                FixtureResolvedElasticState::Isotropic(state) => reference_profile
+                FixtureResolvedElasticState::Isotropic { elastic: state, .. } => reference_profile
                     .spec
                     .resolve_with_isotropic_elastic_state(state, cx)
                     .map_err(pipeline)?,
@@ -1568,7 +1584,7 @@ fn resolve_fixture_physical_disc(
                 .resolve_with_phase_state(phase_state, cx)
                 .map_err(pipeline)?;
             let specimen = match &elastic {
-                FixtureResolvedElasticState::Isotropic(_) => {
+                FixtureResolvedElasticState::Isotropic { .. } => {
                     let solid = resolve_isotropic_solid_state_point(
                         &card,
                         &point,
@@ -1691,6 +1707,7 @@ fn resolve_fixture_physical_plate(
     insert_scalar("density", Density::DIMS, material.density_kg_m3)?;
     insert_scalar("young_modulus", Pressure::DIMS, material.young_modulus_pa)?;
     insert_scalar("poisson_ratio", Dims::NONE, material.poisson_ratio)?;
+    insert_scalar("yield_stress", Pressure::DIMS, material.yield_stress_pa)?;
     let card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: material.material_label.clone(),
@@ -1706,6 +1723,12 @@ fn resolve_fixture_physical_plate(
         .with("T", material.temperature_k)
         .map_err(pipeline)?;
     let elastic = resolve_isotropic_elastic_state_point(
+        &card,
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .map_err(pipeline)?;
+    let solid = resolve_isotropic_solid_state_point(
         &card,
         &point,
         MaterialPropertySelection::SingleClaimOnly,
@@ -1758,6 +1781,7 @@ fn resolve_fixture_physical_plate(
     optical.update(material.optical_source.as_bytes());
     Ok(FixturePhysicalPlateState {
         elastic,
+        solid,
         render_glass,
         render_surface,
         rayleigh_damping,

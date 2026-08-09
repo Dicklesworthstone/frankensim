@@ -255,6 +255,12 @@ impl RectangularModalBasePort {
         })
     }
 
+    /// Stable immutable physical/configuration owner identity.
+    #[must_use]
+    pub const fn identity(&self) -> &RectangularModalBaseIdentity {
+        &self.identity
+    }
+
     /// Exact resolved structural basis shared with acoustics and visualization.
     #[must_use]
     pub fn basis(&self) -> &RectangularPlateModalBasis {

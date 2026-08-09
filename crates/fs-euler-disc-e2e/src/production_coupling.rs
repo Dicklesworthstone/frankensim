@@ -819,6 +819,21 @@ impl fmt::Display for ProductionCouplingError {
 impl std::error::Error for ProductionCouplingError {}
 
 impl ProductionBasePort {
+    /// Stable physical-model and selected-configuration identities.
+    #[must_use]
+    pub fn identity_parts(&self) -> (&str, &str) {
+        match self {
+            Self::ReducedOneMode(port) => {
+                let identity = port.identity();
+                (&identity.model_id, &identity.configuration_id)
+            }
+            Self::RectangularModal(port) => {
+                let identity = port.identity();
+                (&identity.model_id, &identity.configuration_id)
+            }
+        }
+    }
+
     fn initial_checkpoint(&self) -> ProductionBaseCheckpoint {
         match self {
             Self::ReducedOneMode(port) => {
@@ -1772,10 +1787,12 @@ impl ProductionCouplingModel {
         }
         let mut patch_input = input.patch.clone();
         patch_input.bridge.disc_state = checkpoint.disc_state;
-        patch_input.bridge.base_mode.vertical_displacement_m =
-            checkpoint.base_state.modal_displacement_m();
-        patch_input.bridge.base_mode.vertical_velocity_m_per_s =
-            checkpoint.base_state.modal_velocity_m_per_s();
+        let (base_displacement_m, base_velocity_m_per_s) = self.base_port.surface_state(
+            &checkpoint.base_state,
+            patch_input.bridge.profile_support.disc_point_world_m,
+        )?;
+        patch_input.bridge.base_mode.vertical_displacement_m = base_displacement_m;
+        patch_input.bridge.base_mode.vertical_velocity_m_per_s = base_velocity_m_per_s;
         compute_moving_one_mode_patch_kinematics(patch_input)
             .map_err(ProductionCouplingError::Patch)
     }
@@ -2008,7 +2025,7 @@ fn production_checkpoint_fingerprint(
     tangential_state: &TangentialContactState,
     rolling_state: &RollingContactState,
     gas_channel_state: &GasChannelState,
-    base_state: &ReducedBaseCheckpoint,
+    base_state: &ProductionBaseCheckpoint,
 ) -> ContentHash {
     hash_domain(
         "fs-euler-disc-e2e/production-coupling-checkpoint/v1",
