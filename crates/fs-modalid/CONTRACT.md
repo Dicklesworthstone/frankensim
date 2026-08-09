@@ -16,28 +16,36 @@ measurement side of the simulate-vs-measure calibration loop.
   table (freq, re, im[, coherence] per channel; comment lines `#`).
   No UFF/proprietary formats in v1 (stated).
 - `estimate_snr` — coherence-driven `gamma^2/(1-gamma^2)` when
-  present; otherwise a SECOND-DIFFERENCE roughness estimator (white
-  noise amplifies 6x in `d2` power; a smooth FRF contributes only
-  curvature). The naive lowest-decile magnitude floor is WRONG for
-  FRFs (antiresonance valleys are signal — executed failure pinned in
-  the doc).
+  present; otherwise a FOURTH-DIFFERENCE roughness estimator (white
+  noise passes with power gain 70; the median sits at ln2 of the
+  mean — both divided out). The naive lowest-decile magnitude floor
+  is WRONG for FRFs (antiresonance valleys are signal — executed
+  failure). Channels under 5 samples vote ZERO (refusal), never
+  infinity.
 - `identify` — the pipeline: SNR gate (typed `SnrTooLow` refusal) ->
   vector-fit stabilization ladder (per-order pole tables) ->
   `stabilization` verdicts (frequency/damping match tolerances,
   required consecutive runs; every final-order pole gets an
   accept/reject + reason) -> near-duplicate merge at 1/5 the match
   tolerance (the two tolerance roles differ — executed: merging at
-  the match tolerance swallowed a genuine 0.5%-separated pair) ->
+  the match tolerance swallowed a genuine 0.5%-separated pair;
+  within a cluster the LONGEST-stable-run pole wins — keeping the
+  first kept a spare 0.1 Hz off the true mode, executed) ->
   per-channel residues at the SHARED accepted poles (fs-vfit
   `residue_fit_at_poles`, conjugate-EXPANDED pole list) -> residue
-  significance gate (a stable spare pole modeling the noise floor
-  carries residues orders below physical modes) -> split-sample
-  (even/odd half-grid) confidence intervals -> optional
-  exponential-window damping correction with raw values logged.
+  significance gate (dropped frequencies RECORDED in
+  `insignificant_freqs_hz`, never silent) -> split-sample (even/odd
+  half-grid) confidence intervals with a capped nearest-match (an
+  unmatched half-grid pole yields a NaN interval, never zero) ->
+  optional exponential-window damping correction with raw values
+  logged. Ladder options are validated (`order_step >= 1` etc.).
 - `rfp_fit` — classical rational-fraction-polynomial identifier on a
-  Forsythe-orthogonal basis (three-term recurrence, orthonormal under
-  the fit weights), denominator roots via the companion matrix,
-  residues through the SAME fs-vfit residue pass. The third
+  Forsythe-recurrence basis. HONEST MECHANISM (review-corrected): on
+  a positive-frequencies-only grid the basis is NOT orthonormal in
+  the complex inner product; its i^d PARITY structure makes the real
+  Re/Im-stacked LS Gram near-identity (condition < 100 asserted,
+  measured 32). Denominator roots via the companion matrix; residues
+  through the SAME fs-vfit residue pass. The third
   independent identifier (vector fitting and Loewner re-exported from
   fs-vfit are the other two); disagreement is a diagnostic.
 - `mac` / `mac_matrix` / `mac_pairing` — modal assurance criterion
@@ -62,10 +70,10 @@ measurement side of the simulate-vs-measure calibration loop.
 5. SNR refusal fires by name below the floor; no fabricated modes.
    Zero surviving poles is the typed `NoStablePoles`, not an empty
    table.
-6. RFP conditioning: the monomial-basis Gram matrix at degree 20 is
-   numerically singular (condition > 1e8 asserted) while the Forsythe
-   basis is orthonormal by construction — the reason the orthogonal
-   basis is load-bearing, demonstrated not asserted.
+6. RFP conditioning: the monomial-basis Gram at degree 20 is
+   numerically singular (> 1e8) while the real-stacked Forsythe Gram
+   conditions below 100 — both DEMONSTRATED in the battery, with the
+   honest mechanism statement above.
 7. Published benchmark: identification recovers Carcagno et al. JASA
    144(6):3533 Table I modal parameters (Brazilian-rosewood guitar,
    F/Q verified verbatim from the saved CC-BY PDF) from an FRF
@@ -126,3 +134,11 @@ line refusal; Carcagno published-parameter benchmark.
   close pairs.
 - UFF/universal-file ingestion is out of scope (stated in the bead's
   polish round).
+- The d4 SNR estimator assumes the grid resolves the peaks (several
+  samples per half-width); a legitimate coarse survey grid can still
+  refuse — conservative, but a stated limitation (coherence data
+  sidesteps it).
+- Stabilization verdicts cover FINAL-order poles only: a mode stable
+  through intermediate orders but relocated at the top order gets no
+  verdict (stated; longest-run-over-all-orders diagrams are a
+  follow-up).

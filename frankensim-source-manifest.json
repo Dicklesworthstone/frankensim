@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "f042e3c9407a5d75d17cc53a4a6c168461b21ec56684bceeec116175dc24301e",
+  "manifest_identity": "bddd8315bb8b97abfe6614f6cb7f8fcb06e89a932fea228855fbfd63fdeee475",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "8a50bf7b92862ef3a68f92ad152d59a79482307707dbcdc49085b0e745ab114a",
+    "source_root": "403dacd7529b6770d5f1bc13b38dc19f83973ff1b280e2620795003198012224",
     "tracked_file_count": 2278,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1129,8 +1129,8 @@
       {"path": "crates/fs-modal/tests/modal_casebook.rs", "git_mode": "100644", "bytes": 6401, "content_blake3": "a7dd9bf457f5f6540dd653c393284712e2b36294df4c4c1449090902e7b6de3d"},
       {"path": "crates/fs-modalid/CONTRACT.md", "git_mode": "100644", "bytes": 5999, "content_blake3": "d7e566bc0fc0f52c95952f6f973e0c691d3cf79844115eabfc2548ac77dee7af"},
       {"path": "crates/fs-modalid/Cargo.toml", "git_mode": "100644", "bytes": 646, "content_blake3": "81bb7ffd6b3c3eefdaaf205037741d152fd2ac96a293357add0812d5449cd82f"},
-      {"path": "crates/fs-modalid/src/lib.rs", "git_mode": "100644", "bytes": 31332, "content_blake3": "c280042c860382f90a3cbad6b687ca0a3982ad9c959c44b67ddc0c425853eaf8"},
-      {"path": "crates/fs-modalid/tests/modalid.rs", "git_mode": "100644", "bytes": 19926, "content_blake3": "742443c8d7755d12ca332c13d153f1978924a94c77c5f3aeb94c41e7ecc6ba94"},
+      {"path": "crates/fs-modalid/src/lib.rs", "git_mode": "100644", "bytes": 34215, "content_blake3": "cc6b8c820903f222b66460e588653ea82c18781f14f567862b21635af0c307bf"},
+      {"path": "crates/fs-modalid/tests/modalid.rs", "git_mode": "100644", "bytes": 22533, "content_blake3": "8468b85fd2a21ea6d25ab14a7cfb027aa7600aedaed31b7594b5820cde9ff44b"},
       {"path": "crates/fs-motion/CONTRACT.md", "git_mode": "100644", "bytes": 22568, "content_blake3": "833565f4b3f1dad0efb11cba83bbb6708197086a9c31b1a3017dab366bea88d3"},
       {"path": "crates/fs-motion/Cargo.toml", "git_mode": "100644", "bytes": 718, "content_blake3": "652e0d077cb64253cf7fbcca803bc2be40181b0b8d3fca22239b33a76e7fe405"},
       {"path": "crates/fs-motion/src/algebra.rs", "git_mode": "100644", "bytes": 11102, "content_blake3": "22304e3857c6b9146b4c54301578dc57f32109871bac5d78db74a9282de95666"},
