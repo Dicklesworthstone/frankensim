@@ -89,6 +89,7 @@ impl Obstacle {
     ///
     /// # Errors
     /// Typed [`DContactError`].
+    #[allow(clippy::too_many_arguments)] // one admission door for one flat data record
     pub fn new(
         collocation: Vec<f64>,
         n_points: usize,
@@ -122,12 +123,12 @@ impl Obstacle {
                 what: "negative quadrature weight",
             });
         }
-        if stiffness.is_nan() || stiffness < 0.0 || !stiffness.is_finite() {
+        if !stiffness.is_finite() || stiffness < 0.0 {
             return Err(DContactError::Parameter {
                 what: "contact stiffness must be non-negative and finite",
             });
         }
-        if alpha.is_nan() || alpha < 1.0 {
+        if !alpha.is_finite() || alpha < 1.0 {
             return Err(DContactError::Parameter {
                 what: "contact exponent must be at least 1",
             });
@@ -279,7 +280,7 @@ pub fn polyline_heights(
         });
     }
     for pair in vertices.windows(2) {
-        if !(pair[1].0 > pair[0].0) {
+        if pair[1].0 <= pair[0].0 || pair[1].0.is_nan() {
             return Err(DContactError::Parameter {
                 what: "polyline x must strictly ascend",
             });
@@ -312,7 +313,12 @@ pub fn polyline_heights(
 /// standard bridge from modal string states to physical displacement
 /// at the obstacle points.
 #[must_use]
-pub fn string_collocation(length: f64, lin_density: f64, points: &[f64], n_modes: usize) -> Vec<f64> {
+pub fn string_collocation(
+    length: f64,
+    lin_density: f64,
+    points: &[f64],
+    n_modes: usize,
+) -> Vec<f64> {
     let norm = det::sqrt(2.0 / (lin_density * length));
     let pi = core::f64::consts::PI;
     let mut m = vec![0.0; points.len() * n_modes];
