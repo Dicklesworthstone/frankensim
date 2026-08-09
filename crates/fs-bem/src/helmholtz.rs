@@ -692,6 +692,34 @@ pub fn directivity_sh_table(
     medium: Medium,
     l_max: usize,
 ) -> Result<DirectivityTable, HelmholtzError> {
+    directivity_sh_table_from_evaluator(solution.k, l_max, |directions| {
+        Ok(far_field(surface, solution, medium, directions))
+    })
+}
+
+/// Project any caller-supplied far-field evaluator onto the canonical
+/// spherical-harmonic grid used by [`directivity_sh_table`].
+///
+/// This is the representation-neutral radiation seam: boundary-integral,
+/// Rayleigh-integral, analytic, and future fast-multipole producers can all
+/// publish the same checked [`DirectivityTable`] without pretending to be one
+/// another. The evaluator must return one finite complex amplitude for every
+/// requested unit direction, using the convention `p -> F(dir) exp(i k r)/r`.
+///
+/// # Errors
+/// [`HelmholtzError::BadParameter`] if `k` is not finite and positive, the
+/// degree exceeds [`MAX_SH_DEGREE`], or the evaluator returns the wrong number
+/// of samples or a non-finite amplitude. Evaluator refusals propagate.
+pub fn directivity_sh_table_from_evaluator(
+    k: f64,
+    l_max: usize,
+    evaluator: impl FnOnce(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
+) -> Result<DirectivityTable, HelmholtzError> {
+    if !(k.is_finite() && k > 0.0) {
+        return Err(HelmholtzError::BadParameter {
+            what: "directivity wavenumber must be finite and positive",
+        });
+    }
     if l_max > MAX_SH_DEGREE {
         return Err(HelmholtzError::BadParameter {
             what: "spherical-harmonic degree exceeds MAX_SH_DEGREE",
@@ -708,7 +736,15 @@ pub fn directivity_sh_table(
             dirs.push([s * det::cos(phi), s * det::sin(phi), x]);
         }
     }
-    let f = far_field(surface, solution, medium, &dirs);
+    let f = evaluator(&dirs)?;
+    if f.len() != dirs.len()
+        || f.iter()
+            .any(|sample| !sample.re.is_finite() || !sample.im.is_finite())
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "far-field evaluator returned malformed directivity samples",
+        });
+    }
     let w_phi = 2.0 * core::f64::consts::PI / n_phi as f64;
     let mut coefficients = vec![C64::ZERO; (l_max + 1) * (l_max + 1)];
     let mut quadrature_power = 0.0f64;
@@ -746,7 +782,7 @@ pub fn directivity_sh_table(
         0.0
     };
     Ok(DirectivityTable {
-        k: solution.k,
+        k,
         l_max,
         coefficients,
         captured_fraction,
@@ -1379,6 +1415,24 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"sh-basis-pins\",\"verdict\":\"pass\"}}"
         );
+    }
+
+    #[test]
+    fn generic_far_field_projection_preserves_an_analytic_monopole() {
+        let amplitude = C64::new(2.5, -0.75);
+        let table = directivity_sh_table_from_evaluator(3.0, 6, |directions| {
+            Ok(vec![amplitude; directions.len()])
+        })
+        .expect("analytic far field");
+        assert!(table.captured_fraction > 1.0 - 1.0e-12);
+        for direction in [[1.0, 0.0, 0.0], [0.3, -0.4, 0.5], [0.0, 0.0, -1.0]] {
+            let reconstructed = table.evaluate(direction);
+            assert!((reconstructed - amplitude).abs() < 1.0e-11);
+        }
+        assert!(matches!(
+            directivity_sh_table_from_evaluator(3.0, 2, |_| Ok(Vec::new())),
+            Err(HelmholtzError::BadParameter { .. })
+        ));
     }
 
     #[test]
