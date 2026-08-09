@@ -20,6 +20,28 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+- `state_point` is the fail-closed bridge from immutable `fs-matdb`
+  `MaterialCard`s to executable scalar property bundles. Consumers declare
+  property names, dimensions, numerical domains, the complete physical query
+  point, and an explicit claim-selection rule. Resolution is atomic, retains
+  each `PropertyUsageReceipt`, canonicalizes requirement order, and binds the
+  card, state point, selected values, consumer domains, and receipts into one
+  identity. It never infers properties from chemistry names or substitutes a
+  representative material.
+- `resolve_isotropic_solid_state_point` is the first reusable capability rung:
+  density, Young's modulus, Poisson ratio, and yield stress at one state point.
+  Its two-material reduced modulus uses the standard ordered Hertz half-space
+  compliance and binds both resolved state identities. Out-of-range
+  temperature or phase-dependent data refuse through the material query; this
+  module does not silently extend a solid card through melting or select a new
+  phase/model.
+- `resolve_interface_state_point` applies the same atomic query contract to an
+  ordered `InterfaceSystemCard`. Its identity therefore includes both surface
+  material states and texture frames, medium, third body, environment,
+  preparation/history, complete query point, claim-selection policy, selected
+  values, and property-use receipts. Interface properties never migrate onto
+  either bulk material merely because the two chemistry names match.
+
 - `SmallStrainLaw` trait (Voigt 6-space, TENSOR shear components):
   `stress` / `tangent` / `update_state` / `admissibility` / `card`.
   **The tangent contract**: `tangent` is the exact derivative of the
@@ -65,8 +87,19 @@ falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
 200..600 K, monotone-worsening) is asserted as the relation's honest
 boundary. Validity window T in [50, 2000] K, p in (0, 1e7] Pa refuses
 outside; the calorically-perfect gamma degrades above ~600 K
-(vibrational excitation, order 1-2% there) — documented as an accuracy
-boundary so hot-enclosure studies evaluate with honest error language.
+(vibrational excitation, order 1-2% there), densities near the 100 bar
+ceiling carry a few-percent compressibility error (Z ~ 0.97 at 300 K),
+and the USSA/Sutherland fits are EXTRAPOLATED beyond their published
+bands (~187-288 K atmosphere tables; ~170-1900 K Sutherland-air) —
+all documented as accuracy boundaries so extreme-regime studies
+evaluate with honest error language. NO-CLAIM: phase validity is not
+checked — an ideal-gas model cannot know about condensation, so a
+returned state is the gas-phase extrapolation and never evidence the
+gas phase exists at that (T, p); callers own the phase check until
+vapor-pressure/melting taxonomy rows land. The Eucken 5/4 coefficient
+is pinned ABSOLUTELY by the monatomic identity Pr = 2/3 (exact,
+mu-independent), alongside the relative Eucken-vs-USSA divergence
+envelope.
 
 ## Invariants
 

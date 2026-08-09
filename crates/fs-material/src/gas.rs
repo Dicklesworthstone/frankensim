@@ -32,13 +32,25 @@
 //! `rho = 1.2250`, `c = 340.29`, `mu = 1.7894e-5`.
 //!
 //! Validity (refused outside, documented inside): `T` in [50, 2000] K
-//! and `p` in (0, 1e7] Pa admit evaluation; the ideal-gas law is good
-//! to well under 1% below ~10 bar away from condensation, and the
-//! calorically-perfect `gamma` for diatomic air degrades above ~600 K
-//! as vibrational modes excite (order 1-2% at 600 K, growing with T) —
-//! stated as an accuracy boundary, not silently hidden, because the
-//! extreme-regime doctrine (hot enclosures, melting strings) wants
-//! evaluation there with honest error language rather than refusal.
+//! and `p` in (0, 1e7] Pa admit evaluation. Accuracy inside the
+//! window, stated honestly: the ideal-gas law is good to well under 1%
+//! below ~10 bar; toward the 100 bar ceiling air's compressibility
+//! factor drops to Z ~ 0.97 at 300 K (worse when cold), so densities
+//! there carry a few-percent model error. The calorically-perfect
+//! `gamma` for diatomic air degrades above ~600 K as vibrational modes
+//! excite (order 1-2% in gamma at 600 K, growing with T). The USSA
+//! source defines its transport fits for the atmosphere (~187-288 K),
+//! and Sutherland-for-air is conventionally quoted over roughly
+//! 170-1900 K — outside those bands this module EXTRAPOLATES the fit
+//! forms, estimated tier.
+//!
+//! NO-CLAIM — phase validity is NOT checked: an ideal-gas model cannot
+//! know about condensation, so a state in the admitted window can
+//! describe a phase that does not exist (air at 60 K and 1 atm is not
+//! a gas). Callers own the phase check until vapor-pressure/melting
+//! rows from the material-property taxonomy land; the returned state
+//! is the gas-phase EXTRAPOLATION, never evidence the gas phase
+//! exists there.
 //!
 //! Determinism: pure `f64` arithmetic with `fs_math::det` for the
 //! non-IEEE transcendentals; repeat evaluations are bitwise identical.
@@ -364,6 +376,35 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-material-gas\",\"case\":\"extreme-regime-trends\",\"c_700k\":{:.1},\"verdict\":\"pass\"}}",
             hot.sound_speed
+        );
+    }
+
+    #[test]
+    fn monatomic_eucken_prandtl_is_exactly_two_thirds() {
+        // Absolute pin on the Eucken coefficient (review round 3: the
+        // relative USSA cross-check tolerances would let a ~1% slip in
+        // the 5/4 constant survive). Under Eucken, Pr = cp/(cp + 5R/4)
+        // = 4 gamma / (9 gamma - 5): mu cancels, so for a monatomic
+        // gas (gamma = 5/3) Pr = 2/3 EXACTLY, independent of the
+        // Sutherland constants, T, and p. Any perturbation of the 1.25
+        // coefficient breaks this to first order.
+        let monatomic = GasSpec {
+            molar_mass: 39.948e-3, // argon
+            gamma: 5.0 / 3.0,
+            sutherland_beta: 1.93e-6,
+            sutherland_s: 142.0,
+            conductivity: ConductivityModel::Eucken,
+        };
+        for &t in &[100.0, 293.15, 1200.0] {
+            let state = GasState::try_new(&monatomic, t, 101_325.0).expect("argon");
+            assert!(
+                (state.prandtl - 2.0 / 3.0).abs() < 1e-14,
+                "monatomic Eucken Pr({t}) = {} must be exactly 2/3",
+                state.prandtl
+            );
+        }
+        println!(
+            "{{\"suite\":\"fs-material-gas\",\"case\":\"monatomic-eucken-exact\",\"verdict\":\"pass\"}}"
         );
     }
 

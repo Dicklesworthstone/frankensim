@@ -41,7 +41,7 @@ Two doctrine rules govern every row:
 | Hardening law (Ramberg–Osgood n, isotropic/kinematic split, Bauschinger) | Cyclic machine loads | fs-material plastic |
 | Strain-rate sensitivity (Johnson–Cook class), adiabatic-shear tendency | Impacts, crashes, machining | dynamic solid |
 | Hardness — SCALE-TYPED: HB, HRC, HV, Shore (polymers), Janka (wood) | Contact, wear, fret/finger indentation; never silently converted between scales | fs-contact |
-| Fracture toughness K_IC, J_IC; impact energy (Charpy); ductile–brittle transition temperature | Cold rockets: steel that is tough at 20 °C shatters at LOX temperature | fracture |
+| Fracture toughness K_IC, J_IC; impact energy (Charpy); ductile–brittle transition temperature | Cold rockets: FERRITIC/carbon steel that is tough at 20 °C shatters at LOX temperature (austenitic 304/316 has no transition — exactly why it is the standard cryo choice; the swap between them is the point) | fracture |
 | Fatigue: S–N curves, endurance limit, mean-stress (Goodman) behavior, Paris-law da/dN constants | Every rotating machine's life | life prediction |
 | Creep: Norton exponent + activation energy, stress-rupture curves, relaxation | Turbine/exhaust-valve regimes; string tension relaxation | fs-time + solid |
 | Damping: loss factor η(f, T, amplitude), specific damping capacity, thermoelastic damping inputs (α, cp, k already elsewhere) | THE decisive sound property; also machine vibration | fs-modal, vibroacoustics |
@@ -55,7 +55,7 @@ Two doctrine rules govern every row:
 | Thermal expansion α(T), anisotropic where real | Tolerances, thermal stress, microscope drift, fret buzz on a hot day | fs-conduction coupling |
 | Specific heat cp(T) | Transient heating rates | fs-conduction, fs-time |
 | Thermal conductivity k(T), anisotropic (wood: L vs R vs T) | Heat paths in machines; also thermoelastic damping | fs-conduction |
-| Melting: solidus/liquidus, latent heat of fusion; glass transition Tg; allotropic transformation temperatures + latent heats | The phase boundary the doctrine wants to cross; steel's α→γ changes everything at 1185 K | phase-change models |
+| Melting: solidus/liquidus, latent heat of fusion; glass transition Tg; allotropic transformation temperatures + latent heats | The phase boundary the doctrine wants to cross; pure iron's α→γ transition sits at 1185 K (carbon steels begin transforming lower, from the 1000 K eutectoid) | phase-change models |
 | Emissivity ε(λ, T, finish) | Radiative cooling AND incandescent appearance (hot steel glows Planck × ε) | fs-conduction radiation, rendering |
 | Maximum service temperature; decomposition/charring onset (wood!), pyrolysis kinetics | Wood instruments near a fire; ablatives | degradation |
 | Flammability: ignition temperature, heat of combustion, oxygen index | Safety-relevant realism | combustion |
@@ -88,6 +88,7 @@ Two doctrine rules govern every row:
 | Sound speeds: longitudinal, shear, bar/plate; characteristic impedance ρc | Derived from E, G, ρ — stored values serve as cross-check gates (the existing c_L gate pattern) | validation |
 | Ultrasonic attenuation α(f) | NDT realism, high-f damping | wave models |
 | Radiation ratio c_L/ρ | Soundboard selection metric | instrument descriptions |
+| Porous-absorber parameters: flow resistivity, open porosity, tortuosity, viscous + thermal characteristic lengths (Johnson–Champoux–Allard / Biot set) | THE first-order sound properties of felt, foam, textile, wool — piano-hammer felt, case linings, room/enclosure absorbers; a "material" that is mostly air needs its own acoustics | porous-media acoustics |
 
 ## 7. Electrical
 
@@ -100,6 +101,7 @@ Two doctrine rules govern every row:
 | Work function; secondary-electron yield | Electron sources and detectors — the microscope's heart | e-optics |
 | Electrochemical/galvanic-series potential | Dissimilar-metal contact corrodes — material-swap can CREATE corrosion | degradation |
 | Superconducting Tc, Hc (where applicable) | Cryo machines | magnets |
+| Semiconductor properties: band gap, carrier mobilities, dopant behavior (where applicable) | Sensors and electronics inside machines; distinguishes silicon from everything above | devices |
 
 ## 8. Magnetic
 
@@ -132,6 +134,7 @@ Two doctrine rules govern every row:
 | Achievable roughness per finish process (links to BRDF and friction) | The polish axis that couples looks AND friction | shared state axis |
 | Contact stiffness/damping of joints | Joints dominate machine vibration | structural dynamics |
 | Adhesion/stiction | MEMS, seals, cold-welding in vacuum | contact |
+| Coefficient of restitution vs impact velocity (measured, pair + geometry context) | System-dependent, so stored as VALIDATION data for contact models rather than a material constant — but first-order for perceived impact dynamics | contact validation |
 
 ## 11. Chemical/environmental degradation
 
@@ -171,8 +174,9 @@ Which rows a material swap exercises in the owner's example machines:
 - **Electric generator**: 8 (B–H, core loss, Curie, magnetostriction →
   hum), 7 (σ(T), insulation), 2 (rotor fatigue), 10 (bearings), 3
   (cooling).
-- **Rocket**: 4 (EOS, combustion, ablation), 2 (creep, cryo
-  ductile–brittle transition), 3 (outgassing), 11 (LOX compatibility).
+- **Rocket**: 4 (EOS, combustion, ablation), 2 (creep; ductile–brittle
+  screening for ferritic alloys at cryo), 3 (outgassing), 11 (LOX
+  compatibility).
 - **Microscope**: 3 (α → drift, outgassing), 2 (damping → vibration), 7
   (work function), 9 (n+k, birefringence), 10 (stage stiction).
 - **Guitar/clarinet**: 1 (orthotropic E), 2 (η(f), hardness of

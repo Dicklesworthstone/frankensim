@@ -204,10 +204,16 @@ fn acoustic_medium_is_the_gas_primitive_at_room_conditions() {
     )
     .expect("hot cavity");
     let ratio = hot_cavity.omegas[1] / cold_cavity.omegas[1];
-    let expected = hot.sound_speed / state.sound_speed;
+    // INDEPENDENT pin (review round 3): comparing against
+    // hot.sound_speed / cold.sound_speed would be tautological (both
+    // sides come from the same GasState values and any model bug
+    // cancels). For a calorically perfect gas c is proportional to
+    // sqrt(T), so the ratio is pinned against sqrt(700 / 293.15)
+    // computed WITHOUT the gas module — a wrong c(T) law now fails.
+    let expected_independent = (700.0f64 / 293.15).sqrt();
     assert!(
-        (ratio - expected).abs() < 1e-12,
-        "cavity modes must scale with the derived sound speed: {ratio} vs {expected}"
+        (ratio - expected_independent).abs() < 1e-12,
+        "cavity-mode scaling must equal the independent sqrt(T) law:          {ratio} vs {expected_independent}"
     );
     println!(
         "{{\"suite\":\"fs-couple-vibro-casebook\",\"case\":\"gas-primitive-medium\",\"rho_derived\":{:.4},\"c_derived\":{:.2},\"c_700k\":{:.1},\"mode_scaling\":{ratio:.4},\"verdict\":\"pass\"}}",
