@@ -15,6 +15,11 @@ use std::{
 };
 
 use crate::modal_synthesis::{EulerModalParameterSet, EulerModalParameterSetInput};
+use crate::structural_acoustics::{
+    AcousticDirectivityControls, AcousticWorldObserver, PhysicalModalAudioModel,
+    ResolvedAcousticMedium, StructuralMeshControls, StructuralModeRequest,
+    build_structural_modal_basis, modal_loss_spectrum_from_rayleigh,
+};
 use crate::{
     AUDIO_EXCITATION_ALGORITHM_VERSION, AUDIO_RECONSTRUCTION_FILTER_VERSION,
     AUDIO_RESAMPLING_ALGORITHM_VERSION, AudioArtifactBudget, AudioDryMixSpec,
@@ -27,9 +32,9 @@ use crate::{
     ListenerPose as SpatialListenerPose, ListenerPoseTrack, MAX_AUDIO_MASTER_GAIN_DB,
     MicrophoneDirectivity, ModalPresetAuthority, ModalStemFrame, ModalSynthesisBudget,
     ModalSynthesisModel, ModalSynthesisModelInput, ModeContactParticipationRule,
-    OfflineSpatializer, RenderNormalForceSampling, RenderTrajectory, RenderTrajectoryCodecBudget,
-    PhysicalPressureListeningMaster, PressureListeningMasterPolicy, RepresentativeDiscMaterial,
-    SoundWavArtifact, SourcePositionTrack, SpatialAudioAuthority,
+    OfflineSpatializer, PhysicalPressureListeningMaster, PressureListeningMasterPolicy,
+    RenderNormalForceSampling, RenderTrajectory, RenderTrajectoryCodecBudget,
+    RepresentativeDiscMaterial, SoundWavArtifact, SourcePositionTrack, SpatialAudioAuthority,
     SpatialAudioBudget, SpatialAudioConfig, SpatialAudioOutput, SpatialAudioRenderInput,
     SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal, SpatialOutputHorizon,
     SpatialStemComponent, StemGainPan, StereoSample, WavMetadata, WavSampleEncoding, measure_audio,
@@ -48,11 +53,6 @@ use crate::{
     },
     representative_modal_preset,
     timeline_resampling::{EventEvaluationSide, ExposureEventPolicy},
-};
-use crate::structural_acoustics::{
-    AcousticDirectivityControls, AcousticWorldObserver, PhysicalModalAudioModel,
-    ResolvedAcousticMedium, StructuralMeshControls, StructuralModeRequest,
-    build_structural_modal_basis, modal_loss_spectrum_from_rayleigh,
 };
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
@@ -819,11 +819,9 @@ fn resolve_fixture_physical_disc(
     damping.update(&config.rayleigh_alpha_per_s.to_bits().to_le_bytes());
     damping.update(&config.rayleigh_beta_s.to_bits().to_le_bytes());
     damping.update(config.damping_source.as_bytes());
-    let rayleigh_damping = RayleighDamping::new(
-        config.rayleigh_alpha_per_s,
-        config.rayleigh_beta_s,
-    )
-    .map_err(pipeline)?;
+    let rayleigh_damping =
+        RayleighDamping::new(config.rayleigh_alpha_per_s, config.rayleigh_beta_s)
+            .map_err(pipeline)?;
     Ok(FixturePhysicalDiscState {
         specimen,
         render_binding,
@@ -2153,6 +2151,7 @@ pub fn run_cinematic_fixture(
         raw_sequence_identity,
         preview_sequence_identity,
         audio.physical.master.wav.wav_identity(),
+        &audio.physical,
         audio.modal_parameter_set_identity,
         &audio.modal_parameter_set_disclosure,
         audio.warm_start_source_identity,
@@ -4494,8 +4493,8 @@ fn build_physical_audio(
         ModalAcousticTimeBudget::audible_reference(),
     )
     .map_err(pipeline)?;
-    let controls = EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx)
-        .map_err(pipeline)?;
+    let controls =
+        EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
     let listener = spatial_listener_pose();
     let half_ear_spacing_m = 0.045;
     let observers = [
@@ -4526,8 +4525,12 @@ fn build_physical_audio(
             "physical stereo synthesis did not return exactly two observers".into(),
         ));
     }
-    let right = pressure.pop().expect("two-channel result has a right signal");
-    let left = pressure.pop().expect("two-channel result has a left signal");
+    let right = pressure
+        .pop()
+        .expect("two-channel result has a right signal");
+    let left = pressure
+        .pop()
+        .expect("two-channel result has a left signal");
     let first = usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
         .map_err(|_| CinematicFixtureError::Pipeline("audio preroll exceeds usize".into()))?;
     let expected_published_frames = usize::try_from(
@@ -4538,9 +4541,7 @@ fn build_physical_audio(
         .checked_add(expected_published_frames)
         .ok_or_else(|| CinematicFixtureError::Pipeline("physical audio crop overflow".into()))?;
     let left = left.try_crop_rebased(first, end, 0.0).map_err(pipeline)?;
-    let right = right
-        .try_crop_rebased(first, end, 0.0)
-        .map_err(pipeline)?;
+    let right = right.try_crop_rebased(first, end, 0.0).map_err(pipeline)?;
     let left_pressure_identity = left.identity;
     let right_pressure_identity = right.identity;
     let metadata = WavMetadata::try_new(Some(
@@ -4966,6 +4967,7 @@ fn fixture_manifest(
     raw_sequence_identity: ContentHash,
     preview_sequence_identity: ContentHash,
     wav_identity: ContentHash,
+    physical_audio: &FixturePhysicalAudio,
     modal_parameter_set_identity: ContentHash,
     modal_parameter_set_disclosure: &str,
     audio_warm_start_source_identity: ContentHash,
@@ -5086,20 +5088,60 @@ fn fixture_manifest(
     let output_convergence_json = output_convergence.manifest_json();
     let audio_convergence_json = audio_convergence.manifest_json();
     let preview_mesh_json = preview_mesh.manifest_json();
+    let physical_loudness = physical_audio
+        .master
+        .meters
+        .integrated_loudness_lufs
+        .map_or_else(|| "null".to_owned(), |value| format!("{value:.9}"));
+    let physical_audio_json = format!(
+        concat!(
+            "{{\"sample_rate_hz\":{},\"path\":\"sound/physical-listening-master.pcm24.wav\",",
+            "\"wav_identity\":\"{}\",\"authority\":\"structural-FEM plus Rayleigh damping plus exterior acoustic BEM observer pressure\",",
+            "\"calibrated_material_or_apparatus\":false,\"procedural_texture\":false,",
+            "\"structural_basis_identity\":\"{}\",\"acoustic_directivity_identity\":\"{}\",",
+            "\"damping_model_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
+            "\"left_pressure_identity\":\"{}\",\"right_pressure_identity\":\"{}\",",
+            "\"retained_mode_count\":{},\"minimum_mode_frequency_hz\":{:.17e},",
+            "\"maximum_mode_frequency_hz\":{:.17e},\"source_peak_abs_pressure_pa\":{:.17e},",
+            "\"digital_gain_fs_per_pa\":{:.17e},\"digital_gain_db\":{:.9},",
+            "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
+            "\"stereo_rms_fs\":{:.17e},\"integrated_loudness_lufs\":{},",
+            "\"listening_master_policy\":\"single deterministic scalar gain to 0.45 estimated true peak; no EQ, compression, limiter, synthesis preset, or material-name dispatch\"}}"
+        ),
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        wav_identity.to_hex(),
+        physical_audio.structural_basis_identity.to_hex(),
+        physical_audio.acoustic_directivity_identity.to_hex(),
+        physical_audio.damping_model_identity.to_hex(),
+        physical_audio.gas_model_identity.to_hex(),
+        physical_audio.left_pressure_identity.to_hex(),
+        physical_audio.right_pressure_identity.to_hex(),
+        physical_audio.retained_mode_count,
+        physical_audio.minimum_mode_frequency_hz,
+        physical_audio.maximum_mode_frequency_hz,
+        physical_audio.master.source_peak_abs_pressure_pa,
+        physical_audio.master.digital_gain_fs_per_pa,
+        physical_audio.master.digital_gain_db,
+        physical_audio.master.meters.sample_peak_fs,
+        physical_audio.master.meters.true_peak_estimate_fs,
+        physical_audio.master.meters.stereo_rms_fs,
+        physical_loudness,
+    );
     format!(
         concat!(
             "{{\n",
             "  \"schema\": \"frankensim-euler-cinematic-critique-v6\",\n",
-            "  \"authority\": \"source-bound analytical simulation visualization; physically informed but uncalibrated synthesis; artistic spatial presentation\",\n",
+            "  \"authority\": \"source-bound analytical simulation visualization; delivered structural-modal/BEM observer-pressure audio with uncalibrated constitutive inputs\",\n",
             "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"sampling\": {sampling}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
             "  \"timeline\": {{\"video_pts_convention\": \"encoded-frame-start\", \"video_first_pts_s\": 0.00000000000000000e0, \"video_final_pts_s\": {video_final_pts:.17e}, \"video_frame_interval_s\": {frame_interval:.17e}, \"audio_first_sample_time_s\": 0.00000000000000000e0, \"audio_video_clock_origins_aligned\": true, \"shutter_close_convention\": \"mechanics-frame-end\", \"first_shutter_close_time_s\": {first_shutter_close:.17e}, \"final_shutter_close_time_s\": {final_shutter_close:.17e}, \"note\": \"encoded PTS is distinct from the mechanics time at which each back-loaded shutter closes\"}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"preview_mesh\": {preview_mesh},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
             "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"published_source_timestep_s\": {source_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"output_consistency\": {output_convergence}, \"claim\": \"single admitted dt/dt2 consistency pair for terminal time, encoded interval impulse, renderer-stratum pose, and body-contact chirp; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
-            "  \"audio\": {{\"sample_rate_hz\": {audio_rate}, \"wav_identity\": \"{wav_identity}\", \"authority\": \"physically-informed-uncalibrated\", \"calibrated\": false, \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_binding_scope\": \"outer fixture manifest; WAV sound config binds the prepared modal model identity\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"terminal_fade_application\": \"exactly once: dry stems for dry output or post-propagation stereo for spatial output\", \"mix_policy\": \"one content-derived digital mastering gain to 0.45 FS; no limiter\", \"spatialization\": {spatialization}}},\n",
+            "  \"audio\": {physical_audio},\n",
+            "  \"legacy_audio_convergence_diagnostic\": {{\"delivered\": false, \"path\": \"sound/legacy-representative-convergence.float32.wav\", \"sample_rate_hz\": {audio_rate}, \"authority\": \"representative-preset numerical diagnostic only\", \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair for terminal time, interval impulse, renderer-stratum pose, body-contact chirp, resampled modal drive, and unmastered modal stems; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the rendered 10 mm glass plate, housing, and support are representative studio apparatus; mechanics uses a static rigid plane and does not simulate the displayed base's compliance, wobble, thickness, mounting, or the paper's 3.2 mm glass-on-butyl rig\", \"the harmonic-one contact shapes, modal frequencies, damping, masses, and radiation gains are representative rather than measured for this specimen and rig\", \"declared excitation completeness means complete only for this authored reduced-channel sonification, not complete physical acoustic forcing\", \"the 256 Hz reconstruction ceiling is a conservative authored assumption, not a certified bandlimit of the interval controls\", \"the centered FIR and modal state both continue through one source-bound video frame (2000 samples) of real prehistory and are then cropped without a new reflection boundary; earlier acoustic history is not reconstructed and the initial fade remains a presentation taper\", \"the waveform, loudness, spectral envelope, terminal chatter, microphone, room, HRTF, and sound-pressure level are not experimentally validated\", \"spatial output clamps propagation tails, so listener audio does not claim to contain the exact source cutoff sample\", \"digital mastering is presentation normalization, not a pascal or SPL prediction\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical model reproduces published equations and fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered physical audio currently radiates only the resolved disc structural modes from 100 to 6000 Hz; the glass plate, housing, feet, support compliance, room response, broadband moving-boundary retardation, frictional roughness noise, and terminal impacts are not yet resolved\", \"disc elastic coefficients and Rayleigh damping are disclosed estimates rather than measurements of the named specimen; the BEM and modal discretizations still require refinement studies before quantitative acoustic authority\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,
@@ -5202,6 +5244,7 @@ fn fixture_manifest(
         trajectory_identity = trajectory_identity.to_hex(),
         audio_rate = SOUND_MASTER_SAMPLE_RATE_HZ,
         wav_identity = wav_identity.to_hex(),
+        physical_audio = physical_audio_json,
         chirp_start = chirp_start_hz,
         chirp_end = chirp_end_hz,
         audio_bandwidth = CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
