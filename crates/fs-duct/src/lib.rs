@@ -597,10 +597,14 @@ mod tests {
     #[test]
     fn quarter_wave_peaks_carry_the_end_correction() {
         use core::fmt::Write as _;
-        // Unflanged open cylinder driven at the other end: |Z_in|
-        // peaks at f_n ~ (2n - 1) c / (4 (L + 0.6133 a)) — the end
-        // correction is IN the radiation load, so the peak ladder must
-        // land on the corrected length, not the geometric one.
+        // Two separated claims (first run conflated them): (a) the
+        // LOSSLESS peak ladder of an unflanged open pipe lands on
+        // f_n = (2n - 1) c / (4 (L + 0.6133 a)) — the end correction
+        // lives in the radiation load; (b) the VISCOTHERMAL ladder
+        // sits below it by the independently computed dispersion
+        // deficit delta = (1 + (gamma-1)/sqrt(Pr))/(sqrt2 rv) (measured
+        // 1.62% at this bore/frequency vs 1.66% predicted — the first
+        // executed run flagged exactly this).
         let state = air();
         let (radius, length) = (0.0075, 0.5);
         let duct = Duct {
@@ -608,43 +612,63 @@ mod tests {
         };
         let l_eff = length + 0.6133 * radius;
         let f_base = state.sound_speed / (4.0 * l_eff);
-        let sweep = impedance_sweep(
-            &duct,
-            &state,
-            2.0 * core::f64::consts::PI * 0.3 * f_base,
-            2.0 * core::f64::consts::PI * 5.6 * f_base,
-            6000,
-            LossModel::WideTube,
-            Termination::UnflangedOpen,
-        )
-        .expect("sweep");
-        let peaks = impedance_peaks(&sweep);
-        assert!(peaks.len() >= 3, "need three quarter-wave peaks");
+        let run = |loss: LossModel| -> Vec<f64> {
+            let sweep = impedance_sweep(
+                &duct,
+                &state,
+                2.0 * core::f64::consts::PI * 0.3 * f_base,
+                2.0 * core::f64::consts::PI * 5.6 * f_base,
+                12_000,
+                loss,
+                Termination::UnflangedOpen,
+            )
+            .expect("sweep");
+            impedance_peaks(&sweep)
+                .iter()
+                .map(|&i| sweep[i].omega / (2.0 * core::f64::consts::PI))
+                .collect()
+        };
+        let lossless = run(LossModel::Lossless);
+        let lossy = run(LossModel::WideTube);
+        assert!(lossless.len() >= 3 && lossy.len() >= 3);
         let mut rows = String::new();
-        for (n, &idx) in peaks.iter().take(3).enumerate() {
-            let f_peak = sweep[idx].omega / (2.0 * core::f64::consts::PI);
+        for n in 0..3 {
             let f_pred = (2.0 * n as f64 + 1.0) * f_base;
-            let rel = (f_peak / f_pred - 1.0).abs();
-            // Viscothermal dispersion flattens peaks slightly below the
-            // lossless prediction; 0.7% absorbs it at this bore.
+            let rel = (lossless[n] / f_pred - 1.0).abs();
+            // The 0.6133a fit itself is weakly ka-dependent; 0.5% holds
+            // through the third peak on this bore.
             assert!(
-                rel < 7e-3,
-                "peak {n}: {f_peak:.2} Hz vs corrected {f_pred:.2} Hz (rel {rel:.4})"
+                rel < 5e-3,
+                "lossless peak {n}: {:.2} Hz vs corrected {f_pred:.2} Hz (rel {rel:.4})",
+                lossless[n]
+            );
+            // Viscothermal deficit vs the independent dispersion
+            // formula at the peak frequency.
+            let omega = 2.0 * core::f64::consts::PI * lossless[n];
+            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+            let delta = (1.0 + (state.gamma - 1.0) / state.prandtl.sqrt())
+                / (core::f64::consts::SQRT_2 * rv);
+            let measured_deficit = (lossless[n] - lossy[n]) / lossless[n];
+            let ratio = measured_deficit / (delta / (1.0 + delta));
+            assert!(
+                (0.8..1.2).contains(&ratio),
+                "peak {n} dispersion deficit {measured_deficit:.4} vs predicted {:.4}",
+                delta / (1.0 + delta)
             );
             write!(
                 rows,
-                "{}{{\"n\":{n},\"f\":{f_peak:.2},\"pred\":{f_pred:.2}}}",
-                if n == 0 { "" } else { "," }
+                "{}{{\"n\":{n},\"lossless\":{:.2},\"lossy\":{:.2},\"deficit_ratio\":{ratio:.3}}}",
+                if n == 0 { "" } else { "," },
+                lossless[n],
+                lossy[n]
             )
             .expect("write");
         }
-        // Mutation-style contrast: against the UNcorrected length the
-        // first peak misses by the full end-correction fraction.
+        // The corrected and UNcorrected ladders stay distinguishable.
         let f_uncorrected = state.sound_speed / (4.0 * length);
-        let f1 = sweep[peaks[0]].omega / (2.0 * core::f64::consts::PI);
         assert!(
-            (f1 / f_uncorrected - 1.0).abs() > 5e-3,
-            "the corrected and uncorrected ladders must be distinguishable"
+            (lossless[0] / f_uncorrected - 1.0).abs() > 5e-3,
+            "end correction must be observable against the geometric length"
         );
         println!(
             "{{\"suite\":\"fs-duct\",\"case\":\"quarter-wave-end-correction\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
