@@ -3137,9 +3137,12 @@ fn hash_disc_material_state(
     binding: Option<EulerDiscMaterialStateBinding>,
 ) {
     match binding {
-        None => hasher.update(&[0]),
+        // Preserve v2 look-development identities. Physical binding is an
+        // additive tagged extension and therefore cannot alias the legacy
+        // unbound configuration.
+        None => {}
         Some(binding) => {
-            hasher.update(&[1]);
+            hasher.update(&[0xf3]);
             hasher.update(binding.identity.as_bytes());
             hasher.update(binding.mechanical_state_identity.as_bytes());
             hasher.update(binding.optical_state_identity.as_bytes());
