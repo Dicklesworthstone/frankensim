@@ -240,14 +240,14 @@ fn index_tampering_is_detected_and_cannot_poison_answers() {
     let store = seeded_store(&path);
     assert!(store.verify_index("steel-304-synth").is_ok());
     // Tamper with the DERIVED index through a raw connection.
-    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    let mut raw = AsyncConnection::open_sync(&path).expect("raw");
     raw.execute_with_params_sync(
         "UPDATE claims SET scalar_value = ?1 WHERE property = 'young_modulus' \
          AND pack_id = 'steel-304-synth'",
         &[SqliteValue::Float(999.0)],
     )
     .expect("tamper");
-    drop(raw);
+    raw.close_sync().expect("close raw");
     // (a) The cross-check catches it by name.
     assert!(matches!(
         store.verify_index("steel-304-synth"),
@@ -270,10 +270,10 @@ fn index_tampering_is_detected_and_cannot_poison_answers() {
     assert_eq!(answer.evidence.value.value.to_bits(), 193.0e9f64.to_bits());
     // (b2) Review finding: valid_at is DRIVEN by the validity table,
     // so verify_index must cover it too.
-    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    let mut raw = AsyncConnection::open_sync(&path).expect("raw");
     raw.execute_sync("UPDATE validity SET lo = 0.0, hi = 1.0e9 WHERE pack_id = 'steel-304-synth'")
         .expect("validity tamper");
-    drop(raw);
+    raw.close_sync().expect("close raw");
     assert!(matches!(
         store.verify_index("steel-304-synth"),
         Err(StoreError::IndexMismatch {
@@ -286,10 +286,10 @@ fn index_tampering_is_detected_and_cannot_poison_answers() {
     ));
     // (c) Tampering with the CANONICAL BYTES is caught by the content
     // hash at decode time.
-    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    let mut raw = AsyncConnection::open_sync(&path).expect("raw");
     raw.execute_sync("UPDATE packs SET bytes = x'deadbeef' WHERE pack_id = 'steel-304-synth'")
         .expect("corrupt");
-    drop(raw);
+    raw.close_sync().expect("close raw");
     assert!(matches!(
         store.evaluate(
             "steel-304-synth",
@@ -353,23 +353,23 @@ fn partial_ingest_rolls_back_atomically() {
     let path = scratch_path("rollback");
     let _ = std::fs::remove_file(&path);
     let store = MaterialStore::open(&path).expect("open");
-    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    let mut raw = AsyncConnection::open_sync(&path).expect("raw");
     raw.execute_sync("DROP TABLE validity")
         .expect("drop validity");
-    drop(raw);
+    raw.close_sync().expect("close raw");
     assert!(matches!(
         store.ingest_pack(&test_pack("rollback-pack", &[("density", 1000.0)])),
         Err(StoreError::Sql { .. })
     ));
     // Restore the schema; the retry must NOT hit DuplicatePack —
     // nothing of the failed ingest survived.
-    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    let mut raw = AsyncConnection::open_sync(&path).expect("raw");
     raw.execute_sync(
         "CREATE TABLE validity(pack_id TEXT NOT NULL, claim_hash BLOB NOT NULL, \
          axis TEXT NOT NULL, lo REAL NOT NULL, hi REAL NOT NULL)",
     )
     .expect("recreate validity");
-    drop(raw);
+    raw.close_sync().expect("close raw");
     store
         .ingest_pack(&test_pack("rollback-pack", &[("density", 1000.0)]))
         .expect("retry succeeds — the failed ingest left no residue");

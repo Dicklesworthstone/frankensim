@@ -18,7 +18,10 @@ plus a canonical-bytes vault.
 - `ingest_pack(&NormalizedPack)` — canonical bytes + derived index
   rows (claims, validity axes) in the ClaimSet's canonical order;
   refuses duplicates and empty license/redistribution (the license
-  gate survives the store).
+  gate survives the store; the license check is a PRE-PASS and the row
+  writes are one `BEGIN IMMEDIATE` transaction, so a mid-ingest
+  failure leaves no residue and a retry never hits `DuplicatePack` on
+  a half-ingested id).
 - `seal_corpus` / `require_sealed` — a domain-separated BLAKE3 digest
   folded over pack content hashes in pack-id order; EVERY discovery
   and evaluation surface recomputes and compares, refusing
@@ -33,8 +36,11 @@ plus a canonical-bytes vault.
   receipts, and refusal set as direct pack use, passed through
   unchanged (`StoreError::MatDb`).
 - `verify_index(pack_id)` — cross-checks every derived row against the
-  decoded pack (`FS-MATDB-STORE-INDEX-MISMATCH` names the first
-  disagreement).
+  decoded pack, claims table AND validity table (claim hash, axis,
+  bitwise bounds); `FS-MATDB-STORE-INDEX-MISMATCH` names the first
+  disagreement.
+- `load_pack(pack_id)` — hash-verified decode of the stored canonical
+  bytes, gated behind `require_sealed` like every other read surface.
 - `canonical_dump` — fixed-order render of the derived tables for the
   bitwise-rebuild proof.
 - `StoreError` — stable `FS-MATDB-STORE-*` codes.
@@ -51,9 +57,16 @@ plus a canonical-bytes vault.
    refuses until an explicit re-seal.
 4. Rebuild determinism (G5): two stores built from the same packs have
    identical corpus digests and identical canonical dumps.
-5. Absent data is a named refusal (`UnknownProperty`,
-   `NoClaimInDomain` extrapolation) — never a fabricated row, per the
-   population strategy in `docs/MATERIAL_PROPERTY_TAXONOMY.md`.
+5. Absent data is a named refusal — never a fabricated row or a
+   silent empty set: a property name the corpus has never seen is
+   `FS-MATDB-STORE-UNKNOWN-PROPERTY` from `materials_with`/`valid_at`
+   (an empty result on a KNOWN property remains a legitimate empty
+   set), and fs-matdb's own `UnknownProperty`/extrapolation refusals
+   pass through evaluation unchanged, per the population strategy in
+   `docs/MATERIAL_PROPERTY_TAXONOMY.md`.
+6. Ingest is atomic: an induced mid-transaction failure rolls back the
+   pack row, claim rows, and validity rows together (proven by
+   executing a failure with the validity table dropped and retrying).
 
 ## Error model
 
@@ -83,9 +96,13 @@ None (fsqlite's `async-api` feature is a dependency detail).
 
 `tests/store.rs`: discovery surfaces (per-material, per-property with
 range, validity-window); evaluation parity + refusal passthrough;
-staleness fail-closed + deliberate re-seal; index tamper detection +
-poison-proof evaluation + corrupted-bytes refusal; bitwise rebuild;
-duplicate refusal.
+staleness fail-closed + deliberate re-seal; index tamper detection
+(claims AND validity rows) + poison-proof evaluation +
+corrupted-bytes refusal; bitwise rebuild; duplicate refusal; atomic
+rollback of a failed ingest (plus the executed fact that an
+unlicensed claim is UNREPRESENTABLE — `ClaimSet::insert_claim`
+refuses it upstream, making the store's admission pre-pass
+defense-in-depth); unknown-property named refusal.
 
 ## No-claim boundaries
 
