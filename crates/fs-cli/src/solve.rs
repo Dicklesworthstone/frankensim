@@ -1756,7 +1756,7 @@ impl<'a> SolveEngine<'a> {
         material_resolve_receipt(self.spec, self.cards, self.run, self.work, false)
     }
 
-    fn stage_flow_network(&mut self) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+    fn stage_flow_network(&mut self) -> Result<String, SolveRefusal> {
         flow_network_receipt(self.spec, self.run, self.work, false)
     }
 
