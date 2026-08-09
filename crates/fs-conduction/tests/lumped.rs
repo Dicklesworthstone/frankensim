@@ -12,13 +12,21 @@ use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::box_grid;
 use fs_conduction::lumped::{
     BiotGate, LUMPED_BIOT_CEILING, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, LumpedNetwork,
-    LumpedNode, ValidityVerdict, extract_node_from_steady_rise, solve_gated, solve_lumped_enthalpy,
+    LumpedNode, LumpedThermalTransport, ValidityVerdict, extract_node_from_steady_rise,
+    solve_gated, solve_lumped_enthalpy,
 };
-use fs_conduction::material::ConductivityModel;
+use fs_conduction::material::{CONDUCTIVITY_DIMS, ConductivityModel};
 use fs_conduction::mesh::ConductionMesh;
+use fs_conduction::radiation::SURFACE_EMISSIVITY_PROPERTY;
 use fs_conduction::solve::LinearConfig;
 use fs_conduction::transient::{TransientConfig, TransientProblem, VolumetricHeatCapacity, march};
+use fs_evidence::ValidityDomain;
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, SelectionPolicy, UncertaintyModel,
+};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
+use fs_qty::Dims;
 use fs_rep_mesh::TetComplex;
 use support::with_cx;
 
@@ -66,8 +74,12 @@ fn network_at(biot: f64) -> LumpedNetwork {
 }
 
 fn phase_curve() -> EquilibriumEnthalpyPhaseCurve {
+    phase_curve_for(ContentHash([0x71; 32]))
+}
+
+fn phase_curve_for(material_card_identity: ContentHash) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_new(
-        ContentHash([0x71; 32]),
+        material_card_identity,
         vec![
             EnthalpyPhaseKnot {
                 specific_enthalpy_j_kg: 0.0,
@@ -96,6 +108,41 @@ fn phase_curve() -> EquilibriumEnthalpyPhaseCurve {
         ],
     )
     .expect("admitted synthetic phase curve")
+}
+
+fn thermal_material_card() -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    for (name, dims, value) in [
+        ("thermal_conductivity", CONDUCTIVITY_DIMS, 35.0),
+        (SURFACE_EMISSIVITY_PROPERTY, Dims::NONE, 0.5),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained().with("T", 300.0, 800.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: Vec::new(),
+                provenance: Provenance {
+                    source: format!("synthetic card-backed {name}"),
+                    license: "CC0-1.0".to_owned(),
+                    artifact: None,
+                },
+            })
+            .expect("thermal property claim");
+    }
+    MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic phase-change metal".to_owned(),
+            phase: "solid-liquid".to_owned(),
+            process: "test".to_owned(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .expect("thermal material card")
 }
 
 fn enthalpy_body<'a>(curve: &'a EquilibriumEnthalpyPhaseCurve) -> LumpedEnthalpyBody<'a> {
@@ -500,15 +547,15 @@ fn g1_enthalpy_march_conserves_energy_through_the_latent_heat_plateau() {
             .expect("Biot-admitted phase march")
     });
 
-    let final_state = march.samples.last().expect("final sample").phase_state;
+    let final_state = march.samples().last().expect("final sample").phase_state;
     assert_eq!(final_state.phase(), SolidLiquidPhase::SolidLiquid);
     assert!((final_state.temperature_k() - 600.0).abs() < 1.0e-10);
     assert!((final_state.specific_enthalpy_j_kg() - 45_000.0).abs() < 1.0e-6);
     assert!((final_state.liquid_mass_fraction() - 0.6).abs() < 1.0e-10);
     assert!(
-        march.cumulative_absolute_energy_residual_j < 1.0e-4,
+        march.cumulative_absolute_energy_residual_j() < 1.0e-4,
         "discrete energy ledger drifted by {} J",
-        march.cumulative_absolute_energy_residual_j
+        march.cumulative_absolute_energy_residual_j()
     );
 }
 
@@ -542,18 +589,82 @@ fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
         solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config)
             .expect("hot ambient march")
     });
-    let initial = march.samples[0].phase_state;
-    let final_state = march.samples.last().expect("final sample").phase_state;
+    let initial = march.samples()[0].phase_state;
+    let final_state = march.samples().last().expect("final sample").phase_state;
     assert_eq!(initial.phase(), SolidLiquidPhase::Solid);
     assert!(final_state.specific_enthalpy_j_kg() > initial.specific_enthalpy_j_kg());
     assert!(final_state.liquid_mass_fraction() > 0.0);
     assert!(
         march
-            .samples
+            .samples()
             .iter()
             .skip(1)
             .all(|sample| sample.convection_into_body_w > 0.0
                 && sample.radiation_into_body_w > 0.0)
+    );
+}
+
+#[test]
+fn g1_card_backed_transport_drives_the_same_phase_curve_without_extrapolation() {
+    let card = thermal_material_card();
+    let curve = phase_curve_for(card.content_hash());
+    let transport = LumpedThermalTransport::from_material_card(
+        &card,
+        "thermal_conductivity",
+        &[300.0, 600.0, 800.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("card-backed conductivity and emissivity");
+    assert_eq!(
+        transport.material_card_identity(),
+        Some(card.content_hash())
+    );
+    let body = LumpedEnthalpyBody::try_new_with_transport(
+        "card-backed phase body",
+        0.1,
+        0.02,
+        20.0,
+        0.001,
+        transport,
+        &curve,
+    )
+    .expect("body and transport share one card");
+    let config = LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: 20_000.0,
+        ambient_temperature_k: 1_000.0,
+        internal_power_w: 0.0,
+        duration_s: 10.0,
+        maximum_step_s: 0.25,
+        maximum_steps: 40,
+        enthalpy_tolerance_j_kg: 1.0e-8,
+    };
+    let march = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config)
+            .expect("card-backed hot ambient march")
+    });
+    assert!(
+        march
+            .samples()
+            .last()
+            .expect("final sample")
+            .phase_state
+            .liquid_mass_fraction()
+            > 0.0
+    );
+
+    let mismatched_curve = phase_curve();
+    assert!(
+        LumpedEnthalpyBody::try_new_with_transport(
+            "mismatched card body",
+            0.1,
+            0.02,
+            20.0,
+            0.001,
+            body.transport().clone(),
+            &mismatched_curve,
+        )
+        .is_err(),
+        "transport from one material card must not drive another card's phase curve"
     );
 }
 
