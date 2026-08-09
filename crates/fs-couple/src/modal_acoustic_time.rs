@@ -116,6 +116,14 @@ pub enum ModalAcousticTimeError {
         /// Number of generalized forces supplied.
         found: usize,
     },
+    /// A state-dependent observer supplied one transfer per the wrong number
+    /// of admitted modes.
+    TransferCountMismatch {
+        /// Admitted number of modes.
+        expected: usize,
+        /// Number of supplied complex transfers.
+        found: usize,
+    },
     /// A candidate step crossed a caller-owned state/energy/pressure ceiling.
     BudgetExceeded {
         /// Quantity whose absolute magnitude crossed its ceiling.
@@ -151,6 +159,10 @@ impl core::fmt::Display for ModalAcousticTimeError {
             Self::ForceCountMismatch { expected, found } => write!(
                 f,
                 "FS-COUPLE-MODAL-TIME-SHAPE: expected {expected} modal forces, found {found}"
+            ),
+            Self::TransferCountMismatch { expected, found } => write!(
+                f,
+                "FS-COUPLE-MODAL-TIME-TRANSFER-SHAPE: expected {expected} observer transfers, found {found}"
             ),
             Self::BudgetExceeded { what, value, limit } => write!(
                 f,
@@ -248,6 +260,55 @@ impl ModalAcousticTimeModel {
     #[must_use]
     pub const fn sample_period_s(&self) -> f64 {
         self.sample_period_s
+    }
+
+    /// Observe the current modal state through caller-supplied complex
+    /// pressure transfers.
+    ///
+    /// This is the generic seam for a moving source/listener or a changing
+    /// acoustic medium. Each transfer has the same units and
+    /// `exp(-i omega t)` convention as [`ModalAcousticMode::pressure_per_modal_velocity`].
+    /// The method does not advance or mutate oscillator state.
+    ///
+    /// # Errors
+    /// Refuses wrong cardinality, nonfinite transfers/pressure, or the
+    /// admitted absolute-pressure ceiling.
+    pub fn observer_pressure_with_transfers(
+        &self,
+        pressure_per_modal_velocity: &[C64],
+    ) -> Result<f64, ModalAcousticTimeError> {
+        if pressure_per_modal_velocity.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::TransferCountMismatch {
+                expected: self.modes.len(),
+                found: pressure_per_modal_velocity.len(),
+            });
+        }
+        let mut pressure_pa = 0.0;
+        for ((mode, state), transfer) in self
+            .modes
+            .iter()
+            .zip(&self.states)
+            .zip(pressure_per_modal_velocity)
+        {
+            if !(transfer.re.is_finite() && transfer.im.is_finite()) {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "observer pressure transfers must be finite",
+                });
+            }
+            pressure_pa += transfer.re * state.velocity_m_sqrt_kg_per_s
+                + transfer.im * mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg;
+        }
+        if !pressure_pa.is_finite() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "observer pressure evaluation produced a non-finite result",
+            });
+        }
+        check_limit(
+            "absolute observer pressure",
+            pressure_pa.abs(),
+            self.budget.maximum_abs_pressure_pa,
+        )?;
+        Ok(pressure_pa)
     }
 
     /// Advance all modes by one exact zero-order-held sample.
@@ -575,5 +636,37 @@ mod tests {
         assert!(
             (whole_frame.observer_pressure_pa - split_frame.observer_pressure_pa).abs() < 1.0e-13
         );
+    }
+
+    #[test]
+    fn g0_state_dependent_observer_transfer_is_exact_and_nonmutating() {
+        let omega = 2.0 * core::f64::consts::PI * 1_200.0;
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.03,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        model.step(&[4.0]).unwrap();
+        let before = model.states().to_vec();
+        let transfer = C64::new(1.75, -0.3);
+        let pressure = model.observer_pressure_with_transfers(&[transfer]).unwrap();
+        let expected = transfer.re * before[0].velocity_m_sqrt_kg_per_s
+            + transfer.im * omega * before[0].displacement_m_sqrt_kg;
+        assert!((pressure - expected).abs() < 1.0e-15);
+        assert_eq!(model.states(), before);
+
+        assert!(matches!(
+            model.observer_pressure_with_transfers(&[]),
+            Err(ModalAcousticTimeError::TransferCountMismatch {
+                expected: 1,
+                found: 0
+            })
+        ));
+        assert!(matches!(
+            model.observer_pressure_with_transfers(&[C64::new(f64::NAN, 0.0)]),
+            Err(ModalAcousticTimeError::InvalidInput { .. })
+        ));
+        assert_eq!(model.states(), before);
     }
 }
