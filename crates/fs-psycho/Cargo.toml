@@ -11,6 +11,7 @@ authors.workspace = true
 layer = "L3"
 
 [dependencies]
+fs-fft = { path = "../fs-fft" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]

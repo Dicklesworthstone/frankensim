@@ -282,3 +282,73 @@ fn listening_law_is_pinned() {
     // the crate docs.
     assert!(LISTENING_LAW.contains("never a substitute for human listening"));
 }
+
+/// 100% AM tone at 1 kHz carrier, 60 dB SPL: the Daniel-Weber
+/// band-pass character must PEAK near 70 Hz modulation (the published
+/// signature) at ~1 asper (the model's calibration anchor), falling
+/// off on both sides; an unmodulated tone is smooth (near-zero
+/// roughness).
+#[test]
+fn roughness_am_tone_peaks_near_70_hz() {
+    use fs_psycho::roughness::{DW_BLOCK, roughness_dw_block};
+    let sr = 48_000.0;
+    let level_db = 60.0;
+    let p_amp = fs_math::det::sqrt(2.0) * 2.0e-5 * fs_math::det::pow(10.0, level_db / 20.0);
+    let make = |fmod: f64| -> Vec<f64> {
+        (0..DW_BLOCK)
+            .map(|i| {
+                let t = i as f64 / sr;
+                let carrier = fs_math::det::sin(2.0 * core::f64::consts::PI * 1000.0 * t);
+                let am = 1.0 + fs_math::det::sin(2.0 * core::f64::consts::PI * fmod * t);
+                // 100% AM, normalized so the CARRIER keeps 60 dB rms.
+                p_amp * am * carrier
+            })
+            .collect()
+    };
+    let mods = [20.0, 40.0, 55.0, 70.0, 90.0, 120.0, 160.0];
+    let r: Vec<f64> = mods
+        .iter()
+        .map(|&fm| roughness_dw_block(&make(fm), sr).expect("roughness"))
+        .collect();
+    let peak_idx = r
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .expect("nonempty")
+        .0;
+    let peak_mod = mods[peak_idx];
+    assert!(
+        (55.0..=90.0).contains(&peak_mod),
+        "roughness must peak near 70 Hz: peaked at {peak_mod} Hz, curve {r:?}"
+    );
+    // EXACTNESS pin (the loudness lesson: never hide a port bug in a
+    // behavioral envelope): the Apache-2.0 reference implementation,
+    // re-run standalone at this exact block length on this exact
+    // signal, gives R(70 Hz) = 1.0448 — and the port matches it to
+    // 10+ digits (executed cross-run); 1e-3 gate for float-libm
+    // slack. The value also sits at the published ~1-asper anchor.
+    assert!(
+        (r[3] - 1.0448).abs() < 1.0e-3,
+        "70 Hz roughness {} vs the reference's 1.0448",
+        r[3]
+    );
+    // Falloff on both sides of the peak region.
+    assert!(r[0] < 0.7 * r[peak_idx], "low-side falloff: {r:?}");
+    assert!(
+        *r.last().expect("nonempty") < 0.7 * r[peak_idx],
+        "high-side falloff: {r:?}"
+    );
+    // Unmodulated tone: nearly smooth.
+    let steady: Vec<f64> = (0..DW_BLOCK)
+        .map(|i| p_amp * fs_math::det::sin(2.0 * core::f64::consts::PI * 1000.0 * i as f64 / sr))
+        .collect();
+    let r0 = roughness_dw_block(&steady, sr).expect("steady");
+    assert!(
+        r0 < 0.2 * r[peak_idx],
+        "unmodulated tone must be far smoother: {r0} vs {}",
+        r[peak_idx]
+    );
+    println!(
+        "{{\"suite\":\"fs-psycho\",\"case\":\"roughness-am\",\"mods_hz\":{mods:?},\"asper\":{r:?},\"verdict\":\"pass\"}}"
+    );
+}

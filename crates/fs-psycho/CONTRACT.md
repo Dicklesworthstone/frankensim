@@ -33,6 +33,15 @@ test).
 - `spl_from_pcm_rms(pcm, calibration)` — the ONLY PCM-to-absolute
   bridge in v1: REFUSES without a [`Calibration`]
   (`UncalibratedAbsolute`, the honest-scope law in a type).
+- `roughness::roughness_dw_block` — Daniel-Weber roughness [asper]
+  per 8192-sample analysis block (Pa input), ported from the
+  Apache-2.0 MoSQITo reference with tables transcribed mechanically
+  ([`dw_tables`]); numerically EXACT against the reference re-run
+  standalone at the same block length (10+ digits at every AM
+  modulation frequency). Executed port lessons recorded in the
+  module: the reference's empirical 1.42 one-sided factor (a 2.0
+  doubling read 2.59 asper at the anchor) and its zero
+  negative-frequency H half (mirroring + doubling read ~4x).
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 
@@ -61,6 +70,10 @@ test).
    calibrated half-scale sine reads -6.02 dB re full scale.
 7. Diffuse field differs measurably from free field (DDF live).
 8. Determinism bitwise; typed refusals for shape/NaN/degenerate.
+9. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
+   published ~70 Hz signature), R(70 Hz) matches the standalone
+   reference's 1.0448 within 1e-3 (exactness pin), falls off both
+   sides, and an unmodulated tone is far smoother.
 
 ## Error model
 
@@ -86,18 +99,21 @@ None.
 
 ## Conformance tests
 
-`tests/psycho.rs` (10): ISO signal-1 exactness; cross-path tone
+`tests/psycho.rs` (11): ISO signal-1 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
 refusal; low-band mutation; calibration refusal + calibrated value;
 log-attack-time ordering + linear-ramp closed form; bitwise
-determinism + typed refusals; diffuse-vs-free; listening-law pin.
+determinism + typed refusals; diffuse-vs-free; listening-law pin;
+AM-roughness sweep with the exactness pin.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
 - PCM third-octave filterbank (the wav path) and TIME-VARYING
   loudness: not implemented; loudness input is band levels.
-- Roughness and fluctuation strength (Daniel-Weber modulation
-  analysis, the 70 Hz AM peak): not implemented.
+- Fluctuation strength: not implemented (roughness IS — see above).
+- Roughness time-series over long signals (block averaging /
+  overlap): single-block v1; the wrapper is trivial once the
+  time-varying loudness lands.
 - Tonality/harmonicity: not implemented.
 - Phon conversion: deliberately absent pending a verified source.
 - Batch API for Pareto consumers: not implemented.

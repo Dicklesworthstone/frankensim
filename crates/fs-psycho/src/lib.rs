@@ -19,12 +19,14 @@
 //! a human ear adjudicates (the program's listening law — this
 //! statement is load-bearing and pinned by a test).
 //!
-//! Honest v1 scope (stated; the bead stays open until the rest
-//! lands): stationary loudness from BAND LEVELS only (the PCM
-//! third-octave filterbank, time-varying loudness, roughness,
-//! fluctuation strength, and tonality are not yet implemented — no
-//! placeholder claims).
+//! Honest scope (stated; the bead stays open until the rest lands):
+//! stationary loudness from BAND LEVELS only; Daniel-Weber roughness
+//! per analysis block ([`roughness`]); the PCM third-octave
+//! filterbank, time-varying loudness, fluctuation strength, and
+//! tonality are not yet implemented — no placeholder claims.
 
+pub mod dw_tables;
+pub mod roughness;
 pub mod tables;
 
 use fs_math::det;
