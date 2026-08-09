@@ -3,9 +3,8 @@
 //! This module deliberately consumes only [`NormalPatchRequest::evaluate`]. It
 //! neither inspects nor reconstructs private constitutive-law state.
 
-use std::collections::BTreeSet;
-
 use fs_blake3::{ContentHash, hash_domain};
+use fs_tribo::{ExactlyOnceKeyError, ExactlyOnceKeyLedger};
 
 use super::{
     ApplicabilityRatios, InputUncertainty, LineNormalPatchReceipt, NormalPatchError,
@@ -70,7 +69,13 @@ pub struct NormalPatchEmbedState {
     max_forward_step_bits: u64,
     last_time_bits: u64,
     last_iteration: u64,
-    committed_work_keys: BTreeSet<String>,
+    work_ledger: NormalWorkKeyLedger,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NormalWorkKeyLedger {
+    Retained(ExactlyOnceKeyLedger<String>),
+    StrictSequence(ExactlyOnceKeyLedger<u64>),
 }
 
 /// A rollback token made from a complete deterministic state snapshot.
@@ -154,6 +159,12 @@ pub enum NormalPatchEmbedError {
     DuplicateWorkKey {
         key: String,
     },
+    OutOfSequenceWork {
+        iteration: u64,
+    },
+    WorkKeyCapacityExceeded {
+        maximum: usize,
+    },
     Law(NormalPatchError),
 }
 
@@ -193,6 +204,15 @@ impl core::fmt::Display for NormalPatchEmbedError {
             Self::DuplicateWorkKey { key } => {
                 write!(f, "exactly-once work key already committed: {key}")
             }
+            Self::OutOfSequenceWork { iteration } => {
+                write!(
+                    f,
+                    "normal-patch work iteration is out of sequence: {iteration}"
+                )
+            }
+            Self::WorkKeyCapacityExceeded { maximum } => {
+                write!(f, "normal-patch work-key capacity {maximum} is exhausted")
+            }
             Self::Law(error) => error.fmt(f),
         }
     }
@@ -225,8 +245,25 @@ impl NormalPatchEmbedState {
             max_forward_step_bits: max_forward_step_s.to_bits(),
             last_time_bits: anchor_time_s.to_bits(),
             last_iteration: 0,
-            committed_work_keys: BTreeSet::new(),
+            work_ledger: NormalWorkKeyLedger::Retained(
+                ExactlyOnceKeyLedger::retained_set(usize::MAX)
+                    .expect("usize::MAX is a nonzero work-key capacity"),
+            ),
         })
+    }
+
+    /// Starts a fixed-memory ledger accepting iterations `1, 2, ...`.
+    pub fn new_strict_sequence(
+        anchor_time_s: f64,
+        max_forward_step_s: f64,
+        maximum_committed_work_keys: usize,
+    ) -> Result<Self, NormalPatchEmbedError> {
+        let mut state = Self::new(anchor_time_s, max_forward_step_s)?;
+        state.work_ledger = NormalWorkKeyLedger::StrictSequence(
+            ExactlyOnceKeyLedger::strict_sequence(1, maximum_committed_work_keys)
+                .map_err(|error| normal_ledger_error(error, 0, String::new()))?,
+        );
+        Ok(state)
     }
 
     /// Captures a rollback token without changing this state.
@@ -256,12 +293,22 @@ impl NormalPatchEmbedState {
     }
 
     fn canonical(&self) -> String {
-        let keys = self
-            .committed_work_keys
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",");
+        let keys = match &self.work_ledger {
+            NormalWorkKeyLedger::Retained(ledger) => ledger
+                .retained_keys()
+                .expect("retained ledger exposes its exact keys")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
+            NormalWorkKeyLedger::StrictSequence(ledger) => format!(
+                "strict:{}:{}",
+                ledger.committed_count(),
+                ledger
+                    .strict_next_key()
+                    .expect("strict ledger exposes its next key")
+            ),
+        };
         format!(
             "v1|{:.17e}|{:.17e}|{:.17e}|{}|{keys}",
             self.anchor_time_s(),
@@ -280,9 +327,27 @@ impl NormalPatchEmbedRequest {
         state: &NormalPatchEmbedState,
     ) -> Result<NormalPatchEmbedTransition, NormalPatchEmbedError> {
         let work_key = self.work_key();
-        if state.committed_work_keys.contains(&work_key) {
-            return Err(NormalPatchEmbedError::DuplicateWorkKey { key: work_key });
-        }
+        let next_work_ledger = match &state.work_ledger {
+            NormalWorkKeyLedger::Retained(ledger) => {
+                NormalWorkKeyLedger::Retained(ledger.advance(&work_key, None).map_err(|error| {
+                    normal_ledger_error(error, self.kinematics.iteration, work_key.clone())
+                })?)
+            }
+            NormalWorkKeyLedger::StrictSequence(ledger) => {
+                let successor = self
+                    .kinematics
+                    .iteration
+                    .checked_add(1)
+                    .ok_or(NormalPatchEmbedError::InvalidKinematics { field: "iteration" })?;
+                NormalWorkKeyLedger::StrictSequence(
+                    ledger
+                        .advance(&self.kinematics.iteration, Some(successor))
+                        .map_err(|error| {
+                            normal_ledger_error(error, self.kinematics.iteration, work_key.clone())
+                        })?,
+                )
+            }
+        };
         self.validate(state)?;
         let mut query = self.law_request.clone();
         query.indentation_m = self.kinematics.approach_m;
@@ -305,7 +370,7 @@ impl NormalPatchEmbedRequest {
         let mut next_state = state.clone();
         next_state.last_time_bits = self.kinematics.time_s.to_bits();
         next_state.last_iteration = self.kinematics.iteration;
-        next_state.committed_work_keys.insert(work_key);
+        next_state.work_ledger = next_work_ledger;
         Ok(NormalPatchEmbedTransition {
             embedding_id,
             law_request_id: receipt.request_id(),
@@ -444,6 +509,27 @@ impl NormalPatchEmbedRequest {
             self.kinematics.time_s.to_bits(),
             self.kinematics.iteration,
         )
+    }
+}
+
+fn normal_ledger_error(
+    error: ExactlyOnceKeyError,
+    iteration: u64,
+    work_key: String,
+) -> NormalPatchEmbedError {
+    match error {
+        ExactlyOnceKeyError::Duplicate => NormalPatchEmbedError::DuplicateWorkKey { key: work_key },
+        ExactlyOnceKeyError::OutOfSequence => {
+            NormalPatchEmbedError::OutOfSequenceWork { iteration }
+        }
+        ExactlyOnceKeyError::CapacityExceeded { maximum } => {
+            NormalPatchEmbedError::WorkKeyCapacityExceeded { maximum }
+        }
+        ExactlyOnceKeyError::ZeroCapacity | ExactlyOnceKeyError::MissingSuccessor => {
+            NormalPatchEmbedError::InvalidKinematics {
+                field: "exactly-once work ledger",
+            }
+        }
     }
 }
 

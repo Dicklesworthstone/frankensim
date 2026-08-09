@@ -95,12 +95,10 @@ impl<K: Ord + Clone> ExactlyOnceKeyLedger<K> {
     pub const fn maximum_committed(&self) -> usize {
         match self {
             Self::RetainedSet {
-                maximum_committed,
-                ..
+                maximum_committed, ..
             }
             | Self::StrictSequence {
-                maximum_committed,
-                ..
+                maximum_committed, ..
             } => *maximum_committed,
         }
     }
