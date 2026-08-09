@@ -183,6 +183,14 @@ impl Connection {
         self.inner.begin_transaction_sync()
     }
 
+    /// Begin an IMMEDIATE transaction through the SQL layer: the writer
+    /// reservation is taken at BEGIN, so the guard reads inside see the
+    /// latest committed state and a competing writer cannot interleave
+    /// between the check and the write (bead 0npfh).
+    fn begin_immediate_transaction(&self) -> Result<(), FrankenError> {
+        self.execute("BEGIN IMMEDIATE").map(|_| ())
+    }
+
     fn commit_transaction(&self) -> Result<(), FrankenError> {
         self.inner.commit_transaction_sync()
     }
@@ -5261,6 +5269,18 @@ impl Ledger {
         diag: Option<&str>,
         t_end_ns: i64,
     ) -> Result<(), LedgerError> {
+        // Same serial-order requirement as link/seal (bead 0npfh): the
+        // outcome write and its predicates must observe one fresh snapshot.
+        self.run_immediate(|| self.finish_op_body(op, outcome, diag, t_end_ns))
+    }
+
+    fn finish_op_body(
+        &self,
+        op: i64,
+        outcome: OpOutcome,
+        diag: Option<&str>,
+        t_end_ns: i64,
+    ) -> Result<(), LedgerError> {
         if let Some(d) = diag {
             self.require_bounded_op_json("diag", d, MAX_OP_DIAG_BYTES, false)?;
         }
@@ -5932,6 +5952,68 @@ impl Ledger {
         }
     }
 
+    /// Run one check-then-write critical section inside an IMMEDIATE
+    /// transaction with bounded busy-retry (bead 0npfh).
+    ///
+    /// The explicit BEGIN starts with a fresh read snapshot and takes the
+    /// writer reservation up front, so the guard reads and the write share
+    /// one snapshot and a competing writer on another connection serializes
+    /// instead of slipping a commit between the check and the write.
+    /// Busy/locked/write-conflict failures roll back and retry a small
+    /// deterministic number of attempts; every retry starts a fresh
+    /// transaction, so the loser of a legitimate race sees the winner's
+    /// commit and returns the guard's typed refusal.
+    fn run_immediate<T>(
+        &self,
+        body: impl Fn() -> Result<T, LedgerError>,
+    ) -> Result<T, LedgerError> {
+        if self.conn.in_transaction() {
+            return body();
+        }
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            if let Err(error) = self.conn.begin_immediate_transaction() {
+                let mapped = sql_err("begin immediate transaction", &error);
+                if attempt < 8 && Self::is_busy_classified(&mapped) {
+                    continue;
+                }
+                return Err(mapped);
+            }
+            match body() {
+                Ok(value) => match self.conn.commit_transaction() {
+                    Ok(()) => return Ok(value),
+                    Err(error) => {
+                        let _ = self.conn.rollback_transaction();
+                        let mapped = sql_err("immediate transaction commit", &error);
+                        if attempt < 8 && Self::is_busy_classified(&mapped) {
+                            continue;
+                        }
+                        return Err(mapped);
+                    }
+                },
+                Err(error) => {
+                    let _ = self.conn.rollback_transaction();
+                    if attempt < 8 && Self::is_busy_classified(&error) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// Busy-classified failures are retryable contention: the explicit
+    /// `Busy` variant or an engine string naming busy/locked/snapshot
+    /// conflict.
+    fn is_busy_classified(error: &LedgerError) -> bool {
+        if matches!(error, LedgerError::Busy { .. }) {
+            return true;
+        }
+        let lowered = error.to_string().to_ascii_lowercase();
+        lowered.contains("busy") || lowered.contains("locked") || lowered.contains("snapshot")
+    }
+
     /// Link an unfinished op to an artifact in the lineage DAG. The guarded
     /// `INSERT ... SELECT` and [`Ledger::finish_op`] are serialized by the
     /// database: the link either commits before the finish, or changes zero
@@ -5945,6 +6027,19 @@ impl Ledger {
     /// [`LedgerError::Invalid`] for a missing artifact or a conflicting
     /// explicit lineage seal.
     pub fn link(&self, op: i64, artifact: &ContentHash, role: EdgeRole) -> Result<(), LedgerError> {
+        // The guard reads and the insert must share one fresh snapshot: in
+        // autocommit mode a competing seal on another connection could
+        // commit between them and both operations would report success
+        // (bead 0npfh).
+        self.run_immediate(|| self.link_body(op, artifact, role))
+    }
+
+    fn link_body(
+        &self,
+        op: i64,
+        artifact: &ContentHash,
+        role: EdgeRole,
+    ) -> Result<(), LedgerError> {
         let bounded_op = op_storage_predicate();
         let insert = self
             .conn
@@ -6121,6 +6216,18 @@ impl Ledger {
     /// existing seal or the artifact does not currently have exactly that sole
     /// output producer; engine errors otherwise.
     pub fn seal_artifact_output(&self, artifact: &ContentHash, op: i64) -> Result<(), LedgerError> {
+        // The guard check and the seal insert must be one atomic unit with
+        // a fresh snapshot: in autocommit mode a competing edge insert on
+        // another connection could commit between the two statements and
+        // both operations would report success (bead 0npfh).
+        self.run_immediate(|| self.seal_artifact_output_body(artifact, op))
+    }
+
+    fn seal_artifact_output_body(
+        &self,
+        artifact: &ContentHash,
+        op: i64,
+    ) -> Result<(), LedgerError> {
         match self.artifact_output_seal_inner(artifact)? {
             Some(stored) if stored == op => return Ok(()),
             Some(stored) => {
@@ -6273,6 +6380,17 @@ impl Ledger {
     /// [`LedgerError::Invalid`] for an excessive cap, missing op, cardinality
     /// mismatch, or conflicting existing seal; engine errors otherwise.
     pub fn seal_op_artifact_edges(
+        &self,
+        op: i64,
+        expected_count: usize,
+    ) -> Result<(), LedgerError> {
+        // Same cross-connection race as seal_artifact_output (bead 0npfh):
+        // the edge-count check and the seal insert must be atomic under the
+        // writer reservation with a fresh snapshot.
+        self.run_immediate(|| self.seal_op_artifact_edges_body(op, expected_count))
+    }
+
+    fn seal_op_artifact_edges_body(
         &self,
         op: i64,
         expected_count: usize,
@@ -10908,6 +11026,98 @@ mod tests {
         } else {
             assert_eq!(producers.op_ids, vec![canonical, foreign]);
             assert_eq!(ledger.artifact_output_seal(&report.hash).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn concurrent_output_seal_and_link_race_is_stable_across_repeated_schedules() {
+        // Bead 0npfh acceptance: repeated barrier-controlled schedules with
+        // alternating start order; exactly one competitor commits and the
+        // final rows agree with the returned results every time.
+        let spawn_seal = |path: &str,
+                          hash: fs_blake3::ContentHash,
+                          op: i64,
+                          barrier: std::sync::Arc<std::sync::Barrier>|
+         -> std::thread::JoinHandle<bool> {
+            let path = path.to_string();
+            std::thread::spawn(move || {
+                let ledger = Ledger::open(&path).unwrap();
+                barrier.wait();
+                ledger.seal_artifact_output(&hash, op).is_ok()
+            })
+        };
+        let spawn_link = |path: &str,
+                          hash: fs_blake3::ContentHash,
+                          op: i64,
+                          barrier: std::sync::Arc<std::sync::Barrier>|
+         -> std::thread::JoinHandle<bool> {
+            let path = path.to_string();
+            std::thread::spawn(move || {
+                let ledger = Ledger::open(&path).unwrap();
+                barrier.wait();
+                ledger.link(op, &hash, EdgeRole::Out).is_ok()
+            })
+        };
+        for iteration in 0..32_u64 {
+            let path = std::env::temp_dir()
+                .join(format!(
+                    "fs-ledger-output-seal-race-loop-{}-{}-{iteration}.ledger",
+                    std::process::id(),
+                    now_wall_ns()
+                ))
+                .to_string_lossy()
+                .into_owned();
+            let setup = Ledger::open(&path).unwrap();
+            let report = setup
+                .put_artifact("race-loop-report", b"race", None)
+                .unwrap();
+            let canonical = setup.begin_op(None, "{}", &FX, 1).unwrap();
+            let foreign = setup.begin_op(None, "{}", &FX, 2).unwrap();
+            setup.link(canonical, &report.hash, EdgeRole::Out).unwrap();
+            drop(setup);
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (seal_handle, link_handle) = if iteration % 2 == 0 {
+                (
+                    spawn_seal(&path, report.hash, canonical, barrier.clone()),
+                    spawn_link(&path, report.hash, foreign, barrier),
+                )
+            } else {
+                let link_handle = spawn_link(&path, report.hash, foreign, barrier.clone());
+                let seal_handle = spawn_seal(&path, report.hash, canonical, barrier);
+                (seal_handle, link_handle)
+            };
+            let sealed = seal_handle.join().unwrap();
+            let linked = link_handle.join().unwrap();
+            assert_ne!(
+                sealed, linked,
+                "iteration {iteration}: exactly one competing write may commit"
+            );
+
+            let ledger = Ledger::open(&path).unwrap();
+            let producers = ledger
+                .artifact_producer_ops_bounded(&report.hash, 2)
+                .unwrap();
+            if sealed {
+                assert_eq!(producers.op_ids, vec![canonical], "iteration {iteration}");
+                assert_eq!(
+                    ledger.artifact_output_seal(&report.hash).unwrap(),
+                    Some(canonical),
+                    "iteration {iteration}"
+                );
+            } else {
+                assert_eq!(
+                    producers.op_ids,
+                    vec![canonical, foreign],
+                    "iteration {iteration}"
+                );
+                assert_eq!(
+                    ledger.artifact_output_seal(&report.hash).unwrap(),
+                    None,
+                    "iteration {iteration}"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
         }
     }
 
