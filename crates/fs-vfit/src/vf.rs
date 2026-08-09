@@ -366,11 +366,14 @@ fn relocate_once(
             // s*e at s = i*w is purely imaginary.
             a[r_im * ncols + e_col] = wt * w;
         }
-        // Relaxed d_tilde column multiplies -H(s).
+        // Relaxed d_tilde column multiplies -H(s). The sample rows are
+        // HOMOGENEOUS (N(s) - sigma(s)*H(s) ~= 0 with sigma = d_tilde
+        // + sum c_tilde*phi); the non-triviality row below is what
+        // rules out the zero solution. Putting H on the RHS here would
+        // silently shift sigma by 1 relative to the zero-relocation
+        // model — the executed known-answer test caught exactly that.
         a[r_re * ncols + ncols - 1] = wt * -hv.re;
         a[r_im * ncols + ncols - 1] = wt * -hv.im;
-        rhs[r_re] = wt * hv.re;
-        rhs[r_im] = wt * hv.im;
     }
     // Relaxed non-triviality row: sum_i Re(sigma(s_i)) = len (weighted
     // by the mean weight so the row's scale matches the block).

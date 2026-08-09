@@ -12,7 +12,7 @@
 //! least-squares residue pass vector fitting uses, so the two front
 //! ends share nothing upstream of the pole estimates.
 
-use crate::model::{PoleTerm, RationalModel};
+use crate::model::RationalModel;
 use crate::vf::{FitOptions, FitOutcome, VfError};
 use fs_la::eigen_complex::{eig, lu_complex};
 use fs_la::factor::svd_jacobi;
