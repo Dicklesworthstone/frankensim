@@ -87,8 +87,12 @@ fn sponge_reflection_coefficient_under_ceiling_with_wall_control() {
             "incident pulse must actually pass the probe: {incident:e}"
         );
         let r = reflected / incident;
+        // Measured floor: 1.1e-4 (half-width 12) / 2.3e-4 (30);
+        // ceiling authored ~20x above the worse one (the
+        // measured-tolerance doctrine: re-measure in the same commit
+        // if the fixture is re-dimensioned).
         assert!(
-            r < 0.02,
+            r < 5.0e-3,
             "sponge reflection coefficient {r:.4} over ceiling (half-width {half_width})"
         );
         results.push((half_width, r));
@@ -171,7 +175,7 @@ fn sponge_left_side_absorbs() {
         }
     }
     let r = reflected / incident;
-    assert!(r < 0.02, "left-side sponge reflection {r:.4}");
+    assert!(r < 5.0e-3, "left-side sponge reflection {r:.4}");
 }
 
 /// Constructor refusals (crate boundary convention: checked asserts,
