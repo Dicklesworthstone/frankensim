@@ -8,16 +8,16 @@
 
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
-[![Crates](https://img.shields.io/badge/workspace-149%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-150%20of%20150%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-662%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Crates](https://img.shields.io/badge/workspace-150%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
+[![Contracts](https://img.shields.io/badge/contracts-151%20of%20151%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-664%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
 
 FrankenSim is an active Rust source workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
 
-The tree contains 150 `fs-*` crate directories: 149 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+The tree contains 151 `fs-*` crate directories: 150 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
 
 The inventory numbers in this README are derived from the root workspace
 manifest, each crate's declared layer metadata, and the portable tracked-input
@@ -32,12 +32,12 @@ edge is valid.
 <!-- BEGIN GENERATED FRANKENSIM DOC FACTS -->
 | Derived repository fact | Value |
 |-------------------------|-------|
-| Native workspace `fs-*` crates | 149 |
+| Native workspace `fs-*` crates | 150 |
 | Standalone `fs-*` workspaces | 1 (`fs-wasm`) |
-| Tracked `fs-*` crate directories | 150 |
-| Tracked `CONTRACT.md` files | 150 of 150 |
-| Tracked crate integration-test files | 662 |
-| `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=18`, `L3=32`, `L4=32`, `L5=4`, `L6=27`, `TOOL=1` |
+| Tracked `fs-*` crate directories | 151 |
+| Tracked `CONTRACT.md` files | 151 of 151 |
+| Tracked crate integration-test files | 664 |
+| `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=19`, `L3=32`, `L4=32`, `L5=4`, `L6=27`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
 An initial stable validation CLI now exists, but there is not yet an integrated end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
@@ -52,8 +52,8 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 
 | Area | Current implementation |
 |------|------------------------|
-| Workspace | Rust 2024 nightly Cargo workspace with 149 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
-| Contracts | 150 of 150 `fs-*` crate directories have `CONTRACT.md` files |
+| Workspace | Rust 2024 nightly Cargo workspace with 150 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
+| Contracts | 151 of 151 `fs-*` crate directories have `CONTRACT.md` files |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
@@ -1298,7 +1298,7 @@ Different readers should start in different places.
 
 ## Contracts and Verification
 
-The tree currently has 150 `CONTRACT.md` files for 150 `fs-*` crate directories.
+The tree currently has 151 `CONTRACT.md` files for 151 `fs-*` crate directories.
 The contract count is meant to be checkable, not aspirational.
 
 Existing contracts use these required sections:
@@ -1340,7 +1340,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- Cargo.toml                         # Workspace manifest
 |-- Cargo.lock                         # Committed lockfile
 |-- rust-toolchain.toml                # Nightly toolchain and components
-|-- crates/                            # 150 fs-* crates; selected entries shown below
+|-- crates/                            # 151 fs-* crates; selected entries shown below
 |   |-- fs-qty/                        # Dimensional quantities
 |   |-- fs-obs/                        # Structured observability
 |   |-- fs-evidence/                   # Evidence and certification wrappers

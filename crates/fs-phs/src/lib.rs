@@ -34,6 +34,11 @@
 //! first consumer; fs-time strategy wiring lives with fs-time (L3,
 //! above this crate).
 
+// Dense row-major matrix kernels index by (row, col) throughout;
+// iterator rewrites of these loops obscure the algebra (same call the
+// other numerical crates made — fs-spectral, fs-sos, fs-tropical).
+#![allow(clippy::needless_range_loop)]
+
 use fs_la::factor::lu;
 use fs_math::det;
 
@@ -156,7 +161,7 @@ impl Storage for SumStorage {
 }
 
 /// Typed refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PhsError {
     /// A structure matrix is not (skew-)symmetric within tolerance.
     NotSymmetric {
@@ -368,7 +373,11 @@ impl PortHamiltonian {
 #[must_use]
 pub fn discrete_gradient(storage: &dyn Storage, a: &[f64], b: &[f64]) -> Vec<f64> {
     let n = a.len();
-    let mid: Vec<f64> = a.iter().zip(b).map(|(&p, &q)| 0.5 * (p + q)).collect();
+    let mid: Vec<f64> = a
+        .iter()
+        .zip(b)
+        .map(|(&p, &q)| f64::midpoint(p, q))
+        .collect();
     let mut dg = vec![0.0; n];
     storage.gradient(&mid, &mut dg);
     let mut dx_norm_sq = 0.0;
@@ -428,7 +437,7 @@ impl StepRecord {
 
 /// Newton tolerance (relative to state scale) and budget for the
 /// implicit discrete-gradient solve.
-const NEWTON_TOL: f64 = 1.0e-12;
+const NEWTON_TOL: f64 = 1.0e-13;
 const NEWTON_MAX: usize = 50;
 
 /// One Gonzalez discrete-gradient step of size `dt` under held input
@@ -463,31 +472,39 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         }
         res
     };
-    let scale = x0.iter().fold(1.0f64, |a, &v| a.max(v.abs()));
+    // State-RELATIVE stopping tolerance: an absolute floor here leaks
+    // O(tol) state residual per step straight into the energy ledger
+    // (executed: 3e-8 relative H drift on a lossless ladder with
+    // millivolt-scale states under an absolute 1e-12).
+    let scale = x0
+        .iter()
+        .chain(gu.iter())
+        .fold(1.0e-30f64, |a, &v| a.max(v.abs()));
     let mut x1 = x0.to_vec();
     let mut iters = 0usize;
+    let mut best: Option<(Vec<f64>, f64)> = None;
     loop {
         let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
         let res = residual(&x1, &dg);
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+        let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
+        if improved {
+            best = Some((x1.clone(), rnorm));
+        }
         if rnorm <= NEWTON_TOL * scale {
             break;
         }
-        if iters >= NEWTON_MAX {
-            return Err(PhsError::NewtonStalled { residual: rnorm });
-        }
-        // Finite-difference Jacobian of the residual in x1.
-        let mut jac = vec![0.0; n * n];
-        for col in 0..n {
-            let h = 1.0e-7 * (1.0 + x1[col].abs());
-            let mut xp = x1.clone();
-            xp[col] += h;
-            let dgp = discrete_gradient(sys.storage.as_ref(), x0, &xp);
-            let rp = residual(&xp, &dgp);
-            for row in 0..n {
-                jac[row * n + col] = (rp[row] - res[row]) / h;
+        // Stagnation with an approximate (finite-difference) Jacobian:
+        // accept the best iterate once progress stops.
+        if !improved || iters >= NEWTON_MAX {
+            let (bx, brnorm) = best.expect("at least one iterate");
+            if brnorm <= 1.0e3 * NEWTON_TOL * scale {
+                x1 = bx;
+                break;
             }
+            return Err(PhsError::NewtonStalled { residual: brnorm });
         }
+        let jac = fd_jacobian(sys, x0, &x1, scale, &residual);
         let fact = lu(&jac, n).map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
         let mut delta = res;
         fact.solve(&mut delta);
@@ -518,6 +535,39 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         supplied,
         newton_iters: iters,
     })
+}
+
+/// The implicit residual closure shared between the Newton loop and
+/// its Jacobian.
+type ResidualFn<'a> = &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>;
+
+/// Central-difference Jacobian of the implicit residual in `x1` (h^2
+/// accuracy keeps the approximate-Newton linear-convergence tail
+/// short).
+fn fd_jacobian(
+    sys: &PortHamiltonian,
+    x0: &[f64],
+    x1: &[f64],
+    scale: f64,
+    residual: ResidualFn<'_>,
+) -> Vec<f64> {
+    let n = x0.len();
+    let mut jac = vec![0.0; n * n];
+    for col in 0..n {
+        let h = 1.0e-6 * (scale + x1[col].abs());
+        let mut xp = x1.to_vec();
+        let mut xm = x1.to_vec();
+        xp[col] += h;
+        xm[col] -= h;
+        let dgp = discrete_gradient(sys.storage.as_ref(), x0, &xp);
+        let dgm = discrete_gradient(sys.storage.as_ref(), x0, &xm);
+        let rp = residual(&xp, &dgp);
+        let rm = residual(&xm, &dgm);
+        for row in 0..n {
+            jac[row * n + col] = (rp[row] - rm[row]) / (2.0 * h);
+        }
+    }
+    jac
 }
 
 /// Power-preserving interconnection: pair port `pa.0` of `a` with port
@@ -594,6 +644,46 @@ pub fn interconnect(
     PortHamiltonian::new(n, m, j, r, g, storage)
 }
 
+/// Reduced storage: `H_r(xr) = H(V xr)`, gradient `V^T gradH(V xr)`.
+struct ReducedStorage {
+    v: Vec<f64>,
+    n: usize,
+    k: usize,
+    inner: Box<dyn Storage>,
+}
+
+impl ReducedStorage {
+    fn lift(&self, xr: &[f64]) -> Vec<f64> {
+        let mut x = vec![0.0; self.n];
+        for l in 0..self.n {
+            let mut acc = 0.0;
+            for c in 0..self.k {
+                acc += self.v[l * self.k + c] * xr[c];
+            }
+            x[l] = acc;
+        }
+        x
+    }
+}
+
+impl Storage for ReducedStorage {
+    fn hamiltonian(&self, xr: &[f64]) -> f64 {
+        self.inner.hamiltonian(&self.lift(xr))
+    }
+    fn gradient(&self, xr: &[f64], out: &mut [f64]) {
+        let x = self.lift(xr);
+        let mut e = vec![0.0; self.n];
+        self.inner.gradient(&x, &mut e);
+        for c in 0..self.k {
+            let mut acc = 0.0;
+            for l in 0..self.n {
+                acc += self.v[l * self.k + c] * e[l];
+            }
+            out[c] = acc;
+        }
+    }
+}
+
 /// Structure-preserving Galerkin reduction: project onto the columns
 /// of `v` (`n x k`, row-major; caller supplies an orthonormal or at
 /// least full-rank basis). `J_r = V^T J V` is skew and `R_r = V^T R V`
@@ -655,43 +745,6 @@ pub fn reduce_galerkin(
             gr[c * sys.m + p] = acc;
         }
     }
-    // Reduced storage: H_r(xr) = H(V xr), grad = V^T gradH(V xr).
-    struct ReducedStorage {
-        v: Vec<f64>,
-        n: usize,
-        k: usize,
-        inner: Box<dyn Storage>,
-    }
-    impl Storage for ReducedStorage {
-        fn hamiltonian(&self, xr: &[f64]) -> f64 {
-            self.inner.hamiltonian(&self.lift(xr))
-        }
-        fn gradient(&self, xr: &[f64], out: &mut [f64]) {
-            let x = self.lift(xr);
-            let mut e = vec![0.0; self.n];
-            self.inner.gradient(&x, &mut e);
-            for c in 0..self.k {
-                let mut acc = 0.0;
-                for l in 0..self.n {
-                    acc += self.v[l * self.k + c] * e[l];
-                }
-                out[c] = acc;
-            }
-        }
-    }
-    impl ReducedStorage {
-        fn lift(&self, xr: &[f64]) -> Vec<f64> {
-            let mut x = vec![0.0; self.n];
-            for l in 0..self.n {
-                let mut acc = 0.0;
-                for c in 0..self.k {
-                    acc += self.v[l * self.k + c] * xr[c];
-                }
-                x[l] = acc;
-            }
-            x
-        }
-    }
     // The reduction needs the full system's storage; move semantics
     // would consume `sys`, so the reduced system re-uses it through a
     // shared quadratic copy when available. v1 keeps it simple: the
@@ -712,7 +765,7 @@ pub fn reduce_galerkin(
         }
         // Verify linearity (quadratic H): gradient at a probe point
         // must equal Q times the probe.
-        let probe: Vec<f64> = (0..n).map(|i| 0.3 + 0.1 * i as f64).collect();
+        let probe: Vec<f64> = (0..n).map(|i| 0.1f64.mul_add(i as f64, 0.3)).collect();
         let mut grad = vec![0.0; n];
         sys.storage.gradient(&probe, &mut grad);
         for i in 0..n {
@@ -845,6 +898,26 @@ pub fn modal_bank(
     PortHamiltonian::new(n, 1, j, r, g, storage)
 }
 
+/// Duffing storage: `H = p^2/(2m) + k q^2/2 + k3 q^4/4` with analytic
+/// gradient (parameters baked in; separable laws need 'static fns).
+struct DuffingStorage {
+    m: f64,
+    k: f64,
+    k3: f64,
+}
+
+impl Storage for DuffingStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        let (q, p) = (x[0], x[1]);
+        p * p / (2.0 * self.m) + 0.5 * self.k * q * q + 0.25 * self.k3 * det::powi(q, 4)
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        let (q, p) = (x[0], x[1]);
+        out[0] = self.k * q + self.k3 * det::powi(q, 3);
+        out[1] = p / self.m;
+    }
+}
+
 /// Nonlinear (Duffing-type) spring-mass: `H = p^2/(2m) + k q^2/2 +
 /// k3 q^4/4` via separable storage — the non-quadratic exercise for
 /// the Gonzalez gradient.
@@ -856,25 +929,6 @@ pub fn duffing_oscillator(m: f64, k: f64, k3: f64, c: f64) -> Result<PortHamilto
         return Err(PhsError::NotPsd {
             what: "duffing parameters",
         });
-    }
-    // Separable laws need 'static fns; bake the parameters via the
-    // states' scaling instead: store q' = q, p' = p and put m, k, k3
-    // into a custom storage.
-    struct DuffingStorage {
-        m: f64,
-        k: f64,
-        k3: f64,
-    }
-    impl Storage for DuffingStorage {
-        fn hamiltonian(&self, x: &[f64]) -> f64 {
-            let (q, p) = (x[0], x[1]);
-            p * p / (2.0 * self.m) + 0.5 * self.k * q * q + 0.25 * self.k3 * det::powi(q, 4)
-        }
-        fn gradient(&self, x: &[f64], out: &mut [f64]) {
-            let (q, p) = (x[0], x[1]);
-            out[0] = self.k * q + self.k3 * det::powi(q, 3);
-            out[1] = p / self.m;
-        }
     }
     let j = vec![0.0, 1.0, -1.0, 0.0];
     let r = vec![0.0, 0.0, 0.0, c];

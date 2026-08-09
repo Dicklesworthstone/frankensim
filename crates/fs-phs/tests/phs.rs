@@ -1,0 +1,550 @@
+//! fs-phs conformance battery: admission rejection, discrete-gradient
+//! exactness, Gonzalez order-2 on non-quadratic H, interconnection vs
+//! monolithic parity + associativity, per-step power balance, mutation
+//! visibility through the supply-rate audit, and structure-preserving
+//! reduction certified passive by the INDEPENDENT fs-vfit Hamiltonian
+//! test.
+
+use fs_math::c64::C64;
+use fs_phs::{
+    PhsError, PortHamiltonian, QuadraticStorage, Storage, discrete_gradient, duffing_oscillator,
+    interconnect, lc_ladder, mass_spring_damper, modal_bank, reduce_galerkin, step,
+};
+
+fn max_abs(v: &[f64]) -> f64 {
+    v.iter().fold(0.0f64, |a, &x| a.max(x.abs()))
+}
+
+#[test]
+fn admission_rejects_broken_structure() {
+    let storage = || Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).expect("q"));
+    // Non-skew J.
+    let bad_j = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, 1.0, 0.0],
+        vec![0.0; 4],
+        vec![0.0, 1.0],
+        storage(),
+    );
+    assert!(matches!(bad_j, Err(PhsError::NotSymmetric { what: "J" })));
+    // Negative-definite R.
+    let bad_r = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, -0.5],
+        vec![0.0, 1.0],
+        storage(),
+    );
+    assert!(matches!(bad_r, Err(PhsError::NotPsd { what: "R" })));
+    // Asymmetric R.
+    let asym_r = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.3, 0.0, 0.5],
+        vec![0.0, 1.0],
+        storage(),
+    );
+    assert!(matches!(asym_r, Err(PhsError::NotSymmetric { what: "R" })));
+    // Non-PSD Q refuses at the storage.
+    assert!(QuadraticStorage::new(vec![1.0, 0.0, 0.0, -1.0], 2).is_err());
+}
+
+#[test]
+fn discrete_gradient_identity_and_lossless_conservation() {
+    // The Gonzalez identity dg.(b-a) = H(b) - H(a) holds exactly.
+    let q = QuadraticStorage::new(vec![4.0, 1.0, 1.0, 2.0], 2).expect("q");
+    let (a, b) = ([0.3, -1.2], [0.9, 0.4]);
+    let dg = discrete_gradient(&q, &a, &b);
+    let lhs: f64 = dg
+        .iter()
+        .zip(b.iter().zip(&a))
+        .map(|(&g, (&bi, &ai))| g * (bi - ai))
+        .sum();
+    let rhs = q.hamiltonian(&b) - q.hamiltonian(&a);
+    assert!((lhs - rhs).abs() <= 1.0e-14 * rhs.abs().max(1.0));
+    // Undriven lossless LC ladder: H conserved to machine epsilon over
+    // thousands of steps (not just small — EXACT up to Newton tol).
+    let sys = lc_ladder(4, 0.5, 2.0e-3).expect("lc");
+    let mut x = vec![0.0; sys.state_dim()];
+    x[0] = 1.0e-3;
+    x[3] = 2.0e-4;
+    let h0 = sys.hamiltonian(&x);
+    let dt = 1.0e-3;
+    let mut worst = 0.0f64;
+    for _ in 0..2000 {
+        let rec = step(&sys, &x, &[0.0], dt).expect("step");
+        x = rec.x;
+        worst = worst.max((sys.hamiltonian(&x) - h0).abs());
+    }
+    assert!(
+        worst <= 1.0e-10 * h0,
+        "lossless H drifted by {worst:.3e} (H0 = {h0:.3e})"
+    );
+    println!(
+        "{{\"suite\":\"fs-phs\",\"case\":\"lossless-conservation\",\"rel_drift\":{:.3e},\"verdict\":\"pass\"}}",
+        worst / h0
+    );
+}
+
+#[test]
+fn damped_ledger_matches_exactly() {
+    // R > 0: per-step balance residual is solver-zero and the summed
+    // ledger reproduces the total H drop.
+    let sys = mass_spring_damper(0.02, 800.0, 0.15).expect("msd");
+    let mut x = vec![5.0e-3, 0.0];
+    let h0 = sys.hamiltonian(&x);
+    let dt = 1.0e-4;
+    let mut total_dissipated = 0.0;
+    let mut worst_residual = 0.0f64;
+    for _ in 0..5000 {
+        let rec = step(&sys, &x, &[0.0], dt).expect("step");
+        worst_residual = worst_residual.max(rec.balance_residual().abs());
+        assert!(rec.dissipated >= 0.0, "admitted R cannot un-dissipate");
+        total_dissipated += rec.dissipated;
+        x = rec.x;
+    }
+    let h_end = sys.hamiltonian(&x);
+    assert!(worst_residual <= 1.0e-12 * h0);
+    assert!(
+        ((h0 - h_end) - total_dissipated).abs() <= 1.0e-9 * h0,
+        "ledger vs H drop mismatch"
+    );
+    println!(
+        "{{\"suite\":\"fs-phs\",\"case\":\"damped-ledger\",\"h_drop\":{:.6e},\"dissipated\":{total_dissipated:.6e},\"verdict\":\"pass\"}}",
+        h0 - h_end
+    );
+}
+
+#[test]
+fn gonzalez_is_order_two_on_nonquadratic_h() {
+    // Richardson on the Duffing oscillator: halving dt must cut the
+    // endpoint state error by ~4 (order 2).
+    let sys = duffing_oscillator(0.01, 200.0, 5.0e6, 0.0).expect("duffing");
+    let x0 = vec![8.0e-3, 0.0];
+    let t_end = 0.02;
+    let run = |dt: f64| -> Vec<f64> {
+        let mut x = x0.clone();
+        let steps = (t_end / dt).round() as usize;
+        for _ in 0..steps {
+            x = step(&sys, &x, &[0.0], dt).expect("step").x;
+        }
+        x
+    };
+    let reference = run(t_end / 16384.0);
+    let err = |x: &[f64]| -> f64 {
+        x.iter()
+            .zip(&reference)
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0f64, f64::max)
+    };
+    let e1 = err(&run(t_end / 256.0));
+    let e2 = err(&run(t_end / 512.0));
+    let ratio = e1 / e2;
+    assert!(
+        (3.5..4.5).contains(&ratio),
+        "order-2 Richardson ratio {ratio:.3} (e1 {e1:.3e}, e2 {e2:.3e})"
+    );
+    // And energy is STILL conserved exactly despite the truncation
+    // error in the trajectory (the discrete-gradient point).
+    let h0 = sys.hamiltonian(&x0);
+    let mut x = x0.clone();
+    for _ in 0..200 {
+        x = step(&sys, &x, &[0.0], t_end / 200.0).expect("step").x;
+    }
+    assert!((sys.hamiltonian(&x) - h0).abs() <= 1.0e-10 * h0);
+    println!(
+        "{{\"suite\":\"fs-phs\",\"case\":\"gonzalez-order2\",\"richardson\":{ratio:.3},\"verdict\":\"pass\"}}"
+    );
+}
+
+/// Hand-assembled monolithic twin of `interconnect(a, b, [(0, 0)])`
+/// for two mass-spring-dampers: block J with the +/- G_a G_b^T
+/// coupling, block R, block Q.
+fn monolithic_msd_pair(
+    (m1, k1, c1): (f64, f64, f64),
+    (m2, k2, c2): (f64, f64, f64),
+) -> PortHamiltonian {
+    let n = 4;
+    let q = vec![
+        k1,
+        0.0,
+        0.0,
+        0.0, //
+        0.0,
+        1.0 / m1,
+        0.0,
+        0.0, //
+        0.0,
+        0.0,
+        k2,
+        0.0, //
+        0.0,
+        0.0,
+        0.0,
+        1.0 / m2,
+    ];
+    // J: intra blocks [[0,1],[-1,0]] plus coupling between the two
+    // momentum states (g_a = e_p1, g_b = e_p2): -1 at (p1, p2), +1 at
+    // (p2, p1).
+    let mut j = vec![0.0; n * n];
+    j[1] = 1.0;
+    j[n] = -1.0;
+    j[2 * n + 3] = 1.0;
+    j[3 * n + 2] = -1.0;
+    j[n + 3] = -1.0;
+    j[3 * n + 1] = 1.0;
+    let mut r = vec![0.0; n * n];
+    r[n + 1] = c1;
+    r[3 * n + 3] = c2;
+    let g = vec![]; // no external ports after pairing
+    let storage = Box::new(QuadraticStorage::new(q, n).expect("q"));
+    PortHamiltonian::new(n, 0, j, r, g, storage).expect("monolithic")
+}
+
+#[test]
+fn interconnection_matches_monolithic_trajectories() {
+    let pa = (0.02, 800.0, 0.05);
+    let pb = (0.05, 300.0, 0.02);
+    let a = mass_spring_damper(pa.0, pa.1, pa.2).expect("a");
+    let b = mass_spring_damper(pb.0, pb.1, pb.2).expect("b");
+    let coupled = interconnect(a, b, &[(0, 0)]).expect("interconnect");
+    assert_eq!(coupled.state_dim(), 4);
+    assert_eq!(coupled.port_dim(), 0);
+    let mono = monolithic_msd_pair(pa, pb);
+    let mut xc = vec![4.0e-3, 0.0, -2.0e-3, 0.0];
+    let mut xm = xc.clone();
+    let dt = 5.0e-5;
+    for _ in 0..4000 {
+        xc = step(&coupled, &xc, &[], dt).expect("c").x;
+        xm = step(&mono, &xm, &[], dt).expect("m").x;
+    }
+    let dev = xc
+        .iter()
+        .zip(&xm)
+        .map(|(&p, &q)| (p - q).abs())
+        .fold(0.0f64, f64::max);
+    let scale = max_abs(&xm).max(1.0e-12);
+    assert!(
+        dev <= 1.0e-10 * scale,
+        "interconnected vs monolithic drifted {dev:.3e}"
+    );
+    println!(
+        "{{\"suite\":\"fs-phs\",\"case\":\"interconnect-monolithic\",\"rel_dev\":{:.3e},\"verdict\":\"pass\"}}",
+        dev / scale
+    );
+}
+
+#[test]
+fn interconnection_is_associative_on_structure() {
+    // ((A + B) + C) and (A + (B + C)) with the same disjoint pairings
+    // must produce IDENTICAL structure matrices (state order [A B C]).
+    let mk = |m: f64, k: f64, c: f64, ports: usize| -> PortHamiltonian {
+        // msd with `ports` copies of the force port.
+        let q = vec![k, 0.0, 0.0, 1.0 / m];
+        let mut g = vec![0.0; 2 * ports];
+        for p in 0..ports {
+            g[ports + p] = 1.0;
+        }
+        PortHamiltonian::new(
+            2,
+            ports,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, c],
+            g,
+            Box::new(QuadraticStorage::new(q, 2).expect("q")),
+        )
+        .expect("sys")
+    };
+    // A: ports {to B}; B: ports {to A, to C}; C: ports {to B}.
+    let left = interconnect(
+        interconnect(
+            mk(0.02, 800.0, 0.01, 1),
+            mk(0.05, 300.0, 0.02, 2),
+            &[(0, 0)],
+        )
+        .expect("ab"),
+        mk(0.03, 500.0, 0.03, 1),
+        &[(0, 0)],
+    )
+    .expect("ab_c");
+    let right = interconnect(
+        mk(0.02, 800.0, 0.01, 1),
+        interconnect(
+            mk(0.05, 300.0, 0.02, 2),
+            mk(0.03, 500.0, 0.03, 1),
+            &[(1, 0)],
+        )
+        .expect("bc"),
+        &[(0, 0)],
+    )
+    .expect("a_bc");
+    let (jl, rl, gl) = left.structure();
+    let (jr, rr, gr) = right.structure();
+    assert_eq!(jl, jr, "J not associative");
+    assert_eq!(rl, rr, "R not associative");
+    assert_eq!(gl, gr, "G not associative");
+}
+
+#[test]
+fn driven_power_balance_and_supply_audit() {
+    let sys = mass_spring_damper(0.02, 800.0, 0.15).expect("msd");
+    let mut x = vec![0.0, 0.0];
+    let dt = 1.0e-4;
+    let mut worst_defect = f64::NEG_INFINITY;
+    for i in 0i32..3000 {
+        let u = [0.4 * fs_math::det::sin(2.0 * core::f64::consts::PI * 150.0 * f64::from(i) * dt)];
+        let rec = step(&sys, &x, &u, dt).expect("step");
+        assert!(rec.balance_residual().abs() <= 1.0e-10);
+        // Passive: energy gained never exceeds energy supplied.
+        worst_defect = worst_defect.max(rec.supply_defect());
+        x = rec.x;
+    }
+    assert!(
+        worst_defect <= 1.0e-12,
+        "supply audit violated by {worst_defect:.3e}"
+    );
+}
+
+#[test]
+fn mutations_caught_by_supply_audit() {
+    // Symmetric J (energy-pumping "gyrator gone wrong") smuggled past
+    // admission via from_raw_parts: the supply audit MUST fire.
+    let q = QuadraticStorage::new(vec![800.0, 0.0, 0.0, 50.0], 2).expect("q");
+    let sym_j = PortHamiltonian::from_raw_parts(
+        2,
+        0,
+        vec![0.0, 1.0, 1.0, 0.0],
+        vec![0.0; 4],
+        vec![],
+        Box::new(q.clone()),
+    );
+    let mut x = vec![1.0e-2, 1.0e-2];
+    let mut fired = false;
+    for _ in 0..2000 {
+        let rec = step(&sym_j, &x, &[], 1.0e-4).expect("step");
+        if rec.supply_defect() > 1.0e-12 {
+            fired = true;
+            break;
+        }
+        x = rec.x;
+    }
+    assert!(fired, "symmetrized J must violate the supply audit");
+    // Sign-flipped R: undriven energy GROWS.
+    let neg_r = PortHamiltonian::from_raw_parts(
+        2,
+        0,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, -0.15],
+        vec![],
+        Box::new(q.clone()),
+    );
+    let mut x = vec![1.0e-2, 0.0];
+    let mut fired = false;
+    for _ in 0..2000 {
+        let rec = step(&neg_r, &x, &[], 1.0e-4).expect("step");
+        if rec.supply_defect() > 1.0e-12 {
+            fired = true;
+            break;
+        }
+        x = rec.x;
+    }
+    assert!(fired, "sign-flipped R must violate the supply audit");
+    // Broken interconnection map (one-sided coupling): the composite J
+    // is not skew, so ADMISSION refuses it by name — the same class
+    // fs-couple's cross-row residual caught dynamically.
+    let mut j = vec![0.0; 16];
+    j[1] = 1.0;
+    j[4] = -1.0;
+    j[11] = 1.0;
+    j[14] = -1.0;
+    j[4 + 3] = -1.0; // coupling one way only
+    let q4 = QuadraticStorage::new(
+        vec![
+            800.0, 0.0, 0.0, 0.0, //
+            0.0, 50.0, 0.0, 0.0, //
+            0.0, 0.0, 300.0, 0.0, //
+            0.0, 0.0, 0.0, 20.0,
+        ],
+        4,
+    )
+    .expect("q4");
+    let broken = PortHamiltonian::new(4, 0, j, vec![0.0; 16], vec![], Box::new(q4));
+    assert!(matches!(broken, Err(PhsError::NotSymmetric { what: "J" })));
+    println!("{{\"suite\":\"fs-phs\",\"case\":\"mutations\",\"verdict\":\"pass\"}}");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one linear pipeline: reduce -> certify -> H-error
+fn reduction_preserves_structure_and_passivity() {
+    // 24-mode bank -> keep the 8 modes carrying the drive; the reduced
+    // system must re-admit (structural preservation) and its impedance
+    // must certify passive under the INDEPENDENT fs-vfit Hamiltonian
+    // test (the vector-fitting bead's machinery).
+    let nm = 24;
+    let omegas: Vec<f64> = (0..nm)
+        .map(|i| 2.0 * core::f64::consts::PI * 85.0f64.mul_add(i as f64, 100.0))
+        .collect();
+    let zetas: Vec<f64> = (0..nm).map(|i| 0.0005f64.mul_add(i as f64, 0.01)).collect();
+    let drive: Vec<f64> = (0..nm)
+        .map(|i| if i < 8 { 1.0 - 0.05 * i as f64 } else { 0.02 })
+        .collect();
+    let full = modal_bank(&omegas, &zetas, &drive).expect("bank");
+    // Basis: unit vectors of the first 8 modes' (q, p) states.
+    let (n, k) = (2 * nm, 16);
+    let mut v = vec![0.0; n * k];
+    for mode in 0..8 {
+        v[(2 * mode) * k + 2 * mode] = 1.0;
+        v[(2 * mode + 1) * k + 2 * mode + 1] = 1.0;
+    }
+    let red = reduce_galerkin(&full, &v, k).expect("reduced admits — structure preserved");
+    assert_eq!(red.state_dim(), k);
+    // H-error at t = 0 for a state INSIDE the basis is zero (exact
+    // certified statement); for a state with energy outside, the
+    // deficit equals that energy exactly.
+    let mut x_in = vec![0.0; n];
+    x_in[0] = 1.0e-3;
+    let xr: Vec<f64> = (0..k)
+        .map(|c| (0..n).map(|l| v[l * k + c] * x_in[l]).sum())
+        .collect();
+    assert!((red.hamiltonian(&xr) - full.hamiltonian(&x_in)).abs() <= 1.0e-15);
+    // Impedance samples of the reduced system via its linear dynamics,
+    // then fs-vfit certification.
+    let (jm, rm, gm) = red.structure();
+    let a_mat: Vec<f64> = {
+        // A = (J - R) Q with Q recovered from unit gradients.
+        let mut qm = vec![0.0; k * k];
+        for col in 0..k {
+            let mut basis = vec![0.0; k];
+            basis[col] = 1.0;
+            let mut grad = vec![0.0; k];
+            // Reduced storage gradient IS linear (quadratic case).
+            red_gradient(&red, &basis, &mut grad);
+            for row in 0..k {
+                qm[row * k + col] = grad[row];
+            }
+        }
+        let mut a = vec![0.0; k * k];
+        for i in 0..k {
+            for l in 0..k {
+                let mut acc = 0.0;
+                for t in 0..k {
+                    acc += (jm[i * k + t] - rm[i * k + t]) * qm[t * k + l];
+                }
+                a[i * k + l] = acc;
+            }
+        }
+        // Fold Q into C as well: y = G^T Q x.
+        let mut cq = vec![0.0; k];
+        for l in 0..k {
+            let mut acc = 0.0;
+            for t in 0..k {
+                acc += gm[t] * qm[t * k + l];
+            }
+            cq[l] = acc;
+        }
+        // Sample H(i w) = Cq (i w I - A)^{-1} G on a band and fit.
+        let omega_grid: Vec<f64> = (0..300)
+            .map(|i| {
+                let t = f64::from(i) / 299.0;
+                let lo = 300.0f64;
+                let hi = 6000.0f64;
+                2.0 * core::f64::consts::PI * lo * fs_math::det::exp(t * fs_math::det::ln(hi / lo))
+            })
+            .collect();
+        let mut h = Vec::with_capacity(omega_grid.len());
+        for &w in &omega_grid {
+            let mut m = vec![C64::ZERO; k * k];
+            for i in 0..k {
+                for l in 0..k {
+                    m[i * k + l] = C64::from_re(-a[i * k + l]);
+                }
+                m[i * k + i] = m[i * k + i] + C64::new(0.0, w);
+            }
+            let lu = fs_la::eigen_complex::lu_complex(&m, k).expect("lu");
+            let mut xcol: Vec<C64> = gm.iter().map(|&x| C64::from_re(x)).collect();
+            lu.solve(&mut xcol);
+            let mut acc = C64::ZERO;
+            for (ci, xi) in cq.iter().zip(&xcol) {
+                acc = acc + xi.scale(*ci);
+            }
+            h.push(acc);
+        }
+        let fit = fs_vfit::vector_fit(
+            &omega_grid,
+            &h,
+            &fs_vfit::FitOptions {
+                fit_e: false,
+                ..fs_vfit::FitOptions::new(16)
+            },
+        )
+        .expect("fit");
+        let report = fs_vfit::passivity::check_passivity(
+            &fit.model,
+            (omega_grid[0], *omega_grid.last().expect("grid")),
+        )
+        .expect("check");
+        assert!(
+            report.passive,
+            "reduced modal bank must certify passive (worst Re = {:?})",
+            report.worst
+        );
+        println!(
+            "{{\"suite\":\"fs-phs\",\"case\":\"reduction-passivity\",\"class\":\"{:?}\",\"worst_re\":{:.3e},\"verdict\":\"pass\"}}",
+            report.class, report.worst.0
+        );
+        a
+    };
+    let _ = a_mat;
+    // Realized H-error on a validation input (drive within the kept
+    // modes): logged, and gated by an authored envelope measured at
+    // authoring time.
+    let dt = 2.0e-5;
+    let mut xf = vec![0.0; n];
+    let mut xr = vec![0.0; k];
+    let mut worst_h_dev = 0.0f64;
+    let mut h_scale = 0.0f64;
+    for i in 0i32..2000 {
+        let u = [0.1 * fs_math::det::sin(2.0 * core::f64::consts::PI * 180.0 * f64::from(i) * dt)];
+        xf = step(&full, &xf, &u, dt).expect("full").x;
+        xr = step(&red, &xr, &u, dt).expect("red").x;
+        let hf = full.hamiltonian(&xf);
+        let hr = red.hamiltonian(&xr);
+        h_scale = h_scale.max(hf);
+        worst_h_dev = worst_h_dev.max((hf - hr).abs());
+    }
+    // Authored: the truncated modes carry only the residual 0.02 drive
+    // weights; measured H deviation was ~2e-3 of peak H at authoring.
+    // 2% is the envelope with wide headroom; a-priori trajectory
+    // bounds are a recorded no-claim.
+    assert!(
+        worst_h_dev <= 0.02 * h_scale,
+        "reduction H-error {worst_h_dev:.3e} above envelope ({h_scale:.3e} peak H)"
+    );
+    println!(
+        "{{\"suite\":\"fs-phs\",\"case\":\"reduction-h-error\",\"realized\":{worst_h_dev:.3e},\"peak_h\":{h_scale:.3e},\"verdict\":\"pass\"}}"
+    );
+}
+
+/// Gradient of a (known-quadratic) reduced system via its Storage —
+/// helper for the impedance assembly above.
+fn red_gradient(sys: &PortHamiltonian, x: &[f64], out: &mut [f64]) {
+    // PortHamiltonian doesn't expose storage directly; use output-free
+    // probing: gradient = d/dx H at x by central differences would be
+    // inexact — instead use the public output() path? The cleanest
+    // honest route: H is quadratic, so grad_i = H(x + e_i) - H(x - e_i)
+    // over 2 is EXACT for quadratic H with unit steps scaled small
+    // enough to avoid roundoff — use symmetric difference with h = 1.0
+    // exactness of quadratics: grad(x) . e_i = [H(x + h e_i) - H(x - h
+    // e_i)] / (2h) exactly for ANY h on a quadratic.
+    let n = x.len();
+    for i in 0..n {
+        let mut xp = x.to_vec();
+        let mut xm = x.to_vec();
+        xp[i] += 1.0;
+        xm[i] -= 1.0;
+        out[i] = 0.5 * (sys.hamiltonian(&xp) - sys.hamiltonian(&xm));
+    }
+}
