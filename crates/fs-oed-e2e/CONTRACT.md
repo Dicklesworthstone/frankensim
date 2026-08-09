@@ -93,6 +93,22 @@ Dependencies point downward.
   nested `fs-assimilate` colors receive distinct preimages for semantic aliases.
   The quantity-token layout and tags are owned by `fs-qty`; OED owns only the
   outer relative-versus-quantity role tag.
+- `plan::DecisionPlan` — the typed decision-plan record (bead sj31i.7.4):
+  canonical (sorted, deduplicated) alternatives, dimensionless normalized
+  allocation coefficients, typed `DecisionMeasure` cost and utility, and
+  the dimensionless information gain, bound into an
+  `oed-decision-plan:v1:<64 lowercase hex>` receipt identity over the
+  objective schema, coefficients, measures, gain, and report identity
+  version. `DecisionPlan::from_report` extracts a plan from a finished
+  `OedReport`, mechanically verifying that prior and posterior variance
+  share dimensions (so the gain is dimensionless) and normalizing the
+  recorded allocation amounts into weights; an all-zero allocation becomes
+  the uniform weighting, never a divide-by-zero.
+- `plan::verify_decision_plan` — the independent proof lane for the landed
+  campaign slice: recomputes the information gain from the report's
+  recorded variance totals and compares the normalized allocation in
+  canonical order, returning `PlanVerdict::{Verified, Discrepancy}` as
+  data.
 
 ## Invariants
 
@@ -216,7 +232,13 @@ unmeasured-input evidence binding; instrument-bound assimilation lineage;
 admitted/realized work locks; hostile-maximum admission; nested and finalization
 quota sweeps; execution/budget/work identity binding; exact quadrature-bit
 semantics; byte-exact delegation to the reusable `fs-qty::QuantitySpec`
-codec; and sealed-output identity movement.
+codec; and sealed-output identity movement. The decision-plan battery (bead
+sj31i.7.4) covers report round-trip extraction with independent
+verification, invalid/unnormalized coefficient refusals, typed cost/utility
+slots with cross-kind mixing refusal, canonical identity invariance under
+menu permutation with schema mutation sensitivity, structural
+report/plan-mismatch detection, and zero-quota cancellation without a
+partial plan.
 
 ## No-claim boundaries
 
@@ -229,6 +251,10 @@ codec; and sealed-output identity movement.
   certificate or independent validation. The worked campaign currently injects
   declared truth as its deterministic reading; a production measurement
   provider and stochastic outcome stream are separate required work.
+- `plan::DecisionPlan` binds declared schemas, coefficients, measures, and
+  the dimensionless gain into a receipt identity; it does not prove the
+  campaign's model correct, and `verify_decision_plan` checks internal
+  consistency between plan and report, not external validity.
 - `AcquisitionCost` can represent `fs-qty` physical dimensions and semantic
   kinds, but `fs-qty` deliberately has no monetary base dimension. The derived
   value-per-cost schema is estimated opportunity-loss reduction divided by the

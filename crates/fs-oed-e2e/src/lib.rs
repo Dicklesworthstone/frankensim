@@ -37,6 +37,8 @@ use fs_exec::Cx;
 use fs_qty::semantic::{QuantityKind, SemanticQty, SemanticType, ValueForm};
 use fs_qty::{Dims, QUANTITY_SPEC_ENCODED_LEN, QtyAny, QuantitySpec};
 use fs_toleralloc::{Feature, allocate};
+
+pub mod plan;
 use fs_voi::{
     Action, ActionKind, ActionValue, DesignEstimate, Recommendation, Uncertainty,
     expected_opportunity_loss_by,

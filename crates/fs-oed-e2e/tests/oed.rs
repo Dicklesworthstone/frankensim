@@ -1789,3 +1789,226 @@ fn g4_poll_quota_sweep_covers_every_boundary_without_partial_publication() {
         assert_same_non_identity_report(&replay, &baseline);
     }
 }
+
+// ---------------------------------------------------------------------------
+// sj31i.7.4 decision-plan dimensional adoption battery.
+// ---------------------------------------------------------------------------
+
+mod decision_plan_adoption {
+    use super::*;
+    use fs_oed_e2e::ObjectiveSpec;
+    use fs_oed_e2e::demo_candidates;
+    use fs_oed_e2e::plan::{
+        DECISION_PLAN_RECEIPT_PREFIX, DecisionPlan, PlanError, PlanVerdict, verify_decision_plan,
+    };
+    use fs_qty::inference::DecisionMeasure;
+
+    #[test]
+    fn decision_plan_round_trips_a_campaign_report_and_verifies() {
+        let report = campaign(&demo_candidates().expect("demo"), 0.7, 2).expect("campaign");
+        let plan = DecisionPlan::from_report(&report).expect("plan extraction");
+        assert!(!plan.alternatives().is_empty());
+        assert!(plan.information_gain().is_finite());
+        assert!(plan.information_gain() >= 0.0);
+        assert!(
+            plan.receipt_identity()
+                .starts_with(DECISION_PLAN_RECEIPT_PREFIX)
+        );
+        let check = verify_decision_plan(&report, &plan).expect("check");
+        assert_eq!(
+            check.verdict(),
+            PlanVerdict::Verified,
+            "recomputed gain {} vs reported {}",
+            check.recomputed_information_gain(),
+            check.reported_information_gain()
+        );
+        assert!(check.allocation_matches());
+    }
+
+    #[test]
+    fn decision_plan_refuses_invalid_coefficients_and_unnormalized_weights() {
+        let objective = ObjectiveSpec::dimensional(Dims::NONE);
+        let cost = DecisionMeasure::cost(1.0).expect("cost");
+        let utility = DecisionMeasure::utility(0.5).expect("utility");
+        let base = |weights: Vec<f64>| {
+            DecisionPlan::try_new(
+                vec!["a".to_string(), "b".to_string()],
+                weights,
+                cost,
+                utility,
+                0.25,
+                objective,
+            )
+        };
+        assert!(matches!(
+            base(vec![0.25, 0.25]),
+            Err(PlanError::AllocationNotNormalized { .. })
+        ));
+        assert!(matches!(
+            base(vec![1.25, -0.25]),
+            Err(PlanError::InvalidCoefficient { .. })
+        ));
+        assert!(matches!(
+            base(vec![1.0]),
+            Err(PlanError::InvalidCoefficient { .. })
+        ));
+        assert!(matches!(
+            base(vec![f64::NAN, 1.0]),
+            Err(PlanError::InvalidCoefficient { .. })
+        ));
+        assert!(base(vec![0.5, 0.5]).is_ok());
+        assert!(matches!(
+            DecisionPlan::try_new(Vec::new(), Vec::new(), cost, utility, 0.25, objective,),
+            Err(PlanError::EmptyAlternatives)
+        ));
+        assert!(matches!(
+            DecisionPlan::try_new(
+                vec!["a".to_string(), "a".to_string()],
+                vec![0.5, 0.5],
+                cost,
+                utility,
+                0.25,
+                objective,
+            ),
+            Err(PlanError::DuplicateAlternative { .. })
+        ));
+        assert!(matches!(
+            DecisionPlan::try_new(
+                vec!["a".to_string()],
+                vec![1.0],
+                cost,
+                utility,
+                -0.1,
+                objective,
+            ),
+            Err(PlanError::InvalidInformationGain)
+        ));
+    }
+
+    #[test]
+    fn decision_plan_cost_and_utility_slots_are_typed() {
+        let objective = ObjectiveSpec::dimensional(Dims::NONE);
+        let cost = DecisionMeasure::cost(1.0).expect("cost");
+        let utility = DecisionMeasure::utility(0.5).expect("utility");
+        // The core refuses cost+utility algebra outright.
+        assert!(cost.checked_add(utility).is_err());
+        // The plan refuses the wrong measure kind in either typed slot.
+        assert!(matches!(
+            DecisionPlan::try_new(
+                vec!["a".to_string()],
+                vec![1.0],
+                utility,
+                utility,
+                0.25,
+                objective,
+            ),
+            Err(PlanError::InvalidCoefficient { .. })
+        ));
+        assert!(matches!(
+            DecisionPlan::try_new(
+                vec!["a".to_string()],
+                vec![1.0],
+                cost,
+                cost,
+                0.25,
+                objective,
+            ),
+            Err(PlanError::InvalidCoefficient { .. })
+        ));
+    }
+
+    #[test]
+    fn decision_plan_identity_is_canonical_and_schema_sensitive() {
+        let objective = ObjectiveSpec::dimensional(Dims::NONE);
+        let cost = DecisionMeasure::cost(1.0).expect("cost");
+        let utility = DecisionMeasure::utility(0.5).expect("utility");
+        let forward = DecisionPlan::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![0.5, 0.5],
+            cost,
+            utility,
+            0.25,
+            objective,
+        )
+        .expect("forward");
+        let permuted = DecisionPlan::try_new(
+            vec!["b".to_string(), "a".to_string()],
+            vec![0.5, 0.5],
+            cost,
+            utility,
+            0.25,
+            objective,
+        )
+        .expect("permuted");
+        assert_eq!(
+            forward.receipt_identity(),
+            permuted.receipt_identity(),
+            "canonical ordering makes menu order irrelevant"
+        );
+        let mutated = DecisionPlan::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![0.6, 0.4],
+            cost,
+            utility,
+            0.25,
+            objective,
+        )
+        .expect("mutated");
+        assert_ne!(forward.receipt_identity(), mutated.receipt_identity());
+        let other_objective = ObjectiveSpec::dimensional(Dims([0, 0, 1, 0, 0, 0]));
+        let other = DecisionPlan::try_new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![0.5, 0.5],
+            cost,
+            utility,
+            0.25,
+            other_objective,
+        )
+        .expect("other objective");
+        assert_ne!(
+            forward.receipt_identity(),
+            other.receipt_identity(),
+            "objective schema is bound into the receipt"
+        );
+    }
+
+    #[test]
+    fn decision_plan_verifier_detects_report_plan_mismatch() {
+        let candidates = demo_candidates().expect("demo");
+        let report = campaign(&candidates, 0.7, 2).expect("campaign");
+        let plan = DecisionPlan::from_report(&report).expect("plan");
+        // A structurally different candidate set changes the allocation:
+        // verifying the plan against that report must never verify.
+        let reduced = &candidates[..candidates.len() - 1];
+        let other_report = campaign(reduced, 0.7, 2).expect("other campaign");
+        let check = verify_decision_plan(&other_report, &plan);
+        if let Ok(check) = check {
+            assert_eq!(check.verdict(), PlanVerdict::Discrepancy);
+        }
+        let own = verify_decision_plan(&report, &plan).expect("own check");
+        assert_eq!(own.verdict(), PlanVerdict::Verified);
+    }
+
+    #[test]
+    fn decision_plan_cancellation_never_yields_partial_plan() {
+        let candidates = demo_candidates().expect("demo");
+        let refusal = with_cx(
+            &CancelGate::new(),
+            Budget::INFINITE.with_poll_quota(0),
+            ExecMode::Deterministic,
+            |cx| {
+                run_campaign(
+                    &candidates,
+                    ObjectiveValue::dimensionless(0.7).expect("threshold"),
+                    2,
+                    cx,
+                )
+                .expect_err("zero quota refuses the campaign")
+            },
+        );
+        assert!(matches!(
+            refusal,
+            OedError::Cancelled { .. } | OedError::BudgetRefused(_)
+        ));
+    }
+}

@@ -22,6 +22,7 @@ pub mod graph;
 pub mod hyper;
 pub mod identifiability;
 pub mod plastic;
+pub mod state_point;
 pub mod tensor;
 pub mod visco;
 
