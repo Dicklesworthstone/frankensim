@@ -71,13 +71,69 @@ pub fn loewner_fit(
             samples: omega.len(),
         });
     }
+    // DIRECT-TERM STRIPPING, iterated: the Loewner pencil assumes
+    // strictly proper data — a constant `d` shifts `Ls` by a rank-one
+    // block and an improper `e*s` term corrupts every entry, biasing
+    // the identified poles (executed: ~6e-4 relative pole bias,
+    // Q-amplified to percent-level response error). So: crude d/e
+    // estimate from the top of the band, strip, pencil, then let the
+    // shared residue pass refit d/e at the identified poles and strip
+    // again — converging ~8x per round on clean data.
+    let mut d_est = if opts.fit_d { h[h.len() - 1].re } else { 0.0 };
+    let mut e_est = if opts.fit_e && omega.len() >= 2 {
+        let n = omega.len();
+        ((h[n - 1].im - h[n - 2].im) / (omega[n - 1] - omega[n - 2])).max(0.0)
+    } else {
+        0.0
+    };
+    let mut best: Option<(FitOutcome, Vec<f64>)> = None;
+    for _round in 0..6 {
+        let (outcome, ratios) = pencil_round(omega, h, max_order, rank_tol, opts, d_est, e_est)?;
+        d_est = outcome.model.d;
+        e_est = outcome.model.e;
+        let better = match &best {
+            None => true,
+            Some((b, _)) => outcome.report.weighted_rms < b.report.weighted_rms,
+        };
+        let converged = best.as_ref().is_some_and(|(b, _)| {
+            (outcome.report.weighted_rms - b.report.weighted_rms).abs()
+                <= 1.0e-3 * b.report.weighted_rms.max(f64::MIN_POSITIVE)
+        });
+        if better {
+            best = Some((outcome, ratios));
+        }
+        if converged {
+            break;
+        }
+    }
+    Ok(best.expect("at least one round ran"))
+}
+
+/// One strip-then-pencil round: subsample the band for the pencil
+/// (Loewner needs interpolation points, not the whole grid — the SVDs
+/// are cubic), identify poles, then residue-fit on the FULL data.
+fn pencil_round(
+    omega: &[f64],
+    h: &[C64],
+    max_order: usize,
+    rank_tol: f64,
+    opts: &FitOptions,
+    d_est: f64,
+    e_est: f64,
+) -> Result<(FitOutcome, Vec<f64>), LoewnerError> {
+    // Subsample ~48 points evenly over the (assumed sorted) grid.
+    let target = 48usize.min(omega.len());
+    let stride = omega.len().div_ceil(target);
+    let picks: Vec<usize> = (0..omega.len()).step_by(stride).collect();
     // Conjugate augmentation: (i*w, H) and (-i*w, conj H), kept
     // adjacent so the real transformation acts on 2x2 blocks.
     // Interleave sample pairs into left/right partitions.
     let mut left_pts: Vec<(C64, C64)> = Vec::new();
     let mut right_pts: Vec<(C64, C64)> = Vec::new();
-    for (i, (&w, &hv)) in omega.iter().zip(h).enumerate() {
-        let bucket = if i % 2 == 0 {
+    for (k, &i) in picks.iter().enumerate() {
+        let w = omega[i];
+        let hv = h[i] - C64::from_re(d_est) - C64::new(0.0, w * e_est);
+        let bucket = if k % 2 == 0 {
             &mut left_pts
         } else {
             &mut right_pts
@@ -152,6 +208,8 @@ pub fn loewner_fit(
         }
     }
     let terms = crate::vf::terms_from_poles(&poles);
+    // Residue pass on the FULL (unstripped) data: d and e are refit
+    // there, which is what feeds the next stripping round.
     let outcome =
         crate::vf::residue_fit_at_poles(omega, h, &terms, opts).map_err(LoewnerError::Vf)?;
     Ok((outcome, ratios))
