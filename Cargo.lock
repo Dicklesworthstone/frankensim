@@ -1076,6 +1076,7 @@ dependencies = [
 name = "fs-cli"
 version = "0.0.1"
 dependencies = [
+ "fs-airflow",
  "fs-alloc",
  "fs-blake3",
  "fs-euler-disc-e2e",
