@@ -33,6 +33,7 @@ mod robust;
 
 pub mod dimensioned;
 pub mod factor;
+pub mod groups;
 
 pub use nonlinear::{
     FiniteDifferenceProbe, FiniteDifferenceSettings, LinearizationDisposition,
@@ -1010,6 +1011,20 @@ pub enum AssimError {
     /// structured [`fs_qty::inference::InferenceError`] is retained verbatim
     /// and names both sides of any mismatch (bead sj31i.7.3).
     Dimensional(fs_qty::inference::InferenceError),
+    /// A grouped batch named the same dataset row twice: a repeated record
+    /// is never a new experiment (bead sj31i.16).
+    DuplicateDatasetRow {
+        /// The repeated row identity.
+        id: String,
+    },
+    /// A grouped batch's shared-source declarations are inconsistent:
+    /// undeclared, unused, or duplicated.
+    SharedSourceDeclaration {
+        /// The offending source identity.
+        id: String,
+        /// Stable structural reason.
+        reason: &'static str,
+    },
     /// Finite inputs overflowed or otherwise produced a non-finite intermediate.
     NonFiniteComputation {
         /// Stable computation stage.
@@ -1224,6 +1239,14 @@ impl fmt::Display for AssimError {
                 )
             }
             Self::Dimensional(error) => write!(f, "dimensional refusal: {error}"),
+            Self::DuplicateDatasetRow { id } => write!(
+                f,
+                "dataset row {id:?} appears twice in one batch; a repeated record is not a new experiment"
+            ),
+            Self::SharedSourceDeclaration { id, reason } => write!(
+                f,
+                "shared source {id:?} declaration is inconsistent: {reason}"
+            ),
             Self::NonFiniteComputation { stage } => {
                 write!(f, "assimilation produced a non-finite value during {stage}")
             }

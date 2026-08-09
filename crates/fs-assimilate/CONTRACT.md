@@ -145,6 +145,23 @@ linear-Gaussian core of weak-constraint assimilation.
   `dimensioned-assimilation:v1:<64 lowercase hex>` receipt identity
   binding the schema identity, the PSD admission policy version, the
   execution mode, and the exact posterior bits.
+- `groups::GroupedBatch` — shared calibration/registration covariance
+  modeling (bead sj31i.16): every record carries a bounded `RowId` (a
+  repeated row refuses at admission; a repeated record is never a new
+  experiment), `SharedSource` declarations name latent common-mode errors
+  with finite non-negative variances, and the batch covariance is derived
+  mechanically — diagonal entries carry each record's total variance
+  (independent noise plus every shared source it belongs to, matching the
+  robust batch's noise-authority rule) and off-diagonal entries carry the
+  shared terms. Per-record instrument identities namespace to
+  `instrument@row` so replicate readings keep unambiguous row ownership.
+- `groups::assimilate_grouped` — delegates to the checked whitening batch
+  path and returns the grouped posterior, the naive independent-update
+  posterior (the comparison that exposes spurious N-fold information), the
+  derived covariance, and a `grouped-assimilation:v1:<64 lowercase hex>`
+  receipt. `GroupedBatch::common_mode_floor` computes the exact grouped
+  posterior variance of a shared direction under an identical-operator
+  cluster — the floor repeated readings cannot beat.
 
 ## Invariants
 
@@ -204,6 +221,14 @@ linear-Gaussian core of weak-constraint assimilation.
   so the posterior shares the prior schema exactly. The receipt identity
   binds dimensions and numeric policy: the same posterior bits under a
   mutated schema produce a different identity.
+- Grouped batches make correlation structure explicit data: row identities
+  are unique per batch, shared-source memberships are declared and used
+  exactly, the covariance diagonal is the per-record total variance, and
+  the common-mode floor is the exact grouped posterior variance of the
+  shared direction under an identical-operator cluster
+  (`v_post = (1/v0 + S1/(1 + sigma_c^2 S1))^-1`, `S1 = sum_i
+  1/sigma_i^2`). Zero common variance recovers the independent limit;
+  dominating common variance leaves the prior nearly intact.
 - In exact arithmetic, fusing valid observations cannot increase component
   variances and the batch posterior cannot increase the weighted measurement
   misfit. Floating results are checked for finiteness, not interval-certified.
@@ -439,7 +464,12 @@ affine-temperature traps and the difference-conversion route; receipt identity
 binding to schema and numeric policy (same bits, mutated schema, divergent
 identity); deterministic replay; and zero-quota cancellation without partial
 posterior. `tests/robust.rs` adds the two-channel batch covariance-dimension
-algebra case.
+algebra case and the sj31i.16 shared-calibration battery: exact common-mode
+floor bounds on replicated readings with the naive update exposed diving
+below the floor, exact independent and dominating-correlation limits, typed
+duplicate-row and source-declaration refusals, symmetric PSD derived
+covariance with permutation-stable posteriors, idempotent replay identity,
+and clean pre-cancellation.
 
 ## No-claim boundaries
 

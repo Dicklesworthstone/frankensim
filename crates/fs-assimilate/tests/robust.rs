@@ -367,3 +367,237 @@ fn robust_batch_covariance_dims_follow_the_channel_algebra() {
         assert_eq!(cross, Dims([2, 0, -1, 0, 0, 0]));
     });
 }
+
+// ---------------------------------------------------------------------------
+// sj31i.16 shared-calibration covariance battery: common-mode floors,
+// independent/correlated limits, duplicate-row replay refusal, and the
+// naive-update exposure comparison.
+// ---------------------------------------------------------------------------
+
+mod shared_calibration_groups {
+    use super::*;
+    use fs_assimilate::groups::{
+        GROUPED_RECEIPT_PREFIX, GroupedBatch, GroupedRecord, RowId, SharedSource,
+        assimilate_grouped,
+    };
+
+    fn reading(row: &str, value: f64, noise: f64, source: Option<&str>) -> GroupedRecord {
+        GroupedRecord::new(
+            point_sensor(0, 1, value, noise, "shared-cal").expect("observation"),
+            RowId::try_new(row).expect("row id"),
+            source.map(str::to_string),
+        )
+        .expect("grouped record")
+    }
+
+    fn replicated_batch(n: usize, common_variance: f64, noise: f64) -> GroupedBatch {
+        let records = (0..n)
+            .map(|i| {
+                reading(
+                    &format!("row-{i}"),
+                    1.0 + 0.001 * i as f64,
+                    noise,
+                    Some("cal"),
+                )
+            })
+            .collect();
+        GroupedBatch::try_new(
+            records,
+            vec![SharedSource::try_new("cal", common_variance).expect("source")],
+        )
+        .expect("batch")
+    }
+
+    #[test]
+    fn common_mode_floor_bounds_replicated_readings() {
+        let gate = CancelGate::new();
+        with_cx(&gate, |cx| {
+            let prior = Belief::scalar(0.0, 2.0).expect("prior");
+            let batch = replicated_batch(8, 0.5, 0.1);
+            let result = assimilate_grouped(&prior, &batch, cx).expect("grouped update");
+            let grouped_variance = result
+                .robust()
+                .posterior()
+                .expect("posterior")
+                .variance(0)
+                .expect("variance");
+            let naive_variance = result
+                .independent_posterior()
+                .variance(0)
+                .expect("naive variance");
+            let floor = batch.common_mode_floor("cal", 2.0).expect("floor computes");
+
+            // The exact grouped value matches the closed form, the naive
+            // independent update dives below the common-mode floor (the
+            // spurious N-fold claim this bead rejects), and the grouped
+            // update respects it.
+            assert!(
+                (grouped_variance - floor).abs() <= 1e-9 * floor.max(1.0),
+                "grouped {grouped_variance} vs exact floor {floor}"
+            );
+            assert!(
+                naive_variance < floor,
+                "naive independent claim {naive_variance} must dive below the floor {floor} (that is the defect)"
+            );
+            assert!(
+                grouped_variance > naive_variance,
+                "grouped posterior must be more conservative than the naive one"
+            );
+            assert!(result.identity().starts_with(GROUPED_RECEIPT_PREFIX));
+        });
+    }
+
+    #[test]
+    fn independent_and_fully_correlated_limits_are_exact() {
+        let gate = CancelGate::new();
+        with_cx(&gate, |cx| {
+            let prior = Belief::scalar(0.0, 2.0).expect("prior");
+            // Zero common variance: grouped path reduces to the independent
+            // update bit-for-information.
+            let independent_batch = replicated_batch(4, 0.0, 0.1);
+            let grouped = assimilate_grouped(&prior, &independent_batch, cx).expect("grouped");
+            let naive = assimilate_all(
+                &prior,
+                &(0..4_usize)
+                    .map(|i| {
+                        point_sensor(0, 1, 1.0 + 0.001 * i as f64, 0.1, format!("plain-{i}"))
+                            .expect("obs")
+                    })
+                    .collect::<Vec<_>>(),
+                cx,
+            )
+            .expect("naive");
+            let grouped_var = grouped
+                .robust()
+                .posterior()
+                .expect("p")
+                .variance(0)
+                .expect("v");
+            let naive_var = naive.variance(0).expect("v");
+            assert!(
+                (grouped_var - naive_var).abs() <= 1e-12,
+                "zero common variance must recover the independent limit: {grouped_var} vs {naive_var}"
+            );
+
+            // Very large common variance: the readings carry almost no
+            // information about the state.
+            let dominating = replicated_batch(4, 1.0e8, 0.1);
+            let dominated = assimilate_grouped(&prior, &dominating, cx).expect("grouped");
+            let dominated_var = dominated
+                .robust()
+                .posterior()
+                .expect("p")
+                .variance(0)
+                .expect("v");
+            assert!(
+                dominated_var > 1.9,
+                "dominating common mode must leave the prior nearly intact: {dominated_var}"
+            );
+        });
+    }
+
+    #[test]
+    fn duplicate_rows_and_source_declaration_refusals_are_typed() {
+        let duplicate = GroupedBatch::try_new(
+            vec![
+                reading("row-a", 1.0, 0.1, None),
+                reading("row-a", 1.1, 0.1, None),
+            ],
+            Vec::new(),
+        );
+        assert!(matches!(
+            duplicate,
+            Err(AssimError::DuplicateDatasetRow { .. })
+        ));
+
+        let undeclared =
+            GroupedBatch::try_new(vec![reading("row-a", 1.0, 0.1, Some("ghost"))], Vec::new());
+        assert!(matches!(
+            undeclared,
+            Err(AssimError::SharedSourceDeclaration { .. })
+        ));
+
+        let unused = GroupedBatch::try_new(
+            vec![reading("row-a", 1.0, 0.1, None)],
+            vec![SharedSource::try_new("idle", 0.5).expect("source")],
+        );
+        assert!(matches!(
+            unused,
+            Err(AssimError::SharedSourceDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn built_covariance_is_symmetric_psd_and_permutation_stable() {
+        let gate = CancelGate::new();
+        with_cx(&gate, |cx| {
+            let records = vec![
+                reading("row-a", 1.0, 0.10, Some("cal")),
+                reading("row-b", 1.1, 0.20, Some("cal")),
+                reading("row-c", 0.9, 0.05, None),
+            ];
+            let batch = GroupedBatch::try_new(
+                records.clone(),
+                vec![SharedSource::try_new("cal", 0.3).expect("source")],
+            )
+            .expect("batch");
+            let covariance = batch.covariance();
+            assert!((covariance[0][0] - 0.4).abs() <= 1e-15);
+            assert!((covariance[0][1] - 0.3).abs() <= 1e-15);
+            assert_eq!(covariance[0][1].to_bits(), covariance[1][0].to_bits());
+            assert_eq!(covariance[0][2].to_bits(), 0.0_f64.to_bits());
+            assert!((covariance[1][1] - 0.5).abs() <= 1e-15);
+            assert!((covariance[2][2] - 0.05).abs() <= 1e-15);
+
+            let prior = Belief::scalar(0.0, 2.0).expect("prior");
+            let forward = assimilate_grouped(&prior, &batch, cx).expect("forward");
+            let mut reversed_records = records;
+            reversed_records.reverse();
+            let reversed_batch = GroupedBatch::try_new(
+                reversed_records,
+                vec![SharedSource::try_new("cal", 0.3).expect("source")],
+            )
+            .expect("reversed batch");
+            let reversed = assimilate_grouped(&prior, &reversed_batch, cx).expect("reversed");
+            let forward_mean = forward.robust().posterior().expect("p").mean()[0];
+            let reversed_mean = reversed.robust().posterior().expect("p").mean()[0];
+            assert!(
+                (forward_mean - reversed_mean).abs() <= 1e-12,
+                "declaration order must not move the posterior: {forward_mean} vs {reversed_mean}"
+            );
+        });
+    }
+
+    #[test]
+    fn replay_is_idempotent_and_cancellation_is_clean() {
+        let gate = CancelGate::new();
+        with_cx(&gate, |cx| {
+            let prior = Belief::scalar(0.0, 2.0).expect("prior");
+            let batch = replicated_batch(3, 0.25, 0.1);
+            let first = assimilate_grouped(&prior, &batch, cx).expect("first");
+            let second = assimilate_grouped(&prior, &batch, cx).expect("second");
+            assert_eq!(first.identity(), second.identity());
+        });
+        let gate = CancelGate::new();
+        gate.request();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        let clock = VirtualClock::new();
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                TEST_STREAM,
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            )
+            .with_time_source(&clock);
+            let prior = Belief::scalar(0.0, 2.0).expect("prior");
+            let batch = replicated_batch(3, 0.25, 0.1);
+            let refusal = assimilate_grouped(&prior, &batch, &cx).expect_err("pre-cancel refuses");
+            assert!(matches!(
+                refusal,
+                AssimError::Cancelled { .. } | AssimError::BudgetRefused(_)
+            ));
+        });
+    }
+}
