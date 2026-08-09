@@ -252,7 +252,10 @@ fn near_miss_active_model() -> RationalModel {
             },
             PoleTerm::Pair {
                 pole: C64::new(-25.0, 2100.0),
-                residue: C64::new(60.0, 320.0),
+                // sigma = 20 makes min Re H ~= -0.017 against d = 0.05
+                // (verified numerically at authoring): a NEAR miss, so
+                // the repair is a perturbation, not a rewrite.
+                residue: C64::new(60.0, 20.0),
             },
         ],
         d: 0.05,
@@ -415,9 +418,15 @@ fn auto_order_selection_plateaus_and_refuses_overfit() {
     // plateau_ratio 0.2: an order that fails to improve the weighted
     // error by at least 20% ends the ascent; the floor is 3x the
     // injected noise so the stop is robust to the noise realization.
-    let (selected, curve) =
-        fit_auto_order(&omega, &h, &[2, 4, 6, 8, 10, 12], &base, 0.2, 3.0 * noise_rel)
-            .expect("auto order");
+    let (selected, curve) = fit_auto_order(
+        &omega,
+        &h,
+        &[2, 4, 6, 8, 10, 12],
+        &base,
+        0.2,
+        3.0 * noise_rel,
+    )
+    .expect("auto order");
     // The curve must show the plateau at the true order: order 6 error
     // is orders of magnitude below order 4.
     let err_at = |o: usize| {

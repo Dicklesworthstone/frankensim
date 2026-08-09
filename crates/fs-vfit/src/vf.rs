@@ -659,21 +659,34 @@ pub fn fit_auto_order(
     assert!(!orders.is_empty(), "orders list must be non-empty");
     let mut curve: Vec<(usize, f64)> = Vec::new();
     let mut best: Option<FitOutcome> = None;
+    // Under-resolved orders sit on a PRE-convergence plateau before
+    // the error cliff at the true order (executed observation: a
+    // 6-pole system fits at ~0.57 and ~0.51 weighted rms for orders 2
+    // and 4, then crashes to the noise floor at 6). A plateau
+    // therefore only terminates the ascent AFTER a cliff (>= 10x
+    // improvement in one step) has been seen; the noise floor
+    // terminates unconditionally (the overfit refusal).
+    let mut cliff_seen = false;
     for &order in orders {
         let opts = FitOptions { order, ..*base };
         let outcome = vector_fit(omega, h, &opts)?;
         let err = outcome.report.weighted_rms;
         curve.push((order, err));
-        let improved = match &best {
-            None => true,
-            Some(b) => err < b.report.weighted_rms * (1.0 - plateau_ratio),
-        };
-        let hit_floor = err <= noise_floor;
-        if improved {
+        let ratio = best
+            .as_ref()
+            .map(|b| err / b.report.weighted_rms.max(f64::MIN_POSITIVE));
+        if best.as_ref().is_none_or(|b| err < b.report.weighted_rms) {
             best = Some(outcome);
         }
-        if hit_floor || !improved {
+        if err <= noise_floor {
             break;
+        }
+        if let Some(r) = ratio {
+            if r < 0.1 {
+                cliff_seen = true;
+            } else if cliff_seen && r > 1.0 - plateau_ratio {
+                break;
+            }
         }
     }
     Ok((best.expect("at least one order fitted"), curve))
