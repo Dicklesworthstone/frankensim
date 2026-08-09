@@ -22,10 +22,10 @@ use fs_ledger::{
 use fs_project::{
     AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl,
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
-    GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata,
-    OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity,
-    RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings,
-    ThermalLimit, UnitsDoctrine, Vent, Versions, print_sexpr,
+    GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata, OutputRequest,
+    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
+    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
+    Vent, Versions, print_sexpr,
 };
 use fs_qty::QtyAny;
 
@@ -792,11 +792,7 @@ fn g0_material_resolve_binds_the_reference_project_from_a_real_pack() {
     import_fixture(&ledger, &spec, bytes);
 
     let (refusal, _) = run_to_gap(&ledger, &decoded);
-    assert_eq!(
-        refusal.stage,
-        Some("conduction"),
-        "material-resolve passed"
-    );
+    assert_eq!(refusal.stage, Some("conduction"), "material-resolve passed");
     let run = refusal.run.clone().expect("run");
 
     let receipts = stage_receipt_hashes(&ledger, &run);
