@@ -12,15 +12,44 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
+use crate::contact_dynamics::{declared_profile_rolling_initializer, profile_mass_to_mbd};
+use crate::external_air::{
+    EulerDiscBodyFrame, EulerDiscExteriorGeometry, EulerDiscExteriorState, EulerExternalAirInput,
+    EulerExternalAirWorkState, ExteriorAirPressure, ExternalAirDomain, ExternalAirIdentity,
+};
+use crate::modal_base_response::{RectangularModalBaseIdentity, RectangularModalBasePort};
 use crate::modal_synthesis::{EulerModalParameterSet, EulerModalParameterSetInput};
+use crate::normal_contact::{
+    EulerNormalContactInput, EulerNormalGeometry, NORMAL_CONTACT_ADAPTER_ID, NormalContactIdentity,
+    NormalContactIntegrationRegime, NormalMaterialInterface, NormalRateResponse,
+};
+use crate::patch_kinematics::{
+    CurvatureMetadata, MovingOneModeBaseState, MovingOneModePatchBridgeInput,
+    MovingOneModePatchKinematicsInput, OrderedSurfacePair, PatchGeometryMetadata,
+    PatchKinematicThresholds, ProfileSupportKinematics, SurfaceOrder, TangentGaugeInput,
+    compute_moving_one_mode_patch_kinematics,
+};
+use crate::production_coupling::{
+    GasChannelState, GasChannelStepInput, ProductionCouplingCheckpoint, ProductionCouplingIdentity,
+    ProductionCouplingModel, ProductionCouplingStepInput, ProductionSurfaceExcitationStepInput,
+    ProductionSurfaceTraceStepInput,
+};
+use crate::rolling_contact::{
+    ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput,
+};
 use crate::structural_acoustics::{
     AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
-    PhysicalModalAudioModel, PhysicalModalInitialState, RectangularPlateModeRequest,
-    RectangularPlateSupport, ResolvedAcousticMedium, StructuralMeshControls,
-    StructuralModalBasisError, StructuralModeRequest, build_rectangular_plate_modal_basis,
-    build_structural_modal_basis, modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
+    PhysicalModalAudioModel, PhysicalModalInitialState, RectangularPlateModalBasis,
+    RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
+    StructuralMeshControls, StructuralModalBasisError, StructuralModeRequest,
+    build_rectangular_plate_modal_basis, build_structural_modal_basis,
+    modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
+};
+use crate::tangential_contact::{
+    EulerTangentialContactAdapter, TangentialContactLane, TangentialContactRequest,
 };
 use crate::{
     AUDIO_EXCITATION_ALGORITHM_VERSION, AUDIO_RECONSTRUCTION_FILTER_VERSION,
@@ -59,6 +88,10 @@ use crate::{
     timeline_resampling::{EventEvaluationSide, ExposureEventPolicy},
 };
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_contact::normal_patch::{
+    ApplicabilityInput, ApplicabilityLimits, InputUncertainty, NormalPatchEmbedState,
+};
+use fs_couple::StableId;
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_evidence::{
     ValidityDomain,
@@ -72,6 +105,11 @@ use fs_evidence::{
     },
 };
 use fs_exec::{Cx, RunId};
+use fs_flux::{
+    ApplicabilityEnvelope, ClosedRange, ContributionFamily, CorrelationIdentity,
+    CorrelationUncertainty, EdgeFlow, FormDrag, GasPropertyCard, OrientationRateDamping,
+    ReducedAeroComponents, ReducedAeroModel, RotationalSkinFriction, SurfaceRoughness,
+};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_img::{
     Channel, CinematicColorConfig, CinematicColorLimits, ExrAttribute, PixelType, PngColor,
@@ -103,7 +141,7 @@ use fs_material::{
     visco::RayleighDamping,
 };
 use fs_math::det;
-use fs_mbd::Vec3;
+use fs_mbd::{Gravity, Pose, RigidBodyState, Vec3};
 use fs_modal::SliceOptions;
 use fs_qty::{Density, Dims, Pressure};
 use fs_render::{
@@ -127,6 +165,19 @@ use fs_render::{
 };
 use fs_rep_frep::SquatDiscEdgeTreatment;
 use fs_solid::TetAssemblyBudget;
+use fs_tribo::{
+    ApplicabilityRange, InputAuthority, InterfaceMedium, InterfaceSystemRef,
+    partial_slip::{
+        GeneralizedWorkOwnership, NormalPatchAuthority, NormalPatchView, PARTIAL_SLIP_MODEL_ID,
+        PartialSlipInterface, PartialSlipLaw, PartialSlipParameters,
+    },
+    rolling_loss::{
+        CoulombContourCard, LEINE_STYLE_CONTOUR_LAW_ID, PatchCurvature, RollingLossApplicability,
+        RollingLossChannel, RollingLossLaw, RollingLossState, RollingPatchReceipt,
+        RollingWorkOwnership,
+    },
+    surface_excitation::{PeriodicHarmonicSurface, PeriodicSurfaceHarmonic},
+};
 
 use crate::specimen::{DiscProfileSpec, ResolvedDiscProfile, ResolvedDiscThermalGeometry};
 
@@ -679,9 +730,12 @@ impl Default for CinematicSupportPlateMaterialConfig {
             density_kg_m3: 2_500.0,
             young_modulus_pa: 70.0e9,
             poisson_ratio: 0.23,
-            // Conservative declared contact-applicability datum; not a claim
-            // that brittle glass failure is ductile yielding.
-            yield_stress_pa: 40.0e6,
+            // Declared local compressive/contact-failure scale for the Hertz
+            // applicability check. This is deliberately not the much lower
+            // tensile fracture strength, nor a claim that glass yields like
+            // a ductile metal; a specimen-specific strength card should
+            // replace it for calibrated fracture prediction.
+            yield_stress_pa: 1.0e9,
             // Disclosed low-loss estimates, not tuned to a desired recording.
             rayleigh_alpha_per_s: 0.15,
             rayleigh_beta_s: 2.0e-7,
@@ -761,6 +815,196 @@ impl Default for CinematicSupportPlateConfig {
     }
 }
 
+/// One measured or explicitly declared periodic material-frame surface trace.
+///
+/// This is contact geometry, not an audio preset. The same filtered height
+/// perturbation changes the normal force sent to rigid-body mechanics, plate
+/// dynamics, and acoustic radiation. A process or material label never selects
+/// these coefficients.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CinematicPeriodicSurfaceConfig {
+    /// Closed material-frame track length [m].
+    pub period_m: f64,
+    /// Uniform samples used to realize the declared Fourier series.
+    pub sample_count: usize,
+    /// Ordered spatial Fourier coefficients [m].
+    pub harmonics: Vec<PeriodicSurfaceHarmonic>,
+    /// Measurement or estimate provenance.
+    pub source_id: String,
+}
+
+/// Explicit reduced exterior-flow candidate used by the production mechanics.
+///
+/// These are correlation data with applicability and uncertainty, never
+/// coefficients inferred from a material name or fitted to a desired video.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CinematicExteriorAeroConfig {
+    /// Translational form-drag coefficient.
+    pub form_drag_coefficient: f64,
+    /// Rotational face skin-friction torque coefficient.
+    pub rotational_skin_friction_coefficient: f64,
+    /// Exterior rim-flow torque coefficient.
+    pub edge_flow_coefficient: f64,
+    /// Disc-axis reorientation damping coefficient.
+    pub orientation_rate_damping_coefficient: f64,
+    /// Maximum admitted translational Reynolds number.
+    pub maximum_translational_reynolds: f64,
+    /// Maximum admitted rotational Reynolds number.
+    pub maximum_rotational_reynolds: f64,
+    /// Maximum admitted tip Mach number.
+    pub maximum_tip_mach: f64,
+    /// Relative coefficient half-width retained without promotion.
+    pub coefficient_relative_half_width: f64,
+    /// Physical exterior roughness height used by the gas correlation [m].
+    pub exterior_roughness_height_m: f64,
+    /// Far-field gas velocity in world coordinates [m/s].
+    pub gas_velocity_world_m_per_s: [f64; 3],
+    /// Exact source/correlation disclosure.
+    pub source_id: String,
+}
+
+impl Default for CinematicExteriorAeroConfig {
+    fn default() -> Self {
+        Self {
+            // Generic declared room-air estimates. They are intentionally not
+            // calibrated to the Euler-disc trajectory or soundtrack.
+            form_drag_coefficient: 1.17,
+            rotational_skin_friction_coefficient: 0.008,
+            edge_flow_coefficient: 0.012,
+            orientation_rate_damping_coefficient: 0.01,
+            maximum_translational_reynolds: 1.0e7,
+            maximum_rotational_reynolds: 1.0e8,
+            maximum_tip_mach: 0.3,
+            coefficient_relative_half_width: 0.25,
+            exterior_roughness_height_m: 1.0e-7,
+            gas_velocity_world_m_per_s: [0.0; 3],
+            source_id: "frankensim:declared-reduced-exterior-room-air:v1".to_owned(),
+        }
+    }
+}
+
+/// Fully numerical mechanics/contact configuration for the cinematic consumer.
+///
+/// Geometry and material state remain in the disc and support configs. This
+/// value contains initial conditions, numerical resolution, interface laws,
+/// and spatial topography. Changing any of them rebuilds the same generic
+/// coupled system; no descriptive label dispatches a dynamics or sound path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CinematicMechanicsConfig {
+    /// Fixed accepted mechanics rate [Hz].
+    pub sample_rate_hz: u32,
+    /// Uniform world gravity magnitude [m/s2].
+    pub gravity_m_per_s2: f64,
+    /// Initial disc inclination from world vertical [rad].
+    pub initial_inclination_rad: f64,
+    /// Declared initial world-vertical precession rate [rad/s].
+    pub initial_precession_rad_per_s: f64,
+    /// Declared initial spin component about the disc symmetry axis [rad/s].
+    pub initial_spin_rad_per_s: f64,
+    /// Hunt--Crossley point-contact dissipation coefficient [s/m].
+    pub normal_dissipation_s_per_m: f64,
+    /// Normal-law applicability ratios and temperature interval.
+    pub normal_limits: ApplicabilityLimits,
+    /// Retained relative input uncertainty.
+    pub normal_uncertainty: InputUncertainty,
+    /// Maximum relative mismatch in the initial gravity/static-contact solve.
+    pub static_preload_relative_tolerance: f64,
+    /// Generic finite-patch partial-slip coefficients.
+    pub partial_slip: PartialSlipParameters,
+    /// Dimensionless Leine-style contour-loss coefficient.
+    pub rolling_contour_coefficient: f64,
+    /// Disc-side material-frame surface trace.
+    pub disc_surface: CinematicPeriodicSurfaceConfig,
+    /// Support-side material-frame surface trace.
+    pub support_surface: CinematicPeriodicSurfaceConfig,
+    /// Maximum filtered topography height relative to nominal approach.
+    pub maximum_linearized_height_fraction: f64,
+    /// Explicit exterior gas correlation candidate.
+    pub exterior_aero: CinematicExteriorAeroConfig,
+}
+
+impl Default for CinematicMechanicsConfig {
+    fn default() -> Self {
+        let period_m = core::f64::consts::TAU * 0.0375;
+        let harmonics = (1_u32..=96)
+            .map(|cycles| {
+                let amplitude_m = 2.5e-10 / f64::from(cycles).sqrt();
+                PeriodicSurfaceHarmonic {
+                    cycles_per_track: cycles,
+                    cosine_amplitude_m: if cycles % 3 == 0 {
+                        -amplitude_m
+                    } else {
+                        amplitude_m
+                    },
+                    sine_amplitude_m: if cycles % 2 == 0 {
+                        0.5 * amplitude_m
+                    } else {
+                        -0.5 * amplitude_m
+                    },
+                }
+            })
+            .collect();
+        Self {
+            // Resolve the complete default 0--5 kHz base-mode request below
+            // the time integrator's 0.9-Nyquist guard. This is a numerical
+            // clock, not a material or soundtrack preset; callers may change
+            // it, and model admission will refuse an under-resolved basis.
+            sample_rate_hz: 12_000,
+            gravity_m_per_s2: 9.806_65,
+            initial_inclination_rad: 0.30,
+            initial_precession_rad_per_s: 46.0,
+            initial_spin_rad_per_s: -43.9,
+            normal_dissipation_s_per_m: 0.02,
+            normal_limits: ApplicabilityLimits {
+                // The 1 mm edge fillet and static preload produce an admitted
+                // Hertz semi-axis about one quarter of the local radius. Keep
+                // that approximation limit explicit and below one third;
+                // larger patches require a finite-geometry contact backend.
+                max_patch_to_radius: 0.30,
+                max_strain: 0.02,
+                max_patch_to_depth: 0.20,
+                max_patch_to_layer: 0.20,
+                max_pressure_to_yield: 0.95,
+                max_rate_ratio: 0.50,
+                min_temperature_k: 250.0,
+                max_temperature_k: 400.0,
+            },
+            normal_uncertainty: InputUncertainty {
+                radius_relative: 0.01,
+                modulus_relative: 0.05,
+                load_relative: 0.01,
+            },
+            static_preload_relative_tolerance: 1.0e-8,
+            partial_slip: PartialSlipParameters {
+                static_mu: 0.20,
+                kinetic_mu: 0.15,
+                tangential_stiffness_n_per_m: 2.0e6,
+                torsional_stiffness_nm_per_rad: 40.0,
+                torsional_capacity_factor: 0.67,
+                partial_slip_onset_fraction: 0.60,
+                partial_slip_hardening_fraction: 0.20,
+            },
+            rolling_contour_coefficient: 1.0e-3,
+            disc_surface: CinematicPeriodicSurfaceConfig {
+                period_m,
+                sample_count: 2_048,
+                harmonics,
+                source_id: "declared nanometre-scale machined-edge Fourier topography estimate; not measured"
+                    .to_owned(),
+            },
+            support_surface: CinematicPeriodicSurfaceConfig {
+                period_m,
+                sample_count: 2_048,
+                harmonics: Vec::new(),
+                source_id: "declared optically smooth support trace estimate; not measured"
+                    .to_owned(),
+            },
+            maximum_linearized_height_fraction: 0.01,
+            exterior_aero: CinematicExteriorAeroConfig::default(),
+        }
+    }
+}
+
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CinematicFixtureConfig {
@@ -814,6 +1058,8 @@ pub struct CinematicFixtureConfig {
     pub disc_structural_acoustics: CinematicDiscStructuralAcousticConfig,
     /// One parameterized support plate shared by picture and physical sound.
     pub support_plate: CinematicSupportPlateConfig,
+    /// Coupled rigid/contact/base/gas initial conditions and constitutive laws.
+    pub mechanics: CinematicMechanicsConfig,
     /// Ambient gas temperature used by physical acoustic propagation [K].
     pub ambient_temperature_k: f64,
     /// Ambient absolute gas pressure used by physical acoustics [Pa].
@@ -855,6 +1101,7 @@ impl Default for CinematicFixtureConfig {
             disc: CinematicDiscSpecimenConfig::default(),
             disc_structural_acoustics: CinematicDiscStructuralAcousticConfig::default(),
             support_plate: CinematicSupportPlateConfig::default(),
+            mechanics: CinematicMechanicsConfig::default(),
             ambient_temperature_k: 293.15,
             ambient_pressure_pa: 101_325.0,
             ambient_gas: GasSpec::dry_air_ussa1976(),
@@ -1146,6 +1393,73 @@ impl CinematicFixtureConfig {
                 "support plate material identity and provenance strings must be nonblank",
             ));
         }
+        let mechanics = &self.mechanics;
+        if mechanics.sample_rate_hz == 0
+            || mechanics.sample_rate_hz > SOUND_MASTER_SAMPLE_RATE_HZ
+            || !(mechanics.gravity_m_per_s2.is_finite() && mechanics.gravity_m_per_s2 > 0.0)
+            || !(mechanics.initial_inclination_rad.is_finite()
+                && mechanics.initial_inclination_rad > 0.0
+                && mechanics.initial_inclination_rad < core::f64::consts::FRAC_PI_2)
+            || !mechanics.initial_precession_rad_per_s.is_finite()
+            || !mechanics.initial_spin_rad_per_s.is_finite()
+            || !(mechanics.normal_dissipation_s_per_m.is_finite()
+                && mechanics.normal_dissipation_s_per_m >= 0.0)
+            || !(mechanics.static_preload_relative_tolerance.is_finite()
+                && mechanics.static_preload_relative_tolerance > 0.0
+                && mechanics.static_preload_relative_tolerance <= 0.1)
+            || !(mechanics.rolling_contour_coefficient.is_finite()
+                && mechanics.rolling_contour_coefficient >= 0.0)
+            || !(mechanics.maximum_linearized_height_fraction.is_finite()
+                && mechanics.maximum_linearized_height_fraction > 0.0
+                && mechanics.maximum_linearized_height_fraction <= 0.1)
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "mechanics clock, initial state, or constitutive scalar is outside its admitted domain",
+            ));
+        }
+        for surface in [&mechanics.disc_surface, &mechanics.support_surface] {
+            if !(surface.period_m.is_finite() && surface.period_m > 0.0)
+                || surface.sample_count < 4
+                || surface.source_id.trim().is_empty()
+                || surface.harmonics.iter().any(|harmonic| {
+                    harmonic.cycles_per_track == 0
+                        || !harmonic.cosine_amplitude_m.is_finite()
+                        || !harmonic.sine_amplitude_m.is_finite()
+                })
+            {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "surface trace period, sampling, harmonics, and provenance must be finite and nondegenerate",
+                ));
+            }
+        }
+        let aero = &mechanics.exterior_aero;
+        if [
+            aero.form_drag_coefficient,
+            aero.rotational_skin_friction_coefficient,
+            aero.edge_flow_coefficient,
+            aero.orientation_rate_damping_coefficient,
+            aero.maximum_translational_reynolds,
+            aero.maximum_rotational_reynolds,
+            aero.maximum_tip_mach,
+            aero.coefficient_relative_half_width,
+            aero.exterior_roughness_height_m,
+        ]
+        .into_iter()
+        .any(|value| !value.is_finite() || value < 0.0)
+            || aero.maximum_translational_reynolds == 0.0
+            || aero.maximum_rotational_reynolds == 0.0
+            || aero.maximum_tip_mach == 0.0
+            || aero.coefficient_relative_half_width > 1.0
+            || aero
+                .gas_velocity_world_m_per_s
+                .iter()
+                .any(|value| !value.is_finite())
+            || aero.source_id.trim().is_empty()
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "exterior gas-correlation coefficients, envelope, velocity, and source must be finite",
+            ));
+        }
         if GasState::try_new(
             &self.ambient_gas,
             self.ambient_temperature_k,
@@ -1304,6 +1618,7 @@ enum FixtureDiscAcousticRadiator {
 
 struct FixturePhysicalDiscState {
     specimen: crate::specimen::ResolvedElasticDiscProfile,
+    isotropic_solid: Option<IsotropicSolidStatePoint>,
     thermal_geometry: ResolvedDiscThermalGeometry,
     render_binding: EulerDiscMaterialStateBinding,
     rayleigh_damping: RayleighDamping,
@@ -1638,8 +1953,13 @@ fn resolve_fixture_physical_disc(
         RayleighDamping::new(config.rayleigh_alpha_per_s, config.rayleigh_beta_s)
             .map_err(pipeline)?;
     let thermal_geometry = specimen.profile.thermal_geometry(cx).map_err(pipeline)?;
+    let isotropic_solid = match &elastic {
+        FixtureResolvedElasticState::Isotropic { solid, .. } => Some(solid.clone()),
+        FixtureResolvedElasticState::Orthotropic { .. } => None,
+    };
     Ok(FixturePhysicalDiscState {
         specimen,
+        isotropic_solid,
         thermal_geometry,
         render_binding,
         rayleigh_damping,
@@ -1787,6 +2107,724 @@ fn resolve_fixture_physical_plate(
         rayleigh_damping,
         damping_model_identity: damping.finalize(),
         optical_model_identity: optical.finalize(),
+    })
+}
+
+fn build_fixture_plate_basis(
+    config: &CinematicSupportPlateConfig,
+    physical: &FixturePhysicalPlateState,
+    cx: &Cx<'_>,
+) -> Result<Arc<RectangularPlateModalBasis>, CinematicFixtureError> {
+    let request = RectangularPlateModeRequest {
+        width_m: config.width_m,
+        depth_m: config.depth_m,
+        thickness_m: config.thickness_m,
+        elastic: &physical.elastic,
+        support: config.support,
+        cells_x: config.cells_x,
+        cells_y: config.cells_y,
+        maximum_nodes: config.maximum_nodes,
+        minimum_frequency_hz: config.minimum_frequency_hz,
+        maximum_frequency_hz: config.maximum_frequency_hz,
+        maximum_modes: config.maximum_modes,
+        slice: SliceOptions::default(),
+    };
+    build_rectangular_plate_modal_basis(&request, cx)
+        .map(Arc::new)
+        .map_err(pipeline)
+}
+
+struct FixtureProductionMechanics {
+    model: ProductionCouplingModel,
+    checkpoint: ProductionCouplingCheckpoint,
+    template: ProductionCouplingStepInput,
+}
+
+impl FixtureProductionMechanics {
+    /// Rebuild every state-dependent card for one accepted checkpoint.
+    ///
+    /// The surface coordinates are material-frame coordinates, not an audio
+    /// phase oscillator. The disc coordinate comes from the actual profile
+    /// support point expressed in the body frame. Its rate is a deterministic
+    /// kinematic directional derivative obtained by advancing the current pose
+    /// through a small fraction of the admitted mechanics step. The support
+    /// trace uses the declared world-x material coordinate of the stationary
+    /// plate. Both therefore change automatically with the accepted rigid-body
+    /// state and profile geometry.
+    fn input_for_checkpoint(
+        &self,
+        profile: &ResolvedDiscProfile,
+        checkpoint: &ProductionCouplingCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProductionCouplingStepInput, crate::production_coupling::ProductionCouplingError>
+    {
+        use crate::production_coupling::ProductionCouplingError;
+
+        let mut input = self.template.clone();
+        let version = checkpoint.committed_version;
+        let interval = version
+            .checked_add(1)
+            .ok_or(ProductionCouplingError::InvalidInput {
+                field: "cinematic interval identity overflow",
+            })?;
+        input.expected_checkpoint_version = version;
+        input.time_s = checkpoint.elapsed_time_s();
+        input.normal.time_s = input.time_s;
+        input.normal.iteration = interval;
+        input.normal.identity.sample_id = format!("cinematic/contact-sample-{interval}");
+        input.tangential.request_id = format!("cinematic/tangent-step-{interval}");
+        let patch_id = input.patch.patch.patch_identity.as_str().to_owned();
+        input.tangential.work_ownership = GeneralizedWorkOwnership::new(
+            patch_id.clone(),
+            format!("cinematic/tangent-interval-{interval}"),
+            "longitudinal",
+            "lateral",
+            "spin",
+        )
+        .map_err(|_| ProductionCouplingError::InvalidInput {
+            field: "cinematic tangential work identity",
+        })?;
+        input.rolling.ownership = RollingWorkOwnership::new(
+            patch_id,
+            format!("cinematic/rolling-interval-{interval}"),
+            "contour",
+            RollingLossChannel::ContourDeformation,
+        )
+        .map_err(|_| ProductionCouplingError::InvalidInput {
+            field: "cinematic rolling work identity",
+        })?;
+        match &mut input.gas_channel {
+            GasChannelStepInput::ExteriorFreeGas { exchange_key, .. }
+            | GasChannelStepInput::ThinGap { exchange_key, .. } => *exchange_key = interval,
+        }
+        input.base_step_id = format!("cinematic/base-step-{interval}");
+        input.base_load_progress_start = input.time_s;
+        input.base_load_progress_end = input.time_s + input.duration_s;
+
+        self.model
+            .bind_horizontal_plane_axisymmetric_profile_contact(
+                &mut input, profile, checkpoint, cx,
+            )?;
+
+        let current_state = checkpoint.disc_state;
+        let current_contact = input.patch.bridge.profile_support;
+        let orientation = current_state.pose().orientation();
+        let arm_body = orientation.rotate_world_to_body(current_contact.disc_arm_world_m);
+        let current_phase = arm_body
+            .y
+            .atan2(arm_body.x)
+            .rem_euclid(core::f64::consts::TAU);
+
+        // Torque affects angular acceleration, not the instantaneous
+        // coordinate derivative. A short force-free kinematic predictor is
+        // therefore sufficient for this start-of-step material-frame rate.
+        let derivative_step_s = (input.duration_s * 1.0e-3).max(1.0e-9);
+        let omega_body = self
+            .model
+            .disc_mass_properties
+            .angular_velocity_body_checked(current_state.angular_momentum_body())
+            .map_err(ProductionCouplingError::Dynamics)?;
+        let velocity_world = current_state
+            .linear_momentum_world()
+            .scale(self.model.disc_mass_properties.mass().recip());
+        let predicted_pose = Pose::new(
+            current_state
+                .pose()
+                .position_world()
+                .add(velocity_world.scale(derivative_step_s)),
+            orientation
+                .right_exp(omega_body.scale(derivative_step_s))
+                .map_err(ProductionCouplingError::Dynamics)?,
+        )
+        .map_err(ProductionCouplingError::Dynamics)?;
+        let predicted_state = RigidBodyState::new(
+            predicted_pose,
+            current_state.linear_momentum_world(),
+            current_state.angular_momentum_body(),
+        )
+        .map_err(ProductionCouplingError::Dynamics)?;
+        let predicted = crate::contact_dynamics::profile_contact_geometry(
+            &profile.chart,
+            profile.mass_properties,
+            predicted_state.pose(),
+            cx,
+        )
+        .map_err(|_| ProductionCouplingError::InvalidInput {
+            field: "cinematic predicted profile support",
+        })?;
+        let predicted_arm_body = predicted_state
+            .pose()
+            .orientation()
+            .rotate_world_to_body(predicted.contact.radius_world_m);
+        let predicted_phase = predicted_arm_body
+            .y
+            .atan2(predicted_arm_body.x)
+            .rem_euclid(core::f64::consts::TAU);
+        let wrapped_phase_delta = (predicted_phase - current_phase + core::f64::consts::PI)
+            .rem_euclid(core::f64::consts::TAU)
+            - core::f64::consts::PI;
+
+        let patch_kinematics = compute_moving_one_mode_patch_kinematics(input.patch.clone())
+            .map_err(ProductionCouplingError::Patch)?;
+        if let Some(surface) = &mut input.surface_excitation {
+            let disc_period_m = surface.surface_a.trace.track_length_m();
+            surface.surface_a.path_coordinate_m =
+                current_phase / core::f64::consts::TAU * disc_period_m;
+            surface.surface_a.path_speed_m_per_s =
+                wrapped_phase_delta / derivative_step_s / core::f64::consts::TAU * disc_period_m;
+
+            let support_period_m = surface.surface_b.trace.track_length_m();
+            surface.surface_b.path_coordinate_m = current_contact
+                .disc_point_world_m
+                .x
+                .rem_euclid(support_period_m);
+            surface.surface_b.path_speed_m_per_s = (predicted.contact.point_world_m.x
+                - current_contact.disc_point_world_m.x)
+                / derivative_step_s;
+
+            let travel = patch_kinematics.rolling_entrainment_tangent_world_m_per_s;
+            surface.travel_angle_from_patch_major_rad = travel
+                .dot(patch_kinematics.tangent_basis.second_world)
+                .atan2(travel.dot(patch_kinematics.tangent_basis.first_world));
+        }
+        Ok(input)
+    }
+}
+
+fn stable_id(value: impl Into<String>) -> Result<StableId, CinematicFixtureError> {
+    StableId::new(value.into())
+        .map_err(|error| CinematicFixtureError::Pipeline(format!("{error:?}")))
+}
+
+fn resolved_gas_model_identity(spec: GasSpec, state: GasState) -> ContentHash {
+    let mut identity = DomainHasher::new("org.frankensim.gas.resolved-acoustic-state.v1");
+    identity.update(&spec.molar_mass.to_bits().to_le_bytes());
+    identity.update(&spec.gamma.to_bits().to_le_bytes());
+    identity.update(&spec.sutherland_beta.to_bits().to_le_bytes());
+    identity.update(&spec.sutherland_s.to_bits().to_le_bytes());
+    identity.update(match spec.conductivity {
+        GasConductivityModel::Ussa1976AirFit => b"USSA-1976-air-fit" as &[u8],
+        GasConductivityModel::Eucken => b"Eucken",
+    });
+    identity.update(&state.temperature.to_bits().to_le_bytes());
+    identity.update(&state.pressure.to_bits().to_le_bytes());
+    identity.finalize()
+}
+
+fn realize_cinematic_surface(
+    texture_frame_id: &str,
+    config: &CinematicPeriodicSurfaceConfig,
+) -> Result<fs_tribo::surface_excitation::UniformSurfaceTrace, CinematicFixtureError> {
+    PeriodicHarmonicSurface::new(
+        texture_frame_id,
+        config.source_id.clone(),
+        InputAuthority::CallerDeclared,
+        config.period_m,
+        config.sample_count,
+        config.harmonics.clone(),
+    )
+    .and_then(|surface| surface.realize())
+    .map_err(pipeline)
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_fixture_production_mechanics(
+    profile: &ResolvedDiscProfile,
+    physical_disc: &FixturePhysicalDiscState,
+    physical_plate: &FixturePhysicalPlateState,
+    plate_basis: Arc<RectangularPlateModalBasis>,
+    config: &CinematicFixtureConfig,
+    cx: &Cx<'_>,
+) -> Result<FixtureProductionMechanics, CinematicFixtureError> {
+    let mechanics = &config.mechanics;
+    let disc_solid = physical_disc.isotropic_solid.as_ref().ok_or_else(|| {
+        CinematicFixtureError::Pipeline(
+            "the current finite-patch production contact rung requires an isotropic solid disc state; an orthotropic contact law was not supplied"
+                .into(),
+        )
+    })?;
+    if disc_solid.resolved().query_point() != physical_plate.solid.resolved().query_point() {
+        return Err(CinematicFixtureError::Pipeline(
+            "the current dry-contact rung requires both ordered isotropic solids at the same complete state point; non-isothermal interface constitutive data were not supplied"
+                .into(),
+        ));
+    }
+    let reduced_modulus = disc_solid
+        .reduced_modulus_against(&physical_plate.solid)
+        .map_err(pipeline)?;
+    let disc_mass_properties = profile_mass_to_mbd(profile.mass_properties).map_err(pipeline)?;
+    let maximum_steps = u64::from(config.frames)
+        .checked_mul(u64::from(mechanics.sample_rate_hz))
+        .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
+        .and_then(|value| value.checked_add(u64::from(mechanics.sample_rate_hz)))
+        .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics step budget overflow".into()))?;
+    let plate_port = RectangularModalBasePort::try_new(
+        RectangularModalBaseIdentity {
+            model_id: format!("rectangular-modal-plate/{}", plate_basis.identity),
+            configuration_id: format!("{}Hz/{}steps", mechanics.sample_rate_hz, maximum_steps),
+        },
+        plate_basis,
+        physical_plate.rayleigh_damping,
+        mechanics.sample_rate_hz,
+        ModalAcousticTimeBudget::audible_reference(),
+        maximum_steps,
+        1.0e-8
+            * config
+                .support_plate
+                .width_m
+                .max(config.support_plate.depth_m)
+                .max(config.support_plate.thickness_m),
+    )
+    .map_err(pipeline)?;
+    let tangential_law = PartialSlipLaw::new(
+        PARTIAL_SLIP_MODEL_ID,
+        "cinematic/caller-declared-partial-slip-card",
+        mechanics.partial_slip,
+    )
+    .map_err(pipeline)?;
+    let tangential_adapter = EulerTangentialContactAdapter::new(
+        "cinematic/euler-tangential-adapter",
+        "cinematic/caller-declared-partial-slip-card",
+        TangentialContactLane::PartialSlip {
+            law: tangential_law,
+        },
+    )
+    .map_err(pipeline)?;
+    let model = ProductionCouplingModel {
+        identity: ProductionCouplingIdentity {
+            case_id: "cinematic/euler-disc".to_owned(),
+            configuration_id: format!(
+                "profile-{}/disc-{}/plate-{}",
+                profile.identity.0,
+                physical_disc.specimen.material_state_identity,
+                physical_plate.elastic.resolved().identity()
+            ),
+            world_frame_id: "cinematic/right-handed-z-up".to_owned(),
+        },
+        disc_mass_properties,
+        gravity: Gravity::new(Vec3::new(0.0, 0.0, -mechanics.gravity_m_per_s2))
+            .map_err(pipeline)?,
+        base_port: plate_port.into(),
+        tangential_adapter,
+    };
+
+    let initializer = declared_profile_rolling_initializer(
+        &profile.chart,
+        profile.density_kg_per_m3,
+        mechanics.initial_inclination_rad,
+        mechanics.initial_precession_rad_per_s,
+        mechanics.initial_spin_rad_per_s,
+        cx,
+    )
+    .map_err(pipeline)?;
+    let scale_m = profile
+        .dimensions
+        .outer_radius_m
+        .max(profile.dimensions.thickness_m);
+    let threshold_identity = stable_id(format!(
+        "cinematic/patch-thresholds/{:016x}",
+        scale_m.to_bits()
+    ))?;
+    let tie_break_identity = stable_id("cinematic/patch-ties/strict-v1")?;
+    let patch_identity = stable_id(format!("cinematic/profile-patch/{}", profile.identity.0))?;
+    let patch_identity_string = patch_identity.as_str().to_owned();
+    let disc_surface_id = stable_id(format!(
+        "cinematic/disc-surface/{}",
+        physical_disc.specimen.material_state_identity
+    ))?;
+    let base_surface_id = stable_id(format!(
+        "cinematic/base-surface/{}",
+        physical_plate.elastic.resolved().identity()
+    ))?;
+    let bridge = MovingOneModePatchBridgeInput {
+        profile_support: ProfileSupportKinematics::from_profile_contact_geometry(
+            initializer.contact,
+        ),
+        disc_state: initializer.state,
+        disc_mass_properties,
+        base_mode: MovingOneModeBaseState {
+            undeformed_contact_point_world_m: Vec3::new(
+                initializer.contact.contact.point_world_m.x,
+                initializer.contact.contact.point_world_m.y,
+                0.0,
+            ),
+            vertical_displacement_m: 0.0,
+            vertical_velocity_m_per_s: 0.0,
+        },
+        normal_world: Vec3::new(0.0, 0.0, 1.0),
+        tangent_gauge: TangentGaugeInput {
+            reference_world: Vec3::new(1.0, 0.0, 0.0),
+            rotation_rad: 0.0,
+        },
+        thresholds: PatchKinematicThresholds {
+            threshold_identity,
+            tie_break_identity,
+            separation_gap_m: 1.0e-3 * scale_m,
+            touching_gap_m: 1.0e-4 * scale_m,
+            support_point_coincidence_tolerance_m: 1.0e-10 * scale_m.max(1.0),
+            tangent_counterpart_coincidence_tolerance_m: 1.0e-10 * scale_m.max(1.0),
+            approach_speed_m_per_s: 1.0e-5,
+            impact_candidate_speed_m_per_s: 0.5,
+            stationary_tangent_speed_m_per_s: 1.0e-12,
+            minimum_reference_rolling_speed_m_per_s: 1.0e-9,
+            gauge_degeneracy_norm: 1.0e-12,
+        },
+    };
+    let patch = MovingOneModePatchKinematicsInput {
+        bridge,
+        surfaces: OrderedSurfacePair::try_new(
+            disc_surface_id,
+            base_surface_id,
+            SurfaceOrder::DiscThenBase,
+        )
+        .map_err(pipeline)?,
+        patch: PatchGeometryMetadata {
+            patch_identity,
+            source_feature: initializer.contact.support_source_feature,
+            gap_uncertainty_m: 0.0,
+            // Replaced from the exact profile before every evaluation.
+            curvature: CurvatureMetadata::Unavailable {
+                curvature_identity: stable_id("cinematic/curvature/pending-profile-binding")?,
+                reason_identity: stable_id("cinematic/refusal/profile-binding-mandatory")?,
+            },
+        },
+        tangent_effort_probe_world_n: None,
+    };
+    let initial_kinematics =
+        compute_moving_one_mode_patch_kinematics(patch.clone()).map_err(pipeline)?;
+    let interface = InterfaceSystemRef::new(
+        format!(
+            "cinematic/dry-interface/{}/{}",
+            disc_solid.resolved().identity(),
+            physical_plate.solid.resolved().identity()
+        ),
+        "cinematic/initial-clean-dry-history",
+        "cinematic/caller-declared-interface-state",
+        InputAuthority::CallerDeclared,
+        InterfaceMedium::Dry,
+    )
+    .map_err(pipeline)?;
+    let temperature_k = config.disc.material.temperature_k;
+    let normal_state = NormalPatchEmbedState::new(0.0, 1.0).map_err(pipeline)?;
+    let normal = EulerNormalContactInput {
+        identity: NormalContactIdentity {
+            case_id: model.identity.case_id.clone(),
+            adapter_id: NORMAL_CONTACT_ADAPTER_ID.to_owned(),
+            solver_id: "cinematic/compliant-transient-fixed-step".to_owned(),
+            contact_id: interface.ordered_system_id().to_owned(),
+            sample_id: "cinematic/contact-sample-1".to_owned(),
+        },
+        kinematics: initial_kinematics.clone(),
+        material: NormalMaterialInterface {
+            material_card_id: format!(
+                "{}/{}",
+                disc_solid.resolved().identity(),
+                physical_plate.solid.resolved().identity()
+            ),
+            model_id: "fs-contact.normal-hunt-crossley-point:v1".to_owned(),
+            source_id: "cinematic/caller-declared-normal-card".to_owned(),
+            interface: interface.clone(),
+            reduced_modulus_pa: reduced_modulus.value_pa,
+            rate_response: NormalRateResponse::HuntCrossleyPoint {
+                dissipation_s_per_m: mechanics.normal_dissipation_s_per_m,
+            },
+            applicability: ApplicabilityInput {
+                half_space_depth_m: profile
+                    .dimensions
+                    .outer_radius_m
+                    .min(profile.dimensions.thickness_m),
+                layer_thickness_m: config.support_plate.thickness_m,
+                yield_strength_pa: disc_solid
+                    .yield_stress_pa()
+                    .min(physical_plate.solid.yield_stress_pa()),
+                characteristic_rate_m_per_s: 1.0,
+                temperature_k,
+                adhesion_energy_j_per_m2: 0.0,
+            },
+            limits: mechanics.normal_limits,
+            uncertainty: mechanics.normal_uncertainty,
+        },
+        geometry: EulerNormalGeometry::EllipticParaboloid,
+        integration_regime: NormalContactIntegrationRegime::CompliantTransient,
+        state: normal_state.clone(),
+        time_s: 0.0,
+        iteration: 1,
+        step_s: f64::from(mechanics.sample_rate_hz).recip(),
+        converged: true,
+    };
+    let placeholder_normal_patch = NormalPatchView::new(
+        patch_identity_string.clone(),
+        &normal.material.model_id,
+        &normal.material.source_id,
+        NormalPatchAuthority::CallerDeclared,
+        profile.mass_properties.mass * mechanics.gravity_m_per_s2,
+        1.0e-6,
+        1.0e-6,
+        1.0e-13,
+    )
+    .map_err(pipeline)?;
+    let partial_slip_interface = PartialSlipInterface::new(
+        interface.ordered_system_id(),
+        interface.history_id(),
+        interface.provenance().source_id(),
+        NormalPatchAuthority::CallerDeclared,
+    )
+    .map_err(pipeline)?;
+    let rolling_law = RollingLossLaw::CoulombContour(
+        CoulombContourCard::new(
+            LEINE_STYLE_CONTOUR_LAW_ID,
+            "cinematic/caller-declared-contour-loss-card",
+            InputAuthority::CallerDeclared,
+            mechanics.rolling_contour_coefficient,
+            RollingLossApplicability::new(
+                ApplicabilityRange::new(temperature_k, temperature_k).map_err(pipeline)?,
+                ApplicabilityRange::new(0.0, 0.5 * f64::from(mechanics.sample_rate_hz))
+                    .map_err(pipeline)?,
+            )
+            .map_err(pipeline)?,
+        )
+        .map_err(pipeline)?,
+    );
+    let disc_trace =
+        realize_cinematic_surface("cinematic/disc-edge-track", &mechanics.disc_surface)?;
+    let support_trace =
+        realize_cinematic_surface("cinematic/support-track", &mechanics.support_surface)?;
+    let surface_excitation = ProductionSurfaceExcitationStepInput {
+        interface: interface.clone(),
+        surface_a: ProductionSurfaceTraceStepInput {
+            trace: disc_trace,
+            path_coordinate_m: 0.0,
+            path_speed_m_per_s: 0.0,
+        },
+        surface_b: ProductionSurfaceTraceStepInput {
+            trace: support_trace,
+            path_coordinate_m: 0.0,
+            path_speed_m_per_s: 0.0,
+        },
+        travel_angle_from_patch_major_rad: 0.0,
+        maximum_linearized_height_fraction: mechanics.maximum_linearized_height_fraction,
+    };
+    let gas = GasState::try_new(
+        &config.ambient_gas,
+        config.ambient_temperature_k,
+        config.ambient_pressure_pa,
+    )
+    .map_err(pipeline)?;
+    let gas_model_identity = resolved_gas_model_identity(config.ambient_gas, gas);
+    let aero = &mechanics.exterior_aero;
+    let correlation_id = "cinematic/reduced-exterior-v1";
+    let range = |maximum| ClosedRange::try_new(0.0, maximum).map_err(pipeline);
+    let aero_model = ReducedAeroModel::try_new(
+        CorrelationIdentity::try_new(correlation_id, "v1", aero.source_id.clone())
+            .map_err(pipeline)?,
+        ApplicabilityEnvelope {
+            translational_reynolds: range(aero.maximum_translational_reynolds)?,
+            rotational_reynolds: range(aero.maximum_rotational_reynolds)?,
+            relative_roughness: range(1.0)?,
+            maximum_tip_mach: aero.maximum_tip_mach,
+        },
+        CorrelationUncertainty {
+            source_id: aero.source_id.clone(),
+            coefficient_relative_half_width: aero.coefficient_relative_half_width,
+        },
+        ReducedAeroComponents {
+            form_drag: Some(FormDrag {
+                coefficient: aero.form_drag_coefficient,
+            }),
+            rotational_skin_friction: Some(RotationalSkinFriction {
+                coefficient: aero.rotational_skin_friction_coefficient,
+            }),
+            edge_flow: Some(EdgeFlow {
+                coefficient: aero.edge_flow_coefficient,
+            }),
+            orientation_rate_damping: Some(OrientationRateDamping {
+                coefficient: aero.orientation_rate_damping_coefficient,
+            }),
+        },
+        &[
+            ContributionFamily::TranslationalFormDrag,
+            ContributionFamily::RotationalSkinFriction,
+            ContributionFamily::EdgeFlow,
+            ContributionFamily::OrientationRateDamping,
+        ],
+    )
+    .map_err(pipeline)?;
+    let initial_pose = initializer.state.pose();
+    let initial_body_frame = EulerDiscBodyFrame {
+        x_world: {
+            let value = initial_pose
+                .orientation()
+                .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+            fs_flux::Vec3::new(value.x, value.y, value.z)
+        },
+        z_world: {
+            let value = initial_pose
+                .orientation()
+                .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+            fs_flux::Vec3::new(value.x, value.y, value.z)
+        },
+    };
+    let exterior_air = EulerExternalAirInput {
+        domain: ExternalAirDomain::ExteriorFreeGas,
+        identity: ExternalAirIdentity {
+            case_id: model.identity.case_id.clone(),
+            world_frame_id: model.identity.world_frame_id.clone(),
+            body_frame_id: "cinematic/disc-body".to_owned(),
+            geometry_source_id: format!("axisymmetric-profile/{}", profile.identity.0),
+            state_source_id: physical_disc.specimen.material_state_identity.to_string(),
+            domain_source_id: aero.source_id.clone(),
+        },
+        geometry: EulerDiscExteriorGeometry {
+            radius_m: profile.dimensions.outer_radius_m,
+            exterior_thickness_m: profile.dimensions.thickness_m,
+        },
+        state: EulerDiscExteriorState {
+            center_world_m: fs_flux::Vec3::ZERO,
+            center_velocity_world_m_per_s: fs_flux::Vec3::ZERO,
+            angular_velocity_world_rad_per_s: fs_flux::Vec3::ZERO,
+            body_frame: initial_body_frame,
+        },
+        gas: GasPropertyCard {
+            source_id: format!("resolved-gas/{gas_model_identity}"),
+            density_kg_per_m3: Some(gas.density),
+            dynamic_viscosity_pa_s: Some(gas.dynamic_viscosity),
+            speed_of_sound_m_per_s: Some(gas.sound_speed),
+            velocity_world_m_per_s: fs_flux::Vec3::new(
+                aero.gas_velocity_world_m_per_s[0],
+                aero.gas_velocity_world_m_per_s[1],
+                aero.gas_velocity_world_m_per_s[2],
+            ),
+        },
+        pressure: ExteriorAirPressure {
+            absolute_pressure_pa: config.ambient_pressure_pa,
+            source_id: "cinematic/ambient-pressure".to_owned(),
+        },
+        exterior_roughness: SurfaceRoughness {
+            source_id: aero.source_id.clone(),
+            height_m: aero.exterior_roughness_height_m,
+        },
+        alternatives: vec![aero_model],
+    };
+    let tangent_ownership = GeneralizedWorkOwnership::new(
+        patch_identity_string.clone(),
+        "cinematic/tangent-interval-1",
+        "longitudinal",
+        "lateral",
+        "spin",
+    )
+    .map_err(pipeline)?;
+    let mut template = ProductionCouplingStepInput {
+        expected_checkpoint_version: 0,
+        duration_s: f64::from(mechanics.sample_rate_hz).recip(),
+        time_s: 0.0,
+        patch,
+        normal,
+        surface_excitation: Some(surface_excitation),
+        tangential: TangentialContactRequest {
+            request_id: "cinematic/tangent-step-1".to_owned(),
+            expected_state_version: 0,
+            patch_kinematics: initial_kinematics,
+            normal_patch: placeholder_normal_patch,
+            interface: partial_slip_interface,
+            work_ownership: tangent_ownership.clone(),
+            dt_s: f64::from(mechanics.sample_rate_hz).recip(),
+        },
+        rolling: RollingContactInput {
+            identity: RollingContactIdentity {
+                case_id: model.identity.case_id.clone(),
+                adapter_id: ROLLING_CONTACT_ADAPTER_ID.to_owned(),
+                world_frame_id: model.identity.world_frame_id.clone(),
+                port_id: "cinematic/rolling-port".to_owned(),
+                domain_id: patch_identity_string.clone(),
+            },
+            patch: RollingPatchReceipt::new(
+                patch_identity_string.clone(),
+                "cinematic/normal-placeholder",
+                "cinematic/normal-placeholder",
+                InputAuthority::CallerDeclared,
+                profile.mass_properties.mass * mechanics.gravity_m_per_s2,
+                core::f64::consts::PI * 1.0e-12,
+                PatchCurvature::Principal {
+                    first_per_m: profile.dimensions.outer_radius_m.recip(),
+                    second_per_m: profile.dimensions.outer_radius_m.recip(),
+                },
+            )
+            .map_err(pipeline)?,
+            interface,
+            law: rolling_law,
+            state: RollingLossState::zero(),
+            checkpoint: None,
+            ownership: RollingWorkOwnership::new(
+                patch_identity_string,
+                "cinematic/rolling-interval-1",
+                "contour",
+                RollingLossChannel::ContourDeformation,
+            )
+            .map_err(pipeline)?,
+            partial_slip_ownership: None,
+            contact_arm_world_m: initializer.contact.contact.radius_world_m,
+            contour_tangent_axis_world: Vec3::new(1.0, 0.0, 0.0),
+            rolling_axis_world: Vec3::new(0.0, 1.0, 0.0),
+            contour_speed_mps: 0.0,
+            rolling_rate_rad_s: 0.0,
+            spin_rate_rad_s: 0.0,
+            temperature_kelvin: temperature_k,
+            excitation_frequency_hz: 1.0,
+            interval_s: f64::from(mechanics.sample_rate_hz).recip(),
+        },
+        gas_channel: GasChannelStepInput::ExteriorFreeGas {
+            input: exterior_air,
+            selected_correlation_id: correlation_id.to_owned(),
+            exchange_key: 1,
+        },
+        base_step_id: "cinematic/base-step-1".to_owned(),
+        base_load_progress_start: 0.0,
+        base_load_progress_end: f64::from(mechanics.sample_rate_hz).recip(),
+    };
+    let static_force_n = profile.mass_properties.mass * mechanics.gravity_m_per_s2;
+    let static_state = model
+        .solve_horizontal_plane_axisymmetric_static_contact_state(
+            &mut template,
+            profile,
+            initializer.state,
+            normal_state.clone(),
+            static_force_n,
+            mechanics.static_preload_relative_tolerance,
+            96,
+            cx,
+        )
+        .map_err(pipeline)?;
+    let checkpoint = model
+        .initialize_horizontal_plane_axisymmetric_profile_static_contact(
+            &mut template,
+            profile,
+            static_state,
+            normal_state,
+            GasChannelState::ExteriorFreeGas(
+                EulerExternalAirWorkState::new(
+                    "cinematic/exterior-work",
+                    usize::try_from(maximum_steps).map_err(|_| {
+                        CinematicFixtureError::Pipeline(
+                            "mechanics step budget exceeds platform capacity".into(),
+                        )
+                    })?,
+                )
+                .map_err(pipeline)?,
+            ),
+            usize::try_from(maximum_steps).map_err(|_| {
+                CinematicFixtureError::Pipeline(
+                    "tangential step budget exceeds platform capacity".into(),
+                )
+            })?,
+            static_force_n,
+            mechanics.static_preload_relative_tolerance,
+            cx,
+        )
+        .map_err(pipeline)?;
+    Ok(FixtureProductionMechanics {
+        model,
+        checkpoint,
+        template,
     })
 }
 
@@ -2559,6 +3597,7 @@ pub fn run_cinematic_fixture(
     admit_thorne_source_bound_disc_state(&config.disc, &profile, &source_bound_profile)?;
     let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc, cx)?;
     let physical_plate = resolve_fixture_physical_plate(&config.support_plate)?;
+    let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)?;
     let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
     let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
     let (coarse_audio_preroll_trajectory, coarse_trajectory) =
@@ -2660,6 +3699,7 @@ pub fn run_cinematic_fixture(
         &audio_preroll_artifact,
         &physical_disc,
         &physical_plate,
+        &plate_basis,
         run.parameters.gravity_m_per_s2,
         config,
         cx,
@@ -5086,6 +6126,7 @@ fn build_audio(
     fine_preroll_trajectory: &EulerRenderTrajectoryArtifact,
     physical_disc: &FixturePhysicalDiscState,
     physical_plate: &FixturePhysicalPlateState,
+    plate_basis: &RectangularPlateModalBasis,
     gravity_m_per_s2: f64,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
@@ -5367,6 +6408,7 @@ fn build_audio(
         fine_preroll_trajectory,
         physical_disc,
         physical_plate,
+        plate_basis,
         config,
         cx,
     )?;
@@ -5395,6 +6437,7 @@ fn build_physical_audio(
     preroll_trajectory: &EulerRenderTrajectoryArtifact,
     physical_disc: &FixturePhysicalDiscState,
     physical_plate: &FixturePhysicalPlateState,
+    plate_basis: &RectangularPlateModalBasis,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
 ) -> Result<FixturePhysicalAudio, CinematicFixtureError> {
@@ -5433,21 +6476,6 @@ fn build_physical_audio(
     };
 
     let plate = &config.support_plate;
-    let plate_request = RectangularPlateModeRequest {
-        width_m: plate.width_m,
-        depth_m: plate.depth_m,
-        thickness_m: plate.thickness_m,
-        elastic: &physical_plate.elastic,
-        support: plate.support,
-        cells_x: plate.cells_x,
-        cells_y: plate.cells_y,
-        maximum_nodes: plate.maximum_nodes,
-        minimum_frequency_hz: plate.minimum_frequency_hz,
-        maximum_frequency_hz: plate.maximum_frequency_hz,
-        maximum_modes: plate.maximum_modes,
-        slice: SliceOptions::default(),
-    };
-    let plate_basis = build_rectangular_plate_modal_basis(&plate_request, cx).map_err(pipeline)?;
 
     let gas_spec = config.ambient_gas;
     let gas = GasState::try_new(
@@ -5456,18 +6484,7 @@ fn build_physical_audio(
         config.ambient_pressure_pa,
     )
     .map_err(pipeline)?;
-    let mut gas_identity = DomainHasher::new("org.frankensim.gas.resolved-acoustic-state.v1");
-    gas_identity.update(&gas_spec.molar_mass.to_bits().to_le_bytes());
-    gas_identity.update(&gas_spec.gamma.to_bits().to_le_bytes());
-    gas_identity.update(&gas_spec.sutherland_beta.to_bits().to_le_bytes());
-    gas_identity.update(&gas_spec.sutherland_s.to_bits().to_le_bytes());
-    gas_identity.update(match gas_spec.conductivity {
-        GasConductivityModel::Ussa1976AirFit => b"USSA-1976-air-fit" as &[u8],
-        GasConductivityModel::Eucken => b"Eucken",
-    });
-    gas_identity.update(&gas.temperature.to_bits().to_le_bytes());
-    gas_identity.update(&gas.pressure.to_bits().to_le_bytes());
-    let gas_model_identity = gas_identity.finalize();
+    let gas_model_identity = resolved_gas_model_identity(gas_spec, gas);
     let listener = spatial_listener_pose();
     let half_ear_spacing_m = 0.045;
     let observers = [
@@ -6841,6 +7858,73 @@ mod tests {
     }
 
     #[test]
+    fn g0_parameterized_fixture_advances_real_coupling_into_render_audio_controls() {
+        with_test_cx(|cx| {
+            let mut config = CinematicFixtureConfig::default();
+            // Preserve the same physical plate while using the smallest grid
+            // that still contains the declared three support points exactly.
+            config.support_plate.cells_x = 8;
+            config.support_plate.cells_y = 8;
+            config.support_plate.maximum_nodes = 128;
+            config.support_plate.maximum_modes = 16;
+            config.validate().expect("bounded parameterized fixture");
+
+            let profile = config.disc.resolve_profile(cx).expect("resolved profile");
+            let physical_disc =
+                resolve_fixture_physical_disc(&profile, &config.disc, cx).expect("disc state");
+            let physical_plate =
+                resolve_fixture_physical_plate(&config.support_plate).expect("support state");
+            let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)
+                .expect("shared mechanics/acoustics plate basis");
+            let production = build_fixture_production_mechanics(
+                &profile,
+                &physical_disc,
+                &physical_plate,
+                plate_basis,
+                &config,
+                cx,
+            )
+            .expect("generic production assembly");
+
+            let first_input = production
+                .input_for_checkpoint(&profile, &production.checkpoint, cx)
+                .expect("state-derived first input");
+            let surface = first_input
+                .surface_excitation
+                .as_ref()
+                .expect("declared physical topography");
+            assert!(surface.surface_a.path_coordinate_m.is_finite());
+            assert!(surface.surface_a.path_speed_m_per_s.is_finite());
+            assert_ne!(surface.surface_a.path_speed_m_per_s, 0.0);
+
+            let source = production.model.run_eventful_compliant_trajectory(
+                production.checkpoint.clone(),
+                2,
+                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+            );
+            assert_eq!(
+                source.accepted_steps.len(),
+                2,
+                "production path refused: {:?}",
+                source.termination
+            );
+            let render = RenderTrajectory::from_production_event_trajectory(
+                &production.model,
+                &source,
+                &profile,
+                first_input.duration_s,
+                cx,
+            )
+            .expect("accepted mechanics enters common render/audio trajectory");
+            assert_eq!(render.samples().len(), 2);
+            for sample in render.samples() {
+                assert!(sample.input().interval_normal_force_n > 0.0);
+                assert!(sample.input().base_mode.is_some());
+            }
+        });
+    }
+
+    #[test]
     fn g0_nonpositive_disc_mass_input_refuses_before_pipeline_work() {
         for mass in [
             CinematicDiscMassInput::DensityKgPerM3(0.0),
@@ -7825,12 +8909,15 @@ mod tests {
                 let physical_disc =
                     resolve_fixture_physical_disc(&profile, &config.disc, cx).unwrap();
                 let physical_plate = resolve_fixture_physical_plate(&config.support_plate).unwrap();
+                let plate_basis =
+                    build_fixture_plate_basis(&config.support_plate, &physical_plate, cx).unwrap();
                 let audio = build_audio(
                     &artifact,
                     &coarse_preroll_artifact,
                     &preroll_artifact,
                     &physical_disc,
                     &physical_plate,
+                    &plate_basis,
                     refinement.fine.parameters.gravity_m_per_s2,
                     &config,
                     cx,

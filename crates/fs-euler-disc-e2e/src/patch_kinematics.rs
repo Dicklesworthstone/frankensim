@@ -22,6 +22,9 @@ pub enum PatchContactStatus {
     Separated,
     /// A near-contact pair closes more quickly than the approach threshold.
     Approaching,
+    /// A near-contact pair opens faster than the stationary threshold while
+    /// still inside the geometric contact envelope.
+    Receding,
     /// A near-contact pair has stationary normal and tangential relative motion.
     Touching,
     /// A near-contact pair has stationary normal motion but non-stationary tangent motion.
@@ -1099,7 +1102,7 @@ fn classify_status(
             Ok(PatchContactStatus::Grazing)
         };
     }
-    Ok(PatchContactStatus::Unknown)
+    Ok(PatchContactStatus::Receding)
 }
 
 fn tangent_components(

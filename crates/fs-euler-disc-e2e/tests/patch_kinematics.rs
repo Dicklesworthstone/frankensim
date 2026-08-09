@@ -242,7 +242,7 @@ fn pure_spin_mixed_creepage_and_base_motion_are_distinguished_kinematically() {
 }
 
 #[test]
-fn separated_approaching_grazing_and_impact_candidates_use_boundaries() {
+fn separated_approaching_receding_grazing_and_impact_candidates_use_boundaries() {
     let mut separated = input(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
     separated.profile_support.gap_m = 0.02;
     separated.profile_support.disc_point_world_m.z = 0.02;
@@ -258,6 +258,11 @@ fn separated_approaching_grazing_and_impact_candidates_use_boundaries() {
         compute_patch_kinematics(input(Vec3::new(0.0, 0.0, -0.2), Vec3::ZERO, Vec3::ZERO))
             .expect("approach");
     assert_eq!(approaching.status, PatchContactStatus::Approaching);
+
+    let receding =
+        compute_patch_kinematics(input(Vec3::new(0.0, 0.0, 0.2), Vec3::ZERO, Vec3::ZERO))
+            .expect("receding");
+    assert_eq!(receding.status, PatchContactStatus::Receding);
 
     let impact = compute_patch_kinematics(input(Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO, Vec3::ZERO))
         .expect("impact threshold tie");

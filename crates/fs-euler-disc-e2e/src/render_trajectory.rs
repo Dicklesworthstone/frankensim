@@ -572,8 +572,9 @@ impl RenderTrajectory {
             })?;
         let mut interval_start_time_s = source.start_checkpoint.elapsed_time_s();
         let mut previous_state = source.start_checkpoint.disc_state;
-        let mut previous_base_displacement_m = source.start_checkpoint.base_displacement_m();
-        let mut previous_base_velocity_m_per_s = source.start_checkpoint.base_velocity_m_per_s();
+        let mut previous_base_version = source.start_checkpoint.committed_version;
+        let mut last_base_displacement_m = source.start_checkpoint.base_displacement_m();
+        let mut last_base_velocity_m_per_s = source.start_checkpoint.base_velocity_m_per_s();
         let final_index = source.accepted_steps.len() - 1;
         for (index, receipt) in source.accepted_steps.iter().enumerate() {
             if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
@@ -586,10 +587,8 @@ impl RenderTrajectory {
                 || duration_s > declared_maximum_timestep_s
                 || receipt.rigid_step.state_before != previous_state
                 || receipt.rigid_step.state_after != receipt.next_disc_state
-                || base.modal_displacement_start_m.to_bits()
-                    != previous_base_displacement_m.to_bits()
-                || base.modal_velocity_start_m_per_s.to_bits()
-                    != previous_base_velocity_m_per_s.to_bits()
+                || base.parent_version != previous_base_version
+                || previous_base_version.checked_add(1) != Some(base.next_version)
             {
                 return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
                     sample: index,
@@ -702,18 +701,20 @@ impl RenderTrajectory {
             });
             interval_start_time_s = time_s;
             previous_state = receipt.next_disc_state;
-            previous_base_displacement_m = base.modal_displacement_end_m;
-            previous_base_velocity_m_per_s = base.modal_velocity_end_m_per_s;
+            previous_base_version = base.next_version;
+            last_base_displacement_m = base.modal_displacement_end_m;
+            last_base_velocity_m_per_s = base.modal_velocity_end_m_per_s;
         }
         if previous_state != source.last_accepted_checkpoint.disc_state
+            || previous_base_version != source.last_accepted_checkpoint.committed_version
             || interval_start_time_s.to_bits()
                 != source.last_accepted_checkpoint.elapsed_time_s().to_bits()
-            || previous_base_displacement_m.to_bits()
+            || last_base_displacement_m.to_bits()
                 != source
                     .last_accepted_checkpoint
                     .base_displacement_m()
                     .to_bits()
-            || previous_base_velocity_m_per_s.to_bits()
+            || last_base_velocity_m_per_s.to_bits()
                 != source
                     .last_accepted_checkpoint
                     .base_velocity_m_per_s()
@@ -727,14 +728,10 @@ impl RenderTrajectory {
         let configuration_identity = production_configuration_identity(model, model_identity);
         let mut fingerprint = [0_u8; 8];
         fingerprint.copy_from_slice(&configuration_identity.as_bytes()[..8]);
-        let base_identity = model.base_port.identity();
+        let (base_model_id, base_configuration_id) = model.base_port.identity_parts();
         let base_model_identity = hash_domain(
             "org.frankensim.euler-disc.production-base-model.v1",
-            format!(
-                "{}\0{}",
-                base_identity.model_id, base_identity.configuration_id
-            )
-            .as_bytes(),
+            format!("{base_model_id}\0{base_configuration_id}").as_bytes(),
         );
         let metadata = RenderTrajectoryMetadata {
             schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
@@ -849,8 +846,9 @@ impl RenderTrajectory {
             })?;
         let mut interval_start_time_s = source.start_checkpoint.elapsed_time_s();
         let mut previous_state = source.start_checkpoint.disc_state;
-        let mut previous_base_displacement_m = source.start_checkpoint.base_displacement_m();
-        let mut previous_base_velocity_m_per_s = source.start_checkpoint.base_velocity_m_per_s();
+        let mut previous_base_version = source.start_checkpoint.committed_version;
+        let mut last_base_displacement_m = source.start_checkpoint.base_displacement_m();
+        let mut last_base_velocity_m_per_s = source.start_checkpoint.base_velocity_m_per_s();
         let mut transition_index = 0_usize;
         let final_index = source.accepted_steps.len() - 1;
 
@@ -887,10 +885,8 @@ impl RenderTrajectory {
                 || duration_s > declared_maximum_timestep_s
                 || step.end_time_s.to_bits() != time_s.to_bits()
                 || rigid_step.state_before != previous_state
-                || base.modal_displacement_start_m.to_bits()
-                    != previous_base_displacement_m.to_bits()
-                || base.modal_velocity_start_m_per_s.to_bits()
-                    != previous_base_velocity_m_per_s.to_bits()
+                || base.parent_version != previous_base_version
+                || previous_base_version.checked_add(1) != Some(base.next_version)
             {
                 return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
                     sample: index,
@@ -1079,19 +1075,21 @@ impl RenderTrajectory {
             });
             interval_start_time_s = time_s;
             previous_state = next_disc_state;
-            previous_base_displacement_m = base.modal_displacement_end_m;
-            previous_base_velocity_m_per_s = base.modal_velocity_end_m_per_s;
+            previous_base_version = base.next_version;
+            last_base_displacement_m = base.modal_displacement_end_m;
+            last_base_velocity_m_per_s = base.modal_velocity_end_m_per_s;
         }
         if transition_index != source.transitions.len()
             || previous_state != source.last_accepted_checkpoint.disc_state
+            || previous_base_version != source.last_accepted_checkpoint.committed_version
             || interval_start_time_s.to_bits()
                 != source.last_accepted_checkpoint.elapsed_time_s().to_bits()
-            || previous_base_displacement_m.to_bits()
+            || last_base_displacement_m.to_bits()
                 != source
                     .last_accepted_checkpoint
                     .base_displacement_m()
                     .to_bits()
-            || previous_base_velocity_m_per_s.to_bits()
+            || last_base_velocity_m_per_s.to_bits()
                 != source
                     .last_accepted_checkpoint
                     .base_velocity_m_per_s()
@@ -1105,14 +1103,10 @@ impl RenderTrajectory {
         let configuration_identity = production_configuration_identity(model, model_identity);
         let mut fingerprint = [0_u8; 8];
         fingerprint.copy_from_slice(&configuration_identity.as_bytes()[..8]);
-        let base_identity = model.base_port.identity();
+        let (base_model_id, base_configuration_id) = model.base_port.identity_parts();
         let base_model_identity = hash_domain(
             "org.frankensim.euler-disc.production-base-model.v1",
-            format!(
-                "{}\0{}",
-                base_identity.model_id, base_identity.configuration_id
-            )
-            .as_bytes(),
+            format!("{base_model_id}\0{base_configuration_id}").as_bytes(),
         );
         let metadata = RenderTrajectoryMetadata {
             schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
@@ -2550,9 +2544,9 @@ fn production_model_identity(
     for value in [gravity.x, gravity.y, gravity.z] {
         hasher.update(&value.to_bits().to_le_bytes());
     }
-    let base = model.base_port.identity();
-    hash_text(&mut hasher, &base.model_id);
-    hash_text(&mut hasher, &base.configuration_id);
+    let (base_model_id, base_configuration_id) = model.base_port.identity_parts();
+    hash_text(&mut hasher, base_model_id);
+    hash_text(&mut hasher, base_configuration_id);
     hash_text(&mut hasher, model.tangential_adapter.adapter_id());
     hash_text(&mut hasher, model.tangential_adapter.source_id());
     hasher.finalize()
@@ -2701,6 +2695,10 @@ const fn production_refusal_code(error: &ProductionCouplingError) -> u32 {
         ProductionCouplingError::Base(_) => 21,
         ProductionCouplingError::Dynamics(_) => 22,
         ProductionCouplingError::SurfaceExcitation(_) => 23,
+        ProductionCouplingError::ModalBase(_) => 24,
+        ProductionCouplingError::BaseBackendMismatch => 25,
+        ProductionCouplingError::BaseStaticPreloadUnsupported => 26,
+        ProductionCouplingError::StaticPreloadMismatch { .. } => 27,
     }
 }
 

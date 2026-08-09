@@ -1,7 +1,7 @@
 //! Euler-disc translation of finite-patch kinematics into tangential contact.
 //!
 //! This adapter owns no friction coefficients or contact-state classification.
-//! It refuses unavailable creepage and pre-constitutive patch states, then
+//! It refuses unresolved finite-slip creepage and pre-constitutive patch states, then
 //! delegates the actual return map to `fs-tribo` (or the `fs-contact` smooth
 //! transaction wrapper).  The emitted receipt keeps the generic discrete work
 //! closure distinct from the disc endpoint-power diagnostic.
@@ -17,6 +17,7 @@ use fs_tribo::partial_slip::{
     PartialSlipInterface, PartialSlipKinematics, PartialSlipLaw, PartialSlipState,
     PartialSlipStateKind, TangentFrame, TangentialWrench,
 };
+use fs_tribo::{ExactlyOnceKeyError, ExactlyOnceKeyLedger};
 
 use crate::patch_kinematics::{Creepage, PatchContactStatus, PatchKinematics, SurfaceOrder};
 
@@ -103,8 +104,8 @@ impl EulerTangentialContactAdapter {
                     PartialSlipState::zero(),
                 )?,
                 committed_version: 0,
-                committed_work_keys: Vec::new(),
-                max_committed_work_keys,
+                work_ledger: ExactlyOnceKeyLedger::retained_set(max_committed_work_keys)
+                    .map_err(key_ledger_error)?,
             }),
             TangentialContactLane::Smooth { law, adapter } => Ok(TangentialContactState::Smooth {
                 adapter_id: self.adapter_id.clone(),
@@ -117,6 +118,43 @@ impl EulerTangentialContactAdapter {
                 )?,
             }),
         }
+    }
+
+    /// Creates the direct partial-slip lane with a fixed-memory work sequence.
+    ///
+    /// The first ownership interval must be the canonical decimal string `"1"`.
+    /// Every accepted successor is then bound to the next outer transaction
+    /// version. Arbitrary-key callers must continue to use [`Self::initial_state`].
+    pub fn initial_state_strict_sequence(
+        &self,
+        normal_patch: &NormalPatchView,
+        interface: &PartialSlipInterface,
+        maximum_committed_work_keys: usize,
+        first_work_ownership: GeneralizedWorkOwnership,
+    ) -> Result<TangentialContactState, TangentialContactError> {
+        self.validate_identity()?;
+        if first_work_ownership.interval_id() != "1" {
+            return Err(TangentialContactError::OutOfSequenceWorkOwnership);
+        }
+        let TangentialContactLane::PartialSlip { law } = &self.lane else {
+            return Err(TangentialContactError::CheckpointLaneMismatch);
+        };
+        Ok(TangentialContactState::PartialSlip {
+            adapter_id: self.adapter_id.clone(),
+            source_id: self.source_id.clone(),
+            checkpoint: PartialSlipCheckpoint::new(
+                normal_patch.clone(),
+                interface.clone(),
+                law.clone(),
+                PartialSlipState::zero(),
+            )?,
+            committed_version: 0,
+            work_ledger: ExactlyOnceKeyLedger::strict_sequence(
+                first_work_ownership,
+                maximum_committed_work_keys,
+            )
+            .map_err(key_ledger_error)?,
+        })
     }
 
     /// Restores a checkpoint only when the adapter, selected lane, normal
@@ -135,14 +173,15 @@ impl EulerTangentialContactAdapter {
                     adapter_id,
                     source_id,
                     checkpoint,
-                    committed_work_keys,
-                    max_committed_work_keys,
+                    work_ledger,
+                    committed_version,
                     ..
                 },
             ) => {
                 self.validate_state_identity(adapter_id, source_id)?;
-                if *max_committed_work_keys == 0
-                    || committed_work_keys.len() > *max_committed_work_keys
+                if work_ledger.committed_count() > work_ledger.maximum_committed()
+                    || usize::try_from(*committed_version).ok()
+                        != Some(work_ledger.committed_count())
                 {
                     return Err(TangentialContactError::InvalidCheckpoint {
                         field: "partial-slip work-key budget",
@@ -193,13 +232,38 @@ impl EulerTangentialContactAdapter {
             vec3(request.patch_kinematics.tangent_basis.normal_world),
             vec3(request.patch_kinematics.tangent_basis.first_world),
         )?;
-        let Creepage::Available {
-            longitudinal,
-            lateral,
-            reference_rolling_speed_m_per_s,
-        } = request.patch_kinematics.creepage
-        else {
-            return Err(TangentialContactError::CreepageUnavailable);
+        let (longitudinal, lateral, reference_rolling_speed_m_per_s) = match request
+            .patch_kinematics
+            .creepage
+        {
+            Creepage::Available {
+                longitudinal,
+                lateral,
+                reference_rolling_speed_m_per_s,
+            } => (longitudinal, lateral, reference_rolling_speed_m_per_s),
+            Creepage::Unavailable {
+                reference_rolling_speed_m_per_s,
+                minimum_reference_rolling_speed_m_per_s,
+            } => {
+                // At an instantaneous no-slip support point both material
+                // velocities can be zero even while the geometric contact
+                // locus rolls across the bodies. The normalized ratio is then
+                // 0/0, but its stationary limit is exactly zero creepage. Do
+                // not erase a resolved finite slip: only admit this limit when
+                // the relative tangent speed is inside the same declared
+                // low-speed threshold that made normalization unavailable.
+                let relative_speed_m_per_s = request
+                    .patch_kinematics
+                    .tangential_relative_velocity
+                    .squared_norm()
+                    .sqrt();
+                if !(relative_speed_m_per_s.is_finite()
+                    && relative_speed_m_per_s <= minimum_reference_rolling_speed_m_per_s)
+                {
+                    return Err(TangentialContactError::CreepageUnavailable);
+                }
+                (0.0, 0.0, reference_rolling_speed_m_per_s)
+            }
         };
         let kinematics = PartialSlipKinematics {
             creepage: [longitudinal, lateral],
@@ -213,22 +277,10 @@ impl EulerTangentialContactAdapter {
                 TangentialContactState::PartialSlip {
                     checkpoint,
                     committed_version,
-                    committed_work_keys,
-                    max_committed_work_keys,
+                    work_ledger,
                     ..
                 },
             ) => {
-                if committed_work_keys
-                    .iter()
-                    .any(|key| key == &request.work_ownership)
-                {
-                    return Err(TangentialContactError::DuplicateWorkOwnership);
-                }
-                if committed_work_keys.len() >= *max_committed_work_keys {
-                    return Err(TangentialContactError::WorkOwnershipCapacityExceeded {
-                        max: *max_committed_work_keys,
-                    });
-                }
                 let law_state =
                     law.restore_checkpoint(&request.normal_patch, &request.interface, checkpoint)?;
                 let step = law.advance(
@@ -244,15 +296,33 @@ impl EulerTangentialContactAdapter {
                         field: "partial-slip committed version",
                     },
                 )?;
-                let mut next_keys = committed_work_keys.clone();
-                next_keys.push(request.work_ownership.clone());
+                let strict_successor = work_ledger
+                    .strict_next_key()
+                    .map(|_| {
+                        GeneralizedWorkOwnership::new(
+                            request.work_ownership.patch_id(),
+                            next_version
+                                .checked_add(1)
+                                .ok_or(TangentialContactError::InvalidDerived {
+                                    field: "partial-slip successor version",
+                                })?
+                                .to_string(),
+                            request.work_ownership.longitudinal_coordinate_id(),
+                            request.work_ownership.lateral_coordinate_id(),
+                            request.work_ownership.torsional_coordinate_id(),
+                        )
+                        .map_err(TangentialContactError::PartialSlip)
+                    })
+                    .transpose()?;
+                let next_ledger = work_ledger
+                    .advance(&request.work_ownership, strict_successor)
+                    .map_err(key_ledger_error)?;
                 let next_state = TangentialContactState::PartialSlip {
                     adapter_id: self.adapter_id.clone(),
                     source_id: self.source_id.clone(),
                     checkpoint: step.checkpoint.clone(),
                     committed_version: next_version,
-                    committed_work_keys: next_keys,
-                    max_committed_work_keys: *max_committed_work_keys,
+                    work_ledger: next_ledger,
                 };
                 (step, TangentialCandidate::PartialSlip { next_state })
             }
@@ -397,7 +467,11 @@ impl EulerTangentialContactAdapter {
             return Err(TangentialContactError::NormalPatchIdentityMismatch);
         }
         match request.patch_kinematics.status {
-            PatchContactStatus::Touching | PatchContactStatus::Grazing => Ok(()),
+            PatchContactStatus::Approaching
+            | PatchContactStatus::Receding
+            | PatchContactStatus::Touching
+            | PatchContactStatus::Grazing
+            | PatchContactStatus::ImpactCandidate => Ok(()),
             status => Err(TangentialContactError::UnsupportedPatchStatus { status }),
         }
     }
@@ -453,8 +527,7 @@ pub enum TangentialContactState {
         source_id: String,
         checkpoint: PartialSlipCheckpoint,
         committed_version: u64,
-        committed_work_keys: Vec<GeneralizedWorkOwnership>,
-        max_committed_work_keys: usize,
+        work_ledger: ExactlyOnceKeyLedger<GeneralizedWorkOwnership>,
     },
     /// Smooth lane, whose generic adapter owns the full transaction checkpoint.
     Smooth {
@@ -567,7 +640,7 @@ pub enum TangentialContactError {
     InvalidInput { field: &'static str },
     /// A finite input generated an unrepresentable result.
     InvalidDerived { field: &'static str },
-    /// Creepage cannot be normalized at the supplied entrainment speed.
+    /// Finite relative slip cannot be normalized at the supplied entrainment speed.
     CreepageUnavailable,
     /// A pre-constitutive status cannot be treated as a tangential-law mode.
     UnsupportedPatchStatus { status: PatchContactStatus },
@@ -581,6 +654,8 @@ pub enum TangentialContactError {
     CheckpointLaneMismatch,
     /// The direct lane's exactly-once work key was reused.
     DuplicateWorkOwnership,
+    /// The direct lane's strict interval key skipped, repeated, or reordered a version.
+    OutOfSequenceWorkOwnership,
     /// The direct lane's caller-declared work-key budget is exhausted.
     WorkOwnershipCapacityExceeded { max: usize },
     /// Checkpoint internals violate the explicit bounded state contract.
@@ -635,6 +710,23 @@ fn nonblank(value: &str, field: &'static str) -> Result<(), TangentialContactErr
         Err(TangentialContactError::MissingIdentity { field })
     } else {
         Ok(())
+    }
+}
+
+fn key_ledger_error(error: ExactlyOnceKeyError) -> TangentialContactError {
+    match error {
+        ExactlyOnceKeyError::Duplicate => TangentialContactError::DuplicateWorkOwnership,
+        ExactlyOnceKeyError::OutOfSequence => {
+            TangentialContactError::OutOfSequenceWorkOwnership
+        }
+        ExactlyOnceKeyError::CapacityExceeded { maximum } => {
+            TangentialContactError::WorkOwnershipCapacityExceeded { max: maximum }
+        }
+        ExactlyOnceKeyError::ZeroCapacity | ExactlyOnceKeyError::MissingSuccessor => {
+            TangentialContactError::InvalidCheckpoint {
+                field: "partial-slip exactly-once ledger",
+            }
+        }
     }
 }
 

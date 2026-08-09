@@ -11,7 +11,7 @@ use fs_contact::normal_patch::{NormalPatchEmbedState, NormalPatchPort, NormalPat
 use fs_couple::StableId;
 use fs_exec::Cx;
 use fs_mbd::{
-    Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
+    Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 use fs_rep_frep::{AxisymmetricCurvatureAuthority, AxisymmetricIdentity};
 use fs_tribo::{
@@ -806,6 +806,17 @@ pub enum ProductionCouplingError {
     ModalBase(RectangularModalBaseError),
     /// Checkpoint/proposal backend differs from the immutable selected base port.
     BaseBackendMismatch,
+    /// The selected support backend cannot initialize a static contact preload.
+    BaseStaticPreloadUnsupported,
+    /// Caller-supplied initial pose and static support load do not satisfy the selected normal law.
+    StaticPreloadMismatch {
+        /// Requested equilibrium normal load [N].
+        target_force_n: f64,
+        /// Normal-law load at the supplied pose and preloaded support [N].
+        observed_force_n: f64,
+        /// Caller-declared relative acceptance tolerance.
+        maximum_relative_mismatch: f64,
+    },
     /// fs-mbd refused the actual summed wrench.
     Dynamics(fs_mbd::DynamicsError),
 }
@@ -842,6 +853,23 @@ impl ProductionBasePort {
             Self::RectangularModal(port) => {
                 ProductionBaseCheckpoint::RectangularModal(port.initial_checkpoint())
             }
+        }
+    }
+
+    fn initial_static_contact_checkpoint(
+        &self,
+        contact_point_world_m: Vec3,
+        compressive_normal_force_on_base_n: f64,
+    ) -> Result<ProductionBaseCheckpoint, ProductionCouplingError> {
+        match self {
+            Self::RectangularModal(port) => port
+                .initial_static_contact_checkpoint(
+                    [contact_point_world_m.x, contact_point_world_m.y, 0.0],
+                    compressive_normal_force_on_base_n,
+                )
+                .map(ProductionBaseCheckpoint::RectangularModal)
+                .map_err(ProductionCouplingError::ModalBase),
+            Self::ReducedOneMode(_) => Err(ProductionCouplingError::BaseStaticPreloadUnsupported),
         }
     }
 
@@ -1028,11 +1056,29 @@ impl ProductionCouplingModel {
     ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
         validate_identity(&self.identity)?;
         let base_state = self.base_port.initial_checkpoint();
+        self.bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
+            input,
+            profile,
+            disc_state,
+            &base_state,
+            cx,
+        )
+    }
+
+    fn bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        base_state: &ProductionBaseCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        validate_identity(&self.identity)?;
         let (resolved, disc_mass_properties) =
             self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
         let (base_displacement_m, base_velocity_m_per_s) = self
             .base_port
-            .surface_state(&base_state, resolved.support.contact.point_world_m)?;
+            .surface_state(base_state, resolved.support.contact.point_world_m)?;
         let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
             input,
             resolved,
@@ -1105,6 +1151,260 @@ impl ProductionCouplingModel {
             RollingContactState::zero(),
             gas_channel_state,
         )
+    }
+
+    /// Build a coupled checkpoint with the resolved modal support already in static equilibrium.
+    ///
+    /// `disc_state` must already encode the contact approach consistent with
+    /// `static_contact_force_n`. The method independently initializes the
+    /// selected support backend under that force, rebinds the true profile
+    /// against its resulting local displacement, evaluates the selected normal
+    /// law, and refuses unless the two forces agree within the declared relative
+    /// tolerance. This prevents a product driver from injecting an artificial
+    /// start-up ring by pairing a gravity-loaded disc with an unloaded plate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn initialize_horizontal_plane_axisymmetric_profile_static_contact(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        normal_state: NormalPatchEmbedState,
+        gas_channel_state: GasChannelState,
+        maximum_tangential_work_keys: usize,
+        static_contact_force_n: f64,
+        maximum_relative_force_mismatch: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ProductionCouplingCheckpoint, ProductionCouplingError> {
+        if !(static_contact_force_n.is_finite()
+            && static_contact_force_n > 0.0
+            && maximum_relative_force_mismatch.is_finite()
+            && maximum_relative_force_mismatch >= 0.0)
+        {
+            return Err(ProductionCouplingError::InvalidInput {
+                field: "static contact initialization",
+            });
+        }
+        let (resolved, _) = self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
+        let base_state = self.base_port.initial_static_contact_checkpoint(
+            resolved.support.contact.point_world_m,
+            static_contact_force_n,
+        )?;
+        self.bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
+            input,
+            profile,
+            disc_state,
+            &base_state,
+            cx,
+        )?;
+        let patch_kinematics = compute_moving_one_mode_patch_kinematics(input.patch.clone())
+            .map_err(ProductionCouplingError::Patch)?;
+        let mut normal_input = input.normal.clone();
+        normal_input.kinematics = patch_kinematics.clone();
+        normal_input.state = normal_state.clone();
+        normal_input.time_s = 0.0;
+        normal_input.step_s = input.duration_s;
+        let normal = match evaluate_normal_contact(&normal_input)
+            .map_err(ProductionCouplingError::Normal)?
+        {
+            EulerNormalContactOutcome::Active(active) => active,
+            EulerNormalContactOutcome::InactiveSeparated { .. } => {
+                return Err(ProductionCouplingError::StaticPreloadMismatch {
+                    target_force_n: static_contact_force_n,
+                    observed_force_n: 0.0,
+                    maximum_relative_mismatch: maximum_relative_force_mismatch,
+                });
+            }
+        };
+        let observed_force_n = point_normal_force(&normal)?;
+        let relative_mismatch = (observed_force_n - static_contact_force_n).abs()
+            / static_contact_force_n.max(f64::MIN_POSITIVE);
+        if relative_mismatch > maximum_relative_force_mismatch {
+            return Err(ProductionCouplingError::StaticPreloadMismatch {
+                target_force_n: static_contact_force_n,
+                observed_force_n,
+                maximum_relative_mismatch: maximum_relative_force_mismatch,
+            });
+        }
+        let normal_patch = normal_patch_view(&normal, &patch_kinematics)?;
+        let tangential_state = self
+            .tangential_adapter
+            .initial_state(
+                &normal_patch,
+                &input.tangential.interface,
+                maximum_tangential_work_keys,
+            )
+            .map_err(ProductionCouplingError::Tangential)?;
+        self.initial_checkpoint_with_base_state(
+            disc_state,
+            normal_state,
+            tangential_state,
+            RollingContactState::zero(),
+            gas_channel_state,
+            base_state,
+        )
+    }
+
+    /// Solve the vertical pose coordinate for a declared static normal load.
+    ///
+    /// The orientation and both momenta from `seed_state` are preserved. The
+    /// profile is first placed at geometric contact with the undeformed plane;
+    /// the selected modal base is then initialized under `target_force_n`, and
+    /// a deterministic bisection finds the additional contact approach whose
+    /// selected finite-patch law returns that same force. Every trial goes
+    /// through the ordinary profile/patch/normal adapters and therefore retains
+    /// their applicability refusals rather than extrapolating a Hertz law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_horizontal_plane_axisymmetric_static_contact_state(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        seed_state: RigidBodyState,
+        normal_state: NormalPatchEmbedState,
+        target_force_n: f64,
+        maximum_relative_force_mismatch: f64,
+        maximum_iterations: usize,
+        cx: &Cx<'_>,
+    ) -> Result<RigidBodyState, ProductionCouplingError> {
+        if !(target_force_n.is_finite()
+            && target_force_n > 0.0
+            && maximum_relative_force_mismatch.is_finite()
+            && maximum_relative_force_mismatch > 0.0
+            && maximum_iterations > 0)
+        {
+            return Err(ProductionCouplingError::InvalidInput {
+                field: "static contact pose solve",
+            });
+        }
+        let (seed_contact, _) =
+            self.resolve_axisymmetric_profile_contact(profile, seed_state, cx)?;
+        let seed_position = seed_state.pose().position_world();
+        let grounded_position = Vec3::new(
+            seed_position.x,
+            seed_position.y,
+            seed_position.z - seed_contact.support.contact.gap_m,
+        );
+        let grounded_pose = Pose::new(grounded_position, seed_state.pose().orientation())
+            .map_err(ProductionCouplingError::Dynamics)?;
+        let grounded_state = RigidBodyState::new(
+            grounded_pose,
+            seed_state.linear_momentum_world(),
+            seed_state.angular_momentum_body(),
+        )
+        .map_err(ProductionCouplingError::Dynamics)?;
+        let (grounded_contact, _) =
+            self.resolve_axisymmetric_profile_contact(profile, grounded_state, cx)?;
+        let base_state = self.base_port.initial_static_contact_checkpoint(
+            grounded_contact.support.contact.point_world_m,
+            target_force_n,
+        )?;
+        let (base_displacement_m, _) = self
+            .base_port
+            .surface_state(&base_state, grounded_contact.support.contact.point_world_m)?;
+        let state_at_approach =
+            |approach_m: f64| -> Result<RigidBodyState, ProductionCouplingError> {
+                let pose = Pose::new(
+                    Vec3::new(
+                        grounded_position.x,
+                        grounded_position.y,
+                        grounded_position.z + base_displacement_m - approach_m,
+                    ),
+                    grounded_state.pose().orientation(),
+                )
+                .map_err(ProductionCouplingError::Dynamics)?;
+                RigidBodyState::new(
+                    pose,
+                    grounded_state.linear_momentum_world(),
+                    grounded_state.angular_momentum_body(),
+                )
+                .map_err(ProductionCouplingError::Dynamics)
+            };
+        let force_at_approach = |approach_m: f64,
+                                 template: &mut ProductionCouplingStepInput|
+         -> Result<(RigidBodyState, f64), ProductionCouplingError> {
+            let state = state_at_approach(approach_m)?;
+            self.bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
+                template,
+                profile,
+                state,
+                &base_state,
+                cx,
+            )?;
+            let patch = compute_moving_one_mode_patch_kinematics(template.patch.clone())
+                .map_err(ProductionCouplingError::Patch)?;
+            let mut normal_input = template.normal.clone();
+            normal_input.kinematics = patch;
+            normal_input.state = normal_state.clone();
+            normal_input.time_s = 0.0;
+            normal_input.step_s = template.duration_s;
+            let force_n = match evaluate_normal_contact(&normal_input)
+                .map_err(ProductionCouplingError::Normal)?
+            {
+                EulerNormalContactOutcome::Active(active) => point_normal_force(&active)?,
+                EulerNormalContactOutcome::InactiveSeparated { .. } => 0.0,
+            };
+            Ok((state, force_n))
+        };
+
+        let curvature_scale_m = [
+            grounded_contact.curvature.meridional_m_inverse,
+            grounded_contact.curvature.azimuthal_m_inverse,
+        ]
+        .into_iter()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.recip())
+        .fold(f64::INFINITY, f64::min);
+        if !curvature_scale_m.is_finite() {
+            return Err(ProductionCouplingError::CurvatureUnavailable);
+        }
+        let mut lower_m = 0.0_f64;
+        let mut upper_m = (curvature_scale_m * 1.0e-9).max(1.0e-15);
+        let mut upper_state;
+        let mut upper_force_n;
+        loop {
+            (upper_state, upper_force_n) = force_at_approach(upper_m, input)?;
+            if upper_force_n >= target_force_n {
+                break;
+            }
+            upper_m *= 2.0;
+            if !upper_m.is_finite() || upper_m > curvature_scale_m {
+                return Err(ProductionCouplingError::StaticPreloadMismatch {
+                    target_force_n,
+                    observed_force_n: upper_force_n,
+                    maximum_relative_mismatch: maximum_relative_force_mismatch,
+                });
+            }
+        }
+        let mut best_state = upper_state;
+        let mut best_force_n = upper_force_n;
+        for _ in 0..maximum_iterations {
+            let midpoint_m = 0.5 * (lower_m + upper_m);
+            let (candidate, force_n) = force_at_approach(midpoint_m, input)?;
+            if (force_n - target_force_n).abs() / target_force_n.max(f64::MIN_POSITIVE)
+                <= maximum_relative_force_mismatch
+            {
+                return Ok(candidate);
+            }
+            if (force_n - target_force_n).abs() < (best_force_n - target_force_n).abs() {
+                best_state = candidate;
+                best_force_n = force_n;
+            }
+            if force_n < target_force_n {
+                lower_m = midpoint_m;
+            } else {
+                upper_m = midpoint_m;
+            }
+        }
+        let relative_mismatch =
+            (best_force_n - target_force_n).abs() / target_force_n.max(f64::MIN_POSITIVE);
+        if relative_mismatch <= maximum_relative_force_mismatch {
+            Ok(best_state)
+        } else {
+            Err(ProductionCouplingError::StaticPreloadMismatch {
+                target_force_n,
+                observed_force_n: best_force_n,
+                maximum_relative_mismatch: maximum_relative_force_mismatch,
+            })
+        }
     }
 
     /// Rebuilds one smooth profile patch directly from an accepted coupled checkpoint.
@@ -1194,6 +1494,26 @@ impl ProductionCouplingModel {
         rolling_state: RollingContactState,
         gas_channel_state: GasChannelState,
     ) -> Result<ProductionCouplingCheckpoint, ProductionCouplingError> {
+        let base_state = self.base_port.initial_checkpoint();
+        self.initial_checkpoint_with_base_state(
+            disc_state,
+            normal_state,
+            tangential_state,
+            rolling_state,
+            gas_channel_state,
+            base_state,
+        )
+    }
+
+    fn initial_checkpoint_with_base_state(
+        &self,
+        disc_state: RigidBodyState,
+        normal_state: NormalPatchEmbedState,
+        tangential_state: TangentialContactState,
+        rolling_state: RollingContactState,
+        gas_channel_state: GasChannelState,
+        base_state: ProductionBaseCheckpoint,
+    ) -> Result<ProductionCouplingCheckpoint, ProductionCouplingError> {
         validate_identity(&self.identity)?;
         if !disc_state.pose().position_world().is_finite() {
             return Err(ProductionCouplingError::InvalidInput {
@@ -1201,7 +1521,6 @@ impl ProductionCouplingModel {
             });
         }
         validate_gas_state_identity(&self.identity, &gas_channel_state)?;
-        let base_state = self.base_port.initial_checkpoint();
         let checkpoint_fingerprint = production_checkpoint_fingerprint(
             &self.identity,
             0,
@@ -1264,6 +1583,7 @@ impl ProductionCouplingModel {
             NormalContactIntegrationRegime::CompliantTransient => matches!(
                 patch_kinematics.status,
                 PatchContactStatus::Approaching
+                    | PatchContactStatus::Receding
                     | PatchContactStatus::Touching
                     | PatchContactStatus::Grazing
                     | PatchContactStatus::ImpactCandidate
@@ -1324,6 +1644,7 @@ impl ProductionCouplingModel {
         rolling_input.checkpoint = checkpoint.rolling_state.checkpoint.clone();
         rolling_input.partial_slip_ownership = Some(tangential_request.work_ownership.clone());
         rolling_input.interval_s = input.duration_s;
+        bind_rolling_kinematics_from_patch(&mut rolling_input, &patch_kinematics)?;
         let rolling = prepare_rolling_contact(&checkpoint.rolling_state, &rolling_input)
             .map_err(ProductionCouplingError::Rolling)?;
 
@@ -1865,6 +2186,47 @@ impl ProductionCouplingModel {
     }
 }
 
+fn bind_rolling_kinematics_from_patch(
+    rolling: &mut RollingContactInput,
+    patch: &PatchKinematics,
+) -> Result<(), ProductionCouplingError> {
+    let normal = patch.tangent_basis.normal_world;
+    let rotational_surface_velocity = patch
+        .disc_point
+        .angular_velocity_world
+        .cross(patch.disc_point.arm_world);
+    let projected =
+        rotational_surface_velocity.sub(normal.scale(rotational_surface_velocity.dot(normal)));
+    let projected_norm = projected.norm_squared().sqrt();
+    let contour_axis = if projected_norm > 0.0 && projected_norm.is_finite() {
+        projected.scale(projected_norm.recip())
+    } else {
+        patch.tangent_basis.first_world
+    };
+    let rolling_axis_raw = normal.cross(contour_axis);
+    let rolling_axis_norm = rolling_axis_raw.norm_squared().sqrt();
+    if !(contour_axis.is_finite() && rolling_axis_norm.is_finite() && rolling_axis_norm > 0.0) {
+        return Err(ProductionCouplingError::InvalidInput {
+            field: "derived rolling frame",
+        });
+    }
+    let rolling_axis = rolling_axis_raw.scale(rolling_axis_norm.recip());
+    rolling.contour_tangent_axis_world = contour_axis;
+    rolling.rolling_axis_world = rolling_axis;
+    rolling.contour_speed_mps = rotational_surface_velocity.dot(contour_axis);
+    rolling.rolling_rate_rad_s = patch.disc_point.angular_velocity_world.dot(rolling_axis);
+    rolling.spin_rate_rad_s = patch.normal_spin_rad_per_s;
+    if !(rolling.contour_speed_mps.is_finite()
+        && rolling.rolling_rate_rad_s.is_finite()
+        && rolling.spin_rate_rad_s.is_finite())
+    {
+        return Err(ProductionCouplingError::InvalidInput {
+            field: "derived rolling rates",
+        });
+    }
+    Ok(())
+}
+
 fn select_event_branch(
     status: PatchContactStatus,
     integration_regime: NormalContactIntegrationRegime,
@@ -1874,7 +2236,9 @@ fn select_event_branch(
         PatchContactStatus::Touching | PatchContactStatus::Grazing => {
             Ok(ProductionTrajectoryBranch::CompliantContact)
         }
-        PatchContactStatus::Approaching | PatchContactStatus::ImpactCandidate
+        PatchContactStatus::Approaching
+        | PatchContactStatus::Receding
+        | PatchContactStatus::ImpactCandidate
             if integration_regime == NormalContactIntegrationRegime::CompliantTransient =>
         {
             Ok(ProductionTrajectoryBranch::CompliantContact)

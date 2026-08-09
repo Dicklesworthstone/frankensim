@@ -393,14 +393,14 @@ pub fn evaluate_normal_contact(
                 status: input.kinematics.status,
             });
         }
-        PatchContactStatus::ImpactCandidate
+        PatchContactStatus::ImpactCandidate | PatchContactStatus::Receding
             if input.integration_regime != NormalContactIntegrationRegime::CompliantTransient =>
         {
             return Err(NormalContactError::UnavailableKinematics {
                 status: input.kinematics.status,
             });
         }
-        PatchContactStatus::ImpactCandidate => {}
+        PatchContactStatus::ImpactCandidate | PatchContactStatus::Receding => {}
         PatchContactStatus::Approaching
         | PatchContactStatus::Touching
         | PatchContactStatus::Grazing => {}
