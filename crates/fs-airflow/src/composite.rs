@@ -136,7 +136,8 @@ pub fn compose_parallel(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
     pressures.sort_by(|left, right| right.total_cmp(left));
     pressures.dedup_by(|left, right| left.to_bits() == right.to_bits());
     // Flows at each pressure: exact member-inverse sums. Descending
-    // pressure gives ascending flow, so reverse into flow-ascending order.
+    // pressure order already yields ascending flows, so the points are
+    // already in the curve's flow-ascending/pressure-nonincreasing form.
     let mut points: Vec<FanPoint> = Vec::with_capacity(pressures.len());
     for &p in &pressures {
         let flow: f64 = members
@@ -148,7 +149,6 @@ pub fn compose_parallel(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
             Pressure::new(p),
         ));
     }
-    points.reverse();
     let admissible_min = points.first().expect("nonempty").flow.value();
     let curve = synthetic_curve("parallel", banks, points, admissible_min)?;
     FanBank::new(curve, 1, FanArrangement::Series, 1.0)
