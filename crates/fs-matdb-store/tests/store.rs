@@ -277,10 +277,7 @@ fn index_tampering_is_detected_and_cannot_poison_answers() {
     assert!(matches!(
         store.verify_index("steel-304-synth"),
         Err(StoreError::IndexMismatch {
-            what: "validity bounds",
-            ..
-        }) | Err(StoreError::IndexMismatch {
-            what: "scalar value",
+            what: "validity bounds" | "scalar value",
             ..
         })
     ));

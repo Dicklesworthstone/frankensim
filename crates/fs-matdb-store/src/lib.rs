@@ -685,8 +685,13 @@ impl MaterialStore {
                 });
             }
         }
-        // Validity rows (review finding: valid_at is DRIVEN by this
-        // table, so the tamper detector must cover it too).
+        self.verify_validity_rows(pack_id, &pack)
+    }
+
+    /// Validity-table arm of [`Self::verify_index`] (review finding:
+    /// `valid_at` is DRIVEN by this table, so the tamper detector must
+    /// cover it too).
+    fn verify_validity_rows(&self, pack_id: &str, pack: &NormalizedPack) -> Result<(), StoreError> {
         let stored_validity = self
             .conn
             .query_with_params_sync(
