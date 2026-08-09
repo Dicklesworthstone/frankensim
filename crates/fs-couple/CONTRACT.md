@@ -186,6 +186,23 @@ cavity (composes with the BEM's outward panel velocities).
   oracle.
 - `VibroError` — stable `FS-COUPLE-VIBRO-*` refusals.
 
+### `modal_acoustic_time`
+
+`ModalAcousticTimeModel` is the generic fixed-rate realization of independent,
+mass-normalized structural modes. It consumes generalized force in
+`N / sqrt(kg)`, advances viscously damped modal coordinates by the exact
+zero-order-hold transition in underdamped, critically damped, and overdamped
+regimes, and emits physical observer pressure in pascals. Acoustic observation
+uses a caller-supplied complex pressure-per-modal-velocity transfer at each
+natural frequency under `exp(-i omega t)`; no material names, digital gains,
+or mastering values occur in this layer. Energy/work diagnostics and
+transactional state/pressure budgets accompany every sample.
+
+The acoustic realization is explicitly narrow-band: one complex transfer value
+per mode is exact only at that mode's natural frequency. Broadband radiation,
+propagation delay, and feedback impedance require the separately tracked stable
+passive rational-fitting path; this module does not claim them.
+
 ## Invariants
 
 - The Dirac interconnection conserves interface power EXACTLY (to roundoff) —
