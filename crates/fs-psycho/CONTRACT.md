@@ -72,6 +72,17 @@ test).
   48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
   bitwise the standalone call's value (pinned by test); any
   component's typed refusal propagates — no partial results.
+- `tonality::{tone_to_noise_ecma, prominence_ratio_ecma}` — ECMA-74
+  annex D tonality (TNR and PR with prominence classification, totals
+  over prominent tones per ECMA TR/108), ported
+  statement-for-statement from the Apache-2.0 MoSQITo reference
+  (Bray smoothed-spectrum screening, 1/24-octave criteria, annex
+  D.8/D.10 critical bands, D.7.1 hearing threshold). Detection band
+  (89.1, 11200) Hz; power-of-two block (the reference was re-run at
+  the fixture lengths). Three disclosed deviations on paths the
+  reference cannot execute deterministically (uninitialized smoothed
+  tail, -inf spectrum floor, out-of-band LTH NameError) in the
+  module doc.
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 
@@ -124,7 +135,17 @@ test).
     finite samples that OVERFLOW the squaring stage (1e200 Pa once
     read Ok(inf/NaN) — review-caught, now a typed refusal) all
     refuse typed.
-12. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
+12. Tonality fidelity: on bit-identical fixture PCM the extracted
+    reference reproduces — two-tone fixture: TNR 12.43/51.33 dB and
+    PR 61.49/50.70 dB at the exact bin frequencies, all prominent,
+    ratios pinned at 1e-9 relative; noise-only fixture: TNR finds NO
+    tones and PR finds EXACTLY the reference's 10 weak candidates
+    (none prominent, totals exactly 0 — the candidate-set equality is
+    the sharp gate: it caught the even-b band-edge bug the strong
+    tones sailed through); low-SNR fixture: the 500 Hz tone detected,
+    prominent, pinned. Tonality refusals (non-power-of-two, short,
+    NaN, bad rate, unresolvable detection band) typed and executed.
+13. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
    published ~70 Hz signature), ALL SEVEN sweep values match the
    standalone reference run within 1e-12 relative (exactness pins;
    R(70 Hz) = 1.0448 asper at the published ~1-asper anchor), falls
@@ -158,7 +179,7 @@ None.
 
 ## Conformance tests
 
-`tests/psycho.rs` (17 + 1 ignored provenance tool): ISO signal-1
+`tests/psycho.rs` (19 + 1 ignored provenance tool): ISO signal-1
 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
 refusal; low-band mutation; calibration refusal + calibrated value;
@@ -170,14 +191,19 @@ values); time-varying steady-tone and pulse exactness pins with
 temporal-asymmetry behavior; phon conversion + signal refusals;
 `dump_reference_signals` (ignored) regenerates the bit-identical PCM
 the reference binary consumed to mint every signal-path pin; batch
-aggregation-exactness (bitwise) + refusal propagation.
+aggregation-exactness (bitwise) + refusal propagation; tonality
+exactness on three fixtures + typed tonality refusals.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
 - Fluctuation strength: not implemented (roughness IS — see above).
 - Roughness time-series over long signals (block averaging /
   overlap): single-block v1.
-- Tonality/harmonicity: not implemented.
+- Tonality: TNR/PR are the ECMA-74 discrete-tone metrics; Aures/
+  Sottek psychoacoustic tonality (sharpness-of-hearing model) is a
+  different metric and is NOT implemented.
+- The batch `pareto_metrics` does not yet include TNR/PR (they need
+  a power-of-two block contract of their own; recorded follow-up).
 - Sampling rates other than 48 kHz: refused, not resampled (no
   claim); wav parsing is the caller's job (inputs are Pa slices).
 - Per-frame specific loudness is computed internally but not

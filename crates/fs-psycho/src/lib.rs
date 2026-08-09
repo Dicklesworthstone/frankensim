@@ -24,14 +24,17 @@
 //! the reference filterbank ([`signal`]); TIME-VARYING loudness with
 //! Nmax/N5 ([`signal::loudness_time_varying`]); the verified phon
 //! conversion ([`signal::phon_from_sone`]); Daniel-Weber roughness
-//! per analysis block ([`roughness`]). Fluctuation strength and
-//! tonality are not yet implemented — no placeholder claims.
+//! per analysis block ([`roughness`]); ECMA-74 discrete-tone
+//! tonality ([`tonality`]). Fluctuation strength is not yet
+//! implemented (no validated open reference located yet — no
+//! placeholder claims).
 
 pub mod dw_tables;
 pub mod filter_tables;
 pub mod roughness;
 pub mod signal;
 pub mod tables;
+pub mod tonality;
 
 use fs_math::det;
 use tables::{A0, DCB, DDF, DLL, LTQ, RAP, RNS, USL, ZUP};

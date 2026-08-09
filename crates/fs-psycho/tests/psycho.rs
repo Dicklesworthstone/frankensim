@@ -423,6 +423,57 @@ mod sigfix {
             .collect()
     }
 
+    /// Deterministic uniform noise in (-0.5, 0.5) from a 32-bit LCG
+    /// (Numerical Recipes constants) — reproducible bit-exactly in
+    /// any language, so the reference run consumes identical bytes.
+    pub fn lcg_noise(n: usize, seed: u32) -> Vec<f64> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                f64::from(x) / 4_294_967_296.0 - 0.5
+            })
+            .collect()
+    }
+
+    /// Tonality fixture length (power of two for fs-fft).
+    pub const TONAL_LEN: usize = 65_536;
+
+    /// Tonal fixture A: 1 kHz 60 dB tone + 3 kHz at half amplitude +
+    /// broadband LCG noise (~40 dB band level).
+    pub fn tonal_a() -> Vec<f64> {
+        let a = amp(60.0);
+        let noise = lcg_noise(TONAL_LEN, 12_345);
+        (0..TONAL_LEN)
+            .map(|i| {
+                let t = i as f64 / SR;
+                a * fs_math::det::sin(2.0 * core::f64::consts::PI * 1000.0 * t)
+                    + 0.5 * a * fs_math::det::sin(2.0 * core::f64::consts::PI * 3000.0 * t)
+                    + 0.0007 * noise[i]
+            })
+            .collect()
+    }
+
+    /// Noise-only fixture B (no deterministic tonal component).
+    pub fn noise_b() -> Vec<f64> {
+        lcg_noise(TONAL_LEN, 777)
+            .into_iter()
+            .map(|v| 0.028 * v)
+            .collect()
+    }
+
+    /// Low-SNR fixture C: 500 Hz tone barely above the noise.
+    pub fn lowsnr_c() -> Vec<f64> {
+        let noise = lcg_noise(TONAL_LEN, 999);
+        (0..TONAL_LEN)
+            .map(|i| {
+                let t = i as f64 / SR;
+                0.0089 * fs_math::det::sin(2.0 * core::f64::consts::PI * 500.0 * t)
+                    + 0.007 * noise[i]
+            })
+            .collect()
+    }
+
     /// 1 kHz 70 dB tone pulse, on during 0.25..0.75 s.
     pub fn pulse() -> Vec<f64> {
         let a = amp(70.0);
@@ -455,6 +506,9 @@ fn dump_reference_signals() {
     write("tone1k60", &sigfix::tone(1000.0, 60.0));
     write("tone250_80", &sigfix::tone(250.0, 80.0));
     write("pulse1k70", &sigfix::pulse());
+    write("tonal_a", &sigfix::tonal_a());
+    write("noise_b", &sigfix::noise_b());
+    write("lowsnr_c", &sigfix::lowsnr_c());
 }
 
 /// Stationary loudness through the 48 kHz PCM filterbank path,
@@ -713,4 +767,134 @@ fn pareto_batch_is_aggregation_exact() {
         Err(PsychoError::UnsupportedRate { .. })
     ));
     println!("{{\"suite\":\"fs-psycho\",\"case\":\"pareto-batch\",\"verdict\":\"pass\"}}");
+}
+
+/// ECMA tonality (TNR + PR), EXACTNESS-pinned against the extracted
+/// Apache-2.0 MoSQITo reference run on bit-identical fixture PCM
+/// (dump_reference_signals + tnrref/drive_tnr.py, full precision).
+#[test]
+// float_cmp: the zero totals are the reference's EXACT no-prominent
+// convention, not a computed value near zero.
+#[allow(clippy::excessive_precision, clippy::float_cmp)]
+fn tonality_matches_reference() {
+    use fs_psycho::tonality::{prominence_ratio_ecma, tone_to_noise_ecma};
+    let sr = sigfix::SR;
+    // Fixture A: two deterministic tones over LCG noise.
+    let a = sigfix::tonal_a();
+    let tnr = tone_to_noise_ecma(&a, sr).expect("tnr");
+    assert_eq!(tnr.tones.len(), 2, "{:?}", tnr.tones);
+    let pins_tnr: [(f64, f64); 2] = [
+        (1_000.488_281_25, 12.434_966_853_609_048),
+        (3_000.732_421_875, 51.331_313_916_320_724),
+    ];
+    for (tone, (f_ref, v_ref)) in tnr.tones.iter().zip(pins_tnr) {
+        assert_eq!(tone.frequency_hz.to_bits(), f_ref.to_bits(), "tone freq");
+        assert!(
+            ((tone.ratio_db - v_ref) / v_ref).abs() < 1.0e-9,
+            "TNR {:.17} vs {v_ref:.17}",
+            tone.ratio_db
+        );
+        assert!(tone.prominent);
+    }
+    let t_tnr_ref = 51.331_873_83;
+    assert!(
+        (tnr.total_db - t_tnr_ref).abs() < 1.0e-6,
+        "{}",
+        tnr.total_db
+    );
+    let pr = prominence_ratio_ecma(&a, sr).expect("pr");
+    assert_eq!(pr.tones.len(), 2);
+    let pins_pr: [(f64, f64); 2] = [
+        (1_000.488_281_25, 61.485_567_666_731_83),
+        (3_000.732_421_875, 50.696_977_402_016_664),
+    ];
+    for (tone, (f_ref, v_ref)) in pr.tones.iter().zip(pins_pr) {
+        assert_eq!(tone.frequency_hz.to_bits(), f_ref.to_bits());
+        assert!(
+            ((tone.ratio_db - v_ref) / v_ref).abs() < 1.0e-9,
+            "PR {:.17} vs {v_ref:.17}",
+            tone.ratio_db
+        );
+        assert!(tone.prominent);
+    }
+    assert!(
+        (pr.total_db - 61.833_436_68).abs() < 1.0e-6,
+        "{}",
+        pr.total_db
+    );
+    // Fixture B: noise only — TNR finds NO tones; PR finds exactly 10
+    // weak candidates, none prominent, total 0 (reference-exact).
+    let b = sigfix::noise_b();
+    let tnr_b = tone_to_noise_ecma(&b, sr).expect("tnr");
+    assert!(tnr_b.tones.is_empty(), "{:?}", tnr_b.tones);
+    assert_eq!(tnr_b.total_db, 0.0);
+    let pr_b = prominence_ratio_ecma(&b, sr).expect("pr");
+    assert_eq!(pr_b.tones.len(), 10, "{:?}", pr_b.tones);
+    assert!(pr_b.tones.iter().all(|t| !t.prominent));
+    assert_eq!(pr_b.total_db, 0.0);
+    // One PR candidate pinned mid-list (953.6 Hz, 0.5146 dB).
+    let probe = &pr_b.tones[2];
+    assert_eq!(probe.frequency_hz.to_bits(), 953.613_281_25_f64.to_bits());
+    assert!(
+        ((probe.ratio_db - 0.514_649_934_651_174_6) / 0.514_649_934_651_174_6).abs() < 1.0e-6,
+        "{:.17}",
+        probe.ratio_db
+    );
+    // Fixture C: low-SNR 500 Hz tone — detected, prominent, pinned.
+    let c = sigfix::lowsnr_c();
+    let tnr_c = tone_to_noise_ecma(&c, sr).expect("tnr");
+    assert_eq!(tnr_c.tones.len(), 1);
+    assert_eq!(
+        tnr_c.tones[0].frequency_hz.to_bits(),
+        500.976_562_5_f64.to_bits()
+    );
+    assert!(
+        ((tnr_c.tones[0].ratio_db - 12.384_273_273_044_364) / 12.384_273_273_044_364).abs()
+            < 1.0e-9
+    );
+    assert!(tnr_c.tones[0].prominent);
+    let pr_c = prominence_ratio_ecma(&c, sr).expect("pr");
+    assert_eq!(pr_c.tones.len(), 6, "{:?}", pr_c.tones);
+    assert!(
+        ((pr_c.tones[0].ratio_db - 32.775_056_728_327_13) / 32.775_056_728_327_13).abs() < 1.0e-9
+    );
+    assert!(pr_c.tones[0].prominent);
+    assert!(pr_c.tones[1..].iter().all(|t| !t.prominent));
+    println!("{{\"suite\":\"fs-psycho\",\"case\":\"tonality\",\"verdict\":\"pass\"}}");
+}
+
+/// Tonality refusals, typed by name.
+#[test]
+fn tonality_refusals_are_typed() {
+    use fs_psycho::tonality::tone_to_noise_ecma;
+    let good = sigfix::tonal_a();
+    // Non-power-of-two length.
+    assert!(matches!(
+        tone_to_noise_ecma(&good[..60_000], sigfix::SR),
+        Err(PsychoError::Shape { .. })
+    ));
+    // Too short.
+    assert!(matches!(
+        tone_to_noise_ecma(&good[..2048], sigfix::SR),
+        Err(PsychoError::Shape { .. })
+    ));
+    // NaN sample.
+    let mut bad = good.clone();
+    bad[9] = f64::NAN;
+    assert!(matches!(
+        tone_to_noise_ecma(&bad, sigfix::SR),
+        Err(PsychoError::NonFinite { .. })
+    ));
+    // Bad rates.
+    for sr in [f64::NAN, 0.0, -1.0, f64::INFINITY] {
+        assert!(matches!(
+            tone_to_noise_ecma(&good, sr),
+            Err(PsychoError::NonFinite { .. })
+        ));
+    }
+    // A rate so low the detection band is unresolvable.
+    assert!(matches!(
+        tone_to_noise_ecma(&good[..4096], 100.0),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
 }
