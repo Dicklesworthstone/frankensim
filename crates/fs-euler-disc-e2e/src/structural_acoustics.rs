@@ -173,6 +173,169 @@ pub struct StructuralModalBasis {
     pub identity: ContentHash,
 }
 
+/// Geometric support constraint for a rectangular thin plate.
+///
+/// Coordinates are expressed in the centered plate frame, with the plate
+/// occupying `[-width/2,width/2] x [-depth/2,depth/2]`. Point supports are
+/// snapped to the nearest structured-mesh nodes under an explicit tolerance;
+/// the resolved nodes and maximum snap error become part of the modal-basis
+/// artifact and its identity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RectangularPlateSupport {
+    /// Apply one idealized support condition to every perimeter node.
+    Perimeter(PlateEdgeSupport),
+    /// Pin transverse displacement at three non-collinear support locations.
+    /// Plate rotations remain free at each pin.
+    ThreePointPinned {
+        /// Requested support locations in centered plate coordinates [m].
+        points_centered_m: [[f64; 2]; 3],
+        /// Largest permitted request-to-mesh-node distance [m].
+        maximum_snap_distance_m: f64,
+    },
+}
+
+impl RectangularPlateSupport {
+    /// Stable, human-readable support-family code for artifact manifests.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Perimeter(PlateEdgeSupport::SimplySupported) => "simply-supported-perimeter",
+            Self::Perimeter(PlateEdgeSupport::Clamped) => "clamped-perimeter",
+            Self::ThreePointPinned { .. } => "three-point-pinned",
+        }
+    }
+
+    /// Validate support geometry and mesh snapping for a rectangular grid.
+    ///
+    /// # Errors
+    /// Refuses non-finite dimensions, an empty grid, out-of-bounds points,
+    /// excessive snap error, duplicate resolved nodes, or collinear pins.
+    pub fn validate_for_rectangular_grid(
+        self,
+        width_m: f64,
+        depth_m: f64,
+        cells_x: usize,
+        cells_y: usize,
+    ) -> Result<(), StructuralModalBasisError> {
+        if !(width_m.is_finite() && width_m > 0.0)
+            || !(depth_m.is_finite() && depth_m > 0.0)
+            || cells_x == 0
+            || cells_y == 0
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "plate support validation requires positive dimensions and grid cells",
+            });
+        }
+        let mesh = PlateMesh::rectangle(width_m, depth_m, cells_x, cells_y);
+        resolve_rectangular_plate_support(self, &mesh, width_m, depth_m, cells_x, cells_y)
+            .map(|_| ())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedRectangularPlateSupport {
+    boundary_nodes: Vec<usize>,
+    condition: PlateEdgeSupport,
+    maximum_snap_error_m: f64,
+}
+
+fn resolve_rectangular_plate_support(
+    support: RectangularPlateSupport,
+    mesh: &PlateMesh,
+    width_m: f64,
+    depth_m: f64,
+    cells_x: usize,
+    cells_y: usize,
+) -> Result<ResolvedRectangularPlateSupport, StructuralModalBasisError> {
+    match support {
+        RectangularPlateSupport::Perimeter(condition) => Ok(ResolvedRectangularPlateSupport {
+            boundary_nodes: PlateMesh::rectangle_boundary(cells_x, cells_y),
+            condition,
+            maximum_snap_error_m: 0.0,
+        }),
+        RectangularPlateSupport::ThreePointPinned {
+            points_centered_m,
+            maximum_snap_distance_m,
+        } => {
+            if !(maximum_snap_distance_m.is_finite() && maximum_snap_distance_m >= 0.0)
+                || points_centered_m
+                    .iter()
+                    .flatten()
+                    .any(|coordinate| !coordinate.is_finite())
+            {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "plate point supports and snap tolerance must be finite and nonnegative",
+                });
+            }
+            let half_width = 0.5 * width_m;
+            let half_depth = 0.5 * depth_m;
+            if points_centered_m.iter().any(|point| {
+                point[0] < -half_width
+                    || point[0] > half_width
+                    || point[1] < -half_depth
+                    || point[1] > half_depth
+            }) {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "plate point support lies outside the rectangular plate",
+                });
+            }
+
+            let mut boundary_nodes = Vec::with_capacity(3);
+            let mut maximum_snap_error_m = 0.0_f64;
+            for point in points_centered_m {
+                let local = [point[0] + half_width, point[1] + half_depth];
+                let mut nearest = None::<(usize, f64)>;
+                for (node, &(x, y)) in mesh.nodes.iter().enumerate() {
+                    let dx = x - local[0];
+                    let dy = y - local[1];
+                    let distance_squared = dx.mul_add(dx, dy * dy);
+                    if nearest.is_none_or(|(_, best)| distance_squared < best) {
+                        nearest = Some((node, distance_squared));
+                    }
+                }
+                let (node, distance_squared) =
+                    nearest.ok_or(StructuralModalBasisError::InvalidRequest {
+                        what: "plate point support cannot resolve against an empty mesh",
+                    })?;
+                let distance_m = distance_squared.sqrt();
+                if distance_m > maximum_snap_distance_m {
+                    return Err(StructuralModalBasisError::InvalidRequest {
+                        what: "plate point support exceeds its mesh-snap tolerance",
+                    });
+                }
+                maximum_snap_error_m = maximum_snap_error_m.max(distance_m);
+                boundary_nodes.push(node);
+            }
+            let mut distinct_nodes = boundary_nodes.clone();
+            distinct_nodes.sort_unstable();
+            distinct_nodes.dedup();
+            if distinct_nodes.len() != 3 {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "plate point supports must resolve to three distinct mesh nodes",
+                });
+            }
+            let resolved_points =
+                [boundary_nodes[0], boundary_nodes[1], boundary_nodes[2]].map(|node| {
+                    let (x, y) = mesh.nodes[node];
+                    [x - half_width, y - half_depth]
+                });
+            let [a, b, c] = resolved_points;
+            let twice_area = (b[0] - a[0]).mul_add(c[1] - a[1], -(b[1] - a[1]) * (c[0] - a[0]));
+            let area_scale = width_m.max(depth_m).powi(2);
+            if twice_area.abs() <= 64.0 * f64::EPSILON * area_scale {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "plate point supports must be non-collinear",
+                });
+            }
+            Ok(ResolvedRectangularPlateSupport {
+                boundary_nodes,
+                condition: PlateEdgeSupport::SimplySupported,
+                maximum_snap_error_m,
+            })
+        }
+    }
+}
+
 /// Physical and numerical request for a supported rectangular thin plate.
 ///
 /// Geometry, boundary support, and the resolved material state are all
@@ -187,8 +350,8 @@ pub struct RectangularPlateModeRequest<'a> {
     pub thickness_m: f64,
     /// Exact evidence-bearing isotropic elastic state.
     pub elastic: &'a IsotropicElasticStatePoint,
-    /// Idealized perimeter support admitted by the plate model.
-    pub edge_support: PlateEdgeSupport,
+    /// Explicit geometric support constraint admitted by the plate model.
+    pub support: RectangularPlateSupport,
     /// Structured cells along x.
     pub cells_x: usize,
     /// Structured cells along y.
@@ -234,8 +397,12 @@ pub struct RectangularPlateModalBasis {
     pub thickness_m: f64,
     /// Exact material state used by the section.
     pub material_state_identity: ContentHash,
-    /// Perimeter support condition.
-    pub edge_support: PlateEdgeSupport,
+    /// Requested support geometry and condition.
+    pub support: RectangularPlateSupport,
+    /// Mesh nodes to which support constraints were actually applied.
+    pub support_node_indices: Vec<usize>,
+    /// Largest request-to-node support snap error [m].
+    pub maximum_support_snap_error_m: f64,
     /// Structured cells along x.
     pub cells_x: usize,
     /// Structured cells along y.
@@ -1259,15 +1426,22 @@ pub fn build_rectangular_plate_modal_basis(
         request.cells_x,
         request.cells_y,
     );
-    let boundary = PlateMesh::rectangle_boundary(request.cells_x, request.cells_y);
+    let support = resolve_rectangular_plate_support(
+        request.support,
+        &mesh,
+        request.width_m,
+        request.depth_m,
+        request.cells_x,
+        request.cells_y,
+    )?;
     let model = assemble_plate(
         &mesh,
         &section,
-        &boundary,
+        &support.boundary_nodes,
         &[],
         &PlateAssemblyOptions {
             pretension: 0.0,
-            support: request.edge_support,
+            support: support.condition,
         },
     )?;
     let angular_min = core::f64::consts::TAU * request.minimum_frequency_hz;
@@ -1313,10 +1487,31 @@ pub fn build_rectangular_plate_modal_basis(
     for value in [request.width_m, request.depth_m, request.thickness_m] {
         identity.update(&value.to_bits().to_le_bytes());
     }
-    identity.update(&[match request.edge_support {
-        PlateEdgeSupport::SimplySupported => 0,
-        PlateEdgeSupport::Clamped => 1,
-    }]);
+    match request.support {
+        RectangularPlateSupport::Perimeter(condition) => {
+            identity.update(&[0]);
+            identity.update(&[match condition {
+                PlateEdgeSupport::SimplySupported => 0,
+                PlateEdgeSupport::Clamped => 1,
+            }]);
+        }
+        RectangularPlateSupport::ThreePointPinned {
+            points_centered_m,
+            maximum_snap_distance_m,
+        } => {
+            identity.update(&[1]);
+            for point in points_centered_m {
+                for coordinate in point {
+                    identity.update(&coordinate.to_bits().to_le_bytes());
+                }
+            }
+            identity.update(&maximum_snap_distance_m.to_bits().to_le_bytes());
+        }
+    }
+    for node in &support.boundary_nodes {
+        identity.update(&u64::try_from(*node).unwrap_or(u64::MAX).to_le_bytes());
+    }
+    identity.update(&support.maximum_snap_error_m.to_bits().to_le_bytes());
     identity.update(
         &u64::try_from(request.cells_x)
             .unwrap_or(u64::MAX)
@@ -1354,7 +1549,9 @@ pub fn build_rectangular_plate_modal_basis(
         depth_m: request.depth_m,
         thickness_m: request.thickness_m,
         material_state_identity,
-        edge_support: request.edge_support,
+        support: request.support,
+        support_node_indices: support.boundary_nodes,
+        maximum_support_snap_error_m: support.maximum_snap_error_m,
         cells_x: request.cells_x,
         cells_y: request.cells_y,
         mesh,
@@ -3710,6 +3907,73 @@ mod tests {
             .resolve_with_isotropic_elastic_state(&material, cx)
             .unwrap()
         })
+    }
+
+    #[test]
+    fn g0_three_point_plate_support_resolves_geometry_and_builds_physical_modes() {
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let material = resolve_isotropic_elastic_state_point(
+            &material_card(70.0e9, 2_500.0),
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let support = RectangularPlateSupport::ThreePointPinned {
+            points_centered_m: [[-0.0675, -0.0675], [0.0675, -0.0675], [0.0, 0.0675]],
+            maximum_snap_distance_m: 1.0e-12,
+        };
+        let basis = with_cx(|cx| {
+            build_rectangular_plate_modal_basis(
+                &RectangularPlateModeRequest {
+                    width_m: 0.18,
+                    depth_m: 0.18,
+                    thickness_m: 0.010,
+                    elastic: &material,
+                    support,
+                    cells_x: 16,
+                    cells_y: 16,
+                    maximum_nodes: 2_048,
+                    minimum_frequency_hz: 10.0,
+                    maximum_frequency_hz: 5_000.0,
+                    maximum_modes: 64,
+                    slice: SliceOptions::default(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        assert_eq!(basis.support, support);
+        assert_eq!(basis.support_node_indices, vec![36, 48, 246]);
+        assert!(basis.maximum_support_snap_error_m <= 1.0e-12);
+        assert!(!basis.modes.is_empty());
+        assert!(basis.modes.iter().all(|mode| {
+            mode.frequency_hz >= 10.0
+                && mode.frequency_hz <= 5_000.0
+                && mode.frequency_hz.is_finite()
+        }));
+    }
+
+    #[test]
+    fn g0_three_point_plate_support_refuses_degenerate_resolved_constraints() {
+        let duplicate = RectangularPlateSupport::ThreePointPinned {
+            points_centered_m: [[0.0, 0.0], [1.0e-9, 0.0], [0.04, 0.04]],
+            maximum_snap_distance_m: 0.01,
+        };
+        assert!(
+            duplicate
+                .validate_for_rectangular_grid(0.18, 0.18, 16, 16)
+                .is_err()
+        );
+
+        let collinear = RectangularPlateSupport::ThreePointPinned {
+            points_centered_m: [[-0.045, 0.0], [0.0, 0.0], [0.045, 0.0]],
+            maximum_snap_distance_m: 1.0e-12,
+        };
+        assert!(
+            collinear
+                .validate_for_rectangular_grid(0.18, 0.18, 16, 16)
+                .is_err()
+        );
     }
 
     fn coarse_modal_request(specimen: &ResolvedElasticDiscProfile) -> StructuralModeRequest<'_> {

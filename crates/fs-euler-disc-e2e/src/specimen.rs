@@ -46,6 +46,12 @@ pub const EULER_SPECIMEN_THERMAL_GEOMETRY_IDENTITY_DOMAIN: &str =
 /// Canonical identity domain for a thermal march bound to one exact specimen.
 pub const EULER_SPECIMEN_THERMAL_MARCH_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.specimen-thermal-march.v1";
+/// Canonical identity domain for the bounded free-isotropic solid expansion law.
+pub const EULER_ISOTROPIC_FREE_EXPANSION_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.isotropic-free-expansion-law.v1";
+/// Canonical identity domain for one thermally evolved solid profile.
+pub const EULER_EVOLVED_SOLID_PROFILE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.evolved-solid-profile.v1";
 /// Canonical identity domain for geometry plus its resolved material state.
 pub const EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.material-specimen.v1";
@@ -329,6 +335,161 @@ pub struct MassConservingDiscPhaseState {
     pub identity: ContentHash,
 }
 
+/// Bounded law for a homogeneous, unconstrained, isotropic solid in thermal equilibrium.
+///
+/// The phase curve supplies equilibrium density, so mass conservation fixes the
+/// volume ratio. This law supplies the additional constitutive assertion that
+/// the free thermal strain is isotropic, making the unique linear scale the
+/// cube root of that ratio. The authority identity must refer to evidence or a
+/// caller declaration for that assertion; a chemistry name never selects it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UniformIsotropicFreeExpansionLaw {
+    maximum_absolute_linear_strain: f64,
+    authority_identity: ContentHash,
+    identity: ContentHash,
+}
+
+impl UniformIsotropicFreeExpansionLaw {
+    /// Construct a bounded free-expansion law.
+    ///
+    /// `maximum_absolute_linear_strain` is a dimensionless validity bound on
+    /// `abs(linear_scale - 1)`. Zero identities and nonpositive/nonfinite
+    /// bounds refuse rather than creating anonymous constitutive authority.
+    pub fn try_new(
+        maximum_absolute_linear_strain: f64,
+        authority_identity: ContentHash,
+    ) -> Result<Self, SolidGeometryEvolutionError> {
+        if !(maximum_absolute_linear_strain.is_finite() && maximum_absolute_linear_strain > 0.0) {
+            return Err(SolidGeometryEvolutionError::InvalidLaw {
+                field: "maximum_absolute_linear_strain",
+            });
+        }
+        if authority_identity.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(SolidGeometryEvolutionError::InvalidLaw {
+                field: "authority_identity",
+            });
+        }
+        let mut identity = DomainHasher::new(EULER_ISOTROPIC_FREE_EXPANSION_IDENTITY_DOMAIN);
+        identity.update(authority_identity.as_bytes());
+        identity.update(&maximum_absolute_linear_strain.to_bits().to_le_bytes());
+        Ok(Self {
+            maximum_absolute_linear_strain,
+            authority_identity,
+            identity: identity.finalize(),
+        })
+    }
+
+    /// Maximum admitted magnitude of free linear strain.
+    #[must_use]
+    pub const fn maximum_absolute_linear_strain(self) -> f64 {
+        self.maximum_absolute_linear_strain
+    }
+
+    /// Evidence or caller-declaration identity for isotropic free expansion.
+    #[must_use]
+    pub const fn authority_identity(self) -> ContentHash {
+        self.authority_identity
+    }
+
+    /// Complete law identity.
+    #[must_use]
+    pub const fn identity(self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// A mass-conserving solid profile evolved by one admitted geometry law.
+///
+/// Consumers must still resolve temperature-dependent elasticity, contact,
+/// damping, and optics at `phase_state` before advancing mechanics, sound, or
+/// rendering. This value establishes geometry and mass only.
+#[derive(Clone, Debug)]
+pub struct ResolvedEvolvedSolidDiscProfile {
+    /// Geometry and mass properties at the evolved equilibrium density.
+    profile: ResolvedDiscProfile,
+    /// Solid thermodynamic state that required the geometry update.
+    phase_state: EquilibriumPhaseState,
+    /// Uniform scale applied to every reference length.
+    linear_scale: f64,
+    /// Exact free-expansion law identity.
+    expansion_law_identity: ContentHash,
+    /// Identity binding reference specimen, phase state, law, and evolved profile.
+    identity: ContentHash,
+}
+
+impl ResolvedEvolvedSolidDiscProfile {
+    /// Geometry and mass properties at the evolved equilibrium density.
+    #[must_use]
+    pub const fn profile(&self) -> &ResolvedDiscProfile {
+        &self.profile
+    }
+
+    /// Solid thermodynamic state that required the geometry update.
+    #[must_use]
+    pub const fn phase_state(&self) -> EquilibriumPhaseState {
+        self.phase_state
+    }
+
+    /// Uniform scale applied to every reference length.
+    #[must_use]
+    pub const fn linear_scale(&self) -> f64 {
+        self.linear_scale
+    }
+
+    /// Exact free-expansion law identity.
+    #[must_use]
+    pub const fn expansion_law_identity(&self) -> ContentHash {
+        self.expansion_law_identity
+    }
+
+    /// Identity binding the admitted reference, phase state, law, and result.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Bind the evolved geometry to a complete isotropic solid state for contact.
+    pub fn try_bind_isotropic_solid(
+        &self,
+        material: &IsotropicSolidStatePoint,
+    ) -> Result<ResolvedMaterialDiscProfile, PhaseDiscBindingError> {
+        require_matching_phase_material_state(
+            self.phase_state,
+            material.resolved().card_identity(),
+            material.resolved().query_point(),
+            material.density_kg_m3(),
+        )?;
+        let profile_identities = self.profile.content_identities();
+        let mut identity = DomainHasher::new(EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN);
+        identity.update(profile_identities.profile.as_bytes());
+        identity.update(profile_identities.mass_properties.as_bytes());
+        identity.update(material.resolved().identity().as_bytes());
+        Ok(ResolvedMaterialDiscProfile {
+            profile: self.profile.clone(),
+            material: material.clone(),
+            identity: identity.finalize(),
+        })
+    }
+
+    /// Bind the evolved geometry to minimal isotropic elasticity for modes and sound.
+    pub fn try_bind_isotropic_elastic(
+        &self,
+        material: &IsotropicElasticStatePoint,
+    ) -> Result<ResolvedElasticDiscProfile, PhaseDiscBindingError> {
+        require_matching_phase_material_state(
+            self.phase_state,
+            material.resolved().card_identity(),
+            material.resolved().query_point(),
+            material.density_kg_m3(),
+        )?;
+        Ok(ResolvedElasticDiscProfile::bind(
+            self.profile.clone(),
+            TetElasticMaterial::from_resolved_elastic_state(material),
+            material.resolved().card_identity(),
+        ))
+    }
+}
+
 /// One thermal boundary state coupled back to invariant specimen mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiscThermalSample {
@@ -517,6 +678,93 @@ impl ResolvedPhaseDiscProfile {
         })
     }
 
+    /// Evolve a still-solid body under a bounded free/isotropic/isothermal law.
+    ///
+    /// All profile lengths, including bores, fillets, chamfers, and taper
+    /// dimensions, receive the same scale. The evolved profile is then
+    /// re-resolved at the phase state's density, so geometry, support queries,
+    /// mass, centroid, and inertia remain one coherent asset. Liquid states and
+    /// changes outside the law's validity bound refuse.
+    pub fn resolve_uniform_isotropic_free_expansion(
+        &self,
+        state: MassConservingDiscPhaseState,
+        law: UniformIsotropicFreeExpansionLaw,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedEvolvedSolidDiscProfile, SolidGeometryEvolutionError> {
+        let expected = self
+            .mass_conserving_state(state.phase_state)
+            .map_err(SolidGeometryEvolutionError::PhaseBinding)?;
+        // The carrier is publicly constructible for transport/reporting.  A
+        // matching retained hash alone is therefore not an admission token:
+        // reject any field mutation that failed to recompute the identity.
+        if expected != state {
+            return Err(SolidGeometryEvolutionError::PhaseStateMismatch);
+        }
+        if state.phase_state.phase() != SolidLiquidPhase::Solid {
+            return Err(SolidGeometryEvolutionError::EvolvingFreeSurfaceRequired {
+                liquid_mass_fraction: state.phase_state.liquid_mass_fraction(),
+            });
+        }
+        let linear_scale = state.volume_ratio.cbrt();
+        if !(linear_scale.is_finite() && linear_scale > 0.0) {
+            return Err(SolidGeometryEvolutionError::InvalidDerivedScale {
+                volume_ratio: state.volume_ratio,
+            });
+        }
+        let absolute_linear_strain = (linear_scale - 1.0).abs();
+        if absolute_linear_strain > law.maximum_absolute_linear_strain() {
+            return Err(SolidGeometryEvolutionError::LawValidityExceeded {
+                absolute_linear_strain,
+                maximum_absolute_linear_strain: law.maximum_absolute_linear_strain(),
+            });
+        }
+        let scaled_spec = self
+            .profile
+            .spec
+            .uniformly_scaled(linear_scale)
+            .map_err(SolidGeometryEvolutionError::Profile)?;
+        let profile = scaled_spec
+            .resolve(state.phase_state.bulk_density_kg_m3(), cx)
+            .map_err(SolidGeometryEvolutionError::Profile)?;
+        let mass_tolerance = 64.0
+            * f64::EPSILON
+            * state
+                .invariant_mass_kg
+                .abs()
+                .max(profile.mass_properties.mass.abs());
+        let volume_tolerance = 64.0
+            * f64::EPSILON
+            * state
+                .required_volume_m3
+                .abs()
+                .max(profile.mass_properties.volume.abs());
+        if (profile.mass_properties.mass - state.invariant_mass_kg).abs() > mass_tolerance
+            || (profile.mass_properties.volume - state.required_volume_m3).abs() > volume_tolerance
+        {
+            return Err(SolidGeometryEvolutionError::MassConservationFailure {
+                expected_mass_kg: state.invariant_mass_kg,
+                actual_mass_kg: profile.mass_properties.mass,
+                expected_volume_m3: state.required_volume_m3,
+                actual_volume_m3: profile.mass_properties.volume,
+            });
+        }
+        let identities = profile.content_identities();
+        let mut identity = DomainHasher::new(EULER_EVOLVED_SOLID_PROFILE_IDENTITY_DOMAIN);
+        identity.update(self.identity.as_bytes());
+        identity.update(state.identity.as_bytes());
+        identity.update(law.identity().as_bytes());
+        identity.update(identities.profile.as_bytes());
+        identity.update(identities.mass_properties.as_bytes());
+        identity.update(&linear_scale.to_bits().to_le_bytes());
+        Ok(ResolvedEvolvedSolidDiscProfile {
+            profile,
+            phase_state: state.phase_state,
+            linear_scale,
+            expansion_law_identity: law.identity(),
+            identity: identity.finalize(),
+        })
+    }
+
     /// Bind a fully solid phase state to the independently resolved elastic
     /// properties consumed by fixed-topology mechanics.
     ///
@@ -534,27 +782,12 @@ impl ResolvedPhaseDiscProfile {
             });
         }
         let resolved = material.resolved();
-        if resolved.card_identity() != self.phase_state.material_card_identity() {
-            return Err(PhaseDiscBindingError::MaterialCardMismatch);
-        }
-        let temperature_k = resolved
-            .query_point()
-            .binary_search_by(|(axis, _)| axis.as_str().cmp("T"))
-            .ok()
-            .map(|index| resolved.query_point()[index].1)
-            .ok_or(PhaseDiscBindingError::MissingTemperatureCoordinate)?;
-        if temperature_k.to_bits() != self.phase_state.temperature_k().to_bits() {
-            return Err(PhaseDiscBindingError::TemperatureMismatch {
-                phase_temperature_k: self.phase_state.temperature_k(),
-                mechanical_temperature_k: temperature_k,
-            });
-        }
-        if material.density_kg_m3().to_bits() != self.phase_state.bulk_density_kg_m3().to_bits() {
-            return Err(PhaseDiscBindingError::DensityMismatch {
-                phase_density_kg_m3: self.phase_state.bulk_density_kg_m3(),
-                mechanical_density_kg_m3: material.density_kg_m3(),
-            });
-        }
+        require_matching_phase_material_state(
+            self.phase_state,
+            resolved.card_identity(),
+            resolved.query_point(),
+            material.density_kg_m3(),
+        )?;
         let mut identity = DomainHasher::new(EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN);
         let profile_identities = self.profile.content_identities();
         identity.update(profile_identities.profile.as_bytes());
@@ -566,6 +799,36 @@ impl ResolvedPhaseDiscProfile {
             identity: identity.finalize(),
         })
     }
+}
+
+fn require_matching_phase_material_state(
+    phase_state: EquilibriumPhaseState,
+    material_card_identity: ContentHash,
+    query_point: &[(String, f64)],
+    density_kg_m3: f64,
+) -> Result<(), PhaseDiscBindingError> {
+    if material_card_identity != phase_state.material_card_identity() {
+        return Err(PhaseDiscBindingError::MaterialCardMismatch);
+    }
+    let temperature_k = query_point
+        .binary_search_by(|(axis, _)| axis.as_str().cmp("T"))
+        .ok()
+        .and_then(|index| query_point.get(index))
+        .map(|(_, temperature_k)| *temperature_k)
+        .ok_or(PhaseDiscBindingError::MissingTemperatureCoordinate)?;
+    if temperature_k.to_bits() != phase_state.temperature_k().to_bits() {
+        return Err(PhaseDiscBindingError::TemperatureMismatch {
+            phase_temperature_k: phase_state.temperature_k(),
+            mechanical_temperature_k: temperature_k,
+        });
+    }
+    if density_kg_m3.to_bits() != phase_state.bulk_density_kg_m3().to_bits() {
+        return Err(PhaseDiscBindingError::DensityMismatch {
+            phase_density_kg_m3: phase_state.bulk_density_kg_m3(),
+            mechanical_density_kg_m3: density_kg_m3,
+        });
+    }
+    Ok(())
 }
 
 /// Refusal from joining a phase state to fixed-solid mechanics.
@@ -637,6 +900,58 @@ pub enum DiscThermalCouplingError {
         requested: usize,
     },
 }
+
+/// Refusal while evolving a still-solid reference profile.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SolidGeometryEvolutionError {
+    /// Free-expansion law metadata or validity bound was malformed.
+    InvalidLaw {
+        /// Invalid field.
+        field: &'static str,
+    },
+    /// The state was not derived from this exact reference specimen.
+    PhaseStateMismatch,
+    /// Rebinding the phase state to the reference specimen refused.
+    PhaseBinding(PhaseDiscBindingError),
+    /// A liquid fraction requires free-surface evolution instead of similarity scaling.
+    EvolvingFreeSurfaceRequired {
+        /// Equilibrium liquid mass fraction that triggered escalation.
+        liquid_mass_fraction: f64,
+    },
+    /// Density-derived volume ratio did not produce a usable linear scale.
+    InvalidDerivedScale {
+        /// Required evolved-to-reference volume ratio.
+        volume_ratio: f64,
+    },
+    /// Required free strain exceeds the supplied constitutive law's validity.
+    LawValidityExceeded {
+        /// Required magnitude of `linear_scale - 1`.
+        absolute_linear_strain: f64,
+        /// Maximum magnitude admitted by the law.
+        maximum_absolute_linear_strain: f64,
+    },
+    /// Constructing or resolving the scaled profile refused.
+    Profile(DiscProfileError),
+    /// The scaled profile failed the independent mass/volume closure check.
+    MassConservationFailure {
+        /// Invariant reference mass [kg].
+        expected_mass_kg: f64,
+        /// Reintegrated evolved mass [kg].
+        actual_mass_kg: f64,
+        /// Density-derived required volume [m3].
+        expected_volume_m3: f64,
+        /// Reintegrated evolved volume [m3].
+        actual_volume_m3: f64,
+    },
+}
+
+impl fmt::Display for SolidGeometryEvolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for SolidGeometryEvolutionError {}
 
 impl fmt::Display for DiscThermalCouplingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -843,6 +1158,78 @@ impl fmt::Display for DiscProfileError {
 impl std::error::Error for DiscProfileError {}
 
 impl DiscProfileSpec {
+    /// Scale every physical length in the profile by one positive factor.
+    ///
+    /// This operation preserves the exact profile family and all dimensionless
+    /// proportions. It does not select a thermomechanical law; callers must
+    /// obtain the factor from an admitted constitutive/phase-state coupling.
+    pub fn uniformly_scaled(self, linear_scale: f64) -> Result<Self, DiscProfileError> {
+        positive("linear_scale", linear_scale)?;
+        let scale_edge = |edge| match edge {
+            SquatDiscEdgeTreatment::Sharp => SquatDiscEdgeTreatment::Sharp,
+            SquatDiscEdgeTreatment::CircularFillet { radius } => {
+                SquatDiscEdgeTreatment::CircularFillet {
+                    radius: radius * linear_scale,
+                }
+            }
+        };
+        let scaled = match self {
+            Self::SolidCylinder {
+                outer_radius_m,
+                thickness_m,
+                edge_treatment,
+            } => Self::SolidCylinder {
+                outer_radius_m: outer_radius_m * linear_scale,
+                thickness_m: thickness_m * linear_scale,
+                edge_treatment: scale_edge(edge_treatment),
+            },
+            Self::AnnularCylinder {
+                outer_radius_m,
+                inner_radius_m,
+                thickness_m,
+            } => Self::AnnularCylinder {
+                outer_radius_m: outer_radius_m * linear_scale,
+                inner_radius_m: inner_radius_m * linear_scale,
+                thickness_m: thickness_m * linear_scale,
+            },
+            Self::OuterFilletedAnnularCylinder {
+                outer_radius_m,
+                inner_radius_m,
+                thickness_m,
+                outer_fillet_radius_m,
+            } => Self::OuterFilletedAnnularCylinder {
+                outer_radius_m: outer_radius_m * linear_scale,
+                inner_radius_m: inner_radius_m * linear_scale,
+                thickness_m: thickness_m * linear_scale,
+                outer_fillet_radius_m: outer_fillet_radius_m * linear_scale,
+            },
+            Self::SymmetricTapered {
+                outer_radius_m,
+                face_radius_m,
+                thickness_m,
+            } => Self::SymmetricTapered {
+                outer_radius_m: outer_radius_m * linear_scale,
+                face_radius_m: face_radius_m * linear_scale,
+                thickness_m: thickness_m * linear_scale,
+            },
+            Self::ChamferedCylinder {
+                outer_radius_m,
+                thickness_m,
+                chamfer_radial_m,
+                chamfer_axial_m,
+            } => Self::ChamferedCylinder {
+                outer_radius_m: outer_radius_m * linear_scale,
+                thickness_m: thickness_m * linear_scale,
+                chamfer_radial_m: chamfer_radial_m * linear_scale,
+                chamfer_axial_m: chamfer_axial_m * linear_scale,
+            },
+        };
+        // Refuse overflow and any relationship lost to binary64 scaling before
+        // returning a public specification.
+        scaled.chart_and_dimensions()?;
+        Ok(scaled)
+    }
+
     /// Resolve reference geometry and mass at one equilibrium phase state.
     ///
     /// This is phase-agnostic ingress: it admits solid, mushy, and liquid

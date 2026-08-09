@@ -18,9 +18,9 @@ use crate::modal_synthesis::{EulerModalParameterSet, EulerModalParameterSetInput
 use crate::structural_acoustics::{
     AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
     PhysicalModalAudioModel, PhysicalModalInitialState, RectangularPlateModeRequest,
-    ResolvedAcousticMedium, StructuralMeshControls, StructuralModalBasisError,
-    StructuralModeRequest, build_rectangular_plate_modal_basis, build_structural_modal_basis,
-    modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
+    RectangularPlateSupport, ResolvedAcousticMedium, StructuralMeshControls,
+    StructuralModalBasisError, StructuralModeRequest, build_rectangular_plate_modal_basis,
+    build_structural_modal_basis, modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
 };
 use crate::{
     AUDIO_EXCITATION_ALGORITHM_VERSION, AUDIO_RECONSTRUCTION_FILTER_VERSION,
@@ -98,7 +98,6 @@ use fs_material::{
 use fs_math::det;
 use fs_mbd::Vec3;
 use fs_modal::SliceOptions;
-use fs_plate::EdgeSupport as PlateEdgeSupport;
 use fs_qty::{Density, Dims, Pressure};
 use fs_render::{
     aov::{
@@ -519,36 +518,6 @@ impl Default for CinematicDiscStructuralAcousticConfig {
     }
 }
 
-/// Idealized perimeter support admitted by the current thin-plate solver.
-///
-/// This enum selects a mathematical boundary condition, not a material or
-/// apparatus preset. A future elastic foot/housing model must enter through
-/// explicit support stiffness and inertia rather than another name switch.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CinematicPlateEdgeSupport {
-    /// Zero transverse displacement with free boundary rotation.
-    #[default]
-    SimplySupported,
-    /// Zero transverse displacement and zero boundary rotation.
-    Clamped,
-}
-
-impl CinematicPlateEdgeSupport {
-    const fn physical(self) -> PlateEdgeSupport {
-        match self {
-            Self::SimplySupported => PlateEdgeSupport::SimplySupported,
-            Self::Clamped => PlateEdgeSupport::Clamped,
-        }
-    }
-
-    const fn code(self) -> &'static str {
-        match self {
-            Self::SimplySupported => "simply-supported-perimeter",
-            Self::Clamped => "clamped-perimeter",
-        }
-    }
-}
-
 /// Constitutive, damping, and optical inputs for the support plate.
 ///
 /// Every number is caller-replaceable. The descriptive strings are retained
@@ -612,7 +581,7 @@ impl Default for CinematicSupportPlateMaterialConfig {
             // microfacet distribution; callers can supply measured alpha.
             surface_roughness_alpha: None,
             material_label: "crown-like glass support plate; composition unspecified".to_owned(),
-            process_label: "polished plate; perimeter support unmeasured".to_owned(),
+            process_label: "polished plate; three-point support geometry idealized".to_owned(),
             elastic_source:
                 "FrankenSim room-temperature soda-lime/crown-like glass estimate; not measured on apparatus"
                     .to_owned(),
@@ -649,8 +618,8 @@ pub struct CinematicSupportPlateConfig {
     pub maximum_modes: usize,
     /// Minimum surface cells per shortest retained acoustic wavelength.
     pub minimum_panels_per_wavelength: f64,
-    /// Idealized current perimeter support.
-    pub edge_support: CinematicPlateEdgeSupport,
+    /// Explicit support geometry shared with structural acoustics.
+    pub support: RectangularPlateSupport,
     /// Shared constitutive and appearance state.
     pub material: CinematicSupportPlateMaterialConfig,
 }
@@ -668,7 +637,10 @@ impl Default for CinematicSupportPlateConfig {
             maximum_frequency_hz: 5_000.0,
             maximum_modes: 32,
             minimum_panels_per_wavelength: 6.0,
-            edge_support: CinematicPlateEdgeSupport::SimplySupported,
+            support: RectangularPlateSupport::ThreePointPinned {
+                points_centered_m: [[-0.0675, -0.0675], [0.0675, -0.0675], [0.0, 0.0675]],
+                maximum_snap_distance_m: 1.0e-12,
+            },
             material: CinematicSupportPlateMaterialConfig::default(),
         }
     }
@@ -1010,6 +982,15 @@ impl CinematicFixtureConfig {
                 "support plate mesh exceeds its node budget",
             ));
         }
+        plate
+            .support
+            .validate_for_rectangular_grid(
+                plate.width_m,
+                plate.depth_m,
+                plate.cells_x,
+                plate.cells_y,
+            )
+            .map_err(pipeline)?;
         CauchyIor::try_new(
             plate_material.cauchy_a,
             plate_material.cauchy_b_um2,
@@ -1160,6 +1141,8 @@ struct FixturePhysicalAudio {
     plate_optical_model_identity: ContentHash,
     disc_radiator: FixtureDiscAcousticRadiator,
     plate_structural_basis_identity: ContentHash,
+    plate_support_node_indices: Vec<usize>,
+    plate_maximum_support_snap_error_m: f64,
     plate_acoustic_radiation_identity: ContentHash,
     plate_damping_model_identity: ContentHash,
     gas_model_identity: ContentHash,
@@ -5173,7 +5156,7 @@ fn build_physical_audio(
         depth_m: plate.depth_m,
         thickness_m: plate.thickness_m,
         elastic: &physical_plate.elastic,
-        edge_support: plate.edge_support.physical(),
+        support: plate.support,
         cells_x: plate.cells_x,
         cells_y: plate.cells_y,
         maximum_nodes: plate.maximum_nodes,
@@ -5255,6 +5238,8 @@ fn build_physical_audio(
         )
         .map_err(pipeline)?;
     let plate_structural_basis_identity = plate_basis.identity;
+    let plate_support_node_indices = plate_basis.support_node_indices.clone();
+    let plate_maximum_support_snap_error_m = plate_basis.maximum_support_snap_error_m;
     let plate_acoustic_radiation_identity = plate_radiation.identity;
     let plate_retained_mode_count = plate_basis.modes.len();
     let plate_minimum_mode_frequency_hz = plate_basis
@@ -5458,6 +5443,8 @@ fn build_physical_audio(
         plate_optical_model_identity: physical_plate.optical_model_identity,
         disc_radiator,
         plate_structural_basis_identity,
+        plate_support_node_indices,
+        plate_maximum_support_snap_error_m,
         plate_acoustic_radiation_identity,
         plate_damping_model_identity: physical_plate.damping_model_identity,
         gas_model_identity,
@@ -6146,6 +6133,43 @@ fn fixture_manifest(
         .meters
         .integrated_loudness_lufs
         .map_or_else(|| "null".to_owned(), |value| format!("{value:.9}"));
+    let plate_support_nodes = physical_audio
+        .plate_support_node_indices
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let plate_support_json = match config.support_plate.support {
+        RectangularPlateSupport::Perimeter(_) => format!(
+            concat!(
+                "{{\"kind\":\"{}\",\"resolved_node_indices\":[{}],",
+                "\"maximum_snap_error_m\":{:.17e}}}"
+            ),
+            config.support_plate.support.code(),
+            plate_support_nodes,
+            physical_audio.plate_maximum_support_snap_error_m,
+        ),
+        RectangularPlateSupport::ThreePointPinned {
+            points_centered_m,
+            maximum_snap_distance_m,
+        } => format!(
+            concat!(
+                "{{\"kind\":\"three-point-pinned\",",
+                "\"requested_points_centered_m\":[[{:.17e},{:.17e}],[{:.17e},{:.17e}],[{:.17e},{:.17e}]],",
+                "\"maximum_snap_distance_m\":{:.17e},\"resolved_node_indices\":[{}],",
+                "\"maximum_snap_error_m\":{:.17e}}}"
+            ),
+            points_centered_m[0][0],
+            points_centered_m[0][1],
+            points_centered_m[1][0],
+            points_centered_m[1][1],
+            points_centered_m[2][0],
+            points_centered_m[2][1],
+            maximum_snap_distance_m,
+            plate_support_nodes,
+            physical_audio.plate_maximum_support_snap_error_m,
+        ),
+    };
     let disc_radiator_json = match &physical_audio.disc_radiator {
         FixtureDiscAcousticRadiator::OmittedNoModesInBand {
             minimum_frequency_hz,
@@ -6206,7 +6230,7 @@ fn fixture_manifest(
             "\"plate_component_pressure_identities\":{{\"left\":\"{}\",\"right\":\"{}\"}},",
             "\"radiators\":{{",
             "\"disc\":{},",
-            "\"plate\":{{\"geometry\":\"rectangular-thin-plate\",\"radiation_time_model\":\"causal-retarded-normal-acceleration-Rayleigh-I-linear-fractional-delay-v1\",\"structural_basis_identity\":\"{}\",\"acoustic_radiation_identity\":\"{}\",\"damping_model_identity\":\"{}\",\"width_m\":{:.17e},\"depth_m\":{:.17e},\"thickness_m\":{:.17e},\"cells_x\":{},\"cells_y\":{},\"edge_support\":\"{}\",\"density_kg_m3\":{:.17e},\"young_modulus_pa\":{:.17e},\"poisson_ratio\":{:.17e},\"temperature_k\":{:.17e},\"minimum_panels_per_wavelength\":{:.17e},\"retained_mode_count\":{},\"minimum_mode_frequency_hz\":{:.17e},\"maximum_mode_frequency_hz\":{:.17e}}}}},",
+            "\"plate\":{{\"geometry\":\"rectangular-thin-plate\",\"radiation_time_model\":\"causal-retarded-normal-acceleration-Rayleigh-I-linear-fractional-delay-v1\",\"structural_basis_identity\":\"{}\",\"acoustic_radiation_identity\":\"{}\",\"damping_model_identity\":\"{}\",\"width_m\":{:.17e},\"depth_m\":{:.17e},\"thickness_m\":{:.17e},\"cells_x\":{},\"cells_y\":{},\"support\":{},\"density_kg_m3\":{:.17e},\"young_modulus_pa\":{:.17e},\"poisson_ratio\":{:.17e},\"temperature_k\":{:.17e},\"minimum_panels_per_wavelength\":{:.17e},\"retained_mode_count\":{},\"minimum_mode_frequency_hz\":{:.17e},\"maximum_mode_frequency_hz\":{:.17e}}}}},",
             "\"source_peak_abs_pressure_pa\":{:.17e},",
             "\"digital_gain_fs_per_pa\":{:.17e},\"digital_gain_db\":{:.9},",
             "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
@@ -6232,7 +6256,7 @@ fn fixture_manifest(
         config.support_plate.thickness_m,
         config.support_plate.cells_x,
         config.support_plate.cells_y,
-        config.support_plate.edge_support.code(),
+        plate_support_json,
         config.support_plate.material.density_kg_m3,
         config.support_plate.material.young_modulus_pa,
         config.support_plate.material.poisson_ratio,
@@ -6264,7 +6288,7 @@ fn fixture_manifest(
             "  \"audio\": {physical_audio},\n",
             "  \"legacy_audio_convergence_diagnostic\": {{\"delivered\": false, \"path\": \"sound/legacy-representative-convergence.float32.wav\", \"sample_rate_hz\": {audio_rate}, \"authority\": \"representative-preset numerical diagnostic only\", \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical mechanics model reproduces published equations and a fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the source-bound cinematic dynamics admits only its exact benchmark mechanical, damping, contact-surface, and fixed-solid state; arbitrary resolved specimens require the generic coupled dynamics route and never inherit this fitted trajectory\", \"disc and support deformation receive the admitted contact force one-way for sound; their displacement and impedance do not yet feed back into the source-bound rigid-disc trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered audible radiation resolves bending of an ideal perimeter-supported rectangular plate and includes disc elasticity only when certified modes exist in the admitted audio band; housing, feet, in-plane plate motion, elastic support impedance, room response, roughness noise, terminal impacts, and out-of-band modes are omitted\", \"the plate uses a causal finite-distance retarded-acceleration Rayleigh-I surface integral, but remains a linear small-displacement rigid-baffle model without cavity, housing, diffraction, or room response; any admitted moving-disc BEM directivity remains a narrow-band modal approximation without broadband Doppler or retarded moving-boundary history\", \"disc and plate elastic coefficients, damping, optical constants, and perimeter support are disclosed estimates rather than measurements of the apparatus; structural and acoustic mesh-refinement studies remain necessary before quantitative acoustic authority\", \"fixed-topology mechanics and rendering refuse material states that enter a liquid fraction; transient heat transport, finite-strain thermomechanics, phase-dependent optics, free-surface flow, remeshing, and mode updates are not yet integrated into this cinematic fixture\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical mechanics model reproduces published equations and a fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the source-bound cinematic dynamics admits only its exact benchmark mechanical, damping, contact-surface, and fixed-solid state; arbitrary resolved specimens require the generic coupled dynamics route and never inherit this fitted trajectory\", \"disc and support deformation receive the admitted contact force one-way for sound; their displacement and impedance do not yet feed back into the source-bound rigid-disc trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered audible radiation resolves bending of a rectangular plate under the declared geometric support constraint and includes disc elasticity only when certified modes exist in the admitted audio band; elastic feet, housing, in-plane plate motion, support impedance, room response, roughness noise, terminal impacts, and out-of-band modes are omitted\", \"the plate uses a causal finite-distance retarded-acceleration Rayleigh-I surface integral, but remains a linear small-displacement rigid-baffle model without cavity, housing, diffraction, or room response; any admitted moving-disc BEM directivity remains a narrow-band modal approximation without broadband Doppler or retarded moving-boundary history\", \"disc and plate elastic coefficients, damping, optical constants, and support geometry are disclosed estimates rather than measurements of the apparatus; structural and acoustic mesh-refinement studies remain necessary before quantitative acoustic authority\", \"fixed-topology mechanics and rendering refuse material states that enter a liquid fraction; transient heat transport, finite-strain thermomechanics, phase-dependent optics, free-surface flow, remeshing, and mode updates are not yet integrated into this cinematic fixture\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,

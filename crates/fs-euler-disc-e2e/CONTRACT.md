@@ -881,9 +881,24 @@ by the current equilibrium density is computed, and one of three explicit
 geometry regimes is returned: unchanged reference geometry, solid
 thermomechanical update required, or evolving free surface required. This
 prevents a convenient surrogate cylinder from driving another specimen. The
-volume is a conservation constraint, not an invented isotropic scale or liquid
+volume is a conservation constraint, not by itself an isotropic scale or liquid
 shape; downstream deformation/remeshing must satisfy it before updated
 mechanics, acoustics, or optics can be admitted.
+
+For a still-solid, homogeneous, unconstrained, isothermal body,
+`UniformIsotropicFreeExpansionLaw` provides one explicit bounded constitutive
+rung from required volume to geometry. It applies the cube-root volume scale to
+every profile length (including bores, fillets, chamfers, and taper),
+reintegrates mass and inertia at the evolved equilibrium density, and checks
+mass/volume closure independently. Its authority identity and strain-validity
+ceiling are content-bound; material names never select the law. The result is
+geometry authority only: temperature-dependent elasticity, contact, damping,
+optics, and structural modes must still be re-resolved before use. Its contact
+and structural-acoustic binders require the re-queried solid/elastic state to
+match the phase state's exact card, temperature, and density before reusing the
+evolved chart. Any liquid
+fraction, anisotropic or constrained expansion, spatial temperature field, or
+excessive strain refuses this rung and requires a higher-fidelity solver.
 
 The admitted reduced rung evolves whole-body enthalpy under uniform ambient
 convection, radiation, and internal power only while its Biot gate supports an
