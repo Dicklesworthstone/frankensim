@@ -26,14 +26,17 @@ const TEST_SIGNAL_1: [f64; 28] = [
 fn iso_test_signal_1_reference_sones() {
     let out = loudness_stationary(&TEST_SIGNAL_1, SoundField::Free).expect("loudness");
     // The port is statement-for-statement on the SAME path as the
-    // reference (verified against the compiled reference binary:
-    // 83.295660), so the gate is EXACTNESS at 0.001 sone — hiding a
-    // port bug inside the standard's 5% compliance tolerance is
-    // exactly what caught the -.25f transcription mangling.
-    let reference = 83.29566;
+    // reference (compiled reference binary at full precision:
+    // 83.29566042436214), so the gate is EXACTNESS at 1e-9 relative —
+    // hiding a port bug inside the standard's 5% compliance tolerance
+    // is exactly what caught the -.25f transcription mangling, and a
+    // 1e-3 gate is what hid the float32-literal table rounding
+    // (C's `-0.6f` widened into a double is NOT 0.6) until the
+    // signal-path exactness work surfaced it.
+    let reference = 83.295_660_424_362_14;
     assert!(
-        (out.sones - reference).abs() <= 1.0e-3,
-        "test signal 1: {} sone vs reference {reference}",
+        ((out.sones - reference) / reference).abs() <= 1.0e-9,
+        "test signal 1: {:.17} sone vs reference {reference:.17}",
         out.sones
     );
     println!(
@@ -398,4 +401,237 @@ fn roughness_refusals_are_typed() {
             "sample rate {sr} must refuse"
         );
     }
+}
+
+/// Deterministic PCM fixtures shared by the signal-path tests and,
+/// via `dump_reference_signals`, by the ISO reference binary run that
+/// establishes the pinned ground-truth values (bit-identical input on
+/// both sides).
+mod sigfix {
+    pub const SR: f64 = 48_000.0;
+    pub const LEN: usize = 72_000; // 1.5 s
+
+    fn amp(level_db: f64) -> f64 {
+        fs_math::det::sqrt(2.0) * 2.0e-5 * fs_math::det::pow(10.0, level_db / 20.0)
+    }
+
+    /// Steady tone.
+    pub fn tone(freq: f64, level_db: f64) -> Vec<f64> {
+        let a = amp(level_db);
+        (0..LEN)
+            .map(|i| a * fs_math::det::sin(2.0 * core::f64::consts::PI * freq * i as f64 / SR))
+            .collect()
+    }
+
+    /// 1 kHz 70 dB tone pulse, on during 0.25..0.75 s.
+    pub fn pulse() -> Vec<f64> {
+        let a = amp(70.0);
+        (0..LEN)
+            .map(|i| {
+                let t = i as f64 / SR;
+                if (0.25..0.75).contains(&t) {
+                    a * fs_math::det::sin(2.0 * core::f64::consts::PI * 1000.0 * t)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+}
+
+/// Provenance tool, not a gate: dumps the fixture signals as raw
+/// little-endian f64 for the compiled ISO reference binary
+/// (`FS_PSYCHO_DUMP_DIR` names the target directory). The pinned
+/// values in the signal-path tests were produced by running that
+/// binary on exactly these bytes.
+#[test]
+#[ignore = "provenance tool: set FS_PSYCHO_DUMP_DIR and run explicitly"]
+fn dump_reference_signals() {
+    let dir = std::env::var("FS_PSYCHO_DUMP_DIR").expect("FS_PSYCHO_DUMP_DIR");
+    let write = |name: &str, data: &[f64]| {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(format!("{dir}/{name}.f64"), bytes).expect("write");
+    };
+    write("tone1k60", &sigfix::tone(1000.0, 60.0));
+    write("tone250_80", &sigfix::tone(250.0, 80.0));
+    write("pulse1k70", &sigfix::pulse());
+}
+
+/// Stationary loudness through the 48 kHz PCM filterbank path,
+/// EXACTNESS-pinned against the compiled ISO reference binary
+/// (harness over `f_loudness_from_signal`, LoudnessMethodStationary,
+/// time_skip 0.5 s) on bit-identical fixture PCM (see
+/// `dump_reference_signals`). This path also lands on the Annex B.3
+/// PUBLISHED values (4.019 / 14.655 sone) — evidence the level-vector
+/// path's 13% tone gap is filterbank leakage, not a port bug.
+#[test]
+// Pins are the reference binary's %.17g output verbatim; some carry
+// one digit beyond f64 (clippy excessive_precision) — kept verbatim
+// so provenance diffs are textual.
+#[allow(clippy::excessive_precision)]
+fn signal_path_stationary_matches_reference() {
+    use fs_psycho::signal::loudness_stationary_from_pcm;
+    let cases: [(&str, Vec<f64>, f64, f64); 2] = [
+        (
+            "1k60",
+            sigfix::tone(1000.0, 60.0),
+            4.017_710_193_205_207_5,
+            4.019,
+        ),
+        (
+            "250_80",
+            sigfix::tone(250.0, 80.0),
+            14.654_231_012_082_258,
+            14.655,
+        ),
+    ];
+    for (name, pcm, reference, published) in cases {
+        let out = loudness_stationary_from_pcm(&pcm, sigfix::SR, 0.5, SoundField::Free)
+            .expect("loudness");
+        assert!(
+            ((out.sones - reference) / reference).abs() < 1.0e-9,
+            "{name}: {:.17} vs reference {reference:.17}",
+            out.sones
+        );
+        assert!(
+            (out.sones - published).abs() < 0.05,
+            "{name}: {} vs Annex B.3 published {published}",
+            out.sones
+        );
+    }
+    println!("{{\"suite\":\"fs-psycho\",\"case\":\"signal-stationary\",\"verdict\":\"pass\"}}");
+}
+
+/// Time-varying loudness of a steady 1 kHz 60 dB tone: monotone rise
+/// to a plateau that matches the reference run exactly (Nmax and N5
+/// pins plus probe frames), and the plateau sits just above the
+/// stationary value (temporal weighting settles to it).
+#[test]
+// Pins are the reference binary's %.17g output verbatim; some carry
+// one digit beyond f64 (clippy excessive_precision) — kept verbatim
+// so provenance diffs are textual.
+#[allow(clippy::excessive_precision)]
+fn signal_path_time_varying_steady_tone() {
+    use fs_psycho::signal::loudness_time_varying;
+    let out = loudness_time_varying(&sigfix::tone(1000.0, 60.0), sigfix::SR, SoundField::Free)
+        .expect("tv");
+    assert_eq!(out.loudness.len(), 3000);
+    // Reference binary pins (bit-identical input, full precision).
+    let pins = [
+        (187usize, 3.488_182_192_159_547_5),
+        (748, 4.009_182_414_423_507_1),
+        (1496, 4.018_800_724_193_021_7),
+        (2992, 4.018_846_940_720_695_9),
+    ];
+    for (frame, want) in pins {
+        let got = out.loudness[frame];
+        assert!(
+            ((got - want) / want).abs() < 1.0e-9,
+            "frame {frame}: {got:.17} vs {want:.17}"
+        );
+    }
+    let nmax_ref = 4.018_846_940_772_244;
+    let n5_ref = 4.018_846_938_852_739_5;
+    assert!(((out.n_max - nmax_ref) / nmax_ref).abs() < 1.0e-9);
+    assert!(((out.n5 - n5_ref) / n5_ref).abs() < 1.0e-9);
+    // Behavioral: monotone rise onto the plateau (sampled coarsely).
+    for w in out.loudness.chunks(300).collect::<Vec<_>>().windows(2) {
+        assert!(w[1][0] >= w[0][0] - 1e-9, "rise must be monotone");
+    }
+    println!("{{\"suite\":\"fs-psycho\",\"case\":\"signal-tv-steady\",\"verdict\":\"pass\"}}");
+}
+
+/// Time-varying loudness of a 500 ms 1 kHz 70 dB tone pulse:
+/// reference-exact Nmax/N5 and probe frames through rise and decay,
+/// plus the temporal asymmetry the nonlinear decay exists to model
+/// (loudness persists after offset: still >15% of max 90 ms later,
+/// while the pre-onset region is silent).
+#[test]
+// Pins are the reference binary's %.17g output verbatim; some carry
+// one digit beyond f64 (clippy excessive_precision) — kept verbatim
+// so provenance diffs are textual.
+#[allow(clippy::excessive_precision)]
+fn signal_path_time_varying_pulse_decay() {
+    use fs_psycho::signal::loudness_time_varying;
+    let out = loudness_time_varying(&sigfix::pulse(), sigfix::SR, SoundField::Free).expect("tv");
+    let nmax_ref = 8.808_581_173_222_430_4;
+    let n5_ref = 8.077_504_421_840_171;
+    assert!(((out.n_max - nmax_ref) / nmax_ref).abs() < 1.0e-9);
+    assert!(((out.n5 - n5_ref) / n5_ref).abs() < 1.0e-9);
+    // The decay TAIL carries a one-time ~3e-9 relative offset: near
+    // the pulse offset a single sub-step of the nonlinear decay
+    // element flips a case boundary (its |Ui - UoLast| < 1e-5
+    // equality band) under ulp-level libm differences, and the
+    // deterministic decay carries that state shift multiplicatively —
+    // measured -3.1e-9 at frame 1683 and -2.9e-9 at frame 2244 (NOT
+    // compounding: 55x amplitude apart, same relative offset). Tail
+    // gates are therefore 1e-7; rise/plateau pins stay at 1e-9.
+    let pins = [
+        (561usize, 5.769_132_334_749_696_3, 1.0e-9),
+        (1496, 8.082_105_897_289_144_6, 1.0e-9),
+        (1683, 1.699_043_551_606_589_4, 1.0e-7),
+        (2244, 0.030_630_403_130_731_315, 1.0e-7),
+    ];
+    for (frame, want, tol) in pins {
+        let got = out.loudness[frame];
+        assert!(
+            ((got - want) / want).abs() < tol,
+            "frame {frame}: {got:.17} vs {want:.17}"
+        );
+    }
+    // Silence before onset; persistence after offset.
+    assert!(out.loudness[300] < 1e-6, "pre-onset must be silent");
+    assert!(
+        out.loudness[1683] > 0.15 * out.n_max,
+        "post-offset loudness must persist (nonlinear decay)"
+    );
+    println!("{{\"suite\":\"fs-psycho\",\"case\":\"signal-tv-pulse\",\"verdict\":\"pass\"}}");
+}
+
+/// The verified phon conversion (the reference's own f_sone_to_phon)
+/// and the signal-path refusals, all typed by name.
+#[test]
+fn phon_conversion_and_signal_refusals() {
+    use fs_psycho::signal::{loudness_stationary_from_pcm, loudness_time_varying, phon_from_sone};
+    // Exact by construction: 1 sone = 40 phon, each doubling +10.
+    assert!((phon_from_sone(1.0).expect("phon") - 40.0).abs() < 1e-12);
+    assert!((phon_from_sone(2.0).expect("phon") - 50.0).abs() < 1e-12);
+    assert!((phon_from_sone(4.0).expect("phon") - 60.0).abs() < 1e-12);
+    // Below 1 sone: the reference's 40 (N + 0.0005)^0.35 branch with
+    // its 3-phon floor.
+    let half = phon_from_sone(0.5).expect("phon");
+    assert!(
+        (half - 40.0 * fs_math::det::pow(0.5005, 0.35)).abs() < 1e-12,
+        "sub-sone branch: {half}"
+    );
+    assert!((phon_from_sone(0.0).expect("phon") - 3.0).abs() < 1e-12);
+    assert!(phon_from_sone(f64::NAN).is_err());
+    assert!(matches!(
+        phon_from_sone(-0.1),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
+    // Signal-path refusals.
+    let good = sigfix::tone(1000.0, 60.0);
+    assert!(matches!(
+        loudness_time_varying(&good, 44_100.0, SoundField::Free),
+        Err(PsychoError::UnsupportedRate { .. })
+    ));
+    let mut bad = good.clone();
+    bad[5] = f64::INFINITY;
+    assert!(matches!(
+        loudness_time_varying(&bad, sigfix::SR, SoundField::Free),
+        Err(PsychoError::NonFinite { .. })
+    ));
+    assert!(matches!(
+        loudness_time_varying(&good[..40], sigfix::SR, SoundField::Free),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
+    assert!(matches!(
+        loudness_stationary_from_pcm(&good, sigfix::SR, 1.5, SoundField::Free),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
+    assert!(matches!(
+        loudness_stationary_from_pcm(&good[..100], sigfix::SR, 0.5, SoundField::Free),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
 }

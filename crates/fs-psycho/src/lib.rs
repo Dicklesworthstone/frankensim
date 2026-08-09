@@ -20,13 +20,17 @@
 //! statement is load-bearing and pinned by a test).
 //!
 //! Honest scope (stated; the bead stays open until the rest lands):
-//! stationary loudness from BAND LEVELS only; Daniel-Weber roughness
-//! per analysis block ([`roughness`]); the PCM third-octave
-//! filterbank, time-varying loudness, fluctuation strength, and
+//! stationary loudness from band levels or from 48 kHz PCM through
+//! the reference filterbank ([`signal`]); TIME-VARYING loudness with
+//! Nmax/N5 ([`signal::loudness_time_varying`]); the verified phon
+//! conversion ([`signal::phon_from_sone`]); Daniel-Weber roughness
+//! per analysis block ([`roughness`]). Fluctuation strength and
 //! tonality are not yet implemented — no placeholder claims.
 
 pub mod dw_tables;
+pub mod filter_tables;
 pub mod roughness;
+pub mod signal;
 pub mod tables;
 
 use fs_math::det;
@@ -76,6 +80,13 @@ pub enum PsychoError {
         /// Why.
         what: &'static str,
     },
+    /// A sampling rate the method's coefficient tables do not cover —
+    /// refused rather than resampled or extrapolated (the ISO
+    /// reference ships 48 kHz filter tables only).
+    UnsupportedRate {
+        /// What was required.
+        what: &'static str,
+    },
 }
 
 impl core::fmt::Display for PsychoError {
@@ -88,16 +99,19 @@ impl core::fmt::Display for PsychoError {
                 "absolute-level metric requested without calibration: refusing"
             ),
             PsychoError::DegenerateSignal { what } => write!(f, "degenerate signal: {what}"),
+            PsychoError::UnsupportedRate { what } => {
+                write!(f, "unsupported sampling rate: {what}")
+            }
         }
     }
 }
 
 impl std::error::Error for PsychoError {}
 
-/// A stationary loudness result. (Sones only: the ISO reference
-/// implementation outputs sones; a phon conversion would need its own
-/// verified source and is deliberately absent rather than recalled
-/// from memory.)
+/// A stationary loudness result in sones. (The phon conversion lives
+/// in [`signal::phon_from_sone`], ported from the reference's own
+/// `f_sone_to_phon` — it was absent until that verified source was
+/// found; nothing here was recalled from memory.)
 #[derive(Debug, Clone)]
 pub struct Loudness {
     /// Total loudness [sone].
@@ -128,6 +142,17 @@ pub fn loudness_stationary(
             what: "third-octave level",
         });
     }
+    let core = core_loudness_21(third_octave_levels_db, field);
+    let (sones, specific) = slopes_240(&core);
+    Ok(Loudness { sones, specific })
+}
+
+/// Core loudness per critical band (21 entries, last zero) from one
+/// frame of 28 third-octave levels — the reference's
+/// `f_corr_third_octave_intensities` + `f_calc_lcbs` +
+/// `f_calc_core_loudness` + `f_corr_loudness` chain, shared between
+/// the stationary and time-varying methods.
+pub(crate) fn core_loudness_21(third_octave_levels_db: &[f64], field: SoundField) -> [f64; 21] {
     // --- Low-frequency correction and intensities (bands 0..11). ---
     let mut intens = [0.0f64; 11];
     for i in 0..11 {
@@ -165,27 +190,39 @@ pub fn loudness_stationary(
         if le > LTQ[idx] {
             le -= DCB[idx];
             let s = 0.25;
-            let mp1 = 0.0635 * det::pow(10.0, 0.025 * LTQ[idx]);
+            // C literal .0635f: float32-rounded, like the tables.
+            let mp1 = f64::from(0.0635f32) * det::pow(10.0, 0.025 * LTQ[idx]);
             let mp2 = det::pow(1.0 - s + s * det::pow(10.0, 0.1 * (le - LTQ[idx])), 0.25) - 1.0;
             core[idx] = (mp1 * mp2).max(0.0);
         }
     }
     // --- Lowest-band threshold correction. ---
-    let corr_cl = 0.4 + 0.32 * det::pow(core[0], 0.2);
+    // C literals 0.4f/0.32f: float32-rounded, like the tables.
+    let corr_cl = f64::from(0.4f32) + f64::from(0.32f32) * det::pow(core[0], 0.2);
     if corr_cl < 1.0 {
         core[0] *= corr_cl;
     }
+    core
+}
+
+/// Specific-loudness pattern + total loudness from one frame of core
+/// loudness — the reference's `f_calc_slopes`.
+#[allow(clippy::too_many_lines)] // one reference routine, told in its order
+pub(crate) fn slopes_240(core: &[f64; 21]) -> (f64, Vec<f64>) {
     // --- Slopes: specific loudness pattern + total loudness. ---
     let mut specific = vec![0.0f64; N_BARK_STEPS];
     let mut loud = 0.0f64;
+    // The reference's Bark-walk constants are float LITERALS widened
+    // to double (0.1f, .0001f) — replicated exactly; the walk's
+    // comparisons are sensitive to them.
+    let step = f64::from(0.1f32);
     let mut n1 = 0.0f64;
-    let mut z = 0.1f64;
+    let mut z = step;
     let mut z1 = 0.0f64;
     let mut idx_rns = 0usize;
     let mut idx_ns = 0usize;
-    for idx_cl in 0..21 {
-        let core_l = core[idx_cl];
-        let zup = ZUP[idx_cl] + 0.0001;
+    for (idx_cl, &core_l) in core.iter().enumerate() {
+        let zup = ZUP[idx_cl] + f64::from(0.0001f32);
         let idx_cbn = idx_cl.saturating_sub(1).min(7);
         let mut n2;
         loop {
@@ -210,7 +247,7 @@ pub fn loudness_stationary(
                         specific[idx_ns] = n1 - (zk - z1) * usl;
                         idx_ns += 1;
                     }
-                    zk += 0.1;
+                    zk += step;
                 }
                 z = zk;
                 z1 = z2;
@@ -232,7 +269,7 @@ pub fn loudness_stationary(
                         specific[idx_ns] = n2;
                         idx_ns += 1;
                     }
-                    zk += 0.1;
+                    zk += step;
                 }
                 z = zk;
                 z1 = z2;
@@ -250,10 +287,7 @@ pub fn loudness_stationary(
             loud = 0.0;
         }
     }
-    Ok(Loudness {
-        sones: loud,
-        specific,
-    })
+    (loud, specific)
 }
 
 /// DIN 45692 sharpness [acum] from a specific-loudness pattern on the
