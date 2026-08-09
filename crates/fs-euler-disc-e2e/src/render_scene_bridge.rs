@@ -227,10 +227,11 @@ impl EulerDiscMaterialStateBinding {
                 "surface-state identity must not be zero",
             ));
         }
-        let samples = core::array::from_fn(|index| {
-            let sample = optical.samples()[index];
-            ConductorIorSample::try_new(sample.wavelength_nm, sample.eta, sample.k)
-        });
+        let samples: [Result<ConductorIorSample, ConductorError>; 9] =
+            core::array::from_fn(|index| {
+                let sample = optical.samples()[index];
+                ConductorIorSample::try_new(sample.wavelength_nm, sample.eta, sample.k)
+            });
         let mut admitted = [ConductorIorSample::try_new(380.0, 1.0, 0.0)?; 9];
         for (slot, sample) in admitted.iter_mut().zip(samples) {
             *slot = sample?;

@@ -22,7 +22,8 @@
 
 use fs_bem::BemError;
 use fs_bem::helmholtz::{
-    Formulation as HelmholtzFormulation, HelmholtzError, Medium, far_field, solve_radiation,
+    DirectivityTable, Formulation as HelmholtzFormulation, HelmholtzError, MAX_SH_DEGREE, Medium,
+    directivity_sh_table, far_field, solve_radiation,
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::{ContentHash, DomainHasher};
@@ -35,6 +36,7 @@ use fs_material::gas::GasState;
 use fs_material::visco::{LoweredModel, ViscoError, loss_factor_to_zeta};
 use fs_math::c64::C64;
 use fs_math::det;
+use fs_mbd::{Pose, Vec3};
 use fs_mesh::{
     RoundedCylinderMeshError, RoundedCylinderMeshSpec, RoundedCylinderTetMesh,
     rounded_cylinder_tet_mesh,
@@ -42,19 +44,24 @@ use fs_mesh::{
 use fs_modal::{ModalError, SliceOptions, SliceStats, slice_window};
 use fs_rep_frep::SquatDiscEdgeTreatment;
 use fs_solid::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetElasticMaterial,
-    TetLinearElasticProblem, TetMaterialField,
+    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetLinearElasticProblem,
+    TetMaterialField,
 };
 
-use crate::specimen::{DiscProfileSpec, ResolvedMaterialDiscProfile};
+use crate::specimen::{DiscProfileSpec, ResolvedElasticDiscProfile};
+use crate::timeline_resampling::{EventEvaluationSide, TimelineResampler, TimelineResamplingError};
 use crate::{ChannelControl, EulerControlStream};
 
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
+/// Maximum number of simultaneous physical pressure observers in one pass.
+pub const MAX_PHYSICAL_PRESSURE_OBSERVERS: usize = 64;
 const STRUCTURAL_MODAL_BASIS_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-modal-basis.v1";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
+const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.modal-acoustic-directivity.v1";
 
 /// Resolution and resource controls, deliberately separate from physical
 /// dimensions so callers cannot accidentally restate geometry differently
@@ -94,7 +101,7 @@ impl StructuralMeshControls {
 /// One physical modal-basis request.
 pub struct StructuralModeRequest<'a> {
     /// Resolved geometry and complete material state.
-    pub specimen: &'a ResolvedMaterialDiscProfile,
+    pub specimen: &'a ResolvedElasticDiscProfile,
     /// Discretization and work envelope.
     pub mesh: StructuralMeshControls,
     /// Strictly positive lower edge of the requested band [Hz].
@@ -192,6 +199,76 @@ pub struct AcousticObserver {
     pub position_m: [f64; 3],
 }
 
+/// One microphone location in the inertial world frame.
+///
+/// Unlike [`AcousticObserver`], this point does not rotate with the radiating
+/// body. It is the appropriate observation frame for a real stationary
+/// microphone while a rigid specimen tumbles beneath it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcousticWorldObserver {
+    /// Microphone position in world coordinates [m].
+    pub position_world_m: [f64; 3],
+}
+
+/// Accuracy controls for a reusable body-frame acoustic directivity field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcousticDirectivityControls {
+    /// Maximum spherical-harmonic degree retained in the far-field pattern.
+    pub maximum_spherical_harmonic_degree: usize,
+    /// Minimum admitted fraction of quadrature-estimated far-field power.
+    pub minimum_captured_fraction: f64,
+}
+
+/// Exterior radiation of one mass-normalized mode, independent of observer.
+#[derive(Clone, Debug)]
+pub struct AcousticModeDirectivity {
+    /// Index into [`StructuralModalBasis::modes`].
+    pub structural_mode: usize,
+    /// Evaluation angular frequency [rad/s].
+    pub angular_frequency_rad_s: f64,
+    /// Wavenumber [1/m].
+    pub wavenumber_rad_m: f64,
+    /// Boundary-integral formulation used for this mode.
+    pub formulation: HelmholtzFormulation,
+    /// Body-frame far-field amplitude `F(direction)` where
+    /// `p = F exp(i k r) / r` per unit generalized modal velocity.
+    pub directivity: DirectivityTable,
+    /// Radiated power per squared generalized modal velocity
+    /// `[W s^2 / (m^2 kg)]`.
+    pub radiated_power_per_modal_velocity_squared: f64,
+    /// BEM panels per wavelength.
+    pub panels_per_wavelength: f64,
+    /// Probe-based lower bound on the BEM matrix condition number.
+    pub condition_lower_bound: f64,
+    /// Minimum distance admitted by the far-field approximation [m].
+    pub minimum_far_field_distance_m: f64,
+}
+
+/// Observer-independent, gas-state-dependent modal radiation field.
+///
+/// The table is solved once in the undeformed body frame. Any world-fixed
+/// observer can then be evaluated against the current rigid pose without
+/// repeating the boundary-integral solve.
+#[derive(Clone, Debug)]
+pub struct ModalAcousticDirectivity {
+    /// Structural artifact consumed by this solve.
+    pub structural_basis_identity: ContentHash,
+    /// Gas model/species identity supplied by the caller.
+    pub gas_model_identity: ContentHash,
+    /// Temperature [K].
+    pub temperature_k: f64,
+    /// Absolute pressure [Pa].
+    pub ambient_pressure_pa: f64,
+    /// Derived acoustic density [kg/m3].
+    pub density_kg_m3: f64,
+    /// Derived sound speed [m/s].
+    pub sound_speed_m_s: f64,
+    /// One reusable directivity table per retained structural mode.
+    pub modes: Vec<AcousticModeDirectivity>,
+    /// Identity binding structure, gas state/model, controls, and tables.
+    pub identity: ContentHash,
+}
+
 /// Exterior radiation of one mass-normalized structural mode at its natural
 /// frequency.
 #[derive(Clone, Debug)]
@@ -278,6 +355,15 @@ pub enum PhysicalContactForceSampling {
     IntervalMeanAtClosingElseOpeningEndpointZohV1,
 }
 
+/// Coordinate frame and exact location of a physical pressure observer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PhysicalPressureObserver {
+    /// A legacy observer fixed in the undeformed specimen body frame.
+    BodyFixed(AcousticObserver),
+    /// A stationary or externally animated observer in the inertial frame.
+    WorldFixed(AcousticWorldObserver),
+}
+
 /// Unmastered physical pressure signal at one observer.
 #[derive(Clone, Debug)]
 pub struct PhysicalPressureSignal {
@@ -291,6 +377,8 @@ pub struct PhysicalPressureSignal {
     pub peak_abs_pressure_pa: f64,
     /// Exact mechanics-to-audio sampling convention.
     pub contact_force_sampling: PhysicalContactForceSampling,
+    /// Exact coordinate frame and location at which pressure was evaluated.
+    pub observer: PhysicalPressureObserver,
     /// Structural basis consumed by synthesis.
     pub structural_basis_identity: ContentHash,
     /// Acoustic observer transfer consumed by synthesis.
@@ -308,6 +396,7 @@ pub struct PhysicalModalAudioModel<'basis> {
     basis: &'basis StructuralModalBasis,
     runtime: ModalAcousticTimeModel,
     sample_rate_hz: u32,
+    static_observer: Option<AcousticObserver>,
     /// Identity of the acoustic radiation artifact.
     pub radiation_identity: ContentHash,
     /// Identity of the damping model and its evidence.
@@ -342,6 +431,8 @@ pub enum StructuralModalBasisError {
     Viscoelastic(ViscoError),
     /// The exact time-domain modal runtime refused.
     ModalTime(ModalAcousticTimeError),
+    /// Pose reconstruction for a world-fixed observer refused.
+    Timeline(TimelineResamplingError),
     /// The requested band contains no elastic modes.
     NoModesInBand,
     /// The certified count exceeds the caller's retained-mode budget.
@@ -378,6 +469,16 @@ pub enum StructuralModalBasisError {
         mode: usize,
         /// Returned power coefficient.
         power: f64,
+    },
+    /// A spherical-harmonic table omitted more far-field power than the
+    /// caller admitted.
+    DirectivityTruncation {
+        /// Structural mode at which the gate failed.
+        mode: usize,
+        /// Quadrature-estimated captured fraction.
+        captured_fraction: f64,
+        /// Caller-required minimum fraction.
+        minimum_fraction: f64,
     },
     /// Two independently produced physical artifacts do not share an exact
     /// structural basis or material state.
@@ -436,6 +537,12 @@ impl core::fmt::Display for StructuralModalBasisError {
                     "structural modal time integration refused: {source}"
                 )
             }
+            Self::Timeline(source) => {
+                write!(
+                    formatter,
+                    "physical audio pose reconstruction refused: {source}"
+                )
+            }
             Self::NoModesInBand => write!(formatter, "FS-EULER-STRUCTURAL-MODE-EMPTY-BAND"),
             Self::ModeBudgetExceeded { requested, maximum } => write!(
                 formatter,
@@ -463,6 +570,14 @@ impl core::fmt::Display for StructuralModalBasisError {
             Self::NegativeRadiatedPower { mode, power } => write!(
                 formatter,
                 "FS-EULER-ACOUSTIC-NONPASSIVE: mode {mode} returned {power:.6e} W per squared modal velocity"
+            ),
+            Self::DirectivityTruncation {
+                mode,
+                captured_fraction,
+                minimum_fraction,
+            } => write!(
+                formatter,
+                "FS-EULER-ACOUSTIC-DIRECTIVITY-TRUNCATION: mode {mode} captured {captured_fraction:.6e}, below required {minimum_fraction:.6e}"
             ),
             Self::IdentityMismatch { what } => {
                 write!(formatter, "FS-EULER-STRUCTURAL-IDENTITY: {what}")
@@ -497,6 +612,7 @@ impl std::error::Error for StructuralModalBasisError {
             Self::Acoustic(source) => Some(source),
             Self::Viscoelastic(source) => Some(source),
             Self::ModalTime(source) => Some(source),
+            Self::Timeline(source) => Some(source),
             _ => None,
         }
     }
@@ -544,6 +660,12 @@ impl From<ModalAcousticTimeError> for StructuralModalBasisError {
     }
 }
 
+impl From<TimelineResamplingError> for StructuralModalBasisError {
+    fn from(source: TimelineResamplingError) -> Self {
+        Self::Timeline(source)
+    }
+}
+
 /// Assemble a body-fitted structural basis directly from a resolved specimen.
 ///
 /// # Errors
@@ -568,11 +690,10 @@ pub fn build_structural_modal_basis(
         maximum_tetrahedra: request.mesh.maximum_tetrahedra,
     };
     let mesh = rounded_cylinder_tet_mesh(mesh_spec, cx)?;
-    let material = TetElasticMaterial::from_resolved_state(&request.specimen.material);
     let assembly = TetLinearElasticProblem {
         nodes_m: &mesh.nodes_m,
         tetrahedra: &mesh.tetrahedra,
-        materials: TetMaterialField::Uniform(&material),
+        materials: TetMaterialField::Uniform(&request.specimen.elastic_material),
         fixed_dofs: &[],
         budget: request.assembly,
     }
@@ -646,7 +767,7 @@ pub fn build_structural_modal_basis(
         schema_version: STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION,
         specimen_identity: request.specimen.identity,
         profile_identity: request.specimen.profile.content_identities().profile,
-        material_state_identity: request.specimen.material.resolved().identity(),
+        material_state_identity: request.specimen.material_state_identity,
         mesh,
         assembly,
         modes,
@@ -669,12 +790,12 @@ pub fn build_structural_modal_basis(
 /// modal frequency outside the lowered model's certified band.
 pub fn modal_loss_spectrum_from_prony(
     basis: &StructuralModalBasis,
-    specimen: &ResolvedMaterialDiscProfile,
+    specimen: &ResolvedElasticDiscProfile,
     model: &LoweredModel,
     damping_model_identity: ContentHash,
 ) -> Result<ModalLossSpectrum, StructuralModalBasisError> {
     if basis.specimen_identity != specimen.identity
-        || basis.material_state_identity != specimen.material.resolved().identity()
+        || basis.material_state_identity != specimen.material_state_identity
     {
         return Err(StructuralModalBasisError::IdentityMismatch {
             what: "damping specimen does not match the structural basis",
@@ -787,7 +908,88 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             basis,
             runtime,
             sample_rate_hz,
+            static_observer: Some(radiation.observer),
             radiation_identity: radiation.identity,
+            damping_model_identity: loss.damping_model_identity,
+        })
+    }
+
+    /// Bind structural modes and constitutive damping to an
+    /// observer-independent directivity artifact.
+    ///
+    /// The modal oscillator is identical to [`Self::try_new`], but pressure is
+    /// deliberately initialized with zero static transfers. Callers must use
+    /// [`Self::synthesize_control_stream_world_observers`] so every sample is
+    /// observed through an explicit current pose and world microphone.
+    ///
+    /// # Errors
+    /// Refuses foreign identities, wrong cardinalities, malformed loss or
+    /// directivity rows, frequencies above Nyquist, or invalid budgets.
+    pub fn try_new_with_directivity(
+        basis: &'basis StructuralModalBasis,
+        loss: &ModalLossSpectrum,
+        directivity: &ModalAcousticDirectivity,
+        sample_rate_hz: u32,
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<Self, StructuralModalBasisError> {
+        validate_modal_acoustic_directivity(directivity)?;
+        if loss.structural_basis_identity != basis.identity
+            || directivity.structural_basis_identity != basis.identity
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "damping or acoustic directivity artifact does not match the structural basis",
+            });
+        }
+        if loss.material_state_identity != basis.material_state_identity {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "damping material state does not match structural assembly material state",
+            });
+        }
+        if loss.damping_model_identity == ContentHash([0; 32])
+            || directivity.identity == ContentHash([0; 32])
+            || directivity.gas_model_identity == ContentHash([0; 32])
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "damping, directivity, and gas model identities must not be zero",
+            });
+        }
+        if loss.loss_factors.len() != basis.modes.len()
+            || directivity.modes.len() != basis.modes.len()
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "loss, directivity, and structural mode counts must agree",
+            });
+        }
+        let mut modes = Vec::with_capacity(basis.modes.len());
+        for (mode_index, ((structural, loss_factor), acoustic)) in basis
+            .modes
+            .iter()
+            .zip(&loss.loss_factors)
+            .zip(&directivity.modes)
+            .enumerate()
+        {
+            if acoustic.structural_mode != mode_index
+                || acoustic.angular_frequency_rad_s.to_bits()
+                    != structural.angular_frequency_rad_s.to_bits()
+                || !(loss_factor.is_finite() && *loss_factor >= 0.0)
+            {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "per-mode structural, damping, and directivity rows are misaligned",
+                });
+            }
+            modes.push(ModalAcousticMode {
+                angular_frequency_rad_s: structural.angular_frequency_rad_s,
+                damping_ratio: loss_factor_to_zeta(*loss_factor),
+                pressure_per_modal_velocity: C64::ZERO,
+            });
+        }
+        let runtime = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, budget)?;
+        Ok(Self {
+            basis,
+            runtime,
+            sample_rate_hz,
+            static_observer: None,
+            radiation_identity: directivity.identity,
             damping_model_identity: loss.damping_model_identity,
         })
     }
@@ -844,6 +1046,11 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
         maximum_contact_distance_m: f64,
         cx: &Cx<'_>,
     ) -> Result<PhysicalPressureSignal, StructuralModalBasisError> {
+        let observer = self
+            .static_observer
+            .ok_or(StructuralModalBasisError::InvalidRequest {
+                what: "world-observer runtime requires world-observer synthesis",
+            })?;
         let intervals = controls.audio();
         if controls.source().metadata().specimen_profile_identity != self.basis.profile_identity {
             return Err(StructuralModalBasisError::IdentityMismatch {
@@ -944,8 +1151,14 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
         }
         cx.checkpoint()
             .map_err(|_| StructuralModalBasisError::Cancelled)?;
-        let identity =
-            physical_pressure_signal_identity(self, controls, first.start_time_s, &pressure_pa);
+        let observer = PhysicalPressureObserver::BodyFixed(observer);
+        let identity = physical_pressure_signal_identity(
+            self,
+            controls,
+            first.start_time_s,
+            observer,
+            &pressure_pa,
+        );
         Ok(PhysicalPressureSignal {
             start_time_s: first.start_time_s,
             sample_rate_hz: self.sample_rate_hz,
@@ -953,11 +1166,197 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             peak_abs_pressure_pa,
             contact_force_sampling:
                 PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+            observer,
             structural_basis_identity: self.basis.identity,
             radiation_identity: self.radiation_identity,
             damping_model_identity: self.damping_model_identity,
             identity,
         })
+    }
+
+    /// Produce simultaneous physical-pressure signals at world-fixed
+    /// observers from one admitted control stream.
+    ///
+    /// Mechanics forcing advances one shared modal state exactly once. At
+    /// each closing audio boundary the source pose is reconstructed from the
+    /// authoritative trajectory, each world line of sight is rotated into the
+    /// body-frame BEM directivity field, and each observer gets its own SI
+    /// pressure sample. This preserves inter-channel phase and avoids running
+    /// two independently drifting oscillator copies.
+    ///
+    /// Propagation is the narrow-band Helmholtz phase of each retained mode at
+    /// the current sample-boundary pose. It does not claim a broadband moving-
+    /// boundary retarded-time solution or room reflections.
+    ///
+    /// # Errors
+    /// Refuses the static-observer constructor, foreign directivity, empty or
+    /// excessive observer sets, invalid timelines/forces/poses, far-field
+    /// violations, capacity, cancellation, or modal-time failure.
+    pub fn synthesize_control_stream_world_observers(
+        &mut self,
+        controls: &EulerControlStream<'_>,
+        directivity: &ModalAcousticDirectivity,
+        observers: &[AcousticWorldObserver],
+        maximum_contact_distance_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
+        if self.static_observer.is_some() {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "static-observer runtime cannot synthesize world observers",
+            });
+        }
+        if directivity.identity != self.radiation_identity
+            || directivity.structural_basis_identity != self.basis.identity
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "world-observer directivity does not match the admitted audio runtime",
+            });
+        }
+        if observers.is_empty() || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "world observer count must be in 1..=64",
+            });
+        }
+        let intervals = controls.audio();
+        if controls.source().metadata().specimen_profile_identity != self.basis.profile_identity {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "control trajectory specimen profile does not match structural basis profile",
+            });
+        }
+        let first = intervals
+            .first()
+            .ok_or(StructuralModalBasisError::ControlTimeline {
+                what: "control stream has no positive-duration audio intervals",
+            })?;
+        let last = intervals
+            .last()
+            .expect("nonempty interval slice has a last item");
+        for pair in intervals.windows(2) {
+            if pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits() {
+                return Err(StructuralModalBasisError::ControlTimeline {
+                    what: "mechanics audio intervals are not exactly contiguous",
+                });
+            }
+        }
+        let duration_s = last.end_time_s - first.start_time_s;
+        let exact_frames = duration_s * f64::from(self.sample_rate_hz);
+        let rounded_frames = exact_frames.round();
+        let frame_tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
+        if !(duration_s > 0.0
+            && duration_s.is_finite()
+            && exact_frames.is_finite()
+            && rounded_frames >= 1.0
+            && (exact_frames - rounded_frames).abs() <= frame_tolerance
+            && rounded_frames <= usize::MAX as f64)
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "control horizon is not a positive integral number of audio samples",
+            });
+        }
+        let frame_count = rounded_frames as usize;
+        let mut pressure_channels = vec![Vec::new(); observers.len()];
+        for pressure in &mut pressure_channels {
+            pressure.try_reserve_exact(frame_count).map_err(|_| {
+                StructuralModalBasisError::PressureCapacity {
+                    requested: frame_count,
+                }
+            })?;
+        }
+        let mut modal_forces = Vec::with_capacity(intervals.len());
+        for interval in intervals {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            modal_forces.push(self.modal_force_for_control_interval(
+                controls,
+                interval,
+                maximum_contact_distance_m,
+            )?);
+        }
+
+        let timeline = TimelineResampler::new(controls.source());
+        let mut transfer_scratch = vec![Vec::new(); observers.len()];
+        let mut peaks = vec![0.0_f64; observers.len()];
+        let sample_period_s = self.runtime.sample_period_s();
+        let mut interval_index = 0usize;
+        let mut sample_start = first.start_time_s;
+        for frame in 0..frame_count {
+            if frame % 64 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            }
+            let sample_end = if frame + 1 == frame_count {
+                last.end_time_s
+            } else {
+                first.start_time_s + (frame + 1) as f64 * sample_period_s
+            };
+            let mut time = sample_start;
+            while time < sample_end {
+                while interval_index + 1 < intervals.len()
+                    && time >= intervals[interval_index].end_time_s
+                {
+                    interval_index += 1;
+                }
+                let segment_end = sample_end.min(intervals[interval_index].end_time_s);
+                let segment_duration = segment_end - time;
+                if !(segment_duration > 0.0 && segment_duration.is_finite()) {
+                    return Err(StructuralModalBasisError::ControlTimeline {
+                        what: "audio sample subdivision made no forward progress",
+                    });
+                }
+                self.runtime
+                    .step_duration(&modal_forces[interval_index], segment_duration)?;
+                time = segment_end;
+            }
+            let pose = timeline
+                .sample(sample_end, EventEvaluationSide::RightLimit)?
+                .state
+                .pose();
+            for (observer_index, observer) in observers.iter().copied().enumerate() {
+                directivity.write_observer_transfers_at_pose(
+                    pose,
+                    observer,
+                    &mut transfer_scratch[observer_index],
+                )?;
+                let pressure = self
+                    .runtime
+                    .observer_pressure_with_transfers(&transfer_scratch[observer_index])?;
+                peaks[observer_index] = peaks[observer_index].max(pressure.abs());
+                pressure_channels[observer_index].push(pressure);
+            }
+            sample_start = sample_end;
+        }
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+
+        Ok(observers
+            .iter()
+            .copied()
+            .zip(pressure_channels)
+            .zip(peaks)
+            .map(|((observer, pressure_pa), peak_abs_pressure_pa)| {
+                let observer = PhysicalPressureObserver::WorldFixed(observer);
+                let identity = physical_pressure_signal_identity(
+                    self,
+                    controls,
+                    first.start_time_s,
+                    observer,
+                    &pressure_pa,
+                );
+                PhysicalPressureSignal {
+                    start_time_s: first.start_time_s,
+                    sample_rate_hz: self.sample_rate_hz,
+                    pressure_pa,
+                    peak_abs_pressure_pa,
+                    contact_force_sampling:
+                        PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+                    observer,
+                    structural_basis_identity: self.basis.identity,
+                    radiation_identity: self.radiation_identity,
+                    damping_model_identity: self.damping_model_identity,
+                    identity,
+                }
+            })
+            .collect())
     }
 
     fn modal_force_for_control_interval(
@@ -1030,6 +1429,7 @@ fn physical_pressure_signal_identity(
     model: &PhysicalModalAudioModel<'_>,
     controls: &EulerControlStream<'_>,
     start_time_s: f64,
+    observer: PhysicalPressureObserver,
     pressure_pa: &[f64],
 ) -> ContentHash {
     let mut hasher = DomainHasher::new("org.frankensim.euler-disc.physical-pressure-signal.v1");
@@ -1045,6 +1445,20 @@ fn physical_pressure_signal_identity(
     );
     hasher.update(&model.sample_rate_hz.to_le_bytes());
     hasher.update(&start_time_s.to_bits().to_le_bytes());
+    match observer {
+        PhysicalPressureObserver::BodyFixed(observer) => {
+            hasher.update(&[0]);
+            for value in observer.position_m {
+                hasher.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        PhysicalPressureObserver::WorldFixed(observer) => {
+            hasher.update(&[1]);
+            for value in observer.position_world_m {
+                hasher.update(&value.to_bits().to_le_bytes());
+            }
+        }
+    }
     hasher.update(&[0]);
     hasher.update(
         &u64::try_from(pressure_pa.len())
@@ -1250,6 +1664,255 @@ impl StructuralModalBasis {
             identity,
         })
     }
+
+    /// Solve observer-independent far-field directivity for every retained
+    /// structural mode.
+    ///
+    /// The BEM velocity boundary condition comes directly from the
+    /// mass-normalized elastic mode shape. The resulting body-frame spherical
+    /// harmonic tables can be evaluated for any rigid pose and world-fixed
+    /// microphone; neither material names nor hand-authored pan/gain curves
+    /// enter the transfer.
+    ///
+    /// # Errors
+    /// Refuses malformed media/controls, BEM work or resolution failures,
+    /// negative radiated power, and directivity truncation below the explicit
+    /// captured-power floor.
+    pub fn modal_acoustic_directivity(
+        &self,
+        medium: ResolvedAcousticMedium<'_>,
+        controls: AcousticDirectivityControls,
+    ) -> Result<ModalAcousticDirectivity, StructuralModalBasisError> {
+        if medium.gas_model_identity == ContentHash([0; 32]) {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "gas_model_identity must not be zero",
+            });
+        }
+        validate_acoustic_medium(medium.gas)?;
+        if !(controls.minimum_captured_fraction > 0.0
+            && controls.minimum_captured_fraction <= 1.0
+            && controls.minimum_captured_fraction.is_finite())
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "minimum directivity captured fraction must be finite and in (0, 1]",
+            });
+        }
+        let surface = SpherePanels::new(
+            self.mesh.boundary.centroids_m.clone(),
+            self.mesh.boundary.normals.clone(),
+            self.mesh.boundary.areas_m2.clone(),
+        )?;
+        let acoustic_medium = Medium {
+            density: medium.gas.density,
+            sound_speed: medium.gas.sound_speed,
+        };
+        let diameter_m = self
+            .mesh
+            .nodes_m
+            .iter()
+            .map(|node| 2.0 * norm_squared(*node).sqrt())
+            .fold(0.0_f64, f64::max);
+        let mut modes = Vec::with_capacity(self.modes.len());
+        for (mode_index, mode) in self.modes.iter().enumerate() {
+            let k = mode.angular_frequency_rad_s / acoustic_medium.sound_speed;
+            let wavelength_m = core::f64::consts::TAU / k;
+            let minimum_far_field_distance_m =
+                (2.0 * diameter_m * diameter_m / wavelength_m).max(2.0 * diameter_m);
+            let velocity: Vec<C64> = mode
+                .panel_normal_shape_per_sqrt_kg
+                .iter()
+                .map(|value| C64::from_re(*value))
+                .collect();
+            let formulation = if k * (0.5 * diameter_m) < 0.5 {
+                HelmholtzFormulation::PlainCbie
+            } else {
+                HelmholtzFormulation::BurtonMiller
+            };
+            let solution = solve_radiation(&surface, k, acoustic_medium, &velocity, formulation)?;
+            if solution.radiated_power < 0.0 {
+                return Err(StructuralModalBasisError::NegativeRadiatedPower {
+                    mode: mode_index,
+                    power: solution.radiated_power,
+                });
+            }
+            let directivity = directivity_sh_table(
+                &surface,
+                &solution,
+                acoustic_medium,
+                controls.maximum_spherical_harmonic_degree,
+            )?;
+            if solution.radiated_power > 0.0
+                && directivity.captured_fraction < controls.minimum_captured_fraction
+            {
+                return Err(StructuralModalBasisError::DirectivityTruncation {
+                    mode: mode_index,
+                    captured_fraction: directivity.captured_fraction,
+                    minimum_fraction: controls.minimum_captured_fraction,
+                });
+            }
+            modes.push(AcousticModeDirectivity {
+                structural_mode: mode_index,
+                angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                wavenumber_rad_m: k,
+                formulation,
+                directivity,
+                radiated_power_per_modal_velocity_squared: solution.radiated_power,
+                panels_per_wavelength: solution.panels_per_wavelength,
+                condition_lower_bound: solution.condition_lower_bound,
+                minimum_far_field_distance_m,
+            });
+        }
+        let identity = acoustic_directivity_identity(self, medium, controls, &modes);
+        Ok(ModalAcousticDirectivity {
+            structural_basis_identity: self.identity,
+            gas_model_identity: medium.gas_model_identity,
+            temperature_k: medium.gas.temperature,
+            ambient_pressure_pa: medium.gas.pressure,
+            density_kg_m3: medium.gas.density,
+            sound_speed_m_s: medium.gas.sound_speed,
+            modes,
+            identity,
+        })
+    }
+}
+
+impl ModalAcousticDirectivity {
+    /// Evaluate one physical pressure transfer per mode for a world-fixed
+    /// microphone and the specimen's current rigid pose.
+    ///
+    /// Translation controls spherical spreading/propagation phase. Rotation
+    /// maps the world line of sight into the body-frame directivity field.
+    /// The observer is never implicitly attached to the moving body.
+    ///
+    /// # Errors
+    /// Refuses non-finite/coincident observers, malformed mode tables, or a
+    /// pose-observer distance below any mode's far-field applicability bound.
+    pub fn observer_transfers_at_pose(
+        &self,
+        pose: Pose,
+        observer: AcousticWorldObserver,
+    ) -> Result<Vec<C64>, StructuralModalBasisError> {
+        let mut transfers = Vec::with_capacity(self.modes.len());
+        self.write_observer_transfers_at_pose(pose, observer, &mut transfers)?;
+        Ok(transfers)
+    }
+
+    /// Evaluate into a reusable caller-owned buffer.
+    ///
+    /// This is equivalent to [`Self::observer_transfers_at_pose`] but avoids
+    /// per-sample allocation in fixed-rate audio synthesis.
+    pub fn write_observer_transfers_at_pose(
+        &self,
+        pose: Pose,
+        observer: AcousticWorldObserver,
+        transfers: &mut Vec<C64>,
+    ) -> Result<(), StructuralModalBasisError> {
+        validate_modal_acoustic_directivity(self)?;
+        if observer
+            .position_world_m
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "world observer position must be finite",
+            });
+        }
+        let source_world = pose.position_world();
+        let relative_world = Vec3::new(
+            observer.position_world_m[0] - source_world.x,
+            observer.position_world_m[1] - source_world.y,
+            observer.position_world_m[2] - source_world.z,
+        );
+        let distance_m = relative_world.norm_squared().sqrt();
+        if !(distance_m > 0.0 && distance_m.is_finite()) {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "world observer must not coincide with the specimen origin",
+            });
+        }
+        let relative_body = pose.orientation().rotate_world_to_body(relative_world);
+        let direction_body = [relative_body.x, relative_body.y, relative_body.z];
+        transfers.clear();
+        transfers.try_reserve(self.modes.len()).map_err(|_| {
+            StructuralModalBasisError::PressureCapacity {
+                requested: self.modes.len(),
+            }
+        })?;
+        for (mode_index, mode) in self.modes.iter().enumerate() {
+            if distance_m < mode.minimum_far_field_distance_m {
+                return Err(StructuralModalBasisError::ObserverOutsideFarField {
+                    distance_m,
+                    minimum_m: mode.minimum_far_field_distance_m,
+                    mode: mode_index,
+                });
+            }
+            let far = mode.directivity.evaluate(direction_body);
+            let phase = C64::new(
+                det::cos(mode.wavenumber_rad_m * distance_m),
+                det::sin(mode.wavenumber_rad_m * distance_m),
+            );
+            transfers.push((far * phase).scale(distance_m.recip()));
+        }
+        Ok(())
+    }
+}
+
+fn validate_modal_acoustic_directivity(
+    directivity: &ModalAcousticDirectivity,
+) -> Result<(), StructuralModalBasisError> {
+    if directivity.identity == ContentHash([0; 32])
+        || directivity.structural_basis_identity == ContentHash([0; 32])
+        || directivity.gas_model_identity == ContentHash([0; 32])
+        || !(directivity.temperature_k > 0.0
+            && directivity.temperature_k.is_finite()
+            && directivity.ambient_pressure_pa > 0.0
+            && directivity.ambient_pressure_pa.is_finite()
+            && directivity.density_kg_m3 > 0.0
+            && directivity.density_kg_m3.is_finite()
+            && directivity.sound_speed_m_s > 0.0
+            && directivity.sound_speed_m_s.is_finite())
+        || directivity.modes.is_empty()
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "acoustic directivity header is malformed",
+        });
+    }
+    for (mode_index, mode) in directivity.modes.iter().enumerate() {
+        let expected_coefficients = mode
+            .directivity
+            .l_max
+            .checked_add(1)
+            .and_then(|side| side.checked_mul(side));
+        let expected_wavenumber = mode.angular_frequency_rad_s / directivity.sound_speed_m_s;
+        if mode.structural_mode != mode_index
+            || !(mode.angular_frequency_rad_s > 0.0 && mode.angular_frequency_rad_s.is_finite())
+            || !(mode.wavenumber_rad_m > 0.0 && mode.wavenumber_rad_m.is_finite())
+            || mode.wavenumber_rad_m.to_bits() != expected_wavenumber.to_bits()
+            || mode.wavenumber_rad_m.to_bits() != mode.directivity.k.to_bits()
+            || mode.formulation == HelmholtzFormulation::BurtonMillerWrongAlphaSign
+            || mode.directivity.l_max > MAX_SH_DEGREE
+            || expected_coefficients != Some(mode.directivity.coefficients.len())
+            || !(mode.directivity.captured_fraction >= 0.0
+                && mode.directivity.captured_fraction.is_finite()
+                && mode.radiated_power_per_modal_velocity_squared >= 0.0
+                && mode.radiated_power_per_modal_velocity_squared.is_finite()
+                && mode.panels_per_wavelength > 0.0
+                && mode.panels_per_wavelength.is_finite()
+                && mode.condition_lower_bound >= 1.0
+                && mode.condition_lower_bound.is_finite()
+                && mode.minimum_far_field_distance_m > 0.0
+                && mode.minimum_far_field_distance_m.is_finite())
+            || mode
+                .directivity
+                .coefficients
+                .iter()
+                .any(|coefficient| !(coefficient.re.is_finite() && coefficient.im.is_finite()))
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "directivity mode rows are malformed or misaligned",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_acoustic_medium(gas: &GasState) -> Result<(), StructuralModalBasisError> {
@@ -1357,6 +2020,71 @@ fn acoustic_radiation_identity(
     hasher.finalize()
 }
 
+fn acoustic_directivity_identity(
+    basis: &StructuralModalBasis,
+    medium: ResolvedAcousticMedium<'_>,
+    controls: AcousticDirectivityControls,
+    modes: &[AcousticModeDirectivity],
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN);
+    hasher.update(basis.identity.as_bytes());
+    hasher.update(medium.gas_model_identity.as_bytes());
+    hasher.update(
+        &u64::try_from(controls.maximum_spherical_harmonic_degree)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for value in [
+        controls.minimum_captured_fraction,
+        medium.gas.temperature,
+        medium.gas.pressure,
+        medium.gas.density,
+        medium.gas.sound_speed,
+        medium.gas.dynamic_viscosity,
+        medium.gas.thermal_conductivity,
+        medium.gas.gamma,
+        medium.gas.specific_gas_constant,
+        medium.gas.specific_heat_cp,
+        medium.gas.prandtl,
+        medium.gas.characteristic_impedance,
+    ] {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+    for mode in modes {
+        hasher.update(
+            &u64::try_from(mode.structural_mode)
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(&[match mode.formulation {
+            HelmholtzFormulation::PlainCbie => 0,
+            HelmholtzFormulation::BurtonMiller => 1,
+            HelmholtzFormulation::BurtonMillerWrongAlphaSign => 2,
+        }]);
+        hasher.update(
+            &u64::try_from(mode.directivity.l_max)
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for value in [
+            mode.angular_frequency_rad_s,
+            mode.wavenumber_rad_m,
+            mode.directivity.captured_fraction,
+            mode.radiated_power_per_modal_velocity_squared,
+            mode.panels_per_wavelength,
+            mode.condition_lower_bound,
+            mode.minimum_far_field_distance_m,
+        ] {
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        for coefficient in &mode.directivity.coefficients {
+            hasher.update(&coefficient.re.to_bits().to_le_bytes());
+            hasher.update(&coefficient.im.to_bits().to_le_bytes());
+        }
+    }
+    hasher.finalize()
+}
+
 fn validate_request(request: &StructuralModeRequest<'_>) -> Result<(), StructuralModalBasisError> {
     if !(request.minimum_frequency_hz.is_finite()
         && request.minimum_frequency_hz > 0.0
@@ -1376,7 +2104,7 @@ fn validate_request(request: &StructuralModeRequest<'_>) -> Result<(), Structura
 }
 
 fn rounded_cylinder_dimensions(
-    specimen: &ResolvedMaterialDiscProfile,
+    specimen: &ResolvedElasticDiscProfile,
 ) -> Result<(f64, f64, f64), StructuralModalBasisError> {
     match specimen.profile.spec {
         DiscProfileSpec::SolidCylinder {
@@ -1524,8 +2252,10 @@ mod tests {
         PropertyValue, Provenance, QueryPoint, UncertaintyModel,
     };
     use fs_material::state_point::{
-        MaterialPropertySelection, resolve_isotropic_solid_state_point,
+        MaterialPropertySelection, resolve_isotropic_elastic_state_point,
+        resolve_orthotropic_elastic_state_point,
     };
+    use fs_mbd::UnitQuaternion;
     use fs_qty::{Density, Dims, Pressure};
 
     fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -1585,9 +2315,52 @@ mod tests {
         .unwrap()
     }
 
-    fn specimen() -> ResolvedMaterialDiscProfile {
+    fn orthotropic_material_card() -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for (name, dims, value) in [
+            ("density", Density::DIMS, 8_000.0),
+            ("young_modulus_1", Pressure::DIMS, 220.0e9),
+            ("young_modulus_2", Pressure::DIMS, 80.0e9),
+            ("young_modulus_3", Pressure::DIMS, 30.0e9),
+            ("poisson_ratio_12", Dims::NONE, 0.20),
+            ("poisson_ratio_13", Dims::NONE, 0.10),
+            ("poisson_ratio_23", Dims::NONE, 0.15),
+            ("shear_modulus_12", Pressure::DIMS, 50.0e9),
+            ("shear_modulus_23", Pressure::DIMS, 20.0e9),
+            ("shear_modulus_31", Pressure::DIMS, 25.0e9),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained().with("T", 290.0, 300.0),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: format!("structural-acoustics orthotropic test {name}"),
+                        license: "CC0-1.0".to_owned(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "test-orthotropic-solid".to_owned(),
+                phase: "solid".to_owned(),
+                process: "synthetic-principal-axis-data".to_owned(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn specimen() -> ResolvedElasticDiscProfile {
         let point = QueryPoint::new().with("T", 293.15).unwrap();
-        let material = resolve_isotropic_solid_state_point(
+        let material = resolve_isotropic_elastic_state_point(
             &material_card(193.0e9, 8_000.0),
             &point,
             MaterialPropertySelection::SingleClaimOnly,
@@ -1599,9 +2372,28 @@ mod tests {
                 thickness_m: 0.006,
                 edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
             }
-            .resolve_with_material_state(&material, cx)
+            .resolve_with_isotropic_elastic_state(&material, cx)
             .unwrap()
         })
+    }
+
+    fn coarse_modal_request(specimen: &ResolvedElasticDiscProfile) -> StructuralModeRequest<'_> {
+        StructuralModeRequest {
+            specimen,
+            mesh: StructuralMeshControls {
+                core_radial_segments: 2,
+                fillet_radial_segments: 1,
+                azimuthal_segments: 8,
+                axial_segments: 1,
+                maximum_vertices: 1_000,
+                maximum_tetrahedra: 10_000,
+            },
+            minimum_frequency_hz: 100.0,
+            maximum_frequency_hz: 100_000.0,
+            maximum_modes: 64,
+            slice: SliceOptions::default(),
+            assembly: TetAssemblyBudget::standard(),
+        }
     }
 
     #[test]
@@ -1688,6 +2480,72 @@ mod tests {
         {
             assert!((two - 2.0 * one).abs() < 1.0e-12);
         }
+    }
+
+    #[test]
+    fn g1_material_axis_orientation_changes_the_actual_modal_and_acoustic_basis() {
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let material = resolve_orthotropic_elastic_state_point(
+            &orthotropic_material_card(),
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+            1.0e-3,
+        )
+        .unwrap();
+        let profile = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        };
+        let identity_orientation =
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let principal_one_into_axial =
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+        let (radial_stiff, axial_stiff) = with_cx(|cx| {
+            (
+                profile
+                    .resolve_with_orthotropic_elastic_state(
+                        &material,
+                        identity_orientation,
+                        ContentHash([0x31; 32]),
+                        cx,
+                    )
+                    .unwrap(),
+                profile
+                    .resolve_with_orthotropic_elastic_state(
+                        &material,
+                        principal_one_into_axial,
+                        ContentHash([0x32; 32]),
+                        cx,
+                    )
+                    .unwrap(),
+            )
+        });
+        assert_ne!(radial_stiff.identity, axial_stiff.identity);
+        assert_ne!(
+            radial_stiff.elastic_material.stiffness_mandel_pa(),
+            axial_stiff.elastic_material.stiffness_mandel_pa()
+        );
+
+        let radial_basis = with_cx(|cx| {
+            build_structural_modal_basis(&coarse_modal_request(&radial_stiff), cx)
+        })
+        .unwrap();
+        let axial_basis = with_cx(|cx| {
+            build_structural_modal_basis(&coarse_modal_request(&axial_stiff), cx)
+        })
+        .unwrap();
+        assert_ne!(radial_basis.identity, axial_basis.identity);
+        assert!(
+            radial_basis
+                .modes
+                .iter()
+                .zip(&axial_basis.modes)
+                .any(|(radial, axial)| {
+                    radial.frequency_hz.to_bits() != axial.frequency_hz.to_bits()
+                }),
+            "rotating a strongly orthotropic tensor out of the disc plane must alter at least one retained physical mode"
+        );
     }
 
     #[test]
@@ -1784,5 +2642,73 @@ mod tests {
             frame.acoustic.viscous_dissipation_j
                 >= -frame.acoustic.dissipation_roundoff_tolerance_j
         );
+    }
+
+    #[test]
+    fn g0_world_observer_uses_current_body_pose_and_spherical_spreading() {
+        // A pure Y_10 table has a body-axis null in the equatorial plane. A
+        // quarter-turn about body y therefore rotates a world-z microphone
+        // from the polar lobe into that null without any pan/gain scripting.
+        let directivity = ModalAcousticDirectivity {
+            structural_basis_identity: ContentHash([0x11; 32]),
+            gas_model_identity: ContentHash([0x22; 32]),
+            temperature_k: 293.15,
+            ambient_pressure_pa: 101_325.0,
+            density_kg_m3: 1.204,
+            sound_speed_m_s: 343.0,
+            modes: vec![AcousticModeDirectivity {
+                structural_mode: 0,
+                angular_frequency_rad_s: 343.0,
+                wavenumber_rad_m: 1.0,
+                formulation: HelmholtzFormulation::PlainCbie,
+                directivity: DirectivityTable {
+                    k: 1.0,
+                    l_max: 1,
+                    coefficients: vec![C64::ZERO, C64::ZERO, C64::from_re(1.0), C64::ZERO],
+                    captured_fraction: 1.0,
+                },
+                radiated_power_per_modal_velocity_squared: 1.0,
+                panels_per_wavelength: 10.0,
+                condition_lower_bound: 1.0,
+                minimum_far_field_distance_m: 1.0,
+            }],
+            identity: ContentHash([0x33; 32]),
+        };
+        let observer = AcousticWorldObserver {
+            position_world_m: [0.0, 0.0, 10.0],
+        };
+        let polar = directivity
+            .observer_transfers_at_pose(Pose::identity(), observer)
+            .unwrap()[0];
+        assert!(polar.norm_sq() > 1.0e-6);
+
+        let quarter_turn =
+            UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.5 * core::f64::consts::PI)
+                .unwrap();
+        let rotated_pose = Pose::new(Vec3::ZERO, quarter_turn).unwrap();
+        let equatorial = directivity
+            .observer_transfers_at_pose(rotated_pose, observer)
+            .unwrap()[0];
+        assert!(equatorial.norm_sq() < polar.norm_sq() * 1.0e-24);
+
+        let nearer_pose = Pose::new(Vec3::new(0.0, 0.0, 5.0), UnitQuaternion::IDENTITY).unwrap();
+        let nearer = directivity
+            .observer_transfers_at_pose(nearer_pose, observer)
+            .unwrap()[0];
+        assert!((nearer.norm_sq() / polar.norm_sq() - 4.0).abs() < 1.0e-12);
+
+        let mut forged_medium = directivity.clone();
+        forged_medium.sound_speed_m_s = 344.0;
+        assert!(matches!(
+            forged_medium.observer_transfers_at_pose(Pose::identity(), observer),
+            Err(StructuralModalBasisError::InvalidRequest { .. })
+        ));
+
+        let mut forged_far_field = directivity;
+        forged_far_field.modes[0].minimum_far_field_distance_m = f64::NAN;
+        assert!(matches!(
+            forged_far_field.observer_transfers_at_pose(Pose::identity(), observer),
+            Err(StructuralModalBasisError::InvalidRequest { .. })
+        ));
     }
 }

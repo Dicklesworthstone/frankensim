@@ -1,6 +1,6 @@
 //! G0/G3 checks for one-source-of-truth Euler-disc specimen resolution.
 
-use fs_euler_disc_e2e::specimen::{DiscProfileError, DiscProfileSpec};
+use fs_euler_disc_e2e::specimen::{DiscProfileError, DiscProfileSpec, PhaseDiscBindingError};
 use fs_evidence::ValidityDomain;
 use fs_exec::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -8,6 +8,7 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_material::state_point::{MaterialPropertySelection, resolve_isotropic_solid_state_point};
 use fs_qty::{Density, Dims, Pressure};
 use fs_rep_frep::SquatDiscEdgeTreatment;
@@ -145,6 +146,57 @@ fn g0_material_specimen_uses_card_density_without_aliasing_equal_density_materia
     );
     assert_eq!(copper.material.young_modulus_pa(), 117.0e9);
     assert_eq!(steel.material.young_modulus_pa(), 193.0e9);
+}
+
+#[test]
+fn g0_phase_state_invalidates_fixed_solid_mechanics_at_first_liquid_fraction() {
+    let card = isotropic_card("phase-bound-test", 193.0e9);
+    let point = QueryPoint::new().with("T", 293.15).expect("state point");
+    let mechanical = resolve_isotropic_solid_state_point(
+        &card,
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .expect("solid mechanics state");
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        card.content_hash(),
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 293.15,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 8_000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 100_000.0,
+                temperature_k: 293.15,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 7_500.0,
+            },
+        ],
+    )
+    .expect("phase curve");
+    let spec = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: 0.038,
+        thickness_m: 0.006,
+        edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+    };
+    let solid_phase = curve.state_at_specific_enthalpy(0.0).unwrap();
+    let solid = with_cx(|cx| spec.resolve_with_phase_state(solid_phase, cx).unwrap());
+    let bound = solid.try_bind_fixed_solid(&mechanical).unwrap();
+    assert_eq!(
+        bound.profile.content_identities(),
+        solid.profile.content_identities()
+    );
+
+    let partially_liquid = curve.state_at_specific_enthalpy(1.0).unwrap();
+    let evolving = with_cx(|cx| spec.resolve_with_phase_state(partially_liquid, cx).unwrap());
+    assert!(matches!(
+        evolving.try_bind_fixed_solid(&mechanical),
+        Err(PhaseDiscBindingError::EvolvingPhaseRequired {
+            liquid_mass_fraction
+        }) if liquid_mass_fraction > 0.0
+    ));
 }
 
 #[test]

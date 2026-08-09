@@ -352,6 +352,11 @@ mod tests {
             pressure_pa,
             peak_abs_pressure_pa,
             contact_force_sampling: crate::structural_acoustics::PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+            observer: crate::structural_acoustics::PhysicalPressureObserver::WorldFixed(
+                crate::structural_acoustics::AcousticWorldObserver {
+                    position_world_m: [f64::from(radiation), 0.0, 1.0],
+                },
+            ),
             structural_basis_identity: ContentHash([1; 32]),
             radiation_identity: ContentHash([radiation; 32]),
             damping_model_identity: ContentHash([2; 32]),

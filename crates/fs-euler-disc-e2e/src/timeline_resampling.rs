@@ -245,6 +245,20 @@ impl<'trajectory> TimelineResampler<'trajectory> {
             .collect()
     }
 
+    /// Reconstruct one arbitrary time without allocating a query vector.
+    ///
+    /// This is the streaming seam for high-rate downstream consumers such as
+    /// acoustic observer evaluation. It has exactly the same event-side and
+    /// no-extrapolation semantics as [`Self::resample`].
+    pub fn sample(
+        &self,
+        time_s: f64,
+        event_side: EventEvaluationSide,
+    ) -> Result<ResampledTimelineSample, TimelineResamplingError> {
+        validate_queries(self.trajectory, core::slice::from_ref(&time_s))?;
+        self.sample_at(time_s, event_side)
+    }
+
     /// Partition a shutter interval at every known event boundary.
     pub fn partition_exposure(
         &self,

@@ -826,10 +826,17 @@ evidence.
 `DiscProfileSpec` remains the geometry authority for solid, annular, filleted,
 chamfered, and tapered axisymmetric specimens. `resolve_with_material_state`
 derives density, mass, centroid, and inertia from the same complete
-`IsotropicSolidStatePoint` later consumed by contact and structural adapters;
+`IsotropicSolidStatePoint` later consumed by contact adapters;
 its identity binds the exact chart, mass properties, material card, physical
 query point, selected property values, and usage receipts. Equal density does
 not make copper, steel, gold, wood, ruby, or another named state interchangeable.
+
+Structural vibration instead consumes `ResolvedElasticDiscProfile`, which
+binds the same geometry/mass authority to either the minimal isotropic elastic
+state or a full oriented orthotropic tensor. The material-axis rotation and its
+evidence identity are load-bearing inputs. They flow into the actual 3-D
+stiffness matrix and therefore into modal frequencies, shapes, BEM radiation,
+and sound; neither chemistry names nor an isotropic fallback select them.
 
 The normal-contact ingress accepts a `BoundNormalContactModel`: both ordered
 bulk states, the complete `InterfaceSystemCard`, its resolved adhesion datum,
@@ -843,13 +850,19 @@ temperature, adhesion, damping, rate limits, surface order, or law identity.
 This is a generic card-to-contact composition; it contains no Euler outcome
 targets or material-name presets.
 
-This rung does not yet evolve temperature, select a new material phase, melt or
-deform a specimen, recompute structural modes after topology change, or derive
-optical/acoustic properties. A state point outside a supplied solid card's
-validity refuses. Those effects require the generic thermal/phase,
-thermomechanical/free-surface, structural-acoustic, and optical property
-couplings; the cinematic fixture must not simulate them with scripted geometry
-or material-name switches.
+`ResolvedPhaseDiscProfile` binds the reference profile and mass properties to
+the generic `fs-material` specific-enthalpy phase state. A fully solid state can
+enter fixed-topology mechanics only when material-card identity, temperature,
+and density exactly match the independently resolved elastic state. The first
+nonzero liquid fraction refuses that rung as `EvolvingPhaseRequired`; stale
+rigid geometry, modes, sound, or optics cannot silently survive the transition.
+
+This rung does not yet evolve enthalpy from thermal boundary fluxes, deform or
+remesh a mushy/liquid specimen, recompute structural modes after topology
+change, or derive phase-dependent optical/acoustic properties. Those effects
+require the generic thermal transport, thermomechanical/free-surface,
+structural-acoustic, and optical couplings; the cinematic fixture must not
+simulate them with scripted geometry or material-name switches.
 
 ## Animation-grade Euler render trajectory v3
 
@@ -1473,9 +1486,10 @@ radiated acoustic energy, absolute SPL, structural/acoustic calibration, or
 physical validation.
 
 `structural_acoustics` is the physical replacement path for those
-representative presets. A resolved material specimen is tetrahedralized by the
+representative presets. A resolved elastic specimen is tetrahedralized by the
 shared rounded-cylinder mesh primitive; `fs-solid` assembles physical 3-D
-`(K,M)` operators; `fs-modal` returns certified mass-normalized modes; the
+`(K,M)` operators from its global-frame Mandel stiffness tensor; `fs-modal`
+returns certified mass-normalized modes; the
 actual body-frame contact point and force are projected through their P1 mode
 shapes; and `fs-bem` maps the same boundary-normal mode shapes into SI pressure
 at an explicit gas-state-dependent observer. Low acoustic size uses plain CBIE
@@ -1489,15 +1503,22 @@ zero-order-hold transition, and emits unmastered pressure in pascals. Audio
 samples that cross mechanics boundaries are split at the exact source times.
 The only current spatial approximation is declared explicitly: an interval
 mean force uses the closing retained contact point/body orientation, or the
-opening endpoint when the closing endpoint is open. No material name selects a
-frequency, decay constant, radiation gain, or digital level.
+opening endpoint when the closing endpoint is open. Observer-independent BEM
+far fields are projected into caller-bounded spherical-harmonic tables. A
+world-fixed microphone then evaluates spherical spreading, modal propagation
+phase, and body-frame directivity from the actual resampled rigid pose at every
+audio boundary; simultaneous microphones share one oscillator state so stereo
+phase cannot drift. No material name selects a frequency, decay constant,
+radiation gain, pan curve, or digital level.
 
-No-claim boundary: the current observer realization retains one complex BEM
-transfer at each natural frequency, so it is a narrow-band modal radiation
-model. Broadband exterior propagation/delay requires the passive rational
-frequency-response realization tracked separately. The current small-strain
-solid basis also cannot cross yield, large deformation, or phase change; a hot
-lead request must refuse when its evidence-bearing solid state leaves its
+No-claim boundary: both the legacy body-fixed transfer and the pose-dependent
+directivity realization retain only each structural mode's natural-frequency
+Helmholtz response. The latter applies that narrow-band propagation phase at
+the current pose; it is not a broadband moving-boundary retarded-time solve,
+Doppler model, or room response. Those require the passive rational frequency-
+response and propagation-history rungs tracked separately. The current small-
+strain solid basis also cannot cross yield, large deformation, or phase change;
+a hot lead request must refuse when its evidence-bearing solid state leaves its
 validity domain until the enthalpy/phase/evolving-geometry rung exists.
 
 `timeline_resampling` v1 reconstructs render/audio query times from this

@@ -17,11 +17,17 @@ use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_material::state_point::IsotropicSolidStatePoint;
+use fs_material::{
+    phase::{EquilibriumPhaseState, SolidLiquidPhase},
+    state_point::{
+        IsotropicElasticStatePoint, IsotropicSolidStatePoint, OrthotropicElasticStatePoint,
+    },
+};
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricError, AxisymmetricIdentity, AxisymmetricMassError,
     AxisymmetricMassProperties, MeridianPoint, MeridianSegment, SquatDiscEdgeTreatment,
 };
+use fs_solid::{TetElasticError, TetElasticMaterial};
 
 /// Canonical identity domain for the exact retained axisymmetric chart input.
 pub const EULER_SPECIMEN_CHART_IDENTITY_DOMAIN: &str =
@@ -153,6 +159,196 @@ pub struct ResolvedMaterialDiscProfile {
     /// Identity binding geometry, mass, and complete material state.
     pub identity: ContentHash,
 }
+
+/// Axisymmetric geometry and mass bound to a complete linear-elastic tensor.
+///
+/// This is the material-symmetry-independent specimen consumed by structural
+/// modes and vibroacoustics. Contact/plastic solvers may require additional
+/// state such as yield and interface properties, but they must reuse this
+/// profile and its card/state identities rather than constructing a second
+/// material by name.
+#[derive(Clone, Debug)]
+pub struct ResolvedElasticDiscProfile {
+    /// Geometry and mass properties evaluated from the same resolved density.
+    pub profile: ResolvedDiscProfile,
+    /// Global-frame isotropic or oriented-anisotropic elastic tensor.
+    pub elastic_material: TetElasticMaterial,
+    /// Immutable material card from which the bulk properties resolved.
+    pub material_card_identity: ContentHash,
+    /// Complete constitutive-state identity; for anisotropy this includes the
+    /// independently identified material-axis orientation.
+    pub material_state_identity: ContentHash,
+    /// Identity binding geometry, mass, card, and complete constitutive state.
+    pub identity: ContentHash,
+}
+
+impl ResolvedElasticDiscProfile {
+    fn bind(
+        profile: ResolvedDiscProfile,
+        elastic_material: TetElasticMaterial,
+        material_card_identity: ContentHash,
+    ) -> Self {
+        let material_state_identity = ContentHash(elastic_material.material_state_identity);
+        let profile_identities = profile.content_identities();
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-euler-disc-e2e.elastic-material-specimen.v1");
+        identity.update(profile_identities.profile.as_bytes());
+        identity.update(profile_identities.mass_properties.as_bytes());
+        identity.update(material_card_identity.as_bytes());
+        identity.update(material_state_identity.as_bytes());
+        Self {
+            profile,
+            elastic_material,
+            material_card_identity,
+            material_state_identity,
+            identity: identity.finalize(),
+        }
+    }
+}
+
+impl From<&ResolvedMaterialDiscProfile> for ResolvedElasticDiscProfile {
+    fn from(specimen: &ResolvedMaterialDiscProfile) -> Self {
+        Self::bind(
+            specimen.profile.clone(),
+            TetElasticMaterial::from_resolved_state(&specimen.material),
+            specimen.material.resolved().card_identity(),
+        )
+    }
+}
+
+/// Refusal while resolving geometry and a spatial elastic constitutive state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElasticDiscProfileError {
+    /// Axisymmetric geometry or mass integration refused.
+    Profile(DiscProfileError),
+    /// Elastic tensor or material orientation refused.
+    Elastic(TetElasticError),
+}
+
+impl fmt::Display for ElasticDiscProfileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for ElasticDiscProfileError {}
+
+impl From<DiscProfileError> for ElasticDiscProfileError {
+    fn from(source: DiscProfileError) -> Self {
+        Self::Profile(source)
+    }
+}
+
+impl From<TetElasticError> for ElasticDiscProfileError {
+    fn from(source: TetElasticError) -> Self {
+        Self::Elastic(source)
+    }
+}
+
+/// One reference profile resolved at a thermodynamic phase state.
+///
+/// This carrier remains valid when the state is mushy or liquid, but its
+/// `profile` is only the reference axisymmetric material domain evaluated at
+/// the supplied equilibrium bulk density. It does not claim the current free
+/// surface or deformation. A fixed-solid consumer must call
+/// [`Self::try_bind_fixed_solid`] before using rigid or small-strain mechanics.
+#[derive(Clone, Debug)]
+pub struct ResolvedPhaseDiscProfile {
+    /// Reference geometry and mass properties at the phase-state density.
+    pub profile: ResolvedDiscProfile,
+    /// Equilibrium temperature, density, and solid/liquid fractions.
+    pub phase_state: EquilibriumPhaseState,
+    /// Identity binding reference geometry and the complete phase state.
+    pub identity: ContentHash,
+}
+
+impl ResolvedPhaseDiscProfile {
+    /// Bind a fully solid phase state to the independently resolved elastic
+    /// properties consumed by fixed-topology mechanics.
+    ///
+    /// # Errors
+    /// Refuses any liquid fraction, different material card, different
+    /// temperature, or different density. No stale solid law can therefore
+    /// survive an admitted phase transition.
+    pub fn try_bind_fixed_solid(
+        &self,
+        material: &IsotropicSolidStatePoint,
+    ) -> Result<ResolvedMaterialDiscProfile, PhaseDiscBindingError> {
+        if self.phase_state.phase() != SolidLiquidPhase::Solid {
+            return Err(PhaseDiscBindingError::EvolvingPhaseRequired {
+                liquid_mass_fraction: self.phase_state.liquid_mass_fraction(),
+            });
+        }
+        let resolved = material.resolved();
+        if resolved.card_identity() != self.phase_state.material_card_identity() {
+            return Err(PhaseDiscBindingError::MaterialCardMismatch);
+        }
+        let temperature_k = resolved
+            .query_point()
+            .binary_search_by(|(axis, _)| axis.as_str().cmp("T"))
+            .ok()
+            .map(|index| resolved.query_point()[index].1)
+            .ok_or(PhaseDiscBindingError::MissingTemperatureCoordinate)?;
+        if temperature_k.to_bits() != self.phase_state.temperature_k().to_bits() {
+            return Err(PhaseDiscBindingError::TemperatureMismatch {
+                phase_temperature_k: self.phase_state.temperature_k(),
+                mechanical_temperature_k: temperature_k,
+            });
+        }
+        if material.density_kg_m3().to_bits() != self.phase_state.bulk_density_kg_m3().to_bits() {
+            return Err(PhaseDiscBindingError::DensityMismatch {
+                phase_density_kg_m3: self.phase_state.bulk_density_kg_m3(),
+                mechanical_density_kg_m3: material.density_kg_m3(),
+            });
+        }
+        let mut identity = DomainHasher::new(EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN);
+        let profile_identities = self.profile.content_identities();
+        identity.update(profile_identities.profile.as_bytes());
+        identity.update(profile_identities.mass_properties.as_bytes());
+        identity.update(material.resolved().identity().as_bytes());
+        Ok(ResolvedMaterialDiscProfile {
+            profile: self.profile.clone(),
+            material: material.clone(),
+            identity: identity.finalize(),
+        })
+    }
+}
+
+/// Refusal from joining a phase state to fixed-solid mechanics.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PhaseDiscBindingError {
+    /// A nonzero liquid fraction requires phase-aware evolving geometry.
+    EvolvingPhaseRequired {
+        /// Admitted liquid mass fraction that triggered the refusal.
+        liquid_mass_fraction: f64,
+    },
+    /// Phase and mechanical properties came from different material cards.
+    MaterialCardMismatch,
+    /// The elastic state omitted the canonical absolute-temperature axis.
+    MissingTemperatureCoordinate,
+    /// Phase and elastic properties were resolved at different temperatures.
+    TemperatureMismatch {
+        /// Temperature carried by the enthalpy/phase state [K].
+        phase_temperature_k: f64,
+        /// Temperature carried by the mechanical state [K].
+        mechanical_temperature_k: f64,
+    },
+    /// Phase and elastic properties disagree on homogeneous bulk density.
+    DensityMismatch {
+        /// Density carried by the enthalpy/phase state [kg/m3].
+        phase_density_kg_m3: f64,
+        /// Density carried by the mechanical state [kg/m3].
+        mechanical_density_kg_m3: f64,
+    },
+}
+
+impl fmt::Display for PhaseDiscBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for PhaseDiscBindingError {}
 
 /// Strong content identities used to bind a trajectory to its resolved asset.
 ///
@@ -286,6 +482,30 @@ impl fmt::Display for DiscProfileError {
 impl std::error::Error for DiscProfileError {}
 
 impl DiscProfileSpec {
+    /// Resolve reference geometry and mass at one equilibrium phase state.
+    ///
+    /// This is phase-agnostic ingress: it admits solid, mushy, and liquid
+    /// states without pretending the reference shape is the evolved free
+    /// surface. Downstream solvers select an appropriate constitutive and
+    /// geometry-evolution rung from `phase_state`.
+    pub fn resolve_with_phase_state(
+        self,
+        phase_state: EquilibriumPhaseState,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedPhaseDiscProfile, DiscProfileError> {
+        let profile = self.resolve(phase_state.bulk_density_kg_m3(), cx)?;
+        let mut identity = DomainHasher::new("org.frankensim.fs-euler-disc-e2e.phase-specimen.v1");
+        let profile_identities = profile.content_identities();
+        identity.update(profile_identities.profile.as_bytes());
+        identity.update(profile_identities.mass_properties.as_bytes());
+        identity.update(phase_state.identity().as_bytes());
+        Ok(ResolvedPhaseDiscProfile {
+            profile,
+            phase_state,
+            identity: identity.finalize(),
+        })
+    }
+
     /// Resolve this geometry using the density from one admitted material
     /// state, while retaining that complete state for downstream contact,
     /// structural, acoustic, thermal, optical, and provenance consumers.
@@ -305,6 +525,44 @@ impl DiscProfileSpec {
             material: material.clone(),
             identity: identity.finalize(),
         })
+    }
+
+    /// Resolve geometry and mass from the minimal isotropic tangent-elastic
+    /// state used by modal vibration and acoustics.
+    pub fn resolve_with_isotropic_elastic_state(
+        self,
+        material: &IsotropicElasticStatePoint,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedElasticDiscProfile, DiscProfileError> {
+        let profile = self.resolve(material.density_kg_m3(), cx)?;
+        Ok(ResolvedElasticDiscProfile::bind(
+            profile,
+            TetElasticMaterial::from_resolved_elastic_state(material),
+            material.resolved().card_identity(),
+        ))
+    }
+
+    /// Resolve geometry and mass from an oriented orthotropic tangent-elastic
+    /// state. `principal_to_world` maps material axes into the specimen-local
+    /// frame; its nonzero identity must name the texture/orientation evidence.
+    pub fn resolve_with_orthotropic_elastic_state(
+        self,
+        material: &OrthotropicElasticStatePoint,
+        principal_to_world: [[f64; 3]; 3],
+        orientation_identity: ContentHash,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedElasticDiscProfile, ElasticDiscProfileError> {
+        let profile = self.resolve(material.density_kg_m3(), cx)?;
+        let elastic_material = TetElasticMaterial::try_from_resolved_orthotropic_state(
+            material,
+            principal_to_world,
+            orientation_identity,
+        )?;
+        Ok(ResolvedElasticDiscProfile::bind(
+            profile,
+            elastic_material,
+            material.resolved().card_identity(),
+        ))
     }
 
     /// Resolve the specification into a validated profile and matching mass
