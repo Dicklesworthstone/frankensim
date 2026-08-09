@@ -17,6 +17,8 @@ use fs_vfit::passivity::{check_passivity, repair_passivity};
 use fs_vfit::vf::fit_auto_order;
 use fs_vfit::{FitOptions, RationalModel};
 
+use std::fmt::Write as _;
+
 use fs_duct::{Duct, LossModel, Segment, Termination, impedance_peaks, impedance_sweep};
 
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
@@ -185,7 +187,6 @@ fn clarinet_impedance_to_passive_audio_filter() {
         let refined = refine_peak(wp * 0.97, wp * 1.03, &z_dig);
         let c = cents(refined, wp);
         worst_dig_cents = worst_dig_cents.max(c.abs());
-        use std::fmt::Write as _;
         let _ = write!(
             peak_rows,
             "{{\"f_tmm_hz\":{:.3},\"cents_dig\":{c:.4}}},",
