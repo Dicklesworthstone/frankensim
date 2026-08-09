@@ -127,7 +127,7 @@ impl Storage for SosModalStorage {
         let mut h = 0.0;
         for k in 0..n {
             let (q, p) = (x[2 * k], x[2 * k + 1]);
-            h += 0.5 * (p * p + self.omegas[k] * self.omegas[k] * q * q);
+            h += f64::midpoint(p * p, self.omegas[k] * self.omegas[k] * q * q);
         }
         for ch in &self.channels {
             let s = self.quadratic_form(ch, x);
@@ -310,7 +310,7 @@ fn gauss_01(order: usize) -> (Vec<f64>, Vec<f64>) {
             p1 = p2;
         }
         let dp = nf * (x * p1 - p0) / (x * x - 1.0);
-        nodes.push(0.5 * (x + 1.0));
+        nodes.push(f64::midpoint(x, 1.0));
         weights.push(1.0 / ((1.0 - x * x) * dp * dp));
     }
     (nodes, weights)
@@ -417,8 +417,18 @@ pub fn von_karman_ss_plate(
     let phi_norm = det::sqrt(4.0 / (rho * h * lx * ly));
     let psi_norm = det::sqrt(4.0 / (lx * ly));
     let nq = disp_modes.len();
-    let (nodes_a, w_a) = gauss_01(24);
-    let (nodes_b, w_b) = gauss_01(31);
+    // Quadrature order scales with the highest half-wave SUM in the
+    // integrand (executed: fixed order 24 left ~5 points per wave and
+    // a 1e-4 cross-order disagreement); ~5 points per half-wave with
+    // margin, and the certification order is offset AND coprime-ish.
+    let max_sum = {
+        let max_d = disp_modes.iter().map(|m| m.m.max(m.n)).max().unwrap_or(1);
+        let max_s = stress_modes.iter().map(|m| m.m.max(m.n)).max().unwrap_or(1);
+        max_s + 2 * max_d
+    };
+    let order_a = 16 + 5 * max_sum;
+    let (nodes_a, w_a) = gauss_01(order_a);
+    let (nodes_b, w_b) = gauss_01(order_a + 9);
     let mut channels = Vec::with_capacity(stress_modes.len());
     let mut worst_rel = 0.0f64;
     for &sm in stress_modes {
@@ -427,19 +437,30 @@ pub fn von_karman_ss_plate(
                 + (sm.n as f64 * pi / ly) * (sm.n as f64 * pi / ly);
             k2 * k2
         };
-        let mut e = vec![0.0; nq * nq];
+        // Two independent orders per channel; the disagreement is
+        // judged against the CHANNEL's largest integral, not each
+        // entry's own magnitude — the integrands carry (m pi/L)^4
+        // scales, so an analytically-zero entry legitimately computes
+        // to ~1e-13 of the channel scale, which is enormous relative
+        // to itself (executed false refusal at 1e-4 "relative").
+        let mut raw_pairs = Vec::with_capacity(nq * (nq + 1) / 2);
+        let mut chan_scale = f64::MIN_POSITIVE;
         for p in 0..nq {
             for q in 0..=p {
                 let raw_a =
                     coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q], &nodes_a, &w_a);
                 let raw_b =
                     coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q], &nodes_b, &w_b);
-                let scale = raw_a.abs().max(raw_b.abs()).max(1.0e-9 / (lx * ly));
-                worst_rel = worst_rel.max((raw_a - raw_b).abs() / scale);
-                let v = psi_norm * phi_norm * phi_norm * raw_b;
-                e[p * nq + q] = v;
-                e[q * nq + p] = v;
+                chan_scale = chan_scale.max(raw_a.abs()).max(raw_b.abs());
+                raw_pairs.push((p, q, raw_a, raw_b));
             }
+        }
+        let mut e = vec![0.0; nq * nq];
+        for (p, q, raw_a, raw_b) in raw_pairs {
+            worst_rel = worst_rel.max((raw_a - raw_b).abs() / chan_scale);
+            let v = psi_norm * phi_norm * phi_norm * raw_b;
+            e[p * nq + q] = v;
+            e[q * nq + p] = v;
         }
         channels.push(StressChannel {
             coefficient: young * h / (2.0 * xi4),
