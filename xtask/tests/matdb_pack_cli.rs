@@ -7716,5 +7716,19 @@ fn g2_stainless_yield_fraction_temperature_curve() {
     // Exact endpoints as graph-read: 478 K -> 0.68, 1033 K -> 0.43.
     assert!((knots[0].0 - 478.0).abs() < 1.0e-9 && (knots[0].1 - 0.68).abs() < 1.0e-12);
     assert!((knots[3].0 - 1033.0).abs() < 1.0e-9 && (knots[3].1 - 0.43).abs() < 1.0e-12);
+    // QUERIED through the evaluator (the bead's "landed and queried"):
+    // tabulated-only answers at an exact knot temperature.
+    let point = fs_matdb::QueryPoint::new()
+        .with("temperature", 589.0)
+        .expect("query point");
+    let answer = pack
+        .claims()
+        .query(
+            "tensile_yield_fraction",
+            &point,
+            fs_matdb::SelectionPolicy::SingleClaimOnly,
+        )
+        .expect("curve query at a knot");
+    assert!((answer.evidence.value.value - 0.62).abs() < 1.0e-12);
     println!("{{\"suite\":\"matdb-pack\",\"case\":\"fty-fraction-curve\",\"verdict\":\"pass\"}}");
 }
