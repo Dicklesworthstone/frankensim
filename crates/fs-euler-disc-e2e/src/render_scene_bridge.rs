@@ -3570,3 +3570,141 @@ mod bevel_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod material_binding_tests {
+    use fs_evidence::{Provenance, UncertaintyModel, ValidityDomain};
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+        PropertyValue, QueryPoint,
+    };
+    use fs_material::state_point::{
+        MaterialPropertySelection, VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+        VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY, VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+        VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+        VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES, resolve_isotropic_elastic_state_point,
+        resolve_visible_dielectric_state_point,
+    };
+    use fs_qty::{Density, Dims, Pressure};
+
+    use super::*;
+
+    fn dielectric_card(process: &str, red_transmittance: f64) -> MaterialCard {
+        let validity = ValidityDomain::unconstrained().with("T", 293.15, 293.15);
+        let mut claims = ClaimSet::new();
+        let properties = [
+            ("density", Density::DIMS, 3_980.0),
+            ("young_modulus", Pressure::DIMS, 345.0e9),
+            ("poisson_ratio", Dims::NONE, 0.23),
+            (VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY, Dims::NONE, 1.75),
+            (
+                VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+                Dims([2, 0, 0, 0, 0, 0]),
+                5.0e-15,
+            ),
+            (
+                VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+                Dims([4, 0, 0, 0, 0, 0]),
+                0.0,
+            ),
+            (
+                VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[0],
+                Dims::NONE,
+                red_transmittance,
+            ),
+            (
+                VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[1],
+                Dims::NONE,
+                0.30,
+            ),
+            (
+                VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[2],
+                Dims::NONE,
+                0.25,
+            ),
+            (
+                VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+                Dims([1, 0, 0, 0, 0, 0]),
+                0.004,
+            ),
+        ];
+        for (name, dims, value) in properties {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: validity.clone(),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: "synthetic same-card binding test".to_owned(),
+                        license: "CC0-1.0".to_owned(),
+                        artifact: None,
+                    },
+                })
+                .expect("unique valid test property");
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic-corundum".to_owned(),
+                phase: "solid".to_owned(),
+                process: process.to_owned(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .expect("complete dielectric test card")
+    }
+
+    #[test]
+    fn g0_dielectric_binding_requires_one_material_state_and_retains_physical_optics() {
+        let card = dielectric_card("polished", 0.85);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let elastic = resolve_isotropic_elastic_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let optical = resolve_visible_dielectric_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let binding = EulerDiscMaterialStateBinding::try_dielectric_elastic(
+            &elastic,
+            &optical,
+            Some(0.08),
+            ContentHash([7; 32]),
+        )
+        .expect("same-card dielectric binding");
+        let EulerMaterialStyle::Dielectric { glass, surface } = binding.appearance() else {
+            panic!("dielectric state must produce a dielectric renderer material");
+        };
+        assert_eq!(glass.provenance(), GlassProvenance::Custom);
+        assert!(glass.ior().eval(430.0).unwrap() > glass.ior().eval(730.0).unwrap());
+        assert_eq!(surface.roughness_alpha(), Some(0.08));
+        assert!(glass.absorption().transmittance(550.0, 0.004).unwrap() < 1.0);
+        assert_ne!(binding.identity(), ContentHash([0; 32]));
+
+        let foreign = dielectric_card("foreign-finish", 0.85);
+        let foreign_optical = resolve_visible_dielectric_state_point(
+            &foreign,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(matches!(
+            EulerDiscMaterialStateBinding::try_dielectric_elastic(
+                &elastic,
+                &foreign_optical,
+                None,
+                ContentHash([7; 32]),
+            ),
+            Err(EulerSceneError::MaterialStateMismatch(_))
+        ));
+    }
+}
