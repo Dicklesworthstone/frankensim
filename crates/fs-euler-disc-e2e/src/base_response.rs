@@ -9,9 +9,11 @@
 //! cancellable API is required before it can make that project-level claim.
 
 use core::fmt;
-use std::collections::BTreeSet;
 
+use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_solid::{OperatorDiagnostics, ShellAssembly, ShellError, ShellPlate, ShellSupport};
+
+const BASE_STEP_LINEAGE_DOMAIN: &str = "org.frankensim.euler.reduced-base-step-lineage.v1";
 
 /// Largest retained integration length for this synchronous campaign rung.
 ///
@@ -136,8 +138,6 @@ pub enum BaseResponseError {
     PortProposalMismatch,
     /// The caller attempted to accept a stale or skipped checkpoint version.
     PortVersionMismatch { expected: u64, observed: u64 },
-    /// A step identity was already accepted from this checkpoint lineage.
-    DuplicatePortStepIdentity,
     /// The port's declared accepted-step/replay budget is exhausted.
     PortStepBudgetExceeded,
 }
@@ -281,7 +281,11 @@ pub struct ReducedBasePortIdentity {
 /// base, not a reaction reported back to the disc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedBaseStepInput {
-    /// Bounded caller identity used to reject replay within one checkpoint lineage.
+    /// Bounded caller label included in the version-scoped interval identity.
+    ///
+    /// Idempotency is the tuple `(port identity, expected_version, step_id)`;
+    /// the same descriptive label may therefore be reused at another version
+    /// without aliasing the accepted interval.
     pub step_id: String,
     /// Exact version of the checkpoint this interval extends.
     pub expected_version: u64,
@@ -299,9 +303,10 @@ pub struct ReducedBaseStepInput {
 
 /// Cloneable committed state of the one-mode reduced-base port.
 ///
-/// It contains only scalar modal dynamics plus a bounded set of accepted step
-/// identities.  The full plate operators and modal shape remain immutable in
-/// `ReducedBasePort`, so checkpoint cloning does not duplicate them.
+/// It contains only scalar modal dynamics plus a fixed-size content root for
+/// all accepted interval identities. The full plate operators and modal shape
+/// remain immutable in `ReducedBasePort`, so checkpoint cloning is constant
+/// size even for long audio-rate trajectories.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedBaseCheckpoint {
     identity: ReducedBasePortIdentity,
@@ -311,7 +316,7 @@ pub struct ReducedBaseCheckpoint {
     modal_velocity_m_per_s: f64,
     cumulative_damping_work_j: f64,
     cumulative_external_work_j: f64,
-    accepted_step_ids: BTreeSet<String>,
+    accepted_step_lineage_root: ContentHash,
 }
 
 impl ReducedBaseCheckpoint {
@@ -349,6 +354,12 @@ impl ReducedBaseCheckpoint {
     #[must_use]
     pub fn cumulative_external_work_j(&self) -> f64 {
         self.cumulative_external_work_j
+    }
+
+    /// Domain-separated root of every accepted version-scoped step identity.
+    #[must_use]
+    pub const fn accepted_step_lineage_root(&self) -> ContentHash {
+        self.accepted_step_lineage_root
     }
 }
 
@@ -473,7 +484,7 @@ impl ReducedBasePort {
             modal_velocity_m_per_s: self.input.initial_modal_velocity_m_per_s,
             cumulative_damping_work_j: 0.0,
             cumulative_external_work_j: 0.0,
-            accepted_step_ids: BTreeSet::new(),
+            accepted_step_lineage_root: hash_domain(BASE_STEP_LINEAGE_DOMAIN, &[]),
         }
     }
 
@@ -491,9 +502,6 @@ impl ReducedBasePort {
             self.diagnostics.modal_frequency_rad_s,
             self.diagnostics.nondimensional_timestep_limit,
         )?;
-        if checkpoint.accepted_step_ids.contains(&step.step_id) {
-            return Err(BaseResponseError::DuplicatePortStepIdentity);
-        }
         let mut step_input = self.input.clone();
         step_input.load.normal_force_n = step.compressive_normal_force_on_base_n;
         let modal_step = advance_implicit_midpoint(
@@ -551,8 +559,11 @@ impl ReducedBasePort {
             next_damping_work,
             next_external_work,
         )?;
-        let mut accepted_step_ids = checkpoint.accepted_step_ids.clone();
-        accepted_step_ids.insert(step.step_id.clone());
+        let accepted_step_lineage_root = extend_step_lineage(
+            checkpoint.accepted_step_lineage_root,
+            checkpoint.accepted_version,
+            &step.step_id,
+        );
         let next = ReducedBaseCheckpoint {
             identity: self.identity.clone(),
             accepted_version: checkpoint.accepted_version + 1,
@@ -561,7 +572,7 @@ impl ReducedBasePort {
             modal_velocity_m_per_s: modal_step.next_velocity_m_per_s,
             cumulative_damping_work_j: next_damping_work,
             cumulative_external_work_j: next_external_work,
-            accepted_step_ids,
+            accepted_step_lineage_root,
         };
         Ok(ReducedBaseStepProposal {
             parent: checkpoint.clone(),
@@ -629,10 +640,7 @@ impl ReducedBasePort {
         if checkpoint.identity != self.identity {
             return Err(BaseResponseError::PortIdentityMismatch);
         }
-        if checkpoint.accepted_version > self.maximum_accepted_steps
-            || u64::try_from(checkpoint.accepted_step_ids.len()).ok()
-                != Some(checkpoint.accepted_version)
-        {
+        if checkpoint.accepted_version > self.maximum_accepted_steps {
             return Err(BaseResponseError::PortProposalMismatch);
         }
         for (value, field) in [
@@ -1008,6 +1016,21 @@ fn validate_port_identity(identity: &ReducedBasePortIdentity) -> Result<(), Base
         }
     }
     Ok(())
+}
+
+fn extend_step_lineage(
+    parent_root: ContentHash,
+    parent_version: u64,
+    step_id: &str,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(BASE_STEP_LINEAGE_DOMAIN);
+    hasher.update(parent_root.as_bytes());
+    hasher.update(&parent_version.to_le_bytes());
+    let step_id_len =
+        u64::try_from(step_id.len()).expect("validated base step identities are at most 256 bytes");
+    hasher.update(&step_id_len.to_le_bytes());
+    hasher.update(step_id.as_bytes());
+    hasher.finalize()
 }
 
 fn validate_port_step(

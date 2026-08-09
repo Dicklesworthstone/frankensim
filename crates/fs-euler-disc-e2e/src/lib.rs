@@ -28,6 +28,7 @@ pub mod convergence;
 pub mod coupled_runner;
 pub mod external_air;
 pub mod mechanics;
+pub mod modal_base_response;
 pub mod modal_synthesis;
 pub mod normal_contact;
 pub mod patch_kinematics;
@@ -157,8 +158,8 @@ pub use contact_dynamics::{
     ContactStepReceipt, ContactTermination, DiscGeometry as ContactDiscGeometry, EnergyLedger,
     NO_CLAIM_BOUNDARY as CONTACT_NO_CLAIM_BOUNDARY, ProfileContactDynamicsInput,
     ProfileContactGeometry, ProfileContactPatchGeometry, ProfileRollingInitializer,
-    StickFeasibility, TimestepRefinement, contact_geometry, profile_contact_geometry,
-    profile_contact_patch_geometry, profile_state_at_ground_contact,
+    StickFeasibility, TimestepRefinement, contact_geometry, declared_profile_rolling_initializer,
+    profile_contact_geometry, profile_contact_patch_geometry, profile_state_at_ground_contact,
     refine_profile_timestep_by_two, refine_timestep_by_two, run_contact_dynamics,
     run_profile_contact_dynamics, small_angle_rolling_profile_initializer, state_at_ground_contact,
     state_at_profile_ground_contact,

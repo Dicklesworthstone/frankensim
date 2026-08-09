@@ -116,6 +116,13 @@ pub enum ModalAcousticTimeError {
         /// Number of generalized forces supplied.
         found: usize,
     },
+    /// A restored checkpoint supplied one state per the wrong number of modes.
+    StateCountMismatch {
+        /// Admitted number of modes.
+        expected: usize,
+        /// Number of supplied states.
+        found: usize,
+    },
     /// A state-dependent observer supplied one transfer per the wrong number
     /// of admitted modes.
     TransferCountMismatch {
@@ -159,6 +166,10 @@ impl core::fmt::Display for ModalAcousticTimeError {
             Self::ForceCountMismatch { expected, found } => write!(
                 f,
                 "FS-COUPLE-MODAL-TIME-SHAPE: expected {expected} modal forces, found {found}"
+            ),
+            Self::StateCountMismatch { expected, found } => write!(
+                f,
+                "FS-COUPLE-MODAL-TIME-STATE-SHAPE: expected {expected} modal states, found {found}"
             ),
             Self::TransferCountMismatch { expected, found } => write!(
                 f,
@@ -254,6 +265,58 @@ impl ModalAcousticTimeModel {
     #[must_use]
     pub fn states(&self) -> &[ModalAcousticState] {
         &self.states
+    }
+
+    /// Replace the complete modal state from an accepted external checkpoint.
+    ///
+    /// This is the transactional restart seam used when another coupled
+    /// physics owner, rather than the acoustic runtime itself, owns commit and
+    /// rollback. The candidate must match the admitted modal basis and the
+    /// same displacement, velocity, and total-energy budgets as a normal
+    /// advance. A refusal leaves the runtime unchanged.
+    pub fn restore_states(
+        &mut self,
+        states: &[ModalAcousticState],
+    ) -> Result<(), ModalAcousticTimeError> {
+        if states.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::StateCountMismatch {
+                expected: self.modes.len(),
+                found: states.len(),
+            });
+        }
+        let mut total_energy_j = 0.0;
+        for (mode, state) in self.modes.iter().zip(states) {
+            if !(state.displacement_m_sqrt_kg.is_finite()
+                && state.velocity_m_sqrt_kg_per_s.is_finite())
+            {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "restored modal states must be finite",
+                });
+            }
+            check_limit(
+                "absolute modal displacement",
+                state.displacement_m_sqrt_kg.abs(),
+                self.budget.maximum_abs_displacement_m_sqrt_kg,
+            )?;
+            check_limit(
+                "absolute modal velocity",
+                state.velocity_m_sqrt_kg_per_s.abs(),
+                self.budget.maximum_abs_velocity_m_sqrt_kg_per_s,
+            )?;
+            total_energy_j += modal_energy(*mode, *state);
+        }
+        if !total_energy_j.is_finite() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "restored modal energy must be finite",
+            });
+        }
+        check_limit(
+            "total modal energy",
+            total_energy_j,
+            self.budget.maximum_total_energy_j,
+        )?;
+        self.states.clone_from_slice(states);
+        Ok(())
     }
 
     /// Nominal output sample period [s].
@@ -844,6 +907,40 @@ mod tests {
         let before = model.states().to_vec();
         assert!(matches!(
             model.initialize_static_equilibrium(&[f64::NAN]),
+            Err(ModalAcousticTimeError::InvalidInput { .. })
+        ));
+        assert_eq!(model.states(), before);
+    }
+
+    #[test]
+    fn g0_external_checkpoint_restore_is_exact_and_transactional() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 900.0,
+            damping_ratio: 0.015,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        let restored = [ModalAcousticState {
+            displacement_m_sqrt_kg: 2.0e-5,
+            velocity_m_sqrt_kg_per_s: -0.03,
+        }];
+        model.restore_states(&restored).unwrap();
+        assert_eq!(model.states(), restored);
+
+        let before = model.states().to_vec();
+        assert!(matches!(
+            model.restore_states(&[]),
+            Err(ModalAcousticTimeError::StateCountMismatch {
+                expected: 1,
+                found: 0
+            })
+        ));
+        assert_eq!(model.states(), before);
+        assert!(matches!(
+            model.restore_states(&[ModalAcousticState {
+                displacement_m_sqrt_kg: f64::NAN,
+                velocity_m_sqrt_kg_per_s: 0.0,
+            }]),
             Err(ModalAcousticTimeError::InvalidInput { .. })
         ));
         assert_eq!(model.states(), before);

@@ -679,7 +679,7 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         },
         disc_mass_properties: mass(),
         gravity: Gravity::ZERO,
-        base_port: base_port(),
+        base_port: base_port().into(),
         tangential_adapter: adapter.clone(),
     };
     let checkpoint = model
@@ -1239,7 +1239,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             },
             disc_mass_properties,
             gravity: Gravity::ZERO,
-            base_port: base_port(),
+            base_port: base_port().into(),
             tangential_adapter: adapter.clone(),
         };
         let (mut request, _, _) = production_request_template();
@@ -1569,7 +1569,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             identity: model.identity.clone(),
             disc_mass_properties: profile_mbd_mass(stale_mass_profile.mass_properties),
             gravity: Gravity::ZERO,
-            base_port: base_port(),
+            base_port: base_port().into(),
             tangential_adapter: adapter.clone(),
         };
         let mut stale_mass_request = production_request_template().0;
@@ -1613,7 +1613,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             identity: model.identity.clone(),
             disc_mass_properties: profile_mbd_mass(sharp.mass_properties),
             gravity: Gravity::ZERO,
-            base_port: base_port(),
+            base_port: base_port().into(),
             tangential_adapter: adapter,
         };
         let mut sharp_request = production_request_template().0;

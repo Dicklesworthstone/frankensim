@@ -1,9 +1,9 @@
 use fs_euler_disc_e2e::{
     CONTACT_NO_CLAIM_BOUNDARY, ContactDiscGeometry as DiscGeometry, ContactDynamicsError,
     ContactDynamicsInput, ContactTermination, ProfileContactDynamicsInput, contact_geometry,
-    profile_contact_geometry, profile_contact_patch_geometry, refine_profile_timestep_by_two,
-    refine_timestep_by_two, run_contact_dynamics, run_profile_contact_dynamics,
-    small_angle_rolling_profile_initializer, state_at_ground_contact,
+    declared_profile_rolling_initializer, profile_contact_geometry, profile_contact_patch_geometry,
+    refine_profile_timestep_by_two, refine_timestep_by_two, run_contact_dynamics,
+    run_profile_contact_dynamics, small_angle_rolling_profile_initializer, state_at_ground_contact,
     state_at_profile_ground_contact,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -467,6 +467,28 @@ fn sharp_and_one_millimetre_fillet_have_distinct_oblique_profile_contacts_and_ru
             cx,
         )
         .expect("filleted oblique rolling initialization");
+        let declared_initial = declared_profile_rolling_initializer(
+            &filleted,
+            density_kg_per_m3,
+            inclination_rad,
+            80.0,
+            -20.0,
+            cx,
+        )
+        .expect("caller-declared profile rates");
+        assert_eq!(declared_initial.declared_precession_rate_rad_per_s, 80.0);
+        assert!(
+            declared_initial.angular_velocity_body_rad_per_s.z.abs() > 1.0,
+            "an independently declared spin must not be replaced by the analytical cancellation"
+        );
+        assert!(
+            declared_initial
+                .initial_contact_velocity_world_m_per_s
+                .dot(declared_initial.initial_contact_velocity_world_m_per_s)
+                .sqrt()
+                <= 1.0e-12,
+            "the actual profile support point must begin with zero material velocity"
+        );
         let mut sharp_controls = tilted_input(100.0, Vec3::ZERO, 0.0, 1.0e-6, 2);
         sharp_controls.geometry.mass_kg = sharp_mass.mass;
         sharp_controls.initial_state = sharp_initial.state;

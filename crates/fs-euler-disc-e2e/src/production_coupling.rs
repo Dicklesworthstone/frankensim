@@ -31,7 +31,8 @@ use crate::{
         TiltedDiscKinematics,
     },
     base_response::{
-        ReducedBaseCheckpoint, ReducedBasePort, ReducedBaseStepInput, ReducedBaseStepProposal,
+        BaseResponseError, ReducedBaseCheckpoint, ReducedBasePort, ReducedBaseStepInput,
+        ReducedBaseStepProposal,
     },
     contact_dynamics::{
         ContactDynamicsError, ProfileContactPatchGeometry,
@@ -41,6 +42,10 @@ use crate::{
         EulerDiscBodyFrame, EulerDiscExteriorState, EulerExternalAirCandidate,
         EulerExternalAirInput, EulerExternalAirWorkProposal, EulerExternalAirWorkState,
         ExternalAirError, evaluate_euler_disc_external_air,
+    },
+    modal_base_response::{
+        RectangularModalBaseCheckpoint, RectangularModalBaseError, RectangularModalBasePort,
+        RectangularModalBaseProposal, RectangularModalBaseStepInput,
     },
     normal_contact::{
         ActiveNormalContact, EulerNormalContactInput, EulerNormalContactOutcome,
@@ -122,6 +127,128 @@ pub struct ProductionCouplingIdentity {
     pub world_frame_id: String,
 }
 
+/// Selected structural support backend for the coupled mechanics owner.
+#[derive(Debug, Clone)]
+pub enum ProductionBasePort {
+    /// Legacy load-shaped one-mode flat-plate reduction.
+    ReducedOneMode(ReducedBasePort),
+    /// Resolved multi-mode rectangular plate with moving point contact.
+    RectangularModal(RectangularModalBasePort),
+}
+
+impl From<ReducedBasePort> for ProductionBasePort {
+    fn from(value: ReducedBasePort) -> Self {
+        Self::ReducedOneMode(value)
+    }
+}
+
+impl From<RectangularModalBasePort> for ProductionBasePort {
+    fn from(value: RectangularModalBasePort) -> Self {
+        Self::RectangularModal(value)
+    }
+}
+
+/// Accepted support state paired with the selected production backend.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProductionBaseCheckpoint {
+    /// Legacy one-mode checkpoint.
+    ReducedOneMode(ReducedBaseCheckpoint),
+    /// Resolved rectangular modal checkpoint.
+    RectangularModal(RectangularModalBaseCheckpoint),
+}
+
+impl ProductionBaseCheckpoint {
+    fn accepted_version(&self) -> u64 {
+        match self {
+            Self::ReducedOneMode(state) => state.accepted_version(),
+            Self::RectangularModal(state) => state.accepted_version(),
+        }
+    }
+
+    fn elapsed_time_s(&self) -> f64 {
+        match self {
+            Self::ReducedOneMode(state) => state.elapsed_time_s(),
+            Self::RectangularModal(state) => state.elapsed_time_s(),
+        }
+    }
+
+    fn last_surface_state(&self) -> (f64, f64) {
+        match self {
+            Self::ReducedOneMode(state) => {
+                (state.modal_displacement_m(), state.modal_velocity_m_per_s())
+            }
+            Self::RectangularModal(state) => {
+                let surface = state.last_surface_state();
+                (surface.displacement_m, surface.velocity_m_per_s)
+            }
+        }
+    }
+
+    fn last_contact_point_world_m(&self) -> Vec3 {
+        match self {
+            Self::ReducedOneMode(_) => Vec3::ZERO,
+            Self::RectangularModal(state) => {
+                let [x, y, z] = state.last_contact_point_base_m();
+                Vec3::new(x, y, z)
+            }
+        }
+    }
+}
+
+/// Backend-independent support accounting consumed by render and sound bridges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionBaseStepReceipt {
+    /// Consumed support version.
+    pub parent_version: u64,
+    /// Produced support version.
+    pub next_version: u64,
+    /// Accepted subinterval [s].
+    pub timestep_s: f64,
+    /// Compressive force applied into the support [N].
+    pub compressive_normal_force_on_base_n: f64,
+    /// Equal-and-opposite reaction on the disc [N].
+    pub normal_reaction_on_disc_world_n: [f64; 3],
+    /// Local contact displacement at interval start [m].
+    pub modal_displacement_start_m: f64,
+    /// Local contact displacement at interval end [m].
+    pub modal_displacement_end_m: f64,
+    /// Local contact velocity at interval start [m/s].
+    pub modal_velocity_start_m_per_s: f64,
+    /// Local contact velocity at interval end [m/s].
+    pub modal_velocity_end_m_per_s: f64,
+    /// Retained structural-energy change [J].
+    pub stored_energy_change_j: f64,
+    /// Viscous damping work [J].
+    pub damping_work_j: f64,
+    /// External contact work on the support [J].
+    pub external_contact_work_j: f64,
+    /// Structural energy-closure residual [J].
+    pub energy_closure_residual_j: f64,
+    /// Available norm of the support reaction [N].
+    pub end_support_reaction_norm_n: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ProductionBaseProposalBackend {
+    ReducedOneMode(ReducedBaseStepProposal),
+    RectangularModal(RectangularModalBaseProposal),
+}
+
+/// Prepared support transition whose accepted state remains private until commit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionBaseStepProposal {
+    backend: ProductionBaseProposalBackend,
+    receipt: ProductionBaseStepReceipt,
+}
+
+impl ProductionBaseStepProposal {
+    /// Backend-independent interval accounting.
+    #[must_use]
+    pub const fn receipt(&self) -> &ProductionBaseStepReceipt {
+        &self.receipt
+    }
+}
+
 /// Immutable adapters and rigid-body properties used by a production substep.
 #[derive(Debug, Clone)]
 pub struct ProductionCouplingModel {
@@ -131,8 +258,8 @@ pub struct ProductionCouplingModel {
     pub disc_mass_properties: MassProperties,
     /// Uniform world-frame gravity.
     pub gravity: Gravity,
-    /// Already assembled moving-one-mode flexible-base port.
-    pub base_port: ReducedBasePort,
+    /// Already assembled structural support port.
+    pub base_port: ProductionBasePort,
     /// Explicitly selected partial-slip adapter/lane.
     pub tangential_adapter: EulerTangentialContactAdapter,
 }
@@ -151,7 +278,7 @@ pub struct ProductionCouplingCheckpoint {
     tangential_state: TangentialContactState,
     rolling_state: RollingContactState,
     gas_channel_state: GasChannelState,
-    base_state: ReducedBaseCheckpoint,
+    base_state: ProductionBaseCheckpoint,
 }
 
 impl ProductionCouplingCheckpoint {
@@ -176,13 +303,13 @@ impl ProductionCouplingCheckpoint {
     /// Accepted one-mode base displacement [m].
     #[must_use]
     pub fn base_displacement_m(&self) -> f64 {
-        self.base_state.modal_displacement_m()
+        self.base_state.last_surface_state().0
     }
 
     /// Accepted one-mode base velocity [m/s].
     #[must_use]
     pub fn base_velocity_m_per_s(&self) -> f64 {
-        self.base_state.modal_velocity_m_per_s()
+        self.base_state.last_surface_state().1
     }
 }
 
@@ -376,8 +503,8 @@ pub struct ProductionCouplingReceipt {
     pub rolling: RollingContactProposal,
     /// The one gas-channel receipt contributing its real wrench to fs-mbd.
     pub gas_channel: GasChannelReceipt,
-    /// Accepted moving-one-mode base transition accounting.
-    pub base: ReducedBaseStepProposal,
+    /// Accepted selected-base transition accounting.
+    pub base: ProductionBaseStepProposal,
     /// Total real world-frame force sent to fs-mbd [N].
     pub total_force_world_n: Vec3,
     /// Total real world-frame moment about disc COM sent to fs-mbd [N m].
@@ -397,7 +524,7 @@ pub struct ProductionOpenFlightReceipt {
     /// The one gas-channel receipt contributing its real wrench to fs-mbd.
     pub gas_channel: GasChannelReceipt,
     /// Zero-contact-load support transition; the support may continue ringing.
-    pub base: ReducedBaseStepProposal,
+    pub base: ProductionBaseStepProposal,
     /// Gas force sent to fs-mbd [N]; gravity remains integrator-owned.
     pub total_force_world_n: Vec3,
     /// Gas moment about disc COM sent to fs-mbd [N m].
@@ -674,7 +801,11 @@ pub enum ProductionCouplingError {
     /// The named exterior candidate was absent; alternatives are never auto-selected.
     ExteriorCandidateUnavailable,
     /// Reduced base explicitly refuses resolved/as-built/unsupported requests.
-    Base(crate::base_response::BaseResponseError),
+    Base(BaseResponseError),
+    /// Resolved moving-contact modal base refused projection or time advance.
+    ModalBase(RectangularModalBaseError),
+    /// Checkpoint/proposal backend differs from the immutable selected base port.
+    BaseBackendMismatch,
     /// fs-mbd refused the actual summed wrench.
     Dynamics(fs_mbd::DynamicsError),
 }
@@ -686,6 +817,157 @@ impl fmt::Display for ProductionCouplingError {
 }
 
 impl std::error::Error for ProductionCouplingError {}
+
+impl ProductionBasePort {
+    fn initial_checkpoint(&self) -> ProductionBaseCheckpoint {
+        match self {
+            Self::ReducedOneMode(port) => {
+                ProductionBaseCheckpoint::ReducedOneMode(port.initial_checkpoint())
+            }
+            Self::RectangularModal(port) => {
+                ProductionBaseCheckpoint::RectangularModal(port.initial_checkpoint())
+            }
+        }
+    }
+
+    fn surface_state(
+        &self,
+        checkpoint: &ProductionBaseCheckpoint,
+        contact_point_world_m: Vec3,
+    ) -> Result<(f64, f64), ProductionCouplingError> {
+        match (self, checkpoint) {
+            (Self::ReducedOneMode(_), ProductionBaseCheckpoint::ReducedOneMode(state)) => {
+                Ok((state.modal_displacement_m(), state.modal_velocity_m_per_s()))
+            }
+            (Self::RectangularModal(port), ProductionBaseCheckpoint::RectangularModal(state)) => {
+                let surface = port
+                    .surface_state(
+                        state,
+                        [contact_point_world_m.x, contact_point_world_m.y, 0.0],
+                    )
+                    .map_err(ProductionCouplingError::ModalBase)?;
+                Ok((surface.displacement_m, surface.velocity_m_per_s))
+            }
+            _ => Err(ProductionCouplingError::BaseBackendMismatch),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propose(
+        &self,
+        checkpoint: &ProductionBaseCheckpoint,
+        step_id: String,
+        duration_s: f64,
+        compressive_normal_force_on_base_n: f64,
+        contact_point_world_m: Vec3,
+        legacy_load_progress_start: f64,
+        legacy_load_progress_end: f64,
+    ) -> Result<ProductionBaseStepProposal, ProductionCouplingError> {
+        match (self, checkpoint) {
+            (Self::ReducedOneMode(port), ProductionBaseCheckpoint::ReducedOneMode(state)) => {
+                let proposal = port
+                    .propose(
+                        state,
+                        &ReducedBaseStepInput {
+                            step_id,
+                            expected_version: state.accepted_version(),
+                            duration_s,
+                            compressive_normal_force_on_base_n,
+                            load_progress_start: legacy_load_progress_start,
+                            load_progress_end: legacy_load_progress_end,
+                        },
+                    )
+                    .map_err(ProductionCouplingError::Base)?;
+                let base = proposal.receipt();
+                let receipt = ProductionBaseStepReceipt {
+                    parent_version: base.parent_version,
+                    next_version: base.next_version,
+                    timestep_s: base.timestep_s,
+                    compressive_normal_force_on_base_n: base.compressive_normal_force_on_base_n,
+                    normal_reaction_on_disc_world_n: base.normal_reaction_on_disc_world_n,
+                    modal_displacement_start_m: base.modal_displacement_start_m,
+                    modal_displacement_end_m: base.modal_displacement_end_m,
+                    modal_velocity_start_m_per_s: base.modal_velocity_start_m_per_s,
+                    modal_velocity_end_m_per_s: base.modal_velocity_end_m_per_s,
+                    stored_energy_change_j: base.stored_energy_change_j,
+                    damping_work_j: base.damping_work_j,
+                    external_contact_work_j: base.external_contact_work_j,
+                    energy_closure_residual_j: base.energy_closure_residual_j,
+                    end_support_reaction_norm_n: base.end_support_reaction_norm_n,
+                };
+                Ok(ProductionBaseStepProposal {
+                    backend: ProductionBaseProposalBackend::ReducedOneMode(proposal),
+                    receipt,
+                })
+            }
+            (Self::RectangularModal(port), ProductionBaseCheckpoint::RectangularModal(state)) => {
+                let point = [contact_point_world_m.x, contact_point_world_m.y, 0.0];
+                let proposal = port
+                    .propose(
+                        state,
+                        &RectangularModalBaseStepInput {
+                            step_id,
+                            expected_version: state.accepted_version(),
+                            duration_s,
+                            contact_point_start_base_m: point,
+                            contact_point_force_base_m: point,
+                            contact_point_end_base_m: point,
+                            compressive_normal_force_on_base_n,
+                        },
+                    )
+                    .map_err(ProductionCouplingError::ModalBase)?;
+                let base = proposal.receipt();
+                let receipt = ProductionBaseStepReceipt {
+                    parent_version: base.parent_version,
+                    next_version: base.next_version,
+                    timestep_s: base.duration_s,
+                    compressive_normal_force_on_base_n: base.compressive_normal_force_on_base_n,
+                    normal_reaction_on_disc_world_n: base.normal_reaction_on_disc_base_n,
+                    modal_displacement_start_m: base.surface_start.displacement_m,
+                    modal_displacement_end_m: base.surface_end.displacement_m,
+                    modal_velocity_start_m_per_s: base.surface_start.velocity_m_per_s,
+                    modal_velocity_end_m_per_s: base.surface_end.velocity_m_per_s,
+                    stored_energy_change_j: base.stored_energy_change_j,
+                    damping_work_j: base.viscous_dissipation_j,
+                    external_contact_work_j: base.external_work_j,
+                    energy_closure_residual_j: base.energy_closure_residual_j,
+                    end_support_reaction_norm_n: compressive_normal_force_on_base_n,
+                };
+                Ok(ProductionBaseStepProposal {
+                    backend: ProductionBaseProposalBackend::RectangularModal(proposal),
+                    receipt,
+                })
+            }
+            _ => Err(ProductionCouplingError::BaseBackendMismatch),
+        }
+    }
+
+    fn accept(
+        &self,
+        checkpoint: &ProductionBaseCheckpoint,
+        proposal: ProductionBaseStepProposal,
+    ) -> Result<ProductionBaseCheckpoint, ProductionCouplingError> {
+        match (self, checkpoint, proposal.backend) {
+            (
+                Self::ReducedOneMode(port),
+                ProductionBaseCheckpoint::ReducedOneMode(state),
+                ProductionBaseProposalBackend::ReducedOneMode(proposal),
+            ) => port
+                .accept(state, proposal)
+                .map(ProductionBaseCheckpoint::ReducedOneMode)
+                .map_err(ProductionCouplingError::Base),
+            (
+                Self::RectangularModal(port),
+                ProductionBaseCheckpoint::RectangularModal(state),
+                ProductionBaseProposalBackend::RectangularModal(proposal),
+            ) => port
+                .accept(state, proposal)
+                .map(ProductionBaseCheckpoint::RectangularModal)
+                .map_err(ProductionCouplingError::ModalBase),
+            _ => Err(ProductionCouplingError::BaseBackendMismatch),
+        }
+    }
+}
 
 impl ProductionCouplingModel {
     /// Verify that a checkpoint belongs to this exact model lineage and that
@@ -733,13 +1015,16 @@ impl ProductionCouplingModel {
         let base_state = self.base_port.initial_checkpoint();
         let (resolved, disc_mass_properties) =
             self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
+        let (base_displacement_m, base_velocity_m_per_s) = self
+            .base_port
+            .surface_state(&base_state, resolved.support.contact.point_world_m)?;
         let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
             input,
             resolved,
             disc_mass_properties,
             disc_state,
-            base_state.modal_displacement_m(),
-            base_state.modal_velocity_m_per_s(),
+            base_displacement_m,
+            base_velocity_m_per_s,
         )?;
         input.expected_checkpoint_version = 0;
         Ok(resolved)
@@ -823,13 +1108,17 @@ impl ProductionCouplingModel {
         self.validate_checkpoint(checkpoint)?;
         let (resolved, disc_mass_properties) =
             self.resolve_axisymmetric_profile_contact(profile, checkpoint.disc_state, cx)?;
+        let (base_displacement_m, base_velocity_m_per_s) = self.base_port.surface_state(
+            &checkpoint.base_state,
+            resolved.support.contact.point_world_m,
+        )?;
         let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
             input,
             resolved,
             disc_mass_properties,
             checkpoint.disc_state,
-            checkpoint.base_state.modal_displacement_m(),
-            checkpoint.base_state.modal_velocity_m_per_s(),
+            base_displacement_m,
+            base_velocity_m_per_s,
         )?;
         input.expected_checkpoint_version = checkpoint.committed_version;
         Ok(resolved)
@@ -1041,20 +1330,15 @@ impl ProductionCouplingModel {
                 field: "topography-perturbed normal force",
             });
         }
-        let base = self
-            .base_port
-            .propose(
-                &checkpoint.base_state,
-                &ReducedBaseStepInput {
-                    step_id: input.base_step_id.clone(),
-                    expected_version: checkpoint.base_state.accepted_version(),
-                    duration_s: input.duration_s,
-                    compressive_normal_force_on_base_n: normal_force_n,
-                    load_progress_start: input.base_load_progress_start,
-                    load_progress_end: input.base_load_progress_end,
-                },
-            )
-            .map_err(ProductionCouplingError::Base)?;
+        let base = self.base_port.propose(
+            &checkpoint.base_state,
+            input.base_step_id.clone(),
+            input.duration_s,
+            normal_force_n,
+            patch_kinematics.base_point.point_world,
+            input.base_load_progress_start,
+            input.base_load_progress_end,
+        )?;
 
         let (mut normal_force, mut normal_moment) = point_normal_wrench(&normal)?;
         if surface_excitation.is_some() {
@@ -1120,8 +1404,7 @@ impl ProductionCouplingModel {
         let gas_channel_state = commit_gas_channel(&checkpoint.gas_channel_state, &gas_channel)?;
         let base_state = self
             .base_port
-            .accept(&checkpoint.base_state, base.clone())
-            .map_err(ProductionCouplingError::Base)?;
+            .accept(&checkpoint.base_state, base.clone())?;
         let checkpoint_fingerprint = production_checkpoint_fingerprint(
             &self.identity,
             committed_version,
@@ -1194,20 +1477,15 @@ impl ProductionCouplingModel {
             self.disc_mass_properties,
             input.duration_s,
         )?;
-        let base = self
-            .base_port
-            .propose(
-                &checkpoint.base_state,
-                &ReducedBaseStepInput {
-                    step_id: input.base_step_id.clone(),
-                    expected_version: checkpoint.base_state.accepted_version(),
-                    duration_s: input.duration_s,
-                    compressive_normal_force_on_base_n: 0.0,
-                    load_progress_start: input.base_load_progress_start,
-                    load_progress_end: input.base_load_progress_end,
-                },
-            )
-            .map_err(ProductionCouplingError::Base)?;
+        let base = self.base_port.propose(
+            &checkpoint.base_state,
+            input.base_step_id.clone(),
+            input.duration_s,
+            0.0,
+            checkpoint.base_state.last_contact_point_world_m(),
+            input.base_load_progress_start,
+            input.base_load_progress_end,
+        )?;
         if !(gas_force.is_finite() && gas_moment.is_finite()) {
             return Err(ProductionCouplingError::InvalidInput {
                 field: "open-flight gas wrench",
@@ -1237,8 +1515,7 @@ impl ProductionCouplingModel {
         let gas_channel_state = commit_gas_channel(&checkpoint.gas_channel_state, &gas_channel)?;
         let base_state = self
             .base_port
-            .accept(&checkpoint.base_state, base.clone())
-            .map_err(ProductionCouplingError::Base)?;
+            .accept(&checkpoint.base_state, base.clone())?;
         let checkpoint_fingerprint = production_checkpoint_fingerprint(
             &self.identity,
             committed_version,

@@ -805,6 +805,104 @@ pub fn state_at_profile_ground_contact(
     )
 }
 
+/// Build a profile-grounded no-slip state from caller-declared Euler rates.
+///
+/// `precession_rad_per_s` is the world-vertical angular-rate component and
+/// `spin_rad_per_s` is the component about the disc symmetry axis. Their sum
+/// is transformed into the body frame before the actual profile-derived
+/// principal inertia forms angular momentum. The center-of-mass velocity is
+/// then chosen so the material velocity of the actual selected support point
+/// is zero. This is a kinematic initial condition, not an equilibrium or
+/// stability claim; no analytical precession law is imposed.
+pub fn declared_profile_rolling_initializer(
+    chart: &AxisymmetricChart,
+    density_kg_per_m3: f64,
+    inclination_rad: f64,
+    precession_rad_per_s: f64,
+    spin_rad_per_s: f64,
+    cx: &Cx<'_>,
+) -> Result<ProfileRollingInitializer, ContactDynamicsError> {
+    if !(inclination_rad.is_finite()
+        && inclination_rad > 0.0
+        && inclination_rad < core::f64::consts::FRAC_PI_2)
+    {
+        return Err(ContactDynamicsError::InvalidInput {
+            field: "inclination_rad",
+        });
+    }
+    finite_scalar(precession_rad_per_s, "precession_rad_per_s")?;
+    finite_scalar(spin_rad_per_s, "spin_rad_per_s")?;
+    let mass = chart
+        .mass_properties(density_kg_per_m3, cx)
+        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
+    let mass_properties = profile_mass_to_mbd(mass)?;
+    let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), inclination_rad)
+        .map_err(rigid_refusal)?;
+    let symmetry_axis_world = orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+    let angular_velocity_world =
+        Vec3::new(0.0, 0.0, precession_rad_per_s).add(symmetry_axis_world.scale(spin_rad_per_s));
+    finite_vec(angular_velocity_world, "declared_angular_velocity_world")?;
+    let angular_velocity_body_rad_per_s = orientation.rotate_world_to_body(angular_velocity_world);
+    finite_vec(
+        angular_velocity_body_rad_per_s,
+        "declared_angular_velocity_body",
+    )?;
+    let inertia = mass_properties.principal_inertia_body();
+    let angular_momentum_body = Vec3::new(
+        checked_mul(
+            angular_velocity_body_rad_per_s.x,
+            inertia.x,
+            "declared_angular_momentum_body_x",
+        )?,
+        checked_mul(
+            angular_velocity_body_rad_per_s.y,
+            inertia.y,
+            "declared_angular_momentum_body_y",
+        )?,
+        checked_mul(
+            angular_velocity_body_rad_per_s.z,
+            inertia.z,
+            "declared_angular_momentum_body_z",
+        )?,
+    );
+    let provisional = Pose::new(Vec3::ZERO, orientation).map_err(rigid_refusal)?;
+    let provisional_contact = profile_contact_geometry(chart, mass, provisional, cx)?;
+    let linear_velocity_world_m_per_s = checked_scale(
+        checked_cross(
+            angular_velocity_world,
+            provisional_contact.contact.radius_world_m,
+            "declared_contact_rotation_velocity",
+        )?,
+        -1.0,
+        "declared_center_of_mass_velocity",
+    )?;
+    let linear_momentum_world = checked_scale(
+        linear_velocity_world_m_per_s,
+        mass.mass,
+        "declared_linear_momentum_world",
+    )?;
+    let state = profile_state_at_ground_contact(
+        chart,
+        mass,
+        orientation,
+        linear_momentum_world,
+        angular_momentum_body,
+        cx,
+    )?;
+    let contact = profile_contact_geometry(chart, mass, state.pose(), cx)?;
+    let initial_contact_velocity_world_m_per_s =
+        contact_velocity(mass_properties, state, contact.contact.radius_world_m)?;
+    Ok(ProfileRollingInitializer {
+        state,
+        contact,
+        inclination_rad,
+        declared_precession_rate_rad_per_s: precession_rad_per_s,
+        angular_velocity_body_rad_per_s,
+        linear_velocity_world_m_per_s,
+        initial_contact_velocity_world_m_per_s,
+    })
+}
+
 /// Builds a caller-declared, small-angle rolling-compatible profile state.
 ///
 /// The y-tilt convention is derived by rotating body `z` through
@@ -844,64 +942,14 @@ pub fn small_angle_rolling_profile_initializer(
         declared_precession_rate_rad_per_s,
         "declared_precession_rate_rad_per_s",
     )?;
-    let mass = chart
-        .mass_properties(density_kg_per_m3, cx)
-        .map_err(|detail| ContactDynamicsError::ProfileMassRefusal { detail })?;
-    let mass_properties = profile_mass_to_mbd(mass)?;
-    let orientation = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), inclination_rad)
-        .map_err(rigid_refusal)?;
-    let angular_velocity_body_rad_per_s = Vec3::new(
-        -checked_mul(
-            declared_precession_rate_rad_per_s,
-            sine,
-            "declared_angular_velocity_body",
-        )?,
-        0.0,
-        0.0,
-    );
-    let angular_momentum_body = checked_scale(
-        angular_velocity_body_rad_per_s,
-        mass.principal_inertia.transverse,
-        "declared_angular_momentum_body",
-    )?;
-    let provisional = Pose::new(Vec3::ZERO, orientation).map_err(rigid_refusal)?;
-    let provisional_contact = profile_contact_geometry(chart, mass, provisional, cx)?;
-    let angular_velocity_world = orientation.rotate_body_to_world(angular_velocity_body_rad_per_s);
-    finite_vec(angular_velocity_world, "declared_angular_velocity_world")?;
-    let linear_velocity_world_m_per_s = checked_scale(
-        checked_cross(
-            angular_velocity_world,
-            provisional_contact.contact.radius_world_m,
-            "declared_contact_rotation_velocity",
-        )?,
-        -1.0,
-        "declared_center_of_mass_velocity",
-    )?;
-    let linear_momentum_world = checked_scale(
-        linear_velocity_world_m_per_s,
-        mass.mass,
-        "declared_linear_momentum_world",
-    )?;
-    let state = profile_state_at_ground_contact(
+    declared_profile_rolling_initializer(
         chart,
-        mass,
-        orientation,
-        linear_momentum_world,
-        angular_momentum_body,
-        cx,
-    )?;
-    let contact = profile_contact_geometry(chart, mass, state.pose(), cx)?;
-    let initial_contact_velocity_world_m_per_s =
-        contact_velocity(mass_properties, state, contact.contact.radius_world_m)?;
-    Ok(ProfileRollingInitializer {
-        state,
-        contact,
+        density_kg_per_m3,
         inclination_rad,
         declared_precession_rate_rad_per_s,
-        angular_velocity_body_rad_per_s,
-        linear_velocity_world_m_per_s,
-        initial_contact_velocity_world_m_per_s,
-    })
+        -declared_precession_rate_rad_per_s * inclination_rad.cos(),
+        cx,
+    )
 }
 
 /// Runs the fixed-step unilateral contact solver until its horizon or an honest terminal event.

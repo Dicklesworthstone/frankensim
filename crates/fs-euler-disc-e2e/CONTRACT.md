@@ -992,9 +992,32 @@ measured force, deformable-contact model, or acoustic-radiation model.
 
 The transactional production-coupling bridge publishes accepted smooth-contact
 prefixes and also exposes one shared-checkpoint open/contact compliant driver.
+Its profile-native initializer resolves the actual support point and both
+principal curvatures, evaluates the caller-selected normal law, derives the
+finite normal patch used to initialize the caller-selected tangential law,
+starts rolling history, and seals the explicitly selected gas channel into one
+checkpoint. It does not infer any constitutive coefficient or contact radius
+from a specimen name. Product drivers therefore share the same initialization
+boundary instead of recreating synthetic normal-patch state by hand.
+Product drivers may also initialize rolling motion from explicitly declared
+precession and spin rates through the same resolved profile. That generic
+initializer derives mass, principal inertia, ground support, linear momentum,
+and angular momentum from the chart and enforces zero material-point velocity
+at the initial contact. The optional small-angle helper is only one analytical
+way to choose those rates; neither the generic initializer nor the production
+coupling model imposes that approximation.
+For long-form product trajectories, the moving-contact modal base port consumes
+the certified rectangular plate basis directly. It projects each actual
+base-frame contact point through mesh shape functions, advances the same
+mass-normalized modes used by structural acoustics, publishes local surface
+displacement and velocity back to contact kinematics, and retains work,
+stored-energy, viscous-loss, and closure accounting. Checkpoints keep a fixed
+size step-lineage root instead of cloning every prior step identity. The
+production coupling owner accepts either this resolved moving-contact backend
+or the older bounded one-mode estimate without changing disc/contact laws.
 Every contact sample comes from the exact `fs-mbd`
 `StepReceipt` and retains its accepted rigid state, profile-native contact
-feature and point, normal, one-mode base endpoint, and disc mechanical-energy
+feature and point, normal, selected structural-base endpoint, and disc mechanical-energy
 diagnostic. Because the force law is evaluated at the interval start while a
 render sample describes the endpoint, the bridge independently re-queries the
 resolved profile support at the accepted endpoint pose and base displacement;

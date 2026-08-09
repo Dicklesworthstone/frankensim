@@ -429,12 +429,16 @@ fn e2e_reduced_base_port_replays_the_existing_implicit_midpoint_trajectory() {
     );
 
     let mut checkpoint = port.initial_checkpoint();
+    let mut preceding_lineage_root = checkpoint.accepted_step_lineage_root();
     for step_index in 1..=request.steps {
         let proposal = port
             .propose(
                 &checkpoint,
                 &ReducedBaseStepInput {
-                    step_id: format!("mechanics-substep-{step_index}"),
+                    // The version is part of the idempotency tuple, so a
+                    // stable descriptive label does not require retaining an
+                    // ever-growing set inside an audio-rate checkpoint.
+                    step_id: "mechanics-substep".into(),
                     expected_version: checkpoint.accepted_version(),
                     duration_s: request.timestep_s,
                     compressive_normal_force_on_base_n: request.load.normal_force_n,
@@ -456,6 +460,11 @@ fn e2e_reduced_base_port_replays_the_existing_implicit_midpoint_trajectory() {
             );
         }
         checkpoint = port.accept(&checkpoint, proposal).expect("commit interval");
+        assert_ne!(
+            checkpoint.accepted_step_lineage_root(),
+            preceding_lineage_root
+        );
+        preceding_lineage_root = checkpoint.accepted_step_lineage_root();
     }
     let terminal = reference.final_sample().expect("terminal reference sample");
     assert_eq!(checkpoint.accepted_version(), u64::from(request.steps));

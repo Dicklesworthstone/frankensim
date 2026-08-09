@@ -3954,6 +3954,106 @@ mod tests {
     }
 
     #[test]
+    fn g0_modal_base_port_moves_the_actual_contact_and_closes_energy() {
+        use std::sync::Arc;
+
+        use crate::modal_base_response::{
+            RectangularModalBaseIdentity, RectangularModalBasePort, RectangularModalBaseStepInput,
+        };
+
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let material = resolve_isotropic_elastic_state_point(
+            &material_card(70.0e9, 2_500.0),
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let support = RectangularPlateSupport::ThreePointPinned {
+            points_centered_m: [[-0.0675, -0.0675], [0.0675, -0.0675], [0.0, 0.0675]],
+            maximum_snap_distance_m: 1.0e-12,
+        };
+        let basis = with_cx(|cx| {
+            build_rectangular_plate_modal_basis(
+                &RectangularPlateModeRequest {
+                    width_m: 0.18,
+                    depth_m: 0.18,
+                    thickness_m: 0.010,
+                    elastic: &material,
+                    support,
+                    cells_x: 8,
+                    cells_y: 8,
+                    maximum_nodes: 128,
+                    minimum_frequency_hz: 10.0,
+                    maximum_frequency_hz: 5_000.0,
+                    maximum_modes: 8,
+                    slice: SliceOptions::default(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        let port = RectangularModalBasePort::try_new(
+            RectangularModalBaseIdentity {
+                model_id: "test/rectangular-modal-base".into(),
+                configuration_id: "test/moving-contact".into(),
+            },
+            Arc::new(basis),
+            RayleighDamping::new(0.15, 2.0e-7).unwrap(),
+            48_000,
+            ModalAcousticTimeBudget::audible_reference(),
+            2,
+            1.0e-12,
+        )
+        .unwrap();
+        let start = [0.0, 0.0, 0.0];
+        let checkpoint = port.initial_static_contact_checkpoint(start, 2.0).unwrap();
+        let initial_surface = port.surface_state(&checkpoint, start).unwrap();
+        assert!(initial_surface.displacement_m < 0.0);
+        assert_eq!(
+            initial_surface.velocity_m_per_s.to_bits(),
+            0.0_f64.to_bits()
+        );
+
+        let proposal = port
+            .propose(
+                &checkpoint,
+                &RectangularModalBaseStepInput {
+                    step_id: "moving-contact".into(),
+                    expected_version: 0,
+                    duration_s: 1.0 / 48_000.0,
+                    contact_point_start_base_m: start,
+                    contact_point_force_base_m: [0.001, 0.0, 0.0],
+                    contact_point_end_base_m: [0.002, 0.0, 0.0],
+                    compressive_normal_force_on_base_n: 2.0,
+                },
+            )
+            .unwrap();
+        assert!(proposal.receipt().surface_end.displacement_m.is_finite());
+        assert!(proposal.receipt().energy_closure_residual_j.abs() <= 1.0e-12);
+        let next = port.accept(&checkpoint, proposal).unwrap();
+        assert_eq!(next.accepted_version(), 1);
+        assert_ne!(
+            next.accepted_step_lineage_root(),
+            checkpoint.accepted_step_lineage_root()
+        );
+        assert!(
+            port.propose(
+                &next,
+                &RectangularModalBaseStepInput {
+                    step_id: "stale".into(),
+                    expected_version: 0,
+                    duration_s: 1.0 / 48_000.0,
+                    contact_point_start_base_m: [0.002, 0.0, 0.0],
+                    contact_point_force_base_m: [0.003, 0.0, 0.0],
+                    contact_point_end_base_m: [0.004, 0.0, 0.0],
+                    compressive_normal_force_on_base_n: 2.0,
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn g0_three_point_plate_support_refuses_degenerate_resolved_constraints() {
         let duplicate = RectangularPlateSupport::ThreePointPinned {
             points_centered_m: [[0.0, 0.0], [1.0e-9, 0.0], [0.04, 0.04]],
