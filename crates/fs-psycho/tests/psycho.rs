@@ -558,14 +558,15 @@ fn signal_path_time_varying_pulse_decay() {
     let n5_ref = 8.077_504_421_840_171;
     assert!(((out.n_max - nmax_ref) / nmax_ref).abs() < 1.0e-9);
     assert!(((out.n5 - n5_ref) / n5_ref).abs() < 1.0e-9);
-    // The decay TAIL carries a one-time ~3e-9 relative offset: near
-    // the pulse offset a single sub-step of the nonlinear decay
-    // element flips a case boundary (its |Ui - UoLast| < 1e-5
-    // equality band) under ulp-level libm differences, and the
-    // deterministic decay carries that state shift multiplicatively —
-    // measured -3.1e-9 at frame 1683 and -2.9e-9 at frame 2244 (NOT
-    // compounding: 55x amplitude apart, same relative offset). Tail
-    // gates are therefore 1e-7; rise/plateau pins stay at 1e-9.
+    // The decay TAIL carries a one-time branch-flip offset: near the
+    // pulse offset a sub-step of the nonlinear decay element flips a
+    // case boundary (its |Ui - UoLast| < 1e-5 equality band) under
+    // ulp-level libm differences. Full-series diff vs the reference
+    // (review-measured): divergence starts ~frame 1519, peaks at
+    // -7.3e-9 relative around frames 1539-1550, then settles to a
+    // constant -2.9e-9 for the whole tail (zero frames exceed 1e-8;
+    // the steady tone holds 9.3e-15 everywhere). Tail gates are
+    // therefore 1e-7; rise/plateau pins stay at 1e-9.
     let pins = [
         (561usize, 5.769_132_334_749_696_3, 1.0e-9),
         (1496, 8.082_105_897_289_144_6, 1.0e-9),
@@ -620,6 +621,13 @@ fn phon_conversion_and_signal_refusals() {
     bad[5] = f64::INFINITY;
     assert!(matches!(
         loudness_time_varying(&bad, sigfix::SR, SoundField::Free),
+        Err(PsychoError::NonFinite { .. })
+    ));
+    // Huge FINITE samples overflow the squaring stage — must refuse,
+    // not return Ok(inf/NaN) (review-executed hole, closed).
+    let huge = vec![1.0e200f64; sigfix::LEN];
+    assert!(matches!(
+        loudness_time_varying(&huge, sigfix::SR, SoundField::Free),
         Err(PsychoError::NonFinite { .. })
     ));
     assert!(matches!(

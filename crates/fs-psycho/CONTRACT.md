@@ -101,9 +101,10 @@ test).
    tone, 250 Hz 80 dB tone, 500 ms 1 kHz 70 dB pulse) the stationary
    value, the time-varying Nmax/N5, and rise/plateau probe frames
    match the compiled reference binary within 1e-9 relative; the
-   pulse's decay tail carries a measured one-time ~3e-9 branch-flip
-   offset (the nonlinear element's 1e-5 equality band under ulp libm
-   differences — documented in the test) and gates at 1e-7. The
+   pulse's decay tail carries a one-time branch-flip offset (the
+   nonlinear element's 1e-5 equality band under ulp libm differences;
+   full-series review measurement: peak -7.3e-9 near the flip, then a
+   constant -2.9e-9, zero frames beyond 1e-8) and gates at 1e-7. The
    stationary signal path lands on the Annex B.3 published values
    within 0.05 sone. Temporal behavior: silence before onset,
    loudness persisting >15% of Nmax 90 ms after offset.
@@ -113,7 +114,9 @@ test).
 11. Signal-path refusals: non-48 kHz rates refuse by name
     (`UnsupportedRate` — the reference ships 48 kHz tables only,
     resampling would be a silent claim), non-finite samples, too-short
-    signals, and out-of-range or signal-consuming `time_skip` all
+    signals, out-of-range or signal-consuming `time_skip`, and
+    finite samples that OVERFLOW the squaring stage (1e200 Pa once
+    read Ok(inf/NaN) — review-caught, now a typed refusal) all
     refuse typed.
 12. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
    published ~70 Hz signature), ALL SEVEN sweep values match the

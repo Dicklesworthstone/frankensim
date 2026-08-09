@@ -218,11 +218,15 @@ fn temporal_weight(loudness: &mut [f64]) {
 
 /// The standard's percentile estimator (`f_calc_percentile`, P = 5):
 /// sort ascending, `Np = floor(0.95 n)`, average of the two samples
-/// around the cut. (For a series shorter than 2 the reference indexes
-/// out of bounds; here `Np` saturates at 1 — disclosed deviation on
-/// an input the reference cannot process at all.)
+/// around the cut. Requires at least two frames (the reference
+/// indexes out of bounds below that; the public API's two-frame
+/// refusal guards it here).
 fn percentile_n5(series: &[f64]) -> f64 {
     let n = series.len();
+    debug_assert!(
+        n >= 2,
+        "percentile needs >= 2 frames (guarded by the public API)"
+    );
     let mut sorted = series.to_vec();
     sorted.sort_by(f64::total_cmp);
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -232,7 +236,7 @@ fn percentile_n5(series: &[f64]) -> f64 {
 
 /// Validate the PCM + rate common to both signal paths.
 fn validate_signal(pcm_pa: &[f64], sample_rate: f64) -> Result<(), PsychoError> {
-    if !sample_rate.is_finite() || (sample_rate - SIGNAL_SAMPLE_RATE).abs() > 1e-9 {
+    if sample_rate != SIGNAL_SAMPLE_RATE {
         return Err(PsychoError::UnsupportedRate {
             what: "the ISO 532-1 reference filter tables are 48 kHz only",
         });
@@ -365,6 +369,15 @@ pub fn loudness_time_varying(
             let ms = output[frame * DEC_FACTOR];
             lv[band] = 10.0 * det::ln((ms + TINY_VALUE) / I_REF) / det::ln(10.0);
         }
+    }
+    // Finite samples can still OVERFLOW the squaring stage (executed:
+    // 1e200 Pa read Ok(n_max = inf, n5 = NaN) before this gate) — the
+    // stationary path refuses through loudness_stationary's level
+    // check; this is the time-varying twin of that refusal.
+    if levels.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(PsychoError::NonFinite {
+            what: "third-octave level (squaring overflow)",
+        });
     }
     // --- Core loudness per frame, then nonlinear decay per channel. ---
     let mut core_t: Vec<[f64; 21]> = levels
