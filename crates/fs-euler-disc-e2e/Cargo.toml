@@ -54,6 +54,7 @@ fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-mesh = { path = "../fs-mesh" }
 fs-modal = { path = "../fs-modal" }
+fs-plate = { path = "../fs-plate" }
 fs-rand = { path = "../fs-rand" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-render = { path = "../fs-render" }

@@ -33,6 +33,7 @@ use fs_couple::modal_acoustic_time::{
 };
 use fs_exec::Cx;
 use fs_material::gas::GasState;
+use fs_material::state_point::IsotropicElasticStatePoint;
 use fs_material::visco::{LoweredModel, RayleighDamping, ViscoError, loss_factor_to_zeta};
 use fs_math::c64::C64;
 use fs_math::det;
@@ -42,6 +43,10 @@ use fs_mesh::{
     rounded_cylinder_tet_mesh,
 };
 use fs_modal::{ModalError, SliceOptions, SliceStats, slice_window};
+use fs_plate::{
+    AssemblyOptions as PlateAssemblyOptions, EdgeSupport as PlateEdgeSupport, PlateError,
+    PlateMesh, PlateModel, PlateSection, assemble as assemble_plate,
+};
 use fs_rep_frep::SquatDiscEdgeTreatment;
 use fs_solid::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetLinearElasticProblem,
@@ -162,6 +167,129 @@ pub struct StructuralModalBasis {
     pub slice_stats: SliceStats,
     /// Content identity binding all physical and numerical inputs and outputs.
     pub identity: ContentHash,
+}
+
+/// Physical and numerical request for a supported rectangular thin plate.
+///
+/// Geometry, boundary support, and the resolved material state are all
+/// explicit. A display name cannot select stiffness, density, dimensions, or
+/// support conditions.
+pub struct RectangularPlateModeRequest<'a> {
+    /// Plate span along the base-frame x axis [m].
+    pub width_m: f64,
+    /// Plate span along the base-frame y axis [m].
+    pub depth_m: f64,
+    /// Uniform plate thickness [m].
+    pub thickness_m: f64,
+    /// Exact evidence-bearing isotropic elastic state.
+    pub elastic: &'a IsotropicElasticStatePoint,
+    /// Idealized perimeter support admitted by the plate model.
+    pub edge_support: PlateEdgeSupport,
+    /// Structured cells along x.
+    pub cells_x: usize,
+    /// Structured cells along y.
+    pub cells_y: usize,
+    /// Maximum admitted mesh nodes.
+    pub maximum_nodes: usize,
+    /// Strictly positive lower edge of the requested band [Hz].
+    pub minimum_frequency_hz: f64,
+    /// Upper edge of the requested band [Hz].
+    pub maximum_frequency_hz: f64,
+    /// Maximum certified in-band modes retained.
+    pub maximum_modes: usize,
+    /// Certified sparse modal-slice controls.
+    pub slice: SliceOptions,
+}
+
+/// One mass-normalized supported-plate bending mode.
+#[derive(Clone, Debug)]
+pub struct RectangularPlateMode {
+    /// Eigenvalue `lambda = omega^2` [s^-2].
+    pub eigenvalue_s2: f64,
+    /// Natural angular frequency [rad/s].
+    pub angular_frequency_rad_s: f64,
+    /// Natural frequency [Hz].
+    pub frequency_hz: f64,
+    /// Certified eigenvalue interval [s^-2].
+    pub eigenvalue_interval_s2: (f64, f64),
+    /// Residual-derived eigenvalue distance bound [s^-2].
+    pub eigenvalue_residual_s2: f64,
+    /// Transverse displacement at every full plate node [kg^-1/2].
+    pub nodal_transverse_shape_per_sqrt_kg: Vec<f64>,
+}
+
+/// Certified supported-plate basis used for contact-force projection and
+/// acoustic radiation.
+#[derive(Clone, Debug)]
+pub struct RectangularPlateModalBasis {
+    /// Width [m].
+    pub width_m: f64,
+    /// Depth [m].
+    pub depth_m: f64,
+    /// Thickness [m].
+    pub thickness_m: f64,
+    /// Exact material state used by the section.
+    pub material_state_identity: ContentHash,
+    /// Perimeter support condition.
+    pub edge_support: PlateEdgeSupport,
+    /// Structured cells along x.
+    pub cells_x: usize,
+    /// Structured cells along y.
+    pub cells_y: usize,
+    /// Structured plate mesh in `[0,width] x [0,depth]` coordinates.
+    pub mesh: PlateMesh,
+    /// Assembled reduced `(K,M)` pencil and full-to-reduced DOF map.
+    pub model: PlateModel,
+    /// Certified retained bending modes.
+    pub modes: Vec<RectangularPlateMode>,
+    /// Certified requested eigenvalue window [s^-2].
+    pub eigenvalue_window_s2: (f64, f64),
+    /// Inertia-certified count in the requested window.
+    pub certified_mode_count: usize,
+    /// Sparse eigensolver work accounting.
+    pub slice_stats: SliceStats,
+    /// Identity binding geometry, support, material state, mesh, and modes.
+    pub identity: ContentHash,
+}
+
+/// Modal projection of one transverse point force on the supported plate.
+#[derive(Clone, Debug)]
+pub struct PlatePointForceProjection {
+    /// Zero-based structured cell containing the application point.
+    pub cell: [usize; 2],
+    /// Selected triangle within that cell, zero or one.
+    pub triangle_in_cell: usize,
+    /// P1 barycentric weights on the selected triangle.
+    pub barycentric: [f64; 3],
+    /// Generalized force for every retained mode [N kg^-1/2].
+    pub modal_force_n_per_sqrt_kg: Vec<f64>,
+}
+
+/// Exact frequency-domain Rayleigh-integral transfer for fixed observers
+/// above one rigidly baffled supported plate.
+#[derive(Clone, Debug)]
+pub struct BaffledPlateObserverRadiation {
+    /// Structural plate basis consumed by the transfer.
+    pub structural_basis_identity: ContentHash,
+    /// Gas model/species identity.
+    pub gas_model_identity: ContentHash,
+    /// World-space observer positions [m].
+    pub observers: Vec<AcousticWorldObserver>,
+    /// Per-observer, per-mode pressure divided by generalized modal velocity.
+    pub pressure_per_modal_velocity: Vec<Vec<C64>>,
+    /// Smallest acoustic quadrature panels-per-wavelength over retained modes.
+    pub minimum_panels_per_wavelength: f64,
+    /// Identity binding the basis, gas, observers, quadrature, and transfers.
+    pub identity: ContentHash,
+}
+
+/// Physical time-domain runtime for one fixed supported plate.
+pub struct BaffledPlateModalAudioModel<'basis> {
+    basis: &'basis RectangularPlateModalBasis,
+    runtime: ModalAcousticTimeModel,
+    sample_rate_hz: u32,
+    radiation_identity: ContentHash,
+    damping_model_identity: ContentHash,
 }
 
 /// Projection of a physical point force onto every retained structural mode.
@@ -468,6 +596,8 @@ pub enum StructuralModalBasisError {
     Mesh(RoundedCylinderMeshError),
     /// The physical finite-element assembly refused.
     Elastic(TetElasticError),
+    /// The supported thin-plate assembly or modal solve refused.
+    Plate(PlateError),
     /// The certified modal solve refused.
     Modal(ModalError),
     /// The generic boundary-panel carrier refused.
@@ -527,6 +657,14 @@ pub enum StructuralModalBasisError {
         /// Caller-required minimum fraction.
         minimum_fraction: f64,
     },
+    /// The plate surface quadrature is too coarse for its shortest retained
+    /// acoustic wavelength.
+    PlateRadiationUnderresolved {
+        /// Smallest cells per wavelength over both plate axes.
+        panels_per_wavelength: f64,
+        /// Required minimum.
+        minimum: f64,
+    },
     /// Two independently produced physical artifacts do not share an exact
     /// structural basis or material state.
     IdentityMismatch {
@@ -568,6 +706,7 @@ impl core::fmt::Display for StructuralModalBasisError {
             }
             Self::Mesh(source) => write!(formatter, "structural volume mesh refused: {source}"),
             Self::Elastic(source) => write!(formatter, "structural assembly refused: {source}"),
+            Self::Plate(source) => write!(formatter, "supported plate refused: {source}"),
             Self::Modal(source) => write!(formatter, "structural modal solve refused: {source}"),
             Self::BemSurface(source) => {
                 write!(formatter, "structural acoustic surface refused: {source}")
@@ -626,6 +765,13 @@ impl core::fmt::Display for StructuralModalBasisError {
                 formatter,
                 "FS-EULER-ACOUSTIC-DIRECTIVITY-TRUNCATION: mode {mode} captured {captured_fraction:.6e}, below required {minimum_fraction:.6e}"
             ),
+            Self::PlateRadiationUnderresolved {
+                panels_per_wavelength,
+                minimum,
+            } => write!(
+                formatter,
+                "FS-EULER-PLATE-RADIATION-RESOLUTION: {panels_per_wavelength:.6e} panels/wavelength is below {minimum:.6e}"
+            ),
             Self::IdentityMismatch { what } => {
                 write!(formatter, "FS-EULER-STRUCTURAL-IDENTITY: {what}")
             }
@@ -654,6 +800,7 @@ impl std::error::Error for StructuralModalBasisError {
         match self {
             Self::Mesh(source) => Some(source),
             Self::Elastic(source) => Some(source),
+            Self::Plate(source) => Some(source),
             Self::Modal(source) => Some(source),
             Self::BemSurface(source) => Some(source),
             Self::Acoustic(source) => Some(source),
@@ -674,6 +821,12 @@ impl From<RoundedCylinderMeshError> for StructuralModalBasisError {
 impl From<TetElasticError> for StructuralModalBasisError {
     fn from(source: TetElasticError) -> Self {
         Self::Elastic(source)
+    }
+}
+
+impl From<PlateError> for StructuralModalBasisError {
+    fn from(source: PlateError) -> Self {
+        Self::Plate(source)
     }
 }
 
@@ -823,6 +976,688 @@ pub fn build_structural_modal_basis(
         slice_stats: report.stats,
         identity,
     })
+}
+
+/// Assemble a certified bending basis for one resolved supported plate.
+///
+/// # Errors
+/// Refuses invalid geometry/discretization, an unsupported material state,
+/// plate assembly or modal failures, empty bands, or a certified count above
+/// the caller's mode budget.
+pub fn build_rectangular_plate_modal_basis(
+    request: &RectangularPlateModeRequest<'_>,
+    cx: &Cx<'_>,
+) -> Result<RectangularPlateModalBasis, StructuralModalBasisError> {
+    for (value, what) in [
+        (request.width_m, "plate width must be finite and positive"),
+        (request.depth_m, "plate depth must be finite and positive"),
+        (
+            request.thickness_m,
+            "plate thickness must be finite and positive",
+        ),
+        (
+            request.minimum_frequency_hz,
+            "plate minimum frequency must be finite and positive",
+        ),
+        (
+            request.maximum_frequency_hz,
+            "plate maximum frequency must be finite and positive",
+        ),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(StructuralModalBasisError::InvalidRequest { what });
+        }
+    }
+    if request.maximum_frequency_hz <= request.minimum_frequency_hz
+        || request.cells_x < 2
+        || request.cells_y < 2
+        || request.maximum_modes == 0
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "plate frequency band, mesh cells, and mode cap must be ordered and nonzero",
+        });
+    }
+    let node_count = request
+        .cells_x
+        .checked_add(1)
+        .and_then(|x| {
+            request
+                .cells_y
+                .checked_add(1)
+                .and_then(|y| x.checked_mul(y))
+        })
+        .ok_or(StructuralModalBasisError::InvalidRequest {
+            what: "plate mesh node count overflowed",
+        })?;
+    if node_count > request.maximum_nodes {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "plate mesh exceeds the caller node budget",
+        });
+    }
+    cx.checkpoint()
+        .map_err(|_| StructuralModalBasisError::Cancelled)?;
+    let section = PlateSection::isotropic(
+        request.elastic.young_modulus_pa(),
+        request.elastic.poisson_ratio(),
+        request.thickness_m,
+        request.elastic.density_kg_m3(),
+    )?;
+    let mesh = PlateMesh::rectangle(
+        request.width_m,
+        request.depth_m,
+        request.cells_x,
+        request.cells_y,
+    );
+    let boundary = PlateMesh::rectangle_boundary(request.cells_x, request.cells_y);
+    let model = assemble_plate(
+        &mesh,
+        &section,
+        &boundary,
+        &[],
+        &PlateAssemblyOptions {
+            pretension: 0.0,
+            support: request.edge_support,
+        },
+    )?;
+    let angular_min = core::f64::consts::TAU * request.minimum_frequency_hz;
+    let angular_max = core::f64::consts::TAU * request.maximum_frequency_hz;
+    let eigenvalue_window_s2 = (angular_min * angular_min, angular_max * angular_max);
+    let report = fs_plate::modes(&model, eigenvalue_window_s2, &request.slice)?;
+    if report.expected == 0 {
+        return Err(StructuralModalBasisError::NoModesInBand);
+    }
+    if report.expected > request.maximum_modes {
+        return Err(StructuralModalBasisError::ModeBudgetExceeded {
+            requested: report.expected,
+            maximum: request.maximum_modes,
+        });
+    }
+    let mut modes = Vec::with_capacity(report.modes.len());
+    for (mode_index, pair) in report.modes.iter().enumerate() {
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        if !(pair.lambda > 0.0 && pair.interval.0 > 0.0 && pair.interval.1.is_finite()) {
+            return Err(StructuralModalBasisError::NonPositiveCertifiedMode { mode: mode_index });
+        }
+        let mut nodal_transverse = vec![0.0; mesh.nodes.len()];
+        for (node, value) in nodal_transverse.iter_mut().enumerate() {
+            if let Some(reduced) = model.dof_map[3 * node] {
+                *value = pair.phi[reduced];
+            }
+        }
+        let angular_frequency_rad_s = pair.lambda.sqrt();
+        modes.push(RectangularPlateMode {
+            eigenvalue_s2: pair.lambda,
+            angular_frequency_rad_s,
+            frequency_hz: angular_frequency_rad_s / core::f64::consts::TAU,
+            eigenvalue_interval_s2: pair.interval,
+            eigenvalue_residual_s2: pair.residual,
+            nodal_transverse_shape_per_sqrt_kg: nodal_transverse,
+        });
+    }
+    let material_state_identity = request.elastic.resolved().identity();
+    let mut identity =
+        DomainHasher::new("org.frankensim.euler-disc.supported-rectangular-plate-modal-basis.v1");
+    identity.update(material_state_identity.as_bytes());
+    for value in [request.width_m, request.depth_m, request.thickness_m] {
+        identity.update(&value.to_bits().to_le_bytes());
+    }
+    identity.update(&[match request.edge_support {
+        PlateEdgeSupport::SimplySupported => 0,
+        PlateEdgeSupport::Clamped => 1,
+    }]);
+    identity.update(
+        &u64::try_from(request.cells_x)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    identity.update(
+        &u64::try_from(request.cells_y)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for &(x, y) in &mesh.nodes {
+        identity.update(&x.to_bits().to_le_bytes());
+        identity.update(&y.to_bits().to_le_bytes());
+    }
+    for triangle in &mesh.tris {
+        for node in triangle {
+            identity.update(&u64::try_from(*node).unwrap_or(u64::MAX).to_le_bytes());
+        }
+    }
+    for mode in &modes {
+        for value in [
+            mode.eigenvalue_s2,
+            mode.eigenvalue_interval_s2.0,
+            mode.eigenvalue_interval_s2.1,
+            mode.eigenvalue_residual_s2,
+        ] {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        for value in &mode.nodal_transverse_shape_per_sqrt_kg {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    Ok(RectangularPlateModalBasis {
+        width_m: request.width_m,
+        depth_m: request.depth_m,
+        thickness_m: request.thickness_m,
+        material_state_identity,
+        edge_support: request.edge_support,
+        cells_x: request.cells_x,
+        cells_y: request.cells_y,
+        mesh,
+        model,
+        modes,
+        eigenvalue_window_s2,
+        certified_mode_count: report.expected,
+        slice_stats: report.stats,
+        identity: identity.finalize(),
+    })
+}
+
+impl RectangularPlateModalBasis {
+    /// Project a base-frame transverse point force through the exact P1 shape
+    /// functions of the containing structured triangle.
+    pub fn project_transverse_point_force(
+        &self,
+        point_base_m: [f64; 3],
+        transverse_force_n: f64,
+        maximum_surface_distance_m: f64,
+    ) -> Result<PlatePointForceProjection, StructuralModalBasisError> {
+        if point_base_m.iter().any(|value| !value.is_finite())
+            || !transverse_force_n.is_finite()
+            || !(maximum_surface_distance_m.is_finite() && maximum_surface_distance_m >= 0.0)
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "plate point force and projection tolerance must be finite",
+            });
+        }
+        if point_base_m[2].abs() > maximum_surface_distance_m {
+            return Err(StructuralModalBasisError::ContactOutsideTolerance {
+                distance_m: point_base_m[2].abs(),
+                tolerance_m: maximum_surface_distance_m,
+            });
+        }
+        let x = point_base_m[0] + 0.5 * self.width_m;
+        let y = point_base_m[1] + 0.5 * self.depth_m;
+        let scale = self.width_m.max(self.depth_m).max(1.0);
+        let tolerance = 128.0 * f64::EPSILON * scale;
+        if x < -tolerance
+            || x > self.width_m + tolerance
+            || y < -tolerance
+            || y > self.depth_m + tolerance
+        {
+            return Err(StructuralModalBasisError::ContactOutsideTolerance {
+                distance_m: (-x)
+                    .max(x - self.width_m)
+                    .max(-y)
+                    .max(y - self.depth_m)
+                    .max(0.0),
+                tolerance_m: tolerance,
+            });
+        }
+        let gx = (x.clamp(0.0, self.width_m) / self.width_m) * self.cells_x as f64;
+        let gy = (y.clamp(0.0, self.depth_m) / self.depth_m) * self.cells_y as f64;
+        let cell_x = (gx.floor() as usize).min(self.cells_x - 1);
+        let cell_y = (gy.floor() as usize).min(self.cells_y - 1);
+        let u = (gx - cell_x as f64).clamp(0.0, 1.0);
+        let v = (gy - cell_y as f64).clamp(0.0, 1.0);
+        let row = self.cells_x + 1;
+        let lower_left = cell_y * row + cell_x;
+        let (triangle_in_cell, nodes, barycentric) = if v <= u {
+            (
+                0,
+                [lower_left, lower_left + 1, lower_left + row + 1],
+                [1.0 - u, u - v, v],
+            )
+        } else {
+            (
+                1,
+                [lower_left, lower_left + row + 1, lower_left + row],
+                [1.0 - v, u, v - u],
+            )
+        };
+        let modal_force_n_per_sqrt_kg = self
+            .modes
+            .iter()
+            .map(|mode| {
+                let shape = barycentric
+                    .iter()
+                    .zip(nodes)
+                    .map(|(weight, node)| weight * mode.nodal_transverse_shape_per_sqrt_kg[node])
+                    .sum::<f64>();
+                transverse_force_n * shape
+            })
+            .collect();
+        Ok(PlatePointForceProjection {
+            cell: [cell_x, cell_y],
+            triangle_in_cell,
+            barycentric,
+            modal_force_n_per_sqrt_kg,
+        })
+    }
+
+    /// Evaluate the baffled Rayleigh surface integral at fixed world observers
+    /// for every retained structural mode.
+    ///
+    /// The plate lies in world `z = 0`, centered at the origin, and radiates
+    /// into the upper half-space. Triangle-centroid quadrature is admitted only
+    /// with at least six cells per shortest retained wavelength.
+    pub fn baffled_observer_radiation(
+        &self,
+        medium: ResolvedAcousticMedium<'_>,
+        observers: &[AcousticWorldObserver],
+        minimum_panels_per_wavelength: f64,
+        cx: &Cx<'_>,
+    ) -> Result<BaffledPlateObserverRadiation, StructuralModalBasisError> {
+        validate_acoustic_medium(medium.gas)?;
+        if medium.gas_model_identity == ContentHash([0; 32])
+            || observers.is_empty()
+            || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS
+            || !(minimum_panels_per_wavelength.is_finite() && minimum_panels_per_wavelength >= 2.0)
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "plate radiation medium, observer count, and resolution floor must be valid",
+            });
+        }
+        if observers.iter().any(|observer| {
+            observer
+                .position_world_m
+                .iter()
+                .any(|value| !value.is_finite())
+                || observer.position_world_m[2] <= 0.0
+        }) {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "baffled-plate observers must be finite and above the plate plane",
+            });
+        }
+        let largest_cell_m =
+            (self.width_m / self.cells_x as f64).max(self.depth_m / self.cells_y as f64);
+        let maximum_omega = self
+            .modes
+            .last()
+            .expect("admitted plate basis has modes")
+            .angular_frequency_rad_s;
+        let shortest_wavelength_m = core::f64::consts::TAU * medium.gas.sound_speed / maximum_omega;
+        let observed_resolution = shortest_wavelength_m / largest_cell_m;
+        if observed_resolution < minimum_panels_per_wavelength {
+            return Err(StructuralModalBasisError::PlateRadiationUnderresolved {
+                panels_per_wavelength: observed_resolution,
+                minimum: minimum_panels_per_wavelength,
+            });
+        }
+        let mut pressure_per_modal_velocity = vec![Vec::new(); observers.len()];
+        for transfers in &mut pressure_per_modal_velocity {
+            transfers.try_reserve_exact(self.modes.len()).map_err(|_| {
+                StructuralModalBasisError::PressureCapacity {
+                    requested: self.modes.len(),
+                }
+            })?;
+        }
+        for mode in &self.modes {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            let k = mode.angular_frequency_rad_s / medium.gas.sound_speed;
+            for (observer_index, observer) in observers.iter().enumerate() {
+                let mut integral = C64::ZERO;
+                for triangle in &self.mesh.tris {
+                    let a = self.mesh.nodes[triangle[0]];
+                    let b = self.mesh.nodes[triangle[1]];
+                    let c = self.mesh.nodes[triangle[2]];
+                    let twice_area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                    let area_m2 = 0.5 * twice_area.abs();
+                    let centroid = [
+                        (a.0 + b.0 + c.0) / 3.0 - 0.5 * self.width_m,
+                        (a.1 + b.1 + c.1) / 3.0 - 0.5 * self.depth_m,
+                        0.0,
+                    ];
+                    let dx = observer.position_world_m[0] - centroid[0];
+                    let dy = observer.position_world_m[1] - centroid[1];
+                    let dz = observer.position_world_m[2];
+                    let distance_m = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let shape = (mode.nodal_transverse_shape_per_sqrt_kg[triangle[0]]
+                        + mode.nodal_transverse_shape_per_sqrt_kg[triangle[1]]
+                        + mode.nodal_transverse_shape_per_sqrt_kg[triangle[2]])
+                        / 3.0;
+                    let phase = C64::new(det::cos(k * distance_m), det::sin(k * distance_m));
+                    integral = integral + phase.scale(area_m2 * shape / distance_m);
+                }
+                // Rayleigh I for a velocity-prescribed source in an infinite
+                // rigid baffle: p = i rho omega/(2 pi) INT v exp(i k R)/R dS.
+                let coefficient = medium.gas.density * mode.angular_frequency_rad_s
+                    / (2.0 * core::f64::consts::PI);
+                let transfer = C64::new(-integral.im, integral.re).scale(coefficient);
+                if !transfer.re.is_finite() || !transfer.im.is_finite() {
+                    return Err(StructuralModalBasisError::InvalidRequest {
+                        what: "baffled-plate Rayleigh transfer became non-finite",
+                    });
+                }
+                pressure_per_modal_velocity[observer_index].push(transfer);
+            }
+        }
+        let mut identity =
+            DomainHasher::new("org.frankensim.euler-disc.baffled-plate-observer-radiation.v1");
+        identity.update(self.identity.as_bytes());
+        identity.update(medium.gas_model_identity.as_bytes());
+        for value in [
+            medium.gas.temperature,
+            medium.gas.pressure,
+            medium.gas.density,
+            medium.gas.sound_speed,
+            minimum_panels_per_wavelength,
+            observed_resolution,
+        ] {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        for observer in observers {
+            for value in observer.position_world_m {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        for transfers in &pressure_per_modal_velocity {
+            for transfer in transfers {
+                identity.update(&transfer.re.to_bits().to_le_bytes());
+                identity.update(&transfer.im.to_bits().to_le_bytes());
+            }
+        }
+        Ok(BaffledPlateObserverRadiation {
+            structural_basis_identity: self.identity,
+            gas_model_identity: medium.gas_model_identity,
+            observers: observers.to_vec(),
+            pressure_per_modal_velocity,
+            minimum_panels_per_wavelength: observed_resolution,
+            identity: identity.finalize(),
+        })
+    }
+}
+
+impl<'basis> BaffledPlateModalAudioModel<'basis> {
+    /// Bind one supported-plate basis, Rayleigh loss law, and fixed-observer
+    /// Rayleigh radiation artifact into an exact-ZOH modal runtime.
+    pub fn try_new(
+        basis: &'basis RectangularPlateModalBasis,
+        damping: RayleighDamping,
+        damping_model_identity: ContentHash,
+        radiation: &BaffledPlateObserverRadiation,
+        sample_rate_hz: u32,
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<Self, StructuralModalBasisError> {
+        if damping_model_identity == ContentHash([0; 32])
+            || radiation.identity == ContentHash([0; 32])
+            || radiation.structural_basis_identity != basis.identity
+            || radiation.pressure_per_modal_velocity.len() != radiation.observers.len()
+            || radiation
+                .pressure_per_modal_velocity
+                .iter()
+                .any(|transfers| transfers.len() != basis.modes.len())
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "plate damping/radiation artifacts do not match the structural basis",
+            });
+        }
+        let mut modes = Vec::with_capacity(basis.modes.len());
+        for mode in &basis.modes {
+            let damping_ratio = damping.zeta_at(mode.angular_frequency_rad_s);
+            if !(damping_ratio.is_finite() && damping_ratio >= 0.0) {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "plate modal damping ratio must be finite and non-negative",
+                });
+            }
+            modes.push(ModalAcousticMode {
+                angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                damping_ratio,
+                // Observer transfers are applied after one shared state step,
+                // keeping stereo phase exact without duplicating oscillators.
+                pressure_per_modal_velocity: C64::ZERO,
+            });
+        }
+        let runtime = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, budget)?;
+        Ok(Self {
+            basis,
+            runtime,
+            sample_rate_hz,
+            radiation_identity: radiation.identity,
+            damping_model_identity,
+        })
+    }
+
+    /// Synthesize simultaneous SI-pressure signals at fixed observers from the
+    /// equal-and-opposite base contact reaction.
+    ///
+    /// The structural state advances once per exact mechanics/audio substep.
+    /// Only the transverse force admitted by the current DKT bending model is
+    /// projected; no in-plane or housing response is invented.
+    pub fn synthesize_control_stream_observers(
+        &mut self,
+        controls: &EulerControlStream<'_>,
+        radiation: &BaffledPlateObserverRadiation,
+        maximum_contact_surface_distance_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
+        if radiation.identity != self.radiation_identity
+            || radiation.structural_basis_identity != self.basis.identity
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "plate observer radiation does not match the audio runtime",
+            });
+        }
+        let intervals = controls.audio();
+        let first = intervals
+            .first()
+            .ok_or(StructuralModalBasisError::ControlTimeline {
+                what: "control stream has no positive-duration audio intervals",
+            })?;
+        let last = intervals
+            .last()
+            .expect("nonempty interval slice has a last item");
+        for pair in intervals.windows(2) {
+            if pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits() {
+                return Err(StructuralModalBasisError::ControlTimeline {
+                    what: "mechanics audio intervals are not exactly contiguous",
+                });
+            }
+        }
+        let duration_s = last.end_time_s - first.start_time_s;
+        let exact_frames = duration_s * f64::from(self.sample_rate_hz);
+        let rounded_frames = exact_frames.round();
+        let tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
+        if !(duration_s > 0.0
+            && duration_s.is_finite()
+            && rounded_frames >= 1.0
+            && rounded_frames <= usize::MAX as f64
+            && (exact_frames - rounded_frames).abs() <= tolerance)
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "control horizon is not an integral number of plate-audio samples",
+            });
+        }
+        let frame_count = rounded_frames as usize;
+        let mut pressure_channels = vec![Vec::new(); radiation.observers.len()];
+        for channel in &mut pressure_channels {
+            channel.try_reserve_exact(frame_count).map_err(|_| {
+                StructuralModalBasisError::PressureCapacity {
+                    requested: frame_count,
+                }
+            })?;
+        }
+        let mut modal_forces = Vec::with_capacity(intervals.len());
+        for interval in intervals {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            modal_forces.push(self.modal_force_for_interval(
+                controls,
+                interval,
+                maximum_contact_surface_distance_m,
+            )?);
+        }
+        let sample_period_s = self.runtime.sample_period_s();
+        let mut interval_index = 0usize;
+        let mut peaks = vec![0.0_f64; radiation.observers.len()];
+        let mut sample_start = first.start_time_s;
+        for frame in 0..frame_count {
+            if frame % 64 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            }
+            let sample_end = if frame + 1 == frame_count {
+                last.end_time_s
+            } else {
+                first.start_time_s + (frame + 1) as f64 * sample_period_s
+            };
+            let mut time = sample_start;
+            while time < sample_end {
+                while interval_index + 1 < intervals.len()
+                    && time >= intervals[interval_index].end_time_s
+                {
+                    interval_index += 1;
+                }
+                let segment_end = sample_end.min(intervals[interval_index].end_time_s);
+                let segment_duration = segment_end - time;
+                if !(segment_duration > 0.0 && segment_duration.is_finite()) {
+                    return Err(StructuralModalBasisError::ControlTimeline {
+                        what: "plate audio sample subdivision made no forward progress",
+                    });
+                }
+                self.runtime
+                    .step_duration(&modal_forces[interval_index], segment_duration)?;
+                time = segment_end;
+            }
+            for (observer_index, transfers) in
+                radiation.pressure_per_modal_velocity.iter().enumerate()
+            {
+                let pressure = self.runtime.observer_pressure_with_transfers(transfers)?;
+                peaks[observer_index] = peaks[observer_index].max(pressure.abs());
+                pressure_channels[observer_index].push(pressure);
+            }
+            sample_start = sample_end;
+        }
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        Ok(radiation
+            .observers
+            .iter()
+            .copied()
+            .zip(pressure_channels)
+            .zip(peaks)
+            .map(|((observer, pressure_pa), peak_abs_pressure_pa)| {
+                let observer = PhysicalPressureObserver::WorldFixed(observer);
+                let identity = baffled_plate_pressure_signal_identity(
+                    self,
+                    controls,
+                    first.start_time_s,
+                    observer,
+                    &pressure_pa,
+                );
+                PhysicalPressureSignal {
+                    start_time_s: first.start_time_s,
+                    sample_rate_hz: self.sample_rate_hz,
+                    pressure_pa,
+                    peak_abs_pressure_pa,
+                    contact_force_sampling:
+                        PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+                    observer,
+                    structural_basis_identity: self.basis.identity,
+                    radiation_identity: self.radiation_identity,
+                    damping_model_identity: self.damping_model_identity,
+                    identity,
+                }
+            })
+            .collect())
+    }
+
+    fn modal_force_for_interval(
+        &self,
+        controls: &EulerControlStream<'_>,
+        interval: &crate::AudioControlInterval,
+        maximum_contact_surface_distance_m: f64,
+    ) -> Result<Vec<f64>, StructuralModalBasisError> {
+        let visualization = controls.visualization();
+        let end = visualization
+            .get(interval.visual_coverage.end_visualization_index)
+            .ok_or(StructuralModalBasisError::ControlTimeline {
+                what: "plate audio closing visualization index is out of bounds",
+            })?;
+        let start = interval
+            .visual_coverage
+            .start_visualization_index
+            .and_then(|index| visualization.get(index));
+        let selected = if end.contact.is_some() {
+            Some(end)
+        } else {
+            start.filter(|point| point.contact.is_some())
+        };
+        let Some(selected) = selected else {
+            if interval.interval_contact_active {
+                return Err(StructuralModalBasisError::MissingContactLocation {
+                    source_sample: interval.source_sample_index,
+                });
+            }
+            return Ok(vec![0.0; self.basis.modes.len()]);
+        };
+        let contact = selected.contact.expect("selected point has contact");
+        let transverse_force_on_plate_n = match interval.channels.contact {
+            ChannelControl::Available(contact_control) => {
+                let force_on_disc_base = selected
+                    .orientation_base_to_world
+                    .rotate_world_to_body(contact_control.mean_force_world_n);
+                -force_on_disc_base.z
+            }
+            ChannelControl::Unavailable => {
+                if let Some(normal_force_n) = interval.mean_base_normal_contact_force_n {
+                    -normal_force_n * contact.normal_base.z
+                } else if interval.interval_contact_active {
+                    return Err(StructuralModalBasisError::MissingContactForce {
+                        source_sample: interval.source_sample_index,
+                    });
+                } else {
+                    0.0
+                }
+            }
+        };
+        if transverse_force_on_plate_n == 0.0 {
+            return Ok(vec![0.0; self.basis.modes.len()]);
+        }
+        self.basis
+            .project_transverse_point_force(
+                [
+                    contact.point_base_m.x,
+                    contact.point_base_m.y,
+                    contact.point_base_m.z,
+                ],
+                transverse_force_on_plate_n,
+                maximum_contact_surface_distance_m,
+            )
+            .map(|projection| projection.modal_force_n_per_sqrt_kg)
+    }
+}
+
+fn baffled_plate_pressure_signal_identity(
+    model: &BaffledPlateModalAudioModel<'_>,
+    controls: &EulerControlStream<'_>,
+    start_time_s: f64,
+    observer: PhysicalPressureObserver,
+    pressure_pa: &[f64],
+) -> ContentHash {
+    let mut hasher =
+        DomainHasher::new("org.frankensim.euler-disc.baffled-plate-pressure-signal.v1");
+    hasher.update(model.basis.identity.as_bytes());
+    hasher.update(model.radiation_identity.as_bytes());
+    hasher.update(model.damping_model_identity.as_bytes());
+    hasher.update(
+        controls
+            .source()
+            .metadata()
+            .configuration_identity
+            .as_bytes(),
+    );
+    hasher.update(&model.sample_rate_hz.to_le_bytes());
+    hasher.update(&start_time_s.to_bits().to_le_bytes());
+    hash_pressure_observer(&mut hasher, observer);
+    for pressure in pressure_pa {
+        hasher.update(&pressure.to_bits().to_le_bytes());
+    }
+    hasher.finalize()
 }
 
 /// Evaluate a certified generalized-Maxwell material model at every retained
@@ -1519,6 +2354,23 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
     }
 }
 
+fn hash_pressure_observer(hasher: &mut DomainHasher, observer: PhysicalPressureObserver) {
+    match observer {
+        PhysicalPressureObserver::BodyFixed(observer) => {
+            hasher.update(&[0]);
+            for value in observer.position_m {
+                hasher.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        PhysicalPressureObserver::WorldFixed(observer) => {
+            hasher.update(&[1]);
+            for value in observer.position_world_m {
+                hasher.update(&value.to_bits().to_le_bytes());
+            }
+        }
+    }
+}
+
 fn physical_pressure_signal_identity(
     model: &PhysicalModalAudioModel<'_>,
     controls: &EulerControlStream<'_>,
@@ -1539,20 +2391,7 @@ fn physical_pressure_signal_identity(
     );
     hasher.update(&model.sample_rate_hz.to_le_bytes());
     hasher.update(&start_time_s.to_bits().to_le_bytes());
-    match observer {
-        PhysicalPressureObserver::BodyFixed(observer) => {
-            hasher.update(&[0]);
-            for value in observer.position_m {
-                hasher.update(&value.to_bits().to_le_bytes());
-            }
-        }
-        PhysicalPressureObserver::WorldFixed(observer) => {
-            hasher.update(&[1]);
-            for value in observer.position_world_m {
-                hasher.update(&value.to_bits().to_le_bytes());
-            }
-        }
-    }
+    hash_pressure_observer(&mut hasher, observer);
     hasher.update(&[0]);
     hasher.update(
         &u64::try_from(pressure_pa.len())
