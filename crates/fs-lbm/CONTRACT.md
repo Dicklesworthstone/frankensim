@@ -127,6 +127,24 @@ dimension checks. Pure, deterministic (fixed tile/cell/link order).
   estimated). Panics on non-positive Reynolds / length.
 - `poiseuille_analytic(gx, viscosity, ny, y)` — the analytic reference profile.
 
+### Absorbing layer (`sponge`, bead 9ok02)
+
+- `sponge::Sponge2::new(side, width, sigma_max, target_rho, target_u)`
+  — a checked absorbing layer over a contiguous x-range of the D2Q9
+  `core2::Grid`: after each step, fluid cells in the layer blend
+  toward the equilibrium of the authored far-field target,
+  `f <- f + sigma (f_eq - f)`, with a quadratic ramp
+  `sigma = sigma_max ((d+1)/width)^2` growing toward the boundary (an
+  abrupt sigma is its own reflector). `SpongeSide::{LeftX, RightX}`.
+  Construction-time asserts (crate boundary convention): positive
+  width, `sigma_max` in (0, 1], positive finite target density,
+  finite low-Mach target velocity. `apply` skips non-Fluid cells and
+  panics if the layer exceeds the grid.
+- Purpose: outlet-reflection suppression for aeroacoustic source
+  extraction (bead 9ok02 — the jet pilot's 6% Re-200 flux imbalance
+  was outlet-reflection sensitivity; source spectra are untrusted
+  without a MEASURED reflection coefficient).
+
 ### Sparse active-tile infrastructure (`d3q19::sparse`, bead sjro)
 
 - `morton3(tx, ty, tz)` / `demorton3(key)` — 3×21-bit Morton (Z-order) tile
@@ -193,6 +211,14 @@ dimension checks. Pure, deterministic (fixed tile/cell/link order).
 
 ## Invariants
 
+- Sponge: the acoustic reflection coefficient is MEASURED, not
+  assumed — density pulses at two spectral contents read
+  R = 1.1e-4 / 2.3e-4 (authored ceiling 5e-3, ~20x headroom;
+  re-measure in the same commit if the fixture is re-dimensioned)
+  while the bounce-back-wall control measured identically reads 0.75
+  and must exceed 20x the sponge's R (the disabled-sponge mutation
+  cannot pass); a target-matched sponge is a NO-OP on the matched
+  state to 1e-14; left/right sides symmetric; bitwise deterministic.
 - The equilibrium recovers its density + momentum moments exactly.
 - Unforced collision preserves density and all three momentum components to
   roundoff. The boundary grid delegates to the public cell authority; the Duct
@@ -426,6 +452,10 @@ safe scalar twins.
 None.
 
 ## Conformance tests
+
+`tests/sponge_reflection.rs` (8): measured reflection coefficients at
+two pulse widths + wall control; matched-state no-op; left-side
+symmetry; four constructor refusal panics; bitwise determinism.
 
 `tests/lbm.rs` covers the v0 core: equilibrium moments; mass conservation;
 Poiseuille flow matches the analytic parabola (symmetric, centered); the
