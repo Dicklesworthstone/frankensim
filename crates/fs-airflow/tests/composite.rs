@@ -253,9 +253,15 @@ fn composite_solve_produces_a_certified_operating_point() {
         fs_airflow::solve_operating_point(&composite, &network).expect("operating point solves");
     let flow_lo = point.nominal_root.flow.lo();
     let flow_hi = point.nominal_root.flow.hi();
+    // Composite p(Q) = 160 - 2000 Q; the network's nominal equivalent
+    // resistance (primary in parallel with the tight leak) sets the
+    // quadratic loss, so the analytic root solves R Q^2 = 160 - 2000 Q.
+    let resistance = network.equivalent_resistance().value();
+    let expected = (-2000.0 + (2000.0_f64 * 2000.0 + 4.0 * resistance * 160.0).sqrt())
+        / (2.0 * resistance);
     assert!(
-        flow_lo <= 0.04 && flow_hi >= 0.04,
-        "certified root [{flow_lo}, {flow_hi}] must contain the analytic 0.04"
+        flow_lo <= expected && flow_hi >= expected,
+        "certified root [{flow_lo}, {flow_hi}] must contain the analytic {expected}"
     );
     let width = flow_hi - flow_lo;
     assert!(width <= 1e-6, "interval root width {width} is tight");
