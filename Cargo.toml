@@ -47,6 +47,7 @@ members = [
     "crates/fs-exec",
     "crates/fs-math",
     "crates/fs-matdb",
+    "crates/fs-matdb-store",
     "crates/fs-thermochem",
     "crates/fs-la",
     "crates/fs-lattice",

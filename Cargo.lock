@@ -1731,6 +1731,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-matdb-store"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-matdb",
+ "fs-qty",
+ "fsqlite",
+]
+
+[[package]]
 name = "fs-material"
 version = "0.0.1"
 dependencies = [

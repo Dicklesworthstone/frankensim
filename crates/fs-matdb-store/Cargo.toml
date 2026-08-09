@@ -1,0 +1,24 @@
+[package]
+name = "fs-matdb-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "FrankenSQLite-backed queryable index over compiled fs-matdb material packs: discovery through SQL, evaluation through the canonical hash-verified pack bytes, staleness fail-closed."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-matdb = { path = "../fs-matdb" }
+fsqlite = { path = "../../../frankensqlite/crates/fsqlite", features = ["async-api"] }
+
+[dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
+fsqlite = { path = "../../../frankensqlite/crates/fsqlite", features = ["async-api"] }
+
+[lints]
+workspace = true
