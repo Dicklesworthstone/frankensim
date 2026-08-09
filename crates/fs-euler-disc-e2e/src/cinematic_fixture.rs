@@ -945,11 +945,12 @@ impl Default for CinematicMechanicsConfig {
             })
             .collect();
         Self {
-            // Resolve the complete default 0--5 kHz base-mode request below
-            // the time integrator's 0.9-Nyquist guard. This is a numerical
-            // clock, not a material or soundtrack preset; callers may change
-            // it, and model admission will refuse an under-resolved basis.
-            sample_rate_hz: 12_000,
+            // Share the physical sound-master clock so resolved contact-force
+            // transients are not downsampled before they excite the plate.
+            // This is a numerical clock, not a material or soundtrack preset;
+            // callers may change it, and model admission will refuse an
+            // under-resolved structural basis.
+            sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
             gravity_m_per_s2: 9.806_65,
             initial_inclination_rad: 0.30,
             initial_precession_rad_per_s: 46.0,
@@ -7909,12 +7910,12 @@ mod tests {
 
             let source = production.model.run_eventful_compliant_trajectory(
                 production.checkpoint.clone(),
-                2,
+                4_096,
                 |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
             );
             assert_eq!(
                 source.accepted_steps.len(),
-                2,
+                4_096,
                 "production path refused: {:?}",
                 source.termination
             );
@@ -7926,7 +7927,7 @@ mod tests {
                 cx,
             )
             .expect("accepted mechanics enters common render/audio trajectory");
-            assert_eq!(render.samples().len(), 2);
+            assert_eq!(render.samples().len(), 4_096);
             for sample in render.samples() {
                 assert!(sample.input().interval_normal_force_n > 0.0);
                 assert!(sample.input().base_mode.is_some());
