@@ -176,7 +176,29 @@ pub fn migrate_envelope(
                 .to_string(),
         });
     };
-    let migrated = format!("{new_prefix}{rest}");
+    let envelope_rewritten = format!("{new_prefix}{rest}");
+    let migrated = match rule {
+        MigrationRule::SyntheticV0EnvelopeRewrite => envelope_rewritten,
+        MigrationRule::CoolingFanSystemV2 => {
+            // The document's internal `versions.schema` field must move with
+            // the envelope: the validator admits only the current schema.
+            // The rewrite is exactly these two byte strings, never a
+            // semantic reinterpretation.
+            let old_schema = format!("(versions :schema {declared_version}");
+            let new_schema = format!("(versions :schema {FSIM_VERSION}");
+            if !envelope_rewritten.contains(old_schema.as_str()) {
+                return Err(ProjectError {
+                    code: "fsim-migration-shape",
+                    detail: format!(
+                        "the document lacks `(versions :schema {declared_version}` as its schema declaration"
+                    ),
+                    hint: "migrate exactly the bytes that were persisted; do not hand-edit the document"
+                        .to_string(),
+                });
+            }
+            envelope_rewritten.replacen(&old_schema, &new_schema, 1)
+        }
+    };
     let decoded = parse_sexpr(&migrated)?;
     let receipt = ProjectMigrationReceipt {
         source_version: declared_version,
