@@ -251,8 +251,8 @@ fn composite_solve_produces_a_certified_operating_point() {
     );
     let point =
         fs_airflow::solve_operating_point(&composite, &network).expect("operating point solves");
-    let flow_lo = point.flow().lo();
-    let flow_hi = point.flow().hi();
+    let flow_lo = point.nominal_root.flow.lo();
+    let flow_hi = point.nominal_root.flow.hi();
     assert!(
         flow_lo <= 0.04 && flow_hi >= 0.04,
         "certified root [{flow_lo}, {flow_hi}] must contain the analytic 0.04"

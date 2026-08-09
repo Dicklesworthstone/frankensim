@@ -126,6 +126,16 @@ pub enum LossModel {
     WideTube,
 }
 
+/// Open/closed state of a tone hole (a bounded continuous vent
+/// fraction is a recorded follow-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoleState {
+    /// Hole open to the exterior through its chimney.
+    Open,
+    /// Hole sealed at the outer end (pad down): a closed cavity.
+    Closed,
+}
+
 /// One duct segment. Lengths and radii in metres.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Segment {
@@ -148,6 +158,25 @@ pub enum Segment {
         /// Axial length [m].
         length: f64,
     },
+    /// A tone hole: a zero-axial-length side branch at this point in
+    /// the chain — compact-limit lumped shunt (`[[1, 0], [1/Z_h, 1]]`
+    /// T-junction; series corrections are a recorded follow-up).
+    /// OPEN: chimney mass with the validated compact-limit end
+    /// corrections (inner 8/(3 pi) b uniform-profile disc constant,
+    /// outer 0.8216 b wall-flanged) plus flanged radiation resistance.
+    /// CLOSED: the chimney cavity's compliance.
+    ToneHole {
+        /// Hole (chimney) radius b [m]; must be smaller than the bore
+        /// radius.
+        hole_radius: f64,
+        /// Chimney height h (wall thickness plus pad lift geometry)
+        /// [m].
+        chimney_height: f64,
+        /// Main-bore radius at the hole [m].
+        bore_radius: f64,
+        /// Open or closed.
+        state: HoleState,
+    },
 }
 
 impl Segment {
@@ -160,6 +189,17 @@ impl Segment {
                 outlet_radius,
                 length,
             } => ok(inlet_radius) && ok(outlet_radius) && ok(length),
+            Segment::ToneHole {
+                hole_radius,
+                chimney_height,
+                bore_radius,
+                ..
+            } => {
+                ok(hole_radius)
+                    && ok(chimney_height)
+                    && ok(bore_radius)
+                    && hole_radius < bore_radius
+            }
         };
         if valid {
             Ok(())
@@ -178,6 +218,7 @@ impl Segment {
                 outlet_radius,
                 ..
             } => f64::midpoint(inlet_radius, outlet_radius),
+            Segment::ToneHole { bore_radius, .. } => bore_radius,
         }
     }
 
@@ -185,6 +226,7 @@ impl Segment {
         match *self {
             Segment::Cylinder { radius, .. } => radius,
             Segment::Cone { outlet_radius, .. } => outlet_radius,
+            Segment::ToneHole { bore_radius, .. } => bore_radius,
         }
     }
 }
@@ -356,11 +398,57 @@ fn basis_pair(segment: &Segment, wave: &SegmentWave, t: f64, forward: bool) -> (
     }
 }
 
+/// Lumped shunt impedance of a tone hole at `omega` (compact limit):
+/// OPEN `Z = -i omega rho t_eff / S_h + (rho c / S_h) (k b)^2 / 2`
+/// with `t_eff = h + (8/(3 pi)) b + 0.8216 b` (inner uniform-profile
+/// disc constant — the closed-body added-mass recipe validated to
+/// +1.8% in the program's Laplace-BEM pilot — plus the wall-flanged
+/// outer correction); CLOSED `Z = +i rho c^2 / (omega V_h)` with
+/// `V_h = S_h h`. Signs follow the `e^{-i omega t}` convention
+/// (mass-like reactance negative imaginary).
+///
+/// # Errors
+/// [`DuctError::RadiationKaTooLarge`] when an OPEN hole's `k b`
+/// exceeds the compact-limit ceiling.
+pub fn tone_hole_shunt(
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    hole_state: HoleState,
+    omega: f64,
+) -> Result<C64, DuctError> {
+    let area = core::f64::consts::PI * hole_radius * hole_radius;
+    let k = omega / state.sound_speed;
+    match hole_state {
+        HoleState::Open => {
+            let kb = k * hole_radius;
+            if kb > MAX_RADIATION_KA {
+                return Err(DuctError::RadiationKaTooLarge { ka: kb });
+            }
+            let t_eff = chimney_height
+                + (8.0 / (3.0 * core::f64::consts::PI)) * hole_radius
+                + 0.8216 * hole_radius;
+            let resistance = state.density * state.sound_speed / area * 0.5 * kb * kb;
+            Ok(C64::new(resistance, -omega * state.density * t_eff / area))
+        }
+        HoleState::Closed => {
+            let volume = area * chimney_height;
+            Ok(C64::new(
+                0.0,
+                state.density * state.sound_speed * state.sound_speed / (omega * volume),
+            ))
+        }
+    }
+}
+
 /// The segment 2-port `[p_in, U_in] = M [p_out, U_out]`, built
 /// numerically from the analytic basis (no transcribed matrices).
 fn segment_matrix(segment: &Segment, wave: &SegmentWave) -> Result<[C64; 4], DuctError> {
     let length = match *segment {
         Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
+        Segment::ToneHole { .. } => {
+            unreachable!("tone holes are handled by the chain loop, not the basis builder")
+        }
     };
     // Delegate zero-taper cones to the cylinder basis (the apex
     // distance diverges).
@@ -462,9 +550,20 @@ pub fn input_impedance(
     let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let mut min_rv = f64::INFINITY;
     for segment in &duct.segments {
-        let wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
-        min_rv = min_rv.min(wave.shear_number);
-        let s = segment_matrix(segment, &wave)?;
+        let s = if let Segment::ToneHole {
+            hole_radius,
+            chimney_height,
+            state: hole_state,
+            ..
+        } = *segment
+        {
+            let shunt = tone_hole_shunt(state, hole_radius, chimney_height, hole_state, omega)?;
+            [C64::ONE, C64::ZERO, shunt.recip(), C64::ONE]
+        } else {
+            let wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
+            min_rv = min_rv.min(wave.shear_number);
+            segment_matrix(segment, &wave)?
+        };
         let mut next = [C64::ZERO; 4];
         for row in 0..2 {
             for col in 0..2 {
