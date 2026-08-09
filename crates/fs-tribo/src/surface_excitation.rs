@@ -24,6 +24,162 @@ use crate::{InputAuthority, InterfaceSystemRef};
 const MAX_TRACE_SAMPLES: usize = 1_000_000;
 const MAX_INTEGRATION_SEGMENTS: usize = 1_000_000;
 const MAX_PERIODS_PER_FOOTPRINT: f64 = 8.0;
+const MIN_SAMPLES_PER_SHORTEST_HARMONIC: usize = 8;
+
+/// One real Fourier component of a periodic measured or declared surface track.
+///
+/// `cosine_amplitude_m` and `sine_amplitude_m` are signed outward-height
+/// coefficients. The integer cycle count makes the generated trace exactly
+/// periodic on its declared material-frame track; no windowing or hidden seam
+/// correction is applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeriodicSurfaceHarmonic {
+    /// Positive integer cycles around the complete material-frame track.
+    pub cycles_per_track: u32,
+    /// Cosine coefficient [m].
+    pub cosine_amplitude_m: f64,
+    /// Sine coefficient [m].
+    pub sine_amplitude_m: f64,
+}
+
+/// Explicit spatial spectrum from which a periodic surface-height trace is sampled.
+///
+/// This is a geometry input, not a sound synthesizer or a material-name preset.
+/// A measured Fourier decomposition can be supplied directly; a hypothetical
+/// surface may use caller-declared coefficients under an appropriately weak
+/// authority. Components are canonicalized by cycle count, so their input
+/// order cannot change the sampled trace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeriodicHarmonicSurface {
+    texture_frame_id: String,
+    source_id: String,
+    authority: InputAuthority,
+    track_length_m: f64,
+    sample_count: usize,
+    harmonics: Vec<PeriodicSurfaceHarmonic>,
+}
+
+impl PeriodicHarmonicSurface {
+    /// Admit an explicit periodic surface spectrum.
+    ///
+    /// The sample grid must retain at least eight samples per period of the
+    /// shortest harmonic. Duplicate cycle counts refuse rather than depending
+    /// on caller summation order. An empty harmonic set is a valid declared
+    /// perfectly smooth track and realizes to exact zero heights.
+    pub fn new(
+        texture_frame_id: impl Into<String>,
+        source_id: impl Into<String>,
+        authority: InputAuthority,
+        track_length_m: f64,
+        sample_count: usize,
+        mut harmonics: Vec<PeriodicSurfaceHarmonic>,
+    ) -> Result<Self, SurfaceExcitationError> {
+        let texture_frame_id = texture_frame_id.into();
+        let source_id = source_id.into();
+        require_identity(&texture_frame_id, "texture_frame_id")?;
+        require_identity(&source_id, "source_id")?;
+        if !(track_length_m.is_finite() && track_length_m > 0.0) {
+            return Err(SurfaceExcitationError::InvalidInput {
+                field: "track_length_m",
+            });
+        }
+        if !(3..=MAX_TRACE_SAMPLES).contains(&sample_count) {
+            return Err(SurfaceExcitationError::TraceSampleCount {
+                observed: sample_count,
+                minimum: 3,
+                maximum: MAX_TRACE_SAMPLES,
+            });
+        }
+        for harmonic in &harmonics {
+            if harmonic.cycles_per_track == 0
+                || !harmonic.cosine_amplitude_m.is_finite()
+                || !harmonic.sine_amplitude_m.is_finite()
+            {
+                return Err(SurfaceExcitationError::InvalidInput {
+                    field: "periodic_surface_harmonic",
+                });
+            }
+        }
+        harmonics.sort_by_key(|harmonic| harmonic.cycles_per_track);
+        if harmonics
+            .windows(2)
+            .any(|pair| pair[0].cycles_per_track == pair[1].cycles_per_track)
+        {
+            return Err(SurfaceExcitationError::DuplicateHarmonicCycle);
+        }
+        if let Some(maximum_cycle) = harmonics.last().map(|harmonic| harmonic.cycles_per_track) {
+            let required_samples = usize::try_from(maximum_cycle)
+                .ok()
+                .and_then(|cycles| cycles.checked_mul(MIN_SAMPLES_PER_SHORTEST_HARMONIC))
+                .ok_or(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
+                    sample_count,
+                    required_samples: usize::MAX,
+                })?;
+            if sample_count < required_samples {
+                return Err(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
+                    sample_count,
+                    required_samples,
+                });
+            }
+        }
+        Ok(Self {
+            texture_frame_id,
+            source_id,
+            authority,
+            track_length_m,
+            sample_count,
+            harmonics,
+        })
+    }
+
+    /// Exact material-frame period length [m].
+    #[must_use]
+    pub const fn track_length_m(&self) -> f64 {
+        self.track_length_m
+    }
+
+    /// Canonically ordered spatial Fourier components.
+    #[must_use]
+    pub fn harmonics(&self) -> &[PeriodicSurfaceHarmonic] {
+        &self.harmonics
+    }
+
+    /// Sample the explicit spectrum into the trace consumed by the finite-patch filter.
+    pub fn realize(&self) -> Result<UniformSurfaceTrace, SurfaceExcitationError> {
+        let mut heights_m = Vec::new();
+        heights_m
+            .try_reserve_exact(self.sample_count)
+            .map_err(|_| SurfaceExcitationError::TraceCapacity {
+                requested: self.sample_count,
+            })?;
+        let sample_count = self.sample_count as f64;
+        for sample in 0..self.sample_count {
+            let phase_fraction = sample as f64 / sample_count;
+            let mut height_m = 0.0_f64;
+            for harmonic in &self.harmonics {
+                let phase =
+                    core::f64::consts::TAU * f64::from(harmonic.cycles_per_track) * phase_fraction;
+                let (sine, cosine) = phase.sin_cos();
+                height_m = harmonic.cosine_amplitude_m.mul_add(cosine, height_m);
+                height_m = harmonic.sine_amplitude_m.mul_add(sine, height_m);
+            }
+            if !height_m.is_finite() {
+                return Err(SurfaceExcitationError::InvalidInput {
+                    field: "realized_surface_height_m",
+                });
+            }
+            heights_m.push(height_m);
+        }
+        UniformSurfaceTrace::new(
+            self.texture_frame_id.clone(),
+            self.source_id.clone(),
+            self.authority,
+            self.track_length_m / sample_count,
+            heights_m,
+            SurfaceTraceBoundary::Periodic,
+        )
+    }
+}
 
 /// Boundary semantics of a uniformly sampled surface-height trace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,6 +664,20 @@ pub enum SurfaceExcitationError {
         /// Resource ceiling.
         maximum: usize,
     },
+    /// Realizing a declared spectrum could not reserve its bounded trace.
+    TraceCapacity {
+        /// Requested number of retained samples.
+        requested: usize,
+    },
+    /// Two explicit components named the same spatial cycle.
+    DuplicateHarmonicCycle,
+    /// The requested trace grid would alias or poorly resolve its shortest period.
+    SurfaceSpectrumUnderresolved {
+        /// Caller-selected periodic sample count.
+        sample_count: usize,
+        /// Minimum eight-samples-per-period count for the highest cycle.
+        required_samples: usize,
+    },
     /// A finite trace does not cover the complete Hertz footprint.
     FootprintOutsideFiniteTrace {
         /// Offered footprint center [m].
@@ -584,6 +754,80 @@ mod tests {
             boundary,
         )
         .expect("valid trace")
+    }
+
+    #[test]
+    fn g0_periodic_surface_spectrum_is_order_invariant_and_resolved() {
+        let first = PeriodicSurfaceHarmonic {
+            cycles_per_track: 1,
+            cosine_amplitude_m: 2.0e-6,
+            sine_amplitude_m: -1.0e-6,
+        };
+        let third = PeriodicSurfaceHarmonic {
+            cycles_per_track: 3,
+            cosine_amplitude_m: 0.5e-6,
+            sine_amplitude_m: 0.25e-6,
+        };
+        let ordered = PeriodicHarmonicSurface::new(
+            "disc/material-track",
+            "measured-fourier-fit",
+            InputAuthority::CallerDeclared,
+            0.04,
+            32,
+            vec![first, third],
+        )
+        .expect("eight samples per shortest harmonic are admitted");
+        let permuted = PeriodicHarmonicSurface::new(
+            "disc/material-track",
+            "measured-fourier-fit",
+            InputAuthority::CallerDeclared,
+            0.04,
+            32,
+            vec![third, first],
+        )
+        .expect("component order is not physical");
+        assert_eq!(ordered, permuted);
+        assert_eq!(ordered.harmonics(), &[first, third]);
+
+        let trace = ordered.realize().expect("bounded explicit realization");
+        assert_eq!(trace.boundary(), SurfaceTraceBoundary::Periodic);
+        assert_eq!(trace.heights_m().len(), 32);
+        assert_eq!(trace.sample_spacing_m().to_bits(), 0.00125_f64.to_bits());
+        assert!((trace.heights_m()[0] - 2.5e-6).abs() < 1.0e-20);
+    }
+
+    #[test]
+    fn g0_periodic_surface_spectrum_refuses_aliasing_and_duplicate_cycles() {
+        let harmonic = PeriodicSurfaceHarmonic {
+            cycles_per_track: 5,
+            cosine_amplitude_m: 1.0e-6,
+            sine_amplitude_m: 0.0,
+        };
+        assert!(matches!(
+            PeriodicHarmonicSurface::new(
+                "track",
+                "source",
+                InputAuthority::Estimated,
+                0.1,
+                32,
+                vec![harmonic],
+            ),
+            Err(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
+                sample_count: 32,
+                required_samples: 40,
+            })
+        ));
+        assert!(matches!(
+            PeriodicHarmonicSurface::new(
+                "track",
+                "source",
+                InputAuthority::Estimated,
+                0.1,
+                40,
+                vec![harmonic, harmonic],
+            ),
+            Err(SurfaceExcitationError::DuplicateHarmonicCycle)
+        ));
     }
 
     #[test]

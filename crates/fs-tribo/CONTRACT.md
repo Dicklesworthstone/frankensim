@@ -122,6 +122,13 @@ material-hysteresis rung would need a disjoint work channel.
   height outside the caller's tangent-linearization fraction, and a
   perturbation that would open the unilateral contact. Both surface sources
   and authority ceilings remain separate in the receipt.
+- `PeriodicHarmonicSurface` admits either a measured Fourier decomposition or
+  an explicitly declared hypothetical periodic material track. Signed
+  sine/cosine height coefficients are keyed by positive integer spatial cycle,
+  canonicalized by cycle count, and sampled only with at least eight points per
+  shortest period. Duplicate cycles and underresolved grids refuse. An empty
+  spectrum is an exact smooth track. No material name, acoustic frequency,
+  stochastic realization, seam correction, or authority upgrade is inferred.
 
 ## Error model
 
@@ -159,7 +166,10 @@ equilibrium; independent numerical Hertz values and force-pressure-radius
 cross-relations; reversal/scaling/provenance; resistance sign; partition and
 ledger-channel closure; typed flash-data insufficiency and power scaling;
 forged negative/non-finite work rejection; and rollback/deterministic replay
-for work and wear. Test coefficients are explicitly synthetic fixtures.
+for work and wear. Surface-excitation tests additionally cover periodic-spectrum
+order invariance, exact sample-grid realization, duplicate-cycle refusal, and
+the eight-samples-per-shortest-period gate. Test coefficients are explicitly
+synthetic fixtures.
 The separately owned partial-slip tests cover its scalar return-map admission,
 reversal, checkpoint replay, and receipt-mutation refusals.
 Rolling-loss tests cover zero load/rate/factor, force and moment reversal,
