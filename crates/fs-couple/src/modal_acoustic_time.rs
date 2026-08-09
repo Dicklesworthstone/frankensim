@@ -244,6 +244,12 @@ impl ModalAcousticTimeModel {
         &self.states
     }
 
+    /// Nominal output sample period [s].
+    #[must_use]
+    pub const fn sample_period_s(&self) -> f64 {
+        self.sample_period_s
+    }
+
     /// Advance all modes by one exact zero-order-held sample.
     ///
     /// The step is transactional: a refusal leaves every state unchanged.
@@ -255,6 +261,29 @@ impl ModalAcousticTimeModel {
         &mut self,
         generalized_force_n_per_sqrt_kg: &[f64],
     ) -> Result<ModalAcousticFrame, ModalAcousticTimeError> {
+        self.step_duration(generalized_force_n_per_sqrt_kg, self.sample_period_s)
+    }
+
+    /// Advance all modes for one positive caller-specified subinterval under
+    /// exact zero-order-held generalized forces.
+    ///
+    /// This seam lets a fixed-rate audio producer split one sample at exact
+    /// mechanics-control boundaries without smearing force changes. The
+    /// nominal sample rate still owns the Nyquist admission gate.
+    ///
+    /// # Errors
+    /// Refuses nonpositive/nonfinite duration and every condition documented
+    /// by [`Self::step`]. A refusal leaves every modal state unchanged.
+    pub fn step_duration(
+        &mut self,
+        generalized_force_n_per_sqrt_kg: &[f64],
+        duration_s: f64,
+    ) -> Result<ModalAcousticFrame, ModalAcousticTimeError> {
+        if !(duration_s > 0.0 && duration_s.is_finite()) {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "step duration must be positive and finite",
+            });
+        }
         if generalized_force_n_per_sqrt_kg.len() != self.modes.len() {
             return Err(ModalAcousticTimeError::ForceCountMismatch {
                 expected: self.modes.len(),
@@ -282,7 +311,7 @@ impl ModalAcousticTimeModel {
             .zip(&self.states)
             .zip(generalized_force_n_per_sqrt_kg)
         {
-            let next = advance_exact_zoh(*mode, *state, *force, self.sample_period_s);
+            let next = advance_exact_zoh(*mode, *state, *force, duration_s);
             check_limit(
                 "absolute modal displacement",
                 next.displacement_m_sqrt_kg.abs(),
@@ -518,5 +547,33 @@ mod tests {
             Err(ModalAcousticTimeError::BudgetExceeded { .. })
         ));
         assert_eq!(model.states(), before);
+    }
+
+    #[test]
+    fn g3_splitting_a_held_force_at_a_control_boundary_preserves_the_solution() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 2_400.0,
+            damping_ratio: 0.07,
+            pressure_per_modal_velocity: C64::new(1.5, -0.4),
+        };
+        let mut whole = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        let mut split = whole.clone();
+        let whole_frame = whole.step(&[2.5]).unwrap();
+        split.step_duration(&[2.5], 0.5 / 48_000.0).unwrap();
+        let split_frame = split.step_duration(&[2.5], 0.5 / 48_000.0).unwrap();
+        assert!(
+            (whole.states()[0].displacement_m_sqrt_kg - split.states()[0].displacement_m_sqrt_kg)
+                .abs()
+                < 1.0e-18
+        );
+        assert!(
+            (whole.states()[0].velocity_m_sqrt_kg_per_s
+                - split.states()[0].velocity_m_sqrt_kg_per_s)
+                .abs()
+                < 1.0e-13
+        );
+        assert!(
+            (whole_frame.observer_pressure_pa - split_frame.observer_pressure_pa).abs() < 1.0e-13
+        );
     }
 }
