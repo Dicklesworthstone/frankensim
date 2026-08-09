@@ -25,7 +25,8 @@ use fs_material::{
 };
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricError, AxisymmetricIdentity, AxisymmetricMassError,
-    AxisymmetricMassProperties, MeridianPoint, MeridianSegment, SquatDiscEdgeTreatment,
+    AxisymmetricMassProperties, AxisymmetricSurfaceAreaError, MeridianPoint, MeridianSegment,
+    SquatDiscEdgeTreatment,
 };
 use fs_solid::{TetElasticError, TetElasticMaterial};
 
@@ -38,6 +39,9 @@ pub const EULER_SPECIMEN_PROFILE_IDENTITY_DOMAIN: &str =
 /// Canonical identity domain for the resolved production mass properties.
 pub const EULER_SPECIMEN_MASS_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.specimen-mass-properties.v1";
+/// Canonical identity domain for geometry-derived lumped thermal measures.
+pub const EULER_SPECIMEN_THERMAL_GEOMETRY_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.specimen-thermal-geometry.v1";
 /// Canonical identity domain for geometry plus its resolved material state.
 pub const EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.material-specimen.v1";
@@ -141,6 +145,27 @@ pub struct ResolvedDiscProfile {
     pub dimensions: DiscProfileDimensions,
     /// Analytic line/arc mass, center of mass, and centroidal inertia.
     pub mass_properties: AxisymmetricMassProperties,
+}
+
+/// Whole-boundary measures for an isothermal-body thermal rung.
+///
+/// Both values derive from the same exact line/arc chart and volume already
+/// used by mechanics. `characteristic_length_m = volume_m3 / surface_area_m2`
+/// is the conventional body length used by a Biot-number admission gate.
+/// This whole-boundary value is only appropriate when the declared heat-
+/// transfer condition acts over the complete exposed surface; spatially
+/// varying or partially insulated boundaries require a partitioned thermal
+/// mesh rather than an adjusted caller-entered area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedDiscThermalGeometry {
+    /// Exact-formula binary64 area of the complete revolved boundary [m2].
+    pub surface_area_m2: f64,
+    /// Enclosed volume already bound to the resolved mass properties [m3].
+    pub volume_m3: f64,
+    /// Whole-body characteristic length `V/A` [m].
+    pub characteristic_length_m: f64,
+    /// Identity binding the exact chart and all three thermal measures.
+    pub identity: ContentHash,
 }
 
 /// One axisymmetric specimen whose density and remaining elastic properties
@@ -262,7 +287,109 @@ pub struct ResolvedPhaseDiscProfile {
     pub identity: ContentHash,
 }
 
+/// Geometry response required by a mass-conserving phase state.
+///
+/// The enum is an admission result, not a deformation model. It prevents an
+/// enthalpy solver from silently reusing stale rigid geometry after density or
+/// phase changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscPhaseGeometryRegime {
+    /// The exact reference phase state and geometry remain applicable.
+    ReferenceGeometry,
+    /// The body remains solid, but thermomechanical properties and geometry
+    /// must be recomputed at the new state before mechanics continues.
+    SolidThermomechanicalUpdateRequired,
+    /// A nonzero liquid fraction requires an evolving free-surface/topology
+    /// solver rather than fixed-solid or shape-similarity mechanics.
+    EvolvingFreeSurfaceRequired,
+}
+
+/// One phase state constrained to retain the reference specimen's mass.
+///
+/// `required_volume_m3 = invariant_mass_kg / bulk_density_kg_m3` is a scalar
+/// conservation constraint only. It deliberately does not invent an isotropic
+/// scale, thermal strain field, or liquid free surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MassConservingDiscPhaseState {
+    /// State produced by the material-card-bound phase curve.
+    pub phase_state: EquilibriumPhaseState,
+    /// Material mass retained from the reference specimen [kg].
+    pub invariant_mass_kg: f64,
+    /// Volume required by mass conservation at the state's bulk density [m3].
+    pub required_volume_m3: f64,
+    /// Required volume divided by the reference volume.
+    pub volume_ratio: f64,
+    /// Solver rung required before mechanics, sound, or rendering continues.
+    pub geometry_regime: DiscPhaseGeometryRegime,
+    /// Identity binding reference specimen, phase state, and conservation data.
+    pub identity: ContentHash,
+}
+
 impl ResolvedPhaseDiscProfile {
+    /// Bind another state on the same phase curve to invariant specimen mass.
+    ///
+    /// This is the safe handoff from thermal transport to geometry evolution.
+    /// It publishes the volume demanded by density and then explicitly names
+    /// whether reference, thermomechanical-solid, or free-surface geometry is
+    /// required; it never manufactures the missing geometry.
+    pub fn mass_conserving_state(
+        &self,
+        phase_state: EquilibriumPhaseState,
+    ) -> Result<MassConservingDiscPhaseState, PhaseDiscBindingError> {
+        if phase_state.material_card_identity() != self.phase_state.material_card_identity() {
+            return Err(PhaseDiscBindingError::MaterialCardMismatch);
+        }
+        if phase_state.phase_curve_identity() != self.phase_state.phase_curve_identity() {
+            return Err(PhaseDiscBindingError::PhaseCurveMismatch);
+        }
+        let invariant_mass_kg = self.profile.mass_properties.mass;
+        let reference_volume_m3 = self.profile.mass_properties.volume;
+        let required_volume_m3 = if phase_state.identity() == self.phase_state.identity() {
+            reference_volume_m3
+        } else {
+            invariant_mass_kg / phase_state.bulk_density_kg_m3()
+        };
+        let volume_ratio = required_volume_m3 / reference_volume_m3;
+        if !(required_volume_m3.is_finite()
+            && required_volume_m3 > 0.0
+            && volume_ratio.is_finite()
+            && volume_ratio > 0.0)
+        {
+            return Err(PhaseDiscBindingError::InvalidMassConservingVolume {
+                invariant_mass_kg,
+                bulk_density_kg_m3: phase_state.bulk_density_kg_m3(),
+                reference_volume_m3,
+            });
+        }
+        let geometry_regime = if phase_state.identity() == self.phase_state.identity() {
+            DiscPhaseGeometryRegime::ReferenceGeometry
+        } else if phase_state.phase() == SolidLiquidPhase::Solid {
+            DiscPhaseGeometryRegime::SolidThermomechanicalUpdateRequired
+        } else {
+            DiscPhaseGeometryRegime::EvolvingFreeSurfaceRequired
+        };
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-euler-disc-e2e.mass-conserving-phase-state.v1");
+        identity.update(self.identity.as_bytes());
+        identity.update(phase_state.identity().as_bytes());
+        for value in [invariant_mass_kg, required_volume_m3, volume_ratio] {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        identity.update(&[match geometry_regime {
+            DiscPhaseGeometryRegime::ReferenceGeometry => 0,
+            DiscPhaseGeometryRegime::SolidThermomechanicalUpdateRequired => 1,
+            DiscPhaseGeometryRegime::EvolvingFreeSurfaceRequired => 2,
+        }]);
+        Ok(MassConservingDiscPhaseState {
+            phase_state,
+            invariant_mass_kg,
+            required_volume_m3,
+            volume_ratio,
+            geometry_regime,
+            identity: identity.finalize(),
+        })
+    }
+
     /// Bind a fully solid phase state to the independently resolved elastic
     /// properties consumed by fixed-topology mechanics.
     ///
@@ -324,6 +451,17 @@ pub enum PhaseDiscBindingError {
     },
     /// Phase and mechanical properties came from different material cards.
     MaterialCardMismatch,
+    /// A thermal state came from a different enthalpy/phase curve.
+    PhaseCurveMismatch,
+    /// Density and invariant mass did not produce a finite positive volume.
+    InvalidMassConservingVolume {
+        /// Reference specimen mass [kg].
+        invariant_mass_kg: f64,
+        /// New equilibrium bulk density [kg/m3].
+        bulk_density_kg_m3: f64,
+        /// Reference specimen volume [m3].
+        reference_volume_m3: f64,
+    },
     /// The elastic state omitted the canonical absolute-temperature axis.
     MissingTemperatureCoordinate,
     /// Phase and elastic properties were resolved at different temperatures.
@@ -366,6 +504,41 @@ pub struct ResolvedDiscProfileIdentities {
 }
 
 impl ResolvedDiscProfile {
+    /// Derive whole-boundary thermal measures from the mechanics geometry.
+    ///
+    /// The chart is revalidated and integrated under `cx`; no render mesh,
+    /// nominal cylinder formula, or separately supplied area participates.
+    pub fn thermal_geometry(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedDiscThermalGeometry, DiscProfileError> {
+        let surface_area_m2 = self
+            .chart
+            .surface_area(cx)
+            .map_err(DiscProfileError::SurfaceArea)?
+            .area;
+        let volume_m3 = self.mass_properties.volume;
+        let characteristic_length_m = volume_m3 / surface_area_m2;
+        if !(characteristic_length_m.is_finite() && characteristic_length_m > 0.0) {
+            return Err(DiscProfileError::InvalidDerivedThermalGeometry {
+                volume_m3,
+                surface_area_m2,
+            });
+        }
+        let identities = self.content_identities();
+        let mut identity = DomainHasher::new(EULER_SPECIMEN_THERMAL_GEOMETRY_IDENTITY_DOMAIN);
+        identity.update(identities.chart.as_bytes());
+        for value in [volume_m3, surface_area_m2, characteristic_length_m] {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        Ok(ResolvedDiscThermalGeometry {
+            surface_area_m2,
+            volume_m3,
+            characteristic_length_m,
+            identity: identity.finalize(),
+        })
+    }
+
     /// Compute the versioned strong identities used by trajectory metadata and
     /// visualization asset admission.
     #[must_use]
@@ -454,6 +627,15 @@ pub enum DiscProfileError {
     Geometry(AxisymmetricError),
     /// The exact line/arc mass integration refused to publish properties.
     Mass(AxisymmetricMassError),
+    /// The exact line/arc surface integration refused to publish an area.
+    SurfaceArea(AxisymmetricSurfaceAreaError),
+    /// Finite positive volume and area did not produce a usable `V/A` length.
+    InvalidDerivedThermalGeometry {
+        /// Resolved enclosed volume [m3].
+        volume_m3: f64,
+        /// Resolved complete surface area [m2].
+        surface_area_m2: f64,
+    },
 }
 
 impl fmt::Display for DiscProfileError {
@@ -475,6 +657,19 @@ impl fmt::Display for DiscProfileError {
                 write!(formatter, "Euler-disc profile geometry refused: {error}")
             }
             Self::Mass(error) => write!(formatter, "Euler-disc profile mass refused: {error}"),
+            Self::SurfaceArea(error) => {
+                write!(
+                    formatter,
+                    "Euler-disc profile surface area refused: {error}"
+                )
+            }
+            Self::InvalidDerivedThermalGeometry {
+                volume_m3,
+                surface_area_m2,
+            } => write!(
+                formatter,
+                "Euler-disc profile produced invalid thermal geometry V={volume_m3} m3, A={surface_area_m2} m2"
+            ),
         }
     }
 }

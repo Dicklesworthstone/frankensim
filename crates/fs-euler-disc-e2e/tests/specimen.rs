@@ -1,6 +1,8 @@
 //! G0/G3 checks for one-source-of-truth Euler-disc specimen resolution.
 
-use fs_euler_disc_e2e::specimen::{DiscProfileError, DiscProfileSpec, PhaseDiscBindingError};
+use fs_euler_disc_e2e::specimen::{
+    DiscPhaseGeometryRegime, DiscProfileError, DiscProfileSpec, PhaseDiscBindingError,
+};
 use fs_evidence::ValidityDomain;
 use fs_exec::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -108,6 +110,40 @@ fn g0_solid_cylinder_resolution_matches_closed_form_mass_and_inertia() {
 }
 
 #[test]
+fn g0_lumped_thermal_geometry_uses_the_same_profile_area_and_volume() {
+    let radius = 0.038;
+    let thickness = 0.006;
+    let spec = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: radius,
+        thickness_m: thickness,
+        edge_treatment: SquatDiscEdgeTreatment::Sharp,
+    };
+    let (steel, tungsten, thermal, tungsten_thermal) = with_cx(|cx| {
+        let steel = spec.resolve(7_800.0, cx).expect("steel profile");
+        let tungsten = spec.resolve(19_250.0, cx).expect("tungsten profile");
+        let thermal = steel.thermal_geometry(cx).expect("thermal geometry");
+        let tungsten_thermal = tungsten
+            .thermal_geometry(cx)
+            .expect("same-shape thermal geometry");
+        (steel, tungsten, thermal, tungsten_thermal)
+    });
+
+    let expected_volume = core::f64::consts::PI * radius * radius * thickness;
+    let expected_area = 2.0 * core::f64::consts::PI * radius * (radius + thickness);
+    assert_close(thermal.volume_m3, expected_volume);
+    assert_close(thermal.surface_area_m2, expected_area);
+    assert_close(
+        thermal.characteristic_length_m,
+        expected_volume / expected_area,
+    );
+    assert_eq!(thermal, tungsten_thermal);
+    assert_ne!(
+        steel.content_identities().profile,
+        tungsten.content_identities().profile
+    );
+}
+
+#[test]
 fn g0_material_specimen_uses_card_density_without_aliasing_equal_density_materials() {
     let point = QueryPoint::new().with("T", 293.15).expect("state point");
     let copper = resolve_isotropic_solid_state_point(
@@ -197,6 +233,81 @@ fn g0_phase_state_invalidates_fixed_solid_mechanics_at_first_liquid_fraction() {
             liquid_mass_fraction
         }) if liquid_mass_fraction > 0.0
     ));
+}
+
+#[test]
+fn g0_phase_updates_preserve_mass_and_demand_the_correct_geometry_rung() {
+    let card = isotropic_card("mass-conserving-phase-test", 193.0e9);
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        card.content_hash(),
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 293.15,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 8_000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 50_000.0,
+                temperature_k: 500.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 7_900.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 150_000.0,
+                temperature_k: 500.0,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 7_400.0,
+            },
+        ],
+    )
+    .expect("phase curve");
+    let reference_state = curve.state_at_specific_enthalpy(0.0).unwrap();
+    let specimen = with_cx(|cx| {
+        DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.038,
+            thickness_m: 0.006,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+        }
+        .resolve_with_phase_state(reference_state, cx)
+        .expect("reference specimen")
+    });
+
+    let reference = specimen.mass_conserving_state(reference_state).unwrap();
+    assert_eq!(
+        reference.geometry_regime,
+        DiscPhaseGeometryRegime::ReferenceGeometry
+    );
+    assert_eq!(
+        reference.required_volume_m3.to_bits(),
+        specimen.profile.mass_properties.volume.to_bits()
+    );
+
+    let warmer_solid = specimen
+        .mass_conserving_state(curve.state_at_specific_enthalpy(25_000.0).unwrap())
+        .unwrap();
+    assert_eq!(
+        warmer_solid.geometry_regime,
+        DiscPhaseGeometryRegime::SolidThermomechanicalUpdateRequired
+    );
+    assert!(warmer_solid.volume_ratio > 1.0);
+    assert_close(
+        warmer_solid.phase_state.bulk_density_kg_m3() * warmer_solid.required_volume_m3,
+        warmer_solid.invariant_mass_kg,
+    );
+
+    let partially_liquid = specimen
+        .mass_conserving_state(curve.state_at_specific_enthalpy(100_000.0).unwrap())
+        .unwrap();
+    assert_eq!(
+        partially_liquid.geometry_regime,
+        DiscPhaseGeometryRegime::EvolvingFreeSurfaceRequired
+    );
+    assert!(partially_liquid.phase_state.liquid_mass_fraction() > 0.0);
+    assert_close(
+        partially_liquid.phase_state.bulk_density_kg_m3() * partially_liquid.required_volume_m3,
+        partially_liquid.invariant_mass_kg,
+    );
 }
 
 #[test]
