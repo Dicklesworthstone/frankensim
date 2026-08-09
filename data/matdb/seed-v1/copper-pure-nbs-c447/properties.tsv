@@ -1,0 +1,17 @@
+frankensim.matdb-source.v1
+observation	c447-table67-copper	copper (elemental), NBS C447 Table 67 physical-property row	NBS Circular C447 Table 67, melting point on the international temperature scale and density at 20 C	Melting point printed as 1083.2 plus-minus 0.1 deg C on the international temperature scale, converted at K = C + 273.15; density printed at 20 C in g/cm3 and converted at 1000 (kg/m3)/(g/cm3); the printed plus-minus 0.1 C is a scale statement without confidence semantics, so runtime uncertainty stays Unstated. Hardness rows from Table 12: Brinell 47 for 3/4 in rod annealed 1/2 hr at 1290 F (serial 499), Brinell 104 for the same rod cold-drawn 56 percent reduction (serial 500), Rockwell B 37 for OFHC 1/2 in rod cold-drawn 29 percent (serial 484); scales TYPED in the names, never converted; Brinell loads not stated (named absence). Cross-source agreement: the Table 67 melting point 1083.2 C equals MIL-HDBK-698A Table XV liquidus 1981 F for alloy 110 within 0.4 K.
+scalar	melting-point	c447-table67-copper	melting_point	1356.35	K	constant
+uncertainty	melting-point	unstated	-	-	-	-
+validity	melting-point	temperature	294	294	K
+scalar	density	c447-table67-copper	density	8960	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	293	K
+scalar	hardness-brinell-annealed	c447-table67-copper	hardness_brinell_annealed	47	1	constant
+uncertainty	hardness-brinell-annealed	unstated	-	-	-	-
+validity	hardness-brinell-annealed	temperature	294	294	K
+scalar	hardness-brinell-cold-drawn-56pct	c447-table67-copper	hardness_brinell_cold_drawn_56pct	104	1	constant
+uncertainty	hardness-brinell-cold-drawn-56pct	unstated	-	-	-	-
+validity	hardness-brinell-cold-drawn-56pct	temperature	294	294	K
+scalar	hardness-rockwell-b-cold-drawn-29pct	c447-table67-copper	hardness_rockwell_b_cold_drawn_29pct	37	1	constant
+uncertainty	hardness-rockwell-b-cold-drawn-29pct	unstated	-	-	-	-
+validity	hardness-rockwell-b-cold-drawn-29pct	temperature	294	294	K

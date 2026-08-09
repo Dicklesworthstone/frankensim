@@ -1,0 +1,41 @@
+frankensim.matdb-source.v1
+observation	mil5j-table-323ob1-t3-sheet	2024-T3 aluminum alloy sheet (AMS 4037 and AMS-QQ-A-250/4), thickness 0.010-0.128 in, A basis	MIL-HDBK-5J Table 3.2.3.0(b1) design values, A basis (99 percent probability, 95 percent confidence per handbook section 9.1.6); elongation from Table 3.2.3.0(c), T3/T4/T42 bare sheet 0.021-0.249 in, LT	Room-temperature aerospace DESIGN values at A basis; direction-resolved L/LT (ST cells printed as ellipses — named absence); note the tension/compression asymmetry REVERSES between directions (Fcy_L 39 below Fty_L 47, but Fcy_LT 45 above Fty_LT 42 — rolling-texture signature, same class as the 301 packs); SI conversions at 6.894757 MPa/ksi and 27679.905 (kg/m3)/(lb/in3) on the printed 0.100 lb/in3; bearing values (dry-pin, footnote b) not transcribed; elevated-temperature curves are graphs only (Figures 3.2.3.1.1(a) ff., not digitized); uncertainty Unstated
+scalar	tensile-ultimate-l	mil5j-table-323ob1-t3-sheet	tensile_ultimate_l_a_basis	441.26	MPa	constant
+uncertainty	tensile-ultimate-l	unstated	-	-	-	-
+validity	tensile-ultimate-l	temperature	294	294	K
+scalar	tensile-ultimate-lt	mil5j-table-323ob1-t3-sheet	tensile_ultimate_lt_a_basis	434.37	MPa	constant
+uncertainty	tensile-ultimate-lt	unstated	-	-	-	-
+validity	tensile-ultimate-lt	temperature	294	294	K
+scalar	tensile-yield-l	mil5j-table-323ob1-t3-sheet	tensile_yield_l_a_basis	324.05	MPa	constant
+uncertainty	tensile-yield-l	unstated	-	-	-	-
+validity	tensile-yield-l	temperature	294	294	K
+scalar	tensile-yield-lt	mil5j-table-323ob1-t3-sheet	tensile_yield_lt_a_basis	289.58	MPa	constant
+uncertainty	tensile-yield-lt	unstated	-	-	-	-
+validity	tensile-yield-lt	temperature	294	294	K
+scalar	compressive-yield-l	mil5j-table-323ob1-t3-sheet	compressive_yield_l_a_basis	268.9	MPa	constant
+uncertainty	compressive-yield-l	unstated	-	-	-	-
+validity	compressive-yield-l	temperature	294	294	K
+scalar	compressive-yield-lt	mil5j-table-323ob1-t3-sheet	compressive_yield_lt_a_basis	310.26	MPa	constant
+uncertainty	compressive-yield-lt	unstated	-	-	-	-
+validity	compressive-yield-lt	temperature	294	294	K
+scalar	shear-ultimate	mil5j-table-323ob1-t3-sheet	shear_ultimate_a_basis	268.9	MPa	constant
+uncertainty	shear-ultimate	unstated	-	-	-	-
+validity	shear-ultimate	temperature	294	294	K
+scalar	elongation-lt	mil5j-table-323ob1-t3-sheet	elongation_lt_minimum	15	%	constant
+uncertainty	elongation-lt	unstated	-	-	-	-
+validity	elongation-lt	temperature	294	294	K
+scalar	young-modulus	mil5j-table-323ob1-t3-sheet	young_modulus	72.39	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	294	294	K
+scalar	compression-modulus	mil5j-table-323ob1-t3-sheet	compression_modulus	73.77	GPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	temperature	294	294	K
+scalar	shear-modulus	mil5j-table-323ob1-t3-sheet	shear_modulus	27.58	GPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	294	294	K
+scalar	poisson-ratio	mil5j-table-323ob1-t3-sheet	poisson_ratio	0.33	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	294	294	K
+scalar	density	mil5j-table-323ob1-t3-sheet	density	2768.0	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	294	294	K

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	phosphor-bronze-c51000-mil-hdbk-698a
+redistribution	permitted	Work of the US Government (Department of Defense Handbook); public domain; retain handbook number and table numbers
+citation	MIL-HDBK-698A (1971), Copper and Copper Alloys, Department of Defense Handbook, 1 June 1971, Table XV Some Physical Properties of Wrought Alloys, alloy number 510
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

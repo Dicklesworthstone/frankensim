@@ -51,3 +51,7 @@ validity	fty-fraction-811k	temperature	811	811	K
 scalar	fty-fraction-1033k	mil5j-table-2710b-annealed	tensile_yield_fraction_1033k	0.43	1	constant
 uncertainty	fty-fraction-1033k	unstated	-	-	-	-
 validity	fty-fraction-1033k	temperature	1033	1033	K
+observation	mil5j-fig-27111a-curve	AISI 301 annealed sheet/strip yield fraction versus temperature, Figure 2.7.1.1.1(a)	MIL-HDBK-5J Figure 2.7.1.1.1(a) (annealed 301/302/304/304L/321/347, exposure up to 1/2 hr, percent of room-temperature Fty), GRAPH-READ estimated tier	The four graph-read points already carried as exact-temperature scalars are ALSO carried as a single tabulated temperature CURVE so temperature-axis queries interpolate within the read band instead of refusing between the points; the tabulated-only interpolation policy makes no smoothness claim; the graph-read (estimated tier) pedigree is identical to the scalar rows and the runtime uncertainty stays Unstated
+curve	fty-fraction-curve	mil5j-fig-27111a-curve	tensile_yield_fraction	temperature	K	1	478:0.68,589:0.62,811:0.60,1033:0.43	tabulated
+uncertainty	fty-fraction-curve	unstated	-	-	-	-
+validity	fty-fraction-curve	temperature	478	1033	K

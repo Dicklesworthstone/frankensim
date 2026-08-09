@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	c447-table67-tin	tin (elemental), NBS C447 Table 67 physical-property row	NBS Circular C447 Table 67, melting point on the international temperature scale and density at 20 C	Melting point printed as 231.9 plus-minus 0.1 deg C on the international temperature scale, converted at K = C + 273.15; density printed at 20 C in g/cm3 and converted at 1000 (kg/m3)/(g/cm3); the printed plus-minus 0.1 C is a scale statement without confidence semantics, so runtime uncertainty stays Unstated.
+scalar	melting-point	c447-table67-tin	melting_point	505.05	K	constant
+uncertainty	melting-point	unstated	-	-	-	-
+validity	melting-point	temperature	294	294	K
+scalar	density	c447-table67-tin	density	7300	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	293	K

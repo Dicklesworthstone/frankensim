@@ -7486,3 +7486,235 @@ fn g2_cli_compiles_stainless_tranche_with_asymmetry_gates() {
         fcy_lt / fty_lt
     );
 }
+
+const BREADTH_TRANCHE_PACKS: [&str; 15] = [
+    "stainless-17-4ph-h1025-bar-mil-hdbk-5j",
+    "steel-4130-sheet-normalized-mil-hdbk-5j",
+    "aluminum-2024-t3-sheet-mil-hdbk-5j",
+    "lead-pure-nbs-c447",
+    "tin-pure-nbs-c447",
+    "zinc-pure-nbs-c447",
+    "aluminum-pure-nbs-c447",
+    "copper-pure-nbs-c447",
+    "copper-c11000-mil-hdbk-698a",
+    "brass-muntz-c28000-mil-hdbk-698a",
+    "phosphor-bronze-c51000-mil-hdbk-698a",
+    "brass-70-30-nbs-c447-hardness",
+    "carbon-steel-cast-c033-nbs-c447",
+    "sapele-fpl-gtr190",
+    "teak-fpl-gtr190",
+];
+
+/// G2: the common-materials breadth tranches (bead frankensim-0er85) —
+/// MIL-HDBK-5J structural metals, NBS/MIL melting + scale-typed
+/// hardness, FPL tropical woods — compile fail-closed and pass their
+/// per-tranche derived-quantity gates.
+#[test]
+fn g2_cli_compiles_breadth_tranches_with_derived_gates() {
+    let mut packs = std::collections::BTreeMap::new();
+    for slug in BREADTH_TRANCHE_PACKS {
+        let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+        let out = fixture_dir().join(format!("{slug}.fsmatpk"));
+        let run = run_compiler(&manifest, &out);
+        assert!(
+            run.status.success(),
+            "{slug} refused: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = fs::read(&out).expect("read breadth pack");
+        let pack = NormalizedPack::from_bytes_verified(
+            NormalizedPack::from_bytes(&bytes)
+                .expect("decode breadth pack")
+                .content_hash(),
+            &bytes,
+        )
+        .expect("verified breadth pack");
+        assert_eq!(pack.pack_id(), slug);
+        packs.insert(slug, pack);
+    }
+    let scalar = |slug: &str, property: &str| -> f64 {
+        tonewood_scalar(&packs[slug], property)
+            .unwrap_or_else(|| panic!("{slug} must carry {property}"))
+    };
+
+    // TRANCHE 1 (MIL-HDBK-5J metals): E/G/nu consistency — the derived
+    // nu = E/2G - 1 must sit within handbook rounding of the printed
+    // Poisson ratio.
+    for (slug, e_p, g_p, nu_p) in [
+        (
+            "stainless-17-4ph-h1025-bar-mil-hdbk-5j",
+            "young_modulus",
+            "shear_modulus",
+            "poisson_ratio",
+        ),
+        (
+            "steel-4130-sheet-normalized-mil-hdbk-5j",
+            "young_modulus",
+            "shear_modulus",
+            "poisson_ratio",
+        ),
+        (
+            "aluminum-2024-t3-sheet-mil-hdbk-5j",
+            "young_modulus",
+            "shear_modulus",
+            "poisson_ratio",
+        ),
+    ] {
+        let nu_derived = scalar(slug, e_p) / (2.0 * scalar(slug, g_p)) - 1.0;
+        let nu_printed = scalar(slug, nu_p);
+        assert!(
+            (nu_derived - nu_printed).abs() < 0.06,
+            "{slug}: derived nu {nu_derived:.3} vs printed {nu_printed:.3} beyond handbook rounding"
+        );
+    }
+    // Strength ordering: yield below ultimate; 17-4PH Fcy below Fty
+    // (bar, longitudinal).
+    let ph = "stainless-17-4ph-h1025-bar-mil-hdbk-5j";
+    assert!(scalar(ph, "tensile_yield_l_s_basis") < scalar(ph, "tensile_ultimate_l_s_basis"));
+    assert!(scalar(ph, "compressive_yield_l_s_basis") < scalar(ph, "tensile_yield_l_s_basis"));
+    // 2024-T3: the rolling-texture asymmetry REVERSES with direction
+    // (Fcy_L < Fty_L but Fcy_LT > Fty_LT) — same signature class the
+    // 301 tranche pinned; a single knockdown factor cannot represent
+    // this.
+    let al = "aluminum-2024-t3-sheet-mil-hdbk-5j";
+    assert!(
+        scalar(al, "compressive_yield_l_a_basis") < scalar(al, "tensile_yield_l_a_basis"),
+        "2024-T3 longitudinal Fcy must sit below Fty"
+    );
+    assert!(
+        scalar(al, "compressive_yield_lt_a_basis") > scalar(al, "tensile_yield_lt_a_basis"),
+        "2024-T3 transverse Fcy must exceed Fty"
+    );
+
+    // TRANCHE 2 (melting + hardness): solidus never above liquidus for
+    // every alloy pack that carries both.
+    for slug in [
+        "copper-c11000-mil-hdbk-698a",
+        "brass-muntz-c28000-mil-hdbk-698a",
+        "phosphor-bronze-c51000-mil-hdbk-698a",
+    ] {
+        assert!(
+            scalar(slug, "melting_point_solidus") <= scalar(slug, "melting_point_liquidus"),
+            "{slug}: solidus above liquidus"
+        );
+    }
+    // Cross-source melting pin: C11000 liquidus (MIL-HDBK-698A, deg F)
+    // vs elemental copper (NBS C447, deg C) agree within 1 K.
+    let cu_mil = scalar("copper-c11000-mil-hdbk-698a", "melting_point_liquidus");
+    let cu_nbs = scalar("copper-pure-nbs-c447", "melting_point");
+    assert!(
+        (cu_mil - cu_nbs).abs() < 1.0,
+        "cross-source copper melting disagreement: {cu_mil:.2} vs {cu_nbs:.2} K"
+    );
+    // Alloying depresses melting: both brasses melt below pure copper.
+    assert!(scalar("brass-muntz-c28000-mil-hdbk-698a", "melting_point_liquidus") < cu_nbs);
+    // Melting ordering across the pure metals (the extreme-regime
+    // doctrine anchor: lead lowest of the structural set).
+    let melt = |s: &str| scalar(s, "melting_point");
+    assert!(melt("tin-pure-nbs-c447") < melt("lead-pure-nbs-c447"));
+    assert!(melt("lead-pure-nbs-c447") < melt("zinc-pure-nbs-c447"));
+    assert!(melt("zinc-pure-nbs-c447") < melt("aluminum-pure-nbs-c447"));
+    assert!(melt("aluminum-pure-nbs-c447") < melt("copper-pure-nbs-c447"));
+    // SCALE TYPING is structural: every hardness property name carries
+    // its scale, and no scale-less "hardness" scalar exists anywhere in
+    // the tranche.
+    for (slug, pack) in &packs {
+        for (_id, claim) in pack.claims().claims_ordered() {
+            let name = claim.key.name();
+            if name.contains("hardness") && !name.contains("side_hardness") {
+                assert!(
+                    name.contains("brinell")
+                        || name.contains("rockwell")
+                        || name.contains("vickers"),
+                    "{slug}: hardness claim {name} is not scale-typed"
+                );
+            }
+            assert_ne!(name, "hardness", "{slug}: scale-less hardness forbidden");
+        }
+    }
+    // Cold work raises hardness within each lot (copper and brass).
+    assert!(
+        scalar("copper-pure-nbs-c447", "hardness_brinell_cold_drawn_56pct")
+            > scalar("copper-pure-nbs-c447", "hardness_brinell_annealed")
+    );
+    assert!(
+        scalar(
+            "brass-70-30-nbs-c447-hardness",
+            "hardness_rockwell_b_cold_worked_37pct"
+        ) > scalar(
+            "brass-70-30-nbs-c447-hardness",
+            "hardness_rockwell_b_soft_sheet"
+        )
+    );
+    assert!(
+        scalar(
+            "brass-70-30-nbs-c447-hardness",
+            "hardness_brinell_cold_rolled_11pct"
+        ) > scalar("brass-70-30-nbs-c447-hardness", "hardness_brinell_annealed")
+    );
+
+    // TRANCHE 3 (FPL woods): plausibility gates — MOR far below MOE,
+    // compression parallel below MOR, positive toughness.
+    for slug in ["sapele-fpl-gtr190", "teak-fpl-gtr190"] {
+        let mor = scalar(slug, "modulus_of_rupture");
+        let moe = scalar(slug, "bending_modulus_of_elasticity") * 1.0e3; // GPa -> MPa
+        assert!(moe > 50.0 * mor, "{slug}: MOE/MOR ratio implausible");
+        assert!(scalar(slug, "compression_parallel_max") < mor);
+        assert!(scalar(slug, "work_to_maximum_load") > 0.0);
+        assert!(scalar(slug, "side_hardness") > 0.0);
+    }
+
+    println!(
+        "{{\"suite\":\"matdb-pack\",\"case\":\"breadth-tranches\",\"packs\":{},\"verdict\":\"pass\"}}",
+        packs.len()
+    );
+}
+
+/// G2: the 301-annealed elevated-temperature yield-fraction data is
+/// carried as a queryable temperature CURVE (bead frankensim-0er85's
+/// curve-claim acceptance), decreasing across the read band.
+#[test]
+fn g2_stainless_yield_fraction_temperature_curve() {
+    let slug = "stainless-301-annealed-mil-hdbk-5j";
+    let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+    let out = fixture_dir().join(format!("{slug}-curve.fsmatpk"));
+    let run = run_compiler(&manifest, &out);
+    assert!(
+        run.status.success(),
+        "refused: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let bytes = fs::read(&out).expect("read pack");
+    let pack = NormalizedPack::from_bytes_verified(
+        NormalizedPack::from_bytes(&bytes)
+            .expect("decode pack")
+            .content_hash(),
+        &bytes,
+    )
+    .expect("verified pack");
+    let claims = pack.claims().claims_for("tensile_yield_fraction");
+    assert_eq!(claims.len(), 1, "one curve claim expected");
+    let claim = claims[0].1;
+    let PropertyValue::Curve {
+        abscissa, knots, ..
+    } = &claim.value
+    else {
+        panic!("yield fraction must be a CURVE claim");
+    };
+    assert_eq!(abscissa, "temperature");
+    assert_eq!(knots.len(), 4);
+    // Strength decreases with temperature across the whole read band —
+    // the monotonicity gate the bead names.
+    for pair in knots.windows(2) {
+        assert!(pair[0].0 < pair[1].0, "temperature knots must ascend");
+        assert!(
+            pair[0].1 > pair[1].1,
+            "yield fraction must DECREASE with temperature: {:?}",
+            knots
+        );
+    }
+    // Exact endpoints as graph-read: 478 K -> 0.68, 1033 K -> 0.43.
+    assert!((knots[0].0 - 478.0).abs() < 1.0e-9 && (knots[0].1 - 0.68).abs() < 1.0e-12);
+    assert!((knots[3].0 - 1033.0).abs() < 1.0e-9 && (knots[3].1 - 0.43).abs() < 1.0e-12);
+    println!("{{\"suite\":\"matdb-pack\",\"case\":\"fty-fraction-curve\",\"verdict\":\"pass\"}}");
+}

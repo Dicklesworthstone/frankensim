@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	teak-fpl-gtr190
+redistribution	permitted	Work of the US Government (USDA Forest Service, Forest Products Laboratory); public domain; retain report number and table numbers
+citation	Forest Products Laboratory (2010), Wood Handbook: Wood as an Engineering Material, FPL-GTR-190, USDA Forest Service, chapter 5, Table 5-5a Mechanical properties of some woods imported into the United States other than Canadian imports (metric), Teak (Tectona grandis)
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
