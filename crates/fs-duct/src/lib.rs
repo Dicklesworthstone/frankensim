@@ -395,6 +395,9 @@ fn basis_pair(segment: &Segment, wave: &SegmentWave, t: f64, forward: bool) -> (
             let dp = (C64::new(0.0, sign) * k - C64::from_re(1.0 / x)) * p;
             (p, dp.scale(area) * series)
         }
+        Segment::ToneHole { .. } => {
+            unreachable!("tone holes are handled by the chain loop, not the basis builder")
+        }
     }
 }
 
@@ -1387,5 +1390,283 @@ mod review_regressions {
             }
         }
         println!("{{\"suite\":\"fs-duct\",\"case\":\"chain-exactness\",\"verdict\":\"pass\"}}");
+    }
+}
+
+#[cfg(test)]
+mod tone_hole_tests {
+    use super::*;
+    use fs_material::gas::{GasSpec, GasState};
+
+    fn air20() -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
+    }
+
+    /// The Ernoult et al. 2021 four-hole cylinder (Acta Acustica 5:47,
+    /// CC-BY 4.0, Table 1 caliper-measured geometry): main bore
+    /// r = 2 mm, L = 287.5 mm; holes at 100/130/180/240 mm with radii
+    /// 1.5/1.75/1.75/1.25 mm and chimney heights 1.7/1.3/1.5/1.4 mm.
+    /// A FINGERING IS DATA: the instrument description composes the
+    /// generic facility (program doctrine).
+    fn ernoult_duct(states: [HoleState; 4]) -> Duct {
+        let bore = 2.0e-3;
+        let hole = |i: usize| -> Segment {
+            let (r, h) = [
+                (1.5e-3, 1.7e-3),
+                (1.75e-3, 1.3e-3),
+                (1.75e-3, 1.5e-3),
+                (1.25e-3, 1.4e-3),
+            ][i];
+            Segment::ToneHole {
+                hole_radius: r,
+                chimney_height: h,
+                bore_radius: bore,
+                state: states[i],
+            }
+        };
+        let cyl = |length: f64| Segment::Cylinder {
+            radius: bore,
+            length,
+        };
+        Duct {
+            segments: vec![
+                cyl(0.100),
+                hole(0),
+                cyl(0.030),
+                hole(1),
+                cyl(0.050),
+                hole(2),
+                cyl(0.060),
+                hole(3),
+                cyl(0.0475),
+            ],
+        }
+    }
+
+    fn first_peak_hz(duct: &Duct, lo_hz: f64, hi_hz: f64) -> f64 {
+        let state = air20();
+        let sweep = impedance_sweep(
+            duct,
+            &state,
+            2.0 * core::f64::consts::PI * lo_hz,
+            2.0 * core::f64::consts::PI * hi_hz,
+            12_000,
+            LossModel::WideTube,
+            Termination::UnflangedOpen,
+        )
+        .expect("sweep");
+        let peaks = impedance_peaks(&sweep);
+        assert!(!peaks.is_empty(), "no peak in [{lo_hz}, {hi_hz}]");
+        sweep[peaks[0]].omega / (2.0 * core::f64::consts::PI)
+    }
+
+    #[test]
+    fn ernoult_2021_measured_fingering_ladder() {
+        use core::fmt::Write as _;
+        // VALIDATION AGAINST MEASURED DATA (the bead's final clause):
+        // first impedance-peak frequencies of the five fingerings of
+        // the Ernoult 2021 four-hole cylinder, measured by the paper's
+        // two-microphone method with stated +-2 cent peak accuracy
+        // (geometry from the CC-BY paper's Table 1; peak values
+        // extracted from the openwind-published measured curves,
+        // GPLv3, session Measure1: 283/332/449/619/770 Hz).
+        // Authored envelope: measured deviations -8..-20 cents
+        // (2026-08-08), systematically slightly flat — consistent with
+        // the compact-limit inner end correction using the validated
+        // uniform-profile disc constant; 30 cents absolute is the
+        // envelope, and the DIRECTION of every deviation is asserted
+        // too (a sign-scattered model would indicate noise, not
+        // physics).
+        use HoleState::{Closed as X, Open as O};
+        let cases: [([HoleState; 4], f64, &str); 5] = [
+            ([X, X, X, X], 283.0, "xxxx"),
+            ([X, X, X, O], 332.0, "xxxo"),
+            ([X, X, O, X], 449.0, "xxox"),
+            ([X, O, X, X], 619.0, "xoxx"),
+            ([O, X, X, X], 770.0, "oxxx"),
+        ];
+        let mut rows = String::new();
+        let mut previous = 0.0f64;
+        for (i, (states, measured, name)) in cases.iter().enumerate() {
+            let f = first_peak_hz(&ernoult_duct(*states), 150.0, 1000.0);
+            let cents = 1200.0 * (f / measured).ln() / core::f64::consts::LN_2;
+            assert!(
+                cents.abs() < 30.0,
+                "{name}: {f:.1} Hz vs measured {measured} Hz = {cents:+.0} cents"
+            );
+            assert!(
+                cents < 0.0,
+                "{name}: deviations are systematically flat on this model;                  a sharp deviation signals a physics change: {cents:+.1}"
+            );
+            // Opening successive holes from the bell up must RAISE the
+            // pitch monotonically — the fingering ladder is the
+            // instrument-as-data doctrine test.
+            assert!(
+                f > previous,
+                "fingering ladder must rise monotonically: {f:.1} after {previous:.1}"
+            );
+            previous = f;
+            write!(
+                rows,
+                "{}{{\"fingering\":\"{name}\",\"model_hz\":{f:.1},\"measured_hz\":{measured},\"cents\":{cents:.0}}}",
+                if i == 0 { "" } else { "," }
+            )
+            .expect("write");
+        }
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"ernoult-2021-fingering-ladder\",\"citation\":\"Ernoult, Chabassier, Rodriguez, Humeau, Acta Acustica 5:47 (2021), CC-BY-4.0, Table 1; measured curves openwind (GPLv3)\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one coherent algebra + contrast + refusal battery
+    fn tone_hole_algebra_and_contrasts() {
+        // (a) Exact-cascade pin: input_impedance through a hole equals
+        // the hand-composed shunt cascade to 1e-12 — the T-junction
+        // wiring cannot drift. (b) Opening a hole RAISES the first
+        // resonance (shortens the bore). (c) A closed small hole is a
+        // tiny perturbation. (d) Refusals: hole >= bore, open-hole kb
+        // ceiling. (e) Bitwise determinism.
+        let state = air20();
+        let omega = 2.0 * core::f64::consts::PI * 400.0;
+        let bore = 7.5e-3;
+        let up = Segment::Cylinder {
+            radius: bore,
+            length: 0.25,
+        };
+        let down = Segment::Cylinder {
+            radius: bore,
+            length: 0.25,
+        };
+        let hole = Segment::ToneHole {
+            hole_radius: 3.0e-3,
+            chimney_height: 2.0e-3,
+            bore_radius: bore,
+            state: HoleState::Open,
+        };
+        let with_hole = Duct {
+            segments: vec![up, hole, down],
+        };
+        let z_full = input_impedance(
+            &with_hole,
+            &state,
+            omega,
+            LossModel::WideTube,
+            Termination::UnflangedOpen,
+        )
+        .expect("with hole")
+        .impedance;
+        // Hand composition: Z_down through the downstream tube, then
+        // parallel with the shunt, then back through the upstream tube.
+        let z_down = input_impedance(
+            &Duct {
+                segments: vec![down],
+            },
+            &state,
+            omega,
+            LossModel::WideTube,
+            Termination::UnflangedOpen,
+        )
+        .expect("down")
+        .impedance;
+        let shunt = tone_hole_shunt(&state, 3.0e-3, 2.0e-3, HoleState::Open, omega).expect("shunt");
+        let z_parallel = (z_down.recip() + shunt.recip()).recip();
+        // Push z_parallel through the upstream tube's 2-port.
+        let wave = segment_wave(&state, bore, omega, LossModel::WideTube).expect("wave");
+        let m = segment_matrix(&up, &wave).expect("matrix");
+        let z_hand = (m[0] * z_parallel + m[1]) * (m[2] * z_parallel + m[3]).recip();
+        assert!(
+            (z_full - z_hand).abs() < 1e-12 * z_hand.abs(),
+            "cascade algebra: {z_full:?} vs {z_hand:?}"
+        );
+        // (b) open vs closed contrast on the first peak.
+        let peak = |hole_state: HoleState| -> f64 {
+            let duct = Duct {
+                segments: vec![
+                    up,
+                    Segment::ToneHole {
+                        hole_radius: 3.0e-3,
+                        chimney_height: 2.0e-3,
+                        bore_radius: bore,
+                        state: hole_state,
+                    },
+                    down,
+                ],
+            };
+            first_peak_hz(&duct, 80.0, 400.0)
+        };
+        let f_open = peak(HoleState::Open);
+        let f_closed = peak(HoleState::Closed);
+        assert!(
+            f_open > 1.15 * f_closed,
+            "opening the hole must raise the resonance: {f_open:.1} vs {f_closed:.1}"
+        );
+        // (c) closed SMALL hole is a tiny perturbation vs no hole.
+        let f_plain = first_peak_hz(
+            &Duct {
+                segments: vec![Segment::Cylinder {
+                    radius: bore,
+                    length: 0.5,
+                }],
+            },
+            80.0,
+            400.0,
+        );
+        let f_small_closed = {
+            let duct = Duct {
+                segments: vec![
+                    up,
+                    Segment::ToneHole {
+                        hole_radius: 1.0e-3,
+                        chimney_height: 1.0e-3,
+                        bore_radius: bore,
+                        state: HoleState::Closed,
+                    },
+                    down,
+                ],
+            };
+            first_peak_hz(&duct, 80.0, 400.0)
+        };
+        assert!(
+            (f_small_closed / f_plain - 1.0).abs() < 5e-3,
+            "a closed pinhole must barely perturb: {f_small_closed:.2} vs {f_plain:.2}"
+        );
+        // (d) refusals.
+        assert!(matches!(
+            input_impedance(
+                &Duct {
+                    segments: vec![Segment::ToneHole {
+                        hole_radius: 8.0e-3,
+                        chimney_height: 1.0e-3,
+                        bore_radius: bore,
+                        state: HoleState::Open,
+                    }],
+                },
+                &state,
+                omega,
+                LossModel::WideTube,
+                Termination::Closed,
+            ),
+            Err(DuctError::BadParameter { .. })
+        ));
+        assert!(matches!(
+            tone_hole_shunt(&state, 6.0e-3, 1.0e-3, HoleState::Open, 2.0e5),
+            Err(DuctError::RadiationKaTooLarge { .. })
+        ));
+        // (e) determinism.
+        let a = input_impedance(
+            &with_hole,
+            &state,
+            omega,
+            LossModel::WideTube,
+            Termination::UnflangedOpen,
+        )
+        .expect("a")
+        .impedance;
+        assert_eq!(a.re.to_bits(), z_full.re.to_bits());
+        assert_eq!(a.im.to_bits(), z_full.im.to_bits());
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"tone-hole-algebra\",\"f_open\":{f_open:.1},\"f_closed\":{f_closed:.1},\"verdict\":\"pass\"}}"
+        );
     }
 }

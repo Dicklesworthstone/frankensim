@@ -28,6 +28,12 @@ same object, and every medium property derives from
 - `input_impedance` / `impedance_sweep` / `impedance_peaks` —
   `Z_in = p/U` at the inlet with per-solve diagnostics (minimum shear
   number, mouth `ka`).
+- `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — compact-limit
+  lumped side branch (`[[1,0],[1/Z_h,1]]`): OPEN = chimney mass with
+  the validated inner `8/(3 pi) b` + wall-flanged outer `0.8216 b` end
+  corrections plus flanged radiation resistance; CLOSED = chimney
+  cavity compliance. Hole radius must stay below the bore radius;
+  open-hole `k b` refuses above the compact ceiling.
 - `DuctError` — stable `FS-DUCT-*` refusals: bad parameter, too-narrow
   (wide-tube floor), radiation-`ka` ceiling, empty duct, singular.
 
@@ -64,7 +70,15 @@ pipe `Z_in = +i Zc cot(kL)`.
 7. Ambient parameterization: lossless resonances scale with
    `sqrt(T_hot/T_cold)` against the independently computed constant.
 8. Repeat evaluations are bitwise identical.
-9. (Review round) The Zc/impedance correction is pinned by the
+9. MEASURED-DATA VALIDATION: the Ernoult 2021 four-hole cylinder
+   (Acta Acustica 5:47, CC-BY Table 1 geometry; measured curves
+   published via openwind, GPLv3) — the five-fingering first-peak
+   ladder reproduces the measured 283/332/449/619/770 Hz within an
+   authored 30-cent envelope (measured -8..-20 cents, systematically
+   flat, direction asserted) with the monotone fingering-ladder
+   doctrine check; plus the exact-cascade tone-hole algebra pin
+   (1e-12), open-raises/closed-perturbs contrasts, and hole refusals.
+10. (Review round) The Zc/impedance correction is pinned by the
    INDEPENDENT sqrt(Z_series/Y_shunt) transmission-line route (complex
    square roots, physical-branch selection) with the review's three
    surviving eps_z mutants asserted OUTSIDE the second-order band;
@@ -121,8 +135,9 @@ refusals; bitwise determinism.
 - Radiation fits are low-`ka` (ceiling 1.0, refused by name) for
   unflanged/flanged circular mouths; BEM-computed loads are the
   recorded successor (`fs_bem::helmholtz`).
-- No tone holes / side branches / junction elements yet — slice 3 of
-  the bead, along with the provenance-pinned measured-impedance
-  validation of a full fingering lattice.
+- Tone holes are the COMPACT-LIMIT lumped shunt only: no series
+  length corrections, no chimney viscothermal losses, no open-hole
+  mutual interference, no continuous vent fractions — each a recorded
+  refinement with the Ernoult dataset as its regression floor.
 - The gas state inherits `fs_material::gas` boundaries (ideal gas,
   phase validity unchecked, calorically perfect gamma).
