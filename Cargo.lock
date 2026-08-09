@@ -1842,6 +1842,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-nlmodal"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+ "fs-phs",
+]
+
+[[package]]
 name = "fs-obs"
 version = "0.0.1"
 
