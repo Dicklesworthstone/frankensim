@@ -202,6 +202,30 @@ pub fn initial_poles(omega: &[f64], order: usize) -> Vec<PoleTerm> {
     terms
 }
 
+/// Column-equilibrated least squares: normalize every column of the
+/// row-major `a` to unit Euclidean norm, solve, and unscale — the
+/// mixed pole-magnitude basis columns and physical-scale data columns
+/// otherwise span many orders of magnitude and poison the QR
+/// (executed: a clarinet impedance at |Z| ~ 1e7 fit to only ~40%
+/// weighted error before equilibration).
+fn solve_ls_equilibrated(a: &mut [f64], nrows: usize, ncols: usize, rhs: &[f64]) -> Vec<f64> {
+    let mut col_scale = vec![1.0f64; ncols];
+    for (k, scale) in col_scale.iter_mut().enumerate() {
+        let mut sq = 0.0f64;
+        for r in 0..nrows {
+            sq += a[r * ncols + k] * a[r * ncols + k];
+        }
+        if sq > 0.0 {
+            *scale = fs_math::det::sqrt(sq);
+            for r in 0..nrows {
+                a[r * ncols + k] /= *scale;
+            }
+        }
+    }
+    let x = qr(a, nrows, ncols).solve_ls(rhs);
+    x.iter().zip(&col_scale).map(|(&v, &c)| v / c).collect()
+}
+
 fn band_edges(omega: &[f64]) -> (f64, f64) {
     let mut lo = f64::INFINITY;
     let mut hi = 0.0f64;
@@ -277,6 +301,13 @@ fn terms_with_residues(terms: &[PoleTerm], coords: &[f64]) -> Vec<PoleTerm> {
 /// sigma collapse. Never panics on finite input.
 pub fn vector_fit(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<FitOutcome, VfError> {
     validate(omega, h, opts)?;
+    // Normalize the data to O(1) magnitude (fit H/scale, multiply the
+    // linear parameters back at the end — exact by the scaling
+    // covariance the battery pins): physical impedances at |Z| ~ 1e7
+    // otherwise leave the sigma system ill-scaled.
+    let h_scale = magnitude_scale(h);
+    let h_norm: Vec<C64> = h.iter().map(|v| v.scale(1.0 / h_scale)).collect();
+    let h = &h_norm[..];
     let mut terms = initial_poles(omega, opts.order);
     let weights: Vec<f64> = h.iter().map(|&v| opts.weights.weight(v)).collect();
     let mut iterations_run = 0usize;
@@ -293,15 +324,55 @@ pub fn vector_fit(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<FitOutc
     }
     let (model, weighted_rms, max_abs) = residue_pass(omega, h, &weights, &terms, opts)?;
     Ok(FitOutcome {
-        model,
+        model: rescale_model(model, h_scale),
         report: FitReport {
             weighted_rms,
-            max_abs_error: max_abs,
+            max_abs_error: max_abs * h_scale,
             weights: opts.weights.label(),
             iterations_run,
             final_pole_movement: final_move,
         },
     })
+}
+
+/// Geometric-mean magnitude of the samples (the normalization scale).
+fn magnitude_scale(h: &[C64]) -> f64 {
+    let mut acc = 0.0f64;
+    let mut n = 0usize;
+    for v in h {
+        let m = v.abs();
+        if m > 0.0 {
+            acc += fs_math::det::ln(m);
+            n += 1;
+        }
+    }
+    if n == 0 {
+        1.0
+    } else {
+        fs_math::det::exp(acc / n as f64)
+    }
+}
+
+/// Multiply the linear parameters (residues, d, e) by `scale`.
+fn rescale_model(model: RationalModel, scale: f64) -> RationalModel {
+    RationalModel {
+        terms: model
+            .terms
+            .into_iter()
+            .map(|t| match t {
+                PoleTerm::Real { pole, residue } => PoleTerm::Real {
+                    pole,
+                    residue: residue * scale,
+                },
+                PoleTerm::Pair { pole, residue } => PoleTerm::Pair {
+                    pole,
+                    residue: residue.scale(scale),
+                },
+            })
+            .collect(),
+        d: model.d * scale,
+        e: model.e * scale,
+    }
 }
 
 fn validate(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<(), VfError> {
@@ -346,7 +417,8 @@ fn relocate_once(
     let ncols = n_model + n_sigma;
     let nrows = 2 * omega.len() + 1;
     let mut a = vec![0.0f64; nrows * ncols];
-    let mut rhs = vec![0.0f64; nrows];
+    let rhs_len = nrows;
+    let mut rhs = vec![0.0f64; rhs_len];
     for (i, ((&w, &hv), &wt)) in omega.iter().zip(h).zip(weights).enumerate() {
         let s = C64::new(0.0, w);
         let cols = basis_columns(terms, s);
@@ -389,7 +461,7 @@ fn relocate_once(
         let _ = i;
     }
     rhs[last] = mean_wt * omega.len() as f64;
-    let x = qr(&a, nrows, ncols).solve_ls(&rhs);
+    let x = solve_ls_equilibrated(&mut a, nrows, ncols, &rhs);
     let d_tilde = x[ncols - 1];
     if d_tilde.abs() < 1.0e-12 {
         return Err(VfError::SigmaCollapse);
@@ -549,7 +621,8 @@ fn residue_solve(
     let ncols = order + usize::from(use_d) + usize::from(use_e);
     let nrows = 2 * omega.len();
     let mut a = vec![0.0f64; nrows * ncols];
-    let mut rhs = vec![0.0f64; nrows];
+    let rhs_len = nrows;
+    let mut rhs = vec![0.0f64; rhs_len];
     for (i, ((&w, &hv), &wt)) in omega.iter().zip(h).zip(weights).enumerate() {
         let s = C64::new(0.0, w);
         let cols = basis_columns(terms, s);
@@ -569,7 +642,7 @@ fn residue_solve(
         rhs[r_re] = wt * hv.re;
         rhs[r_im] = wt * hv.im;
     }
-    let x = qr(&a, nrows, ncols).solve_ls(&rhs);
+    let x = solve_ls_equilibrated(&mut a, nrows, ncols, &rhs);
     let coords = x[..order].to_vec();
     let mut at = order;
     let d = if use_d {
@@ -627,13 +700,15 @@ pub fn residue_fit_at_poles(
             needed: (order + 2).div_ceil(2),
         });
     }
-    let weights: Vec<f64> = h.iter().map(|&v| opts.weights.weight(v)).collect();
-    let (model, weighted_rms, max_abs) = residue_pass(omega, h, &weights, terms, opts)?;
+    let h_scale = magnitude_scale(h);
+    let h_norm: Vec<C64> = h.iter().map(|v| v.scale(1.0 / h_scale)).collect();
+    let weights: Vec<f64> = h_norm.iter().map(|&v| opts.weights.weight(v)).collect();
+    let (model, weighted_rms, max_abs) = residue_pass(omega, &h_norm, &weights, terms, opts)?;
     Ok(FitOutcome {
-        model,
+        model: rescale_model(model, h_scale),
         report: FitReport {
             weighted_rms,
-            max_abs_error: max_abs,
+            max_abs_error: max_abs * h_scale,
             weights: opts.weights.label(),
             iterations_run: 0,
             final_pole_movement: 0.0,
