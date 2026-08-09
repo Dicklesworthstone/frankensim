@@ -39,16 +39,18 @@ use crate::{
     },
     render_motion_bridge::EulerRenderMotionBridge,
     render_scene_bridge::{
-        EulerCinematicScene, EulerEnvironmentStyle, EulerFrameRequest, EulerMaterialStyle,
-        EulerPreviewMeshReceipt, EulerRectLightSpec, EulerSceneConfig, EulerStudioEnvironmentSpec,
-        EulerSupportSurfaceSpec, EulerTessellationConfig, MAX_EULER_ARC_SUBDIVISIONS,
-        MAX_EULER_AZIMUTHAL_SEGMENTS, euler_scene_smoke_settings,
+        EulerCinematicScene, EulerDiscMaterialStateBinding, EulerEnvironmentStyle,
+        EulerFrameRequest, EulerMaterialStyle, EulerPreviewMeshReceipt, EulerRectLightSpec,
+        EulerSceneConfig, EulerStudioEnvironmentSpec, EulerSupportSurfaceSpec,
+        EulerTessellationConfig, MAX_EULER_ARC_SUBDIVISIONS, MAX_EULER_AZIMUTHAL_SEGMENTS,
+        euler_scene_smoke_settings,
     },
     representative_modal_preset,
     timeline_resampling::{EventEvaluationSide, ExposureEventPolicy},
 };
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_evidence::{
+    ValidityDomain,
     cinematic::{CinematicClock, CinematicClockDomain, SoundAuthority},
     cinematic_config::{CinematicComponentRef, CinematicComponentRole},
     cinematic_sound::{
@@ -58,6 +60,7 @@ use fs_evidence::{
         SoundSynthesisConfig, SoundSynthesisInput, SoundTerminalPolicy, SoundTrajectoryDisposition,
     },
 };
+use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_exec::{Cx, RunId};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_img::{
@@ -67,7 +70,22 @@ use fs_img::{
     transform_cinematic_preview, write_exr_with_attributes, write_png16,
 };
 use fs_math::det;
+use fs_material::{
+    gas::{GasSpec, GasState},
+    state_point::{
+        MaterialPropertySelection, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
+        VISIBLE_COMPLEX_IOR_K_PROPERTIES, resolve_isotropic_elastic_state_point,
+        resolve_visible_conductor_state_point,
+    },
+    visco::RayleighDamping,
+};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
 use fs_mbd::Vec3;
+use fs_modal::SliceOptions;
+use fs_qty::{Density, Dims, Pressure};
 use fs_render::{
     aov::{
         CinematicAovConfig, CinematicAovLimits, CinematicAovProfile, CinematicAovProvenance,
@@ -86,6 +104,7 @@ use fs_render::{
         RenderWorkerPool, Settings, film_to_exr,
     },
 };
+use fs_solid::TetAssemblyBudget;
 
 /// Fixed master frame rate used by the cinematic sound contract.
 pub const CRITIQUE_FPS: u32 = 24;
@@ -229,6 +248,96 @@ impl CinematicAdaptiveSamplingConfig {
     }
 }
 
+/// Material-state inputs for the physical disc used by picture and sound.
+///
+/// These are numerical constitutive data, not a material-name selector. A
+/// caller can replace every value and provenance string; the same resolved
+/// state then drives density/stiffness, structural modes, damping, acoustic
+/// radiation, spectral Fresnel response, and surface roughness. The default
+/// film instance uses the literature specimen's mass-derived density, a
+/// declared room-temperature steel elastic estimate, and room-temperature
+/// elemental-iron optical measurements as an explicitly imperfect proxy for
+/// the reported but composition-unspecified steel disc.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CinematicDiscMaterialConfig {
+    /// Absolute material/environment query temperature [K].
+    pub temperature_k: f64,
+    /// Isotropic tangent Young's modulus [Pa].
+    pub young_modulus_pa: f64,
+    /// Isotropic Poisson ratio.
+    pub poisson_ratio: f64,
+    /// Mass-proportional Rayleigh damping coefficient [1/s].
+    pub rayleigh_alpha_per_s: f64,
+    /// Stiffness-proportional Rayleigh damping coefficient [s].
+    pub rayleigh_beta_s: f64,
+    /// Visible complex-index real parts on FrankenSim's canonical 9-knot grid.
+    pub optical_eta: [f64; 9],
+    /// Visible complex-index extinction coefficients on the same grid.
+    pub optical_k: [f64; 9],
+    /// Isotropic GGX microfacet roughness for the explicit surface state.
+    pub surface_roughness_alpha: f64,
+    /// Identity-only chemistry/specimen description; never dispatches physics.
+    pub material_label: String,
+    /// Process/surface history identifier; never dispatches physics.
+    pub process_label: String,
+    /// Citation or explicit estimate disclosure for elastic coefficients.
+    pub elastic_source: String,
+    /// Citation for the complex optical constants.
+    pub optical_source: String,
+    /// Citation or explicit estimate disclosure for damping coefficients.
+    pub damping_source: String,
+}
+
+impl Default for CinematicDiscMaterialConfig {
+    fn default() -> Self {
+        Self {
+            temperature_k: 293.15,
+            young_modulus_pa: 200.0e9,
+            poisson_ratio: 0.29,
+            // A deliberately disclosed, low-loss room-temperature estimate.
+            // These are input data, not an outcome-tuned frequency or decay.
+            rayleigh_alpha_per_s: 0.35,
+            rayleigh_beta_s: 6.0e-8,
+            // Linear interpolation of Johnson & Christy's room-temperature
+            // elemental-iron n,k table onto 380:50:780 nm. This is visibly and
+            // provenance-wise preferable to an artistic steel preset, but it
+            // remains a proxy because the paper does not report alloy/finish.
+            optical_eta: [
+                2.112_307_692_308,
+                2.472_777_777_778,
+                2.695_2,
+                2.888_928_571_429,
+                2.940_606_060_606,
+                2.892_380_952_381,
+                2.892,
+                2.865,
+                2.895_846_153_846,
+            ],
+            optical_k: [
+                2.494_615_384_615,
+                2.706_666_666_667,
+                2.841_6,
+                2.916_428_571_429,
+                2.986_363_636_364,
+                3.065_476_190_476,
+                3.142,
+                3.235,
+                3.320_615_384_615,
+            ],
+            surface_roughness_alpha: 0.12,
+            material_label: "Thorne-2026 reported steel; composition unspecified".to_owned(),
+            process_label: "machined filleted disc; finish unmeasured".to_owned(),
+            elastic_source:
+                "FrankenSim room-temperature isotropic steel estimate; not measured on specimen"
+                    .to_owned(),
+            optical_source: "P. B. Johnson and R. W. Christy, Phys. Rev. B 9, 5056-5070 (1974), DOI 10.1103/PhysRevB.9.5056; elemental-iron proxy, linearly interpolated"
+                .to_owned(),
+            damping_source:
+                "FrankenSim low-loss Rayleigh estimate; not measured on specimen".to_owned(),
+        }
+    }
+}
+
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CinematicFixtureConfig {
@@ -276,6 +385,8 @@ pub struct CinematicFixtureConfig {
     pub retain_full_aov_exr: bool,
     /// Whether mechanics-derived dry stems use the bounded spatial-audio path.
     pub spatialize_audio: bool,
+    /// One parameterized physical material state shared by picture and sound.
+    pub disc_material: CinematicDiscMaterialConfig,
     /// Whether to ask `ffmpeg` for a non-authoritative convenience movie.
     pub mux_with_ffmpeg: bool,
     /// `ffmpeg` executable name or path.
@@ -308,6 +419,7 @@ impl Default for CinematicFixtureConfig {
             denoise_previews: true,
             retain_full_aov_exr: true,
             spatialize_audio: true,
+            disc_material: CinematicDiscMaterialConfig::default(),
             mux_with_ffmpeg: true,
             ffmpeg_executable: PathBuf::from("ffmpeg"),
         }
@@ -415,6 +527,53 @@ impl CinematicFixtureConfig {
                 "muxed 4:2:0 video requires even width and height",
             ));
         }
+        let material = &self.disc_material;
+        if !(material.temperature_k.is_finite()
+            && material.temperature_k > 0.0
+            && material.young_modulus_pa.is_finite()
+            && material.young_modulus_pa > 0.0
+            && material.poisson_ratio.is_finite()
+            && material.poisson_ratio > -1.0
+            && material.poisson_ratio < 0.5
+            && material.rayleigh_alpha_per_s.is_finite()
+            && material.rayleigh_alpha_per_s >= 0.0
+            && material.rayleigh_beta_s.is_finite()
+            && material.rayleigh_beta_s >= 0.0
+            && material.surface_roughness_alpha.is_finite()
+            && material.surface_roughness_alpha >= 1.0e-4
+            && material.surface_roughness_alpha <= 1.0)
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "disc material mechanical, damping, or surface scalar is outside its physical domain",
+            ));
+        }
+        if material
+            .optical_eta
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+            || material
+                .optical_k
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "disc material optical eta/k table is outside its physical domain",
+            ));
+        }
+        if [
+            &material.material_label,
+            &material.process_label,
+            &material.elastic_source,
+            &material.optical_source,
+            &material.damping_source,
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "disc material identity and provenance strings must be nonblank",
+            ));
+        }
         Ok(())
     }
 
@@ -516,6 +675,141 @@ struct FixtureAudio {
     crop_end_source_audio_frame: u64,
     convergence: FixtureAudioConvergenceEvidence,
     spatialization: Option<FixtureSpatialAudioEvidence>,
+}
+
+struct FixturePhysicalDiscState {
+    specimen: crate::specimen::ResolvedElasticDiscProfile,
+    render_binding: EulerDiscMaterialStateBinding,
+    damping_model_identity: ContentHash,
+}
+
+fn resolve_fixture_physical_disc(
+    reference_profile: &crate::specimen::ResolvedDiscProfile,
+    config: &CinematicDiscMaterialConfig,
+    cx: &Cx<'_>,
+) -> Result<FixturePhysicalDiscState, CinematicFixtureError> {
+    let validity = ValidityDomain::unconstrained().with(
+        "T",
+        config.temperature_k,
+        config.temperature_k,
+    );
+    let mut claims = ClaimSet::new();
+    let mut insert_scalar = |name: &str,
+                             dims: Dims,
+                             value: f64,
+                             source: &str|
+     -> Result<(), CinematicFixtureError> {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: validity.clone(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: Vec::new(),
+                provenance: Provenance {
+                    source: source.to_owned(),
+                    // The fixture's numeric declarations and the CC0 optical
+                    // database transcription are redistributable inputs. The
+                    // original paper remains the scientific citation.
+                    license: "CC0-1.0".to_owned(),
+                    artifact: None,
+                },
+            })
+            .map(|_| ())
+            .map_err(pipeline)
+    };
+    insert_scalar(
+        "density",
+        Density::DIMS,
+        reference_profile.density_kg_per_m3,
+        "Thorne 2026 specimen mass and exact FrankenSim profile volume; mass-derived density",
+    )?;
+    insert_scalar(
+        "young_modulus",
+        Pressure::DIMS,
+        config.young_modulus_pa,
+        &config.elastic_source,
+    )?;
+    insert_scalar(
+        "poisson_ratio",
+        Dims::NONE,
+        config.poisson_ratio,
+        &config.elastic_source,
+    )?;
+    for ((name, value), source) in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES
+        .iter()
+        .zip(config.optical_eta)
+        .zip(core::iter::repeat(config.optical_source.as_str()))
+    {
+        insert_scalar(name, Dims::NONE, value, source)?;
+    }
+    for ((name, value), source) in VISIBLE_COMPLEX_IOR_K_PROPERTIES
+        .iter()
+        .zip(config.optical_k)
+        .zip(core::iter::repeat(config.optical_source.as_str()))
+    {
+        insert_scalar(name, Dims::NONE, value, source)?;
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: config.material_label.clone(),
+            phase: "solid".to_owned(),
+            process: config.process_label.clone(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .map_err(pipeline)?;
+    let point = QueryPoint::new()
+        .with("T", config.temperature_k)
+        .map_err(pipeline)?;
+    let elastic = resolve_isotropic_elastic_state_point(
+        &card,
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .map_err(pipeline)?;
+    let optical = resolve_visible_conductor_state_point(
+        &card,
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .map_err(pipeline)?;
+    let specimen = reference_profile
+        .spec
+        .resolve_with_isotropic_elastic_state(&elastic, cx)
+        .map_err(pipeline)?;
+    if specimen.profile.content_identities().profile
+        != reference_profile.content_identities().profile
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "resolved elastic material changed the mechanics geometry/density profile".into(),
+        ));
+    }
+    let mut surface =
+        DomainHasher::new("org.frankensim.euler-critique.disc-surface-state.v1");
+    surface.update(specimen.material_state_identity.as_bytes());
+    surface.update(config.process_label.as_bytes());
+    surface.update(&config.surface_roughness_alpha.to_bits().to_le_bytes());
+    let render_binding = EulerDiscMaterialStateBinding::try_conductor_elastic(
+        &elastic,
+        &optical,
+        config.surface_roughness_alpha,
+        surface.finalize(),
+    )
+    .map_err(pipeline)?;
+    let mut damping = DomainHasher::new("org.frankensim.euler-critique.rayleigh-damping.v1");
+    damping.update(specimen.material_state_identity.as_bytes());
+    damping.update(&config.rayleigh_alpha_per_s.to_bits().to_le_bytes());
+    damping.update(&config.rayleigh_beta_s.to_bits().to_le_bytes());
+    damping.update(config.damping_source.as_bytes());
+    Ok(FixturePhysicalDiscState {
+        specimen,
+        render_binding,
+        damping_model_identity: damping.finalize(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

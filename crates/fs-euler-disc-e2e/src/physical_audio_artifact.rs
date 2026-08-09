@@ -423,4 +423,20 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn g0_physical_pressure_crop_is_exact_and_rebased_without_processing() {
+        let source = signal(2.0e-5, 3);
+        let cropped = source.try_crop_rebased(2_000, 48_000, 0.0).unwrap();
+        assert_eq!(cropped.start_time_s, 0.0);
+        assert_eq!(cropped.pressure_pa, source.pressure_pa[2_000..48_000]);
+        assert_eq!(cropped.sample_rate_hz, source.sample_rate_hz);
+        assert_eq!(
+            cropped.structural_basis_identity,
+            source.structural_basis_identity
+        );
+        assert_ne!(cropped.identity, source.identity);
+        assert!(source.try_crop_rebased(2_000, 2_000, 0.0).is_err());
+        assert!(source.try_crop_rebased(0, 48_001, 0.0).is_err());
+    }
 }

@@ -390,6 +390,54 @@ pub struct PhysicalPressureSignal {
     pub identity: ContentHash,
 }
 
+impl PhysicalPressureSignal {
+    /// Extract a contiguous pressure interval and rebase its first boundary.
+    ///
+    /// This is the generic causal-preroll publication seam: modal state may be
+    /// warmed on a longer trajectory, while the published signal remains an
+    /// exact sample crop. No resampling, gain, filtering, or fade is applied.
+    pub fn try_crop_rebased(
+        &self,
+        first_frame: usize,
+        end_frame: usize,
+        rebased_start_time_s: f64,
+    ) -> Result<Self, StructuralModalBasisError> {
+        if first_frame >= end_frame
+            || end_frame > self.pressure_pa.len()
+            || !rebased_start_time_s.is_finite()
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "physical pressure crop must be finite, nonempty, and in bounds",
+            });
+        }
+        let pressure_pa = self.pressure_pa[first_frame..end_frame].to_vec();
+        let peak_abs_pressure_pa = pressure_pa
+            .iter()
+            .fold(0.0_f64, |peak, pressure| peak.max(pressure.abs()));
+        let mut identity =
+            DomainHasher::new("org.frankensim.euler-disc.physical-pressure-crop.v1");
+        identity.update(self.identity.as_bytes());
+        identity.update(&(first_frame as u64).to_le_bytes());
+        identity.update(&(end_frame as u64).to_le_bytes());
+        identity.update(&rebased_start_time_s.to_bits().to_le_bytes());
+        for pressure in &pressure_pa {
+            identity.update(&pressure.to_bits().to_le_bytes());
+        }
+        Ok(Self {
+            start_time_s: rebased_start_time_s,
+            sample_rate_hz: self.sample_rate_hz,
+            pressure_pa,
+            peak_abs_pressure_pa,
+            contact_force_sampling: self.contact_force_sampling,
+            observer: self.observer,
+            structural_basis_identity: self.structural_basis_identity,
+            radiation_identity: self.radiation_identity,
+            damping_model_identity: self.damping_model_identity,
+            identity: identity.finalize(),
+        })
+    }
+}
+
 /// Integrated physical runtime: one structural basis, state-dependent modal
 /// damping, and one BEM-derived observer transfer.
 pub struct PhysicalModalAudioModel<'basis> {
