@@ -24,6 +24,28 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+`TetThermalStrainState` and `assemble_thermal_load` add the matching generic
+small-strain thermomechanical load boundary. An upstream material law supplies
+the already-integrated, possibly anisotropic Mandel thermal strain between an
+explicit positive reference and current temperature. Each state is bound to
+the exact elastic material-state identity and a nonzero thermal-law identity;
+the isotropic binder consumes fs-material's exact signed
+`integral(alpha(T) dT)` only when its current endpoint and tangent elasticity
+share the exact card and complete state point. Otherwise it refuses before
+assembly.
+the operator assembles `integral B^T C epsilon_free dV` on the same tetrahedra
+and publishes both full nodal forces and the constrained free-DOF projection.
+`solve_thermal_displacement` advances a Jacobi-PCG solve in cancellation-bounded
+chunks and accepts only an independently recomputed true Euclidean residual;
+it reconstructs the full zero-Dirichlet nodal displacement field for an
+explicit later geometry-update transaction. That transaction is
+`update_geometry_from_displacement`: it identity-checks the reference mesh,
+enforces a caller displacement ceiling, preserves connectivity, and refuses
+every degenerate or orientation-flipped tetrahedron before publishing the
+updated fixed-topology chart.
+No material name, constant-alpha assumption, or Euler-disc geometry appears in
+this layer.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1
@@ -346,11 +368,16 @@ reversal dissipation, G4 bitwise resume.
 
 ## No-claim boundaries
 
-- `linear3` claims infinitesimal-strain isotropic elasticity on a fixed,
-  conforming, non-degenerate tetrahedral mesh. It does not claim plasticity,
-  finite-strain response, physical damping, thermoelastic prestress, phase
-  change, fracture, moving interfaces, or topology evolution. Callers must
-  escalate or refuse when the resolved material state leaves this solid rung.
+- `linear3` claims infinitesimal-strain elasticity and work-conjugate thermal
+  eigenstrain loading on a fixed, conforming, non-degenerate tetrahedral mesh.
+  The thermal operator does not infer expansion coefficients, solve a transient
+  response, remesh, establish mesh/stress convergence, or claim finite-strain
+  validity. Its coordinate update is fixed-topology and inversion-gated, not a
+  finite-strain constitutive update. Its static solve establishes only its reported linear
+  residual on the supplied discretization. It does not claim plasticity,
+  physical damping, phase change, fracture, moving interfaces, or topology
+  evolution. Callers must escalate or refuse when the resolved material state
+  leaves this solid rung.
 - Its free-body stiffness correctly contains rigid modes. Removing, fixing,
   or slicing around those modes is a boundary-condition/eigenproblem decision;
   the assembler never adds hidden grounding stiffness.
