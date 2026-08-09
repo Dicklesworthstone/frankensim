@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "b24d73c107e092989dca96e871f315e5d4f2ba64ad0c4427bc9b4d10c8cc72dd",
+  "manifest_identity": "53766835efda89130173241f813b425d3fe7f48bd9b1d74983c3d95c5be512da",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "3e507609cb5f274fb16e6e3abc5cc73f9b4670d123fddfcf96e0b9d78d8460f2",
+    "source_root": "da381415aa40c378bf9954bab99a3b8771e88b054a738d162b6cfcf2bb91e793",
     "tracked_file_count": 2282,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1152,7 +1152,7 @@
       {"path": "crates/fs-neuroshape-e2e/tests/neuroshape.rs", "git_mode": "100644", "bytes": 7758, "content_blake3": "17e98b7a591339afb16eb9d6c1440a5b142056928d02e52d1925142a2a05ff50"},
       {"path": "crates/fs-nlmodal/CONTRACT.md", "git_mode": "100644", "bytes": 7049, "content_blake3": "b1ea24bea43232350270885e04bb5dc72a102ca4a1b34b6b1dfb06a1fc05338b"},
       {"path": "crates/fs-nlmodal/Cargo.toml", "git_mode": "100644", "bytes": 620, "content_blake3": "d08d165b781c89c50ec1af4cce06af9aef48e186d9d17a22f4c4d104bc2cc7f6"},
-      {"path": "crates/fs-nlmodal/src/lib.rs", "git_mode": "100644", "bytes": 21054, "content_blake3": "fc25e15304f43e431ec02cd187bcce851adb455962d10af7838a23bb858f8f10"},
+      {"path": "crates/fs-nlmodal/src/lib.rs", "git_mode": "100644", "bytes": 22719, "content_blake3": "ec0fa4ebb2561730ef28891f4f7de01dbc03175667e20a86bffeb7fe5c6679c6"},
       {"path": "crates/fs-nlmodal/tests/nlmodal.rs", "git_mode": "100644", "bytes": 22156, "content_blake3": "624fc552d09aa2d6655e926ab168a18517d5c0916ea5ce9f3c93111e731c0639"},
       {"path": "crates/fs-obs/CONTRACT.md", "git_mode": "100644", "bytes": 21645, "content_blake3": "c5dd9bc12ca4bb9d1f0c00072b29b9290aa8ef096288e15245c1774de579142f"},
       {"path": "crates/fs-obs/Cargo.toml", "git_mode": "100644", "bytes": 361, "content_blake3": "86a31b6b0dd9e93784c52d0fbdf8d91eda2229a454535e51d0a2919fc059b460"},

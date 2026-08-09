@@ -182,21 +182,21 @@ pub fn assemble(
     // Negated-positive comparisons so NaN REFUSES instead of slipping
     // through `<= 0.0` (review finding: NaN passed every gate).
     for &w in &storage.omegas {
-        if !(w > 0.0) || !w.is_finite() {
+        if w.is_nan() || w <= 0.0 || !w.is_finite() {
             return Err(NlModalError::Parameter {
                 what: "modal frequency must be positive and finite",
             });
         }
     }
     for &z in zetas {
-        if !(z >= 0.0) {
+        if z.is_nan() || z < 0.0 {
             return Err(NlModalError::Parameter {
                 what: "damping ratio must be non-negative",
             });
         }
     }
     for ch in &storage.channels {
-        if !(ch.coefficient >= 0.0) || !ch.coefficient.is_finite() {
+        if ch.coefficient.is_nan() || ch.coefficient < 0.0 || !ch.coefficient.is_finite() {
             return Err(NlModalError::Parameter {
                 what: "channel coefficient must be non-negative and finite",
             });
@@ -362,28 +362,12 @@ fn coupling_integral(
     acc * lx * ly
 }
 
-/// Build the von Karman modal model for a simply-supported rectangle.
-///
-/// Displacement modes are MASS-NORMALIZED sine products (`rho h
-/// integral Phi^2 = 1`); stress modes are UNIT-normalized sine
-/// products (`integral Psi^2 = 1`), both biharmonic eigenfunctions of
-/// the SS rectangle. Channel coefficients follow the Airy elimination
-/// `c_j = E h / (2 xi_j^4)` with `xi_j^4 = ((m pi/lx)^2 +
-/// (n pi/ly)^2)^2`.
-///
-/// The stress-mode count is a SEPARATE truncation from the
-/// displacement count (the literature uses more stress modes); both
-/// lists are explicit inputs. The coupling tensor is computed at two
-/// independent quadrature orders and REFUSES on disagreement.
-///
-/// # Errors
-/// [`NlModalError`] on bad parameters or a failed quadrature
-/// certificate.
-pub fn von_karman_ss_plate(
+/// Parameter/mode-list validation for [`von_karman_ss_plate`].
+fn validate_vk_inputs(
     params: &VkPlateParams,
     disp_modes: &[SineMode],
     stress_modes: &[SineMode],
-) -> Result<VkModel, NlModalError> {
+) -> Result<(), NlModalError> {
     let VkPlateParams {
         lx,
         ly,
@@ -420,6 +404,47 @@ pub fn von_karman_ss_plate(
             }
         }
     }
+    Ok(())
+}
+
+/// Raw two-order quadrature results for one stress channel.
+struct RawChannel {
+    xi4: f64,
+    pairs: Vec<(usize, usize, f64, f64)>,
+    scale: f64,
+}
+
+/// Build the von Karman modal model for a simply-supported rectangle.
+///
+/// Displacement modes are MASS-NORMALIZED sine products (`rho h
+/// integral Phi^2 = 1`); stress modes are UNIT-normalized sine
+/// products (`integral Psi^2 = 1`), both biharmonic eigenfunctions of
+/// the SS rectangle. Channel coefficients follow the Airy elimination
+/// `c_j = E h / (2 xi_j^4)` with `xi_j^4 = ((m pi/lx)^2 +
+/// (n pi/ly)^2)^2`.
+///
+/// The stress-mode count is a SEPARATE truncation from the
+/// displacement count (the literature uses more stress modes); both
+/// lists are explicit inputs. The coupling tensor is computed at two
+/// independent quadrature orders and REFUSES on disagreement.
+///
+/// # Errors
+/// [`NlModalError`] on bad parameters or a failed quadrature
+/// certificate.
+pub fn von_karman_ss_plate(
+    params: &VkPlateParams,
+    disp_modes: &[SineMode],
+    stress_modes: &[SineMode],
+) -> Result<VkModel, NlModalError> {
+    let VkPlateParams {
+        lx,
+        ly,
+        h,
+        young,
+        nu,
+        rho,
+    } = *params;
+    validate_vk_inputs(params, disp_modes, stress_modes)?;
     let d_bend = young * h * h * h / (12.0 * (1.0 - nu * nu));
     let pi = core::f64::consts::PI;
     let omegas: Vec<f64> = disp_modes
@@ -452,12 +477,7 @@ pub fn von_karman_ss_plate(
     // comparison falsely refuses analytically-zero selection-rule
     // ENTRIES, and an ALL-zero channel's own scale is pure roundoff
     // (measured 0.75 "relative"), so residuals are judged against
-    // max(channel scale, 1e-12 * GLOBAL scale).
-    struct RawChannel {
-        xi4: f64,
-        pairs: Vec<(usize, usize, f64, f64)>,
-        scale: f64,
-    }
+    // max(channel scale, 1e-12 * GLOBAL scale, dimensional floor).
     let mut raw_channels: Vec<RawChannel> = Vec::with_capacity(stress_modes.len());
     let mut global_scale = f64::MIN_POSITIVE;
     for &sm in stress_modes {
