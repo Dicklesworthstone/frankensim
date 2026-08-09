@@ -1951,7 +1951,7 @@ impl ProductionCouplingModel {
                     );
                 }
             };
-            let branch = match select_event_branch(patch.status, input.normal.integration_regime) {
+            let branch = match select_event_branch(&patch, input.normal.integration_regime) {
                 Ok(branch) => branch,
                 Err(error) => {
                     return production_event_refusal(
@@ -2059,7 +2059,7 @@ impl ProductionCouplingModel {
                 }
             };
             let terminal_branch =
-                match select_event_branch(patch.status, input.normal.integration_regime) {
+                match select_event_branch(&patch, input.normal.integration_regime) {
                     Ok(branch) => branch,
                     Err(error) => {
                         return production_event_refusal(
@@ -2236,9 +2236,28 @@ fn bind_rolling_kinematics_from_patch(
 }
 
 fn select_event_branch(
-    status: PatchContactStatus,
+    patch: &PatchKinematics,
     integration_regime: NormalContactIntegrationRegime,
 ) -> Result<ProductionTrajectoryBranch, ProductionCouplingError> {
+    let status = patch.status;
+    let signed_gap_m = patch
+        .disc_point
+        .point_world
+        .sub(patch.base_point.point_world)
+        .dot(patch.tangent_basis.normal_world);
+    if !signed_gap_m.is_finite() {
+        return Err(ProductionCouplingError::InvalidInput {
+            field: "event-branch signed gap",
+        });
+    }
+    // This is a dry, non-adhesive unilateral interface. A certainly positive
+    // gap has no contact port, even while the bodies are approaching, and an
+    // exactly closed interface that is receding opens without evaluating a
+    // zero-indentation Hertz tangent. Negative gap remains on the compliant
+    // branch until the accepted state actually reaches separation.
+    if signed_gap_m > 0.0 || (signed_gap_m == 0.0 && status == PatchContactStatus::Receding) {
+        return Ok(ProductionTrajectoryBranch::OpenFlight);
+    }
     match status {
         PatchContactStatus::Separated => Ok(ProductionTrajectoryBranch::OpenFlight),
         PatchContactStatus::Touching | PatchContactStatus::Grazing => {
