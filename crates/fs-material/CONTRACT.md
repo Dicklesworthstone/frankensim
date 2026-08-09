@@ -88,7 +88,7 @@ falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
 boundary. Validity window T in [50, 2000] K, p in (0, 1e7] Pa refuses
 outside; the calorically-perfect gamma degrades above ~600 K
 (vibrational excitation, order 1-2% there), densities near the 100 bar
-ceiling carry a few-percent compressibility error (Z ~ 0.97 at 300 K),
+ceiling carry a 1-3% real-gas error at 300 K (worse when cold),
 and the USSA/Sutherland fits are EXTRAPOLATED beyond their published
 bands (~187-288 K atmosphere tables; ~170-1900 K Sutherland-air) —
 all documented as accuracy boundaries so extreme-regime studies

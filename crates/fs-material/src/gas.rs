@@ -34,9 +34,10 @@
 //! Validity (refused outside, documented inside): `T` in [50, 2000] K
 //! and `p` in (0, 1e7] Pa admit evaluation. Accuracy inside the
 //! window, stated honestly: the ideal-gas law is good to well under 1%
-//! below ~10 bar; toward the 100 bar ceiling air's compressibility
-//! factor drops to Z ~ 0.97 at 300 K (worse when cold), so densities
-//! there carry a few-percent model error. The calorically-perfect
+//! below ~10 bar; toward the 100 bar ceiling air's real-gas
+//! corrections reach the 1-3% class in density at 300 K (the
+//! first-order virial estimate is Z ~ 0.97, higher virials pull it
+//! back toward ~0.99; worse when cold either way). The calorically-perfect
 //! `gamma` for diatomic air degrades above ~600 K as vibrational modes
 //! excite (order 1-2% in gamma at 600 K, growing with T). The USSA
 //! source defines its transport fits for the atmosphere (~187-288 K),
