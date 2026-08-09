@@ -641,6 +641,25 @@ refusal, or verifier panic).
 
 ## Invariants
 
+0. CONCURRENCY (bead 0npfh): `link`, `finish_op`, `seal_artifact_output`,
+   and `seal_op_artifact_edges` each run their guard reads and write inside
+   one explicit `BEGIN IMMEDIATE` transaction with a bounded busy-retry
+   (`run_immediate`, up to 8 attempts). The explicit begin starts a fresh
+   read snapshot and takes the writer reservation before the guard
+   evaluates, so a competing writer on another connection cannot commit
+   between the check and the mutation; the loser of a legitimate race sees
+   the winner's committed rows and returns the guard's typed refusal
+   (`Invalid`/`OpLineageSealed`), never a silent both-commit. Busy/locked/
+   snapshot-conflict errors are classified as retryable contention
+   (`LedgerError::Busy` semantics), rolled back, and retried with a fresh
+   transaction each attempt; a caller that already holds a transaction is
+   used as-is, with atomicity delegated to that outer transaction.
+   Busy-timeout posture: the connection's `PRAGMA busy_timeout=5000` covers
+   short writer waits; contention that outlives it surfaces as typed
+   `Busy`, which is safe to retry at the call site. WAL behavior: writers
+   serialize on the writer token, and this lane never relies on a cached
+   cross-statement read snapshot for a guard decision.
+
 1. Artifact identity = BLAKE3 of content; identical bytes dedupe to one row.
    ENVELOPE AGREEMENT (bead gp3.19): the dedupe applies only under an
    AGREEING envelope — the offered `kind` must match exactly, and offered
