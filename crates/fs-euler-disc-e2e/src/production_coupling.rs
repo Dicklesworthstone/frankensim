@@ -311,6 +311,17 @@ impl ProductionCouplingCheckpoint {
     pub fn base_velocity_m_per_s(&self) -> f64 {
         self.base_state.last_surface_state().1
     }
+
+    /// Number of accepted finite-contact intervals in this eventful lineage.
+    ///
+    /// Open-flight steps advance the outer checkpoint and gas/base channels,
+    /// but intentionally retain every dry-contact state. Contact work keys
+    /// must therefore be indexed by this counter rather than by
+    /// [`Self::committed_version`].
+    #[must_use]
+    pub const fn committed_contact_intervals(&self) -> u64 {
+        self.tangential_state.committed_version()
+    }
 }
 
 /// All caller-owned cards and one explicit selection for one attempted substep.

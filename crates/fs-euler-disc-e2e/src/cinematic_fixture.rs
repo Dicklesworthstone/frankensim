@@ -2168,16 +2168,22 @@ impl FixtureProductionMechanics {
             .ok_or(ProductionCouplingError::InvalidInput {
                 field: "cinematic interval identity overflow",
             })?;
+        let contact_interval = checkpoint
+            .committed_contact_intervals()
+            .checked_add(1)
+            .ok_or(ProductionCouplingError::InvalidInput {
+                field: "cinematic contact interval identity overflow",
+            })?;
         input.expected_checkpoint_version = version;
         input.time_s = checkpoint.elapsed_time_s();
         input.normal.time_s = input.time_s;
-        input.normal.iteration = interval;
-        input.normal.identity.sample_id = format!("cinematic/contact-sample-{interval}");
-        input.tangential.request_id = format!("cinematic/tangent-step-{interval}");
+        input.normal.iteration = contact_interval;
+        input.normal.identity.sample_id = format!("cinematic/contact-sample-{contact_interval}");
+        input.tangential.request_id = format!("cinematic/tangent-step-{contact_interval}");
         let patch_id = input.patch.patch.patch_identity.as_str().to_owned();
         input.tangential.work_ownership = GeneralizedWorkOwnership::new(
             patch_id.clone(),
-            interval.to_string(),
+            contact_interval.to_string(),
             "longitudinal",
             "lateral",
             "spin",
@@ -2187,7 +2193,7 @@ impl FixtureProductionMechanics {
         })?;
         input.rolling.ownership = RollingWorkOwnership::new(
             patch_id,
-            format!("cinematic/rolling-interval-{interval}"),
+            format!("cinematic/rolling-interval-{contact_interval}"),
             "contour",
             RollingLossChannel::ContourDeformation,
         )
