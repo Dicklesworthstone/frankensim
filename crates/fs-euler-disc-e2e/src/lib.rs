@@ -31,6 +31,7 @@ pub mod mechanics;
 pub mod modal_synthesis;
 pub mod normal_contact;
 pub mod patch_kinematics;
+pub mod physical_audio_artifact;
 pub mod ports;
 pub mod production_coupling;
 #[cfg(feature = "scientific-contract")]
@@ -92,6 +93,9 @@ pub use control_stream::{
     ControlContactEvent, ControlStreamError, EULER_CONTROL_STREAM_SCHEMA_VERSION,
     EulerControlStream, VisualizationControlPoint, WorkIntegralCheck,
 };
+pub use physical_audio_artifact::{
+    PhysicalListeningMasterError, PhysicalPressureListeningMaster, PressureListeningMasterPolicy,
+};
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
     MAX_RENDER_TRAJECTORY_SAMPLES, MAX_RENDER_TRANSITIONS_PER_SAMPLE,
@@ -120,10 +124,12 @@ pub use spatial_audio::{
     SpatialStemComponent, StereoRoomImpulseResponse, bypass_dry_stereo,
 };
 pub use structural_acoustics::{
-    AcousticModeRadiation, AcousticObserver, ModalAcousticRadiation, PointForceProjection,
-    ResolvedAcousticMedium, STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls,
-    StructuralModalBasis, StructuralModalBasisError, StructuralMode, StructuralModeRequest,
-    build_structural_modal_basis,
+    AcousticModeRadiation, AcousticObserver, ModalAcousticRadiation, ModalLossSpectrum,
+    PhysicalContactForceSampling, PhysicalModalAudioModel, PhysicalModalPressureFrame,
+    PhysicalPressureSignal, PointForceProjection, ResolvedAcousticMedium,
+    STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls, StructuralModalBasis,
+    StructuralModalBasisError, StructuralMode, StructuralModeRequest, build_structural_modal_basis,
+    modal_loss_spectrum_from_prony,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,

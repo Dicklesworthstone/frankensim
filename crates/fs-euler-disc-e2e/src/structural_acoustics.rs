@@ -47,6 +47,7 @@ use fs_solid::{
 };
 
 use crate::specimen::{DiscProfileSpec, ResolvedMaterialDiscProfile};
+use crate::{ChannelControl, EulerControlStream};
 
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
@@ -135,6 +136,9 @@ pub struct StructuralModalBasis {
     pub schema_version: u32,
     /// Identity of the resolved geometry plus material state.
     pub specimen_identity: ContentHash,
+    /// Exact geometry/density profile identity shared with trajectory
+    /// metadata, before additional elastic-state properties are attached.
+    pub profile_identity: ContentHash,
     /// Exact evidence-bearing material state used to assemble `(K,M)`.
     pub material_state_identity: ContentHash,
     /// Exact body-fitted volume and boundary panelization.
@@ -196,6 +200,11 @@ pub struct AcousticModeRadiation {
     pub structural_mode: usize,
     /// Evaluation angular frequency [rad/s].
     pub angular_frequency_rad_s: f64,
+    /// Boundary-integral formulation selected from nondimensional acoustic
+    /// size. Plain CBIE avoids the documented low-`ka` Burton--Miller
+    /// resistance artifact; Burton--Miller protects the higher-frequency arm
+    /// from fictitious interior resonances.
+    pub formulation: HelmholtzFormulation,
     /// Complex pressure per unit generalized modal velocity at the observer
     /// `[Pa s / (m sqrt(kg))]`, under the shared `exp(-i omega t)` convention.
     pub observer_pressure_per_modal_velocity: C64,
@@ -258,11 +267,47 @@ pub struct PhysicalModalPressureFrame {
     pub acoustic: ModalAcousticFrame,
 }
 
+/// Discrete semantics used to map mechanics interval controls into body-frame
+/// structural forcing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhysicalContactForceSampling {
+    /// The authoritative interval-mean force is held over its exact mechanics
+    /// interval. Its spatial point and body transform use the closing contact
+    /// endpoint when available, otherwise the opening endpoint. Audio samples
+    /// are split at every mechanics boundary.
+    IntervalMeanAtClosingElseOpeningEndpointZohV1,
+}
+
+/// Unmastered physical pressure signal at one observer.
+#[derive(Clone, Debug)]
+pub struct PhysicalPressureSignal {
+    /// First sample-interval boundary on the source trajectory clock [s].
+    pub start_time_s: f64,
+    /// Fixed output sample rate [Hz].
+    pub sample_rate_hz: u32,
+    /// Pressure at each closing sample boundary [Pa].
+    pub pressure_pa: Vec<f64>,
+    /// Largest absolute pressure in the signal [Pa].
+    pub peak_abs_pressure_pa: f64,
+    /// Exact mechanics-to-audio sampling convention.
+    pub contact_force_sampling: PhysicalContactForceSampling,
+    /// Structural basis consumed by synthesis.
+    pub structural_basis_identity: ContentHash,
+    /// Acoustic observer transfer consumed by synthesis.
+    pub radiation_identity: ContentHash,
+    /// Constitutive damping model consumed by synthesis.
+    pub damping_model_identity: ContentHash,
+    /// Identity binding source controls, all physical models, the sampling
+    /// convention, and the resulting SI pressure samples.
+    pub identity: ContentHash,
+}
+
 /// Integrated physical runtime: one structural basis, state-dependent modal
 /// damping, and one BEM-derived observer transfer.
 pub struct PhysicalModalAudioModel<'basis> {
     basis: &'basis StructuralModalBasis,
     runtime: ModalAcousticTimeModel,
+    sample_rate_hz: u32,
     /// Identity of the acoustic radiation artifact.
     pub radiation_identity: ContentHash,
     /// Identity of the damping model and its evidence.
@@ -340,6 +385,28 @@ pub enum StructuralModalBasisError {
         /// Failed identity relationship.
         what: &'static str,
     },
+    /// A nonzero mechanics force has no retained application point.
+    MissingContactLocation {
+        /// Source sample closing the affected interval.
+        source_sample: usize,
+    },
+    /// A contact-active mechanics interval has no authoritative force.
+    MissingContactForce {
+        /// Source sample closing the affected interval.
+        source_sample: usize,
+    },
+    /// Source intervals cannot form one contiguous fixed-rate signal.
+    ControlTimeline {
+        /// Failed timeline invariant.
+        what: &'static str,
+    },
+    /// Output pressure allocation refused.
+    PressureCapacity {
+        /// Requested sample count.
+        requested: usize,
+    },
+    /// Explicit cancellation at a bounded audio-frame checkpoint.
+    Cancelled,
 }
 
 impl core::fmt::Display for StructuralModalBasisError {
@@ -400,6 +467,22 @@ impl core::fmt::Display for StructuralModalBasisError {
             Self::IdentityMismatch { what } => {
                 write!(formatter, "FS-EULER-STRUCTURAL-IDENTITY: {what}")
             }
+            Self::MissingContactLocation { source_sample } => write!(
+                formatter,
+                "FS-EULER-PHYSICAL-AUDIO-CONTACT-LOCATION: nonzero interval force at source sample {source_sample} has no retained contact point"
+            ),
+            Self::MissingContactForce { source_sample } => write!(
+                formatter,
+                "FS-EULER-PHYSICAL-AUDIO-CONTACT-FORCE: contact-active source sample {source_sample} has no authoritative interval force"
+            ),
+            Self::ControlTimeline { what } => {
+                write!(formatter, "FS-EULER-PHYSICAL-AUDIO-TIMELINE: {what}")
+            }
+            Self::PressureCapacity { requested } => write!(
+                formatter,
+                "FS-EULER-PHYSICAL-AUDIO-CAPACITY: allocation of {requested} pressure samples refused"
+            ),
+            Self::Cancelled => formatter.write_str("FS-EULER-PHYSICAL-AUDIO-CANCELLED"),
         }
     }
 }
@@ -562,6 +645,7 @@ pub fn build_structural_modal_basis(
     Ok(StructuralModalBasis {
         schema_version: STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION,
         specimen_identity: request.specimen.identity,
+        profile_identity: request.specimen.profile.content_identities().profile,
         material_state_identity: request.specimen.material.resolved().identity(),
         mesh,
         assembly,
@@ -650,6 +734,13 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 what: "damping_model_identity must not be zero",
             });
         }
+        if radiation.identity == ContentHash([0; 32])
+            || radiation.gas_model_identity == ContentHash([0; 32])
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "acoustic radiation and gas model identities must not be zero",
+            });
+        }
         if loss.loss_factors.len() != basis.modes.len()
             || radiation.modes.len() != basis.modes.len()
         {
@@ -669,6 +760,17 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 || acoustic.angular_frequency_rad_s.to_bits()
                     != structural.angular_frequency_rad_s.to_bits()
                 || !(loss_factor.is_finite() && *loss_factor >= 0.0)
+                || acoustic.formulation == HelmholtzFormulation::BurtonMillerWrongAlphaSign
+                || !(acoustic.radiated_power_per_modal_velocity_squared >= 0.0
+                    && acoustic
+                        .radiated_power_per_modal_velocity_squared
+                        .is_finite()
+                    && acoustic.panels_per_wavelength > 0.0
+                    && acoustic.panels_per_wavelength.is_finite()
+                    && acoustic.condition_lower_bound >= 1.0
+                    && acoustic.condition_lower_bound.is_finite()
+                    && acoustic.minimum_far_field_distance_m > 0.0
+                    && acoustic.minimum_far_field_distance_m.is_finite())
             {
                 return Err(StructuralModalBasisError::InvalidRequest {
                     what: "per-mode structural, damping, and radiation rows are misaligned",
@@ -684,6 +786,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
         Ok(Self {
             basis,
             runtime,
+            sample_rate_hz,
             radiation_identity: radiation.identity,
             damping_model_identity: loss.damping_model_identity,
         })
@@ -718,6 +821,240 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             acoustic,
         })
     }
+
+    /// Produce one fixed-rate, unmastered SI-pressure signal from an admitted
+    /// Euler control stream.
+    ///
+    /// Mechanics force changes are never rounded onto the audio grid: an
+    /// output sample crossing a mechanics boundary is integrated as multiple
+    /// exact-ZOH modal substeps. When a full contact wrench is unavailable,
+    /// an explicitly admitted interval-mean normal reaction is reconstructed
+    /// along the retained contact normal. No impulse is invented from a
+    /// timing-only contact event.
+    ///
+    /// # Errors
+    /// Refuses discontinuous clocks, nonintegral output duration, missing
+    /// force/location authority, projection/runtime failures, capacity, or
+    /// cancellation. A runtime refusal may have committed earlier complete
+    /// audio frames; callers seeking all-or-nothing publication must discard
+    /// this model instance together with the returned error.
+    pub fn synthesize_control_stream(
+        &mut self,
+        controls: &EulerControlStream<'_>,
+        maximum_contact_distance_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<PhysicalPressureSignal, StructuralModalBasisError> {
+        let intervals = controls.audio();
+        if controls.source().metadata().specimen_profile_identity != self.basis.profile_identity {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "control trajectory specimen profile does not match structural basis profile",
+            });
+        }
+        let first = intervals
+            .first()
+            .ok_or(StructuralModalBasisError::ControlTimeline {
+                what: "control stream has no positive-duration audio intervals",
+            })?;
+        let last = intervals
+            .last()
+            .expect("nonempty interval slice has a last item");
+        for pair in intervals.windows(2) {
+            if pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits() {
+                return Err(StructuralModalBasisError::ControlTimeline {
+                    what: "mechanics audio intervals are not exactly contiguous",
+                });
+            }
+        }
+        let duration_s = last.end_time_s - first.start_time_s;
+        let exact_frames = duration_s * f64::from(self.sample_rate_hz);
+        let rounded_frames = exact_frames.round();
+        let frame_tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
+        if !(duration_s > 0.0
+            && duration_s.is_finite()
+            && exact_frames.is_finite()
+            && rounded_frames >= 1.0
+            && (exact_frames - rounded_frames).abs() <= frame_tolerance
+            && rounded_frames <= usize::MAX as f64)
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "control horizon is not a positive integral number of audio samples",
+            });
+        }
+        let frame_count = rounded_frames as usize;
+        let mut pressure_pa = Vec::new();
+        pressure_pa.try_reserve_exact(frame_count).map_err(|_| {
+            StructuralModalBasisError::PressureCapacity {
+                requested: frame_count,
+            }
+        })?;
+        let mut modal_forces = Vec::with_capacity(intervals.len());
+        for interval in intervals {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            modal_forces.push(self.modal_force_for_control_interval(
+                controls,
+                interval,
+                maximum_contact_distance_m,
+            )?);
+        }
+
+        let sample_period_s = self.runtime.sample_period_s();
+        let mut interval_index = 0usize;
+        let mut peak_abs_pressure_pa = 0.0_f64;
+        let mut sample_start = first.start_time_s;
+        for frame in 0..frame_count {
+            if frame % 64 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            }
+            // Anchor both horizon endpoints to the authoritative mechanics
+            // clock.  Repeated fixed-rate arithmetic is used only for
+            // interior boundaries, so the final sample cannot overshoot the
+            // source horizon by a floating-point ulp.
+            let sample_end = if frame + 1 == frame_count {
+                last.end_time_s
+            } else {
+                first.start_time_s + (frame + 1) as f64 * sample_period_s
+            };
+            let mut time = sample_start;
+            let mut final_pressure = 0.0;
+            while time < sample_end {
+                while interval_index + 1 < intervals.len()
+                    && time >= intervals[interval_index].end_time_s
+                {
+                    interval_index += 1;
+                }
+                let interval = &intervals[interval_index];
+                let segment_end = sample_end.min(interval.end_time_s);
+                let segment_duration = segment_end - time;
+                if !(segment_duration > 0.0 && segment_duration.is_finite()) {
+                    return Err(StructuralModalBasisError::ControlTimeline {
+                        what: "audio sample subdivision made no forward progress",
+                    });
+                }
+                final_pressure = self
+                    .runtime
+                    .step_duration(&modal_forces[interval_index], segment_duration)?
+                    .observer_pressure_pa;
+                time = segment_end;
+            }
+            peak_abs_pressure_pa = peak_abs_pressure_pa.max(final_pressure.abs());
+            pressure_pa.push(final_pressure);
+            sample_start = sample_end;
+        }
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        let identity =
+            physical_pressure_signal_identity(self, controls, first.start_time_s, &pressure_pa);
+        Ok(PhysicalPressureSignal {
+            start_time_s: first.start_time_s,
+            sample_rate_hz: self.sample_rate_hz,
+            pressure_pa,
+            peak_abs_pressure_pa,
+            contact_force_sampling:
+                PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+            structural_basis_identity: self.basis.identity,
+            radiation_identity: self.radiation_identity,
+            damping_model_identity: self.damping_model_identity,
+            identity,
+        })
+    }
+
+    fn modal_force_for_control_interval(
+        &self,
+        controls: &EulerControlStream<'_>,
+        interval: &crate::AudioControlInterval,
+        maximum_contact_distance_m: f64,
+    ) -> Result<Vec<f64>, StructuralModalBasisError> {
+        let visualization = controls.visualization();
+        let end = visualization
+            .get(interval.visual_coverage.end_visualization_index)
+            .ok_or(StructuralModalBasisError::ControlTimeline {
+                what: "audio interval closing visualization index is out of bounds",
+            })?;
+        let start = interval
+            .visual_coverage
+            .start_visualization_index
+            .and_then(|index| visualization.get(index));
+        let (point, orientation, normal_world) = if let Some(contact) = end.contact {
+            (
+                Some(contact.point_body_m),
+                end.disc_pose.orientation(),
+                Some(contact.normal_world),
+            )
+        } else if let Some((start, contact)) =
+            start.and_then(|start| start.contact.map(|c| (start, c)))
+        {
+            (
+                Some(contact.point_body_m),
+                start.disc_pose.orientation(),
+                Some(contact.normal_world),
+            )
+        } else {
+            (None, end.disc_pose.orientation(), None)
+        };
+        let force_world = match interval.channels.contact {
+            ChannelControl::Available(contact) => contact.mean_force_world_n,
+            ChannelControl::Unavailable => {
+                if let (Some(normal_force), Some(normal)) =
+                    (interval.mean_base_normal_contact_force_n, normal_world)
+                {
+                    normal.scale(normal_force)
+                } else if interval.interval_contact_active {
+                    return Err(StructuralModalBasisError::MissingContactForce {
+                        source_sample: interval.source_sample_index,
+                    });
+                } else {
+                    fs_mbd::Vec3::ZERO
+                }
+            }
+        };
+        if force_world.norm_squared() == 0.0 {
+            return Ok(vec![0.0; self.basis.modes.len()]);
+        }
+        let point = point.ok_or(StructuralModalBasisError::MissingContactLocation {
+            source_sample: interval.source_sample_index,
+        })?;
+        let force_body = orientation.rotate_world_to_body(force_world);
+        self.basis
+            .project_point_force(
+                [point.x, point.y, point.z],
+                [force_body.x, force_body.y, force_body.z],
+                maximum_contact_distance_m,
+            )
+            .map(|projection| projection.modal_force_n_per_sqrt_kg)
+    }
+}
+
+fn physical_pressure_signal_identity(
+    model: &PhysicalModalAudioModel<'_>,
+    controls: &EulerControlStream<'_>,
+    start_time_s: f64,
+    pressure_pa: &[f64],
+) -> ContentHash {
+    let mut hasher = DomainHasher::new("org.frankensim.euler-disc.physical-pressure-signal.v1");
+    hasher.update(model.basis.identity.as_bytes());
+    hasher.update(model.radiation_identity.as_bytes());
+    hasher.update(model.damping_model_identity.as_bytes());
+    hasher.update(
+        controls
+            .source()
+            .metadata()
+            .configuration_identity
+            .as_bytes(),
+    );
+    hasher.update(&model.sample_rate_hz.to_le_bytes());
+    hasher.update(&start_time_s.to_bits().to_le_bytes());
+    hasher.update(&[0]);
+    hasher.update(
+        &u64::try_from(pressure_pa.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for pressure in pressure_pa {
+        hasher.update(&pressure.to_bits().to_le_bytes());
+    }
+    hasher.finalize()
 }
 
 impl StructuralModalBasis {
@@ -870,23 +1207,14 @@ impl StructuralModalBasis {
                 .iter()
                 .map(|value| C64::from_re(*value))
                 .collect();
-            let solution = solve_radiation(
-                &surface,
-                k,
-                acoustic_medium,
-                &velocity,
-                HelmholtzFormulation::BurtonMiller,
-            )?;
-            let velocity_area_norm = solution
-                .velocity
-                .iter()
-                .zip(surface.areas())
-                .map(|(value, area)| value.norm_sq() * area)
-                .sum::<f64>();
-            let plane_wave_power_scale =
-                0.5 * acoustic_medium.density * acoustic_medium.sound_speed * velocity_area_norm;
-            let power_tolerance = 1.0e-11 * plane_wave_power_scale.max(f64::MIN_POSITIVE);
-            if solution.radiated_power < -power_tolerance {
+            let acoustic_radius_m = 0.5 * diameter_m;
+            let formulation = if k * acoustic_radius_m < 0.5 {
+                HelmholtzFormulation::PlainCbie
+            } else {
+                HelmholtzFormulation::BurtonMiller
+            };
+            let solution = solve_radiation(&surface, k, acoustic_medium, &velocity, formulation)?;
+            if solution.radiated_power < 0.0 {
                 return Err(StructuralModalBasisError::NegativeRadiatedPower {
                     mode: mode_index,
                     power: solution.radiated_power,
@@ -900,6 +1228,7 @@ impl StructuralModalBasis {
             radiations.push(AcousticModeRadiation {
                 structural_mode: mode_index,
                 angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                formulation,
                 observer_pressure_per_modal_velocity: (far * phase)
                     .scale(observer_distance.recip()),
                 radiated_power_per_modal_velocity_squared: solution.radiated_power,
@@ -1008,6 +1337,11 @@ fn acoustic_radiation_identity(
         hasher.update(&value.to_bits().to_le_bytes());
     }
     for mode in modes {
+        hasher.update(&[match mode.formulation {
+            HelmholtzFormulation::PlainCbie => 0,
+            HelmholtzFormulation::BurtonMiller => 1,
+            HelmholtzFormulation::BurtonMillerWrongAlphaSign => 2,
+        }]);
         for value in [
             mode.angular_frequency_rad_s,
             mode.observer_pressure_per_modal_velocity.re,
@@ -1402,6 +1736,7 @@ mod tests {
                 .map(|(index, mode)| AcousticModeRadiation {
                     structural_mode: index,
                     angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                    formulation: HelmholtzFormulation::PlainCbie,
                     observer_pressure_per_modal_velocity: if index == 0 {
                         C64::from_re(1.0)
                     } else {

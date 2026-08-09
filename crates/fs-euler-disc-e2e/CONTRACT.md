@@ -1472,6 +1472,34 @@ and radiation gains are plausible film parameters, not measured eigenmodes,
 radiated acoustic energy, absolute SPL, structural/acoustic calibration, or
 physical validation.
 
+`structural_acoustics` is the physical replacement path for those
+representative presets. A resolved material specimen is tetrahedralized by the
+shared rounded-cylinder mesh primitive; `fs-solid` assembles physical 3-D
+`(K,M)` operators; `fs-modal` returns certified mass-normalized modes; the
+actual body-frame contact point and force are projected through their P1 mode
+shapes; and `fs-bem` maps the same boundary-normal mode shapes into SI pressure
+at an explicit gas-state-dependent observer. Low acoustic size uses plain CBIE
+to avoid the documented low-`ka` Burton--Miller resistance artifact; the
+higher-frequency arm uses Burton--Miller for fictitious-frequency protection.
+Any negative outgoing power refuses.
+
+`PhysicalModalAudioModel` evaluates material-model loss at those structural
+frequencies, advances every mass-normalized oscillator by an exact
+zero-order-hold transition, and emits unmastered pressure in pascals. Audio
+samples that cross mechanics boundaries are split at the exact source times.
+The only current spatial approximation is declared explicitly: an interval
+mean force uses the closing retained contact point/body orientation, or the
+opening endpoint when the closing endpoint is open. No material name selects a
+frequency, decay constant, radiation gain, or digital level.
+
+No-claim boundary: the current observer realization retains one complex BEM
+transfer at each natural frequency, so it is a narrow-band modal radiation
+model. Broadband exterior propagation/delay requires the passive rational
+frequency-response realization tracked separately. The current small-strain
+solid basis also cannot cross yield, large deformation, or phase change; a hot
+lead request must refuse when its evidence-bearing solid state leaves its
+validity domain until the enthalpy/phase/evolving-geometry rung exists.
+
 `timeline_resampling` v1 reconstructs render/audio query times from this
 admitted state without mutating the source artifact. Center-of-mass translation
 and base displacement use cubic Hermite interpolation with the accepted
