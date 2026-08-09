@@ -16,6 +16,7 @@
 use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_conduction::lumped::{LumpedEnthalpyBody, LumpedEnthalpyMarch};
 use fs_exec::Cx;
 use fs_material::{
     phase::{EquilibriumPhaseState, SolidLiquidPhase},
@@ -42,6 +43,9 @@ pub const EULER_SPECIMEN_MASS_IDENTITY_DOMAIN: &str =
 /// Canonical identity domain for geometry-derived lumped thermal measures.
 pub const EULER_SPECIMEN_THERMAL_GEOMETRY_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.specimen-thermal-geometry.v1";
+/// Canonical identity domain for a thermal march bound to one exact specimen.
+pub const EULER_SPECIMEN_THERMAL_MARCH_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.specimen-thermal-march.v1";
 /// Canonical identity domain for geometry plus its resolved material state.
 pub const EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.material-specimen.v1";
@@ -325,7 +329,130 @@ pub struct MassConservingDiscPhaseState {
     pub identity: ContentHash,
 }
 
+/// One thermal boundary state coupled back to invariant specimen mass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiscThermalSample {
+    /// Physical time [s].
+    pub time_s: f64,
+    /// Phase, density, required volume, and downstream geometry regime.
+    pub mass_conserving_state: MassConservingDiscPhaseState,
+    /// Convective power into the body [W].
+    pub convection_into_body_w: f64,
+    /// Net radiative power into the body [W].
+    pub radiation_into_body_w: f64,
+    /// Declared volumetric/internal power integrated by the thermal rung [W].
+    pub internal_power_w: f64,
+    /// Total power into the body [W].
+    pub net_power_into_body_w: f64,
+    /// Backward-Euler energy residual for the preceding interval [J].
+    pub step_energy_residual_j: f64,
+}
+
+/// An isothermal enthalpy march proven to use the exact mechanics specimen.
+///
+/// This adapter does not deform a solid or evolve a liquid surface. Instead,
+/// every boundary state names the next solver rung required before mechanics,
+/// acoustics, or rendering may consume it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedDiscThermalMarch {
+    /// Conservative Biot number that admitted the lumped thermal model.
+    pub maximum_biot: f64,
+    /// Ordered initial and accepted endpoint states.
+    pub samples: Vec<DiscThermalSample>,
+    /// Sum of absolute discrete thermal energy residuals [J].
+    pub cumulative_absolute_energy_residual_j: f64,
+    /// Original generic thermal-march identity.
+    pub conduction_march_identity: ContentHash,
+    /// Identity binding specimen, exact thermal geometry, and thermal march.
+    pub identity: ContentHash,
+}
+
 impl ResolvedPhaseDiscProfile {
+    /// Bind a generic lumped enthalpy march to this exact specimen.
+    ///
+    /// The body must use the profile's invariant mass, complete revolved
+    /// surface area, `V/A` characteristic length, and phase curve bit for bit.
+    /// This prevents a thermally convenient surrogate body from silently
+    /// driving the mechanics, sound, or picture of a different specimen.
+    pub fn bind_lumped_enthalpy_march(
+        &self,
+        body: &LumpedEnthalpyBody<'_>,
+        march: &LumpedEnthalpyMarch,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedDiscThermalMarch, DiscThermalCouplingError> {
+        let thermal_geometry = self
+            .profile
+            .thermal_geometry(cx)
+            .map_err(DiscThermalCouplingError::ThermalGeometry)?;
+        if march.body_identity() != body.identity() {
+            return Err(DiscThermalCouplingError::BodyIdentityMismatch);
+        }
+        if body.phase_curve().identity() != self.phase_state.phase_curve_identity() {
+            return Err(DiscThermalCouplingError::PhaseCurveMismatch);
+        }
+        for (field, actual, expected) in [
+            ("mass_kg", body.mass_kg(), self.profile.mass_properties.mass),
+            (
+                "surface_area_m2",
+                body.surface_area_m2(),
+                thermal_geometry.surface_area_m2,
+            ),
+            (
+                "characteristic_length_m",
+                body.characteristic_length_m(),
+                thermal_geometry.characteristic_length_m,
+            ),
+        ] {
+            if actual.to_bits() != expected.to_bits() {
+                return Err(DiscThermalCouplingError::SpecimenQuantityMismatch {
+                    field,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        let Some(initial) = march.samples().first() else {
+            return Err(DiscThermalCouplingError::EmptyMarch);
+        };
+        if initial.phase_state.identity() != self.phase_state.identity() {
+            return Err(DiscThermalCouplingError::InitialPhaseStateMismatch);
+        }
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(march.samples().len())
+            .map_err(|_| DiscThermalCouplingError::Capacity {
+                requested: march.samples().len(),
+            })?;
+        for sample in march.samples() {
+            let mass_conserving_state = self
+                .mass_conserving_state(sample.phase_state)
+                .map_err(DiscThermalCouplingError::PhaseBinding)?;
+            samples.push(DiscThermalSample {
+                time_s: sample.time_s,
+                mass_conserving_state,
+                convection_into_body_w: sample.convection_into_body_w,
+                radiation_into_body_w: sample.radiation_into_body_w,
+                internal_power_w: sample.internal_power_w,
+                net_power_into_body_w: sample.net_power_into_body_w,
+                step_energy_residual_j: sample.step_energy_residual_j,
+            });
+        }
+        let mut identity = DomainHasher::new(EULER_SPECIMEN_THERMAL_MARCH_IDENTITY_DOMAIN);
+        identity.update(self.identity.as_bytes());
+        identity.update(thermal_geometry.identity.as_bytes());
+        identity.update(march.identity().as_bytes());
+        for sample in &samples {
+            identity.update(sample.mass_conserving_state.identity.as_bytes());
+        }
+        Ok(ResolvedDiscThermalMarch {
+            maximum_biot: march.maximum_biot(),
+            samples,
+            cumulative_absolute_energy_residual_j: march.cumulative_absolute_energy_residual_j(),
+            conduction_march_identity: march.identity(),
+            identity: identity.finalize(),
+        })
+    }
+
     /// Bind another state on the same phase curve to invariant specimen mass.
     ///
     /// This is the safe handoff from thermal transport to geometry evolution.
@@ -479,6 +606,45 @@ pub enum PhaseDiscBindingError {
         mechanical_density_kg_m3: f64,
     },
 }
+
+/// Refusal while binding a generic thermal march to one exact disc profile.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DiscThermalCouplingError {
+    /// Recomputing whole-boundary thermal geometry refused.
+    ThermalGeometry(DiscProfileError),
+    /// The march was not produced by the supplied body.
+    BodyIdentityMismatch,
+    /// The body's phase curve differs from the specimen's admitted curve.
+    PhaseCurveMismatch,
+    /// A body mass or geometry measure differs from the mechanics specimen.
+    SpecimenQuantityMismatch {
+        /// Quantity that failed the exact binding.
+        field: &'static str,
+        /// Exact profile-derived value.
+        expected: f64,
+        /// Value supplied to the thermal body.
+        actual: f64,
+    },
+    /// A successful march must retain its initial state.
+    EmptyMarch,
+    /// The march starts from a different thermodynamic state than the profile.
+    InitialPhaseStateMismatch,
+    /// One phase state could not be conservatively joined to the specimen.
+    PhaseBinding(PhaseDiscBindingError),
+    /// Retaining the bounded coupled samples failed.
+    Capacity {
+        /// Requested number of thermal boundary states.
+        requested: usize,
+    },
+}
+
+impl fmt::Display for DiscThermalCouplingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for DiscThermalCouplingError {}
 
 impl fmt::Display for PhaseDiscBindingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

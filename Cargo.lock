@@ -1311,6 +1311,7 @@ dependencies = [
  "fs-alloc",
  "fs-bem",
  "fs-blake3",
+ "fs-conduction",
  "fs-contact",
  "fs-couple",
  "fs-evidence",

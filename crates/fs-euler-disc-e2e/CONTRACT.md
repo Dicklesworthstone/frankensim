@@ -868,19 +868,26 @@ effective area. The cinematic critique manifest records these measures, but
 their presence alone does not claim that thermal evolution is coupled into the
 current source-bound trajectory.
 
-`ResolvedPhaseDiscProfile::mass_conserving_state` is the thermal-to-geometry
-handoff. It holds the reference specimen mass invariant, computes the volume
-required by each same-card/same-curve equilibrium density, and returns one of
-three explicit geometry regimes: unchanged reference geometry, solid
-thermomechanical update required, or evolving free surface required. The
+`ResolvedPhaseDiscProfile::bind_lumped_enthalpy_march` is the reduced
+thermal-to-geometry handoff. It accepts the generic `fs-conduction` implicit
+enthalpy march only when that march's body uses the specimen's bit-exact mass,
+complete profile-derived area, `V/A` length, phase curve, and initial state.
+Every accepted thermal boundary is then converted through
+`mass_conserving_state`: reference mass is held invariant, the volume required
+by the current equilibrium density is computed, and one of three explicit
+geometry regimes is returned: unchanged reference geometry, solid
+thermomechanical update required, or evolving free surface required. This
+prevents a convenient surrogate cylinder from driving another specimen. The
 volume is a conservation constraint, not an invented isotropic scale or liquid
 shape; downstream deformation/remeshing must satisfy it before updated
 mechanics, acoustics, or optics can be admitted.
 
-This rung does not yet evolve enthalpy from thermal boundary fluxes, deform or
+The admitted reduced rung evolves whole-body enthalpy under uniform ambient
+convection, radiation, and internal power only while its Biot gate supports an
+isothermal body. It does not resolve spatial thermal gradients, deform or
 remesh a mushy/liquid specimen, recompute structural modes after topology
 change, or derive phase-dependent optical/acoustic properties. Those effects
-require the generic thermal transport, thermomechanical/free-surface,
+require the generic spatial thermal, thermomechanical/free-surface,
 structural-acoustic, and optical couplings; the cinematic fixture must not
 simulate them with scripted geometry or material-name switches.
 

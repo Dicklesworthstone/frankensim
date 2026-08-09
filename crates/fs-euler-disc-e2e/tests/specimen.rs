@@ -1,14 +1,21 @@
 //! G0/G3 checks for one-source-of-truth Euler-disc specimen resolution.
 
+use fs_conduction::lumped::{
+    BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, LumpedThermalTransport,
+    solve_lumped_enthalpy,
+};
+use fs_conduction::material::CONDUCTIVITY_DIMS;
+use fs_conduction::radiation::SURFACE_EMISSIVITY_PROPERTY;
 use fs_euler_disc_e2e::specimen::{
-    DiscPhaseGeometryRegime, DiscProfileError, DiscProfileSpec, PhaseDiscBindingError,
+    DiscPhaseGeometryRegime, DiscProfileError, DiscProfileSpec, DiscThermalCouplingError,
+    PhaseDiscBindingError,
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+    PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_material::state_point::{MaterialPropertySelection, resolve_isotropic_solid_state_point};
@@ -44,9 +51,26 @@ fn assert_close(actual: f64, expected: f64) {
 }
 
 fn isotropic_card(chemistry: &str, young_modulus_pa: f64) -> MaterialCard {
+    isotropic_card_with_density(chemistry, young_modulus_pa, 8_000.0)
+}
+
+fn isotropic_card_with_density(
+    chemistry: &str,
+    young_modulus_pa: f64,
+    density_kg_m3: f64,
+) -> MaterialCard {
+    isotropic_card_with_density_and_thermal(chemistry, young_modulus_pa, density_kg_m3, None)
+}
+
+fn isotropic_card_with_density_and_thermal(
+    chemistry: &str,
+    young_modulus_pa: f64,
+    density_kg_m3: f64,
+    thermal: Option<(f64, f64)>,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
-        ("density", Density::DIMS, 8_000.0),
+        ("density", Density::DIMS, density_kg_m3),
         ("young_modulus", Pressure::DIMS, young_modulus_pa),
         ("poisson_ratio", Dims::NONE, 0.3),
         ("yield_stress", Pressure::DIMS, 200.0e6),
@@ -66,6 +90,32 @@ fn isotropic_card(chemistry: &str, young_modulus_pa: f64) -> MaterialCard {
                 },
             })
             .expect("synthetic material claim");
+    }
+    if let Some((conductivity_w_per_m_k, emissivity)) = thermal {
+        for (name, dims, value) in [
+            (
+                "thermal_conductivity",
+                CONDUCTIVITY_DIMS,
+                conductivity_w_per_m_k,
+            ),
+            (SURFACE_EMISSIVITY_PROPERTY, Dims::NONE, emissivity),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained().with("T", 290.0, 1_000.0),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: format!("synthetic {chemistry} {name}"),
+                        license: "CC0-1.0".to_owned(),
+                        artifact: None,
+                    },
+                })
+                .expect("synthetic thermal material claim");
+        }
     }
     MaterialCard::assemble(
         MaterialStateId {
@@ -308,6 +358,144 @@ fn g0_phase_updates_preserve_mass_and_demand_the_correct_geometry_rung() {
         partially_liquid.phase_state.bulk_density_kg_m3() * partially_liquid.required_volume_m3,
         partially_liquid.invariant_mass_kg,
     );
+}
+
+#[test]
+fn g1_hot_ambient_phase_march_is_bound_to_exact_disc_geometry_and_escalates_at_melting() {
+    let card = isotropic_card_with_density_and_thermal(
+        "lead-like-thermal-coupling",
+        16.0e9,
+        11_340.0,
+        Some((35.0, 0.8)),
+    );
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        card.content_hash(),
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 293.15,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 11_340.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 53_000.0,
+                temperature_k: 600.6,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 10_900.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 76_000.0,
+                temperature_k: 600.6,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 10_650.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 150_000.0,
+                temperature_k: 1_000.0,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 10_200.0,
+            },
+        ],
+    )
+    .expect("lead-like phase curve");
+    let reference_state = curve.state_at_specific_enthalpy(0.0).unwrap();
+    let specimen = with_cx(|cx| {
+        DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.010,
+            thickness_m: 0.001,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.0002 },
+        }
+        .resolve_with_phase_state(reference_state, cx)
+        .expect("lead-like reference specimen")
+    });
+    let thermal = with_cx(|cx| specimen.profile.thermal_geometry(cx).unwrap());
+    let transport = LumpedThermalTransport::from_material_card(
+        &card,
+        "thermal_conductivity",
+        &[293.15, 600.6, 1_000.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("same-card thermal transport");
+    let body = LumpedEnthalpyBody::try_new_with_transport(
+        "same resolved lead-like disc",
+        specimen.profile.mass_properties.mass,
+        thermal.surface_area_m2,
+        20.0,
+        thermal.characteristic_length_m,
+        transport,
+        &curve,
+    )
+    .expect("Biot-gated body inputs");
+    let config = LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: 0.0,
+        ambient_temperature_k: 1_200.0,
+        internal_power_w: 0.0,
+        duration_s: 4.0,
+        maximum_step_s: 0.01,
+        maximum_steps: 400,
+        enthalpy_tolerance_j_kg: 1.0e-8,
+    };
+    let march = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config)
+            .expect("hot-ambient enthalpy march")
+    });
+    let coupled = with_cx(|cx| {
+        specimen
+            .bind_lumped_enthalpy_march(&body, &march, cx)
+            .expect("exact specimen/thermal binding")
+    });
+
+    let initial = coupled.samples.first().unwrap().mass_conserving_state;
+    let final_state = coupled.samples.last().unwrap().mass_conserving_state;
+    assert_eq!(
+        initial.geometry_regime,
+        DiscPhaseGeometryRegime::ReferenceGeometry
+    );
+    assert_eq!(
+        final_state.geometry_regime,
+        DiscPhaseGeometryRegime::EvolvingFreeSurfaceRequired
+    );
+    assert!(final_state.phase_state.liquid_mass_fraction() > 0.0);
+    assert!(final_state.volume_ratio > 1.0);
+    assert!(coupled.maximum_biot <= 0.1);
+    assert!(coupled.samples.iter().all(|sample| {
+        let state = sample.mass_conserving_state;
+        (state.phase_state.bulk_density_kg_m3() * state.required_volume_m3
+            - state.invariant_mass_kg)
+            .abs()
+            <= 1.0e-12
+    }));
+
+    let surrogate = LumpedEnthalpyBody::try_new_with_transport(
+        "wrong-area surrogate",
+        specimen.profile.mass_properties.mass,
+        0.5 * thermal.surface_area_m2,
+        20.0,
+        thermal.characteristic_length_m,
+        body.transport().clone(),
+        &curve,
+    )
+    .unwrap();
+    let surrogate_march = with_cx(|cx| {
+        solve_lumped_enthalpy(
+            cx,
+            &surrogate,
+            BiotGate::corpus_default(),
+            LumpedEnthalpyMarchConfig {
+                duration_s: 0.0,
+                maximum_steps: 1,
+                ..config
+            },
+        )
+        .unwrap()
+    });
+    assert!(matches!(
+        with_cx(|cx| specimen.bind_lumped_enthalpy_march(&surrogate, &surrogate_march, cx)),
+        Err(DiscThermalCouplingError::SpecimenQuantityMismatch {
+            field: "surface_area_m2",
+            ..
+        })
+    ));
 }
 
 #[test]

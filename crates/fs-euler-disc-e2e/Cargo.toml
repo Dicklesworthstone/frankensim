@@ -39,6 +39,7 @@ cinematic-orchestration = ["render-sharding-ledger"]
 fs-blake3 = { path = "../fs-blake3" }
 fs-bem = { path = "../fs-bem" }
 fs-contact = { path = "../fs-contact" }
+fs-conduction = { path = "../fs-conduction" }
 fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
