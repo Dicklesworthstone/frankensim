@@ -21,6 +21,7 @@ pub mod freesurface;
 pub mod perf;
 pub mod refine;
 pub mod rheology;
+pub mod sponge;
 pub mod thermal;
 
 pub use core2::{Cell, Grid};
