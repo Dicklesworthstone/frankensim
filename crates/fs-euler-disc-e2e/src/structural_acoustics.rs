@@ -1506,6 +1506,7 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 first.start_time_s + (frame + 1) as f64 * sample_period_s
             };
             let mut time = sample_start;
+            let mut last_applied_interval = interval_index;
             while time < sample_end {
                 while interval_index + 1 < intervals.len()
                     && time >= intervals[interval_index].end_time_s
@@ -1521,12 +1522,18 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 }
                 self.runtime
                     .step_duration(&modal_forces[interval_index], segment_duration)?;
+                last_applied_interval = interval_index;
                 time = segment_end;
             }
             for (observer_index, transfers) in
                 radiation.pressure_per_modal_velocity.iter().enumerate()
             {
-                let pressure = self.runtime.observer_pressure_with_transfers(transfers)?;
+                let pressure = self
+                    .runtime
+                    .observer_pressure_with_transfers_about_static_equilibrium(
+                        transfers,
+                        &modal_forces[last_applied_interval],
+                    )?;
                 peaks[observer_index] = peaks[observer_index].max(pressure.abs());
                 pressure_channels[observer_index].push(pressure);
             }

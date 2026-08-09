@@ -197,6 +197,12 @@ uses a caller-supplied complex pressure-per-modal-velocity transfer at each
 natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
+`observer_pressure_with_transfers_about_static_equilibrium` additionally
+removes the exact held-force compliance `F/omega^2` before applying the
+complex transfer's displacement-quadrature term. This prevents a static load
+from being misreported as DC acoustic pressure while leaving free modal motion
+unchanged; the caller must provide the same generalized ZOH force that drove
+the structural transition.
 
 The acoustic realization is explicitly narrow-band: one complex transfer value
 per mode is exact only at that mode's natural frequency. Broadband radiation,

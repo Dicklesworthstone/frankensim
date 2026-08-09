@@ -5331,9 +5331,7 @@ fn mux_movie(
         .status();
     match status {
         Ok(status) if status.success() && movie_path.is_file() => {
-            MuxOutcome::Written(PathBuf::from(
-                "euler-disc-critique-prores4444-pcm24.mov",
-            ))
+            MuxOutcome::Written(PathBuf::from("euler-disc-critique-prores4444-pcm24.mov"))
         }
         Ok(status) => MuxOutcome::Failed(status.code().unwrap_or(-1)),
         Err(error) => MuxOutcome::Unavailable(error.to_string()),

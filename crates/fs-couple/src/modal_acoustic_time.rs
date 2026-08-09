@@ -311,6 +311,72 @@ impl ModalAcousticTimeModel {
         Ok(pressure_pa)
     }
 
+    /// Observe oscillatory pressure about the static equilibrium of the
+    /// currently held generalized force.
+    ///
+    /// A complex narrow-band transfer represents the quadrature pair of a
+    /// mode oscillating near its natural frequency. Applying its imaginary
+    /// part directly to the total displacement would incorrectly turn the
+    /// static compliance `q_static = force / omega^2` into DC acoustic
+    /// pressure. This variant removes that equilibrium displacement before
+    /// applying the quadrature term while preserving the actual modal
+    /// velocity. It is appropriate when the structural step is driven by the
+    /// same zero-order-held force supplied here.
+    ///
+    /// The method remains a narrow-band modal radiation realization. It does
+    /// not turn one-frequency transfers into a broadband retarded-time solve.
+    ///
+    /// # Errors
+    /// Refuses wrong transfer/force cardinality, nonfinite inputs or pressure,
+    /// or the admitted absolute-pressure ceiling.
+    pub fn observer_pressure_with_transfers_about_static_equilibrium(
+        &self,
+        pressure_per_modal_velocity: &[C64],
+        held_generalized_force_n_per_sqrt_kg: &[f64],
+    ) -> Result<f64, ModalAcousticTimeError> {
+        if pressure_per_modal_velocity.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::TransferCountMismatch {
+                expected: self.modes.len(),
+                found: pressure_per_modal_velocity.len(),
+            });
+        }
+        if held_generalized_force_n_per_sqrt_kg.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::ForceCountMismatch {
+                expected: self.modes.len(),
+                found: held_generalized_force_n_per_sqrt_kg.len(),
+            });
+        }
+        let mut pressure_pa = 0.0;
+        for (((mode, state), transfer), force) in self
+            .modes
+            .iter()
+            .zip(&self.states)
+            .zip(pressure_per_modal_velocity)
+            .zip(held_generalized_force_n_per_sqrt_kg)
+        {
+            if !(transfer.re.is_finite() && transfer.im.is_finite() && force.is_finite()) {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "observer transfers and held modal forces must be finite",
+                });
+            }
+            let omega = mode.angular_frequency_rad_s;
+            let dynamic_displacement = state.displacement_m_sqrt_kg - force / (omega * omega);
+            pressure_pa += transfer.re * state.velocity_m_sqrt_kg_per_s
+                + transfer.im * omega * dynamic_displacement;
+        }
+        if !pressure_pa.is_finite() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "equilibrium-relative observer pressure became non-finite",
+            });
+        }
+        check_limit(
+            "absolute observer pressure",
+            pressure_pa.abs(),
+            self.budget.maximum_abs_pressure_pa,
+        )?;
+        Ok(pressure_pa)
+    }
+
     /// Advance all modes by one exact zero-order-held sample.
     ///
     /// The step is transactional: a refusal leaves every state unchanged.
@@ -668,5 +734,35 @@ mod tests {
             Err(ModalAcousticTimeError::InvalidInput { .. })
         ));
         assert_eq!(model.states(), before);
+    }
+
+    #[test]
+    fn g0_static_equilibrium_does_not_radiate_through_narrow_band_quadrature() {
+        let omega = 2.0 * core::f64::consts::PI * 1_500.0;
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.02,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        let force = 7.0;
+        model.states[0] = ModalAcousticState {
+            displacement_m_sqrt_kg: force / (omega * omega),
+            velocity_m_sqrt_kg_per_s: 0.0,
+        };
+        let transfer = C64::new(2.0, -0.75);
+        let legacy = model.observer_pressure_with_transfers(&[transfer]).unwrap();
+        let pressure = model
+            .observer_pressure_with_transfers_about_static_equilibrium(&[transfer], &[force])
+            .unwrap();
+        assert!(legacy.abs() > 0.0);
+        assert_eq!(pressure.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            model
+                .observer_pressure_with_transfers_about_static_equilibrium(&[transfer], &[0.0])
+                .unwrap()
+                .to_bits(),
+            legacy.to_bits()
+        );
     }
 }
