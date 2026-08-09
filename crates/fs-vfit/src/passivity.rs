@@ -117,14 +117,45 @@ pub fn check_passivity(
     let grid = build_grid(model, band);
     let mut worst = (f64::INFINITY, 0.0f64);
     let mut violation_freqs: Vec<f64> = Vec::new();
+    // Grid violations are compressed to ONE representative per
+    // contiguous negative band (its argmin) plus the band edges: a
+    // wide violation would otherwise hand the repair QP hundreds of
+    // near-duplicate constraints and push the KKT solves cubic (the
+    // executed hang that motivated this shape).
+    let mut band_min: Option<(f64, f64)> = None; // (re, w) of current band
+    let mut band_edges: (f64, f64) = (0.0, 0.0);
     for &w in &grid {
         let re = model.eval_iw(w).re;
         if re < worst.0 {
             worst = (re, w);
         }
         if re < 0.0 {
-            violation_freqs.push(w);
+            match &mut band_min {
+                None => {
+                    band_min = Some((re, w));
+                    band_edges = (w, w);
+                }
+                Some(m) => {
+                    if re < m.0 {
+                        *m = (re, w);
+                    }
+                    band_edges.1 = w;
+                }
+            }
+        } else if let Some((_, wmin)) = band_min.take() {
+            violation_freqs.push(band_edges.0);
+            if wmin != band_edges.0 && wmin != band_edges.1 {
+                violation_freqs.push(wmin);
+            }
+            violation_freqs.push(band_edges.1);
         }
+    }
+    if let Some((_, wmin)) = band_min.take() {
+        violation_freqs.push(band_edges.0);
+        if wmin != band_edges.0 && wmin != band_edges.1 {
+            violation_freqs.push(wmin);
+        }
+        violation_freqs.push(band_edges.1);
     }
     // Hamiltonian arm (proper part; see descriptor-form statement).
     let mut crossings = Vec::new();
