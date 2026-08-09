@@ -237,7 +237,8 @@ fn band_edges(omega: &[f64]) -> (f64, f64) {
     }
     if !lo.is_finite() || hi <= 0.0 {
         (1.0, 10.0)
-    } else if lo == hi {
+    } else if hi <= lo {
+        // Degenerate single-frequency data: widen symmetrically.
         (lo * 0.5, hi * 2.0)
     } else {
         (lo, hi)

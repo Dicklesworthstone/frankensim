@@ -53,7 +53,7 @@ fn refine_peak(mut lo: f64, mut hi: f64, f: &dyn Fn(f64) -> f64) -> f64 {
             break;
         }
     }
-    0.5 * (lo + hi)
+    f64::midpoint(lo, hi)
 }
 
 fn cents(a: f64, b: f64) -> f64 {
@@ -61,6 +61,7 @@ fn cents(a: f64, b: f64) -> f64 {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one linear 5-stage pipeline, told in order
 fn clarinet_impedance_to_passive_audio_filter() {
     let duct = clarinet_duct();
     let state = air();
@@ -184,10 +185,12 @@ fn clarinet_impedance_to_passive_audio_filter() {
         let refined = refine_peak(wp * 0.97, wp * 1.03, &z_dig);
         let c = cents(refined, wp);
         worst_dig_cents = worst_dig_cents.max(c.abs());
-        peak_rows.push_str(&format!(
+        use std::fmt::Write as _;
+        let _ = write!(
+            peak_rows,
             "{{\"f_tmm_hz\":{:.3},\"cents_dig\":{c:.4}}},",
             wp / TWO_PI
-        ));
+        );
     }
     // Authored: measured sub-cent at 192 kHz with mid-band prewarp;
     // 2 cents keeps the same musical-transparency bar as the fit.

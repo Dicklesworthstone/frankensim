@@ -143,19 +143,11 @@ pub fn check_passivity(
                 }
             }
         } else if let Some((_, wmin)) = band_min.take() {
-            violation_freqs.push(band_edges.0);
-            if wmin != band_edges.0 && wmin != band_edges.1 {
-                violation_freqs.push(wmin);
-            }
-            violation_freqs.push(band_edges.1);
+            push_band(&mut violation_freqs, band_edges, wmin);
         }
     }
     if let Some((_, wmin)) = band_min.take() {
-        violation_freqs.push(band_edges.0);
-        if wmin != band_edges.0 && wmin != band_edges.1 {
-            violation_freqs.push(wmin);
-        }
-        violation_freqs.push(band_edges.1);
+        push_band(&mut violation_freqs, band_edges, wmin);
     }
     // Hamiltonian arm (proper part; see descriptor-form statement).
     let mut crossings = Vec::new();
@@ -199,6 +191,18 @@ pub fn check_passivity(
     })
 }
 
+/// Emit a violation band's representatives: both edges plus the
+/// argmin when it is interior. The comparisons are IDENTITY checks on
+/// values copied from the same grid, so strict equality is exact.
+#[allow(clippy::float_cmp)]
+fn push_band(out: &mut Vec<f64>, edges: (f64, f64), wmin: f64) {
+    out.push(edges.0);
+    if wmin != edges.0 && wmin != edges.1 {
+        out.push(wmin);
+    }
+    out.push(edges.1);
+}
+
 fn build_grid(model: &RationalModel, band: (f64, f64)) -> Vec<f64> {
     let lo = (band.0 / 10.0).max(1.0e-3);
     let hi = band.1 * 10.0;
@@ -212,8 +216,8 @@ fn build_grid(model: &RationalModel, band: (f64, f64)) -> Vec<f64> {
     for t in &model.terms {
         if let PoleTerm::Pair { pole, .. } = t {
             let w0 = pole.abs();
-            for k in 0..32 {
-                let f = 0.9 + 0.2 * (k as f64 / 31.0);
+            for k in 0u32..32 {
+                let f = 0.9 + 0.2 * (f64::from(k) / 31.0);
                 grid.push(w0 * f);
             }
         }
@@ -291,11 +295,11 @@ pub fn repair_passivity(
     model: &RationalModel,
     band: (f64, f64),
 ) -> Result<(RationalModel, RepairReport), PassivityError> {
+    const MAX_ROUNDS: usize = 12;
     let mut current = model.clone();
     let mut constraint_freqs: Vec<f64> = Vec::new();
     let mut last_kkt = 0.0f64;
     let base_norm = residue_norm(model);
-    const MAX_ROUNDS: usize = 12;
     for round in 0..MAX_ROUNDS {
         let report = check_passivity(&current, band)?;
         if report.passive {
