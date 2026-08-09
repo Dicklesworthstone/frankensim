@@ -376,6 +376,65 @@ pub struct HertzRoughnessExcitationInput<'a> {
     pub maximum_linearized_height_fraction: f64,
 }
 
+/// Contact-path height and material derivative for an ordered surface pair.
+///
+/// This is a geometry receipt, not a force or sound model. A zero projected
+/// half-width is the exact point-contact limit used to decide first touch;
+/// positive half-widths use the Hertz pressure marginal documented above.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilteredSurfacePairReceipt {
+    /// Ordered interface-system identity supplied to this leaf.
+    pub ordered_interface_system_id: String,
+    /// Texture-frame identities, in interface order.
+    pub texture_frame_ids: [String; 2],
+    /// Source identities, in interface order.
+    pub source_ids: [String; 2],
+    /// Caller authority ceilings, in interface order.
+    pub authorities: [InputAuthority; 2],
+    /// Projected pressure-support half-width [m], or zero for the point limit.
+    pub projected_half_width_m: f64,
+    /// Outward-positive height of each surface after the declared filtering [m].
+    pub filtered_surface_heights_m: [f64; 2],
+    /// Material-frame spatial derivative of each filtered height [m/m].
+    pub filtered_surface_slopes: [f64; 2],
+    /// Sum of both outward-positive heights [m].
+    pub combined_effective_height_m: f64,
+    /// Material derivative of the combined height along both paths [m/s].
+    pub combined_effective_height_rate_m_per_s: f64,
+}
+
+/// Evaluate the exact point-support limit of two declared surface traces.
+///
+/// Piecewise-linear trace interpolation supplies both height and slope. This
+/// limit is needed by unilateral contact event selection before a finite Hertz
+/// footprint exists; it does not invent an asperity radius or contact force.
+pub fn evaluate_point_surface_pair(
+    interface: &InterfaceSystemRef,
+    surface_a: SurfaceTraceMotion<'_>,
+    surface_b: SurfaceTraceMotion<'_>,
+) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+    let a = sample_trace(surface_a)?;
+    let b = sample_trace(surface_b)?;
+    surface_pair_receipt(interface, surface_a, surface_b, 0.0, a, b)
+}
+
+/// Filter two declared surface traces through a resolved Hertz footprint.
+///
+/// The result remains purely geometric. A caller may use it to re-resolve a
+/// nonlinear unilateral contact law, or may separately request the explicitly
+/// tangent-linear force approximation below.
+pub fn evaluate_hertz_filtered_surface_pair(
+    interface: &InterfaceSystemRef,
+    surface_a: SurfaceTraceMotion<'_>,
+    surface_b: SurfaceTraceMotion<'_>,
+    footprint: ProjectedHertzFootprint,
+) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+    let half_width_m = footprint.projected_half_width_m()?;
+    let a = filter_trace(surface_a, half_width_m)?;
+    let b = filter_trace(surface_b, half_width_m)?;
+    surface_pair_receipt(interface, surface_a, surface_b, half_width_m, a, b)
+}
+
 /// Exact finite-patch filtering plus the explicitly linearized force result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HertzRoughnessExcitationReceipt {
@@ -430,14 +489,14 @@ pub fn evaluate_hertz_roughness_excitation(
             field: "maximum_linearized_height_fraction",
         });
     }
-    let half_width_m = input.footprint.projected_half_width_m()?;
-    let a = filter_trace(input.surface_a, half_width_m)?;
-    let b = filter_trace(input.surface_b, half_width_m)?;
-    let combined_height_m = finite(a.height_m + b.height_m, "combined_effective_height_m")?;
-    let combined_rate_m_per_s = finite(
-        a.slope * input.surface_a.path_speed_m_per_s + b.slope * input.surface_b.path_speed_m_per_s,
-        "combined_effective_height_rate_m_per_s",
+    let filtered = evaluate_hertz_filtered_surface_pair(
+        input.interface,
+        input.surface_a,
+        input.surface_b,
+        input.footprint,
     )?;
+    let combined_height_m = filtered.combined_effective_height_m;
+    let combined_rate_m_per_s = filtered.combined_effective_height_rate_m_per_s;
     let fraction = finite(
         combined_height_m.abs() / input.nominal_approach_m,
         "linearized_height_fraction",
@@ -464,28 +523,100 @@ pub fn evaluate_hertz_roughness_excitation(
         "normal_force_perturbation_rate_n_per_s",
     )?;
     Ok(HertzRoughnessExcitationReceipt {
-        ordered_interface_system_id: input.interface.ordered_system_id().to_owned(),
-        texture_frame_ids: [
-            input.surface_a.trace.texture_frame_id.clone(),
-            input.surface_b.trace.texture_frame_id.clone(),
-        ],
-        source_ids: [
-            input.surface_a.trace.source_id.clone(),
-            input.surface_b.trace.source_id.clone(),
-        ],
-        authorities: [
-            input.surface_a.trace.authority,
-            input.surface_b.trace.authority,
-        ],
-        projected_half_width_m: half_width_m,
-        filtered_surface_heights_m: [a.height_m, b.height_m],
-        filtered_surface_slopes: [a.slope, b.slope],
+        ordered_interface_system_id: filtered.ordered_interface_system_id,
+        texture_frame_ids: filtered.texture_frame_ids,
+        source_ids: filtered.source_ids,
+        authorities: filtered.authorities,
+        projected_half_width_m: filtered.projected_half_width_m,
+        filtered_surface_heights_m: filtered.filtered_surface_heights_m,
+        filtered_surface_slopes: filtered.filtered_surface_slopes,
         combined_effective_height_m: combined_height_m,
         combined_effective_height_rate_m_per_s: combined_rate_m_per_s,
         normal_force_perturbation_n: force_perturbation_n,
         normal_force_perturbation_rate_n_per_s: force_rate_n_per_s,
         linearized_height_fraction: fraction,
     })
+}
+
+fn surface_pair_receipt(
+    interface: &InterfaceSystemRef,
+    surface_a: SurfaceTraceMotion<'_>,
+    surface_b: SurfaceTraceMotion<'_>,
+    projected_half_width_m: f64,
+    a: FilteredTrace,
+    b: FilteredTrace,
+) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+    let combined_effective_height_m =
+        finite(a.height_m + b.height_m, "combined_effective_height_m")?;
+    let combined_effective_height_rate_m_per_s = finite(
+        a.slope * surface_a.path_speed_m_per_s + b.slope * surface_b.path_speed_m_per_s,
+        "combined_effective_height_rate_m_per_s",
+    )?;
+    Ok(FilteredSurfacePairReceipt {
+        ordered_interface_system_id: interface.ordered_system_id().to_owned(),
+        texture_frame_ids: [
+            surface_a.trace.texture_frame_id.clone(),
+            surface_b.trace.texture_frame_id.clone(),
+        ],
+        source_ids: [
+            surface_a.trace.source_id.clone(),
+            surface_b.trace.source_id.clone(),
+        ],
+        authorities: [surface_a.trace.authority, surface_b.trace.authority],
+        projected_half_width_m,
+        filtered_surface_heights_m: [a.height_m, b.height_m],
+        filtered_surface_slopes: [a.slope, b.slope],
+        combined_effective_height_m,
+        combined_effective_height_rate_m_per_s,
+    })
+}
+
+fn sample_trace(motion: SurfaceTraceMotion<'_>) -> Result<FilteredTrace, SurfaceExcitationError> {
+    if !(motion.path_coordinate_m.is_finite() && motion.path_speed_m_per_s.is_finite()) {
+        return Err(SurfaceExcitationError::InvalidInput {
+            field: "surface path coordinate or speed",
+        });
+    }
+    motion.trace.validate()?;
+    let track_length_m = motion.trace.track_length_m();
+    let center_m = match motion.trace.boundary {
+        SurfaceTraceBoundary::Finite => {
+            let tolerance = 64.0 * f64::EPSILON * track_length_m.max(1.0);
+            if motion.path_coordinate_m < -tolerance
+                || motion.path_coordinate_m > track_length_m + tolerance
+            {
+                return Err(SurfaceExcitationError::FootprintOutsideFiniteTrace {
+                    center_m: motion.path_coordinate_m,
+                    half_width_m: 0.0,
+                    track_length_m,
+                });
+            }
+            motion.path_coordinate_m.clamp(0.0, track_length_m)
+        }
+        SurfaceTraceBoundary::Periodic => motion.path_coordinate_m.rem_euclid(track_length_m),
+    };
+    let spacing_m = motion.trace.sample_spacing_m;
+    let segment = match motion.trace.boundary {
+        SurfaceTraceBoundary::Finite if center_m == track_length_m => {
+            i64::try_from(motion.trace.heights_m.len() - 2).map_err(|_| {
+                SurfaceExcitationError::InvalidInput {
+                    field: "finite trace point segment",
+                }
+            })?
+        }
+        _ => (center_m / spacing_m).floor() as i64,
+    };
+    let segment_start_m = segment as f64 * spacing_m;
+    let (height_start_m, height_end_m) = segment_heights(motion.trace, segment)?;
+    let slope = finite(
+        (height_end_m - height_start_m) / spacing_m,
+        "point_surface_slope",
+    )?;
+    let height_m = finite(
+        height_start_m + slope * (center_m - segment_start_m),
+        "point_surface_height_m",
+    )?;
+    Ok(FilteredTrace { height_m, slope })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
