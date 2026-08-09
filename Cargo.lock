@@ -2018,6 +2018,14 @@ name = "fs-propcheck"
 version = "0.0.1"
 
 [[package]]
+name = "fs-psycho"
+version = "0.0.1"
+dependencies = [
+ "fs-fft",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-qty"
 version = "0.0.1"
 dependencies = [

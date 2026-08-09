@@ -20,7 +20,8 @@ use fs_tribo::{
     rolling_loss::{PatchCurvature, RollingPatchReceipt},
     surface_excitation::{
         HertzRoughnessExcitationInput, HertzRoughnessExcitationReceipt, ProjectedHertzFootprint,
-        SurfaceExcitationError, SurfaceTraceMotion, evaluate_hertz_roughness_excitation,
+        SurfaceExcitationError, SurfaceTraceMotion, UniformSurfaceTrace,
+        evaluate_hertz_roughness_excitation,
     },
 };
 
@@ -43,7 +44,7 @@ use crate::{
     },
     normal_contact::{
         ActiveNormalContact, EulerNormalContactInput, EulerNormalContactOutcome,
-        NormalContactError, evaluate_normal_contact,
+        NormalContactError, NormalContactIntegrationRegime, evaluate_normal_contact,
     },
     patch_kinematics::{
         CurvatureMetadata, MovingOneModePatchKinematicsInput, PatchContactStatus, PatchKinematics,
@@ -198,6 +199,12 @@ pub struct ProductionCouplingStepInput {
     pub patch: MovingOneModePatchKinematicsInput,
     /// Normal material/law card; kinematics, state, time, and duration are replaced by this owner.
     pub normal: EulerNormalContactInput,
+    /// Optional measured or explicitly declared small-amplitude topography.
+    ///
+    /// When present, the actual accepted Hertz footprint and normal tangent
+    /// filter these traces before the perturbation is applied to both bodies.
+    /// This is a first-order contact linearization, not a sound preset.
+    pub surface_excitation: Option<ProductionSurfaceExcitationStepInput>,
     /// Tangential card/ownership; kinematics, normal patch, version, and duration are replaced.
     pub tangential: TangentialContactRequest,
     /// Rolling card/ownership; state/checkpoint/patch/interval are replaced.
@@ -210,6 +217,70 @@ pub struct ProductionCouplingStepInput {
     pub base_load_progress_start: f64,
     /// Moving-load location at interval end.
     pub base_load_progress_end: f64,
+}
+
+/// Caller-owned inputs for one mechanically open interval.
+///
+/// Contact, rolling, and tangential laws are intentionally absent. The disc
+/// advances under gravity plus exactly one selected gas mechanism while the
+/// support advances with zero applied contact load. This is the reusable
+/// counterpart to [`ProductionCouplingStepInput`] for separation intervals;
+/// it does not infer an impact impulse or coefficient of restitution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionOpenFlightStepInput {
+    /// Outer checkpoint version observed by the caller.
+    pub expected_checkpoint_version: u64,
+    /// Positive event-localized duration [s].
+    pub duration_s: f64,
+    /// Exactly one selected gas mechanism.
+    pub gas_channel: GasChannelStepInput,
+    /// Base-port replay identity for this zero-contact-load interval.
+    pub base_step_id: String,
+    /// Moving-load coordinate retained for deterministic support state lineage.
+    pub base_load_progress_start: f64,
+    /// Moving-load coordinate retained for deterministic support state lineage.
+    pub base_load_progress_end: f64,
+}
+
+/// One owned surface trace and its current material-frame contact coordinate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionSurfaceTraceStepInput {
+    /// Measured or explicitly declared spatial height trace.
+    pub trace: UniformSurfaceTrace,
+    /// Current contact-path coordinate in the trace's material frame [m].
+    pub path_coordinate_m: f64,
+    /// Coordinate rate in that same material frame [m/s].
+    pub path_speed_m_per_s: f64,
+}
+
+impl ProductionSurfaceTraceStepInput {
+    fn as_motion(&self) -> SurfaceTraceMotion<'_> {
+        SurfaceTraceMotion {
+            trace: &self.trace,
+            path_coordinate_m: self.path_coordinate_m,
+            path_speed_m_per_s: self.path_speed_m_per_s,
+        }
+    }
+}
+
+/// Small-amplitude topography channel for one production contact substep.
+///
+/// The two surfaces retain the exact ordering of `interface`. Material names,
+/// audible frequencies, and renderer choices are absent: this channel contains
+/// only interface identity, spatial geometry, contact-path kinematics, and the
+/// declared linearization domain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionSurfaceExcitationStepInput {
+    /// Ordered dry-interface identity used by the normal-contact law.
+    pub interface: InterfaceSystemRef,
+    /// First ordered surface trace and motion.
+    pub surface_a: ProductionSurfaceTraceStepInput,
+    /// Second ordered surface trace and motion.
+    pub surface_b: ProductionSurfaceTraceStepInput,
+    /// Travel direction measured from the accepted patch major axis [rad].
+    pub travel_angle_from_patch_major_rad: f64,
+    /// Maximum admitted absolute filtered-height/nominal-approach ratio.
+    pub maximum_linearized_height_fraction: f64,
 }
 
 /// Binds one accepted rigid/profile state to the horizontal-plane production patch.
@@ -296,6 +367,9 @@ pub struct ProductionCouplingReceipt {
     pub patch_kinematics: PatchKinematics,
     /// Active finite-patch normal response.
     pub normal: ActiveNormalContact,
+    /// Optional finite-patch-filtered topography force actually included in
+    /// the accepted rigid-body and support wrenches.
+    pub surface_excitation: Option<HertzRoughnessExcitationReceipt>,
     /// Prepared and accepted tangential response.
     pub tangential: TangentialContactReceipt,
     /// Prepared and accepted rolling response.
@@ -317,6 +391,25 @@ pub struct ProductionCouplingReceipt {
     pub estimate_only: bool,
 }
 
+/// Accepted open-flight transition over the same shared checkpoint as contact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionOpenFlightReceipt {
+    /// The one gas-channel receipt contributing its real wrench to fs-mbd.
+    pub gas_channel: GasChannelReceipt,
+    /// Zero-contact-load support transition; the support may continue ringing.
+    pub base: ReducedBaseStepProposal,
+    /// Gas force sent to fs-mbd [N]; gravity remains integrator-owned.
+    pub total_force_world_n: Vec3,
+    /// Gas moment about disc COM sent to fs-mbd [N m].
+    pub total_moment_about_com_world_n_m: Vec3,
+    /// fs-mbd accepted disc state.
+    pub next_disc_state: RigidBodyState,
+    /// Complete rigid-body before/after and energy diagnostics.
+    pub rigid_step: StepReceipt,
+    /// This composition retains only source-adapter Estimate authority.
+    pub estimate_only: bool,
+}
+
 impl ProductionCouplingReceipt {
     /// Filter two named surface traces through this accepted Hertz patch.
     ///
@@ -333,38 +426,56 @@ impl ProductionCouplingReceipt {
         travel_angle_from_patch_major_rad: f64,
         maximum_linearized_height_fraction: f64,
     ) -> Result<HertzRoughnessExcitationReceipt, ProductionSurfaceExcitationError> {
-        let NormalPatchReceipt::Point(normal) = &self.normal.generic.receipt else {
-            return Err(ProductionSurfaceExcitationError::UnsupportedLineContact);
-        };
-        if interface.ordered_system_id() != normal.interface_system_id {
-            return Err(
-                ProductionSurfaceExcitationError::InterfaceIdentityMismatch {
-                    accepted_normal_interface: normal.interface_system_id.clone(),
-                    supplied_interface: interface.ordered_system_id().to_owned(),
-                },
-            );
-        }
-        let (semi_major_axis_m, semi_minor_axis_m) = normal
-            .elliptic_patch_axes
-            .map_or((normal.patch_radius_m, normal.patch_radius_m), |axes| {
-                (axes.semi_major_axis_m, axes.semi_minor_axis_m)
-            });
-        evaluate_hertz_roughness_excitation(HertzRoughnessExcitationInput {
+        evaluate_surface_excitation_for_normal(
+            &self.normal,
             interface,
             surface_a,
             surface_b,
-            footprint: ProjectedHertzFootprint {
-                semi_major_axis_m,
-                semi_minor_axis_m,
-                travel_angle_from_major_rad: travel_angle_from_patch_major_rad,
-            },
-            nominal_approach_m: normal.approach_m,
-            nominal_normal_force_n: normal.normal_force_n,
-            normal_tangent_n_per_m: normal.tangent_n_per_m,
+            travel_angle_from_patch_major_rad,
             maximum_linearized_height_fraction,
-        })
-        .map_err(ProductionSurfaceExcitationError::Surface)
+        )
     }
+}
+
+fn evaluate_surface_excitation_for_normal(
+    active: &ActiveNormalContact,
+    interface: &InterfaceSystemRef,
+    surface_a: SurfaceTraceMotion<'_>,
+    surface_b: SurfaceTraceMotion<'_>,
+    travel_angle_from_patch_major_rad: f64,
+    maximum_linearized_height_fraction: f64,
+) -> Result<HertzRoughnessExcitationReceipt, ProductionSurfaceExcitationError> {
+    let NormalPatchReceipt::Point(normal) = &active.generic.receipt else {
+        return Err(ProductionSurfaceExcitationError::UnsupportedLineContact);
+    };
+    if interface.ordered_system_id() != normal.interface_system_id {
+        return Err(
+            ProductionSurfaceExcitationError::InterfaceIdentityMismatch {
+                accepted_normal_interface: normal.interface_system_id.clone(),
+                supplied_interface: interface.ordered_system_id().to_owned(),
+            },
+        );
+    }
+    let (semi_major_axis_m, semi_minor_axis_m) = normal
+        .elliptic_patch_axes
+        .map_or((normal.patch_radius_m, normal.patch_radius_m), |axes| {
+            (axes.semi_major_axis_m, axes.semi_minor_axis_m)
+        });
+    evaluate_hertz_roughness_excitation(HertzRoughnessExcitationInput {
+        interface,
+        surface_a,
+        surface_b,
+        footprint: ProjectedHertzFootprint {
+            semi_major_axis_m,
+            semi_minor_axis_m,
+            travel_angle_from_major_rad: travel_angle_from_patch_major_rad,
+        },
+        nominal_approach_m: normal.approach_m,
+        nominal_normal_force_n: normal.normal_force_n,
+        normal_tangent_n_per_m: normal.tangent_n_per_m,
+        maximum_linearized_height_fraction,
+    })
+    .map_err(ProductionSurfaceExcitationError::Surface)
 }
 
 /// Refusal while adapting one accepted production contact to surface excitation.
@@ -430,6 +541,87 @@ pub struct SmoothContactTrajectory {
     pub termination: SmoothContactTrajectoryTermination,
 }
 
+/// Mechanically homogeneous branch selected from pre-constitutive gap/rate
+/// kinematics at an accepted checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionTrajectoryBranch {
+    /// Finite-patch normal/tangential/rolling contact is active.
+    CompliantContact,
+    /// No contact port exists; only gravity, gas, and unforced support dynamics advance.
+    OpenFlight,
+}
+
+/// One accepted eventful trajectory interval.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProductionTrajectoryStepReceipt {
+    /// Contact interval evaluated by the complete production composition.
+    CompliantContact(ProductionCouplingReceipt),
+    /// Open interval evaluated without fabricated contact channels.
+    OpenFlight(ProductionOpenFlightReceipt),
+}
+
+/// A branch transition bracketed by the fixed accepted time grid.
+///
+/// No exact event time is claimed: the transition occurred after
+/// `bracket_start_s` and no later than `bracket_end_s`. Refinement of the
+/// caller-selected timestep must shrink this bracket for a timing claim.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProductionBranchTransition {
+    /// Branch used by the preceding accepted interval.
+    pub from: ProductionTrajectoryBranch,
+    /// Branch selected at the current accepted checkpoint.
+    pub to: ProductionTrajectoryBranch,
+    /// Start of the unresolved transition bracket [s].
+    pub bracket_start_s: f64,
+    /// End of the unresolved transition bracket [s].
+    pub bracket_end_s: f64,
+}
+
+/// One accepted interval with its shared before/after clock and branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionTrajectoryStep {
+    /// Accepted interval start [s].
+    pub start_time_s: f64,
+    /// Accepted interval end [s].
+    pub end_time_s: f64,
+    /// Homogeneous mechanics branch for the interval.
+    pub branch: ProductionTrajectoryBranch,
+    /// Exact branch-specific receipt.
+    pub receipt: ProductionTrajectoryStepReceipt,
+}
+
+/// Terminal state of a bounded event-aware compliant trajectory attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProductionEventTrajectoryTermination {
+    /// Caller-selected accepted-step budget was consumed.
+    StepLimitReached {
+        /// Maximum accepted intervals requested by the caller.
+        maximum_accepted_steps: usize,
+    },
+    /// The next candidate refused atomically; the prior checkpoint remains restartable.
+    Refused {
+        /// Version of the checkpoint at which classification or stepping refused.
+        attempted_checkpoint_version: u64,
+        /// Exact typed refusal from the constituent or branch admission.
+        error: ProductionCouplingError,
+    },
+}
+
+/// Replayable open/contact trajectory over one shared coupled checkpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductionEventTrajectory {
+    /// Checkpoint supplied to this invocation.
+    pub start_checkpoint: ProductionCouplingCheckpoint,
+    /// Last state accepted by every active channel.
+    pub last_accepted_checkpoint: ProductionCouplingCheckpoint,
+    /// Ordered accepted homogeneous intervals.
+    pub accepted_steps: Vec<ProductionTrajectoryStep>,
+    /// Fixed-grid brackets for every observed branch change.
+    pub transitions: Vec<ProductionBranchTransition>,
+    /// Bounded completion or first uncommitted refusal.
+    pub termination: ProductionEventTrajectoryTermination,
+}
+
 /// Typed refusal; no caller checkpoint is changed on every error path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProductionCouplingError {
@@ -467,6 +659,8 @@ pub enum ProductionCouplingError {
     UnsupportedLineNormalContact,
     /// Generic normal admission refused the sample.
     Normal(NormalContactError),
+    /// Finite-patch topography filtering or its declared linearization refused.
+    SurfaceExcitation(ProductionSurfaceExcitationError),
     /// Tangential generic admission/refusal.
     Tangential(TangentialContactError),
     /// Rolling generic admission/refusal, including work ownership overlap.
@@ -689,24 +883,27 @@ impl ProductionCouplingModel {
                 field: "duration_s or time_s",
             });
         }
-        let mut patch_input = input.patch.clone();
-        patch_input.bridge.disc_state = checkpoint.disc_state;
-        patch_input.bridge.base_mode.vertical_displacement_m =
-            checkpoint.base_state.modal_displacement_m();
-        patch_input.bridge.base_mode.vertical_velocity_m_per_s =
-            checkpoint.base_state.modal_velocity_m_per_s();
-        let patch_kinematics = compute_moving_one_mode_patch_kinematics(patch_input)
-            .map_err(ProductionCouplingError::Patch)?;
+        let patch_kinematics = self.resolve_patch_kinematics(checkpoint, input)?;
         if matches!(
             patch_kinematics.patch.curvature,
             CurvatureMetadata::Unavailable { .. }
         ) {
             return Err(ProductionCouplingError::CurvatureUnavailable);
         }
-        if !matches!(
-            patch_kinematics.status,
-            PatchContactStatus::Touching | PatchContactStatus::Grazing
-        ) {
+        let admitted_status = match input.normal.integration_regime {
+            NormalContactIntegrationRegime::SmoothQuasistatic => matches!(
+                patch_kinematics.status,
+                PatchContactStatus::Touching | PatchContactStatus::Grazing
+            ),
+            NormalContactIntegrationRegime::CompliantTransient => matches!(
+                patch_kinematics.status,
+                PatchContactStatus::Approaching
+                    | PatchContactStatus::Touching
+                    | PatchContactStatus::Grazing
+                    | PatchContactStatus::ImpactCandidate
+            ),
+        };
+        if !admitted_status {
             return Err(ProductionCouplingError::UnsupportedMechanism {
                 status: patch_kinematics.status,
             });
@@ -727,6 +924,21 @@ impl ProductionCouplingModel {
                 });
             }
         };
+        let surface_excitation = input
+            .surface_excitation
+            .as_ref()
+            .map(|surface| {
+                evaluate_surface_excitation_for_normal(
+                    &normal,
+                    &surface.interface,
+                    surface.surface_a.as_motion(),
+                    surface.surface_b.as_motion(),
+                    surface.travel_angle_from_patch_major_rad,
+                    surface.maximum_linearized_height_fraction,
+                )
+            })
+            .transpose()
+            .map_err(ProductionCouplingError::SurfaceExcitation)?;
         let normal_patch = normal_patch_view(&normal, &patch_kinematics)?;
         let rolling_patch = rolling_patch_receipt(&normal, &patch_kinematics)?;
 
@@ -757,7 +969,16 @@ impl ProductionCouplingModel {
             input.duration_s,
         )?;
 
-        let normal_force_n = point_normal_force(&normal)?;
+        let nominal_normal_force_n = point_normal_force(&normal)?;
+        let normal_force_n = nominal_normal_force_n
+            + surface_excitation
+                .as_ref()
+                .map_or(0.0, |surface| surface.normal_force_perturbation_n);
+        if !(normal_force_n.is_finite() && normal_force_n >= 0.0) {
+            return Err(ProductionCouplingError::InvalidInput {
+                field: "topography-perturbed normal force",
+            });
+        }
         let base = self
             .base_port
             .propose(
@@ -773,7 +994,21 @@ impl ProductionCouplingModel {
             )
             .map_err(ProductionCouplingError::Base)?;
 
-        let (normal_force, normal_moment) = point_normal_wrench(&normal)?;
+        let (mut normal_force, mut normal_moment) = point_normal_wrench(&normal)?;
+        if surface_excitation.is_some() {
+            if !(nominal_normal_force_n.is_finite() && nominal_normal_force_n > 0.0) {
+                return Err(ProductionCouplingError::InvalidInput {
+                    field: "surface-excitation nominal normal force",
+                });
+            }
+            // The roughness leaf is explicitly a tangent perturbation about
+            // this accepted contact. Preserve the same action line while
+            // scaling its point-resultant force and moment; recomputing the
+            // Hertz footprint here would double-apply the linearization.
+            let scale = normal_force_n / nominal_normal_force_n;
+            normal_force = normal_force.scale(scale);
+            normal_moment = normal_moment.scale(scale);
+        }
         let tangential_moment = tangential
             .application_arm_world_m
             .cross(tangential.force_on_disc_world_n)
@@ -851,6 +1086,7 @@ impl ProductionCouplingModel {
             ProductionCouplingReceipt {
                 patch_kinematics,
                 normal,
+                surface_excitation,
                 tangential,
                 rolling,
                 gas_channel,
@@ -862,6 +1098,347 @@ impl ProductionCouplingModel {
                 estimate_only: true,
             },
         ))
+    }
+
+    /// Advances one homogeneous open-flight substep atomically.
+    ///
+    /// The normal, tangential, and rolling checkpoints are retained exactly;
+    /// no zero-force contact receipt is fabricated. The support is advanced by
+    /// its real unforced dynamics, and the gas channel is evaluated from the
+    /// same accepted rigid-body state used by fs-mbd.
+    pub fn step_open_flight(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionOpenFlightStepInput,
+    ) -> Result<(ProductionCouplingCheckpoint, ProductionOpenFlightReceipt), ProductionCouplingError>
+    {
+        self.validate_checkpoint(checkpoint)?;
+        if input.expected_checkpoint_version != checkpoint.committed_version {
+            return Err(ProductionCouplingError::CheckpointVersionMismatch {
+                expected: input.expected_checkpoint_version,
+                observed: checkpoint.committed_version,
+            });
+        }
+        validate_gas_step_identity(&self.identity, &input.gas_channel)?;
+        if !(input.duration_s.is_finite() && input.duration_s > 0.0) {
+            return Err(ProductionCouplingError::InvalidInput {
+                field: "open-flight duration_s",
+            });
+        }
+        let (gas_channel, gas_force, gas_moment) = prepare_gas_channel(
+            &input.gas_channel,
+            &checkpoint.gas_channel_state,
+            checkpoint.disc_state,
+            self.disc_mass_properties,
+            input.duration_s,
+        )?;
+        let base = self
+            .base_port
+            .propose(
+                &checkpoint.base_state,
+                &ReducedBaseStepInput {
+                    step_id: input.base_step_id.clone(),
+                    expected_version: checkpoint.base_state.accepted_version(),
+                    duration_s: input.duration_s,
+                    compressive_normal_force_on_base_n: 0.0,
+                    load_progress_start: input.base_load_progress_start,
+                    load_progress_end: input.base_load_progress_end,
+                },
+            )
+            .map_err(ProductionCouplingError::Base)?;
+        if !(gas_force.is_finite() && gas_moment.is_finite()) {
+            return Err(ProductionCouplingError::InvalidInput {
+                field: "open-flight gas wrench",
+            });
+        }
+        let rigid_step = RigidBodyIntegrator::new(self.gravity)
+            .step(
+                checkpoint.disc_state,
+                self.disc_mass_properties,
+                Wrench {
+                    force_world: gas_force,
+                    torque_body: checkpoint
+                        .disc_state
+                        .pose()
+                        .orientation()
+                        .rotate_world_to_body(gas_moment),
+                },
+                input.duration_s,
+            )
+            .map_err(ProductionCouplingError::Dynamics)?;
+        let next_disc_state = rigid_step.state_after;
+        let committed_version = checkpoint.committed_version.checked_add(1).ok_or(
+            ProductionCouplingError::InvalidInput {
+                field: "committed_version",
+            },
+        )?;
+        let gas_channel_state = commit_gas_channel(&checkpoint.gas_channel_state, &gas_channel)?;
+        let base_state = self
+            .base_port
+            .accept(&checkpoint.base_state, base.clone())
+            .map_err(ProductionCouplingError::Base)?;
+        let checkpoint_fingerprint = production_checkpoint_fingerprint(
+            &self.identity,
+            committed_version,
+            next_disc_state,
+            &checkpoint.normal_state,
+            &checkpoint.tangential_state,
+            &checkpoint.rolling_state,
+            &gas_channel_state,
+            &base_state,
+        );
+        let next = ProductionCouplingCheckpoint {
+            identity: self.identity.clone(),
+            committed_version,
+            disc_state: next_disc_state,
+            checkpoint_fingerprint,
+            normal_state: checkpoint.normal_state.clone(),
+            tangential_state: checkpoint.tangential_state.clone(),
+            rolling_state: checkpoint.rolling_state.clone(),
+            gas_channel_state,
+            base_state,
+        };
+        Ok((
+            next,
+            ProductionOpenFlightReceipt {
+                gas_channel,
+                base,
+                total_force_world_n: gas_force,
+                total_moment_about_com_world_n_m: gas_moment,
+                next_disc_state,
+                rigid_step,
+                estimate_only: true,
+            },
+        ))
+    }
+
+    /// Runs a bounded fixed-grid open/contact compliant trajectory.
+    ///
+    /// The deterministic factory must rebuild geometry, material/interface
+    /// cards, texture coordinates, and ownership keys from each accepted
+    /// checkpoint. `Separated` selects true open flight. `Touching` and
+    /// `Grazing` select finite-patch contact. `Approaching` and
+    /// `ImpactCandidate` additionally require
+    /// [`NormalContactIntegrationRegime::CompliantTransient`].
+    /// `Unknown` refuses. Branch changes are bracketed by the accepted step,
+    /// never promoted to exact impact times, and no restitution impulse is
+    /// invented.
+    pub fn run_eventful_compliant_trajectory<F>(
+        &self,
+        start_checkpoint: ProductionCouplingCheckpoint,
+        maximum_accepted_steps: usize,
+        mut input_for_checkpoint: F,
+    ) -> ProductionEventTrajectory
+    where
+        F: FnMut(
+            &ProductionCouplingCheckpoint,
+        ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+    {
+        let mut last_accepted_checkpoint = start_checkpoint.clone();
+        let mut accepted_steps = Vec::new();
+        let mut transitions = Vec::new();
+        let mut preceding_branch = None;
+        let mut preceding_start_time_s = last_accepted_checkpoint.elapsed_time_s();
+
+        for _ in 0..maximum_accepted_steps {
+            let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
+            let input = match input_for_checkpoint(&last_accepted_checkpoint) {
+                Ok(input) => input,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
+            let patch = match self.resolve_patch_kinematics(&last_accepted_checkpoint, &input) {
+                Ok(patch) => patch,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
+            let branch = match select_event_branch(patch.status, input.normal.integration_regime) {
+                Ok(branch) => branch,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
+            let start_time_s = last_accepted_checkpoint.elapsed_time_s();
+            if let Some(previous) = preceding_branch
+                && previous != branch
+            {
+                transitions.push(ProductionBranchTransition {
+                    from: previous,
+                    to: branch,
+                    bracket_start_s: preceding_start_time_s,
+                    bracket_end_s: start_time_s,
+                });
+            }
+            let result = match branch {
+                ProductionTrajectoryBranch::CompliantContact => self
+                    .step(&last_accepted_checkpoint, &input)
+                    .map(|(next, receipt)| {
+                        (
+                            next,
+                            ProductionTrajectoryStepReceipt::CompliantContact(receipt),
+                        )
+                    }),
+                ProductionTrajectoryBranch::OpenFlight => {
+                    let open = ProductionOpenFlightStepInput {
+                        expected_checkpoint_version: input.expected_checkpoint_version,
+                        duration_s: input.duration_s,
+                        gas_channel: input.gas_channel.clone(),
+                        base_step_id: input.base_step_id.clone(),
+                        base_load_progress_start: input.base_load_progress_start,
+                        base_load_progress_end: input.base_load_progress_end,
+                    };
+                    self.step_open_flight(&last_accepted_checkpoint, &open).map(
+                        |(next, receipt)| {
+                            (next, ProductionTrajectoryStepReceipt::OpenFlight(receipt))
+                        },
+                    )
+                }
+            };
+            let (next_checkpoint, receipt) = match result {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
+            let end_time_s = next_checkpoint.elapsed_time_s();
+            accepted_steps.push(ProductionTrajectoryStep {
+                start_time_s,
+                end_time_s,
+                branch,
+                receipt,
+            });
+            preceding_branch = Some(branch);
+            preceding_start_time_s = start_time_s;
+            last_accepted_checkpoint = next_checkpoint;
+        }
+
+        // Classify the final accepted endpoint as well as every interval
+        // start. Otherwise a branch crossing during the last permitted step
+        // would disappear merely because no subsequent step was requested.
+        // This calls the same deterministic factory once more but advances no
+        // constituent and consumes no ownership key.
+        if let Some(previous) = preceding_branch {
+            let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
+            let input = match input_for_checkpoint(&last_accepted_checkpoint) {
+                Ok(input) => input,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
+            let patch = match self.resolve_patch_kinematics(&last_accepted_checkpoint, &input) {
+                Ok(patch) => patch,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
+            let terminal_branch =
+                match select_event_branch(patch.status, input.normal.integration_regime) {
+                    Ok(branch) => branch,
+                    Err(error) => {
+                        return production_event_refusal(
+                            start_checkpoint,
+                            last_accepted_checkpoint,
+                            accepted_steps,
+                            transitions,
+                            attempted_checkpoint_version,
+                            error,
+                        );
+                    }
+                };
+            if previous != terminal_branch {
+                transitions.push(ProductionBranchTransition {
+                    from: previous,
+                    to: terminal_branch,
+                    bracket_start_s: preceding_start_time_s,
+                    bracket_end_s: last_accepted_checkpoint.elapsed_time_s(),
+                });
+            }
+        }
+        ProductionEventTrajectory {
+            start_checkpoint,
+            last_accepted_checkpoint,
+            accepted_steps,
+            transitions,
+            termination: ProductionEventTrajectoryTermination::StepLimitReached {
+                maximum_accepted_steps,
+            },
+        }
+    }
+
+    fn resolve_patch_kinematics(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+    ) -> Result<PatchKinematics, ProductionCouplingError> {
+        self.validate_checkpoint(checkpoint)?;
+        if input.expected_checkpoint_version != checkpoint.committed_version {
+            return Err(ProductionCouplingError::CheckpointVersionMismatch {
+                expected: input.expected_checkpoint_version,
+                observed: checkpoint.committed_version,
+            });
+        }
+        validate_step_identity(&self.identity, input)?;
+        if !(input.duration_s.is_finite()
+            && input.duration_s > 0.0
+            && input.time_s.is_finite()
+            && input.time_s >= 0.0)
+        {
+            return Err(ProductionCouplingError::InvalidInput {
+                field: "duration_s or time_s",
+            });
+        }
+        let mut patch_input = input.patch.clone();
+        patch_input.bridge.disc_state = checkpoint.disc_state;
+        patch_input.bridge.base_mode.vertical_displacement_m =
+            checkpoint.base_state.modal_displacement_m();
+        patch_input.bridge.base_mode.vertical_velocity_m_per_s =
+            checkpoint.base_state.modal_velocity_m_per_s();
+        compute_moving_one_mode_patch_kinematics(patch_input)
+            .map_err(ProductionCouplingError::Patch)
     }
 
     /// Runs at most `maximum_accepted_steps` smooth homogeneous substeps.
@@ -929,6 +1506,44 @@ impl ProductionCouplingModel {
                 maximum_accepted_steps,
             },
         }
+    }
+}
+
+fn select_event_branch(
+    status: PatchContactStatus,
+    integration_regime: NormalContactIntegrationRegime,
+) -> Result<ProductionTrajectoryBranch, ProductionCouplingError> {
+    match status {
+        PatchContactStatus::Separated => Ok(ProductionTrajectoryBranch::OpenFlight),
+        PatchContactStatus::Touching | PatchContactStatus::Grazing => {
+            Ok(ProductionTrajectoryBranch::CompliantContact)
+        }
+        PatchContactStatus::Approaching | PatchContactStatus::ImpactCandidate
+            if integration_regime == NormalContactIntegrationRegime::CompliantTransient =>
+        {
+            Ok(ProductionTrajectoryBranch::CompliantContact)
+        }
+        status => Err(ProductionCouplingError::UnsupportedMechanism { status }),
+    }
+}
+
+fn production_event_refusal(
+    start_checkpoint: ProductionCouplingCheckpoint,
+    last_accepted_checkpoint: ProductionCouplingCheckpoint,
+    accepted_steps: Vec<ProductionTrajectoryStep>,
+    transitions: Vec<ProductionBranchTransition>,
+    attempted_checkpoint_version: u64,
+    error: ProductionCouplingError,
+) -> ProductionEventTrajectory {
+    ProductionEventTrajectory {
+        start_checkpoint,
+        last_accepted_checkpoint,
+        accepted_steps,
+        transitions,
+        termination: ProductionEventTrajectoryTermination::Refused {
+            attempted_checkpoint_version,
+            error,
+        },
     }
 }
 
@@ -1090,7 +1705,14 @@ fn validate_step_identity(
             return Err(ProductionCouplingError::InputIdentityMismatch { field });
         }
     }
-    match &input.gas_channel {
+    validate_gas_step_identity(identity, &input.gas_channel)
+}
+
+fn validate_gas_step_identity(
+    identity: &ProductionCouplingIdentity,
+    gas_channel: &GasChannelStepInput,
+) -> Result<(), ProductionCouplingError> {
+    match gas_channel {
         GasChannelStepInput::ExteriorFreeGas { input, .. } => {
             for (actual, expected, field) in [
                 (

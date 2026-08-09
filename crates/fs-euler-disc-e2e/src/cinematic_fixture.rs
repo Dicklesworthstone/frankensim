@@ -89,9 +89,16 @@ use fs_material::{
         EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
     },
     state_point::{
-        IsotropicElasticStatePoint, MaterialPropertySelection, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
-        VISIBLE_COMPLEX_IOR_K_PROPERTIES, resolve_isotropic_elastic_state_point,
-        resolve_isotropic_solid_state_point, resolve_visible_conductor_state_point,
+        IsotropicElasticStatePoint, MaterialPropertySelection,
+        ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
+        ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES, OrthotropicElasticStatePoint,
+        ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
+        VISIBLE_COMPLEX_IOR_K_PROPERTIES, VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+        VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY, VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+        VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+        VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES, resolve_isotropic_elastic_state_point,
+        resolve_isotropic_solid_state_point, resolve_orthotropic_elastic_state_point,
+        resolve_visible_optical_state_point,
     },
     visco::RayleighDamping,
 };
@@ -385,20 +392,14 @@ impl CinematicDiscSpecimenConfig {
 pub struct CinematicDiscMaterialConfig {
     /// Absolute material/environment query temperature [K].
     pub temperature_k: f64,
-    /// Isotropic tangent Young's modulus [Pa].
-    pub young_modulus_pa: f64,
-    /// Isotropic Poisson ratio.
-    pub poisson_ratio: f64,
-    /// Uniaxial yield stress used by finite-patch/plastic admissibility [Pa].
-    pub yield_stress_pa: f64,
+    /// Complete symmetry-explicit elastic constitutive data.
+    pub elasticity: CinematicElasticConfig,
     /// Mass-proportional Rayleigh damping coefficient [1/s].
     pub rayleigh_alpha_per_s: f64,
     /// Stiffness-proportional Rayleigh damping coefficient [s].
     pub rayleigh_beta_s: f64,
-    /// Visible complex-index real parts on FrankenSim's canonical 9-knot grid.
-    pub optical_eta: [f64; 9],
-    /// Visible complex-index extinction coefficients on the same grid.
-    pub optical_k: [f64; 9],
+    /// Visible bulk optical constitutive response at this same state point.
+    pub visible_optics: CinematicVisibleOpticalConfig,
     /// Isotropic GGX microfacet roughness for the explicit surface state.
     pub surface_roughness_alpha: f64,
     /// Identity-only chemistry/specimen description; never dispatches physics.
@@ -413,16 +414,123 @@ pub struct CinematicDiscMaterialConfig {
     pub damping_source: String,
 }
 
+/// Symmetry-explicit numerical elastic input for the cinematic specimen.
+///
+/// The branch is selected by the complete tensor schema supplied by the
+/// caller, never by a material name. Orthotropic orientation is an independent
+/// geometric/material-field fact and therefore carries its own provenance.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CinematicElasticConfig {
+    /// Homogeneous isotropic tangent elasticity plus the scalar yield datum
+    /// required by the current finite-patch contact admission rung.
+    Isotropic {
+        /// Tangent Young's modulus [Pa].
+        young_modulus_pa: f64,
+        /// Poisson ratio.
+        poisson_ratio: f64,
+        /// Uniaxial yield stress [Pa].
+        yield_stress_pa: f64,
+    },
+    /// Homogeneous principal-axis orthotropic tangent elasticity.
+    Orthotropic {
+        /// Principal Young's moduli `(E1,E2,E3)` [Pa].
+        young_modulus_pa: [f64; 3],
+        /// Principal major Poisson ratios `(nu12,nu13,nu23)`.
+        poisson_ratio: [f64; 3],
+        /// Principal shear moduli `(G12,G23,G31)` [Pa].
+        shear_modulus_pa: [f64; 3],
+        /// Rotation from material principal axes into the specimen frame.
+        principal_to_specimen: [[f64; 3]; 3],
+        /// Positive small-strain validity limit for the tangent law.
+        linear_strain_limit: f64,
+        /// Evidence or caller declaration naming the material-axis field.
+        orientation_source: String,
+    },
+}
+
+impl CinematicElasticConfig {
+    fn has_valid_scalars(&self) -> bool {
+        match self {
+            Self::Isotropic {
+                young_modulus_pa,
+                poisson_ratio,
+                yield_stress_pa,
+            } => {
+                young_modulus_pa.is_finite()
+                    && *young_modulus_pa > 0.0
+                    && poisson_ratio.is_finite()
+                    && *poisson_ratio > -1.0
+                    && *poisson_ratio < 0.5
+                    && yield_stress_pa.is_finite()
+                    && *yield_stress_pa > 0.0
+            }
+            Self::Orthotropic {
+                young_modulus_pa,
+                poisson_ratio,
+                shear_modulus_pa,
+                principal_to_specimen,
+                linear_strain_limit,
+                orientation_source,
+            } => {
+                young_modulus_pa
+                    .iter()
+                    .chain(shear_modulus_pa)
+                    .all(|value| value.is_finite() && *value > 0.0)
+                    && poisson_ratio.iter().all(|value| value.is_finite())
+                    && principal_to_specimen
+                        .iter()
+                        .flatten()
+                        .all(|value| value.is_finite())
+                    && linear_strain_limit.is_finite()
+                    && *linear_strain_limit > 0.0
+                    && !orientation_source.trim().is_empty()
+            }
+        }
+    }
+}
+
+/// Visible bulk optical response supplied as numerical constitutive data.
+///
+/// The variant is explicit because opaque complex-index and transmitting
+/// dielectric laws require different complete property schemas. Chemistry and
+/// display names never select the branch. Surface roughness remains outside
+/// this bulk response because it belongs to the processed interface state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CinematicVisibleOpticalConfig {
+    /// Opaque complex refractive index on FrankenSim's canonical 9-knot grid.
+    Conductor {
+        /// Absolute real refractive-index samples.
+        eta: [f64; 9],
+        /// Absolute extinction-coefficient samples.
+        k: [f64; 9],
+    },
+    /// Homogeneous transmitting dielectric with dispersion and absorption.
+    Dielectric {
+        /// Dimensionless Cauchy A coefficient.
+        cauchy_a: f64,
+        /// Cauchy B coefficient [m^2].
+        cauchy_b_m2: f64,
+        /// Cauchy C coefficient [m^4].
+        cauchy_c_m4: f64,
+        /// Linear-RGB transmittance over `reference_distance_m`.
+        transmittance_linear_rgb: [f64; 3],
+        /// Beer-Lambert reference path length [m].
+        reference_distance_m: f64,
+    },
+}
+
 impl Default for CinematicDiscMaterialConfig {
     fn default() -> Self {
         Self {
             temperature_k: 293.15,
-            young_modulus_pa: 200.0e9,
-            poisson_ratio: 0.29,
-            // Declared room-temperature estimate. It is retained even though
-            // the current source-bound trajectory remains rigid-body motion,
-            // because contact and future deforming rungs must not invent it.
-            yield_stress_pa: 500.0e6,
+            elasticity: CinematicElasticConfig::Isotropic {
+                young_modulus_pa: 200.0e9,
+                poisson_ratio: 0.29,
+                // Declared room-temperature estimate. It is retained even
+                // though the current source-bound trajectory remains rigid
+                // body motion, because contact must not invent it.
+                yield_stress_pa: 500.0e6,
+            },
             // A deliberately disclosed, low-loss room-temperature estimate.
             // These are input data, not an outcome-tuned frequency or decay.
             rayleigh_alpha_per_s: 0.35,
@@ -431,28 +539,30 @@ impl Default for CinematicDiscMaterialConfig {
             // elemental-iron n,k table onto 380:50:780 nm. This is visibly and
             // provenance-wise preferable to an artistic steel preset, but it
             // remains a proxy because the paper does not report alloy/finish.
-            optical_eta: [
-                2.112_307_692_308,
-                2.472_777_777_778,
-                2.695_2,
-                2.888_928_571_429,
-                2.940_606_060_606,
-                2.892_380_952_381,
-                2.892,
-                2.865,
-                2.895_846_153_846,
-            ],
-            optical_k: [
-                2.494_615_384_615,
-                2.706_666_666_667,
-                2.841_6,
-                2.916_428_571_429,
-                2.986_363_636_364,
-                3.065_476_190_476,
-                3.142,
-                3.235,
-                3.320_615_384_615,
-            ],
+            visible_optics: CinematicVisibleOpticalConfig::Conductor {
+                eta: [
+                    2.112_307_692_308,
+                    2.472_777_777_778,
+                    2.695_2,
+                    2.888_928_571_429,
+                    2.940_606_060_606,
+                    2.892_380_952_381,
+                    2.892,
+                    2.865,
+                    2.895_846_153_846,
+                ],
+                k: [
+                    2.494_615_384_615,
+                    2.706_666_666_667,
+                    2.841_6,
+                    2.916_428_571_429,
+                    2.986_363_636_364,
+                    3.065_476_190_476,
+                    3.142,
+                    3.235,
+                    3.320_615_384_615,
+                ],
+            },
             surface_roughness_alpha: 0.12,
             material_label: "Thorne-2026 reported steel; composition unspecified".to_owned(),
             process_label: "machined filleted disc; finish unmeasured".to_owned(),
@@ -868,13 +978,7 @@ impl CinematicFixtureConfig {
         let material = &self.disc.material;
         if !(material.temperature_k.is_finite()
             && material.temperature_k > 0.0
-            && material.young_modulus_pa.is_finite()
-            && material.young_modulus_pa > 0.0
-            && material.poisson_ratio.is_finite()
-            && material.poisson_ratio > -1.0
-            && material.poisson_ratio < 0.5
-            && material.yield_stress_pa.is_finite()
-            && material.yield_stress_pa > 0.0
+            && material.elasticity.has_valid_scalars()
             && material.rayleigh_alpha_per_s.is_finite()
             && material.rayleigh_alpha_per_s >= 0.0
             && material.rayleigh_beta_s.is_finite()
@@ -887,17 +991,34 @@ impl CinematicFixtureConfig {
                 "disc material mechanical, damping, or surface scalar is outside its physical domain",
             ));
         }
-        if material
-            .optical_eta
-            .iter()
-            .any(|value| !value.is_finite() || *value <= 0.0)
-            || material
-                .optical_k
-                .iter()
-                .any(|value| !value.is_finite() || *value < 0.0)
-        {
+        let valid_visible_optics = match &material.visible_optics {
+            CinematicVisibleOpticalConfig::Conductor { eta, k } => {
+                eta.iter().all(|value| value.is_finite() && *value > 0.0)
+                    && k.iter().all(|value| value.is_finite() && *value >= 0.0)
+            }
+            CinematicVisibleOpticalConfig::Dielectric {
+                cauchy_a,
+                cauchy_b_m2,
+                cauchy_c_m4,
+                transmittance_linear_rgb,
+                reference_distance_m,
+            } => {
+                cauchy_a.is_finite()
+                    && *cauchy_a > 0.0
+                    && cauchy_b_m2.is_finite()
+                    && *cauchy_b_m2 >= 0.0
+                    && cauchy_c_m4.is_finite()
+                    && *cauchy_c_m4 >= 0.0
+                    && transmittance_linear_rgb
+                        .iter()
+                        .all(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+                    && reference_distance_m.is_finite()
+                    && *reference_distance_m > 0.0
+            }
+        };
+        if !valid_visible_optics {
             return Err(CinematicFixtureError::InvalidConfig(
-                "disc material optical eta/k table is outside its physical domain",
+                "disc visible optical constitutive data is outside its physical domain",
             ));
         }
         if [
@@ -1184,6 +1305,24 @@ struct FixturePhysicalDiscState {
     equilibrium_phase_state: Option<EquilibriumPhaseState>,
 }
 
+enum FixtureResolvedElasticState {
+    Isotropic(IsotropicElasticStatePoint),
+    Orthotropic {
+        state: OrthotropicElasticStatePoint,
+        principal_to_specimen: [[f64; 3]; 3],
+        orientation_identity: ContentHash,
+    },
+}
+
+impl FixtureResolvedElasticState {
+    fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        match self {
+            Self::Isotropic(state) => state.resolved(),
+            Self::Orthotropic { state, .. } => state.resolved(),
+        }
+    }
+}
+
 struct FixturePhysicalPlateState {
     elastic: IsotropicElasticStatePoint,
     render_glass: DielectricGlass,
@@ -1236,37 +1375,104 @@ fn resolve_fixture_physical_disc(
         reference_profile.density_kg_per_m3,
         density_source,
     )?;
-    insert_scalar(
-        "young_modulus",
-        Pressure::DIMS,
-        config.young_modulus_pa,
-        &config.elastic_source,
-    )?;
-    insert_scalar(
-        "poisson_ratio",
-        Dims::NONE,
-        config.poisson_ratio,
-        &config.elastic_source,
-    )?;
-    insert_scalar(
-        "yield_stress",
-        Pressure::DIMS,
-        config.yield_stress_pa,
-        &config.elastic_source,
-    )?;
-    for ((name, value), source) in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES
-        .iter()
-        .zip(config.optical_eta)
-        .zip(core::iter::repeat(config.optical_source.as_str()))
-    {
-        insert_scalar(name, Dims::NONE, value, source)?;
+    match &config.elasticity {
+        CinematicElasticConfig::Isotropic {
+            young_modulus_pa,
+            poisson_ratio,
+            yield_stress_pa,
+        } => {
+            insert_scalar(
+                "young_modulus",
+                Pressure::DIMS,
+                *young_modulus_pa,
+                &config.elastic_source,
+            )?;
+            insert_scalar(
+                "poisson_ratio",
+                Dims::NONE,
+                *poisson_ratio,
+                &config.elastic_source,
+            )?;
+            insert_scalar(
+                "yield_stress",
+                Pressure::DIMS,
+                *yield_stress_pa,
+                &config.elastic_source,
+            )?;
+        }
+        CinematicElasticConfig::Orthotropic {
+            young_modulus_pa,
+            poisson_ratio,
+            shear_modulus_pa,
+            ..
+        } => {
+            for (name, value) in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
+                .iter()
+                .zip(*young_modulus_pa)
+            {
+                insert_scalar(name, Pressure::DIMS, value, &config.elastic_source)?;
+            }
+            for (name, value) in ORTHOTROPIC_POISSON_RATIO_PROPERTIES
+                .iter()
+                .zip(*poisson_ratio)
+            {
+                insert_scalar(name, Dims::NONE, value, &config.elastic_source)?;
+            }
+            for (name, value) in ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES
+                .iter()
+                .zip(*shear_modulus_pa)
+            {
+                insert_scalar(name, Pressure::DIMS, value, &config.elastic_source)?;
+            }
+        }
     }
-    for ((name, value), source) in VISIBLE_COMPLEX_IOR_K_PROPERTIES
-        .iter()
-        .zip(config.optical_k)
-        .zip(core::iter::repeat(config.optical_source.as_str()))
-    {
-        insert_scalar(name, Dims::NONE, value, source)?;
+    match &config.visible_optics {
+        CinematicVisibleOpticalConfig::Conductor { eta, k } => {
+            for (name, value) in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES.iter().zip(*eta) {
+                insert_scalar(name, Dims::NONE, value, &config.optical_source)?;
+            }
+            for (name, value) in VISIBLE_COMPLEX_IOR_K_PROPERTIES.iter().zip(*k) {
+                insert_scalar(name, Dims::NONE, value, &config.optical_source)?;
+            }
+        }
+        CinematicVisibleOpticalConfig::Dielectric {
+            cauchy_a,
+            cauchy_b_m2,
+            cauchy_c_m4,
+            transmittance_linear_rgb,
+            reference_distance_m,
+        } => {
+            insert_scalar(
+                VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+                Dims::NONE,
+                *cauchy_a,
+                &config.optical_source,
+            )?;
+            insert_scalar(
+                VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+                Dims([2, 0, 0, 0, 0, 0]),
+                *cauchy_b_m2,
+                &config.optical_source,
+            )?;
+            insert_scalar(
+                VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+                Dims([4, 0, 0, 0, 0, 0]),
+                *cauchy_c_m4,
+                &config.optical_source,
+            )?;
+            for (name, value) in VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES
+                .iter()
+                .zip(*transmittance_linear_rgb)
+            {
+                insert_scalar(name, Dims::NONE, value, &config.optical_source)?;
+            }
+            insert_scalar(
+                VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+                Dims([1, 0, 0, 0, 0, 0]),
+                *reference_distance_m,
+                &config.optical_source,
+            )?;
+        }
     }
     let card = MaterialCard::assemble(
         MaterialStateId {
@@ -1282,36 +1488,75 @@ fn resolve_fixture_physical_disc(
     let point = QueryPoint::new()
         .with("T", config.temperature_k)
         .map_err(pipeline)?;
-    let elastic = resolve_isotropic_elastic_state_point(
-        &card,
-        &point,
-        MaterialPropertySelection::SingleClaimOnly,
-    )
-    .map_err(pipeline)?;
-    let optical = resolve_visible_conductor_state_point(
+    let elastic = match &config.elasticity {
+        CinematicElasticConfig::Isotropic { .. } => FixtureResolvedElasticState::Isotropic(
+            resolve_isotropic_elastic_state_point(
+                &card,
+                &point,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .map_err(pipeline)?,
+        ),
+        CinematicElasticConfig::Orthotropic {
+            principal_to_specimen,
+            linear_strain_limit,
+            orientation_source,
+            ..
+        } => {
+            let state = resolve_orthotropic_elastic_state_point(
+                &card,
+                &point,
+                MaterialPropertySelection::SingleClaimOnly,
+                *linear_strain_limit,
+            )
+            .map_err(pipeline)?;
+            let mut orientation = DomainHasher::new(
+                "org.frankensim.euler-critique.material-orientation-declaration.v1",
+            );
+            orientation.update(orientation_source.as_bytes());
+            for value in principal_to_specimen.iter().flatten() {
+                orientation.update(&value.to_bits().to_le_bytes());
+            }
+            FixtureResolvedElasticState::Orthotropic {
+                state,
+                principal_to_specimen: *principal_to_specimen,
+                orientation_identity: orientation.finalize(),
+            }
+        }
+    };
+    let optical = resolve_visible_optical_state_point(
         &card,
         &point,
         MaterialPropertySelection::SingleClaimOnly,
     )
     .map_err(pipeline)?;
     let (specimen, equilibrium_phase_state) = match &specimen_config.phase {
-        CinematicDiscPhaseConfig::FixedSolidStatePoint => (
-            reference_profile
-                .spec
-                .resolve_with_isotropic_elastic_state(&elastic, cx)
-                .map_err(pipeline)?,
-            None,
-        ),
+        CinematicDiscPhaseConfig::FixedSolidStatePoint => {
+            let specimen = match &elastic {
+                FixtureResolvedElasticState::Isotropic(state) => reference_profile
+                    .spec
+                    .resolve_with_isotropic_elastic_state(state, cx)
+                    .map_err(pipeline)?,
+                FixtureResolvedElasticState::Orthotropic {
+                    state,
+                    principal_to_specimen,
+                    orientation_identity,
+                } => reference_profile
+                    .spec
+                    .resolve_with_orthotropic_elastic_state(
+                        state,
+                        *principal_to_specimen,
+                        *orientation_identity,
+                        cx,
+                    )
+                    .map_err(pipeline)?,
+            };
+            (specimen, None)
+        }
         CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy {
             specific_enthalpy_j_kg,
             knots,
         } => {
-            let solid = resolve_isotropic_solid_state_point(
-                &card,
-                &point,
-                MaterialPropertySelection::SingleClaimOnly,
-            )
-            .map_err(pipeline)?;
             let phase_curve =
                 EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(), knots.clone())
                     .map_err(pipeline)?;
@@ -1322,13 +1567,32 @@ fn resolve_fixture_physical_disc(
                 .profile
                 .resolve_with_phase_state(phase_state, cx)
                 .map_err(pipeline)?;
-            let fixed_solid = phase_specimen
-                .try_bind_fixed_solid(&solid)
-                .map_err(pipeline)?;
-            (
-                crate::specimen::ResolvedElasticDiscProfile::from(&fixed_solid),
-                Some(phase_state),
-            )
+            let specimen = match &elastic {
+                FixtureResolvedElasticState::Isotropic(_) => {
+                    let solid = resolve_isotropic_solid_state_point(
+                        &card,
+                        &point,
+                        MaterialPropertySelection::SingleClaimOnly,
+                    )
+                    .map_err(pipeline)?;
+                    let fixed_solid = phase_specimen
+                        .try_bind_fixed_solid(&solid)
+                        .map_err(pipeline)?;
+                    crate::specimen::ResolvedElasticDiscProfile::from(&fixed_solid)
+                }
+                FixtureResolvedElasticState::Orthotropic {
+                    state,
+                    principal_to_specimen,
+                    orientation_identity,
+                } => phase_specimen
+                    .try_bind_fixed_orthotropic_elastic(
+                        state,
+                        *principal_to_specimen,
+                        *orientation_identity,
+                    )
+                    .map_err(pipeline)?,
+            };
+            (specimen, Some(phase_state))
         }
     };
     if specimen.profile.content_identities().profile
@@ -1342,8 +1606,8 @@ fn resolve_fixture_physical_disc(
     surface.update(specimen.material_state_identity.as_bytes());
     surface.update(config.process_label.as_bytes());
     surface.update(&config.surface_roughness_alpha.to_bits().to_le_bytes());
-    let render_binding = EulerDiscMaterialStateBinding::try_conductor_elastic(
-        &elastic,
+    let render_binding = EulerDiscMaterialStateBinding::try_visible_optical_resolved(
+        elastic.resolved(),
         &optical,
         config.surface_roughness_alpha,
         surface.finalize(),
@@ -1380,27 +1644,21 @@ fn admit_thorne_source_bound_disc_state(
     let fixed_solid = matches!(config.phase, CinematicDiscPhaseConfig::FixedSolidStatePoint);
     let same_mechanical_state = [
         (candidate.temperature_k, admitted.temperature_k),
-        (candidate.young_modulus_pa, admitted.young_modulus_pa),
-        (candidate.poisson_ratio, admitted.poisson_ratio),
-        (candidate.yield_stress_pa, admitted.yield_stress_pa),
         (
             candidate.rayleigh_alpha_per_s,
             admitted.rayleigh_alpha_per_s,
         ),
         (candidate.rayleigh_beta_s, admitted.rayleigh_beta_s),
-        (
-            candidate.surface_roughness_alpha,
-            admitted.surface_roughness_alpha,
-        ),
     ]
     .into_iter()
-    .all(|(candidate, admitted)| same_scalar(candidate, admitted));
+    .all(|(candidate, admitted)| same_scalar(candidate, admitted))
+        && candidate.elasticity == admitted.elasticity;
     let same_profile = resolved.content_identities() == source_bound.content_identities();
     if same_profile && fixed_solid && same_mechanical_state {
         return Ok(());
     }
     Err(CinematicFixtureError::Pipeline(
-        "the current cinematic trajectory is the source-bound Thorne 2026 steel-on-glass reduced model; changed disc geometry, mass, temperature, elastic/yield/damping/contact-surface state, or phase authority requires the generic coupled dynamics path and cannot inherit the fitted steel trajectory".into(),
+        "the current cinematic trajectory is the source-bound Thorne 2026 steel-on-glass reduced model; changed disc geometry, mass, temperature, elastic/yield/damping state, or phase authority requires the generic coupled dynamics path and cannot inherit the fitted steel trajectory".into(),
     ))
 }
 
@@ -5945,6 +6203,46 @@ fn resolved_disc_manifest_json(
         }
         _ => "{\"authority\":\"internal-phase-binding-inconsistency\"}".to_owned(),
     };
+    let visible_optics = match &config.material.visible_optics {
+        CinematicVisibleOpticalConfig::Conductor { eta, k } => format!(
+            "{{\"family\":\"conductor-complex-index\",\"wavelengths_nm\":[380,430,480,530,580,630,680,730,780],\"eta\":{:?},\"k\":{:?}}}",
+            eta, k
+        ),
+        CinematicVisibleOpticalConfig::Dielectric {
+            cauchy_a,
+            cauchy_b_m2,
+            cauchy_c_m4,
+            transmittance_linear_rgb,
+            reference_distance_m,
+        } => format!(
+            "{{\"family\":\"homogeneous-dielectric\",\"cauchy_a\":{cauchy_a:.17e},\"cauchy_b_m2\":{cauchy_b_m2:.17e},\"cauchy_c_m4\":{cauchy_c_m4:.17e},\"transmittance_linear_rgb\":{:?},\"reference_distance_m\":{reference_distance_m:.17e}}}",
+            transmittance_linear_rgb
+        ),
+    };
+    let elasticity = match &config.material.elasticity {
+        CinematicElasticConfig::Isotropic {
+            young_modulus_pa,
+            poisson_ratio,
+            yield_stress_pa,
+        } => format!(
+            "{{\"family\":\"isotropic\",\"young_modulus_pa\":{young_modulus_pa:.17e},\"poisson_ratio\":{poisson_ratio:.17e},\"yield_stress_pa\":{yield_stress_pa:.17e}}}"
+        ),
+        CinematicElasticConfig::Orthotropic {
+            young_modulus_pa,
+            poisson_ratio,
+            shear_modulus_pa,
+            principal_to_specimen,
+            linear_strain_limit,
+            orientation_source,
+        } => format!(
+            "{{\"family\":\"orthotropic\",\"young_modulus_pa\":{:?},\"poisson_ratio\":{:?},\"shear_modulus_pa\":{:?},\"principal_to_specimen\":{:?},\"linear_strain_limit\":{linear_strain_limit:.17e},\"orientation_source\":\"{}\"}}",
+            young_modulus_pa,
+            poisson_ratio,
+            shear_modulus_pa,
+            principal_to_specimen,
+            json_escape(orientation_source),
+        ),
+    };
     format!(
         concat!(
             "{{\"profile_spec\":{},\"mass_input\":{},",
@@ -5954,9 +6252,10 @@ fn resolved_disc_manifest_json(
             "\"identities\":{{\"profile\":\"{}\",\"chart\":\"{}\",\"mass_properties\":\"{}\",",
             "\"thermal_geometry\":\"{}\",\"material_card\":\"{}\",\"elastic_state\":\"{}\",\"elastic_specimen\":\"{}\",",
             "\"render_binding\":\"{}\",\"damping_model\":\"{}\"}},",
-            "\"material_inputs\":{{\"temperature_k\":{:.17e},\"young_modulus_pa\":{:.17e},\"poisson_ratio\":{:.17e},",
-            "\"yield_stress_pa\":{:.17e},\"rayleigh_alpha_per_s\":{:.17e},\"rayleigh_beta_s\":{:.17e},",
-            "\"surface_roughness_alpha\":{:.17e},\"material_label\":\"{}\",\"process_label\":\"{}\"}},",
+            "\"material_inputs\":{{\"temperature_k\":{:.17e},\"elasticity\":{},",
+            "\"rayleigh_alpha_per_s\":{:.17e},\"rayleigh_beta_s\":{:.17e},",
+            "\"surface_roughness_alpha\":{:.17e},\"material_label\":\"{}\",\"process_label\":\"{}\",",
+            "\"visible_optics\":{},\"optical_source\":\"{}\"}},",
             "\"phase_state\":{}}}"
         ),
         disc_profile_spec_manifest_json(config.profile),
@@ -5981,14 +6280,14 @@ fn resolved_disc_manifest_json(
         physical.render_binding.identity().to_hex(),
         physical.damping_model_identity.to_hex(),
         config.material.temperature_k,
-        config.material.young_modulus_pa,
-        config.material.poisson_ratio,
-        config.material.yield_stress_pa,
+        elasticity,
         physical.rayleigh_damping.alpha,
         physical.rayleigh_damping.beta,
         config.material.surface_roughness_alpha,
         json_escape(&config.material.material_label),
         json_escape(&config.material.process_label),
+        visible_optics,
+        json_escape(&config.material.optical_source),
         phase,
     )
 }
@@ -6542,7 +6841,13 @@ mod tests {
             admit_thorne_source_bound_disc_state(&config, &source, &source)
                 .expect("exact benchmark state");
 
-            config.material.young_modulus_pa *= 0.5;
+            let CinematicElasticConfig::Isotropic {
+                young_modulus_pa, ..
+            } = &mut config.material.elasticity
+            else {
+                panic!("default elastic family changed unexpectedly");
+            };
+            *young_modulus_pa *= 0.5;
             let error = admit_thorne_source_bound_disc_state(&config, &source, &source)
                 .expect_err("changed constitutive state must not inherit benchmark dynamics");
             assert!(
@@ -6551,9 +6856,19 @@ mod tests {
             );
 
             let mut optical_only = CinematicDiscSpecimenConfig::default();
-            optical_only.material.optical_eta[0] *= 1.01;
+            let CinematicVisibleOpticalConfig::Conductor { eta, .. } =
+                &mut optical_only.material.visible_optics
+            else {
+                panic!("default optical family changed unexpectedly");
+            };
+            eta[0] *= 1.01;
             admit_thorne_source_bound_disc_state(&optical_only, &source, &source)
                 .expect("optical-only state does not alter the admitted mechanics inputs");
+
+            let mut finish_only = CinematicDiscSpecimenConfig::default();
+            finish_only.material.surface_roughness_alpha *= 1.25;
+            admit_thorne_source_bound_disc_state(&finish_only, &source, &source)
+                .expect("render-only surface finish does not alter the admitted mechanics inputs");
 
             let changed_geometry = CinematicDiscSpecimenConfig {
                 profile: DiscProfileSpec::ChamferedCylinder {
@@ -6569,6 +6884,61 @@ mod tests {
                 .expect("changed profile resolves generically");
             admit_thorne_source_bound_disc_state(&changed_geometry, &changed_profile, &source)
                 .expect_err("changed geometry must not inherit benchmark dynamics");
+        });
+    }
+
+    #[test]
+    fn g0_cinematic_disc_resolves_dielectric_picture_from_the_mechanical_material_card() {
+        with_test_cx(|cx| {
+            let mut config = CinematicDiscSpecimenConfig::default();
+            config.material.visible_optics = CinematicVisibleOpticalConfig::Dielectric {
+                cauchy_a: 1.76,
+                cauchy_b_m2: 8.2e-15,
+                cauchy_c_m4: 1.1e-28,
+                transmittance_linear_rgb: [0.55, 0.72, 0.88],
+                reference_distance_m: 0.004,
+            };
+            config.material.material_label =
+                "synthetic transparent solid; label is identity only".to_owned();
+            config.material.optical_source = "synthetic G0 dielectric constitutive data".to_owned();
+            let profile = config.resolve_profile(cx).expect("reference profile");
+            let physical = resolve_fixture_physical_disc(&profile, &config, cx)
+                .expect("complete dielectric schema resolves without a material-name switch");
+            assert!(matches!(
+                physical.render_binding.appearance(),
+                EulerMaterialStyle::Dielectric { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn g0_cinematic_disc_resolves_oriented_orthotropy_without_material_name_dispatch() {
+        with_test_cx(|cx| {
+            let mut config = CinematicDiscSpecimenConfig::default();
+            config.material.elasticity = CinematicElasticConfig::Orthotropic {
+                young_modulus_pa: [220.0e9, 80.0e9, 30.0e9],
+                poisson_ratio: [0.20, 0.10, 0.15],
+                shear_modulus_pa: [50.0e9, 20.0e9, 25.0e9],
+                principal_to_specimen: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                linear_strain_limit: 1.0e-3,
+                orientation_source: "synthetic G0 principal-axis declaration".to_owned(),
+            };
+            config.material.material_label =
+                "synthetic orthotropic solid; label is identity only".to_owned();
+            config.material.elastic_source =
+                "synthetic G0 orthotropic constitutive data".to_owned();
+            let profile = config.resolve_profile(cx).expect("reference profile");
+            let physical = resolve_fixture_physical_disc(&profile, &config, cx)
+                .expect("complete orthotropic schema and orientation resolve");
+            assert!(matches!(
+                physical.render_binding.appearance(),
+                EulerMaterialStyle::Conductor { .. }
+            ));
+            assert_eq!(
+                physical.specimen.profile.content_identities(),
+                profile.content_identities(),
+                "material symmetry must not fork the shared geometry/mass asset"
+            );
         });
     }
 
@@ -7449,7 +7819,13 @@ mod tests {
                     .sample_peak_fs
                     .max(audio.physical.master.meters.true_peak_estimate_fs);
                 assert!(audio.physical.master.source_peak_abs_pressure_pa > 0.0);
-                assert!(physical_peak > 0.40 && physical_peak <= 0.46);
+                let physical_peak_target =
+                    PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs;
+                assert!(
+                    physical_peak > 0.99 * physical_peak_target
+                        && physical_peak <= physical_peak_target + 1.0e-12,
+                    "physical listening-master peak {physical_peak} did not meet declared target {physical_peak_target}"
+                );
                 assert!(matches!(
                     &audio.physical.disc_radiator,
                     FixtureDiscAcousticRadiator::OmittedNoModesInBand { .. }

@@ -837,13 +837,20 @@ state or a full oriented orthotropic tensor. The material-axis rotation and its
 evidence identity are load-bearing inputs. They flow into the actual 3-D
 stiffness matrix and therefore into modal frequencies, shapes, BEM radiation,
 and sound; neither chemistry names nor an isotropic fallback select them.
+The cinematic specimen accepts both symmetry families as numerical data and
+binds the resolved mechanical and visible-optical bundles from one immutable
+material card and thermodynamic query point. Thus anisotropy changes the real
+modal/acoustic solve, while its chemistry label remains identity metadata only.
 
 The normal-contact ingress accepts a `BoundNormalContactModel`: both ordered
 bulk states, the complete `InterfaceSystemCard`, its resolved adhesion datum,
 and one executable constitutive-model card must share one exact physical state
-point. The model card—not the Euler fixture—selects Hertz versus the currently
-supported sphere-only Hunt--Crossley rung and owns damping, characteristic
-rate, applicability ratios, and finite temperature validity. The Euler adapter
+point. The model card—not the Euler fixture—selects rate-independent Hertz
+versus the point-contact Hunt--Crossley rung and owns damping, characteristic
+rate, applicability ratios, and finite temperature validity. Local profile
+geometry independently selects a sphere/plane or true two-curvature elliptic
+Hertz coefficient, so dissipation cannot replace an elliptic rim by a sphere.
+The Euler adapter
 supplies only geometry-owned half-space/layer extents and propagated
 uncertainty. It cannot retype density, modulus, Poisson ratio, yield stress,
 temperature, adhesion, damping, rate limits, surface order, or law identity.
@@ -983,8 +990,9 @@ kinematically implied interval quantity, not a resolved contact patch,
 subinterval force history, angular-impulse solution, tangential traction,
 measured force, deformable-contact model, or acoustic-radiation model.
 
-The transactional production-coupling bridge publishes only accepted
-smooth-contact prefixes. Every sample comes from the exact `fs-mbd`
+The transactional production-coupling bridge publishes accepted smooth-contact
+prefixes and also exposes one shared-checkpoint open/contact compliant driver.
+Every contact sample comes from the exact `fs-mbd`
 `StepReceipt` and retains its accepted rigid state, profile-native contact
 feature and point, normal, one-mode base endpoint, and disc mechanical-energy
 diagnostic. Because the force law is evaluated at the interval start while a
@@ -1000,12 +1008,36 @@ forcing and may drive the normal-force excitation seam, but its approximation
 to the continuously varying physical force and its usable bandwidth remain
 timestep-dependent convergence questions. The bridge leaves all aggregate
 channel-work availability false until the production composition publishes one
-shared cross-channel work ledger. Its energy defect follows the actual
+shared cross-channel work ledger. During an open interval, normal, tangential,
+and rolling state is retained without fabricating a zero-force contact port;
+the disc advances under gravity plus the selected gas law and the support
+advances with exactly zero applied contact load. A later approaching or
+impact-candidate state may re-enter the same finite-patch law only through the
+explicit time-resolved compliant regime and its declared rate, pressure,
+strain, temperature, and geometry applicability envelope. Branch changes carry
+fixed-grid time brackets, not exact event-time claims; timestep refinement must
+shrink those brackets. No restitution coefficient or synthetic impact impulse
+is inferred. Its energy defect follows the actual
 `fs-mbd` convention of world-fixed force and body-fixed torque, but remains a
 disc-only residual rather than total disc/base/contact/gas closure. Reaching
-the requested prefix step budget is horizon censoring; a source refusal remains
-an explicit backend-specific numerical refusal. The bridge never invents
-separation, impact, reimpact, or terminal continuation after the source stops.
+the requested step budget is horizon censoring; a source refusal remains
+an explicit backend-specific numerical refusal. The older smooth-prefix render
+bridge never invents separation, impact, reimpact, or terminal continuation
+after the source stops; the event-aware trajectory requires its own
+render/control-stream admission.
+
+An optional production substep may additionally carry two owned material-frame
+surface-height traces and their actual path coordinates/speeds. The accepted
+Hertz footprint filters those traces through `fs-tribo::surface_excitation`,
+and the normal law's consistent tangent converts the admitted small height into
+one action/reaction force perturbation. That perturbation is included in both
+the `fs-mbd` wrench and the moving-base load before the step commits, and its
+receipt remains available to structural acoustics. It is therefore not a
+post-hoc audio oscillator. This rung is explicitly first-order: it preserves
+the nominal action line and patch used by tangential/rolling laws and refuses
+outside the caller's bounded height/approach fraction or if the perturbation
+would open contact. Large topography requires nonlinear contact re-resolution;
+no material name, audible frequency, or renderer setting selects this channel.
 
 Localization brackets describe evaluated uncertainty bounds, not additional
 accepted states. A terminal event's retained time must exactly equal its final
@@ -1606,7 +1638,9 @@ Doppler model, or room response. Those require the passive rational frequency-
 response and propagation-history rungs tracked separately. The current small-
 strain solid basis also cannot cross yield, large deformation, or phase change;
 a hot lead request must refuse when its evidence-bearing solid state leaves its
-validity domain until the enthalpy/phase/evolving-geometry rung exists.
+validity domain. The current enthalpy/phase ingress names the required
+mass-conserving free-surface escalation, but no liquid deformation, remeshing,
+flow, phase-dependent acoustics, or phase-dependent optics is yet executed.
 
 `timeline_resampling` v1 reconstructs render/audio query times from this
 admitted state without mutating the source artifact. Center-of-mass translation
@@ -1732,13 +1766,13 @@ strict path-local LIFO entry/exit semantics. Encountered reversed winding,
 non-nested overlap, or escape from a declared closed medium refuses rather than
 silently choosing an index of refraction. This local runtime check is not a
 global watertightness, orientation, or non-overlap certificate for the mesh.
-`EulerMaterialStyle::Conductor` carries the L5 renderer's validated complex-IOR
-optics and isotropic roughness without deriving either from the mechanics
-material. Representative tungsten and stainless-steel presets bind their
-distinct provenance and exact optical/material identities into the Euler
-configuration and scene while leaving trajectory, contact geometry, mass, and
-preview mesh unchanged. They are uncalibrated look-development starting points,
-not predictions of a product, alloy, oxide/passive film, machining, or finish.
+`EulerMaterialStyle::Conductor` carries the L5 renderer's admitted complex-IOR
+optics and explicit isotropic roughness. The cinematic cross-domain binding
+requires bulk mechanics and conductor/dielectric optics to resolve from the
+same immutable material card and thermodynamic state; surface finish retains a
+separate identity because it is not implied by bulk chemistry. Scene look
+presets remain uncalibrated look-development inputs, not predictions of a
+product, alloy, oxide/passive film, machining, or finish.
 Layered engraving, anisotropic brushing, environment lighting, measured
 specimen fitting, and final studio look development remain downstream
 capabilities. Difficult focused caustics can converge slowly in the current

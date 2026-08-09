@@ -37,9 +37,9 @@ pub struct NormalMaterialInterface {
     pub interface: InterfaceSystemRef,
     /// Caller-declared reduced modulus in Pa.
     pub reduced_modulus_pa: f64,
-    /// Optional Hunt--Crossley dissipation coefficient in s/m.  It is valid
-    /// only for the admitted sphere/plane rung.
-    pub hunt_crossley_dissipation_s_per_m: Option<f64>,
+    /// Card-selected normal force-rate family. Geometry remains independently
+    /// resolved from the actual patch and is never inferred from this field.
+    pub rate_response: NormalRateResponse,
     /// Generic half-space, yield, rate, temperature, layer, and adhesion data.
     pub applicability: ApplicabilityInput,
     /// Explicit limits for the generic applicability ratios.
@@ -95,11 +95,13 @@ pub fn bind_normal_material_interface(
     }
     let binding_id = model.identity();
     let model_card = model.model_card();
-    let hunt_crossley_dissipation_s_per_m = match model.law() {
-        BoundNormalContactLaw::ElasticHertz => None,
-        BoundNormalContactLaw::HuntCrossleySphere {
+    let rate_response = match model.law() {
+        BoundNormalContactLaw::ElasticHertz => NormalRateResponse::ElasticHertz,
+        BoundNormalContactLaw::HuntCrossleyPoint {
             dissipation_s_per_m,
-        } => Some(dissipation_s_per_m),
+        } => NormalRateResponse::HuntCrossleyPoint {
+            dissipation_s_per_m,
+        },
     };
     Ok(NormalMaterialInterface {
         material_card_id: format!("fs-contact/normal-model-binding/{binding_id}"),
@@ -115,7 +117,7 @@ pub fn bind_normal_material_interface(
         ),
         interface: elastic.interface().interface().clone(),
         reduced_modulus_pa: elastic.reduced_modulus_pa(),
-        hunt_crossley_dissipation_s_per_m,
+        rate_response,
         applicability: ApplicabilityInput {
             half_space_depth_m: config.half_space_depth_m,
             layer_thickness_m: config.layer_thickness_m,
@@ -174,6 +176,34 @@ pub enum EulerNormalGeometry {
     EllipticParaboloid,
 }
 
+/// Card-bound rate dependence of an admitted point normal response.
+///
+/// This is constitutive data, not a material-name dispatch. The actual local
+/// curvature geometry remains an independent input to the normal law.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NormalRateResponse {
+    /// Rate-independent elastic Hertz response.
+    ElasticHertz,
+    /// Passive Hunt--Crossley force factor for an admitted point-contact Hertz
+    /// geometry. The coefficient has units s/m.
+    HuntCrossleyPoint {
+        /// Velocity-proportional indentation dissipation coefficient [s/m].
+        dissipation_s_per_m: f64,
+    },
+}
+
+/// Numerical regime owning the current normal-contact sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalContactIntegrationRegime {
+    /// Quasistatic/smooth fixed-branch solve; impact-candidate kinematics are a
+    /// typed handoff rather than silently admitted.
+    SmoothQuasistatic,
+    /// Time-resolved compliant transient. High closure rates may be evaluated
+    /// by the same finite-patch law, subject to its explicit rate, pressure,
+    /// strain, temperature, and geometry applicability limits.
+    CompliantTransient,
+}
+
 /// Identities owned by the Euler caller for one smooth fixed-branch sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalContactIdentity {
@@ -200,6 +230,8 @@ pub struct EulerNormalContactInput {
     pub material: NormalMaterialInterface,
     /// Explicitly selected supported local curvature shape.
     pub geometry: EulerNormalGeometry,
+    /// Numerical regime that owns this sample.
+    pub integration_regime: NormalContactIntegrationRegime,
     /// Immutable generic exactly-once state from the prior accepted sample.
     pub state: NormalPatchEmbedState,
     /// Sample clock in seconds.
@@ -318,8 +350,6 @@ pub enum NormalContactError {
     },
     /// Hunt--Crossley is not a line-contact law in the generic ladder.
     DissipativeLineUnsupported,
-    /// The current generic ladder has no dissipative elliptic Hertz variant.
-    DissipativeEllipticUnsupported,
     /// The generic finite-patch law or transactional embedding refused the request.
     GenericRefusal(NormalPatchEmbedError),
 }
@@ -358,11 +388,19 @@ pub fn evaluate_normal_contact(
                 state: input.state.clone(),
             });
         }
-        PatchContactStatus::Unknown | PatchContactStatus::ImpactCandidate => {
+        PatchContactStatus::Unknown => {
             return Err(NormalContactError::UnavailableKinematics {
                 status: input.kinematics.status,
             });
         }
+        PatchContactStatus::ImpactCandidate
+            if input.integration_regime != NormalContactIntegrationRegime::CompliantTransient =>
+        {
+            return Err(NormalContactError::UnavailableKinematics {
+                status: input.kinematics.status,
+            });
+        }
+        PatchContactStatus::ImpactCandidate => {}
         PatchContactStatus::Approaching
         | PatchContactStatus::Touching
         | PatchContactStatus::Grazing => {}
@@ -466,8 +504,10 @@ fn validate_material(material: &NormalMaterialInterface) -> Result<(), NormalCon
             field: "reduced_modulus_pa",
         });
     }
-    if let Some(value) = material.hunt_crossley_dissipation_s_per_m
-        && (!value.is_finite() || value < 0.0)
+    if let NormalRateResponse::HuntCrossleyPoint {
+        dissipation_s_per_m,
+    } = material.rate_response
+        && (!dissipation_s_per_m.is_finite() || dissipation_s_per_m < 0.0)
     {
         return Err(NormalContactError::InvalidInput {
             field: "hunt_crossley_dissipation_s_per_m",
@@ -605,13 +645,15 @@ fn law_from_input(
 ) -> Result<(NormalPatchLaw, NormalPatchGeometry, f64), NormalContactError> {
     match geometry {
         EulerNormalGeometry::SpherePlane => Ok((
-            match material.hunt_crossley_dissipation_s_per_m {
-                Some(dissipation_s_per_m) => NormalPatchLaw::HuntCrossleySphere {
+            match material.rate_response {
+                NormalRateResponse::HuntCrossleyPoint {
+                    dissipation_s_per_m,
+                } => NormalPatchLaw::HuntCrossleySphere {
                     effective_radius_m: curvature.reporting_radius_m,
                     reduced_modulus_pa: material.reduced_modulus_pa,
                     dissipation_s_per_m,
                 },
-                None => NormalPatchLaw::HertzSpherePlane {
+                NormalRateResponse::ElasticHertz => NormalPatchLaw::HertzSpherePlane {
                     effective_radius_m: curvature.reporting_radius_m,
                     reduced_modulus_pa: material.reduced_modulus_pa,
                 },
@@ -622,7 +664,10 @@ fn law_from_input(
         EulerNormalGeometry::CylinderPlane {
             line_load_n_per_m, ..
         } => {
-            if material.hunt_crossley_dissipation_s_per_m.is_some() {
+            if matches!(
+                material.rate_response,
+                NormalRateResponse::HuntCrossleyPoint { .. }
+            ) {
                 return Err(NormalContactError::DissipativeLineUnsupported);
             }
             if !line_load_n_per_m.is_finite() || line_load_n_per_m < 0.0 {
@@ -640,24 +685,28 @@ fn law_from_input(
             ))
         }
         EulerNormalGeometry::EllipticParaboloid => {
-            if material.hunt_crossley_dissipation_s_per_m.is_some() {
-                return Err(NormalContactError::DissipativeEllipticUnsupported);
-            }
             let maximum_principal_curvature_m_inverse = curvature
                 .first_principal_m_inverse
                 .max(curvature.second_principal_m_inverse);
             let minimum_principal_curvature_m_inverse = curvature
                 .first_principal_m_inverse
                 .min(curvature.second_principal_m_inverse);
-            Ok((
-                NormalPatchLaw::HertzEllipticParaboloid {
+            let law = match material.rate_response {
+                NormalRateResponse::ElasticHertz => NormalPatchLaw::HertzEllipticParaboloid {
                     maximum_principal_curvature_m_inverse,
                     minimum_principal_curvature_m_inverse,
                     reduced_modulus_pa: material.reduced_modulus_pa,
                 },
-                NormalPatchGeometry::EllipticParaboloid,
-                0.0,
-            ))
+                NormalRateResponse::HuntCrossleyPoint {
+                    dissipation_s_per_m,
+                } => NormalPatchLaw::HuntCrossleyEllipticParaboloid {
+                    maximum_principal_curvature_m_inverse,
+                    minimum_principal_curvature_m_inverse,
+                    reduced_modulus_pa: material.reduced_modulus_pa,
+                    dissipation_s_per_m,
+                },
+            };
+            Ok((law, NormalPatchGeometry::EllipticParaboloid, 0.0))
         }
     }
 }

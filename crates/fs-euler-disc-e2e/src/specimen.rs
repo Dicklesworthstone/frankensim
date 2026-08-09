@@ -260,6 +260,35 @@ pub enum ElasticDiscProfileError {
     Elastic(TetElasticError),
 }
 
+/// Refusal while binding a thermodynamic solid state to an elastic tensor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PhaseElasticDiscBindingError {
+    /// Phase, material-card, temperature, or density admission refused.
+    Phase(PhaseDiscBindingError),
+    /// The supplied anisotropic tensor or orientation refused.
+    Elastic(TetElasticError),
+}
+
+impl fmt::Display for PhaseElasticDiscBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for PhaseElasticDiscBindingError {}
+
+impl From<PhaseDiscBindingError> for PhaseElasticDiscBindingError {
+    fn from(source: PhaseDiscBindingError) -> Self {
+        Self::Phase(source)
+    }
+}
+
+impl From<TetElasticError> for PhaseElasticDiscBindingError {
+    fn from(source: TetElasticError) -> Self {
+        Self::Elastic(source)
+    }
+}
+
 impl fmt::Display for ElasticDiscProfileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{self:?}")
@@ -485,6 +514,31 @@ impl ResolvedEvolvedSolidDiscProfile {
         Ok(ResolvedElasticDiscProfile::bind(
             self.profile.clone(),
             TetElasticMaterial::from_resolved_elastic_state(material),
+            material.resolved().card_identity(),
+        ))
+    }
+
+    /// Bind evolved solid geometry to an oriented orthotropic tangent.
+    pub fn try_bind_orthotropic_elastic(
+        &self,
+        material: &OrthotropicElasticStatePoint,
+        principal_to_world: [[f64; 3]; 3],
+        orientation_identity: ContentHash,
+    ) -> Result<ResolvedElasticDiscProfile, PhaseElasticDiscBindingError> {
+        require_matching_phase_material_state(
+            self.phase_state,
+            material.resolved().card_identity(),
+            material.resolved().query_point(),
+            material.density_kg_m3(),
+        )?;
+        let elastic_material = TetElasticMaterial::try_from_resolved_orthotropic_state(
+            material,
+            principal_to_world,
+            orientation_identity,
+        )?;
+        Ok(ResolvedElasticDiscProfile::bind(
+            self.profile.clone(),
+            elastic_material,
             material.resolved().card_identity(),
         ))
     }
@@ -798,6 +852,41 @@ impl ResolvedPhaseDiscProfile {
             material: material.clone(),
             identity: identity.finalize(),
         })
+    }
+
+    /// Bind a fully solid phase state to an oriented orthotropic tangent.
+    ///
+    /// The phase state, elastic properties, and orientation remain independent
+    /// inputs. A nonzero liquid fraction refuses before fixed-topology
+    /// mechanics, acoustics, or rendering can reuse the stale solid tensor.
+    pub fn try_bind_fixed_orthotropic_elastic(
+        &self,
+        material: &OrthotropicElasticStatePoint,
+        principal_to_world: [[f64; 3]; 3],
+        orientation_identity: ContentHash,
+    ) -> Result<ResolvedElasticDiscProfile, PhaseElasticDiscBindingError> {
+        if self.phase_state.phase() != SolidLiquidPhase::Solid {
+            return Err(PhaseDiscBindingError::EvolvingPhaseRequired {
+                liquid_mass_fraction: self.phase_state.liquid_mass_fraction(),
+            }
+            .into());
+        }
+        require_matching_phase_material_state(
+            self.phase_state,
+            material.resolved().card_identity(),
+            material.resolved().query_point(),
+            material.density_kg_m3(),
+        )?;
+        let elastic_material = TetElasticMaterial::try_from_resolved_orthotropic_state(
+            material,
+            principal_to_world,
+            orientation_identity,
+        )?;
+        Ok(ResolvedElasticDiscProfile::bind(
+            self.profile.clone(),
+            elastic_material,
+            material.resolved().card_identity(),
+        ))
     }
 }
 

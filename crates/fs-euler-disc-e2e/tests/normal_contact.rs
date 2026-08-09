@@ -17,8 +17,9 @@ use fs_rep_frep::AxisymmetricSupportAuthority;
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 use normal_contact::{
     EulerNormalContactInput, EulerNormalContactOutcome, EulerNormalGeometry,
-    NORMAL_CONTACT_ADAPTER_ID, NormalContactError, NormalContactIdentity, NormalDissipation,
-    NormalElasticStorage, NormalMaterialInterface, evaluate_normal_contact,
+    NORMAL_CONTACT_ADAPTER_ID, NormalContactError, NormalContactIdentity,
+    NormalContactIntegrationRegime, NormalDissipation, NormalElasticStorage,
+    NormalMaterialInterface, NormalRateResponse, evaluate_normal_contact,
 };
 use patch_kinematics::{
     Creepage, CurvatureMetadata, OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata,
@@ -113,7 +114,11 @@ fn material(dissipation: Option<f64>) -> NormalMaterialInterface {
         )
         .expect("interface"),
         reduced_modulus_pa: 2.0e9,
-        hunt_crossley_dissipation_s_per_m: dissipation,
+        rate_response: dissipation.map_or(NormalRateResponse::ElasticHertz, |value| {
+            NormalRateResponse::HuntCrossleyPoint {
+                dissipation_s_per_m: value,
+            }
+        }),
         applicability: ApplicabilityInput {
             half_space_depth_m: 1.0,
             layer_thickness_m: 1.0,
@@ -165,6 +170,7 @@ fn input(
         ),
         material: material(dissipation),
         geometry,
+        integration_regime: NormalContactIntegrationRegime::SmoothQuasistatic,
         state: NormalPatchEmbedState::new(0.0, 1.0).expect("state"),
         time_s: 0.1,
         iteration: 1,
@@ -365,10 +371,14 @@ fn unequal_positive_curvatures_map_to_a_true_elliptic_patch() {
         -0.1,
         EulerNormalGeometry::EllipticParaboloid,
         Some(0.1),
-    ));
+    ))
+    .expect("admitted dissipative elliptic contact");
+    let EulerNormalContactOutcome::Active(dissipative) = dissipative else {
+        panic!("active dissipative elliptic contact expected");
+    };
     assert!(matches!(
-        dissipative,
-        Err(NormalContactError::DissipativeEllipticUnsupported)
+        dissipative.dissipation,
+        NormalDissipation::Point { work_j, power_w } if work_j > 0.0 && power_w > 0.0
     ));
 }
 
@@ -414,6 +424,19 @@ fn hostile_curvature_unknown_and_event_states_refuse() {
             status: PatchContactStatus::ImpactCandidate
         })
     ));
+
+    let mut transient = input(
+        PatchContactStatus::ImpactCandidate,
+        (20.0, 10.0),
+        -1.0e-4,
+        -0.2,
+        EulerNormalGeometry::EllipticParaboloid,
+        Some(0.1),
+    );
+    transient.integration_regime = NormalContactIntegrationRegime::CompliantTransient;
+    let transient = evaluate_normal_contact(&transient)
+        .expect("time-resolved compliant impact candidate is admitted by its law envelope");
+    assert!(matches!(transient, EulerNormalContactOutcome::Active(_)));
 }
 
 #[test]

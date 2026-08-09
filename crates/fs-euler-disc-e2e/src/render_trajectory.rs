@@ -19,7 +19,9 @@ use crate::coupled_runner::{
 };
 use crate::production_coupling::{
     ProductionCouplingError, ProductionCouplingModel, ProductionCouplingReceipt,
-    SmoothContactTrajectory, SmoothContactTrajectoryTermination,
+    ProductionEventTrajectory, ProductionEventTrajectoryTermination, ProductionOpenFlightReceipt,
+    ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt, SmoothContactTrajectory,
+    SmoothContactTrajectoryTermination,
 };
 use crate::reduced_decay::{
     BILDSTEN_PUBLISHED_POWER_COEFFICIENT, ChannelPowers, ChannelWork, REDUCED_DECAY_MODEL_ID,
@@ -41,6 +43,8 @@ pub const MAX_RENDER_TRAJECTORY_NO_CLAIMS: usize = 64;
 pub const REDUCED_DECAY_RENDER_BRIDGE_VERSION: u32 = 3;
 /// Exact producer version for the transactional production-prefix bridge.
 pub const PRODUCTION_COUPLING_RENDER_BRIDGE_VERSION: u32 = 1;
+/// Exact producer version for the event-aware production trajectory bridge.
+pub const PRODUCTION_EVENT_RENDER_BRIDGE_VERSION: u32 = 1;
 /// Cinematic tail retained by the default reduced-decay bridge [s].
 ///
 /// The source run is slightly longer than eight seconds. Rebasing its final
@@ -599,7 +603,7 @@ impl RenderTrajectory {
                     field: "production-prefix time",
                 });
             }
-            let normal_force_n = match &receipt.normal.generic.receipt {
+            let nominal_normal_force_n = match &receipt.normal.generic.receipt {
                 fs_contact::normal_patch::NormalPatchReceipt::Point(point) => point.normal_force_n,
                 fs_contact::normal_patch::NormalPatchReceipt::Line(_) => {
                     return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
@@ -608,6 +612,18 @@ impl RenderTrajectory {
                     });
                 }
             };
+            let expected_applied_normal_force_n = nominal_normal_force_n
+                + receipt
+                    .surface_excitation
+                    .as_ref()
+                    .map_or(0.0, |surface| surface.normal_force_perturbation_n);
+            let normal_force_n = base.compressive_normal_force_on_base_n;
+            if expected_applied_normal_force_n.to_bits() != normal_force_n.to_bits() {
+                return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "topography-perturbed normal-force lineage",
+                });
+            }
             // The force receipt is evaluated from the interval-start patch,
             // but render contact geometry is an endpoint field. Re-query the
             // actual profile support at the accepted post-step pose instead
@@ -764,6 +780,383 @@ impl RenderTrajectory {
                 "render channel work is unavailable pending one shared cross-channel work ledger; zero payloads mean unavailable, not zero physical loss".to_owned(),
                 "mechanical energy and defect are disc-only fs-mbd diagnostics, not full disc/base/contact/gas energy closure".to_owned(),
                 "model identity binds the declared production configuration and exposed adapter/base identities; it does not independently introspect every private constituent law coefficient".to_owned(),
+                "no thermal evolution, phase change, melting, plastic flow, structural-mode solve, or acoustic-radiation solve is implied".to_owned(),
+            ],
+            authority: RenderTrajectoryAuthority::SimulationEvidence,
+        };
+        Self::try_new(metadata, inputs)
+    }
+
+    /// Convert an accepted event-aware production trajectory into the common
+    /// render and sound state stream.
+    ///
+    /// The source interval branch controls whether a physical contact force was
+    /// applied. A branch change detected at the following checkpoint is attached
+    /// to the preceding interval endpoint with its full fixed-grid time bracket:
+    /// contact-to-open therefore retains the contact interval force and ends
+    /// open, while open-to-contact retains exactly zero normal force and ends
+    /// closed. This is the state convention required by the common trajectory
+    /// validator and prevents an impact-only audio impulse from being invented.
+    pub fn from_production_event_trajectory(
+        model: &ProductionCouplingModel,
+        source: &ProductionEventTrajectory,
+        profile: &ResolvedDiscProfile,
+        declared_maximum_timestep_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        cx.checkpoint()
+            .map_err(|_| RenderTrajectoryError::Cancelled)?;
+        if source.accepted_steps.is_empty() {
+            return Err(RenderTrajectoryError::ProductionPrefixEmpty);
+        }
+        if !(declared_maximum_timestep_s.is_finite() && declared_maximum_timestep_s > 0.0) {
+            return Err(RenderTrajectoryError::InvalidTimestep);
+        }
+        let profile_mass = profile_mass_to_mbd(profile.mass_properties)
+            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+        model
+            .validate_checkpoint(&source.start_checkpoint)
+            .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
+        model
+            .validate_checkpoint(&source.last_accepted_checkpoint)
+            .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
+        if model.disc_mass_properties != profile_mass {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+        let expected_version = source
+            .start_checkpoint
+            .committed_version
+            .checked_add(u64::try_from(source.accepted_steps.len()).map_err(|_| {
+                RenderTrajectoryError::Capacity {
+                    artifact: "production-event version",
+                    requested: source.accepted_steps.len(),
+                }
+            })?)
+            .ok_or(RenderTrajectoryError::Capacity {
+                artifact: "production-event version",
+                requested: source.accepted_steps.len(),
+            })?;
+        if source.last_accepted_checkpoint.committed_version != expected_version {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(source.accepted_steps.len())
+            .map_err(|_| RenderTrajectoryError::Capacity {
+                artifact: "production event render samples",
+                requested: source.accepted_steps.len(),
+            })?;
+        let mut interval_start_time_s = source.start_checkpoint.elapsed_time_s();
+        let mut previous_state = source.start_checkpoint.disc_state;
+        let mut previous_base_displacement_m = source.start_checkpoint.base_displacement_m();
+        let mut previous_base_velocity_m_per_s = source.start_checkpoint.base_velocity_m_per_s();
+        let mut transition_index = 0_usize;
+        let final_index = source.accepted_steps.len() - 1;
+
+        for (index, step) in source.accepted_steps.iter().enumerate() {
+            if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
+                cx.checkpoint()
+                    .map_err(|_| RenderTrajectoryError::Cancelled)?;
+            }
+            if step.start_time_s.to_bits() != interval_start_time_s.to_bits() {
+                return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "event source start clock",
+                });
+            }
+            let (rigid_step, base, contact_receipt) = match (&step.branch, &step.receipt) {
+                (
+                    ProductionTrajectoryBranch::CompliantContact,
+                    ProductionTrajectoryStepReceipt::CompliantContact(receipt),
+                ) => (&receipt.rigid_step, receipt.base.receipt(), Some(receipt)),
+                (
+                    ProductionTrajectoryBranch::OpenFlight,
+                    ProductionTrajectoryStepReceipt::OpenFlight(receipt),
+                ) => (&receipt.rigid_step, receipt.base.receipt(), None),
+                _ => {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "event branch/receipt mismatch",
+                    });
+                }
+            };
+            let duration_s = rigid_step.duration_seconds;
+            let time_s = interval_start_time_s + duration_s;
+            if duration_s.to_bits() != base.timestep_s.to_bits()
+                || duration_s > declared_maximum_timestep_s
+                || step.end_time_s.to_bits() != time_s.to_bits()
+                || rigid_step.state_before != previous_state
+                || base.modal_displacement_start_m.to_bits()
+                    != previous_base_displacement_m.to_bits()
+                || base.modal_velocity_start_m_per_s.to_bits()
+                    != previous_base_velocity_m_per_s.to_bits()
+            {
+                return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "event accepted state/clock lineage",
+                });
+            }
+
+            let (next_disc_state, normal_force_n, energy_defect_j) = if let Some(receipt) =
+                contact_receipt
+            {
+                if rigid_step.state_after != receipt.next_disc_state {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "contact endpoint state",
+                    });
+                }
+                let nominal_normal_force_n = match &receipt.normal.generic.receipt {
+                    fs_contact::normal_patch::NormalPatchReceipt::Point(point) => {
+                        point.normal_force_n
+                    }
+                    fs_contact::normal_patch::NormalPatchReceipt::Line(_) => {
+                        return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                            sample: index,
+                            field: "line contact cannot produce a point-resultant trajectory",
+                        });
+                    }
+                };
+                let expected_force_n = nominal_normal_force_n
+                    + receipt
+                        .surface_excitation
+                        .as_ref()
+                        .map_or(0.0, |surface| surface.normal_force_perturbation_n);
+                if expected_force_n.to_bits() != base.compressive_normal_force_on_base_n.to_bits() {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "event topography-perturbed normal-force lineage",
+                    });
+                }
+                (
+                    receipt.next_disc_state,
+                    base.compressive_normal_force_on_base_n,
+                    production_disc_work_residual_j(model, receipt, index)?,
+                )
+            } else {
+                let ProductionTrajectoryStepReceipt::OpenFlight(receipt) = &step.receipt else {
+                    unreachable!("branch/receipt match checked above")
+                };
+                if rigid_step.state_after != receipt.next_disc_state
+                    || base.compressive_normal_force_on_base_n != 0.0
+                {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "open endpoint state or zero contact load",
+                    });
+                }
+                (
+                    receipt.next_disc_state,
+                    0.0,
+                    production_open_disc_work_residual_j(model, receipt, index)?,
+                )
+            };
+
+            let transition = source
+                .transitions
+                .get(transition_index)
+                .filter(|transition| transition.bracket_end_s.to_bits() == time_s.to_bits());
+            let endpoint_branch = transition.map_or(step.branch, |transition| transition.to);
+            if let Some(transition) = transition {
+                if transition.from != step.branch
+                    || transition.bracket_start_s.to_bits() != interval_start_time_s.to_bits()
+                    || !(transition.bracket_start_s <= transition.bracket_end_s)
+                {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "event transition lineage",
+                    });
+                }
+                transition_index += 1;
+            }
+            let endpoint_contact = profile_contact_geometry(
+                &profile.chart,
+                profile.mass_properties,
+                next_disc_state.pose(),
+                cx,
+            )
+            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+            let signed_gap_m = endpoint_contact.contact.gap_m - base.modal_displacement_end_m;
+            let contact_geometry = match endpoint_branch {
+                ProductionTrajectoryBranch::CompliantContact => {
+                    if signed_gap_m > 0.0 {
+                        return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                            sample: index,
+                            field: "closed event endpoint has positive gap",
+                        });
+                    }
+                    Some(RenderContactGeometry {
+                        point_world_m: endpoint_contact.contact.point_world_m,
+                        normal_world: Vec3::new(0.0, 0.0, 1.0),
+                        support_feature: RenderSupportFeature::ProfileFeature(
+                            endpoint_contact.support_source_feature,
+                        ),
+                    })
+                }
+                ProductionTrajectoryBranch::OpenFlight => {
+                    if signed_gap_m < 0.0 {
+                        return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                            sample: index,
+                            field: "open event endpoint has negative gap",
+                        });
+                    }
+                    None
+                }
+            };
+            let contact_transitions = transition
+                .map(|transition| {
+                    vec![RenderContactTransition {
+                        kind: match (transition.from, transition.to) {
+                            (
+                                ProductionTrajectoryBranch::CompliantContact,
+                                ProductionTrajectoryBranch::OpenFlight,
+                            ) => ContactTransitionKind::Opening,
+                            (
+                                ProductionTrajectoryBranch::OpenFlight,
+                                ProductionTrajectoryBranch::CompliantContact,
+                            ) => ContactTransitionKind::Reimpact,
+                            _ => unreachable!("driver records only branch changes"),
+                        },
+                        time_s,
+                        bracket_start_s: transition.bracket_start_s,
+                        bracket_end_s: transition.bracket_end_s,
+                    }]
+                })
+                .unwrap_or_default();
+            let before_qois = DerivedEulerQois::from_state(
+                rigid_step.state_before,
+                model.disc_mass_properties,
+                0.0,
+            )?;
+            let after_qois_without_acceleration = DerivedEulerQois::from_state(
+                rigid_step.state_after,
+                model.disc_mass_properties,
+                0.0,
+            )?;
+            let qois = DerivedEulerQois {
+                precession_acceleration_rad_per_s2: (after_qois_without_acceleration
+                    .precession_rad_per_s
+                    - before_qois.precession_rad_per_s)
+                    / duration_s,
+                ..after_qois_without_acceleration
+            };
+            let orientation = next_disc_state.pose().orientation();
+            inputs.push(RenderTrajectorySampleInput {
+                interval_start_time_s,
+                time_s,
+                world_frame: RenderWorldFrame::RightHandedZUp,
+                units: RenderUnitSystem::SiRadians,
+                center_of_mass_world_m: next_disc_state.pose().position_world(),
+                orientation_body_to_world: orientation.components(),
+                linear_momentum_world_kg_m_per_s: next_disc_state.linear_momentum_world(),
+                angular_momentum_body_kg_m2_per_s: next_disc_state.angular_momentum_body(),
+                symmetry_axis_world: orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+                contact_branch: match endpoint_branch {
+                    ProductionTrajectoryBranch::CompliantContact => RenderContactBranch::Closed,
+                    ProductionTrajectoryBranch::OpenFlight => RenderContactBranch::Open,
+                },
+                contact_geometry,
+                signed_gap_m,
+                interval_contact_active: step.branch
+                    == ProductionTrajectoryBranch::CompliantContact,
+                interval_normal_force_n: normal_force_n,
+                contact_transitions,
+                base_mode: Some(RenderBaseModeState {
+                    displacement_m: base.modal_displacement_end_m,
+                    velocity_m_per_s: base.modal_velocity_end_m_per_s,
+                }),
+                channels: ChannelOwnership::default(),
+                mechanical_energy_j: rigid_step.diagnostics_after.mechanical_energy,
+                energy_defect_j,
+                qois,
+                disposition: if index == final_index {
+                    production_event_disposition(&source.termination)
+                } else {
+                    RenderSampleDisposition::Continue
+                },
+                terminal_event: None,
+            });
+            interval_start_time_s = time_s;
+            previous_state = next_disc_state;
+            previous_base_displacement_m = base.modal_displacement_end_m;
+            previous_base_velocity_m_per_s = base.modal_velocity_end_m_per_s;
+        }
+        if transition_index != source.transitions.len()
+            || previous_state != source.last_accepted_checkpoint.disc_state
+            || interval_start_time_s.to_bits()
+                != source.last_accepted_checkpoint.elapsed_time_s().to_bits()
+            || previous_base_displacement_m.to_bits()
+                != source
+                    .last_accepted_checkpoint
+                    .base_displacement_m()
+                    .to_bits()
+            || previous_base_velocity_m_per_s.to_bits()
+                != source
+                    .last_accepted_checkpoint
+                    .base_velocity_m_per_s()
+                    .to_bits()
+        {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+
+        let identities = profile.content_identities();
+        let model_identity = production_model_identity(model, identities.profile);
+        let configuration_identity = production_configuration_identity(model, model_identity);
+        let mut fingerprint = [0_u8; 8];
+        fingerprint.copy_from_slice(&configuration_identity.as_bytes()[..8]);
+        let base_identity = model.base_port.identity();
+        let base_model_identity = hash_domain(
+            "org.frankensim.euler-disc.production-base-model.v1",
+            format!(
+                "{}\0{}",
+                base_identity.model_id, base_identity.configuration_id
+            )
+            .as_bytes(),
+        );
+        let metadata = RenderTrajectoryMetadata {
+            schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            specimen_profile_identity: identities.profile,
+            specimen_chart_identity: identities.chart,
+            mass_properties: RenderMassProperties {
+                identity: identities.mass_properties,
+                properties: model.disc_mass_properties,
+            },
+            initial_state: source.start_checkpoint.disc_state,
+            initial_base_mode: RenderBaseModeState {
+                displacement_m: source.start_checkpoint.base_displacement_m(),
+                velocity_m_per_s: source.start_checkpoint.base_velocity_m_per_s(),
+            },
+            base_model_identity,
+            base_frame: RenderBaseFrame {
+                origin_world_m: Vec3::ZERO,
+                orientation_base_to_world: UnitQuaternion::IDENTITY,
+            },
+            model_identity,
+            channel_availability: RenderChannelAvailability {
+                gravity: false,
+                contact: false,
+                normal_force_sampling: RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
+                rolling: false,
+                base: false,
+                gas: false,
+            },
+            configuration_identity,
+            configuration_fingerprint: u64::from_le_bytes(fingerprint),
+            timestep_s: declared_maximum_timestep_s,
+            producer_version: format!(
+                "fs-euler-disc-e2e/production-event-render-bridge-v{}",
+                PRODUCTION_EVENT_RENDER_BRIDGE_VERSION
+            ),
+            applicability: "accepted fixed-grid open/contact trajectory from the transactional finite-patch/partial-slip/rolling/gas/one-mode-base composition; branch times retain full timestep brackets".to_owned(),
+            no_claims: vec![
+                "Estimate-authority simulation trajectory; not experimental calibration or validated Euler-disc stopping-time prediction".to_owned(),
+                "opening/reimpact times are fixed-grid brackets whose convergence must be demonstrated; no restitution impulse or exact event time is synthesized".to_owned(),
+                "normal force is the exact mean of each discretized applied zero-order hold and exactly zero on open intervals; physical bandwidth remains timestep-dependent".to_owned(),
+                "render channel work is unavailable pending one shared cross-channel work ledger; zero payloads mean unavailable, not zero physical loss".to_owned(),
+                "mechanical energy and defect are disc-only fs-mbd diagnostics, not full disc/base/contact/gas energy closure".to_owned(),
                 "no thermal evolution, phase change, melting, plastic flow, structural-mode solve, or acoustic-radiation solve is implied".to_owned(),
             ],
             authority: RenderTrajectoryAuthority::SimulationEvidence,
@@ -2181,9 +2574,39 @@ fn production_disc_work_residual_j(
     receipt: &ProductionCouplingReceipt,
     sample: usize,
 ) -> Result<f64, RenderTrajectoryError> {
-    let before = receipt.rigid_step.state_before;
-    let after = receipt.rigid_step.state_after;
-    let duration_s = receipt.rigid_step.duration_seconds;
+    production_wrench_work_residual_j(
+        model,
+        &receipt.rigid_step,
+        receipt.total_force_world_n,
+        receipt.total_moment_about_com_world_n_m,
+        sample,
+    )
+}
+
+fn production_open_disc_work_residual_j(
+    model: &ProductionCouplingModel,
+    receipt: &ProductionOpenFlightReceipt,
+    sample: usize,
+) -> Result<f64, RenderTrajectoryError> {
+    production_wrench_work_residual_j(
+        model,
+        &receipt.rigid_step,
+        receipt.total_force_world_n,
+        receipt.total_moment_about_com_world_n_m,
+        sample,
+    )
+}
+
+fn production_wrench_work_residual_j(
+    model: &ProductionCouplingModel,
+    rigid_step: &fs_mbd::StepReceipt,
+    force_world_n: Vec3,
+    moment_about_com_world_n_m: Vec3,
+    sample: usize,
+) -> Result<f64, RenderTrajectoryError> {
+    let before = rigid_step.state_before;
+    let after = rigid_step.state_after;
+    let duration_s = rigid_step.duration_seconds;
     let velocity_before = before
         .center_of_mass_velocity_world(model.disc_mass_properties)
         .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
@@ -2207,11 +2630,11 @@ fn production_disc_work_residual_j(
     let torque_body = before
         .pose()
         .orientation()
-        .rotate_world_to_body(receipt.total_moment_about_com_world_n_m);
-    let wrench_work_j = duration_s
-        * (receipt.total_force_world_n.dot(velocity_mid) + torque_body.dot(omega_mid_body));
-    let residual = receipt.rigid_step.diagnostics_after.mechanical_energy
-        - receipt.rigid_step.diagnostics_before.mechanical_energy
+        .rotate_world_to_body(moment_about_com_world_n_m);
+    let wrench_work_j =
+        duration_s * (force_world_n.dot(velocity_mid) + torque_body.dot(omega_mid_body));
+    let residual = rigid_step.diagnostics_after.mechanical_energy
+        - rigid_step.diagnostics_before.mechanical_energy
         - wrench_work_j;
     if residual.is_finite() {
         Ok(residual)
@@ -2220,6 +2643,21 @@ fn production_disc_work_residual_j(
             sample: Some(sample),
             field: "production-prefix disc work residual",
         })
+    }
+}
+
+fn production_event_disposition(
+    termination: &ProductionEventTrajectoryTermination,
+) -> RenderSampleDisposition {
+    match termination {
+        ProductionEventTrajectoryTermination::StepLimitReached { .. } => {
+            RenderSampleDisposition::HorizonCensored
+        }
+        ProductionEventTrajectoryTermination::Refused { error, .. } => {
+            RenderSampleDisposition::NumericalRefusal(
+                RenderNumericalRefusalReason::BackendSpecific(production_refusal_code(error)),
+            )
+        }
     }
 }
 
@@ -2262,6 +2700,7 @@ const fn production_refusal_code(error: &ProductionCouplingError) -> u32 {
         ProductionCouplingError::ExteriorCandidateUnavailable => 20,
         ProductionCouplingError::Base(_) => 21,
         ProductionCouplingError::Dynamics(_) => 22,
+        ProductionCouplingError::SurfaceExcitation(_) => 23,
     }
 }
 

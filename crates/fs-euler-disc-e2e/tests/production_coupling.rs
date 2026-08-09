@@ -17,8 +17,8 @@ use fs_euler_disc_e2e::external_air::{
 };
 use fs_euler_disc_e2e::normal_contact::{
     EulerNormalContactInput, EulerNormalContactOutcome, EulerNormalGeometry,
-    NORMAL_CONTACT_ADAPTER_ID, NormalContactIdentity, NormalMaterialInterface,
-    evaluate_normal_contact,
+    NORMAL_CONTACT_ADAPTER_ID, NormalContactIdentity, NormalContactIntegrationRegime,
+    NormalMaterialInterface, NormalRateResponse, evaluate_normal_contact,
 };
 use fs_euler_disc_e2e::patch_kinematics::{
     CurvatureMetadata, MovingOneModeBaseState, MovingOneModePatchBridgeInput,
@@ -29,7 +29,10 @@ use fs_euler_disc_e2e::patch_kinematics::{
 use fs_euler_disc_e2e::production_coupling::{
     GasChannelReceipt, GasChannelState, GasChannelStepInput, ProductionCouplingError,
     ProductionCouplingIdentity, ProductionCouplingModel, ProductionCouplingStepInput,
-    ProductionSurfaceExcitationError, SmoothContactTrajectoryTermination,
+    ProductionEventTrajectoryTermination, ProductionOpenFlightStepInput,
+    ProductionSurfaceExcitationError, ProductionSurfaceExcitationStepInput,
+    ProductionSurfaceTraceStepInput, ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt,
+    SmoothContactTrajectoryTermination,
 };
 use fs_euler_disc_e2e::rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput, RollingContactState,
@@ -64,7 +67,9 @@ use fs_tribo::rolling_loss::{
     CoulombContourCard, LEINE_STYLE_CONTOUR_LAW_ID, RollingLossApplicability, RollingLossChannel,
     RollingLossLaw, RollingWorkOwnership,
 };
-use fs_tribo::surface_excitation::{SurfaceTraceBoundary, SurfaceTraceMotion, UniformSurfaceTrace};
+use fs_tribo::surface_excitation::{
+    PeriodicHarmonicSurface, PeriodicSurfaceHarmonic, SurfaceTraceMotion,
+};
 use fs_tribo::{ApplicabilityRange, InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
 fn id(value: &str) -> StableId {
@@ -198,7 +203,7 @@ fn normal_material() -> NormalMaterialInterface {
         )
         .expect("interface"),
         reduced_modulus_pa: 2.0e9,
-        hunt_crossley_dissipation_s_per_m: None,
+        rate_response: NormalRateResponse::ElasticHertz,
         applicability: ApplicabilityInput {
             half_space_depth_m: 1.0,
             layer_thickness_m: 1.0,
@@ -239,6 +244,7 @@ fn normal_input(
         kinematics,
         material: normal_material(),
         geometry: EulerNormalGeometry::SpherePlane,
+        integration_regime: NormalContactIntegrationRegime::SmoothQuasistatic,
         state: NormalPatchEmbedState::new(0.0, 1.0).expect("normal state"),
         time_s: 0.0,
         iteration: 1,
@@ -582,6 +588,7 @@ fn production_request_template() -> (
         time_s: 0.0,
         patch: patch_input(),
         normal,
+        surface_excitation: None,
         tangential: TangentialContactRequest {
             request_id: "synthetic/tangent-step".into(),
             expected_state_version: 0,
@@ -689,6 +696,59 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
             ),
         )
         .expect("production checkpoint");
+    let open_input = ProductionOpenFlightStepInput {
+        expected_checkpoint_version: 0,
+        duration_s: request.duration_s,
+        gas_channel: request.gas_channel.clone(),
+        base_step_id: "synthetic/open-base-step-1".into(),
+        base_load_progress_start: 0.0,
+        base_load_progress_end: 0.0,
+    };
+    let (open_next, open_receipt) = model
+        .step_open_flight(&checkpoint, &open_input)
+        .expect("open flight composes gravity, gas, and unforced support dynamics");
+    assert_eq!(open_next.committed_version, 1);
+    assert_eq!(
+        open_receipt
+            .base
+            .receipt()
+            .compressive_normal_force_on_base_n,
+        0.0,
+        "an open branch cannot fabricate a zero-force contact receipt"
+    );
+    assert_eq!(
+        open_receipt.total_force_world_n,
+        match &open_receipt.gas_channel {
+            GasChannelReceipt::ExteriorFreeGas { candidate, .. } => {
+                Vec3::new(
+                    candidate.world_wrench.force_world_n.x,
+                    candidate.world_wrench.force_world_n.y,
+                    candidate.world_wrench.force_world_n.z,
+                )
+            }
+            GasChannelReceipt::ThinGap { .. } => panic!("fixture selected exterior gas"),
+        },
+        "open-flight fs-mbd force must be the exact selected gas force"
+    );
+    assert_ne!(open_next.disc_state, checkpoint.disc_state);
+    let contact_after_open = request_for_checkpoint(&request, &open_next);
+    model
+        .step(&open_next, &contact_after_open)
+        .expect("open flight retains contact checkpoints for a later compliant branch");
+
+    let mut invalid_open = open_input.clone();
+    invalid_open.expected_checkpoint_version = 1;
+    assert!(matches!(
+        model.step_open_flight(&checkpoint, &invalid_open),
+        Err(ProductionCouplingError::CheckpointVersionMismatch {
+            expected: 1,
+            observed: 0
+        })
+    ));
+    model
+        .validate_checkpoint(&checkpoint)
+        .expect("a refused open proposal cannot mutate the shared checkpoint");
+
     let (next, receipt) = model
         .step(&checkpoint, &request)
         .expect("synthetic composition");
@@ -704,24 +764,30 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         "exterior force must use the checkpoint's +x velocity, not the stale card state"
     );
 
-    let texture_a = UniformSurfaceTrace::new(
+    let texture_a = PeriodicHarmonicSurface::new(
         "synthetic/disc-track",
         "synthetic/disc-profilometer",
         InputAuthority::SyntheticFixture,
-        1.0e-5,
-        vec![1.0e-9; 32],
-        SurfaceTraceBoundary::Periodic,
+        32.0e-5,
+        32,
+        vec![PeriodicSurfaceHarmonic {
+            cycles_per_track: 1,
+            cosine_amplitude_m: 1.0e-9,
+            sine_amplitude_m: 0.0,
+        }],
     )
-    .expect("synthetic disc trace");
-    let texture_b = UniformSurfaceTrace::new(
+    .and_then(|surface| surface.realize())
+    .expect("synthetic disc spectrum resolves to a physical trace");
+    let texture_b = PeriodicHarmonicSurface::new(
         "synthetic/base-track",
         "synthetic/base-profilometer",
         InputAuthority::SyntheticFixture,
-        1.0e-5,
-        vec![0.0; 32],
-        SurfaceTraceBoundary::Periodic,
+        32.0e-5,
+        32,
+        Vec::new(),
     )
-    .expect("synthetic base trace");
+    .and_then(|surface| surface.realize())
+    .expect("an empty spectrum is an exact smooth trace");
     let normal_interface = InterfaceSystemRef::new(
         "disc->base",
         "synthetic/normal-history",
@@ -735,7 +801,7 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
             &normal_interface,
             SurfaceTraceMotion {
                 trace: &texture_a,
-                path_coordinate_m: 1.0e-4,
+                path_coordinate_m: 0.0,
                 path_speed_m_per_s: 0.5,
             },
             SurfaceTraceMotion {
@@ -759,8 +825,49 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         "surface forcing must consume the accepted physical patch, not a sound preset"
     );
     assert!(
-        (excitation.normal_force_perturbation_n - normal_receipt.tangent_n_per_m * 1.0e-9).abs()
-            < 1.0e-12
+        excitation.normal_force_perturbation_n > 0.0,
+        "a positive cosine crest must raise the admitted point-normal force"
+    );
+
+    let mut textured_request = request.clone();
+    textured_request.surface_excitation = Some(ProductionSurfaceExcitationStepInput {
+        interface: normal_interface.clone(),
+        surface_a: ProductionSurfaceTraceStepInput {
+            trace: texture_a.clone(),
+            path_coordinate_m: 0.0,
+            path_speed_m_per_s: 0.5,
+        },
+        surface_b: ProductionSurfaceTraceStepInput {
+            trace: texture_b.clone(),
+            path_coordinate_m: 2.0e-4,
+            path_speed_m_per_s: 0.0,
+        },
+        travel_angle_from_patch_major_rad: 0.0,
+        maximum_linearized_height_fraction: 0.01,
+    });
+    let (textured_next, textured_receipt) = model
+        .step(&checkpoint, &textured_request)
+        .expect("surface excitation participates in the atomic mechanics step");
+    let coupled_excitation = textured_receipt
+        .surface_excitation
+        .as_ref()
+        .expect("accepted textured step publishes its physical perturbation");
+    assert_eq!(coupled_excitation, &excitation);
+    assert!(
+        textured_receipt
+            .base
+            .receipt()
+            .compressive_normal_force_on_base_n
+            > receipt.base.receipt().compressive_normal_force_on_base_n,
+        "the support must receive the same increased action/reaction load"
+    );
+    assert!(
+        textured_receipt.total_force_world_n.z > receipt.total_force_world_n.z,
+        "the topography force must enter fs-mbd rather than remain a post-hoc audio signal"
+    );
+    assert_ne!(
+        textured_next.disc_state, next.disc_state,
+        "the shared evolving mechanics state must respond to admitted topography"
     );
     let wrong_interface = InterfaceSystemRef::new(
         "base->disc",
@@ -788,6 +895,22 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
         ),
         Err(ProductionSurfaceExcitationError::InterfaceIdentityMismatch { .. })
     ));
+    let mut wrong_surface_request = textured_request.clone();
+    wrong_surface_request
+        .surface_excitation
+        .as_mut()
+        .expect("textured request retains a channel")
+        .interface = wrong_interface;
+    assert!(matches!(
+        model.step(&checkpoint, &wrong_surface_request),
+        Err(ProductionCouplingError::SurfaceExcitation(
+            ProductionSurfaceExcitationError::InterfaceIdentityMismatch { .. }
+        ))
+    ));
+    assert_eq!(checkpoint.committed_version, 0);
+    model
+        .validate_checkpoint(&checkpoint)
+        .expect("a rejected topography proposal cannot mutate accepted mechanics state");
 
     let thin_air = thin_gap_air();
     let thin_channel_state = AirFilmTransactionState::new(
@@ -939,6 +1062,94 @@ fn synthetic_g0_multistep_composes_real_adapters_and_refuses_without_mutation() 
     resumed_receipts.extend(resumed.accepted_steps.clone());
     assert_eq!(resumed_receipts, whole.accepted_steps);
 
+    let eventful = model.run_eventful_compliant_trajectory(checkpoint.clone(), 3, |state| {
+        let mut rebuilt = request_for_checkpoint(&request, state);
+        rebuilt.patch.bridge.profile_support.gap_m = match state.committed_version {
+            1 => 2.0e-3,
+            _ => -1.0e-6,
+        };
+        Ok(rebuilt)
+    });
+    assert_eq!(
+        eventful.termination,
+        ProductionEventTrajectoryTermination::StepLimitReached {
+            maximum_accepted_steps: 3
+        }
+    );
+    assert_eq!(eventful.accepted_steps.len(), 3);
+    assert!(matches!(
+        eventful.accepted_steps[0].receipt,
+        ProductionTrajectoryStepReceipt::CompliantContact(_)
+    ));
+    assert!(matches!(
+        eventful.accepted_steps[1].receipt,
+        ProductionTrajectoryStepReceipt::OpenFlight(_)
+    ));
+    assert!(matches!(
+        eventful.accepted_steps[2].receipt,
+        ProductionTrajectoryStepReceipt::CompliantContact(_)
+    ));
+    assert_eq!(
+        eventful
+            .accepted_steps
+            .iter()
+            .map(|step| step.branch)
+            .collect::<Vec<_>>(),
+        vec![
+            ProductionTrajectoryBranch::CompliantContact,
+            ProductionTrajectoryBranch::OpenFlight,
+            ProductionTrajectoryBranch::CompliantContact,
+        ]
+    );
+    assert_eq!(eventful.transitions.len(), 2);
+    assert_eq!(
+        (eventful.transitions[0].from, eventful.transitions[0].to),
+        (
+            ProductionTrajectoryBranch::CompliantContact,
+            ProductionTrajectoryBranch::OpenFlight,
+        )
+    );
+    assert_eq!(
+        (eventful.transitions[1].from, eventful.transitions[1].to),
+        (
+            ProductionTrajectoryBranch::OpenFlight,
+            ProductionTrajectoryBranch::CompliantContact,
+        )
+    );
+    for transition in &eventful.transitions {
+        assert_eq!(
+            transition.bracket_end_s - transition.bracket_start_s,
+            request.duration_s,
+            "event timing authority is exactly one declared fixed-grid bracket"
+        );
+    }
+
+    let terminal_crossing =
+        model.run_eventful_compliant_trajectory(checkpoint.clone(), 1, |state| {
+            let mut rebuilt = request_for_checkpoint(&request, state);
+            if state.committed_version == 1 {
+                rebuilt.patch.bridge.profile_support.gap_m = 2.0e-3;
+            }
+            Ok(rebuilt)
+        });
+    assert_eq!(terminal_crossing.accepted_steps.len(), 1);
+    assert_eq!(terminal_crossing.transitions.len(), 1);
+    assert_eq!(
+        (
+            terminal_crossing.transitions[0].from,
+            terminal_crossing.transitions[0].to,
+        ),
+        (
+            ProductionTrajectoryBranch::CompliantContact,
+            ProductionTrajectoryBranch::OpenFlight,
+        ),
+        "a crossing during the final step must not vanish at the step budget"
+    );
+    assert_eq!(
+        terminal_crossing.transitions[0].bracket_end_s,
+        terminal_crossing.last_accepted_checkpoint.elapsed_time_s()
+    );
+
     let stopped = model.run_smooth_contact_trajectory(checkpoint.clone(), 3, |state| {
         let mut rebuilt = request_for_checkpoint(&request, state);
         if state.committed_version == 1 {
@@ -1033,6 +1244,53 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
         };
         let (mut request, _, interface) = production_request_template();
         request.normal.geometry = EulerNormalGeometry::EllipticParaboloid;
+        let texture_a = PeriodicHarmonicSurface::new(
+            "synthetic/profile-disc-track",
+            "synthetic/profile-disc-profilometer",
+            InputAuthority::SyntheticFixture,
+            32.0e-5,
+            32,
+            vec![PeriodicSurfaceHarmonic {
+                cycles_per_track: 1,
+                cosine_amplitude_m: 1.0e-12,
+                sine_amplitude_m: 0.0,
+            }],
+        )
+        .and_then(|surface| surface.realize())
+        .expect("tiny resolved profile texture");
+        let texture_b = PeriodicHarmonicSurface::new(
+            "synthetic/profile-base-track",
+            "synthetic/profile-base-profilometer",
+            InputAuthority::SyntheticFixture,
+            32.0e-5,
+            32,
+            Vec::new(),
+        )
+        .and_then(|surface| surface.realize())
+        .expect("exact smooth counterpart trace");
+        let surface_excitation = ProductionSurfaceExcitationStepInput {
+            interface: InterfaceSystemRef::new(
+                "disc->base",
+                "synthetic/profile-normal-history",
+                "synthetic/profile-interface",
+                InputAuthority::SyntheticFixture,
+                InterfaceMedium::Dry,
+            )
+            .expect("profile normal interface identity"),
+            surface_a: ProductionSurfaceTraceStepInput {
+                trace: texture_a,
+                path_coordinate_m: 0.0,
+                path_speed_m_per_s: 0.5,
+            },
+            surface_b: ProductionSurfaceTraceStepInput {
+                trace: texture_b,
+                path_coordinate_m: 0.0,
+                path_speed_m_per_s: 0.0,
+            },
+            travel_angle_from_patch_major_rad: 0.0,
+            maximum_linearized_height_fraction: 0.01,
+        };
+        request.surface_excitation = Some(surface_excitation.clone());
         let resolved = model
             .bind_initial_horizontal_plane_axisymmetric_profile_contact(
                 &mut request,
@@ -1127,6 +1385,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
         let first_request = request.clone();
         let mut repeated_request = production_request_template().0;
         repeated_request.normal.geometry = EulerNormalGeometry::EllipticParaboloid;
+        repeated_request.surface_excitation = Some(surface_excitation);
         let repeated_resolved = model
             .bind_horizontal_plane_axisymmetric_profile_contact(
                 &mut repeated_request,
@@ -1187,6 +1446,23 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
                 .to_bits()
         );
         let accepted = &production_prefix.accepted_steps[0];
+        let nominal_force_n = match &accepted.normal.generic.receipt {
+            NormalPatchReceipt::Point(point) => point.normal_force_n,
+            NormalPatchReceipt::Line(_) => panic!("profile fixture requires point normal units"),
+        };
+        assert!(
+            rendered.interval_normal_force_n > nominal_force_n,
+            "render/audio control must retain the topography force that changed mechanics"
+        );
+        assert_eq!(
+            rendered.interval_normal_force_n.to_bits(),
+            accepted
+                .base
+                .receipt()
+                .compressive_normal_force_on_base_n
+                .to_bits(),
+            "trajectory forcing must be the exact accepted action/reaction load"
+        );
         let endpoint_contact = profile_contact_geometry(
             &profile.chart,
             profile.mass_properties,
@@ -1203,6 +1479,52 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             rendered.signed_gap_m.to_bits(),
             (endpoint_contact.contact.gap_m - accepted.base.receipt().modal_displacement_end_m)
                 .to_bits()
+        );
+
+        let event_source =
+            model.run_eventful_compliant_trajectory(checkpoint.clone(), 1, |accepted| {
+                let mut input = request_for_checkpoint(&first_request, accepted);
+                input.normal.integration_regime =
+                    NormalContactIntegrationRegime::CompliantTransient;
+                Ok(input)
+            });
+        assert!(
+            matches!(
+                event_source.termination,
+                ProductionEventTrajectoryTermination::StepLimitReached {
+                    maximum_accepted_steps: 1
+                }
+            ),
+            "event-aware production path refused: {:?}",
+            event_source.termination
+        );
+        let event_render = RenderTrajectory::from_production_event_trajectory(
+            &model,
+            &event_source,
+            &profile,
+            first_request.duration_s,
+            cx,
+        )
+        .expect("event-aware contact path enters the common render/audio contract");
+        let event_sample = event_render.samples()[0].input();
+        let ProductionTrajectoryStepReceipt::CompliantContact(event_receipt) =
+            &event_source.accepted_steps[0].receipt
+        else {
+            panic!("penetrated profile must select compliant contact")
+        };
+        assert!(event_sample.interval_contact_active);
+        assert_eq!(
+            event_sample.interval_normal_force_n.to_bits(),
+            event_receipt
+                .base
+                .receipt()
+                .compressive_normal_force_on_base_n
+                .to_bits(),
+            "event render/audio forcing must be the exact accepted support reaction"
+        );
+        assert_eq!(
+            event_sample.contact_geometry, rendered.contact_geometry,
+            "the smooth and event-aware bridges must query the same endpoint profile geometry"
         );
         let mut forged_prefix = production_prefix.clone();
         assert_ne!(

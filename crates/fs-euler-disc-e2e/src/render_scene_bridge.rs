@@ -239,14 +239,36 @@ impl EulerDiscMaterialStateBinding {
         roughness_alpha: f64,
         surface_state_identity: ContentHash,
     ) -> Result<Self, EulerSceneError> {
+        Self::try_visible_optical_resolved(
+            mechanical.resolved(),
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )
+    }
+
+    /// Bind visible optics to any complete mechanical state resolved from the
+    /// same immutable material card and thermodynamic query point.
+    ///
+    /// This is the symmetry-independent cross-domain ingress used by
+    /// orthotropic as well as isotropic structural models. The caller still
+    /// owns constitutive admission and spatial material orientation; this
+    /// method only prevents the renderer from substituting unrelated optical
+    /// data or inferring appearance from a chemistry label.
+    pub fn try_visible_optical_resolved(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &VisibleOpticalStatePoint,
+        roughness_alpha: f64,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
         match optical {
-            VisibleOpticalStatePoint::Conductor(optical) => Self::try_conductor_elastic(
+            VisibleOpticalStatePoint::Conductor(optical) => Self::try_conductor_resolved(
                 mechanical,
                 optical,
                 roughness_alpha,
                 surface_state_identity,
             ),
-            VisibleOpticalStatePoint::Dielectric(optical) => Self::try_dielectric_elastic(
+            VisibleOpticalStatePoint::Dielectric(optical) => Self::try_dielectric_resolved(
                 mechanical,
                 optical,
                 Some(roughness_alpha),
