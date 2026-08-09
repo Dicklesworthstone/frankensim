@@ -12,8 +12,8 @@ use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::box_grid;
 use fs_conduction::lumped::{
     BiotGate, LUMPED_BIOT_CEILING, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, LumpedNetwork,
-    LumpedNode, LumpedThermalTransport, ValidityVerdict, extract_node_from_steady_rise,
-    solve_gated, solve_lumped_enthalpy,
+    LumpedNode, LumpedThermalTransport, MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES, ValidityVerdict,
+    extract_node_from_steady_rise, solve_gated, solve_lumped_enthalpy,
 };
 use fs_conduction::material::{CONDUCTIVITY_DIMS, ConductivityModel};
 use fs_conduction::mesh::ConductionMesh;
@@ -607,6 +607,17 @@ fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
 #[test]
 fn g1_card_backed_transport_drives_the_same_phase_curve_without_extrapolation() {
     let card = thermal_material_card();
+    let oversized_grid = vec![300.0; MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES + 1];
+    assert!(
+        LumpedThermalTransport::from_material_card(
+            &card,
+            "thermal_conductivity",
+            &oversized_grid,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .is_err(),
+        "an unbounded material-query grid must refuse before sampling"
+    );
     let curve = phase_curve_for(card.content_hash());
     let transport = LumpedThermalTransport::from_material_card(
         &card,

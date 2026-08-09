@@ -55,6 +55,8 @@ pub const LUMPED_BIOT_CEILING: f64 = 0.1;
 pub const MAX_LUMPED_NODES: usize = 1_024;
 /// Maximum accepted implicit enthalpy steps in one reduced march.
 pub const MAX_LUMPED_ENTHALPY_STEPS: usize = 10_000_000;
+/// Maximum temperature samples retained by one reduced transport model.
+pub const MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES: usize = 4_096;
 /// Fixed bisection ceiling for each monotone backward-Euler enthalpy step.
 pub const LUMPED_ENTHALPY_BISECTION_ITERATIONS: usize = 96;
 
@@ -120,6 +122,15 @@ impl LumpedThermalTransport {
         grid_k: &[f64],
         policy: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
+        if grid_k.len() > MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES {
+            return Err(lumped_error(
+                "card-backed thermal transport",
+                format!(
+                    "temperature grid has {} samples, above hard maximum {MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES}",
+                    grid_k.len()
+                ),
+            ));
+        }
         let conductivity =
             ConductivityTable::from_claims(card.claims(), conductivity_property, grid_k, policy)?;
         let mut emissivity = Vec::new();

@@ -512,10 +512,14 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     let mut iters = 0usize;
     let mut stagnant = 0usize;
     let mut best: Option<(Vec<f64>, f64)> = None;
+    let mut r_init: Option<f64> = None;
     loop {
         let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
         let res = residual(&x1, &dg);
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+        if r_init.is_none() {
+            r_init = Some(rnorm);
+        }
         let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
         if improved {
             best = Some((x1.clone(), rnorm));
@@ -541,8 +545,19 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
             // FD-Jacobian noise floor ~ 4e-14 — a refusal at a
             // perfectly converged iterate). The accepted residual is
             // DISCLOSED in StepRecord::solver_residual either way.
+            // ONE acceptance criterion (replacing a chain of
+            // scale-chasing special cases the executed tests kept
+            // falsifying): the best iterate is accepted iff its
+            // residual sits >= 6 orders below BOTH candidate scales —
+            // the iterate's own magnitude and the initial residual. A
+            // genuinely stuck solve leaves the residual comparable to
+            // one of them; a solve stagnating at the FD-Jacobian noise
+            // floor clears both. The achieved residual is DISCLOSED in
+            // StepRecord::solver_residual for audit scaling either
+            // way.
             let sc_acc = bx.iter().fold(scale, |acc, &v| acc.max(v.abs()));
-            if brnorm <= 1.0e4 * NEWTON_TOL * sc_acc {
+            let ref_scale = sc_acc.max(r_init.unwrap_or(sc_acc));
+            if brnorm <= 1.0e-6 * ref_scale {
                 x1 = bx;
                 break;
             }

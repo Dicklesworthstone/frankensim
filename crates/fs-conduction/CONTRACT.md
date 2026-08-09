@@ -103,6 +103,7 @@ diameter.
 | `RadiationSurface` / `GrayDiffuseEnclosure` / `RadiosityReport` | named non-overlapping P1 exterior traces, deterministic diffuse-gray radiosity, net heat rates, system residual, and enclosure energy closure |
 | `CoupledRadiationConfig` / `CoupledRadiationSolution` | a budgeted, under-relaxed outer fixed point that applies one uniform frozen radiation flux per named trace to explicit adiabatic-remainder faces |
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them |
+| `LumpedThermalTransport` | one reduced-body conductivity/emissivity pair, either explicitly provenance-free declared constants or temperature-grid samples queried from one immutable material card with every conductivity and emissivity receipt retained; sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
 | `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
@@ -792,7 +793,13 @@ authority.
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and
   returns temperature, density, and phase fraction without material-name
-  branches. This is an isothermal reduced rung only: it refuses when the
+  branches. `LumpedThermalTransport` may retain temperature-sampled
+  conductivity and emissivity receipts from the exact same material card as
+  that phase curve; each accepted state evaluates those properties at its own
+  temperature, while the Biot gate conservatively uses the sampled minimum
+  conductivity and maximum emissivity. Declared constants remain available
+  but explicitly carry no material provenance. This is an isothermal reduced
+  rung only: it refuses when the
   convection-plus-radiation Biot gate fails or when a step leaves the supplied
   phase-data domain. It does NOT solve spatial temperature gradients,
   nonequilibrium phase kinetics, thermal stress, finite-strain deformation,

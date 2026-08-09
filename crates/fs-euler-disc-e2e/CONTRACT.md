@@ -872,6 +872,9 @@ current source-bound trajectory.
 thermal-to-geometry handoff. It accepts the generic `fs-conduction` implicit
 enthalpy march only when that march's body uses the specimen's bit-exact mass,
 complete profile-derived area, `V/A` length, phase curve, and initial state.
+The preferred body transport queries temperature-dependent conductivity and
+hemispherical emissivity from that phase curve's same immutable material card;
+its query receipts and temperature grid participate in the body identity.
 Every accepted thermal boundary is then converted through
 `mass_conserving_state`: reference mass is held invariant, the volume required
 by the current equilibrium density is computed, and one of three explicit
