@@ -19,11 +19,14 @@
 //!   fixtures never exercise: (a) the reference paints the smoothed
 //!   spectrum into a numpy `empty` array and can leave the LAST bin
 //!   uninitialized memory — here the tail is painted with the last
-//!   band's value (deterministic completion); (b) a zero spectrum
-//!   magnitude reads -400 dB instead of numpy's -inf-with-warning;
-//!   (c) hearing-threshold coefficients outside 20 Hz..22.05 kHz
+//!   band's value (deterministic completion, head and tail); (b) a
+//!   zero spectrum magnitude reads -140 dB, matching the reference's
+//!   amp2db 2e-12 substitution; (c) hearing-threshold coefficients
 //!   (unreachable through the detection band) clamp to the nearest
-//!   band where the reference raises NameError.
+//!   band where the reference raises NameError; (d) an empty
+//!   1/24-octave smoothing band REFUSES instead of the reference's
+//!   corrupted bookkeeping; (e) a screening walk past the band start
+//!   clamps where numpy index-wraps.
 //!
 //! THE VALUES ARE NEVER A SUBSTITUTE FOR HUMAN LISTENING (crate law).
 
@@ -122,7 +125,9 @@ fn spectrum_db(pcm_pa: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
             if m > 0.0 {
                 20.0 * det::ln(m / 2.0e-5) / det::ln(10.0)
             } else {
-                -400.0
+                // The reference's amp2db substitutes 2e-12 for a
+                // zero amplitude: exactly -140 dB re 2e-5.
+                -140.0
             }
         })
         .collect();
@@ -166,27 +171,35 @@ fn third_of_24_octave_bands() -> Vec<(f64, f64)> {
 
 /// The reference's `_spectrum_smoothing` for one segment: per-band
 /// energy mean painted piecewise-constant onto the frequency axis.
-/// (Empty bands cannot occur on the dense FFT axes this crate
-/// accepts — the narrowest 1/24-octave band at 90 Hz is ~2.6 Hz wide
-/// and the axis spacing is fs/n; the length floor guarantees
-/// coverage. The reference's empty-band bookkeeping is therefore not
-/// replicated; a genuinely empty band refuses upstream by the same
-/// floor.)
-fn smooth_spectrum(freqs: &[f64], spec_db: &[f64]) -> Vec<f64> {
+/// Faithful details: masked bin 0 is EXCLUDED from every band's mean
+/// (the reference's `bin_index > stop - nperseg` filter). Honest
+/// divergences from the reference, both disclosed: an EMPTY
+/// 1/24-octave band REFUSES (`DegenerateSignal`) instead of entering
+/// the reference's corrupted empty-band bookkeeping (a
+/// double-decrement loop over a mutated array — review-executed at
+/// 96 kHz / 8192 samples, where the reference and any completion of
+/// it genuinely diverge), and the bins BEFORE the first painted band
+/// and AFTER the last one — numpy `empty` uninitialized memory in
+/// the reference — carry the first/last band's value
+/// (deterministic completion).
+fn smooth_spectrum(freqs: &[f64], spec_db: &[f64]) -> Result<Vec<f64>, PsychoError> {
     let bands = third_of_24_octave_bands();
     let mut vals: Vec<(f64, f64, f64)> = Vec::new(); // (f1, f2, value)
     for &(f1, f2) in &bands {
         let mut sum = 0.0f64;
         let mut count = 0usize;
-        for (f, s) in freqs.iter().zip(spec_db) {
-            if *f >= f1 && *f <= f2 {
+        for (i, (f, s)) in freqs.iter().zip(spec_db).enumerate() {
+            if i > 0 && *f >= f1 && *f <= f2 {
                 sum += db_to_pow(*s);
                 count += 1;
             }
         }
-        if count > 0 {
-            vals.push((f1, f2, pow_to_db(sum / usize_f64(count))));
+        if count == 0 {
+            return Err(PsychoError::DegenerateSignal {
+                what: "frequency resolution too coarse for 1/24-octave smoothing (empty band)",
+            });
         }
+        vals.push((f1, f2, pow_to_db(sum / usize_f64(count))));
     }
     let mut smooth = vec![0.0f64; freqs.len()];
     for &(f1, f2, v) in &vals {
@@ -196,16 +209,19 @@ fn smooth_spectrum(freqs: &[f64], spec_db: &[f64]) -> Vec<f64> {
             *s = v;
         }
     }
-    // Deterministic completion of the reference's uninitialized tail
-    // (disclosed deviation): the final bin(s) carry the last band's
-    // value.
+    if let Some(&(f1, _, v)) = vals.first() {
+        let low = argmin_abs(freqs, f1);
+        for s in &mut smooth[..low] {
+            *s = v;
+        }
+    }
     if let Some(&(_, f2, v)) = vals.last() {
         let high = argmin_abs(freqs, f2);
         for s in &mut smooth[high..] {
             *s = v;
         }
     }
-    smooth
+    Ok(smooth)
 }
 
 /// ECMA-74 annex D.7.1 lower threshold of hearing (reference `_LTH`).
@@ -349,7 +365,10 @@ fn find_highest_tone(
         .collect();
 
     if multiple_idx.len() > 1 {
-        // Stable descending sort by level (numpy argsort of -spec).
+        // Descending sort by level. numpy's default argsort is an
+        // UNSTABLE introsort; Rust's sort_by is stable — divergence
+        // needs exactly-tied dB levels inside one critical band
+        // (practically unreachable; disclosed).
         let mut order: Vec<usize> = (0..multiple_idx.len()).collect();
         order.sort_by(|&a, &b| {
             spec[multiple_idx[b]]
@@ -375,9 +394,9 @@ fn find_highest_tone(
 /// single segment): local maxima 6 dB over the 1/24-octave smoothed
 /// spectrum and 10 dB over the hearing threshold, then the tonal
 /// width check against half..full critical bandwidth.
-fn screening_for_tones(freqs: &[f64], spec_db: &[f64]) -> Vec<usize> {
+fn screening_for_tones(freqs: &[f64], spec_db: &[f64]) -> Result<Vec<usize>, PsychoError> {
     let m = spec_db.len();
-    let smooth = smooth_spectrum(freqs, spec_db);
+    let smooth = smooth_spectrum(freqs, spec_db)?;
     // Criteria 1-3.
     let mut index: Vec<usize> = Vec::new();
     for j in 1..m - 1 {
@@ -392,7 +411,15 @@ fn screening_for_tones(freqs: &[f64], spec_db: &[f64]) -> Vec<usize> {
     let mut tones: Vec<usize> = Vec::new();
     while let Some(&first) = index.first() {
         let mut peak_index = first;
-        let mut low_limit = peak_index;
+        // `low_limit` is signed: it starts at the ORIGINAL candidate
+        // but the left walk starts from the right-walk-MIGRATED peak
+        // and can take more steps than `low_limit`'s starting value
+        // (review-executed panic: usize underflow at coarse
+        // resolutions). The reference lets it go negative and numpy
+        // WRAPS `freqs[low_limit]` into a garbage width; here the
+        // width read clamps at the band edge instead — a disclosed
+        // deviation on a reference-buggy path.
+        let mut low_limit = peak_index.cast_signed();
         let mut high_limit = peak_index;
         // Right walk.
         let mut temp = peak_index + 1;
@@ -406,22 +433,22 @@ fn screening_for_tones(freqs: &[f64], spec_db: &[f64]) -> Vec<usize> {
         // Left walk (the reference's wrap-read at -1 is dead: the
         // bound test fails regardless of the wrapped comparison).
         let mut temp = peak_index.cast_signed() - 1;
-        while temp >= 0 && spec_db[temp as usize] > smooth[temp as usize] + 6.0 {
-            if spec_db[temp as usize] > spec_db[peak_index] {
-                peak_index = temp as usize;
+        while temp >= 0 && spec_db[temp.cast_unsigned()] > smooth[temp.cast_unsigned()] + 6.0 {
+            if spec_db[temp.cast_unsigned()] > spec_db[peak_index] {
+                peak_index = temp.cast_unsigned();
             }
             low_limit -= 1;
             temp -= 1;
         }
         let (f1, f2) = critical_band(freqs[peak_index]);
         let cb_width = f2 - f1;
-        let t_width = freqs[high_limit] - freqs[low_limit];
+        let t_width = freqs[high_limit] - freqs[low_limit.max(0).cast_unsigned()];
         if t_width < cb_width {
             tones.push(peak_index);
         }
         index.retain(|&i| i > high_limit);
     }
-    tones
+    Ok(tones)
 }
 
 /// Validate + build the masked detection-band view.
@@ -495,11 +522,15 @@ impl ToneAccum {
 #[allow(clippy::too_many_lines)] // one reference routine, told in its order
 pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, PsychoError> {
     let (fr, spec) = detection_band(pcm_pa, sample_rate)?;
-    let mut peaks = screening_for_tones(&fr, &spec);
+    let mut peaks = screening_for_tones(&fr, &spec)?;
     let mut acc = ToneAccum {
         tones: Vec::new(),
         prominent_pow: 0.0,
     };
+    // The reference indexes the UNMASKED axis here with masked
+    // indices (its own bug); on a uniform axis the DIFFERENCES it
+    // takes are identical, so the masked axis is used with no
+    // numerical effect.
     let df = fr[1] - fr[0];
     while !peaks.is_empty() {
         let ind = peaks[0];
@@ -580,7 +611,7 @@ pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, 
 /// Same refusal set as [`tone_to_noise_ecma`].
 pub fn prominence_ratio_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, PsychoError> {
     let (fr, spec) = detection_band(pcm_pa, sample_rate)?;
-    let mut peaks = screening_for_tones(&fr, &spec);
+    let mut peaks = screening_for_tones(&fr, &spec)?;
     let mut acc = ToneAccum {
         tones: Vec::new(),
         prominent_pow: 0.0,

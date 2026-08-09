@@ -79,10 +79,16 @@ test).
   (Bray smoothed-spectrum screening, 1/24-octave criteria, annex
   D.8/D.10 critical bands, D.7.1 hearing threshold). Detection band
   (89.1, 11200) Hz; power-of-two block (the reference was re-run at
-  the fixture lengths). Three disclosed deviations on paths the
-  reference cannot execute deterministically (uninitialized smoothed
-  tail, -inf spectrum floor, out-of-band LTH NameError) in the
-  module doc.
+  the fixture lengths). Disclosed deviations in the module doc, all
+  on paths the reference cannot execute deterministically or
+  correctly: uninitialized smoothed-spectrum head/tail
+  (deterministic completion), zero-magnitude floor at the
+  reference's own -140 dB amp2db substitution, out-of-band LTH
+  clamp, EMPTY 1/24-octave band REFUSES (the reference's bookkeeping
+  corrupts — review-executed silent divergence at 96 kHz/8192 before
+  this gate), and the screening left walk clamps at the band edge
+  where numpy index-wraps (review-executed usize-underflow panic
+  before the fix).
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 
@@ -139,12 +145,18 @@ test).
     reference reproduces — two-tone fixture: TNR 12.43/51.33 dB and
     PR 61.49/50.70 dB at the exact bin frequencies, all prominent,
     ratios pinned at 1e-9 relative; noise-only fixture: TNR finds NO
-    tones and PR finds EXACTLY the reference's 10 weak candidates
-    (none prominent, totals exactly 0 — the candidate-set equality is
-    the sharp gate: it caught the even-b band-edge bug the strong
-    tones sailed through); low-SNR fixture: the 500 Hz tone detected,
-    prominent, pinned. Tonality refusals (non-power-of-two, short,
-    NaN, bad rate, unresolvable detection band) typed and executed.
+    tones and PR finds EXACTLY the reference's 10 weak candidates,
+    every frequency bit-pinned (none prominent, totals exactly 0 —
+    the candidate-set equality is the sharp gate: it caught the
+    even-b band-edge bug the strong tones sailed through); low-SNR
+    fixture: the 500 Hz tone detected, prominent, pinned; close-pair
+    fixture exercises the TNR proximity-MERGE branch (990+1010 Hz in
+    one band -> one merged tone, pinned); far-pair fixture exercises
+    the far-apart branch's ACCEPT path (bin-exact tones; a weak
+    non-prominent tone with total exactly 0). Tonality refusals
+    (non-power-of-two, short, NaN, bad rate, unresolvable detection
+    band, too-coarse resolution for 1/24-octave smoothing incl. the
+    review's panic configuration) typed and executed.
 13. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
    published ~70 Hz signature), ALL SEVEN sweep values match the
    standalone reference run within 1e-12 relative (exactness pins;
@@ -179,7 +191,7 @@ None.
 
 ## Conformance tests
 
-`tests/psycho.rs` (19 + 1 ignored provenance tool): ISO signal-1
+`tests/psycho.rs` (20 + 1 ignored provenance tool): ISO signal-1
 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
 refusal; low-band mutation; calibration refusal + calibrated value;
@@ -192,7 +204,8 @@ temporal-asymmetry behavior; phon conversion + signal refusals;
 `dump_reference_signals` (ignored) regenerates the bit-identical PCM
 the reference binary consumed to mint every signal-path pin; batch
 aggregation-exactness (bitwise) + refusal propagation; tonality
-exactness on three fixtures + typed tonality refusals.
+exactness on five fixtures (incl. both multi-tone branches) + typed
+tonality refusals.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 

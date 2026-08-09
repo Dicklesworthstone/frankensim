@@ -474,6 +474,40 @@ mod sigfix {
             .collect()
     }
 
+    /// Two CLOSE tones (990 + 1010 Hz) in one critical band, within
+    /// the ECMA proximity criterion — exercises the TNR merge branch.
+    pub fn close_d() -> Vec<f64> {
+        let a = amp(60.0);
+        let noise = lcg_noise(TONAL_LEN, 424_242);
+        (0..TONAL_LEN)
+            .map(|i| {
+                let t = i as f64 / SR;
+                a * fs_math::det::sin(2.0 * core::f64::consts::PI * 990.0 * t)
+                    + 0.8 * a * fs_math::det::sin(2.0 * core::f64::consts::PI * 1010.0 * t)
+                    + 0.0007 * noise[i]
+            })
+            .collect()
+    }
+
+    /// Two FAR tones in one critical band, outside the proximity
+    /// criterion — exercises the TNR far-apart branch. Both sit on
+    /// EXACT FFT bins (212.40234375 = bin 290, 262.20703125 =
+    /// bin 358 at 48 kHz / 65536): the branch compares the RAW peak
+    /// line against the band total, so off-bin scalloping would sink
+    /// delta below zero and leave the accept path unexecuted.
+    pub fn far_e() -> Vec<f64> {
+        let a = amp(60.0);
+        let noise = lcg_noise(TONAL_LEN, 555);
+        (0..TONAL_LEN)
+            .map(|i| {
+                let t = i as f64 / SR;
+                a * fs_math::det::sin(2.0 * core::f64::consts::PI * 212.402_343_75 * t)
+                    + 0.15 * a * fs_math::det::sin(2.0 * core::f64::consts::PI * 262.207_031_25 * t)
+                    + 0.0007 * noise[i]
+            })
+            .collect()
+    }
+
     /// 1 kHz 70 dB tone pulse, on during 0.25..0.75 s.
     pub fn pulse() -> Vec<f64> {
         let a = amp(70.0);
@@ -509,6 +543,8 @@ fn dump_reference_signals() {
     write("tonal_a", &sigfix::tonal_a());
     write("noise_b", &sigfix::noise_b());
     write("lowsnr_c", &sigfix::lowsnr_c());
+    write("close_d", &sigfix::close_d());
+    write("far_e", &sigfix::far_e());
 }
 
 /// Stationary loudness through the 48 kHz PCM filterbank path,
@@ -829,7 +865,22 @@ fn tonality_matches_reference() {
     assert!(tnr_b.tones.is_empty(), "{:?}", tnr_b.tones);
     assert_eq!(tnr_b.total_db, 0.0);
     let pr_b = prominence_ratio_ecma(&b, sr).expect("pr");
+    let expected_freqs: [f64; 10] = [
+        596.923_828_125,
+        836.425_781_25,
+        953.613_281_25,
+        1_141.113_281_25,
+        1_468.505_859_375,
+        1_898.437_5,
+        2_994.873_046_875,
+        5_064.697_265_625,
+        9_139.892_578_125,
+        10_453.857_421_875,
+    ];
     assert_eq!(pr_b.tones.len(), 10, "{:?}", pr_b.tones);
+    for (tone, want) in pr_b.tones.iter().zip(expected_freqs) {
+        assert_eq!(tone.frequency_hz.to_bits(), want.to_bits(), "candidate set");
+    }
     assert!(pr_b.tones.iter().all(|t| !t.prominent));
     assert_eq!(pr_b.total_db, 0.0);
     // One PR candidate pinned mid-list (953.6 Hz, 0.5146 dB).
@@ -897,4 +948,73 @@ fn tonality_refusals_are_typed() {
         tone_to_noise_ecma(&good[..4096], 100.0),
         Err(PsychoError::DegenerateSignal { .. })
     ));
+    // Resolution too coarse for 1/24-octave smoothing (review: this
+    // configuration silently DIVERGED from the reference before; the
+    // 192 kHz case additionally panicked on a usize underflow in the
+    // screening left walk).
+    for (len, sr) in [(8192usize, 96_000.0), (4096, 192_000.0)] {
+        assert!(
+            matches!(
+                tone_to_noise_ecma(&good[..len], sr),
+                Err(PsychoError::DegenerateSignal { .. })
+            ),
+            "coarse resolution {len}@{sr} must refuse"
+        );
+    }
+}
+
+/// The TNR multi-tone branches (review-caught untested): two close
+/// tones in one critical band exercise the proximity MERGE branch
+/// (peak levels energy-summed, delta_ft doubled); two far tones in
+/// one band exercise the far-apart branch (RAW line level vs the
+/// band total) through its ACCEPT path. Reference-exact pins.
+#[test]
+#[allow(clippy::excessive_precision, clippy::float_cmp)]
+fn tonality_multitone_branches_match_reference() {
+    use fs_psycho::tonality::{prominence_ratio_ecma, tone_to_noise_ecma};
+    let sr = sigfix::SR;
+    // Close pair: merged into ONE tone at the 990 Hz line.
+    let d = sigfix::close_d();
+    let tnr_d = tone_to_noise_ecma(&d, sr).expect("tnr");
+    assert_eq!(tnr_d.tones.len(), 1, "{:?}", tnr_d.tones);
+    assert_eq!(
+        tnr_d.tones[0].frequency_hz.to_bits(),
+        990.966_796_875_f64.to_bits()
+    );
+    let v = 14.491_516_282_600_855;
+    assert!(
+        ((tnr_d.tones[0].ratio_db - v) / v).abs() < 1.0e-9,
+        "{:.17}",
+        tnr_d.tones[0].ratio_db
+    );
+    assert!(tnr_d.tones[0].prominent);
+    let pr_d = prominence_ratio_ecma(&d, sr).expect("pr");
+    assert_eq!(pr_d.tones.len(), 1);
+    let v = 63.713_183_911_372_86;
+    assert!(((pr_d.tones[0].ratio_db - v) / v).abs() < 1.0e-9);
+    // Far pair: the far-apart branch accepts ONE weak tone (raw line
+    // vs band total), below the prominence threshold — so the total
+    // is exactly 0 while the tone list is not empty (the sharp
+    // discrimination of totals-over-prominent).
+    let e = sigfix::far_e();
+    let tnr_e = tone_to_noise_ecma(&e, sr).expect("tnr");
+    assert_eq!(tnr_e.tones.len(), 1, "{:?}", tnr_e.tones);
+    assert_eq!(
+        tnr_e.tones[0].frequency_hz.to_bits(),
+        213.134_765_625_f64.to_bits()
+    );
+    let v = 2.664_949_568_215_725;
+    assert!(
+        ((tnr_e.tones[0].ratio_db - v) / v).abs() < 1.0e-9,
+        "{:.17}",
+        tnr_e.tones[0].ratio_db
+    );
+    assert!(!tnr_e.tones[0].prominent);
+    assert_eq!(tnr_e.total_db, 0.0);
+    let pr_e = prominence_ratio_ecma(&e, sr).expect("pr");
+    assert_eq!(pr_e.tones.len(), 1);
+    let v = 63.938_143_912_935_13;
+    assert!(((pr_e.tones[0].ratio_db - v) / v).abs() < 1.0e-9);
+    assert!(pr_e.tones[0].prominent);
+    println!("{{\"suite\":\"fs-psycho\",\"case\":\"tonality-multitone\",\"verdict\":\"pass\"}}");
 }
