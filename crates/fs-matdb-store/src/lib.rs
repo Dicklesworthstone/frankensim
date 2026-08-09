@@ -248,6 +248,16 @@ impl MaterialStore {
                 what: "empty redistribution terms",
             });
         }
+        // Admission PRE-PASS before any row is written (review finding:
+        // a mid-ingest refusal must not leave a committed partial pack).
+        for (_claim_id, claim) in pack.claims().claims_ordered() {
+            if claim.provenance.license.trim().is_empty() {
+                return Err(StoreError::Inadmissible {
+                    pack_id,
+                    what: "claim with empty license",
+                });
+            }
+        }
         let existing = self
             .conn
             .query_with_params_sync(
@@ -260,14 +270,41 @@ impl MaterialStore {
         }
         let bytes = pack.to_bytes();
         let hash = pack.content_hash();
+        // Transactional ingest: any failure below rolls the whole pack
+        // back, so retries never hit DuplicatePack on a half-ingested
+        // id and the index can never be partially populated.
+        self.conn
+            .execute_sync("BEGIN IMMEDIATE")
+            .map_err(sql_err("begin ingest"))?;
+        let result = self.ingest_rows(&pack_id, pack, &bytes, hash);
+        match &result {
+            Ok(()) => {
+                self.conn
+                    .execute_sync("COMMIT")
+                    .map_err(sql_err("commit ingest"))?;
+            }
+            Err(_) => {
+                let _ = self.conn.execute_sync("ROLLBACK");
+            }
+        }
+        result
+    }
+
+    fn ingest_rows(
+        &self,
+        pack_id: &str,
+        pack: &NormalizedPack,
+        bytes: &[u8],
+        hash: ContentHash,
+    ) -> Result<(), StoreError> {
         self.conn
             .execute_with_params_sync(
                 "INSERT INTO packs(pack_id, content_hash, bytes, compiler, redistribution) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 &[
-                    text_param(&pack_id),
+                    text_param(pack_id),
                     blob_param(hash.as_bytes()),
-                    blob_param(&bytes),
+                    blob_param(bytes),
                     text_param(pack.compiler()),
                     text_param(pack.redistribution_terms()),
                 ],
@@ -275,12 +312,6 @@ impl MaterialStore {
             .map_err(sql_err("insert pack"))?;
         // Derived index rows, in the ClaimSet's canonical order.
         for (claim_id, claim) in pack.claims().claims_ordered() {
-            if claim.provenance.license.trim().is_empty() {
-                return Err(StoreError::Inadmissible {
-                    pack_id,
-                    what: "claim with empty license",
-                });
-            }
             let (kind, scalar_value) = match &claim.value {
                 fs_matdb::PropertyValue::Scalar { value, .. } => ("scalar", Some(*value)),
                 fs_matdb::PropertyValue::Curve { .. } => ("curve", None),
@@ -290,7 +321,7 @@ impl MaterialStore {
                     "INSERT INTO claims(pack_id, claim_hash, property, kind, scalar_value, \
                      observation_backed, license, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     &[
-                        text_param(&pack_id),
+                        text_param(pack_id),
                         blob_param(claim_id.0.as_bytes()),
                         text_param(claim.key.name()),
                         text_param(kind),
@@ -307,7 +338,7 @@ impl MaterialStore {
                         "INSERT INTO validity(pack_id, claim_hash, axis, lo, hi) \
                          VALUES (?1, ?2, ?3, ?4, ?5)",
                         &[
-                            text_param(&pack_id),
+                            text_param(pack_id),
                             blob_param(claim_id.0.as_bytes()),
                             text_param(axis),
                             SqliteValue::Float(*lo),
