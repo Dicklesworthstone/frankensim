@@ -407,7 +407,7 @@ pub fn string_collocation(
     points: &[f64],
     n_modes: usize,
 ) -> Result<Vec<f64>, DContactError> {
-    if !(length > 0.0) || !(lin_density > 0.0) {
+    if length.is_nan() || length <= 0.0 || lin_density.is_nan() || lin_density <= 0.0 {
         return Err(DContactError::Parameter {
             what: "string length and density must be positive",
         });

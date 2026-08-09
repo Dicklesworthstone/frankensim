@@ -547,7 +547,7 @@ fn contact_gradient_matches_finite_difference_of_h() {
     let n_modes = 5;
     let pts: Vec<f64> = (1i32..=9).map(|i| length * f64::from(i) / 10.0).collect();
     let coll = string_collocation(length, mu, &pts, n_modes).expect("collocation");
-    let weights: Vec<f64> = (1..=9).map(|i| 0.01 * i as f64).collect(); // non-uniform
+    let weights: Vec<f64> = (1i32..=9).map(|i| 0.01 * f64::from(i)).collect(); // non-uniform
     let gaps: Vec<f64> = (0..9)
         .map(|i| if i % 2 == 0 { 1.0e-4 } else { 5.0e-2 }) // half active, half far
         .collect();
