@@ -94,6 +94,12 @@ pub enum StoreError {
     /// The delegated fs-matdb evaluation refused (extrapolation,
     /// unknown property, ambiguity...) — passed through UNCHANGED.
     MatDb(MatDbError),
+    /// No claim in the whole corpus carries this property name — a
+    /// typo is not an empty result set.
+    UnknownProperty {
+        /// Requested property.
+        property: String,
+    },
     /// A stored value could not be decoded as the expected SQL type.
     Malformed {
         /// Where.
@@ -132,6 +138,9 @@ impl core::fmt::Display for StoreError {
                 write!(f, "FS-MATDB-STORE-INADMISSIBLE: {pack_id}: {what}")
             }
             StoreError::MatDb(error) => write!(f, "{error}"),
+            StoreError::UnknownProperty { property } => {
+                write!(f, "FS-MATDB-STORE-UNKNOWN-PROPERTY: {property}")
+            }
             StoreError::Malformed { context } => {
                 write!(f, "FS-MATDB-STORE-MALFORMED: {context}")
             }
@@ -477,7 +486,26 @@ impl MaterialStore {
                 )
                 .map_err(sql_err("materials_with range"))?,
         };
+        if rows.is_empty() {
+            self.require_known_property(property)?;
+        }
         rows.iter().map(property_row).collect()
+    }
+
+    fn require_known_property(&self, property: &str) -> Result<(), StoreError> {
+        let any = self
+            .conn
+            .query_with_params_sync(
+                "SELECT 1 FROM claims WHERE property = ?1 LIMIT 1",
+                &[text_param(property)],
+            )
+            .map_err(sql_err("property probe"))?;
+        if any.is_empty() {
+            return Err(StoreError::UnknownProperty {
+                property: property.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Discovery: materials whose `property` claim is VALID at the
@@ -510,14 +538,27 @@ impl MaterialStore {
                 ],
             )
             .map_err(sql_err("valid_at"))?;
+        if rows.is_empty() {
+            self.require_known_property(property)?;
+        }
         rows.iter().map(property_row).collect()
     }
 
-    /// Load a pack's canonical bytes and decode them HASH-VERIFIED.
+    /// Load a pack's canonical bytes and decode them HASH-VERIFIED,
+    /// behind the staleness gate like every other surface.
     ///
     /// # Errors
-    /// [`StoreError::UnknownPack`] / [`StoreError::PackCorrupt`].
+    /// Staleness refusals plus [`StoreError::UnknownPack`] /
+    /// [`StoreError::PackCorrupt`].
     pub fn load_pack(&self, pack_id: &str) -> Result<NormalizedPack, StoreError> {
+        self.require_sealed()?;
+        self.load_pack_unchecked(pack_id)
+    }
+
+    /// The gate-free decode used internally after a caller has already
+    /// paid `require_sealed` (and by `verify_index`, which must work on
+    /// a DRIFTED store precisely because its job is investigating one).
+    fn load_pack_unchecked(&self, pack_id: &str) -> Result<NormalizedPack, StoreError> {
         let rows = self
             .conn
             .query_with_params_sync(
@@ -557,7 +598,7 @@ impl MaterialStore {
         policy: SelectionPolicy,
     ) -> Result<MaterialAnswer, StoreError> {
         self.require_sealed()?;
-        let pack = self.load_pack(pack_id)?;
+        let pack = self.load_pack_unchecked(pack_id)?;
         let answer = pack.claims().query(property, point, policy)?;
         pack.claims().verify_receipt(&answer.receipt)?;
         Ok(answer)
@@ -570,7 +611,7 @@ impl MaterialStore {
     /// # Errors
     /// [`StoreError::IndexMismatch`] naming the first disagreement.
     pub fn verify_index(&self, pack_id: &str) -> Result<(), StoreError> {
-        let pack = self.load_pack(pack_id)?;
+        let pack = self.load_pack_unchecked(pack_id)?;
         let index_rows = self
             .conn
             .query_with_params_sync(
