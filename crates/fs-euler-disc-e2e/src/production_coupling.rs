@@ -745,6 +745,68 @@ impl ProductionCouplingModel {
         Ok(resolved)
     }
 
+    /// Build the first complete coupled checkpoint from one resolved profile.
+    ///
+    /// This is the profile-native admission boundary used by product drivers.
+    /// It binds the actual support point and principal curvatures, evaluates
+    /// the selected normal law at the supplied state, derives the finite patch
+    /// seen by the selected tangential law, starts rolling history at zero,
+    /// and seals all channel states into one checkpoint. No material name,
+    /// contact radius, normal force, or coefficient is inferred here: every
+    /// constitutive choice remains in `input`, while `gas_channel_state`
+    /// remains an explicitly selected mutually exclusive gas mechanism.
+    ///
+    /// The method mutates only the caller-owned template fields whose values
+    /// are derived from the admitted profile and initial checkpoint. A refusal
+    /// returns no partially accepted coupled state.
+    pub fn initialize_horizontal_plane_axisymmetric_profile_trajectory(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        normal_state: NormalPatchEmbedState,
+        gas_channel_state: GasChannelState,
+        maximum_tangential_work_keys: usize,
+        cx: &Cx<'_>,
+    ) -> Result<ProductionCouplingCheckpoint, ProductionCouplingError> {
+        self.bind_initial_horizontal_plane_axisymmetric_profile_contact(
+            input, profile, disc_state, cx,
+        )?;
+        let patch_kinematics = compute_moving_one_mode_patch_kinematics(input.patch.clone())
+            .map_err(ProductionCouplingError::Patch)?;
+        let mut normal_input = input.normal.clone();
+        normal_input.kinematics = patch_kinematics.clone();
+        normal_input.state = normal_state.clone();
+        normal_input.time_s = 0.0;
+        normal_input.step_s = input.duration_s;
+        let normal = match evaluate_normal_contact(&normal_input)
+            .map_err(ProductionCouplingError::Normal)?
+        {
+            EulerNormalContactOutcome::Active(active) => active,
+            EulerNormalContactOutcome::InactiveSeparated { .. } => {
+                return Err(ProductionCouplingError::UnsupportedMechanism {
+                    status: PatchContactStatus::Separated,
+                });
+            }
+        };
+        let normal_patch = normal_patch_view(&normal, &patch_kinematics)?;
+        let tangential_state = self
+            .tangential_adapter
+            .initial_state(
+                &normal_patch,
+                &input.tangential.interface,
+                maximum_tangential_work_keys,
+            )
+            .map_err(ProductionCouplingError::Tangential)?;
+        self.initial_checkpoint(
+            disc_state,
+            normal_state,
+            tangential_state,
+            RollingContactState::zero(),
+            gas_channel_state,
+        )
+    }
+
     /// Rebuilds one smooth profile patch directly from an accepted coupled checkpoint.
     ///
     /// Base displacement/velocity and rigid-body state come from the private,

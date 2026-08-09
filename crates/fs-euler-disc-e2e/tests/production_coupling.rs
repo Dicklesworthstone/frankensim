@@ -1242,7 +1242,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             base_port: base_port(),
             tangential_adapter: adapter.clone(),
         };
-        let (mut request, _, interface) = production_request_template();
+        let (mut request, _, _) = production_request_template();
         request.normal.geometry = EulerNormalGeometry::EllipticParaboloid;
         let texture_a = PeriodicHarmonicSurface::new(
             "synthetic/profile-disc-track",
@@ -1352,36 +1352,26 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
         let NormalPatchReceipt::Point(point) = &active.generic.receipt else {
             panic!("elliptic profile contact must retain point-resultant units");
         };
-        let (longitudinal, lateral) = point
-            .elliptic_patch_axes
-            .map_or((point.patch_radius_m, point.patch_radius_m), |axes| {
-                (axes.semi_major_axis_m, axes.semi_minor_axis_m)
-            });
-        let normal_view = NormalPatchView::new(
-            request.patch.patch.patch_identity.as_str(),
-            request.normal.material.material_card_id.clone(),
-            request.normal.material.source_id.clone(),
-            NormalPatchAuthority::SyntheticFixture,
-            point.normal_force_n,
-            longitudinal,
-            lateral,
-            point.pressure.second_moment_m2,
-        )
-        .expect("profile-derived normal view");
+        assert!(
+            point.elliptic_patch_axes.is_some_and(|axes| {
+                axes.semi_major_axis_m > 0.0 && axes.semi_minor_axis_m > 0.0
+            }),
+            "profile-native initialization must retain the actual elliptic footprint"
+        );
         let checkpoint = model
-            .initial_checkpoint(
+            .initialize_horizontal_plane_axisymmetric_profile_trajectory(
+                &mut request,
+                &profile,
                 penetrated_state,
                 NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
-                adapter
-                    .initial_state(&normal_view, &interface, 4)
-                    .expect("profile tangential checkpoint"),
-                RollingContactState::zero(),
                 GasChannelState::ExteriorFreeGas(
                     EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
                         .expect("air checkpoint"),
                 ),
+                4,
+                cx,
             )
-            .expect("profile production checkpoint");
+            .expect("profile-native production initialization");
         let first_request = request.clone();
         let mut repeated_request = production_request_template().0;
         repeated_request.normal.geometry = EulerNormalGeometry::EllipticParaboloid;
