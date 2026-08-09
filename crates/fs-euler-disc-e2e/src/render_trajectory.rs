@@ -17,6 +17,10 @@ use crate::coupled_runner::{
     ChannelOwnership, ChannelWrench, ContactTransitionKind, CoupledContactBranch,
     CoupledNumericalRefusalReason, CoupledRun, CoupledSample, CoupledTerminal, qois,
 };
+use crate::production_coupling::{
+    ProductionCouplingError, ProductionCouplingModel, ProductionCouplingReceipt,
+    SmoothContactTrajectory, SmoothContactTrajectoryTermination,
+};
 use crate::reduced_decay::{
     BILDSTEN_PUBLISHED_POWER_COEFFICIENT, ChannelPowers, ChannelWork, REDUCED_DECAY_MODEL_ID,
     ReducedDecayRun, ReducedDecaySample, ReducedDecayTerminal,
@@ -35,6 +39,8 @@ pub const MAX_RENDER_TRANSITIONS_PER_SAMPLE: usize = 64;
 pub const MAX_RENDER_TRAJECTORY_NO_CLAIMS: usize = 64;
 /// Exact deterministic convention for the reduced-decay render bridge.
 pub const REDUCED_DECAY_RENDER_BRIDGE_VERSION: u32 = 3;
+/// Exact producer version for the transactional production-prefix bridge.
+pub const PRODUCTION_COUPLING_RENDER_BRIDGE_VERSION: u32 = 1;
 /// Cinematic tail retained by the default reduced-decay bridge [s].
 ///
 /// The source run is slightly longer than eight seconds. Rebasing its final
@@ -138,6 +144,12 @@ pub enum RenderNormalForceSampling {
     FirstAcceptedSubintervalMidpoint = 1,
     /// The scalar is the mean base-normal reaction over the accepted interval.
     IntervalMean = 2,
+    /// The scalar is the normal-law evaluation applied as a constant world
+    /// force throughout one accepted transactional mechanics substep. It is
+    /// therefore the exact interval mean of the discretized zero-order-hold
+    /// forcing, while remaining only a timestep-dependent approximation to the
+    /// continuously evolving physical force.
+    AppliedSubstepZeroOrderHold = 3,
 }
 
 /// Nominal rigid frame of the reduced base plane.
@@ -490,6 +502,272 @@ impl RenderTrajectory {
                 )
             })
             .collect();
+        Self::try_new(metadata, inputs)
+    }
+
+    /// Convert an accepted smooth-contact prefix from the transactional
+    /// production mechanics stack into the common render trajectory.
+    ///
+    /// Only fields established by that backend are published. The exact
+    /// contact point and single-step normal-law evaluation are retained, while
+    /// the render channel-work payloads remain explicitly unavailable because
+    /// the current production receipt does not yet publish one common
+    /// cross-channel work ledger. The mechanical-energy field is the complete
+    /// disc-only `fs-mbd` diagnostic, and `energy_defect_j` is its constant-
+    /// wrench midpoint work residual. Neither is mislabeled as full coupled
+    /// disc/base/contact energy closure.
+    pub fn from_production_coupling_prefix(
+        model: &ProductionCouplingModel,
+        source: &SmoothContactTrajectory,
+        profile: &ResolvedDiscProfile,
+        declared_maximum_timestep_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        cx.checkpoint()
+            .map_err(|_| RenderTrajectoryError::Cancelled)?;
+        if source.accepted_steps.is_empty() {
+            return Err(RenderTrajectoryError::ProductionPrefixEmpty);
+        }
+        if !(declared_maximum_timestep_s.is_finite() && declared_maximum_timestep_s > 0.0) {
+            return Err(RenderTrajectoryError::InvalidTimestep);
+        }
+        let profile_mass = profile_mass_to_mbd(profile.mass_properties)
+            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+        model
+            .validate_checkpoint(&source.start_checkpoint)
+            .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
+        model
+            .validate_checkpoint(&source.last_accepted_checkpoint)
+            .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
+        if model.disc_mass_properties != profile_mass {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+        let expected_version = source
+            .start_checkpoint
+            .committed_version
+            .checked_add(u64::try_from(source.accepted_steps.len()).map_err(|_| {
+                RenderTrajectoryError::Capacity {
+                    artifact: "production-prefix version",
+                    requested: source.accepted_steps.len(),
+                }
+            })?)
+            .ok_or(RenderTrajectoryError::Capacity {
+                artifact: "production-prefix version",
+                requested: source.accepted_steps.len(),
+            })?;
+        if source.last_accepted_checkpoint.committed_version != expected_version {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(source.accepted_steps.len())
+            .map_err(|_| RenderTrajectoryError::Capacity {
+                artifact: "production render-prefix samples",
+                requested: source.accepted_steps.len(),
+            })?;
+        let mut interval_start_time_s = source.start_checkpoint.elapsed_time_s();
+        let mut previous_state = source.start_checkpoint.disc_state;
+        let mut previous_base_displacement_m = source.start_checkpoint.base_displacement_m();
+        let mut previous_base_velocity_m_per_s = source.start_checkpoint.base_velocity_m_per_s();
+        let final_index = source.accepted_steps.len() - 1;
+        for (index, receipt) in source.accepted_steps.iter().enumerate() {
+            if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
+                cx.checkpoint()
+                    .map_err(|_| RenderTrajectoryError::Cancelled)?;
+            }
+            let base = receipt.base.receipt();
+            let duration_s = receipt.rigid_step.duration_seconds;
+            if duration_s.to_bits() != base.timestep_s.to_bits()
+                || duration_s > declared_maximum_timestep_s
+                || receipt.rigid_step.state_before != previous_state
+                || receipt.rigid_step.state_after != receipt.next_disc_state
+                || base.modal_displacement_start_m.to_bits()
+                    != previous_base_displacement_m.to_bits()
+                || base.modal_velocity_start_m_per_s.to_bits()
+                    != previous_base_velocity_m_per_s.to_bits()
+            {
+                return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "accepted state/clock lineage",
+                });
+            }
+            let time_s = interval_start_time_s + duration_s;
+            if !time_s.is_finite() {
+                return Err(RenderTrajectoryError::NonFinite {
+                    sample: Some(index),
+                    field: "production-prefix time",
+                });
+            }
+            let normal_force_n = match &receipt.normal.generic.receipt {
+                fs_contact::normal_patch::NormalPatchReceipt::Point(point) => point.normal_force_n,
+                fs_contact::normal_patch::NormalPatchReceipt::Line(_) => {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "line contact cannot produce a point-resultant trajectory",
+                    });
+                }
+            };
+            // The force receipt is evaluated from the interval-start patch,
+            // but render contact geometry is an endpoint field. Re-query the
+            // actual profile support at the accepted post-step pose instead
+            // of pairing a stale start point with the new rigid state.
+            let endpoint_contact = profile_contact_geometry(
+                &profile.chart,
+                profile.mass_properties,
+                receipt.next_disc_state.pose(),
+                cx,
+            )
+            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+            let normal_world = Vec3::new(0.0, 0.0, 1.0);
+            let signed_gap_m = endpoint_contact.contact.gap_m - base.modal_displacement_end_m;
+            if signed_gap_m > 0.0 {
+                return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "accepted smooth-contact step ends after an unlocalized opening",
+                });
+            }
+            let before_qois = DerivedEulerQois::from_state(
+                receipt.rigid_step.state_before,
+                model.disc_mass_properties,
+                0.0,
+            )?;
+            let after_qois_without_acceleration = DerivedEulerQois::from_state(
+                receipt.rigid_step.state_after,
+                model.disc_mass_properties,
+                0.0,
+            )?;
+            let precession_acceleration_rad_per_s2 = (after_qois_without_acceleration
+                .precession_rad_per_s
+                - before_qois.precession_rad_per_s)
+                / duration_s;
+            let qois = DerivedEulerQois {
+                precession_acceleration_rad_per_s2,
+                ..after_qois_without_acceleration
+            };
+            let energy_defect_j = production_disc_work_residual_j(model, receipt, index)?;
+            let orientation = receipt.next_disc_state.pose().orientation();
+            inputs.push(RenderTrajectorySampleInput {
+                interval_start_time_s,
+                time_s,
+                world_frame: RenderWorldFrame::RightHandedZUp,
+                units: RenderUnitSystem::SiRadians,
+                center_of_mass_world_m: receipt.next_disc_state.pose().position_world(),
+                orientation_body_to_world: orientation.components(),
+                linear_momentum_world_kg_m_per_s: receipt.next_disc_state.linear_momentum_world(),
+                angular_momentum_body_kg_m2_per_s: receipt.next_disc_state.angular_momentum_body(),
+                symmetry_axis_world: orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+                contact_branch: RenderContactBranch::Closed,
+                contact_geometry: Some(RenderContactGeometry {
+                    point_world_m: endpoint_contact.contact.point_world_m,
+                    normal_world,
+                    support_feature: RenderSupportFeature::ProfileFeature(
+                        endpoint_contact.support_source_feature,
+                    ),
+                }),
+                signed_gap_m,
+                interval_contact_active: true,
+                interval_normal_force_n: normal_force_n,
+                contact_transitions: Vec::new(),
+                base_mode: Some(RenderBaseModeState {
+                    displacement_m: base.modal_displacement_end_m,
+                    velocity_m_per_s: base.modal_velocity_end_m_per_s,
+                }),
+                channels: ChannelOwnership::default(),
+                mechanical_energy_j: receipt.rigid_step.diagnostics_after.mechanical_energy,
+                energy_defect_j,
+                qois,
+                disposition: if index == final_index {
+                    production_prefix_disposition(&source.termination)
+                } else {
+                    RenderSampleDisposition::Continue
+                },
+                terminal_event: None,
+            });
+            interval_start_time_s = time_s;
+            previous_state = receipt.next_disc_state;
+            previous_base_displacement_m = base.modal_displacement_end_m;
+            previous_base_velocity_m_per_s = base.modal_velocity_end_m_per_s;
+        }
+        if previous_state != source.last_accepted_checkpoint.disc_state
+            || interval_start_time_s.to_bits()
+                != source.last_accepted_checkpoint.elapsed_time_s().to_bits()
+            || previous_base_displacement_m.to_bits()
+                != source
+                    .last_accepted_checkpoint
+                    .base_displacement_m()
+                    .to_bits()
+            || previous_base_velocity_m_per_s.to_bits()
+                != source
+                    .last_accepted_checkpoint
+                    .base_velocity_m_per_s()
+                    .to_bits()
+        {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+
+        let identities = profile.content_identities();
+        let model_identity = production_model_identity(model, identities.profile);
+        let configuration_identity = production_configuration_identity(model, model_identity);
+        let mut fingerprint = [0_u8; 8];
+        fingerprint.copy_from_slice(&configuration_identity.as_bytes()[..8]);
+        let base_identity = model.base_port.identity();
+        let base_model_identity = hash_domain(
+            "org.frankensim.euler-disc.production-base-model.v1",
+            format!(
+                "{}\0{}",
+                base_identity.model_id, base_identity.configuration_id
+            )
+            .as_bytes(),
+        );
+        let metadata = RenderTrajectoryMetadata {
+            schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            specimen_profile_identity: identities.profile,
+            specimen_chart_identity: identities.chart,
+            mass_properties: RenderMassProperties {
+                identity: identities.mass_properties,
+                properties: model.disc_mass_properties,
+            },
+            initial_state: source.start_checkpoint.disc_state,
+            initial_base_mode: RenderBaseModeState {
+                displacement_m: source.start_checkpoint.base_displacement_m(),
+                velocity_m_per_s: source.start_checkpoint.base_velocity_m_per_s(),
+            },
+            base_model_identity,
+            base_frame: RenderBaseFrame {
+                origin_world_m: Vec3::ZERO,
+                orientation_base_to_world: UnitQuaternion::IDENTITY,
+            },
+            model_identity,
+            channel_availability: RenderChannelAvailability {
+                gravity: false,
+                contact: false,
+                normal_force_sampling: RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
+                rolling: false,
+                base: false,
+                gas: false,
+            },
+            configuration_identity,
+            configuration_fingerprint: u64::from_le_bytes(fingerprint),
+            timestep_s: declared_maximum_timestep_s,
+            producer_version: format!(
+                "fs-euler-disc-e2e/production-coupling-render-bridge-v{}",
+                PRODUCTION_COUPLING_RENDER_BRIDGE_VERSION
+            ),
+            applicability: "accepted smooth-contact prefix from the transactional finite-patch/partial-slip/rolling/gas/one-mode-base composition; ends at its explicit step budget or first typed mechanism refusal".to_owned(),
+            no_claims: vec![
+                "Estimate-authority simulation prefix; not experimental calibration or validated Euler-disc stopping-time prediction".to_owned(),
+                "smooth-contact prefix only; separation, impact, reimpact, and terminal continuation are not synthesized".to_owned(),
+                "normal force is the exact mean of the discretized applied zero-order hold; physical force bandwidth and convergence remain limited by the mechanics timestep".to_owned(),
+                "render channel work is unavailable pending one shared cross-channel work ledger; zero payloads mean unavailable, not zero physical loss".to_owned(),
+                "mechanical energy and defect are disc-only fs-mbd diagnostics, not full disc/base/contact/gas energy closure".to_owned(),
+                "model identity binds the declared production configuration and exposed adapter/base identities; it does not independently introspect every private constituent law coefficient".to_owned(),
+                "no thermal evolution, phase change, melting, plastic flow, structural-mode solve, or acoustic-radiation solve is implied".to_owned(),
+            ],
+            authority: RenderTrajectoryAuthority::SimulationEvidence,
+        };
         Self::try_new(metadata, inputs)
     }
 
@@ -848,6 +1126,17 @@ pub enum RenderTrajectoryError {
     InvalidTimestep,
     /// No samples were supplied.
     EmptyTrajectory,
+    /// A production smooth-contact prefix accepted no mechanics substep.
+    ProductionPrefixEmpty,
+    /// Production model, specimen, start, or final checkpoint identities disagreed.
+    ProductionPrefixModelMismatch,
+    /// One accepted production receipt did not extend the preceding state exactly.
+    ProductionPrefixSampleMismatch {
+        /// Zero-based accepted-step index.
+        sample: usize,
+        /// Stable mismatch category.
+        field: &'static str,
+    },
     /// The retained sample ceiling was exceeded.
     TooManySamples(usize),
     /// A bounded trajectory allocation could not be admitted.
@@ -1853,6 +2142,128 @@ fn reduced_decay_configuration_identity(
 fn hash_text(hasher: &mut DomainHasher, value: &str) {
     hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(value.as_bytes());
+}
+
+fn production_model_identity(
+    model: &ProductionCouplingModel,
+    profile_identity: ContentHash,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new("org.frankensim.euler-disc.production-render-model.v1");
+    hash_text(&mut hasher, &model.identity.case_id);
+    hash_text(&mut hasher, &model.identity.configuration_id);
+    hash_text(&mut hasher, &model.identity.world_frame_id);
+    hasher.update(profile_identity.as_bytes());
+    let gravity = model.gravity.acceleration_world();
+    for value in [gravity.x, gravity.y, gravity.z] {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+    let base = model.base_port.identity();
+    hash_text(&mut hasher, &base.model_id);
+    hash_text(&mut hasher, &base.configuration_id);
+    hash_text(&mut hasher, model.tangential_adapter.adapter_id());
+    hash_text(&mut hasher, model.tangential_adapter.source_id());
+    hasher.finalize()
+}
+
+fn production_configuration_identity(
+    model: &ProductionCouplingModel,
+    model_identity: ContentHash,
+) -> ContentHash {
+    let mut hasher =
+        DomainHasher::new("org.frankensim.euler-disc.production-render-configuration.v1");
+    hasher.update(model_identity.as_bytes());
+    hash_text(&mut hasher, &model.identity.configuration_id);
+    hasher.finalize()
+}
+
+fn production_disc_work_residual_j(
+    model: &ProductionCouplingModel,
+    receipt: &ProductionCouplingReceipt,
+    sample: usize,
+) -> Result<f64, RenderTrajectoryError> {
+    let before = receipt.rigid_step.state_before;
+    let after = receipt.rigid_step.state_after;
+    let duration_s = receipt.rigid_step.duration_seconds;
+    let velocity_before = before
+        .center_of_mass_velocity_world(model.disc_mass_properties)
+        .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+    let velocity_after = after
+        .center_of_mass_velocity_world(model.disc_mass_properties)
+        .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+    let omega_before_body = model
+        .disc_mass_properties
+        .angular_velocity_body_checked(before.angular_momentum_body())
+        .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+    let omega_after_body = model
+        .disc_mass_properties
+        .angular_velocity_body_checked(after.angular_momentum_body())
+        .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+    let velocity_mid = velocity_before.add(velocity_after).scale(0.5);
+    let omega_mid_body = omega_before_body.add(omega_after_body).scale(0.5);
+    // `fs-mbd::Wrench` holds torque constant in body axes, whereas force is
+    // held constant in world axes. Reconstruct that exact discrete convention;
+    // averaging two world-frame angular velocities would silently use a
+    // different torque history as the body rotates.
+    let torque_body = before
+        .pose()
+        .orientation()
+        .rotate_world_to_body(receipt.total_moment_about_com_world_n_m);
+    let wrench_work_j = duration_s
+        * (receipt.total_force_world_n.dot(velocity_mid)
+            + torque_body.dot(omega_mid_body));
+    let residual = receipt.rigid_step.diagnostics_after.mechanical_energy
+        - receipt.rigid_step.diagnostics_before.mechanical_energy
+        - wrench_work_j;
+    if residual.is_finite() {
+        Ok(residual)
+    } else {
+        Err(RenderTrajectoryError::NonFinite {
+            sample: Some(sample),
+            field: "production-prefix disc work residual",
+        })
+    }
+}
+
+fn production_prefix_disposition(
+    termination: &SmoothContactTrajectoryTermination,
+) -> RenderSampleDisposition {
+    match termination {
+        SmoothContactTrajectoryTermination::StepLimitReached { .. } => {
+            RenderSampleDisposition::HorizonCensored
+        }
+        SmoothContactTrajectoryTermination::Refused { error, .. } => {
+            RenderSampleDisposition::NumericalRefusal(
+                RenderNumericalRefusalReason::BackendSpecific(production_refusal_code(error)),
+            )
+        }
+    }
+}
+
+const fn production_refusal_code(error: &ProductionCouplingError) -> u32 {
+    match error {
+        ProductionCouplingError::CheckpointMismatch => 1,
+        ProductionCouplingError::CheckpointVersionMismatch { .. } => 2,
+        ProductionCouplingError::CheckpointIntegrityMismatch => 3,
+        ProductionCouplingError::InputIdentityMismatch { .. } => 4,
+        ProductionCouplingError::InvalidInput { .. } => 5,
+        ProductionCouplingError::ProfileContact(_) => 6,
+        ProductionCouplingError::ProfileModelMassMismatch => 7,
+        ProductionCouplingError::ResolvedProfileMassMismatch => 8,
+        ProductionCouplingError::ResolvedProfileIdentityMismatch { .. } => 9,
+        ProductionCouplingError::Patch(_) => 10,
+        ProductionCouplingError::CurvatureUnavailable => 11,
+        ProductionCouplingError::UnsupportedMechanism { .. } => 12,
+        ProductionCouplingError::UnsupportedLineNormalContact => 13,
+        ProductionCouplingError::Normal(_) => 14,
+        ProductionCouplingError::Tangential(_) => 15,
+        ProductionCouplingError::Rolling(_) => 16,
+        ProductionCouplingError::ExteriorAir(_) => 17,
+        ProductionCouplingError::AirFilm(_) => 18,
+        ProductionCouplingError::GasChannelMismatch => 19,
+        ProductionCouplingError::ExteriorCandidateUnavailable => 20,
+        ProductionCouplingError::Base(_) => 21,
+        ProductionCouplingError::Dynamics(_) => 22,
+    }
 }
 
 fn coupled_sample_input(

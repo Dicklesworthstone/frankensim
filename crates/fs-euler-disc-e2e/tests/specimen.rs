@@ -1,8 +1,15 @@
 //! G0/G3 checks for one-source-of-truth Euler-disc specimen resolution.
 
 use fs_euler_disc_e2e::specimen::{DiscProfileError, DiscProfileSpec};
+use fs_evidence::ValidityDomain;
 use fs_exec::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
+use fs_material::state_point::{MaterialPropertySelection, resolve_isotropic_solid_state_point};
+use fs_qty::{Density, Dims, Pressure};
 use fs_rep_frep::SquatDiscEdgeTreatment;
 
 fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -33,6 +40,43 @@ fn assert_close(actual: f64, expected: f64) {
     );
 }
 
+fn isotropic_card(chemistry: &str, young_modulus_pa: f64) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    for (name, dims, value) in [
+        ("density", Density::DIMS, 8_000.0),
+        ("young_modulus", Pressure::DIMS, young_modulus_pa),
+        ("poisson_ratio", Dims::NONE, 0.3),
+        ("yield_stress", Pressure::DIMS, 200.0e6),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained().with("T", 290.0, 300.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: Vec::new(),
+                provenance: Provenance {
+                    source: format!("synthetic {chemistry} {name}"),
+                    license: "CC0-1.0".to_owned(),
+                    artifact: None,
+                },
+            })
+            .expect("synthetic material claim");
+    }
+    MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: chemistry.to_owned(),
+            phase: "solid".to_owned(),
+            process: "synthetic".to_owned(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .expect("synthetic material card")
+}
+
 #[test]
 fn g0_solid_cylinder_resolution_matches_closed_form_mass_and_inertia() {
     let radius = 0.038;
@@ -60,6 +104,47 @@ fn g0_solid_cylinder_resolution_matches_closed_form_mass_and_inertia() {
         resolved.mass_properties.principal_inertia.transverse,
         mass * (3.0 * radius.powi(2) + thickness.powi(2)) / 12.0,
     );
+}
+
+#[test]
+fn g0_material_specimen_uses_card_density_without_aliasing_equal_density_materials() {
+    let point = QueryPoint::new().with("T", 293.15).expect("state point");
+    let copper = resolve_isotropic_solid_state_point(
+        &isotropic_card("copper-c110", 117.0e9),
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .expect("copper state");
+    let steel = resolve_isotropic_solid_state_point(
+        &isotropic_card("stainless-316l", 193.0e9),
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .expect("steel state");
+    let spec = DiscProfileSpec::SolidCylinder {
+        outer_radius_m: 0.038,
+        thickness_m: 0.006,
+        edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+    };
+    let (copper, steel) = with_cx(|cx| {
+        (
+            spec.resolve_with_material_state(&copper, cx)
+                .expect("copper specimen"),
+            spec.resolve_with_material_state(&steel, cx)
+                .expect("steel specimen"),
+        )
+    });
+    assert_eq!(
+        copper.profile.content_identities(),
+        steel.profile.content_identities(),
+        "equal geometry and density retain equal mass geometry"
+    );
+    assert_ne!(
+        copper.identity, steel.identity,
+        "different complete material states cannot alias merely because density matches"
+    );
+    assert_eq!(copper.material.young_modulus_pa(), 117.0e9);
+    assert_eq!(steel.material.young_modulus_pa(), 193.0e9);
 }
 
 #[test]

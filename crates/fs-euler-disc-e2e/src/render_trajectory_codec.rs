@@ -1564,6 +1564,7 @@ fn decode_availability_bits(
         0 => RenderNormalForceSampling::Unavailable,
         1 => RenderNormalForceSampling::FirstAcceptedSubintervalMidpoint,
         2 => RenderNormalForceSampling::IntervalMean,
+        3 => RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
         tag => {
             return Err(RenderTrajectoryCodecError::InvalidTag {
                 field,

@@ -2677,8 +2677,11 @@ fn fixture_impulse_audit(
         })?;
     for interval in intervals {
         let full_contact_mean_available = interval.channels.contact.available().is_some();
-        let declared_scalar_is_interval_mean =
-            interval.normal_force_sampling == RenderNormalForceSampling::IntervalMean;
+        let declared_scalar_is_interval_mean = matches!(
+            interval.normal_force_sampling,
+            RenderNormalForceSampling::IntervalMean
+                | RenderNormalForceSampling::AppliedSubstepZeroOrderHold
+        );
         if !full_contact_mean_available && !declared_scalar_is_interval_mean {
             return Err(CinematicFixtureError::Pipeline(format!(
                 "normal-impulse audit requires a full-contact duration mean or an IntervalMean scalar at source sample {}",

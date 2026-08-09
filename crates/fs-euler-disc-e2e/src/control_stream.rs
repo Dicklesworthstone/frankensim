@@ -391,8 +391,12 @@ impl<'trajectory> EulerControlStream<'trajectory> {
                     .available()
                     .map(|contact| contact.mean_force_world_n.dot(base_axis_world))
                     .or_else(|| {
-                        (normal_force_sampling == RenderNormalForceSampling::IntervalMean)
-                            .then_some(input.interval_normal_force_n)
+                        matches!(
+                            normal_force_sampling,
+                            RenderNormalForceSampling::IntervalMean
+                                | RenderNormalForceSampling::AppliedSubstepZeroOrderHold
+                        )
+                        .then_some(input.interval_normal_force_n)
                     });
                 if mean_base_normal_contact_force_n.is_some_and(|value| !value.is_finite()) {
                     return Err(ControlStreamError::NonFiniteDerived {

@@ -821,6 +821,36 @@ one-test checker smoke used to verify the log/receipt schema; it does not replay
 the recorded case, resolve its logical artifacts, or establish physical
 evidence.
 
+## Parameterized material specimen and contact ingress
+
+`DiscProfileSpec` remains the geometry authority for solid, annular, filleted,
+chamfered, and tapered axisymmetric specimens. `resolve_with_material_state`
+derives density, mass, centroid, and inertia from the same complete
+`IsotropicSolidStatePoint` later consumed by contact and structural adapters;
+its identity binds the exact chart, mass properties, material card, physical
+query point, selected property values, and usage receipts. Equal density does
+not make copper, steel, gold, wood, ruby, or another named state interchangeable.
+
+The normal-contact ingress accepts a `BoundNormalContactModel`: both ordered
+bulk states, the complete `InterfaceSystemCard`, its resolved adhesion datum,
+and one executable constitutive-model card must share one exact physical state
+point. The model card—not the Euler fixture—selects Hertz versus the currently
+supported sphere-only Hunt--Crossley rung and owns damping, characteristic
+rate, applicability ratios, and finite temperature validity. The Euler adapter
+supplies only geometry-owned half-space/layer extents and propagated
+uncertainty. It cannot retype density, modulus, Poisson ratio, yield stress,
+temperature, adhesion, damping, rate limits, surface order, or law identity.
+This is a generic card-to-contact composition; it contains no Euler outcome
+targets or material-name presets.
+
+This rung does not yet evolve temperature, select a new material phase, melt or
+deform a specimen, recompute structural modes after topology change, or derive
+optical/acoustic properties. A state point outside a supplied solid card's
+validity refuses. Those effects require the generic thermal/phase,
+thermomechanical/free-surface, structural-acoustic, and optical property
+couplings; the cinematic fixture must not simulate them with scripted geometry
+or material-name switches.
+
 ## Animation-grade Euler render trajectory v3
 
 `render_trajectory` defines the accepted public state boundary shared by later
@@ -894,6 +924,27 @@ reaction. This scalar has no associated authoritative torque or work. It is a
 kinematically implied interval quantity, not a resolved contact patch,
 subinterval force history, angular-impulse solution, tangential traction,
 measured force, deformable-contact model, or acoustic-radiation model.
+
+The transactional production-coupling bridge publishes only accepted
+smooth-contact prefixes. Every sample comes from the exact `fs-mbd`
+`StepReceipt` and retains its accepted rigid state, profile-native contact
+feature and point, normal, one-mode base endpoint, and disc mechanical-energy
+diagnostic. Because the force law is evaluated at the interval start while a
+render sample describes the endpoint, the bridge independently re-queries the
+resolved profile support at the accepted endpoint pose and base displacement;
+an endpoint beyond the plane is refused as an unlocalized opening instead of
+being mislabeled closed. It checks checkpoint integrity plus exact state, time,
+base, model, and specimen lineage before admission. Its normal scalar is tagged
+`AcceptedSubstepEvaluation`: this is the normal-law evaluation consumed by the
+accepted mechanics substep, not a duration mean or a promised midpoint. The
+bridge therefore leaves all channel-work availability false until the
+production composition publishes one shared cross-channel work ledger, and
+the sound path must not treat this scalar as an acoustic force measure. Its
+energy defect is a disc-only constant-wrench midpoint residual, not total
+disc/base/contact/gas closure. Reaching the requested prefix step budget is
+horizon censoring; a source refusal remains an explicit backend-specific
+numerical refusal. The bridge never invents separation, impact, reimpact, or
+terminal continuation after the source stops.
 
 Localization brackets describe evaluated uncertainty bounds, not additional
 accepted states. A terminal event's retained time must exactly equal its final
@@ -983,10 +1034,13 @@ damping work rather than total contact work into the base; and the exterior-gas
 channel is body work rather than relative gas dissipation. The separately
 retained `interval_normal_force_n` has an explicit
 `RenderNormalForceSampling` tag in `RenderChannelAvailability`: `Unavailable`,
-`FirstAcceptedSubintervalMidpoint`, or `IntervalMean`. The coupled runner uses
-the midpoint tag; reduced-decay bridge v2 uses the documented interval-mean
-tag. Full contact requires a non-unavailable tag, but a normal-only midpoint is
-diagnostic-only and **cannot** be promoted into a sound force measure.
+`FirstAcceptedSubintervalMidpoint`, `IntervalMean`, or
+`AcceptedSubstepEvaluation`. The coupled runner uses the midpoint tag;
+reduced-decay bridge v2 uses the documented interval-mean tag; and the
+transactional production-prefix bridge uses the accepted-evaluation tag. Full
+contact requires a non-unavailable tag, but a normal-only midpoint or accepted
+substep evaluation is diagnostic-only and **cannot** be promoted into a sound
+force measure.
 Duration-mean normal-load authority comes from the full contact-channel mean
 projected onto base `+z` whenever that channel is available, or from the scalar
 only when its tag is `IntervalMean` and full contact is unavailable. Sound mapping

@@ -40,6 +40,7 @@ use fs_euler_disc_e2e::tangential_contact::{
 };
 use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseInput, ContactLoadScope, LevelSupportInput, MovingContactLoad,
+    RenderNormalForceSampling, RenderSampleDisposition, RenderTrajectory, profile_contact_geometry,
     state_at_profile_ground_contact,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -991,7 +992,11 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             &profile.chart,
             7_800.0,
             orientation,
-            Vec3::ZERO,
+            // The partial-slip lane requires a nonzero reference rolling
+            // direction. Give this G0 composition fixture a small declared
+            // tangential velocity instead of asking the law to choose one at
+            // a completely stationary contact.
+            Vec3::new(profile.mass_properties.mass * 0.01, 0.0, 0.0),
             Vec3::ZERO,
             cx,
         )
@@ -1000,7 +1005,11 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             grounded
                 .pose()
                 .position_world()
-                .sub(Vec3::new(0.0, 0.0, 1.0e-6)),
+                // Keep this synthetic preload inside the normal-law card's
+                // declared small-patch applicability envelope for a 1 mm
+                // fillet. A 1 micrometre overlap produces a/R > 0.2 here and
+                // is correctly refused by the model rather than extrapolated.
+                .sub(Vec3::new(0.0, 0.0, 1.0e-7)),
             grounded.pose().orientation(),
         )
         .expect("finite compliant-contact pose");
@@ -1128,6 +1137,89 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             .expect("deterministic repeated profile binding");
         assert_eq!(resolved, repeated_resolved);
         assert_eq!(first_request, repeated_request);
+
+        let production_prefix =
+            model.run_smooth_contact_trajectory(checkpoint.clone(), 1, |accepted| {
+                Ok(request_for_checkpoint(&first_request, accepted))
+            });
+        assert!(
+            !production_prefix.accepted_steps.is_empty(),
+            "production prefix refused before its first commit: {:?}",
+            production_prefix.termination
+        );
+        let render_prefix = RenderTrajectory::from_production_coupling_prefix(
+            &model,
+            &production_prefix,
+            &profile,
+            first_request.duration_s,
+            cx,
+        )
+        .expect("accepted production prefix enters the common render contract");
+        assert_eq!(render_prefix.samples().len(), 1);
+        assert_eq!(
+            render_prefix
+                .metadata()
+                .channel_availability
+                .normal_force_sampling,
+            RenderNormalForceSampling::AcceptedSubstepEvaluation
+        );
+        assert!(!render_prefix.metadata().channel_availability.contact);
+        let rendered = render_prefix.samples()[0].input();
+        assert_eq!(
+            rendered.disposition,
+            RenderSampleDisposition::HorizonCensored
+        );
+        assert_eq!(
+            rendered
+                .contact_geometry
+                .expect("closed patch")
+                .support_feature,
+            fs_euler_disc_e2e::RenderSupportFeature::ProfileFeature(
+                first_request.patch.patch.source_feature,
+            )
+        );
+        assert_eq!(
+            rendered.mechanical_energy_j.to_bits(),
+            production_prefix.accepted_steps[0]
+                .rigid_step
+                .diagnostics_after
+                .mechanical_energy
+                .to_bits()
+        );
+        let accepted = &production_prefix.accepted_steps[0];
+        let endpoint_contact = profile_contact_geometry(
+            &profile.chart,
+            profile.mass_properties,
+            accepted.next_disc_state.pose(),
+            cx,
+        )
+        .expect("accepted endpoint support");
+        let rendered_contact = rendered.contact_geometry.expect("closed endpoint contact");
+        assert_eq!(
+            rendered_contact.point_world_m, endpoint_contact.contact.point_world_m,
+            "render geometry must be evaluated at the accepted endpoint pose"
+        );
+        assert_eq!(
+            rendered.signed_gap_m.to_bits(),
+            (endpoint_contact.contact.gap_m - accepted.base.receipt().modal_displacement_end_m)
+                .to_bits()
+        );
+        let mut forged_prefix = production_prefix.clone();
+        assert_ne!(
+            forged_prefix.last_accepted_checkpoint.disc_state,
+            checkpoint.disc_state
+        );
+        forged_prefix.last_accepted_checkpoint.disc_state = checkpoint.disc_state;
+        assert!(matches!(
+            RenderTrajectory::from_production_coupling_prefix(
+                &model,
+                &forged_prefix,
+                &profile,
+                first_request.duration_s,
+                cx,
+            ),
+            Err(fs_euler_disc_e2e::RenderTrajectoryError::ProductionPrefixModelMismatch)
+        ));
 
         let first = model
             .step(&checkpoint, &first_request)

@@ -47,11 +47,14 @@ fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }
 fs-img = { path = "../fs-img" }
 fs-ledger = { path = "../fs-ledger", optional = true }
+fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-rand = { path = "../fs-rand" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-render = { path = "../fs-render" }
+fs-qty = { path = "../fs-qty" }
 fs-solid = { path = "../fs-solid" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }

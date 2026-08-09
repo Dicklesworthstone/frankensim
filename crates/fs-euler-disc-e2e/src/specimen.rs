@@ -17,6 +17,7 @@ use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
+use fs_material::state_point::IsotropicSolidStatePoint;
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricError, AxisymmetricIdentity, AxisymmetricMassError,
     AxisymmetricMassProperties, MeridianPoint, MeridianSegment, SquatDiscEdgeTreatment,
@@ -31,6 +32,9 @@ pub const EULER_SPECIMEN_PROFILE_IDENTITY_DOMAIN: &str =
 /// Canonical identity domain for the resolved production mass properties.
 pub const EULER_SPECIMEN_MASS_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.specimen-mass-properties.v1";
+/// Canonical identity domain for geometry plus its resolved material state.
+pub const EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.material-specimen.v1";
 
 /// The bounded, user-facing profile families admitted by the Euler campaign.
 ///
@@ -131,6 +135,23 @@ pub struct ResolvedDiscProfile {
     pub dimensions: DiscProfileDimensions,
     /// Analytic line/arc mass, center of mass, and centroidal inertia.
     pub mass_properties: AxisymmetricMassProperties,
+}
+
+/// One axisymmetric specimen whose density and remaining elastic properties
+/// come from the same evidence-bearing material state point.
+///
+/// The contained profile remains the geometry/mass source consumed by legacy
+/// mechanics adapters. This wrapper adds the full material-state identity so
+/// equal-density but physically different materials cannot alias in an
+/// integrated simulation or render.
+#[derive(Clone, Debug)]
+pub struct ResolvedMaterialDiscProfile {
+    /// Geometry and mass properties evaluated from the resolved density.
+    pub profile: ResolvedDiscProfile,
+    /// Complete isotropic material property/receipt bundle.
+    pub material: IsotropicSolidStatePoint,
+    /// Identity binding geometry, mass, and complete material state.
+    pub identity: ContentHash,
 }
 
 /// Strong content identities used to bind a trajectory to its resolved asset.
@@ -265,6 +286,27 @@ impl fmt::Display for DiscProfileError {
 impl std::error::Error for DiscProfileError {}
 
 impl DiscProfileSpec {
+    /// Resolve this geometry using the density from one admitted material
+    /// state, while retaining that complete state for downstream contact,
+    /// structural, acoustic, thermal, optical, and provenance consumers.
+    pub fn resolve_with_material_state(
+        self,
+        material: &IsotropicSolidStatePoint,
+        cx: &Cx<'_>,
+    ) -> Result<ResolvedMaterialDiscProfile, DiscProfileError> {
+        let profile = self.resolve(material.density_kg_m3(), cx)?;
+        let profile_identities = profile.content_identities();
+        let mut identity = DomainHasher::new(EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN);
+        identity.update(profile_identities.profile.as_bytes());
+        identity.update(profile_identities.mass_properties.as_bytes());
+        identity.update(material.resolved().identity().as_bytes());
+        Ok(ResolvedMaterialDiscProfile {
+            profile,
+            material: material.clone(),
+            identity: identity.finalize(),
+        })
+    }
+
     /// Resolve the specification into a validated profile and matching mass
     /// properties.  The same `Cx` controls chart mass integration and is
     /// retained by callers for later support queries.

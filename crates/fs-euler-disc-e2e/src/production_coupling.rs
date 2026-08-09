@@ -10,7 +10,9 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_contact::normal_patch::{NormalPatchEmbedState, NormalPatchPort, NormalPatchReceipt};
 use fs_couple::StableId;
 use fs_exec::Cx;
-use fs_mbd::{Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
+use fs_mbd::{
+    Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
+};
 use fs_rep_frep::{AxisymmetricCurvatureAuthority, AxisymmetricIdentity};
 use fs_tribo::{
     InputAuthority, InterfaceSystemRef,
@@ -152,10 +154,34 @@ pub struct ProductionCouplingCheckpoint {
 }
 
 impl ProductionCouplingCheckpoint {
+    /// Stable owner identity for this accepted lineage.
+    #[must_use]
+    pub const fn identity(&self) -> &ProductionCouplingIdentity {
+        &self.identity
+    }
+
     /// Content hash binding identity, version, rigid state, and every channel snapshot.
     #[must_use]
     pub const fn fingerprint(&self) -> ContentHash {
         self.checkpoint_fingerprint
+    }
+
+    /// Accepted physical time retained by the base port [s].
+    #[must_use]
+    pub fn elapsed_time_s(&self) -> f64 {
+        self.base_state.elapsed_time_s()
+    }
+
+    /// Accepted one-mode base displacement [m].
+    #[must_use]
+    pub fn base_displacement_m(&self) -> f64 {
+        self.base_state.modal_displacement_m()
+    }
+
+    /// Accepted one-mode base velocity [m/s].
+    #[must_use]
+    pub fn base_velocity_m_per_s(&self) -> f64 {
+        self.base_state.modal_velocity_m_per_s()
     }
 }
 
@@ -284,6 +310,9 @@ pub struct ProductionCouplingReceipt {
     pub total_moment_about_com_world_n_m: Vec3,
     /// fs-mbd accepted disc state.
     pub next_disc_state: RigidBodyState,
+    /// Complete rigid-body before/after state and energy diagnostics from the
+    /// exact step that produced `next_disc_state`.
+    pub rigid_step: StepReceipt,
     /// This composition retains only source-adapter Estimate authority.
     pub estimate_only: bool,
 }
@@ -465,6 +494,33 @@ impl fmt::Display for ProductionCouplingError {
 impl std::error::Error for ProductionCouplingError {}
 
 impl ProductionCouplingModel {
+    /// Verify that a checkpoint belongs to this exact model lineage and that
+    /// none of its public or private accepted state has been altered.
+    pub fn validate_checkpoint(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+    ) -> Result<(), ProductionCouplingError> {
+        validate_identity(&self.identity)?;
+        if checkpoint.identity != self.identity {
+            return Err(ProductionCouplingError::CheckpointMismatch);
+        }
+        if checkpoint.checkpoint_fingerprint
+            != production_checkpoint_fingerprint(
+                &checkpoint.identity,
+                checkpoint.committed_version,
+                checkpoint.disc_state,
+                &checkpoint.normal_state,
+                &checkpoint.tangential_state,
+                &checkpoint.rolling_state,
+                &checkpoint.gas_channel_state,
+                &checkpoint.base_state,
+            )
+        {
+            return Err(ProductionCouplingError::CheckpointIntegrityMismatch);
+        }
+        Ok(())
+    }
+
     /// Resolves the initial smooth profile patch against this model's zero-version base state.
     ///
     /// The immutable mechanics mass must exactly match the mass derived from
@@ -508,24 +564,7 @@ impl ProductionCouplingModel {
         checkpoint: &ProductionCouplingCheckpoint,
         cx: &Cx<'_>,
     ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
-        validate_identity(&self.identity)?;
-        if checkpoint.identity != self.identity {
-            return Err(ProductionCouplingError::CheckpointMismatch);
-        }
-        if checkpoint.checkpoint_fingerprint
-            != production_checkpoint_fingerprint(
-                &checkpoint.identity,
-                checkpoint.committed_version,
-                checkpoint.disc_state,
-                &checkpoint.normal_state,
-                &checkpoint.tangential_state,
-                &checkpoint.rolling_state,
-                &checkpoint.gas_channel_state,
-                &checkpoint.base_state,
-            )
-        {
-            return Err(ProductionCouplingError::CheckpointIntegrityMismatch);
-        }
+        self.validate_checkpoint(checkpoint)?;
         let (resolved, disc_mass_properties) =
             self.resolve_axisymmetric_profile_contact(profile, checkpoint.disc_state, cx)?;
         let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
@@ -633,24 +672,7 @@ impl ProductionCouplingModel {
         input: &ProductionCouplingStepInput,
     ) -> Result<(ProductionCouplingCheckpoint, ProductionCouplingReceipt), ProductionCouplingError>
     {
-        validate_identity(&self.identity)?;
-        if checkpoint.identity != self.identity {
-            return Err(ProductionCouplingError::CheckpointMismatch);
-        }
-        if checkpoint.checkpoint_fingerprint
-            != production_checkpoint_fingerprint(
-                &checkpoint.identity,
-                checkpoint.committed_version,
-                checkpoint.disc_state,
-                &checkpoint.normal_state,
-                &checkpoint.tangential_state,
-                &checkpoint.rolling_state,
-                &checkpoint.gas_channel_state,
-                &checkpoint.base_state,
-            )
-        {
-            return Err(ProductionCouplingError::CheckpointIntegrityMismatch);
-        }
+        self.validate_checkpoint(checkpoint)?;
         if input.expected_checkpoint_version != checkpoint.committed_version {
             return Err(ProductionCouplingError::CheckpointVersionMismatch {
                 expected: input.expected_checkpoint_version,
@@ -769,7 +791,7 @@ impl ProductionCouplingModel {
                 field: "summed wrench",
             });
         }
-        let next_disc_state = RigidBodyIntegrator::new(self.gravity)
+        let rigid_step = RigidBodyIntegrator::new(self.gravity)
             .step(
                 checkpoint.disc_state,
                 self.disc_mass_properties,
@@ -783,8 +805,8 @@ impl ProductionCouplingModel {
                 },
                 input.duration_s,
             )
-            .map_err(ProductionCouplingError::Dynamics)?
-            .state_after;
+            .map_err(ProductionCouplingError::Dynamics)?;
+        let next_disc_state = rigid_step.state_after;
 
         let committed_version = checkpoint.committed_version.checked_add(1).ok_or(
             ProductionCouplingError::InvalidInput {
@@ -836,6 +858,7 @@ impl ProductionCouplingModel {
                 total_force_world_n,
                 total_moment_about_com_world_n_m,
                 next_disc_state,
+                rigid_step,
                 estimate_only: true,
             },
         ))

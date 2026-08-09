@@ -7,6 +7,7 @@
 
 use core::fmt;
 
+use fs_contact::interface_binding::{BoundNormalContactLaw, BoundNormalContactModel};
 use fs_contact::normal_patch::{
     ApplicabilityInput, ApplicabilityLimits, InputUncertainty, IntegrationLane,
     NormalPatchEmbedError, NormalPatchEmbedIdentity, NormalPatchEmbedRequest,
@@ -26,7 +27,7 @@ const CURVATURE_TOLERANCE: f64 = 256.0 * f64::EPSILON;
 /// One caller-declared material and ordered interface input set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalMaterialInterface {
-    /// Stable material-card identity; this adapter does not admit the card.
+    /// Stable material/interface-state binding identity.
     pub material_card_id: String,
     /// Stable normal-law identity retained in the generic receipt.
     pub model_id: String,
@@ -46,6 +47,112 @@ pub struct NormalMaterialInterface {
     /// Material/load input uncertainty; curvature uncertainty is merged in.
     pub uncertainty: InputUncertainty,
 }
+
+/// Geometry-owned settings needed to adapt an admitted material/model binding
+/// to one normal-contact law. Bulk properties, ordered interface properties,
+/// model choice, damping, rate scale, and applicability limits are
+/// deliberately absent: the binding derives those from
+/// [`BoundNormalContactModel`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalMaterialLawConfig {
+    /// Local half-space depth used by the applicability check [m].
+    pub half_space_depth_m: f64,
+    /// Smallest relevant material-layer thickness [m].
+    pub layer_thickness_m: f64,
+    /// Propagated material/load uncertainty supplied by its evidence owner.
+    pub uncertainty: InputUncertainty,
+}
+
+/// Build the Euler normal-contact material input from a shared, evidence-bound
+/// ordered material state.
+///
+/// The temperature is the exact common `T` coordinate used to resolve both
+/// material cards. The Hertz modulus and limiting yield stress are derived by
+/// `fs-material`/`fs-contact`; this adapter cannot accept caller-retyped
+/// duplicates of those values.
+pub fn bind_normal_material_interface(
+    model: &BoundNormalContactModel,
+    config: NormalMaterialLawConfig,
+) -> Result<NormalMaterialInterface, NormalMaterialBindingError> {
+    let normal = model.normal_state();
+    let elastic = normal.elastic();
+    let temperature_k = elastic
+        .state_coordinate("T")
+        .ok_or(NormalMaterialBindingError::MissingTemperature)?;
+    if !temperature_k.is_finite() || temperature_k <= 0.0 {
+        return Err(NormalMaterialBindingError::InvalidTemperature { temperature_k });
+    }
+    for (value, field, strictly_positive) in [
+        (config.half_space_depth_m, "half_space_depth_m", true),
+        (config.layer_thickness_m, "layer_thickness_m", true),
+    ] {
+        if !value.is_finite()
+            || (strictly_positive && value <= 0.0)
+            || (!strictly_positive && value < 0.0)
+        {
+            return Err(NormalMaterialBindingError::InvalidConfig { field });
+        }
+    }
+    let binding_id = model.identity();
+    let model_card = model.model_card();
+    let hunt_crossley_dissipation_s_per_m = match model.law() {
+        BoundNormalContactLaw::ElasticHertz => None,
+        BoundNormalContactLaw::HuntCrossleySphere {
+            dissipation_s_per_m,
+        } => Some(dissipation_s_per_m),
+    };
+    Ok(NormalMaterialInterface {
+        material_card_id: format!("fs-contact/normal-model-binding/{binding_id}"),
+        model_id: format!(
+            "{}:v{}:{}",
+            model_card.law.0,
+            model_card.law_version,
+            model_card.content_hash()
+        ),
+        source_id: format!(
+            "fs-matdb/constitutive-model-card/{}",
+            model_card.content_hash()
+        ),
+        interface: elastic.interface().interface().clone(),
+        reduced_modulus_pa: elastic.reduced_modulus_pa(),
+        hunt_crossley_dissipation_s_per_m,
+        applicability: ApplicabilityInput {
+            half_space_depth_m: config.half_space_depth_m,
+            layer_thickness_m: config.layer_thickness_m,
+            yield_strength_pa: elastic.limiting_yield_stress_pa(),
+            characteristic_rate_m_per_s: model.characteristic_rate_m_per_s(),
+            temperature_k,
+            adhesion_energy_j_per_m2: normal.adhesion_energy_j_per_m2(),
+        },
+        limits: model.limits(),
+        uncertainty: config.uncertainty,
+    })
+}
+
+/// Typed refusal from the ordered material-state to Euler normal-law bridge.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NormalMaterialBindingError {
+    /// The common material state point did not contain the canonical `T` axis.
+    MissingTemperature,
+    /// The retained absolute temperature was nonphysical.
+    InvalidTemperature {
+        /// Offered absolute temperature [K].
+        temperature_k: f64,
+    },
+    /// A law-specific scalar or identity was invalid.
+    InvalidConfig {
+        /// Stable offending field name.
+        field: &'static str,
+    },
+}
+
+impl fmt::Display for NormalMaterialBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for NormalMaterialBindingError {}
 
 /// The only local curvature shapes admitted by the current generic ladder.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -598,5 +705,211 @@ fn storage_and_dissipation(
                 power_w_per_m: receipt.dissipated_power_w_per_m,
             },
         ),
+    }
+}
+
+#[cfg(test)]
+mod material_binding_tests {
+    use std::collections::BTreeMap;
+
+    use fs_contact::interface_binding::{
+        ADHESION_ENERGY_DIMS, ADHESION_ENERGY_PROPERTY, NORMAL_HERTZ_LAW_ID,
+        NormalContactModelSelection, bind_dry_interface_system_card,
+        bind_isotropic_elastic_interface, bind_normal_contact_model, bind_normal_interface_state,
+    };
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterfaceSystemCard,
+        InterpolationPolicy, LawId, LawParameter, MaterialCard, MaterialStateId, PropertyClaim,
+        PropertyKey, PropertyValue, Provenance, QueryPoint, SurfaceSpec, SystemContext,
+        UncertaintyModel,
+    };
+    use fs_material::state_point::{
+        MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_interface_state_point, resolve_isotropic_solid_state_point,
+    };
+    use fs_qty::{Density, Dims, Pressure};
+
+    use super::*;
+
+    fn state_id(chemistry: &str) -> MaterialStateId {
+        MaterialStateId {
+            chemistry: chemistry.to_owned(),
+            phase: "solid".to_owned(),
+            process: "synthetic-state-series".to_owned(),
+            revision: 0,
+        }
+    }
+
+    fn material_card(
+        chemistry: &str,
+        density: f64,
+        young: f64,
+        poisson: f64,
+        yield_stress: f64,
+    ) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for (name, dims, value) in [
+            ("density", Density::DIMS, density),
+            ("young_modulus", Pressure::DIMS, young),
+            ("poisson_ratio", Dims::NONE, poisson),
+            ("yield_stress", Pressure::DIMS, yield_stress),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
+                    uncertainty: UncertaintyModel::RelativeHalfWidth {
+                        fraction: 0.01,
+                        confidence: 0.95,
+                    },
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: format!("synthetic {chemistry} {name}"),
+                        license: "CC0-1.0".to_owned(),
+                        artifact: None,
+                    },
+                })
+                .expect("property claim");
+        }
+        MaterialCard::assemble(state_id(chemistry), claims, Vec::new()).expect("material card")
+    }
+
+    fn normal_model_card() -> ConstitutiveModelCard {
+        let mut parameters = BTreeMap::new();
+        for (name, dims, value) in [
+            ("characteristic-rate", Dims([1, 0, -1, 0, 0, 0]), 1.0),
+            ("max-patch-to-radius", Dims::NONE, 0.1),
+            ("max-strain", Dims::NONE, 0.01),
+            ("max-patch-to-depth", Dims::NONE, 0.1),
+            ("max-patch-to-layer", Dims::NONE, 0.1),
+            ("max-pressure-to-yield", Dims::NONE, 0.2),
+            ("max-rate-ratio", Dims::NONE, 0.1),
+        ] {
+            parameters.insert(name.to_owned(), LawParameter { value, dims });
+        }
+        ConstitutiveModelCard {
+            law: LawId(NORMAL_HERTZ_LAW_ID.to_owned()),
+            law_version: 1,
+            parameters,
+            state_schema_version: 1,
+            initial_state: InitialStatePolicy::ZeroInternalState,
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
+            sources: Vec::new(),
+            provenance: Provenance {
+                source: "synthetic Hertz applicability card".to_owned(),
+                license: "CC0-1.0".to_owned(),
+                artifact: None,
+            },
+        }
+    }
+
+    #[test]
+    fn g0_normal_material_binding_uses_resolved_cards_and_common_temperature() {
+        let copper_card = material_card("copper-c110", 8960.0, 117.0e9, 0.34, 70.0e6);
+        let glass_card = material_card("soda-lime-glass", 2500.0, 72.0e9, 0.22, 1.0e9);
+        let point = QueryPoint::new().with("T", 293.15).expect("state point");
+        let copper = resolve_isotropic_solid_state_point(
+            &copper_card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("copper state");
+        let glass = resolve_isotropic_solid_state_point(
+            &glass_card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("glass state");
+        let mut interface_claims = ClaimSet::new();
+        interface_claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(ADHESION_ENERGY_PROPERTY, ADHESION_ENERGY_DIMS),
+                value: PropertyValue::Scalar {
+                    value: 0.0,
+                    dims: ADHESION_ENERGY_DIMS,
+                },
+                validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
+                uncertainty: UncertaintyModel::HalfWidth {
+                    half_width: 0.0,
+                    confidence: 0.95,
+                },
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: Vec::new(),
+                provenance: Provenance {
+                    source: "synthetic explicitly nonadhesive interface".to_owned(),
+                    license: "CC0-1.0".to_owned(),
+                    artifact: None,
+                },
+            })
+            .expect("adhesion claim");
+        let interface_card = InterfaceSystemCard::assemble(
+            SurfaceSpec {
+                material: state_id("copper-c110"),
+                texture_frame: "disc-edge/profile-17".to_owned(),
+            },
+            SurfaceSpec {
+                material: state_id("soda-lime-glass"),
+                texture_frame: "base-track/profile-4".to_owned(),
+            },
+            SystemContext {
+                medium: "dry".to_owned(),
+                third_body: None,
+                environment: "air-293K".to_owned(),
+                history: "cleaned".to_owned(),
+            },
+            interface_claims,
+            vec![normal_model_card()],
+        )
+        .expect("interface card");
+        let dry = bind_dry_interface_system_card(&interface_card, InputAuthority::SyntheticFixture)
+            .expect("dry interface");
+        let elastic = bind_isotropic_elastic_interface(&dry, &copper, &glass)
+            .expect("ordered elastic interface");
+        let interface_state = resolve_interface_state_point(
+            &interface_card,
+            &point,
+            &[ScalarPropertyRequirement::try_new(
+                ADHESION_ENERGY_PROPERTY,
+                ADHESION_ENERGY_DIMS,
+                ScalarAdmissibility::NonNegative,
+            )
+            .expect("normal interface requirement")],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("interface property state");
+        let normal = bind_normal_interface_state(&elastic, &interface_state)
+            .expect("normal interface state");
+        let model =
+            bind_normal_contact_model(&normal, NormalContactModelSelection::SingleSupported)
+                .expect("normal model binding");
+        let material = bind_normal_material_interface(
+            &model,
+            NormalMaterialLawConfig {
+                half_space_depth_m: 0.02,
+                layer_thickness_m: 0.01,
+                uncertainty: InputUncertainty {
+                    radius_relative: 0.001,
+                    modulus_relative: 0.02,
+                    load_relative: 0.03,
+                },
+            },
+        )
+        .expect("normal material binding");
+        assert_eq!(
+            material.reduced_modulus_pa.to_bits(),
+            elastic.reduced_modulus_pa().to_bits()
+        );
+        assert_eq!(material.applicability.yield_strength_pa, 70.0e6);
+        assert_eq!(material.applicability.temperature_k, 293.15);
+        assert_eq!(material.applicability.characteristic_rate_m_per_s, 1.0);
+        assert_eq!(material.limits.max_pressure_to_yield, 0.2);
+        assert!(material.model_id.starts_with(NORMAL_HERTZ_LAW_ID));
+        assert_eq!(
+            material.interface.ordered_system_id(),
+            dry.interface().ordered_system_id()
+        );
     }
 }
