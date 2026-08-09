@@ -39,7 +39,9 @@ use crate::{
     SpatialStemComponent, StemGainPan, StereoSample, WavMetadata, WavSampleEncoding, measure_audio,
     mix_dry_modal_stems,
     reduced_decay::{
-        ReducedDecayError, ReducedDecayRun, RefinementEvidence, Thorne2026SteelGlassBenchmark,
+        ReducedDecayError, ReducedDecayRun, RefinementEvidence, THORNE_2026_STEEL_DISC_DIAMETER_M,
+        THORNE_2026_STEEL_DISC_FILLET_RADIUS_M, THORNE_2026_STEEL_DISC_MASS_KG,
+        THORNE_2026_STEEL_DISC_THICKNESS_M, Thorne2026SteelGlassBenchmark,
         thorne_2026_refinement_evidence,
     },
     render_motion_bridge::EulerRenderMotionBridge,
@@ -111,6 +113,9 @@ use fs_render::{
         RenderWorkerPool, Settings, film_to_exr,
     },
 };
+use fs_rep_frep::SquatDiscEdgeTreatment;
+
+use crate::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 
 /// Fixed master frame rate used by the cinematic sound contract.
 pub const CRITIQUE_FPS: u32 = 24;
@@ -251,6 +256,83 @@ impl CinematicAdaptiveSamplingConfig {
             relative_error: policy.relative_error(),
             dark_floor: policy.dark_floor(),
         })
+    }
+}
+
+/// How homogeneous mass is supplied for one physical specimen.
+///
+/// Both forms resolve to one volumetric density before geometry, inertia,
+/// contact, acoustics, and rendering are built. `TotalMassKg` exists because
+/// weighing a finished specimen is often much better evidence than assuming a
+/// handbook density for an alloy, composite, porous body, or wooden part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CinematicDiscMassInput {
+    /// Homogeneous bulk density [kg/m3].
+    DensityKgPerM3(f64),
+    /// Measured or declared total mass [kg].
+    TotalMassKg(f64),
+}
+
+impl CinematicDiscMassInput {
+    fn value(self) -> f64 {
+        match self {
+            Self::DensityKgPerM3(value) | Self::TotalMassKg(value) => value,
+        }
+    }
+}
+
+/// Geometry, mass, and constitutive state of the physical disc.
+///
+/// This is the cross-domain asset boundary for the cinematic pipeline. The
+/// profile is resolved once and the resulting chart, mass, centroid, and
+/// inertia are reused by mechanics, acoustics, and rendering. Descriptive
+/// material labels never select a geometry or a law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CinematicDiscSpecimenConfig {
+    /// Exact axisymmetric reference geometry.
+    pub profile: DiscProfileSpec,
+    /// Homogeneous mass input used to resolve density and inertia.
+    pub mass: CinematicDiscMassInput,
+    /// Mechanical, damping, optical, and provenance inputs at one state point.
+    pub material: CinematicDiscMaterialConfig,
+}
+
+impl Default for CinematicDiscSpecimenConfig {
+    fn default() -> Self {
+        Self {
+            profile: DiscProfileSpec::SolidCylinder {
+                outer_radius_m: 0.5 * THORNE_2026_STEEL_DISC_DIAMETER_M,
+                thickness_m: THORNE_2026_STEEL_DISC_THICKNESS_M,
+                edge_treatment: SquatDiscEdgeTreatment::CircularFillet {
+                    radius: THORNE_2026_STEEL_DISC_FILLET_RADIUS_M,
+                },
+            },
+            mass: CinematicDiscMassInput::TotalMassKg(THORNE_2026_STEEL_DISC_MASS_KG),
+            material: CinematicDiscMaterialConfig::default(),
+        }
+    }
+}
+
+impl CinematicDiscSpecimenConfig {
+    fn resolve_profile(&self, cx: &Cx<'_>) -> Result<ResolvedDiscProfile, CinematicFixtureError> {
+        match self.mass {
+            CinematicDiscMassInput::DensityKgPerM3(density_kg_per_m3) => self
+                .profile
+                .resolve(density_kg_per_m3, cx)
+                .map_err(pipeline),
+            CinematicDiscMassInput::TotalMassKg(total_mass_kg) => {
+                let unit_density = self.profile.resolve(1.0, cx).map_err(pipeline)?;
+                let density_kg_per_m3 = total_mass_kg / unit_density.mass_properties.volume;
+                if !(density_kg_per_m3.is_finite() && density_kg_per_m3 > 0.0) {
+                    return Err(CinematicFixtureError::InvalidConfig(
+                        "disc total mass and resolved volume must imply a finite positive density",
+                    ));
+                }
+                self.profile
+                    .resolve(density_kg_per_m3, cx)
+                    .map_err(pipeline)
+            }
+        }
     }
 }
 
@@ -546,8 +628,8 @@ pub struct CinematicFixtureConfig {
     pub retain_full_aov_exr: bool,
     /// Whether mechanics-derived dry stems use the bounded spatial-audio path.
     pub spatialize_audio: bool,
-    /// One parameterized physical material state shared by picture and sound.
-    pub disc_material: CinematicDiscMaterialConfig,
+    /// One parameterized geometry, mass, and material state shared by all domains.
+    pub disc: CinematicDiscSpecimenConfig,
     /// One parameterized support plate shared by picture and physical sound.
     pub support_plate: CinematicSupportPlateConfig,
     /// Ambient gas temperature used by physical acoustic propagation [K].
@@ -588,7 +670,7 @@ impl Default for CinematicFixtureConfig {
             denoise_previews: true,
             retain_full_aov_exr: true,
             spatialize_audio: true,
-            disc_material: CinematicDiscMaterialConfig::default(),
+            disc: CinematicDiscSpecimenConfig::default(),
             support_plate: CinematicSupportPlateConfig::default(),
             ambient_temperature_k: 293.15,
             ambient_pressure_pa: 101_325.0,
@@ -700,7 +782,12 @@ impl CinematicFixtureConfig {
                 "muxed 4:2:0 video requires even width and height",
             ));
         }
-        let material = &self.disc_material;
+        if !(self.disc.mass.value().is_finite() && self.disc.mass.value() > 0.0) {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "disc density or total mass must be finite and positive",
+            ));
+        }
+        let material = &self.disc.material;
         if !(material.temperature_k.is_finite()
             && material.temperature_k > 0.0
             && material.young_modulus_pa.is_finite()
@@ -1962,8 +2049,8 @@ pub fn run_cinematic_fixture(
 
     progress("stage=mechanics begin");
     let benchmark = Thorne2026SteelGlassBenchmark::ambient().map_err(pipeline)?;
-    let profile = benchmark.resolve_specimen(cx).map_err(pipeline)?;
-    let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc_material, cx)?;
+    let profile = config.disc.resolve_profile(cx)?;
+    let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc.material, cx)?;
     let physical_plate = resolve_fixture_physical_plate(&config.support_plate)?;
     let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
     let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
@@ -5709,6 +5796,76 @@ mod tests {
             );
             operation(&cx)
         })
+    }
+
+    #[test]
+    fn g0_default_cinematic_specimen_is_the_exact_literature_profile() {
+        with_test_cx(|cx| {
+            let configured = CinematicDiscSpecimenConfig::default()
+                .resolve_profile(cx)
+                .expect("default cinematic specimen");
+            let literature = Thorne2026SteelGlassBenchmark::ambient()
+                .expect("literature benchmark")
+                .resolve_specimen(cx)
+                .expect("literature specimen");
+            assert_eq!(configured.spec, literature.spec);
+            assert_eq!(
+                configured.content_identities(),
+                literature.content_identities()
+            );
+            assert_eq!(
+                configured.mass_properties.mass.to_bits(),
+                THORNE_2026_STEEL_DISC_MASS_KG.to_bits()
+            );
+        });
+    }
+
+    #[test]
+    fn g0_density_and_total_mass_inputs_resolve_one_cross_domain_profile() {
+        let profile = DiscProfileSpec::ChamferedCylinder {
+            outer_radius_m: 0.021,
+            thickness_m: 0.004,
+            chamfer_radial_m: 0.0008,
+            chamfer_axial_m: 0.0006,
+        };
+        with_test_cx(|cx| {
+            let direct = CinematicDiscSpecimenConfig {
+                profile,
+                mass: CinematicDiscMassInput::DensityKgPerM3(8_930.0),
+                material: CinematicDiscMaterialConfig::default(),
+            }
+            .resolve_profile(cx)
+            .expect("direct-density specimen");
+            let mass_matched = CinematicDiscSpecimenConfig {
+                profile,
+                mass: CinematicDiscMassInput::TotalMassKg(direct.mass_properties.mass),
+                material: CinematicDiscMaterialConfig::default(),
+            }
+            .resolve_profile(cx)
+            .expect("mass-matched specimen");
+            assert_eq!(direct.spec, mass_matched.spec);
+            assert_eq!(
+                direct.content_identities(),
+                mass_matched.content_identities()
+            );
+        });
+    }
+
+    #[test]
+    fn g0_nonpositive_disc_mass_input_refuses_before_pipeline_work() {
+        for mass in [
+            CinematicDiscMassInput::DensityKgPerM3(0.0),
+            CinematicDiscMassInput::TotalMassKg(f64::NAN),
+        ] {
+            let mut config = CinematicFixtureConfig::default();
+            config.disc.mass = mass;
+            assert_eq!(
+                config.validate(),
+                Err(CinematicFixtureError::InvalidConfig(
+                    "disc density or total mass must be finite and positive"
+                ))
+            );
+        }
     }
 
     fn stereo_rms(samples: &[StereoSample]) -> f64 {
