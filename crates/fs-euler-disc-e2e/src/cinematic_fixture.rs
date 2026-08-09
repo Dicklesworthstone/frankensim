@@ -2684,7 +2684,7 @@ fn fixture_impulse_audit(
         );
         if !full_contact_mean_available && !declared_scalar_is_interval_mean {
             return Err(CinematicFixtureError::Pipeline(format!(
-                "normal-impulse audit requires a full-contact duration mean or an IntervalMean scalar at source sample {}",
+                "normal-impulse audit requires a full-contact duration mean, IntervalMean scalar, or applied zero-order hold at source sample {}",
                 interval.source_sample_index
             )));
         }

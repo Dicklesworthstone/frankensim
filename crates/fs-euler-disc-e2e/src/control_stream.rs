@@ -235,7 +235,8 @@ pub struct AudioControlInterval {
     /// Sampling rule of [`Self::declared_normal_force_n`].
     pub normal_force_sampling: RenderNormalForceSampling,
     /// Producer-declared normal-load scalar [N]. Its exact meaning is carried
-    /// by [`Self::normal_force_sampling`]; it is never assumed to be a mean.
+    /// by [`Self::normal_force_sampling`]; only a declared interval mean or
+    /// applied zero-order hold enters the mean-force sound seam.
     pub declared_normal_force_n: f64,
     /// Exact raw channel controls.
     pub channels: ChannelControlSet,

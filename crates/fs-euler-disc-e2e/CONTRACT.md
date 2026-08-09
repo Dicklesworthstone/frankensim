@@ -935,16 +935,19 @@ resolved profile support at the accepted endpoint pose and base displacement;
 an endpoint beyond the plane is refused as an unlocalized opening instead of
 being mislabeled closed. It checks checkpoint integrity plus exact state, time,
 base, model, and specimen lineage before admission. Its normal scalar is tagged
-`AcceptedSubstepEvaluation`: this is the normal-law evaluation consumed by the
-accepted mechanics substep, not a duration mean or a promised midpoint. The
-bridge therefore leaves all channel-work availability false until the
-production composition publishes one shared cross-channel work ledger, and
-the sound path must not treat this scalar as an acoustic force measure. Its
-energy defect is a disc-only constant-wrench midpoint residual, not total
-disc/base/contact/gas closure. Reaching the requested prefix step budget is
-horizon censoring; a source refusal remains an explicit backend-specific
-numerical refusal. The bridge never invents separation, impact, reimpact, or
-terminal continuation after the source stops.
+`AppliedSubstepZeroOrderHold`: this is the normal-law evaluation that the
+transactional mechanics step applies as a constant world force over the
+accepted interval. It is therefore the exact duration mean of the discretized
+forcing and may drive the normal-force excitation seam, but its approximation
+to the continuously varying physical force and its usable bandwidth remain
+timestep-dependent convergence questions. The bridge leaves all aggregate
+channel-work availability false until the production composition publishes one
+shared cross-channel work ledger. Its energy defect follows the actual
+`fs-mbd` convention of world-fixed force and body-fixed torque, but remains a
+disc-only residual rather than total disc/base/contact/gas closure. Reaching
+the requested prefix step budget is horizon censoring; a source refusal remains
+an explicit backend-specific numerical refusal. The bridge never invents
+separation, impact, reimpact, or terminal continuation after the source stops.
 
 Localization brackets describe evaluated uncertainty bounds, not additional
 accepted states. A terminal event's retained time must exactly equal its final
@@ -1035,16 +1038,18 @@ channel is body work rather than relative gas dissipation. The separately
 retained `interval_normal_force_n` has an explicit
 `RenderNormalForceSampling` tag in `RenderChannelAvailability`: `Unavailable`,
 `FirstAcceptedSubintervalMidpoint`, `IntervalMean`, or
-`AcceptedSubstepEvaluation`. The coupled runner uses the midpoint tag;
+`AppliedSubstepZeroOrderHold`. The coupled runner uses the midpoint tag;
 reduced-decay bridge v2 uses the documented interval-mean tag; and the
-transactional production-prefix bridge uses the accepted-evaluation tag. Full
-contact requires a non-unavailable tag, but a normal-only midpoint or accepted
-substep evaluation is diagnostic-only and **cannot** be promoted into a sound
-force measure.
+transactional production-prefix bridge uses the applied zero-order-hold tag.
+Full contact requires a non-unavailable tag. A normal-only midpoint is
+diagnostic-only and **cannot** be promoted into a sound force measure; an
+applied zero-order hold is a discrete interval mean and remains explicitly
+distinguishable from an analytically or quadrature-derived `IntervalMean`.
 Duration-mean normal-load authority comes from the full contact-channel mean
 projected onto base `+z` whenever that channel is available, or from the scalar
-only when its tag is `IntervalMean` and full contact is unavailable. Sound mapping
-for `ContactNormalForce` fails closed (unavailable) in every other case.
+only when its tag is `IntervalMean` or `AppliedSubstepZeroOrderHold` and full
+contact is unavailable. Sound mapping for `ContactNormalForce` fails closed
+(unavailable) in every other case.
 Available numerical zero is never treated as missing.
 
 Each audio interval also declares its exact visualization endpoint coverage.

@@ -383,7 +383,7 @@ fn normal_load_only_availability_roundtrips_without_contact_wrench_authority() {
     with_cx(false, |cx| {
         for sampling in [
             RenderNormalForceSampling::IntervalMean,
-            RenderNormalForceSampling::AcceptedSubstepEvaluation,
+            RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
         ] {
             let mut first = sample(0.0, 0.0, RenderSampleDisposition::Continue, false);
             let mut retained = sample(0.0, 1.0, RenderSampleDisposition::HorizonCensored, false);

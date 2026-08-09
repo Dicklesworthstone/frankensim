@@ -2209,8 +2209,7 @@ fn production_disc_work_residual_j(
         .orientation()
         .rotate_world_to_body(receipt.total_moment_about_com_world_n_m);
     let wrench_work_j = duration_s
-        * (receipt.total_force_world_n.dot(velocity_mid)
-            + torque_body.dot(omega_mid_body));
+        * (receipt.total_force_world_n.dot(velocity_mid) + torque_body.dot(omega_mid_body));
     let residual = receipt.rigid_step.diagnostics_after.mechanical_energy
         - receipt.rigid_step.diagnostics_before.mechanical_energy
         - wrench_work_j;

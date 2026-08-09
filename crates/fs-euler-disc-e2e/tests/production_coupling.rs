@@ -1161,7 +1161,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
                 .metadata()
                 .channel_availability
                 .normal_force_sampling,
-            RenderNormalForceSampling::AcceptedSubstepEvaluation
+            RenderNormalForceSampling::AppliedSubstepZeroOrderHold
         );
         assert!(!render_prefix.metadata().channel_availability.contact);
         let rendered = render_prefix.samples()[0].input();

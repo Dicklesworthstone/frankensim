@@ -419,44 +419,52 @@ fn normal_load_only_authority_drives_mean_control_without_forging_contact_wrench
         RenderContactBranch::Closed,
         RenderSampleDisposition::HorizonCensored,
     );
-    let availability = RenderChannelAvailability {
+    for sampling in [
+        fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean,
+        fs_euler_disc_e2e::RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
+    ] {
+        let availability = RenderChannelAvailability {
+            gravity: false,
+            contact: false,
+            normal_force_sampling: sampling,
+            rolling: false,
+            base: false,
+            gas: false,
+        };
+        let source = trajectory(vec![retained.clone()], default_base_frame(), availability);
+        with_cx(false, |cx| {
+            let controls = EulerControlStream::try_derive(&source, cx).unwrap();
+            let interval = &controls.audio()[0];
+            assert_eq!(interval.mean_base_normal_contact_force_n, Some(31.0));
+            assert_eq!(interval.normal_force_sampling, sampling);
+            assert_eq!(interval.declared_normal_force_n, 31.0);
+            assert!(matches!(
+                interval.channels.contact,
+                ChannelControl::Unavailable
+            ));
+
+            let coarsened = controls
+                .boxcar_coarsen(NonZeroUsize::new(1).unwrap(), cx)
+                .unwrap();
+            assert_eq!(
+                coarsened.bins()[0].mean_base_normal_contact_force_n,
+                Some(31.0)
+            );
+            assert!(matches!(
+                coarsened.bins()[0].channels.contact,
+                ChannelControl::Unavailable
+            ));
+        });
+    }
+
+    let unavailable = RenderChannelAvailability {
         gravity: false,
         contact: false,
-        normal_force_sampling: fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean,
+        normal_force_sampling: fs_euler_disc_e2e::RenderNormalForceSampling::Unavailable,
         rolling: false,
         base: false,
         gas: false,
     };
-    let source = trajectory(vec![retained.clone()], default_base_frame(), availability);
-    with_cx(false, |cx| {
-        let controls = EulerControlStream::try_derive(&source, cx).unwrap();
-        let interval = &controls.audio()[0];
-        assert_eq!(interval.mean_base_normal_contact_force_n, Some(31.0));
-        assert_eq!(
-            interval.normal_force_sampling,
-            fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean
-        );
-        assert_eq!(interval.declared_normal_force_n, 31.0);
-        assert!(matches!(
-            interval.channels.contact,
-            ChannelControl::Unavailable
-        ));
-
-        let coarsened = controls
-            .boxcar_coarsen(NonZeroUsize::new(1).unwrap(), cx)
-            .unwrap();
-        assert_eq!(
-            coarsened.bins()[0].mean_base_normal_contact_force_n,
-            Some(31.0)
-        );
-        assert!(matches!(
-            coarsened.bins()[0].channels.contact,
-            ChannelControl::Unavailable
-        ));
-    });
-
-    let mut unavailable = availability;
-    unavailable.normal_force_sampling = fs_euler_disc_e2e::RenderNormalForceSampling::Unavailable;
     assert_eq!(
         RenderTrajectory::try_new(
             metadata(&retained, default_base_frame(), unavailable),

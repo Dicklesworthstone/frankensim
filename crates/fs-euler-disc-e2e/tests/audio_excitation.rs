@@ -532,57 +532,63 @@ fn g0_normal_load_only_authority_maps_force_and_measure_without_contact_wrench()
         RenderSampleDisposition::HorizonCensored,
     );
     retained.interval_normal_force_n = 7.0;
-    let availability = RenderChannelAvailability {
-        gravity: false,
-        contact: false,
-        normal_force_sampling: fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean,
-        rolling: false,
-        base: false,
-        gas: false,
-    };
 
     with_cx(false, |cx| {
-        let artifact = artifact(vec![first, retained], availability, cx);
-        let controls = EulerControlStream::try_derive(artifact.trajectory(), cx).unwrap();
-        assert!(matches!(
-            controls.audio()[0].channels.contact,
-            ChannelControl::Unavailable
-        ));
-        assert_eq!(
-            controls.audio()[0].mean_base_normal_contact_force_n,
-            Some(7.0)
-        );
-        let modal = modal_model(&[SoundModalComponent::Disc], cx);
-        let mapper = AudioExcitationMapper::try_new(
-            &artifact,
-            &controls,
-            &modal,
-            mapper_input(
-                vec![mapping(
-                    SoundExcitationChannel::ContactNormalForce,
-                    SoundModalComponent::Disc,
-                    1.0,
-                )],
-                1,
-            ),
-            cx,
-        )
-        .unwrap();
-        let chunk = mapper
-            .map_next_chunk(
-                &mapper.initial_checkpoint(cx).unwrap(),
-                NonZeroUsize::new(1).unwrap(),
+        for sampling in [
+            fs_euler_disc_e2e::RenderNormalForceSampling::IntervalMean,
+            fs_euler_disc_e2e::RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
+        ] {
+            let availability = RenderChannelAvailability {
+                gravity: false,
+                contact: false,
+                normal_force_sampling: sampling,
+                rolling: false,
+                base: false,
+                gas: false,
+            };
+            let artifact = artifact(vec![first.clone(), retained.clone()], availability, cx);
+            let controls = EulerControlStream::try_derive(artifact.trajectory(), cx).unwrap();
+            assert!(matches!(
+                controls.audio()[0].channels.contact,
+                ChannelControl::Unavailable
+            ));
+            assert_eq!(controls.audio()[0].normal_force_sampling, sampling);
+            assert_eq!(
+                controls.audio()[0].mean_base_normal_contact_force_n,
+                Some(7.0)
+            );
+            let modal = modal_model(&[SoundModalComponent::Disc], cx);
+            let mapper = AudioExcitationMapper::try_new(
+                &artifact,
+                &controls,
+                &modal,
+                mapper_input(
+                    vec![mapping(
+                        SoundExcitationChannel::ContactNormalForce,
+                        SoundModalComponent::Disc,
+                        1.0,
+                    )],
+                    1,
+                ),
                 cx,
             )
             .unwrap();
-        let interval = &chunk.intervals[0];
-        assert_eq!(
-            interval.availability.contact,
-            ExcitationSourceAvailability::Available
-        );
-        assert_eq!(interval.mean_force_stems_n.contact.disc, 7.0);
-        assert_eq!(interval.force_time_stems_n_s.contact.disc, 7.0);
-        assert_eq!(interval.measure_residual_stems_n_s.contact.disc, 0.0);
+            let chunk = mapper
+                .map_next_chunk(
+                    &mapper.initial_checkpoint(cx).unwrap(),
+                    NonZeroUsize::new(1).unwrap(),
+                    cx,
+                )
+                .unwrap();
+            let interval = &chunk.intervals[0];
+            assert_eq!(
+                interval.availability.contact,
+                ExcitationSourceAvailability::Available
+            );
+            assert_eq!(interval.mean_force_stems_n.contact.disc, 7.0);
+            assert_eq!(interval.force_time_stems_n_s.contact.disc, 7.0);
+            assert_eq!(interval.measure_residual_stems_n_s.contact.disc, 0.0);
+        }
     });
 }
 
