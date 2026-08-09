@@ -16,9 +16,14 @@ LCP, no bespoke scheme).
 - `Obstacle` — collocation matrix `Phi[i][k]`, per-point gaps and
   quadrature weights, shared `(K, alpha)` power law with a PROVENANCE
   string (logged, never invented; matdb lookup deferred until packs
-  carrying contact-law parameters exist — no fake wiring). Admission
+  carrying contact-law parameters exist — no fake wiring). Fields are
+  PRIVATE so admission is mandatory (accessors + a documented
+  `from_raw_parts` trust escape for mutation batteries). Admission
   refuses NaN/non-finite entries, negative weights/stiffness, and
-  `alpha < 1` (the force law loses C^1 there) by name.
+  `alpha < 1` by name. Smoothness, stated precisely: the POTENTIAL is
+  C^1 for all `alpha >= 1` (what Gonzalez needs); the force is C^1
+  only for `alpha > 1`, and the contact Hessian is unbounded for
+  `1 < alpha < 2` and discontinuous at `alpha` in {1, 2}.
 - `ContactStorage` — wraps any fs-phs `Storage` with
   `Phi_c = sum_i w_i K/(alpha+1) [p_i]_+^(alpha+1)`,
   `p_i = (Phi q)_i - c_i`; exact analytic gradient; `probe()` reports
@@ -43,13 +48,20 @@ LCP, no bespoke scheme).
 3. String-fret rattle with >= 3 contact events conserves H to 1e-8
    relative over 20k steps; the explicit-integrator mutation
    (symplectic Euler on the same field) visibly grows energy by
-   >= 1e3x the discrete-gradient drift or diverges.
+   >= 1e3x the discrete-gradient drift or diverges. HONEST SCOPE
+   (review-corrected): under Gonzalez stepping the correction term
+   forces dg.dx = dH for ANY gradient, so conservation certifies the
+   INTEGRATOR, not the contact gradient — the gradient's own oracle
+   is invariant 10.
 4. Dropped one-sidedness is detected as ATTRACTION: a separated state
    feels zero force from the true storage and a large spurious force
    from the two-sided mutant.
-5. Iteration budget holds across a 3-level velocity sweep (max
-   newton_iters <= 50, histogram logged); the stall path is the TYPED
-   `NewtonStalled` (executed at absurd stiffness x step size).
+5. Iteration budget: an INTERIOR bound (max newton_iters <= 24,
+   measured <= 8) holds across a 3-level velocity sweep with the
+   histogram logged — asserting the fs-phs cap itself would be
+   vacuous, since a successful step cannot exceed it
+   (review-corrected); the stall path is the TYPED `NewtonStalled`
+   (executed at absurd stiffness x step size).
 6. Collocation refinement converges (8 -> 32 -> 128 point contact
    energy differences contract).
 7. Jawari casebook: a graded bridge profile grazes the swinging
@@ -59,6 +71,14 @@ LCP, no bespoke scheme).
    logged as JSON. Executed design lesson: a tiny-gap rattling point
    is itself a collision exciter, not a "hard bridge" control.
 8. Determinism: repeated runs are bitwise identical.
+9. `polyline_heights` and `string_collocation` refuse non-finite and
+   non-physical inputs by name (NaN slipped ordering comparisons —
+   executed).
+10. THE contact-gradient oracle: central finite differences of the
+    coded `H` match `gradient()` to 1e-5 relative on a multi-point,
+    non-uniform-weight obstacle with a MIXED active/inactive contact
+    set, and `probe().contact_energy` equals the Hamiltonian split
+    exactly.
 
 ## Error model
 
@@ -85,11 +105,13 @@ None.
 
 ## Conformance tests
 
-`tests/dcontact.rs` (9): polyline geometry + refusals; bouncing
+`tests/dcontact.rs` (10): polyline geometry + refusals; bouncing
 restitution/penetration closed form; fret-rattle conservation +
-explicit mutation; one-sidedness mutation; iteration budget sweep +
-typed stall; collocation refinement; jawari vs clean termination
-(band-energy JSON); bitwise determinism; typed parameter refusals.
+explicit mutation; one-sidedness mutation (force swept over separated
+depths); iteration budget sweep + typed stall; collocation refinement
+(0.1 gate, measured 0.0099); FD gradient oracle + probe consistency;
+jawari vs clean termination (band-energy JSON); bitwise determinism;
+typed parameter refusals.
 
 ## No-claim boundaries
 
@@ -100,11 +122,13 @@ typed stall; collocation refinement; jawari vs clean termination
   losses enter through the modal damping `R`; the lossy contact law
   is a recorded follow-up (it needs state-dependent `R`, outside the
   constant-R pHS form).
-- `alpha < 2` laws carry an unbounded contact Hessian at the boundary
-  (`d2f ~ p^(alpha-2)`); the tight-graze regime stalled the
-  FD-Jacobian Newton at `alpha = 1.5` (typed refusal, executed) —
-  stiff grazing fixtures should use `alpha >= 2`, recorded as
-  guidance, and a globalized Newton is a potential fs-phs follow-up.
+- `1 < alpha < 2` laws carry an unbounded contact Hessian at the
+  boundary (at `alpha = 1` the Hessian coefficient vanishes and the
+  FORCE has a C^0 kink instead — review-corrected); the tight-graze
+  regime stalled the FD-Jacobian Newton at `alpha = 1.5` (typed
+  refusal, executed) — stiff grazing fixtures should use
+  `alpha >= 2`, and a globalized Newton is a potential fs-phs
+  follow-up.
 - Contact-law `(K, alpha)` materials data: no packs exist yet; the
   provenance field is the wiring point when they do.
 - Obstacles are static (no moving frets/bridges) in v1.

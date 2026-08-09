@@ -150,7 +150,7 @@ fn fret_system(n_modes: usize, gap: f64, k_c: f64) -> (PortHamiltonian, ContactS
     let (storage, omegas) = string_storage(length, tension, mu, n_modes);
     // 24 fret-line collocation points along the first two thirds.
     let points: Vec<f64> = (1i32..=24).map(|i| length * f64::from(i) / 36.0).collect();
-    let coll = string_collocation(length, mu, &points, n_modes);
+    let coll = string_collocation(length, mu, &points, n_modes).expect("collocation");
     let seg = length / 36.0;
     let fret = Obstacle::new(
         coll.clone(),
@@ -265,32 +265,33 @@ struct TwoSidedMutant {
 impl Storage for TwoSidedMutant {
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         // Same structure energy; contact term evaluated WITHOUT clamp
-        // (alpha = 1.5 on a negative base is NaN — use |p|^2.5 signed
-        // even power surrogate the bug class produces with alpha 2).
-        let ob = &self.inner.obstacles[0];
-        let mut h = self.inner.inner.hamiltonian(x);
-        for i in 0..ob.n_points {
+        // (the |p|-weighted odd form the bug class produces).
+        let ob = &self.inner.obstacles()[0];
+        let nm = self.inner.n_modes();
+        let mut h = self.inner.inner_storage().hamiltonian(x);
+        for i in 0..ob.n_points() {
             let mut disp = 0.0;
-            for k in 0..self.inner.n_modes {
-                disp += ob.collocation[i * self.inner.n_modes + k] * x[2 * k];
+            for k in 0..nm {
+                disp += ob.collocation()[i * nm + k] * x[2 * k];
             }
-            let p = disp - ob.gaps[i]; // NO clamp
-            h += ob.weights[i] * ob.stiffness / 3.0 * p * p * p.abs();
+            let p = disp - ob.gaps()[i]; // NO clamp
+            h += ob.weights()[i] * ob.stiffness() / 3.0 * p * p * p.abs();
         }
         h
     }
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
-        self.inner.inner.gradient(x, out);
-        let ob = &self.inner.obstacles[0];
-        for i in 0..ob.n_points {
+        self.inner.inner_storage().gradient(x, out);
+        let ob = &self.inner.obstacles()[0];
+        let nm = self.inner.n_modes();
+        for i in 0..ob.n_points() {
             let mut disp = 0.0;
-            for k in 0..self.inner.n_modes {
-                disp += ob.collocation[i * self.inner.n_modes + k] * x[2 * k];
+            for k in 0..nm {
+                disp += ob.collocation()[i * nm + k] * x[2 * k];
             }
-            let p = disp - ob.gaps[i];
-            let f = ob.weights[i] * ob.stiffness * p * p.abs();
-            for k in 0..self.inner.n_modes {
-                out[2 * k] += f * ob.collocation[i * self.inner.n_modes + k];
+            let p = disp - ob.gaps()[i];
+            let f = ob.weights()[i] * ob.stiffness() * p * p.abs();
+            for k in 0..nm {
+                out[2 * k] += f * ob.collocation()[i * nm + k];
             }
         }
     }
@@ -301,8 +302,6 @@ fn dropped_one_sidedness_detected_as_attraction() {
     // Probe: a state SEPARATED from the obstacle must feel zero
     // contact force from the true storage, nonzero (attractive) from
     // the mutant.
-    let n_modes = 1;
-    let (_, _, _) = fret_system(1, 1.0, 1.0e7);
     let floor = Obstacle::new(
         vec![1.0],
         1,
@@ -319,21 +318,25 @@ fn dropped_one_sidedness_detected_as_attraction() {
     let mutant = TwoSidedMutant {
         inner: ContactStorage::new(Box::new(FreeMass { m: 1.0 }), 1, vec![floor]).expect("m"),
     };
-    let x_separated = vec![-0.3, 0.0]; // 0.8 m away from the floor
-    let mut g_real = vec![0.0; 2];
-    let mut g_mut = vec![0.0; 2];
-    real.gradient(&x_separated, &mut g_real);
-    mutant.gradient(&x_separated, &mut g_mut);
-    assert!(
-        g_real[0].abs() < f64::MIN_POSITIVE,
-        "separated true contact force must vanish"
-    );
-    assert!(
-        g_mut[0].abs() > 1.0e3,
-        "mutant must exert spurious force at separation: {:.3e}",
-        g_mut[0]
-    );
-    let _ = n_modes;
+    // Sweep separated depths: true force identically zero everywhere
+    // on the free side, mutant force present and pulling TOWARD the
+    // obstacle (positive q-gradient = restoring toward +q contact).
+    for sep in [0.1, 0.3, 0.6] {
+        let x_separated = vec![0.5 - sep - 0.5, 0.0]; // sep below the gap
+        let mut g_real = vec![0.0; 2];
+        let mut g_mut = vec![0.0; 2];
+        real.gradient(&x_separated, &mut g_real);
+        mutant.gradient(&x_separated, &mut g_mut);
+        assert!(
+            g_real[0].abs() < f64::MIN_POSITIVE,
+            "separated true contact force must vanish at sep {sep}"
+        );
+        assert!(
+            g_mut[0].abs() > 1.0e2,
+            "mutant must exert spurious force at sep {sep}: {:.3e}",
+            g_mut[0]
+        );
+    }
 }
 
 #[test]
@@ -352,7 +355,11 @@ fn iteration_budget_held_across_velocity_sweep_and_stall_is_typed() {
             x = rec.x;
         }
     }
-    assert!(max_iters <= 50, "budget exceeded: {max_iters}");
+    // Interior bound (review finding: <= 50 is vacuous — a successful
+    // step CANNOT report more than the fs-phs cap; a stall is already
+    // a panic above). Histogram-measured headroom at authoring: all
+    // steps <= 8 iterations.
+    assert!(max_iters <= 24, "iteration budget regressed: {max_iters}");
     println!(
         "{{\"suite\":\"fs-dcontact\",\"case\":\"iteration-budget\",\"max_iters\":{max_iters},\"histogram\":{histogram:?},\"verdict\":\"pass\"}}"
     );
@@ -382,7 +389,7 @@ fn collocation_refinement_converges() {
         let pts: Vec<f64> = (1..=n_pts)
             .map(|i| length * i as f64 / (n_pts as f64 + 1.0))
             .collect();
-        let coll = string_collocation(length, mu, &pts, n_modes);
+        let coll = string_collocation(length, mu, &pts, n_modes).expect("collocation");
         let seg = length / (n_pts as f64 + 1.0);
         let ob = Obstacle::new(
             coll,
@@ -409,8 +416,10 @@ fn collocation_refinement_converges() {
     let d_coarse = (e32 - e8).abs();
     let d_fine = (e128 - e32).abs();
     assert!(e128 > 0.0, "fixture must penetrate");
+    // Measured ratio 0.0099 at authoring (near O(h^2)); 0.1 keeps 10x
+    // headroom while catching an O(h)-degradation (ratio ~0.25).
     assert!(
-        d_fine < 0.35 * d_coarse.max(1.0e-30),
+        d_fine < 0.1 * d_coarse.max(1.0e-30),
         "refinement not converging: {e8:.6e} {e32:.6e} {e128:.6e}"
     );
 }
@@ -477,7 +486,7 @@ fn jawari_bridge_enriches_high_band_vs_clean_termination() {
     let gaps = polyline_heights(&profile, &jaw_pts).expect("gaps");
     let seg = 0.06 / 12.0;
     let jawari = Obstacle::new(
-        string_collocation(length, mu, &jaw_pts, n_modes),
+        string_collocation(length, mu, &jaw_pts, n_modes).expect("collocation"),
         jaw_pts.len(),
         n_modes,
         gaps,
@@ -495,7 +504,7 @@ fn jawari_bridge_enriches_high_band_vs_clean_termination() {
     // Clean termination: zero contact stiffness = the plain linear
     // string (the model's fixed ends ARE the knife-edge bridge).
     let clean = Obstacle::new(
-        string_collocation(length, mu, &[0.02], n_modes),
+        string_collocation(length, mu, &[0.02], n_modes).expect("collocation"),
         1,
         n_modes,
         vec![1.5e-4],
@@ -523,6 +532,76 @@ fn jawari_bridge_enriches_high_band_vs_clean_termination() {
     );
     println!(
         "{{\"suite\":\"fs-dcontact\",\"case\":\"jawari\",\"high_band_fraction_jawari\":{f_jaw:.4},\"high_band_fraction_clean\":{f_clean:.4},\"band_energies_jawari\":{e_jaw:?},\"band_energies_clean\":{e_hard:?},\"verdict\":\"pass\"}}"
+    );
+}
+
+#[test]
+fn contact_gradient_matches_finite_difference_of_h() {
+    // THE oracle the conservation test cannot be (review finding: the
+    // Gonzalez correction forces dg.dx = dH for ANY gradient, so
+    // energy conservation is structurally blind to contact-gradient
+    // errors): central finite differences of the coded H must match
+    // gradient() on a MULTI-POINT, NON-UNIFORM-WEIGHT obstacle at a
+    // state with a mixed active/inactive contact set.
+    let (length, mu) = (0.65, 5.0e-3);
+    let n_modes = 5;
+    let pts: Vec<f64> = (1i32..=9).map(|i| length * f64::from(i) / 10.0).collect();
+    let coll = string_collocation(length, mu, &pts, n_modes).expect("collocation");
+    let weights: Vec<f64> = (1..=9).map(|i| 0.01 * i as f64).collect(); // non-uniform
+    let gaps: Vec<f64> = (0..9)
+        .map(|i| if i % 2 == 0 { 1.0e-4 } else { 5.0e-2 }) // half active, half far
+        .collect();
+    let ob = Obstacle::new(
+        coll,
+        9,
+        n_modes,
+        gaps,
+        weights,
+        3.0e6,
+        1.7,
+        "test".to_string(),
+    )
+    .expect("ob");
+    let cs = ContactStorage::new(
+        Box::new(string_storage(length, 70.0, mu, n_modes).0),
+        n_modes,
+        vec![ob],
+    )
+    .expect("cs");
+    let mut x = vec![0.0; 2 * n_modes];
+    for k in 0..n_modes {
+        x[2 * k] = 3.0e-3 / (k + 1) as f64;
+        x[2 * k + 1] = 0.1 * (k as f64 - 2.0);
+    }
+    let probe = cs.probe(&x);
+    assert!(
+        probe.active_points >= 2 && probe.active_points <= 8,
+        "fixture needs a MIXED active set, got {}",
+        probe.active_points
+    );
+    let mut g = vec![0.0; 2 * n_modes];
+    cs.gradient(&x, &mut g);
+    let scale = g.iter().fold(1.0e-30f64, |a, &v| a.max(v.abs()));
+    for i in 0..2 * n_modes {
+        let h_step = 1.0e-7 * (1.0 + x[i].abs());
+        let mut xp = x.clone();
+        let mut xm = x.clone();
+        xp[i] += h_step;
+        xm[i] -= h_step;
+        let fd = (cs.hamiltonian(&xp) - cs.hamiltonian(&xm)) / (2.0 * h_step);
+        assert!(
+            (fd - g[i]).abs() <= 1.0e-5 * scale,
+            "gradient[{i}] {:.6e} vs FD {fd:.6e}",
+            g[i]
+        );
+    }
+    // Probe-vs-Hamiltonian consistency (review finding: duplicated
+    // potential formula): contact energy equals the storage split.
+    let inner_h = string_storage(length, 70.0, mu, n_modes).0.hamiltonian(&x);
+    assert!(
+        (probe.contact_energy - (cs.hamiltonian(&x) - inner_h)).abs()
+            <= 1.0e-12 * probe.contact_energy.max(1.0),
+        "probe energy diverged from the Hamiltonian split"
     );
 }
 

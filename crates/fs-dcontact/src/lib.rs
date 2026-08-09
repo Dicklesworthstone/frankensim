@@ -31,29 +31,19 @@ use fs_math::det;
 use fs_phs::Storage;
 
 /// A distributed obstacle: collocation points with per-point gap,
-/// quadrature weight, and the shared power-law contact law.
+/// quadrature weight, and the shared power-law contact law. Fields
+/// are PRIVATE so admission is mandatory (review finding: pub fields
+/// made every check advisory); mutation batteries use the documented
+/// [`Obstacle::from_raw_parts`] trust escape.
 #[derive(Debug, Clone)]
 pub struct Obstacle {
-    /// Row-major collocation matrix `Phi[i][k]` — mode shape `k`
-    /// evaluated at collocation point `i` (n_points x n_modes).
-    pub collocation: Vec<f64>,
-    /// Number of collocation points.
-    pub n_points: usize,
-    /// Per-point gap `c_i` from the rest position to the obstacle
-    /// (displacement beyond it is penetration).
-    pub gaps: Vec<f64>,
-    /// Per-point quadrature weight `w_i` (segment length share for a
-    /// line obstacle; 1 for a point stop).
-    pub weights: Vec<f64>,
-    /// Contact stiffness `K` (force per penetration^alpha per unit
-    /// weight).
-    pub stiffness: f64,
-    /// Contact exponent `alpha >= 1` (Hertzian sphere 1.5; hard
-    /// flat-ish laws use larger values).
-    pub alpha: f64,
-    /// Where `(K, alpha)` came from — logged, never invented (a matdb
-    /// claim id once contact-law packs exist; free text until then).
-    pub provenance: String,
+    collocation: Vec<f64>,
+    n_points: usize,
+    gaps: Vec<f64>,
+    weights: Vec<f64>,
+    stiffness: f64,
+    alpha: f64,
+    provenance: String,
 }
 
 /// Typed refusal.
@@ -84,8 +74,11 @@ impl std::error::Error for DContactError {}
 
 impl Obstacle {
     /// Admit an obstacle: consistent lengths, finite entries,
-    /// `K >= 0`, `alpha >= 1` (below 1 the force law is not C^1 and
-    /// the discrete-gradient Newton loses its convergence footing).
+    /// `K >= 0`, `alpha >= 1`. The load-bearing property is that the
+    /// contact POTENTIAL stays C^1 for alpha >= 1 (what the Gonzalez
+    /// scheme needs); the force itself is C^1 only for alpha > 1, and
+    /// its Hessian is unbounded for 1 < alpha < 2 (stiff-graze
+    /// guidance: alpha >= 2).
     ///
     /// # Errors
     /// Typed [`DContactError`].
@@ -144,6 +137,73 @@ impl Obstacle {
         })
     }
 
+    /// Bypass admission — for mutation batteries and trusted callers
+    /// ONLY (the fs-phs `from_raw_parts` pattern); nothing downstream
+    /// re-checks.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_raw_parts(
+        collocation: Vec<f64>,
+        n_points: usize,
+        gaps: Vec<f64>,
+        weights: Vec<f64>,
+        stiffness: f64,
+        alpha: f64,
+        provenance: String,
+    ) -> Self {
+        Obstacle {
+            collocation,
+            n_points,
+            gaps,
+            weights,
+            stiffness,
+            alpha,
+            provenance,
+        }
+    }
+
+    /// Row-major collocation matrix `Phi[i][k]` (n_points x n_modes).
+    #[must_use]
+    pub fn collocation(&self) -> &[f64] {
+        &self.collocation
+    }
+
+    /// Collocation point count.
+    #[must_use]
+    pub fn n_points(&self) -> usize {
+        self.n_points
+    }
+
+    /// Per-point gaps.
+    #[must_use]
+    pub fn gaps(&self) -> &[f64] {
+        &self.gaps
+    }
+
+    /// Per-point quadrature weights.
+    #[must_use]
+    pub fn weights(&self) -> &[f64] {
+        &self.weights
+    }
+
+    /// Contact stiffness `K`.
+    #[must_use]
+    pub fn stiffness(&self) -> f64 {
+        self.stiffness
+    }
+
+    /// Contact exponent `alpha`.
+    #[must_use]
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
+
+    /// Contact-law provenance (logged, never invented).
+    #[must_use]
+    pub fn provenance(&self) -> &str {
+        &self.provenance
+    }
+
     /// Penetration `p_i = (Phi q)_i - c_i`, clamped one-sided, for the
     /// interleaved `[q, p]` state.
     fn penetrations(&self, n_modes: usize, x: &[f64]) -> Vec<f64> {
@@ -174,12 +234,9 @@ pub struct ContactProbe {
 /// contact potentials. State layout is the inner storage's
 /// (`[q_0, p_0, ...]` interleaved, `n_modes` pairs).
 pub struct ContactStorage {
-    /// Inner (structure) storage.
-    pub inner: Box<dyn Storage>,
-    /// Modal count of the inner storage.
-    pub n_modes: usize,
-    /// Obstacles.
-    pub obstacles: Vec<Obstacle>,
+    inner: Box<dyn Storage>,
+    n_modes: usize,
+    obstacles: Vec<Obstacle>,
 }
 
 impl ContactStorage {
@@ -204,6 +261,24 @@ impl ContactStorage {
             n_modes,
             obstacles,
         })
+    }
+
+    /// The wrapped inner storage.
+    #[must_use]
+    pub fn inner_storage(&self) -> &dyn Storage {
+        self.inner.as_ref()
+    }
+
+    /// The obstacles.
+    #[must_use]
+    pub fn obstacles(&self) -> &[Obstacle] {
+        &self.obstacles
+    }
+
+    /// Modal count.
+    #[must_use]
+    pub fn n_modes(&self) -> usize {
+        self.n_modes
     }
 
     /// Contact diagnostics at a state (max penetration feeds the
@@ -279,8 +354,18 @@ pub fn polyline_heights(
             what: "polyline needs at least 2 vertices",
         });
     }
+    // NaN slips through ordering comparisons (review finding:
+    // executed Ok(NaN)); refuse non-finite coordinates up front.
+    if vertices
+        .iter()
+        .any(|&(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return Err(DContactError::Parameter {
+            what: "non-finite polyline vertex",
+        });
+    }
     for pair in vertices.windows(2) {
-        if pair[1].0 <= pair[0].0 || pair[1].0.is_nan() {
+        if pair[1].0 <= pair[0].0 {
             return Err(DContactError::Parameter {
                 what: "polyline x must strictly ascend",
             });
@@ -312,13 +397,21 @@ pub fn polyline_heights(
 /// string: `Phi[i][k] = sqrt(2/(mu L)) sin((k+1) pi x_i / L)` — the
 /// standard bridge from modal string states to physical displacement
 /// at the obstacle points.
-#[must_use]
+/// # Errors
+/// [`DContactError::Parameter`] on non-positive length/density (the
+/// silent-NaN alternative violates the refusal doctrine — review
+/// finding).
 pub fn string_collocation(
     length: f64,
     lin_density: f64,
     points: &[f64],
     n_modes: usize,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, DContactError> {
+    if !(length > 0.0) || !(lin_density > 0.0) {
+        return Err(DContactError::Parameter {
+            what: "string length and density must be positive",
+        });
+    }
     let norm = det::sqrt(2.0 / (lin_density * length));
     let pi = core::f64::consts::PI;
     let mut m = vec![0.0; points.len() * n_modes];
@@ -327,5 +420,5 @@ pub fn string_collocation(
             m[i * n_modes + k] = norm * det::sin((k + 1) as f64 * pi * x / length);
         }
     }
-    m
+    Ok(m)
 }
