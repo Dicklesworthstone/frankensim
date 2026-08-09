@@ -334,7 +334,22 @@ pub fn repair_passivity(
                 constraint_freqs.push(w);
             }
         }
-        let margin = report.worst.0.abs() * 0.05 * (round as f64 + 1.0);
+        // Margin from the ACTUAL dip at the constraint frequencies
+        // (review finding: the grid-worst can be an unrelated positive
+        // value when the violation is grid-invisible and only the
+        // Hamiltonian arm sees it), floored away from zero so a
+        // borderline crossing still gets a real push.
+        let dip = constraint_freqs
+            .iter()
+            .map(|&w| model.eval_iw(w).re)
+            .fold(f64::INFINITY, f64::min);
+        let dip_scale = if dip.is_finite() {
+            dip.min(0.0).abs()
+        } else {
+            0.0
+        };
+        let floor = 1.0e-9 * residue_norm(model).max(f64::MIN_POSITIVE);
+        let margin = dip_scale.max(floor) * 0.05 * (round as f64 + 1.0);
         let (repaired, kkt) = qp_step(model, &constraint_freqs, margin);
         last_kkt = kkt;
         current = repaired;
@@ -475,8 +490,11 @@ fn qp_step(anchor: &RationalModel, freqs: &[f64], margin: f64) -> (RationalModel
         }
         let Ok(fact) = lu(&k, dim) else {
             // Degenerate active set (duplicate constraints): drop the
-            // newest and retry.
+            // newest and retry. The stale solution of the DISCARDED
+            // set must not survive into the applied step (review
+            // finding), so reset delta.
             active.pop();
+            delta = vec![0.0f64; nv];
             continue;
         };
         let mut sol = b.clone();
@@ -507,6 +525,10 @@ fn qp_step(anchor: &RationalModel, freqs: &[f64], margin: f64) -> (RationalModel
         }
         if let Some(aj) = drop_idx {
             active.remove(aj);
+            if active.is_empty() {
+                // Same stale-delta hazard when pruning empties the set.
+                delta = vec![0.0f64; nv];
+            }
             continue;
         }
         // Add most-violated inactive constraint, if any.

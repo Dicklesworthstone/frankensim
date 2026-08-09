@@ -287,6 +287,18 @@ pub fn bilinear_state_space(
             nyquist,
         });
     }
+    // Same per-pole refusal as the section route (review finding: a
+    // resonance at/beyond Nyquist must not alias silently through the
+    // Tustin route either).
+    for t in &model.terms {
+        let w = match t {
+            PoleTerm::Real { pole, .. } => pole.abs(),
+            PoleTerm::Pair { pole, .. } => pole.abs(),
+        };
+        if w >= nyquist {
+            return Err(DiscretizeError::BeyondNyquist { omega: w, nyquist });
+        }
+    }
     let k = if omega_pw > 0.0 {
         omega_pw / det::tan(omega_pw * t_s / 2.0)
     } else {

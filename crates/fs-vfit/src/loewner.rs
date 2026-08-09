@@ -121,10 +121,20 @@ fn pencil_round(
     d_est: f64,
     e_est: f64,
 ) -> Result<(FitOutcome, Vec<f64>), LoewnerError> {
-    // Subsample ~48 points evenly over the (assumed sorted) grid.
+    // Subsample ~48 points evenly over the (assumed sorted) grid by
+    // rounded index interpolation (a stride of div_ceil can halve the
+    // pick count — review finding).
     let target = 48usize.min(omega.len());
-    let stride = omega.len().div_ceil(target);
-    let picks: Vec<usize> = (0..omega.len()).step_by(stride).collect();
+    let mut picks: Vec<usize> = (0..target)
+        .map(|i| {
+            if target == 1 {
+                0
+            } else {
+                (i * (omega.len() - 1)) / (target - 1)
+            }
+        })
+        .collect();
+    picks.dedup();
     // Conjugate augmentation: (i*w, H) and (-i*w, conj H), kept
     // adjacent so the real transformation acts on 2x2 blocks.
     // Interleave sample pairs into left/right partitions.
@@ -154,8 +164,10 @@ fn pencil_round(
     }
     // Real transformation: per conjugate pair of LEFT rows,
     // [x; conj x] -> [sqrt2 Re x; sqrt2 Im x]; same on RIGHT columns.
-    // After both, entries are real up to roundoff (asserted by taking
-    // the real part; the imaginary residue is a diagnostic bound).
+    // After both, entries are real up to roundoff; the imaginary
+    // residue is DISCARDED (not measured) — exact for conjugate-
+    // consistent data, which the augmentation guarantees here by
+    // construction.
     let lw_r = realify(&lw, nl, nr);
     let ls_r = realify(&ls, nl, nr);
     // Rank decision on stacked [L; Ls] (2*nl x nr).
@@ -304,15 +316,19 @@ pub struct CrossCheck {
 /// Compare two fitted models against each other on the data grid.
 #[must_use]
 pub fn cross_check(omega: &[f64], h: &[C64], a: &RationalModel, b: &RationalModel) -> CrossCheck {
+    // Symmetrized pole metric (review finding: one direction alone is
+    // blind to spurious extra poles on the other side).
     let pa = a.poles_expanded();
     let pb = b.poles_expanded();
     let mut worst_pole = 0.0f64;
-    for p in &pa {
-        let mut best = f64::INFINITY;
-        for q in &pb {
-            best = best.min((*p - *q).abs());
+    for (from, to) in [(&pa, &pb), (&pb, &pa)] {
+        for p in from {
+            let mut best = f64::INFINITY;
+            for q in to {
+                best = best.min((*p - *q).abs());
+            }
+            worst_pole = worst_pole.max(best / p.abs().max(1.0));
         }
-        worst_pole = worst_pole.max(best / p.abs().max(1.0));
     }
     let mut worst_resp = 0.0f64;
     for (&w, &hv) in omega.iter().zip(h) {

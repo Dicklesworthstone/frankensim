@@ -501,6 +501,16 @@ fn weight_preset_changes_the_fit_and_is_logged() {
 }
 
 #[test]
+fn nyquist_refusal_on_both_discretization_routes() {
+    // Review finding: the Tustin route must refuse a beyond-Nyquist
+    // resonance just like the section route (no silent aliasing).
+    let model = six_pole_model();
+    let t_s = 1.0 / 1000.0; // nyquist = pi*1000 ~= 3141 rad/s < 5200
+    assert!(bilinear(&model, t_s, 0.0).is_err());
+    assert!(bilinear_state_space(&model, t_s, 0.0).is_err());
+}
+
+#[test]
 fn refusals_are_typed() {
     let omega = log_grid(50.0, 2.0e4, 40);
     let h: Vec<C64> = omega.iter().map(|&w| C64::new(1.0, w * 1.0e-4)).collect();

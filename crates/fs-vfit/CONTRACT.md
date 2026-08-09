@@ -34,8 +34,8 @@ to parallel biquad sections and discrete state-space.
   (Gustavsen-Semlyen): homogeneous sigma system with the relaxed
   non-triviality row, pole relocation via the sigma-zero eigensolve on
   the real block realization, stable-pole flipping, conjugate closure.
-  `d >= 0` / `e >= 0` enforced IN the solve (exact active-set on the
-  two bounds). Data normalized to O(1) by geometric-mean magnitude and
+  `d >= 0` / `e >= 0` enforced IN the solve — exact by enumeration of
+  all four bound combinations, keeping the feasible minimum. Data normalized to O(1) by geometric-mean magnitude and
   every LS column-equilibrated (physical scales like |Z| ~ 1e7
   otherwise poison the QR). Weight presets: uniform, inverse-magnitude
   (honest at antiresonances), log-band — recorded in `FitReport`.
@@ -156,7 +156,9 @@ at every stage.
   behavior is out of scope.
 - Passivity certification is exact only through the Hamiltonian arm
   (`d > 1e-12`); the `GridOnly` class is honest about its weaker
-  guarantee.
+  guarantee (a dip narrower than the grid can hide). Consumers reading
+  only the `passive` bool inherit that weaker guarantee — check
+  `class` when the certificate strength matters.
 - The QP repair minimizes residue movement, not a band-weighted
   perceptual metric; a perceptually weighted repair is a follow-up.
 - Discrete-time (z-domain) DIRECT vector fitting is a follow-up; v1

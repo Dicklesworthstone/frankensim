@@ -106,7 +106,11 @@ impl FitOptions {
 /// Everything a fit run reports besides the model itself.
 #[derive(Debug, Clone)]
 pub struct FitReport {
-    /// Weighted root-mean-square misfit of the FINAL residue pass.
+    /// Weighted root-mean-square misfit of the FINAL residue pass,
+    /// computed on the magnitude-NORMALIZED data (dimensionless and
+    /// comparable across physical scales; exactly relative error under
+    /// `InverseMagnitude` weights). `max_abs_error` by contrast is in
+    /// the data's physical units.
     pub weighted_rms: f64,
     /// Unweighted maximum absolute misfit over the samples.
     pub max_abs_error: f64,
@@ -323,7 +327,7 @@ pub fn vector_fit(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<FitOutc
             break;
         }
     }
-    let (model, weighted_rms, max_abs) = residue_pass(omega, h, &weights, &terms, opts)?;
+    let (model, weighted_rms, max_abs) = residue_pass(omega, h, &weights, &terms, opts);
     Ok(FitOutcome {
         model: rescale_model(model, h_scale),
         report: FitReport {
@@ -385,10 +389,11 @@ fn validate(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<(), VfError> 
             return Err(VfError::BadSample { index: i });
         }
     }
-    // Sigma system unknowns: order (model residues) + 2 (d, e) + order
-    // (sigma residues) + 1 (relaxed d_tilde); each sample gives 2 real
-    // rows and the relaxation adds 1.
-    let needed = opts.order + 1 + (opts.order + 2).div_ceil(2);
+    // Sigma system unknowns: at most 2*order + 3 (model residues, d,
+    // e, sigma residues, relaxed d_tilde); each sample contributes 2
+    // real rows and the relaxation adds 1, so order + 2 samples make
+    // the system square-or-overdetermined.
+    let needed = opts.order + 2;
     if omega.len() < needed || omega.len() != h.len() {
         return Err(VfError::TooFewSamples {
             samples: omega.len(),
@@ -533,8 +538,16 @@ fn conjugate_close(zeros: &[C64]) -> Vec<PoleTerm> {
             }
         }
     }
-    real_poles.sort_by(f64::total_cmp);
+    // Reconcile by count: a threshold-straddling near-real pair can
+    // leave one member folded to real AND its partner kept as a Pair
+    // (3 represented poles from 2 eigenvalues); fold the smallest-Im
+    // pair back to real until the represented order matches.
     upper.sort_by(|x, y| x.im.total_cmp(&y.im).then(x.re.total_cmp(&y.re)));
+    while real_poles.len() + 2 * upper.len() > zeros.len() && !upper.is_empty() {
+        let folded = upper.remove(0);
+        real_poles.push(folded.re);
+    }
+    real_poles.sort_by(f64::total_cmp);
     let mut terms: Vec<PoleTerm> = real_poles
         .into_iter()
         .map(|p| PoleTerm::Real {
@@ -584,20 +597,20 @@ fn residue_pass(
     weights: &[f64],
     terms: &[PoleTerm],
     opts: &FitOptions,
-) -> Result<(RationalModel, f64, f64), VfError> {
+) -> (RationalModel, f64, f64) {
     let order: usize = terms.iter().map(PoleTerm::state_dim).sum();
-    // Try with both direct columns (when enabled); clamp any that come
-    // out negative and re-solve without them.
-    let mut use_d = opts.fit_d;
-    let mut use_e = opts.fit_e;
-    loop {
-        let (coords, d, e) = residue_solve(omega, h, weights, terms, order, use_d, use_e);
-        if d < 0.0 {
-            use_d = false;
+    // EXACT active-set on the two bound constraints d >= 0, e >= 0:
+    // enumerate all four bound combinations, keep the FEASIBLE
+    // candidate with the smallest weighted error (review finding: the
+    // earlier sequential clamp — drop d, then e, never re-admit — is
+    // feasible but measurably suboptimal on ~2.5% of instances).
+    let mut best: Option<(RationalModel, f64, f64)> = None;
+    for (use_d, use_e) in [(true, true), (true, false), (false, true), (false, false)] {
+        if (use_d && !opts.fit_d) || (use_e && !opts.fit_e) {
             continue;
         }
-        if e < 0.0 {
-            use_e = false;
+        let (coords, d, e) = residue_solve(omega, h, weights, terms, order, use_d, use_e);
+        if d < 0.0 || e < 0.0 {
             continue;
         }
         let model = RationalModel {
@@ -606,8 +619,11 @@ fn residue_pass(
             e,
         };
         let (wrms, maxabs) = fit_errors(omega, h, weights, &model);
-        return Ok((model, wrms, maxabs));
+        if best.as_ref().is_none_or(|(_, b, _)| wrms < *b) {
+            best = Some((model, wrms, maxabs));
+        }
     }
+    best.expect("the all-pinned candidate (d=0, e=0) is always feasible")
 }
 
 fn residue_solve(
@@ -704,7 +720,7 @@ pub fn residue_fit_at_poles(
     let h_scale = magnitude_scale(h);
     let h_norm: Vec<C64> = h.iter().map(|v| v.scale(1.0 / h_scale)).collect();
     let weights: Vec<f64> = h_norm.iter().map(|&v| opts.weights.weight(v)).collect();
-    let (model, weighted_rms, max_abs) = residue_pass(omega, &h_norm, &weights, terms, opts)?;
+    let (model, weighted_rms, max_abs) = residue_pass(omega, &h_norm, &weights, terms, opts);
     Ok(FitOutcome {
         model: rescale_model(model, h_scale),
         report: FitReport {
