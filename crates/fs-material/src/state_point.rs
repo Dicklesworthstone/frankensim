@@ -904,7 +904,10 @@ mod tests {
                 .insert_claim(claim(
                     name,
                     Dims::NONE,
-                    vec![(250.0, 1.5 + index as f64 * 0.1), (600.0, 1.4 + index as f64 * 0.1)],
+                    vec![
+                        (250.0, 1.5 + index as f64 * 0.1),
+                        (600.0, 1.4 + index as f64 * 0.1),
+                    ],
                     upper_temperature_k,
                 ))
                 .unwrap();
@@ -914,7 +917,10 @@ mod tests {
                 .insert_claim(claim(
                     name,
                     Dims::NONE,
-                    vec![(250.0, 2.0 + index as f64 * 0.1), (600.0, 2.5 + index as f64 * 0.1)],
+                    vec![
+                        (250.0, 2.0 + index as f64 * 0.1),
+                        (600.0, 2.5 + index as f64 * 0.1),
+                    ],
                     upper_temperature_k,
                 ))
                 .unwrap();

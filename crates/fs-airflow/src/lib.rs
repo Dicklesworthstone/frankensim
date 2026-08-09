@@ -1623,13 +1623,19 @@ impl fmt::Display for AirflowError {
                 formatter,
                 "a {topology} fan-system composition needs at least two member banks"
             ),
-            Self::NoCommonSeriesDomain { low_bits, high_bits } => write!(
+            Self::NoCommonSeriesDomain {
+                low_bits,
+                high_bits,
+            } => write!(
                 formatter,
                 "series fan members share no flow domain above their stall boundaries: [{}, {}]",
                 f64::from_bits(*low_bits),
                 f64::from_bits(*high_bits)
             ),
-            Self::NoCommonParallelDomain { low_bits, high_bits } => write!(
+            Self::NoCommonParallelDomain {
+                low_bits,
+                high_bits,
+            } => write!(
                 formatter,
                 "parallel fan members share no pressure domain keeping every member on-curve: [{}, {}]",
                 f64::from_bits(*low_bits),

@@ -164,7 +164,9 @@ fn composition_refusals_are_typed() {
     ));
     assert!(matches!(
         compose_parallel(&[single]),
-        Err(AirflowError::EmptyFanComposition { topology: "parallel" })
+        Err(AirflowError::EmptyFanComposition {
+            topology: "parallel"
+        })
     ));
     // Disjoint flow domains refuse: A tops out at 0.10, B starts at 0.20.
     let a = bank(
@@ -247,8 +249,8 @@ fn composite_solve_produces_a_certified_operating_point() {
             .expect("leak element"),
         ),
     );
-    let point = fs_airflow::solve_operating_point(&composite, &network)
-        .expect("operating point solves");
+    let point =
+        fs_airflow::solve_operating_point(&composite, &network).expect("operating point solves");
     let flow_lo = point.flow().lo();
     let flow_hi = point.flow().hi();
     assert!(

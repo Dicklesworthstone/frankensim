@@ -75,10 +75,7 @@ pub fn compose_series(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
     knots.dedup_by(|left, right| left.to_bits() == right.to_bits());
     let mut points = Vec::with_capacity(knots.len());
     for &q in &knots {
-        let pressure: f64 = members
-            .iter()
-            .map(|member| interpolate(member, q))
-            .sum();
+        let pressure: f64 = members.iter().map(|member| interpolate(member, q)).sum();
         points.push(FanPoint::new(
             VolumetricFlowRate::new(q),
             Pressure::new(pressure),
@@ -227,10 +224,7 @@ fn synthetic_curve(
     points: Vec<FanPoint>,
     admissible_min_flow: f64,
 ) -> Result<FanCurve, AirflowError> {
-    let names: Vec<&str> = banks
-        .iter()
-        .map(|bank| bank.curve().name())
-        .collect();
+    let names: Vec<&str> = banks.iter().map(|bank| bank.curve().name()).collect();
     let name = format!("{topology}({})", names.join("+"));
     let mut hasher = fs_blake3::DomainHasher::new(COMPOSITE_SOURCE_DOMAIN);
     hasher.update(topology.as_bytes());

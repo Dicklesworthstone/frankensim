@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, Point3, Vec3};
-use fs_math::det;
 use fs_material::state_point::{IsotropicSolidStatePoint, VisibleConductorStatePoint};
+use fs_math::det;
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
 use fs_render::animated_instances::{
     AnimatedGeometryInstance, AnimatedInstanceError, RigidTransformTrajectory, TransformKeyframe,
@@ -246,9 +246,8 @@ impl EulerDiscMaterialStateBinding {
         let mechanical_state_identity = mechanical.identity();
         let optical_state_identity = optical_resolved.identity();
         let material_card_identity = mechanical.card_identity();
-        let mut hasher = DomainHasher::new(
-            "org.frankensim.euler-disc.resolved-conductor-material-binding.v1",
-        );
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-disc.resolved-conductor-material-binding.v1");
         for identity in [
             mechanical_state_identity,
             optical_state_identity,
