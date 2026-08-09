@@ -203,6 +203,19 @@ as correlated cross-QoI geometry terms.
 - `field::profile_statistics` returns `Ra`, `Rq`, `Rt`, and segment-averaged
   `Rz` after removing a DECLARED mean-line form. These are UNFILTERED; see the
   no-claim boundaries.
+- `dimensioned::FramePoint` / `dimensioned::Displacement` /
+  `dimensioned::Tolerance` / `dimensioned::DimensionedFiducial` — the
+  dimensionally typed front door (bead sj31i.7.2): affine positions bound to
+  a validated `FrameId` and `LengthUnit`, linear displacements, explicit
+  mm/m conversion only, and typed refusal of frame crossing. Points minus
+  points are displacements; point-plus-point has no API.
+- `dimensioned::register_dimensioned` runs the production rigid fit on
+  explicitly converted points and returns a `DimensionedRegistration`
+  binding design/measured frames, the registration unit, the transform,
+  the residual, and an `as-built-registration:v1:<64 lowercase hex>`
+  receipt identity. `dimensioned::planar_covariance_schema` derives the
+  planar uncertainty covariance dimensions (length-squared) through the
+  shared `fs_qty::inference` core.
 
 ## Invariants
 

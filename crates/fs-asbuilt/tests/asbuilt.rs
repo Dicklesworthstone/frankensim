@@ -944,9 +944,8 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
 mod dimensioned_adoption {
     use super::*;
     use fs_asbuilt::dimensioned::{
-        DimensionedFiducial, Displacement, FrameId, FramePoint,
-        LengthUnit, REGISTRATION_RECEIPT_PREFIX, Tolerance, planar_covariance_schema,
-        register_dimensioned,
+        DimensionedFiducial, Displacement, FrameId, FramePoint, LengthUnit,
+        REGISTRATION_RECEIPT_PREFIX, Tolerance, planar_covariance_schema, register_dimensioned,
     };
 
     fn frame(name: &str) -> FrameId {
@@ -1007,15 +1006,10 @@ mod dimensioned_adoption {
     fn dimensioned_registration_recovers_rigid_transform_with_typed_units() {
         with_cx(false, ExecMode::Deterministic, Budget::INFINITE, |cx| {
             // A pure translation (+0.25 m, -0.5 m) measured in millimetres.
-            let design: Vec<FramePoint> = [
-                (0.0, 0.0),
-                (1.0, 0.0),
-                (0.0, 1.0),
-                (1.0, 1.0),
-            ]
-            .into_iter()
-            .map(|(x, y)| point("design", LengthUnit::Meters, x, y))
-            .collect();
+            let design: Vec<FramePoint> = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                .into_iter()
+                .map(|(x, y)| point("design", LengthUnit::Meters, x, y))
+                .collect();
             let fiducials: Vec<DimensionedFiducial> = design
                 .iter()
                 .map(|design_point| {
@@ -1034,7 +1028,11 @@ mod dimensioned_adoption {
             assert!((registration.registration().ty() + 0.5).abs() <= 1e-12);
             assert!(registration.registration().rotation_rad().abs() <= 1e-12);
             assert_eq!(registration.unit(), LengthUnit::Meters);
-            assert!(registration.identity().starts_with(REGISTRATION_RECEIPT_PREFIX));
+            assert!(
+                registration
+                    .identity()
+                    .starts_with(REGISTRATION_RECEIPT_PREFIX)
+            );
         });
     }
 

@@ -172,7 +172,9 @@ impl FramePoint {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         if !dx.is_finite() || !dy.is_finite() {
-            return Err(RegError::NonFinite { field: "point difference" });
+            return Err(RegError::NonFinite {
+                field: "point difference",
+            });
         }
         Ok(Displacement {
             unit: self.unit,
