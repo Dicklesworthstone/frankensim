@@ -1733,9 +1733,11 @@ pub fn run_cinematic_fixture(
         )
         .map_err(pipeline)?;
     trajectory_file.flush()?;
-    let wav_path = sound_directory.join("master.float32.wav");
-    write_new(&wav_path, audio.artifact.wav_bytes())?;
-    let audio_manifest_path = sound_directory.join("master.manifest.json");
+    let wav_path = sound_directory.join("physical-listening-master.pcm24.wav");
+    write_new(&wav_path, audio.physical.master.wav_bytes())?;
+    let legacy_wav_path = sound_directory.join("legacy-representative-convergence.float32.wav");
+    write_new(&legacy_wav_path, audio.artifact.wav_bytes())?;
+    let audio_manifest_path = sound_directory.join("legacy-representative-convergence.json");
     write_new(
         &audio_manifest_path,
         audio.artifact.manifest().to_manifest_json().as_bytes(),
@@ -2150,7 +2152,7 @@ pub fn run_cinematic_fixture(
         &trajectory_artifact,
         raw_sequence_identity,
         preview_sequence_identity,
-        audio.artifact.manifest().wav().wav_identity(),
+        audio.physical.master.wav.wav_identity(),
         audio.modal_parameter_set_identity,
         &audio.modal_parameter_set_disclosure,
         audio.warm_start_source_identity,
@@ -2184,7 +2186,7 @@ pub fn run_cinematic_fixture(
     Ok(CinematicFixtureReport {
         output_directory: output_directory.to_path_buf(),
         manifest_path: output_directory.join("critique-manifest.json"),
-        wav_path: output_directory.join("sound/master.float32.wav"),
+        wav_path: output_directory.join("sound/physical-listening-master.pcm24.wav"),
         first_preview_path: output_directory
             .join(format!("preview/frame-{:06}.png", render_frame_range.start)),
         movie_path: completed_movie.map(|_| output_directory.join("euler-disc-critique.mkv")),
@@ -4926,7 +4928,7 @@ fn mux_movie(
             "-i",
             "preview/frame-%06d.png",
             "-i",
-            "sound/master.float32.wav",
+            "sound/physical-listening-master.pcm24.wav",
             "-c:v",
             "libsvtav1",
             "-crf",
