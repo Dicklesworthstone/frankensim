@@ -268,7 +268,10 @@ impl EulerDiscMaterialStateBinding {
                 let sample = optical.samples()[index];
                 ConductorIorSample::try_new(sample.wavelength_nm, sample.eta, sample.k)
             });
-        let mut admitted = [ConductorIorSample::try_new(380.0, 1.0, 0.0)?; 9];
+        // This value is only an initialization sentinel and every slot is
+        // replaced below. Keep it inside the conductor contract (`k > 0`) so
+        // valid caller-supplied optical tables are not rejected before copy.
+        let mut admitted = [ConductorIorSample::try_new(380.0, 1.0, 1.0)?; 9];
         for (slot, sample) in admitted.iter_mut().zip(samples) {
             *slot = sample?;
         }
