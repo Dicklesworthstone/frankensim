@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "28e6c8f0833c47f3d7d659fa9ac2f23d6b5288715bc37f19790732cd0d36415d",
+  "manifest_identity": "6b0112da771efbf37a79a7de5345b0c960fdbe5f4f41a984bf999d55208c0ec0",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "bcf0d42f880e9d3630f64ace359ee9c53755297f22f84902fd4734ae205edeb9",
+    "source_root": "334c88ffaf7faf6b19c2863068ad33cea6e6ba1287183c2ae75ffad1c037d9f7",
     "tracked_file_count": 2316,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -355,8 +355,8 @@
       {"path": "crates/fs-cutfem/tests/graded_elasticity.rs", "git_mode": "100644", "bytes": 9862, "content_blake3": "ebff41a493244e5bc4e5a8fe330ab398a581e9472c27da7daa81936106027fd9"},
       {"path": "crates/fs-dcontact/CONTRACT.md", "git_mode": "100644", "bytes": 6255, "content_blake3": "478e9c0b844a6bb632187ead36a39185b1840be84153e3396f9c4389281c9b0e"},
       {"path": "crates/fs-dcontact/Cargo.toml", "git_mode": "100644", "bytes": 617, "content_blake3": "a5dd3209bb7ac4a491ead9add8d5e1d9d762adf5d6f92542a02878cd7767badd"},
-      {"path": "crates/fs-dcontact/src/lib.rs", "git_mode": "100644", "bytes": 13413, "content_blake3": "93059d0e9b510828c0634072f2f6af4f17e36d4d83583d59cce42e5c409c67f1"},
-      {"path": "crates/fs-dcontact/tests/dcontact.rs", "git_mode": "100644", "bytes": 24260, "content_blake3": "e1d3de92c28592b75e31d80dc8cea1e2fe516f696149aa3b6c7bc7f19219e861"},
+      {"path": "crates/fs-dcontact/src/lib.rs", "git_mode": "100644", "bytes": 13452, "content_blake3": "8f512a24ab7fe706a33bc5723ed81c2f69ffc2d36f0add9e3ea927232b0b7e58"},
+      {"path": "crates/fs-dcontact/tests/dcontact.rs", "git_mode": "100644", "bytes": 24267, "content_blake3": "14ca1000da2524dd84d180dba7b0e5780d02d906009df34938a65aa637d15209"},
       {"path": "crates/fs-dd/CONTRACT.md", "git_mode": "100644", "bytes": 7596, "content_blake3": "52dba3bea06ad3c2e5106966a6393dbba753dbdeb2c5d09af1321219f3351f71"},
       {"path": "crates/fs-dd/Cargo.toml", "git_mode": "100644", "bytes": 918, "content_blake3": "defbba5b3967bbf9ec26f25fb3e6dc6a005a66f04635bff82e4e82deed460649"},
       {"path": "crates/fs-dd/src/lib.rs", "git_mode": "100644", "bytes": 58286, "content_blake3": "ce4084824d92069864fc79caf4b3cf11082f8db3005c57db0180c13fdbbb8da4"},
@@ -2360,7 +2360,7 @@
     "release_host_status": "required-in-e13.3-release-envelope"
   },
   "workspace": {
-    "native_fs_crates": 153,
+    "native_fs_crates": 154,
     "standalone_fs_crates": 1,
     "crates": [
       {"name": "fs-ad", "version": "0.0.1", "layer": "L1", "manifest": "crates/fs-ad/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
@@ -2457,6 +2457,7 @@
       {"name": "fs-probe", "version": "0.0.1", "layer": "L3", "manifest": "crates/fs-probe/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-project", "version": "0.0.1", "layer": "L6", "manifest": "crates/fs-project/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-propcheck", "version": "0.0.1", "layer": "UTIL", "manifest": "crates/fs-propcheck/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
+      {"name": "fs-psycho", "version": "0.0.1", "layer": "L3", "manifest": "crates/fs-psycho/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-qty", "version": "0.0.1", "layer": "UTIL", "manifest": "crates/fs-qty/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-query", "version": "0.0.1", "layer": "L2", "manifest": "crates/fs-query/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-race", "version": "0.0.1", "layer": "L4", "manifest": "crates/fs-race/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},

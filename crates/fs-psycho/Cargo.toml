@@ -1,0 +1,19 @@
+[package]
+name = "fs-psycho"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standards-anchored psychoacoustic metrics: stationary Zwicker loudness (ISO 532-1 tables transcribed mechanically from the ISO reference implementation), DIN 45692 sharpness, log-attack-time, and an explicit calibration contract with typed refusals — perceptual objective axes, never a substitute for human listening."
+authors.workspace = true
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
