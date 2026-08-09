@@ -82,10 +82,11 @@ use fs_matdb::{
 };
 use fs_material::{
     gas::{ConductivityModel as GasConductivityModel, GasSpec, GasState},
+    phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve},
     state_point::{
         IsotropicElasticStatePoint, MaterialPropertySelection, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
         VISIBLE_COMPLEX_IOR_K_PROPERTIES, resolve_isotropic_elastic_state_point,
-        resolve_visible_conductor_state_point,
+        resolve_isotropic_solid_state_point, resolve_visible_conductor_state_point,
     },
     visco::RayleighDamping,
 };
@@ -273,6 +274,32 @@ pub enum CinematicDiscMassInput {
     TotalMassKg(f64),
 }
 
+/// Thermodynamic authority available for one cinematic disc state.
+///
+/// The fixed-solid variant is an explicit no-phase-evolution assumption. The
+/// enthalpy variant resolves temperature, density, and liquid fraction from a
+/// material-card-bound phase curve. The current rigid/small-strain pipeline
+/// accepts only the fully solid result; any nonzero liquid fraction refuses
+/// until an evolving-geometry constitutive backend is selected.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CinematicDiscPhaseConfig {
+    /// No phase curve was supplied; retain the declared fixed solid state.
+    FixedSolidStatePoint,
+    /// Equilibrium phase state selected by specific enthalpy [J/kg].
+    EquilibriumSpecificEnthalpy {
+        /// Current specific enthalpy [J/kg].
+        specific_enthalpy_j_kg: f64,
+        /// Ordered solid-to-liquid phase curve for this exact material card.
+        knots: Vec<EnthalpyPhaseKnot>,
+    },
+}
+
+impl Default for CinematicDiscPhaseConfig {
+    fn default() -> Self {
+        Self::FixedSolidStatePoint
+    }
+}
+
 impl CinematicDiscMassInput {
     fn value(self) -> f64 {
         match self {
@@ -293,6 +320,8 @@ pub struct CinematicDiscSpecimenConfig {
     pub profile: DiscProfileSpec,
     /// Homogeneous mass input used to resolve density and inertia.
     pub mass: CinematicDiscMassInput,
+    /// Phase-state authority and current thermodynamic coordinate.
+    pub phase: CinematicDiscPhaseConfig,
     /// Mechanical, damping, optical, and provenance inputs at one state point.
     pub material: CinematicDiscMaterialConfig,
 }
@@ -308,6 +337,7 @@ impl Default for CinematicDiscSpecimenConfig {
                 },
             },
             mass: CinematicDiscMassInput::TotalMassKg(THORNE_2026_STEEL_DISC_MASS_KG),
+            phase: CinematicDiscPhaseConfig::FixedSolidStatePoint,
             material: CinematicDiscMaterialConfig::default(),
         }
     }
@@ -354,6 +384,8 @@ pub struct CinematicDiscMaterialConfig {
     pub young_modulus_pa: f64,
     /// Isotropic Poisson ratio.
     pub poisson_ratio: f64,
+    /// Uniaxial yield stress used by finite-patch/plastic admissibility [Pa].
+    pub yield_stress_pa: f64,
     /// Mass-proportional Rayleigh damping coefficient [1/s].
     pub rayleigh_alpha_per_s: f64,
     /// Stiffness-proportional Rayleigh damping coefficient [s].
@@ -382,6 +414,10 @@ impl Default for CinematicDiscMaterialConfig {
             temperature_k: 293.15,
             young_modulus_pa: 200.0e9,
             poisson_ratio: 0.29,
+            // Declared room-temperature estimate. It is retained even though
+            // the current source-bound trajectory remains rigid-body motion,
+            // because contact and future deforming rungs must not invent it.
+            yield_stress_pa: 500.0e6,
             // A deliberately disclosed, low-loss room-temperature estimate.
             // These are input data, not an outcome-tuned frequency or decay.
             rayleigh_alpha_per_s: 0.35,
@@ -787,6 +823,16 @@ impl CinematicFixtureConfig {
                 "disc density or total mass must be finite and positive",
             ));
         }
+        if let CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy {
+            specific_enthalpy_j_kg,
+            knots,
+        } = &self.disc.phase
+            && (!specific_enthalpy_j_kg.is_finite() || knots.len() < 2)
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "disc phase input requires finite specific enthalpy and at least two knots",
+            ));
+        }
         let material = &self.disc.material;
         if !(material.temperature_k.is_finite()
             && material.temperature_k > 0.0
@@ -795,6 +841,8 @@ impl CinematicFixtureConfig {
             && material.poisson_ratio.is_finite()
             && material.poisson_ratio > -1.0
             && material.poisson_ratio < 0.5
+            && material.yield_stress_pa.is_finite()
+            && material.yield_stress_pa > 0.0
             && material.rayleigh_alpha_per_s.is_finite()
             && material.rayleigh_alpha_per_s >= 0.0
             && material.rayleigh_beta_s.is_finite()
@@ -1057,9 +1105,10 @@ struct FixturePhysicalPlateState {
 
 fn resolve_fixture_physical_disc(
     reference_profile: &crate::specimen::ResolvedDiscProfile,
-    config: &CinematicDiscMaterialConfig,
+    specimen_config: &CinematicDiscSpecimenConfig,
     cx: &Cx<'_>,
 ) -> Result<FixturePhysicalDiscState, CinematicFixtureError> {
+    let config = &specimen_config.material;
     let validity =
         ValidityDomain::unconstrained().with("T", config.temperature_k, config.temperature_k);
     let mut claims = ClaimSet::new();
@@ -1103,6 +1152,12 @@ fn resolve_fixture_physical_disc(
         config.poisson_ratio,
         &config.elastic_source,
     )?;
+    insert_scalar(
+        "yield_stress",
+        Pressure::DIMS,
+        config.yield_stress_pa,
+        &config.elastic_source,
+    )?;
     for ((name, value), source) in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES
         .iter()
         .zip(config.optical_eta)
@@ -1143,10 +1198,37 @@ fn resolve_fixture_physical_disc(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .map_err(pipeline)?;
-    let specimen = reference_profile
-        .spec
-        .resolve_with_isotropic_elastic_state(&elastic, cx)
-        .map_err(pipeline)?;
+    let specimen = match &specimen_config.phase {
+        CinematicDiscPhaseConfig::FixedSolidStatePoint => reference_profile
+            .spec
+            .resolve_with_isotropic_elastic_state(&elastic, cx)
+            .map_err(pipeline)?,
+        CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy {
+            specific_enthalpy_j_kg,
+            knots,
+        } => {
+            let solid = resolve_isotropic_solid_state_point(
+                &card,
+                &point,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .map_err(pipeline)?;
+            let phase_curve =
+                EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(), knots.clone())
+                    .map_err(pipeline)?;
+            let phase_state = phase_curve
+                .state_at_specific_enthalpy(*specific_enthalpy_j_kg)
+                .map_err(pipeline)?;
+            let phase_specimen = specimen_config
+                .profile
+                .resolve_with_phase_state(phase_state, cx)
+                .map_err(pipeline)?;
+            let fixed_solid = phase_specimen
+                .try_bind_fixed_solid(&solid)
+                .map_err(pipeline)?;
+            crate::specimen::ResolvedElasticDiscProfile::from(&fixed_solid)
+        }
+    };
     if specimen.profile.content_identities().profile
         != reference_profile.content_identities().profile
     {
@@ -2050,7 +2132,7 @@ pub fn run_cinematic_fixture(
     progress("stage=mechanics begin");
     let benchmark = Thorne2026SteelGlassBenchmark::ambient().map_err(pipeline)?;
     let profile = config.disc.resolve_profile(cx)?;
-    let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc.material, cx)?;
+    let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc, cx)?;
     let physical_plate = resolve_fixture_physical_plate(&config.support_plate)?;
     let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
     let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
@@ -5832,6 +5914,7 @@ mod tests {
             let direct = CinematicDiscSpecimenConfig {
                 profile,
                 mass: CinematicDiscMassInput::DensityKgPerM3(8_930.0),
+                phase: CinematicDiscPhaseConfig::FixedSolidStatePoint,
                 material: CinematicDiscMaterialConfig::default(),
             }
             .resolve_profile(cx)
@@ -5839,6 +5922,7 @@ mod tests {
             let mass_matched = CinematicDiscSpecimenConfig {
                 profile,
                 mass: CinematicDiscMassInput::TotalMassKg(direct.mass_properties.mass),
+                phase: CinematicDiscPhaseConfig::FixedSolidStatePoint,
                 material: CinematicDiscMaterialConfig::default(),
             }
             .resolve_profile(cx)
@@ -5859,13 +5943,53 @@ mod tests {
         ] {
             let mut config = CinematicFixtureConfig::default();
             config.disc.mass = mass;
-            assert_eq!(
+            assert!(matches!(
                 config.validate(),
                 Err(CinematicFixtureError::InvalidConfig(
                     "disc density or total mass must be finite and positive"
                 ))
-            );
+            ));
         }
+    }
+
+    #[test]
+    fn g0_cinematic_fixed_solid_binding_refuses_first_nonzero_liquid_fraction() {
+        with_test_cx(|cx| {
+            let mut config = CinematicDiscSpecimenConfig::default();
+            let profile = config.resolve_profile(cx).expect("reference profile");
+            let density = profile.density_kg_per_m3;
+            let knots = vec![
+                EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: 0.0,
+                    temperature_k: config.material.temperature_k,
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: density,
+                },
+                EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: 100_000.0,
+                    temperature_k: config.material.temperature_k,
+                    liquid_mass_fraction: 1.0,
+                    bulk_density_kg_m3: 0.95 * density,
+                },
+            ];
+            config.phase = CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy {
+                specific_enthalpy_j_kg: 0.0,
+                knots: knots.clone(),
+            };
+            resolve_fixture_physical_disc(&profile, &config, cx).expect("fully solid phase state");
+
+            config.phase = CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy {
+                specific_enthalpy_j_kg: 1.0,
+                knots,
+            };
+            let error = resolve_fixture_physical_disc(&profile, &config, cx).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("EvolvingPhaseRequired { liquid_mass_fraction:"),
+                "unexpected phase refusal: {error}"
+            );
+        });
     }
 
     fn stereo_rms(samples: &[StereoSample]) -> f64 {
@@ -6665,10 +6789,12 @@ mod tests {
             for spatialize_audio in [true, false] {
                 let mut config = CinematicFixtureConfig::default();
                 config.spatialize_audio = spatialize_audio;
+                let physical_plate = resolve_fixture_physical_plate(&config.support_plate).unwrap();
                 let audio = build_audio(
                     &artifact,
                     &coarse_preroll_artifact,
                     &preroll_artifact,
+                    &physical_plate,
                     refinement.fine.parameters.gravity_m_per_s2,
                     &config,
                     cx,
