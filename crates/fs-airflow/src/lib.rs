@@ -6,6 +6,7 @@
 //! coefficients, and leakage remain model-form estimates; a numerical root
 //! certificate does not promote those physical uncertainties to an enclosure.
 
+pub mod composite;
 pub mod conjugate;
 pub mod qoi;
 
@@ -190,6 +191,18 @@ impl FanCurve {
         &self.name
     }
 
+    /// Declared sample points in strictly increasing flow order.
+    #[must_use]
+    pub fn points(&self) -> &[FanPoint] {
+        &self.points
+    }
+
+    /// Lowest admissible flow (declared stall boundary).
+    #[must_use]
+    pub const fn admissible_min_flow(&self) -> VolumetricFlowRate {
+        self.admissible_min_flow
+    }
+
     /// Source attached to the pressure-flow data.
     #[must_use]
     pub fn source(&self) -> &SourceProvenance {
@@ -339,14 +352,38 @@ impl FanBank {
         })
     }
 
-    fn flow_factor(&self) -> f64 {
+    /// The member curve this bank scales.
+    #[must_use]
+    pub const fn curve(&self) -> &FanCurve {
+        &self.curve
+    }
+
+    /// Identical fans in the bank.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Series/parallel arrangement inside the bank.
+    #[must_use]
+    pub const fn arrangement(&self) -> FanArrangement {
+        self.arrangement
+    }
+
+    /// Declared fan-law speed ratio.
+    #[must_use]
+    pub const fn speed_ratio(&self) -> f64 {
+        self.speed_ratio
+    }
+
+    pub(crate) fn flow_factor(&self) -> f64 {
         match self.arrangement {
             FanArrangement::Series => self.speed_ratio,
             FanArrangement::Parallel => self.speed_ratio * self.count as f64,
         }
     }
 
-    fn pressure_factor(&self) -> f64 {
+    pub(crate) fn pressure_factor(&self) -> f64 {
         let speed_squared = self.speed_ratio * self.speed_ratio;
         match self.arrangement {
             FanArrangement::Series => speed_squared * self.count as f64,
@@ -1291,6 +1328,27 @@ pub enum AirflowError {
         /// Raw IEEE-754 bits of the rejected tolerance.
         value_bits: u64,
     },
+    /// A fan-system composition needs at least two member banks.
+    EmptyFanComposition {
+        /// The topology that was attempted.
+        topology: &'static str,
+    },
+    /// Series members share no common flow domain above every member's
+    /// stall boundary.
+    NoCommonSeriesDomain {
+        /// Raw bits of the computed domain lower bound.
+        low_bits: u64,
+        /// Raw bits of the computed domain upper bound.
+        high_bits: u64,
+    },
+    /// Parallel members share no common pressure domain that keeps every
+    /// member on its declared curve and above its stall boundary.
+    NoCommonParallelDomain {
+        /// Raw bits of the computed domain lower bound.
+        low_bits: u64,
+        /// Raw bits of the computed domain upper bound.
+        high_bits: u64,
+    },
     /// Fan-law scaling domain is malformed or excludes the reference speed.
     InvalidSpeedDomain {
         /// Raw IEEE-754 bits of the proposed lower bound.
@@ -1561,6 +1619,22 @@ impl fmt::Display for AirflowError {
                 "stall boundary must lie inside the retained fan-flow span"
             ),
             Self::EmptyFanBank => write!(formatter, "a fan bank must contain at least one fan"),
+            Self::EmptyFanComposition { topology } => write!(
+                formatter,
+                "a {topology} fan-system composition needs at least two member banks"
+            ),
+            Self::NoCommonSeriesDomain { low_bits, high_bits } => write!(
+                formatter,
+                "series fan members share no flow domain above their stall boundaries: [{}, {}]",
+                f64::from_bits(*low_bits),
+                f64::from_bits(*high_bits)
+            ),
+            Self::NoCommonParallelDomain { low_bits, high_bits } => write!(
+                formatter,
+                "parallel fan members share no pressure domain keeping every member on-curve: [{}, {}]",
+                f64::from_bits(*low_bits),
+                f64::from_bits(*high_bits)
+            ),
             Self::FlowOutOfDomain { .. } => {
                 write!(formatter, "flow is outside the retained fan curve")
             }
