@@ -219,18 +219,31 @@ pub fn estimate_snr(data: &FrfData) -> f64 {
             snrs.push(acc / n as f64);
         } else {
             let n = ch.h.len();
-            if n < 3 {
-                snrs.push(f64::INFINITY);
+            if n < 5 {
+                // Too few samples to separate noise from signal:
+                // vote ZERO so the gate refuses (an INFINITY vote
+                // would bypass the gate — review finding).
+                snrs.push(0.0);
                 continue;
             }
-            let mut d2: Vec<f64> = (1..n - 1)
+            // FOURTH difference annihilates cubics, so smooth-FRF
+            // curvature leaks far less than through a second
+            // difference (review finding: d2 read a legitimate
+            // coarse survey grid as noise). White noise passes with
+            // power gain 70 = sum of squared binomials, and the
+            // MEDIAN of |d4|^2 under Gaussian-class noise sits at
+            // ln2 of the mean — both divided out.
+            let mut d4: Vec<f64> = (2..n - 2)
                 .map(|i| {
-                    let v = ch.h[i + 1] - ch.h[i].scale(2.0) + ch.h[i - 1];
+                    let v = ch.h[i + 2] - ch.h[i + 1].scale(4.0) + ch.h[i].scale(6.0)
+                        - ch.h[i - 1].scale(4.0)
+                        + ch.h[i - 2];
                     v.norm_sq()
                 })
                 .collect();
-            d2.sort_by(f64::total_cmp);
-            let noise = (d2[d2.len() / 2] / 6.0).max(f64::MIN_POSITIVE);
+            d4.sort_by(f64::total_cmp);
+            let noise =
+                (d4[d4.len() / 2] / (70.0 * core::f64::consts::LN_2)).max(f64::MIN_POSITIVE);
             let mut mags: Vec<f64> = ch.h.iter().map(|v| v.norm_sq()).collect();
             mags.sort_by(f64::total_cmp);
             snrs.push(mags[mags.len() / 2] / noise);
@@ -244,12 +257,23 @@ pub fn estimate_snr(data: &FrfData) -> f64 {
 // RFP: rational fraction polynomial on a Forsythe-orthogonal basis
 // ---------------------------------------------------------------------
 
-/// Forsythe-orthogonal polynomial basis evaluated on the (scaled)
-/// imaginary axis: three-term recurrence orthonormal under the
-/// sample-weighted inner product. Returns `deg + 1` rows of length
-/// `points.len()` plus the recurrence coefficients needed to convert
-/// back to monomials.
-fn forsythe_basis(points: &[f64], weights: &[f64], deg: usize) -> (Vec<Vec<C64>>, Vec<(f64, f64)>) {
+/// Forsythe-recurrence polynomial basis evaluated on the (scaled)
+/// imaginary axis. HONEST MECHANISM STATEMENT (review-corrected): the
+/// two-term recurrence used here is NOT orthonormal in the complex
+/// sample inner product on a positive-frequencies-only grid (the
+/// even/odd argument needs a +/-omega-symmetric measure). What makes
+/// the LS well-conditioned is the PARITY structure: basis polynomial
+/// d is i^d times a real polynomial, so after the Re/Im row stacking
+/// the REAL operative Gram is near-identity (asserted < 10 condition
+/// in the battery) while naive monomials are numerically singular.
+/// Returns `deg + 1` rows plus the recurrence coefficients needed to
+/// convert back to monomials.
+#[must_use]
+pub fn forsythe_basis(
+    points: &[f64],
+    weights: &[f64],
+    deg: usize,
+) -> (Vec<Vec<C64>>, Vec<(f64, f64)>) {
     // Basis in the variable s = i*w_scaled; polynomials of i*w with
     // REAL recurrence coefficients (even/odd structure preserved by
     // the imaginary axis).
@@ -646,6 +670,9 @@ pub struct Identification {
     /// Raw (pre-window-correction) damping ratios per accepted mode
     /// (equal to the corrected ones when no window was declared).
     pub damping_raw: Vec<f64>,
+    /// Frequencies [Hz] of stabilized poles DROPPED by the residue
+    /// significance gate — recorded, never silently discarded.
+    pub insignificant_freqs_hz: Vec<f64>,
 }
 
 /// Poles of a fitted model as `(omega_n, zeta)` pairs (conjugate
@@ -674,6 +701,11 @@ fn model_poles(model: &RationalModel) -> Vec<(f64, f64)> {
 /// [`ModalIdError::SnrTooLow`] below the floor; fit failures.
 #[allow(clippy::too_many_lines)] // one linear pipeline: gate -> ladder -> verdicts -> shapes -> CI
 pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification, ModalIdError> {
+    if opts.order_step == 0 || opts.min_order == 0 || opts.max_order < opts.min_order {
+        return Err(ModalIdError::Shape {
+            what: "ladder needs min_order >= 1, order_step >= 1, max_order >= min_order",
+        });
+    }
     let snr = estimate_snr(data);
     if snr < opts.snr_floor {
         return Err(ModalIdError::SnrTooLow {
@@ -685,6 +717,7 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
     let href = &data.channels[0].h;
     let fit_opts = FitOptions {
         fit_e: false,
+        iterations: 60,
         ..FitOptions::new(opts.max_order)
     };
     // Stabilization ladder.
@@ -698,13 +731,14 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
     }
     let verdicts = stabilization(&diagram, &opts.rule);
     // Accepted poles -> full pole set for the residue passes.
-    let accepted: Vec<(f64, f64)> = verdicts
+    let accepted: Vec<(f64, f64, usize)> = verdicts
         .iter()
         .filter(|v| v.accepted)
         .map(|v| {
             (
                 v.frequency_hz * 2.0 * core::f64::consts::PI,
                 v.damping_ratio,
+                v.stable_orders,
             )
         })
         .collect();
@@ -717,17 +751,22 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
     // TIMES TIGHTER than the cross-order match tolerance: the two
     // roles differ, and merging at the match tolerance swallowed a
     // genuine 0.5%-separated close pair (executed).
+    // Within a duplicate cluster keep the pole with the LONGEST
+    // stable run (executed failure: keeping the first kept a spare
+    // pole 0.1 Hz below the true mode and biased its damping 5e-4).
     let merge_tol = opts.rule.freq_tol / 5.0;
-    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(accepted.len());
-    for &(wn, zeta) in &accepted {
-        if merged
-            .last()
-            .is_none_or(|&(wp, _)| (wn - wp).abs() > merge_tol * wn)
-        {
-            merged.push((wn, zeta));
+    let mut merged: Vec<(f64, f64, usize)> = Vec::with_capacity(accepted.len());
+    for &(wn, zeta, runs) in &accepted {
+        match merged.last_mut() {
+            Some(last) if (wn - last.0).abs() <= merge_tol * wn => {
+                if runs > last.2 {
+                    *last = (wn, zeta, runs);
+                }
+            }
+            _ => merged.push((wn, zeta, runs)),
         }
     }
-    let accepted = merged;
+    let accepted: Vec<(f64, f64)> = merged.into_iter().map(|(w, z, _)| (w, z)).collect();
     // terms_from_poles expects the EXPANDED conjugate-complete list
     // (its count reconciliation folds pairs to real otherwise —
     // executed: upper-half-only input silently produced zero shapes).
@@ -778,6 +817,17 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
         .iter()
         .map(|sh| sh.iter().any(|r| r.abs() >= 1.0e-4 * peak))
         .collect();
+    let insignificant_freqs_hz: Vec<f64> = accepted
+        .iter()
+        .zip(&significant)
+        .filter_map(|(&(wn, _), &sig)| {
+            if sig {
+                None
+            } else {
+                Some(wn / (2.0 * core::f64::consts::PI))
+            }
+        })
+        .collect();
     let accepted: Vec<(f64, f64)> = accepted
         .iter()
         .zip(&significant)
@@ -808,18 +858,27 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
         Ok(model_poles(&outcome.model))
     };
     let (even, odd) = (half(0)?, half(1)?);
+    // Nearest-match with a CAP (review finding: an uncapped nearest
+    // silently pairs to a wrong pole; an unmatched half-grid fit must
+    // yield an INVALID (NaN) interval, not a zero one).
     let nearest = |set: &[(f64, f64)], wn: f64| -> Option<(f64, f64)> {
         set.iter()
             .min_by(|a, b| (a.0 - wn).abs().total_cmp(&(b.0 - wn).abs()))
+            .filter(|&&(w2, _)| (w2 - wn).abs() <= opts.rule.freq_tol * wn)
             .copied()
     };
     let mut modes = Vec::with_capacity(accepted.len());
     let mut damping_raw = Vec::with_capacity(accepted.len());
     for (k, &(wn, zeta)) in accepted.iter().enumerate() {
-        let (fe, ze) = nearest(&even, wn).unwrap_or((wn, zeta));
-        let (fo_, zo) = nearest(&odd, wn).unwrap_or((wn, zeta));
-        let f_ci = 0.5 * (fe - fo_).abs() / (2.0 * core::f64::consts::PI);
-        let z_ci = 0.5 * (ze - zo).abs();
+        let (f_ci, z_ci) = match (nearest(&even, wn), nearest(&odd, wn)) {
+            (Some((fe, ze)), Some((fo_, zo))) => (
+                0.5 * (fe - fo_).abs() / (2.0 * core::f64::consts::PI),
+                0.5 * (ze - zo).abs(),
+            ),
+            // A half-grid that cannot re-find the pole means the
+            // uncertainty is UNKNOWN: NaN, never zero.
+            _ => (f64::NAN, f64::NAN),
+        };
         damping_raw.push(zeta);
         let (zeta_corr, _delta) = match opts.window_tau {
             Some(tau) => correct_exponential_window(zeta, wn, tau),
@@ -839,5 +898,6 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
         snr,
         diagram,
         damping_raw,
+        insignificant_freqs_hz,
     })
 }

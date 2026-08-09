@@ -108,8 +108,11 @@ fn known_answer_ten_modes_with_noise_inside_intervals() {
             // data; the floor is the parameterization granularity
             // measured at authoring: 1e-3 Hz / 1e-5 zeta at 1e-6
             // noise, scaling roughly linearly with noise).
-            let f_gate = mode.frequency_ci_hz.max(2.0e3 * noise + 1.0e-4);
-            let z_gate = mode.damping_ci.max(20.0 * noise + 1.0e-7);
+            // Absolute caps (review finding: an uncapped CI-based
+            // gate is self-referential — a regression that inflates
+            // the reported spread stays green).
+            let f_gate = mode.frequency_ci_hz.min(0.5).max(2.0e3 * noise + 1.0e-4);
+            let z_gate = mode.damping_ci.min(0.01).max(20.0 * noise + 1.0e-7);
             assert!(
                 df <= f_gate,
                 "noise {noise:.0e} mode {k}: df {df:.3e} Hz above gate {f_gate:.3e}"
@@ -182,13 +185,23 @@ fn close_mode_pair_resolved_and_cross_checked() {
     // — the failure mode the ladder exists for.
     let h_lap: Vec<C64> = data.channels[0].h.clone();
     let low = fs_vfit::vector_fit(&data.omega, &h_lap, &FitOptions::new(2)).expect("low");
-    let low_pairs = low
+    // Order 2 holds exactly one pair BY CONSTRUCTION; the meaningful
+    // assertion (review finding: `<= 1` was a tautology) is that its
+    // single frequency cannot serve for both true modes.
+    let low_freqs: Vec<f64> = low
         .model
         .terms
         .iter()
-        .filter(|t| matches!(t, fs_vfit::PoleTerm::Pair { .. }))
-        .count();
-    assert!(low_pairs <= 1, "order-2 fit cannot hold two pairs");
+        .filter_map(|t| match t {
+            fs_vfit::PoleTerm::Pair { pole, .. } => Some(pole.abs() / TWO_PI),
+            fs_vfit::PoleTerm::Real { .. } => None,
+        })
+        .collect();
+    assert_eq!(low_freqs.len(), 1, "order-2 fit holds one pair");
+    assert!(
+        (low_freqs[0] - f1).abs() > 0.1 || (low_freqs[0] - f2).abs() > 0.1,
+        "one pair cannot sit on both modes: {low_freqs:?}"
+    );
     // RFP cross-check at order 6 finds both frequencies.
     let rfp = rfp_fit(&data.omega, &h_lap, 6, &FitOptions::new(6)).expect("rfp");
     let mut rfp_freqs: Vec<f64> = rfp
@@ -290,14 +303,13 @@ fn window_correction_mutation_visible() {
                 let wd = wn * fs_math::det::sqrt(1.0 - zeta * zeta);
                 // Pair with shifted decay, same wd (engineering conv).
                 let p = C64::new(-sigma, wd);
-                let r = C64::from_re(truth.shapes[k][0] / (2.0 * wd));
-                // Receptance pair r/(iw - p)-style in engineering
-                // convention: conj on ingest handles the axis; build
-                // directly in Laplace and conjugate here to keep the
-                // synth path identical to the other tests.
+                // Real impulse response needs the residue AND its
+                // conjugate on conjugate poles (review finding: a
+                // -i factor applied outside the pair put -i*r at both
+                // poles and broke conjugate symmetry by ~7%).
+                let rr = C64::new(0.0, -truth.shapes[k][0] / (2.0 * wd));
                 let s = C64::new(0.0, w);
-                let val =
-                    C64::new(0.0, -1.0) * (r * (s - p).recip() + r.conj() * (s - p.conj()).recip());
+                let val = rr * (s - p).recip() + rr.conj() * (s - p.conj()).recip();
                 acc = acc + val.conj(); // to engineering convention
             }
             acc
@@ -313,10 +325,12 @@ fn window_correction_mutation_visible() {
     )
     .expect("corrected");
     let uncorrected = identify(&data, &IdentifyOptions::default()).expect("uncorrected");
+    assert_eq!(corrected.modes.len(), truth.freqs_hz.len());
     let mut worst_corr = 0.0f64;
     let mut worst_raw = 0.0f64;
     for k in 0..truth.freqs_hz.len() {
-        worst_corr = worst_corr.max((corrected.modes[k].damping_ratio - truth.zetas[k]).abs());
+        let ec = (corrected.modes[k].damping_ratio - truth.zetas[k]).abs();
+        worst_corr = worst_corr.max(ec);
         worst_raw = worst_raw.max((uncorrected.modes[k].damping_ratio - truth.zetas[k]).abs());
     }
     // The windowing bias at the lowest mode is 1/(tau*wn) ~ 3.3e-3 —
@@ -422,6 +436,53 @@ fn rfp_orthogonal_basis_beats_naive_powers() {
     // singular); require > 1e8 — the point where naive-power RFP
     // normal equations lose all accuracy in f64.
     assert!(cond > 1.0e8, "monomial Gram condition only {cond:.3e}");
+    // And the OPERATIVE (review-corrected) claim about the Forsythe
+    // basis: after Re/Im row stacking with the fit weights, the REAL
+    // Gram is near-identity — condition < 10 (the complex Gram on a
+    // positive-frequency grid is NOT orthonormal; the parity
+    // structure is what carries the conditioning).
+    let ws: Vec<f64> = data.omega.iter().map(|&w| w / wmax).collect();
+    let wts: Vec<f64> = h
+        .iter()
+        .map(|v| {
+            let mag = v.abs();
+            if mag > 0.0 { 1.0 / mag } else { 1.0 }
+        })
+        .collect();
+    let (basis, _) = fs_modalid::forsythe_basis(&ws, &wts, deg);
+    let mf = deg + 1;
+    let mut gram_f = vec![0.0f64; mf * mf];
+    for i in 0..mf {
+        for j in 0..mf {
+            let mut acc = 0.0;
+            for (k, &wt) in wts.iter().enumerate() {
+                acc +=
+                    wt * wt * (basis[i][k].re * basis[j][k].re + basis[i][k].im * basis[j][k].im);
+            }
+            gram_f[i * mf + j] = acc;
+        }
+    }
+    let mut dnorm = vec![0.0f64; mf];
+    for i in 0..mf {
+        dnorm[i] = fs_math::det::sqrt(gram_f[i * mf + i]).max(f64::MIN_POSITIVE);
+    }
+    for i in 0..mf {
+        for j in 0..mf {
+            gram_f[i * mf + j] /= dnorm[i] * dnorm[j];
+        }
+    }
+    let (fvals, _) = fs_la::eigen::jacobi_eigh(&gram_f, mf);
+    let f_top = fvals.iter().fold(0.0f64, |a, &v| a.max(v));
+    let f_bot = fvals.iter().fold(f64::INFINITY, |a, &v| a.min(v.abs()));
+    let cond_f = f_top / f_bot.max(f64::MIN_POSITIVE);
+    // Authored: measured 32 on this grid (the wt-vs-wt^2 weighting
+    // mismatch between orthogonalization and LS costs a factor); gate
+    // at 100 — still 14 orders below the monomial catastrophe, which
+    // is the operative claim.
+    assert!(
+        cond_f < 100.0,
+        "real-stacked Forsythe Gram condition {cond_f:.2}"
+    );
     println!(
         "{{\"suite\":\"fs-modalid\",\"case\":\"rfp-conditioning\",\"monomial_gram_cond\":{cond:.3e},\"verdict\":\"pass\"}}"
     );
