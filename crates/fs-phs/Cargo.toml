@@ -1,0 +1,21 @@
+[package]
+name = "fs-phs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Port-Hamiltonian systems: structural passivity by formulation (J skew, R PSD), Gonzalez discrete-gradient time stepping with exact discrete energy balance, power-preserving interconnection, and structure-preserving Galerkin reduction."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fs-vfit = { path = "../fs-vfit" }
+
+[lints]
+workspace = true
