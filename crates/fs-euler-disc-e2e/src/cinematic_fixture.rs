@@ -82,7 +82,9 @@ use fs_matdb::{
 };
 use fs_material::{
     gas::{ConductivityModel as GasConductivityModel, GasSpec, GasState},
-    phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve},
+    phase::{
+        EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
+    },
     state_point::{
         IsotropicElasticStatePoint, MaterialPropertySelection, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
         VISIBLE_COMPLEX_IOR_K_PROPERTIES, resolve_isotropic_elastic_state_point,
@@ -1092,6 +1094,7 @@ struct FixturePhysicalDiscState {
     render_binding: EulerDiscMaterialStateBinding,
     rayleigh_damping: RayleighDamping,
     damping_model_identity: ContentHash,
+    equilibrium_phase_state: Option<EquilibriumPhaseState>,
 }
 
 struct FixturePhysicalPlateState {
@@ -1134,11 +1137,17 @@ fn resolve_fixture_physical_disc(
                 .map(|_| ())
                 .map_err(pipeline)
         };
+    let density_source = match specimen_config.mass {
+        CinematicDiscMassInput::DensityKgPerM3(_) => "caller-supplied homogeneous bulk density",
+        CinematicDiscMassInput::TotalMassKg(_) => {
+            "caller-supplied total mass divided by the exact resolved profile volume"
+        }
+    };
     insert_scalar(
         "density",
         Density::DIMS,
         reference_profile.density_kg_per_m3,
-        "Thorne 2026 specimen mass and exact FrankenSim profile volume; mass-derived density",
+        density_source,
     )?;
     insert_scalar(
         "young_modulus",
@@ -1198,11 +1207,14 @@ fn resolve_fixture_physical_disc(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .map_err(pipeline)?;
-    let specimen = match &specimen_config.phase {
-        CinematicDiscPhaseConfig::FixedSolidStatePoint => reference_profile
-            .spec
-            .resolve_with_isotropic_elastic_state(&elastic, cx)
-            .map_err(pipeline)?,
+    let (specimen, equilibrium_phase_state) = match &specimen_config.phase {
+        CinematicDiscPhaseConfig::FixedSolidStatePoint => (
+            reference_profile
+                .spec
+                .resolve_with_isotropic_elastic_state(&elastic, cx)
+                .map_err(pipeline)?,
+            None,
+        ),
         CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy {
             specific_enthalpy_j_kg,
             knots,
@@ -1226,7 +1238,10 @@ fn resolve_fixture_physical_disc(
             let fixed_solid = phase_specimen
                 .try_bind_fixed_solid(&solid)
                 .map_err(pipeline)?;
-            crate::specimen::ResolvedElasticDiscProfile::from(&fixed_solid)
+            (
+                crate::specimen::ResolvedElasticDiscProfile::from(&fixed_solid),
+                Some(phase_state),
+            )
         }
     };
     if specimen.profile.content_identities().profile
@@ -1260,7 +1275,44 @@ fn resolve_fixture_physical_disc(
         render_binding,
         rayleigh_damping,
         damping_model_identity: damping.finalize(),
+        equilibrium_phase_state,
     })
+}
+
+fn admit_thorne_source_bound_disc_state(
+    config: &CinematicDiscSpecimenConfig,
+    resolved: &ResolvedDiscProfile,
+    source_bound: &ResolvedDiscProfile,
+) -> Result<(), CinematicFixtureError> {
+    let reference = CinematicDiscSpecimenConfig::default();
+    let candidate = &config.material;
+    let admitted = &reference.material;
+    let same_scalar = |left: f64, right: f64| left.to_bits() == right.to_bits();
+    let fixed_solid = matches!(config.phase, CinematicDiscPhaseConfig::FixedSolidStatePoint);
+    let same_mechanical_state = [
+        (candidate.temperature_k, admitted.temperature_k),
+        (candidate.young_modulus_pa, admitted.young_modulus_pa),
+        (candidate.poisson_ratio, admitted.poisson_ratio),
+        (candidate.yield_stress_pa, admitted.yield_stress_pa),
+        (
+            candidate.rayleigh_alpha_per_s,
+            admitted.rayleigh_alpha_per_s,
+        ),
+        (candidate.rayleigh_beta_s, admitted.rayleigh_beta_s),
+        (
+            candidate.surface_roughness_alpha,
+            admitted.surface_roughness_alpha,
+        ),
+    ]
+    .into_iter()
+    .all(|(candidate, admitted)| same_scalar(candidate, admitted));
+    let same_profile = resolved.content_identities() == source_bound.content_identities();
+    if same_profile && fixed_solid && same_mechanical_state {
+        return Ok(());
+    }
+    Err(CinematicFixtureError::Pipeline(
+        "the current cinematic trajectory is the source-bound Thorne 2026 steel-on-glass reduced model; changed disc geometry, mass, temperature, elastic/yield/damping/contact-surface state, or phase authority requires the generic coupled dynamics path and cannot inherit the fitted steel trajectory".into(),
+    ))
 }
 
 fn resolve_fixture_physical_plate(
@@ -2132,6 +2184,8 @@ pub fn run_cinematic_fixture(
     progress("stage=mechanics begin");
     let benchmark = Thorne2026SteelGlassBenchmark::ambient().map_err(pipeline)?;
     let profile = config.disc.resolve_profile(cx)?;
+    let source_bound_profile = benchmark.resolve_specimen(cx).map_err(pipeline)?;
+    admit_thorne_source_bound_disc_state(&config.disc, &profile, &source_bound_profile)?;
     let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc, cx)?;
     let physical_plate = resolve_fixture_physical_plate(&config.support_plate)?;
     let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
@@ -2689,6 +2743,7 @@ pub fn run_cinematic_fixture(
         raw_sequence_identity,
         preview_sequence_identity,
         audio.physical.master.wav.wav_identity(),
+        &physical_disc,
         &audio.physical,
         audio.modal_parameter_set_identity,
         &audio.modal_parameter_set_disclosure,
@@ -5507,6 +5562,139 @@ fn mux_movie(
     }
 }
 
+fn disc_profile_spec_manifest_json(spec: DiscProfileSpec) -> String {
+    match spec {
+        DiscProfileSpec::SolidCylinder {
+            outer_radius_m,
+            thickness_m,
+            edge_treatment,
+        } => {
+            let edge = match edge_treatment {
+                SquatDiscEdgeTreatment::Sharp => "{\"kind\":\"sharp\"}".to_owned(),
+                SquatDiscEdgeTreatment::CircularFillet { radius } => {
+                    format!("{{\"kind\":\"circular-fillet\",\"radius_m\":{radius:.17e}}}")
+                }
+            };
+            format!(
+                "{{\"family\":\"solid-cylinder\",\"outer_radius_m\":{outer_radius_m:.17e},\"thickness_m\":{thickness_m:.17e},\"edge_treatment\":{edge}}}"
+            )
+        }
+        DiscProfileSpec::AnnularCylinder {
+            outer_radius_m,
+            inner_radius_m,
+            thickness_m,
+        } => format!(
+            "{{\"family\":\"annular-cylinder\",\"outer_radius_m\":{outer_radius_m:.17e},\"inner_radius_m\":{inner_radius_m:.17e},\"thickness_m\":{thickness_m:.17e}}}"
+        ),
+        DiscProfileSpec::OuterFilletedAnnularCylinder {
+            outer_radius_m,
+            inner_radius_m,
+            thickness_m,
+            outer_fillet_radius_m,
+        } => format!(
+            "{{\"family\":\"outer-filleted-annular-cylinder\",\"outer_radius_m\":{outer_radius_m:.17e},\"inner_radius_m\":{inner_radius_m:.17e},\"thickness_m\":{thickness_m:.17e},\"outer_fillet_radius_m\":{outer_fillet_radius_m:.17e}}}"
+        ),
+        DiscProfileSpec::SymmetricTapered {
+            outer_radius_m,
+            face_radius_m,
+            thickness_m,
+        } => format!(
+            "{{\"family\":\"symmetric-tapered\",\"outer_radius_m\":{outer_radius_m:.17e},\"face_radius_m\":{face_radius_m:.17e},\"thickness_m\":{thickness_m:.17e}}}"
+        ),
+        DiscProfileSpec::ChamferedCylinder {
+            outer_radius_m,
+            thickness_m,
+            chamfer_radial_m,
+            chamfer_axial_m,
+        } => format!(
+            "{{\"family\":\"chamfered-cylinder\",\"outer_radius_m\":{outer_radius_m:.17e},\"thickness_m\":{thickness_m:.17e},\"chamfer_radial_m\":{chamfer_radial_m:.17e},\"chamfer_axial_m\":{chamfer_axial_m:.17e}}}"
+        ),
+    }
+}
+
+fn resolved_disc_manifest_json(
+    config: &CinematicDiscSpecimenConfig,
+    physical: &FixturePhysicalDiscState,
+) -> String {
+    let profile = &physical.specimen.profile;
+    let identities = profile.content_identities();
+    let mass_input = match config.mass {
+        CinematicDiscMassInput::DensityKgPerM3(value) => {
+            format!("{{\"kind\":\"homogeneous-density\",\"density_kg_per_m3\":{value:.17e}}}")
+        }
+        CinematicDiscMassInput::TotalMassKg(value) => {
+            format!("{{\"kind\":\"total-mass\",\"mass_kg\":{value:.17e}}}")
+        }
+    };
+    let phase = match (config.phase.clone(), physical.equilibrium_phase_state) {
+        (CinematicDiscPhaseConfig::FixedSolidStatePoint, None) => format!(
+            "{{\"authority\":\"fixed-solid-state-point\",\"temperature_k\":{:.17e},\"liquid_mass_fraction\":0.0}}",
+            config.material.temperature_k
+        ),
+        (CinematicDiscPhaseConfig::EquilibriumSpecificEnthalpy { .. }, Some(state)) => {
+            let phase = match state.phase() {
+                SolidLiquidPhase::Solid => "solid",
+                SolidLiquidPhase::SolidLiquid => "solid-liquid",
+                SolidLiquidPhase::Liquid => "liquid",
+            };
+            format!(
+                "{{\"authority\":\"material-card-bound-equilibrium-specific-enthalpy\",\"specific_enthalpy_j_per_kg\":{:.17e},\"temperature_k\":{:.17e},\"solid_mass_fraction\":{:.17e},\"liquid_mass_fraction\":{:.17e},\"bulk_density_kg_per_m3\":{:.17e},\"phase\":\"{}\",\"phase_curve_identity\":\"{}\",\"phase_state_identity\":\"{}\"}}",
+                state.specific_enthalpy_j_kg(),
+                state.temperature_k(),
+                state.solid_mass_fraction(),
+                state.liquid_mass_fraction(),
+                state.bulk_density_kg_m3(),
+                phase,
+                state.phase_curve_identity().to_hex(),
+                state.identity().to_hex(),
+            )
+        }
+        _ => "{\"authority\":\"internal-phase-binding-inconsistency\"}".to_owned(),
+    };
+    format!(
+        concat!(
+            "{{\"profile_spec\":{},\"mass_input\":{},",
+            "\"resolved\":{{\"density_kg_per_m3\":{:.17e},\"volume_m3\":{:.17e},\"mass_kg\":{:.17e},",
+            "\"center_of_mass_m\":[{:.17e},{:.17e},{:.17e}],\"principal_inertia_kg_m2\":{{\"transverse\":{:.17e},\"axial\":{:.17e}}}}},",
+            "\"identities\":{{\"profile\":\"{}\",\"chart\":\"{}\",\"mass_properties\":\"{}\",",
+            "\"material_card\":\"{}\",\"elastic_state\":\"{}\",\"elastic_specimen\":\"{}\",",
+            "\"render_binding\":\"{}\",\"damping_model\":\"{}\"}},",
+            "\"material_inputs\":{{\"temperature_k\":{:.17e},\"young_modulus_pa\":{:.17e},\"poisson_ratio\":{:.17e},",
+            "\"yield_stress_pa\":{:.17e},\"rayleigh_alpha_per_s\":{:.17e},\"rayleigh_beta_s\":{:.17e},",
+            "\"surface_roughness_alpha\":{:.17e},\"material_label\":\"{}\",\"process_label\":\"{}\"}},",
+            "\"phase_state\":{}}}"
+        ),
+        disc_profile_spec_manifest_json(config.profile),
+        mass_input,
+        profile.density_kg_per_m3,
+        profile.mass_properties.volume,
+        profile.mass_properties.mass,
+        profile.mass_properties.center_of_mass.x,
+        profile.mass_properties.center_of_mass.y,
+        profile.mass_properties.center_of_mass.z,
+        profile.mass_properties.principal_inertia.transverse,
+        profile.mass_properties.principal_inertia.axial,
+        identities.profile.to_hex(),
+        identities.chart.to_hex(),
+        identities.mass_properties.to_hex(),
+        physical.specimen.material_card_identity.to_hex(),
+        physical.specimen.material_state_identity.to_hex(),
+        physical.specimen.identity.to_hex(),
+        physical.render_binding.identity().to_hex(),
+        physical.damping_model_identity.to_hex(),
+        config.material.temperature_k,
+        config.material.young_modulus_pa,
+        config.material.poisson_ratio,
+        config.material.yield_stress_pa,
+        physical.rayleigh_damping.alpha,
+        physical.rayleigh_damping.beta,
+        config.material.surface_roughness_alpha,
+        json_escape(&config.material.material_label),
+        json_escape(&config.material.process_label),
+        phase,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fixture_manifest(
     config: &CinematicFixtureConfig,
@@ -5519,6 +5707,7 @@ fn fixture_manifest(
     raw_sequence_identity: ContentHash,
     preview_sequence_identity: ContentHash,
     wav_identity: ContentHash,
+    physical_disc: &FixturePhysicalDiscState,
     physical_audio: &FixturePhysicalAudio,
     modal_parameter_set_identity: ContentHash,
     modal_parameter_set_disclosure: &str,
@@ -5640,6 +5829,7 @@ fn fixture_manifest(
     let output_convergence_json = output_convergence.manifest_json();
     let audio_convergence_json = audio_convergence.manifest_json();
     let preview_mesh_json = preview_mesh.manifest_json();
+    let resolved_disc_json = resolved_disc_manifest_json(&config.disc, physical_disc);
     let physical_loudness = physical_audio
         .master
         .meters
@@ -5697,18 +5887,19 @@ fn fixture_manifest(
     format!(
         concat!(
             "{{\n",
-            "  \"schema\": \"frankensim-euler-cinematic-critique-v7\",\n",
+            "  \"schema\": \"frankensim-euler-cinematic-critique-v8\",\n",
             "  \"authority\": \"source-bound analytical simulation visualization; delivered contact-driven supported-plate observer-pressure audio with uncalibrated constitutive and support inputs\",\n",
             "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"sampling\": {sampling}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
             "  \"timeline\": {{\"video_pts_convention\": \"encoded-frame-start\", \"video_first_pts_s\": 0.00000000000000000e0, \"video_final_pts_s\": {video_final_pts:.17e}, \"video_frame_interval_s\": {frame_interval:.17e}, \"audio_first_sample_time_s\": 0.00000000000000000e0, \"audio_video_clock_origins_aligned\": true, \"shutter_close_convention\": \"mechanics-frame-end\", \"first_shutter_close_time_s\": {first_shutter_close:.17e}, \"final_shutter_close_time_s\": {final_shutter_close:.17e}, \"note\": \"encoded PTS is distinct from the mechanics time at which each back-loaded shutter closes\"}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"preview_mesh\": {preview_mesh},\n",
+            "  \"resolved_disc\": {resolved_disc},\n",
             "  \"denoise\": {{\"requested\": {denoise_requested}, \"applied_frames\": {denoised_frames}, \"pipeline\": \"{denoise_pipeline}\", \"authority\": \"biased-display-derivative\", \"maximum_retained_bytes\": {denoise_bytes}, \"maximum_history_frames\": {history_frames}}},\n",
             "  \"mechanics\": {{\"model\": \"Thorne-2026-small-angle-rolling-plus-Bildsten-boundary-layer\", \"source_id\": \"{source_id}\", \"model_authority\": \"{model_authority}\", \"physical_validation\": \"{physical_validation}\", \"specimen\": {{\"diameter_m\": {diameter:.17e}, \"thickness_m\": {thickness:.17e}, \"mass_kg\": {mass:.17e}, \"outer_fillet_radius_m\": {fillet:.17e}}}, \"inputs\": {{\"gravity_m_per_s2\": {gravity:.17e}, \"source_initial_inclination_rad\": {source_initial_theta:.17e}, \"air_density_kg_per_m3\": {air_density:.17e}, \"air_dynamic_viscosity_pa_s\": {air_viscosity:.17e}, \"bildsten_dimensionless_prefactor\": {bildsten_prefactor:.17e}, \"maximum_steps\": {maximum_steps}}}, \"integration\": {{\"coarse_timestep_s\": {coarse_dt:.17e}, \"fine_timestep_s\": {fine_dt:.17e}, \"published_source_timestep_s\": {source_dt:.17e}, \"source_sample_count\": {source_samples}, \"source_duration_s\": {source_duration:.17e}, \"retained_tail_sample_count\": {tail_samples}, \"retained_tail_duration_s\": {tail_duration:.17e}, \"terminal\": \"{terminal:?}\", \"positive_validity_cutoff_rad\": {cutoff:.17e}}}, \"refinement\": {{\"terminal_time_difference_s\": {refine_time:.17e}, \"total_work_difference_j\": {refine_work:.17e}, \"output_consistency\": {output_convergence}, \"claim\": \"single admitted dt/dt2 consistency pair for terminal time, encoded interval impulse, renderer-stratum pose, and body-contact chirp; not experimental validation or an asymptotic-order certificate\"}}, \"channels\": {{\"rolling_coefficient_mu\": {rolling_mu:.17e}, \"rolling_work_j\": {rolling_work:.17e}, \"boundary_layer_work_j\": {gas_work:.17e}}}, \"first_retained_qoi\": {{\"inclination_rad\": {first_theta:.17e}, \"precession_rad_per_s\": {first_precession:.17e}, \"spin_rad_per_s\": {first_spin:.17e}}}, \"last_retained_qoi\": {{\"inclination_rad\": {last_theta:.17e}, \"precession_rad_per_s\": {last_precession:.17e}, \"spin_rad_per_s\": {last_spin:.17e}}}, \"energy\": {{\"initial_j\": {initial_energy:.17e}, \"final_j\": {final_energy:.17e}, \"closure_residual_j\": {energy_residual:.17e}, \"relative_abs_residual\": {relative_residual:.17e}}}, \"trajectory_identity\": \"{trajectory_identity}\"}},\n",
             "  \"audio\": {physical_audio},\n",
             "  \"legacy_audio_convergence_diagnostic\": {{\"delivered\": false, \"path\": \"sound/legacy-representative-convergence.float32.wav\", \"sample_rate_hz\": {audio_rate}, \"authority\": \"representative-preset numerical diagnostic only\", \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical mechanics model reproduces published equations and a fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered audible radiation resolves only bending of an ideal perimeter-supported rectangular plate; housing, feet, in-plane plate motion, elastic support impedance, room response, roughness noise, terminal impacts, and ultrasonic disc modes are omitted\", \"the finite-distance Rayleigh surface integral uses each retained mode's natural frequency and triangle-centroid quadrature; it is not a broadband moving-boundary retarded-time, Doppler, cavity, or room solve\", \"plate elastic coefficients, damping, optical constants, and perimeter support are disclosed estimates rather than measurements of the apparatus; modal and acoustic mesh-refinement studies remain necessary before quantitative acoustic authority\", \"fixed-topology mechanics and rendering refuse material states that enter a liquid fraction; transient heat transport, finite-strain thermomechanics, phase-dependent optics, free-surface flow, remeshing, and mode updates are not yet integrated into this cinematic fixture\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical mechanics model reproduces published equations and a fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the source-bound cinematic dynamics admits only its exact benchmark mechanical, damping, contact-surface, and fixed-solid state; arbitrary resolved specimens require the generic coupled dynamics route and never inherit this fitted trajectory\", \"support-plate deformation currently receives the admitted contact force one-way for sound and appearance; it does not yet feed displacement or impedance back into the source-bound disc trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered audible radiation resolves only bending of an ideal perimeter-supported rectangular plate; housing, feet, in-plane plate motion, elastic support impedance, room response, roughness noise, terminal impacts, and ultrasonic disc modes are omitted\", \"the finite-distance Rayleigh surface integral uses each retained mode's natural frequency and triangle-centroid quadrature; it is not a broadband moving-boundary retarded-time, Doppler, cavity, or room solve\", \"plate elastic coefficients, damping, optical constants, and perimeter support are disclosed estimates rather than measurements of the apparatus; modal and acoustic mesh-refinement studies remain necessary before quantitative acoustic authority\", \"fixed-topology mechanics and rendering refuse material states that enter a liquid fraction; transient heat transport, finite-strain thermomechanics, phase-dependent optics, free-surface flow, remeshing, and mode updates are not yet integrated into this cinematic fixture\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,
@@ -5754,6 +5945,7 @@ fn fixture_manifest(
         publication_ns = render.publication_ns,
         idle_ns = render.idle_worker_ns,
         preview_mesh = preview_mesh_json,
+        resolved_disc = resolved_disc_json,
         denoised_frames = denoise.applied_frames,
         denoise_pipeline = denoise_pipeline,
         denoise_bytes = denoise.maximum_retained_bytes,
@@ -5950,6 +6142,44 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn g0_source_bound_cinematic_refuses_changed_disc_mechanics_without_generic_solver() {
+        with_test_cx(|cx| {
+            let mut config = CinematicDiscSpecimenConfig::default();
+            let source = config.resolve_profile(cx).expect("source-bound profile");
+            admit_thorne_source_bound_disc_state(&config, &source, &source)
+                .expect("exact benchmark state");
+
+            config.material.young_modulus_pa *= 0.5;
+            let error = admit_thorne_source_bound_disc_state(&config, &source, &source)
+                .expect_err("changed constitutive state must not inherit benchmark dynamics");
+            assert!(
+                error.to_string().contains("generic coupled dynamics path"),
+                "unexpected source-bound refusal: {error}"
+            );
+
+            let mut optical_only = CinematicDiscSpecimenConfig::default();
+            optical_only.material.optical_eta[0] *= 1.01;
+            admit_thorne_source_bound_disc_state(&optical_only, &source, &source)
+                .expect("optical-only state does not alter the admitted mechanics inputs");
+
+            let changed_geometry = CinematicDiscSpecimenConfig {
+                profile: DiscProfileSpec::ChamferedCylinder {
+                    outer_radius_m: 0.021,
+                    thickness_m: 0.004,
+                    chamfer_radial_m: 0.0008,
+                    chamfer_axial_m: 0.0006,
+                },
+                ..CinematicDiscSpecimenConfig::default()
+            };
+            let changed_profile = changed_geometry
+                .resolve_profile(cx)
+                .expect("changed profile resolves generically");
+            admit_thorne_source_bound_disc_state(&changed_geometry, &changed_profile, &source)
+                .expect_err("changed geometry must not inherit benchmark dynamics");
+        });
     }
 
     #[test]
