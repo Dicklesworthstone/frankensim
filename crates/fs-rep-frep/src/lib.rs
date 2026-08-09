@@ -47,7 +47,7 @@ pub use axisymmetric::{
 };
 pub use axisymmetric_mass::{
     AxisymmetricMassError, AxisymmetricMassProperties, AxisymmetricMassRoundoffDiagnostics,
-    AxisymmetricPrincipalInertia,
+    AxisymmetricPrincipalInertia, AxisymmetricSurfaceArea, AxisymmetricSurfaceAreaError,
 };
 
 use fs_evidence::NumericalCertificate;

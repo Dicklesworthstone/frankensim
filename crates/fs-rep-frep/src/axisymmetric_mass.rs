@@ -11,6 +11,11 @@
 //! I_perp  = rho_m pi * integral_C (rho^4/4 + rho^2 z^2) dz.
 //! ```
 //!
+//! The exposed surface area is evaluated from the same retained meridian:
+//! `A = 2 pi integral_C rho ds`. Lines use the frustum formula and circular
+//! arcs use its closed trigonometric antiderivative, so thermal and acoustic
+//! consumers do not need a separately typed or tessellated area.
+//!
 //! Lines are integrated as ordinary polynomials.  Arcs expand into bounded
 //! powers of sine and cosine and use their closed antiderivatives.  Thus an
 //! admitted profile stays an exact geometric profile throughout mechanics
@@ -72,6 +77,62 @@ pub struct AxisymmetricMassProperties {
     /// Non-authoritative term-magnitude telemetry; never an error bound.
     pub roundoff_diagnostics: AxisymmetricMassRoundoffDiagnostics,
 }
+
+/// Analytic exposed area of one validated solid of revolution.
+///
+/// This is the complete boundary area, including inner bores and planar caps.
+/// Axis-closing meridian segments contribute exactly zero because their
+/// revolution is not a surface. The value is deterministic binary64
+/// evaluation of exact line/arc formulas, not a directed-rounding certificate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricSurfaceArea {
+    /// Complete exposed boundary area [length^2].
+    pub area: f64,
+}
+
+/// Refusal from [`AxisymmetricChart::surface_area`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxisymmetricSurfaceAreaError {
+    /// The retained meridian no longer meets its construction obligations.
+    InvalidChart(AxisymmetricError),
+    /// Cancellation was observed before all features were integrated.
+    Cancelled,
+    /// An exact-formula evaluation overflowed or otherwise became non-finite.
+    NonFinite {
+        /// Retained meridian feature that failed.
+        source_feature: usize,
+    },
+    /// A validated closed solid reconstructed a non-positive exposed area.
+    NonPositiveArea {
+        /// Reconstructed total area.
+        area: f64,
+    },
+}
+
+impl core::fmt::Display for AxisymmetricSurfaceAreaError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidChart(error) => write!(
+                f,
+                "axisymmetric area requires a still-valid closed meridian: {error}"
+            ),
+            Self::Cancelled => write!(
+                f,
+                "axisymmetric area integration was cancelled before publishing a value"
+            ),
+            Self::NonFinite { source_feature } => write!(
+                f,
+                "axisymmetric area became non-finite at meridian feature {source_feature}"
+            ),
+            Self::NonPositiveArea { area } => write!(
+                f,
+                "axisymmetric area reconstructed non-positive boundary area {area}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AxisymmetricSurfaceAreaError {}
 
 /// Refusal from [`AxisymmetricChart::mass_properties`].
 #[derive(Debug, Clone, PartialEq)]
@@ -162,6 +223,50 @@ impl core::fmt::Display for AxisymmetricMassError {
 impl std::error::Error for AxisymmetricMassError {}
 
 impl AxisymmetricChart {
+    /// Compute complete exposed area from this chart's exact meridian.
+    ///
+    /// The construction certificate is revalidated, work follows retained
+    /// feature order, and cancellation is polled at the same bounded stride as
+    /// mass integration. No render mesh or caller-provided area participates.
+    pub fn surface_area(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricSurfaceArea, AxisymmetricSurfaceAreaError> {
+        match self.verify_construction_with_cx(cx) {
+            Ok(_) => {}
+            Err(AxisymmetricError::Cancelled) => {
+                return Err(AxisymmetricSurfaceAreaError::Cancelled);
+            }
+            Err(error) => return Err(AxisymmetricSurfaceAreaError::InvalidChart(error)),
+        }
+
+        let mut area = 0.0;
+        for (index, segment) in self.segments().iter().copied().enumerate() {
+            if index % POLL_STRIDE == 0 && cx.checkpoint().is_err() {
+                return Err(AxisymmetricSurfaceAreaError::Cancelled);
+            }
+            let contribution = revolved_segment_area(segment);
+            if !contribution.is_finite() {
+                return Err(AxisymmetricSurfaceAreaError::NonFinite {
+                    source_feature: index,
+                });
+            }
+            area += contribution;
+            if !area.is_finite() {
+                return Err(AxisymmetricSurfaceAreaError::NonFinite {
+                    source_feature: index,
+                });
+            }
+        }
+        if cx.checkpoint().is_err() {
+            return Err(AxisymmetricSurfaceAreaError::Cancelled);
+        }
+        if area <= 0.0 {
+            return Err(AxisymmetricSurfaceAreaError::NonPositiveArea { area });
+        }
+        Ok(AxisymmetricSurfaceArea { area })
+    }
+
     /// Compute homogeneous-solid mass properties from this chart's exact
     /// meridian features.
     ///
@@ -307,6 +412,44 @@ impl AxisymmetricChart {
                 axial_inertia_term_scale,
             },
         })
+    }
+}
+
+/// Evaluate `2 pi integral radius ds` over one retained meridian feature.
+fn revolved_segment_area(segment: MeridianSegment) -> f64 {
+    match segment {
+        MeridianSegment::Line { start, end } => {
+            let slant = (end.radius - start.radius).hypot(end.axial - start.axial);
+            PI * (start.radius + end.radius) * slant
+        }
+        MeridianSegment::Arc {
+            start,
+            end,
+            center,
+            clockwise,
+        } => {
+            let start_angle = (start.axial - center.axial).atan2(start.radius - center.radius);
+            let end_angle = (end.axial - center.axial).atan2(end.radius - center.radius);
+            let sweep = if clockwise {
+                -(start_angle - end_angle).rem_euclid(TAU)
+            } else {
+                (end_angle - start_angle).rem_euclid(TAU)
+            };
+            let sweep_magnitude = sweep.abs();
+            let middle_angle = start_angle + 0.5 * sweep;
+            let arc_radius = (start.radius - center.radius).hypot(start.axial - center.axial);
+
+            // Parameterizing by unsigned arc length avoids subtracting the
+            // endpoint sines. The bracket is the exact integral of radius
+            // over the admitted sweep and remains well conditioned for short
+            // fillets and either orientation.
+            let radial_integral = center.radius * sweep_magnitude
+                + 2.0
+                    * arc_radius
+                    * fs_math::det::cos(middle_angle)
+                    * fs_math::det::sin(0.5 * sweep_magnitude);
+            TAU * arc_radius * radial_integral
+        }
     }
 }
 

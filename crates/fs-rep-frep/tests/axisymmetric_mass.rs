@@ -4,8 +4,8 @@ use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_rep_frep::{
-    AxisymmetricChart, AxisymmetricMassError, MeridianPoint, MeridianSegment,
-    SquatDiscEdgeTreatment,
+    AxisymmetricChart, AxisymmetricMassError, AxisymmetricSurfaceAreaError, MeridianPoint,
+    MeridianSegment, SquatDiscEdgeTreatment,
 };
 
 fn point(radius: f64, axial: f64) -> MeridianPoint {
@@ -172,6 +172,87 @@ fn g0_exact_arc_sphere_matches_volume_and_isotropic_inertia() {
     assert_close(properties.center_of_mass.z, 0.0);
     assert_close(properties.principal_inertia.transverse, inertia);
     assert_close(properties.principal_inertia.axial, inertia);
+}
+
+#[test]
+fn g0_cylinder_and_exact_arc_sphere_surface_areas_match_closed_forms() {
+    let cylinder_radius = 2.0;
+    let cylinder_thickness = 4.0;
+    let sphere_radius = 1.75;
+    with_cx(false, |cx| {
+        let cylinder_area = cylinder(cylinder_radius, cylinder_thickness, 0.0)
+            .surface_area(cx)
+            .expect("cylinder surface area")
+            .area;
+        let expected_cylinder =
+            2.0 * core::f64::consts::PI * cylinder_radius * (cylinder_radius + cylinder_thickness);
+        assert_close(cylinder_area, expected_cylinder);
+
+        let sphere_area = sphere(sphere_radius, 0.0)
+            .surface_area(cx)
+            .expect("sphere surface area")
+            .area;
+        assert_close(
+            sphere_area,
+            4.0 * core::f64::consts::PI * sphere_radius * sphere_radius,
+        );
+    });
+}
+
+#[test]
+fn g0_true_outer_fillets_use_analytic_toroidal_patch_area() {
+    let outer_radius = 2.0;
+    let thickness = 1.0;
+    let fillet_radius = 0.25;
+    let chart = AxisymmetricChart::squat_disc(
+        outer_radius,
+        thickness,
+        SquatDiscEdgeTreatment::CircularFillet {
+            radius: fillet_radius,
+        },
+    )
+    .expect("true filleted disc");
+    let area = with_cx(false, |cx| {
+        chart.surface_area(cx).expect("filleted area").area
+    });
+    let cap_area = 2.0 * core::f64::consts::PI * (outer_radius - fillet_radius).powi(2);
+    let cylindrical_area =
+        2.0 * core::f64::consts::PI * outer_radius * (thickness - 2.0 * fillet_radius);
+    let two_quarter_tori = 4.0
+        * core::f64::consts::PI
+        * fillet_radius
+        * ((outer_radius - fillet_radius) * core::f64::consts::FRAC_PI_2 + fillet_radius);
+    assert_close(area, cap_area + cylindrical_area + two_quarter_tori);
+}
+
+#[test]
+fn g3_surface_area_obeys_scale_translation_and_feature_refinement_laws() {
+    let scale = 3.0;
+    with_cx(false, |cx| {
+        let base = cylinder(1.25, 0.8, 0.0)
+            .surface_area(cx)
+            .expect("base area")
+            .area;
+        let scaled = cylinder(scale * 1.25, scale * 0.8, 0.0)
+            .surface_area(cx)
+            .expect("scaled area")
+            .area;
+        let translated = cylinder(1.25, 0.8, 2.75)
+            .surface_area(cx)
+            .expect("translated area")
+            .area;
+        let refined = refined_cylinder(1.25, 0.8)
+            .surface_area(cx)
+            .expect("refined area")
+            .area;
+
+        assert_close(scaled, scale * scale * base);
+        // Translating endpoints changes the rounded subtraction used to
+        // recover an identical segment length, so the geometric law is tight
+        // binary64 agreement rather than a bitwise-translation claim.
+        assert_close(translated, base);
+        assert_close(refined, base);
+    });
 }
 
 #[test]
@@ -362,6 +443,10 @@ fn g0_invalid_density_and_cancelled_work_refuse_without_partial_properties() {
         assert!(matches!(
             chart.mass_properties(1.0, cx),
             Err(AxisymmetricMassError::Cancelled)
+        ));
+        assert!(matches!(
+            chart.surface_area(cx),
+            Err(AxisymmetricSurfaceAreaError::Cancelled)
         ));
     });
 }

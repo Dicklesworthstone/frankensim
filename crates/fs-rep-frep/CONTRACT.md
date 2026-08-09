@@ -211,6 +211,13 @@ the suite unchanged.
   published origin transverse moment, and every post-multiplier diagnostic is
   finite-checked transactionally; neither policy makes the diagnostics an
   error enclosure.
+- `surface_area(cx)` evaluates the complete revolved boundary directly from
+  the same retained line/circular-arc meridian as support and mass. Lines use
+  the exact frustum formula, arcs use a closed trigonometric antiderivative,
+  and axis closures contribute zero; caps, bores, fillets, chamfers, and outer
+  faces are therefore included without a render mesh or caller-entered area.
+  The result is deterministic binary64 analytic evaluation with cancellation,
+  finite, and positive-area admission, not a directed-rounding certificate.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join
   once fs-cheb's profile evaluators land; the node set here is the
   closed-form primitive zoo.
