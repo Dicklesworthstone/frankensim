@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	mil5j-table-2710b-annealed	AISI 301 stainless steel sheet and strip, annealed (AMS 5901, thickness <= 0.187 in); properties also applicable to AISI 302 (AMS 5516), AISI 304 (AMS 5513), and AISI 316 (AMS 5524) annealed per the table footnotes	MIL-HDBK-5J Table 2.7.1.0(b) design values, S basis (specification minimum, statistical assurance traditionally not known per the handbook's own section 9.1.6)	Room-temperature aerospace DESIGN values, not typical values: S basis means the governing specification minimum; strengths are direction-resolved (L longitudinal = rolling direction, LT long transverse) and the SI rows below convert the printed ksi values at 6.894757 MPa/ksi and the printed density 0.286 lb/in3 at 27679.9 (kg/m3)/(lb/in3) = 7916.5 kg/m3; elongation 40 percent (LT, S basis); moduli are handbook-rounded (E 29.0e3 ksi, Ec 28.0e3, G 11.2e3, mu 0.27), so the derived nu = E/2G - 1 = 0.29 differs from the printed 0.27 within handbook rounding; elevated-temperature yield-fraction rows are GRAPH-READ estimated tier from Figure 2.7.1.1.1(a) (annealed 301/302/304/304L/321/347, exposure up to 1/2 hr, percent of room-temperature Fty); no confidence semantics beyond the stated basis, so runtime uncertainty stays Unstated
+scalar	tensile-ultimate-l	mil5j-table-2710b-annealed	tensile_ultimate_l_s_basis	503.3	MPa	constant
+uncertainty	tensile-ultimate-l	unstated	-	-	-	-
+validity	tensile-ultimate-l	temperature	294	294	K
+scalar	tensile-ultimate-lt	mil5j-table-2710b-annealed	tensile_ultimate_lt_s_basis	517.1	MPa	constant
+uncertainty	tensile-ultimate-lt	unstated	-	-	-	-
+validity	tensile-ultimate-lt	temperature	294	294	K
+scalar	tensile-yield-l	mil5j-table-2710b-annealed	tensile_yield_l_s_basis	179.3	MPa	constant
+uncertainty	tensile-yield-l	unstated	-	-	-	-
+validity	tensile-yield-l	temperature	294	294	K
+scalar	tensile-yield-lt	mil5j-table-2710b-annealed	tensile_yield_lt_s_basis	206.8	MPa	constant
+uncertainty	tensile-yield-lt	unstated	-	-	-	-
+validity	tensile-yield-lt	temperature	294	294	K
+scalar	compressive-yield-l	mil5j-table-2710b-annealed	compressive_yield_l_s_basis	158.6	MPa	constant
+uncertainty	compressive-yield-l	unstated	-	-	-	-
+validity	compressive-yield-l	temperature	294	294	K
+scalar	compressive-yield-lt	mil5j-table-2710b-annealed	compressive_yield_lt_s_basis	199.9	MPa	constant
+uncertainty	compressive-yield-lt	unstated	-	-	-	-
+validity	compressive-yield-lt	temperature	294	294	K
+scalar	shear-ultimate	mil5j-table-2710b-annealed	shear_ultimate_s_basis	344.7	MPa	constant
+uncertainty	shear-ultimate	unstated	-	-	-	-
+validity	shear-ultimate	temperature	294	294	K
+scalar	young-modulus-l	mil5j-table-2710b-annealed	young_modulus_l	199.9	GPa	constant
+uncertainty	young-modulus-l	unstated	-	-	-	-
+validity	young-modulus-l	temperature	294	294	K
+scalar	compression-modulus-l	mil5j-table-2710b-annealed	compression_modulus_l	193.1	GPa	constant
+uncertainty	compression-modulus-l	unstated	-	-	-	-
+validity	compression-modulus-l	temperature	294	294	K
+scalar	shear-modulus	mil5j-table-2710b-annealed	shear_modulus	77.2	GPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	294	294	K
+scalar	poisson-ratio	mil5j-table-2710b-annealed	poisson_ratio	0.27	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	294	294	K
+scalar	density	mil5j-table-2710b-annealed	density	7916.5	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	294	294	K
+scalar	elongation-lt	mil5j-table-2710b-annealed	elongation_lt_s_basis	40	%	constant
+uncertainty	elongation-lt	unstated	-	-	-	-
+validity	elongation-lt	temperature	294	294	K
+scalar	fty-fraction-478k	mil5j-table-2710b-annealed	tensile_yield_fraction_478k	0.68	1	constant
+uncertainty	fty-fraction-478k	unstated	-	-	-	-
+validity	fty-fraction-478k	temperature	478	478	K
+scalar	fty-fraction-589k	mil5j-table-2710b-annealed	tensile_yield_fraction_589k	0.62	1	constant
+uncertainty	fty-fraction-589k	unstated	-	-	-	-
+validity	fty-fraction-589k	temperature	589	589	K
+scalar	fty-fraction-811k	mil5j-table-2710b-annealed	tensile_yield_fraction_811k	0.60	1	constant
+uncertainty	fty-fraction-811k	unstated	-	-	-	-
+validity	fty-fraction-811k	temperature	811	811	K
+scalar	fty-fraction-1033k	mil5j-table-2710b-annealed	tensile_yield_fraction_1033k	0.43	1	constant
+uncertainty	fty-fraction-1033k	unstated	-	-	-	-
+validity	fty-fraction-1033k	temperature	1033	1033	K

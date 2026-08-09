@@ -7371,3 +7371,118 @@ fn g2_cli_compiles_instrument_loss_and_string_tranche_with_derived_gates() {
         INSTRUMENT_TRANCHE2_PACKS.len()
     );
 }
+
+/// The MIL-HDBK-5J stainless tranche (bead frankensim-0er85 tranche 1):
+/// design-basis stainless data with the DIRECTION-RESOLVED
+/// tension/compression asymmetry the owner named, gated by derived
+/// physics rather than dims alone.
+const STAINLESS_TRANCHE_PACKS: [&str; 2] = [
+    "stainless-301-annealed-mil-hdbk-5j",
+    "stainless-301-full-hard-mil-hdbk-5j",
+];
+
+#[test]
+fn g2_cli_compiles_stainless_tranche_with_asymmetry_gates() {
+    let mut packs = std::collections::BTreeMap::new();
+    for slug in STAINLESS_TRANCHE_PACKS {
+        let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+        let out = fixture_dir().join(format!("{slug}.fsmatpk"));
+        let run = run_compiler(&manifest, &out);
+        assert!(
+            run.status.success(),
+            "{slug} refused: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = fs::read(&out).expect("read stainless pack");
+        let pack = NormalizedPack::from_bytes_verified(
+            NormalizedPack::from_bytes(&bytes)
+                .expect("decode stainless pack")
+                .content_hash(),
+            &bytes,
+        )
+        .expect("verified stainless pack");
+        assert_eq!(pack.pack_id(), slug);
+        packs.insert(slug, pack);
+    }
+    let scalar = |slug: &str, property: &str| -> f64 {
+        tonewood_scalar(&packs[slug], property)
+            .unwrap_or_else(|| panic!("{slug} must carry {property}"))
+    };
+
+    // Full hard, B basis: the cold-rolling texture signature — the
+    // LONGITUDINAL compressive yield sits FAR below tensile while the
+    // TRANSVERSE compressive yield exceeds tensile. Sign-resolved
+    // asymmetry, not a single knockdown factor.
+    let fh = "stainless-301-full-hard-mil-hdbk-5j";
+    let fty_l = scalar(fh, "tensile_yield_l_b_basis");
+    let fcy_l = scalar(fh, "compressive_yield_l_b_basis");
+    let fty_lt = scalar(fh, "tensile_yield_lt_b_basis");
+    let fcy_lt = scalar(fh, "compressive_yield_lt_b_basis");
+    assert!(
+        fcy_l < 0.75 * fty_l,
+        "longitudinal Fcy must sit far below Fty: {fcy_l:.3e} vs {fty_l:.3e}"
+    );
+    assert!(
+        fcy_lt > 1.05 * fty_lt,
+        "transverse Fcy must exceed Fty: {fcy_lt:.3e} vs {fty_lt:.3e}"
+    );
+    // Annealed: near-isotropic yield (no texture yet) — asymmetry
+    // within 15%.
+    let ann = "stainless-301-annealed-mil-hdbk-5j";
+    let a_fty = scalar(ann, "tensile_yield_l_s_basis");
+    let a_fcy = scalar(ann, "compressive_yield_l_s_basis");
+    assert!(
+        (a_fcy / a_fty - 1.0).abs() < 0.15,
+        "annealed asymmetry must be small: {a_fcy:.3e} vs {a_fty:.3e}"
+    );
+    // Cold work strengthens: full hard ultimate far above annealed.
+    assert!(
+        scalar(fh, "tensile_ultimate_l_b_basis") > 2.0 * scalar(ann, "tensile_ultimate_l_s_basis"),
+        "full hard must be dramatically stronger than annealed"
+    );
+    // Ordering sanity per condition: ultimate > yield.
+    assert!(scalar(fh, "tensile_ultimate_l_b_basis") > fty_l);
+    assert!(scalar(ann, "tensile_ultimate_l_s_basis") > a_fty);
+    // Elastic consistency: nu = E/2G - 1 within handbook rounding of
+    // the printed 0.27 (window 0.20..0.36 — the rounded moduli give
+    // 0.29 annealed).
+    for slug in [ann, fh] {
+        let e = scalar(slug, "young_modulus_l");
+        let g = scalar(slug, "shear_modulus");
+        let nu = e / (2.0 * g) - 1.0;
+        assert!(
+            (0.20..0.36).contains(&nu),
+            "{slug}: derived nu {nu:.3} inconsistent with handbook moduli"
+        );
+        let rho = scalar(slug, "density");
+        assert!((7_800.0..8_050.0).contains(&rho), "{slug}: density {rho}");
+        // Longitudinal sound speed sanity (unit-slip catcher).
+        let c = (e / rho).sqrt();
+        assert!(
+            (4_400.0..5_400.0).contains(&c),
+            "{slug}: c_L = {c:.0} m/s outside the steel window"
+        );
+    }
+    // Elevated-temperature yield fractions: below 1 and monotone
+    // decreasing (graph-read tier, but the TREND is load-bearing).
+    let fractions = [
+        scalar(ann, "tensile_yield_fraction_478k"),
+        scalar(ann, "tensile_yield_fraction_589k"),
+        scalar(ann, "tensile_yield_fraction_811k"),
+        scalar(ann, "tensile_yield_fraction_1033k"),
+    ];
+    let mut previous = 1.0f64;
+    for (i, &f) in fractions.iter().enumerate() {
+        assert!(
+            f > 0.0 && f < 1.0 && f <= previous,
+            "yield fraction {i} must decrease below 1: {fractions:?}"
+        );
+        previous = f;
+    }
+    println!(
+        "{{\"suite\":\"xtask-matdb\",\"case\":\"stainless-tranche\",\"packs\":{},\"fcy_l_over_fty_l\":{:.3},\"fcy_lt_over_fty_lt\":{:.3},\"verdict\":\"pass\"}}",
+        STAINLESS_TRANCHE_PACKS.len(),
+        fcy_l / fty_l,
+        fcy_lt / fty_lt
+    );
+}
