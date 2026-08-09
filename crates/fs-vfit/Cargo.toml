@@ -1,0 +1,22 @@
+[package]
+name = "fs-vfit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Passive rational approximation of tabulated frequency responses: relaxed vector fitting + Loewner cross-check, Hamiltonian passivity certification with convex residue repair, and prewarped bilinear discretization to state-space/biquad runtime filters."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fs-duct = { path = "../fs-duct" }
+fs-material = { path = "../fs-material" }
+
+[lints]
+workspace = true
