@@ -784,6 +784,23 @@ fn pareto_batch_is_aggregation_exact() {
             .expect("lat")
             .to_bits()
     );
+    // Tonality on the largest power-of-two prefix (72000 -> 65536),
+    // bitwise vs the standalone calls on that exact prefix.
+    assert_eq!(m.tonality_block, 65_536);
+    assert_eq!(
+        m.tnr_total_db.to_bits(),
+        fs_psycho::tonality::tone_to_noise_ecma(&pcm[..65_536], sigfix::SR)
+            .expect("tnr")
+            .total_db
+            .to_bits()
+    );
+    assert_eq!(
+        m.pr_total_db.to_bits(),
+        fs_psycho::tonality::prominence_ratio_ecma(&pcm[..65_536], sigfix::SR)
+            .expect("pr")
+            .total_db
+            .to_bits()
+    );
     // Sanity: this fixture's roughness is strong (70 Hz AM near the
     // anchor) — the batch value must reflect it, not a stub.
     assert!(

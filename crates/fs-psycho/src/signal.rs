@@ -458,6 +458,16 @@ pub struct ParetoMetrics {
     /// Timbre-toolbox log-attack-time [log10 s] with the given
     /// envelope window.
     pub log_attack_time: f64,
+    /// ECMA-74 T-TNR [dB] over prominent tones (0.0 if none) on the
+    /// largest power-of-two prefix.
+    pub tnr_total_db: f64,
+    /// ECMA-74 T-PR [dB] over prominent tones (0.0 if none) on the
+    /// same prefix.
+    pub pr_total_db: f64,
+    /// Length of the power-of-two prefix the tonality metrics
+    /// analyzed (disclosed: tonality does not see the whole signal
+    /// unless its length is a power of two).
+    pub tonality_block: usize,
 }
 
 /// Compute the full [`ParetoMetrics`] set from one calibrated PCM
@@ -469,7 +479,9 @@ pub struct ParetoMetrics {
 /// Any error of the component metrics
 /// ([`loudness_stationary_from_pcm`], [`loudness_time_varying`],
 /// [`crate::sharpness_din`], [`crate::roughness::roughness_dw_block`],
-/// [`crate::log_attack_time`], [`phon_from_sone`]).
+/// [`crate::log_attack_time`], [`phon_from_sone`],
+/// [`crate::tonality::tone_to_noise_ecma`] /
+/// [`crate::tonality::prominence_ratio_ecma`]).
 pub fn pareto_metrics(
     pcm_pa: &[f64],
     sample_rate: f64,
@@ -497,6 +509,16 @@ pub fn pareto_metrics(
     #[allow(clippy::cast_precision_loss)]
     let roughness_mean = r_sum / n_blocks as f64;
     let lat = crate::log_attack_time(pcm_pa, sample_rate, lat_env_window)?;
+    // Tonality needs a power-of-two block: analyze the largest
+    // power-of-two prefix (>= 4096 or the tonality refusal
+    // propagates like every other member refusal).
+    let tonality_block = if pcm_pa.len().is_power_of_two() {
+        pcm_pa.len()
+    } else {
+        1usize << (usize::BITS - 1 - pcm_pa.len().leading_zeros())
+    };
+    let tnr = crate::tonality::tone_to_noise_ecma(&pcm_pa[..tonality_block], sample_rate)?;
+    let pr = crate::tonality::prominence_ratio_ecma(&pcm_pa[..tonality_block], sample_rate)?;
     Ok(ParetoMetrics {
         sones_stationary: stationary.sones,
         phon_stationary: phon_from_sone(stationary.sones)?,
@@ -506,5 +528,8 @@ pub fn pareto_metrics(
         roughness_asper_mean: roughness_mean,
         roughness_blocks: n_blocks,
         log_attack_time: lat,
+        tnr_total_db: tnr.total_db,
+        pr_total_db: pr.total_db,
+        tonality_block,
     })
 }

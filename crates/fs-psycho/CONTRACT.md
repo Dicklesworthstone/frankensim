@@ -68,8 +68,9 @@ test).
   the reference's small branch step at 1 sone kept and documented.
 - `signal::pareto_metrics` — the batch set for Pareto/listening
   consumers (stationary sones + phon, N5/Nmax, sharpness, mean
-  DW-block roughness with block count, log-attack-time) from one
-  48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
+  DW-block roughness with block count, log-attack-time, ECMA T-TNR
+  and T-PR on the largest power-of-two prefix with that prefix
+  length disclosed) from one 48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
   bitwise the standalone call's value (pinned by test); any
   component's typed refusal propagates — no partial results.
 - `tonality::{tone_to_noise_ecma, prominence_ratio_ecma}` — ECMA-74
@@ -215,8 +216,6 @@ tonality refusals.
 - Tonality: TNR/PR are the ECMA-74 discrete-tone metrics; Aures/
   Sottek psychoacoustic tonality (sharpness-of-hearing model) is a
   different metric and is NOT implemented.
-- The batch `pareto_metrics` does not yet include TNR/PR (they need
-  a power-of-two block contract of their own; recorded follow-up).
 - Sampling rates other than 48 kHz: refused, not resampled (no
   claim); wav parsing is the caller's job (inputs are Pa slices).
 - Per-frame specific loudness is computed internally but not
