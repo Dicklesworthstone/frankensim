@@ -64,6 +64,19 @@ checkpoint is the only rollback source. Eventful, stale, future, duplicate, and
 nonconverged samples refuse before publishing a port. The embedded transition
 retains the law receipt identities, uncertainty, and applicability fields.
 
+### Ordered material/interface binding
+
+`interface_binding` retains the complete immutable `InterfaceSystemCard`, its
+ordered material and texture roles, and the dependency-light `fs-tribo`
+interface identity without promoting authority. Two complete
+`IsotropicSolidStatePoint` bundles may bind only when their material roles and
+exact physical query points agree with the interface card. The derived Hertz
+modulus and limiting yield stress retain both full bulk-property bundles and
+their usage receipts. Normal-contact binding additionally requires an explicit
+nonnegative, dimensionally correct `adhesion-energy` claim resolved from the
+same interface card and exact state point; absence or card/state rebinding
+refuses rather than implying zero adhesion.
+
 ### Smooth tangential adapter (bead `frankensim-b8bxd.7.2`)
 
 `tangential::smooth` is a solver transaction adapter over the public
@@ -223,6 +236,15 @@ through-shot's sphere-entry window survives as Retained).
   validated two-curvature law. The generic embedding is not a port-schema-v2
   implementation, cancellation proof, global solve, or a replacement for the
   upstream coupled-port contract.
+- Material/interface binding proves exact identity, dimensional admission, and
+  state-point consistency. Its normal-model bridge selects exactly one
+  supported immutable interface-card law (or one explicitly pinned card),
+  derives its rate scale, damping coefficient, applicability ratios, and finite
+  temperature domain, and rejects missing, ambiguous, out-of-domain,
+  dimensionally wrong, or surplus parameter data. This is executable schema
+  admission, not physical validation: it does not infer missing
+  friction/roughness/damping values, establish a surface as representative of a
+  physical specimen, or extend a solid material through a phase transition.
 
 - Certified CCD verdicts remain ENCLOSURE verdicts: `PossibleContact` /
   `Retained` windows localize in time but never adjudicate contact;
