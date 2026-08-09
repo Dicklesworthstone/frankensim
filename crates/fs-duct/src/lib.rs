@@ -428,6 +428,11 @@ pub fn tone_hole_shunt(
             if kb > MAX_RADIATION_KA {
                 return Err(DuctError::RadiationKaTooLarge { ka: kb });
             }
+            // v1 compact corrections; the recorded refinement is the
+            // delta = b/a bore-interaction polynomial for the INNER
+            // term (Keefe/Dalmont class ~ b(0.82 - 0.193 d - 1.09 d^2
+            // + ...)), which a review quantified as exactly the
+            // committed -8..-20 cent flat bias on the Ernoult holes.
             let t_eff = chimney_height
                 + (8.0 / (3.0 * core::f64::consts::PI)) * hole_radius
                 + 0.8216 * hole_radius;
@@ -560,6 +565,14 @@ pub fn input_impedance(
             ..
         } = *segment
         {
+            // Chimney viscothermal losses are NOT modeled (no-claim),
+            // but the chimney is often the narrowest element, so its
+            // shear number still folds into the reported margin
+            // (review finding: the diagnostic must see it).
+            if loss == LossModel::WideTube {
+                let rv = hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+                min_rv = min_rv.min(rv);
+            }
             let shunt = tone_hole_shunt(state, hole_radius, chimney_height, hole_state, omega)?;
             [C64::ONE, C64::ZERO, shunt.recip(), C64::ONE]
         } else {
@@ -1469,7 +1482,7 @@ mod tone_hole_tests {
         // two-microphone method with stated +-2 cent peak accuracy
         // (geometry from the CC-BY paper's Table 1; peak values
         // extracted from the openwind-published measured curves,
-        // GPLv3, session Measure1: 283/332/449/619/770 Hz).
+        // GPLv3, sessions Measure1-3 agree within ~3 Hz: 283/332/449/619/770 Hz).
         // Authored envelope: measured deviations -8..-20 cents
         // (2026-08-08), systematically slightly flat — consistent with
         // the compact-limit inner end correction using the validated
