@@ -13,11 +13,20 @@
 //! other's artifacts; the cross-check is part of the conformance
 //! battery, not an afterthought.
 //!
-//! Sign conventions: time dependence `e^{+i*omega*t}` is NOT assumed
-//! anywhere; everything is phrased on the Laplace axis `s = i*omega`
-//! with real impulse responses enforced by conjugate-closed storage
+//! Sign conventions: everything is phrased on the Laplace axis
+//! `s = i*omega` (equivalently `e^{+i*omega*t}` time dependence) with
+//! real impulse responses enforced by conjugate-closed storage
 //! ([`model::PoleTerm`]). Passivity is impedance-form positive
 //! realness `Re H(i*omega) >= 0`.
+//!
+//! LOAD-BEARING for acoustics consumers: FrankenSim's acoustics stack
+//! (fs-duct, fs-bem, ...) uses the `e^{-i*omega*t}` convention, the
+//! COMPLEX CONJUGATE of this crate's. Conjugate such data
+//! (`H.conj()`) before fitting — otherwise the phase rotates the
+//! wrong way through every resonance and no stable rational model can
+//! fit it (an executed failure, pinned by the clarinet casebook).
+//! `|H|` and `Re H` — the cents- and passivity-bearing quantities —
+//! are conjugation-invariant.
 
 pub mod discretize;
 pub mod loewner;
