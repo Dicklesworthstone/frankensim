@@ -105,8 +105,9 @@ pub fn parse_sexpr_migrating(source: &str) -> Result<MigratedOrNative, ProjectEr
             let declared = declared_envelope_version(source).ok_or_else(|| ProjectError {
                 code: "fsim-migration-shape",
                 detail: "the envelope version could not be read for migration".to_string(),
-                hint: "migrate exactly the bytes that were persisted; do not hand-edit the envelope"
-                    .to_string(),
+                hint:
+                    "migrate exactly the bytes that were persisted; do not hand-edit the envelope"
+                        .to_string(),
             })?;
             let migrated = migrate_envelope(source, declared)?;
             Ok(MigratedOrNative {

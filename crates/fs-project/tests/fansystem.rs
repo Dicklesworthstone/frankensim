@@ -327,8 +327,8 @@ mod wire_surface {
         SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
         migrate_envelope, parse_sexpr, print_sexpr,
     };
-    use fs_scenario::EntityDeclaration as _;
     use fs_qty::QtyAny;
+    use fs_scenario::EntityDeclaration as _;
 
     fn kelvin(value: f64) -> QtyAny {
         QtyAny::new(value, dims::TEMPERATURE)
@@ -521,9 +521,11 @@ mod wire_surface {
 
         let migrated = migrate_envelope(&v1, 1).expect("registered v1 rule migrates");
         assert_eq!(migrated.decoded.canonical, v1_rendered);
-        assert!(migrated
-            .receipt
-            .verifies(v1.as_bytes(), migrated.decoded.canonical.as_bytes()));
+        assert!(
+            migrated
+                .receipt
+                .verifies(v1.as_bytes(), migrated.decoded.canonical.as_bytes())
+        );
         assert_eq!(migrated.receipt.source_version, 1);
         assert_eq!(migrated.receipt.target_version, 2);
         assert_eq!(migrated.receipt.rule.label(), "cooling-fan-system-v2");

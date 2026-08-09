@@ -1102,6 +1102,7 @@ dependencies = [
  "fs-feec",
  "fs-io",
  "fs-matdb",
+ "fs-material",
  "fs-math",
  "fs-mms",
  "fs-qty",

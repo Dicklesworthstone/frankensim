@@ -38,8 +38,8 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 
-use crate::radiation::STEFAN_BOLTZMANN_W_M2_K4;
 use crate::ConductionError;
+use crate::radiation::STEFAN_BOLTZMANN_W_M2_K4;
 
 /// The admitted Biot ceiling for lumped treatment.
 ///
@@ -123,7 +123,8 @@ impl<'a> LumpedEnthalpyBody<'a> {
                 format!("emissivity {emissivity} is outside [0,1]"),
             ));
         }
-        let mut identity = DomainHasher::new("org.frankensim.fs-conduction.lumped-enthalpy-body.v1");
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-conduction.lumped-enthalpy-body.v1");
         identity.update(&(name.len() as u64).to_le_bytes());
         identity.update(name.as_bytes());
         for value in [
@@ -258,16 +259,20 @@ pub fn solve_lumped_enthalpy(
             ),
         ));
     }
-    let requested_steps = (config.duration_s / config.maximum_step_s).ceil() as usize;
-    if requested_steps > config.maximum_steps || requested_steps > MAX_LUMPED_ENTHALPY_STEPS {
+    let requested_steps_f64 = (config.duration_s / config.maximum_step_s).ceil();
+    if !requested_steps_f64.is_finite()
+        || requested_steps_f64 > config.maximum_steps as f64
+        || requested_steps_f64 > MAX_LUMPED_ENTHALPY_STEPS as f64
+    {
         return Err(lumped_error(
             &body.name,
             format!(
-                "enthalpy march requests {requested_steps} steps, above caller maximum {} or hard maximum {MAX_LUMPED_ENTHALPY_STEPS}",
-                config.maximum_steps
+                "enthalpy march requests {requested_steps_f64} steps, above caller maximum {} or hard maximum {MAX_LUMPED_ENTHALPY_STEPS}",
+                config.maximum_steps,
             ),
         ));
     }
+    let requested_steps = requested_steps_f64 as usize;
     cx.checkpoint().map_err(|_| ConductionError::Cancelled {
         stage: "lumped-enthalpy",
         at: 0,
@@ -347,7 +352,10 @@ fn validate_enthalpy_config(
         (config.maximum_step_s, "maximum step", true),
         (config.enthalpy_tolerance_j_kg, "enthalpy tolerance", true),
     ] {
-        if !value.is_finite() || (strictly_positive && value <= 0.0) || (!strictly_positive && value < 0.0) {
+        if !value.is_finite()
+            || (strictly_positive && value <= 0.0)
+            || (!strictly_positive && value < 0.0)
+        {
             return Err(lumped_error(
                 &body.name,
                 format!("{field} {value} is outside its finite admitted domain"),
@@ -383,7 +391,7 @@ fn solve_enthalpy_step(
         let (_, _, power) = enthalpy_power(body, config, state.temperature_k());
         Ok(body.mass_kg * (specific_enthalpy - previous_h) - dt_s * power)
     };
-    let mut lower_residual = residual(lower)?;
+    let lower_residual = residual(lower)?;
     let upper_residual = residual(upper)?;
     if lower_residual > 0.0 || upper_residual < 0.0 {
         return Err(lumped_error(
@@ -401,7 +409,6 @@ fn solve_enthalpy_step(
         let midpoint_residual = residual(midpoint)?;
         if midpoint_residual <= 0.0 {
             lower = midpoint;
-            lower_residual = midpoint_residual;
         } else {
             upper = midpoint;
         }
@@ -409,7 +416,6 @@ fn solve_enthalpy_step(
             break;
         }
     }
-    let _ = lower_residual;
     Ok(lower + 0.5 * (upper - lower))
 }
 

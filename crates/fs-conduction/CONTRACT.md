@@ -788,7 +788,17 @@ authority.
   Component uncertainty is a conservative arithmetic sum of stated
   half-widths, not a probabilistic convolution, and no correlation between
   components is modelled.
-- NO PHASE CHANGE, no latent heat, no moving boundaries.
+- The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
+  change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
+  It couples constant internal power with convection and surface radiation and
+  returns temperature, density, and phase fraction without material-name
+  branches. This is an isothermal reduced rung only: it refuses when the
+  convection-plus-radiation Biot gate fails or when a step leaves the supplied
+  phase-data domain. It does NOT solve spatial temperature gradients,
+  nonequilibrium phase kinetics, thermal stress, finite-strain deformation,
+  moving boundaries, free surfaces, fluid flow, ablation, or vaporization;
+  those regimes require escalation to the corresponding spatial multiphysics
+  solvers rather than reinterpretation of this trajectory.
 - PCB HOMOGENIZATION IS CONSUMED, NOT REINTERPRETED. This crate uses the
   nominal tensor and retains its constituent property receipts. Coverage
   provenance, Reuss/Voigt structural bounds, propagated principal bounds,

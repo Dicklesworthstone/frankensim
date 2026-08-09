@@ -101,6 +101,17 @@ const IMPORT_VERIFY_AUTHORITY: &str = "re-hashed retained import evidence";
 const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
+const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
+/// Specific gas constant of dry air, J/(kg·K); used only for the declared
+/// envelope-derived density estimate (see FLOW_NETWORK_NO_CLAIM).
+const AIR_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
+const FLOW_NETWORK_AUTHORITY: &str =
+    "lossless-project-lowering-plus-interval-certified-operating-point";
+const FLOW_NETWORK_NO_CLAIM: &str = "the stage proves the declared fan system lowered losslessly \
+    and the enclosure network produced an interval-certified nominal operating point under the \
+    declared orifice/leakage models; it does not authenticate manufacturer curve data, system \
+    effects, compressibility, installation effects, or any experimental validation, and the \
+    envelope-derived air density is a declared ideal-gas estimate, not a measurement";
 const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
     interface resolves to an admitted card whose selected claim covers the declared temperature \
     range, and retains that claim's replayable usage receipt; it does not authenticate the pack \
@@ -2511,6 +2522,233 @@ fn material_resolve_receipt(
     work.checkpoint(phase, None, u64::MAX)
         .map_err(|_| cancelled())?;
     Ok((receipt, usages))
+}
+
+fn flow_network_receipt(
+    spec: &ProjectSpec,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+    resume: bool,
+) -> Result<String, SolveRefusal> {
+    let stage = SolveStage::FlowNetwork;
+    let cancelled = || {
+        if resume {
+            cancelled_resume_refusal(run)
+        } else {
+            cancelled_fresh_refusal(run, Some(stage))
+        }
+    };
+    let phase = SolveEvidencePhase::FlowNetworkSolve;
+    let mut units = 0u64;
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    let cooling = spec.cooling.as_ref().ok_or_else(|| {
+        SolveRefusal::staged(
+            "cli-solve-flow-network-no-cooling",
+            stage,
+            "the project declares no cooling section".to_string(),
+            "declare the cooling section; the flow-network stage consumes declared fans, vents, and leakage",
+        )
+    })?;
+    let fan_system = cooling.fan_system.as_ref().ok_or_else(|| {
+        SolveRefusal::staged(
+            "cli-solve-flow-network-no-fan-system",
+            stage,
+            "the cooling section declares no fan system".to_string(),
+            "declare `(fan-system ...)` under cooling (schema v2); the stage never infers banks, speeds, or topology",
+        )
+    })?;
+    let leakage = cooling.airflow_leakage.as_ref().ok_or_else(|| {
+        SolveRefusal::staged(
+            "cli-solve-flow-network-no-leakage",
+            stage,
+            "the cooling section declares no airflow leakage area".to_string(),
+            "declare `(airflow-leakage :area ...)`; the stage refuses to invent the mandatory leakage branch",
+        )
+    })?;
+    let envelope = spec.envelope.as_ref().ok_or_else(|| {
+        SolveRefusal::staged(
+            "cli-solve-flow-network-no-envelope",
+            stage,
+            "the project declares no operating envelope".to_string(),
+            "declare the envelope; the air density estimate needs ambient pressure and temperature",
+        )
+    })?;
+    units = units.saturating_add(1);
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    // Lossless lowering of the versioned fan-system declaration (bead
+    // frn2i.1): every bank is consumed exactly once and the composite
+    // carries member-bound provenance.
+    let lowered = fs_project::fansystem::lower_fan_system(fan_system).map_err(|error| {
+        SolveRefusal::staged(
+            "cli-solve-flow-network-lowering",
+            stage,
+            format!("fan-system lowering refused: {}", error.detail),
+            error.hint,
+        )
+    })?;
+    work.charge(DERIVATION_ITEM_WORK_BYTES)
+        .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    units = units.saturating_add(1);
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    // Envelope-derived ideal-gas density at the ambient midpoint: a typed,
+    // receipted estimate, never a measurement.
+    let ambient_mid = (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0;
+    let air_density = envelope.pressure.value / (AIR_SPECIFIC_GAS_CONSTANT * ambient_mid);
+    if !(air_density.is_finite() && air_density > 0.0) {
+        return Err(SolveRefusal::staged(
+            "cli-solve-flow-network-density",
+            stage,
+            format!("the envelope yields a non-positive or non-finite air density ({air_density})"),
+            "check ambient temperature and pressure bounds",
+        ));
+    }
+    let density = fs_qty::Density::new(air_density);
+
+    // Vents lower to sharp-edged-orifice loss elements in parallel; the
+    // declared leakage area is the mandatory leakage branch.
+    let mut branches: Vec<fs_airflow::LossNetwork> = Vec::new();
+    for vent in &cooling.vents {
+        if vent.area.dims != fs_project::spec::dims::AREA {
+            return Err(SolveRefusal::staged(
+                "cli-solve-flow-network-vent-units",
+                stage,
+                format!(
+                    "vent `{}` area carries dims {}",
+                    vent.region,
+                    vent.area.dims.unit_string()
+                ),
+                "vent areas must carry m^2 dimensions",
+            ));
+        }
+        let element = fs_airflow::sharp_edged_orifice_loss(
+            format!("vent:{}", vent.region),
+            fs_qty::Area::new(vent.area.value),
+            density,
+        )
+        .map_err(|error| {
+            SolveRefusal::staged(
+                "cli-solve-flow-network-vent",
+                stage,
+                format!("vent `{}` refused: {error}", vent.region),
+                "declare a positive finite vent area",
+            )
+        })?;
+        work.charge(DERIVATION_ITEM_WORK_BYTES)
+            .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+        units = units.saturating_add(1);
+        work.checkpoint(phase, None, units)
+            .map_err(|_| cancelled())?;
+        branches.push(fs_airflow::LossNetwork::Element(element));
+    }
+    if branches.is_empty() {
+        return Err(SolveRefusal::staged(
+            "cli-solve-flow-network-no-vents",
+            stage,
+            "the cooling section declares no vents".to_string(),
+            "declare at least one vent area; the stage never invents flow paths",
+        ));
+    }
+    let primary = if branches.len() == 1 {
+        branches.pop().expect("one branch")
+    } else {
+        fs_airflow::LossNetwork::parallel(branches).map_err(|error| {
+            SolveRefusal::staged(
+                "cli-solve-flow-network-network",
+                stage,
+                format!("vent network composition refused: {error}"),
+                "report this; validated vents cannot fail parallel composition",
+            )
+        })?
+    };
+    let leakage_element = if leakage.area.dims != fs_project::spec::dims::AREA {
+        return Err(SolveRefusal::staged(
+            "cli-solve-flow-network-leakage-units",
+            stage,
+            format!("leakage area carries dims {}", leakage.area.dims.unit_string()),
+            "the leakage area must carry m^2 dimensions",
+        ));
+    } else {
+        fs_airflow::sharp_edged_orifice_loss(
+            "leakage",
+            fs_qty::Area::new(leakage.area.value),
+            density,
+        )
+        .map_err(|error| {
+            SolveRefusal::staged(
+                "cli-solve-flow-network-leakage",
+                stage,
+                format!("leakage lowering refused: {error}"),
+                "declare a positive finite leakage area",
+            )
+        })?
+    };
+    let network = fs_airflow::EnclosureNetwork::new(
+        primary,
+        fs_airflow::LeakageElement::new(leakage_element),
+    );
+    units = units.saturating_add(1);
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    let operating =
+        fs_airflow::solve_operating_point(&lowered.system_bank, &network).map_err(|error| {
+            SolveRefusal::staged(
+                "cli-solve-flow-network-solve",
+                stage,
+                format!("the interval-certified operating-point solve refused: {error}"),
+                "check fan domains against the network's resistance, or revisit the declaration",
+            )
+        })?;
+    work.charge(DERIVATION_ITEM_WORK_BYTES)
+        .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    units = units.saturating_add(1);
+    work.checkpoint(phase, None, units)
+        .map_err(|_| cancelled())?;
+
+    let flow = operating.nominal_root.flow;
+    let pressure_lo = operating.pressure.numerical.lo;
+    let pressure_hi = operating.pressure.numerical.hi;
+    let receipt = format!(
+        "{{\"schema\":{},\"run\":{},\"stage\":{},\"declaration\":{},\
+         \"composite\":{},\"density_estimate\":{},\"vent_count\":{},\
+         \"operating_point\":{{\"flow_lo\":{},\"flow_hi\":{},\"flow_mid\":{},\
+         \"pressure_lo\":{},\"pressure_hi\":{}}},\"leakage_fraction\":{},\
+         \"authority\":{},\"no_claim\":{}}}",
+        json_string(FLOW_NETWORK_RECEIPT_SCHEMA),
+        json_string(&run.to_hex()),
+        json_string(stage.name()),
+        json_string(&lowered.declaration_identity),
+        json_string(&lowered.system_bank.curve().source().identifier),
+        json_string(&format!("ideal-gas:{air_density}")),
+        cooling.vents.len(),
+        json_string(&flow.lo().to_string()),
+        json_string(&flow.hi().to_string()),
+        json_string(&flow.midpoint().to_string()),
+        json_string(&pressure_lo.to_string()),
+        json_string(&pressure_hi.to_string()),
+        json_string(&operating.leakage_fraction.to_string()),
+        json_string(FLOW_NETWORK_AUTHORITY),
+        json_string(FLOW_NETWORK_NO_CLAIM),
+    );
+    work.charge(u64::try_from(receipt.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            Some(stage),
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    work.checkpoint(phase, None, u64::MAX)
+        .map_err(|_| cancelled())?;
+    Ok(receipt)
 }
 
 fn assignment_receipt(

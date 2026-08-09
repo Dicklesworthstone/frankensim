@@ -5,18 +5,20 @@
 
 mod support;
 
+use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::box_grid;
 use fs_conduction::lumped::{
-    BiotGate, LUMPED_BIOT_CEILING, LumpedNetwork, LumpedNode, ValidityVerdict,
-    extract_node_from_steady_rise, solve_gated,
+    BiotGate, LUMPED_BIOT_CEILING, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, LumpedNetwork,
+    LumpedNode, ValidityVerdict, extract_node_from_steady_rise, solve_gated, solve_lumped_enthalpy,
 };
 use fs_conduction::material::ConductivityModel;
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::solve::LinearConfig;
 use fs_conduction::transient::{TransientConfig, TransientProblem, VolumetricHeatCapacity, march};
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_rep_mesh::TetComplex;
 use support::with_cx;
 
@@ -61,6 +63,56 @@ fn node_at(biot: f64) -> LumpedNode {
 
 fn network_at(biot: f64) -> LumpedNetwork {
     LumpedNetwork::new(vec![node_at(biot)], AMBIENT).expect("network admits")
+}
+
+fn phase_curve() -> EquilibriumEnthalpyPhaseCurve {
+    EquilibriumEnthalpyPhaseCurve::try_new(
+        ContentHash([0x71; 32]),
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 300.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 11_300.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 30_000.0,
+                temperature_k: 600.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 11_100.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 55_000.0,
+                temperature_k: 600.0,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 10_600.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 95_000.0,
+                temperature_k: 800.0,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 10_300.0,
+            },
+        ],
+    )
+    .expect("admitted synthetic phase curve")
+}
+
+fn enthalpy_body<'a>(curve: &'a EquilibriumEnthalpyPhaseCurve) -> LumpedEnthalpyBody<'a> {
+    LumpedEnthalpyBody::try_new("phase body", 2.0, 0.01, 0.0, 0.0, 0.001, 35.0, curve)
+        .expect("admitted phase body")
+}
+
+fn enthalpy_config() -> LumpedEnthalpyMarchConfig {
+    LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: 20_000.0,
+        ambient_temperature_k: 300.0,
+        internal_power_w: 500.0,
+        duration_s: 100.0,
+        maximum_step_s: 1.0,
+        maximum_steps: 100,
+        enthalpy_tolerance_j_kg: 1.0e-8,
+    }
 }
 
 /// Mean temperature of the FULL transient at one lumped time constant.
@@ -437,4 +489,106 @@ fn the_reduced_rung_is_deterministic() {
         .expect("solve")
     };
     assert_eq!(solve(), solve());
+}
+
+#[test]
+fn g1_enthalpy_march_conserves_energy_through_the_latent_heat_plateau() {
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let march = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), enthalpy_config())
+            .expect("Biot-admitted phase march")
+    });
+
+    let final_state = march.samples.last().expect("final sample").phase_state;
+    assert_eq!(final_state.phase(), SolidLiquidPhase::SolidLiquid);
+    assert!((final_state.temperature_k() - 600.0).abs() < 1.0e-10);
+    assert!((final_state.specific_enthalpy_j_kg() - 45_000.0).abs() < 1.0e-6);
+    assert!((final_state.liquid_mass_fraction() - 0.6).abs() < 1.0e-10);
+    assert!(
+        march.cumulative_absolute_energy_residual_j < 1.0e-4,
+        "discrete energy ledger drifted by {} J",
+        march.cumulative_absolute_energy_residual_j
+    );
+}
+
+#[test]
+fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
+    let curve = phase_curve();
+    let body = LumpedEnthalpyBody::try_new(
+        "radiatively heated body",
+        0.1,
+        0.02,
+        20.0,
+        0.5,
+        0.001,
+        100.0,
+        &curve,
+    )
+    .expect("admitted body");
+    let config = LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: 20_000.0,
+        ambient_temperature_k: 1_000.0,
+        internal_power_w: 0.0,
+        duration_s: 20.0,
+        maximum_step_s: 0.25,
+        maximum_steps: 80,
+        enthalpy_tolerance_j_kg: 1.0e-8,
+    };
+    let march = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config)
+            .expect("hot ambient march")
+    });
+    let initial = march.samples[0].phase_state;
+    let final_state = march.samples.last().expect("final sample").phase_state;
+    assert_eq!(initial.phase(), SolidLiquidPhase::Solid);
+    assert!(final_state.specific_enthalpy_j_kg() > initial.specific_enthalpy_j_kg());
+    assert!(final_state.liquid_mass_fraction() > 0.0);
+    assert!(
+        march
+            .samples
+            .iter()
+            .skip(1)
+            .all(|sample| sample.convection_into_body_w > 0.0
+                && sample.radiation_into_body_w > 0.0)
+    );
+}
+
+#[test]
+fn g0_enthalpy_march_refuses_invalid_fidelity_or_missing_phase_domain() {
+    let curve = phase_curve();
+    let nonuniform =
+        LumpedEnthalpyBody::try_new("nonuniform body", 1.0, 1.0, 20.0, 0.8, 0.1, 1.0, &curve)
+            .expect("body declaration itself is valid");
+    assert!(
+        with_cx(|cx| solve_lumped_enthalpy(
+            cx,
+            &nonuniform,
+            BiotGate::corpus_default(),
+            enthalpy_config(),
+        ))
+        .is_err()
+    );
+
+    let body = enthalpy_body(&curve);
+    let mut outside = enthalpy_config();
+    outside.initial_specific_enthalpy_j_kg = 90_000.0;
+    outside.internal_power_w = 1.0e6;
+    outside.duration_s = 1.0;
+    outside.maximum_step_s = 1.0;
+    outside.maximum_steps = 1;
+    assert!(
+        with_cx(|cx| solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), outside,))
+            .is_err()
+    );
+
+    let mut unbounded_steps = enthalpy_config();
+    unbounded_steps.duration_s = f64::MAX;
+    unbounded_steps.maximum_step_s = f64::MIN_POSITIVE;
+    assert!(
+        with_cx(
+            |cx| solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), unbounded_steps,)
+        )
+        .is_err()
+    );
 }

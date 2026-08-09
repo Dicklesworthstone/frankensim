@@ -697,7 +697,9 @@ fn read_project_for_import(
         ));
     }
     let decoded = match syntax {
-        ProjectSyntax::Sexpr => fs_project::parse_sexpr_migrating(&source).map(|migrated| migrated.decoded),
+        ProjectSyntax::Sexpr => {
+            fs_project::parse_sexpr_migrating(&source).map(|migrated| migrated.decoded)
+        }
         ProjectSyntax::Json => fs_project::parse_json(&source),
     }
     .map_err(|error| import_refusal(mode, &label, error.code, error.detail, error.hint))?;
@@ -919,7 +921,9 @@ fn read_project_for_solve(
         ));
     }
     let decoded = match syntax {
-        ProjectSyntax::Sexpr => fs_project::parse_sexpr_migrating(&source).map(|migrated| migrated.decoded),
+        ProjectSyntax::Sexpr => {
+            fs_project::parse_sexpr_migrating(&source).map(|migrated| migrated.decoded)
+        }
         ProjectSyntax::Json => fs_project::parse_json(&source),
     }
     .map_err(|error| {
@@ -1397,7 +1401,9 @@ fn validate_loaded(
     mode: OutputMode,
 ) -> CommandOutput {
     let decoded = match syntax {
-        ProjectSyntax::Sexpr => fs_project::parse_sexpr_migrating(source).map(|migrated| migrated.decoded),
+        ProjectSyntax::Sexpr => {
+            fs_project::parse_sexpr_migrating(source).map(|migrated| migrated.decoded)
+        }
         ProjectSyntax::Json => fs_project::parse_json(source),
     };
     let decoded = match decoded {

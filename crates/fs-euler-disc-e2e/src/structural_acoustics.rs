@@ -2497,10 +2497,8 @@ mod tests {
             thickness_m: 0.006,
             edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
         };
-        let identity_orientation =
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let principal_one_into_axial =
-            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+        let identity_orientation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let principal_one_into_axial = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
         let (radial_stiff, axial_stiff) = with_cx(|cx| {
             (
                 profile
@@ -2527,14 +2525,12 @@ mod tests {
             axial_stiff.elastic_material.stiffness_mandel_pa()
         );
 
-        let radial_basis = with_cx(|cx| {
-            build_structural_modal_basis(&coarse_modal_request(&radial_stiff), cx)
-        })
-        .unwrap();
-        let axial_basis = with_cx(|cx| {
-            build_structural_modal_basis(&coarse_modal_request(&axial_stiff), cx)
-        })
-        .unwrap();
+        let radial_basis =
+            with_cx(|cx| build_structural_modal_basis(&coarse_modal_request(&radial_stiff), cx))
+                .unwrap();
+        let axial_basis =
+            with_cx(|cx| build_structural_modal_basis(&coarse_modal_request(&axial_stiff), cx))
+                .unwrap();
         assert_ne!(radial_basis.identity, axial_basis.identity);
         assert!(
             radial_basis
