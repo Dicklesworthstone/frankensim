@@ -1171,6 +1171,7 @@ impl ProductionCouplingModel {
         normal_state: NormalPatchEmbedState,
         gas_channel_state: GasChannelState,
         maximum_tangential_work_keys: usize,
+        strict_sequential_tangential_work: bool,
         static_contact_force_n: f64,
         maximum_relative_force_mismatch: f64,
         cx: &Cx<'_>,
@@ -1226,14 +1227,21 @@ impl ProductionCouplingModel {
             });
         }
         let normal_patch = normal_patch_view(&normal, &patch_kinematics)?;
-        let tangential_state = self
-            .tangential_adapter
-            .initial_state(
+        let tangential_state = if strict_sequential_tangential_work {
+            self.tangential_adapter.initial_state_strict_sequence(
+                &normal_patch,
+                &input.tangential.interface,
+                maximum_tangential_work_keys,
+                input.tangential.work_ownership.clone(),
+            )
+        } else {
+            self.tangential_adapter.initial_state(
                 &normal_patch,
                 &input.tangential.interface,
                 maximum_tangential_work_keys,
             )
-            .map_err(ProductionCouplingError::Tangential)?;
+        }
+        .map_err(ProductionCouplingError::Tangential)?;
         self.initial_checkpoint_with_base_state(
             disc_state,
             normal_state,

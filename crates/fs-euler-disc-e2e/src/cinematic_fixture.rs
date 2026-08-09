@@ -2176,7 +2176,7 @@ impl FixtureProductionMechanics {
         let patch_id = input.patch.patch.patch_identity.as_str().to_owned();
         input.tangential.work_ownership = GeneralizedWorkOwnership::new(
             patch_id.clone(),
-            format!("cinematic/tangent-interval-{interval}"),
+            interval.to_string(),
             "longitudinal",
             "lateral",
             "spin",
@@ -2505,7 +2505,16 @@ fn build_fixture_production_mechanics(
     )
     .map_err(pipeline)?;
     let temperature_k = config.disc.material.temperature_k;
-    let normal_state = NormalPatchEmbedState::new(0.0, 1.0).map_err(pipeline)?;
+    let normal_state = NormalPatchEmbedState::new_strict_sequence(
+        0.0,
+        1.0,
+        usize::try_from(maximum_steps).map_err(|_| {
+            CinematicFixtureError::Pipeline(
+                "normal-contact step budget exceeds platform capacity".into(),
+            )
+        })?,
+    )
+    .map_err(pipeline)?;
     let normal = EulerNormalContactInput {
         identity: NormalContactIdentity {
             case_id: model.identity.case_id.clone(),
@@ -2707,7 +2716,7 @@ fn build_fixture_production_mechanics(
     };
     let tangent_ownership = GeneralizedWorkOwnership::new(
         patch_identity_string.clone(),
-        "cinematic/tangent-interval-1",
+        "1",
         "longitudinal",
         "lateral",
         "spin",
@@ -2801,7 +2810,7 @@ fn build_fixture_production_mechanics(
             static_state,
             normal_state,
             GasChannelState::ExteriorFreeGas(
-                EulerExternalAirWorkState::new(
+                EulerExternalAirWorkState::new_strict_sequence(
                     "cinematic/exterior-work",
                     usize::try_from(maximum_steps).map_err(|_| {
                         CinematicFixtureError::Pipeline(
@@ -2816,6 +2825,7 @@ fn build_fixture_production_mechanics(
                     "tangential step budget exceeds platform capacity".into(),
                 )
             })?,
+            true,
             static_force_n,
             mechanics.static_preload_relative_tolerance,
             cx,

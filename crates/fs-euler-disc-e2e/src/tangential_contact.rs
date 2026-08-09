@@ -232,39 +232,37 @@ impl EulerTangentialContactAdapter {
             vec3(request.patch_kinematics.tangent_basis.normal_world),
             vec3(request.patch_kinematics.tangent_basis.first_world),
         )?;
-        let (longitudinal, lateral, reference_rolling_speed_m_per_s) = match request
-            .patch_kinematics
-            .creepage
-        {
-            Creepage::Available {
-                longitudinal,
-                lateral,
-                reference_rolling_speed_m_per_s,
-            } => (longitudinal, lateral, reference_rolling_speed_m_per_s),
-            Creepage::Unavailable {
-                reference_rolling_speed_m_per_s,
-                minimum_reference_rolling_speed_m_per_s,
-            } => {
-                // At an instantaneous no-slip support point both material
-                // velocities can be zero even while the geometric contact
-                // locus rolls across the bodies. The normalized ratio is then
-                // 0/0, but its stationary limit is exactly zero creepage. Do
-                // not erase a resolved finite slip: only admit this limit when
-                // the relative tangent speed is inside the same declared
-                // low-speed threshold that made normalization unavailable.
-                let relative_speed_m_per_s = request
-                    .patch_kinematics
-                    .tangential_relative_velocity
-                    .squared_norm()
-                    .sqrt();
-                if !(relative_speed_m_per_s.is_finite()
-                    && relative_speed_m_per_s <= minimum_reference_rolling_speed_m_per_s)
-                {
-                    return Err(TangentialContactError::CreepageUnavailable);
+        let (longitudinal, lateral, reference_rolling_speed_m_per_s) =
+            match request.patch_kinematics.creepage {
+                Creepage::Available {
+                    longitudinal,
+                    lateral,
+                    reference_rolling_speed_m_per_s,
+                } => (longitudinal, lateral, reference_rolling_speed_m_per_s),
+                Creepage::Unavailable {
+                    reference_rolling_speed_m_per_s,
+                    minimum_reference_rolling_speed_m_per_s,
+                } => {
+                    // At an instantaneous no-slip support point both material
+                    // velocities can be zero even while the geometric contact
+                    // locus rolls across the bodies. The normalized ratio is then
+                    // 0/0, but its stationary limit is exactly zero creepage. Do
+                    // not erase a resolved finite slip: only admit this limit when
+                    // the relative tangent speed is inside the same declared
+                    // low-speed threshold that made normalization unavailable.
+                    let relative_speed_m_per_s = request
+                        .patch_kinematics
+                        .tangential_relative_velocity
+                        .squared_norm()
+                        .sqrt();
+                    if !(relative_speed_m_per_s.is_finite()
+                        && relative_speed_m_per_s <= minimum_reference_rolling_speed_m_per_s)
+                    {
+                        return Err(TangentialContactError::CreepageUnavailable);
+                    }
+                    (0.0, 0.0, reference_rolling_speed_m_per_s)
                 }
-                (0.0, 0.0, reference_rolling_speed_m_per_s)
-            }
-        };
+            };
         let kinematics = PartialSlipKinematics {
             creepage: [longitudinal, lateral],
             rolling_speed_mps: reference_rolling_speed_m_per_s,
@@ -716,9 +714,7 @@ fn nonblank(value: &str, field: &'static str) -> Result<(), TangentialContactErr
 fn key_ledger_error(error: ExactlyOnceKeyError) -> TangentialContactError {
     match error {
         ExactlyOnceKeyError::Duplicate => TangentialContactError::DuplicateWorkOwnership,
-        ExactlyOnceKeyError::OutOfSequence => {
-            TangentialContactError::OutOfSequenceWorkOwnership
-        }
+        ExactlyOnceKeyError::OutOfSequence => TangentialContactError::OutOfSequenceWorkOwnership,
         ExactlyOnceKeyError::CapacityExceeded { maximum } => {
             TangentialContactError::WorkOwnershipCapacityExceeded { max: maximum }
         }

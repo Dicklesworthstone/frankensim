@@ -6,13 +6,13 @@
 //! target-fitted terms have no representation here.
 
 use core::fmt;
-use std::collections::BTreeSet;
 
 use fs_flux::{
     AlternativeWrenchSet, BodyKinematics, CandidateWrench, DiscGeometry, DiscPose, GasProperties,
     GasPropertyCard, ReducedAeroError, ReducedAeroInput, ReducedAeroModel, SurfaceRoughness, Vec3,
     WorkReceipt, WorkWindow,
 };
+use fs_tribo::{ExactlyOnceKeyError, ExactlyOnceKeyLedger};
 
 const UNIT_TOLERANCE: f64 = 1.0e-12;
 
@@ -211,6 +211,8 @@ pub enum ExternalAirError {
     GenericRefusal { detail: ReducedAeroError },
     /// A caller tried to stage exterior work already accepted in this state.
     DuplicateAcceptedWork { exchange_key: u64 },
+    /// A fixed-memory transaction supplied a skipped or reordered exchange key.
+    OutOfSequenceAcceptedWork { exchange_key: u64 },
     /// The caller-declared bounded exactly-once ledger has no capacity for a
     /// new accepted exterior-work interval.
     AcceptedWorkCapacityExceeded { maximum: usize },
@@ -332,8 +334,7 @@ impl EulerExternalAirWorkWindow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EulerExternalAirWorkState {
     state_id: String,
-    committed_exchange_keys: BTreeSet<u64>,
-    maximum_committed_exchange_keys: usize,
+    exchange_ledger: ExactlyOnceKeyLedger<u64>,
     body_work_j: f64,
     relative_dissipation_j: f64,
     committed_version: u64,
@@ -357,8 +358,28 @@ impl EulerExternalAirWorkState {
         }
         Ok(Self {
             state_id,
-            committed_exchange_keys: BTreeSet::new(),
-            maximum_committed_exchange_keys,
+            exchange_ledger: ExactlyOnceKeyLedger::retained_set(maximum_committed_exchange_keys)
+                .map_err(exactly_once_error)?,
+            body_work_j: 0.0,
+            relative_dissipation_j: 0.0,
+            committed_version: 0,
+        })
+    }
+
+    /// Creates a fixed-memory ledger that accepts `1, 2, ...` in order.
+    pub fn new_strict_sequence(
+        state_id: impl Into<String>,
+        maximum_committed_exchange_keys: usize,
+    ) -> Result<Self, ExternalAirError> {
+        let state_id = state_id.into();
+        validate_identity(&state_id, "exterior_work_state_id")?;
+        Ok(Self {
+            state_id,
+            exchange_ledger: ExactlyOnceKeyLedger::strict_sequence(
+                1,
+                maximum_committed_exchange_keys,
+            )
+            .map_err(exactly_once_error)?,
             body_work_j: 0.0,
             relative_dissipation_j: 0.0,
             committed_version: 0,
@@ -375,7 +396,7 @@ impl EulerExternalAirWorkState {
     /// Maximum accepted exchange keys retained by this checkpoint.
     #[must_use]
     pub const fn maximum_committed_exchange_keys(&self) -> usize {
-        self.maximum_committed_exchange_keys
+        self.exchange_ledger.maximum_committed()
     }
 
     /// Total accepted work into the body [J]. Moving ambient gas may make this
@@ -407,14 +428,21 @@ impl EulerExternalAirWorkState {
         duration_s: f64,
         candidate: &EulerExternalAirCandidate,
     ) -> Result<EulerExternalAirWorkProposal, ExternalAirError> {
-        if self.committed_exchange_keys.contains(&exchange_key) {
-            return Err(ExternalAirError::DuplicateAcceptedWork { exchange_key });
-        }
-        if self.committed_exchange_keys.len() >= self.maximum_committed_exchange_keys {
-            return Err(ExternalAirError::AcceptedWorkCapacityExceeded {
-                maximum: self.maximum_committed_exchange_keys,
-            });
-        }
+        let strict_successor = self
+            .exchange_ledger
+            .strict_next_key()
+            .map(|_| {
+                exchange_key
+                    .checked_add(1)
+                    .ok_or(ExternalAirError::InvalidInput {
+                        field: "exterior work exchange-key successor",
+                    })
+            })
+            .transpose()?;
+        let exchange_ledger = self
+            .exchange_ledger
+            .advance(&exchange_key, strict_successor)
+            .map_err(|error| exactly_once_prepare_error(error, exchange_key))?;
         let mut validator = WorkWindow::default();
         let receipt = validator
             .record_once(exchange_key, duration_s, &candidate.world_wrench)
@@ -432,8 +460,6 @@ impl EulerExternalAirWorkState {
                 .ok_or(ExternalAirError::InvalidInput {
                     field: "accepted exterior work version",
                 })?;
-        let mut committed_exchange_keys = self.committed_exchange_keys.clone();
-        committed_exchange_keys.insert(exchange_key);
         Ok(EulerExternalAirWorkProposal {
             receipt,
             correlation_id: candidate.world_wrench.correlation.id.clone(),
@@ -441,8 +467,7 @@ impl EulerExternalAirWorkState {
             prior_state: self.clone(),
             next_state: Self {
                 state_id: self.state_id.clone(),
-                committed_exchange_keys,
-                maximum_committed_exchange_keys: self.maximum_committed_exchange_keys,
+                exchange_ledger,
                 body_work_j,
                 relative_dissipation_j,
                 committed_version,
@@ -528,6 +553,27 @@ fn validate_identity(value: &str, field: &'static str) -> Result<(), ExternalAir
         return Err(ExternalAirError::InvalidIdentity { field });
     }
     Ok(())
+}
+
+fn exactly_once_error(error: ExactlyOnceKeyError) -> ExternalAirError {
+    exactly_once_prepare_error(error, 0)
+}
+
+fn exactly_once_prepare_error(error: ExactlyOnceKeyError, exchange_key: u64) -> ExternalAirError {
+    match error {
+        ExactlyOnceKeyError::Duplicate => ExternalAirError::DuplicateAcceptedWork { exchange_key },
+        ExactlyOnceKeyError::OutOfSequence => {
+            ExternalAirError::OutOfSequenceAcceptedWork { exchange_key }
+        }
+        ExactlyOnceKeyError::CapacityExceeded { maximum } => {
+            ExternalAirError::AcceptedWorkCapacityExceeded { maximum }
+        }
+        ExactlyOnceKeyError::ZeroCapacity | ExactlyOnceKeyError::MissingSuccessor => {
+            ExternalAirError::InvalidInput {
+                field: "exterior work exactly-once ledger",
+            }
+        }
+    }
 }
 
 fn dot(left: Vec3, right: Vec3) -> f64 {
