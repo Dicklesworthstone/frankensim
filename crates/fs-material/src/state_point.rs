@@ -82,6 +82,24 @@ pub const VISIBLE_COMPLEX_IOR_K_PROPERTIES: [&str; 9] = [
     "optical_k_730nm",
     "optical_k_780nm",
 ];
+/// Canonical material-card key for the dimensionless Cauchy `A` coefficient.
+pub const VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY: &str = "optical_cauchy_a";
+/// Canonical material-card key for the Cauchy `B` coefficient in SI m2.
+pub const VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY: &str = "optical_cauchy_b_m2";
+/// Canonical material-card key for the Cauchy `C` coefficient in SI m4.
+pub const VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY: &str = "optical_cauchy_c_m4";
+/// Canonical material-card keys for linear-RGB reference transmittance.
+pub const VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES: [&str; 3] = [
+    "optical_transmittance_linear_r",
+    "optical_transmittance_linear_g",
+    "optical_transmittance_linear_b",
+];
+/// Canonical material-card key for the Beer-Lambert reference distance [m].
+pub const VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY: &str =
+    "optical_transmittance_reference_distance_m";
+
+const LENGTH_SQUARED_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
+const LENGTH_FOURTH_DIMS: Dims = Dims([4, 0, 0, 0, 0, 0]);
 
 /// Numerical domain a resolved scalar must satisfy before a solver may use it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -980,6 +998,46 @@ pub struct VisibleConductorStatePoint {
     samples: [VisibleComplexIndexSample; 9],
 }
 
+/// Visible homogeneous-dielectric response resolved at one material state.
+///
+/// Cauchy coefficients are retained in SI (`B` in m2, `C` in m4). The
+/// reference transmittance and distance define the homogeneous Beer-Lambert
+/// absorption model consumed by the spectral renderer. Surface roughness is
+/// deliberately not a bulk-material property and is bound separately.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibleDielectricStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    cauchy_coefficients_si: [f64; 3],
+    reference_transmittance_linear_rgb: [f64; 3],
+    reference_distance_m: f64,
+}
+
+impl VisibleDielectricStatePoint {
+    /// Complete card/state/property-use bundle.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Cauchy `(A, B_m2, C_m4)` coefficients.
+    #[must_use]
+    pub const fn cauchy_coefficients_si(&self) -> [f64; 3] {
+        self.cauchy_coefficients_si
+    }
+
+    /// Linear-RGB transmittance at [`Self::reference_distance_m`].
+    #[must_use]
+    pub const fn reference_transmittance_linear_rgb(&self) -> [f64; 3] {
+        self.reference_transmittance_linear_rgb
+    }
+
+    /// Beer-Lambert reference distance [m].
+    #[must_use]
+    pub const fn reference_distance_m(&self) -> f64 {
+        self.reference_distance_m
+    }
+}
+
 impl VisibleConductorStatePoint {
     /// Complete card/state/property-use bundle.
     #[must_use]
@@ -1033,6 +1091,73 @@ pub fn resolve_visible_conductor_state_point(
             .value_si(),
     });
     Ok(VisibleConductorStatePoint { resolved, samples })
+}
+
+/// Resolve a homogeneous visible dielectric at one exact material state.
+///
+/// No chemistry name selects an optical model. All seven properties must be
+/// present on one immutable material card and valid at the same query point.
+/// Transmittance is admitted only in `(0, 1]`; malformed or partial optical
+/// data refuses atomically rather than falling back to a visual preset.
+pub fn resolve_visible_dielectric_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<VisibleDielectricStatePoint, MaterialStatePointError> {
+    let mut requirements = Vec::with_capacity(7);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+        Dims::NONE,
+        ScalarAdmissibility::StrictlyPositive,
+    )?);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+        LENGTH_SQUARED_DIMS,
+        ScalarAdmissibility::NonNegative,
+    )?);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+        LENGTH_FOURTH_DIMS,
+        ScalarAdmissibility::NonNegative,
+    )?);
+    for name in VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name,
+            Dims::NONE,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+    }
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+        Dims([1, 0, 0, 0, 0, 0]),
+        ScalarAdmissibility::StrictlyPositive,
+    )?);
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical visible-dielectric requirement was resolved")
+            .value_si()
+    };
+    let reference_transmittance_linear_rgb = VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES.map(value);
+    if reference_transmittance_linear_rgb
+        .iter()
+        .any(|value| *value > 1.0)
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "visible_dielectric_reference_transmittance",
+        });
+    }
+    Ok(VisibleDielectricStatePoint {
+        cauchy_coefficients_si: [
+            value(VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY),
+            value(VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY),
+            value(VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY),
+        ],
+        reference_transmittance_linear_rgb,
+        reference_distance_m: value(VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY),
+        resolved,
+    })
 }
 
 impl IsotropicSolidStatePoint {
@@ -1398,6 +1523,67 @@ mod tests {
         .unwrap()
     }
 
+    fn dielectric_optical_card(red_transmittance: f64) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for property in [
+            claim(
+                VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+                Dims::NONE,
+                vec![(250.0, 1.50), (600.0, 1.48)],
+                600.0,
+            ),
+            claim(
+                VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+                LENGTH_SQUARED_DIMS,
+                vec![(250.0, 4.2e-15), (600.0, 4.0e-15)],
+                600.0,
+            ),
+            claim(
+                VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+                LENGTH_FOURTH_DIMS,
+                vec![(250.0, 0.0), (600.0, 0.0)],
+                600.0,
+            ),
+            claim(
+                VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[0],
+                Dims::NONE,
+                vec![(250.0, red_transmittance), (600.0, red_transmittance)],
+                600.0,
+            ),
+            claim(
+                VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[1],
+                Dims::NONE,
+                vec![(250.0, 0.99), (600.0, 0.97)],
+                600.0,
+            ),
+            claim(
+                VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[2],
+                Dims::NONE,
+                vec![(250.0, 0.96), (600.0, 0.92)],
+                600.0,
+            ),
+            claim(
+                VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+                Dims([1, 0, 0, 0, 0, 0]),
+                vec![(250.0, 0.01), (600.0, 0.01)],
+                600.0,
+            ),
+        ] {
+            claims.insert_claim(property).unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "test-visible-dielectric".to_owned(),
+                phase: "solid".to_owned(),
+                process: "polished".to_owned(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn orthotropic_card(poisson: [f64; 3]) -> MaterialCard {
         let mut claims = ClaimSet::new();
         claims
@@ -1660,6 +1846,35 @@ mod tests {
             Err(MaterialStatePointError::Query {
                 source: MatDbError::NoClaimInDomain { .. },
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_visible_dielectric_is_state_resolved_and_refuses_gain() {
+        let card = dielectric_optical_card(0.98);
+        let resolved = resolve_visible_dielectric_state_point(
+            &card,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("complete homogeneous dielectric state resolves");
+        assert_eq!(resolved.cauchy_coefficients_si(), [1.49, 4.1e-15, 0.0]);
+        assert_eq!(
+            resolved.reference_transmittance_linear_rgb(),
+            [0.98, 0.98, 0.94]
+        );
+        assert_eq!(resolved.reference_distance_m(), 0.01);
+        assert_eq!(resolved.resolved().card_identity(), card.content_hash());
+
+        assert!(matches!(
+            resolve_visible_dielectric_state_point(
+                &dielectric_optical_card(1.01),
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "visible_dielectric_reference_transmittance"
             })
         ));
     }

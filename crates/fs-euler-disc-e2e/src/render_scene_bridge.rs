@@ -15,7 +15,7 @@ use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, Point3, Vec3};
 use fs_material::state_point::{
     IsotropicElasticStatePoint, IsotropicSolidStatePoint, ResolvedMaterialStatePoint,
-    VisibleConductorStatePoint,
+    VisibleConductorStatePoint, VisibleDielectricStatePoint,
 };
 use fs_math::det;
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
@@ -29,7 +29,8 @@ use fs_render::conductor::{
     ConductorSurface,
 };
 use fs_render::dielectric::{
-    BeerLambertParameters, DielectricGlass, DielectricSurface, GlassProvenance,
+    BeerLambertAbsorption, BeerLambertParameters, CauchyIor, DielectricError, DielectricGlass,
+    DielectricSurface, GlassProvenance,
 };
 use fs_render::instances::{GeometryInstance, InstanceError, RigidTransform, SharedGeometry};
 use fs_render::lighting::{EnvironmentMap, LightingError};
@@ -288,6 +289,100 @@ impl EulerDiscMaterialStateBinding {
         let material_card_identity = mechanical.card_identity();
         let mut hasher =
             DomainHasher::new("org.frankensim.euler-disc.resolved-conductor-material-binding.v1");
+        for identity in [
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+        ] {
+            hasher.update(identity.as_bytes());
+        }
+        hash_material(&mut hasher, appearance);
+        Ok(Self {
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+            appearance,
+            identity: hasher.finalize(),
+        })
+    }
+
+    /// Resolve a homogeneous dielectric appearance from one evidence-bearing
+    /// bulk material state and an explicit surface finish.
+    ///
+    /// `roughness_alpha=None` selects a smooth dielectric boundary. The Cauchy
+    /// dispersion and Beer-Lambert absorption remain bulk optical properties;
+    /// no chemistry label selects either law.
+    pub fn try_dielectric(
+        mechanical: &IsotropicSolidStatePoint,
+        optical: &VisibleDielectricStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        Self::try_dielectric_resolved(
+            mechanical.resolved(),
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )
+    }
+
+    /// Dielectric binding for the minimal elastic state consumed by
+    /// structural modes and acoustic radiation.
+    pub fn try_dielectric_elastic(
+        mechanical: &IsotropicElasticStatePoint,
+        optical: &VisibleDielectricStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        Self::try_dielectric_resolved(
+            mechanical.resolved(),
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )
+    }
+
+    fn try_dielectric_resolved(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &VisibleDielectricStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        let optical_resolved = optical.resolved();
+        if mechanical.material() != optical_resolved.material()
+            || mechanical.card_identity() != optical_resolved.card_identity()
+            || mechanical.query_point() != optical_resolved.query_point()
+        {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "mechanical and optical properties must resolve from one card and state point",
+            ));
+        }
+        if surface_state_identity == ContentHash([0; 32]) {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "surface-state identity must not be zero",
+            ));
+        }
+        let [a, b_m2, c_m4] = optical.cauchy_coefficients_si();
+        let glass = DielectricGlass::new(
+            CauchyIor::try_new(a, b_m2 * 1.0e12, c_m4 * 1.0e24)?,
+            BeerLambertAbsorption::try_from_rgb_transmittance(
+                optical.reference_transmittance_linear_rgb(),
+                optical.reference_distance_m(),
+            )?,
+            GlassProvenance::Custom,
+        );
+        let surface = match roughness_alpha {
+            Some(alpha) => DielectricSurface::try_rough(alpha)?,
+            None => DielectricSurface::POLISHED,
+        };
+        let appearance = EulerMaterialStyle::Dielectric { glass, surface };
+        let mechanical_state_identity = mechanical.identity();
+        let optical_state_identity = optical_resolved.identity();
+        let material_card_identity = mechanical.card_identity();
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-disc.resolved-dielectric-material-binding.v1");
         for identity in [
             mechanical_state_identity,
             optical_state_identity,
@@ -1659,6 +1754,8 @@ pub enum EulerSceneError {
     MotionBounds(MotionBoundsError),
     /// Spectral conductor data or surface response refused.
     Conductor(ConductorError),
+    /// Spectral dielectric data or surface response refused.
+    Dielectric(DielectricError),
 }
 
 impl fmt::Display for EulerSceneError {
@@ -1720,6 +1817,12 @@ impl From<MotionBoundsError> for EulerSceneError {
 impl From<ConductorError> for EulerSceneError {
     fn from(error: ConductorError) -> Self {
         Self::Conductor(error)
+    }
+}
+
+impl From<DielectricError> for EulerSceneError {
+    fn from(error: DielectricError) -> Self {
+        Self::Dielectric(error)
     }
 }
 
