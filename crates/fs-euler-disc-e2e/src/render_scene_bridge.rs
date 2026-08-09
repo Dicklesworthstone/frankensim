@@ -188,10 +188,11 @@ pub enum EulerMaterialStyle {
 }
 
 /// Exact cross-domain binding from one resolved bulk material state to its
-/// mechanical and visible-conductor property bundles.
+/// mechanical and visible optical-property bundles.
 ///
 /// The renderer consumes the appearance while this receipt prevents a scene
-/// from pairing (for example) copper optics with steel density/elasticity.
+/// from pairing (for example) copper optics with steel density/elasticity or
+/// ruby dispersion with an unrelated transparent solid.
 /// Surface finish remains an explicit independent state because polishing,
 /// oxidation, wear, and contamination are not implied by bulk chemistry.
 #[derive(Clone, Copy, Debug, PartialEq)]
