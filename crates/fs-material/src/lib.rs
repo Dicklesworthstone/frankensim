@@ -21,6 +21,7 @@ pub mod gas;
 pub mod graph;
 pub mod hyper;
 pub mod identifiability;
+pub mod phase;
 pub mod plastic;
 pub mod state_point;
 pub mod tensor;

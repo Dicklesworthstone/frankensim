@@ -28,13 +28,26 @@ homogenization, the P2 milestone.
   card, state point, selected values, consumer domains, and receipts into one
   identity. It never infers properties from chemistry names or substitutes a
   representative material.
-- `resolve_isotropic_solid_state_point` is the first reusable capability rung:
-  density, Young's modulus, Poisson ratio, and yield stress at one state point.
-  Its two-material reduced modulus uses the standard ordered Hertz half-space
-  compliance and binds both resolved state identities. Out-of-range
-  temperature or phase-dependent data refuse through the material query; this
-  module does not silently extend a solid card through melting or select a new
-  phase/model.
+- `resolve_isotropic_elastic_state_point` requests only density, Young's
+  modulus, and Poisson ratio for linear vibration/elasticity. The distinct
+  `resolve_isotropic_solid_state_point` additionally requires yield stress for
+  contact/plastic admission; consumers do not need to fabricate an unrelated
+  yield datum merely to compute modes. `resolve_orthotropic_elastic_state_point`
+  atomically resolves density plus the nine principal-axis engineering
+  constants and refuses a non-positive-definite compliance. Spatial material
+  orientation remains an independently identity-bound field owned by the
+  geometry/solid consumer; no chemistry name implies isotropy or a grain axis.
+  The two-material reduced modulus on the contact-capable isotropic rung uses
+  the standard ordered Hertz half-space compliance and binds both resolved
+  state identities. Out-of-range temperature or phase-dependent data refuse
+  through the material query; this module does not silently extend a solid
+  card through melting or select a new phase/model.
+- `phase::EquilibriumEnthalpyPhaseCurve` is the generic phase-state ingress:
+  source-provided monotone specific-enthalpy knots resolve temperature, bulk
+  density, and solid/liquid mass fractions, including an isothermal
+  latent-heat plateau. It contains no material-name presets and never
+  extrapolates. It is not a heat-transfer, deformation, remeshing,
+  free-surface, acoustic, or optical solver.
 - `resolve_interface_state_point` applies the same atomic query contract to an
   ordered `InterfaceSystemCard`. Its identity therefore includes both surface
   material states and texture frames, medium, third body, environment,

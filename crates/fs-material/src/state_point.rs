@@ -18,6 +18,8 @@ use fs_matdb::{
 };
 use fs_qty::{Density, Dims, Pressure};
 
+use crate::elastic::OrthotropicElastic;
+
 /// Identity domain for a complete resolved material state-point bundle.
 pub const MATERIAL_STATE_POINT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-material.state-point.v1";
 /// Identity domain for a complete resolved ordered-interface property bundle.
@@ -36,6 +38,15 @@ pub const YOUNG_MODULUS_PROPERTY: &str = "young_modulus";
 pub const POISSON_RATIO_PROPERTY: &str = "poisson_ratio";
 /// Canonical property key for uniaxial yield stress in pascals.
 pub const YIELD_STRESS_PROPERTY: &str = "yield_stress";
+/// Canonical orthotropic Young's-modulus keys along material axes 1, 2, 3.
+pub const ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES: [&str; 3] =
+    ["young_modulus_1", "young_modulus_2", "young_modulus_3"];
+/// Canonical orthotropic major Poisson-ratio keys `(nu12, nu13, nu23)`.
+pub const ORTHOTROPIC_POISSON_RATIO_PROPERTIES: [&str; 3] =
+    ["poisson_ratio_12", "poisson_ratio_13", "poisson_ratio_23"];
+/// Canonical orthotropic shear-modulus keys `(G12, G23, G31)`.
+pub const ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES: [&str; 3] =
+    ["shear_modulus_12", "shear_modulus_23", "shear_modulus_31"];
 /// Fixed visible wavelengths used by the current evidence-bearing complex-IOR
 /// bridge [vacuum nm]. The physics value is the sampled constitutive response;
 /// this grid is a bounded transport convention, not a material preset.
@@ -497,6 +508,185 @@ fn resolve_scalar_property_set(
     Ok((query_point, properties))
 }
 
+/// The three scalar properties needed by isotropic linear elasticity.
+///
+/// Yield is deliberately absent: free-vibration eigenmodes need density and
+/// the tangent stiffness, while contact/plastic admission additionally needs
+/// a yield surface. Requiring unrelated data would prevent valid acoustic
+/// calculations; silently inventing it would be worse.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IsotropicElasticStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    density_kg_m3: f64,
+    young_modulus_pa: f64,
+    poisson_ratio: f64,
+}
+
+impl IsotropicElasticStatePoint {
+    /// Complete evidence-bearing property bundle.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Density at the queried state [kg/m3].
+    #[must_use]
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+
+    /// Young's modulus at the queried state [Pa].
+    #[must_use]
+    pub const fn young_modulus_pa(&self) -> f64 {
+        self.young_modulus_pa
+    }
+
+    /// Isotropic Poisson ratio.
+    #[must_use]
+    pub const fn poisson_ratio(&self) -> f64 {
+        self.poisson_ratio
+    }
+}
+
+/// Resolve density and isotropic tangent elasticity at one exact state point.
+pub fn resolve_isotropic_elastic_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<IsotropicElasticStatePoint, MaterialStatePointError> {
+    let requirements = [
+        ScalarPropertyRequirement::try_new(
+            DENSITY_PROPERTY,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?,
+        ScalarPropertyRequirement::try_new(
+            POISSON_RATIO_PROPERTY,
+            Dims::NONE,
+            ScalarAdmissibility::OpenInterval {
+                lower: -1.0,
+                upper: 0.5,
+            },
+        )?,
+        ScalarPropertyRequirement::try_new(
+            YOUNG_MODULUS_PROPERTY,
+            Pressure::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?,
+    ];
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical isotropic-elastic requirement was resolved")
+            .value_si()
+    };
+    Ok(IsotropicElasticStatePoint {
+        density_kg_m3: value(DENSITY_PROPERTY),
+        young_modulus_pa: value(YOUNG_MODULUS_PROPERTY),
+        poisson_ratio: value(POISSON_RATIO_PROPERTY),
+        resolved,
+    })
+}
+
+/// Evidence-bearing orthotropic tangent elasticity in its material frame.
+///
+/// Orientation is intentionally not part of this bulk property bundle. A
+/// geometry/material-field consumer must supply and identity-bind the mapping
+/// from material axes to its spatial frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrthotropicElasticStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    density_kg_m3: f64,
+    law: OrthotropicElastic,
+}
+
+impl OrthotropicElasticStatePoint {
+    /// Complete evidence-bearing property bundle.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Density at the queried state [kg/m3].
+    #[must_use]
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+
+    /// Admitted principal-axis orthotropic constitutive law.
+    #[must_use]
+    pub const fn law(&self) -> &OrthotropicElastic {
+        &self.law
+    }
+}
+
+/// Resolve a complete principal-axis orthotropic tangent at one state point.
+///
+/// All ten scalars resolve atomically from one immutable card and query point.
+/// The derived compliance must be positive definite; no material name selects
+/// anisotropy and no isotropic fallback exists.
+pub fn resolve_orthotropic_elastic_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    strain_limit: f64,
+) -> Result<OrthotropicElasticStatePoint, MaterialStatePointError> {
+    if !(strain_limit.is_finite() && strain_limit > 0.0) {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "orthotropic_linear_strain_limit",
+        });
+    }
+    let mut requirements = Vec::with_capacity(10);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        DENSITY_PROPERTY,
+        Density::DIMS,
+        ScalarAdmissibility::StrictlyPositive,
+    )?);
+    for property in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            property,
+            Pressure::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+    }
+    for property in ORTHOTROPIC_POISSON_RATIO_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            property,
+            Dims::NONE,
+            ScalarAdmissibility::Finite,
+        )?);
+    }
+    for property in ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            property,
+            Pressure::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+    }
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical orthotropic requirement was resolved")
+            .value_si()
+    };
+    let law = OrthotropicElastic::new(
+        ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES.map(value),
+        ORTHOTROPIC_POISSON_RATIO_PROPERTIES.map(value),
+        ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES.map(value),
+        strain_limit,
+    )
+    .map_err(|_| MaterialStatePointError::InvalidDerived {
+        quantity: "orthotropic_compliance",
+    })?;
+    Ok(OrthotropicElasticStatePoint {
+        density_kg_m3: value(DENSITY_PROPERTY),
+        resolved,
+        law,
+    })
+}
+
 /// The four scalar properties needed by an isotropic elastic contact/body rung.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IsotropicSolidStatePoint {
@@ -938,6 +1128,65 @@ mod tests {
         .unwrap()
     }
 
+    fn orthotropic_card(poisson: [f64; 3]) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        claims
+            .insert_claim(claim(
+                DENSITY_PROPERTY,
+                Density::DIMS,
+                vec![(250.0, 800.0), (600.0, 760.0)],
+                600.0,
+            ))
+            .unwrap();
+        for (index, property) in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES.iter().enumerate() {
+            claims
+                .insert_claim(claim(
+                    property,
+                    Pressure::DIMS,
+                    vec![
+                        (250.0, [12.0e9, 3.0e9, 1.5e9][index]),
+                        (600.0, [10.0e9, 2.5e9, 1.2e9][index]),
+                    ],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        for (index, property) in ORTHOTROPIC_POISSON_RATIO_PROPERTIES.iter().enumerate() {
+            claims
+                .insert_claim(claim(
+                    property,
+                    Dims::NONE,
+                    vec![(250.0, poisson[index]), (600.0, poisson[index])],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        for (index, property) in ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES.iter().enumerate() {
+            claims
+                .insert_claim(claim(
+                    property,
+                    Pressure::DIMS,
+                    vec![
+                        (250.0, [1.2e9, 0.8e9, 0.6e9][index]),
+                        (600.0, [1.0e9, 0.7e9, 0.5e9][index]),
+                    ],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "test-orthotropic-solid".to_owned(),
+                phase: "solid".to_owned(),
+                process: "oriented-principal-axis-data".to_owned(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn interface_card(history: &str) -> InterfaceSystemCard {
         let mut claims = ClaimSet::new();
         for property in [
@@ -1066,6 +1315,53 @@ mod tests {
             Err(MaterialStatePointError::Query {
                 source: MatDbError::NoClaimInDomain { .. },
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_elastic_resolvers_request_only_their_law_and_admit_orthotropy_atomically() {
+        let complete_contact_card = solid_card(
+            "test-isotropic-solid",
+            [1_000.0, 900.0],
+            [10.0e9, 8.0e9],
+            [0.25, 0.30],
+            [50.0e6, 30.0e6],
+        );
+        let elastic = resolve_isotropic_elastic_state_point(
+            &complete_contact_card,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(elastic.resolved().properties().len(), 3);
+        assert_eq!(elastic.density_kg_m3(), 950.0);
+        assert_eq!(elastic.young_modulus_pa(), 9.0e9);
+        assert_eq!(elastic.poisson_ratio(), 0.275);
+
+        let card = orthotropic_card([0.25, 0.10, 0.20]);
+        let orthotropic = resolve_orthotropic_elastic_state_point(
+            &card,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+            1.0e-3,
+        )
+        .unwrap();
+        assert_eq!(orthotropic.resolved().properties().len(), 10);
+        assert_eq!(orthotropic.density_kg_m3(), 780.0);
+        assert_eq!(orthotropic.law().e, [11.0e9, 2.75e9, 1.35e9]);
+        assert_eq!(orthotropic.law().nu, [0.25, 0.10, 0.20]);
+        assert_eq!(orthotropic.law().g, [1.1e9, 0.75e9, 0.55e9]);
+
+        assert!(matches!(
+            resolve_orthotropic_elastic_state_point(
+                &orthotropic_card([2.0, 2.0, 2.0]),
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+                1.0e-3,
+            ),
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "orthotropic_compliance"
             })
         ));
     }
