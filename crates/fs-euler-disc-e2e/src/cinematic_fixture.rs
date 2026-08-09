@@ -80,7 +80,7 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::{
-    gas::{GasSpec, GasState},
+    gas::{ConductivityModel as GasConductivityModel, GasSpec, GasState},
     state_point::{
         MaterialPropertySelection, VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
         VISIBLE_COMPLEX_IOR_K_PROPERTIES, resolve_isotropic_elastic_state_point,
@@ -392,6 +392,12 @@ pub struct CinematicFixtureConfig {
     pub spatialize_audio: bool,
     /// One parameterized physical material state shared by picture and sound.
     pub disc_material: CinematicDiscMaterialConfig,
+    /// Ambient gas temperature used by physical acoustic propagation [K].
+    pub ambient_temperature_k: f64,
+    /// Ambient absolute gas pressure used by physical acoustics [Pa].
+    pub ambient_pressure_pa: f64,
+    /// Calorically-perfect gas and transport model used by the environment.
+    pub ambient_gas: GasSpec,
     /// Whether to ask `ffmpeg` for a non-authoritative convenience movie.
     pub mux_with_ffmpeg: bool,
     /// `ffmpeg` executable name or path.
@@ -425,6 +431,9 @@ impl Default for CinematicFixtureConfig {
             retain_full_aov_exr: true,
             spatialize_audio: true,
             disc_material: CinematicDiscMaterialConfig::default(),
+            ambient_temperature_k: 293.15,
+            ambient_pressure_pa: 101_325.0,
+            ambient_gas: GasSpec::dry_air_ussa1976(),
             mux_with_ffmpeg: true,
             ffmpeg_executable: PathBuf::from("ffmpeg"),
         }
@@ -577,6 +586,17 @@ impl CinematicFixtureConfig {
         {
             return Err(CinematicFixtureError::InvalidConfig(
                 "disc material identity and provenance strings must be nonblank",
+            ));
+        }
+        if GasState::try_new(
+            &self.ambient_gas,
+            self.ambient_temperature_k,
+            self.ambient_pressure_pa,
+        )
+        .is_err()
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "ambient gas species/model, temperature, or pressure is outside its admitted domain",
             ));
         }
         Ok(())
@@ -4391,7 +4411,7 @@ fn build_audio(
         .map_err(pipeline)?;
         (artifact, None)
     };
-    let physical = build_physical_audio(fine_preroll_trajectory, physical_disc, cx)?;
+    let physical = build_physical_audio(fine_preroll_trajectory, physical_disc, config, cx)?;
     Ok(FixtureAudio {
         artifact,
         physical,
@@ -4416,6 +4436,7 @@ fn build_audio(
 fn build_physical_audio(
     preroll_trajectory: &EulerRenderTrajectoryArtifact,
     physical_disc: &FixturePhysicalDiscState,
+    config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
 ) -> Result<FixturePhysicalAudio, CinematicFixtureError> {
     // The upper edge is a declared current fidelity band, not an EQ cutoff.
@@ -4448,14 +4469,22 @@ fn build_physical_audio(
     )
     .map_err(pipeline)?;
 
-    let gas_spec = GasSpec::dry_air_ussa1976();
-    let gas = GasState::try_new(&gas_spec, 293.15, 101_325.0).map_err(pipeline)?;
-    let mut gas_identity = DomainHasher::new("org.frankensim.gas.dry-air-ussa1976-state.v1");
+    let gas_spec = config.ambient_gas;
+    let gas = GasState::try_new(
+        &gas_spec,
+        config.ambient_temperature_k,
+        config.ambient_pressure_pa,
+    )
+    .map_err(pipeline)?;
+    let mut gas_identity = DomainHasher::new("org.frankensim.gas.resolved-acoustic-state.v1");
     gas_identity.update(&gas_spec.molar_mass.to_bits().to_le_bytes());
     gas_identity.update(&gas_spec.gamma.to_bits().to_le_bytes());
     gas_identity.update(&gas_spec.sutherland_beta.to_bits().to_le_bytes());
     gas_identity.update(&gas_spec.sutherland_s.to_bits().to_le_bytes());
-    gas_identity.update(b"USSA-1976 conductivity fit");
+    gas_identity.update(match gas_spec.conductivity {
+        GasConductivityModel::Ussa1976AirFit => b"USSA-1976-air-fit" as &[u8],
+        GasConductivityModel::Eucken => b"Eucken",
+    });
     gas_identity.update(&gas.temperature.to_bits().to_le_bytes());
     gas_identity.update(&gas.pressure.to_bits().to_le_bytes());
     let gas_model_identity = gas_identity.finalize();
