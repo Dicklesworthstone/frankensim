@@ -20,11 +20,12 @@ use fs_ledger::{
     FiveExplicits, Ledger, MAX_OP_FIELD_BYTES, OpOutcome, STORAGE_CHUNK_LEN, hash_bytes,
 };
 use fs_project::{
-    Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl, Envelope,
-    GeometryArtifact, GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata,
+    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl,
+    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
+    GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata,
     OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity,
     RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings,
-    ThermalLimit, UnitsDoctrine, Versions, print_sexpr,
+    ThermalLimit, UnitsDoctrine, Vent, Versions, print_sexpr,
 };
 use fs_qty::QtyAny;
 
@@ -269,10 +270,46 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
         }]),
         cooling: Some(Cooling {
             fans: Vec::new(),
-            vents: Vec::new(),
+            vents: vec![Vent {
+                region: "air".to_string(),
+                area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            }],
             leakage: watts(0.0),
-            airflow_leakage: None,
-            fan_system: None,
+            airflow_leakage: Some(AirflowLeakage {
+                area: QtyAny::new(0.0015, fs_project::spec::dims::AREA),
+            }),
+            fan_system: Some(fs_project::fansystem::FanSystemDecl {
+                version: fs_project::fansystem::FAN_SYSTEM_DECL_VERSION,
+                banks: vec![fs_project::fansystem::FanBankDecl {
+                    bank_id: "fixture-bank".to_string(),
+                    curve: FanCurveDecl {
+                        points: vec![
+                            FanCurvePoint {
+                                flow: QtyAny::new(0.0, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                                static_pressure: QtyAny::new(
+                                    160.0,
+                                    fs_project::spec::dims::PRESSURE,
+                                ),
+                            },
+                            FanCurvePoint {
+                                flow: QtyAny::new(0.08, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                                static_pressure: QtyAny::new(0.0, fs_project::spec::dims::PRESSURE),
+                            },
+                        ],
+                        pressure_tolerance_rel: 0.05,
+                        tolerance_basis: FanToleranceBasis::Manufacturer,
+                        source: "solve fixture curve; not manufacturer data".to_string(),
+                        source_id: "solve-fixture-curve-v1".to_string(),
+                        min_flow: QtyAny::new(0.001, fs_project::spec::dims::VOLUMETRIC_FLOW),
+                    },
+                    count: 1,
+                    arrangement: fs_airflow::FanArrangement::Series,
+                    speed_ratio: 1.0,
+                    speed_ratio_domain: (0.5, 2.0),
+                    rated_point: None,
+                }],
+                topology: fs_project::fansystem::FanSystemTopology::Single,
+            }),
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -705,7 +742,7 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap");
-    assert_eq!(refusal.stage, Some("flow-network"));
+    assert_eq!(refusal.stage, Some("conduction"));
     assert_eq!(refusal.dependency, Some("frankensim-frn2i"));
     assert!(refusal.recorded_op.is_some(), "the gap refusal is ledgered");
     let run = refusal.run.clone().expect("run id derived");
@@ -739,7 +776,7 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
                 .is_some_and(|row| row.session.as_deref() == Some(run_id.as_bytes().as_slice()))
         })
         .collect();
-    assert_eq!(solve_ops.len(), 4, "three stages plus the recorded refusal");
+    assert_eq!(solve_ops.len(), 5, "four stages plus the recorded refusal");
 }
 
 /// The `material-resolve` stage's own evidence: the reference project's
@@ -757,13 +794,13 @@ fn g0_material_resolve_binds_the_reference_project_from_a_real_pack() {
     let (refusal, _) = run_to_gap(&ledger, &decoded);
     assert_eq!(
         refusal.stage,
-        Some("flow-network"),
+        Some("conduction"),
         "material-resolve passed"
     );
     let run = refusal.run.clone().expect("run");
 
     let receipts = stage_receipt_hashes(&ledger, &run);
-    assert_eq!(receipts.len(), 3, "three stages retained a receipt");
+    assert_eq!(receipts.len(), 4, "four stages retained a receipt");
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[2])).expect("receipt is utf-8");
 
@@ -874,7 +911,7 @@ fn g4_resume_recovers_card_packs_and_reproduces_material_evidence() {
     assert_eq!(resumed.code, "cli-solve-stage-gap");
     assert_eq!(
         resumed.stage,
-        Some("flow-network"),
+        Some("conduction"),
         "resume executed material-resolve from ledger-recovered packs"
     );
 
@@ -1389,7 +1426,7 @@ fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
     )
     .expect_err("resume still refuses at the gap");
     assert_eq!(resumed.code, "cli-solve-stage-gap");
-    assert_eq!(resumed.stage, Some("flow-network"));
+    assert_eq!(resumed.stage, Some("conduction"));
     assert_eq!(resumed.dependency, Some("frankensim-frn2i"));
 
     // The interrupted-then-resumed evidence equals the uninterrupted run's:
@@ -1569,7 +1606,7 @@ fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
     let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut progress)
         .expect_err("unchanged durable prefix still reaches the known gap");
     assert_eq!(retry.code, "cli-solve-stage-gap");
-    assert_eq!(retry.stage, Some("flow-network"));
+    assert_eq!(retry.stage, Some("conduction"));
     assert_eq!(
         stage_receipt_hashes(&ledger, &run).len(),
         3,
@@ -2195,7 +2232,7 @@ fn g3_import_ir_duplicate_checks_preserve_order_and_bound_labels() {
     let source = Ledger::open(":memory:").expect("source ledger");
     let imported = import_fixture(&source, &spec, bytes);
     let (valid_gap, _) = run_to_gap(&source, &decoded);
-    assert_eq!(valid_gap.stage, Some("flow-network"));
+    assert_eq!(valid_gap.stage, Some("conduction"));
 
     let source_row = source
         .op(imported.op_id)
@@ -2437,7 +2474,7 @@ fn g3_unrelated_wide_success_does_not_mask_an_older_valid_import() {
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
-    assert_eq!(refusal.stage, Some("flow-network"));
+    assert_eq!(refusal.stage, Some("conduction"));
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
         "the older valid import must still execute the solve prefix"
@@ -2487,7 +2524,7 @@ fn g3_multi_page_unrelated_history_still_finds_the_older_valid_import() {
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
-    assert_eq!(refusal.stage, Some("flow-network"));
+    assert_eq!(refusal.stage, Some("conduction"));
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
         "descending discovery must continue across multiple pages"
@@ -2637,7 +2674,7 @@ fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
     let refusal = resume_solve(&ledger, &gate, &mut clock, &run_hex, &mut progress)
         .expect_err("valid checkpoint resumes to the known stage gap");
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
-    assert_eq!(refusal.stage, Some("flow-network"));
+    assert_eq!(refusal.stage, Some("conduction"));
     assert!(progress.is_empty(), "no new stage executes before the gap");
     assert_eq!(
         stage_receipt_hashes(&ledger, &run_hex),
