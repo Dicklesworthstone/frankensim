@@ -19,7 +19,15 @@
 //! both regimes and the crossover; finite-difference derivatives vs
 //! the recurrence identities (independent code paths); and a
 //! cross-implementation oracle against fsci-special (cephes-heritage)
-//! as a dev-dependency.
+//! as a dev-dependency. Honest limits of that certificate
+//! (review-measured with a 120-digit reference): the Wronskian is
+//! structurally BLIND to common phase errors (the chi_0 - chi_1
+//! difference is exactly pi/2, so half-ulp(x) phase rounding cancels
+//! identically), and pointwise accuracy at LARGE argument degrades
+//! as ~x*eps from representing the phase in f64 (measured ~2e-11
+//! relative-to-envelope at x = 1e6, ~5e-13 at x = 1e4, under 5e-13
+//! for x <= 3e3 — the certified grid). Intended kr ranges sit well
+//! inside the certified band.
 //!
 //! Convention: with the workspace's `e^{-i omega t}` time convention
 //! the OUTGOING cylindrical wave is `H0^(1)(kr) = J0 + i Y0`.
@@ -141,6 +149,18 @@ fn asymptotic_pq(nu: f64, x: f64) -> (f64, f64) {
         if term.abs() > last {
             break; // divergence onset: stop at the smallest term
         }
+        if term.abs() < 1.0e-18 {
+            // Converged far below f64 epsilon (large x): the
+            // remaining terms cannot move P or Q.
+            if m % 2 == 0 {
+                if m % 4 == 0 {
+                    p += term;
+                } else {
+                    p -= term;
+                }
+            }
+            break;
+        }
         last = term.abs();
         if m % 2 == 0 {
             // (-1)^{m/2} term into P
@@ -200,11 +220,13 @@ pub fn j1(x: f64) -> f64 {
     } else {
         jy_asymptotic(1.0, ax).0
     };
-    if x < 0.0 { -v } else { v }
+    // Odd symmetry including the sign of zero (j1(-0.0) = -0.0).
+    if x.is_sign_negative() { -v } else { v }
 }
 
 /// Bessel function of the second kind, order 0 (`x > 0`; NaN
-/// otherwise, matching the real-domain definition).
+/// otherwise, matching the real-domain definition — a DISCLOSED
+/// divergence from fsci/scipy, which return -inf at exactly 0).
 #[must_use]
 pub fn y0(x: f64) -> f64 {
     if x.is_nan() || x <= 0.0 {
@@ -238,15 +260,23 @@ pub fn y1(x: f64) -> f64 {
 }
 
 /// Outgoing 2D Hankel function `H0^(1)(x) = J0(x) + i Y0(x)`
-/// (`e^{-i omega t}` convention; `x > 0`).
+/// (`e^{-i omega t}` convention). Outside the domain (`x <= 0` or
+/// NaN) BOTH components are NaN — never a half-valid complex
+/// (review-caught: `C64(1.0, NaN)` leaked for non-positive x).
 #[must_use]
 pub fn hankel0_outgoing(x: f64) -> C64 {
+    if x.is_nan() || x <= 0.0 {
+        return C64::new(f64::NAN, f64::NAN);
+    }
     C64::new(j0(x), y0(x))
 }
 
-/// Outgoing 2D Hankel function `H1^(1)(x) = J1(x) + i Y1(x)`
-/// (`x > 0`).
+/// Outgoing 2D Hankel function `H1^(1)(x) = J1(x) + i Y1(x)`; same
+/// full-NaN domain policy as [`hankel0_outgoing`].
 #[must_use]
 pub fn hankel1_outgoing(x: f64) -> C64 {
+    if x.is_nan() || x <= 0.0 {
+        return C64::new(f64::NAN, f64::NAN);
+    }
     C64::new(j1(x), y1(x))
 }

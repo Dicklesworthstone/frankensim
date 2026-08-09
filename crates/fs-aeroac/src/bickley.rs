@@ -19,7 +19,8 @@
 //! `phi = sech(y) tanh(y)` at `(alpha, c) = (1, 2/3)` (varicose) are
 //! EXACT solutions — derived by hand (substituting into the Rayleigh
 //! equation reduces it to `s [s (6c - alpha^2) + c (alpha^2 - 4)]`
-//! resp. `u t [s (6c - alpha^2 - 2) + ... ]` with `s = sech^2`) and
+//! resp. `u t [s (6c - alpha^2 - 3) + c (alpha^2 - 1)]` with
+//! `s = sech^2`, `u = sech`, `t = tanh`) and
 //! RE-PROVEN numerically at machine precision by the residual test on
 //! every run, so no literature value is transcribed on trust.
 
@@ -114,8 +115,13 @@ fn mismatch(alpha: f64, c: C64, symmetry: JetSymmetry, l: f64, steps: usize) -> 
     }
 }
 
-/// Solve for the Rayleigh mode at wavenumber `alpha` starting the
-/// complex secant iteration from `c_guess`.
+/// Solve for A Rayleigh mode at wavenumber `alpha` starting the
+/// complex secant iteration from `c_guess`. GUESS-DEPENDENT: any
+/// eigenvalue of the requested symmetry class zeroes the mismatch,
+/// so the returned mode is the one the secant converges to from
+/// `c_guess` — not a canonical "the" mode. Callers tracking a branch
+/// must continue it in `alpha` from a known point (the tests anchor
+/// at the self-verified neutral pins).
 ///
 /// Defaults tuned by the convergence test: half-domain `l = 14`
 /// (sech^2 < 3e-12 there), `steps` RK4 steps (2048 gives ~1e-10

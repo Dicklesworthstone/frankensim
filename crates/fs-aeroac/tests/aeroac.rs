@@ -108,6 +108,14 @@ fn bessel_small_argument_limits() {
     assert!((a - b).abs() < 1.0e-9, "Y0 log constant drifts: {a} vs {b}");
     // Domain: Y at non-positive arguments is NaN, not a fabrication.
     assert!(y0(0.0).is_nan() && y0(-1.0).is_nan() && y1(-2.0).is_nan());
+    // Hankel domain policy: BOTH components NaN outside the domain
+    // (review-caught: a half-valid C64(1.0, NaN) once leaked).
+    let h = hankel0_outgoing(-1.0);
+    assert!(h.re.is_nan() && h.im.is_nan());
+    let h = fs_aeroac::bessel::hankel1_outgoing(0.0);
+    assert!(h.re.is_nan() && h.im.is_nan());
+    // Odd symmetry including signed zero.
+    assert!(j1(-0.0).is_sign_negative());
 }
 
 /// Far-field amplitude of the outgoing Hankel function:

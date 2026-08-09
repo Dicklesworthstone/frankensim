@@ -40,8 +40,12 @@ scope law, pinned as data and by test).
 
 1. EXACT Wronskian: `J1 Y0 - J0 Y1 = 2/(pi x)` holds within 5e-13
    over a log grid 1e-3..3e3 including the series/asymptotic
-   crossover from both sides — one identity certifying all four
-   functions jointly.
+   crossover from both sides. Honest limits (review-measured against
+   a 120-digit reference): the identity is blind to COMMON phase
+   errors, and pointwise accuracy beyond the certified grid degrades
+   as ~x*eps from f64 phase representation (~2e-11 at x = 1e6) —
+   stated in the module doc; intended kr ranges sit inside the
+   certified band.
 2. Independent-path derivatives: central-difference `J0'` matches
    `-J1` and `Y0'` matches `-Y1` at FD accuracy (1e-8) across both
    regimes.
@@ -71,7 +75,11 @@ scope law, pinned as data and by test).
    1e-8).
 8. Refusals typed by name (non-positive wavenumber, coincident
    observer/source, non-finite inputs, bad solver parameters,
-   non-convergence with residual); determinism bitwise.
+   non-convergence with residual); Hankel functions outside their
+   domain are FULLY NaN (both components — a half-valid complex once
+   leaked, review-caught); the Rayleigh solver's result is
+   documented GUESS-DEPENDENT (any eigenvalue of the symmetry class
+   zeroes the mismatch); determinism bitwise.
 
 ## Error model
 
