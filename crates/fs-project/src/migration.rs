@@ -22,6 +22,13 @@ pub enum MigrationRule {
     /// only the envelope version is rewritten. Registered to prove the
     /// machinery; no released artifact ever carried version 0.
     SyntheticV0EnvelopeRewrite,
+    /// Version 1 to 2: the cooling section gains the optional
+    /// `(fan-system ...)` subsection (bead frn2i.1). Every version-1
+    /// document is a valid version-2 document unchanged, so the rule is the
+    /// receipted envelope rewrite — there is no semantic compatibility
+    /// default for documents that do carry the new section: version-1
+    /// readers refuse them as unknown subsections.
+    CoolingFanSystemV2,
 }
 
 impl MigrationRule {
@@ -30,6 +37,7 @@ impl MigrationRule {
     pub const fn label(self) -> &'static str {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => "synthetic-v0-envelope-rewrite",
+            MigrationRule::CoolingFanSystemV2 => "cooling-fan-system-v2",
         }
     }
 
@@ -38,6 +46,7 @@ impl MigrationRule {
     pub const fn source_version(self) -> u32 {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => 0,
+            MigrationRule::CoolingFanSystemV2 => 1,
         }
     }
 }
@@ -86,6 +95,7 @@ pub fn migrate_envelope(
 ) -> Result<MigratedProject, ProjectError> {
     let rule = match declared_version {
         0 => MigrationRule::SyntheticV0EnvelopeRewrite,
+        1 => MigrationRule::CoolingFanSystemV2,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",

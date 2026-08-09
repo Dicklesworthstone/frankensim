@@ -15,13 +15,18 @@
 pub mod assignment;
 pub mod bind;
 pub mod decision;
+pub mod fansystem;
 pub mod migration;
 pub mod spec;
 pub mod wire;
 
 /// The current `.fsim` schema version. Readers admit exactly this version;
 /// older envelopes must pass through [`migration::migrate_envelope`].
-pub const FSIM_VERSION: u32 = 1;
+///
+/// Version 2 adds the optional `(fan-system ...)` cooling subsection (bead
+/// frn2i.1); version-1 documents are valid version-2 documents unchanged,
+/// and the migration is the receipted envelope rewrite.
+pub const FSIM_VERSION: u32 = 2;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,

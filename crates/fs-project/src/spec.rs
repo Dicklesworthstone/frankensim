@@ -543,6 +543,9 @@ pub struct Cooling {
     /// the flow-network stage refuses rather than inventing a leakage
     /// branch.
     pub airflow_leakage: Option<AirflowLeakage>,
+    /// Optional versioned fan-system declaration (bead frn2i.1, schema
+    /// v2). Absence declares that no fan-system evidence is carried.
+    pub fan_system: Option<crate::fansystem::FanSystemDecl>,
 }
 
 /// The operating envelope.

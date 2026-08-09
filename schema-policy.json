@@ -21,14 +21,15 @@
       "version_kind": "integer-const",
       "version_constant": "FSIM_VERSION",
       "version_location": "crates/fs-project/src/lib.rs",
-      "current_version": "1",
+      "current_version": "2",
       "lockstep": [],
       "surface": [
         "the canonical .fsim envelope and its canonical-hash construction",
         "the Five Explicits fields required of every project",
         "declared region and interface material bindings",
         "the optional per-binding claim pin (`:claim <hex>`, both spellings) admitted at bead f85xj.6.4; a pin never bypasses validity and refuses as PinnedClaimOutOfDomain or PinnedClaimUnknown",
-        "structural finding identifiers reported by `frankensim validate`"
+        "structural finding identifiers reported by `frankensim validate`",
+        "the optional cooling `(fan-system ...)` subsection admitted at bead frn2i.1 (schema v2): versioned bank declarations with explicit count/arrangement/speed-ratio/domain, monotone curve, stall boundary, tolerance basis, source identity, and an explicit multi-bank topology"
       ],
       "minor_bump": "may add optional fields with receipted defaults and may add new structural findings; must keep every prior document loadable and its canonical hash stable",
       "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",
@@ -37,6 +38,10 @@
         {
           "test": "the_version_bump_machinery_is_proven_with_the_synthetic_migration",
           "location": "crates/fs-project/tests/project.rs"
+        },
+        {
+          "test": "v1_envelopes_migrate_to_v2_with_a_receipted_rewrite",
+          "location": "crates/fs-project/tests/fansystem.rs"
         }
       ],
       "deprecation_horizon": "a removed field stays accepted for one major version after the release that deprecates it"
@@ -363,6 +368,12 @@
     }
   ],
   "not_promised": [
+    {
+      "constant": "FAN_SYSTEM_DECL_VERSION",
+      "location": "crates/fs-project/src/fansystem.rs",
+      "reason_class": "internal-wire",
+      "reason": "declaration-struct version for the bead frn2i.1 fan system; the serialized promise is the .fsim envelope version (project.fsim v2), and this constant never appears on the wire"
+    },
     {
       "constant": "INITIAL_SEMANTIC_SCHEMA_VERSION",
       "location": "crates/fs-checker/src/semantic.rs",

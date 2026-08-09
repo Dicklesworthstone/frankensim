@@ -304,7 +304,7 @@ per-schema compatibility and deprecation rules, is
 
 | Frozen schema | Owner | Version | If an older document appears |
 |---------------|-------|---------|------------------------------|
-| `.fsim` project schema | `fs-project` | 1 | migrates, with a receipt |
+| `.fsim` project schema | `fs-project` | 2 | migrates, with a receipt |
 | Evidence-package format | `fs-package` | 9 | refused by name |
 | Checker protocol | `fs-checker` | 7 | refused by name |
 | Euler scientific Context and composite contract | `fs-euler-disc-e2e` | 1 | no predecessor yet; every other version refuses |

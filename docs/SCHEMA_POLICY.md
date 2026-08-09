@@ -21,7 +21,7 @@ deprecation horizon.
 
 | Id | Owner | Version constant | Current |
 |----|-------|------------------|---------|
-| `project.fsim` | `fs-project` | `FSIM_VERSION` | 1 |
+| `project.fsim` | `fs-project` | `FSIM_VERSION` | 2 |
 | `package.format` | `fs-package` | `FORMAT_VERSION` | 9 |
 | `checker.protocol` | `fs-checker` | `CHECKER_PROTOCOL_VERSION` | 7 |
 | `euler.scientific-contract` | `fs-euler-disc-e2e` | `EULER_CONTRACT_SCHEMA_VERSION` | 1 |

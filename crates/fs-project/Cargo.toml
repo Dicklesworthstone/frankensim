@@ -11,6 +11,7 @@ description = "The versioned .fsim project schema (bead f85xj.6.1): the user-fac
 layer = "L6"
 
 [dependencies]
+fs-airflow = { path = "../fs-airflow" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-conduction = { path = "../fs-conduction" }
 fs-evidence = { path = "../fs-evidence" }

@@ -1956,6 +1956,7 @@ dependencies = [
 name = "fs-project"
 version = "0.0.1"
 dependencies = [
+ "fs-airflow",
  "fs-alloc",
  "fs-blake3",
  "fs-conduction",

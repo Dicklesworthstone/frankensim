@@ -105,7 +105,8 @@ pub fn compose_parallel(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
     let members: Vec<Vec<(f64, f64)>> = banks.iter().map(effective_curve).collect();
     // Shared pressure domain: [max member minimum pressure, min member
     // stall pressure]. The stall pressure is the pressure at which the
-    // member's (scaled) flow hits its declared admissible minimum.
+    // member's (scaled) flow hits its declared admissible minimum — the
+    // forward curve evaluation at that flow.
     let pressure_lo = members
         .iter()
         .map(|member| member.last().expect("nonempty curve").1)
@@ -115,7 +116,7 @@ pub fn compose_parallel(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
         .zip(&members)
         .map(|(bank, member)| {
             let stall_flow = bank.curve().admissible_min_flow().value() * bank.flow_factor();
-            interpolate_inverse(member, stall_flow)
+            interpolate(member, stall_flow)
         })
         .fold(f64::INFINITY, f64::min);
     if !(pressure_lo.is_finite() && pressure_hi.is_finite() && pressure_lo < pressure_hi) {

@@ -72,7 +72,7 @@ fn series_composition_adds_pressures_exactly() {
     assert_eq!(points.len(), 2);
     // Monotone pressure, strictly increasing flow, pinned speed domain.
     assert!(p0 > pn);
-    assert_eq!(composite.speed_ratio(), 1.0);
+    assert_eq!(composite.speed_ratio().to_bits(), 1.0_f64.to_bits());
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn composition_refusals_are_typed() {
         1.0,
     );
     assert!(matches!(
-        compose_series(&[single.clone()]),
+        compose_series(std::slice::from_ref(&single)),
         Err(AirflowError::EmptyFanComposition { topology: "series" })
     ));
     assert!(matches!(
@@ -257,8 +257,8 @@ fn composite_solve_produces_a_certified_operating_point() {
     // resistance (primary in parallel with the tight leak) sets the
     // quadratic loss, so the analytic root solves R Q^2 = 160 - 2000 Q.
     let resistance = network.equivalent_resistance().value();
-    let expected = (-2000.0 + (2000.0_f64 * 2000.0 + 4.0 * resistance * 160.0).sqrt())
-        / (2.0 * resistance);
+    let expected =
+        (-2000.0 + (2000.0_f64 * 2000.0 + 4.0 * resistance * 160.0).sqrt()) / (2.0 * resistance);
     assert!(
         flow_lo <= expected && flow_hi >= expected,
         "certified root [{flow_lo}, {flow_hi}] must contain the analytic {expected}"

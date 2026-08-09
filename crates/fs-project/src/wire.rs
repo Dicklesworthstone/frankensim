@@ -501,6 +501,73 @@ fn lower_fan_curve(curve: &FanCurveDecl) -> Result<Node, ProjectError> {
     ]))
 }
 
+fn lower_fan_system_decl(decl: &crate::fansystem::FanSystemDecl) -> Result<Node, ProjectError> {
+    use crate::fansystem::{FanSystemTopology, RatedPointAdmission};
+    let mut banks = vec![sym("banks")];
+    for bank in &decl.banks {
+        let mut row = vec![
+            sym("bank"),
+            kw("id"),
+            text(&bank.bank_id),
+            kw("count"),
+            int(bank.count as i64),
+            kw("arrangement"),
+            text(match bank.arrangement {
+                fs_airflow::FanArrangement::Series => "series",
+                fs_airflow::FanArrangement::Parallel => "parallel",
+            }),
+            kw("speed-ratio"),
+            float(bank.speed_ratio),
+            kw("speed-domain-lo"),
+            float(bank.speed_ratio_domain.0),
+            kw("speed-domain-hi"),
+            float(bank.speed_ratio_domain.1),
+            kw("curve"),
+            lower_fan_curve(&bank.curve)?,
+        ];
+        if let Some(rated) = &bank.rated_point {
+            row.push(kw("rated-point"));
+            row.push(list(vec![
+                sym("rated-point"),
+                kw("flow"),
+                qty(rated.flow)?,
+                kw("static-pressure"),
+                qty(rated.static_pressure)?,
+                kw("admission"),
+                text(match rated.admission {
+                    RatedPointAdmission::CheckedWithinDeclaredTolerance => "checked",
+                    RatedPointAdmission::CorrelationOnly => "correlation-only",
+                }),
+            ]));
+        }
+        banks.push(list(row));
+    }
+    let topology = match &decl.topology {
+        FanSystemTopology::Single => list(vec![sym("topology"), sym("single")]),
+        FanSystemTopology::Series(members) => {
+            let mut row = vec![sym("topology"), sym("series")];
+            for member in members {
+                row.push(sym(member));
+            }
+            list(row)
+        }
+        FanSystemTopology::Parallel(members) => {
+            let mut row = vec![sym("topology"), sym("parallel")];
+            for member in members {
+                row.push(sym(member));
+            }
+            list(row)
+        }
+    };
+    Ok(list(vec![
+        sym("fan-system"),
+        kw("banks"),
+        list(banks),
+        kw("topology"),
+        topology,
+    ]))
+}
+
 fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), ProjectError> {
     let mut fans = vec![sym("fans")];
     for fan in &cooling.fans {
@@ -541,6 +608,9 @@ fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), Proj
             kw("area"),
             qty(airflow_leakage.area)?,
         ]));
+    }
+    if let Some(fan_system) = &cooling.fan_system {
+        cooling_sections.push(lower_fan_system_decl(fan_system)?);
     }
     sections.push(list(cooling_sections));
     Ok(())
@@ -1998,6 +2068,7 @@ fn read_cooling(
     let mut vents = Vec::new();
     let mut leakage = None;
     let mut airflow_leakage = None;
+    let mut fan_system = None;
     for node in body {
         match section_name(node) {
             Some(("fans", inner)) => {
@@ -2059,6 +2130,9 @@ fn read_cooling(
                     area: expect_qty(field(&pairs, "area"), "airflow-leakage.area", out),
                 });
             }
+            Some(("fan-system", inner)) => {
+                fan_system = read_fan_system(inner, out, defaults);
+            }
             _ => {
                 out.push(Violation {
                     code: "project-unknown-field",
@@ -2083,6 +2157,7 @@ fn read_cooling(
         vents,
         leakage,
         airflow_leakage,
+        fan_system,
     })
 }
 
@@ -2101,6 +2176,229 @@ fn parse_tolerance_basis(value: &str, out: &mut Vec<Violation>) -> FanToleranceB
             FanToleranceBasis::Engineering
         }
     }
+}
+
+fn read_fan_system(
+    body: &[Node],
+    out: &mut Vec<Violation>,
+    defaults: &mut Vec<DefaultReceipt>,
+) -> Option<crate::fansystem::FanSystemDecl> {
+    use crate::fansystem::{
+        FAN_SYSTEM_DECL_VERSION, FanBankDecl, FanSystemTopology, RatedPointAdmission,
+        RatedPointDecl,
+    };
+    let pairs = read_pairs(body, "fan-system", &["banks", "topology"], out);
+    let mut banks: Vec<FanBankDecl> = Vec::new();
+    match field(&pairs, "banks").and_then(section_name) {
+        Some(("banks", rows)) => {
+            for row in rows {
+                let Some(("bank", bank_body)) = section_name(row) else {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: "fan-system banks must be `(bank ...)` rows".to_string(),
+                        fix: "declare `(bank :id ... :count ... :arrangement ... :speed-ratio ... :speed-domain-lo ... :speed-domain-hi ... (curve ...) [(rated-point ...)])`"
+                            .to_string(),
+                    });
+                    continue;
+                };
+                let bank_pairs = read_pairs(
+                    bank_body,
+                    "fan-system.bank",
+                    &[
+                        "id",
+                        "count",
+                        "arrangement",
+                        "speed-ratio",
+                        "speed-domain-lo",
+                        "speed-domain-hi",
+                        "curve",
+                        "rated-point",
+                    ],
+                    out,
+                );
+                let bank_id = expect_str(field(&bank_pairs, "id"), "bank.id", out);
+                let count_node = field(&bank_pairs, "count");
+                let count = match count_node {
+                    Some(Node {
+                        kind: NodeKind::Int(value),
+                        ..
+                    }) if *value >= 0 => *value as usize,
+                    _ => {
+                        out.push(Violation {
+                            code: "project-malformed-clause",
+                            what: format!(
+                                "bank `{bank_id}` :count expected a non-negative integer"
+                            ),
+                            fix: "declare the fan count explicitly as an integer".to_string(),
+                        });
+                        0
+                    }
+                };
+                let arrangement =
+                    match expect_str(field(&bank_pairs, "arrangement"), "bank.arrangement", out)
+                        .as_str()
+                    {
+                        "series" => fs_airflow::FanArrangement::Series,
+                        "parallel" => fs_airflow::FanArrangement::Parallel,
+                        other => {
+                            out.push(Violation {
+                                code: "project-malformed-clause",
+                                what: format!(
+                                    "bank `{bank_id}` arrangement {other:?} is not series|parallel"
+                                ),
+                                fix: "declare `:arrangement series` or `:arrangement parallel`"
+                                    .to_string(),
+                            });
+                            fs_airflow::FanArrangement::Series
+                        }
+                    };
+                let speed_ratio =
+                    expect_float(field(&bank_pairs, "speed-ratio"), "bank.speed-ratio", out);
+                let speed_lo = expect_float(
+                    field(&bank_pairs, "speed-domain-lo"),
+                    "bank.speed-domain-lo",
+                    out,
+                );
+                let speed_hi = expect_float(
+                    field(&bank_pairs, "speed-domain-hi"),
+                    "bank.speed-domain-hi",
+                    out,
+                );
+                let Some(curve) = field(&bank_pairs, "curve")
+                    .and_then(|node| read_fan_curve(node, &bank_id, out, defaults))
+                else {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: format!("bank `{bank_id}` lacks its `(curve ...)` section"),
+                        fix: "every bank declares its full curve; nothing is inferred".to_string(),
+                    });
+                    continue;
+                };
+                let rated_point = field(&bank_pairs, "rated-point").and_then(|node| {
+                    let Some(("rated-point", rated_body)) = section_name(node) else {
+                        out.push(Violation {
+                            code: "project-malformed-clause",
+                            what: format!("bank `{bank_id}` :rated-point must be a `(rated-point ...)` section"),
+                            fix: "declare `(rated-point :flow ... :static-pressure ... :admission checked|correlation-only)`".to_string(),
+                        });
+                        return None;
+                    };
+                    let rated_pairs = read_pairs(
+                        rated_body,
+                        "fan-system.rated-point",
+                        &["flow", "static-pressure", "admission"],
+                        out,
+                    );
+                    let admission = match expect_str(
+                        field(&rated_pairs, "admission"),
+                        "rated-point.admission",
+                        out,
+                    )
+                    .as_str()
+                    {
+                        "checked" => RatedPointAdmission::CheckedWithinDeclaredTolerance,
+                        "correlation-only" => RatedPointAdmission::CorrelationOnly,
+                        other => {
+                            out.push(Violation {
+                                code: "project-malformed-clause",
+                                what: format!("rated-point admission {other:?} is not checked|correlation-only"),
+                                fix: "declare `:admission checked` or `:admission correlation-only`".to_string(),
+                            });
+                            RatedPointAdmission::CorrelationOnly
+                        }
+                    };
+                    Some(RatedPointDecl {
+                        flow: expect_qty(field(&rated_pairs, "flow"), "rated-point.flow", out),
+                        static_pressure: expect_qty(
+                            field(&rated_pairs, "static-pressure"),
+                            "rated-point.static-pressure",
+                            out,
+                        ),
+                        admission,
+                    })
+                });
+                banks.push(FanBankDecl {
+                    bank_id,
+                    count,
+                    arrangement,
+                    speed_ratio,
+                    speed_ratio_domain: (speed_lo, speed_hi),
+                    curve,
+                    rated_point,
+                });
+            }
+        }
+        _ => {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "fan-system lacks its `(banks ...)` list".to_string(),
+                fix: "declare `(banks (bank ...) ...)`".to_string(),
+            });
+        }
+    }
+    let topology = match field(&pairs, "topology").and_then(section_name) {
+        Some(("topology", members)) => {
+            let mut members_iter = members.iter();
+            let kind = members_iter
+                .next()
+                .and_then(|node| match &node.kind {
+                    NodeKind::Symbol(name) => Some(name.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let member_ids: Vec<String> = members_iter
+                .filter_map(|node| match &node.kind {
+                    NodeKind::Symbol(name) => Some(name.clone()),
+                    NodeKind::Str(name) => Some(name.clone()),
+                    _ => {
+                        out.push(Violation {
+                            code: "project-malformed-clause",
+                            what: "topology members must be bank identity tokens".to_string(),
+                            fix:
+                                "list bank identities as symbols: `(topology series bank-a bank-b)`"
+                                    .to_string(),
+                        });
+                        None
+                    }
+                })
+                .collect();
+            match kind {
+                "single" => FanSystemTopology::Single,
+                "series" => FanSystemTopology::Series(member_ids),
+                "parallel" => FanSystemTopology::Parallel(member_ids),
+                other => {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: format!("fan-system topology kind {other:?} is unknown"),
+                        fix: "declare `(topology single)` or `(topology series|parallel <bank-ids...>)`".to_string(),
+                    });
+                    FanSystemTopology::Single
+                }
+            }
+        }
+        _ => {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "fan-system lacks its `(topology ...)` declaration".to_string(),
+                fix: "declare the system topology explicitly".to_string(),
+            });
+            return None;
+        }
+    };
+    let decl = crate::fansystem::FanSystemDecl {
+        version: FAN_SYSTEM_DECL_VERSION,
+        banks,
+        topology,
+    };
+    if let Err(error) = decl.validate() {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!("fan-system declaration refused: {}", error.detail),
+            fix: error.hint,
+        });
+        return None;
+    }
+    Some(decl)
 }
 
 fn read_fan_curve(

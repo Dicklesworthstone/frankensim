@@ -246,6 +246,7 @@ fn reference_project() -> ProjectSpec {
             }],
             leakage: watts(2.5),
             airflow_leakage: None,
+            fan_system: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(273.15),
@@ -695,7 +696,7 @@ fn noncanonical_whitespace_is_refused_strictly_and_receipted_leniently() {
 #[test]
 fn the_version_bump_machinery_is_proven_with_the_synthetic_migration() {
     let rendered = print_sexpr(&reference_project()).expect("renders");
-    let v0 = rendered.replacen("(fsim-project :version 1", "(fsim-project :version 0", 1);
+    let v0 = rendered.replacen("(fsim-project :version 2", "(fsim-project :version 0", 1);
 
     // The reader refuses the old envelope outright.
     let refusal = parse_sexpr(&v0).expect_err("v0 must not parse directly");
