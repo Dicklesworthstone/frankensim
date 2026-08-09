@@ -35,6 +35,7 @@ mod parallel;
 mod recovery;
 mod refine;
 mod remesh;
+mod rounded_cylinder;
 
 pub use adaptivity::{
     ADAPTIVITY_RECEIPT_SCHEMA_V1, AdaptivityAction, AdaptivityEffects, AdaptivityError,
@@ -54,6 +55,10 @@ pub use recovery::{
 };
 pub use refine::{RefineOptions, RefineStats, refine};
 pub use remesh::{MetricField, RemeshOptions, RemeshStats, UniformMetric, remesh};
+pub use rounded_cylinder::{
+    BoundaryPanelMesh, RoundedCylinderMeshError, RoundedCylinderMeshSpec, RoundedCylinderTetMesh,
+    rounded_cylinder_tet_mesh,
+};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

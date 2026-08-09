@@ -35,6 +35,11 @@ half-edge round-trips, closed-manifold audits).
   ordered), `points()`, `hull()` (outward-oriented `Soup`),
   `complex()` (fs-rep-mesh `TetComplex`, δδ = 0), `stats()`,
   `audit(full_insphere)`.
+- `rounded_cylinder_tet_mesh`: deterministic conforming P1 tetrahedra for a
+  solid cylinder with equal circular outer-rim fillets. Geometry, fillet,
+  radial/azimuthal/axial resolution, and count budgets are explicit. The
+  cap/fillet tangent is a retained radial ring. Its derived boundary triangles
+  carry outward normals, centroids, and areas for rendering/BEM consumers.
 - `audit`: exact self-audit — positive orientation, mutual adjacency,
   LOCAL Delaunay on every internal facet (the Delaunay lemma lifts
   local to global), Euler characteristic = 1, hull closed, hull
@@ -368,6 +373,14 @@ assertions.
   needs a weighted exact predicate — recorded no-claim below.
 
 ## No-claim boundaries
+
+- The rounded-cylinder primitive is a piecewise-planar approximation of the
+  exact circular meridian and circular revolution. Its output reports the
+  meridian and azimuthal chord-error estimates; neither the volume mesh nor its
+  boundary is an exact curved geometry. The v1 constructor refuses fillets that
+  collapse the cylindrical side or planar cap instead of emitting degenerate
+  elements. General line/arc profiles, annular topology, anisotropic sizing,
+  and curved high-order volume elements remain outside this constructor.
 
 - Weighted exact insphere predicate (the Edelsbrunner weight-pump
   exudation variant; the perturbation flavor ships).
