@@ -1003,7 +1003,9 @@ covering-index query plans without temporary sorts, hostile edge-identity
 sanitization, typed missing/corrupt/finished link refusal with zero row changes,
 caller-transaction rollback, a real two-connection link/finish ordering race,
 immutable sole-producer and exact-op-edge-set seals, raw trigger and orphan
-detection, a real two-connection seal/link race, v8-to-v9 migration
+detection, a real two-connection seal/link race plus a 32-iteration
+barrier-controlled alternating-start seal/link schedule battery asserting
+exactly-one-commits and final-row agreement every iteration (bead 0npfh), v8-to-v9 migration
 including stale-marker healing, and `malformed_ops` lint detection.
 The `ledger_003b`/`ledger_003c`/`ledger_003d`/`ledger_003e` identity battery covers handle
 movement, independent memory ledgers, file reopen and aliasing, same-path file
