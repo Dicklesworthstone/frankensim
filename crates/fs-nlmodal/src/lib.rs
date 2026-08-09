@@ -6,7 +6,7 @@
 //!
 //! `H = 1/2 sum_k (p_k^2 + w_k^2 q_k^2) + 1/4 sum_j c_j (q^T E_j q)^2`
 //!
-//! with `c_j > 0` and `E_j` symmetric — the Airy-stress-eliminated von
+//! with `c_j >= 0` and `E_j` symmetric — the Airy-stress-eliminated von
 //! Karman form (Ducceschi-Touze / Bilbao modal formulation). Because
 //! the nonlinear potential is a positive sum of squares, `H` is
 //! bounded below and the whole system is a PORT-HAMILTONIAN system
@@ -35,7 +35,7 @@
 use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, Storage};
 
-/// One Airy-stress coupling channel: coefficient `c > 0` and the
+/// One Airy-stress coupling channel: coefficient `c >= 0` and the
 /// symmetric matrix `E` (row-major `n x n`) of `q^T E q`.
 #[derive(Debug, Clone)]
 pub struct StressChannel {
@@ -91,9 +91,10 @@ impl std::error::Error for NlModalError {}
 /// State layout matches fs-phs `modal_bank`: `[q_0, p_0, q_1, p_1,
 /// ...]`. The gradient is the EXACT analytic gradient of the coded
 /// `H` — force-vs-energy divergence (the classic hand-derived-tensor
-/// bug class) is therefore impossible through this type; the mutation
-/// battery demonstrates what the fs-phs supply audit does to a storage
-/// whose gradient and energy disagree.
+/// bug class) is therefore impossible through this type; the battery
+/// demonstrates that under Gonzalez stepping such divergence is a
+/// TRAJECTORY error, never an energy error (the architectural
+/// finding pinned in the tests).
 pub struct SosModalStorage {
     /// Modal angular frequencies [rad/s].
     pub omegas: Vec<f64>,
@@ -178,24 +179,31 @@ pub fn assemble(
             what: "zetas/strike_weights length vs mode count",
         });
     }
+    // Negated-positive comparisons so NaN REFUSES instead of slipping
+    // through `<= 0.0` (review finding: NaN passed every gate).
     for &w in &storage.omegas {
-        if w <= 0.0 {
+        if !(w > 0.0) || !w.is_finite() {
             return Err(NlModalError::Parameter {
-                what: "modal frequency must be positive",
+                what: "modal frequency must be positive and finite",
             });
         }
     }
     for &z in zetas {
-        if z < 0.0 {
+        if !(z >= 0.0) {
             return Err(NlModalError::Parameter {
                 what: "damping ratio must be non-negative",
             });
         }
     }
     for ch in &storage.channels {
-        if ch.coefficient < 0.0 {
+        if !(ch.coefficient >= 0.0) || !ch.coefficient.is_finite() {
             return Err(NlModalError::Parameter {
-                what: "channel coefficient must be non-negative",
+                what: "channel coefficient must be non-negative and finite",
+            });
+        }
+        if ch.coupling.iter().any(|v| !v.is_finite()) {
+            return Err(NlModalError::Parameter {
+                what: "coupling entries must be finite",
             });
         }
         if ch.coupling.len() != n * n {
@@ -401,6 +409,17 @@ pub fn von_karman_ss_plate(
             });
         }
     }
+    // Duplicates silently double-count a physical mode (review
+    // finding): refuse in each list.
+    for list in [disp_modes, stress_modes] {
+        for (i, a) in list.iter().enumerate() {
+            if list[..i].contains(a) {
+                return Err(NlModalError::Parameter {
+                    what: "duplicate mode in list",
+                });
+            }
+        }
+    }
     let d_bend = young * h * h * h / (12.0 * (1.0 - nu * nu));
     let pi = core::f64::consts::PI;
     let omegas: Vec<f64> = disp_modes
@@ -429,41 +448,62 @@ pub fn von_karman_ss_plate(
     let order_a = 16 + 5 * max_sum;
     let (nodes_a, w_a) = gauss_01(order_a);
     let (nodes_b, w_b) = gauss_01(order_a + 9);
-    let mut channels = Vec::with_capacity(stress_modes.len());
-    let mut worst_rel = 0.0f64;
+    // Two passes (review findings, both executed): entrywise relative
+    // comparison falsely refuses analytically-zero selection-rule
+    // ENTRIES, and an ALL-zero channel's own scale is pure roundoff
+    // (measured 0.75 "relative"), so residuals are judged against
+    // max(channel scale, 1e-12 * GLOBAL scale).
+    struct RawChannel {
+        xi4: f64,
+        pairs: Vec<(usize, usize, f64, f64)>,
+        scale: f64,
+    }
+    let mut raw_channels: Vec<RawChannel> = Vec::with_capacity(stress_modes.len());
+    let mut global_scale = f64::MIN_POSITIVE;
     for &sm in stress_modes {
         let xi4 = {
             let k2 = (sm.m as f64 * pi / lx) * (sm.m as f64 * pi / lx)
                 + (sm.n as f64 * pi / ly) * (sm.n as f64 * pi / ly);
             k2 * k2
         };
-        // Two independent orders per channel; the disagreement is
-        // judged against the CHANNEL's largest integral, not each
-        // entry's own magnitude — the integrands carry (m pi/L)^4
-        // scales, so an analytically-zero entry legitimately computes
-        // to ~1e-13 of the channel scale, which is enormous relative
-        // to itself (executed false refusal at 1e-4 "relative").
-        let mut raw_pairs = Vec::with_capacity(nq * (nq + 1) / 2);
-        let mut chan_scale = f64::MIN_POSITIVE;
+        let mut pairs = Vec::with_capacity(nq * (nq + 1) / 2);
+        let mut scale = f64::MIN_POSITIVE;
         for p in 0..nq {
             for q in 0..=p {
                 let raw_a =
                     coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q], &nodes_a, &w_a);
                 let raw_b =
                     coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q], &nodes_b, &w_b);
-                chan_scale = chan_scale.max(raw_a.abs()).max(raw_b.abs());
-                raw_pairs.push((p, q, raw_a, raw_b));
+                scale = scale.max(raw_a.abs()).max(raw_b.abs());
+                pairs.push((p, q, raw_a, raw_b));
             }
         }
+        global_scale = global_scale.max(scale);
+        raw_channels.push(RawChannel { xi4, pairs, scale });
+    }
+    // Dimensional floor for the judge scale: when EVERY channel is a
+    // selection-rule zero (executed: single-mode fixtures), even the
+    // global scale is roundoff; a characteristic nonzero integral has
+    // magnitude ~ kmin^4 * area, which anchors the comparison in
+    // physical units.
+    let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
+    let char_scale = kmin2 * kmin2 * lx * ly;
+    let mut channels = Vec::with_capacity(stress_modes.len());
+    let mut worst_rel = 0.0f64;
+    for rc in raw_channels {
+        let judge_scale = rc
+            .scale
+            .max(1.0e-12 * global_scale)
+            .max(1.0e-8 * char_scale);
         let mut e = vec![0.0; nq * nq];
-        for (p, q, raw_a, raw_b) in raw_pairs {
-            worst_rel = worst_rel.max((raw_a - raw_b).abs() / chan_scale);
+        for (p, q, raw_a, raw_b) in rc.pairs {
+            worst_rel = worst_rel.max((raw_a - raw_b).abs() / judge_scale);
             let v = psi_norm * phi_norm * phi_norm * raw_b;
             e[p * nq + q] = v;
             e[q * nq + p] = v;
         }
         channels.push(StressChannel {
-            coefficient: young * h / (2.0 * xi4),
+            coefficient: young * h / (2.0 * rc.xi4),
             coupling: e,
         });
     }
