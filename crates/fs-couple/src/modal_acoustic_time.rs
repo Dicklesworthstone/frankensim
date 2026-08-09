@@ -96,7 +96,10 @@ pub struct ModalAcousticFrame {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModalAcousticTimeError {
     /// An input scalar or array violates its physical domain.
-    InvalidInput { what: &'static str },
+    InvalidInput {
+        /// Failed physical or numerical invariant.
+        what: &'static str,
+    },
     /// A natural frequency violates the caller's Nyquist guard.
     ModeAboveNyquistGuard {
         /// Zero-based mode index.
@@ -107,16 +110,26 @@ pub enum ModalAcousticTimeError {
         maximum_hz: f64,
     },
     /// The force vector cardinality differs from the admitted mode count.
-    ForceCountMismatch { expected: usize, found: usize },
+    ForceCountMismatch {
+        /// Admitted number of modes.
+        expected: usize,
+        /// Number of generalized forces supplied.
+        found: usize,
+    },
     /// A candidate step crossed a caller-owned state/energy/pressure ceiling.
     BudgetExceeded {
+        /// Quantity whose absolute magnitude crossed its ceiling.
         what: &'static str,
+        /// Candidate magnitude.
         value: f64,
+        /// Caller-authored ceiling.
         limit: f64,
     },
     /// A supposedly dissipative oscillator produced energy beyond roundoff.
     NegativeDissipation {
+        /// Computed work-minus-energy difference [J].
         dissipation_j: f64,
+        /// Scale-aware floating-point allowance [J].
         tolerance_j: f64,
     },
 }
