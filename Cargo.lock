@@ -1264,6 +1264,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-duct"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-material",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-dwr"
 version = "0.0.1"
 dependencies = [

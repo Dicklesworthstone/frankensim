@@ -1,0 +1,21 @@
+[package]
+name = "fs-duct"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "1D viscothermal duct/horn acoustics: transfer matrices over cylinder/cone segments with Zwikker-Kosten wide-tube losses, radiation loads, and input impedance — instrument bores, mufflers, HVAC and waveguides are the same object."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
