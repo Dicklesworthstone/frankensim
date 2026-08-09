@@ -2278,6 +2278,7 @@ name = "fs-solid"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-blake3",
  "fs-cutfem",
  "fs-exec",
  "fs-ivl",

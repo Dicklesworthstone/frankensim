@@ -13,10 +13,16 @@ constructor facade.
 
 The `linear3` module is the generic body-fitted three-dimensional
 small-strain rung. It assembles a sparse stiffness/consistent-mass pencil from
-P1 tetrahedra plus uniform or per-element `fs-material` state points. Object
-names and material presets are deliberately absent: downstream vibration and
-vibroacoustic consumers receive the same `(K,M)` artifact for any admitted
-geometry/material composition.
+P1 tetrahedra plus uniform or per-element `fs-material` state points. Its
+constitutive seam is a finite, exactly symmetric, positive-definite 6x6 tensor
+in an explicitly documented Mandel basis; isotropic and oriented-orthotropic
+constructors lower into that shared representation. Object names and material
+presets are deliberately absent: downstream vibration and vibroacoustic
+consumers receive the same `(K,M)` artifact for any admitted
+geometry/material composition. Anisotropy is therefore supported at the
+operator level, but material-card resolution of engineering/crystal constants
+and texture/orientation fields remains a separate evidence-bearing admission
+step; absence of that data is not permission to assume isotropy.
 
 ## Public types and semantics
 

@@ -19,6 +19,7 @@ koiter-asymptotics = []
 contact = []
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-cutfem = { path = "../fs-cutfem" }
 fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }

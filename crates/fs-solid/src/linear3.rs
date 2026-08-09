@@ -7,22 +7,29 @@
 //!
 //! `K = sum_e integral B^T C B dV`, `M = sum_e integral rho N^T N dV`
 //!
-//! for isotropic material state points. No object class or material name is
-//! encoded: a squat metal disc, a wooden body, or a glass support are merely
-//! geometry plus resolved material fields. The output is the ordinary
-//! `(K,M)` pencil consumed by `fs-modal`.
+//! for arbitrary symmetric positive-definite linear-elastic material states.
+//! Isotropic and oriented-orthotropic constructors lower their constitutive
+//! laws into the same Mandel-basis tensor, so no object class or material name
+//! is encoded: a squat metal disc, a wooden body, a crystal, or a glass
+//! support are geometry plus resolved material fields. The output is the
+//! ordinary `(K,M)` pencil consumed by `fs-modal`.
 //!
 //! The v1 applicability boundary is intentionally narrow and explicit:
-//! infinitesimal strain, isotropic elasticity, undeformed geometry, and
-//! conforming non-degenerate P1 tetrahedra. Plasticity, finite strain,
+//! infinitesimal strain, symmetric positive-definite linear elasticity,
+//! undeformed geometry, and conforming non-degenerate P1 tetrahedra.
+//! Plasticity, finite strain,
 //! thermoelastic prestress, phase change, and evolving topology must select a
 //! different constitutive/kinematic rung rather than silently passing through
 //! this operator.
 
 use std::collections::BTreeSet;
 
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_material::state_point::IsotropicSolidStatePoint;
+use fs_material::OrthotropicElastic;
+use fs_material::state_point::{
+    IsotropicElasticStatePoint, IsotropicSolidStatePoint, OrthotropicElasticStatePoint,
+};
 use fs_sparse::{Coo, Csr};
 
 /// Bounded assembly request. Limits are checked before matrix allocation.
@@ -57,50 +64,185 @@ impl Default for TetAssemblyBudget {
     }
 }
 
-/// One uniform isotropic elastic state carried into the element operator.
+/// Mandel ordering used by the three-dimensional operator:
+/// `[xx, yy, zz, sqrt(2)xy, sqrt(2)yz, sqrt(2)zx]`.
+///
+/// Mandel scaling makes the ordinary six-vector dot product equal to tensor
+/// double contraction. Consequently an elastic matrix is symmetric positive
+/// definite in the usual Euclidean sense, including after material-frame
+/// rotations.
+pub type MandelStiffness6 = [[f64; 6]; 6];
+
+/// One uniform linear-elastic state carried into the element operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TetElasticMaterial {
     /// Density [kg/m^3].
     pub density_kg_m3: f64,
-    /// Young's modulus [Pa].
-    pub young_modulus_pa: f64,
-    /// Poisson ratio [-].
-    pub poisson_ratio: f64,
+    /// Symmetric positive-definite constitutive tensor [Pa] in the global
+    /// frame and the module's declared Mandel ordering.
+    stiffness_mandel_pa: MandelStiffness6,
     /// Raw bytes of the evidence-bearing `fs-material` state identity.
     pub material_state_identity: [u8; 32],
 }
 
 impl TetElasticMaterial {
-    /// Construct from scalar properties and an upstream material-state
-    /// identity. The identity is mandatory because otherwise changing a
-    /// temperature-dependent property could leave no trace in downstream
-    /// modal or acoustic artifacts.
+    /// Construct an isotropic state from scalar properties and an upstream
+    /// material-state identity.
+    ///
+    /// The identity is mandatory because otherwise changing a temperature-
+    /// dependent property could leave no trace in downstream modal or
+    /// acoustic artifacts.
     pub fn try_new(
         density_kg_m3: f64,
         young_modulus_pa: f64,
         poisson_ratio: f64,
         material_state_identity: [u8; 32],
     ) -> Result<Self, TetElasticError> {
+        if !(young_modulus_pa.is_finite() && young_modulus_pa > 0.0) {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "young_modulus_pa must be finite and positive",
+            });
+        }
+        if !(poisson_ratio.is_finite() && poisson_ratio > -1.0 && poisson_ratio < 0.5) {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "poisson_ratio must lie in (-1, 0.5)",
+            });
+        }
+        let lambda = young_modulus_pa * poisson_ratio
+            / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio));
+        let mu = young_modulus_pa / (2.0 * (1.0 + poisson_ratio));
+        let mut stiffness = [[0.0; 6]; 6];
+        for (row, values) in stiffness.iter_mut().enumerate().take(3) {
+            for value in values.iter_mut().take(3) {
+                *value = lambda;
+            }
+            values[row] += 2.0 * mu;
+        }
+        for (index, row) in stiffness.iter_mut().enumerate().skip(3) {
+            row[index] = 2.0 * mu;
+        }
+        Self::try_new_mandel(density_kg_m3, stiffness, material_state_identity)
+    }
+
+    /// Construct from a complete global-frame Mandel stiffness tensor.
+    ///
+    /// This is the material-name-independent admission seam for anisotropic
+    /// solids. The matrix must be finite, exactly symmetric, and positive
+    /// definite. Callers that obtain paired tensor entries from noisy data
+    /// must perform and identify their chosen symmetry projection upstream;
+    /// this operator never repairs constitutive evidence silently.
+    pub fn try_new_mandel(
+        density_kg_m3: f64,
+        stiffness_mandel_pa: MandelStiffness6,
+        material_state_identity: [u8; 32],
+    ) -> Result<Self, TetElasticError> {
         let material = Self {
             density_kg_m3,
-            young_modulus_pa,
-            poisson_ratio,
+            stiffness_mandel_pa,
             material_state_identity,
         };
         material.validate()?;
         Ok(material)
     }
 
+    /// Construct an oriented orthotropic state.
+    ///
+    /// `principal_to_world` is a proper orthonormal rotation whose columns are
+    /// the material principal axes expressed in world coordinates. The
+    /// constitutive law is rotated exactly once at admission; element hot
+    /// loops consume the resulting global-frame tensor without dispatch.
+    pub fn try_new_oriented_orthotropic(
+        density_kg_m3: f64,
+        law: &OrthotropicElastic,
+        principal_to_world: [[f64; 3]; 3],
+        material_state_identity: [u8; 32],
+        orientation_identity: [u8; 32],
+    ) -> Result<Self, TetElasticError> {
+        validate_rotation(principal_to_world)?;
+        if orientation_identity == [0; 32] {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "orientation_identity must not be the zero identity",
+            });
+        }
+        let principal = law.stiffness();
+        let transform = mandel_rotation(principal_to_world);
+        let mut world = [[0.0; 6]; 6];
+        for a in 0..6 {
+            for b in 0..6 {
+                for p in 0..6 {
+                    for q in 0..6 {
+                        world[a][b] =
+                            transform[a][p].mul_add(principal[p][q] * transform[b][q], world[a][b]);
+                    }
+                }
+            }
+        }
+        // The operation tree above is symmetric mathematically, but separate
+        // floating-point accumulation paths can differ by a final bit. Use one
+        // deterministic triangle as the exact stored constitutive tensor.
+        for row in 0..6 {
+            for column in 0..row {
+                world[row][column] = world[column][row];
+            }
+        }
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-solid.oriented-orthotropic-constitutive-state.v1");
+        identity.update(&material_state_identity);
+        identity.update(&orientation_identity);
+        for row in principal_to_world {
+            for value in row {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        Self::try_new_mandel(density_kg_m3, world, *identity.finalize().as_bytes())
+    }
+
     /// Bind directly to the canonical temperature/environment-resolved
     /// isotropic material state.
     #[must_use]
     pub fn from_resolved_state(state: &IsotropicSolidStatePoint) -> Self {
-        Self {
-            density_kg_m3: state.density_kg_m3(),
-            young_modulus_pa: state.young_modulus_pa(),
-            poisson_ratio: state.poisson_ratio(),
-            material_state_identity: *state.resolved().identity().as_bytes(),
-        }
+        Self::try_new(
+            state.density_kg_m3(),
+            state.young_modulus_pa(),
+            state.poisson_ratio(),
+            *state.resolved().identity().as_bytes(),
+        )
+        .expect("an admitted isotropic material state satisfies tet invariants")
+    }
+
+    /// Bind the minimal evidence-bearing isotropic-elastic state used by
+    /// vibration analysis, without requiring an unrelated yield datum.
+    #[must_use]
+    pub fn from_resolved_elastic_state(state: &IsotropicElasticStatePoint) -> Self {
+        Self::try_new(
+            state.density_kg_m3(),
+            state.young_modulus_pa(),
+            state.poisson_ratio(),
+            *state.resolved().identity().as_bytes(),
+        )
+        .expect("an admitted isotropic-elastic state satisfies tet invariants")
+    }
+
+    /// Bind an evidence-bearing orthotropic state and an independently
+    /// identified material-axis orientation to the global operator frame.
+    pub fn try_from_resolved_orthotropic_state(
+        state: &OrthotropicElasticStatePoint,
+        principal_to_world: [[f64; 3]; 3],
+        orientation_identity: ContentHash,
+    ) -> Result<Self, TetElasticError> {
+        Self::try_new_oriented_orthotropic(
+            state.density_kg_m3(),
+            state.law(),
+            principal_to_world,
+            *state.resolved().identity().as_bytes(),
+            *orientation_identity.as_bytes(),
+        )
+    }
+
+    /// Complete global-frame Mandel stiffness tensor [Pa].
+    #[must_use]
+    pub const fn stiffness_mandel_pa(&self) -> &MandelStiffness6 {
+        &self.stiffness_mandel_pa
     }
 
     fn validate(&self) -> Result<(), TetElasticError> {
@@ -109,17 +251,30 @@ impl TetElasticMaterial {
                 what: "density_kg_m3 must be finite and positive",
             });
         }
-        if !(self.young_modulus_pa.is_finite() && self.young_modulus_pa > 0.0) {
-            return Err(TetElasticError::InvalidMaterial {
-                what: "young_modulus_pa must be finite and positive",
-            });
-        }
-        if !(self.poisson_ratio.is_finite()
-            && self.poisson_ratio > -1.0
-            && self.poisson_ratio < 0.5)
+        if self
+            .stiffness_mandel_pa
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
         {
             return Err(TetElasticError::InvalidMaterial {
-                what: "poisson_ratio must lie in (-1, 0.5)",
+                what: "stiffness_mandel_pa must be finite",
+            });
+        }
+        for row in 0..6 {
+            for column in 0..row {
+                if self.stiffness_mandel_pa[row][column].to_bits()
+                    != self.stiffness_mandel_pa[column][row].to_bits()
+                {
+                    return Err(TetElasticError::InvalidMaterial {
+                        what: "stiffness_mandel_pa must be exactly symmetric",
+                    });
+                }
+            }
+        }
+        if !is_positive_definite(self.stiffness_mandel_pa) {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "stiffness_mandel_pa must be positive definite",
             });
         }
         if self.material_state_identity == [0; 32] {
@@ -535,34 +690,21 @@ fn element_matrices(
     geometry: &TetGeometry,
     material: &TetElasticMaterial,
 ) -> ([[f64; 12]; 12], [[f64; 12]; 12]) {
-    let e = material.young_modulus_pa;
-    let nu = material.poisson_ratio;
-    let lambda = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
-    let mu = e / (2.0 * (1.0 + nu));
-    // Engineering-shear Voigt order: xx, yy, zz, xy, yz, zx.
-    let mut d = [[0.0; 6]; 6];
-    for (row, drow) in d.iter_mut().enumerate().take(3) {
-        for slot in drow.iter_mut().take(3) {
-            *slot = lambda;
-        }
-        drow[row] += 2.0 * mu;
-    }
-    d[3][3] = mu;
-    d[4][4] = mu;
-    d[5][5] = mu;
+    let d = material.stiffness_mandel_pa;
 
     let mut b = [[0.0; 12]; 6];
+    let inverse_sqrt_two = core::f64::consts::FRAC_1_SQRT_2;
     for (node, g) in geometry.gradients.iter().enumerate() {
         let c = 3 * node;
         b[0][c] = g[0];
         b[1][c + 1] = g[1];
         b[2][c + 2] = g[2];
-        b[3][c] = g[1];
-        b[3][c + 1] = g[0];
-        b[4][c + 1] = g[2];
-        b[4][c + 2] = g[1];
-        b[5][c] = g[2];
-        b[5][c + 2] = g[0];
+        b[3][c] = g[1] * inverse_sqrt_two;
+        b[3][c + 1] = g[0] * inverse_sqrt_two;
+        b[4][c + 1] = g[2] * inverse_sqrt_two;
+        b[4][c + 2] = g[1] * inverse_sqrt_two;
+        b[5][c] = g[2] * inverse_sqrt_two;
+        b[5][c + 2] = g[0] * inverse_sqrt_two;
     }
     let mut db = [[0.0; 12]; 6];
     for i in 0..6 {
@@ -597,6 +739,100 @@ fn element_matrices(
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn is_positive_definite(matrix: MandelStiffness6) -> bool {
+    let mut lower = [[0.0_f64; 6]; 6];
+    for row in 0..6 {
+        for column in 0..=row {
+            let mut remainder = matrix[row][column];
+            for inner in 0..column {
+                remainder = lower[row][inner].mul_add(-lower[column][inner], remainder);
+            }
+            if row == column {
+                if !(remainder.is_finite() && remainder > 0.0) {
+                    return false;
+                }
+                lower[row][column] = remainder.sqrt();
+            } else {
+                lower[row][column] = remainder / lower[column][column];
+                if !lower[row][column].is_finite() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn validate_rotation(rotation: [[f64; 3]; 3]) -> Result<(), TetElasticError> {
+    if rotation.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(TetElasticError::InvalidMaterial {
+            what: "principal_to_world must be finite",
+        });
+    }
+    const ORTHONORMAL_TOLERANCE: f64 = 1.0e-12;
+    for column_a in 0..3 {
+        for column_b in 0..3 {
+            let dot = (0..3)
+                .map(|row| rotation[row][column_a] * rotation[row][column_b])
+                .sum::<f64>();
+            let target = if column_a == column_b { 1.0 } else { 0.0 };
+            if (dot - target).abs() > ORTHONORMAL_TOLERANCE {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "principal_to_world must be orthonormal",
+                });
+            }
+        }
+    }
+    if (determinant3(rotation) - 1.0).abs() > ORTHONORMAL_TOLERANCE {
+        return Err(TetElasticError::InvalidMaterial {
+            what: "principal_to_world must be a proper rotation",
+        });
+    }
+    Ok(())
+}
+
+fn mandel_rotation(rotation: [[f64; 3]; 3]) -> [[f64; 6]; 6] {
+    let basis = mandel_basis();
+    let mut transform = [[0.0; 6]; 6];
+    for principal in 0..6 {
+        let mut rotated = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for p in 0..3 {
+                    for q in 0..3 {
+                        rotated[i][j] = rotation[i][p]
+                            .mul_add(basis[principal][p][q] * rotation[j][q], rotated[i][j]);
+                    }
+                }
+            }
+        }
+        for world in 0..6 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    transform[world][principal] =
+                        basis[world][i][j].mul_add(rotated[i][j], transform[world][principal]);
+                }
+            }
+        }
+    }
+    transform
+}
+
+fn mandel_basis() -> [[[f64; 3]; 3]; 6] {
+    let mut basis = [[[0.0; 3]; 3]; 6];
+    basis[0][0][0] = 1.0;
+    basis[1][1][1] = 1.0;
+    basis[2][2][2] = 1.0;
+    let shear = core::f64::consts::FRAC_1_SQRT_2;
+    basis[3][0][1] = shear;
+    basis[3][1][0] = shear;
+    basis[4][1][2] = shear;
+    basis[4][2][1] = shear;
+    basis[5][2][0] = shear;
+    basis[5][0][2] = shear;
+    basis
 }
 
 fn determinant3(a: [[f64; 3]; 3]) -> f64 {
@@ -742,14 +978,114 @@ mod tests {
             .iter()
             .flat_map(|p| [alpha * p[0], 0.0, 0.0])
             .collect();
-        let nu = mat.poisson_ratio;
-        let lambda = mat.young_modulus_pa * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
-        let mu = mat.young_modulus_pa / (2.0 * (1.0 + nu));
-        let expected = 0.5 * (lambda + 2.0 * mu) * alpha * alpha / 6.0;
+        let expected = 0.5 * mat.stiffness_mandel_pa()[0][0] * alpha * alpha / 6.0;
         let actual = 0.5 * quadratic(&k, &extension);
         assert!(
             (actual - expected).abs() < 1.0e-13,
             "{actual} != {expected}"
+        );
+    }
+
+    #[test]
+    fn g0_oriented_orthotropy_rotates_energy_and_preserves_mass() {
+        let law = OrthotropicElastic::new(
+            [120.0, 60.0, 30.0],
+            [0.2, 0.1, 0.15],
+            [20.0, 15.0, 10.0],
+            0.01,
+        )
+        .unwrap();
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let quarter_turn_about_z = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let principal = TetElasticMaterial::try_new_oriented_orthotropic(
+            6.0, &law, identity, [8; 32], [0x18; 32],
+        )
+        .unwrap();
+        let rotated = TetElasticMaterial::try_new_oriented_orthotropic(
+            6.0,
+            &law,
+            quarter_turn_about_z,
+            [9; 32],
+            [0x19; 32],
+        )
+        .unwrap();
+        assert!(
+            (principal.stiffness_mandel_pa()[0][0] - rotated.stiffness_mandel_pa()[1][1]).abs()
+                < 1.0e-12
+        );
+        assert!(
+            (principal.stiffness_mandel_pa()[1][1] - rotated.stiffness_mandel_pa()[0][0]).abs()
+                < 1.0e-12
+        );
+
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let principal_assembly =
+            with_cx(|cx| reference_problem(&nodes, &tets, &principal, &[]).assemble(cx)).unwrap();
+        let rotated_assembly =
+            with_cx(|cx| reference_problem(&nodes, &tets, &rotated, &[]).assemble(cx)).unwrap();
+        assert_eq!(principal_assembly.total_mass_kg, 1.0);
+        assert_eq!(rotated_assembly.total_mass_kg, 1.0);
+
+        let alpha = 0.125;
+        let x_extension: Vec<f64> = nodes
+            .iter()
+            .flat_map(|point| [alpha * point[0], 0.0, 0.0])
+            .collect();
+        let principal_energy =
+            0.5 * quadratic(&principal_assembly.stiffness.to_dense(), &x_extension);
+        let rotated_energy = 0.5 * quadratic(&rotated_assembly.stiffness.to_dense(), &x_extension);
+        assert!(principal_energy > rotated_energy);
+        assert!(
+            (principal_energy / rotated_energy
+                - principal.stiffness_mandel_pa()[0][0] / rotated.stiffness_mandel_pa()[0][0])
+                .abs()
+                < 1.0e-12
+        );
+    }
+
+    #[test]
+    fn g0_constitutive_admission_refuses_asymmetry_indefiniteness_and_bad_orientation() {
+        let mut asymmetric = [[0.0; 6]; 6];
+        for (index, row) in asymmetric.iter_mut().enumerate() {
+            row[index] = 1.0;
+        }
+        asymmetric[0][1] = 0.25;
+        assert_eq!(
+            TetElasticMaterial::try_new_mandel(1.0, asymmetric, [1; 32]).unwrap_err(),
+            TetElasticError::InvalidMaterial {
+                what: "stiffness_mandel_pa must be exactly symmetric"
+            }
+        );
+
+        let mut indefinite = [[0.0; 6]; 6];
+        for (index, row) in indefinite.iter_mut().enumerate() {
+            row[index] = 1.0;
+        }
+        indefinite[5][5] = -1.0;
+        assert_eq!(
+            TetElasticMaterial::try_new_mandel(1.0, indefinite, [1; 32]).unwrap_err(),
+            TetElasticError::InvalidMaterial {
+                what: "stiffness_mandel_pa must be positive definite"
+            }
+        );
+
+        let law = OrthotropicElastic::new([3.0, 2.0, 1.0], [0.1, 0.1, 0.1], [0.8, 0.7, 0.6], 0.01)
+            .unwrap();
+        let reflection = [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        assert_eq!(
+            TetElasticMaterial::try_new_oriented_orthotropic(
+                1.0, &law, reflection, [1; 32], [2; 32],
+            )
+            .unwrap_err(),
+            TetElasticError::InvalidMaterial {
+                what: "principal_to_world must be a proper rotation"
+            }
         );
     }
 
