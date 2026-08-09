@@ -66,6 +66,12 @@ test).
   (verified source; previously deliberately absent): 10 log2(N) + 40
   above 1 sone, `40 (N + 0.0005)^0.35` floored at 3 phon below, with
   the reference's small branch step at 1 sone kept and documented.
+- `signal::pareto_metrics` — the batch set for Pareto/listening
+  consumers (stationary sones + phon, N5/Nmax, sharpness, mean
+  DW-block roughness with block count, log-attack-time) from one
+  48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
+  bitwise the standalone call's value (pinned by test); any
+  component's typed refusal propagates — no partial results.
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 
@@ -152,7 +158,7 @@ None.
 
 ## Conformance tests
 
-`tests/psycho.rs` (16 + 1 ignored provenance tool): ISO signal-1
+`tests/psycho.rs` (17 + 1 ignored provenance tool): ISO signal-1
 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
 refusal; low-band mutation; calibration refusal + calibrated value;
@@ -163,7 +169,8 @@ refusals; signal-path stationary exactness (+ Annex B.3 published
 values); time-varying steady-tone and pulse exactness pins with
 temporal-asymmetry behavior; phon conversion + signal refusals;
 `dump_reference_signals` (ignored) regenerates the bit-identical PCM
-the reference binary consumed to mint every signal-path pin.
+the reference binary consumed to mint every signal-path pin; batch
+aggregation-exactness (bitwise) + refusal propagation.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
@@ -171,7 +178,6 @@ the reference binary consumed to mint every signal-path pin.
 - Roughness time-series over long signals (block averaging /
   overlap): single-block v1.
 - Tonality/harmonicity: not implemented.
-- Batch API for Pareto consumers: not implemented.
 - Sampling rates other than 48 kHz: refused, not resampled (no
   claim); wav parsing is the caller's job (inputs are Pa slices).
 - Per-frame specific loudness is computed internally but not

@@ -429,3 +429,82 @@ pub fn phon_from_sone(sones: f64) -> Result<f64, PsychoError> {
         Ok(10.0 * det::ln(sones) / det::ln(2.0) + 40.0)
     }
 }
+
+/// The batch metric set for Pareto/listening-evidence consumers: one
+/// call, one PCM block in Pa at 48 kHz, every metric this crate can
+/// currently claim. Aggregation-exact BY CONTRACT: each field equals
+/// the corresponding standalone call on the same input (pinned by
+/// test — a wiring mistake like swapped fields is the failure mode
+/// this contract exists to catch).
+#[derive(Debug, Clone)]
+pub struct ParetoMetrics {
+    /// Stationary loudness [sone] via the PCM filterbank path
+    /// (`time_skip` as passed).
+    pub sones_stationary: f64,
+    /// Loudness level [phon] of the stationary loudness.
+    pub phon_stationary: f64,
+    /// Time-varying N5 [sone] (the standard's percentile summary).
+    pub n5: f64,
+    /// Time-varying Nmax [sone].
+    pub n_max: f64,
+    /// DIN 45692 sharpness [acum] over the stationary
+    /// specific-loudness pattern.
+    pub sharpness_acum: f64,
+    /// Daniel-Weber roughness [asper], mean over the consecutive
+    /// whole [`crate::roughness::DW_BLOCK`] blocks in the signal.
+    pub roughness_asper_mean: f64,
+    /// Number of whole roughness blocks averaged.
+    pub roughness_blocks: usize,
+    /// Timbre-toolbox log-attack-time [log10 s] with the given
+    /// envelope window.
+    pub log_attack_time: f64,
+}
+
+/// Compute the full [`ParetoMetrics`] set from one calibrated PCM
+/// block (Pa, 48 kHz). Refusals from any component metric propagate
+/// unchanged — a batch call never papers over a member's typed
+/// refusal with a partial result.
+///
+/// # Errors
+/// Any error of the component metrics
+/// ([`loudness_stationary_from_pcm`], [`loudness_time_varying`],
+/// [`crate::sharpness_din`], [`crate::roughness::roughness_dw_block`],
+/// [`crate::log_attack_time`], [`phon_from_sone`]).
+pub fn pareto_metrics(
+    pcm_pa: &[f64],
+    sample_rate: f64,
+    time_skip: f64,
+    field: SoundField,
+    lat_env_window: usize,
+) -> Result<ParetoMetrics, PsychoError> {
+    let stationary = loudness_stationary_from_pcm(pcm_pa, sample_rate, time_skip, field)?;
+    let tv = loudness_time_varying(pcm_pa, sample_rate, field)?;
+    let sharpness = crate::sharpness_din(&stationary.specific)?;
+    let n_blocks = pcm_pa.len() / crate::roughness::DW_BLOCK;
+    if n_blocks == 0 {
+        return Err(PsychoError::DegenerateSignal {
+            what: "no whole roughness block in the signal",
+        });
+    }
+    let mut r_sum = 0.0f64;
+    for b in 0..n_blocks {
+        let start = b * crate::roughness::DW_BLOCK;
+        r_sum += crate::roughness::roughness_dw_block(
+            &pcm_pa[start..start + crate::roughness::DW_BLOCK],
+            sample_rate,
+        )?;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let roughness_mean = r_sum / n_blocks as f64;
+    let lat = crate::log_attack_time(pcm_pa, sample_rate, lat_env_window)?;
+    Ok(ParetoMetrics {
+        sones_stationary: stationary.sones,
+        phon_stationary: phon_from_sone(stationary.sones)?,
+        n5: tv.n5,
+        n_max: tv.n_max,
+        sharpness_acum: sharpness,
+        roughness_asper_mean: roughness_mean,
+        roughness_blocks: n_blocks,
+        log_attack_time: lat,
+    })
+}

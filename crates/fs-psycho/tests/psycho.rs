@@ -643,3 +643,74 @@ fn phon_conversion_and_signal_refusals() {
         Err(PsychoError::DegenerateSignal { .. })
     ));
 }
+
+/// The batch Pareto API is aggregation-exact: every field is BITWISE
+/// equal to the corresponding standalone call on the same input (the
+/// wiring-mistake contract), refusals propagate typed, and the
+/// roughness mean covers exactly the whole blocks.
+#[test]
+fn pareto_batch_is_aggregation_exact() {
+    use fs_psycho::roughness::{DW_BLOCK, roughness_dw_block};
+    use fs_psycho::signal::{
+        loudness_stationary_from_pcm, loudness_time_varying, pareto_metrics, phon_from_sone,
+    };
+    // An AM tone so roughness, sharpness, and attack all have signal.
+    let pcm: Vec<f64> = (0..sigfix::LEN)
+        .map(|i| {
+            let t = i as f64 / sigfix::SR;
+            let a = fs_math::det::sqrt(2.0) * 2.0e-5 * fs_math::det::pow(10.0, 65.0 / 20.0);
+            a * (1.0 + fs_math::det::sin(2.0 * core::f64::consts::PI * 70.0 * t))
+                * fs_math::det::sin(2.0 * core::f64::consts::PI * 1000.0 * t)
+        })
+        .collect();
+    let m = pareto_metrics(&pcm, sigfix::SR, 0.5, SoundField::Free, 480).expect("batch");
+    let stationary =
+        loudness_stationary_from_pcm(&pcm, sigfix::SR, 0.5, SoundField::Free).expect("stat");
+    let tv = loudness_time_varying(&pcm, sigfix::SR, SoundField::Free).expect("tv");
+    assert_eq!(m.sones_stationary.to_bits(), stationary.sones.to_bits());
+    assert_eq!(
+        m.phon_stationary.to_bits(),
+        phon_from_sone(stationary.sones).expect("phon").to_bits()
+    );
+    assert_eq!(m.n5.to_bits(), tv.n5.to_bits());
+    assert_eq!(m.n_max.to_bits(), tv.n_max.to_bits());
+    assert_eq!(
+        m.sharpness_acum.to_bits(),
+        sharpness_din(&stationary.specific).expect("s").to_bits()
+    );
+    assert_eq!(m.roughness_blocks, sigfix::LEN / DW_BLOCK);
+    let mut r_sum = 0.0;
+    for b in 0..m.roughness_blocks {
+        r_sum += roughness_dw_block(&pcm[b * DW_BLOCK..(b + 1) * DW_BLOCK], sigfix::SR)
+            .expect("roughness");
+    }
+    assert_eq!(
+        m.roughness_asper_mean.to_bits(),
+        (r_sum / m.roughness_blocks as f64).to_bits()
+    );
+    assert_eq!(
+        m.log_attack_time.to_bits(),
+        fs_psycho::log_attack_time(&pcm, sigfix::SR, 480)
+            .expect("lat")
+            .to_bits()
+    );
+    // Sanity: this fixture's roughness is strong (70 Hz AM near the
+    // anchor) — the batch value must reflect it, not a stub.
+    assert!(
+        m.roughness_asper_mean > 0.5,
+        "AM fixture roughness {}",
+        m.roughness_asper_mean
+    );
+    // Refusal propagation: too short for a roughness block.
+    assert!(matches!(
+        pareto_metrics(&pcm[..DW_BLOCK - 1], sigfix::SR, 0.0, SoundField::Free, 48),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
+    // Refusal propagation: unsupported rate comes from the loudness
+    // path before anything else runs.
+    assert!(matches!(
+        pareto_metrics(&pcm, 44_100.0, 0.5, SoundField::Free, 480),
+        Err(PsychoError::UnsupportedRate { .. })
+    ));
+    println!("{{\"suite\":\"fs-psycho\",\"case\":\"pareto-batch\",\"verdict\":\"pass\"}}");
+}
