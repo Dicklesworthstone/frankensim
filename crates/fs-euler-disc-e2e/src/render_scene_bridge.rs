@@ -13,7 +13,10 @@ use std::collections::BTreeSet;
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, Point3, Vec3};
-use fs_material::state_point::{IsotropicSolidStatePoint, VisibleConductorStatePoint};
+use fs_material::state_point::{
+    IsotropicElasticStatePoint, IsotropicSolidStatePoint, ResolvedMaterialStatePoint,
+    VisibleConductorStatePoint,
+};
 use fs_math::det;
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
 use fs_render::animated_instances::{
@@ -53,7 +56,8 @@ use crate::render_trajectory::{
 };
 use crate::render_trajectory_codec::EulerRenderTrajectoryArtifact;
 use crate::specimen::{
-    ResolvedDiscProfile, ResolvedDiscProfileIdentities, ResolvedMaterialDiscProfile,
+    ResolvedDiscProfile, ResolvedDiscProfileIdentities, ResolvedElasticDiscProfile,
+    ResolvedMaterialDiscProfile,
 };
 use crate::timeline_resampling::{EventEvaluationSide, ExposureEventPolicy};
 
@@ -212,7 +216,39 @@ impl EulerDiscMaterialStateBinding {
         roughness_alpha: f64,
         surface_state_identity: ContentHash,
     ) -> Result<Self, EulerSceneError> {
-        let mechanical = mechanical.resolved();
+        Self::try_conductor_resolved(
+            mechanical.resolved(),
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )
+    }
+
+    /// Resolve an opaque-conductor appearance for the minimal elastic state
+    /// consumed by structural vibration and acoustic radiation.
+    ///
+    /// This avoids requiring an unrelated yield-stress claim merely to bind
+    /// optics to the exact density/stiffness state used by modal mechanics.
+    pub fn try_conductor_elastic(
+        mechanical: &IsotropicElasticStatePoint,
+        optical: &VisibleConductorStatePoint,
+        roughness_alpha: f64,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        Self::try_conductor_resolved(
+            mechanical.resolved(),
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )
+    }
+
+    fn try_conductor_resolved(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &VisibleConductorStatePoint,
+        roughness_alpha: f64,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
         let optical_resolved = optical.resolved();
         if mechanical.material() != optical_resolved.material()
             || mechanical.card_identity() != optical_resolved.card_identity()
@@ -706,6 +742,27 @@ impl<'artifact> EulerCinematicScene<'artifact> {
         {
             return Err(EulerSceneError::MaterialStateMismatch(
                 "render binding does not match the resolved mechanical specimen",
+            ));
+        }
+        config.disc_material = binding.appearance;
+        config.disc_material_state = Some(binding);
+        Self::try_build_inner(artifact, &specimen.profile, config, cx)
+    }
+
+    /// Build a scene bound to the same density and elastic constitutive state
+    /// used by structural modes and physical acoustic radiation.
+    pub fn try_build_elastic_physical(
+        artifact: &'artifact EulerRenderTrajectoryArtifact,
+        specimen: &ResolvedElasticDiscProfile,
+        binding: EulerDiscMaterialStateBinding,
+        mut config: EulerSceneConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, EulerSceneError> {
+        if specimen.material_state_identity != binding.mechanical_state_identity
+            || specimen.material_card_identity != binding.material_card_identity
+        {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "render binding does not match the resolved elastic specimen",
             ));
         }
         config.disc_material = binding.appearance;

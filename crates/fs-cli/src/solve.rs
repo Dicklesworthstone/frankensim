@@ -4419,6 +4419,64 @@ fn validate_resume_candidate(
                 })?;
                 expected_edges.push((EdgeRole::In, predecessor));
             }
+            SolveStage::FlowNetwork => {
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let rebuilt = flow_network_receipt(&project.spec, run, work, true);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let expected_receipt = match rebuilt {
+                    Ok(rebuilt) => rebuilt,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "cli-solve-cancelled" | "cli-solve-work-envelope"
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(resume_identity(format!(
+                            "the retained cooling declaration no longer lowers or solves: {}",
+                            error.what
+                        )));
+                    }
+                };
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
+                    return Err(resume_identity(
+                        "the retained flow-network receipt is not the canonical driver receipt",
+                    ));
+                }
+                let predecessor = predecessor_state.ok_or_else(|| {
+                    resume_identity(
+                        "the retained flow-network stage has no verified material-resolve-stage \
+                         predecessor",
+                    )
+                })?;
+                expected_edges.push((EdgeRole::In, predecessor));
+            }
             _ => unreachable!("completed unavailable stages were refused above"),
         }
         require_exact_edges(

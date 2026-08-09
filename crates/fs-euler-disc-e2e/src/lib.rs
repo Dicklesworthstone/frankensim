@@ -129,7 +129,7 @@ pub use structural_acoustics::{
     PhysicalPressureSignal, PointForceProjection, ResolvedAcousticMedium,
     STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls, StructuralModalBasis,
     StructuralModalBasisError, StructuralMode, StructuralModeRequest, build_structural_modal_basis,
-    modal_loss_spectrum_from_prony,
+    modal_loss_spectrum_from_prony, modal_loss_spectrum_from_rayleigh,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,

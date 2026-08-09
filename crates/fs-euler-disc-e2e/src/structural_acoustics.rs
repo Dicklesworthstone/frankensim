@@ -33,7 +33,7 @@ use fs_couple::modal_acoustic_time::{
 };
 use fs_exec::Cx;
 use fs_material::gas::GasState;
-use fs_material::visco::{LoweredModel, ViscoError, loss_factor_to_zeta};
+use fs_material::visco::{LoweredModel, RayleighDamping, ViscoError, loss_factor_to_zeta};
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_mbd::{Pose, Vec3};
@@ -812,6 +812,53 @@ pub fn modal_loss_spectrum_from_prony(
         if !(loss >= 0.0 && loss.is_finite()) {
             return Err(StructuralModalBasisError::InvalidRequest {
                 what: "constitutive modal loss factor must be finite and non-negative",
+            });
+        }
+        loss_factors.push(loss);
+    }
+    Ok(ModalLossSpectrum {
+        structural_basis_identity: basis.identity,
+        material_state_identity: basis.material_state_identity,
+        damping_model_identity,
+        loss_factors,
+    })
+}
+
+/// Evaluate a caller-identified Rayleigh damping law on one structural basis.
+///
+/// This is the inexpensive constitutive rung for materials whose damping data
+/// are available as mass- and stiffness-proportional coefficients. The
+/// coefficients are numerical material/process state, not a material-name
+/// preset; changing either coefficient changes the retained loss spectrum and
+/// all downstream pressure samples.
+///
+/// # Errors
+/// Refuses a foreign specimen/material binding, a zero damping identity, or a
+/// non-finite/negative modal loss factor.
+pub fn modal_loss_spectrum_from_rayleigh(
+    basis: &StructuralModalBasis,
+    specimen: &ResolvedElasticDiscProfile,
+    model: RayleighDamping,
+    damping_model_identity: ContentHash,
+) -> Result<ModalLossSpectrum, StructuralModalBasisError> {
+    if basis.specimen_identity != specimen.identity
+        || basis.material_state_identity != specimen.material_state_identity
+    {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "damping specimen does not match the structural basis",
+        });
+    }
+    if damping_model_identity == ContentHash([0; 32]) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "damping_model_identity must not be zero",
+        });
+    }
+    let mut loss_factors = Vec::with_capacity(basis.modes.len());
+    for mode in &basis.modes {
+        let loss = 2.0 * model.zeta_at(mode.angular_frequency_rad_s);
+        if !(loss >= 0.0 && loss.is_finite()) {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "Rayleigh modal loss factor must be finite and non-negative",
             });
         }
         loss_factors.push(loss);
@@ -2463,6 +2510,21 @@ mod tests {
                 })
                 .sum::<f64>();
             assert!((modal_mass - 1.0).abs() < 1.0e-8, "{modal_mass}");
+        }
+
+        let rayleigh = RayleighDamping::new(1.25, 2.5e-8).unwrap();
+        let loss = modal_loss_spectrum_from_rayleigh(
+            &basis,
+            &specimen,
+            rayleigh,
+            ContentHash([0x48; 32]),
+        )
+        .unwrap();
+        assert_eq!(loss.loss_factors.len(), basis.modes.len());
+        for (loss_factor, mode) in loss.loss_factors.iter().zip(&basis.modes) {
+            let expected = rayleigh.alpha / mode.angular_frequency_rad_s
+                + rayleigh.beta * mode.angular_frequency_rad_s;
+            assert_eq!(loss_factor.to_bits(), expected.to_bits());
         }
 
         let point = [0.038, 0.0, 0.0];
