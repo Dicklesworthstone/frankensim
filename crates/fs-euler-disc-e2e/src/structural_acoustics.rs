@@ -55,7 +55,11 @@ use fs_solid::{
 
 use crate::specimen::{DiscProfileSpec, ResolvedElasticDiscProfile};
 use crate::timeline_resampling::{EventEvaluationSide, TimelineResampler, TimelineResamplingError};
-use crate::{ChannelControl, EulerControlStream};
+use crate::{
+    AudioResamplingError, ChannelControl, EulerControlStream, GeneralizedForceMeasureInterval,
+    GeneralizedForceReconstructionInput, ReconstructedGeneralizedForce,
+    reconstruct_generalized_force_measures,
+};
 
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
@@ -265,8 +269,8 @@ pub struct PlatePointForceProjection {
     pub modal_force_n_per_sqrt_kg: Vec<f64>,
 }
 
-/// Exact frequency-domain Rayleigh-integral transfer for fixed observers
-/// above one rigidly baffled supported plate.
+/// Frequency-domain and causal retarded-time Rayleigh transfers for fixed
+/// observers above one rigidly baffled supported plate.
 #[derive(Clone, Debug)]
 pub struct BaffledPlateObserverRadiation {
     /// Structural plate basis consumed by the transfer.
@@ -277,6 +281,14 @@ pub struct BaffledPlateObserverRadiation {
     pub observers: Vec<AcousticWorldObserver>,
     /// Per-observer, per-mode pressure divided by generalized modal velocity.
     pub pressure_per_modal_velocity: Vec<Vec<C64>>,
+    /// Per-observer, per-mode causal FIR mapping sampled generalized modal
+    /// acceleration to pressure [Pa / (m sqrt(kg) s^-2)]. Lag zero is the
+    /// current sample boundary; later entries are progressively older states.
+    pub pressure_per_modal_acceleration_fir: Vec<Vec<Vec<f64>>>,
+    /// Sampling rate at which the retarded-time FIR was constructed [Hz].
+    pub retarded_sample_rate_hz: u32,
+    /// Longest retained propagation delay including its interpolation tap.
+    pub maximum_retarded_delay_frames: usize,
     /// Smallest acoustic quadrature panels-per-wavelength over retained modes.
     pub minimum_panels_per_wavelength: f64,
     /// Identity binding the basis, gas, observers, quadrature, and transfers.
@@ -287,7 +299,9 @@ pub struct BaffledPlateObserverRadiation {
 pub struct BaffledPlateModalAudioModel<'basis> {
     basis: &'basis RectangularPlateModalBasis,
     runtime: ModalAcousticTimeModel,
+    modal_damping_ratios: Vec<f64>,
     sample_rate_hz: u32,
+    maximum_abs_pressure_pa: f64,
     radiation_identity: ContentHash,
     damping_model_identity: ContentHash,
 }
@@ -481,6 +495,25 @@ pub enum PhysicalContactForceSampling {
     /// endpoint when available, otherwise the opening endpoint. Audio samples
     /// are split at every mechanics boundary.
     IntervalMeanAtClosingElseOpeningEndpointZohV1,
+    /// Authoritative interval force-time measures are conservatively
+    /// rasterized onto the audio clock and low-pass reconstructed before
+    /// structural integration. Spatial projection still uses the closing
+    /// contact endpoint, falling back to the opening endpoint when required.
+    IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
+}
+
+/// Explicit modal state at the first retained mechanics boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhysicalModalInitialState {
+    /// Every retained displacement and velocity begins at zero. This is
+    /// appropriate only when the modeled excitation truly begins at the
+    /// source horizon.
+    Zero,
+    /// Begin at static equilibrium under the first held generalized load.
+    /// This avoids inventing an impact when a causal preroll starts during an
+    /// already-running contact experiment; subsequent force motion still
+    /// excites the modes dynamically.
+    StaticEquilibriumAtFirstHeldForce,
 }
 
 /// Coordinate frame and exact location of a physical pressure observer.
@@ -565,11 +598,140 @@ impl PhysicalPressureSignal {
     }
 }
 
+/// Superpose simultaneous physical pressure fields at one observer.
+///
+/// Linear acoustic pressure is additive. This operation stays in pascals and
+/// therefore belongs before any pressure-to-digital listening gain. Inputs
+/// are ordered by their complete signal identities so the result is invariant
+/// to caller iteration order; the composite structural, damping, and
+/// radiation identities bind every contributing model.
+///
+/// # Errors
+/// Refuses an empty set, mismatched clocks/observers/sampling conventions,
+/// non-finite source or summed pressure, allocation failure, or cancellation.
+pub fn superpose_pressure_signals(
+    signals: &[&PhysicalPressureSignal],
+    cx: &Cx<'_>,
+) -> Result<PhysicalPressureSignal, StructuralModalBasisError> {
+    let first = signals
+        .first()
+        .copied()
+        .ok_or(StructuralModalBasisError::InvalidRequest {
+            what: "pressure superposition requires at least one signal",
+        })?;
+    let mut ordered = Vec::new();
+    ordered.try_reserve_exact(signals.len()).map_err(|_| {
+        StructuralModalBasisError::PressureCapacity {
+            requested: signals.len(),
+        }
+    })?;
+    ordered.extend_from_slice(signals);
+    ordered.sort_by(|left, right| left.identity.as_bytes().cmp(right.identity.as_bytes()));
+
+    for signal in &ordered {
+        if signal.start_time_s.to_bits() != first.start_time_s.to_bits()
+            || signal.sample_rate_hz != first.sample_rate_hz
+            || signal.pressure_pa.len() != first.pressure_pa.len()
+            || signal.contact_force_sampling != first.contact_force_sampling
+            || signal.observer != first.observer
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "superposed pressure fields must share clock, observer, length, and force-sampling semantics",
+            });
+        }
+    }
+
+    let mut pressure_pa = Vec::new();
+    pressure_pa
+        .try_reserve_exact(first.pressure_pa.len())
+        .map_err(|_| StructuralModalBasisError::PressureCapacity {
+            requested: first.pressure_pa.len(),
+        })?;
+    let mut peak_abs_pressure_pa = 0.0_f64;
+    for frame in 0..first.pressure_pa.len() {
+        if frame % 4_096 == 0 {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        }
+        let mut sum = 0.0_f64;
+        let mut correction = 0.0_f64;
+        for signal in &ordered {
+            let value = signal.pressure_pa[frame];
+            if !value.is_finite() {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "pressure superposition source sample must be finite",
+                });
+            }
+            let corrected = value - correction;
+            let next = sum + corrected;
+            correction = (next - sum) - corrected;
+            sum = next;
+        }
+        if !sum.is_finite() {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "pressure superposition produced a non-finite sample",
+            });
+        }
+        peak_abs_pressure_pa = peak_abs_pressure_pa.max(sum.abs());
+        pressure_pa.push(sum);
+    }
+    cx.checkpoint()
+        .map_err(|_| StructuralModalBasisError::Cancelled)?;
+
+    let composite_identity =
+        |domain: &'static str, select: fn(&PhysicalPressureSignal) -> ContentHash| {
+            let mut hasher = DomainHasher::new(domain);
+            let mut identities: Vec<_> = ordered.iter().map(|signal| select(signal)).collect();
+            identities.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            for identity in identities {
+                hasher.update(identity.as_bytes());
+            }
+            hasher.finalize()
+        };
+    let structural_basis_identity = composite_identity(
+        "org.frankensim.euler-disc.pressure-superposition.structural-bases.v1",
+        |signal| signal.structural_basis_identity,
+    );
+    let radiation_identity = composite_identity(
+        "org.frankensim.euler-disc.pressure-superposition.radiation.v1",
+        |signal| signal.radiation_identity,
+    );
+    let damping_model_identity = composite_identity(
+        "org.frankensim.euler-disc.pressure-superposition.damping.v1",
+        |signal| signal.damping_model_identity,
+    );
+    let mut identity =
+        DomainHasher::new("org.frankensim.euler-disc.pressure-superposition.signal.v1");
+    for signal in &ordered {
+        identity.update(signal.identity.as_bytes());
+    }
+    identity.update(structural_basis_identity.as_bytes());
+    identity.update(radiation_identity.as_bytes());
+    identity.update(damping_model_identity.as_bytes());
+    for pressure in &pressure_pa {
+        identity.update(&pressure.to_bits().to_le_bytes());
+    }
+
+    Ok(PhysicalPressureSignal {
+        start_time_s: first.start_time_s,
+        sample_rate_hz: first.sample_rate_hz,
+        pressure_pa,
+        peak_abs_pressure_pa,
+        contact_force_sampling: first.contact_force_sampling,
+        observer: first.observer,
+        structural_basis_identity,
+        radiation_identity,
+        damping_model_identity,
+        identity: identity.finalize(),
+    })
+}
+
 /// Integrated physical runtime: one structural basis, state-dependent modal
 /// damping, and one BEM-derived observer transfer.
 pub struct PhysicalModalAudioModel<'basis> {
     basis: &'basis StructuralModalBasis,
     runtime: ModalAcousticTimeModel,
+    static_pressure_transfers: Vec<C64>,
     sample_rate_hz: u32,
     static_observer: Option<AcousticObserver>,
     /// Identity of the acoustic radiation artifact.
@@ -608,6 +770,8 @@ pub enum StructuralModalBasisError {
     Viscoelastic(ViscoError),
     /// The exact time-domain modal runtime refused.
     ModalTime(ModalAcousticTimeError),
+    /// Conservative generalized-force reconstruction refused.
+    ForceReconstruction(AudioResamplingError),
     /// Pose reconstruction for a world-fixed observer refused.
     Timeline(TimelineResamplingError),
     /// The requested band contains no elastic modes.
@@ -723,6 +887,12 @@ impl core::fmt::Display for StructuralModalBasisError {
                     "structural modal time integration refused: {source}"
                 )
             }
+            Self::ForceReconstruction(source) => {
+                write!(
+                    formatter,
+                    "physical generalized-force reconstruction refused: {source}"
+                )
+            }
             Self::Timeline(source) => {
                 write!(
                     formatter,
@@ -806,6 +976,7 @@ impl std::error::Error for StructuralModalBasisError {
             Self::Acoustic(source) => Some(source),
             Self::Viscoelastic(source) => Some(source),
             Self::ModalTime(source) => Some(source),
+            Self::ForceReconstruction(source) => Some(source),
             Self::Timeline(source) => Some(source),
             _ => None,
         }
@@ -860,10 +1031,50 @@ impl From<ModalAcousticTimeError> for StructuralModalBasisError {
     }
 }
 
+impl From<AudioResamplingError> for StructuralModalBasisError {
+    fn from(source: AudioResamplingError) -> Self {
+        Self::ForceReconstruction(source)
+    }
+}
+
 impl From<TimelineResamplingError> for StructuralModalBasisError {
     fn from(source: TimelineResamplingError) -> Self {
         Self::Timeline(source)
     }
+}
+
+fn reconstruct_projected_modal_forces(
+    intervals: &[crate::AudioControlInterval],
+    modal_forces: &[Vec<f64>],
+    input: GeneralizedForceReconstructionInput,
+    cx: &Cx<'_>,
+) -> Result<ReconstructedGeneralizedForce, StructuralModalBasisError> {
+    if intervals.len() != modal_forces.len() {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "projected modal forces do not match mechanics intervals",
+        });
+    }
+    let mut measures = Vec::new();
+    measures.try_reserve_exact(intervals.len()).map_err(|_| {
+        StructuralModalBasisError::PressureCapacity {
+            requested: intervals.len(),
+        }
+    })?;
+    for (interval, mean_force) in intervals.iter().zip(modal_forces) {
+        let mut force_time_measure = Vec::new();
+        force_time_measure
+            .try_reserve_exact(mean_force.len())
+            .map_err(|_| StructuralModalBasisError::PressureCapacity {
+                requested: mean_force.len(),
+            })?;
+        force_time_measure.extend(mean_force.iter().map(|force| force * interval.duration_s));
+        measures.push(GeneralizedForceMeasureInterval {
+            start_time_s: interval.start_time_s,
+            end_time_s: interval.end_time_s,
+            force_time_measure,
+        });
+    }
+    reconstruct_generalized_force_measures(&measures, input, cx).map_err(Into::into)
 }
 
 /// Assemble a body-fitted structural basis directly from a resolved specimen.
@@ -1249,12 +1460,14 @@ impl RectangularPlateModalBasis {
         medium: ResolvedAcousticMedium<'_>,
         observers: &[AcousticWorldObserver],
         minimum_panels_per_wavelength: f64,
+        retarded_sample_rate_hz: u32,
         cx: &Cx<'_>,
     ) -> Result<BaffledPlateObserverRadiation, StructuralModalBasisError> {
         validate_acoustic_medium(medium.gas)?;
         if medium.gas_model_identity == ContentHash([0; 32])
             || observers.is_empty()
             || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS
+            || retarded_sample_rate_hz == 0
             || !(minimum_panels_per_wavelength.is_finite() && minimum_panels_per_wavelength >= 2.0)
         {
             return Err(StructuralModalBasisError::InvalidRequest {
@@ -1288,6 +1501,8 @@ impl RectangularPlateModalBasis {
             });
         }
         let mut pressure_per_modal_velocity = vec![Vec::new(); observers.len()];
+        let mut pressure_per_modal_acceleration_fir =
+            vec![vec![Vec::new(); self.modes.len()]; observers.len()];
         for transfers in &mut pressure_per_modal_velocity {
             transfers.try_reserve_exact(self.modes.len()).map_err(|_| {
                 StructuralModalBasisError::PressureCapacity {
@@ -1295,12 +1510,15 @@ impl RectangularPlateModalBasis {
                 }
             })?;
         }
-        for mode in &self.modes {
+        let mut maximum_retarded_delay_frames = 0_usize;
+        for (mode_index, mode) in self.modes.iter().enumerate() {
             cx.checkpoint()
                 .map_err(|_| StructuralModalBasisError::Cancelled)?;
             let k = mode.angular_frequency_rad_s / medium.gas.sound_speed;
             for (observer_index, observer) in observers.iter().enumerate() {
                 let mut integral = C64::ZERO;
+                let acceleration_fir =
+                    &mut pressure_per_modal_acceleration_fir[observer_index][mode_index];
                 for triangle in &self.mesh.tris {
                     let a = self.mesh.nodes[triangle[0]];
                     let b = self.mesh.nodes[triangle[1]];
@@ -1322,6 +1540,30 @@ impl RectangularPlateModalBasis {
                         / 3.0;
                     let phase = C64::new(det::cos(k * distance_m), det::sin(k * distance_m));
                     integral = integral + phase.scale(area_m2 * shape / distance_m);
+
+                    let delay_frames =
+                        distance_m / medium.gas.sound_speed * f64::from(retarded_sample_rate_hz);
+                    let delay_floor = delay_frames.floor();
+                    if !(delay_floor >= 0.0 && delay_floor <= (usize::MAX - 2) as f64) {
+                        return Err(StructuralModalBasisError::InvalidRequest {
+                            what: "baffled-plate propagation delay exceeds addressable history",
+                        });
+                    }
+                    let lag = delay_floor as usize;
+                    let fraction = delay_frames - delay_floor;
+                    let required = lag + 2;
+                    if acceleration_fir.len() < required {
+                        acceleration_fir.resize(required, 0.0);
+                    }
+                    maximum_retarded_delay_frames = maximum_retarded_delay_frames.max(required);
+                    // Under this module's exp(-i omega t) convention the
+                    // existing frequency transfer is +i rho omega times
+                    // velocity. Therefore its causal time-domain equivalent
+                    // is -rho times retarded normal acceleration.
+                    let coefficient = -medium.gas.density * area_m2 * shape
+                        / (2.0 * core::f64::consts::PI * distance_m);
+                    acceleration_fir[lag] += coefficient * (1.0 - fraction);
+                    acceleration_fir[lag + 1] += coefficient * fraction;
                 }
                 // Rayleigh I for a velocity-prescribed source in an infinite
                 // rigid baffle: p = i rho omega/(2 pi) INT v exp(i k R)/R dS.
@@ -1335,6 +1577,17 @@ impl RectangularPlateModalBasis {
                 }
                 pressure_per_modal_velocity[observer_index].push(transfer);
             }
+        }
+        if maximum_retarded_delay_frames == 0
+            || pressure_per_modal_acceleration_fir.iter().any(|observer| {
+                observer.iter().any(|fir| {
+                    fir.is_empty() || fir.iter().any(|coefficient| !coefficient.is_finite())
+                })
+            })
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "baffled-plate retarded-time radiation kernel is empty or non-finite",
+            });
         }
         let mut identity =
             DomainHasher::new("org.frankensim.euler-disc.baffled-plate-observer-radiation.v1");
@@ -1350,6 +1603,8 @@ impl RectangularPlateModalBasis {
         ] {
             identity.update(&value.to_bits().to_le_bytes());
         }
+        identity.update(&retarded_sample_rate_hz.to_le_bytes());
+        identity.update(&(maximum_retarded_delay_frames as u64).to_le_bytes());
         for observer in observers {
             for value in observer.position_world_m {
                 identity.update(&value.to_bits().to_le_bytes());
@@ -1361,11 +1616,22 @@ impl RectangularPlateModalBasis {
                 identity.update(&transfer.im.to_bits().to_le_bytes());
             }
         }
+        for observer in &pressure_per_modal_acceleration_fir {
+            for fir in observer {
+                identity.update(&(fir.len() as u64).to_le_bytes());
+                for coefficient in fir {
+                    identity.update(&coefficient.to_bits().to_le_bytes());
+                }
+            }
+        }
         Ok(BaffledPlateObserverRadiation {
             structural_basis_identity: self.identity,
             gas_model_identity: medium.gas_model_identity,
             observers: observers.to_vec(),
             pressure_per_modal_velocity,
+            pressure_per_modal_acceleration_fir,
+            retarded_sample_rate_hz,
+            maximum_retarded_delay_frames,
             minimum_panels_per_wavelength: observed_resolution,
             identity: identity.finalize(),
         })
@@ -1374,7 +1640,9 @@ impl RectangularPlateModalBasis {
 
 impl<'basis> BaffledPlateModalAudioModel<'basis> {
     /// Bind one supported-plate basis, Rayleigh loss law, and fixed-observer
-    /// Rayleigh radiation artifact into an exact-ZOH modal runtime.
+    /// Rayleigh radiation artifact into an exact-ZOH modal runtime. The
+    /// frequency-domain transfers remain diagnostic; published samples use
+    /// the artifact's causal retarded-acceleration FIR.
     pub fn try_new(
         basis: &'basis RectangularPlateModalBasis,
         damping: RayleighDamping,
@@ -1387,16 +1655,31 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
             || radiation.identity == ContentHash([0; 32])
             || radiation.structural_basis_identity != basis.identity
             || radiation.pressure_per_modal_velocity.len() != radiation.observers.len()
+            || radiation.pressure_per_modal_acceleration_fir.len() != radiation.observers.len()
+            || radiation.retarded_sample_rate_hz != sample_rate_hz
+            || radiation.maximum_retarded_delay_frames == 0
             || radiation
                 .pressure_per_modal_velocity
                 .iter()
                 .any(|transfers| transfers.len() != basis.modes.len())
+            || radiation
+                .pressure_per_modal_acceleration_fir
+                .iter()
+                .any(|kernels| {
+                    kernels.len() != basis.modes.len()
+                        || kernels.iter().any(|kernel| {
+                            kernel.is_empty()
+                                || kernel.len() > radiation.maximum_retarded_delay_frames
+                                || kernel.iter().any(|coefficient| !coefficient.is_finite())
+                        })
+                })
         {
             return Err(StructuralModalBasisError::IdentityMismatch {
                 what: "plate damping/radiation artifacts do not match the structural basis",
             });
         }
         let mut modes = Vec::with_capacity(basis.modes.len());
+        let mut modal_damping_ratios = Vec::with_capacity(basis.modes.len());
         for mode in &basis.modes {
             let damping_ratio = damping.zeta_at(mode.angular_frequency_rad_s);
             if !(damping_ratio.is_finite() && damping_ratio >= 0.0) {
@@ -1411,12 +1694,15 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 // keeping stereo phase exact without duplicating oscillators.
                 pressure_per_modal_velocity: C64::ZERO,
             });
+            modal_damping_ratios.push(damping_ratio);
         }
         let runtime = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, budget)?;
         Ok(Self {
             basis,
             runtime,
+            modal_damping_ratios,
             sample_rate_hz,
+            maximum_abs_pressure_pa: budget.maximum_abs_pressure_pa,
             radiation_identity: radiation.identity,
             damping_model_identity,
         })
@@ -1425,13 +1711,17 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
     /// Synthesize simultaneous SI-pressure signals at fixed observers from the
     /// equal-and-opposite base contact reaction.
     ///
-    /// The structural state advances once per exact mechanics/audio substep.
+    /// Mechanics force-time measures are conservatively reconstructed on the
+    /// audio clock before the structural state advances once per audio cell.
+    /// Modal acceleration is propagated from every surface triangle at its
+    /// physical sound-travel delay using a linear fractional-sample kernel.
     /// Only the transverse force admitted by the current DKT bending model is
     /// projected; no in-plane or housing response is invented.
     pub fn synthesize_control_stream_observers(
         &mut self,
         controls: &EulerControlStream<'_>,
         radiation: &BaffledPlateObserverRadiation,
+        force_reconstruction: GeneralizedForceReconstructionInput,
         maximum_contact_surface_distance_m: f64,
         cx: &Cx<'_>,
     ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
@@ -1491,59 +1781,91 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 maximum_contact_surface_distance_m,
             )?);
         }
+        let reconstructed =
+            reconstruct_projected_modal_forces(intervals, &modal_forces, force_reconstruction, cx)?;
+        if reconstructed.sample_rate_hz != self.sample_rate_hz
+            || reconstructed.frame_count() != frame_count
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "reconstructed plate force clock does not match modal audio clock",
+            });
+        }
         // This source trajectory is a causal preroll cropped from an already
         // running spin, not a force-application experiment. Begin from the
-        // static deflection under its first held contact load so the output
+        // static deflection under its first reconstructed contact load so the output
         // cannot invent a plate impact at the arbitrary retained horizon.
-        self.runtime
-            .initialize_static_equilibrium(&modal_forces[0])?;
+        self.runtime.initialize_static_equilibrium(
+            reconstructed
+                .frame(0)
+                .expect("positive reconstructed frame count has a first force row"),
+        )?;
         let sample_period_s = self.runtime.sample_period_s();
-        let mut interval_index = 0usize;
         let mut peaks = vec![0.0_f64; radiation.observers.len()];
-        let mut sample_start = first.start_time_s;
+        let history_length = radiation.maximum_retarded_delay_frames;
+        let history_cells = self.basis.modes.len().checked_mul(history_length).ok_or(
+            StructuralModalBasisError::PressureCapacity {
+                requested: usize::MAX,
+            },
+        )?;
+        let mut modal_acceleration_history = vec![0.0_f64; history_cells];
+        let mut history_head = history_length - 1;
         for frame in 0..frame_count {
             if frame % 64 == 0 {
                 cx.checkpoint()
                     .map_err(|_| StructuralModalBasisError::Cancelled)?;
             }
-            let sample_end = if frame + 1 == frame_count {
-                last.end_time_s
-            } else {
-                first.start_time_s + (frame + 1) as f64 * sample_period_s
-            };
-            let mut time = sample_start;
-            let mut last_applied_interval = interval_index;
-            while time < sample_end {
-                while interval_index + 1 < intervals.len()
-                    && time >= intervals[interval_index].end_time_s
-                {
-                    interval_index += 1;
-                }
-                let segment_end = sample_end.min(intervals[interval_index].end_time_s);
-                let segment_duration = segment_end - time;
-                if !(segment_duration > 0.0 && segment_duration.is_finite()) {
-                    return Err(StructuralModalBasisError::ControlTimeline {
-                        what: "plate audio sample subdivision made no forward progress",
+            let applied_force = reconstructed
+                .frame(frame)
+                .expect("reconstructed frame count matches plate pressure horizon");
+            self.runtime.step_duration(applied_force, sample_period_s)?;
+            history_head = (history_head + 1) % history_length;
+            for (mode_index, ((mode, damping_ratio), state)) in self
+                .basis
+                .modes
+                .iter()
+                .zip(&self.modal_damping_ratios)
+                .zip(self.runtime.states())
+                .enumerate()
+            {
+                let omega = mode.angular_frequency_rad_s;
+                let acceleration = applied_force[mode_index]
+                    - 2.0 * damping_ratio * omega * state.velocity_m_sqrt_kg_per_s
+                    - omega * omega * state.displacement_m_sqrt_kg;
+                if !acceleration.is_finite() {
+                    return Err(StructuralModalBasisError::InvalidRequest {
+                        what: "plate modal acceleration became non-finite",
                     });
                 }
-                self.runtime
-                    .step_duration(&modal_forces[interval_index], segment_duration)?;
-                last_applied_interval = interval_index;
-                time = segment_end;
+                modal_acceleration_history[mode_index * history_length + history_head] =
+                    acceleration;
             }
-            for (observer_index, transfers) in
-                radiation.pressure_per_modal_velocity.iter().enumerate()
+            for (observer_index, mode_kernels) in radiation
+                .pressure_per_modal_acceleration_fir
+                .iter()
+                .enumerate()
             {
-                let pressure = self
-                    .runtime
-                    .observer_pressure_with_transfers_about_static_equilibrium(
-                        transfers,
-                        &modal_forces[last_applied_interval],
-                    )?;
+                let mut pressure = 0.0_f64;
+                let mut correction = 0.0_f64;
+                for (mode_index, kernel) in mode_kernels.iter().enumerate() {
+                    let history_offset = mode_index * history_length;
+                    for (lag, coefficient) in kernel.iter().copied().enumerate() {
+                        let history_index = (history_head + history_length - lag) % history_length;
+                        let contribution = coefficient
+                            * modal_acceleration_history[history_offset + history_index];
+                        let corrected = contribution - correction;
+                        let next = pressure + corrected;
+                        correction = (next - pressure) - corrected;
+                        pressure = next;
+                    }
+                }
+                if !pressure.is_finite() || pressure.abs() > self.maximum_abs_pressure_pa {
+                    return Err(StructuralModalBasisError::InvalidRequest {
+                        what: "retarded baffled-plate observer pressure exceeded its finite safety envelope",
+                    });
+                }
                 peaks[observer_index] = peaks[observer_index].max(pressure.abs());
                 pressure_channels[observer_index].push(pressure);
             }
-            sample_start = sample_end;
         }
         cx.checkpoint()
             .map_err(|_| StructuralModalBasisError::Cancelled)?;
@@ -1560,6 +1882,7 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                     controls,
                     first.start_time_s,
                     observer,
+                    reconstructed.identity,
                     &pressure_pa,
                 );
                 PhysicalPressureSignal {
@@ -1568,7 +1891,7 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                     pressure_pa,
                     peak_abs_pressure_pa,
                     contact_force_sampling:
-                        PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+                        PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
                     observer,
                     structural_basis_identity: self.basis.identity,
                     radiation_identity: self.radiation_identity,
@@ -1650,10 +1973,11 @@ fn baffled_plate_pressure_signal_identity(
     controls: &EulerControlStream<'_>,
     start_time_s: f64,
     observer: PhysicalPressureObserver,
+    force_reconstruction_identity: ContentHash,
     pressure_pa: &[f64],
 ) -> ContentHash {
     let mut hasher =
-        DomainHasher::new("org.frankensim.euler-disc.baffled-plate-pressure-signal.v1");
+        DomainHasher::new("org.frankensim.euler-disc.baffled-plate-pressure-signal.v2");
     hasher.update(model.basis.identity.as_bytes());
     hasher.update(model.radiation_identity.as_bytes());
     hasher.update(model.damping_model_identity.as_bytes());
@@ -1666,6 +1990,7 @@ fn baffled_plate_pressure_signal_identity(
     );
     hasher.update(&model.sample_rate_hz.to_le_bytes());
     hasher.update(&start_time_s.to_bits().to_le_bytes());
+    hasher.update(force_reconstruction_identity.as_bytes());
     hash_pressure_observer(&mut hasher, observer);
     for pressure in pressure_pa {
         hasher.update(&pressure.to_bits().to_le_bytes());
@@ -1812,6 +2137,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             });
         }
         let mut modes = Vec::with_capacity(basis.modes.len());
+        let mut static_pressure_transfers = Vec::with_capacity(basis.modes.len());
         for (mode_index, ((structural, loss_factor), acoustic)) in basis
             .modes
             .iter()
@@ -1844,11 +2170,13 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 damping_ratio: loss_factor_to_zeta(*loss_factor),
                 pressure_per_modal_velocity: acoustic.observer_pressure_per_modal_velocity,
             });
+            static_pressure_transfers.push(acoustic.observer_pressure_per_modal_velocity);
         }
         let runtime = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, budget)?;
         Ok(Self {
             basis,
             runtime,
+            static_pressure_transfers,
             sample_rate_hz,
             static_observer: Some(radiation.observer),
             radiation_identity: radiation.identity,
@@ -1929,6 +2257,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
         Ok(Self {
             basis,
             runtime,
+            static_pressure_transfers: vec![C64::ZERO; basis.modes.len()],
             sample_rate_hz,
             static_observer: None,
             radiation_identity: directivity.identity,
@@ -1969,12 +2298,11 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
     /// Produce one fixed-rate, unmastered SI-pressure signal from an admitted
     /// Euler control stream.
     ///
-    /// Mechanics force changes are never rounded onto the audio grid: an
-    /// output sample crossing a mechanics boundary is integrated as multiple
-    /// exact-ZOH modal substeps. When a full contact wrench is unavailable,
-    /// an explicitly admitted interval-mean normal reaction is reconstructed
-    /// along the retained contact normal. No impulse is invented from a
-    /// timing-only contact event.
+    /// Mechanics force-time measures are conservatively rasterized onto the
+    /// exact audio cells and band-limited before modal integration. When a full
+    /// contact wrench is unavailable, an explicitly admitted interval-mean
+    /// normal reaction is reconstructed along the retained contact normal. No
+    /// impulse is invented from a timing-only contact event.
     ///
     /// # Errors
     /// Refuses discontinuous clocks, nonintegral output duration, missing
@@ -1985,6 +2313,8 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
     pub fn synthesize_control_stream(
         &mut self,
         controls: &EulerControlStream<'_>,
+        initial_state: PhysicalModalInitialState,
+        force_reconstruction: GeneralizedForceReconstructionInput,
         maximum_contact_distance_m: f64,
         cx: &Cx<'_>,
     ) -> Result<PhysicalPressureSignal, StructuralModalBasisError> {
@@ -2046,50 +2376,47 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 maximum_contact_distance_m,
             )?);
         }
+        let reconstructed =
+            reconstruct_projected_modal_forces(intervals, &modal_forces, force_reconstruction, cx)?;
+        if reconstructed.sample_rate_hz != self.sample_rate_hz
+            || reconstructed.frame_count() != frame_count
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "reconstructed specimen force clock does not match modal audio clock",
+            });
+        }
+        if initial_state == PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce {
+            self.runtime.initialize_static_equilibrium(
+                reconstructed
+                    .frame(0)
+                    .expect("positive reconstructed frame count has a first force row"),
+            )?;
+        }
 
         let sample_period_s = self.runtime.sample_period_s();
-        let mut interval_index = 0usize;
         let mut peak_abs_pressure_pa = 0.0_f64;
-        let mut sample_start = first.start_time_s;
         for frame in 0..frame_count {
             if frame % 64 == 0 {
                 cx.checkpoint()
                     .map_err(|_| StructuralModalBasisError::Cancelled)?;
             }
-            // Anchor both horizon endpoints to the authoritative mechanics
-            // clock.  Repeated fixed-rate arithmetic is used only for
-            // interior boundaries, so the final sample cannot overshoot the
-            // source horizon by a floating-point ulp.
-            let sample_end = if frame + 1 == frame_count {
-                last.end_time_s
-            } else {
-                first.start_time_s + (frame + 1) as f64 * sample_period_s
-            };
-            let mut time = sample_start;
-            let mut final_pressure = 0.0;
-            while time < sample_end {
-                while interval_index + 1 < intervals.len()
-                    && time >= intervals[interval_index].end_time_s
-                {
-                    interval_index += 1;
-                }
-                let interval = &intervals[interval_index];
-                let segment_end = sample_end.min(interval.end_time_s);
-                let segment_duration = segment_end - time;
-                if !(segment_duration > 0.0 && segment_duration.is_finite()) {
-                    return Err(StructuralModalBasisError::ControlTimeline {
-                        what: "audio sample subdivision made no forward progress",
-                    });
-                }
-                final_pressure = self
-                    .runtime
-                    .step_duration(&modal_forces[interval_index], segment_duration)?
-                    .observer_pressure_pa;
-                time = segment_end;
-            }
+            let applied_force = reconstructed
+                .frame(frame)
+                .expect("reconstructed frame count matches specimen pressure horizon");
+            self.runtime.step_duration(applied_force, sample_period_s)?;
+            let final_pressure =
+                if initial_state == PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce {
+                    self.runtime
+                        .observer_pressure_with_transfers_about_static_equilibrium(
+                            &self.static_pressure_transfers,
+                            applied_force,
+                        )?
+                } else {
+                    self.runtime
+                        .observer_pressure_with_transfers(&self.static_pressure_transfers)?
+                };
             peak_abs_pressure_pa = peak_abs_pressure_pa.max(final_pressure.abs());
             pressure_pa.push(final_pressure);
-            sample_start = sample_end;
         }
         cx.checkpoint()
             .map_err(|_| StructuralModalBasisError::Cancelled)?;
@@ -2099,6 +2426,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             controls,
             first.start_time_s,
             observer,
+            reconstructed.identity,
             &pressure_pa,
         );
         Ok(PhysicalPressureSignal {
@@ -2107,7 +2435,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             pressure_pa,
             peak_abs_pressure_pa,
             contact_force_sampling:
-                PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+                PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
             observer,
             structural_basis_identity: self.basis.identity,
             radiation_identity: self.radiation_identity,
@@ -2139,6 +2467,8 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
         controls: &EulerControlStream<'_>,
         directivity: &ModalAcousticDirectivity,
         observers: &[AcousticWorldObserver],
+        initial_state: PhysicalModalInitialState,
+        force_reconstruction: GeneralizedForceReconstructionInput,
         maximum_contact_distance_m: f64,
         cx: &Cx<'_>,
     ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
@@ -2214,13 +2544,27 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 maximum_contact_distance_m,
             )?);
         }
+        let reconstructed =
+            reconstruct_projected_modal_forces(intervals, &modal_forces, force_reconstruction, cx)?;
+        if reconstructed.sample_rate_hz != self.sample_rate_hz
+            || reconstructed.frame_count() != frame_count
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "reconstructed specimen force clock does not match world-observer audio clock",
+            });
+        }
+        if initial_state == PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce {
+            self.runtime.initialize_static_equilibrium(
+                reconstructed
+                    .frame(0)
+                    .expect("positive reconstructed frame count has a first force row"),
+            )?;
+        }
 
         let timeline = TimelineResampler::new(controls.source());
         let mut transfer_scratch = vec![Vec::new(); observers.len()];
         let mut peaks = vec![0.0_f64; observers.len()];
         let sample_period_s = self.runtime.sample_period_s();
-        let mut interval_index = 0usize;
-        let mut sample_start = first.start_time_s;
         for frame in 0..frame_count {
             if frame % 64 == 0 {
                 cx.checkpoint()
@@ -2231,24 +2575,10 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
             } else {
                 first.start_time_s + (frame + 1) as f64 * sample_period_s
             };
-            let mut time = sample_start;
-            while time < sample_end {
-                while interval_index + 1 < intervals.len()
-                    && time >= intervals[interval_index].end_time_s
-                {
-                    interval_index += 1;
-                }
-                let segment_end = sample_end.min(intervals[interval_index].end_time_s);
-                let segment_duration = segment_end - time;
-                if !(segment_duration > 0.0 && segment_duration.is_finite()) {
-                    return Err(StructuralModalBasisError::ControlTimeline {
-                        what: "audio sample subdivision made no forward progress",
-                    });
-                }
-                self.runtime
-                    .step_duration(&modal_forces[interval_index], segment_duration)?;
-                time = segment_end;
-            }
+            let applied_force = reconstructed
+                .frame(frame)
+                .expect("reconstructed frame count matches world-observer pressure horizon");
+            self.runtime.step_duration(applied_force, sample_period_s)?;
             let pose = timeline
                 .sample(sample_end, EventEvaluationSide::RightLimit)?
                 .state
@@ -2259,13 +2589,21 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                     observer,
                     &mut transfer_scratch[observer_index],
                 )?;
-                let pressure = self
-                    .runtime
-                    .observer_pressure_with_transfers(&transfer_scratch[observer_index])?;
+                let pressure = if initial_state
+                    == PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce
+                {
+                    self.runtime
+                        .observer_pressure_with_transfers_about_static_equilibrium(
+                            &transfer_scratch[observer_index],
+                            applied_force,
+                        )?
+                } else {
+                    self.runtime
+                        .observer_pressure_with_transfers(&transfer_scratch[observer_index])?
+                };
                 peaks[observer_index] = peaks[observer_index].max(pressure.abs());
                 pressure_channels[observer_index].push(pressure);
             }
-            sample_start = sample_end;
         }
         cx.checkpoint()
             .map_err(|_| StructuralModalBasisError::Cancelled)?;
@@ -2282,6 +2620,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                     controls,
                     first.start_time_s,
                     observer,
+                    reconstructed.identity,
                     &pressure_pa,
                 );
                 PhysicalPressureSignal {
@@ -2290,7 +2629,7 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                     pressure_pa,
                     peak_abs_pressure_pa,
                     contact_force_sampling:
-                        PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+                        PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
                     observer,
                     structural_basis_identity: self.basis.identity,
                     radiation_identity: self.radiation_identity,
@@ -2389,9 +2728,10 @@ fn physical_pressure_signal_identity(
     controls: &EulerControlStream<'_>,
     start_time_s: f64,
     observer: PhysicalPressureObserver,
+    force_reconstruction_identity: ContentHash,
     pressure_pa: &[f64],
 ) -> ContentHash {
-    let mut hasher = DomainHasher::new("org.frankensim.euler-disc.physical-pressure-signal.v1");
+    let mut hasher = DomainHasher::new("org.frankensim.euler-disc.physical-pressure-signal.v2");
     hasher.update(model.basis.identity.as_bytes());
     hasher.update(model.radiation_identity.as_bytes());
     hasher.update(model.damping_model_identity.as_bytes());
@@ -2404,6 +2744,7 @@ fn physical_pressure_signal_identity(
     );
     hasher.update(&model.sample_rate_hz.to_le_bytes());
     hasher.update(&start_time_s.to_bits().to_le_bytes());
+    hasher.update(force_reconstruction_identity.as_bytes());
     hash_pressure_observer(&mut hasher, observer);
     hasher.update(&[0]);
     hasher.update(
@@ -3224,6 +3565,54 @@ mod tests {
         })
     }
 
+    fn pressure_signal(identity_byte: u8, pressure_pa: Vec<f64>) -> PhysicalPressureSignal {
+        PhysicalPressureSignal {
+            start_time_s: 0.0,
+            sample_rate_hz: 48_000,
+            peak_abs_pressure_pa: pressure_pa
+                .iter()
+                .fold(0.0_f64, |peak, value| peak.max(value.abs())),
+            pressure_pa,
+            contact_force_sampling:
+                PhysicalContactForceSampling::IntervalMeanAtClosingElseOpeningEndpointZohV1,
+            observer: PhysicalPressureObserver::WorldFixed(AcousticWorldObserver {
+                position_world_m: [0.25, -0.1, 0.3],
+            }),
+            structural_basis_identity: ContentHash([identity_byte; 32]),
+            radiation_identity: ContentHash([identity_byte.wrapping_add(1); 32]),
+            damping_model_identity: ContentHash([identity_byte.wrapping_add(2); 32]),
+            identity: ContentHash([identity_byte.wrapping_add(3); 32]),
+        }
+    }
+
+    #[test]
+    fn g0_physical_pressure_superposition_is_si_additive_and_order_invariant() {
+        let disc = pressure_signal(0x20, vec![1.0, -2.0, 0.5]);
+        let plate = pressure_signal(0x40, vec![0.25, 3.0, -0.5]);
+        let (forward, reversed) = with_cx(|cx| {
+            (
+                superpose_pressure_signals(&[&disc, &plate], cx).unwrap(),
+                superpose_pressure_signals(&[&plate, &disc], cx).unwrap(),
+            )
+        });
+        assert_eq!(forward.pressure_pa, vec![1.25, 1.0, 0.0]);
+        assert_eq!(forward.pressure_pa, reversed.pressure_pa);
+        assert_eq!(forward.peak_abs_pressure_pa.to_bits(), 1.25_f64.to_bits());
+        assert_eq!(forward.identity, reversed.identity);
+        assert_eq!(
+            forward.structural_basis_identity,
+            reversed.structural_basis_identity
+        );
+        assert_ne!(
+            forward.structural_basis_identity,
+            disc.structural_basis_identity
+        );
+        assert_ne!(
+            forward.structural_basis_identity,
+            plate.structural_basis_identity
+        );
+    }
+
     fn material_card(young_modulus_pa: f64, density_kg_m3: f64) -> MaterialCard {
         let mut claims = ClaimSet::new();
         for (name, dims, value) in [
@@ -3384,6 +3773,14 @@ mod tests {
             assembly: TetAssemblyBudget::standard(),
         };
         let basis = with_cx(|cx| build_structural_modal_basis(&request, cx)).unwrap();
+        eprintln!(
+            "coarse structural mode frequencies_hz={:?}",
+            basis
+                .modes
+                .iter()
+                .map(|mode| mode.frequency_hz)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(basis.certified_mode_count, basis.modes.len());
         assert!(!basis.modes.is_empty());
         assert!(basis.assembly.total_mass_kg > 0.0);

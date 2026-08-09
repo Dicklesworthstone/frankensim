@@ -66,9 +66,11 @@ impl PhysicalPressureListeningMaster {
     /// Deterministically master and encode two physical observer signals.
     ///
     /// Pass the same signal twice for a valid dual-mono presentation. Distinct
-    /// signals must share the same structural basis, damping model, start
+    /// signals must share the same physical-field aggregate identities, start
     /// time, sample rate, and frame count; their radiation identities may
-    /// differ because they represent different observer locations.
+    /// differ because they represent different observer locations. An
+    /// aggregate identity may represent one radiator or a deterministic SI
+    /// pressure superposition of several simultaneously excited bodies.
     ///
     /// # Errors
     /// Refuses mismatched signals, silence, malformed policy, excessive gain,

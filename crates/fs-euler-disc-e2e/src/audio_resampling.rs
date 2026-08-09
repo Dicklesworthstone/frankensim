@@ -565,6 +565,358 @@ impl AudioResamplingChunk {
     }
 }
 
+/// One exact mechanics interval carrying generalized-force time measures.
+///
+/// Coordinates are deliberately anonymous: they may be structural modes,
+/// rigid-body coordinates, boundary basis functions, or any other generalized
+/// force basis.  The producer, not this reconstruction layer, owns their units
+/// and physical meaning.  Every coordinate must use one consistent force unit,
+/// so each stored value is that generalized force integrated over the interval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneralizedForceMeasureInterval {
+    /// Exact inclusive interval boundary [s].
+    pub start_time_s: f64,
+    /// Exact exclusive interval boundary [s].
+    pub end_time_s: f64,
+    /// Generalized force-time measure for every canonical coordinate.
+    pub force_time_measure: Vec<f64>,
+}
+
+/// Admission contract for measure-preserving generalized-force reconstruction.
+///
+/// The output clock is the 48 kHz physical-audio master.  Source bandwidth is
+/// explicit because cell-integrated mechanics data cannot establish content
+/// above their cadence merely by being sampled onto a faster clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeneralizedForceReconstructionInput {
+    /// Declared highest mechanics-derived source frequency [Hz].
+    pub declared_source_bandwidth_hz: f64,
+    /// Physical anti-imaging/anti-alias reconstruction filter.
+    pub filter: AudioReconstructionFilterSpec,
+    /// Global-horizon padding rule.
+    pub boundary_policy: AudioResamplingBoundaryPolicy,
+    /// Explicit work and allocation ceilings.
+    pub budget: AudioResamplingBudget,
+}
+
+/// Reconstructed fixed-rate generalized force, stored row-major by
+/// `(audio_frame, canonical_coordinate)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReconstructedGeneralizedForce {
+    /// First output-cell boundary on the source mechanics clock [s].
+    pub start_time_s: f64,
+    /// Fixed physical-audio master rate [Hz].
+    pub sample_rate_hz: u32,
+    /// Number of generalized coordinates in every frame.
+    coordinate_count: usize,
+    /// Row-major reconstructed generalized forces.
+    force: Vec<f64>,
+    /// Measured response and compensated latency of the admitted filter.
+    pub filter_diagnostics: AudioReconstructionFilterDiagnostics,
+    /// Identity binding source measures, filter, clock, and output values.
+    pub identity: ContentHash,
+}
+
+impl ReconstructedGeneralizedForce {
+    /// Number of generalized coordinates in each row.
+    #[must_use]
+    pub const fn coordinate_count(&self) -> usize {
+        self.coordinate_count
+    }
+
+    /// Complete row-major reconstructed generalized-force storage.
+    #[must_use]
+    pub fn force_values(&self) -> &[f64] {
+        &self.force
+    }
+
+    /// Number of complete reconstructed audio frames.
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.force.len() / self.coordinate_count
+    }
+
+    /// Generalized-force row for one closing audio frame.
+    #[must_use]
+    pub fn frame(&self, frame: usize) -> Option<&[f64]> {
+        let start = frame.checked_mul(self.coordinate_count)?;
+        let end = start.checked_add(self.coordinate_count)?;
+        self.force.get(start..end)
+    }
+}
+
+/// Conservatively reconstruct arbitrary generalized-force measures on the
+/// physical-audio master clock, then remove mechanics-cadence images with the
+/// same admitted Blackman-Harris low-pass used by the cinematic audio path.
+///
+/// Rasterization distributes each source measure by exact cell overlap.  The
+/// centered, unit-DC filter uses global half-sample even reflection, so it does
+/// not reset at chunk or publication boundaries.  No material, geometry, mode
+/// family, or Euler-disc name participates in this operation.
+///
+/// # Errors
+/// Refuses empty or noncontiguous source intervals, inconsistent coordinate
+/// counts, non-finite measures, a non-integral output horizon, unsupported
+/// source bandwidth, work/capacity overflow, filter-contract failure, or
+/// cancellation. No partial signal is returned.
+pub fn reconstruct_generalized_force_measures(
+    intervals: &[GeneralizedForceMeasureInterval],
+    input: GeneralizedForceReconstructionInput,
+    cx: &Cx<'_>,
+) -> Result<ReconstructedGeneralizedForce, AudioResamplingError> {
+    let mut checkpoint = || checkpoint(cx);
+    checkpoint()?;
+    validate_budget(input.budget)?;
+    if input.boundary_policy != AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1 {
+        return Err(AudioResamplingError::InvalidFilter(
+            "generalized-force boundary policy",
+        ));
+    }
+    let first = intervals
+        .first()
+        .ok_or(AudioResamplingError::InvalidSourceTimeline {
+            interval: 0,
+            field: "nonempty generalized-force measures",
+        })?;
+    let coordinate_count = first.force_time_measure.len();
+    if coordinate_count == 0 {
+        return Err(AudioResamplingError::InvalidSourceTimeline {
+            interval: 0,
+            field: "positive generalized-force coordinate count",
+        });
+    }
+    if intervals.len() > input.budget.maximum_source_intervals {
+        return Err(AudioResamplingError::BudgetExceeded {
+            artifact: "generalized-force source intervals",
+            requested: intervals.len() as u64,
+            limit: input.budget.maximum_source_intervals as u64,
+        });
+    }
+    let mut maximum_interval_duration_s = 0.0_f64;
+    for (index, interval) in intervals.iter().enumerate() {
+        if index % AUDIO_RESAMPLING_CANCELLATION_POLL_FRAMES == 0 {
+            checkpoint()?;
+        }
+        let duration_s = interval.end_time_s - interval.start_time_s;
+        if !(interval.start_time_s.is_finite()
+            && interval.end_time_s.is_finite()
+            && duration_s > 0.0
+            && duration_s.is_finite())
+        {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: index,
+                field: "finite positive generalized-force interval",
+            });
+        }
+        if index > 0 && intervals[index - 1].end_time_s.to_bits() != interval.start_time_s.to_bits()
+        {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: index,
+                field: "exactly contiguous generalized-force intervals",
+            });
+        }
+        if interval.force_time_measure.len() != coordinate_count
+            || interval
+                .force_time_measure
+                .iter()
+                .any(|measure| !measure.is_finite())
+        {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: index,
+                field: "finite fixed-width generalized-force measures",
+            });
+        }
+        maximum_interval_duration_s = maximum_interval_duration_s.max(duration_s);
+    }
+    let last = intervals
+        .last()
+        .expect("nonempty generalized-force interval slice has a last item");
+    let duration_s = last.end_time_s - first.start_time_s;
+    let exact_frames = duration_s * f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let rounded_frames = exact_frames.round();
+    let frame_tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
+    if !(duration_s > 0.0
+        && duration_s.is_finite()
+        && exact_frames.is_finite()
+        && rounded_frames >= 1.0
+        && rounded_frames <= u64::MAX as f64
+        && (exact_frames - rounded_frames).abs() <= frame_tolerance)
+    {
+        return Err(AudioResamplingError::InvalidSourceTimeline {
+            interval: intervals.len() - 1,
+            field: "integral 48 kHz generalized-force horizon",
+        });
+    }
+    let total_frames = rounded_frames as u64;
+    if total_frames > input.budget.maximum_total_audio_frames {
+        return Err(AudioResamplingError::BudgetExceeded {
+            artifact: "generalized-force audio frames",
+            requested: total_frames,
+            limit: input.budget.maximum_total_audio_frames,
+        });
+    }
+    let nominal_source_nyquist_hz = 0.5 / maximum_interval_duration_s;
+    if !(input.declared_source_bandwidth_hz.is_finite() && input.declared_source_bandwidth_hz > 0.0)
+    {
+        return Err(AudioResamplingError::InvalidFilter(
+            "declared generalized-force source bandwidth",
+        ));
+    }
+    if input.declared_source_bandwidth_hz > nominal_source_nyquist_hz {
+        return Err(AudioResamplingError::UnsupportedSourceBandwidth {
+            requested_hz: input.declared_source_bandwidth_hz,
+            nominal_ceiling_hz: nominal_source_nyquist_hz,
+        });
+    }
+    if input.declared_source_bandwidth_hz > input.filter.passband_edge_hz {
+        return Err(AudioResamplingError::InvalidFilter(
+            "generalized-force passband does not contain declared source bandwidth",
+        ));
+    }
+    let filter = design_physical_filter(
+        input.filter,
+        nominal_source_nyquist_hz,
+        input.budget,
+        &mut checkpoint,
+    )?;
+    let frame_count =
+        usize::try_from(total_frames).map_err(|_| AudioResamplingError::Capacity {
+            artifact: "generalized-force audio frames",
+            requested: usize::MAX,
+        })?;
+    let value_count =
+        frame_count
+            .checked_mul(coordinate_count)
+            .ok_or(AudioResamplingError::BudgetExceeded {
+                artifact: "generalized-force mode values",
+                requested: u64::MAX,
+                limit: input.budget.maximum_chunk_mode_values as u64,
+            })?;
+    if value_count > input.budget.maximum_chunk_mode_values {
+        return Err(AudioResamplingError::BudgetExceeded {
+            artifact: "generalized-force mode values",
+            requested: value_count as u64,
+            limit: input.budget.maximum_chunk_mode_values as u64,
+        });
+    }
+    let work = (value_count as u64)
+        .checked_mul(filter.coefficients.len() as u64)
+        .ok_or(AudioResamplingError::BudgetExceeded {
+            artifact: "generalized-force reconstruction multiply-adds",
+            requested: u64::MAX,
+            limit: input.budget.maximum_chunk_multiply_adds,
+        })?;
+    if work > input.budget.maximum_chunk_multiply_adds {
+        return Err(AudioResamplingError::BudgetExceeded {
+            artifact: "generalized-force reconstruction multiply-adds",
+            requested: work,
+            limit: input.budget.maximum_chunk_multiply_adds,
+        });
+    }
+
+    let sample_period_s = 1.0 / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let mut raw = Vec::new();
+    reserve_exact(
+        &mut raw,
+        value_count,
+        "generalized-force conservative raster",
+    )?;
+    raw.resize(value_count, 0.0);
+    let mut interval_index = 0usize;
+    for frame in 0..frame_count {
+        if frame % AUDIO_RESAMPLING_CANCELLATION_POLL_FRAMES == 0 {
+            checkpoint()?;
+        }
+        let cell_start = first.start_time_s + frame as f64 * sample_period_s;
+        let cell_end = if frame + 1 == frame_count {
+            last.end_time_s
+        } else {
+            first.start_time_s + (frame + 1) as f64 * sample_period_s
+        };
+        while interval_index + 1 < intervals.len()
+            && cell_start >= intervals[interval_index].end_time_s
+        {
+            interval_index += 1;
+        }
+        let mut source_index = interval_index;
+        while let Some(interval) = intervals.get(source_index) {
+            if interval.start_time_s >= cell_end {
+                break;
+            }
+            let overlap_start = cell_start.max(interval.start_time_s);
+            let overlap_end = cell_end.min(interval.end_time_s);
+            if overlap_end > overlap_start {
+                let fraction = (overlap_end - overlap_start)
+                    / (interval.end_time_s - interval.start_time_s)
+                    / sample_period_s;
+                let row = frame * coordinate_count;
+                for (coordinate, measure) in interval.force_time_measure.iter().copied().enumerate()
+                {
+                    raw[row + coordinate] = measure.mul_add(fraction, raw[row + coordinate]);
+                }
+            }
+            source_index += 1;
+        }
+    }
+
+    let mut force = Vec::new();
+    reserve_exact(&mut force, value_count, "filtered generalized-force signal")?;
+    force.resize(value_count, 0.0);
+    let radius = (filter.coefficients.len() / 2) as i128;
+    for frame in 0..frame_count {
+        if frame % AUDIO_RESAMPLING_CANCELLATION_POLL_FRAMES == 0 {
+            checkpoint()?;
+        }
+        for coordinate in 0..coordinate_count {
+            if coordinate % AUDIO_RESAMPLING_CANCELLATION_POLL_MODES == 0 {
+                checkpoint()?;
+            }
+            let mut sum = CompensatedSum::new();
+            for (tap, coefficient) in filter.coefficients.iter().copied().enumerate() {
+                let virtual_frame = frame as i128 + tap as i128 - radius;
+                let source_frame = reflect_half_sample_even(virtual_frame, total_frames) as usize;
+                sum.add(coefficient * raw[source_frame * coordinate_count + coordinate]);
+            }
+            let value = sum.total();
+            if !value.is_finite() {
+                return Err(AudioResamplingError::NonFiniteResult {
+                    frame: frame as u64,
+                    field: "filtered generalized force",
+                });
+            }
+            force[frame * coordinate_count + coordinate] = value;
+        }
+    }
+    checkpoint()?;
+    let mut identity =
+        DomainHasher::new("org.frankensim.audio.generalized-force-measure-reconstruction.v1");
+    identity.update(filter.identity.as_bytes());
+    identity.update(&first.start_time_s.to_bits().to_le_bytes());
+    identity.update(&last.end_time_s.to_bits().to_le_bytes());
+    identity.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
+    identity.update(&input.declared_source_bandwidth_hz.to_bits().to_le_bytes());
+    identity.update(&(coordinate_count as u64).to_le_bytes());
+    identity.update(&(intervals.len() as u64).to_le_bytes());
+    for interval in intervals {
+        identity.update(&interval.start_time_s.to_bits().to_le_bytes());
+        identity.update(&interval.end_time_s.to_bits().to_le_bytes());
+        for measure in &interval.force_time_measure {
+            identity.update(&measure.to_bits().to_le_bytes());
+        }
+    }
+    for value in &force {
+        identity.update(&value.to_bits().to_le_bytes());
+    }
+    Ok(ReconstructedGeneralizedForce {
+        start_time_s: first.start_time_s,
+        sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
+        coordinate_count,
+        force,
+        filter_diagnostics: filter.diagnostics,
+        identity: identity.finalize(),
+    })
+}
+
 /// Typed admission or transactional reconstruction refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioResamplingError {
@@ -3010,6 +3362,27 @@ mod tests {
             SoundTerminalPolicy, SoundTrajectoryDisposition,
         },
     };
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x4746_4d45_4153_5552,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            operation(&cx)
+        })
+    }
 
     fn test_identity(label: &str) -> ContentHash {
         hash_domain(
@@ -3651,6 +4024,64 @@ mod tests {
                 direct_real,
                 2.0e-15,
             );
+        }
+    }
+
+    #[test]
+    fn g0_generalized_force_reconstruction_preserves_constant_si_measure() {
+        let source_rate_hz = 16_000.0;
+        let interval_duration_s = 1.0 / source_rate_hz;
+        let interval_count = 32usize;
+        let mean_force = [3.25_f64, -0.75_f64];
+        let intervals: Vec<_> = (0..interval_count)
+            .map(|index| GeneralizedForceMeasureInterval {
+                start_time_s: index as f64 * interval_duration_s,
+                end_time_s: (index + 1) as f64 * interval_duration_s,
+                force_time_measure: mean_force
+                    .iter()
+                    .map(|force| force * interval_duration_s)
+                    .collect(),
+            })
+            .collect();
+        let signal = with_cx(|cx| {
+            reconstruct_generalized_force_measures(
+                &intervals,
+                GeneralizedForceReconstructionInput {
+                    declared_source_bandwidth_hz: 256.0,
+                    filter: AudioReconstructionFilterSpec {
+                        passband_edge_hz: 2_000.0,
+                        stopband_edge_hz: 4_800.0,
+                        half_length: 128,
+                        maximum_passband_ripple_db: 0.1,
+                        minimum_stopband_attenuation_db: 80.0,
+                        response_grid_intervals: 8_192,
+                    },
+                    boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+                    budget: AudioResamplingBudget::reference_film(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+
+        assert_eq!(signal.sample_rate_hz, 48_000);
+        assert_eq!(signal.coordinate_count(), 2);
+        assert_eq!(signal.frame_count(), interval_count * 3);
+        for frame in signal.force_values().chunks_exact(2) {
+            assert_close(frame[0], mean_force[0], 4.0e-14);
+            assert_close(frame[1], mean_force[1], 4.0e-14);
+        }
+        for coordinate in 0..2 {
+            let output_measure = signal
+                .force_values()
+                .chunks_exact(2)
+                .map(|frame| frame[coordinate] / 48_000.0)
+                .sum::<f64>();
+            let source_measure = intervals
+                .iter()
+                .map(|interval| interval.force_time_measure[coordinate])
+                .sum::<f64>();
+            assert_close(output_measure, source_measure, 2.0e-15);
         }
     }
 }

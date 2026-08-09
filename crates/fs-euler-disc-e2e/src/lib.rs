@@ -82,9 +82,10 @@ pub use audio_resampling::{
     AudioResamplingCheckpoint, AudioResamplingChunk, AudioResamplingCrop,
     AudioResamplingDiagnostics, AudioResamplingError, AudioResamplingModelInput,
     AudioVideoAlignment, AudioVideoSyncMarker, EVENT_SAMPLE_SNAP_TOLERANCE_FRAMES,
+    GeneralizedForceMeasureInterval, GeneralizedForceReconstructionInput,
     MAX_AUDIO_FILTER_PASSBAND_RIPPLE_DB, MAX_AUDIO_RECONSTRUCTION_FILTER_TAPS,
     MAX_SOURCE_CLOCK_ALIGNMENT_ERROR_FRAMES, MIN_AUDIO_FILTER_STOPBAND_ATTENUATION_DB,
-    ResampledAudioEvent,
+    ReconstructedGeneralizedForce, ResampledAudioEvent, reconstruct_generalized_force_measures,
 };
 pub use control_stream::{
     AudioControlFilter, AudioControlInterval, AudioVisualCoverage, AudioVisualHorizon,
@@ -125,11 +126,12 @@ pub use spatial_audio::{
 };
 pub use structural_acoustics::{
     AcousticModeRadiation, AcousticObserver, ModalAcousticRadiation, ModalLossSpectrum,
-    PhysicalContactForceSampling, PhysicalModalAudioModel, PhysicalModalPressureFrame,
-    PhysicalPressureSignal, PointForceProjection, ResolvedAcousticMedium,
-    STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls, StructuralModalBasis,
-    StructuralModalBasisError, StructuralMode, StructuralModeRequest, build_structural_modal_basis,
-    modal_loss_spectrum_from_prony, modal_loss_spectrum_from_rayleigh,
+    PhysicalContactForceSampling, PhysicalModalAudioModel, PhysicalModalInitialState,
+    PhysicalModalPressureFrame, PhysicalPressureSignal, PointForceProjection,
+    ResolvedAcousticMedium, STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls,
+    StructuralModalBasis, StructuralModalBasisError, StructuralMode, StructuralModeRequest,
+    build_structural_modal_basis, modal_loss_spectrum_from_prony,
+    modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,

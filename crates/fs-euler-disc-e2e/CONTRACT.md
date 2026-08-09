@@ -857,6 +857,26 @@ and density exactly match the independently resolved elastic state. The first
 nonzero liquid fraction refuses that rung as `EvolvingPhaseRequired`; stale
 rigid geometry, modes, sound, or optics cannot silently survive the transition.
 
+`ResolvedDiscProfile::thermal_geometry` derives complete boundary area and the
+whole-body Biot length `V/A` from that same exact line/arc chart and resolved
+volume. Its geometry identity is material-independent, while a later thermal
+body identity must additionally bind mass, phase curve, conductivity,
+emissivity, and boundary transfer. It is a valid ingress to a whole-boundary
+isothermal rung only; partially insulated or spatially varying boundaries must
+escalate to a partitioned thermal mesh rather than substituting a hand-entered
+effective area. The cinematic critique manifest records these measures, but
+their presence alone does not claim that thermal evolution is coupled into the
+current source-bound trajectory.
+
+`ResolvedPhaseDiscProfile::mass_conserving_state` is the thermal-to-geometry
+handoff. It holds the reference specimen mass invariant, computes the volume
+required by each same-card/same-curve equilibrium density, and returns one of
+three explicit geometry regimes: unchanged reference geometry, solid
+thermomechanical update required, or evolving free surface required. The
+volume is a conservation constraint, not an invented isotropic scale or liquid
+shape; downstream deformation/remeshing must satisfy it before updated
+mechanics, acoustics, or optics can be admitted.
+
 This rung does not yet evolve enthalpy from thermal boundary fluxes, deform or
 remesh a mushy/liquid specimen, recompute structural modes after topology
 change, or derive phase-dependent optical/acoustic properties. Those effects
@@ -1214,6 +1234,15 @@ boundary convention, not modeled physical pre-roll or post-roll. Each chunk
 recomputes its global-horizon halo from the immutable complete source payload, so
 chunk size and restart boundaries do not reset filter state.
 
+The same module exposes a geometry- and material-independent generalized-force
+variant for physical structural solvers. Each anonymous coordinate carries its
+own interval force-time measure, is conservatively rasterized by exact temporal
+overlap, and is filtered by the identical admitted physical low-pass before
+fixed-rate integration. Its identity binds every source measure, clock, filter,
+bandwidth declaration, and output value. This prevents a mechanics update clock
+from becoming an acoustic tone while avoiding any Euler-object, material-name,
+or modal-family preset in the reconstruction layer.
+
 `AudioResamplingCrop` is the only admitted way to publish a nonzero-offset
 subrange while preserving that global boundary condition. Its half-open source
 range must begin and end on exact video/audio alignment markers, must fit the
@@ -1498,18 +1527,42 @@ higher-frequency arm uses Burton--Miller for fictitious-frequency protection.
 Any negative outgoing power refuses.
 
 `PhysicalModalAudioModel` evaluates material-model loss at those structural
-frequencies, advances every mass-normalized oscillator by an exact
-zero-order-hold transition, and emits unmastered pressure in pascals. Audio
-samples that cross mechanics boundaries are split at the exact source times.
-The only current spatial approximation is declared explicitly: an interval
-mean force uses the closing retained contact point/body orientation, or the
-opening endpoint when the closing endpoint is open. Observer-independent BEM
-far fields are projected into caller-bounded spherical-harmonic tables. A
-world-fixed microphone then evaluates spherical spreading, modal propagation
-phase, and body-frame directivity from the actual resampled rigid pose at every
-audio boundary; simultaneous microphones share one oscillator state so stereo
-phase cannot drift. No material name selects a frequency, decay constant,
-radiation gain, pan curve, or digital level.
+frequencies, projects each interval mean to a generalized force-time measure,
+conservatively reconstructs those measures on the audio clock, advances every
+mass-normalized oscillator by an exact constant-force transition over each
+reconstructed audio cell, and emits unmastered pressure in pascals. The current
+spatial approximation is declared explicitly: an interval mean force uses the
+closing retained contact point/body orientation, or the opening endpoint when
+the closing endpoint is open. Observer-independent BEM far fields are projected
+into caller-bounded spherical-harmonic tables. A world-fixed microphone then
+evaluates spherical spreading, modal propagation phase, and body-frame
+directivity from the actual resampled rigid pose at every audio boundary;
+simultaneous microphones share one oscillator state so stereo phase cannot
+drift. No material name selects a frequency, decay constant, radiation gain,
+pan curve, or digital level.
+
+The modal initial condition is explicit. `Zero` is admissible only when the
+retained horizon begins before excitation; a cropped horizon that begins under
+a held contact force uses `StaticEquilibriumAtFirstHeldForce` so that truncating
+unavailable prehistory does not invent a start-up impulse. Simultaneously
+radiating bodies are combined by `superpose_pressure_signals` in SI pascals
+before any presentation mastering. The superposition validates a common
+observer, clock, sample count, and contact sampling convention, canonicalizes
+component identities and summation order, and emits aggregate structural,
+radiation, and damping identities. Exactly one explicit pressure-to-digital
+gain may then be applied to the composite field.
+
+The fixed supported-plate path does not reuse a natural-frequency Helmholtz
+transfer for arbitrary forced motion. It advances the physical modal state
+under the contact reaction, evaluates each mode's instantaneous normal
+acceleration, and applies a causal Rayleigh-I surface integral at every
+triangle's finite sound-travel delay. Linear fractional-sample delay taps are
+fixed by panel geometry, observer position, gas sound speed, and the declared
+sample rate. Thus a sub-resonant moving contact radiates at its simulated
+forcing harmonics instead of being relabeled as a plate eigenfrequency. This
+remains linear small-displacement radiation into an infinite rigid baffle; it
+does not include the housing cavity, edge diffraction, room response, or
+two-way radiation impedance.
 
 No-claim boundary: both the legacy body-fixed transfer and the pose-dependent
 directivity realization retain only each structural mode's natural-frequency
