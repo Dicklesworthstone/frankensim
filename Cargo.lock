@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -179,9 +179,9 @@ dependencies = [
  "chacha20poly1305",
  "crc32fast",
  "crossbeam-queue",
- "franken-decision 0.4.1",
- "franken-evidence 0.4.1",
- "franken-kernel 0.4.1",
+ "franken-decision 0.4.2",
+ "franken-evidence 0.4.2",
+ "franken-kernel 0.4.2",
  "futures-lite",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -826,10 +826,10 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
- "franken-evidence 0.4.1",
- "franken-kernel 0.4.1",
+ "franken-evidence 0.4.2",
+ "franken-kernel 0.4.2",
  "serde",
 ]
 
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
 ]
@@ -1050,7 +1050,7 @@ version = "0.0.1"
 name = "fs-cheb"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-casebook",
  "fs-exec",
@@ -1124,7 +1124,7 @@ dependencies = [
 name = "fs-constraint"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -1137,7 +1137,7 @@ dependencies = [
 name = "fs-contact"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -1354,7 +1354,7 @@ dependencies = [
 name = "fs-exec"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-obs",
@@ -1455,7 +1455,7 @@ dependencies = [
 name = "fs-flywheel-e2e"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-adjoint",
  "fs-alloc",
  "fs-asbuilt",
@@ -1519,7 +1519,7 @@ version = "0.0.1"
 name = "fs-geocon"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-constraint",
  "fs-evidence",
@@ -1536,7 +1536,7 @@ dependencies = [
 name = "fs-geom"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -1707,7 +1707,7 @@ dependencies = [
 name = "fs-marquee"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-adjoint",
  "fs-alloc",
  "fs-cutfem",
@@ -1758,7 +1758,7 @@ version = "0.0.1"
 name = "fs-mesh"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-exec",
  "fs-geom",
@@ -1839,7 +1839,7 @@ dependencies = [
 name = "fs-opdsl"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-ad",
  "fs-alloc",
  "fs-blake3",
@@ -1863,7 +1863,7 @@ dependencies = [
 name = "fs-opt"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-exec",
@@ -1901,7 +1901,7 @@ dependencies = [
 name = "fs-plan"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-conduction",
@@ -1979,7 +1979,7 @@ dependencies = [
 name = "fs-query"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -2034,7 +2034,7 @@ dependencies = [
 name = "fs-render"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-ad",
  "fs-alloc",
  "fs-blake3",
@@ -2055,7 +2055,7 @@ dependencies = [
 name = "fs-rep-frep"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -2069,7 +2069,7 @@ dependencies = [
 name = "fs-rep-mesh"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -2092,7 +2092,7 @@ dependencies = [
 name = "fs-rep-nurbs"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-ad",
  "fs-alloc",
  "fs-evidence",
@@ -2106,7 +2106,7 @@ dependencies = [
 name = "fs-rep-sdf"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
@@ -2119,7 +2119,7 @@ dependencies = [
 name = "fs-rep-voxel"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fnx-classes",
  "fnx-runtime",
  "fs-alloc",
@@ -2207,7 +2207,7 @@ dependencies = [
 name = "fs-selfknow-e2e"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-adjoint",
  "fs-evidence",
  "fs-iface",
@@ -2346,7 +2346,7 @@ dependencies = [
 name = "fs-surrogate"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-blake3",
  "fs-evidence",
@@ -2423,7 +2423,7 @@ dependencies = [
 name = "fs-topo"
 version = "0.0.1"
 dependencies = [
- "asupersync 0.4.1",
+ "asupersync 0.4.2",
  "fs-alloc",
  "fs-evidence",
  "fs-exec",

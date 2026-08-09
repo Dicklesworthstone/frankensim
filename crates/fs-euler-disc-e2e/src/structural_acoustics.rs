@@ -26,8 +26,13 @@ use fs_bem::helmholtz::{
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_couple::modal_acoustic_time::{
+    ModalAcousticFrame, ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError,
+    ModalAcousticTimeModel,
+};
 use fs_exec::Cx;
 use fs_material::gas::GasState;
+use fs_material::visco::{LoweredModel, ViscoError, loss_factor_to_zeta};
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_mesh::{
@@ -130,6 +135,8 @@ pub struct StructuralModalBasis {
     pub schema_version: u32,
     /// Identity of the resolved geometry plus material state.
     pub specimen_identity: ContentHash,
+    /// Exact evidence-bearing material state used to assemble `(K,M)`.
+    pub material_state_identity: ContentHash,
     /// Exact body-fitted volume and boundary panelization.
     pub mesh: RoundedCylinderTetMesh,
     /// Assembled physical mass and stiffness operators.
@@ -227,6 +234,41 @@ pub struct ModalAcousticRadiation {
     pub identity: ContentHash,
 }
 
+/// Frequency-dependent material loss values evaluated on one exact structural
+/// basis. This is the neutral handoff accepted from any constitutive damping
+/// producer; material names never enter modal time integration.
+#[derive(Clone, Debug)]
+pub struct ModalLossSpectrum {
+    /// Structural basis whose frequencies were evaluated.
+    pub structural_basis_identity: ContentHash,
+    /// Material state to which the damping model applies.
+    pub material_state_identity: ContentHash,
+    /// Identity of the constitutive damping model and its parameter evidence.
+    pub damping_model_identity: ContentHash,
+    /// Loss factor `eta(omega_k)` for every retained mode.
+    pub loss_factors: Vec<f64>,
+}
+
+/// One physical contact-force transition and its SI pressure observation.
+#[derive(Clone, Debug)]
+pub struct PhysicalModalPressureFrame {
+    /// Actual point-force projection used to drive the retained modes.
+    pub force_projection: PointForceProjection,
+    /// Exact-ZOH modal transition and physical pressure in pascals.
+    pub acoustic: ModalAcousticFrame,
+}
+
+/// Integrated physical runtime: one structural basis, state-dependent modal
+/// damping, and one BEM-derived observer transfer.
+pub struct PhysicalModalAudioModel<'basis> {
+    basis: &'basis StructuralModalBasis,
+    runtime: ModalAcousticTimeModel,
+    /// Identity of the acoustic radiation artifact.
+    pub radiation_identity: ContentHash,
+    /// Identity of the damping model and its evidence.
+    pub damping_model_identity: ContentHash,
+}
+
 /// Typed refusal from structural-mode construction or force projection.
 #[derive(Debug)]
 pub enum StructuralModalBasisError {
@@ -251,6 +293,10 @@ pub enum StructuralModalBasisError {
     BemSurface(BemError),
     /// The exterior Helmholtz solve refused.
     Acoustic(HelmholtzError),
+    /// The state-dependent viscoelastic model refused.
+    Viscoelastic(ViscoError),
+    /// The exact time-domain modal runtime refused.
+    ModalTime(ModalAcousticTimeError),
     /// The requested band contains no elastic modes.
     NoModesInBand,
     /// The certified count exceeds the caller's retained-mode budget.
@@ -288,6 +334,12 @@ pub enum StructuralModalBasisError {
         /// Returned power coefficient.
         power: f64,
     },
+    /// Two independently produced physical artifacts do not share an exact
+    /// structural basis or material state.
+    IdentityMismatch {
+        /// Failed identity relationship.
+        what: &'static str,
+    },
 }
 
 impl core::fmt::Display for StructuralModalBasisError {
@@ -307,6 +359,15 @@ impl core::fmt::Display for StructuralModalBasisError {
             }
             Self::Acoustic(source) => {
                 write!(formatter, "structural acoustic radiation refused: {source}")
+            }
+            Self::Viscoelastic(source) => {
+                write!(formatter, "structural damping refused: {source}")
+            }
+            Self::ModalTime(source) => {
+                write!(
+                    formatter,
+                    "structural modal time integration refused: {source}"
+                )
             }
             Self::NoModesInBand => write!(formatter, "FS-EULER-STRUCTURAL-MODE-EMPTY-BAND"),
             Self::ModeBudgetExceeded { requested, maximum } => write!(
@@ -336,6 +397,9 @@ impl core::fmt::Display for StructuralModalBasisError {
                 formatter,
                 "FS-EULER-ACOUSTIC-NONPASSIVE: mode {mode} returned {power:.6e} W per squared modal velocity"
             ),
+            Self::IdentityMismatch { what } => {
+                write!(formatter, "FS-EULER-STRUCTURAL-IDENTITY: {what}")
+            }
         }
     }
 }
@@ -348,6 +412,8 @@ impl std::error::Error for StructuralModalBasisError {
             Self::Modal(source) => Some(source),
             Self::BemSurface(source) => Some(source),
             Self::Acoustic(source) => Some(source),
+            Self::Viscoelastic(source) => Some(source),
+            Self::ModalTime(source) => Some(source),
             _ => None,
         }
     }
@@ -380,6 +446,18 @@ impl From<BemError> for StructuralModalBasisError {
 impl From<HelmholtzError> for StructuralModalBasisError {
     fn from(source: HelmholtzError) -> Self {
         Self::Acoustic(source)
+    }
+}
+
+impl From<ViscoError> for StructuralModalBasisError {
+    fn from(source: ViscoError) -> Self {
+        Self::Viscoelastic(source)
+    }
+}
+
+impl From<ModalAcousticTimeError> for StructuralModalBasisError {
+    fn from(source: ModalAcousticTimeError) -> Self {
+        Self::ModalTime(source)
     }
 }
 
@@ -484,6 +562,7 @@ pub fn build_structural_modal_basis(
     Ok(StructuralModalBasis {
         schema_version: STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION,
         specimen_identity: request.specimen.identity,
+        material_state_identity: request.specimen.material.resolved().identity(),
         mesh,
         assembly,
         modes,
@@ -492,6 +571,153 @@ pub fn build_structural_modal_basis(
         slice_stats: report.stats,
         identity,
     })
+}
+
+/// Evaluate a certified generalized-Maxwell material model at every retained
+/// structural frequency.
+///
+/// This adapter intentionally accepts an explicit model identity. The
+/// parameter/evidence author, not the material's display name, owns that
+/// identity and the certified frequency band.
+///
+/// # Errors
+/// Refuses a foreign specimen/material binding, a zero model identity, or any
+/// modal frequency outside the lowered model's certified band.
+pub fn modal_loss_spectrum_from_prony(
+    basis: &StructuralModalBasis,
+    specimen: &ResolvedMaterialDiscProfile,
+    model: &LoweredModel,
+    damping_model_identity: ContentHash,
+) -> Result<ModalLossSpectrum, StructuralModalBasisError> {
+    if basis.specimen_identity != specimen.identity
+        || basis.material_state_identity != specimen.material.resolved().identity()
+    {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "damping specimen does not match the structural basis",
+        });
+    }
+    if damping_model_identity == ContentHash([0; 32]) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "damping_model_identity must not be zero",
+        });
+    }
+    let mut loss_factors = Vec::with_capacity(basis.modes.len());
+    for mode in &basis.modes {
+        let loss = model.loss_factor_checked(mode.angular_frequency_rad_s)?;
+        if !(loss >= 0.0 && loss.is_finite()) {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "constitutive modal loss factor must be finite and non-negative",
+            });
+        }
+        loss_factors.push(loss);
+    }
+    Ok(ModalLossSpectrum {
+        structural_basis_identity: basis.identity,
+        material_state_identity: basis.material_state_identity,
+        damping_model_identity,
+        loss_factors,
+    })
+}
+
+impl<'basis> PhysicalModalAudioModel<'basis> {
+    /// Bind structural, damping, and radiation artifacts into one exact-ZOH
+    /// physical-pressure runtime.
+    ///
+    /// # Errors
+    /// Refuses foreign identities, wrong cardinalities, malformed loss
+    /// factors, frequencies above the Nyquist guard, or invalid budgets.
+    pub fn try_new(
+        basis: &'basis StructuralModalBasis,
+        loss: &ModalLossSpectrum,
+        radiation: &ModalAcousticRadiation,
+        sample_rate_hz: u32,
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<Self, StructuralModalBasisError> {
+        if loss.structural_basis_identity != basis.identity
+            || radiation.structural_basis_identity != basis.identity
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "damping or acoustic artifact does not match the structural basis",
+            });
+        }
+        if loss.material_state_identity != basis.material_state_identity {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "damping material state does not match structural assembly material state",
+            });
+        }
+        if loss.damping_model_identity == ContentHash([0; 32]) {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "damping_model_identity must not be zero",
+            });
+        }
+        if loss.loss_factors.len() != basis.modes.len()
+            || radiation.modes.len() != basis.modes.len()
+        {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "loss, radiation, and structural mode counts must agree",
+            });
+        }
+        let mut modes = Vec::with_capacity(basis.modes.len());
+        for (mode_index, ((structural, loss_factor), acoustic)) in basis
+            .modes
+            .iter()
+            .zip(&loss.loss_factors)
+            .zip(&radiation.modes)
+            .enumerate()
+        {
+            if acoustic.structural_mode != mode_index
+                || acoustic.angular_frequency_rad_s.to_bits()
+                    != structural.angular_frequency_rad_s.to_bits()
+                || !(loss_factor.is_finite() && *loss_factor >= 0.0)
+            {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "per-mode structural, damping, and radiation rows are misaligned",
+                });
+            }
+            modes.push(ModalAcousticMode {
+                angular_frequency_rad_s: structural.angular_frequency_rad_s,
+                damping_ratio: loss_factor_to_zeta(*loss_factor),
+                pressure_per_modal_velocity: acoustic.observer_pressure_per_modal_velocity,
+            });
+        }
+        let runtime = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, budget)?;
+        Ok(Self {
+            basis,
+            runtime,
+            radiation_identity: radiation.identity,
+            damping_model_identity: loss.damping_model_identity,
+        })
+    }
+
+    /// Current physical sample-boundary modal states.
+    #[must_use]
+    pub fn states(&self) -> &[fs_couple::modal_acoustic_time::ModalAcousticState] {
+        self.runtime.states()
+    }
+
+    /// Project one body-frame point force and advance the physical pressure
+    /// runtime by one audio sample.
+    ///
+    /// # Errors
+    /// Refuses an off-boundary contact, invalid force, or a transactional
+    /// modal-time failure. A refusal leaves all modal states unchanged.
+    pub fn step_point_force(
+        &mut self,
+        point_body_m: [f64; 3],
+        force_body_n: [f64; 3],
+        maximum_distance_m: f64,
+    ) -> Result<PhysicalModalPressureFrame, StructuralModalBasisError> {
+        let force_projection =
+            self.basis
+                .project_point_force(point_body_m, force_body_n, maximum_distance_m)?;
+        let acoustic = self
+            .runtime
+            .step(&force_projection.modal_force_n_per_sqrt_kg)?;
+        Ok(PhysicalModalPressureFrame {
+            force_projection,
+            acoustic,
+        })
+    }
 }
 
 impl StructuralModalBasis {
@@ -1128,5 +1354,100 @@ mod tests {
         {
             assert!((two - 2.0 * one).abs() < 1.0e-12);
         }
+    }
+
+    #[test]
+    fn g1_point_force_drives_identity_bound_si_pressure_runtime() {
+        let specimen = specimen();
+        let request = StructuralModeRequest {
+            specimen: &specimen,
+            mesh: StructuralMeshControls {
+                core_radial_segments: 2,
+                fillet_radial_segments: 1,
+                azimuthal_segments: 8,
+                axial_segments: 1,
+                maximum_vertices: 1_000,
+                maximum_tetrahedra: 10_000,
+            },
+            minimum_frequency_hz: 100.0,
+            maximum_frequency_hz: 100_000.0,
+            maximum_modes: 64,
+            slice: SliceOptions::default(),
+            assembly: TetAssemblyBudget::standard(),
+        };
+        let basis = with_cx(|cx| build_structural_modal_basis(&request, cx)).unwrap();
+        let loss = ModalLossSpectrum {
+            structural_basis_identity: basis.identity,
+            material_state_identity: basis.material_state_identity,
+            damping_model_identity: ContentHash([0x5a; 32]),
+            loss_factors: vec![0.02; basis.modes.len()],
+        };
+        // This manufactured transfer isolates the structural/contact/time
+        // composition. The BEM radiation solver has independent tests; no
+        // synthetic value is shipped by the production constructor.
+        let radiation = ModalAcousticRadiation {
+            structural_basis_identity: basis.identity,
+            gas_model_identity: ContentHash([0x6b; 32]),
+            temperature_k: 293.15,
+            ambient_pressure_pa: 101_325.0,
+            density_kg_m3: 1.204,
+            sound_speed_m_s: 343.0,
+            observer: AcousticObserver {
+                position_m: [1.0, 0.0, 0.0],
+            },
+            modes: basis
+                .modes
+                .iter()
+                .enumerate()
+                .map(|(index, mode)| AcousticModeRadiation {
+                    structural_mode: index,
+                    angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                    observer_pressure_per_modal_velocity: if index == 0 {
+                        C64::from_re(1.0)
+                    } else {
+                        C64::ZERO
+                    },
+                    radiated_power_per_modal_velocity_squared: 0.0,
+                    panels_per_wavelength: 10.0,
+                    condition_lower_bound: 1.0,
+                    minimum_far_field_distance_m: 0.1,
+                })
+                .collect(),
+            identity: ContentHash([0x7c; 32]),
+        };
+        let mut runtime = PhysicalModalAudioModel::try_new(
+            &basis,
+            &loss,
+            &radiation,
+            500_000,
+            ModalAcousticTimeBudget::audible_reference(),
+        )
+        .unwrap();
+
+        let first_mode = &basis.modes[0];
+        let mut selected = None;
+        for triangle in &basis.mesh.boundary.triangles {
+            for &node in triangle {
+                let shape = first_mode.nodal_shape_per_sqrt_kg[node];
+                let norm = norm_squared(shape);
+                if selected
+                    .as_ref()
+                    .is_none_or(|(_, _, best): &([f64; 3], [f64; 3], f64)| norm > *best)
+                {
+                    selected = Some((basis.mesh.nodes_m[node], shape, norm));
+                }
+            }
+        }
+        let (point, shape, norm) = selected.unwrap();
+        assert!(norm > 0.0);
+        let force = shape.map(|component| component / norm.sqrt());
+        let frame = runtime.step_point_force(point, force, 1.0e-12).unwrap();
+        assert!(frame.force_projection.modal_force_n_per_sqrt_kg[0] > 0.0);
+        assert_ne!(frame.acoustic.observer_pressure_pa, 0.0);
+        assert!(frame.acoustic.total_modal_energy_j > 0.0);
+        assert!(
+            frame.acoustic.viscous_dissipation_j
+                >= -frame.acoustic.dissipation_roundoff_tolerance_j
+        );
     }
 }
