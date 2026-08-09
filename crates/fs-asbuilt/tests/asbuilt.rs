@@ -935,3 +935,194 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
         "contract drift: section \"Cancellation behavior\" is stale for live symbol \"register(..., &fs_exec::Cx<'_>)\"; missing fact \"final checkpoint gates publication\""
     );
 }
+
+// ---------------------------------------------------------------------------
+// sj31i.7.2 dimensional adoption battery: frames, units, affine/linear
+// distinctions, tolerances, and dimensioned registration receipts.
+// ---------------------------------------------------------------------------
+
+mod dimensioned_adoption {
+    use super::*;
+    use fs_asbuilt::dimensioned::{
+        DimensionedFiducial, Displacement, FrameId, FramePoint,
+        LengthUnit, REGISTRATION_RECEIPT_PREFIX, Tolerance, planar_covariance_schema,
+        register_dimensioned,
+    };
+
+    fn frame(name: &str) -> FrameId {
+        FrameId::try_new(name).expect("frame id")
+    }
+
+    fn point(frame_name: &str, unit: LengthUnit, x: f64, y: f64) -> FramePoint {
+        FramePoint::new(frame(frame_name), unit, x, y).expect("point")
+    }
+
+    #[test]
+    fn affine_point_algebra_refuses_frame_crossing_and_scales_units() {
+        let a = point("design", LengthUnit::Meters, 1.0, 2.0);
+        let b = point("design", LengthUnit::Millimeters, 500.0, 500.0);
+        let delta = a.difference(&b).expect("same-frame difference");
+        assert!((delta.dx() - 0.5).abs() <= 1e-15);
+        assert!((delta.dy() - 1.5).abs() <= 1e-15);
+        assert_eq!(delta.unit(), LengthUnit::Meters);
+
+        let other_frame = point("scan", LengthUnit::Meters, 0.0, 0.0);
+        assert!(matches!(
+            a.difference(&other_frame),
+            Err(RegError::FrameMismatch { .. })
+        ));
+
+        let moved = a
+            .translate(Displacement::new(LengthUnit::Millimeters, 1000.0, -1000.0).expect("disp"))
+            .expect("translate");
+        assert!((moved.x() - 2.0).abs() <= 1e-15);
+        assert!((moved.y() - 1.0).abs() <= 1e-15);
+    }
+
+    #[test]
+    fn tolerance_comparison_converts_units_explicitly() {
+        let tolerance = Tolerance::new(2.0, LengthUnit::Millimeters).expect("tolerance");
+        let within = Displacement::new(LengthUnit::Meters, 0.001, 0.001).expect("disp");
+        assert!(tolerance.contains(within));
+        let beyond = Displacement::new(LengthUnit::Meters, 0.01, 0.0).expect("disp");
+        assert!(!tolerance.contains(beyond));
+        assert!(Tolerance::new(-1.0, LengthUnit::Meters).is_err());
+        assert!(Tolerance::new(f64::NAN, LengthUnit::Meters).is_err());
+    }
+
+    #[test]
+    fn planar_covariance_dims_are_mechanical_length_squared() {
+        let covariance = planar_covariance_schema().expect("schema");
+        assert_eq!(
+            covariance.entry_dims(0, 1).expect("entry"),
+            fs_qty::Dims([2, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            covariance.information_entry_dims(0, 0).expect("info"),
+            fs_qty::Dims([-2, 0, 0, 0, 0, 0])
+        );
+    }
+
+    #[test]
+    fn dimensioned_registration_recovers_rigid_transform_with_typed_units() {
+        with_cx(false, ExecMode::Deterministic, Budget::INFINITE, |cx| {
+            // A pure translation (+0.25 m, -0.5 m) measured in millimetres.
+            let design: Vec<FramePoint> = [
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (1.0, 1.0),
+            ]
+            .into_iter()
+            .map(|(x, y)| point("design", LengthUnit::Meters, x, y))
+            .collect();
+            let fiducials: Vec<DimensionedFiducial> = design
+                .iter()
+                .map(|design_point| {
+                    let measured = point(
+                        "scan",
+                        LengthUnit::Millimeters,
+                        (design_point.x() + 0.25) * 1000.0,
+                        (design_point.y() - 0.5) * 1000.0,
+                    );
+                    DimensionedFiducial::new(design_point.clone(), measured)
+                })
+                .collect();
+            let registration =
+                register_dimensioned(&fiducials, LengthUnit::Meters, cx).expect("registration");
+            assert!((registration.registration().tx() - 0.25).abs() <= 1e-12);
+            assert!((registration.registration().ty() + 0.5).abs() <= 1e-12);
+            assert!(registration.registration().rotation_rad().abs() <= 1e-12);
+            assert_eq!(registration.unit(), LengthUnit::Meters);
+            assert!(registration.identity().starts_with(REGISTRATION_RECEIPT_PREFIX));
+        });
+    }
+
+    #[test]
+    fn dimensioned_registration_refuses_mixed_frames_and_replays_identity() {
+        with_cx(false, ExecMode::Deterministic, Budget::INFINITE, |cx| {
+            let fiducials = vec![
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 0.0, 0.0),
+                    point("scan", LengthUnit::Meters, 0.1, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("other-design", LengthUnit::Meters, 1.0, 0.0),
+                    point("scan", LengthUnit::Meters, 1.1, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 0.0, 1.0),
+                    point("scan", LengthUnit::Meters, 0.1, 1.0),
+                ),
+            ];
+            assert!(matches!(
+                register_dimensioned(&fiducials, LengthUnit::Meters, cx),
+                Err(RegError::FrameMismatch { .. })
+            ));
+
+            let consistent = vec![
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 0.0, 0.0),
+                    point("scan", LengthUnit::Meters, 0.1, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 1.0, 0.0),
+                    point("scan", LengthUnit::Meters, 1.1, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 0.0, 1.0),
+                    point("scan", LengthUnit::Meters, 0.1, 1.0),
+                ),
+            ];
+            let first = register_dimensioned(&consistent, LengthUnit::Meters, cx).expect("first");
+            let second = register_dimensioned(&consistent, LengthUnit::Meters, cx).expect("second");
+            assert_eq!(first.identity(), second.identity());
+
+            // The unit declaration is bound into the receipt: the same
+            // physical fit declared in millimetres carries a different
+            // identity.
+            let in_mm = vec![
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Millimeters, 0.0, 0.0),
+                    point("scan", LengthUnit::Millimeters, 100.0, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Millimeters, 1000.0, 0.0),
+                    point("scan", LengthUnit::Millimeters, 1100.0, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Millimeters, 0.0, 1000.0),
+                    point("scan", LengthUnit::Millimeters, 100.0, 1000.0),
+                ),
+            ];
+            let metric = register_dimensioned(&in_mm, LengthUnit::Millimeters, cx).expect("mm");
+            assert_ne!(first.identity(), metric.identity());
+        });
+    }
+
+    #[test]
+    fn dimensioned_registration_cancellation_publishes_nothing() {
+        with_cx(true, ExecMode::Deterministic, Budget::INFINITE, |cx| {
+            let fiducials = vec![
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 0.0, 0.0),
+                    point("scan", LengthUnit::Meters, 0.1, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 1.0, 0.0),
+                    point("scan", LengthUnit::Meters, 1.1, 0.0),
+                ),
+                DimensionedFiducial::new(
+                    point("design", LengthUnit::Meters, 0.0, 1.0),
+                    point("scan", LengthUnit::Meters, 0.1, 1.0),
+                ),
+            ];
+            let refusal = register_dimensioned(&fiducials, LengthUnit::Meters, cx)
+                .expect_err("pre-cancelled context refuses");
+            assert!(matches!(
+                refusal,
+                RegError::Cancelled { .. } | RegError::BudgetRefused(_)
+            ));
+        });
+    }
+}

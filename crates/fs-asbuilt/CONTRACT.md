@@ -441,7 +441,14 @@ identity, signed-zero canonicalization, scale-invariant rank admission, and
 deterministic replay; typed resource planning, affine budgeted registration and
 diff execution, retained last-maximum index ties, and receipt integrity; G4
 pre-cancel, exact stride-boundary, mid-phase, and publication cancellation; and
-G5 execution/work/poll identity separation.
+G5 execution/work/poll identity separation. Its dimensioned battery (bead
+sj31i.7.2) covers affine point algebra with frame-crossing refusal, explicit
+mm/m conversion, typed tolerance comparison, mechanical planar
+covariance/information dimensions, dimensioned rigid-transform recovery with
+typed units, mixed-frame batch refusal, unit-bound receipt identity replay
+and divergence, and pre-cancelled contexts publishing nothing.
+`tests/spatial_uncertainty.rs` additionally binds the uncertainty lane's
+covariance dimensions to the shared inference core.
 
 `tests/field.rs`: G0 deviation recovery of injected analytic offsets under
 identity and general poses (including a tangential slide that must NOT

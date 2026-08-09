@@ -33,6 +33,9 @@ use fs_ivl::Interval;
 /// Datum-priority (3-2-1) registration with per-datum residuals and the
 /// datum-versus-global diagnostic delta.
 pub mod datum;
+/// Dimensionally typed frames, units, and affine/linear distinctions for
+/// coordinates, registration, tolerances, and uncertainty (bead sj31i.7.2).
+pub mod dimensioned;
 /// As-built deviation, thickness/gap, warpage-form, and profile-roughness
 /// fields over supplied surface correspondences.
 pub mod field;
@@ -169,6 +172,18 @@ pub enum RegError {
     },
     /// A typed invocation child refused resource accounting.
     InvocationBudget(fs_exec::InvocationError),
+    /// The dimensional core refused an admission or derivation; the
+    /// structured [`fs_qty::inference::InferenceError`] is retained verbatim
+    /// (bead sj31i.7.2).
+    Dimensional(fs_qty::inference::InferenceError),
+    /// A frame-tagged operation crossed two different coordinate frames
+    /// without an explicit transform.
+    FrameMismatch {
+        /// Expected frame identity.
+        expected: String,
+        /// Supplied frame identity.
+        actual: String,
+    },
     /// The ambient admitted budget refused admission or further work
     /// (deadline, poll, or cost); the typed refusal is retained
     /// verbatim and no partial result is published (bead sj31i.6).
@@ -221,6 +236,13 @@ pub enum RegError {
         /// Input byte length, retained without cloning hostile input.
         bytes: usize,
     },
+    /// A frame identity is not an admissible bounded token.
+    InvalidFrameIdentity {
+        /// Stable structural reason.
+        reason: &'static str,
+        /// Input byte length, retained without cloning hostile input.
+        bytes: usize,
+    },
     /// The bounded deviations vector could not reserve memory.
     AllocationFailed,
     /// A canonical identity field length could not be represented as `u64`.
@@ -259,6 +281,13 @@ impl core::fmt::Display for RegError {
             Self::InvocationBudget(error) => {
                 write!(formatter, "as-built invocation refused: {error}")
             }
+            Self::Dimensional(error) => {
+                write!(formatter, "as-built dimensional refusal: {error}")
+            }
+            Self::FrameMismatch { expected, actual } => write!(
+                formatter,
+                "frame mismatch: expected {expected:?}, got {actual:?}"
+            ),
             Self::BudgetRefused(refusal) => {
                 write!(formatter, "as-built budget refused: {refusal}")
             }
@@ -284,6 +313,10 @@ impl core::fmt::Display for RegError {
             Self::InvalidCalibrationIdentity { reason, bytes } => write!(
                 formatter,
                 "calibration candidate identity is invalid ({reason}, {bytes} bytes)"
+            ),
+            Self::InvalidFrameIdentity { reason, bytes } => write!(
+                formatter,
+                "frame identity is not an admissible token: {reason} ({bytes} bytes)"
             ),
             Self::AllocationFailed => {
                 formatter.write_str("could not reserve the bounded deviations vector")
@@ -311,6 +344,7 @@ impl std::error::Error for RegError {
         match self {
             Self::InvocationBudget(error) => Some(error),
             Self::BudgetRefused(refusal) => Some(refusal),
+            Self::Dimensional(error) => Some(error),
             _ => None,
         }
     }

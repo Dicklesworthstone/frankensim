@@ -932,3 +932,29 @@ fn cancellation_refuses_before_publication() {
         })
     );
 }
+
+// sj31i.7.2: the uncertainty lane's covariance dimensions bind to the
+// shared inference core — planar covariance entries are length-squared,
+// information entries inverse-length-squared, derived mechanically.
+#[test]
+fn uncertainty_covariance_dims_match_the_shared_core() {
+    use fs_asbuilt::dimensioned::planar_covariance_schema;
+    let covariance = planar_covariance_schema().expect("planar schema");
+    let entry = covariance.entry_dims(0, 1).expect("entry dims");
+    assert_eq!(entry, fs_qty::Dims([2, 0, 0, 0, 0, 0]));
+    let information = covariance
+        .information_entry_dims(1, 1)
+        .expect("information dims");
+    assert_eq!(information, fs_qty::Dims([-2, 0, 0, 0, 0, 0]));
+    // A calibrated Covariance2 lives in the squared reading dimensions of a
+    // length observation, so its entries are exactly the core's planar
+    // covariance dimensions.
+    let reading = fs_qty::inference::ObservationSchema::new(
+        fs_qty::semantic::QuantitySpec::dimensional(fs_qty::Dims([1, 0, 0, 0, 0, 0])),
+    );
+    assert_eq!(
+        reading.noise_variance_dims().expect("variance dims"),
+        entry,
+        "Covariance2 entries carry squared reading dimensions"
+    );
+}
