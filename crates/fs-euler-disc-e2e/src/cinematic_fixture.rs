@@ -700,6 +700,7 @@ struct FixturePhysicalAudio {
 struct FixturePhysicalDiscState {
     specimen: crate::specimen::ResolvedElasticDiscProfile,
     render_binding: EulerDiscMaterialStateBinding,
+    rayleigh_damping: RayleighDamping,
     damping_model_identity: ContentHash,
 }
 
@@ -818,9 +819,15 @@ fn resolve_fixture_physical_disc(
     damping.update(&config.rayleigh_alpha_per_s.to_bits().to_le_bytes());
     damping.update(&config.rayleigh_beta_s.to_bits().to_le_bytes());
     damping.update(config.damping_source.as_bytes());
+    let rayleigh_damping = RayleighDamping::new(
+        config.rayleigh_alpha_per_s,
+        config.rayleigh_beta_s,
+    )
+    .map_err(pipeline)?;
     Ok(FixturePhysicalDiscState {
         specimen,
         render_binding,
+        rayleigh_damping,
         damping_model_identity: damping.finalize(),
     })
 }
@@ -1690,6 +1697,7 @@ pub fn run_cinematic_fixture(
         &trajectory_artifact,
         &coarse_audio_preroll_artifact,
         &audio_preroll_artifact,
+        &physical_disc,
         run.parameters.gravity_m_per_s2,
         config,
         cx,
@@ -4105,6 +4113,7 @@ fn build_audio(
     trajectory: &EulerRenderTrajectoryArtifact,
     coarse_preroll_trajectory: &EulerRenderTrajectoryArtifact,
     fine_preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    physical_disc: &FixturePhysicalDiscState,
     gravity_m_per_s2: f64,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
@@ -4382,8 +4391,10 @@ fn build_audio(
         .map_err(pipeline)?;
         (artifact, None)
     };
+    let physical = build_physical_audio(fine_preroll_trajectory, physical_disc, cx)?;
     Ok(FixtureAudio {
         artifact,
+        physical,
         modal_parameter_set_identity,
         modal_parameter_set_disclosure,
         chirp_start_hz,
@@ -4399,6 +4410,162 @@ fn build_audio(
         crop_end_source_audio_frame: crop.end_source_audio_frame(),
         convergence,
         spatialization,
+    })
+}
+
+fn build_physical_audio(
+    preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    physical_disc: &FixturePhysicalDiscState,
+    cx: &Cx<'_>,
+) -> Result<FixturePhysicalAudio, CinematicFixtureError> {
+    // The upper edge is a declared current fidelity band, not an EQ cutoff.
+    // It keeps the dense BEM inside its mandatory six-panels-per-wavelength
+    // discretization gate. Higher modes require a refined boundary mesh or a
+    // fast boundary operator; neither may be replaced by an under-resolved
+    // acoustic solve simply to make the output brighter.
+    let request = StructuralModeRequest {
+        specimen: &physical_disc.specimen,
+        mesh: StructuralMeshControls {
+            core_radial_segments: 4,
+            fillet_radial_segments: 2,
+            azimuthal_segments: 24,
+            axial_segments: 2,
+            maximum_vertices: 10_000,
+            maximum_tetrahedra: 60_000,
+        },
+        minimum_frequency_hz: 100.0,
+        maximum_frequency_hz: 6_000.0,
+        maximum_modes: 32,
+        slice: SliceOptions::default(),
+        assembly: TetAssemblyBudget::standard(),
+    };
+    let basis = build_structural_modal_basis(&request, cx).map_err(pipeline)?;
+    let loss = modal_loss_spectrum_from_rayleigh(
+        &basis,
+        &physical_disc.specimen,
+        physical_disc.rayleigh_damping,
+        physical_disc.damping_model_identity,
+    )
+    .map_err(pipeline)?;
+
+    let gas_spec = GasSpec::dry_air_ussa1976();
+    let gas = GasState::try_new(&gas_spec, 293.15, 101_325.0).map_err(pipeline)?;
+    let mut gas_identity = DomainHasher::new("org.frankensim.gas.dry-air-ussa1976-state.v1");
+    gas_identity.update(&gas_spec.molar_mass.to_bits().to_le_bytes());
+    gas_identity.update(&gas_spec.gamma.to_bits().to_le_bytes());
+    gas_identity.update(&gas_spec.sutherland_beta.to_bits().to_le_bytes());
+    gas_identity.update(&gas_spec.sutherland_s.to_bits().to_le_bytes());
+    gas_identity.update(b"USSA-1976 conductivity fit");
+    gas_identity.update(&gas.temperature.to_bits().to_le_bytes());
+    gas_identity.update(&gas.pressure.to_bits().to_le_bytes());
+    let gas_model_identity = gas_identity.finalize();
+    let directivity = basis
+        .modal_acoustic_directivity(
+            ResolvedAcousticMedium {
+                gas: &gas,
+                gas_model_identity,
+            },
+            AcousticDirectivityControls {
+                maximum_spherical_harmonic_degree: 10,
+                minimum_captured_fraction: 0.95,
+            },
+        )
+        .map_err(pipeline)?;
+    let structural_basis_identity = basis.identity;
+    let acoustic_directivity_identity = directivity.identity;
+    let retained_mode_count = basis.modes.len();
+    let minimum_mode_frequency_hz = basis
+        .modes
+        .first()
+        .expect("admitted structural basis contains modes")
+        .frequency_hz;
+    let maximum_mode_frequency_hz = basis
+        .modes
+        .last()
+        .expect("admitted structural basis contains modes")
+        .frequency_hz;
+    let mut runtime = PhysicalModalAudioModel::try_new_with_directivity(
+        &basis,
+        &loss,
+        &directivity,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .map_err(pipeline)?;
+    let controls = EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx)
+        .map_err(pipeline)?;
+    let listener = spatial_listener_pose();
+    let half_ear_spacing_m = 0.045;
+    let observers = [
+        AcousticWorldObserver {
+            position_world_m: core::array::from_fn(|axis| {
+                listener.position_m[axis] - half_ear_spacing_m * listener.right_unit[axis]
+            }),
+        },
+        AcousticWorldObserver {
+            position_world_m: core::array::from_fn(|axis| {
+                listener.position_m[axis] + half_ear_spacing_m * listener.right_unit[axis]
+            }),
+        },
+    ];
+    let maximum_contact_projection_distance_m =
+        0.02 * physical_disc.specimen.profile.dimensions.outer_radius_m;
+    let mut pressure = runtime
+        .synthesize_control_stream_world_observers(
+            &controls,
+            &directivity,
+            &observers,
+            maximum_contact_projection_distance_m,
+            cx,
+        )
+        .map_err(pipeline)?;
+    if pressure.len() != 2 {
+        return Err(CinematicFixtureError::Pipeline(
+            "physical stereo synthesis did not return exactly two observers".into(),
+        ));
+    }
+    let right = pressure.pop().expect("two-channel result has a right signal");
+    let left = pressure.pop().expect("two-channel result has a left signal");
+    let first = usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+        .map_err(|_| CinematicFixtureError::Pipeline("audio preroll exceeds usize".into()))?;
+    let expected_published_frames = usize::try_from(
+        u64::from(CRITIQUE_FRAMES) * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS),
+    )
+    .map_err(|_| CinematicFixtureError::Pipeline("published audio exceeds usize".into()))?;
+    let end = first
+        .checked_add(expected_published_frames)
+        .ok_or_else(|| CinematicFixtureError::Pipeline("physical audio crop overflow".into()))?;
+    let left = left.try_crop_rebased(first, end, 0.0).map_err(pipeline)?;
+    let right = right
+        .try_crop_rebased(first, end, 0.0)
+        .map_err(pipeline)?;
+    let left_pressure_identity = left.identity;
+    let right_pressure_identity = right.identity;
+    let metadata = WavMetadata::try_new(Some(
+        "FrankenSim Euler disc: SI structural-modal/BEM observer pressure; deterministic PCM24 listening gain; uncalibrated material damping and incomplete base radiation"
+            .to_owned(),
+    ))
+    .map_err(pipeline)?;
+    let master = PhysicalPressureListeningMaster::try_build(
+        &left,
+        &right,
+        PressureListeningMasterPolicy::CRITIQUE,
+        &metadata,
+        AudioArtifactBudget::DEFAULT,
+        cx,
+    )
+    .map_err(pipeline)?;
+    Ok(FixturePhysicalAudio {
+        master,
+        structural_basis_identity,
+        acoustic_directivity_identity,
+        damping_model_identity: physical_disc.damping_model_identity,
+        gas_model_identity,
+        left_pressure_identity,
+        right_pressure_identity,
+        retained_mode_count,
+        minimum_mode_frequency_hz,
+        maximum_mode_frequency_hz,
     })
 }
 
