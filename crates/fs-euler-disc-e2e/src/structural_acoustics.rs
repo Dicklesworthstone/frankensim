@@ -1491,6 +1491,12 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 maximum_contact_surface_distance_m,
             )?);
         }
+        // This source trajectory is a causal preroll cropped from an already
+        // running spin, not a force-application experiment. Begin from the
+        // static deflection under its first held contact load so the output
+        // cannot invent a plate impact at the arbitrary retained horizon.
+        self.runtime
+            .initialize_static_equilibrium(&modal_forces[0])?;
         let sample_period_s = self.runtime.sample_period_s();
         let mut interval_index = 0usize;
         let mut peaks = vec![0.0_f64; radiation.observers.len()];

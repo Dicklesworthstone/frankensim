@@ -262,6 +262,62 @@ impl ModalAcousticTimeModel {
         self.sample_period_s
     }
 
+    /// Initialize every mode at the static equilibrium of one held force.
+    ///
+    /// This is the causal initial condition for a simulation window that
+    /// begins after a load has already been applied for long enough that its
+    /// transient vibration has decayed. Each mass-normalized coordinate is set
+    /// to `q = force / omega^2` with zero velocity. It must not be used to hide
+    /// a real load-on event; callers that model application of a new force
+    /// should retain the zero state and advance that force normally.
+    ///
+    /// The update is transactional: malformed forces or a state/energy budget
+    /// refusal leave every modal coordinate unchanged.
+    pub fn initialize_static_equilibrium(
+        &mut self,
+        generalized_force_n_per_sqrt_kg: &[f64],
+    ) -> Result<(), ModalAcousticTimeError> {
+        if generalized_force_n_per_sqrt_kg.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::ForceCountMismatch {
+                expected: self.modes.len(),
+                found: generalized_force_n_per_sqrt_kg.len(),
+            });
+        }
+        let mut candidate = Vec::with_capacity(self.states.len());
+        let mut total_energy_j = 0.0;
+        for (mode, force) in self.modes.iter().zip(generalized_force_n_per_sqrt_kg) {
+            if !force.is_finite() {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "static-equilibrium modal forces must be finite",
+                });
+            }
+            let omega = mode.angular_frequency_rad_s;
+            let state = ModalAcousticState {
+                displacement_m_sqrt_kg: force / (omega * omega),
+                velocity_m_sqrt_kg_per_s: 0.0,
+            };
+            check_limit(
+                "absolute modal displacement",
+                state.displacement_m_sqrt_kg.abs(),
+                self.budget.maximum_abs_displacement_m_sqrt_kg,
+            )?;
+            total_energy_j += modal_energy(*mode, state);
+            candidate.push(state);
+        }
+        if !total_energy_j.is_finite() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "static-equilibrium modal energy must be finite",
+            });
+        }
+        check_limit(
+            "total modal energy",
+            total_energy_j,
+            self.budget.maximum_total_energy_j,
+        )?;
+        self.states = candidate;
+        Ok(())
+    }
+
     /// Observe the current modal state through caller-supplied complex
     /// pressure transfers.
     ///
@@ -764,5 +820,32 @@ mod tests {
                 .to_bits(),
             legacy.to_bits()
         );
+    }
+
+    #[test]
+    fn g0_static_equilibrium_initializer_sets_exact_compliance_transactionally() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 1_500.0,
+            damping_ratio: 0.02,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        let force = 3.25;
+        model.initialize_static_equilibrium(&[force]).unwrap();
+        let omega = model.modes()[0].angular_frequency_rad_s;
+        assert_eq!(
+            model.states()[0],
+            ModalAcousticState {
+                displacement_m_sqrt_kg: force / (omega * omega),
+                velocity_m_sqrt_kg_per_s: 0.0,
+            }
+        );
+
+        let before = model.states().to_vec();
+        assert!(matches!(
+            model.initialize_static_equilibrium(&[f64::NAN]),
+            Err(ModalAcousticTimeError::InvalidInput { .. })
+        ));
+        assert_eq!(model.states(), before);
     }
 }

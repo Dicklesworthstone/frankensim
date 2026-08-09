@@ -197,6 +197,10 @@ uses a caller-supplied complex pressure-per-modal-velocity transfer at each
 natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
+The default initial state is zero displacement and velocity. A caller whose
+window begins after a load has already settled may explicitly initialize the
+exact static compliance `q = F/omega^2`, `qdot = 0`; using that operation to
+erase a real load-on transient is outside the contract.
 `observer_pressure_with_transfers_about_static_equilibrium` additionally
 removes the exact held-force compliance `F/omega^2` before applying the
 complex transfer's displacement-quadrature term. This prevents a static load
