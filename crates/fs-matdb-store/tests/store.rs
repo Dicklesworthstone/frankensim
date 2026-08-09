@@ -268,6 +268,22 @@ fn index_tampering_is_detected_and_cannot_poison_answers() {
         )
         .expect("evaluate");
     assert_eq!(answer.evidence.value.value.to_bits(), 193.0e9f64.to_bits());
+    // (b2) Review finding: valid_at is DRIVEN by the validity table,
+    // so verify_index must cover it too.
+    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    raw.execute_sync("UPDATE validity SET lo = 0.0, hi = 1.0e9 WHERE pack_id = 'steel-304-synth'")
+        .expect("validity tamper");
+    drop(raw);
+    assert!(matches!(
+        store.verify_index("steel-304-synth"),
+        Err(StoreError::IndexMismatch {
+            what: "validity bounds",
+            ..
+        }) | Err(StoreError::IndexMismatch {
+            what: "scalar value",
+            ..
+        })
+    ));
     // (c) Tampering with the CANONICAL BYTES is caught by the content
     // hash at decode time.
     let raw = AsyncConnection::open_sync(&path).expect("raw");
@@ -299,6 +315,114 @@ fn rebuild_is_bitwise_identical() {
         b.canonical_dump().expect("dump b")
     );
     println!("{{\"suite\":\"fs-matdb-store\",\"case\":\"bitwise-rebuild\",\"verdict\":\"pass\"}}");
+}
+
+#[test]
+fn partial_ingest_rolls_back_atomically() {
+    // Review finding: a mid-ingest refusal must leave NO trace — the
+    // pack row, claims, and validity rows all roll back, and a
+    // corrected retry succeeds instead of hitting DuplicatePack.
+    let path = scratch_path("rollback");
+    let _ = std::fs::remove_file(&path);
+    let store = MaterialStore::open(&path).expect("open");
+    // A pack whose SECOND claim carries an empty license: the
+    // admission pre-pass refuses before any row is written.
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "rollback specimen".to_string(),
+            method: "authored".to_string(),
+            artifact: fs_blake3_hash(b"rollback"),
+            caveats: "synthetic".to_string(),
+            provenance: provenance(),
+        })
+        .expect("observation");
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("density", dims_none()),
+            value: PropertyValue::Scalar {
+                value: 1000.0,
+                dims: dims_none(),
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .expect("licensed claim");
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("young_modulus", dims_none()),
+            value: PropertyValue::Scalar {
+                value: 1.0e9,
+                dims: dims_none(),
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: Provenance {
+                source: "unlicensed".to_string(),
+                license: "  ".to_string(),
+                artifact: None,
+            },
+        })
+        .expect("unlicensed claim");
+    let bad = NormalizedPack::new(
+        "rollback-pack",
+        "store-battery-v1",
+        fs_blake3_hash(b"rollback source"),
+        "synthetic redistribution permitted for tests",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("pack");
+    assert!(matches!(
+        store.ingest_pack(&bad),
+        Err(StoreError::Inadmissible {
+            what: "claim with empty license",
+            ..
+        })
+    ));
+    // NO residue: a good pack under the same id ingests cleanly.
+    store
+        .ingest_pack(&test_pack("rollback-pack", &[("density", 1000.0)]))
+        .expect("retry succeeds — nothing was left behind");
+    store.seal_corpus().expect("seal");
+    assert_eq!(
+        store.properties_of("rollback-pack").expect("props").len(),
+        1
+    );
+    store
+        .verify_index("rollback-pack")
+        .expect("index consistent");
+    println!("{{\"suite\":\"fs-matdb-store\",\"case\":\"atomic-rollback\",\"verdict\":\"pass\"}}");
+}
+
+#[test]
+fn unknown_property_refuses_by_name() {
+    // Review finding: a typo'd property must be a NAMED refusal, not
+    // an empty result set.
+    let path = scratch_path("unknown-prop");
+    let store = seeded_store(&path);
+    assert!(matches!(
+        store.materials_with("yuong_modulus", None),
+        Err(StoreError::UnknownProperty { .. })
+    ));
+    assert!(matches!(
+        store.valid_at("yuong_modulus", "temperature", 300.0),
+        Err(StoreError::UnknownProperty { .. })
+    ));
+    // An empty RANGE result on a KNOWN property is a legitimate empty
+    // set, not a refusal.
+    assert!(
+        store
+            .materials_with("young_modulus", Some((1.0, 2.0)))
+            .expect("known property, empty range")
+            .is_empty()
+    );
 }
 
 #[test]

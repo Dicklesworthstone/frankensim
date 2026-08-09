@@ -685,6 +685,58 @@ impl MaterialStore {
                 });
             }
         }
+        // Validity rows (review finding: valid_at is DRIVEN by this
+        // table, so the tamper detector must cover it too).
+        let stored_validity = self
+            .conn
+            .query_with_params_sync(
+                "SELECT lower(hex(claim_hash)), axis, lo, hi FROM validity                  WHERE pack_id = ?1 ORDER BY claim_hash, axis",
+                &[text_param(pack_id)],
+            )
+            .map_err(sql_err("verify_index validity scan"))?;
+        let mut derived_validity: Vec<(String, String, f64, f64)> = Vec::new();
+        for (claim_id, claim) in pack.claims().claims_ordered() {
+            for (axis, (lo, hi)) in claim.validity.bounds() {
+                derived_validity.push((hex(claim_id.0.as_bytes()), axis.clone(), *lo, *hi));
+            }
+        }
+        derived_validity.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        if stored_validity.len() != derived_validity.len() {
+            return Err(StoreError::IndexMismatch {
+                pack_id: pack_id.to_string(),
+                what: "validity row count",
+            });
+        }
+        for (row, expect) in stored_validity.iter().zip(derived_validity.iter()) {
+            let hash_hex = row_text(row, 0, "validity.claim_hash")?;
+            let axis = row_text(row, 1, "validity.axis")?;
+            let lo = match row.get(2) {
+                Some(SqliteValue::Float(v)) => *v,
+                _ => {
+                    return Err(StoreError::Malformed {
+                        context: "validity.lo",
+                    });
+                }
+            };
+            let hi = match row.get(3) {
+                Some(SqliteValue::Float(v)) => *v,
+                _ => {
+                    return Err(StoreError::Malformed {
+                        context: "validity.hi",
+                    });
+                }
+            };
+            if hash_hex != expect.0
+                || axis != expect.1
+                || lo.to_bits() != expect.2.to_bits()
+                || hi.to_bits() != expect.3.to_bits()
+            {
+                return Err(StoreError::IndexMismatch {
+                    pack_id: pack_id.to_string(),
+                    what: "validity bounds",
+                });
+            }
+        }
         Ok(())
     }
 
@@ -706,8 +758,7 @@ impl MaterialStore {
             .map_err(sql_err("dump claims"))?;
         for row in &rows {
             for i in 0..6 {
-                out.push_str(&render_value(row.get(i)));
-                out.push('|');
+                push_field(&mut out, &render_value(row.get(i)));
             }
             out.push('\n');
         }
@@ -720,13 +771,20 @@ impl MaterialStore {
             .map_err(sql_err("dump validity"))?;
         for row in &rows {
             for i in 0..5 {
-                out.push_str(&render_value(row.get(i)));
-                out.push('|');
+                push_field(&mut out, &render_value(row.get(i)));
             }
             out.push('\n');
         }
         Ok(out)
     }
+}
+
+/// Length-prefixed field framing so no field content can shift a
+/// boundary (review finding: bare separators collide on ids containing
+/// the separator).
+fn push_field(out: &mut String, field: &str) {
+    use core::fmt::Write as _;
+    write!(out, "{}:{field}|", field.len()).expect("writing to String cannot fail");
 }
 
 fn render_value(value: Option<&SqliteValue>) -> String {
