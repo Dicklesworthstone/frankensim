@@ -14,6 +14,7 @@ layer = "L3"
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
+fs-lbm = { path = "../fs-lbm" }
 fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.1.0" }
 fsci-runtime = { path = "../../../frankenscipy/crates/fsci-runtime", version = "=0.1.0" }
 

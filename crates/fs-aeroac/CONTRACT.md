@@ -73,7 +73,19 @@ scope law, pinned as data and by test).
    mid-band growth exceeding the near-neutral growth, and the
    eigenvalue is grid-converged (2048 vs 4096 RK4 steps within
    1e-8).
-8. Refusals typed by name (non-positive wavenumber, coincident
+8. VERIFICATION CHAIN link 1 (dev-dep composition with fs-lbm): the
+   D2Q9 Bickley jet's measured linear growth rate CONVERGES toward
+   the inviscid Rayleigh oracle under simultaneous grid + Reynolds
+   refinement — measured -21.4% (b = 8 lu, Re 240) closing to -12.0%
+   (b = 12 lu, Re 432), both biased LOW as finite-Re physics demands,
+   with clean-exponential window consistency, low-Mach and linearity
+   diagnostics green per run, and gates authored just outside the
+   measured values (a fixed loose envelope would hide a broken
+   convergence direction). Executed lesson in the test doc: the free
+   jet's own viscous diffusion (~nu/b^2 per step) decays the base
+   flow and drags the measured rate down over long runs — fit early,
+   at high Re.
+9. Refusals typed by name (non-positive wavenumber, coincident
    observer/source, non-finite inputs, bad solver parameters,
    non-convergence with residual); Hankel functions outside their
    domain are FULLY NaN (both components — a half-valid complex once
@@ -106,6 +118,9 @@ Synchronous, milliseconds-class. No `Cx` integration (workspace
 None.
 
 ## Conformance tests
+
+`tests/bickley_lbm.rs` (1): the LBM-vs-Rayleigh growth-rate
+convergence fixture (invariant 8).
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field

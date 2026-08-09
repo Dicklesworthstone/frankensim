@@ -327,6 +327,7 @@
     "crates/fs-adjoint/tests/mitigate.rs",
     "crates/fs-adjoint/tests/transpose.rs",
     "crates/fs-aeroac/tests/aeroac.rs",
+    "crates/fs-aeroac/tests/bickley_lbm.rs",
     "crates/fs-airflow/tests/composite.rs",
     "crates/fs-airflow/tests/conformance.rs",
     "crates/fs-airflow/tests/conjugate.rs",
