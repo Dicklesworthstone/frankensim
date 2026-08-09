@@ -213,7 +213,12 @@ const SYM_TOL: f64 = 1.0e-10;
 const PSD_TOL: f64 = 1.0e-10;
 
 fn matrix_scale(m: &[f64]) -> f64 {
-    m.iter().fold(0.0f64, |a, &v| a.max(v.abs())).max(1.0)
+    // Relative floor, not 1.0: an absolute floor silently loosens
+    // admission for small-magnitude (SI-unit) matrices (review
+    // finding: R entries ~1e-6 with 100% relative asymmetry admitted).
+    m.iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()))
+        .max(f64::MIN_POSITIVE)
 }
 
 fn require_skew(j: &[f64], n: usize, what: &'static str) -> Result<(), PhsError> {
@@ -387,7 +392,15 @@ pub fn discrete_gradient(storage: &dyn Storage, a: &[f64], b: &[f64]) -> Vec<f64
         dx_norm_sq += dx * dx;
         mid_dot += dg[i] * dx;
     }
-    if dx_norm_sq > 0.0 {
+    // Cancellation guard (review finding): for |dx| below the roundoff
+    // scale the correction quotient amplifies eps*|H|/|dx| without
+    // bound; grad(mid) is already exact to available precision there.
+    let state_scale = a
+        .iter()
+        .chain(b.iter())
+        .fold(f64::MIN_POSITIVE, |acc, &v| acc.max(v.abs()));
+    let dx_floor = 1.0e-14 * state_scale;
+    if dx_norm_sq > dx_floor * dx_floor {
         let corr = (storage.hamiltonian(b) - storage.hamiltonian(a) - mid_dot) / dx_norm_sq;
         for i in 0..n {
             dg[i] += corr * (b[i] - a[i]);
@@ -413,13 +426,20 @@ pub struct StepRecord {
     pub supplied: f64,
     /// Newton iterations used.
     pub newton_iters: usize,
+    /// Residual norm of the ACCEPTED implicit-solve iterate. The
+    /// supply audit is blind below `~n * |dg|_inf * solver_residual`
+    /// (the ledger inherits this much slack), so audit thresholds must
+    /// scale with it — the crate discloses rather than hides the band.
+    pub solver_residual: f64,
 }
 
 impl StepRecord {
-    /// The exact discrete balance residual
+    /// The discrete balance residual
     /// `delta_h + dissipated - supplied` — zero to solver tolerance
-    /// for a true pHS regardless of structure mutations (it restates
-    /// the update equation), so it is a SOLVER diagnostic.
+    /// for an ADMITTED (skew-J) system, where it restates the update
+    /// equation: a SOLVER diagnostic, not a structure audit. Under a
+    /// symmetrized J it equals the energy-pumping term `dt dg^T J_sym
+    /// dg` instead.
     #[must_use]
     pub fn balance_residual(&self) -> f64 {
         self.delta_h + self.dissipated - self.supplied
@@ -454,6 +474,11 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
             what: "state/input length",
         });
     }
+    if !dt.is_finite() || dt < 0.0 {
+        return Err(PhsError::Dimension {
+            what: "dt must be finite and non-negative",
+        });
+    }
     // Forcing term dt*G*u (held over the step).
     let mut gu = vec![0.0; n];
     for i in 0..n {
@@ -475,13 +500,17 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     // State-RELATIVE stopping tolerance: an absolute floor here leaks
     // O(tol) state residual per step straight into the energy ledger
     // (executed: 3e-8 relative H drift on a lossless ladder with
-    // millivolt-scale states under an absolute 1e-12).
+    // millivolt-scale states under an absolute 1e-12). The input term
+    // enters as the STATE INCREMENT dt*|G u| (review finding: bare
+    // |G u| is a rate and inflates the tolerance by 1/dt).
     let scale = x0
         .iter()
-        .chain(gu.iter())
-        .fold(1.0e-30f64, |a, &v| a.max(v.abs()));
+        .map(|v| v.abs())
+        .chain(gu.iter().map(|v| (dt * v).abs()))
+        .fold(1.0e-30f64, f64::max);
     let mut x1 = x0.to_vec();
     let mut iters = 0usize;
+    let mut stagnant = 0usize;
     let mut best: Option<(Vec<f64>, f64)> = None;
     loop {
         let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
@@ -495,10 +524,25 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
             break;
         }
         // Stagnation with an approximate (finite-difference) Jacobian:
-        // accept the best iterate once progress stops.
-        if !improved || iters >= NEWTON_MAX {
+        // Newton residuals are not monotone far from the solution, so
+        // allow a few non-improving iterates before accepting the best
+        // one (review finding: first-non-improving aborts spuriously).
+        if !improved {
+            stagnant += 1;
+        } else {
+            stagnant = 0;
+        }
+        if stagnant >= 3 || iters >= NEWTON_MAX {
             let (bx, brnorm) = best.expect("at least one iterate");
-            if brnorm <= 1.0e3 * NEWTON_TOL * scale {
+            // Acceptance scale includes the ITERATE's own magnitude:
+            // the entry scale is built from x0 and the input increment
+            // and can be far below where the solution actually lands
+            // (executed: quasi-static reed, x0 ~ 0, solution ~ 2.5e-4,
+            // FD-Jacobian noise floor ~ 4e-14 — a refusal at a
+            // perfectly converged iterate). The accepted residual is
+            // DISCLOSED in StepRecord::solver_residual either way.
+            let sc_acc = bx.iter().fold(scale, |acc, &v| acc.max(v.abs()));
+            if brnorm <= 1.0e4 * NEWTON_TOL * sc_acc {
                 x1 = bx;
                 break;
             }
@@ -514,6 +558,11 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         iters += 1;
     }
     // Ledger at the converged discrete gradient.
+    let solver_residual = {
+        let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
+        let res = residual(&x1, &dg);
+        res.iter().fold(0.0f64, |a, &v| a.max(v.abs()))
+    };
     let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
     let mut dissipated = 0.0;
     for i in 0..n {
@@ -534,6 +583,7 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         dissipated,
         supplied,
         newton_iters: iters,
+        solver_residual,
     })
 }
 
@@ -704,9 +754,9 @@ pub fn reduce_galerkin(
     k: usize,
 ) -> Result<PortHamiltonian, PhsError> {
     let n = sys.n;
-    if v.len() != n * k {
+    if v.len() != n * k || k > n {
         return Err(PhsError::Dimension {
-            what: "basis size vs (n, k)",
+            what: "basis size vs (n, k) with k <= n",
         });
     }
     let vt_m_v = |mat: &[f64]| -> Vec<f64> {
@@ -919,8 +969,8 @@ impl Storage for DuffingStorage {
 }
 
 /// Nonlinear (Duffing-type) spring-mass: `H = p^2/(2m) + k q^2/2 +
-/// k3 q^4/4` via separable storage — the non-quadratic exercise for
-/// the Gonzalez gradient.
+/// k3 q^4/4` via a bespoke storage (parameters baked in) — the
+/// non-quadratic exercise for the Gonzalez gradient.
 ///
 /// # Errors
 /// Admission errors on non-physical parameters.

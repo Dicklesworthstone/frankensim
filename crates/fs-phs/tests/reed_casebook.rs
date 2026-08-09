@@ -25,14 +25,18 @@ use fs_phs::{mass_spring_damper, modal_bank, step};
 
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 
-/// Bernoulli reed-channel flow: `U = w * h * sqrt(2 dp / rho)` for
-/// `dp > 0, h > 0`, else 0 (no backflow modeling below threshold).
+/// Bernoulli reed-channel flow, TWO-SIDED: `U = sign(dp) * w * h *
+/// sqrt(2 |dp| / rho)` for `h > 0` (backflow reverses with the
+/// pressure difference), 0 for a closed channel. Dissipativity
+/// `dp * U >= 0` is then a real property of the law on BOTH branches
+/// — not a guard baked into the function (review finding: the
+/// one-sided version made the dissipativity assert a tautology).
 fn valve_flow(w: f64, h: f64, dp: f64, rho: f64) -> f64 {
-    if dp <= 0.0 || h <= 0.0 {
-        0.0
-    } else {
-        w * h * det::sqrt(2.0 * dp / rho)
+    if h <= 0.0 {
+        return 0.0;
     }
+    let mag = w * h * det::sqrt(2.0 * dp.abs() / rho);
+    if dp < 0.0 { -mag } else { mag }
 }
 
 #[test]
@@ -57,7 +61,9 @@ fn reed_as_phs_quasi_static_equilibrium_and_energy_audit() {
     let dt = 2.0e-5;
     let mut x_reed = vec![0.0, 0.0];
     let mut x_bore = vec![0.0; bore.state_dim()];
-    let mut worst_valve_power = 0.0f64;
+    let h_total_0 = 0.0f64; // both subsystems start at rest
+    let mut mouth_work = 0.0f64;
+    let mut worst_valve_power = f64::INFINITY;
     let mut worst_closed_defect = f64::NEG_INFINITY;
     let steps = 60_000usize;
     for _ in 0..steps {
@@ -76,15 +82,28 @@ fn reed_as_phs_quasi_static_equilibrium_and_energy_audit() {
         // Structural passivity of each component, every step.
         assert!(rec_r.supply_defect() <= 1.0e-10, "reed supply audit");
         assert!(rec_b.supply_defect() <= 1.0e-10, "bore supply audit");
-        // Closed accounting: total stored-energy growth is bounded by
-        // the mouth supply plus the reed's pressure work (both routed
-        // through dp; the valve only ever removes energy).
+        // Per-step consistency restatement (NOT independent — it is
+        // algebraically implied by the two supply audits plus valve
+        // dissipativity; review finding): kept as a cheap regression
+        // tripwire, with the honest label.
         let d_total = rec_r.delta_h + rec_b.delta_h;
         let mouth_supply = (pm * flow + s_r * dp * rec_r.y[0]) * dt;
         worst_closed_defect = worst_closed_defect.max(d_total - mouth_supply);
+        // Physically closed mouth work: the mouth pushes BOTH the jet
+        // and the reed face at pressure pm; accumulated for the
+        // integral bound checked after the loop against energies
+        // recomputed directly from the final states.
+        mouth_work += pm * (flow + s_r * rec_r.y[0]) * dt;
         x_reed = rec_r.x;
         x_bore = rec_b.x;
     }
+    // INTEGRAL bound from state-recomputed energies: everything the
+    // instrument stores came through the mouth.
+    let h_total_end = reed.hamiltonian(&x_reed) + bore.hamiltonian(&x_bore);
+    assert!(
+        h_total_end - h_total_0 <= mouth_work + 1.0e-9,
+        "stored energy {h_total_end:.3e} exceeds accumulated mouth work {mouth_work:.3e}"
+    );
     assert!(
         worst_valve_power >= 0.0,
         "valve created energy: {worst_valve_power:.3e}"

@@ -99,18 +99,34 @@ fn damped_ledger_matches_exactly() {
     let dt = 1.0e-4;
     let mut total_dissipated = 0.0;
     let mut worst_residual = 0.0f64;
+    let (m, c) = (0.02, 0.15);
+    let mut quad_dissipation = 0.0;
+    let mut v_prev = x[1] / m;
     for _ in 0..5000 {
         let rec = step(&sys, &x, &[0.0], dt).expect("step");
         worst_residual = worst_residual.max(rec.balance_residual().abs());
         assert!(rec.dissipated >= 0.0, "admitted R cannot un-dissipate");
         total_dissipated += rec.dissipated;
         x = rec.x;
+        let v = x[1] / m;
+        quad_dissipation += 0.5 * c * (v_prev * v_prev + v * v) * dt;
+        v_prev = v;
     }
     let h_end = sys.hamiltonian(&x);
     assert!(worst_residual <= 1.0e-12 * h0);
+    // Ledger-vs-H-drop is the accumulated balance residual (same code
+    // path — a consistency restatement, kept as a tripwire).
     assert!(
         ((h0 - h_end) - total_dissipated).abs() <= 1.0e-9 * h0,
         "ledger vs H drop mismatch"
+    );
+    // INDEPENDENT oracle (review finding): the dissipation ledger must
+    // match a trapezoidal quadrature of c*v^2 computed from recorded
+    // VELOCITIES (states, not StepRecords). Trapezoid error at ~50
+    // samples/period is ~0.4%; 2% gate.
+    assert!(
+        (total_dissipated - quad_dissipation).abs() <= 0.02 * total_dissipated,
+        "ledger {total_dissipated:.6e} vs c*v^2 quadrature {quad_dissipation:.6e}"
     );
     println!(
         "{{\"suite\":\"fs-phs\",\"case\":\"damped-ledger\",\"h_drop\":{:.6e},\"dissipated\":{total_dissipated:.6e},\"verdict\":\"pass\"}}",
