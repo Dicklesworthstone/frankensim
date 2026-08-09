@@ -68,8 +68,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Bumped to 3 when `material-resolve` stopped being a typed gap: the stage
 /// set a run identity stands for changed, and the run preimage gained the
 /// admitted card-pack-set root. A v2 checkpoint therefore cannot be mistaken
-/// for a v3 run.
-pub const SOLVE_DRIVER_VERSION: u32 = 3;
+/// for a v3 run. Bumped to 4 when `flow-network` stopped being a typed gap
+/// (frankensim-frn2i.2): v3 checkpoints cannot resume into a v4 stage set.
+pub const SOLVE_DRIVER_VERSION: u32 = 4;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -222,6 +223,9 @@ pub enum SolveEvidencePhase {
     /// Resolve declared bindings against the admitted card library, or build
     /// the canonical material-resolve receipt.
     MaterialBindingResolution,
+    /// Lower the declared cooling fan system and solve the enclosure's
+    /// network operating point, or build the canonical flow-network receipt.
+    FlowNetworkSolve,
     /// Materialize one retained card pack during resume.
     ///
     /// The optional plan index is the pack's canonical position in the set.
@@ -585,7 +589,7 @@ impl SolveStage {
     pub const fn gap_dependency(self) -> Option<&'static str> {
         match self {
             SolveStage::ImportVerify | SolveStage::Assign | SolveStage::MaterialResolve => None,
-            SolveStage::FlowNetwork => Some("frankensim-frn2i"),
+            SolveStage::FlowNetwork => None,
             SolveStage::Conduction => Some("frankensim-s93ej"),
             SolveStage::Qoi => Some("frankensim-s2l9v"),
         }
@@ -1434,6 +1438,9 @@ impl<'a> SolveEngine<'a> {
                     .stage_assign(&context)
                     .map(|receipt| (receipt, Vec::new())),
                 SolveStage::MaterialResolve => self.stage_material_resolve(),
+                SolveStage::FlowNetwork => self
+                    .stage_flow_network()
+                    .map(|receipt| (receipt, Vec::new())),
                 _ => unreachable!("gap stages returned above"),
             };
             let (receipt_json, usages) = match body {
@@ -1736,6 +1743,10 @@ impl<'a> SolveEngine<'a> {
     /// admitted card packs.
     fn stage_material_resolve(&mut self) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
         material_resolve_receipt(self.spec, self.cards, self.run, self.work, false)
+    }
+
+    fn stage_flow_network(&mut self) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+        flow_network_receipt(self.spec, self.run, self.work, false)
     }
 
     /// Persist one completed stage as a ledgered op: stage receipt, sealed
@@ -4493,7 +4504,7 @@ fn attest_retained_project(
 ) -> Result<ResumeImportCache, SolveRefusal> {
     work.checkpoint(SolveEvidencePhase::ResumeProjectParse, None, 0)
         .map_err(|_| cancelled_resume_refusal(run))?;
-    let project = fs_project::parse_sexpr(source);
+    let project = fs_project::parse_sexpr_migrating(source).map(|migrated| migrated.decoded);
     work.checkpoint(SolveEvidencePhase::ResumeProjectParse, None, 1)
         .map_err(|_| cancelled_resume_refusal(run))?;
     let project = project.map_err(|error| {

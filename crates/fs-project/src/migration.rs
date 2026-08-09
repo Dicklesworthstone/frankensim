@@ -87,6 +87,57 @@ pub struct MigratedProject {
     pub receipt: ProjectMigrationReceipt,
 }
 
+/// Parse a canonical `.fsim` document, migrating an older envelope through
+/// its registered receipted rule when needed (the `auto-migration-receipt`
+/// obligation). The returned document is always the current version; the
+/// migration receipt, when one fired, is retained for the caller's ledger.
+///
+/// # Errors
+/// Returns [`ProjectError`] from the strict parser, or from
+/// [`migrate_envelope`] when the declared version has no registered rule.
+pub fn parse_sexpr_migrating(source: &str) -> Result<MigratedOrNative, ProjectError> {
+    match parse_sexpr(source) {
+        Ok(decoded) => Ok(MigratedOrNative {
+            decoded,
+            migration: None,
+        }),
+        Err(error) if error.code == "fsim-unsupported-version" => {
+            let declared = declared_envelope_version(source).ok_or_else(|| ProjectError {
+                code: "fsim-migration-shape",
+                detail: "the envelope version could not be read for migration".to_string(),
+                hint: "migrate exactly the bytes that were persisted; do not hand-edit the envelope"
+                    .to_string(),
+            })?;
+            let migrated = migrate_envelope(source, declared)?;
+            Ok(MigratedOrNative {
+                decoded: migrated.decoded,
+                migration: Some(migrated.receipt),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// A parsed project plus the migration receipt when an older envelope was
+/// rewritten by a registered rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MigratedOrNative {
+    /// The decoded project at the current version.
+    pub decoded: DecodedProject,
+    /// The migration receipt, present exactly when a rule fired.
+    pub migration: Option<ProjectMigrationReceipt>,
+}
+
+/// Read the envelope's declared `:version` integer without full parsing.
+fn declared_envelope_version(source: &str) -> Option<u32> {
+    let prefix = source.strip_prefix("(fsim-project :version ")?;
+    let digits: String = prefix
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
 /// Migrate an older envelope to the current version under a registered rule,
 /// refusing unknown versions. The output is strictly canonical.
 pub fn migrate_envelope(

@@ -47,7 +47,10 @@ pub use decision::{
     ProjectDecisionError, project_decision_authorities, project_decision_authority,
 };
 pub use fs_io::{HalfSpaceSide, MeshSelector};
-pub use migration::{MigratedProject, MigrationRule, ProjectMigrationReceipt, migrate_envelope};
+pub use migration::{
+    MigratedOrNative, MigratedProject, MigrationRule, ProjectMigrationReceipt, migrate_envelope,
+    parse_sexpr_migrating,
+};
 pub use spec::{
     AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
