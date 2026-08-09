@@ -638,7 +638,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 3,
+        SOLVE_DRIVER_VERSION, 4,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -2722,10 +2722,7 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
     assert_eq!(SolveStage::ImportVerify.gap_dependency(), None);
     assert_eq!(SolveStage::Assign.gap_dependency(), None);
     assert_eq!(SolveStage::MaterialResolve.gap_dependency(), None);
-    assert_eq!(
-        SolveStage::FlowNetwork.gap_dependency(),
-        Some("frankensim-frn2i")
-    );
+    assert_eq!(SolveStage::FlowNetwork.gap_dependency(), None);
     assert_eq!(
         SolveStage::Conduction.gap_dependency(),
         Some("frankensim-s93ej")
