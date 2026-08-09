@@ -894,7 +894,7 @@ impl CoulombCapacity {
 }
 
 /// Generalized-coordinate ownership labels used to prevent work double counting.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GeneralizedWorkOwnership {
     patch_id: String,
     interval_id: String,
@@ -933,6 +933,24 @@ impl GeneralizedWorkOwnership {
     #[must_use]
     pub fn interval_id(&self) -> &str {
         &self.interval_id
+    }
+
+    /// Longitudinal generalized-coordinate identity.
+    #[must_use]
+    pub fn longitudinal_coordinate_id(&self) -> &str {
+        &self.longitudinal_coordinate_id
+    }
+
+    /// Lateral generalized-coordinate identity.
+    #[must_use]
+    pub fn lateral_coordinate_id(&self) -> &str {
+        &self.lateral_coordinate_id
+    }
+
+    /// Torsional generalized-coordinate identity.
+    #[must_use]
+    pub fn torsional_coordinate_id(&self) -> &str {
+        &self.torsional_coordinate_id
     }
 
     fn validate_for_patch(&self, patch_id: &str) -> Result<(), PartialSlipError> {

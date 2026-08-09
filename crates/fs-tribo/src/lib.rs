@@ -11,8 +11,165 @@ pub mod rolling_loss;
 pub mod surface_excitation;
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 const EPSILON: f64 = 64.0 * f64::EPSILON;
+
+/// Bounded exactly-once key ownership for arbitrary or strictly sequential work.
+///
+/// `RetainedSet` preserves the general replay contract by retaining every key.
+/// `StrictSequence` is the fixed-memory production form: it admits only the
+/// exact next key and advances to a caller-supplied successor. The latter is
+/// sound only when the surrounding transaction also binds a monotone version;
+/// it must never be used as a lossy cache for arbitrary keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactlyOnceKeyLedger<K> {
+    /// Arbitrary keys with complete duplicate detection.
+    RetainedSet {
+        committed: BTreeSet<K>,
+        maximum_committed: usize,
+    },
+    /// One exact next key plus a monotone accepted count.
+    StrictSequence {
+        next: K,
+        committed_count: usize,
+        maximum_committed: usize,
+    },
+}
+
+/// Refusal from a bounded exactly-once key transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactlyOnceKeyError {
+    /// The caller supplied a zero capacity.
+    ZeroCapacity,
+    /// An arbitrary key was already retained.
+    Duplicate,
+    /// A strict sequence did not supply its exact next key.
+    OutOfSequence,
+    /// No successor was supplied for an accepted strict-sequence key.
+    MissingSuccessor,
+    /// The caller-authored accepted-key ceiling was reached.
+    CapacityExceeded { maximum: usize },
+}
+
+impl<K: Ord + Clone> ExactlyOnceKeyLedger<K> {
+    /// Starts a complete arbitrary-key ledger.
+    pub fn retained_set(maximum_committed: usize) -> Result<Self, ExactlyOnceKeyError> {
+        if maximum_committed == 0 {
+            return Err(ExactlyOnceKeyError::ZeroCapacity);
+        }
+        Ok(Self::RetainedSet {
+            committed: BTreeSet::new(),
+            maximum_committed,
+        })
+    }
+
+    /// Starts a fixed-memory strict sequence at `first`.
+    pub fn strict_sequence(
+        first: K,
+        maximum_committed: usize,
+    ) -> Result<Self, ExactlyOnceKeyError> {
+        if maximum_committed == 0 {
+            return Err(ExactlyOnceKeyError::ZeroCapacity);
+        }
+        Ok(Self::StrictSequence {
+            next: first,
+            committed_count: 0,
+            maximum_committed,
+        })
+    }
+
+    /// Number of accepted keys.
+    #[must_use]
+    pub fn committed_count(&self) -> usize {
+        match self {
+            Self::RetainedSet { committed, .. } => committed.len(),
+            Self::StrictSequence {
+                committed_count, ..
+            } => *committed_count,
+        }
+    }
+
+    /// Caller-authored accepted-key ceiling.
+    #[must_use]
+    pub const fn maximum_committed(&self) -> usize {
+        match self {
+            Self::RetainedSet {
+                maximum_committed,
+                ..
+            }
+            | Self::StrictSequence {
+                maximum_committed,
+                ..
+            } => *maximum_committed,
+        }
+    }
+
+    /// Exact retained keys for the arbitrary mode.
+    #[must_use]
+    pub const fn retained_keys(&self) -> Option<&BTreeSet<K>> {
+        match self {
+            Self::RetainedSet { committed, .. } => Some(committed),
+            Self::StrictSequence { .. } => None,
+        }
+    }
+
+    /// Exact next key for the fixed-memory mode.
+    #[must_use]
+    pub const fn strict_next_key(&self) -> Option<&K> {
+        match self {
+            Self::StrictSequence { next, .. } => Some(next),
+            Self::RetainedSet { .. } => None,
+        }
+    }
+
+    /// Returns the immutable successor after accepting `key` exactly once.
+    ///
+    /// `strict_successor` is ignored by `RetainedSet` and mandatory for
+    /// `StrictSequence`.
+    pub fn advance(
+        &self,
+        key: &K,
+        strict_successor: Option<K>,
+    ) -> Result<Self, ExactlyOnceKeyError> {
+        if self.committed_count() >= self.maximum_committed() {
+            return Err(ExactlyOnceKeyError::CapacityExceeded {
+                maximum: self.maximum_committed(),
+            });
+        }
+        match self {
+            Self::RetainedSet {
+                committed,
+                maximum_committed,
+            } => {
+                if committed.contains(key) {
+                    return Err(ExactlyOnceKeyError::Duplicate);
+                }
+                let mut next = committed.clone();
+                next.insert(key.clone());
+                Ok(Self::RetainedSet {
+                    committed: next,
+                    maximum_committed: *maximum_committed,
+                })
+            }
+            Self::StrictSequence {
+                next,
+                committed_count,
+                maximum_committed,
+            } => {
+                if key != next {
+                    return Err(ExactlyOnceKeyError::OutOfSequence);
+                }
+                let successor = strict_successor.ok_or(ExactlyOnceKeyError::MissingSuccessor)?;
+                Ok(Self::StrictSequence {
+                    next: successor,
+                    committed_count: committed_count + 1,
+                    maximum_committed: *maximum_committed,
+                })
+            }
+        }
+    }
+}
 
 /// The declared ceiling of the caller's numerical input. This is not a receipt or admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
