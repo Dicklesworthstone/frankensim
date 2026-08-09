@@ -2670,7 +2670,10 @@ fn flow_network_receipt(
         return Err(SolveRefusal::staged(
             "cli-solve-flow-network-leakage-units",
             stage,
-            format!("leakage area carries dims {}", leakage.area.dims.unit_string()),
+            format!(
+                "leakage area carries dims {}",
+                leakage.area.dims.unit_string()
+            ),
             "the leakage area must carry m^2 dimensions",
         ));
     } else {

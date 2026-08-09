@@ -414,8 +414,7 @@ impl PhysicalPressureSignal {
         let peak_abs_pressure_pa = pressure_pa
             .iter()
             .fold(0.0_f64, |peak, pressure| peak.max(pressure.abs()));
-        let mut identity =
-            DomainHasher::new("org.frankensim.euler-disc.physical-pressure-crop.v1");
+        let mut identity = DomainHasher::new("org.frankensim.euler-disc.physical-pressure-crop.v1");
         identity.update(self.identity.as_bytes());
         identity.update(&(first_frame as u64).to_le_bytes());
         identity.update(&(end_frame as u64).to_le_bytes());
@@ -2561,13 +2560,9 @@ mod tests {
         }
 
         let rayleigh = RayleighDamping::new(1.25, 2.5e-8).unwrap();
-        let loss = modal_loss_spectrum_from_rayleigh(
-            &basis,
-            &specimen,
-            rayleigh,
-            ContentHash([0x48; 32]),
-        )
-        .unwrap();
+        let loss =
+            modal_loss_spectrum_from_rayleigh(&basis, &specimen, rayleigh, ContentHash([0x48; 32]))
+                .unwrap();
         assert_eq!(loss.loss_factors.len(), basis.modes.len());
         for (loss_factor, mode) in loss.loss_factors.iter().zip(&basis.modes) {
             let expected = rayleigh.alpha / mode.angular_frequency_rad_s

@@ -319,77 +319,60 @@ fn rebuild_is_bitwise_identical() {
 
 #[test]
 fn partial_ingest_rolls_back_atomically() {
-    // Review finding: a mid-ingest refusal must leave NO trace — the
-    // pack row, claims, and validity rows all roll back, and a
-    // corrected retry succeeds instead of hitting DuplicatePack.
+    // Review finding follow-through, with an executed twist: an
+    // unlicensed claim turned out to be UNREPRESENTABLE — fs-matdb's
+    // own ClaimSet::insert_claim refuses it (MissingLicense), so the
+    // store's admission pre-pass is defense-in-depth for future pack
+    // paths, and this test pins the upstream gate...
+    let mut claims = ClaimSet::new();
+    let refused = claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new("young_modulus", dims_none()),
+        value: PropertyValue::Scalar {
+            value: 1.0e9,
+            dims: dims_none(),
+        },
+        validity: ValidityDomain::unconstrained(),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![],
+        provenance: Provenance {
+            source: "unlicensed".to_string(),
+            license: "  ".to_string(),
+            artifact: None,
+        },
+    });
+    assert!(
+        refused.is_err(),
+        "fs-matdb itself must refuse an unlicensed claim"
+    );
+    // ...and the TRANSACTIONAL machinery is exercised by an induced
+    // mid-ingest SQL failure: with the validity table dropped, the
+    // third insert of a fresh pack fails and the whole pack — packs
+    // row and claims rows — must roll back, leaving a retry able to
+    // succeed once the schema is restored.
     let path = scratch_path("rollback");
     let _ = std::fs::remove_file(&path);
     let store = MaterialStore::open(&path).expect("open");
-    // A pack whose SECOND claim carries an empty license: the
-    // admission pre-pass refuses before any row is written.
-    let mut claims = ClaimSet::new();
-    let observation = claims
-        .register_observation(ObservationDataset {
-            specimen: "rollback specimen".to_string(),
-            method: "authored".to_string(),
-            artifact: fs_blake3_hash(b"rollback"),
-            caveats: "synthetic".to_string(),
-            provenance: provenance(),
-        })
-        .expect("observation");
-    claims
-        .insert_claim(PropertyClaim {
-            key: PropertyKey::new("density", dims_none()),
-            value: PropertyValue::Scalar {
-                value: 1000.0,
-                dims: dims_none(),
-            },
-            validity: ValidityDomain::unconstrained(),
-            uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::ConstantWithinValidity,
-            observations: vec![observation],
-            provenance: provenance(),
-        })
-        .expect("licensed claim");
-    claims
-        .insert_claim(PropertyClaim {
-            key: PropertyKey::new("young_modulus", dims_none()),
-            value: PropertyValue::Scalar {
-                value: 1.0e9,
-                dims: dims_none(),
-            },
-            validity: ValidityDomain::unconstrained(),
-            uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::ConstantWithinValidity,
-            observations: vec![observation],
-            provenance: Provenance {
-                source: "unlicensed".to_string(),
-                license: "  ".to_string(),
-                artifact: None,
-            },
-        })
-        .expect("unlicensed claim");
-    let bad = NormalizedPack::new(
-        "rollback-pack",
-        "store-battery-v1",
-        fs_blake3_hash(b"rollback source"),
-        "synthetic redistribution permitted for tests",
-        claims,
-        Vec::new(),
-        Vec::new(),
-    )
-    .expect("pack");
+    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    raw.execute_sync("DROP TABLE validity")
+        .expect("drop validity");
+    drop(raw);
     assert!(matches!(
-        store.ingest_pack(&bad),
-        Err(StoreError::Inadmissible {
-            what: "claim with empty license",
-            ..
-        })
+        store.ingest_pack(&test_pack("rollback-pack", &[("density", 1000.0)])),
+        Err(StoreError::Sql { .. })
     ));
-    // NO residue: a good pack under the same id ingests cleanly.
+    // Restore the schema; the retry must NOT hit DuplicatePack —
+    // nothing of the failed ingest survived.
+    let raw = AsyncConnection::open_sync(&path).expect("raw");
+    raw.execute_sync(
+        "CREATE TABLE validity(pack_id TEXT NOT NULL, claim_hash BLOB NOT NULL, \
+         axis TEXT NOT NULL, lo REAL NOT NULL, hi REAL NOT NULL)",
+    )
+    .expect("recreate validity");
+    drop(raw);
     store
         .ingest_pack(&test_pack("rollback-pack", &[("density", 1000.0)]))
-        .expect("retry succeeds — nothing was left behind");
+        .expect("retry succeeds — the failed ingest left no residue");
     store.seal_corpus().expect("seal");
     assert_eq!(
         store.properties_of("rollback-pack").expect("props").len(),

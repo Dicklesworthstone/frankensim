@@ -28,7 +28,8 @@ use crate::{
     MicrophoneDirectivity, ModalPresetAuthority, ModalStemFrame, ModalSynthesisBudget,
     ModalSynthesisModel, ModalSynthesisModelInput, ModeContactParticipationRule,
     OfflineSpatializer, RenderNormalForceSampling, RenderTrajectory, RenderTrajectoryCodecBudget,
-    RepresentativeDiscMaterial, SoundWavArtifact, SourcePositionTrack, SpatialAudioAuthority,
+    PhysicalPressureListeningMaster, PressureListeningMasterPolicy, RepresentativeDiscMaterial,
+    SoundWavArtifact, SourcePositionTrack, SpatialAudioAuthority,
     SpatialAudioBudget, SpatialAudioConfig, SpatialAudioOutput, SpatialAudioRenderInput,
     SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal, SpatialOutputHorizon,
     SpatialStemComponent, StemGainPan, StereoSample, WavMetadata, WavSampleEncoding, measure_audio,
@@ -48,7 +49,13 @@ use crate::{
     representative_modal_preset,
     timeline_resampling::{EventEvaluationSide, ExposureEventPolicy},
 };
+use crate::structural_acoustics::{
+    AcousticDirectivityControls, AcousticWorldObserver, PhysicalModalAudioModel,
+    ResolvedAcousticMedium, StructuralMeshControls, StructuralModeRequest,
+    build_structural_modal_basis, modal_loss_spectrum_from_rayleigh,
+};
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_evidence::{
     ValidityDomain,
     cinematic::{CinematicClock, CinematicClockDomain, SoundAuthority},
@@ -60,7 +67,6 @@ use fs_evidence::{
         SoundSynthesisConfig, SoundSynthesisInput, SoundTerminalPolicy, SoundTrajectoryDisposition,
     },
 };
-use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_exec::{Cx, RunId};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_img::{
@@ -69,7 +75,10 @@ use fs_img::{
     TemporalDenoiseLimits, TemporalDenoisedFrame, TemporalFrameBoundary, temporal_denoise_rgb,
     transform_cinematic_preview, write_exr_with_attributes, write_png16,
 };
-use fs_math::det;
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
 use fs_material::{
     gas::{GasSpec, GasState},
     state_point::{
@@ -79,10 +88,7 @@ use fs_material::{
     },
     visco::RayleighDamping,
 };
-use fs_matdb::{
-    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
-};
+use fs_math::det;
 use fs_mbd::Vec3;
 use fs_modal::SliceOptions;
 use fs_qty::{Density, Dims, Pressure};
@@ -660,6 +666,7 @@ enum MuxOutcome {
 
 struct FixtureAudio {
     artifact: SoundWavArtifact,
+    physical: FixturePhysicalAudio,
     modal_parameter_set_identity: ContentHash,
     modal_parameter_set_disclosure: String,
     chirp_start_hz: f64,
@@ -677,6 +684,19 @@ struct FixtureAudio {
     spatialization: Option<FixtureSpatialAudioEvidence>,
 }
 
+struct FixturePhysicalAudio {
+    master: PhysicalPressureListeningMaster,
+    structural_basis_identity: ContentHash,
+    acoustic_directivity_identity: ContentHash,
+    damping_model_identity: ContentHash,
+    gas_model_identity: ContentHash,
+    left_pressure_identity: ContentHash,
+    right_pressure_identity: ContentHash,
+    retained_mode_count: usize,
+    minimum_mode_frequency_hz: f64,
+    maximum_mode_frequency_hz: f64,
+}
+
 struct FixturePhysicalDiscState {
     specimen: crate::specimen::ResolvedElasticDiscProfile,
     render_binding: EulerDiscMaterialStateBinding,
@@ -688,37 +708,31 @@ fn resolve_fixture_physical_disc(
     config: &CinematicDiscMaterialConfig,
     cx: &Cx<'_>,
 ) -> Result<FixturePhysicalDiscState, CinematicFixtureError> {
-    let validity = ValidityDomain::unconstrained().with(
-        "T",
-        config.temperature_k,
-        config.temperature_k,
-    );
+    let validity =
+        ValidityDomain::unconstrained().with("T", config.temperature_k, config.temperature_k);
     let mut claims = ClaimSet::new();
-    let mut insert_scalar = |name: &str,
-                             dims: Dims,
-                             value: f64,
-                             source: &str|
-     -> Result<(), CinematicFixtureError> {
-        claims
-            .insert_claim(PropertyClaim {
-                key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
-                validity: validity.clone(),
-                uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: Vec::new(),
-                provenance: Provenance {
-                    source: source.to_owned(),
-                    // The fixture's numeric declarations and the CC0 optical
-                    // database transcription are redistributable inputs. The
-                    // original paper remains the scientific citation.
-                    license: "CC0-1.0".to_owned(),
-                    artifact: None,
-                },
-            })
-            .map(|_| ())
-            .map_err(pipeline)
-    };
+    let mut insert_scalar =
+        |name: &str, dims: Dims, value: f64, source: &str| -> Result<(), CinematicFixtureError> {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: validity.clone(),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: source.to_owned(),
+                        // The fixture's numeric declarations and the CC0 optical
+                        // database transcription are redistributable inputs. The
+                        // original paper remains the scientific citation.
+                        license: "CC0-1.0".to_owned(),
+                        artifact: None,
+                    },
+                })
+                .map(|_| ())
+                .map_err(pipeline)
+        };
     insert_scalar(
         "density",
         Density::DIMS,
@@ -788,8 +802,7 @@ fn resolve_fixture_physical_disc(
             "resolved elastic material changed the mechanics geometry/density profile".into(),
         ));
     }
-    let mut surface =
-        DomainHasher::new("org.frankensim.euler-critique.disc-surface-state.v1");
+    let mut surface = DomainHasher::new("org.frankensim.euler-critique.disc-surface-state.v1");
     surface.update(specimen.material_state_identity.as_bytes());
     surface.update(config.process_label.as_bytes());
     surface.update(&config.surface_roughness_alpha.to_bits().to_le_bytes());
@@ -1577,6 +1590,7 @@ pub fn run_cinematic_fixture(
     progress("stage=mechanics begin");
     let benchmark = Thorne2026SteelGlassBenchmark::ambient().map_err(pipeline)?;
     let profile = benchmark.resolve_specimen(cx).map_err(pipeline)?;
+    let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc_material, cx)?;
     let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
     let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
     let (coarse_audio_preroll_trajectory, coarse_trajectory) =
@@ -1732,10 +1746,6 @@ pub fn run_cinematic_fixture(
         arc_subdivisions_per_arc: config.arc_subdivisions_per_arc,
     };
     scene_config.show_spin_fiducial = true;
-    scene_config.disc_material = EulerMaterialStyle::Conductor {
-        optics: ConductorOptics::representative_stainless_steel(),
-        surface: ConductorSurface::try_rough(0.12).map_err(pipeline)?,
-    };
     // The product plate is polished glass, not a visibly frosted surface. The
     // reference scene's rough-GGX convenience preset creates rare, extremely
     // bright microfacet paths at practical cinematic sample counts. Use the
@@ -1773,8 +1783,14 @@ pub fn run_cinematic_fixture(
         floor_linear_rgb: [0.012, 0.009, 0.007],
         radiance_scale: 0.35,
     });
-    let scene = EulerCinematicScene::try_build(&trajectory_artifact, &profile, scene_config, cx)
-        .map_err(pipeline)?;
+    let scene = EulerCinematicScene::try_build_elastic_physical(
+        &trajectory_artifact,
+        &physical_disc.specimen,
+        physical_disc.render_binding,
+        scene_config,
+        cx,
+    )
+    .map_err(pipeline)?;
     let preview_mesh_evidence =
         FixturePreviewMeshEvidence::from_receipt(scene.preview_mesh_receipt());
     let render_sample_ceiling = config.render_sample_ceiling();
