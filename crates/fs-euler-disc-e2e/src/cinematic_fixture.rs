@@ -5982,7 +5982,10 @@ mod tests {
                 specific_enthalpy_j_kg: 1.0,
                 knots,
             };
-            let error = resolve_fixture_physical_disc(&profile, &config, cx).unwrap_err();
+            let error = match resolve_fixture_physical_disc(&profile, &config, cx) {
+                Ok(_) => panic!("partially liquid disc entered fixed-solid mechanics"),
+                Err(error) => error,
+            };
             assert!(
                 error
                     .to_string()
