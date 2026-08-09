@@ -37,6 +37,7 @@ pub mod hyper2d;
 #[cfg(feature = "koiter-asymptotics")]
 pub mod koiter;
 pub mod linear;
+pub mod linear3;
 pub mod mesh2;
 pub mod rod;
 pub mod shell;
@@ -48,6 +49,10 @@ pub use cutfront::{BoundaryTraction, CutElasticity, CutSolution, DesignBoxEdge, 
 pub use fiber::{Fiber, FiberLaw, Section, SectionState, update_sections_batched};
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use linear::{Formulation, LinearProblem, PlaneKind};
+pub use linear3::{
+    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetElasticMaterial,
+    TetLinearElasticProblem, TetMaterialField,
+};
 pub use mesh2::{Mesh2, Patch};
 pub use rod::{Rod, RodSection, TipLoad};
 pub use shell::{

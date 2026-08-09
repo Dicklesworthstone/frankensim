@@ -11,6 +11,13 @@ the globalized Newton loop. Vector CutFEM assembly and solution are
 owned canonically by fs-cutfem; fs-solid retains only a legacy
 constructor facade.
 
+The `linear3` module is the generic body-fitted three-dimensional
+small-strain rung. It assembles a sparse stiffness/consistent-mass pencil from
+P1 tetrahedra plus uniform or per-element `fs-material` state points. Object
+names and material presets are deliberately absent: downstream vibration and
+vibroacoustic consumers receive the same `(K,M)` artifact for any admitted
+geometry/material composition.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1
@@ -332,6 +339,15 @@ consistency + throughput ledger; str-006 force-based pushover,
 reversal dissipation, G4 bitwise resume.
 
 ## No-claim boundaries
+
+- `linear3` claims infinitesimal-strain isotropic elasticity on a fixed,
+  conforming, non-degenerate tetrahedral mesh. It does not claim plasticity,
+  finite-strain response, physical damping, thermoelastic prestress, phase
+  change, fracture, moving interfaces, or topology evolution. Callers must
+  escalate or refuse when the resolved material state leaves this solid rung.
+- Its free-body stiffness correctly contains rigid modes. Removing, fixing,
+  or slicing around those modes is a boundary-condition/eigenproblem decision;
+  the assembler never adds hidden grounding stiffness.
 
 - The facade inherits fs-cutfem's no-claim for clipping a supported traction
   segment cut by the SDF and for quadrature error bounds on arbitrary traction

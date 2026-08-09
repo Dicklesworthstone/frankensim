@@ -20,6 +20,7 @@ contact = []
 
 [dependencies]
 fs-cutfem = { path = "../fs-cutfem" }
+fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-scenario = { path = "../fs-scenario" }
@@ -28,7 +29,10 @@ fs-sparse = { path = "../fs-sparse" }
 fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-ivl = { path = "../fs-ivl" }
+fs-mesh = { path = "../fs-mesh" }
+fs-modal = { path = "../fs-modal" }
 
 [[test]]
 name = "koiter"
