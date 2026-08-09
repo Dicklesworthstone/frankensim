@@ -1,0 +1,21 @@
+[package]
+name = "fs-aeroac"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Low-Mach aeroacoustic source models: 2D frequency-domain Curle dipole radiation over the outgoing Hankel Green's function, self-contained deterministic Bessel J0/J1/Y0/Y1, and the Bickley-jet Rayleigh instability oracle — shape/scaling authorities with explicit no-absolute-SPL refusals, never SPL prediction."
+authors.workspace = true
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.1.0" }
+fsci-runtime = { path = "../../../frankenscipy/crates/fsci-runtime", version = "=0.1.0" }
+
+[lints]
+workspace = true

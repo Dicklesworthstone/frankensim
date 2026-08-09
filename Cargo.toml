@@ -84,6 +84,7 @@ members = [
     "crates/fs-nlmodal",
     "crates/fs-dcontact",
     "crates/fs-psycho",
+    "crates/fs-aeroac",
     "crates/fs-modal",
     "crates/fs-motion",
     "crates/fs-plate",

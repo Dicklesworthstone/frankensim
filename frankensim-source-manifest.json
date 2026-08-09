@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "521b925e4e6afc35c0871ec36d66f1851c760e7e772265853909bbbee66ab3f8",
+  "manifest_identity": "fde8d9f9e3ebd0691c389d96b424cf191d9b34f86045fe78ab6bcf22f49e7525",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "1ab61b938e8e2b1146b0747424ecbef1e437a4fbb10ddfe55411f66282798082",
+    "source_root": "33628cfe7a20c30c0393d37e5a55e89bd1ffe90a8f0e3f3800d26c8a30f487af",
     "tracked_file_count": 2327,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1291,16 +1291,16 @@
       {"path": "crates/fs-propcheck/src/metamorphic.rs", "git_mode": "100644", "bytes": 17449, "content_blake3": "1e4bc14f61ec36dee22b089d4f87dccff5ff4f0bf6726dc6470206a4ded6cf4c"},
       {"path": "crates/fs-propcheck/tests/metamorphic_battery.rs", "git_mode": "100644", "bytes": 6875, "content_blake3": "175a067a367dc6ad7ee4e5eb6c1b2e5f3755167c93e8c0eaccdf77d5cf8b6981"},
       {"path": "crates/fs-propcheck/tests/propcheck_battery.rs", "git_mode": "100644", "bytes": 12717, "content_blake3": "e10adf5ef39640605ba89f40ae090ba01d39fc3940c7a61e35386573740671fa"},
-      {"path": "crates/fs-psycho/CONTRACT.md", "git_mode": "100644", "bytes": 12118, "content_blake3": "c65bc7cb46748c789c73dc6989a66f8a2ef1eda347e5035e9121451d289e5711"},
+      {"path": "crates/fs-psycho/CONTRACT.md", "git_mode": "100644", "bytes": 12075, "content_blake3": "4ab5b4cdf23c65799bb26383a322904544518212539fad41a494b7a8072e22de"},
       {"path": "crates/fs-psycho/Cargo.toml", "git_mode": "100644", "bytes": 665, "content_blake3": "a828f9dd9f4769f036384796d1c32be37b428c6da2f3cc0a5b6c11d1d51e2331"},
       {"path": "crates/fs-psycho/src/dw_tables.rs", "git_mode": "100644", "bytes": 4307, "content_blake3": "2a9c550589a08fad4349a4b5e81fd92d05a9071a6e3498d0e92fe879b8b4df03"},
       {"path": "crates/fs-psycho/src/filter_tables.rs", "git_mode": "100644", "bytes": 6516, "content_blake3": "6d6c0b0734d62d593f9e3f32c5d6c92fa89f0a12bd752f3f6207ae86795dedf3"},
       {"path": "crates/fs-psycho/src/lib.rs", "git_mode": "100644", "bytes": 15186, "content_blake3": "20b3fc3f7366c04e023f754f5c0c88029b61625bcc5a75c63a14b6e36cca540b"},
       {"path": "crates/fs-psycho/src/roughness.rs", "git_mode": "100644", "bytes": 13020, "content_blake3": "b6cc637593c1c008b0dda270865821f3daa275b4af8f5a0f3c3335fd0c3a982d"},
-      {"path": "crates/fs-psycho/src/signal.rs", "git_mode": "100644", "bytes": 19368, "content_blake3": "f068a18be60630ba6ae639bbb9085d3f3670b7f389319362862c007642c07b92"},
+      {"path": "crates/fs-psycho/src/signal.rs", "git_mode": "100644", "bytes": 20543, "content_blake3": "a359a7a40a60fd85b90e39fd60d5b7ab7ecfaa477941cf3342c76ce73fbd1851"},
       {"path": "crates/fs-psycho/src/tables.rs", "git_mode": "100644", "bytes": 7413, "content_blake3": "501ba4e80a16ce6c42ce147a99c1f82f4c4599299cd0dd7747c596223f775134"},
       {"path": "crates/fs-psycho/src/tonality.rs", "git_mode": "100644", "bytes": 23262, "content_blake3": "7ea556e9dc7ffa02dd7f0e68fca70e68044720a4ce67d5302a0e7f6e0dd759ae"},
-      {"path": "crates/fs-psycho/tests/psycho.rs", "git_mode": "100644", "bytes": 39862, "content_blake3": "b30488cd6ffc52ea36d84c1f32a74f52577c3a09fb239265aa471543052d6150"},
+      {"path": "crates/fs-psycho/tests/psycho.rs", "git_mode": "100644", "bytes": 40445, "content_blake3": "099f00aa12d348e25751584bfdc524412a08db618d754d350c393e94448ec631"},
       {"path": "crates/fs-qty/CONTRACT.md", "git_mode": "100644", "bytes": 17678, "content_blake3": "b5c3a89fabd6f0958b4854536ac8004f2aba45bd1f379627e21835bdc76ae1ac"},
       {"path": "crates/fs-qty/Cargo.toml", "git_mode": "100644", "bytes": 449, "content_blake3": "60fda6940c14bb8d8d95a0fdd40edb5f8a98f9fe115ffcb4a82e2f98278b2fed"},
       {"path": "crates/fs-qty/src/chemistry.rs", "git_mode": "100644", "bytes": 49819, "content_blake3": "8cdc61b1717f371024bce4bf5b2de4403942542f32d658375a8c68fec6b508a7"},
@@ -2358,7 +2358,7 @@
       {"lib": "franken_networkx", "version": "0.2.0", "git_head": "4e72da0f0c98f32ee580c9bd62eb1745d400c4ea", "remote": "https://github.com/Dicklesworthstone/franken_networkx.git", "boundary": "production-cone", "runtime_consumers": ["fs-rep-voxel", "fs-sparse", "fs-truss"], "dev_consumers": [], "production_api_references": 11, "test_api_references": 0, "verification_refs": ["constellation.lock#libraries/franken_networkx", "constellation-bootstrap.json#libraries/franken_networkx", "constellation-trust-assessment.json#siblings/franken_networkx"]},
       {"lib": "franken_numpy", "version": "0.1.0", "git_head": "7fca9f6006c9f4ecdb6c7432318a0893f3a7bea1", "remote": "https://github.com/Dicklesworthstone/franken_numpy.git", "boundary": "production-cone", "runtime_consumers": ["fs-sparse"], "dev_consumers": [], "production_api_references": 4, "test_api_references": 0, "verification_refs": ["constellation.lock#libraries/franken_numpy", "constellation-bootstrap.json#libraries/franken_numpy", "constellation-trust-assessment.json#siblings/franken_numpy"]},
       {"lib": "frankenpandas", "version": "0.1.2", "git_head": "803efc1c6daed53e5305790f313133a26b41dd6b", "remote": "https://github.com/Dicklesworthstone/frankenpandas.git", "boundary": "pinned-unused-planned", "runtime_consumers": [], "dev_consumers": [], "production_api_references": 0, "test_api_references": 0, "verification_refs": ["constellation.lock#libraries/frankenpandas", "constellation-bootstrap.json#libraries/frankenpandas", "constellation-trust-assessment.json#siblings/frankenpandas"]},
-      {"lib": "frankenscipy", "version": "0.1.0", "git_head": "9e271fd734465e2b2ff755aa73ea66a7217d619b", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "boundary": "development-reference", "runtime_consumers": [], "dev_consumers": ["fs-ascent", "fs-cheb", "fs-fft", "fs-la", "fs-math", "fs-modal", "fs-sparse", "fs-time"], "production_api_references": 0, "test_api_references": 15, "verification_refs": ["constellation.lock#libraries/frankenscipy", "constellation-bootstrap.json#libraries/frankenscipy", "constellation-trust-assessment.json#siblings/frankenscipy"]},
+      {"lib": "frankenscipy", "version": "0.1.0", "git_head": "9e271fd734465e2b2ff755aa73ea66a7217d619b", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "boundary": "development-reference", "runtime_consumers": [], "dev_consumers": ["fs-aeroac", "fs-ascent", "fs-cheb", "fs-fft", "fs-la", "fs-math", "fs-modal", "fs-sparse", "fs-time"], "production_api_references": 0, "test_api_references": 22, "verification_refs": ["constellation.lock#libraries/frankenscipy", "constellation-bootstrap.json#libraries/frankenscipy", "constellation-trust-assessment.json#siblings/frankenscipy"]},
       {"lib": "frankensqlite", "version": "unversioned-workspace", "git_head": "987cfb97f86d3fca4d9b44e7871f427636b10126", "remote": "https://github.com/Dicklesworthstone/frankensqlite.git", "boundary": "production-cone", "runtime_consumers": ["fs-ledger", "fs-matdb-store", "fs-vskeleton"], "dev_consumers": ["fs-ledger", "fs-matdb-store"], "production_api_references": 31, "test_api_references": 18, "verification_refs": ["constellation.lock#libraries/frankensqlite", "constellation-bootstrap.json#libraries/frankensqlite", "constellation-trust-assessment.json#siblings/frankensqlite"]},
       {"lib": "frankentorch", "version": "0.1.0", "git_head": "f00c3ce79737ffd0e7c7e2f2e81540907ce26562", "remote": "https://github.com/Dicklesworthstone/frankentorch.git", "boundary": "production-cone", "runtime_consumers": ["fs-ad"], "dev_consumers": [], "production_api_references": 2, "test_api_references": 0, "verification_refs": ["constellation.lock#libraries/frankentorch", "constellation-bootstrap.json#libraries/frankentorch", "constellation-trust-assessment.json#siblings/frankentorch"]}
     ]
@@ -2371,12 +2371,13 @@
     "release_host_status": "required-in-e13.3-release-envelope"
   },
   "workspace": {
-    "native_fs_crates": 154,
+    "native_fs_crates": 155,
     "standalone_fs_crates": 1,
     "crates": [
       {"name": "fs-ad", "version": "0.0.1", "layer": "L1", "manifest": "crates/fs-ad/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-adaptbo-e2e", "version": "0.0.1", "layer": "L4", "manifest": "crates/fs-adaptbo-e2e/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-adjoint", "version": "0.0.1", "layer": "L3", "manifest": "crates/fs-adjoint/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
+      {"name": "fs-aeroac", "version": "0.0.1", "layer": "L3", "manifest": "crates/fs-aeroac/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-airflow", "version": "0.0.1", "layer": "L3", "manifest": "crates/fs-airflow/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-alloc", "version": "0.0.1", "layer": "L0", "manifest": "crates/fs-alloc/Cargo.toml", "workspace": "native", "unsafe_capsules": 2},
       {"name": "fs-archive", "version": "0.0.1", "layer": "L4", "manifest": "crates/fs-archive/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},

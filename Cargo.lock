@@ -910,6 +910,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-aeroac"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+ "fsci-runtime",
+ "fsci-special",
+]
+
+[[package]]
 name = "fs-airflow"
 version = "0.0.1"
 dependencies = [
