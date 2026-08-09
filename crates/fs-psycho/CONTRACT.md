@@ -37,11 +37,17 @@ test).
   per 8192-sample analysis block (Pa input), ported from the
   Apache-2.0 MoSQITo reference with tables transcribed mechanically
   ([`dw_tables`]); numerically EXACT against the reference re-run
-  standalone at the same block length (10+ digits at every AM
-  modulation frequency). Executed port lessons recorded in the
-  module: the reference's empirical 1.42 one-sided factor (a 2.0
-  doubling read 2.59 asper at the anchor) and its zero
-  negative-frequency H half (mirroring + doubling read ~4x).
+  standalone at the same block length (better than 1e-12 relative at
+  every AM modulation frequency, all seven values pinned in the
+  test). Executed port lessons recorded in the module: the
+  reference's empirical 1.42 one-sided factor (a 2.0 doubling read
+  2.59 asper at the anchor), its zero negative-frequency H half
+  (mirroring + doubling read ~4x), and — review-caught — its
+  floor()-truncated H support with the 502 Hz cutoff REUSED for
+  H16/H21/H42 (interpolating to each table's own endpoint read only
+  7-9 matching digits behind a loose 1e-3 pin). Disclosed residual
+  deviations (edge-channel numpy wraparound, corrcoef NaN) in the
+  module doc.
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 
@@ -71,9 +77,12 @@ test).
 7. Diffuse field differs measurably from free field (DDF live).
 8. Determinism bitwise; typed refusals for shape/NaN/degenerate.
 9. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
-   published ~70 Hz signature), R(70 Hz) matches the standalone
-   reference's 1.0448 within 1e-3 (exactness pin), falls off both
-   sides, and an unmodulated tone is far smoother.
+   published ~70 Hz signature), ALL SEVEN sweep values match the
+   standalone reference run within 1e-12 relative (exactness pins;
+   R(70 Hz) = 1.0448 asper at the published ~1-asper anchor), falls
+   off both sides, and an unmodulated tone is far smoother. Roughness
+   refusals (short block, NaN sample, NaN/zero/negative/INFINITE
+   sample rate) are typed and executed.
 
 ## Error model
 
@@ -99,12 +108,13 @@ None.
 
 ## Conformance tests
 
-`tests/psycho.rs` (11): ISO signal-1 exactness; cross-path tone
+`tests/psycho.rs` (12): ISO signal-1 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
 refusal; low-band mutation; calibration refusal + calibrated value;
 log-attack-time ordering + linear-ramp closed form; bitwise
 determinism + typed refusals; diffuse-vs-free; listening-law pin;
-AM-roughness sweep with the exactness pin.
+AM-roughness sweep with seven-point exactness pins; roughness typed
+refusals.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 

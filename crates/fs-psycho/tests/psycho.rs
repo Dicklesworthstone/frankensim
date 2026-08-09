@@ -322,16 +322,29 @@ fn roughness_am_tone_peaks_near_70_hz() {
         "roughness must peak near 70 Hz: peaked at {peak_mod} Hz, curve {r:?}"
     );
     // EXACTNESS pin (the loudness lesson: never hide a port bug in a
-    // behavioral envelope): the Apache-2.0 reference implementation,
-    // re-run standalone at this exact block length on this exact
-    // signal, gives R(70 Hz) = 1.0448 — and the port matches it to
-    // 10+ digits (executed cross-run); 1e-3 gate for float-libm
-    // slack. The value also sits at the published ~1-asper anchor.
-    assert!(
-        (r[3] - 1.0448).abs() < 1.0e-3,
-        "70 Hz roughness {} vs the reference's 1.0448",
-        r[3]
-    );
+    // behavioral envelope): the Apache-2.0 reference implementation
+    // (hw._H_weighting + main_calc), re-run standalone at this exact
+    // block length on this exact signal, gives these seven values —
+    // pinned at 1e-12 RELATIVE (an adversarial review caught the
+    // first port reading only 7-9 matching digits: its H-weighting
+    // support ignored the reference's floor() bin truncation; a loose
+    // 1e-3 pin had hidden it). R(70 Hz) also sits at the published
+    // ~1-asper anchor.
+    let reference = [
+        0.197_327_796_978_835_65,
+        0.660_982_441_631_880_9,
+        0.949_126_590_618_143_1,
+        1.044_791_270_606_281_9,
+        0.940_671_646_615_856_8,
+        0.641_113_651_282_113_5,
+        0.335_153_389_958_774_8,
+    ];
+    for ((&got, &want), &fm) in r.iter().zip(&reference).zip(&mods) {
+        assert!(
+            ((got - want) / want).abs() < 1.0e-12,
+            "R({fm} Hz) = {got:.17} vs reference {want:.17}"
+        );
+    }
     // Falloff on both sides of the peak region.
     assert!(r[0] < 0.7 * r[peak_idx], "low-side falloff: {r:?}");
     assert!(
@@ -351,4 +364,38 @@ fn roughness_am_tone_peaks_near_70_hz() {
     println!(
         "{{\"suite\":\"fs-psycho\",\"case\":\"roughness-am\",\"mods_hz\":{mods:?},\"asper\":{r:?},\"verdict\":\"pass\"}}"
     );
+}
+
+/// Roughness refusal paths are TYPED, by name (review-caught: the
+/// happy path alone left DegenerateSignal/NonFinite unexecuted, and
+/// an infinite sample rate slipped a NaN-only guard to fabricate a
+/// value).
+#[test]
+fn roughness_refusals_are_typed() {
+    use fs_psycho::PsychoError;
+    use fs_psycho::roughness::{DW_BLOCK, roughness_dw_block};
+    let good = vec![0.01f64; DW_BLOCK];
+    // Short input.
+    assert!(matches!(
+        roughness_dw_block(&good[..DW_BLOCK - 1], 48_000.0),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
+    // Non-finite sample.
+    let mut bad = good.clone();
+    bad[7] = f64::NAN;
+    assert!(matches!(
+        roughness_dw_block(&bad, 48_000.0),
+        Err(PsychoError::NonFinite { .. })
+    ));
+    // Bad sample rates: NaN, zero, negative, and INFINITE (which
+    // once produced Ok(garbage) through an all-inf frequency axis).
+    for sr in [f64::NAN, 0.0, -48_000.0, f64::INFINITY] {
+        assert!(
+            matches!(
+                roughness_dw_block(&good, sr),
+                Err(PsychoError::NonFinite { .. })
+            ),
+            "sample rate {sr} must refuse"
+        );
+    }
 }

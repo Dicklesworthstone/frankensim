@@ -5,11 +5,20 @@
 //! (github.com/Eomys/MoSQITo, commit d990c33; algorithm from Daniel &
 //! Weber 1997), with its data in [`crate::dw_tables`]. The port is
 //! numerically EXACT against the reference at the same block length
-//! (the AM validation matches to 10+ digits at every modulation
-//! frequency). Stated deviation: the block is 8192 samples (fs-fft
-//! is power-of-two; the reference default is 0.2 s = 9600 at 48 kHz;
-//! the reference itself was re-run at 8192 to establish the pinned
-//! values). Level-RELATIVE in shape but the
+//! (the AM validation matches to better than 1e-12 relative at every
+//! modulation frequency — reference values pinned in the test).
+//! Stated deviations from the reference:
+//! - the block is 8192 samples (fs-fft is power-of-two; the
+//!   reference default is 0.2 s = 9600 at 48 kHz; the reference
+//!   itself was re-run at 8192 to establish the pinned values);
+//! - excitation amplitudes for components whose neighbor channel
+//!   falls outside 0..47 read 0.0 here, where numpy's negative-index
+//!   WRAPAROUND makes the reference read column 46 (a reference
+//!   artifact, unreachable for in-band audible components);
+//! - a zero-variance envelope correlates as 0.0 here where numpy's
+//!   `corrcoef` yields NaN.
+//!
+//! Level-RELATIVE in shape but the
 //! asper scale is anchored at 1 asper for a 1 kHz 60 dB tone with
 //! 100% 70 Hz AM — inputs are treated as sound pressure in Pa (the
 //! caller's calibration turns digital samples into Pa; the
@@ -60,22 +69,30 @@ fn bark_to_freq(z: f64) -> f64 {
 }
 
 /// The H modulation-bandpass weight for channel `ch` (0-based) at
-/// modulation frequency `fm` — the reference's channel-group mapping:
+/// spectrum bin `idx` — the reference's channel-group mapping:
 /// channels 0..4 use the H2 anchor, 4..15 H5, 15..20 H16, 20..41 H21,
 /// 41..47 H42 (piecewise-constant across groups, as implemented by
-/// the reference).
-fn h_weight(ch: usize, fm: f64) -> f64 {
-    let (xs, ys): (&[f64], &[f64]) = match ch {
-        0..=3 => (&H2_X, &H2_Y),
-        4..=14 => (&H5_X, &H5_Y),
-        15..=19 => (&H16_X, &H16_Y),
-        20..=40 => (&H21_X, &H21_Y),
-        _ => (&H42_X, &H42_Y),
+/// the reference). SUPPORT is the reference's, replicated bin-exactly
+/// (review-caught: interpolating to each table's own endpoint read
+/// only 7-9 matching digits): each curve lives on bins
+/// `2..floor(f_last/fs*n)` END-EXCLUSIVE, and the reference reuses
+/// H5's 502 Hz cutoff for H16/H21/H42 even though their tables extend
+/// to 645 Hz (its `last` variable is simply not recomputed) — so the
+/// upper ~500..645 Hz tails of those tables are dead data there and
+/// here.
+fn h_weight(ch: usize, idx: usize, n: usize, fs: f64) -> f64 {
+    let (xs, ys, f_last): (&[f64], &[f64], f64) = match ch {
+        0..=3 => (&H2_X, &H2_Y, 358.0),
+        4..=14 => (&H5_X, &H5_Y, 502.0),
+        15..=19 => (&H16_X, &H16_Y, 502.0),
+        20..=40 => (&H21_X, &H21_Y, 502.0),
+        _ => (&H42_X, &H42_Y, 502.0),
     };
-    if fm <= 0.0 || fm >= xs[xs.len() - 1] {
+    let last = ((f_last / fs) * n as f64).floor() as usize;
+    if idx < 2 || idx >= last {
         return 0.0;
     }
-    interp(fm, xs, ys)
+    interp(idx as f64 * fs / n as f64, xs, ys)
 }
 
 /// Pearson correlation of two equal-length slices.
@@ -112,7 +129,7 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
     if pcm_pa.iter().take(DW_BLOCK).any(|v| !v.is_finite()) {
         return Err(PsychoError::NonFinite { what: "pcm sample" });
     }
-    if sample_rate.is_nan() || sample_rate <= 0.0 {
+    if !sample_rate.is_finite() || sample_rate <= 0.0 {
         return Err(PsychoError::NonFinite {
             what: "sample rate",
         });
@@ -262,12 +279,7 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
         // doubling gave 2x envelope amplitude ~ 4x roughness
         // (executed: R(20 Hz) read 0.85 vs the reference's 0.197).
         for (idx, e) in env.iter_mut().enumerate() {
-            let w = if (2..=n / 2).contains(&idx) {
-                h_weight(ch, idx as f64 * fs / n as f64)
-            } else {
-                0.0
-            };
-            *e = cscale(*e, w);
+            *e = cscale(*e, h_weight(ch, idx, n, fs));
         }
         fft.inverse(&mut env, &mut scratch);
         let hbp: Vec<f64> = env.iter().map(|c| 2.0 * c.re).collect();
@@ -278,10 +290,12 @@ pub fn roughness_dw_block(pcm_pa: &[f64], sample_rate: f64) -> Result<f64, Psych
     // Cross-correlation between channels i and i+2, then the Aures
     // gzi weighting and the published 0.25 calibration.
     let mut ki = vec![0.0f64; n_channel];
+    // The reference gates on `hBP[i].all() != 0` — EVERY sample
+    // nonzero in both channels (review-caught: `any` inverted it).
     for i in 0..n_channel - 2 {
-        let any_a = h_bp[i].iter().any(|&v| v != 0.0);
-        let any_b = h_bp[i + 2].iter().any(|&v| v != 0.0);
-        if any_a && any_b {
+        let all_a = h_bp[i].iter().all(|&v| v != 0.0);
+        let all_b = h_bp[i + 2].iter().all(|&v| v != 0.0);
+        if all_a && all_b {
             ki[i] = corrcoef(&h_bp[i], &h_bp[i + 2]);
         }
     }
