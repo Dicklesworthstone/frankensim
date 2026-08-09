@@ -64,6 +64,14 @@ pipe `Z_in = +i Zc cot(kL)`.
 7. Ambient parameterization: lossless resonances scale with
    `sqrt(T_hot/T_cold)` against the independently computed constant.
 8. Repeat evaluations are bitwise identical.
+9. (Review round) The Zc/impedance correction is pinned by the
+   INDEPENDENT sqrt(Z_series/Y_shunt) transmission-line route (complex
+   square roots, physical-branch selection) with the review's three
+   surviving eps_z mutants asserted OUTSIDE the second-order band;
+   contracting cones match port reversal and the lumped
+   cavity-compliance limit (9.5e-4); the flanged ladder lands on
+   0.8216a; chained same-radius halves equal the whole through
+   input_impedance to 1e-10 in both loss arms.
 
 ## Error model
 

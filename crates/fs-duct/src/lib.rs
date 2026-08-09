@@ -285,8 +285,11 @@ pub fn segment_wave(
             let thermal = (state.gamma - 1.0) / state.prandtl.sqrt();
             let scale = 1.0 / (core::f64::consts::SQRT_2 * rv);
             // (1 + i) scale (1 +- thermal): Im k > 0 decays under
-            // e^{i(kx - omega t)}; the signs are pinned by the
-            // passivity, flattening, and Q oracles below.
+            // e^{i(kx - omega t)}. The eps_k signs are pinned by the
+            // passivity/flattening/Q oracles; eps_z is pinned by the
+            // independent sqrt(Z_series/Y_shunt) route oracle (a
+            // review found every eps_z mutation survived the physics
+            // oracles — the impedance correction needs its own pin).
             let eps_k = C64::new(1.0, 1.0).scale(scale * (1.0 + thermal));
             let eps_z = C64::new(1.0, 1.0).scale(scale * (1.0 - thermal));
             Ok(SegmentWave {
@@ -1039,5 +1042,251 @@ mod tests {
         .expect("b");
         assert_eq!(a.impedance.re.to_bits(), b.impedance.re.to_bits());
         assert_eq!(a.impedance.im.to_bits(), b.impedance.im.to_bits());
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use fs_material::gas::{GasSpec, GasState};
+
+    fn air() -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
+    }
+
+    #[test]
+    fn zc_and_k_match_the_independent_sqrt_route() {
+        // REVIEW FINDING (executed): every mutation of the eps_z
+        // impedance correction survived the physics oracles — the
+        // Zc correction was observationally decorative. This oracle
+        // pins BOTH k and Zc through the independent transmission-line
+        // route: series impedance with the viscous boundary-layer
+        // fraction F_v = sqrt2 (1+i)/rv, shunt admittance with the
+        // thermal fraction F_t = F_v / sqrt(Pr), then
+        // k_ref = -i sqrt(Zs Yp), z_ref = sqrt(Zs / Yp) via COMPLEX
+        // SQUARE ROOTS — different algebra and arithmetic from the
+        // implementation's first-order eps form. Agreement must be
+        // second-order small; the zeroed / conjugated / thermal-flipped
+        // eps_z mutants sit far outside the band.
+        let state = air();
+        for &(radius, f) in &[(0.0075f64, 200.0f64), (0.0075, 1000.0), (0.02, 500.0)] {
+            let omega = 2.0 * core::f64::consts::PI * f;
+            let wave = segment_wave(&state, radius, omega, LossModel::WideTube).expect("wave");
+            let area = core::f64::consts::PI * radius * radius;
+            let rv = wave.shear_number;
+            let f_v = C64::new(1.0, 1.0).scale(core::f64::consts::SQRT_2 / rv);
+            let f_t = f_v.scale(1.0 / state.prandtl.sqrt());
+            // Zs = (i omega rho / S)(1 + F_v);
+            // Yp = (i omega S / rho c^2)(1 + (gamma - 1) F_t).
+            let i_omega = C64::new(0.0, omega);
+            let zs = i_omega.scale(state.density / area) * (C64::ONE + f_v);
+            let yp = i_omega.scale(area / (state.density * state.sound_speed * state.sound_speed))
+                * (C64::ONE + f_t.scale(state.gamma - 1.0));
+            // k = -i sqrt(Zs Yp) with the PHYSICAL branch selected
+            // explicitly (Zs Yp sits just below the negative real
+            // axis, so the principal square root can land on either
+            // side): pick Re k > 0 (forward propagation), and for the
+            // impedance pick Re Z > 0 (passive).
+            let mut k_ref = C64::new(0.0, -1.0) * (zs * yp).sqrt();
+            if k_ref.re < 0.0 {
+                k_ref = k_ref.scale(-1.0);
+            }
+            let mut z_ref = (zs * yp.recip()).sqrt();
+            if z_ref.re < 0.0 {
+                z_ref = z_ref.scale(-1.0);
+            }
+            let eps = 1.0 / (core::f64::consts::SQRT_2 * rv);
+            // First-order forms differ from the sqrt route at O(eps^2).
+            let tol = 6.0 * eps * eps;
+            let k_rel = (wave.wavenumber - k_ref).abs() / k_ref.abs();
+            let z_rel = (wave.characteristic_impedance - z_ref).abs() / z_ref.abs();
+            assert!(
+                k_rel < tol,
+                "k vs sqrt route at r={radius}, f={f}: rel {k_rel:.3e} (tol {tol:.3e})"
+            );
+            assert!(
+                z_rel < tol,
+                "Zc vs sqrt route at r={radius}, f={f}: rel {z_rel:.3e} (tol {tol:.3e})"
+            );
+            // The review's surviving mutants must violate the band:
+            // zeroed eps_z, conjugated eps_z, thermal-flipped eps_z.
+            let z0 = state.density * state.sound_speed / area;
+            let thermal = (state.gamma - 1.0) / state.prandtl.sqrt();
+            let scale = 1.0 / (core::f64::consts::SQRT_2 * rv);
+            let mutants = [
+                C64::from_re(z0),
+                (C64::ONE + C64::new(1.0, -1.0).scale(scale * (1.0 - thermal))).scale(z0),
+                (C64::ONE + C64::new(1.0, 1.0).scale(scale * (1.0 + thermal))).scale(z0),
+            ];
+            for (idx, mutant) in mutants.iter().enumerate() {
+                let rel = (*mutant - z_ref).abs() / z_ref.abs();
+                assert!(
+                    rel > tol,
+                    "eps_z mutant {idx} must sit outside the sqrt-route band: {rel:.3e}"
+                );
+            }
+        }
+        println!("{{\"suite\":\"fs-duct\",\"case\":\"zc-sqrt-route-pin\",\"verdict\":\"pass\"}}");
+    }
+
+    #[test]
+    fn contracting_cones_are_correct_not_just_claimed() {
+        // REVIEW FINDING: contracting cones (negative taper, negative
+        // apex coordinate) were handled by the algebra but never
+        // tested. Two pins: (a) port reversal — the contracting cone's
+        // 2-port equals the expanding cone's with A/D swapped
+        // ([[D, B], [C, A]] for a reciprocal det-1 2-port), (b) a
+        // CLOSED contracting cone at low frequency matches the lumped
+        // cavity-compliance impedance Z = rho c^2 / (-i omega V) with
+        // V the frustum volume.
+        let state = air();
+        let omega = 2.0 * core::f64::consts::PI * 300.0;
+        let wave = segment_wave(&state, 0.015, omega, LossModel::Lossless).expect("wave");
+        let expanding = Segment::Cone {
+            inlet_radius: 0.01,
+            outlet_radius: 0.02,
+            length: 0.2,
+        };
+        let contracting = Segment::Cone {
+            inlet_radius: 0.02,
+            outlet_radius: 0.01,
+            length: 0.2,
+        };
+        let me = segment_matrix(&expanding, &wave).expect("expanding");
+        let mc = segment_matrix(&contracting, &wave).expect("contracting");
+        // Port reversal of a det-1 2-port swaps the diagonal.
+        let expected = [me[3], me[1], me[2], me[0]];
+        for i in 0..4 {
+            assert!(
+                (mc[i] - expected[i]).abs() < 1e-10 * expected[i].abs().max(1e-9),
+                "port-reversal entry {i}: {:?} vs {:?}",
+                mc[i],
+                expected[i]
+            );
+        }
+        // Lumped compliance limit at 20 Hz.
+        let (r1, r2, length) = (0.02, 0.01, 0.2);
+        let duct = Duct {
+            segments: vec![Segment::Cone {
+                inlet_radius: r1,
+                outlet_radius: r2,
+                length,
+            }],
+        };
+        let omega_low = 2.0 * core::f64::consts::PI * 20.0;
+        let z = input_impedance(
+            &duct,
+            &state,
+            omega_low,
+            LossModel::Lossless,
+            Termination::Closed,
+        )
+        .expect("closed cone")
+        .impedance;
+        let volume = core::f64::consts::PI * length / 3.0 * (r1 * r1 + r1 * r2 + r2 * r2);
+        // Z = rho c^2/(-i omega V) = +i rho c^2/(omega V).
+        let z_expected = C64::new(
+            0.0,
+            state.density * state.sound_speed * state.sound_speed / (omega_low * volume),
+        );
+        let rel = (z - z_expected).abs() / z_expected.abs();
+        assert!(
+            rel < 2e-3,
+            "closed contracting cone must reduce to cavity compliance: {z:?} vs {z_expected:?} \
+             (rel {rel:.2e})"
+        );
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"contracting-cone-pins\",\"compliance_rel\":{rel:.2e},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn flanged_ladder_carries_the_0p8216_correction() {
+        // REVIEW FINDING: the flanged termination had zero executable
+        // backing. Same lossless quarter-wave pattern as the unflanged
+        // test, on the 0.8216 a corrected length — and the two ladders
+        // must be mutually distinguishable.
+        let state = air();
+        let (radius, length) = (0.0075, 0.5);
+        let duct = Duct {
+            segments: vec![Segment::Cylinder { radius, length }],
+        };
+        let run = |termination: Termination| -> f64 {
+            let l_eff = match termination {
+                Termination::FlangedOpen => length + 0.8216 * radius,
+                _ => length + 0.6133 * radius,
+            };
+            let f_base = state.sound_speed / (4.0 * l_eff);
+            let sweep = impedance_sweep(
+                &duct,
+                &state,
+                2.0 * core::f64::consts::PI * 0.5 * f_base,
+                2.0 * core::f64::consts::PI * 1.5 * f_base,
+                8000,
+                LossModel::Lossless,
+                termination,
+            )
+            .expect("sweep");
+            let peaks = impedance_peaks(&sweep);
+            sweep[peaks[0]].omega / (2.0 * core::f64::consts::PI)
+        };
+        let f_flanged = run(Termination::FlangedOpen);
+        let f_pred = state.sound_speed / (4.0 * (length + 0.8216 * radius));
+        let rel = (f_flanged / f_pred - 1.0).abs();
+        assert!(
+            rel < 5e-3,
+            "flanged peak {f_flanged:.2} vs corrected {f_pred:.2} (rel {rel:.4})"
+        );
+        let f_unflanged = run(Termination::UnflangedOpen);
+        assert!(
+            f_flanged < f_unflanged,
+            "the larger flanged correction must sit lower: {f_flanged:.2} vs {f_unflanged:.2}"
+        );
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"flanged-ladder\",\"f\":{f_flanged:.2},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn chained_halves_equal_the_whole_through_input_impedance() {
+        // REVIEW FINDING: no end-to-end chain oracle. Two half
+        // cylinders of the same radius must reproduce the single long
+        // cylinder exactly (identical mean radius, so even the lossy
+        // arm is exact).
+        let state = air();
+        let whole = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.0075,
+                length: 0.5,
+            }],
+        };
+        let halves = Duct {
+            segments: vec![
+                Segment::Cylinder {
+                    radius: 0.0075,
+                    length: 0.25,
+                },
+                Segment::Cylinder {
+                    radius: 0.0075,
+                    length: 0.25,
+                },
+            ],
+        };
+        for loss in [LossModel::Lossless, LossModel::WideTube] {
+            for &f in &[150.0, 440.0, 900.0] {
+                let omega = 2.0 * core::f64::consts::PI * f;
+                let a = input_impedance(&whole, &state, omega, loss, Termination::UnflangedOpen)
+                    .expect("whole")
+                    .impedance;
+                let b = input_impedance(&halves, &state, omega, loss, Termination::UnflangedOpen)
+                    .expect("halves")
+                    .impedance;
+                assert!(
+                    (a - b).abs() < 1e-10 * a.abs(),
+                    "chain exactness at {f} Hz ({loss:?}): {a:?} vs {b:?}"
+                );
+            }
+        }
+        println!("{{\"suite\":\"fs-duct\",\"case\":\"chain-exactness\",\"verdict\":\"pass\"}}");
     }
 }
