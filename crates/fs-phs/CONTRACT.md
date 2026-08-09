@@ -22,12 +22,18 @@ stepping, and Galerkin reduction preserves the structure.
 - `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
   2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
 - `step` — implicit discrete-gradient step (approximate-Newton with
-  central-difference Jacobian, state-relative tolerance, stagnation
-  acceptance at the best iterate). Returns `StepRecord` with the exact
+  central-difference Jacobian, state-relative tolerance; on
+  stagnation the best iterate is accepted iff its residual sits six
+  orders below both the iterate scale and the initial residual, else
+  a typed `NewtonStalled` refusal). Returns `StepRecord` with the
   ledger: `delta_h`, `dissipated = dt dg^T R dg`, `supplied = dt u^T
-  y`. `balance_residual()` restates the update equation (solver
-  diagnostic); `supply_defect() = delta_h - supplied` is the
-  INDEPENDENT passivity audit (`<= 0` for a true pHS).
+  y`, and `solver_residual` (the ACHIEVED residual, disclosed).
+  `balance_residual()` restates the update equation for an admitted
+  skew-J system (solver diagnostic, NOT a structure audit);
+  `supply_defect() = delta_h - supplied` is the independent passivity
+  audit, valid to the DISCLOSED band `~n * |dg|_inf *
+  solver_residual` — audit thresholds must scale with it (the crate
+  states the blind band rather than hiding it).
 - `interconnect` — canonical skew pairing `u_a = -y_b`, `u_b = +y_a`
   over chosen port pairs; unpaired ports stay external (a's first);
   the composite is RE-ADMITTED (no false passivity). Associative on
@@ -97,12 +103,18 @@ realized H-error inside an authored 2% envelope with the measurement
 recorded).
 
 `tests/reed_casebook.rs` (1): single-reed exciter as pHS components —
-reed lamella (msd pHS) + modal bore bank + Bernoulli valve as a
-memoryless dissipative port (`dp * U >= 0` asserted every step);
-per-step component supply audits + closed whole-instrument energy
-accounting bounded by mouth supply; quasi-static equilibrium pinned
-against the hand-derived analytic solution (`q* = Sr pm / k`, zero
-bore DC pressure, `U* = w h* sqrt(2 pm / rho)`). JSON-lines summary.
+reed lamella (msd pHS) + modal bore bank + TWO-SIDED Bernoulli valve
+(backflow reverses with dp, so `dp * U >= 0` is a property of the
+law, not a guard); per-step component supply audits; an integral
+mouth-work bound from state-recomputed energies; the per-step closed
+accounting is labeled as the consistency restatement it is (implied
+by component passivity + valve dissipativity); quasi-static
+equilibrium pinned against the hand-derived analytic solution
+(`q* = Sr pm / k`, zero bore DC pressure, `U* = w h* sqrt(2 pm /
+rho)`) — the casebook's independent evidential content. JSON-lines
+summary. The damped-ledger battery test carries its own independent
+oracle: trapezoidal quadrature of `c v^2` from recorded states
+matches the dissipation ledger within 2%.
 
 ## No-claim boundaries
 

@@ -531,10 +531,10 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         // Newton residuals are not monotone far from the solution, so
         // allow a few non-improving iterates before accepting the best
         // one (review finding: first-non-improving aborts spuriously).
-        if !improved {
-            stagnant += 1;
-        } else {
+        if improved {
             stagnant = 0;
+        } else {
+            stagnant += 1;
         }
         if stagnant >= 3 || iters >= NEWTON_MAX {
             let (bx, brnorm) = best.expect("at least one iterate");
@@ -578,6 +578,20 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         let res = residual(&x1, &dg);
         res.iter().fold(0.0f64, |a, &v| a.max(v.abs()))
     };
+    Ok(ledger(sys, x0, x1, u, dt, iters, solver_residual))
+}
+
+/// Assemble the exact per-step energy ledger at the accepted iterate.
+fn ledger(
+    sys: &PortHamiltonian,
+    x0: &[f64],
+    x1: Vec<f64>,
+    u: &[f64],
+    dt: f64,
+    newton_iters: usize,
+    solver_residual: f64,
+) -> StepRecord {
+    let n = sys.n;
     let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
     let mut dissipated = 0.0;
     for i in 0..n {
@@ -591,15 +605,15 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     let y = sys.output_from_effort(&dg);
     let supplied = dt * u.iter().zip(&y).map(|(&a, &b)| a * b).sum::<f64>();
     let delta_h = sys.storage.hamiltonian(&x1) - sys.storage.hamiltonian(x0);
-    Ok(StepRecord {
+    StepRecord {
         x: x1,
         y,
         delta_h,
         dissipated,
         supplied,
-        newton_iters: iters,
+        newton_iters,
         solver_residual,
-    })
+    }
 }
 
 /// The implicit residual closure shared between the Newton loop and
