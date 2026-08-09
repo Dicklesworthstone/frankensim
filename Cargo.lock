@@ -954,6 +954,7 @@ dependencies = [
  "fs-exec",
  "fs-ivl",
  "fs-la",
+ "fs-qty",
 ]
 
 [[package]]
