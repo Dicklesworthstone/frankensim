@@ -32,7 +32,18 @@ homogenization, the P2 milestone.
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for
   contact/plastic admission; consumers do not need to fabricate an unrelated
-  yield datum merely to compute modes. `resolve_orthotropic_elastic_state_point`
+  yield datum merely to compute modes.
+  `resolve_isotropic_thermal_expansion_state_point` independently resolves the
+  instantaneous isotropic linear expansion coefficient, including its exact
+  state-point validity and property-use receipt. Negative expansion is
+  admissible; material names imply neither its sign nor its value. This result
+  is a coefficient, not a total strain: a coupled driver must integrate it over
+  the admitted temperature path before solid mechanics use.
+  `integrate_isotropic_thermal_expansion` performs that integration exactly for
+  scalar and piecewise-linear material claims, requires every other state axis
+  to remain fixed, pins both endpoints to one selected claim, and identity-binds
+  the complete path and signed `integral(alpha(T) dT)` result.
+  `resolve_orthotropic_elastic_state_point`
   atomically resolves density plus the nine principal-axis engineering
   constants and refuses a non-positive-definite compliance. Spatial material
   orientation remains an independently identity-bound field owned by the

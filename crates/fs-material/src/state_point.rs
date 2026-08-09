@@ -38,6 +38,11 @@ pub const YOUNG_MODULUS_PROPERTY: &str = "young_modulus";
 pub const POISSON_RATIO_PROPERTY: &str = "poisson_ratio";
 /// Canonical property key for uniaxial yield stress in pascals.
 pub const YIELD_STRESS_PROPERTY: &str = "yield_stress";
+/// Canonical property key for isotropic linear thermal expansion [1/K].
+pub const LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY: &str =
+    "linear_thermal_expansion_coefficient";
+/// Dimensions of an inverse thermodynamic-temperature interval [1/K].
+pub const INVERSE_TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, -1, 0, 0]);
 /// Canonical orthotropic Young's-modulus keys along material axes 1, 2, 3.
 pub const ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES: [&str; 3] =
     ["young_modulus_1", "young_modulus_2", "young_modulus_3"];
@@ -520,6 +525,265 @@ pub struct IsotropicElasticStatePoint {
     density_kg_m3: f64,
     young_modulus_pa: f64,
     poisson_ratio: f64,
+}
+
+/// Evidence-bearing instantaneous isotropic thermal-expansion coefficient.
+///
+/// This is a state-point value, not a total strain. A thermomechanical driver
+/// integrates it over the actual temperature path before constructing a solid
+/// operator's stress-free strain state. Negative coefficients are admissible;
+/// material names never select a sign or value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IsotropicThermalExpansionStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    linear_coefficient_per_k: f64,
+}
+
+impl IsotropicThermalExpansionStatePoint {
+    /// Complete evidence-bearing property bundle.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Instantaneous isotropic linear expansion coefficient [1/K].
+    #[must_use]
+    pub const fn linear_coefficient_per_k(&self) -> f64 {
+        self.linear_coefficient_per_k
+    }
+}
+
+/// Resolve the instantaneous isotropic thermal-expansion coefficient.
+///
+/// The material card owns temperature dependence and validity. This resolver
+/// neither extrapolates nor replaces a missing coefficient with a preset.
+pub fn resolve_isotropic_thermal_expansion_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<IsotropicThermalExpansionStatePoint, MaterialStatePointError> {
+    let requirements = [ScalarPropertyRequirement::try_new(
+        LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+        INVERSE_TEMPERATURE_DIMS,
+        ScalarAdmissibility::Finite,
+    )?];
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let linear_coefficient_per_k = resolved
+        .property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+        .expect("canonical isotropic thermal-expansion requirement was resolved")
+        .value_si();
+    Ok(IsotropicThermalExpansionStatePoint {
+        resolved,
+        linear_coefficient_per_k,
+    })
+}
+
+/// Total isotropic free linear strain integrated over one temperature path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IntegratedIsotropicThermalExpansion {
+    reference: IsotropicThermalExpansionStatePoint,
+    current: IsotropicThermalExpansionStatePoint,
+    selected_claim: ClaimId,
+    free_linear_strain: f64,
+    identity: ContentHash,
+}
+
+impl IntegratedIsotropicThermalExpansion {
+    /// Expansion state at the path's reference temperature.
+    #[must_use]
+    pub const fn reference(&self) -> &IsotropicThermalExpansionStatePoint {
+        &self.reference
+    }
+
+    /// Expansion state at the path's current temperature.
+    #[must_use]
+    pub const fn current(&self) -> &IsotropicThermalExpansionStatePoint {
+        &self.current
+    }
+
+    /// Exact property claim integrated over the path.
+    #[must_use]
+    pub const fn selected_claim(&self) -> ClaimId {
+        self.selected_claim
+    }
+
+    /// Signed free linear strain `integral(alpha(T) dT)`.
+    #[must_use]
+    pub const fn free_linear_strain(&self) -> f64 {
+        self.free_linear_strain
+    }
+
+    /// Identity binding the card, path endpoints, selected curve, and result.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Integrate one selected isotropic expansion claim exactly over temperature.
+///
+/// Scalar claims use `alpha * delta_T`; piecewise-linear `alpha(T)` claims are
+/// integrated segment by segment without quadrature error. Every non-temperature
+/// coordinate must be identical at the two endpoints. The reference selection
+/// chooses one claim and the current endpoint is then pinned to that exact claim,
+/// preventing a path from silently switching evidence sources.
+pub fn integrate_isotropic_thermal_expansion(
+    card: &MaterialCard,
+    reference_point: &QueryPoint,
+    current_point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<IntegratedIsotropicThermalExpansion, MaterialStatePointError> {
+    let (reference_temperature_k, current_temperature_k) =
+        matching_temperature_path(reference_point, current_point)?;
+    let reference =
+        resolve_isotropic_thermal_expansion_state_point(card, reference_point, selection)?;
+    let selected_claim = reference
+        .resolved()
+        .property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+        .expect("canonical thermal-expansion requirement was resolved")
+        .answer()
+        .receipt
+        .selected;
+    let current = resolve_isotropic_thermal_expansion_state_point(
+        card,
+        current_point,
+        MaterialPropertySelection::PinnedByProperty(vec![(
+            LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY.to_owned(),
+            selected_claim,
+        )]),
+    )?;
+    let claim =
+        card.claims()
+            .claim(selected_claim)
+            .ok_or(MaterialStatePointError::InvalidDerived {
+                quantity: "selected thermal-expansion claim",
+            })?;
+    let free_linear_strain = match &claim.value {
+        fs_matdb::PropertyValue::Scalar { value, .. } => {
+            value * (current_temperature_k - reference_temperature_k)
+        }
+        fs_matdb::PropertyValue::Curve {
+            abscissa, knots, ..
+        } if abscissa == "T" => {
+            integrate_piecewise_linear(knots, reference_temperature_k, current_temperature_k)?
+        }
+        fs_matdb::PropertyValue::Curve { .. } => {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "thermal-expansion curve abscissa must be T",
+            });
+        }
+    };
+    if !free_linear_strain.is_finite() {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "integrated free linear strain",
+        });
+    }
+    let mut identity =
+        DomainHasher::new("org.frankensim.fs-material.integrated-isotropic-thermal-expansion.v1");
+    identity.update(card.content_hash().as_bytes());
+    identity.update(selected_claim.0.as_bytes());
+    identity.update(reference.resolved().identity().as_bytes());
+    identity.update(current.resolved().identity().as_bytes());
+    identity.update(&free_linear_strain.to_bits().to_le_bytes());
+    Ok(IntegratedIsotropicThermalExpansion {
+        reference,
+        current,
+        selected_claim,
+        free_linear_strain,
+        identity: identity.finalize(),
+    })
+}
+
+fn matching_temperature_path(
+    reference: &QueryPoint,
+    current: &QueryPoint,
+) -> Result<(f64, f64), MaterialStatePointError> {
+    if reference.axes().len() != current.axes().len() {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "thermal path coordinate set",
+        });
+    }
+    for (axis, reference_value) in reference.axes() {
+        let Some(current_value) = current.axes().get(axis) else {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "thermal path coordinate set",
+            });
+        };
+        if axis != "T" && reference_value.to_bits() != current_value.to_bits() {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "non-temperature path coordinate changed",
+            });
+        }
+    }
+    let reference_temperature_k =
+        reference
+            .axes()
+            .get("T")
+            .copied()
+            .ok_or(MaterialStatePointError::InvalidDerived {
+                quantity: "reference temperature coordinate",
+            })?;
+    let current_temperature_k =
+        current
+            .axes()
+            .get("T")
+            .copied()
+            .ok_or(MaterialStatePointError::InvalidDerived {
+                quantity: "current temperature coordinate",
+            })?;
+    if reference_temperature_k <= 0.0 || current_temperature_k <= 0.0 {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "positive absolute temperature path",
+        });
+    }
+    Ok((reference_temperature_k, current_temperature_k))
+}
+
+fn integrate_piecewise_linear(
+    knots: &[(f64, f64)],
+    start: f64,
+    end: f64,
+) -> Result<f64, MaterialStatePointError> {
+    if start.to_bits() == end.to_bits() {
+        return Ok(0.0);
+    }
+    let (lower, upper, sign) = if start < end {
+        (start, end, 1.0)
+    } else {
+        (end, start, -1.0)
+    };
+    let mut cuts = Vec::with_capacity(knots.len() + 2);
+    cuts.push(lower);
+    cuts.extend(
+        knots
+            .iter()
+            .map(|(temperature, _)| *temperature)
+            .filter(|temperature| *temperature > lower && *temperature < upper),
+    );
+    cuts.push(upper);
+    let interpolate = |temperature: f64| {
+        let upper_index = knots.partition_point(|(knot, _)| *knot < temperature);
+        if upper_index == 0 {
+            return knots.first().map(|(_, value)| *value);
+        }
+        if upper_index == knots.len() {
+            return knots.last().map(|(_, value)| *value);
+        }
+        let (x0, y0) = knots[upper_index - 1];
+        let (x1, y1) = knots[upper_index];
+        Some((temperature - x0).mul_add((y1 - y0) / (x1 - x0), y0))
+    };
+    let mut integral = 0.0;
+    for pair in cuts.windows(2) {
+        let y0 = interpolate(pair[0]).ok_or(MaterialStatePointError::InvalidDerived {
+            quantity: "empty thermal-expansion curve",
+        })?;
+        let y1 = interpolate(pair[1]).ok_or(MaterialStatePointError::InvalidDerived {
+            quantity: "empty thermal-expansion curve",
+        })?;
+        integral = (0.5 * (y0 + y1)).mul_add(pair[1] - pair[0], integral);
+    }
+    Ok(sign * integral)
 }
 
 impl IsotropicElasticStatePoint {
@@ -1063,6 +1327,12 @@ mod tests {
                 vec![(250.0, yield_stress[0]), (600.0, yield_stress[1])],
                 600.0,
             ),
+            claim(
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                INVERSE_TEMPERATURE_DIMS,
+                vec![(250.0, 10.0e-6), (600.0, 24.0e-6)],
+                600.0,
+            ),
         ] {
             claims
                 .insert_claim(property)
@@ -1288,6 +1558,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(forward.identity(), reverse.identity());
+    }
+
+    #[test]
+    fn g0_isotropic_thermal_expansion_is_card_resolved_and_domain_bounded() {
+        let lead = solid_card(
+            "lead-pb99.99",
+            [11_360.0, 11_100.0],
+            [16.0e9, 8.0e9],
+            [0.44, 0.46],
+            [18.0e6, 3.0e6],
+        );
+        let resolved = resolve_isotropic_thermal_expansion_state_point(
+            &lead,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("temperature-dependent expansion resolves inside its evidence domain");
+        assert_eq!(resolved.linear_coefficient_per_k(), 17.0e-6);
+        assert_eq!(resolved.resolved().card_identity(), lead.content_hash());
+        assert!(matches!(
+            resolve_isotropic_thermal_expansion_state_point(
+                &lead,
+                &point(700.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(MaterialStatePointError::Query {
+                source: MatDbError::NoClaimInDomain { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_piecewise_linear_thermal_expansion_integrates_exactly_and_reverses() {
+        let lead = solid_card(
+            "lead-pb99.99",
+            [11_360.0, 11_100.0],
+            [16.0e9, 8.0e9],
+            [0.44, 0.46],
+            [18.0e6, 3.0e6],
+        );
+        let forward = integrate_isotropic_thermal_expansion(
+            &lead,
+            &point(300.0),
+            &point(500.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("one selected alpha(T) curve spans the path");
+        let reverse = integrate_isotropic_thermal_expansion(
+            &lead,
+            &point(500.0),
+            &point(300.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("the same admitted path reverses");
+        assert!((forward.free_linear_strain() - 0.0032).abs() < 1.0e-15);
+        assert_eq!(
+            reverse.free_linear_strain().to_bits(),
+            (-forward.free_linear_strain()).to_bits()
+        );
+        assert_eq!(forward.selected_claim(), reverse.selected_claim());
+
+        let reference = point(300.0).with("pressure", 1.0e5).unwrap();
+        let current = point(500.0).with("pressure", 2.0e5).unwrap();
+        assert!(matches!(
+            integrate_isotropic_thermal_expansion(
+                &lead,
+                &reference,
+                &current,
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "non-temperature path coordinate changed"
+            })
+        ));
     }
 
     #[test]
