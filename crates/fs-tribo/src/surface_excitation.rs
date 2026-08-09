@@ -374,8 +374,13 @@ fn filter_trace(
         }
     };
     let spacing_m = motion.trace.sample_spacing_m;
-    let start_m = center_m - half_width_m;
-    let end_m = center_m + half_width_m;
+    let (start_m, end_m) = match motion.trace.boundary {
+        SurfaceTraceBoundary::Finite => (
+            (center_m - half_width_m).max(0.0),
+            (center_m + half_width_m).min(track_length_m),
+        ),
+        SurfaceTraceBoundary::Periodic => (center_m - half_width_m, center_m + half_width_m),
+    };
     let first_segment = (start_m / spacing_m).floor() as i64;
     let last_segment = (end_m / spacing_m).ceil() as i64 - 1;
     let segment_count_i64 = last_segment.saturating_sub(first_segment).saturating_add(1);
@@ -485,38 +490,59 @@ fn finite(value: f64, field: &'static str) -> Result<f64, SurfaceExcitationError
 #[derive(Clone, Debug, PartialEq)]
 pub enum SurfaceExcitationError {
     /// A texture/source identity was blank or unreasonably large.
-    MissingIdentity { field: &'static str },
+    MissingIdentity {
+        /// Stable offending field name.
+        field: &'static str,
+    },
     /// A physical scalar, coordinate, or derived value was invalid.
-    InvalidInput { field: &'static str },
+    InvalidInput {
+        /// Stable offending field name.
+        field: &'static str,
+    },
     /// The trace was too short for its boundary semantics or exceeded its cap.
     TraceSampleCount {
+        /// Supplied sample count.
         observed: usize,
+        /// Minimum admitted by the selected boundary semantics.
         minimum: usize,
+        /// Resource ceiling.
         maximum: usize,
     },
     /// A finite trace does not cover the complete Hertz footprint.
     FootprintOutsideFiniteTrace {
+        /// Offered footprint center [m].
         center_m: f64,
+        /// Offered footprint half-width [m].
         half_width_m: f64,
+        /// Available finite track length [m].
         track_length_m: f64,
     },
     /// A periodic footprint spans too many repeated copies for this scalar leaf.
     FootprintTooWideForPeriodicTrace {
+        /// Complete projected footprint width [m].
         footprint_width_m: f64,
+        /// Declared spatial period [m].
         track_length_m: f64,
     },
     /// The exact piecewise integration would exceed its bounded work cap.
     IntegrationBudgetExceeded {
+        /// Number of piecewise-linear segments required.
         requested_segments: usize,
+        /// Fixed scalar-leaf work ceiling.
         maximum_segments: usize,
     },
     /// The declared contact-tangent linearization is being used too far from its state.
     OutsideLinearizedContact {
+        /// Actual absolute filtered-height/approach ratio.
         observed_fraction: f64,
+        /// Caller-declared admissible ceiling.
         maximum_fraction: f64,
     },
     /// The linearized perturbation would make the nominal unilateral load negative.
-    WouldOpenContact { perturbed_force_n: f64 },
+    WouldOpenContact {
+        /// Nominal plus perturbation normal force [N].
+        perturbed_force_n: f64,
+    },
 }
 
 impl fmt::Display for SurfaceExcitationError {
