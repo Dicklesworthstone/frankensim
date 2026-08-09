@@ -110,7 +110,14 @@ impl DigitalFilter {
 }
 
 fn is_lossless_differentiator(s: &Biquad) -> bool {
-    s.b[1] == -s.b[0] && s.b[2] == 0.0 && s.a == [1.0, 0.0]
+    // Exact bitwise structural match against the section `bilinear`
+    // emits for the e-term — an identity check, not a numeric
+    // comparison, so strict equality is the correct operator.
+    #[allow(clippy::float_cmp)]
+    fn exact(s: &Biquad) -> bool {
+        s.b[1] == -s.b[0] && s.b[2] == 0.0 && s.a == [1.0, 0.0]
+    }
+    exact(s)
 }
 
 /// Typed discretization failure.
@@ -155,7 +162,7 @@ pub fn bilinear(
     t_s: f64,
     omega_pw: f64,
 ) -> Result<DigitalFilter, DiscretizeError> {
-    if !(t_s > 0.0) {
+    if t_s <= 0.0 || t_s.is_nan() {
         return Err(DiscretizeError::BadSampleInterval);
     }
     let nyquist = core::f64::consts::PI / t_s;
@@ -270,7 +277,7 @@ pub fn bilinear_state_space(
     t_s: f64,
     omega_pw: f64,
 ) -> Result<DiscreteStateSpace, DiscretizeError> {
-    if !(t_s > 0.0) {
+    if t_s <= 0.0 || t_s.is_nan() {
         return Err(DiscretizeError::BadSampleInterval);
     }
     let nyquist = core::f64::consts::PI / t_s;
@@ -316,8 +323,8 @@ pub fn bilinear_state_space(
     fact.solve_transpose(&mut z);
     let cd: Vec<f64> = z.iter().map(|&v| g * v).collect();
     let mut dd = ss.d;
-    for i in 0..n {
-        dd += ss.c[i] * y[i];
+    for (ci, yi) in ss.c.iter().zip(&y) {
+        dd += ci * yi;
     }
     Ok(DiscreteStateSpace {
         n,
