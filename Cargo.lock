@@ -1307,6 +1307,7 @@ name = "fs-euler-disc-e2e"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-bem",
  "fs-blake3",
  "fs-contact",
  "fs-couple",
@@ -1322,6 +1323,8 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-mbd",
+ "fs-mesh",
+ "fs-modal",
  "fs-qty",
  "fs-rand",
  "fs-render",
@@ -1762,6 +1765,7 @@ dependencies = [
  "fs-ivl",
  "fs-math",
  "fs-obs",
+ "fs-rep-frep",
  "fs-rep-mesh",
 ]
 
@@ -2261,10 +2265,14 @@ version = "0.0.1"
 name = "fs-solid"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-cutfem",
+ "fs-exec",
  "fs-ivl",
  "fs-la",
  "fs-material",
+ "fs-mesh",
+ "fs-modal",
  "fs-scenario",
  "fs-solver",
  "fs-sparse",

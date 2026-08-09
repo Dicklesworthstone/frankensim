@@ -48,6 +48,7 @@ pub mod render_trajectory_codec;
 pub mod rolling_contact;
 pub mod spatial_audio;
 pub mod specimen;
+pub mod structural_acoustics;
 pub mod tangential_contact;
 pub mod timeline_resampling;
 
@@ -117,6 +118,12 @@ pub use spatial_audio::{
     SpatialAudioDiagnostics, SpatialAudioError, SpatialAudioOutput, SpatialAudioRenderInput,
     SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal, SpatialOutputHorizon,
     SpatialStemComponent, StereoRoomImpulseResponse, bypass_dry_stereo,
+};
+pub use structural_acoustics::{
+    AcousticModeRadiation, AcousticObserver, ModalAcousticRadiation, PointForceProjection,
+    ResolvedAcousticMedium, STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls,
+    StructuralModalBasis, StructuralModalBasisError, StructuralMode, StructuralModeRequest,
+    build_structural_modal_basis,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,
