@@ -1,0 +1,20 @@
+[package]
+name = "fs-dcontact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Distributed unilateral contact with energy-consistent collision potentials: one-sided power-law penalty potentials over collocation lines (fret rattle, jawari bridges, reed lays) as port-Hamiltonian storage, stepped by discrete gradients with a disclosed energy ledger."
+authors.workspace = true
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+fs-phs = { path = "../fs-phs" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
