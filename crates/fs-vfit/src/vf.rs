@@ -684,8 +684,11 @@ fn fit_errors(omega: &[f64], h: &[C64], weights: &[f64], model: &RationalModel) 
     (fs_math::det::sqrt(sq / (2.0 * omega.len() as f64)), maxabs)
 }
 
-/// Canonical conjugate-closed terms from an expanded pole list (public
-/// hook shared with the Loewner front end).
+/// Canonical conjugate-closed terms from an EXPANDED pole list — both
+/// members of every conjugate pair must be present (the count
+/// reconciliation folds pairs to real otherwise; an upper-half-only
+/// list silently halves the order — executed downstream failure).
+/// Public hook shared with the Loewner front end and fs-modalid.
 #[must_use]
 pub fn terms_from_poles(poles: &[C64]) -> Vec<PoleTerm> {
     conjugate_close(poles)

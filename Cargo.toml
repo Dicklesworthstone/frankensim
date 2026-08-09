@@ -80,6 +80,7 @@ members = [
     "crates/fs-duct",
     "crates/fs-vfit",
     "crates/fs-phs",
+    "crates/fs-modalid",
     "crates/fs-modal",
     "crates/fs-motion",
     "crates/fs-plate",

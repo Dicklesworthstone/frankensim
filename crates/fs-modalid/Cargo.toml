@@ -1,0 +1,21 @@
+[package]
+name = "fs-modalid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Experimental modal identification from measured FRFs: Loewner + vector-fitting + rational-fraction-polynomial identifiers sharing one pole/residue core (fs-vfit), stabilization-diagram automation, MAC gates, exponential-window bias correction, and SNR-gated refusals."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-vfit = { path = "../fs-vfit" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
