@@ -530,9 +530,12 @@ fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
         initial_specific_enthalpy_j_kg: 20_000.0,
         ambient_temperature_k: 1_000.0,
         internal_power_w: 0.0,
-        duration_s: 20.0,
+        // Long enough to enter the latent-heat interval, but intentionally
+        // short of the phase curve's 95 kJ/kg evidence boundary. The solver
+        // must refuse rather than extrapolate once that boundary is reached.
+        duration_s: 10.0,
         maximum_step_s: 0.25,
-        maximum_steps: 80,
+        maximum_steps: 40,
         enthalpy_tolerance_j_kg: 1.0e-8,
     };
     let march = with_cx(|cx| {
