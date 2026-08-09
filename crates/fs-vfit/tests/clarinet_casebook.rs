@@ -76,7 +76,17 @@ fn clarinet_impedance_to_passive_audio_filter() {
     )
     .expect("sweep");
     let omega: Vec<f64> = sweep.iter().map(|r| r.omega).collect();
-    let h: Vec<C64> = sweep.iter().map(|r| r.impedance).collect();
+    // TIME-CONVENTION BRIDGE (load-bearing, found by an executed
+    // failure): fs-duct, like the rest of the acoustics stack, uses
+    // e^{-i*omega*t}, while rational filter models live on the Laplace
+    // axis s = +i*omega (e^{+i*omega*t}). The conventions are complex
+    // CONJUGATES of each other — without this conj() the data's phase
+    // rotates the wrong way through every resonance and NO
+    // stable rational function can fit it (every front end plateaued
+    // at ~50% error before this line existed). |Z| and Re Z, the
+    // passivity- and cents-bearing quantities, are conjugation-
+    // invariant.
+    let h: Vec<C64> = sweep.iter().map(|r| r.impedance.conj()).collect();
     // TMM reference peaks, refined to sub-cent.
     let peak_idx = impedance_peaks(&sweep);
     assert!(
