@@ -14,13 +14,17 @@ use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, Point3, Vec3};
 use fs_math::det;
+use fs_material::state_point::{IsotropicSolidStatePoint, VisibleConductorStatePoint};
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
 use fs_render::animated_instances::{
     AnimatedGeometryInstance, AnimatedInstanceError, RigidTransformTrajectory, TransformKeyframe,
 };
 use fs_render::camera::{AnimatedCamera, CameraError, CutSide, KeyframeFocus};
 use fs_render::charts::TriMesh;
-use fs_render::conductor::{ConductorOptics, ConductorSurface};
+use fs_render::conductor::{
+    ConductorDataStatus, ConductorError, ConductorIorSample, ConductorOptics, ConductorSource,
+    ConductorSurface,
+};
 use fs_render::dielectric::{
     BeerLambertParameters, DielectricGlass, DielectricSurface, GlassProvenance,
 };
@@ -48,7 +52,9 @@ use crate::render_trajectory::{
     RenderContactBranch, RenderTrajectoryAuthority, RenderUnitSystem, RenderWorldFrame,
 };
 use crate::render_trajectory_codec::EulerRenderTrajectoryArtifact;
-use crate::specimen::{ResolvedDiscProfile, ResolvedDiscProfileIdentities};
+use crate::specimen::{
+    ResolvedDiscProfile, ResolvedDiscProfileIdentities, ResolvedMaterialDiscProfile,
+};
 use crate::timeline_resampling::{EventEvaluationSide, ExposureEventPolicy};
 
 /// Version of the scene-composition, asset-binding, and preview-mesh policy.
@@ -174,6 +180,105 @@ pub enum EulerMaterialStyle {
         /// Smooth-delta or isotropic-GGX boundary treatment.
         surface: DielectricSurface,
     },
+}
+
+/// Exact cross-domain binding from one resolved bulk material state to its
+/// mechanical and visible-conductor property bundles.
+///
+/// The renderer consumes the appearance while this receipt prevents a scene
+/// from pairing (for example) copper optics with steel density/elasticity.
+/// Surface finish remains an explicit independent state because polishing,
+/// oxidation, wear, and contamination are not implied by bulk chemistry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EulerDiscMaterialStateBinding {
+    mechanical_state_identity: ContentHash,
+    optical_state_identity: ContentHash,
+    material_card_identity: ContentHash,
+    surface_state_identity: ContentHash,
+    appearance: EulerMaterialStyle,
+    identity: ContentHash,
+}
+
+impl EulerDiscMaterialStateBinding {
+    /// Resolve an opaque-conductor appearance from evidence-bearing material
+    /// state and explicit surface finish.
+    ///
+    /// # Errors
+    /// Refuses different material cards/state points, a zero surface identity,
+    /// or optical/roughness data outside the spectral tracer's physical domain.
+    pub fn try_conductor(
+        mechanical: &IsotropicSolidStatePoint,
+        optical: &VisibleConductorStatePoint,
+        roughness_alpha: f64,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        let mechanical = mechanical.resolved();
+        let optical_resolved = optical.resolved();
+        if mechanical.material() != optical_resolved.material()
+            || mechanical.card_identity() != optical_resolved.card_identity()
+            || mechanical.query_point() != optical_resolved.query_point()
+        {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "mechanical and optical properties must resolve from one card and state point",
+            ));
+        }
+        if surface_state_identity == ContentHash([0; 32]) {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "surface-state identity must not be zero",
+            ));
+        }
+        let samples = core::array::from_fn(|index| {
+            let sample = optical.samples()[index];
+            ConductorIorSample::try_new(sample.wavelength_nm, sample.eta, sample.k)
+        });
+        let mut admitted = [ConductorIorSample::try_new(380.0, 1.0, 0.0)?; 9];
+        for (slot, sample) in admitted.iter_mut().zip(samples) {
+            *slot = sample?;
+        }
+        let source = ConductorSource::try_new(
+            optical_resolved.identity(),
+            ConductorDataStatus::CallerAssertedMeasured,
+        )?;
+        let appearance = EulerMaterialStyle::Conductor {
+            optics: ConductorOptics::try_new(admitted, source)?,
+            surface: ConductorSurface::try_rough(roughness_alpha)?,
+        };
+        let mechanical_state_identity = mechanical.identity();
+        let optical_state_identity = optical_resolved.identity();
+        let material_card_identity = mechanical.card_identity();
+        let mut hasher = DomainHasher::new(
+            "org.frankensim.euler-disc.resolved-conductor-material-binding.v1",
+        );
+        for identity in [
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+        ] {
+            hasher.update(identity.as_bytes());
+        }
+        hash_material(&mut hasher, appearance);
+        Ok(Self {
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+            appearance,
+            identity: hasher.finalize(),
+        })
+    }
+
+    /// Render appearance produced from the resolved state.
+    #[must_use]
+    pub const fn appearance(self) -> EulerMaterialStyle {
+        self.appearance
+    }
+
+    /// Complete state/optics/surface binding identity.
+    #[must_use]
+    pub const fn identity(self) -> ContentHash {
+        self.identity
+    }
 }
 
 /// Representative base and housing dimensions in metres.
@@ -335,6 +440,10 @@ pub struct EulerSceneConfig {
     pub object_ids: EulerSceneObjectIds,
     /// Disc appearance.
     pub disc_material: EulerMaterialStyle,
+    /// Optional evidence-bound disc material state. `None` is an explicit
+    /// look-development scene; physical publication uses
+    /// [`EulerCinematicScene::try_build_physical`].
+    pub disc_material_state: Option<EulerDiscMaterialStateBinding>,
     /// Spectral base-plate appearance. The reference configuration uses a
     /// representative, explicitly non-measured glass preset.
     pub plate_material: EulerMaterialStyle,
@@ -387,6 +496,7 @@ impl EulerSceneConfig {
                 linear_rgb: [0.72, 0.74, 0.78],
                 alpha: 0.12,
             },
+            disc_material_state: None,
             plate_material: EulerMaterialStyle::Dielectric {
                 glass: DielectricGlass::representative_crown(),
                 surface: DielectricSurface::POLISHED,
@@ -569,6 +679,41 @@ impl<'artifact> EulerCinematicScene<'artifact> {
     /// Build the complete reference scene from one admitted artifact and the
     /// exact resolved specimen asset named by its metadata.
     pub fn try_build(
+        artifact: &'artifact EulerRenderTrajectoryArtifact,
+        specimen: &ResolvedDiscProfile,
+        config: EulerSceneConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, EulerSceneError> {
+        if config.disc_material_state.is_some() {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "a bound physical material requires try_build_physical",
+            ));
+        }
+        Self::try_build_inner(artifact, specimen, config, cx)
+    }
+
+    /// Build a scene whose visible disc response is bound to the same resolved
+    /// material card/state that supplied density and elasticity.
+    pub fn try_build_physical(
+        artifact: &'artifact EulerRenderTrajectoryArtifact,
+        specimen: &ResolvedMaterialDiscProfile,
+        binding: EulerDiscMaterialStateBinding,
+        mut config: EulerSceneConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, EulerSceneError> {
+        if specimen.material.resolved().identity() != binding.mechanical_state_identity
+            || specimen.material.resolved().card_identity() != binding.material_card_identity
+        {
+            return Err(EulerSceneError::MaterialStateMismatch(
+                "render binding does not match the resolved mechanical specimen",
+            ));
+        }
+        config.disc_material = binding.appearance;
+        config.disc_material_state = Some(binding);
+        Self::try_build_inner(artifact, &specimen.profile, config, cx)
+    }
+
+    fn try_build_inner(
         artifact: &'artifact EulerRenderTrajectoryArtifact,
         specimen: &ResolvedDiscProfile,
         config: EulerSceneConfig,
@@ -1380,6 +1525,9 @@ pub enum EulerSceneError {
     AssetIdentityMismatch(&'static str),
     /// Artifact mechanics properties differed from the resolved profile.
     MassPropertiesMismatch,
+    /// Mechanical, optical, or surface state bindings did not refer to one
+    /// coherent resolved material state.
+    MaterialStateMismatch(&'static str),
     /// V1 cannot safely interpolate a producer-declared discontinuity.
     DeclaredDiscontinuityUnsupported,
     /// The requested tessellation exceeded a hard topology ceiling.
@@ -1449,6 +1597,8 @@ pub enum EulerSceneError {
     RenderExecution(RenderExecutionError),
     /// Conservative animated-instance bounds refused.
     MotionBounds(MotionBoundsError),
+    /// Spectral conductor data or surface response refused.
+    Conductor(ConductorError),
 }
 
 impl fmt::Display for EulerSceneError {
@@ -1507,6 +1657,12 @@ impl From<MotionBoundsError> for EulerSceneError {
     }
 }
 
+impl From<ConductorError> for EulerSceneError {
+    fn from(error: ConductorError) -> Self {
+        Self::Conductor(error)
+    }
+}
+
 fn checkpoint(cx: &Cx<'_>) -> Result<(), EulerSceneError> {
     cx.checkpoint().map_err(|_| EulerSceneError::Cancelled)
 }
@@ -1514,6 +1670,13 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), EulerSceneError> {
 fn validate_config(config: &EulerSceneConfig) -> Result<(), EulerSceneError> {
     if config.length_unit != EulerSceneLengthUnit::Metres {
         return Err(EulerSceneError::UnsupportedLengthUnit);
+    }
+    if let Some(binding) = config.disc_material_state
+        && binding.appearance != config.disc_material
+    {
+        return Err(EulerSceneError::MaterialStateMismatch(
+            "disc appearance no longer matches its resolved material binding",
+        ));
     }
     if !(8..=MAX_EULER_AZIMUTHAL_SEGMENTS).contains(&config.tessellation.azimuthal_segments) {
         return Err(EulerSceneError::InvalidConfig("azimuthal_segments"));
@@ -2885,6 +3048,7 @@ fn scene_identity(
     }
     hash_base_config(&mut hasher, config);
     hash_material(&mut hasher, config.disc_material);
+    hash_disc_material_state(&mut hasher, config.disc_material_state);
     hash_material(&mut hasher, config.plate_material);
     hash_material(&mut hasher, config.housing_material);
     hash_light(&mut hasher, config.light);
@@ -2936,6 +3100,7 @@ fn configuration_identity(config: &EulerSceneConfig) -> ContentHash {
         hash_material(&mut hasher, support.material);
     }
     hash_material(&mut hasher, config.disc_material);
+    hash_disc_material_state(&mut hasher, config.disc_material_state);
     hash_material(&mut hasher, config.plate_material);
     hash_material(&mut hasher, config.housing_material);
     hash_light(&mut hasher, config.light);
@@ -2965,6 +3130,23 @@ fn configuration_identity(config: &EulerSceneConfig) -> ContentHash {
         hasher.update(&[1]);
     }
     hasher.finalize()
+}
+
+fn hash_disc_material_state(
+    hasher: &mut DomainHasher,
+    binding: Option<EulerDiscMaterialStateBinding>,
+) {
+    match binding {
+        None => hasher.update(&[0]),
+        Some(binding) => {
+            hasher.update(&[1]);
+            hasher.update(binding.identity.as_bytes());
+            hasher.update(binding.mechanical_state_identity.as_bytes());
+            hasher.update(binding.optical_state_identity.as_bytes());
+            hasher.update(binding.material_card_identity.as_bytes());
+            hasher.update(binding.surface_state_identity.as_bytes());
+        }
+    }
 }
 
 fn hash_base_config(hasher: &mut DomainHasher, config: &EulerSceneConfig) {

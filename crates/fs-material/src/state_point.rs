@@ -36,6 +36,36 @@ pub const YOUNG_MODULUS_PROPERTY: &str = "young_modulus";
 pub const POISSON_RATIO_PROPERTY: &str = "poisson_ratio";
 /// Canonical property key for uniaxial yield stress in pascals.
 pub const YIELD_STRESS_PROPERTY: &str = "yield_stress";
+/// Fixed visible wavelengths used by the current evidence-bearing complex-IOR
+/// bridge [vacuum nm]. The physics value is the sampled constitutive response;
+/// this grid is a bounded transport convention, not a material preset.
+pub const VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM: [f64; 9] = [
+    380.0, 430.0, 480.0, 530.0, 580.0, 630.0, 680.0, 730.0, 780.0,
+];
+/// Canonical material-card keys for the real part of visible complex index.
+pub const VISIBLE_COMPLEX_IOR_ETA_PROPERTIES: [&str; 9] = [
+    "optical_eta_380nm",
+    "optical_eta_430nm",
+    "optical_eta_480nm",
+    "optical_eta_530nm",
+    "optical_eta_580nm",
+    "optical_eta_630nm",
+    "optical_eta_680nm",
+    "optical_eta_730nm",
+    "optical_eta_780nm",
+];
+/// Canonical material-card keys for the nonnegative extinction coefficient.
+pub const VISIBLE_COMPLEX_IOR_K_PROPERTIES: [&str; 9] = [
+    "optical_k_380nm",
+    "optical_k_430nm",
+    "optical_k_480nm",
+    "optical_k_530nm",
+    "optical_k_580nm",
+    "optical_k_630nm",
+    "optical_k_680nm",
+    "optical_k_730nm",
+    "optical_k_780nm",
+];
 
 /// Numerical domain a resolved scalar must satisfy before a solver may use it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -477,6 +507,80 @@ pub struct IsotropicSolidStatePoint {
     yield_stress_pa: f64,
 }
 
+/// One evidence-bearing absolute complex-index sample at a material state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisibleComplexIndexSample {
+    /// Vacuum wavelength [nm].
+    pub wavelength_nm: f64,
+    /// Absolute real refractive index.
+    pub eta: f64,
+    /// Absolute extinction coefficient.
+    pub k: f64,
+}
+
+/// Visible-band complex refractive index resolved from the same immutable
+/// material-card/state-point machinery as mechanical properties.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibleConductorStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    samples: [VisibleComplexIndexSample; 9],
+}
+
+impl VisibleConductorStatePoint {
+    /// Complete card/state/property-use bundle.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Canonical visible-band complex-index samples.
+    #[must_use]
+    pub const fn samples(&self) -> &[VisibleComplexIndexSample; 9] {
+        &self.samples
+    }
+}
+
+/// Resolve a visible complex-index table at one exact material state point.
+///
+/// No chemistry name selects optical constants. All eighteen dimensionless
+/// values must exist in the supplied card and be valid at `point`; the entire
+/// table refuses atomically on missing, ambiguous, extrapolated, wrongly
+/// dimensioned, or nonphysical data.
+pub fn resolve_visible_conductor_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<VisibleConductorStatePoint, MaterialStatePointError> {
+    let mut requirements = Vec::with_capacity(18);
+    for name in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name,
+            Dims::NONE,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+    }
+    for name in VISIBLE_COMPLEX_IOR_K_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name,
+            Dims::NONE,
+            ScalarAdmissibility::NonNegative,
+        )?);
+    }
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let samples = core::array::from_fn(|index| VisibleComplexIndexSample {
+        wavelength_nm: VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM[index],
+        eta: resolved
+            .property(VISIBLE_COMPLEX_IOR_ETA_PROPERTIES[index])
+            .expect("canonical eta requirement was resolved")
+            .value_si(),
+        k: resolved
+            .property(VISIBLE_COMPLEX_IOR_K_PROPERTIES[index])
+            .expect("canonical extinction requirement was resolved")
+            .value_si(),
+    });
+    Ok(VisibleConductorStatePoint { resolved, samples })
+}
+
 impl IsotropicSolidStatePoint {
     /// Complete evidence-bearing property bundle.
     #[must_use]
@@ -793,6 +897,41 @@ mod tests {
             .expect("finite temperature")
     }
 
+    fn optical_card(upper_temperature_k: f64) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for (index, name) in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES.iter().enumerate() {
+            claims
+                .insert_claim(claim(
+                    name,
+                    Dims::NONE,
+                    vec![(250.0, 1.5 + index as f64 * 0.1), (600.0, 1.4 + index as f64 * 0.1)],
+                    upper_temperature_k,
+                ))
+                .unwrap();
+        }
+        for (index, name) in VISIBLE_COMPLEX_IOR_K_PROPERTIES.iter().enumerate() {
+            claims
+                .insert_claim(claim(
+                    name,
+                    Dims::NONE,
+                    vec![(250.0, 2.0 + index as f64 * 0.1), (600.0, 2.5 + index as f64 * 0.1)],
+                    upper_temperature_k,
+                ))
+                .unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "test-visible-conductor".to_owned(),
+                phase: "solid".to_owned(),
+                process: "polished".to_owned(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn interface_card(history: &str) -> InterfaceSystemCard {
         let mut claims = ClaimSet::new();
         for property in [
@@ -894,6 +1033,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(forward.identity(), reverse.identity());
+    }
+
+    #[test]
+    fn g0_visible_complex_index_is_state_resolved_and_extrapolation_refuses() {
+        let card = optical_card(600.0);
+        let resolved = resolve_visible_conductor_state_point(
+            &card,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(resolved.samples().len(), 9);
+        assert_eq!(resolved.samples()[0].wavelength_nm, 380.0);
+        assert_eq!(resolved.samples()[8].wavelength_nm, 780.0);
+        assert_eq!(resolved.samples()[0].eta, 1.45);
+        assert_eq!(resolved.samples()[0].k, 2.25);
+        assert_eq!(resolved.resolved().card_identity(), card.content_hash());
+
+        assert!(matches!(
+            resolve_visible_conductor_state_point(
+                &card,
+                &point(700.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(MaterialStatePointError::Query {
+                source: MatDbError::NoClaimInDomain { .. },
+                ..
+            })
+        ));
     }
 
     #[test]
