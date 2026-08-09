@@ -230,10 +230,14 @@ through-shot's sphere-entry window survives as Retained).
   finite-element contact solutions, material-card admission, friction or heat
   partitioning, lubrication/EHL, plasticity, adhesion, roughness, calibration,
   experimental validation, Euler-disc target fitting, or any one-millimetre
-  optimum/ranking claim. Hunt--Crossley dissipation is a declared model rung,
-  not a measured loss mechanism. Toroidal and highly elliptical patches have
-  no physical-compliance claim in this module; they require a separately
-  validated two-curvature law. The generic embedding is not a port-schema-v2
+  optimum/ranking claim. Hunt--Crossley dissipation is a declared point-contact
+  model rung, not a measured loss mechanism or coefficient-of-restitution
+  shortcut. It augments either the admitted sphere/plane coefficient or the
+  actual two-principal-curvature elliptic Hertz coefficient; force, consistent
+  tangent, elastic storage, irreversible work, pressure, and patch axes remain
+  one constitutive receipt. Toroidal and highly elliptical patches outside the
+  elliptic-law numerical envelope have no physical-compliance claim in this
+  module; they require a separately validated law. The generic embedding is not a port-schema-v2
   implementation, cancellation proof, global solve, or a replacement for the
   upstream coupled-port contract.
 - Material/interface binding proves exact identity, dimensional admission, and

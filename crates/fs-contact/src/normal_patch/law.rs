@@ -59,6 +59,20 @@ pub enum NormalPatchLaw {
         minimum_principal_curvature_m_inverse: f64,
         reduced_modulus_pa: f64,
     },
+    /// Passive Hunt--Crossley augmentation of the elliptic Hertz rung.
+    ///
+    /// This retains the true two-principal-curvature Hertz coefficient and
+    /// multiplies its elastic force by `1 + c * indentation_rate`. It is a
+    /// compliant transient point-contact law, not a coefficient-of-restitution
+    /// shortcut. The request applicability envelope remains responsible for
+    /// refusing rates, pressures, strains, or temperatures outside the model
+    /// card's evidence.
+    HuntCrossleyEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: f64,
+        minimum_principal_curvature_m_inverse: f64,
+        reduced_modulus_pa: f64,
+        dissipation_s_per_m: f64,
+    },
 }
 
 /// Declared local geometry. The analytic rungs deliberately do not approximate
@@ -350,6 +364,21 @@ impl NormalPatchRequest {
                     maximum_principal_curvature_m_inverse,
                     minimum_principal_curvature_m_inverse,
                     reduced_modulus_pa,
+                    None,
+                );
+            }
+            NormalPatchLaw::HuntCrossleyEllipticParaboloid {
+                maximum_principal_curvature_m_inverse,
+                minimum_principal_curvature_m_inverse,
+                reduced_modulus_pa,
+                dissipation_s_per_m,
+            } => {
+                return self.elliptic_paraboloid(
+                    request_id,
+                    maximum_principal_curvature_m_inverse,
+                    minimum_principal_curvature_m_inverse,
+                    reduced_modulus_pa,
+                    Some(dissipation_s_per_m),
                 );
             }
             NormalPatchLaw::HuntCrossleySphere {
@@ -393,7 +422,7 @@ impl NormalPatchRequest {
             (4.0 / 3.0) * modulus * radius.sqrt() * d.powf(1.5),
             "sphere_force",
         )?;
-        let tangent = if d == 0.0 {
+        let elastic_tangent = if d == 0.0 {
             0.0
         } else {
             checked(2.0 * modulus * (radius * d).sqrt(), "sphere_tangent")?
@@ -407,6 +436,7 @@ impl NormalPatchRequest {
             });
         }
         let force = checked(elastic_force * factor, "normal_force")?;
+        let tangent = checked(elastic_tangent * factor, "normal_tangent")?;
         let p0 = if a == 0.0 {
             0.0
         } else {
@@ -515,6 +545,7 @@ impl NormalPatchRequest {
         maximum_curvature: f64,
         minimum_curvature: f64,
         modulus: f64,
+        dissipative: Option<f64>,
     ) -> Result<NormalPatchReceipt, NormalPatchError> {
         let d = self.indentation_m;
         let shape = elliptic_hertz_shape(maximum_curvature, minimum_curvature)?;
@@ -525,16 +556,26 @@ impl NormalPatchRequest {
         )?;
         let b = checked(b_squared.sqrt(), "elliptic_minor_axis")?;
         let a = checked(b * shape.aspect_ratio, "elliptic_major_axis")?;
-        let force = checked(
+        let elastic_force = checked(
             core::f64::consts::PI * modulus * b.powi(3) * shape.aspect_ratio * curvature_sum
                 / (3.0 * shape.complete_e),
-            "elliptic_force",
+            "elliptic_elastic_force",
         )?;
-        let tangent = if d == 0.0 {
+        let elastic_tangent = if d == 0.0 {
             0.0
         } else {
-            checked(1.5 * force / d, "elliptic_tangent")?
+            checked(1.5 * elastic_force / d, "elliptic_elastic_tangent")?
         };
+        let factor = dissipative.map_or(1.0, |c| 1.0 + c * self.indentation_rate_m_per_s);
+        if factor < 0.0 {
+            return Err(NormalPatchError::OutsideApplicability {
+                ratio: "Hunt-Crossley force factor",
+                value: factor,
+                limit: 0.0,
+            });
+        }
+        let force = checked(elastic_force * factor, "elliptic_normal_force")?;
+        let tangent = checked(elastic_tangent * factor, "elliptic_normal_tangent")?;
         let patch_area = checked(core::f64::consts::PI * a * b, "elliptic_patch_area")?;
         let p0 = if patch_area == 0.0 {
             0.0
@@ -553,7 +594,14 @@ impl NormalPatchRequest {
             aspect_ratio: shape.aspect_ratio,
         };
         let reporting_radius = checked((a * b).sqrt(), "elliptic_reporting_radius")?;
-        let reversible = checked(0.4 * force * d, "elliptic_reversible_energy")?;
+        let reversible = checked(0.4 * elastic_force * d, "elliptic_reversible_energy")?;
+        let irreversible_power = dissipative.map_or(0.0, |c| {
+            elastic_force * c * self.indentation_rate_m_per_s.powi(2)
+        });
+        let irreversible_work = checked(
+            irreversible_power * self.step_s,
+            "elliptic_irreversible_work",
+        )?;
         self.elliptic_point_receipt(
             request_id,
             d,
@@ -564,6 +612,8 @@ impl NormalPatchRequest {
             p0,
             checked((a * a + b * b) / 5.0, "elliptic_second_moment")?,
             reversible,
+            irreversible_work,
+            irreversible_power,
             ratios,
         )
     }
@@ -645,6 +695,8 @@ impl NormalPatchRequest {
         peak: f64,
         moment: f64,
         reversible: f64,
+        irreversible: f64,
+        power: f64,
         ratios: ApplicabilityRatios,
     ) -> Result<NormalPatchReceipt, NormalPatchError> {
         self.validate_response(
@@ -654,8 +706,8 @@ impl NormalPatchRequest {
             reporting_radius,
             peak,
             reversible,
-            0.0,
-            0.0,
+            irreversible,
+            power,
         )?;
         let receipt_id = self.elliptic_receipt_id(
             request_id,
@@ -667,6 +719,8 @@ impl NormalPatchRequest {
             peak,
             moment,
             reversible,
+            irreversible,
+            power,
             ratios,
         );
         Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
@@ -688,8 +742,8 @@ impl NormalPatchRequest {
                 second_moment_m2: moment,
             },
             reversible_energy_j: reversible,
-            irreversible_work_j: 0.0,
-            dissipated_power_w: 0.0,
+            irreversible_work_j: irreversible,
+            dissipated_power_w: power,
             ratios,
             uncertainty: self.uncertainty,
         }))
@@ -848,6 +902,8 @@ impl NormalPatchRequest {
         peak: f64,
         moment: f64,
         reversible: f64,
+        irreversible: f64,
+        power: f64,
         ratios: ApplicabilityRatios,
     ) -> ContentHash {
         hash_domain(
@@ -856,7 +912,7 @@ impl NormalPatchRequest {
                 concat!(
                     "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                     "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
-                    "{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
+                    "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
                 ),
                 request_id.to_hex(),
                 self.identity.state_id,
@@ -870,6 +926,8 @@ impl NormalPatchRequest {
                 peak,
                 moment,
                 reversible,
+                irreversible,
+                power,
                 ratios,
                 self.uncertainty.radius_relative,
                 self.uncertainty.modulus_relative,
@@ -1048,6 +1106,12 @@ impl NormalPatchRequest {
                 maximum_principal_curvature_m_inverse,
                 minimum_principal_curvature_m_inverse,
                 reduced_modulus_pa,
+            }
+            | NormalPatchLaw::HuntCrossleyEllipticParaboloid {
+                maximum_principal_curvature_m_inverse,
+                minimum_principal_curvature_m_inverse,
+                reduced_modulus_pa,
+                ..
             } => {
                 if !(maximum_principal_curvature_m_inverse.is_finite()
                     && maximum_principal_curvature_m_inverse > 0.0
@@ -1068,6 +1132,10 @@ impl NormalPatchRequest {
             }
         }
         if let NormalPatchLaw::HuntCrossleySphere {
+            dissipation_s_per_m,
+            ..
+        }
+        | NormalPatchLaw::HuntCrossleyEllipticParaboloid {
             dissipation_s_per_m,
             ..
         } = self.law
@@ -1091,6 +1159,10 @@ impl NormalPatchRequest {
             )
             | (
                 NormalPatchLaw::HertzEllipticParaboloid { .. },
+                NormalPatchGeometry::EllipticParaboloid,
+            )
+            | (
+                NormalPatchLaw::HuntCrossleyEllipticParaboloid { .. },
                 NormalPatchGeometry::EllipticParaboloid,
             ) => {}
             _ => {

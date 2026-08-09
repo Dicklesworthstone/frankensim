@@ -27,8 +27,12 @@ pub const ADHESION_ENERGY_DIMS: Dims = Dims([0, 1, -2, 0, 0, 0]);
 
 /// Stateless nonadhesive Hertz model-card law identifier.
 pub const NORMAL_HERTZ_LAW_ID: &str = "fs-contact.normal-hertz";
-/// Sphere-only Hunt--Crossley model-card law identifier.
-pub const NORMAL_HUNT_CROSSLEY_SPHERE_LAW_ID: &str = "fs-contact.normal-hunt-crossley-sphere";
+/// Point-contact Hunt--Crossley model-card law identifier.
+///
+/// The local geometry still selects the sphere/plane or true elliptic Hertz
+/// coefficient. This card contributes only the passive rate factor and its
+/// validity envelope; it never substitutes one contact geometry for another.
+pub const NORMAL_HUNT_CROSSLEY_POINT_LAW_ID: &str = "fs-contact.normal-hunt-crossley-point";
 /// Executable model-card law version understood by this bridge.
 pub const NORMAL_CONTACT_LAW_VERSION: u32 = 1;
 /// Stateless normal-law state schema understood by this bridge.
@@ -82,9 +86,9 @@ pub struct BoundNormalInterfaceState {
 pub enum BoundNormalContactLaw {
     /// Nonadhesive Hertz response; local geometry selects the analytic rung.
     ElasticHertz,
-    /// Passive Hunt--Crossley augmentation, currently admitted only for a
-    /// sphere/plane patch by the generic normal-law implementation.
-    HuntCrossleySphere {
+    /// Passive Hunt--Crossley augmentation for an admitted point-contact Hertz
+    /// geometry (sphere/plane or elliptic paraboloid).
+    HuntCrossleyPoint {
         /// Card-resolved dissipation coefficient [s/m].
         dissipation_s_per_m: f64,
     },
@@ -561,7 +565,7 @@ pub fn bind_normal_contact_model(
     };
     let law = match model.law.0.as_str() {
         NORMAL_HERTZ_LAW_ID => BoundNormalContactLaw::ElasticHertz,
-        NORMAL_HUNT_CROSSLEY_SPHERE_LAW_ID => BoundNormalContactLaw::HuntCrossleySphere {
+        NORMAL_HUNT_CROSSLEY_POINT_LAW_ID => BoundNormalContactLaw::HuntCrossleyPoint {
             dissipation_s_per_m: required_model_parameter(
                 model,
                 HUNT_CROSSLEY_DISSIPATION_PARAMETER,
@@ -587,10 +591,7 @@ pub fn bind_normal_contact_model(
 }
 
 fn is_supported_normal_law(law: &str) -> bool {
-    matches!(
-        law,
-        NORMAL_HERTZ_LAW_ID | NORMAL_HUNT_CROSSLEY_SPHERE_LAW_ID
-    )
+    matches!(law, NORMAL_HERTZ_LAW_ID | NORMAL_HUNT_CROSSLEY_POINT_LAW_ID)
 }
 
 fn required_model_parameter(
@@ -627,7 +628,7 @@ fn validate_parameter_roster(
 ) -> Result<(), InterfaceBindingError> {
     let expected = match law {
         BoundNormalContactLaw::ElasticHertz => &COMMON_NORMAL_PARAMETERS[..],
-        BoundNormalContactLaw::HuntCrossleySphere { .. } => &HUNT_NORMAL_PARAMETERS[..],
+        BoundNormalContactLaw::HuntCrossleyPoint { .. } => &HUNT_NORMAL_PARAMETERS[..],
     };
     if model.parameters.len() != expected.len()
         || !model
@@ -1079,10 +1080,7 @@ mod tests {
 
         let hunt_card = card_with_models(
             "dry",
-            vec![normal_model(
-                NORMAL_HUNT_CROSSLEY_SPHERE_LAW_ID,
-                Some(0.075),
-            )],
+            vec![normal_model(NORMAL_HUNT_CROSSLEY_POINT_LAW_ID, Some(0.075))],
         );
         let hunt_dry = bind_dry_interface_system_card(&hunt_card, InputAuthority::CallerDeclared)
             .expect("hunt interface");
@@ -1096,7 +1094,7 @@ mod tests {
                 .expect("hunt model");
         assert_eq!(
             hunt.law(),
-            BoundNormalContactLaw::HuntCrossleySphere {
+            BoundNormalContactLaw::HuntCrossleyPoint {
                 dissipation_s_per_m: 0.075,
             }
         );
@@ -1123,7 +1121,7 @@ mod tests {
             "dry",
             vec![
                 normal_model(NORMAL_HERTZ_LAW_ID, None),
-                normal_model(NORMAL_HUNT_CROSSLEY_SPHERE_LAW_ID, Some(0.075)),
+                normal_model(NORMAL_HUNT_CROSSLEY_POINT_LAW_ID, Some(0.075)),
             ],
         );
         let ambiguous_dry =

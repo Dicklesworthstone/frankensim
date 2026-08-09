@@ -7,7 +7,10 @@ fn request(law: NormalPatchLaw) -> NormalPatchRequest {
         NormalPatchLaw::HertzSpherePlane { .. } | NormalPatchLaw::HuntCrossleySphere { .. } => {
             NormalPatchGeometry::SpherePlane
         }
-        NormalPatchLaw::HertzEllipticParaboloid { .. } => NormalPatchGeometry::EllipticParaboloid,
+        NormalPatchLaw::HertzEllipticParaboloid { .. }
+        | NormalPatchLaw::HuntCrossleyEllipticParaboloid { .. } => {
+            NormalPatchGeometry::EllipticParaboloid
+        }
     };
     NormalPatchRequest {
         identity: NormalPatchIdentity {
@@ -146,6 +149,16 @@ fn np_003_hunt_crossley_loading_and_unloading_are_passive() {
     assert!(loading.irreversible_work_j > 0.0 && loading.dissipated_power_w > 0.0);
     assert!(unloading.irreversible_work_j > 0.0 && unloading.dissipated_power_w > 0.0);
     assert!(unloading.normal_force_n < loading.normal_force_n);
+
+    let h = 1.0e-8;
+    let mut plus = request(law);
+    plus.indentation_m += h;
+    let mut minus = request(law);
+    minus.indentation_m -= h;
+    let numerical = (point(plus.evaluate().unwrap()).unwrap().normal_force_n
+        - point(minus.evaluate().unwrap()).unwrap().normal_force_n)
+        / (2.0 * h);
+    assert!((numerical - loading.tangent_n_per_m).abs() / loading.tangent_n_per_m < 2.0e-6);
 }
 
 #[test]
@@ -449,4 +462,45 @@ fn np_010_elliptic_hertz_reduces_to_sphere_and_refuses_out_of_domain_shapes() {
         extreme.evaluate(),
         Err(NormalPatchError::EllipticAspectRatioUnsupported { .. })
     ));
+}
+
+#[test]
+fn np_011_hunt_crossley_elliptic_is_passive_and_preserves_true_patch_geometry() {
+    let law = NormalPatchLaw::HuntCrossleyEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 100.0,
+        minimum_principal_curvature_m_inverse: 25.0,
+        reduced_modulus_pa: 2.0e9,
+        dissipation_s_per_m: 10.0,
+    };
+    let loading_request = request(law);
+    let loading = point(loading_request.evaluate().unwrap()).unwrap();
+    let mut elastic_request = loading_request.clone();
+    elastic_request.law = NormalPatchLaw::HertzEllipticParaboloid {
+        maximum_principal_curvature_m_inverse: 100.0,
+        minimum_principal_curvature_m_inverse: 25.0,
+        reduced_modulus_pa: 2.0e9,
+    };
+    let elastic = point(elastic_request.evaluate().unwrap()).unwrap();
+    let loading_factor = 1.0 + 10.0 * loading_request.indentation_rate_m_per_s;
+    assert!((loading.normal_force_n / elastic.normal_force_n - loading_factor).abs() < 1.0e-12);
+    assert!((loading.tangent_n_per_m / elastic.tangent_n_per_m - loading_factor).abs() < 1.0e-12);
+    assert_eq!(loading.elliptic_patch_axes, elastic.elliptic_patch_axes);
+    assert_eq!(loading.reversible_energy_j, elastic.reversible_energy_j);
+    assert!(loading.irreversible_work_j > 0.0 && loading.dissipated_power_w > 0.0);
+
+    let mut unloading_request = loading_request.clone();
+    unloading_request.indentation_rate_m_per_s = -1.0e-3;
+    let unloading = point(unloading_request.evaluate().unwrap()).unwrap();
+    assert!(unloading.normal_force_n < loading.normal_force_n);
+    assert!(unloading.irreversible_work_j > 0.0 && unloading.dissipated_power_w > 0.0);
+
+    let h = 1.0e-8;
+    let mut plus = loading_request.clone();
+    plus.indentation_m += h;
+    let mut minus = loading_request;
+    minus.indentation_m -= h;
+    let numerical = (point(plus.evaluate().unwrap()).unwrap().normal_force_n
+        - point(minus.evaluate().unwrap()).unwrap().normal_force_n)
+        / (2.0 * h);
+    assert!((numerical - loading.tangent_n_per_m).abs() / loading.tangent_n_per_m < 2.0e-6);
 }
