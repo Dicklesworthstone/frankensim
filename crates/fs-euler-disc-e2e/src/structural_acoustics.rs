@@ -2146,18 +2146,57 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
         if transverse_force_on_plate_n == 0.0 {
             return Ok(vec![0.0; self.basis.modes.len()]);
         }
+        let plate_reference_point_m = plate_reference_contact_point(
+            [
+                contact.point_base_m.x,
+                contact.point_base_m.y,
+                contact.point_base_m.z,
+            ],
+            selected.signed_gap_m,
+        )?;
         self.basis
             .project_transverse_point_force(
-                [
-                    contact.point_base_m.x,
-                    contact.point_base_m.y,
-                    contact.point_base_m.z,
-                ],
+                plate_reference_point_m,
                 transverse_force_on_plate_n,
                 maximum_contact_surface_distance_m,
             )
             .map(|projection| projection.modal_force_n_per_sqrt_kg)
     }
+}
+
+fn plate_reference_contact_point(
+    disc_contact_point_base_m: [f64; 3],
+    signed_gap_m: f64,
+) -> Result<[f64; 3], StructuralModalBasisError> {
+    let scale_m = disc_contact_point_base_m
+        .iter()
+        .fold(signed_gap_m.abs(), |scale, coordinate| {
+            scale.max(coordinate.abs())
+        })
+        .max(1.0);
+    let consistency_tolerance_m = 256.0 * f64::EPSILON * scale_m;
+    if disc_contact_point_base_m
+        .iter()
+        .any(|coordinate| !coordinate.is_finite())
+        || !signed_gap_m.is_finite()
+        || (disc_contact_point_base_m[2] - signed_gap_m).abs() > consistency_tolerance_m
+    {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "disc-side base-frame contact point is inconsistent with the retained signed gap",
+        });
+    }
+
+    // The contact point retained by mechanics lies on the disc surface. In a
+    // compliant closed contact it is below the displaced support by exactly
+    // the signed penetration. Plate modes, however, are defined on the
+    // undeformed z=0 reference midsurface, so their force coordinate is the
+    // corresponding support-side material point at the same in-plane
+    // location—not the penetrating disc-side point.
+    Ok([
+        disc_contact_point_base_m[0],
+        disc_contact_point_base_m[1],
+        0.0,
+    ])
 }
 
 fn baffled_plate_pressure_signal_identity(
@@ -3741,6 +3780,20 @@ mod tests {
             );
             operation(&cx)
         })
+    }
+
+    #[test]
+    fn g0_compliant_disc_contact_maps_to_plate_reference_surface() {
+        let penetration_m = -4.005_401e-7;
+        assert_eq!(
+            plate_reference_contact_point([0.012, -0.007, penetration_m], penetration_m)
+                .expect("consistent disc-side contact and signed gap"),
+            [0.012, -0.007, 0.0]
+        );
+        assert!(matches!(
+            plate_reference_contact_point([0.012, -0.007, penetration_m], -2.0 * penetration_m),
+            Err(StructuralModalBasisError::IdentityMismatch { .. })
+        ));
     }
 
     fn pressure_signal(identity_byte: u8, pressure_pa: Vec<f64>) -> PhysicalPressureSignal {

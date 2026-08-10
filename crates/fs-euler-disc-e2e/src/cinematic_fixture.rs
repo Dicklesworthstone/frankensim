@@ -4057,7 +4057,11 @@ pub fn run_cinematic_fixture(
     let render_pool =
         RenderWorkerPool::new(&pool_execution, cx.mode(), CRITIQUE_RENDER_SCHEDULER_SEED);
     let trajectory_samples = trajectory_artifact.trajectory().samples();
-    let trajectory_start_s = trajectory_samples[0].input().time_s;
+    // Production controls retain closing endpoints, so their first sample is
+    // one control cell after the exact rebased initial state carried by the
+    // trajectory metadata. Presentation and frame-zero cut provenance begin
+    // at that initial boundary, not at the first closing endpoint.
+    let trajectory_start_s = 0.0;
     let trajectory_end_s = trajectory_samples[trajectory_samples.len() - 1]
         .input()
         .time_s;
