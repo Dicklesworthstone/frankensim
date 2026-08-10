@@ -401,8 +401,9 @@ fn edge_tone_adiabatic_ramp_hysteresis() {
 ///   (flatness ~1e-15; St 0.0916 = 2.25x Brown stage I — a
 ///   stage-II-scale mode on this rig scale, recorded not asserted).
 ///   No turbulent broadband regime exists inside BGK's stable
-///   window at any resolution (the boundary depends only on
-///   Re/delta).
+///   window at any resolution (at the rigs' fixed u = 0.08 the
+///   boundary tracked Re/delta = u/nu across delta 6 and 12; a
+///   u-dependence via Mach was not probed and is not claimed).
 /// - The projected/recursive regularized operators roughly double
 ///   the window (Re 576 runs) but contaminate the plate force with
 ///   a temporal-Nyquist parity artifact at the top of it (bins

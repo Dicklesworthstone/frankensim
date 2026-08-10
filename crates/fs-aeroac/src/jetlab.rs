@@ -523,10 +523,12 @@ pub fn transverse_force_peak(
 /// Which leg of the ramp a rung was measured on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RampDirection {
-    /// Reynolds increasing from the base value toward
-    /// [`RampConfig::reynolds_end`].
+    /// The outbound leg, from the base Reynolds toward
+    /// [`RampConfig::reynolds_end`] (an INCREASING sweep when
+    /// `reynolds_end > base`; the protocol also accepts a
+    /// downward-only sweep, where this leg decreases).
     Up,
-    /// Reynolds decreasing back toward the base value.
+    /// The return leg, back toward the base Reynolds.
     Down,
 }
 
