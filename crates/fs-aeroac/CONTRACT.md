@@ -55,7 +55,9 @@ scope law, pinned as data and by test).
   settle/ramp/record boundary via `catch_unwind` and returned as a
   named `NonFinite` refusal; the rig state is discarded on that
   path. Executed trigger: plain-BGK destabilizes at cell Reynolds
-  `Re/delta` in (36, 48) on this rig family.
+  `Re/delta` in (36, 48) on this rig family (measured at the fixed
+  rig speed u = 0.08 across delta 6 and 12; the Mach/u dependence of
+  the boundary was not probed and is not claimed).
 - `jetlab::run_adiabatic_ramp` — the hysteresis-following protocol
   for the MULTI-STABLE rig: after one base lock-in, Reynolds is
   swept quasi-statically (per-step linear relaxation-time ramp at
