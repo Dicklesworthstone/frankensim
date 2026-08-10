@@ -101,7 +101,12 @@ pub use sharding::{
     UniformRenderShardResult, UniformRenderShardSpec, merge_uniform_shards, render_cinematic_shard,
     render_motion_shard, render_static_shard,
 };
+mod bdpt;
 mod manifold;
+pub use bdpt::{
+    BIDIRECTIONAL_TRACER_SEMANTICS_VERSION, BidirectionalRenderOutput, BidirectionalStrategyStats,
+    render_cinematic_bidirectional,
+};
 mod transport;
 
 /// Bit-affecting semantic surface version of the tracer (see
