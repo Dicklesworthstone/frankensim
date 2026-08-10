@@ -135,6 +135,8 @@ material-hysteresis rung would need a disjoint work channel.
   stochastic realization, seam correction, or authority upgrade is inferred.
 - `SelfAffinePeriodicProfileSpectrum` refuses nonpositive/nonfinite RMS height,
   Hurst exponents outside `0 < H < 1`, inverted or zero cycle bands, and
+  harmonic bands whose shortest wavelength cannot satisfy the eight-samples-
+  per-period rule within the one-million-sample trace ceiling, as well as
   unbounded harmonic counts. Every retained cycle owns a counter-based phase
   stream keyed by the explicit seed and cycle, so extending the band preserves
   shared-cycle phases. Phase changes preserve the declared Fourier power, and

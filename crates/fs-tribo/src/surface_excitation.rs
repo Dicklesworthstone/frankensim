@@ -95,6 +95,21 @@ impl SelfAffinePeriodicProfileSpectrum {
                 field: "self_affine_cycle_band",
             });
         }
+        let maximum_resolvable_cycle = MAX_TRACE_SAMPLES / MIN_SAMPLES_PER_SHORTEST_HARMONIC;
+        let maximum_cycle = usize::try_from(maximum_cycles_per_track).map_err(|_| {
+            SurfaceExcitationError::SurfaceSpectrumUnderresolved {
+                sample_count: MAX_TRACE_SAMPLES,
+                required_samples: usize::MAX,
+            }
+        })?;
+        if maximum_cycle > maximum_resolvable_cycle {
+            return Err(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
+                sample_count: MAX_TRACE_SAMPLES,
+                required_samples: maximum_cycle
+                    .checked_mul(MIN_SAMPLES_PER_SHORTEST_HARMONIC)
+                    .unwrap_or(usize::MAX),
+            });
+        }
         let harmonic_count = u64::from(maximum_cycles_per_track)
             .checked_sub(u64::from(minimum_cycles_per_track))
             .and_then(|span| span.checked_add(1))
@@ -1171,6 +1186,22 @@ mod tests {
             Err(SurfaceExcitationError::InvalidInput {
                 field: "self_affine_cycle_band"
             })
+        ));
+        let first_unresolvable_cycle =
+            u32::try_from(MAX_TRACE_SAMPLES / MIN_SAMPLES_PER_SHORTEST_HARMONIC + 1)
+                .expect("trace ceiling fits u32");
+        assert!(matches!(
+            SelfAffinePeriodicProfileSpectrum::new(
+                1.0e-9,
+                0.8,
+                first_unresolvable_cycle,
+                first_unresolvable_cycle,
+                0,
+            ),
+            Err(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
+                sample_count: MAX_TRACE_SAMPLES,
+                required_samples,
+            }) if required_samples == MAX_TRACE_SAMPLES + MIN_SAMPLES_PER_SHORTEST_HARMONIC
         ));
     }
 
