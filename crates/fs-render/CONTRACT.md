@@ -139,6 +139,26 @@ differentiable lift). Pure Rust throughout.
   admitted workers, layout, setup/traversal/compute/merge/publication timings,
   executor drain diagnostics, and the operation-memory receipt.
 
+- `tracer` finite-light bidirectional transport (opt-in, [F]):
+  `render_cinematic_bidirectional` constructs paired camera and rectangle-light
+  subpaths, evaluates every admissible `(s,t)` connection through the declared
+  depth, and combines reciprocal area-measure densities with balance-heuristic
+  path-space MIS. Radiance and importance walks use their respective
+  refractive transport factors. Two-sided rectangle emission has identical
+  support and radiance in emitter-hit, direct-light, and launch strategies.
+  `render_cinematic_bidirectional_with_execution` and the parked-crew method
+  partition work into fixed eight-sample full-raster blocks because `t=1`
+  light paths may splat into arbitrary pixels; blocks publish only after full
+  executor drain and reduce in ascending sample order, so worker count and
+  arrival order do not affect bits. Owen-Sobol full-path mode assigns disjoint
+  nested-scramble domains to camera walks, light walks, and each connector.
+  Current support is a pinhole cinematic camera, finite rectangle emitters,
+  opaque materials, and smooth/rough dielectrics. Environment illumination
+  remains a separate camera-path/NEE estimator rather than a fictitious finite
+  launch surface. Finite apertures, adaptive BDPT sampling, aligned BDPT AOVs,
+  vertex merging, and participating-media bidirectional transport are explicit
+  no-claim/refusal boundaries.
+
 - `tracer` deterministic adaptive sampling (bead
   `frankensim-h7xu5.5.2`): `AdaptiveSamplingConfig` declares a minimum,
   maximum through `Settings::spp`, fixed decision-batch spacing, per-channel
