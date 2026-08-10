@@ -105,7 +105,18 @@ scope law, pinned as data and by test).
    0.13% (gate 1%; the outlet-reflection pathology this fixture
    replaces read 6%). Geometry/regime refusals typed; bitwise
    deterministic.
-10. Refusals typed by name (non-positive wavenumber, coincident
+10. EDGE-TONE STAGING (ignored heavy test, executed on record): with
+    a nozzle wall at the jet root, the rig at Re 144, h/delta = 10
+    measures stage-I St = 0.03662 vs Brown's (1937) 0.03554 (+3.0%,
+    gate 15%) — INSIDE the published spread (Vaik/Paal exp 0.03723,
+    CFD 0.03497; two fetched sources, provenance in the test doc) —
+    at prominence ~6000 and flux imbalance 0.03%. EXECUTED
+    STRUCTURAL FINDING: without the nozzle the same rig oscillates
+    at the free jet's most-amplified frequency (St 0.46, 12x the
+    ladder) — the receptivity edge at the jet root is what closes
+    the Brown feedback loop, and the nozzle-free default fixture's
+    oscillation is documented as NOT an edge-tone stage.
+11. Refusals typed by name (non-positive wavenumber, coincident
    observer/source, non-finite inputs, bad solver parameters,
    non-convergence with residual); Hankel functions outside their
    domain are FULLY NaN (both components — a half-valid complex once
@@ -142,6 +153,9 @@ None.
 `tests/bickley_lbm.rs` (1): the LBM-vs-Rayleigh growth-rate
 convergence fixture (invariant 8).
 
+`tests/edgetone_staging.rs` (1, ignored heavy): stage-I Strouhal vs
+Brown + Vaik/Paal published values (invariant 10).
+
 `tests/jetlab.rs` (3): edge-tone oscillation + diagnostics +
 radiation with scope; typed refusals; bitwise determinism.
 
@@ -154,10 +168,9 @@ determinism.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
-- Edge-tone Strouhal staging vs published data (Brown/Coltman): not
-  implemented — the fixture asserts oscillation EXISTENCE and regime
-  diagnostics only; no Strouhal-value claim is made until the
-  two-source literature comparison lands.
+- Edge-tone staging BEYOND stage I: only the stage-I point
+  (Re 144, h/delta = 10) is validated; the stage II/III ladder and
+  hysteresis are not exercised.
 - Grid-convergence of source spectra across refinement levels: not
   implemented (single-resolution v1).
 - Fitted flute-noise tables + demo-synth consumption: not

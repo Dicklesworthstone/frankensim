@@ -22,6 +22,7 @@ fn base_config() -> JetLabiumConfig {
         fringe_sigma: 0.3,
         steps_settle: 3000,
         steps_record: 4096,
+        nozzle_thickness: 0,
     }
 }
 

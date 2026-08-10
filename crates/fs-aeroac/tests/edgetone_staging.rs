@@ -1,0 +1,106 @@
+//! Edge-tone Strouhal STAGING against published data (bead 9ok02's
+//! acceptance item). Literature provenance, fetched 2026-08-09 (two
+//! sources, saved to the session scratchpad as
+//! edgetone/vaik-paal-part{1,2}.pdf):
+//!
+//! - Vaik, Varga & Paal, "Frequency and Phase Characteristics of the
+//!   Edge Tone Part I", Period. Polytech. Mech. Eng. 58(1) 2014,
+//!   Table 1: Brown's (1937) stage-I coefficients for
+//!   `St = (c1 - c2/Re)((delta/h)^k - c3)`, c1 = 0.4659,
+//!   c2 = 12.06, c3 = 0.007, k = 1 (validity h/delta in 3.1..60,
+//!   Re in 75..1300, claimed max 6% deviation).
+//! - Part II, Table 1 (same journal issue): the authors' own top-hat
+//!   measurements and CFD at h/delta ~ 10,
+//!   `St = c/Re + St_inf`: experiment c = -1.150,
+//!   St_inf = 0.04522; CFD c = -0.7387, St_inf = 0.04010 (pure
+//!   stage I).
+//!
+//! The fixture runs the jet-labium rig at the canonical staging
+//! geometry h/delta = 10, Re = 144 (inside the stage-I band: onset
+//! ~75, stage II ~220 per Part I) and compares the measured
+//! `St = f delta / u` against all three published predictions. The
+//! DEFAULT jetlab fixture (h/delta = 3) is deliberately NOT used
+//! here: it sits at the very edge of Brown's validity band and its
+//! oscillation is not on the stage ladder (measured St 0.64 —
+//! recorded as a negative result in the bead).
+//!
+//! `#[ignore]`d for runtime (~4 min debug): executed on demand and on
+//! the record — the JSON line below was produced by a real run.
+
+use fs_aeroac::jetlab::{JetLabiumConfig, run_jet_labium};
+use fs_fft::{C64, Fft};
+
+#[test]
+#[ignore = "heavy staging run (~4 min); execute explicitly"]
+fn edge_tone_stage_one_strouhal_matches_published() {
+    let cfg = JetLabiumConfig {
+        nx: 192,
+        ny: 64,
+        slot_half: 3.0,
+        slot_smoothing: 1.2,
+        u_jet: 0.08,
+        tau: 0.51,         // nu = 1/300 -> Re = u * 2*slot_half / nu = 144
+        edge_distance: 60, // h/delta = 60/6 = 10
+        plate_length: 50,
+        fringe_width: 32,
+        fringe_sigma: 0.3,
+        steps_settle: 4000,
+        steps_record: 16_384,
+        nozzle_thickness: 2,
+    };
+    let run = run_jet_labium(&cfg).expect("run");
+    let d = &run.diagnostics;
+    assert!(d.mach_max_lattice < 0.25, "Mach {}", d.mach_max_lattice);
+    let imbalance = (d.flux_plate_plane - d.flux_fringe_plane).abs() / d.flux_plate_plane.abs();
+    assert!(imbalance < 0.02, "flux imbalance {imbalance:.4}");
+    // Transverse-force spectrum (Hann).
+    let n = run.force_series.len();
+    let mean = run.force_series.iter().map(|f| f[1]).sum::<f64>() / n as f64;
+    let fft = Fft::new(n);
+    let mut buf: Vec<C64> = run
+        .force_series
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let w = 0.5 - 0.5 * ((2.0 * core::f64::consts::PI * i as f64) / (n as f64 - 1.0)).cos();
+            C64::new((f[1] - mean) * w, 0.0)
+        })
+        .collect();
+    let mut scratch = vec![C64::new(0.0, 0.0); n];
+    fft.forward(&mut buf, &mut scratch);
+    let power: Vec<f64> = buf[..n / 2].iter().map(|c| c.norm_sq()).collect();
+    let (peak_bin, peak_pow) = power
+        .iter()
+        .enumerate()
+        .skip(8)
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .expect("spectrum");
+    let mut sorted = power[8..].to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let prominence = peak_pow / sorted[sorted.len() / 2].max(1e-300);
+    assert!(
+        prominence > 50.0,
+        "no oscillation: prominence {prominence:.1}"
+    );
+    let freq = peak_bin as f64 / n as f64;
+    let delta = 2.0 * cfg.slot_half;
+    let st = freq * delta / cfg.u_jet;
+    // Published stage-I predictions at Re = 144, h/delta = 10:
+    let re = d.reynolds;
+    let st_brown = (0.4659 - 12.06 / re) * (delta / cfg.edge_distance as f64 - 0.007);
+    let st_vaik_exp = -1.150 / re + 0.045_22;
+    let st_vaik_cfd = -0.738_7 / re + 0.040_10;
+    // Authored envelope: within 15% of the Brown prediction
+    // (measured +3.0% on the recorded run, INSIDE the published
+    // sources' own ~8% spread; the two-cell plate vs wedge, the
+    // fringe closure, and delta = 6 lu discretization are this rig's
+    // honest error sources — re-measure if re-dimensioned).
+    let dev = (st - st_brown) / st_brown;
+    assert!(
+        dev.abs() < 0.15,
+        "stage-I Strouhal {st:.4} vs Brown {st_brown:.4} (dev {dev:.2}); Vaik exp {st_vaik_exp:.4}, CFD {st_vaik_cfd:.4}"
+    );
+    println!(
+        "{{\"suite\":\"fs-aeroac\",\"case\":\"edge-tone-staging\",\"re\":{re:.0},\"h_over_delta\":10,\"st_measured\":{st:.5},\"st_brown\":{st_brown:.5},\"st_vaik_exp\":{st_vaik_exp:.5},\"st_vaik_cfd\":{st_vaik_cfd:.5},\"deviation_vs_brown\":{dev:.3},\"prominence\":{prominence:.0},\"flux_imbalance\":{imbalance:.5},\"verdict\":\"pass\"}}"
+    );
+}

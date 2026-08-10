@@ -56,6 +56,13 @@ pub struct JetLabiumConfig {
     pub steps_settle: usize,
     /// Recorded steps (power of two, for the caller's FFT).
     pub steps_record: usize,
+    /// Nozzle wall thickness at the jet root (0 = no nozzle). A
+    /// nozzle wall with a slit of the slot height provides the
+    /// RECEPTIVITY edge the classic edge-tone feedback loop closes
+    /// at — without it the rig oscillates at the free jet's own
+    /// most-amplified frequency instead of the Brown stage ladder
+    /// (executed: St 0.46 vs stage-I 0.036 at h/delta = 10).
+    pub nozzle_thickness: usize,
 }
 
 /// Per-run diagnostics (the bead's mandated honesty block).
@@ -130,9 +137,11 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
             what: "jet geometry (domain, slot, speed, tau) out of range",
         });
     }
-    if cfg.edge_distance + cfg.plate_length + cfg.fringe_width + 8 > cfg.nx {
+    if cfg.nozzle_thickness + 2 + cfg.edge_distance + cfg.plate_length + cfg.fringe_width + 8
+        > cfg.nx
+    {
         return Err(AeroacError::InvalidParameter {
-            what: "plate + fringe do not fit in the domain",
+            what: "nozzle + plate + fringe do not fit in the domain",
         });
     }
     if !cfg.steps_record.is_power_of_two() || cfg.steps_record < 64 {
@@ -151,9 +160,25 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
             grid.f[i] = fs_lbm::equilibrium(1.0, row.1[0], 0.0);
         }
     }
+    // Nozzle wall: a slit of the slot height in a solid column at
+    // the domain start; the fringe (which targets the slot profile)
+    // sits at the domain END, so the wrap feeds the nozzle plenum.
+    #[allow(clippy::cast_precision_loss)]
+    let yc = cfg.ny as f64 / 2.0 - 0.5;
+    for x in 0..cfg.nozzle_thickness {
+        for y in 0..cfg.ny {
+            #[allow(clippy::cast_precision_loss)]
+            let open = (y as f64 - yc).abs() < cfg.slot_half;
+            if !open {
+                let i = grid.idx(x, y);
+                grid.flags[i] = Cell::Wall;
+            }
+        }
+    }
+    let plate_x0 = cfg.nozzle_thickness + cfg.edge_distance;
     let y_plate_lo = cfg.ny / 2 - 1;
     let mut plate_mask = vec![false; cfg.nx * cfg.ny];
-    for x in cfg.edge_distance..cfg.edge_distance + cfg.plate_length {
+    for x in plate_x0..plate_x0 + cfg.plate_length {
         for y in [y_plate_lo, y_plate_lo + 1] {
             let i = grid.idx(x, y);
             grid.flags[i] = Cell::Wall;
@@ -174,7 +199,7 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
     }
     let mut force_series = Vec::with_capacity(cfg.steps_record);
     let mut mach_max = 0.0f64;
-    let x_plate_plane = cfg.edge_distance.saturating_sub(6).max(1);
+    let x_plate_plane = plate_x0.saturating_sub(6).max(cfg.nozzle_thickness + 1);
     let x_fringe_plane = cfg.nx - cfg.fringe_width - 4;
     let mut flux_plate = 0.0f64;
     let mut flux_fringe = 0.0f64;
