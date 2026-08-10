@@ -1295,6 +1295,69 @@ impl RigidBodyIntegrator {
         })
     }
 
+    /// Performs one deterministic kick-drift Lie-group step.
+    ///
+    /// The supplied wrench is evaluated before this method is called. Linear
+    /// and body angular momenta receive the complete kick before position and
+    /// attitude drift with the updated momenta. Consequently, when a caller
+    /// re-evaluates a conservative position force after every accepted step,
+    /// the translational map is the symplectic-Euler map rather than the
+    /// secularly unstable explicit Taylor map. The rotational update is a
+    /// first-order Lie-group kick-drift, not a variational rigid-body claim.
+    /// Contact active sets, force evaluation, convergence, and energy auditing
+    /// remain responsibilities of the composing solver.
+    pub fn step_kick_drift(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench: Wrench,
+        duration_seconds: f64,
+    ) -> Result<StepReceipt, DynamicsError> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(DynamicsError::InvalidStepDuration);
+        }
+        self.gravity.validate()?;
+        state.validate()?;
+        properties.validate()?;
+        wrench.validate()?;
+        let diagnostics_before = self.diagnostics(state, properties)?;
+        let total_force_world = wrench
+            .force_world
+            .add(self.gravity.acceleration_world().scale(properties.mass));
+        let linear_momentum_after = state
+            .linear_momentum_world
+            .add(total_force_world.scale(duration_seconds));
+        let position_after = state
+            .pose
+            .position_world
+            .add(linear_momentum_after.scale(duration_seconds / properties.mass));
+
+        let angular_rate_before =
+            angular_momentum_rate(state.angular_momentum_body, properties, wrench.torque_body);
+        let angular_momentum_after = state
+            .angular_momentum_body
+            .add(angular_rate_before.scale(duration_seconds));
+        let angular_velocity_after = properties.angular_velocity_body(angular_momentum_after);
+        let orientation_after = state
+            .pose
+            .orientation
+            .right_exp(angular_velocity_after.scale(duration_seconds))?;
+
+        let state_after = RigidBodyState::new(
+            Pose::new(position_after, orientation_after)?,
+            linear_momentum_after,
+            angular_momentum_after,
+        )?;
+        let diagnostics_after = self.diagnostics(state_after, properties)?;
+        Ok(StepReceipt {
+            duration_seconds,
+            state_before: state,
+            state_after,
+            diagnostics_before,
+            diagnostics_after,
+        })
+    }
+
     /// Advances at most `step_count` fixed steps and observes cancellation only
     /// at whole-step boundaries. A cancellation result therefore never contains
     /// a partially applied force, torque, orientation, or diagnostics update.
@@ -1531,6 +1594,43 @@ mod tests {
         assert_close(receipt.state_after.linear_momentum_world().x, 2.0, EPSILON);
         assert_close(receipt.state_after.pose().position_world().x, 0.25, EPSILON);
         assert_close(receipt.state_after.angular_momentum_body().z, 1.5, EPSILON);
+    }
+
+    #[test]
+    fn kick_drift_has_bounded_energy_for_a_recomputed_harmonic_force() {
+        let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(0.25, 0.25, 0.25)).unwrap();
+        let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+        let mut current = RigidBodyState::new(
+            Pose::new(Vec3::new(1.0, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+            Vec3::ZERO,
+            Vec3::ZERO,
+        )
+        .unwrap();
+        let initial_energy = 0.5;
+        let mut maximum_energy_error = 0.0_f64;
+        for _ in 0..100_000 {
+            let spring_force_x = -current.pose().position_world().x;
+            current = integrator
+                .step_kick_drift(
+                    current,
+                    properties,
+                    Wrench {
+                        force_world: Vec3::new(spring_force_x, 0.0, 0.0),
+                        torque_body: Vec3::ZERO,
+                    },
+                    0.05,
+                )
+                .unwrap()
+                .state_after;
+            let velocity_x = current.linear_momentum_world().x;
+            let position_x = current.pose().position_world().x;
+            let energy = 0.5 * velocity_x * velocity_x + 0.5 * position_x * position_x;
+            maximum_energy_error = maximum_energy_error.max((energy - initial_energy).abs());
+        }
+        assert!(
+            maximum_energy_error < 0.013,
+            "symplectic-Euler energy envelope drifted by {maximum_energy_error:e}"
+        );
     }
 
     #[test]
