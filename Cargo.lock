@@ -913,6 +913,7 @@ dependencies = [
 name = "fs-aeroac"
 version = "0.0.1"
 dependencies = [
+ "fs-lbm",
  "fs-math",
  "fsci-runtime",
  "fsci-special",
