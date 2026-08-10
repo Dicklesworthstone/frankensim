@@ -1013,7 +1013,7 @@ impl Default for CinematicFiniteGapContactConfig {
                 0.0, 1.0e-6, 2.0e-6, 5.0e-6, 1.0e-5, 2.0e-5, 5.0e-5, 1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3,
             ],
             outside_probe_to_outer_radius: 0.01,
-            maximum_inward_search_to_outer_radius: 0.05,
+            maximum_inward_search_to_outer_radius: 0.015,
             root_tolerance_to_outer_radius: 1.0e-10,
             maximum_bisection_steps: 64,
             maximum_active_set_iterations: 128,
