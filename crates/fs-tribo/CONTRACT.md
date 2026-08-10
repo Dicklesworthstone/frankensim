@@ -52,8 +52,12 @@ reactions, and residual embedding.
   surface-height traces and filters them by the exact one-dimensional marginal
   of an elliptic Hertz pressure footprint. It analytically integrates the
   piecewise-linear trace and its path derivative, then applies only the
-  explicitly bounded contact tangent `delta_F = k_n delta_h`. It creates no
-  random texture, audio spectrum, or apparatus-specific frequency.
+  explicitly bounded contact tangent `delta_F = k_n delta_h`.
+  `SelfAffinePeriodicProfileSpectrum` can construct a deterministic,
+  random-phase, band-limited one-dimensional profile whose spatial PSD follows
+  `Phi(q) proportional to q^-(2 H + 1)` and whose Fourier coefficients are
+  normalized to an explicit RMS height. Its seed selects spatial phase only;
+  it creates no temporal/audio spectrum or apparatus-specific frequency.
 
 ### Partial-slip return-map rung
 
@@ -129,6 +133,13 @@ material-hysteresis rung would need a disjoint work channel.
   shortest period. Duplicate cycles and underresolved grids refuse. An empty
   spectrum is an exact smooth track. No material name, acoustic frequency,
   stochastic realization, seam correction, or authority upgrade is inferred.
+- `SelfAffinePeriodicProfileSpectrum` refuses nonpositive/nonfinite RMS height,
+  Hurst exponents outside `0 < H < 1`, inverted or zero cycle bands, and
+  unbounded harmonic counts. Every retained cycle owns a counter-based phase
+  stream keyed by the explicit seed and cycle, so extending the band preserves
+  shared-cycle phases. Phase changes preserve the declared Fourier power, and
+  the continuous periodic profile retains the requested RMS height to
+  floating-point roundoff.
 
 ## Error model
 
@@ -168,8 +179,10 @@ ledger-channel closure; typed flash-data insufficiency and power scaling;
 forged negative/non-finite work rejection; and rollback/deterministic replay
 for work and wear. Surface-excitation tests additionally cover periodic-spectrum
 order invariance, exact sample-grid realization, duplicate-cycle refusal, and
-the eight-samples-per-shortest-period gate. Test coefficients are explicitly
-synthetic fixtures.
+the eight-samples-per-shortest-period gate. They also cover deterministic
+self-affine replay, exact RMS normalization, the declared PSD slope, seed-only
+phase changes, and malformed statistic/band refusal. Test coefficients are
+explicitly synthetic fixtures.
 The separately owned partial-slip tests cover its scalar return-map admission,
 reversal, checkpoint replay, and receipt-mutation refusals.
 Rolling-loss tests cover zero load/rate/factor, force and moment reversal,
@@ -192,6 +205,13 @@ re-solution of contact, structural response, or acoustic radiation. Its flash ca
 semi-infinite uniform-flux model-form estimate, not a temperature measurement
 or validation result. A caller may record an estimated or synthetic result,
 but must not promote it based on this crate alone.
+
+The self-affine constructor is likewise a geometry realization, not evidence
+that a specimen is self-affine or that its RMS height, Hurst exponent,
+wavelength cutoffs, or phase realization are correct. Those inputs require
+profilometry or an explicitly weak estimate. The one-dimensional profile does
+not establish an isotropic two-dimensional areal PSD or resolve asperity-scale
+partial contact.
 
 The rolling and contour rungs likewise do not establish deformation-loss
 dominance, coupon calibration validity, normal-contact admission, an error

@@ -20,12 +20,16 @@
 use core::fmt;
 use std::sync::Arc;
 
+use fs_math::det;
+use fs_rand::StreamKey;
+
 use crate::{InputAuthority, InterfaceSystemRef};
 
 const MAX_TRACE_SAMPLES: usize = 1_000_000;
 const MAX_INTEGRATION_SEGMENTS: usize = 1_000_000;
 const MAX_PERIODS_PER_FOOTPRINT: f64 = 8.0;
 const MIN_SAMPLES_PER_SHORTEST_HARMONIC: usize = 8;
+const SELF_AFFINE_PHASE_KERNEL: u32 = 0x5341_4646;
 
 /// One real Fourier component of a periodic measured or declared surface track.
 ///
@@ -41,6 +45,165 @@ pub struct PeriodicSurfaceHarmonic {
     pub cosine_amplitude_m: f64,
     /// Sine coefficient [m].
     pub sine_amplitude_m: f64,
+}
+
+/// Bounded random-phase realization of a one-dimensional self-affine profile.
+///
+/// The retained spatial power follows `Phi(q) proportional to q^-(2 H + 1)`
+/// between the declared integer cycle cutoffs. Fourier magnitudes are
+/// normalized so the continuous zero-mean periodic profile has exactly the
+/// requested RMS height (up to floating-point roundoff). The seed chooses only
+/// spatial phases; it never selects a temporal or acoustic frequency.
+///
+/// This is a caller-parameterized geometry model. It is not a measurement, a
+/// material-name preset, a two-dimensional areal texture, or a statistical
+/// validation of any specimen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelfAffinePeriodicProfileSpectrum {
+    rms_height_m: f64,
+    hurst_exponent: f64,
+    minimum_cycles_per_track: u32,
+    maximum_cycles_per_track: u32,
+    phase_seed: u64,
+}
+
+impl SelfAffinePeriodicProfileSpectrum {
+    /// Admit one band-limited self-affine profile spectrum.
+    ///
+    /// `0 < hurst_exponent < 1` is the ordinary self-affine profile range.
+    /// Both cycle cutoffs are positive and inclusive. The returned spectrum is
+    /// still only caller input; construction does not upgrade its authority.
+    pub fn new(
+        rms_height_m: f64,
+        hurst_exponent: f64,
+        minimum_cycles_per_track: u32,
+        maximum_cycles_per_track: u32,
+        phase_seed: u64,
+    ) -> Result<Self, SurfaceExcitationError> {
+        if !(rms_height_m.is_finite() && rms_height_m > 0.0) {
+            return Err(SurfaceExcitationError::InvalidInput {
+                field: "self_affine_rms_height_m",
+            });
+        }
+        if !(hurst_exponent.is_finite() && hurst_exponent > 0.0 && hurst_exponent < 1.0) {
+            return Err(SurfaceExcitationError::InvalidInput {
+                field: "self_affine_hurst_exponent",
+            });
+        }
+        if minimum_cycles_per_track == 0 || maximum_cycles_per_track < minimum_cycles_per_track {
+            return Err(SurfaceExcitationError::InvalidInput {
+                field: "self_affine_cycle_band",
+            });
+        }
+        let harmonic_count = u64::from(maximum_cycles_per_track)
+            .checked_sub(u64::from(minimum_cycles_per_track))
+            .and_then(|span| span.checked_add(1))
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(SurfaceExcitationError::TraceCapacity {
+                requested: usize::MAX,
+            })?;
+        if harmonic_count > MAX_TRACE_SAMPLES {
+            return Err(SurfaceExcitationError::TraceCapacity {
+                requested: harmonic_count,
+            });
+        }
+        Ok(Self {
+            rms_height_m,
+            hurst_exponent,
+            minimum_cycles_per_track,
+            maximum_cycles_per_track,
+            phase_seed,
+        })
+    }
+
+    /// Requested continuous-profile RMS height [m].
+    #[must_use]
+    pub const fn rms_height_m(&self) -> f64 {
+        self.rms_height_m
+    }
+
+    /// One-dimensional self-affine Hurst exponent.
+    #[must_use]
+    pub const fn hurst_exponent(&self) -> f64 {
+        self.hurst_exponent
+    }
+
+    /// Inclusive lowest retained spatial cycle around the track.
+    #[must_use]
+    pub const fn minimum_cycles_per_track(&self) -> u32 {
+        self.minimum_cycles_per_track
+    }
+
+    /// Inclusive highest retained spatial cycle around the track.
+    #[must_use]
+    pub const fn maximum_cycles_per_track(&self) -> u32 {
+        self.maximum_cycles_per_track
+    }
+
+    /// Explicit deterministic phase-realization seed.
+    #[must_use]
+    pub const fn phase_seed(&self) -> u64 {
+        self.phase_seed
+    }
+
+    /// Realize the declared PSD into explicit periodic Fourier coefficients.
+    ///
+    /// Each cycle owns a separate counter-based random stream, so extending or
+    /// truncating the admitted band does not change the phases of shared
+    /// cycles. Coefficient order is canonical ascending cycle order.
+    pub fn realize_harmonics(
+        &self,
+    ) -> Result<Vec<PeriodicSurfaceHarmonic>, SurfaceExcitationError> {
+        let count = usize::try_from(
+            u64::from(self.maximum_cycles_per_track) - u64::from(self.minimum_cycles_per_track) + 1,
+        )
+        .map_err(|_| SurfaceExcitationError::TraceCapacity {
+            requested: usize::MAX,
+        })?;
+        let spectral_exponent = self.hurst_exponent.mul_add(2.0, 1.0);
+        let mut weights = Vec::new();
+        weights
+            .try_reserve_exact(count)
+            .map_err(|_| SurfaceExcitationError::TraceCapacity { requested: count })?;
+        let mut total_weight = 0.0_f64;
+        for cycles in self.minimum_cycles_per_track..=self.maximum_cycles_per_track {
+            let cycle = f64::from(cycles);
+            let weight = det::exp(-spectral_exponent * det::ln(cycle));
+            if !(weight.is_finite() && weight > 0.0) {
+                return Err(SurfaceExcitationError::InvalidInput {
+                    field: "self_affine_spectral_weight",
+                });
+            }
+            total_weight += weight;
+            weights.push((cycles, weight));
+        }
+        if !(total_weight.is_finite() && total_weight > 0.0) {
+            return Err(SurfaceExcitationError::InvalidInput {
+                field: "self_affine_total_spectral_weight",
+            });
+        }
+
+        let mut harmonics = Vec::new();
+        harmonics
+            .try_reserve_exact(count)
+            .map_err(|_| SurfaceExcitationError::TraceCapacity { requested: count })?;
+        for (cycles, weight) in weights {
+            let amplitude_m = self.rms_height_m * det::sqrt(2.0 * weight / total_weight);
+            let mut phase_stream = StreamKey {
+                seed: self.phase_seed,
+                kernel: SELF_AFFINE_PHASE_KERNEL,
+                tile: cycles,
+            }
+            .stream();
+            let phase_rad = core::f64::consts::TAU * phase_stream.next_f64();
+            harmonics.push(PeriodicSurfaceHarmonic {
+                cycles_per_track: cycles,
+                cosine_amplitude_m: amplitude_m * det::cos(phase_rad),
+                sine_amplitude_m: amplitude_m * det::sin(phase_rad),
+            });
+        }
+        Ok(harmonics)
+    }
 }
 
 /// Explicit spatial spectrum from which a periodic surface-height trace is sampled.
@@ -926,6 +1089,89 @@ mod tests {
         assert_eq!(trace.heights_m().len(), 32);
         assert_eq!(trace.sample_spacing_m().to_bits(), 0.00125_f64.to_bits());
         assert!((trace.heights_m()[0] - 2.5e-6).abs() < 1.0e-20);
+    }
+
+    #[test]
+    fn g0_self_affine_profile_replays_exact_power_and_requested_rms() {
+        let spectrum = SelfAffinePeriodicProfileSpectrum::new(4.5e-10, 0.8, 3, 96, 0x5eed)
+            .expect("bounded self-affine profile");
+        let first = spectrum
+            .realize_harmonics()
+            .expect("deterministic Fourier realization");
+        let replay = spectrum.realize_harmonics().expect("same seed must replay");
+        assert_eq!(first, replay);
+        assert_eq!(first.first().expect("first cycle").cycles_per_track, 3);
+        assert_eq!(first.last().expect("last cycle").cycles_per_track, 96);
+
+        let mean_square_m2 = 0.5
+            * first
+                .iter()
+                .map(|harmonic| {
+                    harmonic.cosine_amplitude_m.mul_add(
+                        harmonic.cosine_amplitude_m,
+                        harmonic.sine_amplitude_m * harmonic.sine_amplitude_m,
+                    )
+                })
+                .sum::<f64>();
+        let observed_rms_m = det::sqrt(mean_square_m2);
+        assert!(
+            (observed_rms_m / spectrum.rms_height_m() - 1.0).abs() < 2.0e-14,
+            "requested RMS was not retained: requested={:.17e}, observed={observed_rms_m:.17e}",
+            spectrum.rms_height_m()
+        );
+
+        let power = |harmonic: &PeriodicSurfaceHarmonic| {
+            harmonic.cosine_amplitude_m.mul_add(
+                harmonic.cosine_amplitude_m,
+                harmonic.sine_amplitude_m * harmonic.sine_amplitude_m,
+            )
+        };
+        let low = &first[2];
+        let high = &first[31];
+        let expected_ratio = det::exp(
+            -(2.0 * spectrum.hurst_exponent() + 1.0)
+                * det::ln(f64::from(high.cycles_per_track) / f64::from(low.cycles_per_track)),
+        );
+        assert!(
+            (power(high) / power(low) / expected_ratio - 1.0).abs() < 2.0e-14,
+            "realized Fourier power does not follow the declared self-affine PSD"
+        );
+
+        let other_seed = SelfAffinePeriodicProfileSpectrum::new(4.5e-10, 0.8, 3, 96, 0x5eee)
+            .expect("second bounded realization")
+            .realize_harmonics()
+            .expect("second deterministic realization");
+        assert_ne!(first, other_seed, "phase seed must affect geometry");
+        for (a, b) in first.iter().zip(&other_seed) {
+            assert!(
+                (power(a) / power(b) - 1.0).abs() < 2.0e-14,
+                "phase seed must not alter the declared PSD"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_self_affine_profile_refuses_invalid_statistics_and_band() {
+        for hurst in [f64::NAN, 0.0, 1.0] {
+            assert!(matches!(
+                SelfAffinePeriodicProfileSpectrum::new(1.0e-9, hurst, 1, 8, 0),
+                Err(SurfaceExcitationError::InvalidInput {
+                    field: "self_affine_hurst_exponent"
+                })
+            ));
+        }
+        assert!(matches!(
+            SelfAffinePeriodicProfileSpectrum::new(1.0e-9, 0.8, 0, 8, 0),
+            Err(SurfaceExcitationError::InvalidInput {
+                field: "self_affine_cycle_band"
+            })
+        ));
+        assert!(matches!(
+            SelfAffinePeriodicProfileSpectrum::new(1.0e-9, 0.8, 9, 8, 0),
+            Err(SurfaceExcitationError::InvalidInput {
+                field: "self_affine_cycle_band"
+            })
+        ));
     }
 
     #[test]

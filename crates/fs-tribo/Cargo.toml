@@ -8,5 +8,9 @@ description = "Typed dry-contact and tribology baseline for FrankenSim"
 [package.metadata.frankensim]
 layer = "L3"
 
+[dependencies]
+fs-math = { path = "../fs-math" }
+fs-rand = { path = "../fs-rand" }
+
 [lints]
 workspace = true
