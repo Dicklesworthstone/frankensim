@@ -11,7 +11,9 @@ use super::transport::{TransportMode, refractive_transport_factor};
 use super::*;
 
 /// Bit-affecting semantics of the opt-in bidirectional path integrator.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 1;
+/// Version 2 corrects the global sample multiplicity and estimator
+/// normalization of light-subpath strategies that splat into the raster.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 2;
 
 const CAMERA_WALK_DOMAIN: u32 = 0x4244_4341;
 const LIGHT_WALK_DOMAIN: u32 = 0x4244_4c49;

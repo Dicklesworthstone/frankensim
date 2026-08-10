@@ -974,11 +974,16 @@ impl Default for CinematicExteriorAeroConfig {
 pub struct CinematicFiniteGapContactConfig {
     /// Inclination nodes indexing one common-grid response family [rad].
     pub inclination_nodes_rad: Vec<f64>,
-    /// Square tangent-grid cell count. Odd counts retain the support point at
-    /// the centre of one cell rather than on a cell edge.
-    pub cells_per_axis: usize,
-    /// Half-width of the tangent sampling window divided by outer radius.
-    pub tangent_half_extent_to_outer_radius: f64,
+    /// Cell count along the first tangent direction. An odd count retains the
+    /// support point at the centre of one cell rather than on a cell edge.
+    pub cells_x: usize,
+    /// Cell count along the second tangent direction, with the same centering
+    /// convention as `cells_x`.
+    pub cells_y: usize,
+    /// First-tangent half-width divided by outer radius.
+    pub tangent_half_extent_x_to_outer_radius: f64,
+    /// Second-tangent half-width divided by outer radius.
+    pub tangent_half_extent_y_to_outer_radius: f64,
     /// Strictly increasing approach nodes divided by outer radius.
     pub approach_nodes_to_outer_radius: Vec<f64>,
     /// Outward root-bracketing probe divided by outer radius.
@@ -1007,16 +1012,26 @@ impl Default for CinematicFiniteGapContactConfig {
             inclination_nodes_rad: vec![
                 0.002, 0.005, 0.01, 0.02, 0.04, 0.08, 0.12, 0.16, 0.24, 0.35,
             ],
-            cells_per_axis: 25,
-            tangent_half_extent_to_outer_radius: 0.025,
+            // At shallow inclination the exact Euler-disc patch is long along
+            // the circumferential tangent but narrow across the fillet. Mirror
+            // that physical anisotropy instead of spending a square grid on
+            // empty meridional cells. Both directions remain cell-centred and
+            // resolve their respective footprints without boundary truncation.
+            cells_x: 121,
+            cells_y: 41,
+            tangent_half_extent_x_to_outer_radius: 0.12,
+            tangent_half_extent_y_to_outer_radius: 0.01,
             approach_nodes_to_outer_radius: vec![
-                0.0, 1.0e-6, 2.0e-6, 5.0e-6, 1.0e-5, 2.0e-5, 5.0e-5, 1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3,
+                0.0, 0.5e-6, 1.0e-6, 2.0e-6, 3.0e-6, 5.0e-6, 7.5e-6, 1.0e-5,
             ],
             outside_probe_to_outer_radius: 0.01,
-            maximum_inward_search_to_outer_radius: 0.015,
+            // The tangent window spans a finite part of the exact curved
+            // surface. Corner rays therefore need a bracket deeper than the
+            // local sagitta before the chart can certify an inside endpoint.
+            maximum_inward_search_to_outer_radius: 0.06,
             root_tolerance_to_outer_radius: 1.0e-10,
             maximum_bisection_steps: 64,
-            maximum_active_set_iterations: 128,
+            maximum_active_set_iterations: 1_024,
             complementarity_tolerance_to_outer_radius: 1.0e-10,
             boundary_clearance_cells: 2,
             absolute_energy_tolerance_j: 1.0e-12,
@@ -1705,19 +1720,23 @@ impl CinematicFixtureConfig {
                     .windows(2)
                     .all(|pair| pair[1] > pair[0]);
             let cell_count = finite_gap
-                .cells_per_axis
-                .checked_mul(finite_gap.cells_per_axis);
+                .cells_x
+                .checked_mul(finite_gap.cells_y);
             if !valid_nodes
                 || !valid_approaches
-                || finite_gap.cells_per_axis < 5
-                || finite_gap.cells_per_axis.is_multiple_of(2)
+                || finite_gap.cells_x < 5
+                || finite_gap.cells_y < 5
+                || finite_gap.cells_x.is_multiple_of(2)
+                || finite_gap.cells_y.is_multiple_of(2)
                 || cell_count.is_none_or(|count| count > 16_384)
                 || finite_gap.boundary_clearance_cells == 0
-                || 2 * finite_gap.boundary_clearance_cells >= finite_gap.cells_per_axis
+                || 2 * finite_gap.boundary_clearance_cells >= finite_gap.cells_x
+                || 2 * finite_gap.boundary_clearance_cells >= finite_gap.cells_y
                 || finite_gap.maximum_bisection_steps == 0
                 || finite_gap.maximum_active_set_iterations == 0
                 || [
-                    finite_gap.tangent_half_extent_to_outer_radius,
+                    finite_gap.tangent_half_extent_x_to_outer_radius,
+                    finite_gap.tangent_half_extent_y_to_outer_radius,
                     finite_gap.outside_probe_to_outer_radius,
                     finite_gap.maximum_inward_search_to_outer_radius,
                     finite_gap.root_tolerance_to_outer_radius,
@@ -2691,13 +2710,13 @@ fn build_fixture_finite_gap_response(
     cx: &Cx<'_>,
 ) -> Result<Arc<FiniteGapResponseFamily>, CinematicFixtureError> {
     let radius_m = profile.dimensions.outer_radius_m;
-    let half_extent_m = config.tangent_half_extent_to_outer_radius * radius_m;
-    let cell_size_m = 2.0 * half_extent_m / config.cells_per_axis as f64;
+    let half_extent_x_m = config.tangent_half_extent_x_to_outer_radius * radius_m;
+    let half_extent_y_m = config.tangent_half_extent_y_to_outer_radius * radius_m;
     let grid = FiniteGapGrid {
-        cells_x: config.cells_per_axis,
-        cells_y: config.cells_per_axis,
-        cell_width_m: cell_size_m,
-        cell_depth_m: cell_size_m,
+        cells_x: config.cells_x,
+        cells_y: config.cells_y,
+        cell_width_m: 2.0 * half_extent_x_m / config.cells_x as f64,
+        cell_depth_m: 2.0 * half_extent_y_m / config.cells_y as f64,
     };
     let approach_nodes_m = config
         .approach_nodes_to_outer_radius
@@ -2760,7 +2779,11 @@ fn build_fixture_finite_gap_response(
                 },
                 cx,
             )
-            .map_err(pipeline)?,
+            .map_err(|error| {
+                pipeline(format_args!(
+                    "finite-gap response at inclination {inclination_rad:.17e} rad refused: {error}"
+                ))
+            })?,
         );
     }
     FiniteGapResponseFamily::try_new(
@@ -5438,7 +5461,7 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
     hasher.update(&config.render_sample_ceiling().to_le_bytes());
     match config.render_integrator {
         CinematicRenderIntegrator::CameraPathMis => hasher.update(b"camera-path-mis-v1"),
-        CinematicRenderIntegrator::Bidirectional => hasher.update(b"finite-light-bdpt-v1"),
+        CinematicRenderIntegrator::Bidirectional => hasher.update(b"finite-light-bdpt-v2"),
     }
     if let Some(policy) = config.independent_pilot_sampling {
         let admitted = policy
@@ -8581,7 +8604,7 @@ fn fixture_sampling_manifest_json(
             "{{\"mode\":\"uniform\",\"integrator\":\"{}\",\"samples_per_pixel\":{}}}",
             match config.render_integrator {
                 CinematicRenderIntegrator::CameraPathMis => "camera-path-mis-v1",
-                CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v1",
+                CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v2",
             },
             config.samples_per_pixel,
         )
@@ -8649,7 +8672,7 @@ fn production_fixture_manifest(
     };
     let render_integrator = match config.render_integrator {
         CinematicRenderIntegrator::CameraPathMis => "camera-path-mis-v1",
-        CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v1",
+        CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v2",
     };
     let reconstruction_filter = fixture_reconstruction_filter_spec();
     format!(
@@ -9302,6 +9325,129 @@ mod tests {
             assert_eq!(
                 configured.mass_properties.mass.to_bits(),
                 THORNE_2026_STEEL_DISC_MASS_KG.to_bits()
+            );
+        });
+    }
+
+    #[test]
+    fn g0_default_finite_gap_chart_is_centered_on_the_exact_support() {
+        with_test_cx(|cx| {
+            let profile = CinematicDiscSpecimenConfig::default()
+                .resolve_profile(cx)
+                .expect("default cinematic specimen");
+            let config = CinematicFiniteGapContactConfig::default();
+            let radius_m = profile.dimensions.outer_radius_m;
+            let grid = FiniteGapGrid {
+                cells_x: config.cells_x,
+                cells_y: config.cells_y,
+                cell_width_m: 2.0 * config.tangent_half_extent_x_to_outer_radius * radius_m
+                    / config.cells_x as f64,
+                cell_depth_m: 2.0 * config.tangent_half_extent_y_to_outer_radius * radius_m
+                    / config.cells_y as f64,
+            };
+            let inclination_rad = config.inclination_nodes_rad[0];
+            let sine = inclination_rad.sin();
+            let cosine = inclination_rad.cos();
+            let support = profile
+                .chart
+                .minimum_support_point(GeomVec3::new(-sine, 0.0, cosine), cx)
+                .expect("exact profile support");
+            let sampling = sample_finite_gap_from_chart(
+                &FiniteGapChartSamplingRequest {
+                    chart: &profile.chart,
+                    source_geometry_id: "g0-default-finite-gap-centering",
+                    grid,
+                    frame: FiniteGapContactFrame {
+                        surface_point_m: support.point,
+                        outward_normal: GeomVec3::new(sine, 0.0, -cosine),
+                        tangent_x: GeomVec3::new(0.0, 1.0, 0.0),
+                        tangent_y: GeomVec3::new(cosine, 0.0, sine),
+                    },
+                    evidence_requirement: FiniteGapChartEvidenceRequirement::AllowEstimate,
+                    outside_probe_m: config.outside_probe_to_outer_radius * radius_m,
+                    maximum_inward_search_m: config.maximum_inward_search_to_outer_radius
+                        * radius_m,
+                    root_tolerance_m: config.root_tolerance_to_outer_radius * radius_m,
+                    maximum_bisection_steps: config.maximum_bisection_steps,
+                },
+                cx,
+            )
+            .expect("sample exact profile about its selected support");
+            let (minimum_index, minimum_gap_m) = sampling
+                .undeformed_gap_m
+                .iter()
+                .copied()
+                .enumerate()
+                .min_by(|left, right| left.1.total_cmp(&right.1))
+                .expect("nonempty finite-gap grid");
+            let centre_x = config.cells_x / 2;
+            let centre_y = config.cells_y / 2;
+            let minimum_x = minimum_index % config.cells_x;
+            let minimum_y = minimum_index / config.cells_x;
+            assert_eq!(
+                (minimum_x, minimum_y),
+                (centre_x, centre_y),
+                "minimum gap {minimum_gap_m:.17e} m must occur at the exact support cell"
+            );
+            let clearance = config.boundary_clearance_cells;
+            let (boundary_index, boundary_gap_m) = sampling
+                .undeformed_gap_m
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| {
+                    let x = index % config.cells_x;
+                    let y = index / config.cells_x;
+                    x < clearance
+                        || y < clearance
+                        || x >= config.cells_x - clearance
+                        || y >= config.cells_y - clearance
+                })
+                .map(|(index, gap_m)| (index, gap_m - minimum_gap_m))
+                .min_by(|left, right| left.1.total_cmp(&right.1))
+                .expect("nonempty finite-gap boundary ring");
+            assert!(
+                boundary_gap_m
+                    > config
+                        .approach_nodes_to_outer_radius
+                        .last()
+                        .copied()
+                        .expect("nonempty approach grid")
+                        * radius_m,
+                "minimum boundary-ring gap {boundary_gap_m:.17e} m at cell ({}, {}) does not contain the response domain",
+                boundary_index % config.cells_x,
+                boundary_index / config.cells_x
+            );
+            let response = build_finite_gap_response_curve(
+                &FiniteGapResponseCurveRequest {
+                    gap_source_identity: sampling.identity,
+                    gap_source_authority: sampling.authority,
+                    grid,
+                    undeformed_gap_m: sampling.undeformed_gap_m,
+                    reduced_modulus_pa: 50.0e9,
+                    approach_nodes_m: config.approach_nodes_to_outer_radius
+                        .iter()
+                        .map(|ratio| ratio * radius_m)
+                        .collect(),
+                    maximum_active_set_iterations: config.maximum_active_set_iterations,
+                    complementarity_tolerance_m: config
+                        .complementarity_tolerance_to_outer_radius
+                        * radius_m,
+                    boundary_clearance_cells: config.boundary_clearance_cells,
+                    absolute_energy_tolerance_j: config.absolute_energy_tolerance_j,
+                    relative_energy_tolerance: config.relative_energy_tolerance,
+                },
+                cx,
+            )
+            .expect("contained default finite-gap response prefix");
+            let terminal_force_n = response
+                .nodes
+                .last()
+                .expect("three-node response")
+                .normal_force_n;
+            assert!(
+                terminal_force_n >= THORNE_2026_STEEL_DISC_MASS_KG * 9.806_65,
+                "contained response domain supports only {terminal_force_n:.17e} N"
             );
         });
     }
