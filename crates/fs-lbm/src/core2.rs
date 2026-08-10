@@ -11,6 +11,38 @@ use std::f64::consts::{PI, SQRT_2};
 const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
 const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 
+/// Collision operator for the D2Q9 core (naming follows the d3q19
+/// [`crate::d3q19::CollisionModel3`] precedent; tau stays per-cell,
+/// so the variants carry no parameters).
+///
+/// Default is [`CollisionModel2::Bgk`], whose arithmetic path is
+/// byte-for-byte the historical one — every existing pin and golden
+/// is unchanged. [`CollisionModel2::Regularized`] is the
+/// Latt–Chopard regularized collision: the non-equilibrium part is
+/// projected onto the second-order Hermite subspace
+/// (`f_neq_reg = w_i (9/2) Q_i : Pi_neq`, `Q_i = e_i e_i - cs^2 I`),
+/// discarding the non-hydrodynamic ghost content that drives the
+/// plain-BGK instability at high cell Reynolds number (executed
+/// boundary on the jet-labium family: `Re/delta` in (36, 48)). The
+/// shear viscosity keeps the identical `nu = (tau - 1/2)/3` law.
+///
+/// Scope: honored by the plain [`Grid::collide_into`] path (and
+/// everything built on it, including the stepping drivers and the
+/// partial-saturation proposal). Combining `Regularized` with the
+/// partial-saturation solid operator or body forces is possible but
+/// UNVALIDATED here: with Guo forcing the bare non-equilibrium is
+/// regularized without subtracting the half-force moment — exact
+/// for unforced cells, a disclosed approximation otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CollisionModel2 {
+    /// Plain BGK single-relaxation-time collision (historical path).
+    #[default]
+    Bgk,
+    /// Latt–Chopard regularized collision (second-order Hermite
+    /// projection of the non-equilibrium).
+    Regularized,
+}
+
 /// Cell classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
@@ -46,6 +78,9 @@ pub struct Grid {
     pub periodic_x: bool,
     /// Periodic in y?
     pub periodic_y: bool,
+    /// Collision operator (default [`CollisionModel2::Bgk`], the
+    /// byte-identical historical path).
+    pub collision: CollisionModel2,
 }
 
 /// Macroscopic moments of one cell.
@@ -645,6 +680,7 @@ impl Grid {
             fext: vec![[0.0; 2]; nx * ny],
             periodic_x: true,
             periodic_y: true,
+            collision: CollisionModel2::default(),
         }
     }
 
@@ -872,10 +908,13 @@ impl Grid {
         receipt
     }
 
-    /// Collide (per-cell tau, vector Guo forcing) into `post`.
+    /// Collide (per-cell tau, vector Guo forcing) into `post`,
+    /// honoring [`Grid::collision`]. The BGK branch is byte-for-byte
+    /// the historical arithmetic.
     pub fn collide_into(&self, post: &mut Vec<[f64; Q]>) {
         post.clear();
         post.resize(self.nx * self.ny, [0.0; Q]);
+        let regularized = matches!(self.collision, CollisionModel2::Regularized);
         for (i, out) in post.iter_mut().enumerate().take(self.nx * self.ny) {
             if !matches!(self.flags[i], Cell::Fluid | Cell::Interface) {
                 *out = self.f[i];
@@ -894,14 +933,40 @@ impl Grid {
                 self.g[0].mul_add(rho, self.fext[i][0]),
                 self.g[1].mul_add(rho, self.fext[i][1]),
             );
-            for q in 0..Q {
-                let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
-                let eu = ex * ux + ey * uy;
-                // Guo forcing, vector form.
-                let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
-                let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
-                let force = coef * W[q] * (fx * gx + fy * gy);
-                out[q] = self.f[i][q] + (feq[q] - self.f[i][q]) / tau + force;
+            if regularized {
+                // Second moment of the non-equilibrium.
+                let (mut pxx, mut pyy, mut pxy) = (0.0f64, 0.0f64, 0.0f64);
+                for q in 0..Q {
+                    let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
+                    let fneq = self.f[i][q] - feq[q];
+                    pxx += ex * ex * fneq;
+                    pyy += ey * ey * fneq;
+                    pxy += ex * ey * fneq;
+                }
+                let relax = 1.0 - 1.0 / tau;
+                for q in 0..Q {
+                    let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
+                    let eu = ex * ux + ey * uy;
+                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
+                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
+                    let force = coef * W[q] * (fx * gx + fy * gy);
+                    // w_i / (2 cs^4) = 4.5 w_i; Q_i : Pi_neq with the
+                    // symmetric off-diagonal counted twice.
+                    let qxx = ex * ex - CS2;
+                    let qyy = ey * ey - CS2;
+                    let fneq_reg = 4.5 * W[q] * (qxx * pxx + qyy * pyy + 2.0 * ex * ey * pxy);
+                    out[q] = feq[q] + relax * fneq_reg + force;
+                }
+            } else {
+                for q in 0..Q {
+                    let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
+                    let eu = ex * ux + ey * uy;
+                    // Guo forcing, vector form.
+                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
+                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
+                    let force = coef * W[q] * (fx * gx + fy * gy);
+                    out[q] = self.f[i][q] + (feq[q] - self.f[i][q]) / tau + force;
+                }
             }
         }
     }
