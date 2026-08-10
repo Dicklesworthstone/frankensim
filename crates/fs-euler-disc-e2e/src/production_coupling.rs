@@ -849,14 +849,28 @@ fn resolve_surface_geometry_contact(
                 });
             }
         };
-        let next_filtered = evaluate_hertz_filtered_surface_pair(
-            &surface.interface,
-            surface.surface_a.as_motion(),
-            surface.surface_b.as_motion(),
-            surface_footprint(&active, surface.travel_angle_from_patch_major_rad)?,
-        )
-        .map_err(ProductionSurfaceExcitationError::Surface)
-        .map_err(ProductionCouplingError::SurfaceExcitation)?;
+        let footprint = surface_footprint(&active, surface.travel_angle_from_patch_major_rad)?;
+        // Static-load bracketing legitimately evaluates the exact grazing
+        // state before a finite Hertz patch exists.  Preserve the point-limit
+        // geometry at that endpoint; clamping in an artificial patch radius
+        // would change both the load root and the filtered topography.
+        let next_filtered =
+            if footprint.semi_major_axis_m == 0.0 && footprint.semi_minor_axis_m == 0.0 {
+                evaluate_point_surface_pair(
+                    &surface.interface,
+                    surface.surface_a.as_motion(),
+                    surface.surface_b.as_motion(),
+                )
+            } else {
+                evaluate_hertz_filtered_surface_pair(
+                    &surface.interface,
+                    surface.surface_a.as_motion(),
+                    surface.surface_b.as_motion(),
+                    footprint,
+                )
+            }
+            .map_err(ProductionSurfaceExcitationError::Surface)
+            .map_err(ProductionCouplingError::SurfaceExcitation)?;
         last_height_residual_m = (next_filtered.combined_effective_height_m
             - filtered.combined_effective_height_m)
             .abs();
