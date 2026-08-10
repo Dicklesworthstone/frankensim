@@ -22,6 +22,7 @@ fn base_config() -> JetLabiumConfig {
         fringe_sigma: 0.3,
         steps_settle: 3000,
         steps_record: 4096,
+        seed_amplitude: 0.02,
         nozzle_thickness: 0,
     }
 }
@@ -74,6 +75,22 @@ fn jet_labium_edge_tone_oscillates_and_radiates() {
     // at 1%.
     let imbalance = (d.flux_plate_plane - d.flux_fringe_plane).abs() / d.flux_plate_plane.abs();
     assert!(imbalance < 0.01, "flux imbalance {imbalance:.4}");
+    // REAL oscillation amplitude (the vacuous-noise trap: an
+    // unseeded mirror-symmetric run shows high-prominence spectral
+    // structure in ~1e-15 amplified roundoff).
+    let n_f = run.force_series.len() as f64;
+    let mean_fy = run.force_series.iter().map(|f| f[1]).sum::<f64>() / n_f;
+    let fy_rms = (run
+        .force_series
+        .iter()
+        .map(|f| (f[1] - mean_fy) * (f[1] - mean_fy))
+        .sum::<f64>()
+        / n_f)
+        .sqrt();
+    assert!(
+        fy_rms > 1.0e-6,
+        "Fy rms {fy_rms:.3e} at machine-noise scale"
+    );
     // The transverse force oscillates: a prominent spectral peak
     // (exclude the near-DC drift bins), measured against the median
     // power. Prominence and location printed for the record.

@@ -27,6 +27,18 @@
 //! `#[ignore]`d for runtime (~4 min debug): executed on demand and on
 //! the record — the JSON line below was produced by a real run.
 //!
+//! SEED PROVENANCE (executed, all three states): unseeded, the
+//! mirror-symmetric rig amplifies ROUNDOFF at the physically
+//! selected frequency (same St 0.03662, but the amplitude is
+//! machine noise — a frequency-selection result only); seeded at
+//! 0.005 the SATURATED limit cycle (prominence ~1e20, real
+//! amplitude) locks at the same St 0.03662, +3.0% vs Brown within
+//! the +-6% bin quantization — the claim below; seeded at 0.02 the
+//! rig settles on a NEIGHBORING locked state (St 0.0458, +29%) —
+//! multi-stability/hysteresis of edge tones is documented in the
+//! literature (Brown 1937; Part I's stage-overlap discussion), and
+//! the strong-seed state is recorded, not asserted against.
+//!
 //! OPEN SCOPE (probed, recorded on the bead, not yet passing —
 //! refusal beats fabrication): stage II at Re 243 measured
 //! St 0.0549, BETWEEN rungs (the literature's documented
@@ -57,6 +69,7 @@ fn edge_tone_stage_one_strouhal_matches_published() {
         fringe_sigma: 0.3,
         steps_settle: 4000,
         steps_record: 16_384,
+        seed_amplitude: 0.005,
         nozzle_thickness: 2,
     };
     let run = run_jet_labium(&cfg).expect("run");

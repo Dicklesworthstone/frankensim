@@ -11,11 +11,11 @@ authors.workspace = true
 layer = "L3"
 
 [dependencies]
+fs-fft = { path = "../fs-fft" }
 fs-lbm = { path = "../fs-lbm" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
-fs-fft = { path = "../fs-fft" }
 fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.1.0" }
 fsci-runtime = { path = "../../../frankenscipy/crates/fsci-runtime", version = "=0.1.0" }
 

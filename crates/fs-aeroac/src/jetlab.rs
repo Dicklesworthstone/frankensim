@@ -56,6 +56,16 @@ pub struct JetLabiumConfig {
     pub steps_settle: usize,
     /// Recorded steps (power of two, for the caller's FFT).
     pub steps_record: usize,
+    /// Transverse seed amplitude RELATIVE to `u_jet` (0 disables).
+    /// THE VACUOUS-OSCILLATION TRAP (executed): the rig is mirror-
+    /// symmetric, and unseeded runs preserve that symmetry to
+    /// roundoff — the force spectrum then shows structured, high-
+    /// prominence peaks that are AMPLIFIED MACHINE NOISE (~1e-15
+    /// lattice force). Frequency-selection claims survive (the
+    /// instability amplifies roundoff at the physically selected
+    /// frequency) but ANY amplitude-bearing claim needs this seed to
+    /// reach the saturated limit cycle.
+    pub seed_amplitude: f64,
     /// Nozzle wall thickness at the jet root (0 = no nozzle). A
     /// nozzle wall with a slit of the slot height provides the
     /// RECEPTIVITY edge the classic edge-tone feedback loop closes
@@ -115,6 +125,7 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
         (cfg.slot_half, "slot_half"),
         (cfg.slot_smoothing, "slot_smoothing"),
         (cfg.u_jet, "u_jet"),
+        (cfg.seed_amplitude, "seed_amplitude"),
         (cfg.tau, "tau"),
         (cfg.fringe_sigma, "fringe_sigma"),
     ] {
@@ -132,6 +143,7 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
         || cfg.slot_half <= 1.0
         || 2.0 * cfg.slot_half >= 0.5 * ny_f
         || cfg.slot_smoothing <= 0.0
+        || !(0.0..0.2).contains(&cfg.seed_amplitude)
     {
         return Err(AeroacError::InvalidParameter {
             what: "jet geometry (domain, slot, speed, tau) out of range",
@@ -155,9 +167,17 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
         .map(|y| (1.0, [jet_profile(cfg, y), 0.0]))
         .collect();
     for x in 0..cfg.nx {
+        #[allow(clippy::cast_precision_loss)]
+        let phase = 2.0 * core::f64::consts::PI * x as f64 / cfg.nx as f64;
+        let seed = cfg.seed_amplitude * cfg.u_jet * det::sin(phase);
         for (y, row) in profile.iter().enumerate() {
             let i = grid.idx(x, y);
-            grid.f[i] = fs_lbm::equilibrium(1.0, row.1[0], 0.0);
+            // Sinuous-symmetry transverse seed shaped by the jet
+            // profile: breaks the mirror symmetry deterministically
+            // so the oscillation saturates instead of riding on
+            // roundoff.
+            let vy = seed * row.1[0] / cfg.u_jet;
+            grid.f[i] = fs_lbm::equilibrium(1.0, row.1[0], vy);
         }
     }
     // Nozzle wall: a slit of the slot height in a solid column at
