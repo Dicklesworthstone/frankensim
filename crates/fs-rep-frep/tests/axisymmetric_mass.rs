@@ -328,10 +328,12 @@ fn g3_scale_and_axial_translation_obey_dimensional_and_parallel_axis_laws() {
     assert_close(scaled.mass, scale.powi(3) * base.mass);
     assert_close(
         scaled.principal_inertia.transverse,
+        // det-ok: 3^5 = 243 is an exact small integer in binary64.
         scale.powi(5) * base.principal_inertia.transverse,
     );
     assert_close(
         scaled.principal_inertia.axial,
+        // det-ok: 3^5 = 243 is an exact small integer in binary64.
         scale.powi(5) * base.principal_inertia.axial,
     );
 

@@ -622,6 +622,7 @@ fn arc_integral(
 /// avoids a quadrature tolerance or an input-dependent refinement path.
 fn trig_power_integral(cos_power: u32, sin_power: u32, start: f64, end: f64) -> f64 {
     let mut sum = 0.0;
+    // det-ok: base 2.0, exponent <= 7 — a power of two, exact in binary64
     let denominator = 2.0_f64.powi((cos_power + sin_power) as i32);
     for cos_pick in 0..=cos_power {
         for sin_pick in 0..=sin_power {
