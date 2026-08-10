@@ -1022,7 +1022,8 @@ impl Default for CinematicFiniteGapContactConfig {
             tangent_half_extent_x_to_outer_radius: 0.12,
             tangent_half_extent_y_to_outer_radius: 0.01,
             approach_nodes_to_outer_radius: vec![
-                0.0, 0.5e-6, 1.0e-6, 2.0e-6, 3.0e-6, 5.0e-6, 7.5e-6, 1.0e-5,
+                0.0, 0.05e-6, 0.1e-6, 0.25e-6, 0.5e-6, 1.0e-6, 2.0e-6, 3.0e-6,
+                5.0e-6, 7.5e-6, 1.0e-5,
             ],
             outside_probe_to_outer_radius: 0.01,
             // The tangent window spans a finite part of the exact curved
