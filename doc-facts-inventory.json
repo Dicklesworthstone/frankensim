@@ -694,6 +694,7 @@
     "crates/fs-lbm/tests/lbm.rs",
     "crates/fs-lbm/tests/perf_lane.rs",
     "crates/fs-lbm/tests/perf_model.rs",
+    "crates/fs-lbm/tests/regularized_collision.rs",
     "crates/fs-lbm/tests/sponge_reflection.rs",
     "crates/fs-ledger/tests/ambient_cx.rs",
     "crates/fs-ledger/tests/color_battery.rs",
