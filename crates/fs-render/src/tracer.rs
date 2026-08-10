@@ -9698,13 +9698,16 @@ fn trace_path(
                             } else if let Some(blocker) = shadow_hit
                                 && primitive_is_dielectric(scene, blocker.primitive_index)
                             {
-                                if medium_stack.len() != 0 {
-                                    return Err(slab_nee_refusal(
-                                        blocker.primitive_index,
-                                        "opaque source is already inside a nested medium",
-                                    ));
-                                }
                                 'optional_slab_nee: {
+                                    // The current slab connector models one isolated
+                                    // dielectric layer in ambient. If the source is
+                                    // already inside a medium, this would instead be a
+                                    // nested-media connection, so this optional NEE
+                                    // technique has no proposal. Ordinary BSDF transport
+                                    // remains support-complete for the path.
+                                    if medium_stack.len() != 0 {
+                                        break 'optional_slab_nee;
+                                    }
                                     let slab = match discover_parallel_slab(
                                         scene, cx, &shadow, blocker, ray_time,
                                     ) {
@@ -11429,6 +11432,127 @@ mod tests {
                     ..
                 })
             ));
+        });
+    }
+
+    #[test]
+    fn nested_medium_opaque_source_omits_optional_slab_nee_without_refusing_path() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0, 1.0, 1.0]);
+            let glass = DielectricGlass::new(
+                CauchyIor::try_constant(1.5).unwrap(),
+                BeerLambertAbsorption::try_constant(0.0).unwrap(),
+                GlassProvenance::Custom,
+            );
+            let emission = (white, 2.0);
+            let light_primitive = 2;
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        // Enclosing medium: the resumed path starts inside it.
+                        shape: instanced_test_mesh(
+                            closed_test_slab_with_extent(-1.0, 3.0, 8.0),
+                            91,
+                        ),
+                        material: Material::Dielectric {
+                            glass,
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    Primitive {
+                        // A second dielectric blocks the straight light sample.
+                        shape: instanced_test_mesh(closed_test_slab(0.8, 1.0), 92),
+                        material: Material::Dielectric {
+                            glass,
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    Primitive {
+                        shape: Shape::Mesh(horizontal_quad(2.0, 2.0)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: Some(emission),
+                    },
+                    Primitive {
+                        // The resumed camera ray reaches this opaque source surface
+                        // without crossing either dielectric boundary.
+                        shape: Shape::Mesh(horizontal_quad(0.0, 4.0)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: None,
+                    },
+                ],
+                lights: vec![RectLight {
+                    corner: Point3::new(-2.0, -2.0, 2.0),
+                    edge_u: Vec3::new(4.0, 0.0, 0.0),
+                    edge_v: Vec3::new(0.0, 4.0, 0.0),
+                    prim: light_primitive,
+                    emission,
+                }],
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, 0.25),
+                    forward: Vec3::new(0.0, 0.0, -1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0,
+                },
+            };
+            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 1,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 0x4e45_5354_4544,
+            };
+            let mut medium_stack = MediumStack::new();
+            medium_stack
+                .push(MediumEntry {
+                    boundary_primitive: 0,
+                    glass,
+                })
+                .unwrap();
+            let origin = Point3::new(0.0, 0.0, 0.25);
+            let result = trace_path(
+                &scene,
+                &lighting,
+                cx,
+                &settings,
+                1.0 / y_integral(),
+                0,
+                0,
+                0.5,
+                0.5,
+                0.5,
+                None,
+                CameraPath::Legacy,
+                false,
+                Some(SpectralPathState {
+                    ray: Ray {
+                        origin,
+                        dir: Vec3::new(0.0, 0.0, -1.0),
+                    },
+                    throughput: [1.0; PACKET],
+                    previous_bsdf: None,
+                    prev_origin: origin,
+                    segment_origin: origin,
+                    medium_stack,
+                    rng: PathRng {
+                        pixel: 0,
+                        sample: 0,
+                        dim: 1,
+                        key: [0, 0],
+                    },
+                    next_depth: 0,
+                    active_lane: None,
+                }),
+            );
+            let sample = result.expect(
+                "unsupported nested-media slab NEE must be omitted, not refuse the BSDF path",
+            );
+            assert!(sample.xyz.into_iter().all(f64::is_finite));
         });
     }
 
