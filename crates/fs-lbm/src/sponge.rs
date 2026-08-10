@@ -31,13 +31,19 @@ pub enum SpongeSide {
     RightX,
 }
 
-/// An absorbing layer over a contiguous x-range of the grid.
+/// An absorbing layer over a contiguous x-range of the grid. The
+/// target may be uniform ([`Sponge2::new`]) or a per-row PROFILE
+/// ([`Sponge2::with_profile`]) — the latter turns the layer into a
+/// FRINGE region (spectral-DNS style): in a periodic-x domain it
+/// re-conditions outflow toward an authored inflow profile, so the
+/// wrap delivers fresh inflow without open boundaries.
 #[derive(Debug, Clone)]
 pub struct Sponge2 {
     side: SpongeSide,
     width: usize,
     sigma_max: f64,
-    target: [f64; crate::Q],
+    /// One equilibrium target per y-row (length 1 = uniform).
+    targets: Vec<[f64; crate::Q]>,
 }
 
 impl Sponge2 {
@@ -81,7 +87,52 @@ impl Sponge2 {
             side,
             width,
             sigma_max,
-            target: equilibrium(target_rho, target_u[0], target_u[1]),
+            targets: vec![equilibrium(target_rho, target_u[0], target_u[1])],
+        }
+    }
+
+    /// Construct a fringe layer whose target varies per y-row:
+    /// `profile[y] = (rho, [ux, uy])`. Same ramp and checks as
+    /// [`Sponge2::new`], applied to every row of the profile.
+    ///
+    /// # Panics
+    /// As [`Sponge2::new`], plus an empty profile.
+    #[must_use]
+    pub fn with_profile(
+        side: SpongeSide,
+        width: usize,
+        sigma_max: f64,
+        profile: &[(f64, [f64; 2])],
+    ) -> Self {
+        assert!(width > 0, "sponge width must be positive");
+        assert!(
+            sigma_max.is_finite() && sigma_max > 0.0 && sigma_max <= 1.0,
+            "sponge sigma_max must lie in (0, 1]"
+        );
+        assert!(!profile.is_empty(), "sponge profile must be non-empty");
+        let targets = profile
+            .iter()
+            .map(|&(rho, u)| {
+                assert!(
+                    rho.is_finite() && rho > 0.0,
+                    "sponge target density must be positive and finite"
+                );
+                assert!(
+                    u.iter().all(|c| c.is_finite()),
+                    "sponge target velocity must be finite"
+                );
+                assert!(
+                    u[0] * u[0] + u[1] * u[1] < 0.03,
+                    "sponge target velocity exceeds the low-Mach boundary envelope"
+                );
+                equilibrium(rho, u[0], u[1])
+            })
+            .collect();
+        Sponge2 {
+            side,
+            width,
+            sigma_max,
+            targets,
         }
     }
 
@@ -98,9 +149,14 @@ impl Sponge2 {
     /// [`Grid::step`]). Only `Cell::Fluid` cells are touched.
     ///
     /// # Panics
-    /// If the layer is wider than the grid.
+    /// If the layer is wider than the grid, or a per-row profile's
+    /// length does not match `grid.ny`.
     pub fn apply(&self, grid: &mut Grid) {
         assert!(self.width <= grid.nx, "sponge layer wider than the grid");
+        assert!(
+            self.targets.len() == 1 || self.targets.len() == grid.ny,
+            "sponge profile length must equal the grid height"
+        );
         for d in 0..self.width {
             let x = match self.side {
                 SpongeSide::RightX => grid.nx - self.width + d,
@@ -112,7 +168,12 @@ impl Sponge2 {
                 if grid.flags[i] != Cell::Fluid {
                     continue;
                 }
-                for (fq, tq) in grid.f[i].iter_mut().zip(&self.target) {
+                let target = if self.targets.len() == 1 {
+                    &self.targets[0]
+                } else {
+                    &self.targets[y]
+                };
+                for (fq, tq) in grid.f[i].iter_mut().zip(target) {
                     *fq += s * (tq - *fq);
                 }
             }
