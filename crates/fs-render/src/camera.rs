@@ -657,6 +657,25 @@ pub enum OpticalCenterProjection {
     },
 }
 
+/// Pinhole sensor response for a world point that projects inside one raster
+/// pixel.
+///
+/// The density is the exact solid-angle density induced by uniform sampling
+/// over that pixel's tangent-plane footprint. Light-subpath estimators use it
+/// as the camera-endpoint importance factor so their splats estimate the same
+/// per-pixel radiance average as camera-ray sampling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PinholeRasterSample {
+    /// Row-major pixel index in `width * height`.
+    pub pixel: u32,
+    /// Unit direction from the optical centre to the projected world point.
+    pub direction_from_camera: Vec3,
+    /// Camera-ray probability density with respect to solid angle [sr^-1].
+    pub pdf_solid_angle: f64,
+    /// Positive axial camera depth [m].
+    pub depth_m: f64,
+}
+
 #[derive(Clone, Copy)]
 struct CameraBasis {
     forward: Vec3,
@@ -885,6 +904,79 @@ impl PhysicalCamera {
             return Err(CameraError::InvalidProjection);
         }
         Ok(OpticalCenterProjection::InFront { ndc_xy, depth_m })
+    }
+
+    /// Evaluate the pinhole camera endpoint corresponding to a world point.
+    ///
+    /// `Ok(None)` means that the point is behind the camera or outside the
+    /// half-open raster. A finite aperture refuses because connecting to the
+    /// optical centre would not represent that camera's lens-area integral.
+    pub fn pinhole_raster_sample(
+        &self,
+        world_point: Point3,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<PinholeRasterSample>, CameraError> {
+        if !self.aperture.is_pinhole() {
+            return Err(CameraError::InvalidAperture);
+        }
+        if width == 0 || height == 0 {
+            return Err(CameraError::InvalidProjection);
+        }
+        let aspect_ratio = f64::from(width) / f64::from(height);
+        let OpticalCenterProjection::InFront { ndc_xy, depth_m } =
+            self.project_from_optical_center(world_point, aspect_ratio)?
+        else {
+            return Ok(None);
+        };
+        // Raster x grows with NDC x, while raster y grows opposite NDC y.
+        // Preserve the exact half-open pixel domain in each orientation.
+        let x_inside = (-1.0..1.0).contains(&ndc_xy[0]);
+        let y_inside = (-1.0..=1.0).contains(&ndc_xy[1]) && ndc_xy[1] != -1.0;
+        if !x_inside || !y_inside {
+            return Ok(None);
+        }
+        let raster_x = 0.5 * (ndc_xy[0] + 1.0) * f64::from(width);
+        let raster_y = 0.5 * (1.0 - ndc_xy[1]) * f64::from(height);
+        if !(raster_x >= 0.0
+            && raster_x < f64::from(width)
+            && raster_y >= 0.0
+            && raster_y < f64::from(height))
+        {
+            return Ok(None);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pixel_x = raster_x as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pixel_y = raster_y as u32;
+        let pixel = pixel_y
+            .checked_mul(width)
+            .and_then(|row| row.checked_add(pixel_x))
+            .ok_or(CameraError::InvalidProjection)?;
+
+        let from_camera = world_point.delta_from(self.eye);
+        let distance_m = scaled_norm(from_camera)?;
+        let direction_from_camera = from_camera.scale(1.0 / distance_m);
+        let optical_cosine = direction_from_camera.dot(self.forward);
+        let half_tan = self.projection.vertical_half_tan();
+        let tangent_pixel_area =
+            4.0 * aspect_ratio * half_tan * half_tan / (f64::from(width) * f64::from(height));
+        let optical_cosine_cubed = optical_cosine * optical_cosine * optical_cosine;
+        let pdf_solid_angle = 1.0 / (tangent_pixel_area * optical_cosine_cubed);
+        if !(optical_cosine > 0.0
+            && tangent_pixel_area > 0.0
+            && tangent_pixel_area.is_finite()
+            && pdf_solid_angle > 0.0
+            && pdf_solid_angle.is_finite())
+        {
+            return Err(CameraError::InvalidProjection);
+        }
+        Ok(Some(PinholeRasterSample {
+            pixel,
+            direction_from_camera,
+            pdf_solid_angle,
+            depth_m,
+        }))
     }
 
     /// Generate a ray from horizontal and vertical tangent offsets. A pinhole

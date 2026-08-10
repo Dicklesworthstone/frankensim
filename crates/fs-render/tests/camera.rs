@@ -203,6 +203,93 @@ fn physical_projection_and_f_number_admission_are_fail_closed() {
 }
 
 #[test]
+fn pinhole_raster_importance_round_trips_camera_ray_and_solid_angle_density() {
+    let camera = axial_camera(pinhole(), 3.0);
+    let width = 400_u32;
+    let height = 200_u32;
+    let aspect = f64::from(width) / f64::from(height);
+    let half_tan = camera.projection().vertical_half_tan();
+    let tangent_pixel_area =
+        4.0 * aspect * half_tan * half_tan / (f64::from(width) * f64::from(height));
+
+    with_cx(|_, cx| {
+        for (pixel_x, pixel_y) in [(0_u32, 0_u32), (123, 77), (399, 199)] {
+            let x_tan =
+                (2.0 * (f64::from(pixel_x) + 0.5) / f64::from(width) - 1.0) * aspect * half_tan;
+            let y_tan = (1.0 - 2.0 * (f64::from(pixel_y) + 0.5) / f64::from(height)) * half_tan;
+            let ray = camera
+                .generate_ray_from_tangent_offsets(cx, x_tan, y_tan, LensSample::CENTER)
+                .unwrap();
+            let point = ray.origin.offset(ray.dir.scale(7.0));
+            let response = camera
+                .pinhole_raster_sample(point, width, height)
+                .unwrap()
+                .expect("every pixel-centre ray projects inside its source pixel");
+            assert_eq!(response.pixel, pixel_y * width + pixel_x);
+            assert_vec_close(
+                response.direction_from_camera,
+                ray.dir,
+                "light connection reverses the pixel-centre ray",
+            );
+            let optical_cosine = ray.dir.dot(camera.forward());
+            let optical_cosine_cubed = optical_cosine * optical_cosine * optical_cosine;
+            let expected_pdf = 1.0 / (tangent_pixel_area * optical_cosine_cubed);
+            assert_close(
+                response.pdf_solid_angle,
+                expected_pdf,
+                16.0 * f64::EPSILON * expected_pdf,
+                "uniform tangent-pixel density converted to solid angle",
+            );
+            assert_close(
+                response.depth_m,
+                7.0 * optical_cosine,
+                16.0 * f64::EPSILON * response.depth_m,
+                "axial projection depth",
+            );
+        }
+    });
+}
+
+#[test]
+fn pinhole_raster_importance_refuses_wrong_camera_measure_and_excludes_boundaries() {
+    let camera = axial_camera(pinhole(), 3.0);
+    assert_eq!(
+        camera.pinhole_raster_sample(Point3::new(0.0, 0.0, 1.0), 16, 9),
+        Ok(None),
+        "a point behind the pinhole has no sensor response",
+    );
+    assert_eq!(
+        camera.pinhole_raster_sample(Point3::new(0.5, 0.0, -1.0), 16, 16),
+        Ok(None),
+        "the positive NDC boundary belongs to no half-open raster pixel",
+    );
+    assert_eq!(
+        camera
+            .pinhole_raster_sample(Point3::new(-0.5, 0.5, -1.0), 16, 16)
+            .unwrap()
+            .map(|sample| sample.pixel),
+        Some(0),
+        "the left and top boundaries belong to the first raster pixel",
+    );
+    assert_eq!(
+        camera.pinhole_raster_sample(Point3::new(0.0, -0.5, -1.0), 16, 16),
+        Ok(None),
+        "the bottom NDC boundary belongs to no half-open raster pixel",
+    );
+    assert_eq!(
+        camera.pinhole_raster_sample(Point3::new(0.0, 0.0, -1.0), 0, 16),
+        Err(CameraError::InvalidProjection),
+    );
+
+    let finite_aperture = axial_camera(Aperture::try_circular(0.01).unwrap(), 3.0);
+    assert_eq!(
+        finite_aperture.pinhole_raster_sample(Point3::new(0.0, 0.0, -1.0), 16, 16),
+        Err(CameraError::InvalidAperture),
+        "an optical-centre splat cannot substitute for lens-area integration",
+    );
+}
+
+#[test]
 fn exact_pinhole_ray_matches_the_legacy_operation_order_and_known_bits() {
     let camera = axial_camera(pinhole(), 5.0);
     let x_tan = 0.25;
