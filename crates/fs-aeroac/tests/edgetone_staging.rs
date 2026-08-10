@@ -242,14 +242,41 @@ fn edge_tone_fine_lattice_slitfix_regression() {
 /// (viscosity at fixed jet speed — Mach, fringe, slit, and seed all
 /// unchanged) up to Re 264 and back, measuring a spectral rung after
 /// every transition. Fixed-parameter runs cannot demonstrate stage
-/// selection on a multi-stable rig; branch-following can. Transition
-/// budget: ramp 6000 steps (~3 stage-I periods) + settle 4000 (~2
-/// periods) per rung; record 16384 (~8 periods, +-6% quantization at
-/// the stage-I bin).
+/// selection on a multi-stable rig; branch-following can.
+/// Transition budget: ramp 30000 steps (~15 stage-I periods) +
+/// settle 8000 (~4 periods) per rung; record 16384 (~8 periods,
+/// +-6% quantization at the stage-I bin).
 ///
-/// Gates are health + the rung-0 stage-I ladder anchor; the staging
-/// structure (jump locations, hysteresis) is printed per rung and
-/// pinned only after execution — refusal beats fabrication.
+/// EXECUTED FINDINGS (2026-08-10, two ramp rates — the committed
+/// gentle protocol AND a 5x-faster variant with rungs at every
+/// Re 20, ramp 6000/settle 4000 — agree qualitatively, so the
+/// result is robust to ramp rate over that range):
+///
+/// 1. NO STAGE-II LOCK by Re 264: every rung on both legs stays in
+///    the stage-I NEIGHBORHOOD (this run: 0.72-1.29x Brown stage I;
+///    fast variant: 0.72-1.55x). The literature's stage-II onset
+///    (~Re 220-250 for a wedge) does not reproduce on this
+///    two-cell-plate, periodic-fringe, 2D rig by Re 264 — recorded
+///    as a NO-CLAIM boundary, not asserted against. Candidate
+///    mechanisms (unproven): plate-vs-wedge receptivity, fringe
+///    recirculation phase, 2D confinement (ny = 64).
+/// 2. The rig WANDERS between neighboring locked states (bins 6-8 =
+///    the 0.0366 family vs bins 9-11 = the 0.0458 family) along the
+///    sweep — mode competition, consistent with the fixed-run
+///    multi-stability finding.
+/// 3. HYSTERESIS IS REAL AND REPRODUCIBLE: the down-leg returns to
+///    Re 144 on a DIFFERENT attractor than the up-leg started from
+///    (this run: bin 9 / St 0.0412 vs start bin 7 / St 0.0320;
+///    fast variant: bin 12 vs 7). Both runs bitwise deterministic,
+///    so the path dependence is a pinnable same-ISA measurement.
+///
+/// Pinned gates: per-rung health, the rung-0 stage-I anchor, the
+/// ladder-NEIGHBORHOOD band [0.6, 1.7]x Brown on every rung (under
+/// branch-following, the slit-lip St_delta 2-3 (>5x) and free-jet
+/// St 0.46 (>12x) pathologies never appear at any Reynolds in
+/// 144..264, either direction — a regression surface fixed-Re runs
+/// cannot provide), and the witnessed start-vs-end attractor
+/// difference at Re 144.
 #[test]
 #[ignore = "heavy ramp protocol (~340k lattice steps); execute explicitly, prefer release"]
 fn edge_tone_adiabatic_ramp_hysteresis() {
@@ -271,14 +298,14 @@ fn edge_tone_adiabatic_ramp_hysteresis() {
             nozzle_thickness: 2,
         },
         reynolds_end: 264.0,
-        rungs: 7, // Re = 144, 164, ..., 264
-        steps_ramp: 6000,
-        steps_rung_settle: 4000,
+        rungs: 4, // Re = 144, 184, 224, 264
+        steps_ramp: 30_000,
+        steps_rung_settle: 8000,
         steps_rung_record: 16_384,
         skip_bins: 6,
     };
     let report = run_adiabatic_ramp(&cfg).expect("ramp");
-    assert_eq!(report.rungs.len(), 13);
+    assert_eq!(report.rungs.len(), 7);
     for r in &report.rungs {
         let dir = match r.direction {
             RampDirection::Up => "up",
@@ -317,11 +344,41 @@ fn edge_tone_adiabatic_ramp_hysteresis() {
         );
     }
     // Rung 0 anchors the protocol on the validated stage-I state
-    // (staging fixture: St 0.03662 = 1.03x Brown at Re 144).
+    // (executed: St 0.03204 = 0.90x Brown at Re 144 — one bin below
+    // the staging fixture's 0.03662, inside quantization).
     let first = &report.rungs[0];
     let ratio0 = first.peak.strouhal / st_brown_stage_one(first.reynolds);
     assert!(
         (0.7..1.4).contains(&ratio0),
         "ramp did not start on the stage-I ladder: {ratio0:.2}x Brown"
+    );
+    // Ladder-neighborhood band on EVERY rung, both legs (executed
+    // extremes across both ramp rates: 0.717 and 1.546): under
+    // adiabatic branch-following the rig never leaves the stage-I
+    // neighborhood — no slit-lip (>5x), no free-jet (>12x), and no
+    // stage-II (~2.3x) excursion anywhere in Re 144..264.
+    for r in &report.rungs {
+        let ratio = r.peak.strouhal / st_brown_stage_one(r.reynolds);
+        assert!(
+            (0.6..1.7).contains(&ratio),
+            "off the stage-I neighborhood at Re {} ({:?}): {ratio:.2}x Brown",
+            r.reynolds,
+            r.direction
+        );
+    }
+    // Hysteresis witness (executed, bitwise-deterministic same-ISA):
+    // the down-leg ends at Re 144 on a different attractor (bin 9,
+    // St 0.0412) than the up-leg started from (bin 7, St 0.0320).
+    let last = &report.rungs[report.rungs.len() - 1];
+    assert!(
+        (last.reynolds - first.reynolds).abs() < 1e-9,
+        "protocol must close the loop at the base Reynolds"
+    );
+    assert_ne!(
+        first.peak.bin, last.peak.bin,
+        "hysteresis witness vanished: start and end select the same bin \
+         ({}) — if a rig change made the loop reversible, re-measure and \
+         re-pin the multi-stability findings",
+        first.peak.bin
     );
 }

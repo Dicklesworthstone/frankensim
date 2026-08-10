@@ -609,10 +609,10 @@ pub fn run_adiabatic_ramp(cfg: &RampConfig) -> Result<RampReport, AeroacError> {
     rig.settle(cfg.base.steps_settle);
     let mut tau_now = cfg.base.tau;
     let mut rungs = Vec::with_capacity(2 * cfg.rungs - 1);
-    let mut measure = |rig: &mut Rig,
-                       reynolds: f64,
-                       tau: f64,
-                       direction: RampDirection|
+    let measure = |rig: &mut Rig,
+                   reynolds: f64,
+                   tau: f64,
+                   direction: RampDirection|
      -> Result<RampRung, AeroacError> {
         let seg = rig.record(cfg.steps_rung_record);
         let peak = transverse_force_peak(
