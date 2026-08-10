@@ -9,6 +9,7 @@ use fs_aeroac::jetlab::{
     run_jet_labium, transverse_force_peak,
 };
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
+use fs_lbm::core2::CollisionModel2;
 use fs_math::c64::C64;
 
 fn base_config() -> JetLabiumConfig {
@@ -27,6 +28,7 @@ fn base_config() -> JetLabiumConfig {
         steps_record: 4096,
         seed_amplitude: 0.02,
         nozzle_thickness: 0,
+        collision: CollisionModel2::Bgk,
     }
 }
 
@@ -190,6 +192,7 @@ fn tiny_ramp_config() -> RampConfig {
             steps_record: 64, // unused by the ramp
             seed_amplitude: 0.01,
             nozzle_thickness: 2,
+            collision: CollisionModel2::Bgk,
         },
         reynolds_end: 180.0,
         rungs: 3,

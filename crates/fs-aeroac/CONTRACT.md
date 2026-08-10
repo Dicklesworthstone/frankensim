@@ -248,10 +248,14 @@ determinism.
   not turbulent flute-noise spectra. QUANTIFIED (executed probe,
   delta = 12 lu): the plain-BGK stable window ends at cell Reynolds
   `Re/delta` in (36, 48), and the spectrum is still an essentially
-  pure tone (flatness ~1e-15) at the last stable rung — a turbulent
-  broadband regime does not exist anywhere in this rig's stable
-  window. Reaching it requires an fs-lbm collision-model upgrade
-  (MRT/regularized/entropic) or 3D, both out of scope here.
+  pure tone (flatness ~1e-15) at the last stable rung. The fs-lbm
+  `CollisionModel2::CentralMoment` operator (bead 3zkcr) removes the
+  stability wall — the same rig runs through Re 2304 (Re_cell 192),
+  now selectable via `JetLabiumConfig::collision` — but every
+  executed rung REMAINS an essentially pure tone (flatness ~1e-18;
+  free-jet-scale St ~ 0.467 at Re >= 1152), so broadband flute
+  noise is reachable territory yet still NOT demonstrated, and the
+  2D inverse-cascade caveat stands.
 - Quadrupole (volume) sources: dipoles dominate at low Mach over
   rigid surfaces; the Lighthill volume term is out of scope v1.
 - Only orders 0 and 1 of the Bessel functions are provided (all the

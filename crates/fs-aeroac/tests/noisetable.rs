@@ -9,6 +9,7 @@
 use fs_aeroac::jetlab::JetLabiumConfig;
 use fs_aeroac::noisetable::{N_BANDS, fit_noise_table};
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
+use fs_lbm::core2::CollisionModel2;
 
 fn geometry() -> JetLabiumConfig {
     JetLabiumConfig {
@@ -32,6 +33,7 @@ fn geometry() -> JetLabiumConfig {
         // staging suite) and the table claims shape/scaling only.
         seed_amplitude: 0.02,
         nozzle_thickness: 0,
+        collision: CollisionModel2::Bgk,
     }
 }
 

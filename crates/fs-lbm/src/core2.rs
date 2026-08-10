@@ -33,14 +33,61 @@ const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 /// UNVALIDATED here: with Guo forcing the bare non-equilibrium is
 /// regularized without subtracting the half-force moment — exact
 /// for unforced cells, a disclosed approximation otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CollisionModel2 {
     /// Plain BGK single-relaxation-time collision (historical path).
     #[default]
     Bgk,
     /// Latt–Chopard regularized collision (second-order Hermite
-    /// projection of the non-equilibrium).
+    /// projection of the non-equilibrium). EXECUTED BOUNDARIES: on
+    /// the jet-labium rig it roughly doubles the stable window
+    /// (Re_cell (36,48) -> (48,96)) but its plate-force spectrum is
+    /// dominated by a temporal-Nyquist parity artifact with
+    /// bounce-back walls, and on an UNRESOLVED (about one cell)
+    /// free shear layer it destabilizes where plain BGK survives.
     Regularized,
+    /// Recursive regularized collision (Coreixas-style RR3): as
+    /// [`CollisionModel2::Regularized`], plus the two D2Q9-supported
+    /// third-order Hermite coefficients reconstructed RECURSIVELY
+    /// from the second-order ones
+    /// (`a3_xxy = 2 ux a2_xy + uy a2_xx`,
+    /// `a3_xyy = 2 uy a2_xy + ux a2_yy`), which repairs the
+    /// projected operator's high-shear fragility.
+    RecursiveRegularized,
+    /// Two-relaxation-time collision (Ginzburg/d'Humieres): the
+    /// even (symmetric) non-equilibrium relaxes at the viscous rate
+    /// `1/tau` (so `nu = (tau - 1/2)/3` exactly as BGK), the odd
+    /// (antisymmetric) part at the rate fixed by the magic
+    /// combination `magic = (tau_even - 1/2)(tau_odd - 1/2)`.
+    /// `magic = 3/16` places straight bounce-back walls exactly
+    /// halfway; `Trt { magic: (tau - 1/2)^2 }` is analytically BGK.
+    /// EXECUTED WARNING (2026-08-10 scan, this crate's example
+    /// driver): the folklore "magic = 1/4 is stability-optimal" is
+    /// FALSE on impulsively started shear layers at tau near 1/2 —
+    /// every tested magic above the BGK point REDUCED the stable
+    /// window on both the periodic box and the jet-labium rig
+    /// (tau_odd = 1/2 + magic/(tau - 1/2) grows huge, freezing odd
+    /// modes). Use [`CollisionModel2::CentralMoment`] when the goal
+    /// is stability.
+    Trt {
+        /// The magic parameter `(tau_even - 1/2)(tau_odd - 1/2)`;
+        /// must be finite and positive.
+        magic: f64,
+    },
+    /// Central-moment (cascaded, Geier/De Rosis class) collision,
+    /// the D2Q9 analog of the d3q19 `CollisionModel3::CentralMoment`
+    /// precedent: moments are shifted into the local velocity frame,
+    /// the shear pair `{k11, k20 - k02}` relaxes at the viscous rate
+    /// `1/tau` (so `nu = (tau - 1/2)/3` exactly), and the bulk
+    /// (`k20 + k02`), third (`k21`, `k12`), and fourth (`k22`)
+    /// central moments are EQUILIBRATED each step to their
+    /// Maxwellian values — the maximally dissipative ghost/bulk
+    /// choice. Note the enhanced bulk dissipation damps in-domain
+    /// acoustics harder than BGK; for the Curle rigs (surface-force
+    /// sources, sponge-absorbed domain waves) that is a stability
+    /// feature, but it is NOT a faithful acoustic-propagation
+    /// operator.
+    CentralMoment,
 }
 
 /// Cell classification.
@@ -914,7 +961,13 @@ impl Grid {
     pub fn collide_into(&self, post: &mut Vec<[f64; Q]>) {
         post.clear();
         post.resize(self.nx * self.ny, [0.0; Q]);
-        let regularized = matches!(self.collision, CollisionModel2::Regularized);
+        let model = self.collision;
+        if let CollisionModel2::Trt { magic } = model {
+            assert!(
+                magic.is_finite() && magic > 0.0,
+                "TRT magic parameter must be finite and positive"
+            );
+        }
         for (i, out) in post.iter_mut().enumerate().take(self.nx * self.ny) {
             if !matches!(self.flags[i], Cell::Fluid | Cell::Interface) {
                 *out = self.f[i];
@@ -933,7 +986,99 @@ impl Grid {
                 self.g[0].mul_add(rho, self.fext[i][0]),
                 self.g[1].mul_add(rho, self.fext[i][1]),
             );
-            if regularized {
+            if matches!(model, CollisionModel2::CentralMoment) {
+                // Central moments K[m][n] = Sum f (ex-ux)^m (ey-uy)^n.
+                let mut k = [[0.0f64; 3]; 3];
+                for q in 0..Q {
+                    let cx = f64::from(E[q].0) - ux;
+                    let cy = f64::from(E[q].1) - uy;
+                    let (cx2, cy2) = (cx * cx, cy * cy);
+                    let fi = self.f[i][q];
+                    let xs = [1.0, cx, cx2];
+                    let ys = [1.0, cy, cy2];
+                    for (m, xv) in xs.iter().enumerate() {
+                        for (n, yv) in ys.iter().enumerate() {
+                            k[m][n] += fi * xv * yv;
+                        }
+                    }
+                }
+                // Relax: conserved k00/k10/k01 untouched; shear pair
+                // at 1/tau toward 0 (k11) and 0 (k20 - k02); bulk,
+                // third, fourth equilibrated to Maxwellian values.
+                let omega = 1.0 / tau;
+                let shear_diff = (1.0 - omega) * (k[2][0] - k[0][2]);
+                let bulk = 2.0 * rho * CS2; // equilibrium k20 + k02
+                k[1][1] *= 1.0 - omega;
+                k[2][0] = 0.5 * (bulk + shear_diff);
+                k[0][2] = 0.5 * (bulk - shear_diff);
+                k[2][1] = 0.0;
+                k[1][2] = 0.0;
+                k[2][2] = rho * CS2 * CS2;
+                // Central -> raw moments (binomial shift by +u).
+                let mut m_raw = [[0.0f64; 3]; 3];
+                let binom = [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 2.0, 1.0]];
+                let uxp = [1.0, ux, ux * ux];
+                let uyp = [1.0, uy, uy * uy];
+                for m in 0..3 {
+                    for n in 0..3 {
+                        let mut acc = 0.0;
+                        for p in 0..=m {
+                            for r in 0..=n {
+                                acc +=
+                                    binom[m][p] * binom[n][r] * uxp[m - p] * uyp[n - r] * k[p][r];
+                            }
+                        }
+                        m_raw[m][n] = acc;
+                    }
+                }
+                // Exact tensor-product reconstruction on {-1,0,1}^2:
+                // 1D: g(-1) = (mu2 - mu1)/2, g(0) = mu0 - mu2,
+                // g(1) = (mu2 + mu1)/2, applied per axis.
+                let g = |mu: [f64; 3], a: i32| -> f64 {
+                    match a {
+                        -1 => 0.5 * (mu[2] - mu[1]),
+                        0 => mu[0] - mu[2],
+                        _ => 0.5 * (mu[2] + mu[1]),
+                    }
+                };
+                for q in 0..Q {
+                    let (ax, ay) = (E[q].0, E[q].1);
+                    let partial = [
+                        g([m_raw[0][0], m_raw[1][0], m_raw[2][0]], ax),
+                        g([m_raw[0][1], m_raw[1][1], m_raw[2][1]], ax),
+                        g([m_raw[0][2], m_raw[1][2], m_raw[2][2]], ax),
+                    ];
+                    let (ex, ey) = (f64::from(ax), f64::from(ay));
+                    let eu = ex * ux + ey * uy;
+                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
+                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
+                    let force = coef * W[q] * (fx * gx + fy * gy);
+                    out[q] = g(partial, ay) + force;
+                }
+            } else if let CollisionModel2::Trt { magic } = model {
+                // Even/odd split of the non-equilibrium; the odd
+                // relaxation rate comes from the magic combination.
+                let omega_even = 1.0 / tau;
+                let tau_odd = 0.5 + magic / (tau - 0.5);
+                let omega_odd = 1.0 / tau_odd;
+                let mut fneq = [0.0f64; Q];
+                for q in 0..Q {
+                    fneq[q] = self.f[i][q] - feq[q];
+                }
+                for q in 0..Q {
+                    let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
+                    let eu = ex * ux + ey * uy;
+                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
+                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
+                    let force = coef * W[q] * (fx * gx + fy * gy);
+                    let even = 0.5 * (fneq[q] + fneq[OPP[q]]);
+                    let odd = 0.5 * (fneq[q] - fneq[OPP[q]]);
+                    out[q] = self.f[i][q] - omega_even * even - omega_odd * odd + force;
+                }
+            } else if matches!(
+                model,
+                CollisionModel2::Regularized | CollisionModel2::RecursiveRegularized
+            ) {
                 // Second moment of the non-equilibrium.
                 let (mut pxx, mut pyy, mut pxy) = (0.0f64, 0.0f64, 0.0f64);
                 for q in 0..Q {
@@ -944,6 +1089,13 @@ impl Grid {
                     pxy += ex * ey * fneq;
                 }
                 let relax = 1.0 - 1.0 / tau;
+                // Recursive third-order Hermite coefficients (RR3);
+                // zero for the plain projected operator.
+                let (a3_xxy, a3_xyy) = if matches!(model, CollisionModel2::RecursiveRegularized) {
+                    (2.0 * ux * pxy + uy * pxx, 2.0 * uy * pxy + ux * pyy)
+                } else {
+                    (0.0, 0.0)
+                };
                 for q in 0..Q {
                     let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
                     let eu = ex * ux + ey * uy;
@@ -954,7 +1106,12 @@ impl Grid {
                     // symmetric off-diagonal counted twice.
                     let qxx = ex * ex - CS2;
                     let qyy = ey * ey - CS2;
-                    let fneq_reg = 4.5 * W[q] * (qxx * pxx + qyy * pyy + 2.0 * ex * ey * pxy);
+                    // Third-order Hermite polynomials H_xxy, H_xyy;
+                    // w_i / (2 cs^6) = 13.5 w_i.
+                    let h_xxy = qxx * ey;
+                    let h_xyy = ex * qyy;
+                    let fneq_reg = 4.5 * W[q] * (qxx * pxx + qyy * pyy + 2.0 * ex * ey * pxy)
+                        + 13.5 * W[q] * (h_xxy * a3_xxy + h_xyy * a3_xyy);
                     out[q] = feq[q] + relax * fneq_reg + force;
                 }
             } else {

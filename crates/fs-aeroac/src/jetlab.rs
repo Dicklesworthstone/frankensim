@@ -34,7 +34,7 @@
 
 use crate::curle2d::dipole_pressure;
 use crate::{AeroacError, SCOPE_STATEMENT};
-use fs_lbm::core2::{Cell, Grid};
+use fs_lbm::core2::{Cell, CollisionModel2, Grid};
 use fs_lbm::sponge::{Sponge2, SpongeSide};
 use fs_math::c64::C64;
 use fs_math::det;
@@ -84,6 +84,11 @@ pub struct JetLabiumConfig {
     /// most-amplified frequency instead of the Brown stage ladder
     /// (executed: St 0.46 vs stage-I 0.036 at h/delta = 10).
     pub nozzle_thickness: usize,
+    /// Collision operator ([`CollisionModel2::Bgk`] preserves every
+    /// recorded pin byte-for-byte; `Regularized` is the
+    /// higher-cell-Reynolds path under evaluation for the turbulent
+    /// regime).
+    pub collision: CollisionModel2,
 }
 
 /// Per-run diagnostics (the bead's mandated honesty block).
@@ -257,6 +262,7 @@ impl Rig {
             cfg.fringe_sigma,
             &profile,
         );
+        grid.collision = cfg.collision;
         let x_plate_plane = plate_x0.saturating_sub(6).max(cfg.nozzle_thickness + 1);
         let x_fringe_plane = cfg.nx - cfg.fringe_width - 4;
         Rig {

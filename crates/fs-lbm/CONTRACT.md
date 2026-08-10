@@ -21,6 +21,28 @@ dimension checks. Pure, deterministic (fixed tile/cell/link order).
   bounce-back y-walls). `step`/`run` (collide + Guo forcing + stream +
   bounce-back); `density`, `velocity` (Guo-corrected), `total_mass`,
   `viscosity` (`ν = (τ−½)/3`), `x_velocity_profile`.
+- `core2::CollisionModel2` (bead 3zkcr) — the D2Q9 collision-operator
+  selector on `Grid::collision`: `Bgk` (default; byte-for-byte the
+  historical arithmetic, so every existing pin/golden is unchanged),
+  `Regularized` (Latt–Chopard projected), `RecursiveRegularized`
+  (Coreixas-style RR3), `Trt { magic }`, and `CentralMoment`
+  (cascaded, the D2Q9 analog of `CollisionModel3::CentralMoment`).
+  All modes keep the exact shear-viscosity law `nu = (tau - 1/2)/3`
+  (executed shear-wave identity, all under 0.1% deviation), conserve
+  mass/momentum exactly, and are bitwise deterministic. EXECUTED
+  stability landscape (2026-08-10, `examples/stab_scan` and the
+  fs-aeroac jet-labium probe): `CentralMoment` is the robust
+  high-cell-Reynolds operator (rig runs through Re_cell = 192 where
+  BGK dies at ~48); plain `Regularized` destabilizes on unresolved
+  (~1-cell) shear layers where BGK survives, `RecursiveRegularized`
+  repairs that but hits a temporal-Nyquist parity artifact with
+  bounce-back at high shear, and every `Trt` magic above the BGK
+  point REDUCED the stable window at tau near 1/2 (the "magic = 1/4
+  optimal" folklore is false on this family). Body forces under the
+  non-BGK modes reuse the BGK-form Guo term (exact for unforced
+  cells; disclosed approximation otherwise); combining non-BGK modes
+  with the partial-saturation or free-surface operators is
+  mechanically possible but unvalidated.
 - `core2::Grid` / re-exported `Grid` — a general dense D2Q9 grid with cell
   flags, vector gravity, per-cell relaxation time, per-cell external force,
   periodicity flags, deterministic collide/stream steps, and gas/wall
@@ -564,6 +586,16 @@ symmetry-breaking seed is disclosed as offset `(10, 6)` at transverse speed
 `1e-4`. Roshko NACA TR-1191, Posdziech-Grundmann 2007, Behr et al. 1995, and
 Maskell ARC R&M 3400 are cited at the executable gate; no publisher artifact is
 redistributed.
+
+### Collision-operator battery (`tests/regularized_collision.rs`)
+
+Hermite-state BGK equivalence of the projected regularization (and
+RR3 at zero velocity); TRT-at-BGK-magic equivalence; exact
+mass/momentum conservation of every operator; the shear-wave
+viscosity identity for every operator; the executed
+unresolved-shear-layer stability asymmetry (BGK/RR3/CM survive,
+projected Regularized destabilizes — also the mode-discrimination
+control); bitwise determinism of every non-BGK path.
 
 ## No-claim boundaries
 
