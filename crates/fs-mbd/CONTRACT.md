@@ -129,9 +129,9 @@ None. The crate denies unsafe code and contains no unsafe blocks.
 
 None. This initial core depends only on `std`/`core` and has no feature flags.
 
-## Focused evidence
+## Conformance tests
 
-The inline test module in `src/lib.rs` contains seventeen focused checks:
+The inline test module in `src/lib.rs` contains nineteen focused checks:
 
 1. mass, inertia, and centre-of-mass-reference refusals;
 2. canonical quaternion double-cover selection and a known 180-degree rotation;
@@ -154,7 +154,10 @@ The inline test module in `src/lib.rs` contains seventeen focused checks:
 15. a closed-form offset directional-effective-mass oracle and zero-direction
     refusal;
 16. equal-and-opposite two-body impulse balance and paired work ledger;
-17. non-finite and overflowing event-input refusal without a partial state.
+17. non-finite and overflowing event-input refusal without a partial state;
+18. bit-exact canonical-quaternion replay without renormalization drift;
+19. bounded-energy symplectic kick-drift stepping under a recomputed
+    harmonic force.
 
 These are local G0-style checks. They do not constitute full multibody,
 constraint, contact, physical-validation, performance, G4 fault-injection, or
