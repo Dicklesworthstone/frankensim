@@ -539,6 +539,33 @@ pub struct RectLightSample {
     pub pdf_solid_angle: f64,
 }
 
+/// One two-sided rectangular-emitter sample for a light subpath.
+///
+/// Position and direction densities are kept separate because BDPT converts
+/// the directional term to area measure only after the first surface hit is
+/// known. The selection probability is already included in
+/// `pdf_position_area`.
+#[derive(Debug, Clone, Copy)]
+pub struct RectEmissionSample {
+    /// Original input-light index.
+    pub light_index: usize,
+    /// Matching emissive primitive.
+    pub primitive_index: usize,
+    /// Uniform point on the emitter [world units].
+    pub point: Point3,
+    /// Declared rectangle normal. Emission is two-sided, matching emissive-hit
+    /// and direct-light semantics.
+    pub normal: Vec3,
+    /// Cosine-weighted emitted direction on one of the two hemispheres.
+    pub direction: Vec3,
+    /// Emitted spectral radiance.
+    pub emission: (LiftedSpectrum, f64),
+    /// Light-selection probability times uniform area density [1/area].
+    pub pdf_position_area: f64,
+    /// Two-sided cosine-hemisphere directional density [1/sr].
+    pub pdf_direction_solid_angle: f64,
+}
+
 /// Sample of the environment, including the complete scene-mixture
 /// solid-angle PDF.
 #[derive(Debug, Clone, Copy)]
@@ -782,6 +809,120 @@ impl<'a> AdmittedLighting<'a> {
         self.sample_candidate(candidate, origin, residual, u2, weight / total_weight)
     }
 
+    /// Sample a finite rectangular emitter as the endpoint of a light
+    /// subpath. Selection is proportional to emitted luminance times area;
+    /// position is uniform area and direction is a two-sided cosine
+    /// hemisphere. Environment emission requires a scene-bound launch surface
+    /// and remains outside this finite-emitter API.
+    #[must_use]
+    pub fn sample_rectangle_emission(
+        &self,
+        light_sample: f64,
+        position_v: f64,
+        direction_u: f64,
+        direction_v: f64,
+    ) -> Option<RectEmissionSample> {
+        if [light_sample, position_v, direction_u, direction_v]
+            .into_iter()
+            .any(|sample| !unit_sample(sample))
+        {
+            return None;
+        }
+        let total_weight = self.rectangle_emission_weight_sum();
+        if !(total_weight > 0.0 && total_weight.is_finite()) {
+            return None;
+        }
+        let target = light_sample * total_weight;
+        let mut cumulative = 0.0;
+        let mut selected = None;
+        let mut last_positive = None;
+        for candidate in &self.candidates {
+            let LightKind::Rectangle(light_index) = candidate.kind else {
+                continue;
+            };
+            let weight = self.rectangle_emission_weight(light_index)?;
+            last_positive = Some((light_index, cumulative, weight));
+            let upper = cumulative + weight;
+            if target < upper {
+                selected = Some((light_index, cumulative, weight));
+                break;
+            }
+            cumulative = upper;
+        }
+        let (light_index, lower, weight) = selected.or(last_positive)?;
+        let light = self.rectangles.get(light_index)?;
+        let position_u = clamp_unit_open((target - lower) / weight);
+        let point = light
+            .corner
+            .offset(light.edge_u.scale(position_u))
+            .offset(light.edge_v.scale(position_v));
+
+        let positive_side = direction_u < 0.5;
+        let hemisphere_u = if positive_side {
+            2.0 * direction_u
+        } else {
+            2.0 * (direction_u - 0.5)
+        };
+        let radial = hemisphere_u.sqrt();
+        let azimuth = TAU * direction_v;
+        let tangent = light.edge_u.scale(1.0 / light.edge_u.norm());
+        let bitangent = light.edge_v.scale(1.0 / light.edge_v.norm());
+        let signed_normal = if positive_side {
+            light.normal()
+        } else {
+            light.normal().scale(-1.0)
+        };
+        let tangent_scale = radial * det::cos(azimuth);
+        let bitangent_scale = radial * det::sin(azimuth);
+        let normal_scale = (1.0 - hemisphere_u).max(0.0).sqrt();
+        let direction = Vec3::new(
+            tangent_scale * tangent.x
+                + bitangent_scale * bitangent.x
+                + normal_scale * signed_normal.x,
+            tangent_scale * tangent.y
+                + bitangent_scale * bitangent.y
+                + normal_scale * signed_normal.y,
+            tangent_scale * tangent.z
+                + bitangent_scale * bitangent.z
+                + normal_scale * signed_normal.z,
+        );
+        let cosine = light.normal().dot(direction).abs();
+        let selection_probability = weight / total_weight;
+        Some(RectEmissionSample {
+            light_index,
+            primitive_index: light.prim,
+            point,
+            normal: light.normal(),
+            direction,
+            emission: light.emission,
+            pdf_position_area: selection_probability / light.area(),
+            pdf_direction_solid_angle: cosine / (2.0 * PI),
+        })
+    }
+
+    /// Evaluate the finite-emitter endpoint PDFs used by
+    /// [`Self::sample_rectangle_emission`].
+    #[must_use]
+    pub fn rectangle_emission_pdfs(
+        &self,
+        light_index: usize,
+        direction: Vec3,
+    ) -> Option<(f64, f64)> {
+        let light = self.rectangles.get(light_index)?;
+        let direction_norm = direction.norm();
+        if !direction_norm.is_finite() || (direction_norm - 1.0).abs() > 2.0e-10 {
+            return None;
+        }
+        let total_weight = self.rectangle_emission_weight_sum();
+        let weight = self.rectangle_emission_weight(light_index)?;
+        if !(total_weight > 0.0 && weight > 0.0) {
+            return None;
+        }
+        let position_pdf = (weight / total_weight) / light.area();
+        let direction_pdf = light.normal().dot(direction).abs() / (2.0 * PI);
+        Some((position_pdf, direction_pdf))
+    }
+
     fn sample_candidate(
         &self,
         candidate: Candidate,
@@ -943,6 +1084,23 @@ impl<'a> AdmittedLighting<'a> {
                 }),
             LightKind::Environment => self.environment.map_or(0.0, |map| map.total_weight),
         }
+    }
+
+    fn rectangle_emission_weight(&self, light_index: usize) -> Option<f64> {
+        self.rectangles
+            .get(light_index)
+            .zip(self.rectangle_luminances.get(light_index))
+            .map(|(light, luminance)| light.area() * *luminance)
+    }
+
+    fn rectangle_emission_weight_sum(&self) -> f64 {
+        self.candidates
+            .iter()
+            .filter_map(|candidate| match candidate.kind {
+                LightKind::Rectangle(light_index) => self.rectangle_emission_weight(light_index),
+                LightKind::Environment => None,
+            })
+            .sum()
     }
 }
 
@@ -1487,6 +1645,88 @@ mod tests {
             expected_pdf.to_bits(),
             "reverse MIS did not replay the forward spherical-rectangle density"
         );
+    }
+
+    #[test]
+    fn g0_rectangle_emission_sample_and_reverse_pdfs_agree() {
+        let light = rectangle(-0.5, 3, 4.0);
+        let lights = [light];
+        let admitted = AdmittedLighting::try_new(&lights, None).unwrap();
+
+        for (direction_u, expected_side) in [(0.125, 1.0), (0.625, -1.0)] {
+            let sample = admitted
+                .sample_rectangle_emission(0.25, 0.75, direction_u, 0.375)
+                .expect("finite emitter sample");
+            assert_eq!(sample.light_index, 0);
+            assert_eq!(sample.primitive_index, 3);
+            assert_close(sample.point.x, -0.25, 1.0e-14, "emitter position x");
+            assert_close(sample.point.y, 1.0, 1.0e-14, "emitter position y");
+            assert_close(sample.point.z, 0.25, 1.0e-14, "emitter position z");
+            assert_close(sample.direction.norm(), 1.0, 2.0e-15, "emitted direction");
+            assert!(
+                expected_side * sample.normal.dot(sample.direction) > 0.0,
+                "sample escaped requested emitter side: direction_u={direction_u}"
+            );
+
+            let (position_pdf, direction_pdf) = admitted
+                .rectangle_emission_pdfs(sample.light_index, sample.direction)
+                .expect("reverse emitter PDFs");
+            assert_eq!(
+                sample.pdf_position_area.to_bits(),
+                position_pdf.to_bits(),
+                "forward and reverse endpoint area densities diverged"
+            );
+            assert_eq!(
+                sample.pdf_direction_solid_angle.to_bits(),
+                direction_pdf.to_bits(),
+                "forward and reverse endpoint direction densities diverged"
+            );
+            assert_eq!(position_pdf.to_bits(), 1.0_f64.to_bits());
+            assert!(direction_pdf > 0.0);
+        }
+    }
+
+    #[test]
+    fn g5_rectangle_emission_stream_is_construction_order_independent() {
+        let dim = rectangle(-2.0, 10, 1.0);
+        let bright = rectangle(2.0, 11, 3.0);
+        let forward_lights = [dim, bright];
+        let reversed_lights = [bright, dim];
+        let forward = AdmittedLighting::try_new(&forward_lights, None).unwrap();
+        let reversed = AdmittedLighting::try_new(&reversed_lights, None).unwrap();
+
+        for light_sample in [0.01, 0.19, 0.41, 0.73, 0.99] {
+            let a = forward
+                .sample_rectangle_emission(light_sample, 0.37, 0.61, 0.83)
+                .expect("forward-order emitter sample");
+            let b = reversed
+                .sample_rectangle_emission(light_sample, 0.37, 0.61, 0.83)
+                .expect("reverse-order emitter sample");
+            assert_eq!(
+                a.primitive_index, b.primitive_index,
+                "caller order changed the selected physical emitter at u={light_sample}"
+            );
+            for (actual, expected, context) in [
+                (a.point.x, b.point.x, "point x"),
+                (a.point.y, b.point.y, "point y"),
+                (a.point.z, b.point.z, "point z"),
+                (a.direction.x, b.direction.x, "direction x"),
+                (a.direction.y, b.direction.y, "direction y"),
+                (a.direction.z, b.direction.z, "direction z"),
+                (a.pdf_position_area, b.pdf_position_area, "position PDF"),
+                (
+                    a.pdf_direction_solid_angle,
+                    b.pdf_direction_solid_angle,
+                    "direction PDF",
+                ),
+            ] {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{context} changed with caller order at u={light_sample}"
+                );
+            }
+        }
     }
 
     #[test]
