@@ -789,6 +789,7 @@
     "crates/fs-project/tests/project.rs",
     "crates/fs-propcheck/tests/metamorphic_battery.rs",
     "crates/fs-propcheck/tests/propcheck_battery.rs",
+    "crates/fs-psycho/tests/fluctuation.rs",
     "crates/fs-psycho/tests/psycho.rs",
     "crates/fs-qty/tests/conformance.rs",
     "crates/fs-qty/tests/parse_allocation.rs",

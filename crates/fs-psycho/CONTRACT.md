@@ -90,6 +90,20 @@ test).
   this gate), and the screening left walk clamps at the band edge
   where numpy index-wraps (review-executed usize-underflow panic
   before the fix).
+- `fluctuation::fluctuation_strength_frame` — fluctuation strength
+  [vacil] per 131072-sample frame, implemented from the PUBLISHED
+  equations of Osses/Garcia/Kohlrausch (ICA2016-113; NO code ported —
+  the only open implementations are CC BY-NC or unlicensed):
+  Eq. 1 over 47 critical-band channels with Terhardt excitation
+  patterns, generalised modulation depth with the paper's 3:1
+  compression above 0.7, `H(fmod)` band-pass, cross covariances
+  i±2, `g(z)` high-frequency taper, exponents 1.7. Disclosed
+  realisation choices (module doc): power-of-two frame (2.73 s vs
+  the paper's 2 s), zero-phase Butterworth-style `H` magnitudes with
+  corners FITTED to the published AM curve per the paper's own
+  methodology (1st-order HP 1.7 Hz, 3rd-order LP 13 Hz), `C_FS`
+  re-derived on the paper's 1-vacil reference, DW threshold table
+  reuse, edge-channel single-factor rule.
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 
@@ -158,7 +172,21 @@ test).
     (non-power-of-two, short, NaN, bad rate, unresolvable detection
     band, too-coarse resolution for 1/24-octave smoothing incl. the
     review's panic configuration) typed and executed.
-13. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
+13. Fluctuation strength: the 1-vacil reference stimulus reads
+    EXACTLY 1.0 (calibration regression, bitwise-stable); the
+    published AM-tone curve (Fastl-Zwicker values via the paper's
+    Table 1) is reproduced within +-(0.05 + 25%) per point —
+    measured worst -18% at 4-8 Hz, a LEVEL-GROWTH deficit (60->70 dB
+    growth weaker than published) disclosed with direction asserted;
+    shape gates (bandpass peak at 4-8 Hz, monotone rise, 32 Hz
+    collapse) discriminate flat models; FM values are REPORTED with
+    the overestimation disclosed (the paper's own model
+    overestimates FM > 4 Hz; this realisation reads ~1.5x at the
+    4 Hz FM point) and gated qualitatively; the Bark formula
+    cross-checks the independent Daniel-Weber BARK_FREQS table
+    within 0.35 Bark; unmodulated/silent inputs are smooth/zero;
+    refusals typed; determinism bitwise.
+14. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
    published ~70 Hz signature), ALL SEVEN sweep values match the
    standalone reference run within 1e-12 relative (exactness pins;
    R(70 Hz) = 1.0448 asper at the published ~1-asper anchor), falls
@@ -192,6 +220,10 @@ None.
 
 ## Conformance tests
 
+`tests/fluctuation.rs` (6 + 2 ignored probes): reference
+calibration; published AM curve + shape; FM behavior; smoothness;
+Bark cross-check; refusals + determinism.
+
 `tests/psycho.rs` (20 + 1 ignored provenance tool): ISO signal-1
 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
@@ -210,7 +242,12 @@ tonality refusals.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
-- Fluctuation strength: not implemented (roughness IS — see above).
+- Fluctuation strength: single-frame API v1 (no 90%-overlap frame
+  train); level growth with SPL is weaker than published (measured
+  -18% at 70 dB mid-band — the AM envelope gates carry it,
+  disclosed); FM absolute values overestimate (reported, gated
+  qualitatively); NOT in `pareto_metrics` (its 2.73-s frame exceeds
+  the batch block contract — recorded decision).
 - Roughness time-series over long signals (block averaging /
   overlap): single-block v1.
 - Tonality: TNR/PR are the ECMA-74 discrete-tone metrics; Aures/

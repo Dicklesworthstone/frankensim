@@ -25,12 +25,15 @@
 //! Nmax/N5 ([`signal::loudness_time_varying`]); the verified phon
 //! conversion ([`signal::phon_from_sone`]); Daniel-Weber roughness
 //! per analysis block ([`roughness`]); ECMA-74 discrete-tone
-//! tonality ([`tonality`]). Fluctuation strength is not yet
-//! implemented (no validated open reference located yet — no
-//! placeholder claims).
+//! tonality ([`tonality`]); fluctuation strength from the published
+//! Osses/Garcia/Kohlrausch model equations ([`fluctuation`] — no
+//! open reference code is license-compatible, so the equations were
+//! implemented directly and validated against the published
+//! Fastl-Zwicker values).
 
 pub mod dw_tables;
 pub mod filter_tables;
+pub mod fluctuation;
 pub mod roughness;
 pub mod signal;
 pub mod tables;
@@ -121,6 +124,23 @@ pub struct Loudness {
     pub sones: f64,
     /// Specific loudness on the 0.1-Bark grid [sone/Bark].
     pub specific: Vec<f64>,
+}
+
+/// numpy-style clamped linear interpolation over a table (shared by
+/// the Daniel-Weber and fluctuation-strength chains).
+pub(crate) fn tables_interp(x: f64, xs: &[f64], ys: &[f64]) -> f64 {
+    if x <= xs[0] {
+        return ys[0];
+    }
+    if x >= xs[xs.len() - 1] {
+        return ys[ys.len() - 1];
+    }
+    let mut i = 0;
+    while xs[i + 1] < x {
+        i += 1;
+    }
+    let t = (x - xs[i]) / (xs[i + 1] - xs[i]);
+    ys[i] + t * (ys[i + 1] - ys[i])
 }
 
 /// Stationary Zwicker loudness from 28 third-octave band levels
