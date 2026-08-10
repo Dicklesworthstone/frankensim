@@ -122,3 +122,22 @@ frankensim_illustration.png
 # beads.db-wal / beads.db-shm which are covered by beads.db-*).
 .beads/beads.db.pre-*
 .beads/*.pre-repair*
+
+# === multi-repo ephemeral patterns 2026-08-10 ===
+# Eidetic Engine local runtime memory (machine-local DB/WAL/locks)
+.ee/
+# NTM agent swarm runtime (logs, pids, rate limits)
+.ntm/
+# Claude Code local session state (nothing tracked here)
+.claude/
+# Local one-off audio probe dumps (never fixtures)
+/test.m4a
+# br fsqlite-ns VFS sidecars — per-machine runtime state, like -wal/-shm
+.beads/beads.db-fsqlite-ns-*
+# Recoverable Beads write-lock snapshots moved aside when stale
+.beads/.write.lock.stale-*
+# git-repo-janitor skill scratch workspace
+.repo_janitor_workspace/
+# Skill-loop progress scratch
+.skill-loop-progress.md
+.skill-loop-progress-*.md
