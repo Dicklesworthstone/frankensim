@@ -160,7 +160,7 @@ pub fn fit_noise_table(
             }
         }
         let peak = band_pow.iter().copied().fold(f64::MIN, f64::max);
-        if !(peak > 0.0) {
+        if !peak.is_finite() || peak <= 0.0 {
             return Err(AeroacError::InvalidParameter {
                 what: "no band energy in the Strouhal range (degenerate run)",
             });
@@ -207,6 +207,7 @@ impl NoiseTable {
     /// scope statement — the marketing-mutation guard asserts the
     /// latter's presence.
     #[must_use]
+    #[allow(clippy::format_push_string)] // export builder, clarity over micro-alloc
     pub fn to_json(&self) -> String {
         let mut s = String::from("{\"kind\":\"fs-aeroac-noise-table\",\"entries\":[");
         for (i, e) in self.entries.iter().enumerate() {

@@ -330,6 +330,7 @@
     "crates/fs-aeroac/tests/bickley_lbm.rs",
     "crates/fs-aeroac/tests/edgetone_staging.rs",
     "crates/fs-aeroac/tests/jetlab.rs",
+    "crates/fs-aeroac/tests/noisetable.rs",
     "crates/fs-airflow/tests/composite.rs",
     "crates/fs-airflow/tests/conformance.rs",
     "crates/fs-airflow/tests/conjugate.rs",

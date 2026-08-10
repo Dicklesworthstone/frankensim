@@ -97,26 +97,41 @@ scope law, pinned as data and by test).
    jet's own viscous diffusion (~nu/b^2 per step) decays the base
    flow and drags the measured rate down over long runs — fit early,
    at high Re.
-9. Jet-labium fixture: the default configuration (Re 240, slot 10
-   lu, edge at 3 slot heights) produces a REAL self-sustained
-   oscillation — transverse-force spectral peak with prominence
-   ~720x the median (gate 100x), ~21 cycles resolved in the record —
-   with max Mach 0.07 (gate 0.25) and plate-vs-fringe flux imbalance
-   0.13% (gate 1%; the outlet-reflection pathology this fixture
-   replaces read 6%). Geometry/regime refusals typed; bitwise
-   deterministic.
-10. EDGE-TONE STAGING (ignored heavy test, executed on record): with
-    a nozzle wall at the jet root, the rig at Re 144, h/delta = 10
-    measures stage-I St = 0.03662 vs Brown's (1937) 0.03554 (+3.0%,
-    gate 15%) — INSIDE the published spread (Vaik/Paal exp 0.03723,
-    CFD 0.03497; two fetched sources, provenance in the test doc) —
-    at prominence ~6000 and flux imbalance 0.03%. EXECUTED
-    STRUCTURAL FINDING: without the nozzle the same rig oscillates
-    at the free jet's most-amplified frequency (St 0.46, 12x the
-    ladder) — the receptivity edge at the jet root is what closes
-    the Brown feedback loop, and the nozzle-free default fixture's
-    oscillation is documented as NOT an edge-tone stage.
-11. Refusals typed by name (non-positive wavenumber, coincident
+9. Jet-labium fixture: THE VACUOUS-OSCILLATION TRAP (executed and
+   now gated): the mirror-symmetric rig, unseeded, preserves
+   symmetry to roundoff and its force spectrum shows high-prominence
+   structure in ~1e-15 amplified machine noise — prominence-style
+   ratios cannot detect it, so every amplitude-bearing test now
+   REQUIRES the deterministic sinuous seed (`seed_amplitude`) and a
+   force-RMS floor (1e-6 lattice). Seeded, the default configuration
+   (Re 240, edge at 3 slot heights) saturates into a REAL limit
+   cycle (Fy rms >> floor, essentially pure tone), max Mach 0.07,
+   flux imbalance under 1% (the outlet-reflection pathology read
+   6%). Geometry/regime refusals typed; bitwise deterministic.
+10. EDGE-TONE STAGING (ignored heavy test, executed on record;
+    seed-provenance trio in the test doc): with a nozzle wall at the
+    jet root and the 0.005 sinuous seed, the SATURATED rig at
+    Re 144, h/delta = 10 locks stage-I St = 0.03662 vs Brown's
+    (1937) 0.03554 — +3.0%, within the record's +-6% bin
+    quantization and INSIDE the published spread (Vaik/Paal exp
+    0.03723, CFD 0.03497; two fetched sources). The unseeded run
+    selects the SAME frequency in amplified roundoff
+    (frequency-selection only); a 0.02 seed lands a NEIGHBORING
+    locked state (St 0.0458) — edge-tone multi-stability, recorded.
+    STRUCTURAL FINDING: without the nozzle the rig locks to the free
+    jet's own mode (St 0.46, 12x the ladder) — the jet-root
+    receptivity edge closes Brown's loop.
+11. NOISE TABLES (the product deliverable): `noisetable` fits
+    Strouhal-band power-DENSITY shapes (record-length-independent —
+    a band-SUM convention broke the synth round trip by the log-band
+    width ratio, executed) over a velocity sweep with per-entry
+    regime gates and real-amplitude floors; the JSON export embeds
+    the scope statement (marketing-mutation guard) and the MEASURED
+    power exponent as data (the saturated tonal limit cycle is NOT
+    monotone in u near mode switches — multi-stability, reported not
+    prescribed); the demo synth consumes the table and its output's
+    band densities match within 6 dB (measured worst 2.5 dB).
+12. Refusals typed by name (non-positive wavenumber, coincident
    observer/source, non-finite inputs, bad solver parameters,
    non-convergence with residual); Hankel functions outside their
    domain are FULLY NaN (both components — a half-valid complex once
@@ -156,6 +171,9 @@ convergence fixture (invariant 8).
 `tests/edgetone_staging.rs` (1, ignored heavy): stage-I Strouhal vs
 Brown + Vaik/Paal published values (invariant 10).
 
+`tests/noisetable.rs` (2): sweep + export + synth round trip;
+typed refusals.
+
 `tests/jetlab.rs` (3): edge-tone oscillation + diagnostics +
 radiation with scope; typed refusals; bitwise determinism.
 
@@ -173,8 +191,9 @@ determinism.
   hysteresis are not exercised.
 - Grid-convergence of source spectra across refinement levels: not
   implemented (single-resolution v1).
-- Fitted flute-noise tables + demo-synth consumption: not
-  implemented.
+- Noise tables catalog THIS rig's tonal limit cycle at low Re in
+  2D; they are not turbulent flute-noise spectra (that regime needs
+  higher Re than the rig currently reaches).
 - Quadrupole (volume) sources: dipoles dominate at low Mach over
   rigid surfaces; the Lighthill volume term is out of scope v1.
 - Only orders 0 and 1 of the Bessel functions are provided (all the
