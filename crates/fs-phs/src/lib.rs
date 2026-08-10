@@ -843,16 +843,29 @@ pub fn reduce_galerkin(
             }
         }
         // Verify linearity (quadratic H): gradient at a probe point
-        // must equal Q times the probe.
+        // must equal Q times the probe. The tolerance is PER
+        // COMPONENT and relative to that row's own magnitudes — an
+        // absolute floor here is the same hazard `matrix_scale`
+        // documents (a nonlinear storage whose gradients sit below
+        // the floor silently passes as quadratic and reduces to a
+        // fully wrong surrogate), and even a GLOBAL relative scale
+        // leaks the mixed-scale case where one large component (a
+        // momentum row) masks a tiny nonlinear one (executed: a
+        // 1e-9-stiffness Duffing q-row hid behind an O(1) p-row).
+        // The row's absolute-sum dot product bounds its roundoff, so
+        // a legitimately cancelling quadratic row still passes.
         let probe: Vec<f64> = (0..n).map(|i| 0.1f64.mul_add(i as f64, 0.3)).collect();
         let mut grad = vec![0.0; n];
         sys.storage.gradient(&probe, &mut grad);
         for i in 0..n {
             let mut acc = 0.0;
+            let mut acc_abs = 0.0;
             for l in 0..n {
-                acc += q[i * n + l] * probe[l];
+                let term = q[i * n + l] * probe[l];
+                acc += term;
+                acc_abs += term.abs();
             }
-            if (acc - grad[i]).abs() > 1.0e-8 * (1.0 + grad[i].abs()) {
+            if (acc - grad[i]).abs() > 1.0e-8 * (grad[i].abs() + acc_abs) {
                 ok = false;
             }
         }

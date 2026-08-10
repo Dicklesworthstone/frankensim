@@ -564,3 +564,21 @@ fn red_gradient(sys: &PortHamiltonian, x: &[f64], out: &mut [f64]) {
         out[i] = 0.5 * (sys.hamiltonian(&xp) - sys.hamiltonian(&xm));
     }
 }
+
+/// Reduction linearity probe at TINY gradient scales: a nonlinear
+/// (Duffing) storage whose q-row gradients sit far below any absolute
+/// floor must still REFUSE quadratic-only reduction, even with an O(1)
+/// momentum row alongside (the mixed-scale masking case); a quadratic
+/// system at the same tiny scale must still reduce.
+#[test]
+fn reduction_refuses_tiny_scale_nonlinear_storage_and_admits_tiny_quadratic() {
+    let identity = vec![1.0, 0.0, 0.0, 1.0];
+    let duffing = fs_phs::duffing_oscillator(1.0, 1.0e-10, 1.0e-9, 0.0).expect("duffing");
+    assert!(matches!(
+        fs_phs::reduce_galerkin(&duffing, &identity, 2),
+        Err(fs_phs::PhsError::Dimension { .. })
+    ));
+    let msd = fs_phs::mass_spring_damper(1.0, 1.0e-10, 0.0).expect("msd");
+    let reduced = fs_phs::reduce_galerkin(&msd, &identity, 2).expect("tiny quadratic reduces");
+    assert_eq!(reduced.state_dim(), 2);
+}
