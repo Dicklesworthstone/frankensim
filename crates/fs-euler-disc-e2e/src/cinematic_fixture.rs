@@ -33,8 +33,9 @@ use crate::patch_kinematics::{
     compute_moving_one_mode_patch_kinematics,
 };
 use crate::production_coupling::{
-    GasChannelState, GasChannelStepInput, ProductionCouplingCheckpoint, ProductionCouplingIdentity,
-    ProductionCouplingModel, ProductionCouplingStepInput, ProductionSurfaceExcitationStepInput,
+    GasChannelState, GasChannelStepInput, ProductionControlTrajectory,
+    ProductionCouplingCheckpoint, ProductionCouplingIdentity, ProductionCouplingModel,
+    ProductionCouplingStepInput, ProductionSurfaceGeometryStepInput,
     ProductionSurfaceTraceStepInput,
 };
 use crate::rolling_contact::{
@@ -919,6 +920,14 @@ pub struct CinematicMechanicsConfig {
     pub support_surface: CinematicPeriodicSurfaceConfig,
     /// Maximum filtered topography height relative to nominal approach.
     pub maximum_linearized_height_fraction: f64,
+    /// Iteration ceiling for nonlinear surface-gap/footprint consistency.
+    pub surface_geometry_maximum_iterations: usize,
+    /// Absolute filtered-height convergence tolerance [m].
+    pub surface_geometry_height_tolerance_m: f64,
+    /// Absolute filtered-height-rate convergence tolerance [m/s].
+    pub surface_geometry_height_rate_tolerance_m_per_s: f64,
+    /// Relative filtered-height and height-rate convergence tolerance.
+    pub surface_geometry_relative_tolerance: f64,
     /// Explicit exterior gas correlation candidate.
     pub exterior_aero: CinematicExteriorAeroConfig,
 }
@@ -945,12 +954,12 @@ impl Default for CinematicMechanicsConfig {
             })
             .collect();
         Self {
-            // Share the physical sound-master clock so resolved contact-force
-            // transients are not downsampled before they excite the plate.
-            // This is a numerical clock, not a material or soundtrack preset;
-            // callers may change it, and model admission will refuse an
-            // under-resolved structural basis.
-            sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
+            // The stiff finite-patch/contact-support transient is resolved on
+            // its own mechanics clock. A 48/96/192/384 kHz refinement probe
+            // removed spurious separation only at 384 kHz; the accepted force
+            // measure is subsequently projected onto the independent 48 kHz
+            // sound-master cells without identifying the two clocks.
+            sample_rate_hz: 384_000,
             gravity_m_per_s2: 9.806_65,
             initial_inclination_rad: 0.30,
             initial_precession_rad_per_s: 46.0,
@@ -965,7 +974,12 @@ impl Default for CinematicMechanicsConfig {
                 max_strain: 0.02,
                 max_patch_to_depth: 0.20,
                 max_patch_to_layer: 0.20,
-                max_pressure_to_yield: 0.95,
+                // Hertz peak pressure is not a uniaxial stress. For ordinary
+                // metal Poisson ratios, first subsurface yield occurs near
+                // p0/Y = 1.6 under the Hertz elastic stress field. Retain a
+                // conservative margin and refuse at 1.5; this is still an
+                // elastic-applicability gate, not an elastoplastic model.
+                max_pressure_to_yield: 1.50,
                 max_rate_ratio: 0.50,
                 min_temperature_k: 250.0,
                 max_temperature_k: 400.0,
@@ -1001,6 +1015,10 @@ impl Default for CinematicMechanicsConfig {
                     .to_owned(),
             },
             maximum_linearized_height_fraction: 0.01,
+            surface_geometry_maximum_iterations: 24,
+            surface_geometry_height_tolerance_m: 1.0e-15,
+            surface_geometry_height_rate_tolerance_m_per_s: 1.0e-12,
+            surface_geometry_relative_tolerance: 1.0e-6,
             exterior_aero: CinematicExteriorAeroConfig::default(),
         }
     }
@@ -1396,7 +1414,9 @@ impl CinematicFixtureConfig {
         }
         let mechanics = &self.mechanics;
         if mechanics.sample_rate_hz == 0
-            || mechanics.sample_rate_hz > SOUND_MASTER_SAMPLE_RATE_HZ
+            || mechanics.sample_rate_hz > 1_000_000
+            || mechanics.sample_rate_hz < SOUND_MASTER_SAMPLE_RATE_HZ
+            || mechanics.sample_rate_hz % SOUND_MASTER_SAMPLE_RATE_HZ != 0
             || !(mechanics.gravity_m_per_s2.is_finite() && mechanics.gravity_m_per_s2 > 0.0)
             || !(mechanics.initial_inclination_rad.is_finite()
                 && mechanics.initial_inclination_rad > 0.0
@@ -1413,6 +1433,17 @@ impl CinematicFixtureConfig {
             || !(mechanics.maximum_linearized_height_fraction.is_finite()
                 && mechanics.maximum_linearized_height_fraction > 0.0
                 && mechanics.maximum_linearized_height_fraction <= 0.1)
+            || mechanics.surface_geometry_maximum_iterations == 0
+            || mechanics.surface_geometry_maximum_iterations > 128
+            || !(mechanics.surface_geometry_height_tolerance_m.is_finite()
+                && mechanics.surface_geometry_height_tolerance_m > 0.0)
+            || !(mechanics
+                .surface_geometry_height_rate_tolerance_m_per_s
+                .is_finite()
+                && mechanics.surface_geometry_height_rate_tolerance_m_per_s > 0.0)
+            || !(mechanics.surface_geometry_relative_tolerance.is_finite()
+                && mechanics.surface_geometry_relative_tolerance > 0.0
+                && mechanics.surface_geometry_relative_tolerance <= 1.0)
         {
             return Err(CinematicFixtureError::InvalidConfig(
                 "mechanics clock, initial state, or constitutive scalar is outside its admitted domain",
@@ -1540,7 +1571,7 @@ pub struct CinematicFixtureReport {
     pub output_directory: PathBuf,
     /// Deterministic top-level critique manifest.
     pub manifest_path: PathBuf,
-    /// Verified float32 stereo master.
+    /// Verified 48 kHz stereo PCM24 pressure-derived listening master.
     pub wav_path: PathBuf,
     /// First display-referred frame, useful for quick inspection.
     pub first_preview_path: PathBuf,
@@ -2273,7 +2304,7 @@ impl FixtureProductionMechanics {
 
         let patch_kinematics = compute_moving_one_mode_patch_kinematics(input.patch.clone())
             .map_err(ProductionCouplingError::Patch)?;
-        if let Some(surface) = &mut input.surface_excitation {
+        if let Some(surface) = &mut input.surface_geometry {
             let disc_period_m = surface.surface_a.trace.track_length_m();
             surface.surface_a.path_coordinate_m =
                 current_phase / core::f64::consts::TAU * disc_period_m;
@@ -2605,7 +2636,7 @@ fn build_fixture_production_mechanics(
         realize_cinematic_surface("cinematic/disc-edge-track", &mechanics.disc_surface)?;
     let support_trace =
         realize_cinematic_surface("cinematic/support-track", &mechanics.support_surface)?;
-    let surface_excitation = ProductionSurfaceExcitationStepInput {
+    let surface_geometry = ProductionSurfaceGeometryStepInput {
         interface: interface.clone(),
         surface_a: ProductionSurfaceTraceStepInput {
             trace: disc_trace,
@@ -2618,7 +2649,11 @@ fn build_fixture_production_mechanics(
             path_speed_m_per_s: 0.0,
         },
         travel_angle_from_patch_major_rad: 0.0,
-        maximum_linearized_height_fraction: mechanics.maximum_linearized_height_fraction,
+        maximum_iterations: mechanics.surface_geometry_maximum_iterations,
+        absolute_height_tolerance_m: mechanics.surface_geometry_height_tolerance_m,
+        absolute_height_rate_tolerance_m_per_s: mechanics
+            .surface_geometry_height_rate_tolerance_m_per_s,
+        relative_tolerance: mechanics.surface_geometry_relative_tolerance,
     };
     let gas = GasState::try_new(
         &config.ambient_gas,
@@ -2735,7 +2770,8 @@ fn build_fixture_production_mechanics(
         time_s: 0.0,
         patch,
         normal,
-        surface_excitation: Some(surface_excitation),
+        surface_excitation: None,
+        surface_geometry: Some(surface_geometry),
         tangential: TangentialContactRequest {
             request_id: "cinematic/tangent-step-1".to_owned(),
             expected_state_version: 0,
@@ -2871,7 +2907,7 @@ impl FixtureAudioConvergenceEvidence {
     fn diagnostics(self) -> String {
         format!(
             concat!(
-                "stage=audio timestep_convergence source=fine-dt2 full_frames={} ",
+                "stage=audio control_resolution_convergence source=fine-48kHz full_frames={} ",
                 "published_frames={} modes={} drive_nrmse={:.6e} ",
                 "drive_peak_rel={:.6e} stem_nrmse={:.6e} stem_peak_rel={:.6e}"
             ),
@@ -2888,7 +2924,7 @@ impl FixtureAudioConvergenceEvidence {
     fn manifest_json(self) -> String {
         format!(
             concat!(
-                "{{\"comparison\":\"coarse-dt versus fine-dt2 on one shared continuous 48 kHz preroll clock; fine-dt2 alone is published\",",
+                "{{\"comparison\":\"24 kHz impulse-preserving control cells versus 48 kHz control cells from one shared 384 kHz mechanics trajectory; 48 kHz alone is published\",",
                 "\"full_audio_frame_count\":{},\"published_audio_frame_count\":{},\"mode_count\":{},",
                 "\"drive\":{{\"normalization_floor_n\":{:.17e},",
                 "\"localized_nrmse\":{:.17e},\"localized_normalized_peak\":{:.17e},",
@@ -2903,7 +2939,7 @@ impl FixtureAudioConvergenceEvidence {
                 "\"coarse_crop_binding\":\"{}\",\"fine_crop_binding\":\"{}\"}},",
                 "\"artistic_localized_impulses\":\"exact all-zero in both members\",",
                 "\"comparison_stage\":\"pre-fade, pre-spatialization, pre-mix, pre-master\",",
-                "\"claim\":\"one fixed-gate output-consistency pair for the encoded reduced mechanics and declared uncalibrated modal model; not asymptotic convergence, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experiment\"}}"
+                "\"claim\":\"one control-resolution consistency pair for the declared uncalibrated modal model; not mechanics-timestep convergence, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experiment\"}}"
             ),
             self.full_audio_frame_count,
             self.published_audio_frame_count,
@@ -3608,50 +3644,143 @@ pub fn run_cinematic_fixture(
     let duration_s = f64::from(config.frames) / f64::from(CRITIQUE_FPS);
 
     progress("stage=mechanics begin");
-    let benchmark = Thorne2026SteelGlassBenchmark::ambient().map_err(pipeline)?;
     let profile = config.disc.resolve_profile(cx)?;
-    let source_bound_profile = benchmark.resolve_specimen(cx).map_err(pipeline)?;
-    admit_thorne_source_bound_disc_state(&config.disc, &profile, &source_bound_profile)?;
     let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc, cx)?;
     let physical_plate = resolve_fixture_physical_plate(&config.support_plate)?;
     let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)?;
-    let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).map_err(pipeline)?;
-    let audio_preroll_duration_s = f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
-    let (coarse_audio_preroll_trajectory, coarse_trajectory) =
-        RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
-            &refinement.coarse,
-            &profile,
-            audio_preroll_duration_s,
-            duration_s,
-            cx,
-        )
-        .map_err(pipeline)?;
-    let (audio_preroll_trajectory, trajectory) =
-        RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
-            &refinement.fine,
-            &profile,
-            audio_preroll_duration_s,
-            duration_s,
-            cx,
-        )
-        .map_err(pipeline)?;
-    let output_convergence = fixture_output_convergence_evidence(
-        &coarse_audio_preroll_trajectory,
-        &coarse_trajectory,
-        &audio_preroll_trajectory,
-        &trajectory,
+    let production = build_fixture_production_mechanics(
+        &profile,
+        &physical_disc,
+        &physical_plate,
+        plate_basis.clone(),
         config,
-        &refinement,
-        audio_preroll_duration_s,
-        duration_s,
         cx,
     )?;
-    progress(&output_convergence.diagnostics());
-    // Once the fixed mechanics gate passes, retain the coarse full-preroll
-    // source only through the pre-master audio gate. The coarse published
-    // picture trajectory has served its sole comparison purpose.
-    drop(coarse_trajectory);
-    let run = &refinement.fine;
+    let mechanics_steps_per_control_interval = usize::try_from(
+        config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ,
+    )
+    .map_err(|_| CinematicFixtureError::Pipeline("mechanics/control ratio exceeds usize".into()))?;
+    let preroll_mechanics_steps = usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+        .ok()
+        .and_then(|frames| frames.checked_mul(mechanics_steps_per_control_interval))
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline("audio preroll mechanics budget overflow".into())
+        })?;
+    let picture_mechanics_steps = usize::try_from(
+        u64::from(config.frames)
+            .checked_mul(u64::from(config.mechanics.sample_rate_hz))
+            .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("picture mechanics budget overflow".into())
+            })?,
+    )
+    .map_err(|_| {
+        CinematicFixtureError::Pipeline("picture mechanics budget exceeds usize".into())
+    })?;
+    let preroll_control = production
+        .model
+        .run_eventful_control_trajectory(
+            production.checkpoint.clone(),
+            preroll_mechanics_steps,
+            mechanics_steps_per_control_interval,
+            |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+        )
+        .map_err(pipeline)?;
+    if preroll_control.accepted_mechanics_steps != preroll_mechanics_steps
+        || !matches!(
+            preroll_control.termination,
+            crate::production_coupling::ProductionEventTrajectoryTermination::StepLimitReached { .. }
+        )
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "production preroll stopped after {}/{} mechanics steps: {:?}",
+            preroll_control.accepted_mechanics_steps,
+            preroll_mechanics_steps,
+            preroll_control.termination
+        )));
+    }
+    // Advance in one-second chunks. This retains exactly the same mechanics
+    // steps and ownership sequence while publishing useful progress during a
+    // multi-million-step production solve.
+    let mechanics_steps_per_second = usize::try_from(config.mechanics.sample_rate_hz)
+        .map_err(|_| CinematicFixtureError::Pipeline("mechanics rate exceeds usize".into()))?;
+    let mut remaining_picture_steps = picture_mechanics_steps;
+    let mut picture_control = None;
+    while remaining_picture_steps > 0 {
+        let chunk_steps = remaining_picture_steps.min(mechanics_steps_per_second);
+        let chunk_start = picture_control.as_ref().map_or_else(
+            || preroll_control.last_accepted_checkpoint.clone(),
+            |accepted: &ProductionControlTrajectory| accepted.last_accepted_checkpoint.clone(),
+        );
+        let chunk = production
+            .model
+            .run_eventful_control_trajectory(
+                chunk_start,
+                chunk_steps,
+                mechanics_steps_per_control_interval,
+                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+            )
+            .map_err(pipeline)?;
+        if chunk.accepted_mechanics_steps != chunk_steps
+            || !matches!(
+                chunk.termination,
+                crate::production_coupling::ProductionEventTrajectoryTermination::StepLimitReached { .. }
+            )
+        {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "production picture chunk stopped after {}/{} mechanics steps: {:?}",
+                chunk.accepted_mechanics_steps, chunk_steps, chunk.termination
+            )));
+        }
+        picture_control = Some(match picture_control {
+            None => chunk,
+            Some(prefix) => prefix.concatenate(chunk).map_err(pipeline)?,
+        });
+        remaining_picture_steps -= chunk_steps;
+        progress(&format!(
+            "stage=mechanics accepted_picture_steps={}/{} simulated_picture_s={:.3}",
+            picture_mechanics_steps - remaining_picture_steps,
+            picture_mechanics_steps,
+            (picture_mechanics_steps - remaining_picture_steps) as f64
+                / f64::from(config.mechanics.sample_rate_hz),
+        ));
+    }
+    let picture_control = picture_control.ok_or_else(|| {
+        CinematicFixtureError::Pipeline("production picture horizon is empty".into())
+    })?;
+    let control_timestep_s = f64::from(SOUND_MASTER_SAMPLE_RATE_HZ).recip();
+    let trajectory = RenderTrajectory::from_production_control_trajectory(
+        &production.model,
+        &picture_control,
+        &profile,
+        control_timestep_s,
+        cx,
+    )
+    .map_err(pipeline)?;
+    let audio_control = preroll_control
+        .concatenate(picture_control)
+        .map_err(pipeline)?;
+    let coarse_audio_control = audio_control.coarsened(2).map_err(pipeline)?;
+    let audio_preroll_trajectory = RenderTrajectory::from_production_control_trajectory(
+        &production.model,
+        &audio_control,
+        &profile,
+        control_timestep_s,
+        cx,
+    )
+    .map_err(pipeline)?;
+    progress(&format!(
+        concat!(
+            "stage=mechanics production=true mechanics_hz={} control_hz={} ",
+            "accepted_steps={} controls={} audio_preroll_controls={} ",
+            "mechanics_dt_refinement=outstanding"
+        ),
+        config.mechanics.sample_rate_hz,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        preroll_mechanics_steps + picture_mechanics_steps,
+        trajectory.samples().len(),
+        audio_preroll_trajectory.samples().len(),
+    ));
     let retained_time_s = trajectory
         .samples()
         .last()
@@ -3660,13 +3789,13 @@ pub fn run_cinematic_fixture(
         .time_s;
     if (retained_time_s - duration_s).abs() > 16.0 * f64::EPSILON * duration_s {
         return Err(CinematicFixtureError::Pipeline(format!(
-            "source-bound render tail is {retained_time_s:.17e}s, expected {duration_s:.17e}s"
+            "production render trajectory is {retained_time_s:.17e}s, expected {duration_s:.17e}s"
         )));
     }
     progress("stage=mechanics complete");
 
     let mut campaign_hasher =
-        DomainHasher::new("org.frankensim.euler-critique.literature-campaign.v2");
+        DomainHasher::new("org.frankensim.euler-critique.production-campaign.v1");
     campaign_hasher.update(trajectory.metadata().configuration_identity.as_bytes());
     campaign_hasher.update(&config.frames.to_le_bytes());
     campaign_hasher.update(&CRITIQUE_FPS.to_le_bytes());
@@ -3690,43 +3819,30 @@ pub fn run_cinematic_fixture(
         cx,
     )
     .map_err(pipeline)?;
-    let coarse_audio_preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
-        hash_domain(
-            "org.frankensim.euler-critique.coarse-audio-convergence-source.v1",
-            coarse_audio_preroll_trajectory
-                .metadata()
-                .configuration_identity
-                .as_bytes(),
-        ),
-        coarse_audio_preroll_trajectory,
-        Vec::new(),
-        RenderTrajectoryCodecBudget::DEFAULT,
-        cx,
-    )
-    .map_err(pipeline)?;
     progress(&trajectory_diagnostics(&trajectory_artifact));
 
     // Sound construction is much cheaper than path tracing and depends only
     // on the admitted trajectory. Fail here before spending render-hours if a
     // synthesis, mastering, or artifact contract is unsatisfied.
     progress("stage=audio begin");
-    let audio = build_audio(
-        &trajectory_artifact,
-        &coarse_audio_preroll_artifact,
+    let physical_audio = build_physical_audio(
         &audio_preroll_artifact,
         &physical_disc,
         &physical_plate,
         &plate_basis,
-        run.parameters.gravity_m_per_s2,
         config,
         cx,
     )?;
-    progress(&audio.convergence.diagnostics());
-    drop(coarse_audio_preroll_artifact);
-    audio
-        .artifact
-        .verify(AudioArtifactBudget::DEFAULT, cx)
-        .map_err(pipeline)?;
+    progress(&format!(
+        concat!(
+            "stage=audio physical_pressure=true peak_pa={:.6e} ",
+            "presentation_gain_db={:.3} sample_peak_fs={:.6} true_peak_fs={:.6}"
+        ),
+        physical_audio.master.source_peak_abs_pressure_pa,
+        physical_audio.master.digital_gain_db,
+        physical_audio.master.meters.sample_peak_fs,
+        physical_audio.master.meters.true_peak_estimate_fs,
+    ));
     progress("stage=audio complete");
 
     fs::create_dir(&staging_directory)?;
@@ -3753,14 +3869,7 @@ pub fn run_cinematic_fixture(
         .map_err(pipeline)?;
     trajectory_file.flush()?;
     let wav_path = sound_directory.join("physical-listening-master.pcm24.wav");
-    write_new(&wav_path, audio.physical.master.wav_bytes())?;
-    let legacy_wav_path = sound_directory.join("legacy-representative-convergence.float32.wav");
-    write_new(&legacy_wav_path, audio.artifact.wav_bytes())?;
-    let audio_manifest_path = sound_directory.join("legacy-representative-convergence.json");
-    write_new(
-        &audio_manifest_path,
-        audio.artifact.manifest().to_manifest_json().as_bytes(),
-    )?;
+    write_new(&wav_path, physical_audio.master.wav_bytes())?;
 
     progress("stage=render begin");
     let camera = critique_camera(duration_s).map_err(pipeline)?;
@@ -4161,39 +4270,23 @@ pub fn run_cinematic_fixture(
         _ => None,
     };
     let manifest_path = staging_directory.join("critique-manifest.json");
-    let manifest = fixture_manifest(
+    let manifest = production_fixture_manifest(
         config,
         duration_s,
-        run,
-        &refinement,
-        &output_convergence,
-        &audio.convergence,
+        &audio_control,
+        &coarse_audio_control,
         &trajectory_artifact,
         raw_sequence_identity,
         preview_sequence_identity,
-        audio.physical.master.wav.wav_identity(),
+        physical_audio.master.wav.wav_identity(),
         &physical_disc,
-        &audio.physical,
-        audio.modal_parameter_set_identity,
-        &audio.modal_parameter_set_disclosure,
-        audio.warm_start_source_identity,
-        audio.warm_start_checkpoint_identity,
-        audio.source_sound_configuration_identity,
-        audio.published_trajectory_identity,
-        audio.crop_resampler_identity,
-        audio.crop_first_source_audio_frame,
-        audio.crop_end_source_audio_frame,
-        audio.chirp_start_hz,
-        audio.chirp_end_hz,
-        audio.pre_master_peak_fs,
-        audio.master_gain_db,
+        &physical_audio,
         over_range_channels,
         gamut_mapped_pixels,
         &render_evidence,
         preview_mesh_evidence,
         &adaptive_sampling_evidence,
         &denoise_evidence,
-        audio.spatialization.as_ref(),
         &mux,
     );
     write_new(&manifest_path, manifest.as_bytes())?;
@@ -7351,6 +7444,160 @@ fn resolved_disc_manifest_json(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn production_fixture_manifest(
+    config: &CinematicFixtureConfig,
+    duration_s: f64,
+    fine_controls: &ProductionControlTrajectory,
+    coarse_controls: &ProductionControlTrajectory,
+    trajectory: &EulerRenderTrajectoryArtifact,
+    raw_sequence_identity: ContentHash,
+    preview_sequence_identity: ContentHash,
+    wav_identity: ContentHash,
+    physical_disc: &FixturePhysicalDiscState,
+    physical_audio: &FixturePhysicalAudio,
+    over_range_channels: u64,
+    gamut_mapped_pixels: u64,
+    render: &FixtureRenderEvidence,
+    preview_mesh: FixturePreviewMeshEvidence,
+    adaptive_sampling: &FixtureAdaptiveSamplingEvidence,
+    denoise: &FixtureDenoiseEvidence,
+    mux: &MuxOutcome,
+) -> String {
+    let rendered_frames = config
+        .render_frame_range()
+        .expect("validated fixture configuration retains a valid frame window");
+    let fine_impulse_n_s: f64 = fine_controls
+        .intervals
+        .iter()
+        .map(|interval| interval.normal_impulse_n_s)
+        .sum();
+    let coarse_impulse_n_s: f64 = coarse_controls
+        .intervals
+        .iter()
+        .map(|interval| interval.normal_impulse_n_s)
+        .sum();
+    let impulse_residual_n_s = (fine_impulse_n_s - coarse_impulse_n_s).abs();
+    let mux_json = match mux {
+        MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
+        MuxOutcome::Unavailable(message) => format!(
+            "{{\"status\":\"unavailable\",\"detail\":\"{}\"}}",
+            json_escape(message)
+        ),
+        MuxOutcome::Failed(code) => {
+            format!("{{\"status\":\"failed\",\"exit_code\":{code}}}")
+        }
+        MuxOutcome::Written(path) => format!(
+            "{{\"status\":\"written\",\"path\":\"{}\"}}",
+            json_escape(&path.display().to_string())
+        ),
+    };
+    let adaptive_json = config.adaptive_sampling.map_or_else(
+        || {
+            format!(
+                "{{\"mode\":\"uniform\",\"samples_per_pixel\":{}}}",
+                config.samples_per_pixel
+            )
+        },
+        |policy| adaptive_sampling.manifest_json(policy),
+    );
+    let disc_json = resolved_disc_manifest_json(&config.disc, physical_disc);
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"frankensim-euler-disc-production-critique-v1\",\n",
+            "  \"status\": \"estimate-only-physics-render\",\n",
+            "  \"picture\": {{\"width\":{},\"height\":{},\"fps\":{},\"frames\":{},",
+            "\"rendered_frame_start\":{},\"rendered_frame_end_exclusive\":{},\"duration_s\":{:.17e},",
+            "\"raw_sequence_identity\":\"{}\",\"preview_sequence_identity\":\"{}\",",
+            "\"over_range_linear_channels\":{},\"gamut_mapped_pixels\":{},",
+            "\"sampling\":{},\"denoise\":{{\"applied_frames\":{},\"maximum_retained_bytes\":{},",
+            "\"maximum_history_frames\":{}}},\"preview_mesh\":{}}},\n",
+            "  \"mechanics\": {{\"model\":\"generic transactional rigid-profile/contact/tribology/exterior-gas/modal-support composition\",",
+            "\"mechanics_sample_rate_hz\":{},\"control_sample_rate_hz\":{},",
+            "\"accepted_mechanics_steps\":{},\"fine_control_intervals\":{},\"coarse_audio_control_intervals\":{},",
+            "\"branch_transition_count\":{},\"fine_normal_impulse_n_s\":{:.17e},",
+            "\"coarse_normal_impulse_n_s\":{:.17e},\"coarsening_impulse_residual_n_s\":{:.17e},",
+            "\"mechanics_dt_refinement\":\"outstanding; 384 kHz passed an 85.3 ms probe after 48/96/192 kHz showed nonconverged contact transients\",",
+            "\"trajectory_identity\":\"{}\",\"disc\":{}}},\n",
+            "  \"audio\": {{\"primary\":\"physical-listening-master.pcm24.wav\",",
+            "\"wav_identity\":\"{}\",\"source_peak_abs_pressure_pa\":{:.17e},",
+            "\"presentation_gain_fs_per_pa\":{:.17e},\"presentation_gain_db\":{:.17e},",
+            "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
+            "\"stereo_rms_fs\":{:.17e},\"left_pressure_identity\":\"{}\",",
+            "\"right_pressure_identity\":\"{}\",\"plate_basis_identity\":\"{}\",",
+            "\"plate_radiation_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
+            "\"observer_model\":\"two fixed world-space ear observers with causal retarded-time radiation\",",
+            "\"control_resolution_evidence\":{{\"fine_hz\":48000,\"coarse_hz\":24000,",
+            "\"coarsening_impulse_residual_n_s\":{:.17e},",
+            "\"pressure_response_convergence\":\"outstanding\"}}}},\n",
+            "  \"render_execution\": {{\"frames\":{},\"maximum_effective_workers\":{},",
+            "\"maximum_peak_memory_bytes\":{},\"setup_ns\":{},\"traversal_ns\":{},",
+            "\"tile_compute_ns\":{},\"tile_merge_ns\":{},\"publication_ns\":{},",
+            "\"idle_worker_ns\":{}}},\n",
+            "  \"mux\": {},\n",
+            "  \"no_claims\": [",
+            "\"constitutive cards and initial conditions are disclosed estimates, not calibration to a measured Euler-disc run\",",
+            "\"the 384 kHz mechanics timestep has a bounded startup probe but no full-duration dt/dt2 convergence certificate yet\",",
+            "\"the current fixed-topology contact composition admits solid isotropic states and refuses liquid fraction, plastic flow, fracture, wear-driven geometry evolution, and remeshing\",",
+            "\"temperature and phase are parameterized inputs, but transient heat transport, latent-heat evolution, melting deformation, free-surface flow, and phase-dependent optical remeshing are not yet coupled\",",
+            "\"the pressure stem is an uncalibrated linear structural-radiation estimate; digital listening-master gain is presentation mastering and not an SPL claim\",",
+            "\"image quality is final only after native-4K sample-rung review and complete-sequence decode and player verification\"",
+            "]\n}}\n"
+        ),
+        config.width,
+        config.height,
+        CRITIQUE_FPS,
+        config.frames,
+        rendered_frames.start,
+        rendered_frames.end,
+        duration_s,
+        raw_sequence_identity.to_hex(),
+        preview_sequence_identity.to_hex(),
+        over_range_channels,
+        gamut_mapped_pixels,
+        adaptive_json,
+        denoise.applied_frames,
+        denoise.maximum_retained_bytes,
+        denoise.maximum_history_frames,
+        preview_mesh.manifest_json(),
+        config.mechanics.sample_rate_hz,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        fine_controls.accepted_mechanics_steps,
+        fine_controls.intervals.len(),
+        coarse_controls.intervals.len(),
+        fine_controls.transitions.len(),
+        fine_impulse_n_s,
+        coarse_impulse_n_s,
+        impulse_residual_n_s,
+        trajectory.receipt().artifact_identity().to_hex(),
+        disc_json,
+        wav_identity.to_hex(),
+        physical_audio.master.source_peak_abs_pressure_pa,
+        physical_audio.master.digital_gain_fs_per_pa,
+        physical_audio.master.digital_gain_db,
+        physical_audio.master.meters.sample_peak_fs,
+        physical_audio.master.meters.true_peak_estimate_fs,
+        physical_audio.master.meters.stereo_rms_fs,
+        physical_audio.left_pressure_identity.to_hex(),
+        physical_audio.right_pressure_identity.to_hex(),
+        physical_audio.plate_structural_basis_identity.to_hex(),
+        physical_audio.plate_acoustic_radiation_identity.to_hex(),
+        physical_audio.gas_model_identity.to_hex(),
+        impulse_residual_n_s,
+        render.frames,
+        render.maximum_effective_workers,
+        render.maximum_peak_memory_bytes,
+        render.setup_ns,
+        render.traversal_ns,
+        render.tile_compute_ns,
+        render.tile_merge_ns,
+        render.publication_ns,
+        render.idle_worker_ns,
+        mux_json,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fixture_manifest(
     config: &CinematicFixtureConfig,
     duration_s: f64,
@@ -7907,37 +8154,53 @@ mod tests {
                 .input_for_checkpoint(&profile, &production.checkpoint, cx)
                 .expect("state-derived first input");
             let surface = first_input
-                .surface_excitation
+                .surface_geometry
                 .as_ref()
                 .expect("declared physical topography");
             assert!(surface.surface_a.path_coordinate_m.is_finite());
             assert!(surface.surface_a.path_speed_m_per_s.is_finite());
             assert_ne!(surface.surface_a.path_speed_m_per_s, 0.0);
 
-            let source = production.model.run_eventful_compliant_trajectory(
-                production.checkpoint.clone(),
-                4_096,
-                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
-            );
+            let mechanics_steps_per_control_interval =
+                usize::try_from(config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ)
+                    .expect("integer mechanics/control reduction");
+            let source = production
+                .model
+                .run_eventful_control_trajectory(
+                    production.checkpoint.clone(),
+                    4_096,
+                    mechanics_steps_per_control_interval,
+                    |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                )
+                .expect("bounded-memory production controls");
             assert_eq!(
-                source.accepted_steps.len(),
-                4_096,
+                source.accepted_mechanics_steps, 4_096,
                 "production path refused: {:?}",
                 source.termination
             );
-            let render = RenderTrajectory::from_production_event_trajectory(
+            let render = RenderTrajectory::from_production_control_trajectory(
                 &production.model,
                 &source,
                 &profile,
-                first_input.duration_s,
+                f64::from(SOUND_MASTER_SAMPLE_RATE_HZ).recip(),
                 cx,
             )
             .expect("accepted mechanics enters common render/audio trajectory");
-            assert_eq!(render.samples().len(), 4_096);
+            assert_eq!(render.samples().len(), 512);
+            let mut closed_samples = 0_usize;
+            let mut open_samples = 0_usize;
             for sample in render.samples() {
-                assert!(sample.input().interval_normal_force_n > 0.0);
+                if sample.input().interval_contact_active {
+                    assert!(sample.input().interval_normal_force_n > 0.0);
+                    closed_samples += 1;
+                } else {
+                    assert_eq!(sample.input().interval_normal_force_n, 0.0);
+                    open_samples += 1;
+                }
                 assert!(sample.input().base_mode.is_some());
             }
+            assert!(closed_samples > 0);
+            assert_eq!(closed_samples + open_samples, render.samples().len());
         });
     }
 

@@ -18,10 +18,10 @@ use crate::coupled_runner::{
     CoupledNumericalRefusalReason, CoupledRun, CoupledSample, CoupledTerminal, qois,
 };
 use crate::production_coupling::{
-    ProductionCouplingError, ProductionCouplingModel, ProductionCouplingReceipt,
-    ProductionEventTrajectory, ProductionEventTrajectoryTermination, ProductionOpenFlightReceipt,
-    ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt, SmoothContactTrajectory,
-    SmoothContactTrajectoryTermination,
+    ProductionControlTrajectory, ProductionCouplingError, ProductionCouplingModel,
+    ProductionCouplingReceipt, ProductionEventTrajectory, ProductionEventTrajectoryTermination,
+    ProductionOpenFlightReceipt, ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt,
+    SmoothContactTrajectory, SmoothContactTrajectoryTermination,
 };
 use crate::reduced_decay::{
     BILDSTEN_PUBLISHED_POWER_COEFFICIENT, ChannelPowers, ChannelWork, REDUCED_DECAY_MODEL_ID,
@@ -1152,6 +1152,313 @@ impl RenderTrajectory {
                 "render channel work is unavailable pending one shared cross-channel work ledger; zero payloads mean unavailable, not zero physical loss".to_owned(),
                 "mechanical energy and defect are disc-only fs-mbd diagnostics, not full disc/base/contact/gas energy closure".to_owned(),
                 "no thermal evolution, phase change, melting, plastic flow, structural-mode solve, or acoustic-radiation solve is implied".to_owned(),
+            ],
+            authority: RenderTrajectoryAuthority::SimulationEvidence,
+        };
+        Self::try_new(metadata, inputs)
+    }
+
+    /// Convert a bounded-memory production control trajectory into the common
+    /// rendering and structural-acoustics stream.
+    ///
+    /// Each source interval is homogeneous in its contact branch. Its normal
+    /// force is the exact mechanics impulse divided by interval duration, so a
+    /// mechanics-to-control reduction preserves every published force-time
+    /// cell rather than decimating point samples. Endpoint rigid/base state is
+    /// the actual accepted state; no pose or contact event is synthesized.
+    pub fn from_production_control_trajectory(
+        model: &ProductionCouplingModel,
+        source: &ProductionControlTrajectory,
+        profile: &ResolvedDiscProfile,
+        declared_maximum_timestep_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RenderTrajectoryError> {
+        cx.checkpoint()
+            .map_err(|_| RenderTrajectoryError::Cancelled)?;
+        if source.intervals.is_empty() || source.accepted_mechanics_steps == 0 {
+            return Err(RenderTrajectoryError::ProductionPrefixEmpty);
+        }
+        if !(declared_maximum_timestep_s.is_finite() && declared_maximum_timestep_s > 0.0) {
+            return Err(RenderTrajectoryError::InvalidTimestep);
+        }
+        let profile_mass = profile_mass_to_mbd(profile.mass_properties)
+            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+        model
+            .validate_checkpoint(&source.start_checkpoint)
+            .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
+        model
+            .validate_checkpoint(&source.last_accepted_checkpoint)
+            .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
+        if model.disc_mass_properties != profile_mass {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+        let accepted_steps = u64::try_from(source.accepted_mechanics_steps).map_err(|_| {
+            RenderTrajectoryError::Capacity {
+                artifact: "production-control accepted mechanics steps",
+                requested: source.accepted_mechanics_steps,
+            }
+        })?;
+        if source
+            .start_checkpoint
+            .committed_version
+            .checked_add(accepted_steps)
+            != Some(source.last_accepted_checkpoint.committed_version)
+            || source
+                .intervals
+                .iter()
+                .map(|interval| interval.mechanics_substeps)
+                .sum::<usize>()
+                != source.accepted_mechanics_steps
+        {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(source.intervals.len())
+            .map_err(|_| RenderTrajectoryError::Capacity {
+                artifact: "production control render samples",
+                requested: source.intervals.len(),
+            })?;
+        let time_origin_s = source.start_checkpoint.elapsed_time_s();
+        let mut previous_time_s = 0.0_f64;
+        let mut previous_state = source.start_checkpoint.disc_state;
+        let mut previous_base_version = source.start_checkpoint.committed_version;
+        let mut transition_index = 0_usize;
+        let final_index = source.intervals.len() - 1;
+        for (index, interval) in source.intervals.iter().enumerate() {
+            if index % TRAJECTORY_ADMISSION_CHECKPOINT_SAMPLES == 0 {
+                cx.checkpoint()
+                    .map_err(|_| RenderTrajectoryError::Cancelled)?;
+            }
+            let interval_start_time_s = interval.start_time_s - time_origin_s;
+            let interval_end_time_s = interval.end_time_s - time_origin_s;
+            let duration_s = interval_end_time_s - interval_start_time_s;
+            if interval_start_time_s.to_bits() != previous_time_s.to_bits()
+                || !(duration_s.is_finite()
+                    && duration_s > 0.0
+                    && duration_s
+                        <= declared_maximum_timestep_s
+                            + 64.0 * f64::EPSILON * declared_maximum_timestep_s.max(1.0))
+                || interval.mechanics_substeps == 0
+                || interval.state_before != previous_state
+                || interval.base_parent_version != previous_base_version
+                || interval.base_next_version
+                    != previous_base_version
+                        .checked_add(u64::try_from(interval.mechanics_substeps).map_err(|_| {
+                            RenderTrajectoryError::Capacity {
+                                artifact: "control interval mechanics substeps",
+                                requested: interval.mechanics_substeps,
+                            }
+                        })?)
+                        .ok_or(RenderTrajectoryError::Capacity {
+                            artifact: "control interval base version",
+                            requested: interval.mechanics_substeps,
+                        })?
+                || !(interval.mean_normal_force_n.is_finite()
+                    && interval.mean_normal_force_n >= 0.0)
+                || (interval.normal_impulse_n_s - interval.mean_normal_force_n * duration_s).abs()
+                    > 64.0 * f64::EPSILON * interval.normal_impulse_n_s.abs().max(1.0)
+                || (interval.branch == ProductionTrajectoryBranch::OpenFlight
+                    && (interval.mean_normal_force_n != 0.0 || interval.normal_impulse_n_s != 0.0))
+            {
+                return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "control interval clock/state/impulse lineage",
+                });
+            }
+            let transition = source
+                .transitions
+                .get(transition_index)
+                .filter(|transition| {
+                    transition.bracket_end_s.to_bits() == interval.end_time_s.to_bits()
+                });
+            let endpoint_branch = transition.map_or(interval.branch, |transition| transition.to);
+            if let Some(transition) = transition {
+                if transition.from != interval.branch
+                    || transition.bracket_start_s < interval.start_time_s
+                    || transition.bracket_start_s > transition.bracket_end_s
+                {
+                    return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                        sample: index,
+                        field: "control event transition lineage",
+                    });
+                }
+                transition_index += 1;
+            }
+            let endpoint_contact = profile_contact_geometry(
+                &profile.chart,
+                profile.mass_properties,
+                interval.state_after.pose(),
+                cx,
+            )
+            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+            let signed_gap_m = endpoint_contact.contact.gap_m - interval.base_displacement_end_m;
+            let contact_geometry = match endpoint_branch {
+                ProductionTrajectoryBranch::CompliantContact => {
+                    if signed_gap_m > 0.0 {
+                        return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                            sample: index,
+                            field: "closed control endpoint has positive bulk-surface gap",
+                        });
+                    }
+                    Some(RenderContactGeometry {
+                        point_world_m: endpoint_contact.contact.point_world_m,
+                        normal_world: Vec3::new(0.0, 0.0, 1.0),
+                        support_feature: RenderSupportFeature::ProfileFeature(
+                            endpoint_contact.support_source_feature,
+                        ),
+                    })
+                }
+                ProductionTrajectoryBranch::OpenFlight => {
+                    if signed_gap_m < 0.0 {
+                        return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                            sample: index,
+                            field: "open control endpoint has negative bulk-surface gap",
+                        });
+                    }
+                    None
+                }
+            };
+            let contact_transitions = transition
+                .map(|transition| {
+                    vec![RenderContactTransition {
+                        kind: match (transition.from, transition.to) {
+                            (
+                                ProductionTrajectoryBranch::CompliantContact,
+                                ProductionTrajectoryBranch::OpenFlight,
+                            ) => ContactTransitionKind::Opening,
+                            (
+                                ProductionTrajectoryBranch::OpenFlight,
+                                ProductionTrajectoryBranch::CompliantContact,
+                            ) => ContactTransitionKind::Reimpact,
+                            _ => unreachable!("only branch changes are retained"),
+                        },
+                        time_s: interval_end_time_s,
+                        bracket_start_s: transition.bracket_start_s - time_origin_s,
+                        bracket_end_s: transition.bracket_end_s - time_origin_s,
+                    }]
+                })
+                .unwrap_or_default();
+            let before_qois = DerivedEulerQois::from_state(
+                interval.state_before,
+                model.disc_mass_properties,
+                0.0,
+            )?;
+            let after_qois_without_acceleration = DerivedEulerQois::from_state(
+                interval.state_after,
+                model.disc_mass_properties,
+                0.0,
+            )?;
+            let qois = DerivedEulerQois {
+                precession_acceleration_rad_per_s2: (after_qois_without_acceleration
+                    .precession_rad_per_s
+                    - before_qois.precession_rad_per_s)
+                    / duration_s,
+                ..after_qois_without_acceleration
+            };
+            let orientation = interval.state_after.pose().orientation();
+            inputs.push(RenderTrajectorySampleInput {
+                interval_start_time_s,
+                time_s: interval_end_time_s,
+                world_frame: RenderWorldFrame::RightHandedZUp,
+                units: RenderUnitSystem::SiRadians,
+                center_of_mass_world_m: interval.state_after.pose().position_world(),
+                orientation_body_to_world: orientation.components(),
+                linear_momentum_world_kg_m_per_s: interval.state_after.linear_momentum_world(),
+                angular_momentum_body_kg_m2_per_s: interval.state_after.angular_momentum_body(),
+                symmetry_axis_world: orientation.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+                contact_branch: match endpoint_branch {
+                    ProductionTrajectoryBranch::CompliantContact => RenderContactBranch::Closed,
+                    ProductionTrajectoryBranch::OpenFlight => RenderContactBranch::Open,
+                },
+                contact_geometry,
+                signed_gap_m,
+                interval_contact_active: interval.branch
+                    == ProductionTrajectoryBranch::CompliantContact,
+                interval_normal_force_n: interval.mean_normal_force_n,
+                contact_transitions,
+                base_mode: Some(RenderBaseModeState {
+                    displacement_m: interval.base_displacement_end_m,
+                    velocity_m_per_s: interval.base_velocity_end_m_per_s,
+                }),
+                channels: ChannelOwnership::default(),
+                mechanical_energy_j: interval.mechanical_energy_end_j,
+                energy_defect_j: interval.disc_work_residual_j,
+                qois,
+                disposition: if index == final_index {
+                    production_event_disposition(&source.termination)
+                } else {
+                    RenderSampleDisposition::Continue
+                },
+                terminal_event: None,
+            });
+            previous_time_s = interval_end_time_s;
+            previous_state = interval.state_after;
+            previous_base_version = interval.base_next_version;
+        }
+        if transition_index != source.transitions.len()
+            || previous_time_s.to_bits()
+                != (source.last_accepted_checkpoint.elapsed_time_s() - time_origin_s).to_bits()
+            || previous_state != source.last_accepted_checkpoint.disc_state
+            || previous_base_version != source.last_accepted_checkpoint.committed_version
+        {
+            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
+        }
+
+        let identities = profile.content_identities();
+        let model_identity = production_model_identity(model, identities.profile);
+        let configuration_identity = production_configuration_identity(model, model_identity);
+        let mut fingerprint = [0_u8; 8];
+        fingerprint.copy_from_slice(&configuration_identity.as_bytes()[..8]);
+        let (base_model_id, base_configuration_id) = model.base_port.identity_parts();
+        let base_model_identity = hash_domain(
+            "org.frankensim.euler-disc.production-base-model.v1",
+            format!("{base_model_id}\0{base_configuration_id}").as_bytes(),
+        );
+        let metadata = RenderTrajectoryMetadata {
+            schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+            world_frame: RenderWorldFrame::RightHandedZUp,
+            units: RenderUnitSystem::SiRadians,
+            specimen_profile_identity: identities.profile,
+            specimen_chart_identity: identities.chart,
+            mass_properties: RenderMassProperties {
+                identity: identities.mass_properties,
+                properties: model.disc_mass_properties,
+            },
+            initial_state: source.start_checkpoint.disc_state,
+            initial_base_mode: RenderBaseModeState {
+                displacement_m: source.start_checkpoint.base_displacement_m(),
+                velocity_m_per_s: source.start_checkpoint.base_velocity_m_per_s(),
+            },
+            base_model_identity,
+            base_frame: RenderBaseFrame {
+                origin_world_m: Vec3::ZERO,
+                orientation_base_to_world: UnitQuaternion::IDENTITY,
+            },
+            model_identity,
+            channel_availability: RenderChannelAvailability {
+                gravity: false,
+                contact: false,
+                normal_force_sampling: RenderNormalForceSampling::AppliedSubstepZeroOrderHold,
+                rolling: false,
+                base: false,
+                gas: false,
+            },
+            configuration_identity,
+            configuration_fingerprint: u64::from_le_bytes(fingerprint),
+            timestep_s: declared_maximum_timestep_s,
+            producer_version: format!(
+                "fs-euler-disc-e2e/production-control-render-bridge-v{}",
+                PRODUCTION_EVENT_RENDER_BRIDGE_VERSION
+            ),
+            applicability: "bounded-memory homogeneous controls reduced from the transactional finite-patch/surface/partial-slip/rolling/gas/modal-base production composition; normal impulse is exact across reduction cells".to_owned(),
+            no_claims: vec![
+                "Estimate-authority simulation trajectory; not experimental calibration or validated Euler-disc stopping-time prediction".to_owned(),
+                "mechanics-to-control reduction preserves accepted impulse and endpoints but does not establish mechanics timestep convergence".to_owned(),
+                "opening/reimpact times retain mechanics-grid brackets; no restitution impulse or exact event time is synthesized".to_owned(),
+                "mechanical energy and defect are disc-only fs-mbd diagnostics, not full disc/base/contact/gas energy closure".to_owned(),
+                "no thermal evolution, phase change, melting, plastic flow, or phase-dependent remeshing is implied".to_owned(),
             ],
             authority: RenderTrajectoryAuthority::SimulationEvidence,
         };
