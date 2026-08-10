@@ -1121,12 +1121,18 @@ fn finite_mis_weight(
     }
 
     let remap_zero = |pdf: f64| if pdf == 0.0 { 1.0 } else { pdf };
+    // A t=1 strategy is sampled once for every source pixel and splatted into
+    // the pixel selected by the camera endpoint.  All other strategies are
+    // sampled once for the target pixel.  Multi-sample MIS therefore uses the
+    // global t=1 sample count in addition to the path-density ratio.  Omitting
+    // this factor makes t=1 both misweighted and resolution dependent.
     let mut sum_ratio = 0.0;
     let mut ratio = 1.0;
     for index in (1..t).rev() {
         ratio *= remap_zero(camera_path[index].pdf_rev) / remap_zero(camera_path[index].pdf_fwd);
         if !camera_path[index].delta && !camera_path[index - 1].delta {
-            sum_ratio += ratio;
+            sum_ratio +=
+                ratio_with_sample_multiplicity(ratio, index, t, width, height)?;
         }
     }
     ratio = 1.0;
@@ -1134,7 +1140,14 @@ fn finite_mis_weight(
         ratio *= remap_zero(light[index].pdf_rev) / remap_zero(light[index].pdf_fwd);
         let preceding_delta = index > 0 && light[index - 1].delta;
         if !light[index].delta && !preceding_delta {
-            sum_ratio += ratio;
+            let alternative_t = t + (s - index);
+            sum_ratio += ratio_with_sample_multiplicity(
+                ratio,
+                alternative_t,
+                t,
+                width,
+                height,
+            )?;
         }
     }
     let weight = 1.0 / (1.0 + sum_ratio);
@@ -1143,6 +1156,34 @@ fn finite_mis_weight(
     } else {
         Err(TracerError::InvalidInput)
     }
+}
+
+fn ratio_with_sample_multiplicity(
+    density_ratio: f64,
+    alternative_t: usize,
+    current_t: usize,
+    width: u32,
+    height: u32,
+) -> Result<f64, TracerError> {
+    let alternative_samples =
+        strategy_sample_multiplicity(alternative_t, width, height)?;
+    let current_samples = strategy_sample_multiplicity(current_t, width, height)?;
+    Ok(density_ratio * alternative_samples / current_samples)
+}
+
+fn strategy_sample_multiplicity(
+    t: usize,
+    width: u32,
+    height: u32,
+) -> Result<f64, TracerError> {
+    if t != 1 {
+        return Ok(1.0);
+    }
+    let pixels = width.checked_mul(height).ok_or(TracerError::InvalidInput)?;
+    if pixels == 0 {
+        return Err(TracerError::InvalidInput);
+    }
+    Ok(f64::from(pixels))
 }
 
 fn scalar_to_xyz(value: f64, wavelength_nm: f64) -> [f64; 3] {
@@ -1347,7 +1388,14 @@ fn connect_t1(
         settings.width,
         settings.height,
     )?;
-    let value = qs.beta * f * camera_importance_area * transmittance * mis;
+    // The complete raster launches width*height independent light subpaths
+    // for every sample index.  A target pixel receives arbitrary splats from
+    // that global pool, so each splat carries the ordinary 1/n estimator
+    // normalization for the t=1 strategy.
+    let light_path_samples =
+        strategy_sample_multiplicity(1, settings.width, settings.height)?;
+    let value =
+        qs.beta * f * camera_importance_area * transmittance * mis / light_path_samples;
     Ok((value.is_finite() && value > 0.0).then_some((raster.pixel, value)))
 }
 
@@ -2268,6 +2316,33 @@ mod tests {
         publish_source_splats(&mut reverse, &mut reverse_records);
         assert_eq!(forward.xyz, reverse.xyz);
         assert_eq!(forward.xyz[1][0].to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn g0_t1_global_sample_count_closes_two_strategy_mis() {
+        let width = 4;
+        let height = 2;
+        let light_tracing_samples =
+            strategy_sample_multiplicity(1, width, height).unwrap();
+        assert_eq!(light_tracing_samples, 8.0);
+        assert_eq!(strategy_sample_multiplicity(2, width, height).unwrap(), 1.0);
+
+        // For equal path densities, balance-heuristic weights are proportional
+        // to the number of samples drawn by each strategy.  This also proves
+        // the two directional ratios close to one rather than merely checking
+        // a sum that could hide a strategy permutation.
+        let t2_over_t1 =
+            ratio_with_sample_multiplicity(1.0, 2, 1, width, height).unwrap();
+        let t1_over_t2 =
+            ratio_with_sample_multiplicity(1.0, 1, 2, width, height).unwrap();
+        assert_eq!(t2_over_t1, 1.0 / 8.0);
+        assert_eq!(t1_over_t2, 8.0);
+        let t1_weight = 1.0 / (1.0 + t2_over_t1);
+        let t2_weight = 1.0 / (1.0 + t1_over_t2);
+        assert!((t1_weight - 8.0 / 9.0).abs() <= f64::EPSILON);
+        assert!((t2_weight - 1.0 / 9.0).abs() <= f64::EPSILON);
+        assert!((t1_weight + t2_weight - 1.0).abs() <= f64::EPSILON);
+        assert!(strategy_sample_multiplicity(1, 0, height).is_err());
     }
 
     #[test]
