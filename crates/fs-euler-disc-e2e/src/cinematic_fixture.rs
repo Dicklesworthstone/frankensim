@@ -15,7 +15,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::contact_dynamics::{declared_profile_rolling_initializer, profile_mass_to_mbd};
+use crate::contact_dynamics::{
+    declared_profile_rolling_initializer, profile_mass_to_mbd,
+    small_angle_rolling_profile_initializer,
+};
 use crate::external_air::{
     EulerDiscBodyFrame, EulerDiscExteriorGeometry, EulerDiscExteriorState, EulerExternalAirInput,
     EulerExternalAirWorkState, ExteriorAirPressure, ExternalAirDomain, ExternalAirIdentity,
@@ -896,12 +899,8 @@ pub struct CinematicMechanicsConfig {
     pub sample_rate_hz: u32,
     /// Uniform world gravity magnitude [m/s2].
     pub gravity_m_per_s2: f64,
-    /// Initial disc inclination from world vertical [rad].
-    pub initial_inclination_rad: f64,
-    /// Declared initial world-vertical precession rate [rad/s].
-    pub initial_precession_rad_per_s: f64,
-    /// Declared initial spin component about the disc symmetry axis [rad/s].
-    pub initial_spin_rad_per_s: f64,
+    /// Parameterized rigid-body initial-motion construction.
+    pub initial_motion: CinematicInitialMotionConfig,
     /// Hunt--Crossley point-contact dissipation coefficient [s/m].
     pub normal_dissipation_s_per_m: f64,
     /// Normal-law applicability ratios and temperature interval.
@@ -930,6 +929,28 @@ pub struct CinematicMechanicsConfig {
     pub surface_geometry_relative_tolerance: f64,
     /// Explicit exterior gas correlation candidate.
     pub exterior_aero: CinematicExteriorAeroConfig,
+}
+
+/// Initial rolling state supplied to the generic profile/contact composition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CinematicInitialMotionConfig {
+    /// Derive the small-angle no-slip rates from gravity, inclination, and the
+    /// resolved profile radius. This is an initialization recipe, not a claim
+    /// that a thick filleted profile is in exact dynamic equilibrium.
+    SmallAngleNoSlip {
+        /// Initial disc inclination from world vertical [rad].
+        inclination_rad: f64,
+    },
+    /// Use caller-declared Euler-rate components, then derive the center-of-
+    /// mass velocity that makes the resolved profile contact point no-slip.
+    DeclaredNoSlip {
+        /// Initial disc inclination from world vertical [rad].
+        inclination_rad: f64,
+        /// World-vertical precession component [rad/s].
+        precession_rad_per_s: f64,
+        /// Component about the disc symmetry axis [rad/s].
+        spin_rad_per_s: f64,
+    },
 }
 
 impl Default for CinematicMechanicsConfig {
@@ -961,9 +982,9 @@ impl Default for CinematicMechanicsConfig {
             // sound-master cells without identifying the two clocks.
             sample_rate_hz: 384_000,
             gravity_m_per_s2: 9.806_65,
-            initial_inclination_rad: 0.30,
-            initial_precession_rad_per_s: 46.0,
-            initial_spin_rad_per_s: -43.9,
+            initial_motion: CinematicInitialMotionConfig::SmallAngleNoSlip {
+                inclination_rad: 0.12,
+            },
             normal_dissipation_s_per_m: 0.02,
             normal_limits: ApplicabilityLimits {
                 // The 1 mm edge fillet and static preload produce an admitted
@@ -1413,16 +1434,28 @@ impl CinematicFixtureConfig {
             ));
         }
         let mechanics = &self.mechanics;
+        let valid_initial_motion = match mechanics.initial_motion {
+            CinematicInitialMotionConfig::SmallAngleNoSlip { inclination_rad } => {
+                inclination_rad.is_finite() && inclination_rad > 0.0 && inclination_rad <= 0.35
+            }
+            CinematicInitialMotionConfig::DeclaredNoSlip {
+                inclination_rad,
+                precession_rad_per_s,
+                spin_rad_per_s,
+            } => {
+                inclination_rad.is_finite()
+                    && inclination_rad > 0.0
+                    && inclination_rad < core::f64::consts::FRAC_PI_2
+                    && precession_rad_per_s.is_finite()
+                    && spin_rad_per_s.is_finite()
+            }
+        };
         if mechanics.sample_rate_hz == 0
             || mechanics.sample_rate_hz > 1_000_000
             || mechanics.sample_rate_hz < SOUND_MASTER_SAMPLE_RATE_HZ
             || mechanics.sample_rate_hz % SOUND_MASTER_SAMPLE_RATE_HZ != 0
             || !(mechanics.gravity_m_per_s2.is_finite() && mechanics.gravity_m_per_s2 > 0.0)
-            || !(mechanics.initial_inclination_rad.is_finite()
-                && mechanics.initial_inclination_rad > 0.0
-                && mechanics.initial_inclination_rad < core::f64::consts::FRAC_PI_2)
-            || !mechanics.initial_precession_rad_per_s.is_finite()
-            || !mechanics.initial_spin_rad_per_s.is_finite()
+            || !valid_initial_motion
             || !(mechanics.normal_dissipation_s_per_m.is_finite()
                 && mechanics.normal_dissipation_s_per_m >= 0.0)
             || !(mechanics.static_preload_relative_tolerance.is_finite()
@@ -2446,14 +2479,29 @@ fn build_fixture_production_mechanics(
         tangential_adapter,
     };
 
-    let initializer = declared_profile_rolling_initializer(
-        &profile.chart,
-        profile.density_kg_per_m3,
-        mechanics.initial_inclination_rad,
-        mechanics.initial_precession_rad_per_s,
-        mechanics.initial_spin_rad_per_s,
-        cx,
-    )
+    let initializer = match mechanics.initial_motion {
+        CinematicInitialMotionConfig::SmallAngleNoSlip { inclination_rad } => {
+            small_angle_rolling_profile_initializer(
+                &profile.chart,
+                profile.density_kg_per_m3,
+                inclination_rad,
+                mechanics.gravity_m_per_s2,
+                cx,
+            )
+        }
+        CinematicInitialMotionConfig::DeclaredNoSlip {
+            inclination_rad,
+            precession_rad_per_s,
+            spin_rad_per_s,
+        } => declared_profile_rolling_initializer(
+            &profile.chart,
+            profile.density_kg_per_m3,
+            inclination_rad,
+            precession_rad_per_s,
+            spin_rad_per_s,
+            cx,
+        ),
+    }
     .map_err(pipeline)?;
     let scale_m = profile
         .dimensions
@@ -7513,6 +7561,7 @@ fn production_fixture_manifest(
             "\"sampling\":{},\"denoise\":{{\"applied_frames\":{},\"maximum_retained_bytes\":{},",
             "\"maximum_history_frames\":{}}},\"preview_mesh\":{}}},\n",
             "  \"mechanics\": {{\"model\":\"generic transactional rigid-profile/contact/tribology/exterior-gas/modal-support composition\",",
+            "\"initial_motion\":\"{}\",",
             "\"mechanics_sample_rate_hz\":{},\"control_sample_rate_hz\":{},",
             "\"accepted_mechanics_steps\":{},\"fine_control_intervals\":{},\"coarse_audio_control_intervals\":{},",
             "\"branch_transition_count\":{},\"fine_normal_impulse_n_s\":{:.17e},",
@@ -7560,6 +7609,7 @@ fn production_fixture_manifest(
         denoise.maximum_retained_bytes,
         denoise.maximum_history_frames,
         preview_mesh.manifest_json(),
+        json_escape(&format!("{:?}", config.mechanics.initial_motion)),
         config.mechanics.sample_rate_hz,
         SOUND_MASTER_SAMPLE_RATE_HZ,
         fine_controls.accepted_mechanics_steps,
