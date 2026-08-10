@@ -146,9 +146,9 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
         .map(|y| (1.0, [jet_profile(cfg, y), 0.0]))
         .collect();
     for x in 0..cfg.nx {
-        for y in 0..cfg.ny {
+        for (y, row) in profile.iter().enumerate() {
             let i = grid.idx(x, y);
-            grid.f[i] = fs_lbm::equilibrium(1.0, profile[y].1[0], 0.0);
+            grid.f[i] = fs_lbm::equilibrium(1.0, row.1[0], 0.0);
         }
     }
     let y_plate_lo = cfg.ny / 2 - 1;

@@ -139,7 +139,11 @@ dimension checks. Pure, deterministic (fixed tile/cell/link order).
   Construction-time asserts (crate boundary convention): positive
   width, `sigma_max` in (0, 1], positive finite target density,
   finite low-Mach target velocity. `apply` skips non-Fluid cells and
-  panics if the layer exceeds the grid.
+  panics if the layer exceeds the grid or a profile mismatches the
+  height. `Sponge2::with_profile` takes a per-y-row `(rho, u)`
+  profile, turning the layer into a spectral-DNS style FRINGE region
+  (periodic-x domains: outflow re-conditioned to an authored inflow
+  profile — the jet-labium fixture in fs-aeroac consumes it).
 - Purpose: outlet-reflection suppression for aeroacoustic source
   extraction (bead 9ok02 — the jet pilot's 6% Re-200 flux imbalance
   was outlet-reflection sensitivity; source spectra are untrusted

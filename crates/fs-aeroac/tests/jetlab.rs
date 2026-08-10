@@ -68,6 +68,11 @@ fn jet_labium_edge_tone_oscillates_and_radiates() {
         d.flux_plate_plane,
         d.flux_fringe_plane
     );
+    // Flux imbalance between the plate and fringe planes: measured
+    // 0.13% (the outlet-reflection pilot pathology read 6%) — gated
+    // at 1%.
+    let imbalance = (d.flux_plate_plane - d.flux_fringe_plane).abs() / d.flux_plate_plane.abs();
+    assert!(imbalance < 0.01, "flux imbalance {imbalance:.4}");
     // The transverse force oscillates: a prominent spectral peak
     // (exclude the near-DC drift bins), measured against the median
     // power. Prominence and location printed for the record.

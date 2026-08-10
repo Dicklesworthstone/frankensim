@@ -33,6 +33,18 @@ scope law, pinned as data and by test).
   REFUSES with the residual disclosed; no partial eigenvalue.
 - `bickley::rayleigh_residual_closed_form` — the self-verification
   surface for the analytic pins.
+- `jetlab::run_jet_labium` — the edge-tone base-flow fixture: an
+  fs-lbm slot jet (smoothed top-hat) impinging on a two-cell splitter
+  plate (DISCLOSED simplification of a wedge — the sharp edge, not
+  the wedge angle, drives the oscillation class), in a PERIODIC-x
+  domain closed by a per-row-profile FRINGE layer (the spectral-DNS
+  fringe method: the sponge re-conditions outflow to the authored
+  inflow profile, and doubles as the measured acoustic absorber).
+  Records the plate force series via momentum exchange; returns
+  per-run diagnostics (max Mach, plate-vs-fringe plane fluxes,
+  Reynolds) and embeds the scope statement.
+  `jetlab::dipole_spectrum_line` radiates a caller-FFT'd force line
+  through the 2D Curle dipole.
 - `SCOPE_STATEMENT` — the no-absolute-SPL / 2D-to-3D-span-correction
   law as data (the marketing-mutation guard asserts it).
 
@@ -85,7 +97,15 @@ scope law, pinned as data and by test).
    jet's own viscous diffusion (~nu/b^2 per step) decays the base
    flow and drags the measured rate down over long runs — fit early,
    at high Re.
-9. Refusals typed by name (non-positive wavenumber, coincident
+9. Jet-labium fixture: the default configuration (Re 240, slot 10
+   lu, edge at 3 slot heights) produces a REAL self-sustained
+   oscillation — transverse-force spectral peak with prominence
+   ~720x the median (gate 100x), ~21 cycles resolved in the record —
+   with max Mach 0.07 (gate 0.25) and plate-vs-fringe flux imbalance
+   0.13% (gate 1%; the outlet-reflection pathology this fixture
+   replaces read 6%). Geometry/regime refusals typed; bitwise
+   deterministic.
+10. Refusals typed by name (non-positive wavenumber, coincident
    observer/source, non-finite inputs, bad solver parameters,
    non-convergence with residual); Hankel functions outside their
    domain are FULLY NaN (both components — a half-valid complex once
@@ -122,6 +142,9 @@ None.
 `tests/bickley_lbm.rs` (1): the LBM-vs-Rayleigh growth-rate
 convergence fixture (invariant 8).
 
+`tests/jetlab.rs` (3): edge-tone oscillation + diagnostics +
+radiation with scope; typed refusals; bitwise determinism.
+
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field
 amplitude; Curle spreading + directivity + scope guard; Curle typed
@@ -131,12 +154,12 @@ determinism.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
-- fs-lbm source EXTRACTION (surface-pressure spectra from jet-labium
-  runs) and the absorbing-layer treatment with a measured reflection
-  coefficient: not implemented (the bead's pilot showed 6% flux
-  imbalance at Re 200 from outlet reflections — spectra are NOT
-  trustworthy before the sponge lands).
-- Edge-tone Strouhal staging vs published data: not implemented.
+- Edge-tone Strouhal staging vs published data (Brown/Coltman): not
+  implemented — the fixture asserts oscillation EXISTENCE and regime
+  diagnostics only; no Strouhal-value claim is made until the
+  two-source literature comparison lands.
+- Grid-convergence of source spectra across refinement levels: not
+  implemented (single-resolution v1).
 - Fitted flute-noise tables + demo-synth consumption: not
   implemented.
 - Quadrupole (volume) sources: dipoles dominate at low Mach over
