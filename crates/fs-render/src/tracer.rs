@@ -79,6 +79,7 @@ use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 use fs_rand::qmc::Sobol;
 use manifold::{PlaneFrame, solve_two_planar_interfaces, target_area_per_source_solid_angle};
+use transport::DirectionalPdfPair;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
@@ -101,6 +102,7 @@ pub use sharding::{
     render_motion_shard, render_static_shard,
 };
 mod manifold;
+mod transport;
 
 /// Bit-affecting semantic surface version of the tracer (see
 /// golden-couplings.json): the path-integrator estimator shape, the
@@ -362,8 +364,7 @@ struct BoundaryMedia {
 
 #[derive(Clone, Copy)]
 struct PreviousBsdf {
-    pdf: f64,
-    delta: bool,
+    pdf: DirectionalPdfPair,
     /// Only opaque source vertices are covered by the parallel-slab NEE
     /// technique. Retaining the oriented geometric normal also lets reverse
     /// MIS replay the exact straight shadow-ray spawn used by forward NEE.
@@ -10553,16 +10554,28 @@ fn previous_after_dielectric_sample(
     sampled_delta: bool,
     wavelength_nm: f64,
 ) -> Result<PreviousBsdf, TracerError> {
+    let boundary = boundary_media(boundary_primitive, glass, frame.entering, medium_stack)?;
     let mut next = PreviousBsdf {
-        pdf: sampled_pdf,
-        delta: sampled_delta,
+        pdf: if sampled_delta {
+            DirectionalPdfPair::delta()
+        } else {
+            let reverse_pdf = reverse_dielectric_pdf(
+                frame.oriented,
+                incident_ray.dir.scale(-1.0),
+                sampled_direction,
+                surface,
+                boundary,
+                wavelength_nm,
+            )?;
+            DirectionalPdfPair::continuous(sampled_pdf, reverse_pdf)
+                .ok_or(TracerError::InvalidInput)?
+        },
         opaque_source_geometric_normal: None,
         smooth_slab: None,
     };
     if !surface.is_delta() || sampled_event != DielectricEvent::Transmission {
         return Ok(next);
     }
-    let boundary = boundary_media(boundary_primitive, glass, frame.entering, medium_stack)?;
     let eta_i = medium_ior(boundary.incident, wavelength_nm)?;
     let eta_t = medium_ior(boundary.transmitted, wavelength_nm)?;
     let (_, transmission_probability) =
@@ -10571,7 +10584,7 @@ fn previous_after_dielectric_sample(
     if frame.entering && medium_stack.len() == 0 {
         let Some(source) = previous.filter(|source| {
             source.opaque_source_geometric_normal.is_some()
-                && !source.delta
+                && !source.pdf.is_delta()
                 && source.smooth_slab.is_none()
         }) else {
             return Ok(next);
@@ -10590,7 +10603,7 @@ fn previous_after_dielectric_sample(
                     source_origin: previous_origin,
                     source_geometric_normal,
                     source_direction: incident_ray.dir,
-                    source_pdf_solid_angle: source.pdf,
+                    source_pdf_solid_angle: source.pdf.forward_solid_angle(),
                     slab,
                     entry_transmission_probability: transmission_probability,
                 })),
@@ -10606,7 +10619,7 @@ fn previous_after_dielectric_sample(
                                 source_origin: previous_origin,
                                 source_geometric_normal,
                                 source_direction: incident_ray.dir,
-                                source_pdf_solid_angle: source.pdf,
+                                source_pdf_solid_angle: source.pdf.forward_solid_angle(),
                                 boundary_primitive: boundary.boundary_primitive,
                                 glass: boundary.glass,
                                 entry_transmission_probability: transmission_probability,
@@ -10700,6 +10713,31 @@ fn previous_after_dielectric_sample(
         }));
     }
     Ok(next)
+}
+
+fn reverse_dielectric_pdf(
+    normal: Vec3,
+    wo: Vec3,
+    wi: Vec3,
+    surface: DielectricSurface,
+    boundary: BoundaryMedia,
+    wavelength_nm: f64,
+) -> Result<f64, TracerError> {
+    let Some(alpha) = surface.roughness_alpha() else {
+        return Ok(0.0);
+    };
+    let eta_i = medium_ior(boundary.incident, wavelength_nm)?;
+    let eta_t = medium_ior(boundary.transmitted, wavelength_nm)?;
+    let reflection = normal.dot(wi) > 0.0;
+    let evaluation = if reflection {
+        evaluate_rough_dielectric(normal, wi, wo, eta_i, eta_t, alpha)?
+    } else {
+        // Reversing a transmitted edge changes both the incident half-space
+        // and the oriented normal. The directions remain surface-to-vertex
+        // vectors, so they are swapped without negation.
+        evaluate_rough_dielectric(normal.scale(-1.0), wi, wo, eta_t, eta_i, alpha)?
+    };
+    Ok(evaluation.pdf)
 }
 
 fn same_local_parallel_face_pair(left: ParallelSlab, right: ParallelSlab) -> bool {
@@ -12129,8 +12167,11 @@ fn trace_path(
                         / pdf;
                 }
                 previous_bsdf = Some(PreviousBsdf {
-                    pdf,
-                    delta: false,
+                    pdf: DirectionalPdfPair::continuous(
+                        pdf,
+                        bsdf_pdf(&prim.material, n, wi, wo),
+                    )
+                    .ok_or(TracerError::InvalidInput)?,
                     opaque_source_geometric_normal: Some(n),
                     smooth_slab: None,
                 });
@@ -12610,14 +12651,14 @@ fn emissive_hit_weight(
     let Some(previous) = previous_bsdf else {
         return 1.0;
     };
-    if previous.delta {
+    if previous.pdf.is_delta() {
         return 1.0;
     }
     match strategy {
         DirectStrategy::BsdfOnly => 1.0,
         DirectStrategy::NeeOnly => 0.0,
         DirectStrategy::Mis => designated_light_nee_pdf.map_or(1.0, |nee_pdf| {
-            balance_heuristic(1, previous.pdf, 1, nee_pdf)
+            balance_heuristic(1, previous.pdf.forward_solid_angle(), 1, nee_pdf)
         }),
     }
 }
@@ -14901,8 +14942,7 @@ mod tests {
         let bsdf_pdf = 0.25;
         let nee_pdf = 0.75;
         let previous = Some(PreviousBsdf {
-            pdf: bsdf_pdf,
-            delta: false,
+            pdf: DirectionalPdfPair::continuous(bsdf_pdf, bsdf_pdf).unwrap(),
             opaque_source_geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),
             smooth_slab: None,
         });
@@ -14923,8 +14963,7 @@ mod tests {
             emissive_hit_weight(
                 DirectStrategy::NeeOnly,
                 Some(PreviousBsdf {
-                    pdf: 0.0,
-                    delta: true,
+                    pdf: DirectionalPdfPair::delta(),
                     opaque_source_geometric_normal: None,
                     smooth_slab: None,
                 }),
