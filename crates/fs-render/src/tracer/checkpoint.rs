@@ -505,6 +505,7 @@ fn sampler_tag(sampler: Sampler) -> u8 {
     match sampler {
         Sampler::Iid => 0,
         Sampler::OwenSobol => 1,
+        Sampler::OwenSobolFullPath => 2,
     }
 }
 

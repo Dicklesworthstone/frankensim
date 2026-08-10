@@ -25,9 +25,10 @@ use crate::spectral::{xyz_e_to_d65, xyz_to_linear_srgb};
 use crate::tracer::{
     ADAPTIVE_SAMPLING_SEMANTICS_VERSION, AdaptiveDecision, AdaptiveFilm, AdaptiveSamplingConfig,
     CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION, DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION,
-    DirectStrategy, Film, LIGHTING_TRACER_BIT_SEMANTICS_VERSION, MATERIAL_CONTENT_IDENTITY_DOMAIN,
-    MOTION_TRACER_BIT_SEMANTICS_VERSION, Sampler, Scene, Settings, Shape,
-    TRACER_BIT_SEMANTICS_VERSION,
+    DirectStrategy, Film, FixedSampleFilm, INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION,
+    IndependentPilotSamplePlan, LIGHTING_TRACER_BIT_SEMANTICS_VERSION,
+    MATERIAL_CONTENT_IDENTITY_DOMAIN, MOTION_TRACER_BIT_SEMANTICS_VERSION, Sampler, Scene,
+    Settings, Shape, TRACER_BIT_SEMANTICS_VERSION,
 };
 
 #[path = "aov_checkpoint.rs"]
@@ -779,6 +780,10 @@ impl CinematicAovTileAccumulator {
     fn len(&self) -> usize {
         self.beauty.len()
     }
+
+    pub(crate) fn beauty_sums(&self) -> &[[f64; 3]] {
+        &self.beauty
+    }
 }
 
 /// Deterministic lossless mappings for `FLOAT` identity channels.
@@ -1319,6 +1324,7 @@ impl CinematicAovFilm {
             binding,
             "uniform",
             self.beauty.spp_done.to_string(),
+            None,
         )?;
 
         let spp = f64::from(self.beauty.spp_done);
@@ -1456,11 +1462,12 @@ fn cinematic_exr_attributes(
     binding: &CinematicAovRenderBinding,
     sample_mode: &'static str,
     rendered_spp: String,
+    independent_plan: Option<&IndependentPilotSamplePlan>,
 ) -> Result<Vec<ExrAttribute>, CinematicAovError> {
     let provenance = config.provenance;
     let mut attributes = Vec::new();
     attributes
-        .try_reserve_exact(31)
+        .try_reserve_exact(32)
         .map_err(|_| CinematicAovError::AllocationRefused)?;
     let mut push = |name: &str, value: String| {
         attributes.push(ExrAttribute {
@@ -1543,6 +1550,25 @@ fn cinematic_exr_attributes(
                 f64_bits_string(policy.absolute_error()),
                 f64_bits_string(policy.relative_error()),
                 f64_bits_string(policy.dark_floor())
+            ),
+        );
+    }
+    if let Some(plan) = independent_plan {
+        let allocation = plan.config();
+        push(
+            "frankensim.render.pilotPlan",
+            format!(
+                "version={};pilotSeed={};pilotSampler={};minimum={};maximum={};absolute={};relative={};darkFloor={};safety={};total={}",
+                plan.semantics_version(),
+                plan.pilot_seed(),
+                sampler_name(plan.pilot_sampler()),
+                allocation.minimum_samples(),
+                allocation.maximum_samples(),
+                f64_bits_string(allocation.absolute_error()),
+                f64_bits_string(allocation.relative_error()),
+                f64_bits_string(allocation.dark_floor()),
+                f64_bits_string(allocation.safety_factor()),
+                plan.total_samples(),
             ),
         );
     }
@@ -1676,6 +1702,7 @@ impl AdaptiveCinematicAovFilm {
             &self.binding,
             "adaptive",
             rendered_spp.to_string(),
+            None,
         )?;
         let channels = build_exr_channels(
             self.config.profile,
@@ -1754,6 +1781,156 @@ impl AdaptiveCinematicAovFilm {
     }
 }
 
+/// Raw fixed-plan production beauty plus exactly aligned cinematic AOVs.
+///
+/// The count map was selected from a discarded independent pilot before any
+/// retained production path was traced. Every guide observes precisely the
+/// same production prefix as its beauty pixel. This is distinct from
+/// [`AdaptiveCinematicAovFilm`]: no retained sample can alter its own terminal
+/// count.
+#[derive(Debug, PartialEq)]
+pub struct FixedSampleCinematicAovFilm {
+    pub(crate) beauty: FixedSampleFilm,
+    pub(crate) config: CinematicAovConfig,
+    common: Option<Vec<CommonPixel>>,
+    final_diagnostic: Option<Vec<FinalPixel>>,
+    pub(crate) binding: CinematicAovRenderBinding,
+    retained_bytes: u64,
+}
+
+impl FixedSampleCinematicAovFilm {
+    /// Production-only beauty and its immutable count-plan provenance.
+    #[must_use]
+    pub const fn beauty(&self) -> &FixedSampleFilm {
+        &self.beauty
+    }
+
+    /// Complete AOV configuration.
+    #[must_use]
+    pub const fn config(&self) -> CinematicAovConfig {
+        self.config
+    }
+
+    /// Scene-derived palette. It is empty for profiles without ID channels.
+    #[must_use]
+    pub const fn palette(&self) -> &CinematicAovPalette {
+        &self.binding.palette
+    }
+
+    /// Complete retained film payload, including the fixed count map.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
+    }
+
+    /// Materialize denoising guides aligned to every pixel's fixed production
+    /// prefix.
+    pub fn denoise_guides(&self) -> Result<CinematicDenoiseGuides, CinematicAovError> {
+        self.validate_complete()?;
+        let common = self
+            .common
+            .as_deref()
+            .ok_or(CinematicAovError::DenoiseGuidesUnavailable)?;
+        build_denoise_guides(
+            self.beauty.width(),
+            self.beauty.height(),
+            self.config,
+            common,
+            self.final_diagnostic.as_deref(),
+        )
+    }
+
+    /// Encode the fixed-plan raw estimate with per-pixel sample counts and
+    /// independent-pilot allocation provenance.
+    pub fn to_exr(&self) -> Result<Vec<u8>, CinematicAovError> {
+        self.validate_complete()?;
+        let pixel_count = self.beauty.xyz_sums().len();
+        validate_export_plane_budget(pixel_count, self.config)?;
+        let rendered_spp = if self.config.profile.has_final() {
+            "per-pixel-channel"
+        } else {
+            "per-pixel-unexported-by-profile"
+        };
+        let attributes = admitted_exr_attributes(
+            self.beauty.width(),
+            self.beauty.height(),
+            self.config,
+            &self.binding,
+            "independent-pilot-fixed-v1",
+            rendered_spp.to_string(),
+            Some(self.beauty.sample_plan()),
+        )?;
+        let channels = build_exr_channels(
+            self.config.profile,
+            pixel_count,
+            |pixel| {
+                self.beauty
+                    .beauty_mean_xyz(pixel)
+                    .expect("validated fixed-sample film owns shape-matched buffers")
+            },
+            |pixel| self.beauty.sample_plan().sample_counts()[pixel],
+            self.common.as_deref(),
+            self.final_diagnostic.as_deref(),
+        )?;
+        fs_img::write_exr_with_attributes_budgeted(
+            self.beauty.width(),
+            self.beauty.height(),
+            &channels,
+            &attributes,
+            ExrWriteLimits {
+                max_scratch_bytes: self.config.limits.max_exr_encoder_scratch_bytes,
+                max_output_bytes: self.config.limits.max_encoded_exr_bytes,
+            },
+        )
+        .map_err(CinematicAovError::Image)
+    }
+
+    fn validate_complete(&self) -> Result<(), CinematicAovError> {
+        let expected = checked_pixel_count(self.beauty.width(), self.beauty.height())?;
+        let plan = self.beauty.sample_plan();
+        if self.beauty.xyz_sums().len() != expected
+            || plan.sample_counts().len() != expected
+            || self
+                .common
+                .as_ref()
+                .is_some_and(|plane| plane.len() != expected)
+            || self
+                .final_diagnostic
+                .as_ref()
+                .is_some_and(|plane| plane.len() != expected)
+        {
+            return Err(CinematicAovError::ShapeMismatch);
+        }
+        if self.binding.adaptive_policy.is_some()
+            || self.binding.settings.width != self.beauty.width()
+            || self.binding.settings.height != self.beauty.height()
+            || self.binding.settings.spp != plan.config().maximum_samples()
+            || self.binding.settings.sampler != self.beauty.sampler()
+            || self.binding.settings.seed != plan.production_seed()
+            || plan.semantics_version() != INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION
+        {
+            return Err(CinematicAovError::ProgressiveBindingMismatch);
+        }
+        if plan.sample_counts().contains(&0)
+            || (self.config.profile.has_final()
+                && plan
+                    .sample_counts()
+                    .iter()
+                    .any(|samples| *samples > MAX_EXACT_F32_INTEGER))
+        {
+            return Err(CinematicAovError::SampleAlignmentMismatch);
+        }
+        if let Some(common) = &self.common {
+            for (pixel, state) in common.iter().enumerate() {
+                if state.accepted_count != plan.sample_counts()[pixel] {
+                    return Err(CinematicAovError::SampleAlignmentMismatch);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Private per-pixel AOV construction state used while adaptive beauty remains
 /// unpublished. It cannot influence adaptive stopping decisions.
 pub(crate) struct AdaptiveAovAccumulator {
@@ -1796,6 +1973,36 @@ impl AdaptiveAovAccumulator {
         Ok((pixel_count, retained_bytes))
     }
 
+    pub(crate) fn admitted_fixed_retained_bytes(
+        width: u32,
+        height: u32,
+        maximum_samples: u32,
+        config: CinematicAovConfig,
+    ) -> Result<(usize, u64), CinematicAovError> {
+        let pixel_count = checked_pixel_count(width, height)?;
+        let requested_pixels = u64::try_from(pixel_count)
+            .map_err(|_| CinematicAovError::InvalidDimensions { width, height })?;
+        if requested_pixels > config.limits.max_pixels {
+            return Err(CinematicAovError::PixelLimit {
+                requested: requested_pixels,
+                limit: config.limits.max_pixels,
+            });
+        }
+        if config.profile.has_final() && maximum_samples > MAX_EXACT_F32_INTEGER {
+            return Err(CinematicAovError::InexactSampleCount {
+                samples: maximum_samples,
+            });
+        }
+        let retained_bytes = fixed_sample_retained_bytes(pixel_count, config.profile)?;
+        if retained_bytes > config.limits.max_retained_bytes {
+            return Err(CinematicAovError::RetainedMemoryLimit {
+                requested: retained_bytes,
+                limit: config.limits.max_retained_bytes,
+            });
+        }
+        Ok((pixel_count, retained_bytes))
+    }
+
     pub(crate) fn try_new(
         width: u32,
         height: u32,
@@ -1804,6 +2011,34 @@ impl AdaptiveAovAccumulator {
     ) -> Result<Self, CinematicAovError> {
         let (pixel_count, retained_bytes) =
             Self::admitted_retained_bytes(width, height, maximum_samples, config)?;
+        let common = config
+            .profile
+            .has_common()
+            .then(|| fallible_filled(pixel_count, CommonPixel::EMPTY))
+            .transpose()?;
+        let final_diagnostic = config
+            .profile
+            .has_final()
+            .then(|| fallible_filled(pixel_count, FinalPixel::EMPTY))
+            .transpose()?;
+        Ok(Self {
+            width,
+            height,
+            config,
+            common,
+            final_diagnostic,
+            retained_bytes,
+        })
+    }
+
+    pub(crate) fn try_new_fixed(
+        width: u32,
+        height: u32,
+        maximum_samples: u32,
+        config: CinematicAovConfig,
+    ) -> Result<Self, CinematicAovError> {
+        let (pixel_count, retained_bytes) =
+            Self::admitted_fixed_retained_bytes(width, height, maximum_samples, config)?;
         let common = config
             .profile
             .has_common()
@@ -1911,6 +2146,26 @@ impl AdaptiveAovAccumulator {
             return Err(CinematicAovError::ShapeMismatch);
         }
         let film = AdaptiveCinematicAovFilm {
+            beauty,
+            config: self.config,
+            common: self.common,
+            final_diagnostic: self.final_diagnostic,
+            binding,
+            retained_bytes: self.retained_bytes,
+        };
+        film.validate_complete()?;
+        Ok(film)
+    }
+
+    pub(crate) fn publish_fixed(
+        self,
+        beauty: FixedSampleFilm,
+        binding: CinematicAovRenderBinding,
+    ) -> Result<FixedSampleCinematicAovFilm, CinematicAovError> {
+        if (beauty.width(), beauty.height()) != (self.width, self.height) {
+            return Err(CinematicAovError::ShapeMismatch);
+        }
+        let film = FixedSampleCinematicAovFilm {
             beauty,
             config: self.config,
             common: self.common,
@@ -2289,6 +2544,33 @@ fn adaptive_retained_bytes(
         .ok_or(CinematicAovError::SizeOverflow)
 }
 
+fn fixed_sample_retained_bytes(
+    pixel_count: usize,
+    profile: CinematicAovProfile,
+) -> Result<u64, CinematicAovError> {
+    let bytes_per_pixel = size_of::<[f64; 3]>()
+        .checked_add(size_of::<u32>())
+        .and_then(|bytes| {
+            bytes.checked_add(if profile.has_common() {
+                size_of::<CommonPixel>()
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if profile.has_final() {
+                size_of::<FinalPixel>()
+            } else {
+                0
+            })
+        })
+        .ok_or(CinematicAovError::SizeOverflow)?;
+    u64::try_from(pixel_count)
+        .ok()
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel as u64))
+        .ok_or(CinematicAovError::SizeOverflow)
+}
+
 fn validate_export_plane_budget(
     pixel_count: usize,
     config: CinematicAovConfig,
@@ -2420,6 +2702,7 @@ fn admitted_exr_attributes(
     binding: &CinematicAovRenderBinding,
     sample_mode: &'static str,
     rendered_spp: String,
+    independent_plan: Option<&IndependentPilotSamplePlan>,
 ) -> Result<Vec<ExrAttribute>, CinematicAovError> {
     let metadata_bound = export_metadata_payload_bound(binding)?;
     if metadata_bound > config.limits.max_export_metadata_bytes {
@@ -2428,7 +2711,8 @@ fn admitted_exr_attributes(
             limit: config.limits.max_export_metadata_bytes,
         });
     }
-    let attributes = cinematic_exr_attributes(config, binding, sample_mode, rendered_spp)?;
+    let attributes =
+        cinematic_exr_attributes(config, binding, sample_mode, rendered_spp, independent_plan)?;
     let metadata_bytes = export_metadata_payload_bytes(config.profile, &attributes)?;
     if metadata_bytes > metadata_bound || metadata_bytes > config.limits.max_export_metadata_bytes {
         return Err(CinematicAovError::ExportMetadataMemoryLimit {
@@ -2916,6 +3200,7 @@ const fn sampler_name(sampler: Sampler) -> &'static str {
     match sampler {
         Sampler::Iid => "iid-philox",
         Sampler::OwenSobol => "owen-sobol",
+        Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
     }
 }
 
@@ -3038,7 +3323,7 @@ mod tests {
         )
         .unwrap();
         let attributes =
-            cinematic_exr_attributes(config, &binding, "uniform", "1".to_string()).unwrap();
+            cinematic_exr_attributes(config, &binding, "uniform", "1".to_string(), None).unwrap();
         let bytes = fs_img::write_exr_with_attributes(1, 1, &channels, &attributes).unwrap();
         fs_img::read_exr(&bytes).unwrap()
     }
@@ -3131,7 +3416,7 @@ mod tests {
         let metadata_bound = export_metadata_payload_bound(&binding).unwrap();
         assert!(metadata_bound <= config.limits().max_export_metadata_bytes());
         let attributes =
-            cinematic_exr_attributes(config, &binding, "uniform", "1".to_string()).unwrap();
+            cinematic_exr_attributes(config, &binding, "uniform", "1".to_string(), None).unwrap();
         assert!(
             export_metadata_payload_bytes(config.profile(), &attributes).unwrap() <= metadata_bound
         );

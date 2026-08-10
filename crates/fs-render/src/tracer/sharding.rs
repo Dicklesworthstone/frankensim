@@ -16,14 +16,13 @@ use super::{
     DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION, DirectStrategy, Film, FilmTimeMode,
     LIGHTING_TRACER_BIT_SEMANTICS_VERSION, MOTION_TRACER_BIT_SEMANTICS_VERSION, RenderTileLayout,
     Sampler, Scene, Settings, TRACER_BIT_SEMANTICS_VERSION, TracerError, checked_pixel_len,
-    requested_time_mode, trace_pixel_sample, validate_scene,
+    path_sobol, pixel_sobol, requested_time_mode, trace_pixel_sample, validate_scene,
 };
 use crate::camera::{AnimatedCamera, CutSide};
 use crate::motion::{ShutterConvention, ShutterDistribution, ShutterInterval};
 use crate::spectral::y_integral;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_rand::qmc::Sobol;
 use std::collections::BTreeMap;
 
 /// Canonical shard-result wire schema.
@@ -713,8 +712,8 @@ fn render_shard_impl(
         (spec.settings.seed & 0xffff_ffff) as u32,
         (spec.settings.seed >> 32) as u32,
     ];
-    let sobol = (spec.settings.sampler == Sampler::OwenSobol)
-        .then(|| Sobol::scrambled(3, spec.settings.seed));
+    let sobol = pixel_sobol(spec.settings.sampler, spec.settings.seed);
+    let path_sobol = path_sobol(spec.settings.sampler);
     let kn = 1.0 / y_integral();
     for tile in spec.tile_start..spec.tile_end {
         checkpoint(cx)?;
@@ -743,6 +742,7 @@ fn render_shard_impl(
                         &spec.settings,
                         kn,
                         sobol.as_ref(),
+                        path_sobol.as_ref(),
                         key,
                         pixel,
                         sample,
@@ -1453,6 +1453,7 @@ const fn sampler_tag(sampler: Sampler) -> u8 {
     match sampler {
         Sampler::Iid => 0,
         Sampler::OwenSobol => 1,
+        Sampler::OwenSobolFullPath => 2,
     }
 }
 

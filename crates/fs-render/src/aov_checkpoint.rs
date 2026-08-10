@@ -1353,6 +1353,7 @@ const fn sampler_tag(sampler: Sampler) -> u8 {
     match sampler {
         Sampler::Iid => 0,
         Sampler::OwenSobol => 1,
+        Sampler::OwenSobolFullPath => 2,
     }
 }
 
@@ -1360,6 +1361,7 @@ fn decode_sampler(tag: u8) -> Result<Sampler, CinematicAovCheckpointError> {
     match tag {
         0 => Ok(Sampler::Iid),
         1 => Ok(Sampler::OwenSobol),
+        2 => Ok(Sampler::OwenSobolFullPath),
         _ => Err(CinematicAovCheckpointError::InvalidEnvelope),
     }
 }

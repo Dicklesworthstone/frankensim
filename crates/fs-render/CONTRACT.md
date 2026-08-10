@@ -158,6 +158,22 @@ differentiable lift). Pure Rust throughout.
   cinematic-camera, scoped-worker, parked-crew, and opaque resumable entry
   points share the same estimator.
 
+- `tracer` independent-pilot fixed production allocation: an
+  `IndependentPilotSamplePlan` converts a completed pilot film's per-channel
+  sample variances into a fixed row-major production count map using an
+  explicit absolute/relative error scale, dark floor, safety factor, and
+  minimum/maximum interval. The pilot and production counter-stream seeds must
+  differ, pilot radiance is discarded, and every production pixel consumes its
+  complete preselected prefix before any retained production sample is
+  inspected. Conditional on the plan, this is therefore the ordinary
+  fixed-count path estimator rather than data-dependent stopping. The
+  allocation remains a quality/cost heuristic: a single Owen scramble's
+  within-stream variance is not a confidence interval. Version 1 supports a
+  fresh cinematic beauty film, exactly co-sampled variable-count cinematic
+  AOVs, count-aware denoising guides, and linear-float EXR carrying the count
+  map and pilot-plan provenance. It does not yet claim checkpoint/resume or
+  shard merge for a fixed-plan production pass.
+
 - `aov` module (bead `frankensim-h7xu5.6.1`): opt-in cinematic diagnostic and
   denoising accumulation is deliberately parallel to legacy `Film`; ordinary
   RGB rendering, RGB EXR output, checkpoint bytes, and shard bytes neither
@@ -446,7 +462,8 @@ The high-level renderer reserves its complete private image buffer before
 sampling and drops it on any tracking refusal; no error path returns a partial
 image.
 The tile renderer additionally reserves retained/staging film payloads, one
-shared three-dimensional Sobol direction table for Owen-Sobol jobs, its worst-case concurrent
+shared three-dimensional Sobol direction table for pixel-Owen jobs plus a
+six-dimensional reusable path-block table for full-path-Owen jobs, its worst-case concurrent
 tile-pixel scratch envelope, and `fs-exec` root metadata before dispatch. Tile
 scratch uses fallible raw buffers only inside that already-held aggregate
 charge, so scheduling overlap cannot change lease admission. The dielectric
@@ -557,7 +574,11 @@ Bradford-adapted linear sRGB → byte-exact EXR. Streams are
 counter-based and keyed (pixel, sample, dimension) — Philox for path
 decisions, optional Owen-scrambled Sobol' for pixel dimensions
 (measured at 64 spp on the Cornell fixture: variance ratio 0.676 vs
-iid, ledgered on bead 872c) — so images are bitwise invariant to any
+iid, ledgered on bead 872c), or pixel Sobol' plus independently
+nested-uniform-scrambled six-dimensional light/BSDF/dielectric-event blocks
+per bounce. The latter is a randomized blocked-QMC estimator, not one
+monolithic high-dimensional Sobol' net; its quality ordering is measured per
+scene at equal fixed SPP and is not assumed. Streams remain bitwise invariant to any
 pixel/tile scheduling and progressive checkpoints resume bitwise.
 Radiance-path transcendentals go through `fs_math::det`; the Cornell
 golden (`fs-render:cornell` in golden-couplings.json) reproduced
@@ -680,7 +701,9 @@ cancelled authority. A contained one-time worker panic also retains a strict
 row prefix and resumes bit-exactly. Mode- or budget-changing retries refuse
 before dispatch; cancellation/resume uses four workers and multiple tiles; and
 a pool placement seed is not observable by scene charts. IID and zero-sample
-jobs prove that they neither allocate nor charge unused Sobol direction state. Failures name
+jobs prove that they neither allocate nor charge unused Sobol direction state;
+pixel-only and full-path modes charge exactly three and nine direction tables.
+Failures name
 run, tile policy, pixel, channel, and binary64 bits; success logs setup,
 traversal, compute, merge, idle, and memory measurements. The Euler cinematic
 bridge adds animated-camera, geometry, dielectric, and direct-light
@@ -806,6 +829,11 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   certificate, or evidence that a threshold transfers between scenes,
   exposures, samplers, materials, or output transforms. Statistically
   meaningful randomized-QMC error estimation requires independent scrambles.
+  Full-path Owen sampling is unbiased only under its fixed-SPP randomized-QMC
+  interpretation; data-dependent stopping does not inherit that statement.
+  Independent-pilot allocation preserves the fixed-count interpretation only
+  because the pilot is discarded and a distinct production seed is required;
+  it does not certify that the selected count meets the requested image error.
   Denoised and postprocessed pixels cannot enter the accumulator or stopping
   API. Uniform rendering remains the final-quality fallback.
 - Operation-memory receipts cover the named film, progress, Sobol, tile

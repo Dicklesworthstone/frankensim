@@ -473,7 +473,7 @@ fn g5_pending_render_binds_mode_budget_and_counts_refused_attempts() {
 #[test]
 fn g5_parallel_workers_and_schedules_are_bit_exact_to_serial() {
     let scene = scene();
-    for sampler in [Sampler::Iid, Sampler::OwenSobol] {
+    for sampler in [Sampler::Iid, Sampler::OwenSobol, Sampler::OwenSobolFullPath] {
         let settings = settings(5, sampler);
         let serial = with_cx(false, |cx| render(&scene, cx, &settings)).expect("serial oracle");
         for workers in [1, 2, 4, 8] {
@@ -497,12 +497,12 @@ fn g5_parallel_workers_and_schedules_are_bit_exact_to_serial() {
             assert_eq!(output.report.staging_film_bytes, film_bytes);
             assert_eq!(
                 output.report.sampler_state_bytes,
-                if sampler == Sampler::OwenSobol {
-                    3 * size_of::<[u32; 32]>() as u64
-                } else {
-                    0
+                match sampler {
+                    Sampler::Iid => 0,
+                    Sampler::OwenSobol => 3 * size_of::<[u32; 32]>() as u64,
+                    Sampler::OwenSobolFullPath => 9 * size_of::<[u32; 32]>() as u64,
                 },
-                "only Owen-Sobol jobs may allocate direction state"
+                "sampler direction-state accounting must match the admitted estimator"
             );
             if workers == 1 {
                 assert!(
@@ -1514,7 +1514,7 @@ fn g3_uniform_shard_invalid_input_diagnostics_are_permutation_invariant() {
 
 #[test]
 fn g5_uniform_shards_are_arrival_order_invariant_with_explicit_exactness_boundaries() {
-    for sampler in [Sampler::Iid, Sampler::OwenSobol] {
+    for sampler in [Sampler::Iid, Sampler::OwenSobol, Sampler::OwenSobolFullPath] {
         let scene = scene();
         let settings = shard_test_settings(sampler);
         let layout = RenderTileLayout::try_new(settings.width, settings.height, 3, 3)
@@ -1522,6 +1522,7 @@ fn g5_uniform_shards_are_arrival_order_invariant_with_explicit_exactness_boundar
         let plan_identity = shard_test_identity(match sampler {
             Sampler::Iid => "iid-plan",
             Sampler::OwenSobol => "sobol-plan",
+            Sampler::OwenSobolFullPath => "sobol-full-path-plan",
         });
         let frame_identity = shard_test_identity("g5-frame");
         let limits = RenderShardLimits::try_new(1 << 20, 4 << 20).expect("shard caps");

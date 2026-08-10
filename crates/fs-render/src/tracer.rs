@@ -8,7 +8,9 @@
 //! keyed by `(pixel, sample, bounce-dimension)` — Philox 4×32-10 for
 //! path decisions, optionally Owen-scrambled Sobol' for the pixel/
 //! wavelength dimensions ([`Sampler::OwenSobol`], decorrelated across
-//! pixels by a Philox-derived scramble seed). No draw depends on
+//! pixels by a Philox-derived scramble seed), or independently scrambled
+//! light/BSDF/event blocks at each bounce
+//! ([`Sampler::OwenSobolFullPath`]). No draw depends on
 //! scheduling, so images are bitwise invariant to tile traversal and
 //! worker count, and a render RESUMED from an `spp` checkpoint equals
 //! the straight-through render bitwise (the pause–serialize–resume
@@ -32,8 +34,8 @@ use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError}
 use crate::aov::{
     AdaptiveAovAccumulator, AdaptiveCinematicAovFilm, AlignedAovPrimary, AlignedAovSample,
     CinematicAovConfig, CinematicAovError, CinematicAovFilm, CinematicAovPalette,
-    CinematicAovTileAccumulator, MAX_EXACT_F32_INTEGER, adaptive_render_binding, render_binding,
-    validate_binding, validate_reference_times,
+    CinematicAovTileAccumulator, FixedSampleCinematicAovFilm, MAX_EXACT_F32_INTEGER,
+    adaptive_render_binding, render_binding, validate_binding, validate_reference_times,
 };
 use crate::camera::{
     AnimatedCamera, CameraError, CameraExposure, CutSide, KeyframeFocus, LensSample,
@@ -492,6 +494,9 @@ struct PathRng {
     sample: u32,
     dim: u32,
     key: [u32; 2],
+    qmc_depth: u32,
+    qmc_values: [f64; PATH_QMC_DIMENSIONS],
+    qmc_valid: bool,
 }
 
 impl PathRng {
@@ -500,7 +505,28 @@ impl PathRng {
         self.dim += 1;
         (u32_unit(out[0]), u32_unit(out[1]))
     }
+
+    fn path_pair(&mut self, sobol: Option<&Sobol>, depth: u32, slot: usize) -> (f64, f64) {
+        let Some(sobol) = sobol else {
+            return self.next2();
+        };
+        debug_assert!(slot < PATH_QMC_PAIR_SLOTS);
+        if !self.qmc_valid || self.qmc_depth != depth {
+            let seed_words =
+                philox4x32_10([self.pixel, depth, PATH_QMC_SCRAMBLE_DOMAIN, 0], self.key);
+            let scramble_seed = u64::from(seed_words[0]) | (u64::from(seed_words[1]) << 32);
+            sobol.point_with_owen_scramble(self.sample, &mut self.qmc_values, scramble_seed);
+            self.qmc_depth = depth;
+            self.qmc_valid = true;
+        }
+        let first = slot * 2;
+        (self.qmc_values[first], self.qmc_values[first + 1])
+    }
 }
+
+const PATH_QMC_PAIR_SLOTS: usize = 3;
+const PATH_QMC_DIMENSIONS: usize = PATH_QMC_PAIR_SLOTS * 2;
+const PATH_QMC_SCRAMBLE_DOMAIN: u32 = 0x5041_5448;
 
 fn u32_unit(x: u32) -> f64 {
     f64::from(x) / 4_294_967_296.0
@@ -552,6 +578,42 @@ pub enum Sampler {
     /// (the ambition-round upgrade; its equal-spp variance claim is
     /// measured in the battery, not assumed).
     OwenSobol,
+    /// Owen-scrambled Sobol' for camera/wavelength dimensions plus an
+    /// independently nested-uniform-scrambled six-dimensional block at each
+    /// path bounce: light selection/sample, BSDF direction, and dielectric
+    /// event. Every `(pixel, depth)` owns a disjoint Owen tree. This is an
+    /// unbiased randomized blocked-QMC estimator at fixed SPP, not a claim of
+    /// one monolithic high-dimensional Sobol' net. Data-dependent adaptive
+    /// stopping remains a biased presentation/diagnostic policy unless a
+    /// separate sequential-estimation argument is supplied.
+    OwenSobolFullPath,
+}
+
+const fn sampler_uses_pixel_sobol(sampler: Sampler) -> bool {
+    matches!(sampler, Sampler::OwenSobol | Sampler::OwenSobolFullPath)
+}
+
+const fn sampler_uses_path_sobol(sampler: Sampler) -> bool {
+    matches!(sampler, Sampler::OwenSobolFullPath)
+}
+
+fn pixel_sobol(sampler: Sampler, seed: u64) -> Option<Sobol> {
+    sampler_uses_pixel_sobol(sampler).then(|| Sobol::scrambled(3, seed))
+}
+
+fn path_sobol(sampler: Sampler) -> Option<Sobol> {
+    sampler_uses_path_sobol(sampler).then(|| Sobol::new(PATH_QMC_DIMENSIONS))
+}
+
+const fn sampler_direction_bytes(sampler: Sampler) -> u64 {
+    let dimensions = if sampler_uses_path_sobol(sampler) {
+        3 + PATH_QMC_DIMENSIONS
+    } else if sampler_uses_pixel_sobol(sampler) {
+        3
+    } else {
+        0
+    };
+    dimensions as u64 * size_of::<[u32; 32]>() as u64
 }
 
 /// How direct lighting is estimated — [`DirectStrategy::Mis`] is the
@@ -916,6 +978,200 @@ impl AdaptiveSamplingConfig {
     }
 }
 
+/// Bit-affecting semantics of independent-pilot production allocation.
+///
+/// Version 1 converts each pilot pixel's maximum per-channel sample variance
+/// into a fixed production count using the declared absolute/relative error
+/// scale and safety factor. The pilot is never included in the production
+/// mean. Consequently, conditional on the completed pilot plan, production is
+/// the ordinary fixed-count path estimator at every pixel.
+pub const INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION: u32 = 1;
+
+/// Invalid independent-pilot allocation request or pilot state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndependentPilotAllocationError {
+    /// The minimum production count was zero.
+    ZeroMinimumSamples,
+    /// The maximum production count was below the minimum.
+    MaximumBelowMinimum,
+    /// A threshold or safety factor was negative, zero where prohibited, or
+    /// non-finite.
+    InvalidParameter {
+        /// Rejected configuration field.
+        field: &'static str,
+    },
+    /// Pilot and production reused the same counter-stream seed.
+    NonIndependentSeed,
+    /// The pilot had no pixels or contained inconsistent retained planes.
+    InvalidPilotShape,
+    /// A pilot mean or variance was non-finite or otherwise invalid.
+    InvalidPilotStatistics,
+    /// Production render settings did not match the plan's shape, ceiling, or
+    /// independent stream seed.
+    ProductionSettingsMismatch,
+}
+
+impl core::fmt::Display for IndependentPilotAllocationError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ZeroMinimumSamples => {
+                formatter.write_str("production minimum samples must be nonzero")
+            }
+            Self::MaximumBelowMinimum => {
+                formatter.write_str("production maximum samples are below the minimum")
+            }
+            Self::InvalidParameter { field } => write!(
+                formatter,
+                "independent-pilot allocation parameter {field} is invalid"
+            ),
+            Self::NonIndependentSeed => formatter.write_str(
+                "pilot and production seeds must differ so pilot samples cannot enter or select the production stream",
+            ),
+            Self::InvalidPilotShape => {
+                formatter.write_str("pilot film has inconsistent or empty pixel state")
+            }
+            Self::InvalidPilotStatistics => {
+                formatter.write_str("pilot film contains invalid mean or variance state")
+            }
+            Self::ProductionSettingsMismatch => formatter.write_str(
+                "production settings do not match the independent-pilot sample plan",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for IndependentPilotAllocationError {}
+
+/// Quality target used to turn an independent pilot into fixed per-pixel
+/// production counts.
+///
+/// For channel `c`, the target standard-error scale is
+/// `absolute_error + relative_error * max(abs(pilot_mean[c]), dark_floor)`.
+/// The estimated required count is `safety_factor^2 * variance[c] / scale^2`;
+/// the largest channel requirement is rounded upward and clamped to the
+/// declared sample interval. This is an allocation heuristic, not a confidence
+/// interval: within-stream Owen-Sobol variance is not an IID error estimate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IndependentPilotAllocationConfig {
+    minimum_samples: u32,
+    maximum_samples: u32,
+    absolute_error: f64,
+    relative_error: f64,
+    dark_floor: f64,
+    safety_factor: f64,
+}
+
+impl IndependentPilotAllocationConfig {
+    /// Validate an independent-pilot allocation policy.
+    pub fn try_new(
+        minimum_samples: u32,
+        maximum_samples: u32,
+        absolute_error: f64,
+        relative_error: f64,
+        dark_floor: f64,
+        safety_factor: f64,
+    ) -> Result<Self, IndependentPilotAllocationError> {
+        if minimum_samples == 0 {
+            return Err(IndependentPilotAllocationError::ZeroMinimumSamples);
+        }
+        if maximum_samples < minimum_samples {
+            return Err(IndependentPilotAllocationError::MaximumBelowMinimum);
+        }
+        for (field, value) in [
+            ("absolute_error", absolute_error),
+            ("relative_error", relative_error),
+            ("dark_floor", dark_floor),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(IndependentPilotAllocationError::InvalidParameter { field });
+            }
+        }
+        if !safety_factor.is_finite() || safety_factor <= 0.0 {
+            return Err(IndependentPilotAllocationError::InvalidParameter {
+                field: "safety_factor",
+            });
+        }
+        let canonical_zero = |value: f64| if value == 0.0 { 0.0 } else { value };
+        Ok(Self {
+            minimum_samples,
+            maximum_samples,
+            absolute_error: canonical_zero(absolute_error),
+            relative_error: canonical_zero(relative_error),
+            dark_floor: canonical_zero(dark_floor),
+            safety_factor,
+        })
+    }
+
+    /// Smallest fixed production count assigned to any pixel.
+    #[must_use]
+    pub const fn minimum_samples(self) -> u32 {
+        self.minimum_samples
+    }
+
+    /// Largest fixed production count assigned to any pixel.
+    #[must_use]
+    pub const fn maximum_samples(self) -> u32 {
+        self.maximum_samples
+    }
+
+    /// Absolute component of the per-channel pilot error scale.
+    #[must_use]
+    pub const fn absolute_error(self) -> f64 {
+        self.absolute_error
+    }
+
+    /// Relative component of the per-channel pilot error scale.
+    #[must_use]
+    pub const fn relative_error(self) -> f64 {
+        self.relative_error
+    }
+
+    /// Lower mean magnitude used by the relative component.
+    #[must_use]
+    pub const fn dark_floor(self) -> f64 {
+        self.dark_floor
+    }
+
+    /// Multiplicative guard applied to the pilot standard deviation.
+    #[must_use]
+    pub const fn safety_factor(self) -> f64 {
+        self.safety_factor
+    }
+
+    fn count_for(
+        self,
+        mean_xyz: [f64; 3],
+        variance_xyz: [f64; 3],
+    ) -> Result<u32, IndependentPilotAllocationError> {
+        if mean_xyz.iter().any(|value| !value.is_finite())
+            || variance_xyz
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(IndependentPilotAllocationError::InvalidPilotStatistics);
+        }
+        let safety_squared = self.safety_factor * self.safety_factor;
+        let mut required = f64::from(self.minimum_samples);
+        for channel in 0..3 {
+            if variance_xyz[channel] == 0.0 {
+                continue;
+            }
+            let scale = self.absolute_error
+                + self.relative_error * mean_xyz[channel].abs().max(self.dark_floor);
+            if scale == 0.0 {
+                return Ok(self.maximum_samples);
+            }
+            required = required.max(safety_squared * variance_xyz[channel] / (scale * scale));
+        }
+        if required >= f64::from(self.maximum_samples) {
+            return Ok(self.maximum_samples);
+        }
+        let truncated = required as u32;
+        let rounded_up = truncated + u32::from(f64::from(truncated) < required);
+        Ok(rounded_up.clamp(self.minimum_samples, self.maximum_samples))
+    }
+}
+
 /// Why one adaptive pixel stopped consuming paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1034,6 +1290,7 @@ pub const MAX_RENDER_TILE_EDGE: u32 = 4_096;
 pub const MAX_RENDER_WORKERS: usize = 256;
 const RENDER_TILE_KERNEL: &str = "fs-render/spectral-film-tile-v1";
 const CINEMATIC_AOV_TILE_KERNEL: &str = "fs-render/cinematic-aov-tile-v1";
+const FIXED_SAMPLE_CINEMATIC_AOV_TILE_KERNEL: &str = "fs-render/fixed-sample-cinematic-aov-tile-v1";
 /// Independent tile program identity for the adaptive cinematic AOV path.
 ///
 /// The adaptive stop decision remains local to each pixel and uses only the
@@ -1442,6 +1699,26 @@ impl ParkedRenderScope<'_> {
         )
     }
 
+    /// Render a fresh cinematic production film with a discarded-pilot fixed
+    /// sample plan on this already parked worker crew.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cinematic_with_independent_pilot(
+        &self,
+        scene: &Scene,
+        camera: &AnimatedCamera,
+        cut_side: CutSide,
+        cx: &Cx<'_>,
+        settings: &Settings,
+        plan: IndependentPilotSamplePlan,
+        shutter: ShutterInterval,
+        execution: &RenderExecutionConfig,
+    ) -> Result<FixedSampleRenderOutput, RenderExecutionError> {
+        self.validate_job(cx, execution)?;
+        render_cinematic_with_independent_pilot_execution_impl(
+            scene, camera, cut_side, cx, settings, plan, shutter, execution, self.pool,
+        )
+    }
+
     /// Render a fresh cinematic-camera film with exactly aligned AOVs on this
     /// already parked worker crew. The film remains private until all tiles,
     /// the executor drain, and the final cancellation checkpoint succeed.
@@ -1461,6 +1738,28 @@ impl ParkedRenderScope<'_> {
             .map_err(CinematicAovExecutionError::Execution)?;
         render_cinematic_with_aovs_execution_impl(
             scene, camera, cut_side, cx, settings, shutter, config, execution, self.pool,
+        )
+    }
+
+    /// Render fixed-plan production beauty and exactly aligned cinematic AOVs
+    /// on this already parked worker crew.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cinematic_with_independent_pilot_aovs(
+        &self,
+        scene: &Scene,
+        camera: &AnimatedCamera,
+        cut_side: CutSide,
+        cx: &Cx<'_>,
+        settings: &Settings,
+        plan: IndependentPilotSamplePlan,
+        shutter: ShutterInterval,
+        config: CinematicAovConfig,
+        execution: &RenderExecutionConfig,
+    ) -> Result<FixedSampleCinematicAovExecutionOutput, CinematicAovExecutionError> {
+        self.validate_job(cx, execution)
+            .map_err(CinematicAovExecutionError::Execution)?;
+        render_cinematic_with_independent_pilot_aovs_execution_impl(
+            scene, camera, cut_side, cx, settings, plan, shutter, config, execution, self.pool,
         )
     }
 
@@ -1734,6 +2033,8 @@ pub enum RenderExecutionError {
     Allocation(AllocError),
     /// Adaptive-policy validation or raw moment accumulation refused.
     Adaptive(AdaptiveSamplingError),
+    /// Independent-pilot plan construction or production binding refused.
+    SamplePlan(IndependentPilotAllocationError),
     /// The throughput lane contained a panic, spawn failure, or internal
     /// execution refusal and drained all children before returning.
     Executor(RunError),
@@ -1749,6 +2050,9 @@ impl core::fmt::Display for RenderExecutionError {
             Self::Memory(error) => write!(formatter, "tile render memory refused: {error}"),
             Self::Allocation(error) => write!(formatter, "tile render allocation refused: {error}"),
             Self::Adaptive(error) => write!(formatter, "adaptive render refused: {error}"),
+            Self::SamplePlan(error) => {
+                write!(formatter, "independent-pilot render refused: {error}")
+            }
             Self::Executor(error) => write!(formatter, "tile render execution failed: {error}"),
             Self::Internal(detail) => write!(formatter, "tile render invariant failed: {detail}"),
         }
@@ -1762,6 +2066,7 @@ impl core::error::Error for RenderExecutionError {
             Self::Tracer(error) => Some(error),
             Self::Allocation(error) => Some(error),
             Self::Adaptive(error) => Some(error),
+            Self::SamplePlan(error) => Some(error),
             Self::Executor(error) => Some(error),
             Self::Memory(_) | Self::Internal(_) => None,
         }
@@ -1777,6 +2082,12 @@ impl From<TracerError> for RenderExecutionError {
 impl From<AdaptiveSamplingError> for RenderExecutionError {
     fn from(error: AdaptiveSamplingError) -> Self {
         Self::Adaptive(error)
+    }
+}
+
+impl From<IndependentPilotAllocationError> for RenderExecutionError {
+    fn from(error: IndependentPilotAllocationError) -> Self {
+        Self::SamplePlan(error)
     }
 }
 
@@ -1841,8 +2152,9 @@ pub struct RenderExecutionReport {
     /// One-based attempt number for resumable jobs. Compatibility one-shot
     /// runs use one; no-work reports use zero.
     pub attempt_index: u64,
-    /// Bytes charged for an already-retained progressive input film. Zero for
-    /// fresh rendering and empty progressive ranges.
+    /// Bytes charged for an already-retained progressive input film or a
+    /// fixed per-pixel production count plan. Zero for ordinary fresh
+    /// rendering and empty progressive ranges.
     pub retained_film_bytes: u64,
     /// Bytes charged for private all-or-nothing output state. A fresh uniform
     /// render owns one XYZ film payload; an adaptive render additionally owns
@@ -1889,6 +2201,15 @@ pub struct RenderExecutionOutput {
     pub report: RenderExecutionReport,
 }
 
+/// Fixed-plan variable-sample film plus execution evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedSampleRenderOutput {
+    /// Fully published production-only film.
+    pub film: FixedSampleFilm,
+    /// Tile, scheduling, timing, and memory evidence.
+    pub report: RenderExecutionReport,
+}
+
 /// Fully published aligned cinematic AOV film plus deterministic tile
 /// execution evidence.
 #[derive(Debug, PartialEq)]
@@ -1907,6 +2228,16 @@ pub struct CinematicAovExecutionOutput {
 pub struct AdaptiveCinematicAovExecutionOutput {
     /// Complete private-until-success adaptive beauty and aligned AOV state.
     pub film: AdaptiveCinematicAovFilm,
+    /// Tile, scheduling, timing, and memory evidence.
+    pub report: RenderExecutionReport,
+}
+
+/// Fully published fixed-plan production beauty and aligned AOVs plus tile
+/// execution evidence.
+#[derive(Debug, PartialEq)]
+pub struct FixedSampleCinematicAovExecutionOutput {
+    /// Production-only variable-count beauty and exactly matching guides.
+    pub film: FixedSampleCinematicAovFilm,
     /// Tile, scheduling, timing, and memory evidence.
     pub report: RenderExecutionReport,
 }
@@ -1978,6 +2309,7 @@ pub struct PendingRender<'assets> {
     layout: RenderTileLayout,
     state: Mutex<PendingRenderState>,
     sobol: Option<Sobol>,
+    path_sobol: Option<Sobol>,
     lease: OperationMemoryLease,
     film_charge: Option<LeaseCharge>,
     progress_charge: Option<LeaseCharge>,
@@ -2027,6 +2359,7 @@ pub struct PendingAdaptiveRender<'assets> {
     layout: RenderTileLayout,
     state: Mutex<PendingAdaptiveRenderState>,
     sobol: Option<Sobol>,
+    path_sobol: Option<Sobol>,
     lease: OperationMemoryLease,
     state_charge: Option<LeaseCharge>,
     progress_charge: Option<LeaseCharge>,
@@ -2828,6 +3161,237 @@ impl AdaptiveFilm {
     }
 }
 
+/// Fixed row-major production counts derived from a discarded independent
+/// pilot film.
+///
+/// The plan contains no radiance samples. It only selects a count before the
+/// production stream begins, and it refuses seed reuse. A production render
+/// using this plan is therefore a fixed-count estimator conditional on the
+/// pilot. The allocation heuristic can be imperfect without biasing the
+/// retained production means; it affects variance and cost only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndependentPilotSamplePlan {
+    width: u32,
+    height: u32,
+    sample_counts: Vec<u32>,
+    config: IndependentPilotAllocationConfig,
+    pilot_seed: u64,
+    production_seed: u64,
+    pilot_sampler: Sampler,
+    semantics_version: u32,
+}
+
+impl IndependentPilotSamplePlan {
+    /// Build a fixed production plan from a completed pilot film.
+    ///
+    /// The caller must render production with `production_seed`; reusing the
+    /// pilot seed is rejected. Pilot counts must all be at least two so every
+    /// per-channel sample variance is defined.
+    pub fn try_from_pilot(
+        pilot: &AdaptiveFilm,
+        production_seed: u64,
+        config: IndependentPilotAllocationConfig,
+    ) -> Result<Self, IndependentPilotAllocationError> {
+        if production_seed == pilot.stream_seed() {
+            return Err(IndependentPilotAllocationError::NonIndependentSeed);
+        }
+        let expected = usize::try_from(pilot.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(pilot.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .filter(|pixels| *pixels != 0)
+            .ok_or(IndependentPilotAllocationError::InvalidPilotShape)?;
+        if pilot.xyz_sums().len() != expected
+            || pilot.running_means_xyz().len() != expected
+            || pilot.m2_xyz().len() != expected
+            || pilot.sample_counts().len() != expected
+            || pilot.decisions().len() != expected
+            || pilot.sample_counts().iter().any(|samples| *samples < 2)
+        {
+            return Err(IndependentPilotAllocationError::InvalidPilotShape);
+        }
+        let mut sample_counts = Vec::new();
+        sample_counts
+            .try_reserve_exact(expected)
+            .map_err(|_| IndependentPilotAllocationError::InvalidPilotShape)?;
+        for pixel in 0..expected {
+            let mean = pilot
+                .estimator_mean_xyz(pixel)
+                .ok_or(IndependentPilotAllocationError::InvalidPilotShape)?;
+            let variance = pilot
+                .sample_variance_xyz(pixel)
+                .ok_or(IndependentPilotAllocationError::InvalidPilotStatistics)?;
+            sample_counts.push(config.count_for(mean, variance)?);
+        }
+        Ok(Self {
+            width: pilot.width(),
+            height: pilot.height(),
+            sample_counts,
+            config,
+            pilot_seed: pilot.stream_seed(),
+            production_seed,
+            pilot_sampler: pilot.sampler(),
+            semantics_version: INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION,
+        })
+    }
+
+    /// Plan width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Plan height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Exact fixed production count for every row-major pixel.
+    #[must_use]
+    pub fn sample_counts(&self) -> &[u32] {
+        &self.sample_counts
+    }
+
+    /// Allocation policy that produced the count map.
+    #[must_use]
+    pub const fn config(&self) -> IndependentPilotAllocationConfig {
+        self.config
+    }
+
+    /// Counter-stream seed used only by the discarded pilot.
+    #[must_use]
+    pub const fn pilot_seed(&self) -> u64 {
+        self.pilot_seed
+    }
+
+    /// Counter-stream seed required for retained production paths.
+    #[must_use]
+    pub const fn production_seed(&self) -> u64 {
+        self.production_seed
+    }
+
+    /// Sampler family used to estimate pilot variance.
+    #[must_use]
+    pub const fn pilot_sampler(&self) -> Sampler {
+        self.pilot_sampler
+    }
+
+    /// Bit-affecting allocation semantics version.
+    #[must_use]
+    pub const fn semantics_version(&self) -> u32 {
+        self.semantics_version
+    }
+
+    /// Exact number of retained production paths selected by the plan.
+    #[must_use]
+    pub fn total_samples(&self) -> u64 {
+        self.sample_counts
+            .iter()
+            .map(|samples| u64::from(*samples))
+            .sum()
+    }
+
+    fn validate_settings(
+        &self,
+        settings: &Settings,
+    ) -> Result<(), IndependentPilotAllocationError> {
+        if (settings.width, settings.height) != (self.width, self.height)
+            || settings.spp != self.config.maximum_samples
+            || settings.seed != self.production_seed
+        {
+            return Err(IndependentPilotAllocationError::ProductionSettingsMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Raw production film rendered with an independent-pilot fixed sample plan.
+///
+/// Every pixel is normalized by its own preselected count. Pilot radiance is
+/// absent by construction. This type intentionally does not expose progressive
+/// append: changing a count after seeing production samples would invalidate
+/// the fixed-plan estimator boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedSampleFilm {
+    width: u32,
+    height: u32,
+    xyz: Vec<[f64; 3]>,
+    plan: IndependentPilotSamplePlan,
+    sampler: Sampler,
+    time_mode: FilmTimeMode,
+}
+
+impl FixedSampleFilm {
+    /// Film width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Film height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Unnormalized row-major CIE XYZ production sums.
+    #[must_use]
+    pub fn xyz_sums(&self) -> &[[f64; 3]] {
+        &self.xyz
+    }
+
+    /// Complete independent-pilot count plan and seed provenance.
+    #[must_use]
+    pub const fn sample_plan(&self) -> &IndependentPilotSamplePlan {
+        &self.plan
+    }
+
+    /// Production sampler family.
+    #[must_use]
+    pub const fn sampler(&self) -> Sampler {
+        self.sampler
+    }
+
+    /// Camera path and exact-shutter provenance shared by production paths.
+    #[must_use]
+    pub const fn time_mode(&self) -> FilmTimeMode {
+        self.time_mode
+    }
+
+    /// Per-pixel production mean in CIE XYZ.
+    #[must_use]
+    pub fn beauty_mean_xyz(&self, pixel: usize) -> Option<[f64; 3]> {
+        let sum = *self.xyz.get(pixel)?;
+        let samples = *self.plan.sample_counts.get(pixel)?;
+        let inverse = 1.0 / f64::from(samples);
+        Some(sum.map(|value| value * inverse))
+    }
+
+    /// Linear-sRGB planes normalized by each pixel's fixed production count.
+    #[must_use]
+    pub fn to_linear_srgb(&self) -> [Vec<f32>; 3] {
+        let n = self.xyz.len();
+        let mut planes = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
+        for pixel in 0..n {
+            let rgb = xyz_to_linear_srgb(xyz_e_to_d65(
+                self.beauty_mean_xyz(pixel)
+                    .expect("fixed-sample film owns shape-matched private buffers"),
+            ));
+            for (plane, value) in planes.iter_mut().zip(rgb) {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    plane[pixel] = value as f32;
+                }
+            }
+        }
+        planes
+    }
+}
+
 /// Exact aggregate of one adaptive film's decision map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdaptiveRenderSummary {
@@ -2957,7 +3521,8 @@ fn render_range_impl(
         return Ok(());
     }
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
-    let sobol = (s.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, s.seed));
+    let sobol = pixel_sobol(s.sampler, s.seed);
+    let path_sobol = path_sobol(s.sampler);
     let kn = 1.0 / y_integral();
     // Cancellation and backend refusals are transactional: a failed range
     // leaves both the accumulated sums and checkpoint unchanged, so retrying
@@ -2984,6 +3549,7 @@ fn render_range_impl(
                     s,
                     kn,
                     sobol.as_ref(),
+                    path_sobol.as_ref(),
                     key,
                     pixel,
                     sample,
@@ -3023,9 +3589,11 @@ struct ParallelRenderKernel<'run, 'assets> {
     layout: RenderTileLayout,
     from: u32,
     to: u32,
+    sample_counts: Option<&'run [u32]>,
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     compute_ns: &'run AtomicU64,
     merge_ns: &'run AtomicU64,
 }
@@ -3098,7 +3666,10 @@ impl ParallelRenderKernel<'_, '_> {
                     );
                 };
                 let mut xyz = self.base_xyz.map_or([0.0; 3], |base| base[pixel as usize]);
-                for sample in self.from..self.to {
+                let sample_to = self
+                    .sample_counts
+                    .map_or(self.to, |counts| counts[pixel as usize]);
+                for sample in self.from..sample_to {
                     if cx.checkpoint().is_err() {
                         atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
                         return ControlFlow::Break(Cancelled);
@@ -3110,6 +3681,7 @@ impl ParallelRenderKernel<'_, '_> {
                         self.settings,
                         kn,
                         self.sobol,
+                        self.path_sobol,
                         key,
                         pixel,
                         sample,
@@ -3194,6 +3766,7 @@ struct ParallelCinematicAovKernel<'run, 'assets> {
     shutter: ShutterInterval,
     camera_path: CameraPath<'assets>,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     compute_ns: &'run AtomicU64,
     merge_ns: &'run AtomicU64,
 }
@@ -3287,6 +3860,7 @@ impl ParallelCinematicAovKernel<'_, '_> {
                         self.settings,
                         kn,
                         self.sobol,
+                        self.path_sobol,
                         key,
                         pixel,
                         sample,
@@ -3401,6 +3975,255 @@ impl TileKernel for ParallelCinematicAovKernel<'_, '_> {
     }
 }
 
+struct FixedSampleCinematicAovStaging {
+    xyz: Vec<[f64; 3]>,
+    aov: AdaptiveAovAccumulator,
+}
+
+struct ParallelFixedSampleCinematicAovKernel<'run, 'assets> {
+    scene: &'assets Scene,
+    lighting: &'run AdmittedLighting<'assets>,
+    camera: &'assets AnimatedCamera,
+    exposure: CameraExposure<'assets>,
+    cut_side: CutSide,
+    settings: &'run Settings,
+    plan: &'run IndependentPilotSamplePlan,
+    config: CinematicAovConfig,
+    palette: &'run CinematicAovPalette,
+    albedo_cache: &'run AovAlbedoCache,
+    staging: &'run Mutex<FixedSampleCinematicAovStaging>,
+    failures: &'run Mutex<Option<(u64, CinematicAovTileFailure)>>,
+    layout: RenderTileLayout,
+    shutter: ShutterInterval,
+    camera_path: CameraPath<'assets>,
+    sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
+    compute_ns: &'run AtomicU64,
+    merge_ns: &'run AtomicU64,
+}
+
+impl ParallelFixedSampleCinematicAovKernel<'_, '_> {
+    fn fail(&self, tile: u64, failure: CinematicAovTileFailure) -> ControlFlow<Cancelled, ()> {
+        let mut recorded = self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if recorded
+            .as_ref()
+            .is_none_or(|(recorded_tile, _)| tile < *recorded_tile)
+        {
+            *recorded = Some((tile, failure));
+        }
+        ControlFlow::Break(Cancelled)
+    }
+
+    fn aov_error(&self, tile: u64, error: CinematicAovError) -> ControlFlow<Cancelled, ()> {
+        if matches!(error, CinematicAovError::Tracer(TracerError::Cancelled)) {
+            ControlFlow::Break(Cancelled)
+        } else {
+            self.fail(tile, CinematicAovTileFailure::Aov(error))
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_tile(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, ()> {
+        if cx.checkpoint().is_err() {
+            return ControlFlow::Break(Cancelled);
+        }
+        let Some(bounds) = self.layout.bounds(tile) else {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Internal("fixed-plan AOV tile outside planned layout"),
+            );
+        };
+        let Some(pixel_count) = bounds
+            .width
+            .checked_mul(bounds.height)
+            .and_then(|count| usize::try_from(count).ok())
+        else {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Internal("fixed-plan AOV tile pixel count overflow"),
+            );
+        };
+        let mut pixels =
+            match CinematicAovTileAccumulator::try_new(pixel_count, self.config.profile()) {
+                Ok(pixels) => pixels,
+                Err(error) => return self.aov_error(tile, error),
+            };
+
+        let compute_started = Instant::now();
+        let key = [
+            (self.settings.seed & 0xffff_ffff) as u32,
+            (self.settings.seed >> 32) as u32,
+        ];
+        let kn = 1.0 / y_integral();
+        let capture_primary = self.config.captures_primary();
+        let capture_ids = self.config.captures_ids();
+        let mut local_pixel = 0usize;
+        for py in bounds.y..bounds.y + bounds.height {
+            if cx.checkpoint().is_err() {
+                atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                return ControlFlow::Break(Cancelled);
+            }
+            for px in bounds.x..bounds.x + bounds.width {
+                let Some(pixel) = py
+                    .checked_mul(self.settings.width)
+                    .and_then(|row| row.checked_add(px))
+                else {
+                    atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                    return self.fail(
+                        tile,
+                        CinematicAovTileFailure::Internal(
+                            "fixed-plan AOV pixel identity overflow after preflight",
+                        ),
+                    );
+                };
+                let samples = self.plan.sample_counts()[pixel as usize];
+                for sample in 0..samples {
+                    if cx.checkpoint().is_err() {
+                        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                        return ControlFlow::Break(Cancelled);
+                    }
+                    let traced = match trace_pixel_sample_with_primary(
+                        self.scene,
+                        self.lighting,
+                        cx,
+                        self.settings,
+                        kn,
+                        self.sobol,
+                        self.path_sobol,
+                        key,
+                        pixel,
+                        sample,
+                        Some(self.shutter),
+                        self.camera_path,
+                        capture_primary,
+                    ) {
+                        Ok(traced) => traced,
+                        Err(TracerError::Cancelled) => {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return ControlFlow::Break(Cancelled);
+                        }
+                        Err(error) => {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return self.aov_error(tile, CinematicAovError::Tracer(error));
+                        }
+                    };
+                    let aligned = if capture_primary {
+                        let Some(split) = traced.contribution_split else {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return self
+                                .aov_error(tile, CinematicAovError::SampleAlignmentMismatch);
+                        };
+                        let Some(absolute_time_s) = traced.absolute_time_s else {
+                            atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                            return self.aov_error(
+                                tile,
+                                CinematicAovError::Tracer(TracerError::MissingRayTime),
+                            );
+                        };
+                        let primary = match prepare_aligned_aov_primary(
+                            self.scene,
+                            self.camera,
+                            self.exposure,
+                            self.cut_side,
+                            cx,
+                            self.settings,
+                            self.config.provenance(),
+                            self.palette,
+                            self.albedo_cache,
+                            capture_ids,
+                            absolute_time_s,
+                            traced.primary.as_ref(),
+                        ) {
+                            Ok(primary) => primary,
+                            Err(error) => {
+                                atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                                return self.aov_error(tile, error);
+                            }
+                        };
+                        Some(AlignedAovSample {
+                            beauty_xyz: traced.xyz,
+                            direct_xyz: split.direct_xyz,
+                            indirect_xyz: split.indirect_xyz,
+                            emission_xyz: split.emission_xyz,
+                            pixel_jitter: traced.pixel_jitter,
+                            absolute_sample: sample,
+                            primary,
+                        })
+                    } else {
+                        None
+                    };
+                    if let Err(error) = pixels.push(local_pixel, traced.xyz, aligned) {
+                        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                        return self.aov_error(tile, error);
+                    }
+                }
+                local_pixel += 1;
+            }
+        }
+        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+        if local_pixel != pixel_count {
+            return self.fail(
+                tile,
+                CinematicAovTileFailure::Internal(
+                    "fixed-plan AOV tile accumulator length mismatch",
+                ),
+            );
+        }
+        if cx.checkpoint().is_err() {
+            return ControlFlow::Break(Cancelled);
+        }
+
+        let mut staging = self
+            .staging
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let merge_started = Instant::now();
+        let mut source_offset = 0usize;
+        for py in bounds.y..bounds.y + bounds.height {
+            if cx.checkpoint().is_err() {
+                atomic_saturating_add(self.merge_ns, elapsed_ns(merge_started));
+                return ControlFlow::Break(Cancelled);
+            }
+            let destination = py as usize * self.settings.width as usize + bounds.x as usize;
+            let source_end = source_offset + bounds.width as usize;
+            staging.xyz[destination..destination + bounds.width as usize]
+                .copy_from_slice(&pixels.beauty_sums()[source_offset..source_end]);
+            source_offset = source_end;
+        }
+        let copied = staging.aov.copy_fresh_tile(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            &pixels,
+            || cx.checkpoint().is_ok(),
+        );
+        atomic_saturating_add(self.merge_ns, elapsed_ns(merge_started));
+        match copied {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => self.aov_error(tile, error),
+        }
+    }
+}
+
+impl TileKernel for ParallelFixedSampleCinematicAovKernel<'_, '_> {
+    type Out = ();
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new(
+            FIXED_SAMPLE_CINEMATIC_AOV_TILE_KERNEL,
+            self.layout.tile_count(),
+        )
+    }
+
+    fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, Self::Out> {
+        self.run_tile(tile, cx)
+    }
+}
+
 struct AdaptiveRenderState {
     xyz: Vec<[f64; 3]>,
     mean_xyz: Vec<[f64; 3]>,
@@ -3502,6 +4325,7 @@ struct ParallelAdaptiveCinematicAovKernel<'run, 'assets> {
     shutter: ShutterInterval,
     camera_path: CameraPath<'assets>,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     compute_ns: &'run AtomicU64,
     merge_ns: &'run AtomicU64,
 }
@@ -3603,6 +4427,7 @@ impl ParallelAdaptiveCinematicAovKernel<'_, '_> {
                         self.settings,
                         kn,
                         self.sobol,
+                        self.path_sobol,
                         key,
                         pixel,
                         sample,
@@ -3786,6 +4611,7 @@ fn trace_adaptive_pixel(
     policy: AdaptiveSamplingConfig,
     kn: f64,
     sobol: Option<&Sobol>,
+    path_sobol: Option<&Sobol>,
     key: [u32; 2],
     pixel: u32,
     shutter: Option<ShutterInterval>,
@@ -3802,6 +4628,7 @@ fn trace_adaptive_pixel(
             settings,
             kn,
             sobol,
+            path_sobol,
             key,
             pixel,
             sample,
@@ -3831,6 +4658,7 @@ struct AdaptiveRenderKernel<'run, 'assets> {
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     compute_ns: &'run AtomicU64,
     merge_ns: &'run AtomicU64,
 }
@@ -3911,6 +4739,7 @@ impl AdaptiveRenderKernel<'_, '_> {
                     self.policy,
                     kn,
                     self.sobol,
+                    self.path_sobol,
                     key,
                     pixel,
                     self.shutter,
@@ -3994,6 +4823,7 @@ struct PendingAdaptiveRenderKernel<'run, 'assets> {
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     row_quota: Option<NonZeroU32>,
     compute_ns: &'run AtomicU64,
     merge_ns: &'run AtomicU64,
@@ -4105,6 +4935,7 @@ impl PendingAdaptiveRenderKernel<'_, '_> {
                     self.policy,
                     kn,
                     self.sobol,
+                    self.path_sobol,
                     key,
                     pixel,
                     self.shutter,
@@ -4189,6 +5020,7 @@ struct PendingRenderKernel<'run, 'assets> {
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     row_quota: Option<NonZeroU32>,
     compute_ns: &'run AtomicU64,
     merge_ns: &'run AtomicU64,
@@ -4319,6 +5151,7 @@ impl PendingRenderKernel<'_, '_> {
                         self.settings,
                         kn,
                         self.sobol,
+                        self.path_sobol,
                         key,
                         pixel,
                         sample,
@@ -4436,6 +5269,7 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
     cx: &Cx<'_>,
     settings: &Settings,
     base_film: Option<&Film>,
+    sample_plan: Option<&IndependentPilotSamplePlan>,
     from: u32,
     to: u32,
     shutter: Option<ShutterInterval>,
@@ -4444,6 +5278,11 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
     runner: &R,
 ) -> Result<ParallelRenderResult, RenderExecutionError> {
     let setup_started = Instant::now();
+    if sample_plan.is_some() && (base_film.is_some() || from != 0 || to != settings.spp) {
+        return Err(RenderExecutionError::Internal(
+            "fixed sample plan is valid only for a fresh complete production render",
+        ));
+    }
     let (lighting, requested_mode) = preflight_render(
         scene,
         cx,
@@ -4487,8 +5326,23 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
         .ok_or(RenderExecutionError::Config(
             RenderExecutionConfigError::InvalidImageDimensions,
         ))?;
-    let retained_charge = base_film
-        .map(|_| lease.reserve("render-retained-film", film_bytes))
+    let sample_plan_bytes = sample_plan
+        .map(|plan| {
+            u64::try_from(plan.sample_counts.len())
+                .ok()
+                .and_then(|count| count.checked_mul(size_of::<u32>() as u64))
+                .ok_or(RenderExecutionError::Internal(
+                    "fixed sample plan byte accounting overflow",
+                ))
+        })
+        .transpose()?;
+    let retained_input_bytes = if base_film.is_some() {
+        film_bytes
+    } else {
+        sample_plan_bytes.unwrap_or(0)
+    };
+    let retained_charge = (retained_input_bytes != 0)
+        .then(|| lease.reserve("render-retained-input", retained_input_bytes))
         .transpose()
         .map_err(RenderExecutionError::Memory)?;
     let staging_charge = lease
@@ -4543,17 +5397,13 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
     let tile_scratch_charge = lease
         .reserve("render-tile-scratch-envelope", tile_scratch_envelope_bytes)
         .map_err(RenderExecutionError::Memory)?;
-    let sobol_bytes = if settings.sampler == Sampler::OwenSobol {
-        3_u64 * size_of::<[u32; 32]>() as u64
-    } else {
-        0
-    };
+    let sobol_bytes = sampler_direction_bytes(settings.sampler);
     let sobol_charge = (sobol_bytes != 0)
         .then(|| lease.reserve("render-sobol-directions", sobol_bytes))
         .transpose()
         .map_err(RenderExecutionError::Memory)?;
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let staging = Mutex::new(staged_xyz);
     let failures = Mutex::new(None);
     let compute_ns = AtomicU64::new(0);
@@ -4568,9 +5418,11 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
         layout,
         from,
         to,
+        sample_counts: sample_plan.map(IndependentPilotSamplePlan::sample_counts),
         shutter,
         camera_path,
         sobol: sobol.as_ref(),
+        path_sobol: path_sobol.as_ref(),
         compute_ns: &compute_ns,
         merge_ns: &merge_ns,
     };
@@ -4628,7 +5480,7 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
             requested_workers: execution.workers,
             workers: active_workers,
             attempt_index: 1,
-            retained_film_bytes: if base_film.is_some() { film_bytes } else { 0 },
+            retained_film_bytes: retained_input_bytes,
             staging_film_bytes: film_bytes,
             tile_scratch_envelope_bytes,
             sampler_state_bytes: sobol_bytes,
@@ -4751,17 +5603,13 @@ fn render_cinematic_with_aovs_execution_impl<R: RenderPoolRunner>(
             tile_scratch_envelope_bytes,
         )
         .map_err(RenderExecutionError::Memory)?;
-    let sobol_bytes = if settings.sampler == Sampler::OwenSobol {
-        3_u64 * size_of::<[u32; 32]>() as u64
-    } else {
-        0
-    };
+    let sobol_bytes = sampler_direction_bytes(settings.sampler);
     let sobol_charge = (sobol_bytes != 0)
         .then(|| lease.reserve("render-cinematic-aov-sobol-directions", sobol_bytes))
         .transpose()
         .map_err(RenderExecutionError::Memory)?;
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let staging = Mutex::new(staged);
     let failures = Mutex::new(None);
     let compute_ns = AtomicU64::new(0);
@@ -4782,6 +5630,7 @@ fn render_cinematic_with_aovs_execution_impl<R: RenderPoolRunner>(
         shutter,
         camera_path,
         sobol: sobol.as_ref(),
+        path_sobol: path_sobol.as_ref(),
         compute_ns: &compute_ns,
         merge_ns: &merge_ns,
     };
@@ -4863,6 +5712,269 @@ fn render_cinematic_with_aovs_execution_impl<R: RenderPoolRunner>(
             workers: active_workers,
             attempt_index: 1,
             retained_film_bytes: 0,
+            staging_film_bytes,
+            tile_scratch_envelope_bytes,
+            sampler_state_bytes: sobol_bytes,
+            progress_state_bytes: 0,
+            setup_ns,
+            traversal_ns,
+            tile_compute_ns,
+            tile_merge_ns,
+            publication_ns,
+            idle_worker_ns,
+            executor,
+            memory,
+        },
+    })
+}
+
+/// Tile-parallel fixed-plan cinematic render with AOVs co-staged against each
+/// pixel's complete preselected production prefix.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn render_cinematic_with_independent_pilot_aovs_execution_impl<R: RenderPoolRunner>(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    plan: IndependentPilotSamplePlan,
+    shutter: ShutterInterval,
+    config: CinematicAovConfig,
+    execution: &RenderExecutionConfig,
+    runner: &R,
+) -> Result<FixedSampleCinematicAovExecutionOutput, CinematicAovExecutionError> {
+    let setup_started = Instant::now();
+    cx.checkpoint().map_err(RenderExecutionError::from)?;
+    plan.validate_settings(settings)
+        .map_err(RenderExecutionError::from)?;
+    validate_reference_times(config, shutter)?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)
+        .map_err(RenderExecutionError::from)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, requested_mode) = preflight_render(
+        scene,
+        cx,
+        settings,
+        None,
+        0,
+        settings.spp,
+        Some(shutter),
+        camera_path,
+    )
+    .map_err(RenderExecutionError::from)?;
+    let capture_ids = config.captures_ids();
+    let palette = CinematicAovPalette::try_from_scene(scene, config.limits(), capture_ids, cx)?;
+    let albedo_cache = AovAlbedoCache::try_new(scene.primitives.len(), config.captures_primary())?;
+    let continuity_fingerprint = cinematic_input_continuity_fingerprint(scene, camera, cx)?;
+    let layout = RenderTileLayout::try_new(
+        settings.width,
+        settings.height,
+        execution.tile_width,
+        execution.tile_height,
+    )
+    .map_err(RenderExecutionError::Config)?;
+    let lease = OperationMemoryLease::bounded(execution.memory_limit_bytes);
+    let (pixel_count, retained_payload_bytes) =
+        AdaptiveAovAccumulator::admitted_fixed_retained_bytes(
+            settings.width,
+            settings.height,
+            settings.spp,
+            config,
+        )?;
+    let plan_bytes = u64::try_from(pixel_count)
+        .ok()
+        .and_then(|pixels| pixels.checked_mul(size_of::<u32>() as u64))
+        .ok_or(RenderExecutionError::Internal(
+            "fixed-plan cinematic AOV count-map byte overflow",
+        ))?;
+    let staging_film_bytes =
+        retained_payload_bytes
+            .checked_sub(plan_bytes)
+            .ok_or(RenderExecutionError::Internal(
+                "fixed-plan cinematic AOV byte accounting underflow",
+            ))?;
+    let retained_plan_charge = lease
+        .reserve("render-retained-independent-pilot-plan", plan_bytes)
+        .map_err(RenderExecutionError::Memory)?;
+    let staging_charge = lease
+        .reserve(
+            "render-fixed-sample-cinematic-aov-staging-film",
+            staging_film_bytes,
+        )
+        .map_err(RenderExecutionError::Memory)?;
+    let xyz_bytes = u64::try_from(pixel_count)
+        .ok()
+        .and_then(|pixels| pixels.checked_mul(size_of::<[f64; 3]>() as u64))
+        .ok_or(RenderExecutionError::Internal(
+            "fixed-plan cinematic AOV beauty byte overflow",
+        ))?;
+    let mut xyz = Vec::new();
+    xyz.try_reserve_exact(pixel_count).map_err(|_| {
+        RenderExecutionError::Allocation(AllocError::OutOfMemory {
+            site: "render-fixed-sample-cinematic-aov-beauty",
+            requested_bytes: usize::try_from(xyz_bytes).unwrap_or(usize::MAX),
+        })
+    })?;
+    xyz.resize(pixel_count, [0.0; 3]);
+    let staging = FixedSampleCinematicAovStaging {
+        xyz,
+        aov: AdaptiveAovAccumulator::try_new_fixed(
+            settings.width,
+            settings.height,
+            settings.spp,
+            config,
+        )?,
+    };
+
+    let max_tile_pixels_u64 = u64::from(execution.tile_width.min(settings.width))
+        .checked_mul(u64::from(execution.tile_height.min(settings.height)))
+        .ok_or(RenderExecutionError::Internal(
+            "fixed-plan cinematic AOV tile scratch pixel envelope overflow",
+        ))?;
+    let max_tile_pixels = usize::try_from(max_tile_pixels_u64).map_err(|_| {
+        RenderExecutionError::Internal("fixed-plan cinematic AOV tile scratch length overflow")
+    })?;
+    let active_worker_ceiling = u64::try_from(execution.workers)
+        .unwrap_or(u64::MAX)
+        .min(layout.tile_count());
+    let tile_scratch_envelope_bytes =
+        CinematicAovTileAccumulator::retained_bytes(max_tile_pixels, config.profile())?
+            .checked_mul(active_worker_ceiling)
+            .ok_or(RenderExecutionError::Internal(
+                "fixed-plan cinematic AOV tile scratch byte envelope overflow",
+            ))?;
+    let tile_scratch_charge = lease
+        .reserve(
+            "render-fixed-sample-cinematic-aov-tile-scratch-envelope",
+            tile_scratch_envelope_bytes,
+        )
+        .map_err(RenderExecutionError::Memory)?;
+    let sobol_bytes = sampler_direction_bytes(settings.sampler);
+    let sobol_charge = (sobol_bytes != 0)
+        .then(|| {
+            lease.reserve(
+                "render-fixed-sample-cinematic-aov-sobol-directions",
+                sobol_bytes,
+            )
+        })
+        .transpose()
+        .map_err(RenderExecutionError::Memory)?;
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
+    let staging = Mutex::new(staging);
+    let failures = Mutex::new(None);
+    let compute_ns = AtomicU64::new(0);
+    let merge_ns = AtomicU64::new(0);
+    let kernel = ParallelFixedSampleCinematicAovKernel {
+        scene,
+        lighting: &lighting,
+        camera,
+        exposure,
+        cut_side,
+        settings,
+        plan: &plan,
+        config,
+        palette: &palette,
+        albedo_cache: &albedo_cache,
+        staging: &staging,
+        failures: &failures,
+        layout,
+        shutter,
+        camera_path,
+        sobol: sobol.as_ref(),
+        path_sobol: path_sobol.as_ref(),
+        compute_ns: &compute_ns,
+        merge_ns: &merge_ns,
+    };
+    let setup_ns = elapsed_ns(setup_started);
+    let traversal_started = Instant::now();
+    let (outcome, executor) = runner.run_render(cx, &kernel, execution.run_id, &lease);
+    let traversal_ns = elapsed_ns(traversal_started);
+    let failure = failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match outcome {
+        Err(RunError::Cancelled { .. }) => {
+            if let Some((_tile, failure)) = failure {
+                return Err(match failure {
+                    CinematicAovTileFailure::Aov(error) => CinematicAovExecutionError::Aov(error),
+                    CinematicAovTileFailure::Internal(detail) => {
+                        CinematicAovExecutionError::Execution(RenderExecutionError::Internal(
+                            detail,
+                        ))
+                    }
+                });
+            }
+            return Err(CinematicAovExecutionError::Execution(
+                RenderExecutionError::Tracer(TracerError::Cancelled),
+            ));
+        }
+        Err(error) => {
+            return Err(CinematicAovExecutionError::Execution(
+                RenderExecutionError::Executor(error),
+            ));
+        }
+        Ok(()) => {
+            if failure.is_some() {
+                return Err(CinematicAovExecutionError::Execution(
+                    RenderExecutionError::Internal(
+                        "fixed-plan cinematic AOV tile failure disagreed with executor outcome",
+                    ),
+                ));
+            }
+        }
+    }
+    cx.checkpoint().map_err(RenderExecutionError::from)?;
+    drop(kernel);
+    let staged = staging.into_inner().map_err(|_| {
+        CinematicAovExecutionError::Execution(RenderExecutionError::Internal(
+            "successful fixed-plan cinematic AOV staging mutex was poisoned",
+        ))
+    })?;
+    let publication_started = Instant::now();
+    let beauty = FixedSampleFilm {
+        width: settings.width,
+        height: settings.height,
+        xyz: staged.xyz,
+        plan,
+        sampler: settings.sampler,
+        time_mode: requested_mode,
+    };
+    let film = staged.aov.publish_fixed(
+        beauty,
+        render_binding(
+            *settings,
+            shutter,
+            exposure.shot_id(),
+            cut_side,
+            palette,
+            continuity_fingerprint,
+        ),
+    )?;
+    let publication_ns = elapsed_ns(publication_started);
+    let tile_compute_ns = compute_ns.load(Ordering::Relaxed);
+    let tile_merge_ns = merge_ns.load(Ordering::Relaxed);
+    let active_workers = executor.tiles_by_worker.len();
+    let worker_capacity_ns = traversal_ns.saturating_mul(active_workers as u64);
+    let idle_worker_ns =
+        worker_capacity_ns.saturating_sub(tile_compute_ns.saturating_add(tile_merge_ns));
+    drop(sobol);
+    drop(sobol_charge);
+    drop(tile_scratch_charge);
+    drop(staging_charge);
+    drop(retained_plan_charge);
+    let memory = lease.receipt();
+    Ok(FixedSampleCinematicAovExecutionOutput {
+        film,
+        report: RenderExecutionReport {
+            layout,
+            requested_workers: execution.workers,
+            workers: active_workers,
+            attempt_index: 1,
+            retained_film_bytes: plan_bytes,
             staging_film_bytes,
             tile_scratch_envelope_bytes,
             sampler_state_bytes: sobol_bytes,
@@ -4992,11 +6104,7 @@ fn render_cinematic_adaptive_with_aovs_execution_impl<R: RenderPoolRunner>(
             tile_scratch_envelope_bytes,
         )
         .map_err(RenderExecutionError::Memory)?;
-    let sobol_bytes = if settings.sampler == Sampler::OwenSobol {
-        3_u64 * size_of::<[u32; 32]>() as u64
-    } else {
-        0
-    };
+    let sobol_bytes = sampler_direction_bytes(settings.sampler);
     let sobol_charge = (sobol_bytes != 0)
         .then(|| {
             lease.reserve(
@@ -5006,8 +6114,8 @@ fn render_cinematic_adaptive_with_aovs_execution_impl<R: RenderPoolRunner>(
         })
         .transpose()
         .map_err(RenderExecutionError::Memory)?;
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let staging = Mutex::new(staging);
     let failures = Mutex::new(None);
     let compute_ns = AtomicU64::new(0);
@@ -5029,6 +6137,7 @@ fn render_cinematic_adaptive_with_aovs_execution_impl<R: RenderPoolRunner>(
         shutter,
         camera_path,
         sobol: sobol.as_ref(),
+        path_sobol: path_sobol.as_ref(),
         compute_ns: &compute_ns,
         merge_ns: &merge_ns,
     };
@@ -5194,17 +6303,13 @@ fn render_adaptive_parallel_impl<R: RenderPoolRunner>(
             tile_scratch_envelope_bytes,
         )
         .map_err(RenderExecutionError::Memory)?;
-    let sampler_state_bytes = if settings.sampler == Sampler::OwenSobol {
-        3_u64 * size_of::<[u32; 32]>() as u64
-    } else {
-        0
-    };
+    let sampler_state_bytes = sampler_direction_bytes(settings.sampler);
     let sampler_charge = (sampler_state_bytes != 0)
         .then(|| lease.reserve("render-adaptive-sobol-directions", sampler_state_bytes))
         .transpose()
         .map_err(RenderExecutionError::Memory)?;
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let state = Mutex::new(state);
     let failures = Mutex::new(None);
     let compute_ns = AtomicU64::new(0);
@@ -5220,6 +6325,7 @@ fn render_adaptive_parallel_impl<R: RenderPoolRunner>(
         shutter,
         camera_path,
         sobol: sobol.as_ref(),
+        path_sobol: path_sobol.as_ref(),
         compute_ns: &compute_ns,
         merge_ns: &merge_ns,
     };
@@ -5461,17 +6567,20 @@ impl<'assets> PendingRender<'assets> {
             }
         }
 
-        let needs_sobol = settings.spp != 0 && settings.sampler == Sampler::OwenSobol;
-        let sampler_state_bytes = if needs_sobol {
-            3_u64 * size_of::<[u32; 32]>() as u64
-        } else {
+        let needs_sobol = settings.spp != 0 && sampler_uses_pixel_sobol(settings.sampler);
+        let sampler_state_bytes = if settings.spp == 0 {
             0
+        } else {
+            sampler_direction_bytes(settings.sampler)
         };
         let sampler_charge = (sampler_state_bytes != 0)
             .then(|| lease.reserve("render-pending-sobol-directions", sampler_state_bytes))
             .transpose()
             .map_err(RenderExecutionError::Memory)?;
         let sobol = needs_sobol.then(|| Sobol::scrambled(3, settings.seed));
+        let path_sobol = (settings.spp != 0)
+            .then(|| path_sobol(settings.sampler))
+            .flatten();
         Ok(Self {
             scene,
             lighting,
@@ -5485,6 +6594,7 @@ impl<'assets> PendingRender<'assets> {
             layout,
             state: Mutex::new(PendingRenderState { xyz, next_row }),
             sobol,
+            path_sobol,
             lease,
             film_charge: Some(film_charge),
             progress_charge: Some(progress_charge),
@@ -5670,6 +6780,7 @@ impl<'assets> PendingRender<'assets> {
             shutter: self.shutter,
             camera_path: self.camera_path,
             sobol: self.sobol.as_ref(),
+            path_sobol: self.path_sobol.as_ref(),
             row_quota: Some(rows_per_incomplete_tile),
             compute_ns: &compute_ns,
             merge_ns: &merge_ns,
@@ -5783,6 +6894,7 @@ impl<'assets> PendingRender<'assets> {
             shutter: self.shutter,
             camera_path: self.camera_path,
             sobol: self.sobol.as_ref(),
+            path_sobol: self.path_sobol.as_ref(),
             row_quota: None,
             compute_ns: &compute_ns,
             merge_ns: &merge_ns,
@@ -5944,6 +7056,7 @@ impl<'assets> PendingRender<'assets> {
         drop(next_row);
         drop(self.progress_charge.take());
         drop(self.sobol);
+        drop(self.path_sobol);
         drop(self.sampler_charge.take());
         // Publication transfers the film allocation to the returned value, so
         // it leaves the operation lease even though `xyz` remains live.
@@ -6089,10 +7202,10 @@ impl<'assets> PendingAdaptiveRender<'assets> {
         })?;
         next_row.resize(tile_count, 0);
 
-        let sampler_state_bytes = if settings.sampler == Sampler::OwenSobol {
-            3_u64 * size_of::<[u32; 32]>() as u64
-        } else {
+        let sampler_state_bytes = if settings.spp == 0 {
             0
+        } else {
+            sampler_direction_bytes(settings.sampler)
         };
         let sampler_charge = (sampler_state_bytes != 0)
             .then(|| {
@@ -6103,8 +7216,12 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             })
             .transpose()
             .map_err(RenderExecutionError::Memory)?;
-        let sobol =
-            (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+        let sobol = (settings.spp != 0)
+            .then(|| pixel_sobol(settings.sampler, settings.seed))
+            .flatten();
+        let path_sobol = (settings.spp != 0)
+            .then(|| path_sobol(settings.sampler))
+            .flatten();
         Ok(Self {
             scene,
             lighting,
@@ -6119,6 +7236,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             layout,
             state: Mutex::new(PendingAdaptiveRenderState { film, next_row }),
             sobol,
+            path_sobol,
             lease,
             state_charge: Some(state_charge),
             progress_charge: Some(progress_charge),
@@ -6303,6 +7421,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             shutter: self.shutter,
             camera_path: self.camera_path,
             sobol: self.sobol.as_ref(),
+            path_sobol: self.path_sobol.as_ref(),
             row_quota: Some(rows_per_incomplete_tile),
             compute_ns: &compute_ns,
             merge_ns: &merge_ns,
@@ -6417,6 +7536,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
             shutter: self.shutter,
             camera_path: self.camera_path,
             sobol: self.sobol.as_ref(),
+            path_sobol: self.path_sobol.as_ref(),
             row_quota: None,
             compute_ns: &compute_ns,
             merge_ns: &merge_ns,
@@ -6578,6 +7698,7 @@ impl<'assets> PendingAdaptiveRender<'assets> {
         drop(next_row);
         drop(self.progress_charge.take());
         drop(self.sobol);
+        drop(self.path_sobol);
         drop(self.sampler_charge.take());
         // Publication transfers all adaptive AOV allocations to the returned
         // film, so those bytes leave the operation lease while remaining live.
@@ -6741,6 +7862,7 @@ fn render_range_with_execution_impl<R: RenderPoolRunner>(
         cx,
         settings,
         Some(film),
+        None,
         from,
         to,
         shutter,
@@ -6828,6 +7950,29 @@ pub fn render_cinematic_with_execution(
     )
 }
 
+/// Render a fresh cinematic production film using fixed per-pixel counts from
+/// a discarded independent pilot.
+///
+/// `plan` is consumed so the returned film retains the exact count map and
+/// seed provenance used to normalize every pixel. Production settings must
+/// use the plan's declared seed and maximum sample ceiling.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_with_independent_pilot_execution(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    plan: IndependentPilotSamplePlan,
+    shutter: ShutterInterval,
+    execution: &RenderExecutionConfig,
+) -> Result<FixedSampleRenderOutput, RenderExecutionError> {
+    let pool = build_render_pool(execution, cx.mode(), settings.seed);
+    render_cinematic_with_independent_pilot_execution_impl(
+        scene, camera, cut_side, cx, settings, plan, shutter, execution, &pool,
+    )
+}
+
 /// Render a fresh cinematic-camera film with exactly aligned AOVs under an
 /// explicit deterministic tile policy. The existing serial AOV API remains the
 /// progressive oracle; this entry point owns one private staging film and
@@ -6847,6 +7992,26 @@ pub fn render_cinematic_with_aovs_execution(
     let pool = build_render_pool(execution, cx.mode(), settings.seed);
     render_cinematic_with_aovs_execution_impl(
         scene, camera, cut_side, cx, settings, shutter, config, execution, &pool,
+    )
+}
+
+/// Render fixed-plan production beauty and exactly aligned cinematic AOVs
+/// under an explicit deterministic tile policy.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_with_independent_pilot_aovs_execution(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    plan: IndependentPilotSamplePlan,
+    shutter: ShutterInterval,
+    config: CinematicAovConfig,
+    execution: &RenderExecutionConfig,
+) -> Result<FixedSampleCinematicAovExecutionOutput, CinematicAovExecutionError> {
+    let pool = build_render_pool(execution, cx.mode(), settings.seed);
+    render_cinematic_with_independent_pilot_aovs_execution_impl(
+        scene, camera, cut_side, cx, settings, plan, shutter, config, execution, &pool,
     )
 }
 
@@ -6965,6 +8130,7 @@ fn render_fresh_with_execution_impl<R: RenderPoolRunner>(
         cx,
         settings,
         None,
+        None,
         0,
         settings.spp,
         shutter,
@@ -6989,6 +8155,51 @@ fn render_fresh_with_execution_impl<R: RenderPoolRunner>(
     let mut report = result.report;
     report.publication_ns = elapsed_ns(publication_started);
     Ok(RenderExecutionOutput { film, report })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_cinematic_with_independent_pilot_execution_impl<R: RenderPoolRunner>(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    plan: IndependentPilotSamplePlan,
+    shutter: ShutterInterval,
+    execution: &RenderExecutionConfig,
+    runner: &R,
+) -> Result<FixedSampleRenderOutput, RenderExecutionError> {
+    plan.validate_settings(settings)?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)?;
+    let result = render_range_parallel_impl(
+        scene,
+        cx,
+        settings,
+        None,
+        Some(&plan),
+        0,
+        settings.spp,
+        Some(shutter),
+        CameraPath::Cinematic { camera, exposure },
+        execution,
+        runner,
+    )?;
+    let publication_started = Instant::now();
+    let film = FixedSampleFilm {
+        width: settings.width,
+        height: settings.height,
+        xyz: result.xyz.ok_or(RenderExecutionError::Internal(
+            "fixed-plan render omitted staging film",
+        ))?,
+        plan,
+        sampler: settings.sampler,
+        time_mode: result.requested_mode,
+    };
+    let mut report = result.report;
+    report.publication_ns = elapsed_ns(publication_started);
+    Ok(FixedSampleRenderOutput { film, report })
 }
 
 /// Render the full image (fresh film, samples `[0, spp)`).
@@ -7110,8 +8321,8 @@ pub fn render_cinematic_adaptive_with_aovs(
         (settings.seed & 0xffff_ffff) as u32,
         (settings.seed >> 32) as u32,
     ];
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let kn = 1.0 / y_integral();
     let capture_primary = config.captures_primary();
 
@@ -7132,6 +8343,7 @@ pub fn render_cinematic_adaptive_with_aovs(
                     settings,
                     kn,
                     sobol.as_ref(),
+                    path_sobol.as_ref(),
                     key,
                     pixel,
                     sample,
@@ -7272,8 +8484,8 @@ pub fn render_cinematic_range_with_aovs(
         (settings.seed & 0xffff_ffff) as u32,
         (settings.seed >> 32) as u32,
     ];
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let kn = 1.0 / y_integral();
     let capture_primary = film.config().captures_primary();
     for py in 0..settings.height {
@@ -7289,6 +8501,7 @@ pub fn render_cinematic_range_with_aovs(
                     settings,
                     kn,
                     sobol.as_ref(),
+                    path_sobol.as_ref(),
                     key,
                     pixel,
                     sample,
@@ -7847,8 +9060,8 @@ pub fn trace_cinematic_pixel_sample(
         (settings.seed & 0xffff_ffff) as u32,
         (settings.seed >> 32) as u32,
     ];
-    let sobol =
-        (settings.sampler == Sampler::OwenSobol).then(|| Sobol::scrambled(3, settings.seed));
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let traced = trace_pixel_sample_with_primary(
         scene,
         &lighting,
@@ -7856,6 +9069,7 @@ pub fn trace_cinematic_pixel_sample(
         settings,
         1.0 / y_integral(),
         sobol.as_ref(),
+        path_sobol.as_ref(),
         key,
         pixel,
         sample,
@@ -7883,6 +9097,7 @@ fn trace_pixel_sample(
     settings: &Settings,
     kn: f64,
     sobol: Option<&Sobol>,
+    path_sobol: Option<&Sobol>,
     key: [u32; 2],
     pixel: u32,
     sample: u32,
@@ -7896,6 +9111,7 @@ fn trace_pixel_sample(
         settings,
         kn,
         sobol,
+        path_sobol,
         key,
         pixel,
         sample,
@@ -7914,6 +9130,7 @@ fn trace_pixel_sample_with_primary(
     settings: &Settings,
     kn: f64,
     sobol: Option<&Sobol>,
+    path_sobol: Option<&Sobol>,
     key: [u32; 2],
     pixel: u32,
     sample: u32,
@@ -7967,6 +9184,7 @@ fn trace_pixel_sample_with_primary(
         ray_time.as_ref(),
         camera_path,
         capture_primary,
+        path_sobol,
         None,
     )
 }
@@ -7984,7 +9202,7 @@ fn pixel_dims(
             let a = philox4x32_10([pixel, sample, 0xdead_0001, 0], key);
             Ok((u32_unit(a[0]), u32_unit(a[1]), u32_unit(a[2])))
         }
-        Sampler::OwenSobol => {
+        Sampler::OwenSobol | Sampler::OwenSobolFullPath => {
             let sobol = sobol.ok_or(TracerError::InvalidInput)?;
             // One Sobol' point per sample index; Cranley–Patterson-free
             // decorrelation across pixels via a per-pixel Philox shift
@@ -9227,6 +10445,7 @@ fn trace_path(
     ray_time: Option<&PathTime>,
     camera_path: CameraPath<'_>,
     capture_primary: bool,
+    path_sobol: Option<&Sobol>,
     resume: Option<SpectralPathState>,
 ) -> Result<PathTraceSample, TracerError> {
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
@@ -9235,6 +10454,9 @@ fn trace_path(
         sample,
         dim: 1,
         key,
+        qmc_depth: 0,
+        qmc_values: [0.0; PATH_QMC_DIMENSIONS],
+        qmc_valid: false,
     };
     // Hero wavelengths: one stratified draw covers the packet.
     let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
@@ -9455,7 +10677,7 @@ fn trace_path(
                 Material::Dielectric { surface, .. } => {
                     if let Some(alpha) = surface.roughness_alpha() {
                         let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
-                        let (u1, u2) = rng.next2();
+                        let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
                         if let Some(direct) = lighting
                             .sample(hit.point, u1, u2)
                             .and_then(|sample| prepare_direct_light(hit.point, sample))
@@ -9578,7 +10800,7 @@ fn trace_path(
                     // Preserve the opaque tracer-v1 arithmetic and draw order
                     // expression-for-expression so the frozen Cornell path is
                     // unaffected by enabling dielectric support.
-                    let (u1, u2) = rng.next2();
+                    let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
                     if let Some(direct) = lighting
                         .sample(hit.point, u1, u2)
                         .and_then(|sample| prepare_direct_light(hit.point, sample))
@@ -9803,7 +11025,7 @@ fn trace_path(
         }
 
         // BSDF sampling for the next bounce.
-        let (u1, u2) = rng.next2();
+        let (u1, u2) = rng.path_pair(path_sobol, depth, 1);
         let wo = ray.dir.scale(-1.0);
         match prim.material {
             Material::Dielectric { glass, surface } => {
@@ -9812,7 +11034,7 @@ fn trace_path(
                 let event_sample = if surface.is_delta() {
                     u1
                 } else {
-                    rng.next2().0
+                    rng.path_pair(path_sobol, depth, 2).0
                 };
                 if should_split_dispersive_boundary(active_lane, &boundary, &lambdas)? {
                     let continuations = sample_dispersive_dielectric_lanes(
@@ -9880,6 +11102,7 @@ fn trace_path(
                             ray_time,
                             camera_path,
                             capture_primary,
+                            path_sobol,
                             Some(SpectralPathState {
                                 ray: Ray {
                                     origin: dielectric_spawn_origin(
@@ -10806,8 +12029,11 @@ fn instance_object_id(shape: &Shape) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aov::{CinematicAovLimits, CinematicAovProfile, CinematicAovProvenance};
+    use crate::camera::Aperture;
     use crate::dielectric::{BeerLambertAbsorption, CauchyIor};
     use crate::instances::RigidTransform;
+    use crate::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution};
     use crate::spectral::lift_rgb;
     use fs_blake3::hash_domain;
     use fs_exec::{CancelGate, StreamKey};
@@ -10838,6 +12064,313 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{context}: actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
         );
+    }
+
+    fn test_path_rng(pixel: u32, sample: u32) -> PathRng {
+        PathRng {
+            pixel,
+            sample,
+            dim: 1,
+            key: [0x0123_4567, 0x89ab_cdef],
+            qmc_depth: 0,
+            qmc_values: [0.0; PATH_QMC_DIMENSIONS],
+            qmc_valid: false,
+        }
+    }
+
+    #[test]
+    fn g0_full_path_qmc_replays_logical_slots_and_decorrelates_bounces() {
+        let sobol = Sobol::new(PATH_QMC_DIMENSIONS);
+        let mut first = test_path_rng(19, 7);
+        let first_pairs = [
+            first.path_pair(Some(&sobol), 3, 0),
+            first.path_pair(Some(&sobol), 3, 1),
+            first.path_pair(Some(&sobol), 3, 2),
+        ];
+        assert_eq!(
+            first.dim, 1,
+            "QMC path blocks must not consume Philox draws"
+        );
+
+        let mut replay = test_path_rng(19, 7);
+        let replay_pairs = [
+            replay.path_pair(Some(&sobol), 3, 0),
+            replay.path_pair(Some(&sobol), 3, 1),
+            replay.path_pair(Some(&sobol), 3, 2),
+        ];
+        assert_eq!(first_pairs, replay_pairs);
+
+        let mut next_bounce = test_path_rng(19, 7);
+        let changed = next_bounce.path_pair(Some(&sobol), 4, 0);
+        assert_ne!(first_pairs[0], changed);
+
+        let mut legacy = test_path_rng(19, 7);
+        let expected = legacy.next2();
+        let mut through_compatibility_path = test_path_rng(19, 7);
+        assert_eq!(
+            through_compatibility_path.path_pair(None, 3, 0),
+            expected,
+            "the established Owen-pixel and IID path streams must remain bit-identical"
+        );
+        assert_eq!(through_compatibility_path.dim, 2);
+    }
+
+    #[test]
+    fn g0_full_path_qmc_preserves_power_of_two_one_dimensional_strata() {
+        let sobol = Sobol::new(PATH_QMC_DIMENSIONS);
+        const SAMPLE_COUNT: usize = 16;
+        let mut occupancy = [[0_u8; SAMPLE_COUNT]; PATH_QMC_DIMENSIONS];
+        for sample in 0..SAMPLE_COUNT as u32 {
+            let mut rng = test_path_rng(29, sample);
+            for slot in 0..PATH_QMC_PAIR_SLOTS {
+                let pair = rng.path_pair(Some(&sobol), 5, slot);
+                for (component, value) in [pair.0, pair.1].into_iter().enumerate() {
+                    let stratum = (value * SAMPLE_COUNT as f64) as usize;
+                    assert!(stratum < SAMPLE_COUNT);
+                    occupancy[2 * slot + component][stratum] += 1;
+                }
+            }
+        }
+        for dimension in occupancy {
+            assert_eq!(dimension, [1; SAMPLE_COUNT]);
+        }
+    }
+
+    fn two_pixel_uniform_pilot(seed: u64) -> AdaptiveFilm {
+        AdaptiveFilm {
+            width: 2,
+            height: 1,
+            xyz: vec![[3.0, 3.0, 3.0], [0.0; 3]],
+            mean_xyz_aov: vec![[1.0; 3], [0.0; 3]],
+            // Three pilot samples make the first channel's sample variance
+            // exactly 16 and every variance of the second pixel exactly zero.
+            m2_xyz: vec![[32.0, 0.0, 0.0], [0.0; 3]],
+            sample_counts: vec![3, 3],
+            decisions: vec![
+                AdaptiveDecision::MaximumSamples,
+                AdaptiveDecision::MaximumSamples,
+            ],
+            maximum_samples: 3,
+            policy: AdaptiveSamplingConfig::try_new(3, 1, 0.0, 0.0, 0.0).unwrap(),
+            sampler: Sampler::OwenSobolFullPath,
+            stream_seed: seed,
+            semantics_version: ADAPTIVE_SAMPLING_SEMANTICS_VERSION,
+            time_mode: FilmTimeMode::Static,
+        }
+    }
+
+    #[test]
+    fn g0_independent_pilot_allocation_is_fixed_clamped_and_seed_separated() {
+        let config = IndependentPilotAllocationConfig::try_new(2, 8, 1.0, 0.0, 0.0, 1.0).unwrap();
+        let pilot = two_pixel_uniform_pilot(41);
+        assert_eq!(
+            IndependentPilotSamplePlan::try_from_pilot(&pilot, 41, config),
+            Err(IndependentPilotAllocationError::NonIndependentSeed)
+        );
+
+        let plan = IndependentPilotSamplePlan::try_from_pilot(&pilot, 73, config).unwrap();
+        assert_eq!(plan.sample_counts(), &[8, 2]);
+        assert_eq!(plan.total_samples(), 10);
+        assert_eq!(plan.pilot_seed(), 41);
+        assert_eq!(plan.production_seed(), 73);
+        assert_eq!(plan.pilot_sampler(), Sampler::OwenSobolFullPath);
+        assert_eq!(
+            plan.semantics_version(),
+            INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION
+        );
+
+        let matching = Settings {
+            width: 2,
+            height: 1,
+            spp: 8,
+            max_depth: 4,
+            sampler: Sampler::OwenSobolFullPath,
+            strategy: DirectStrategy::Mis,
+            seed: 73,
+        };
+        assert_eq!(plan.validate_settings(&matching), Ok(()));
+        assert_eq!(
+            plan.validate_settings(&Settings {
+                seed: 74,
+                ..matching
+            }),
+            Err(IndependentPilotAllocationError::ProductionSettingsMismatch)
+        );
+    }
+
+    #[test]
+    fn g0_independent_pilot_allocation_refuses_invalid_policy_and_statistics() {
+        assert_eq!(
+            IndependentPilotAllocationConfig::try_new(0, 8, 0.0, 0.1, 0.01, 1.0),
+            Err(IndependentPilotAllocationError::ZeroMinimumSamples)
+        );
+        assert_eq!(
+            IndependentPilotAllocationConfig::try_new(4, 3, 0.0, 0.1, 0.01, 1.0),
+            Err(IndependentPilotAllocationError::MaximumBelowMinimum)
+        );
+        assert_eq!(
+            IndependentPilotAllocationConfig::try_new(2, 8, 0.0, 0.1, 0.01, 0.0),
+            Err(IndependentPilotAllocationError::InvalidParameter {
+                field: "safety_factor"
+            })
+        );
+
+        let config = IndependentPilotAllocationConfig::try_new(2, 8, 1.0, 0.0, 0.0, 1.0).unwrap();
+        let mut invalid = two_pixel_uniform_pilot(41);
+        invalid.m2_xyz[0][0] = f64::NAN;
+        assert_eq!(
+            IndependentPilotSamplePlan::try_from_pilot(&invalid, 73, config),
+            Err(IndependentPilotAllocationError::InvalidPilotStatistics)
+        );
+    }
+
+    #[test]
+    fn g0_fixed_plan_production_equals_the_corresponding_uniform_prefixes() {
+        let white = lift_rgb([1.0, 1.0, 1.0]);
+        let scene = Scene {
+            primitives: vec![Primitive {
+                shape: Shape::Mesh(horizontal_quad(0.0, 1.0)),
+                material: Material::Lambertian { reflectance: white },
+                emission: Some((white, 2.0)),
+            }],
+            lights: vec![RectLight {
+                corner: Point3::new(-1.0, -1.0, 0.0),
+                edge_u: Vec3::new(2.0, 0.0, 0.0),
+                edge_v: Vec3::new(0.0, 2.0, 0.0),
+                prim: 0,
+                emission: (white, 2.0),
+            }],
+            environment: None,
+            camera: Camera {
+                eye: Point3::new(0.0, 0.0, 2.0),
+                forward: Vec3::new(0.0, 0.0, -1.0),
+                up: Vec3::new(0.0, 1.0, 0.0),
+                half_tan: 0.25,
+            },
+        };
+        let physical = PhysicalCamera::try_legacy_compatible(
+            scene.camera.eye,
+            scene.camera.forward,
+            scene.camera.up,
+            scene.camera.half_tan,
+            2.0,
+            Aperture::try_circular(0.0).unwrap(),
+        )
+        .unwrap();
+        let camera = AnimatedCamera::try_static(7, 0.0, 1.0, physical).unwrap();
+        let shutter = ShutterInterval::resolve(
+            0.5,
+            0.0,
+            ShutterConvention::FrontLoaded,
+            ShutterDistribution::StratifiedCounterV1 { strata: 8 },
+            ShotTimeBounds::try_new(0.0, 1.0).unwrap(),
+        )
+        .unwrap();
+        let settings = Settings {
+            width: 2,
+            height: 1,
+            spp: 8,
+            max_depth: 1,
+            sampler: Sampler::Iid,
+            strategy: DirectStrategy::Mis,
+            seed: 73,
+        };
+        let plan = IndependentPilotSamplePlan {
+            width: 2,
+            height: 1,
+            sample_counts: vec![8, 2],
+            config: IndependentPilotAllocationConfig::try_new(2, 8, 1.0, 0.0, 0.0, 1.0).unwrap(),
+            pilot_seed: 41,
+            production_seed: 73,
+            pilot_sampler: Sampler::Iid,
+            semantics_version: INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION,
+        };
+        let execution =
+            RenderExecutionConfig::try_new(1, 1, 2, 16 * 1024 * 1024, RunId(9)).unwrap();
+
+        with_test_cx(|cx| {
+            let full = render_cinematic_with_execution(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+                &execution,
+            )
+            .unwrap();
+            let prefix = render_cinematic_with_execution(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &Settings { spp: 2, ..settings },
+                shutter,
+                &execution,
+            )
+            .unwrap();
+            let aov = render_cinematic_with_independent_pilot_aovs_execution(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                plan.clone(),
+                shutter,
+                CinematicAovConfig::new(
+                    CinematicAovProfile::FinalDiagnostic,
+                    CinematicAovProvenance::try_new(
+                        0,
+                        0.5,
+                        0.0,
+                        1.0,
+                        hash_domain("org.frankensim.test.pilot.trajectory", b"trajectory"),
+                        hash_domain("org.frankensim.test.pilot.scene", b"scene"),
+                        hash_domain("org.frankensim.test.pilot.composition", b"composition"),
+                    )
+                    .unwrap(),
+                    CinematicAovLimits::default(),
+                ),
+                &execution,
+            )
+            .unwrap();
+            let planned = render_cinematic_with_independent_pilot_execution(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                plan,
+                shutter,
+                &execution,
+            )
+            .unwrap();
+            assert_eq!(planned.film.xyz_sums()[0], full.film.xyz[0]);
+            assert_eq!(planned.film.xyz_sums()[1], prefix.film.xyz[1]);
+            assert_eq!(planned.film.sample_plan().sample_counts(), &[8, 2]);
+            assert_eq!(aov.film.beauty().xyz_sums(), planned.film.xyz_sums());
+            assert_eq!(aov.film.beauty().sample_plan().sample_counts(), &[8, 2]);
+            assert_eq!(aov.film.denoise_guides().unwrap().width(), 2);
+            let decoded = fs_img::read_exr(&aov.film.to_exr().unwrap()).unwrap();
+            let samples = decoded
+                .channels
+                .iter()
+                .find(|channel| channel.name == "samples")
+                .unwrap();
+            assert_eq!(samples.data, [8.0, 2.0]);
+            let sample_mode = decoded
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == "frankensim.render.sampleMode")
+                .unwrap();
+            assert_eq!(sample_mode.value, b"independent-pilot-fixed-v1");
+            let pilot_plan = decoded
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name == "frankensim.render.pilotPlan")
+                .unwrap();
+            assert!(pilot_plan.value.starts_with(b"version=1;pilotSeed=41;"));
+        });
     }
 
     #[test]
@@ -11529,6 +13062,7 @@ mod tests {
                 None,
                 CameraPath::Legacy,
                 false,
+                None,
                 Some(SpectralPathState {
                     ray: Ray {
                         origin,
@@ -11544,6 +13078,9 @@ mod tests {
                         sample: 0,
                         dim: 1,
                         key: [0, 0],
+                        qmc_depth: 0,
+                        qmc_values: [0.0; PATH_QMC_DIMENSIONS],
+                        qmc_valid: false,
                     },
                     next_depth: 0,
                     active_lane: None,
@@ -13153,6 +14690,27 @@ fn unit(v: Vec3) -> Vec3 {
 /// # Errors
 /// Propagates [`fs_img::ImgError`] on shape defects.
 pub fn film_to_exr(film: &Film) -> Result<Vec<u8>, fs_img::ImgError> {
+    let [r, g, b] = film.to_linear_srgb();
+    let ch = |name: &str, data: Vec<f32>| fs_img::Channel {
+        name: name.to_string(),
+        ty: fs_img::PixelType::Float,
+        data,
+    };
+    fs_img::write_exr(
+        film.width,
+        film.height,
+        &[ch("R", r), ch("G", g), ch("B", b)],
+    )
+}
+
+/// Encode a fixed-plan production film as linear-sRGB float EXR.
+///
+/// Each pixel is divided by its own preselected production count before
+/// encoding. Pilot samples remain absent from both the image and divisor.
+///
+/// # Errors
+/// Propagates [`fs_img::ImgError`] on shape defects.
+pub fn fixed_sample_film_to_exr(film: &FixedSampleFilm) -> Result<Vec<u8>, fs_img::ImgError> {
     let [r, g, b] = film.to_linear_srgb();
     let ch = |name: &str, data: Vec<f32>| fs_img::Channel {
         name: name.to_string(),

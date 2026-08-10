@@ -1769,6 +1769,28 @@ fn sobol_vs_iid_equal_spp_logged() {
     );
 }
 
+/// Controlled equal-SPP comparison between the established pixel-only Owen
+/// stream and the independently scrambled per-bounce path blocks. This is a
+/// measured fixture result, not a universal variance ordering claim.
+#[test]
+fn full_path_owen_vs_pixel_owen_equal_spp_logged() {
+    let scene = cornell();
+    let v_pixel = mean_pixel_variance(&scene, DirectStrategy::Mis, Sampler::OwenSobol, 16, 12);
+    let v_full_path = mean_pixel_variance(
+        &scene,
+        DirectStrategy::Mis,
+        Sampler::OwenSobolFullPath,
+        16,
+        12,
+    );
+    assert!(v_pixel.is_finite() && v_pixel > 0.0);
+    assert!(v_full_path.is_finite() && v_full_path > 0.0);
+    println!(
+        "{{\"suite\":\"fs-render/tracer\",\"case\":\"full-path-owen-vs-pixel-owen-16spp\",\"verdict\":\"info\",\"detail\":\"var pixel {v_pixel:.3e} full_path {v_full_path:.3e} ratio {:.3}\"}}",
+        v_full_path / v_pixel
+    );
+}
+
 /// The bead's 64-spp Sobol claim, release lane:
 /// `cargo test -p fs-render --release --features tracer --test tracer_battery -- --ignored --nocapture`
 #[test]
