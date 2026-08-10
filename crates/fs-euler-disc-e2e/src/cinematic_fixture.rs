@@ -987,11 +987,13 @@ impl Default for CinematicMechanicsConfig {
             },
             normal_dissipation_s_per_m: 0.02,
             normal_limits: ApplicabilityLimits {
-                // The 1 mm edge fillet and static preload produce an admitted
-                // Hertz semi-axis about one quarter of the local radius. Keep
-                // that approximation limit explicit and below one third;
-                // larger patches require a finite-geometry contact backend.
-                max_patch_to_radius: 0.30,
+                // The reported 1.6 mm edge fillet and static preload produce an admitted
+                // Hertz semi-axis about one quarter of the local radius. At
+                // a/R=0.35, the exact circular-fillet sag differs from its
+                // quadratic tangent by 3.266% at the patch edge. Keep that
+                // geometric approximation budget explicit; larger patches
+                // require a finite-geometry contact backend.
+                max_patch_to_radius: 0.35,
                 max_strain: 0.02,
                 max_patch_to_depth: 0.20,
                 max_patch_to_layer: 0.20,
@@ -3747,6 +3749,16 @@ pub fn run_cinematic_fixture(
             preroll_control.termination
         )));
     }
+    let preroll_max_mean_force_n = preroll_control
+        .intervals
+        .iter()
+        .map(|interval| interval.mean_normal_force_n)
+        .fold(0.0_f64, f64::max);
+    progress(&format!(
+        "stage=mechanics preroll_complete accepted_steps={} control_intervals={} max_control_mean_normal_force_n={preroll_max_mean_force_n:.9e}",
+        preroll_control.accepted_mechanics_steps,
+        preroll_control.intervals.len(),
+    ));
     // Advance in one-second chunks. This retains exactly the same mechanics
     // steps and ownership sequence while publishing useful progress during a
     // multi-million-step production solve.
@@ -3775,9 +3787,28 @@ pub fn run_cinematic_fixture(
                 crate::production_coupling::ProductionEventTrajectoryTermination::StepLimitReached { .. }
             )
         {
+            let maximum_mean_force_n = chunk
+                .intervals
+                .iter()
+                .map(|interval| interval.mean_normal_force_n)
+                .fold(0.0_f64, f64::max);
+            let endpoint = chunk.intervals.last();
             return Err(CinematicFixtureError::Pipeline(format!(
-                "production picture chunk stopped after {}/{} mechanics steps: {:?}",
-                chunk.accepted_mechanics_steps, chunk_steps, chunk.termination
+                concat!(
+                    "production picture chunk stopped after {}/{} mechanics steps: {:?}; ",
+                    "accepted_control_intervals={} max_control_mean_normal_force_n={:.9e} ",
+                    "last_control_mean_normal_force_n={:.9e} last_base_displacement_m={:.9e} ",
+                    "last_base_velocity_m_per_s={:.9e} last_com_world_m={:?}"
+                ),
+                chunk.accepted_mechanics_steps,
+                chunk_steps,
+                chunk.termination,
+                chunk.intervals.len(),
+                maximum_mean_force_n,
+                endpoint.map_or(0.0, |interval| interval.mean_normal_force_n),
+                endpoint.map_or(0.0, |interval| interval.base_displacement_end_m),
+                endpoint.map_or(0.0, |interval| interval.base_velocity_end_m_per_s),
+                endpoint.map(|interval| interval.state_after.pose().position_world()),
             )));
         }
         picture_control = Some(match picture_control {

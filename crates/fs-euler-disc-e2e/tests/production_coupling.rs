@@ -589,6 +589,7 @@ fn production_request_template() -> (
         patch: patch_input(),
         normal,
         surface_excitation: None,
+        surface_geometry: None,
         tangential: TangentialContactRequest {
             request_id: "synthetic/tangent-step".into(),
             expected_state_version: 0,

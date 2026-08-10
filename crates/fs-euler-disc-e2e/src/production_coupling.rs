@@ -2244,7 +2244,7 @@ impl ProductionCouplingModel {
             });
         }
         let rigid_step = RigidBodyIntegrator::new(self.gravity)
-            .step(
+            .step_kick_drift(
                 checkpoint.disc_state,
                 self.disc_mass_properties,
                 Wrench {
