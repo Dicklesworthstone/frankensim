@@ -5,7 +5,9 @@
 //! observer. A media player instead expects unitless digital-full-scale
 //! samples. This module keeps that conversion explicit and replayable. It
 //! never changes, normalizes, or relabels the source pressure signal; it emits
-//! a separate listening master whose gain is presentation metadata.
+//! a separate listening master whose boundary window and gain are presentation
+//! metadata. The window prevents a finite media cut through an already-ringing
+//! pressure field from manufacturing a playback click at either endpoint.
 
 use core::fmt;
 
@@ -20,7 +22,7 @@ use crate::audio_artifact::{
 use crate::structural_acoustics::PhysicalPressureSignal;
 
 const PHYSICAL_LISTENING_MASTER_IDENTITY_DOMAIN: &str =
-    "org.frankensim.euler-disc.physical-listening-master.v1";
+    "org.frankensim.euler-disc.physical-listening-master.v2";
 
 /// Explicit policy for the nonphysical pressure-to-digital presentation step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,15 +31,21 @@ pub struct PressureListeningMasterPolicy {
     pub target_true_peak_fs: f64,
     /// Largest admitted absolute pressure-to-digital gain adjustment [dB].
     pub maximum_absolute_gain_db: f64,
+    /// Raised-cosine fade from exact zero at the media cut [sample frames].
+    pub initial_fade_sample_frames: u32,
+    /// Raised-cosine fade to exact zero at the media cut [sample frames].
+    pub terminal_fade_sample_frames: u32,
 }
 
 impl PressureListeningMasterPolicy {
     /// Critique master with a conventional -1 dBFS estimated true-peak ceiling.
-    /// This is one scalar presentation gain; it cannot alter the physical
-    /// pressure waveform, spectral balance, or dynamics.
+    /// The short boundary windows exist only on the listening derivative; the
+    /// separately identified physical pressure signals remain unchanged.
     pub const CRITIQUE: Self = Self {
         target_true_peak_fs: 0.891_250_938_133_745_6,
         maximum_absolute_gain_db: 180.0,
+        initial_fade_sample_frames: 960,
+        terminal_fade_sample_frames: 240,
     };
 }
 
@@ -94,6 +102,7 @@ impl PhysicalPressureListeningMaster {
         {
             return Err(PhysicalListeningMasterError::InvalidPolicy);
         }
+        validate_boundary_fades(policy, left.pressure_pa.len())?;
 
         let source_peak_abs_pressure_pa = left.peak_abs_pressure_pa.max(right.peak_abs_pressure_pa);
         if !(source_peak_abs_pressure_pa > 0.0 && source_peak_abs_pressure_pa.is_finite()) {
@@ -104,7 +113,7 @@ impl PhysicalPressureListeningMaster {
         // account for intersample overshoot using the same declared estimator
         // published by the WAV artifact layer.
         let mut digital_gain_fs_per_pa = policy.target_true_peak_fs / source_peak_abs_pressure_pa;
-        let mut samples = convert_pair(left, right, digital_gain_fs_per_pa)?;
+        let mut samples = convert_pair(left, right, policy, digital_gain_fs_per_pa)?;
         let first_meters = measure_audio(&samples, budget, cx)?;
         let first_peak = first_meters
             .sample_peak_fs
@@ -121,7 +130,7 @@ impl PhysicalPressureListeningMaster {
             });
         }
 
-        samples = convert_pair(left, right, digital_gain_fs_per_pa)?;
+        samples = convert_pair(left, right, policy, digital_gain_fs_per_pa)?;
         let meters = measure_audio(&samples, budget, cx)?;
         let observed_peak = meters.sample_peak_fs.max(meters.true_peak_estimate_fs);
         let tolerance = 256.0 * f64::EPSILON * policy.target_true_peak_fs;
@@ -251,6 +260,7 @@ fn validate_pair(
 fn convert_pair(
     left: &PhysicalPressureSignal,
     right: &PhysicalPressureSignal,
+    policy: PressureListeningMasterPolicy,
     gain_fs_per_pa: f64,
 ) -> Result<Vec<StereoSample>, PhysicalListeningMasterError> {
     let mut samples = Vec::new();
@@ -270,9 +280,17 @@ fn convert_pair(
                 return Err(PhysicalListeningMasterError::NonFinitePressure { channel, frame });
             }
         }
-        let sample = StereoSample {
-            left_fs: left_pa * gain_fs_per_pa,
-            right_fs: right_pa * gain_fs_per_pa,
+        let window = boundary_window(frame, left.pressure_pa.len(), policy);
+        let sample = if window.to_bits() == 0.0_f64.to_bits() {
+            StereoSample {
+                left_fs: 0.0,
+                right_fs: 0.0,
+            }
+        } else {
+            StereoSample {
+                left_fs: left_pa * gain_fs_per_pa * window,
+                right_fs: right_pa * gain_fs_per_pa * window,
+            }
         };
         if !(sample.left_fs.is_finite() && sample.right_fs.is_finite()) {
             return Err(PhysicalListeningMasterError::GainOutsidePolicy {
@@ -283,6 +301,58 @@ fn convert_pair(
         samples.push(sample);
     }
     Ok(samples)
+}
+
+fn validate_boundary_fades(
+    policy: PressureListeningMasterPolicy,
+    sample_frames: usize,
+) -> Result<(), PhysicalListeningMasterError> {
+    let initial = usize::try_from(policy.initial_fade_sample_frames)
+        .map_err(|_| PhysicalListeningMasterError::InvalidPolicy)?;
+    let terminal = usize::try_from(policy.terminal_fade_sample_frames)
+        .map_err(|_| PhysicalListeningMasterError::InvalidPolicy)?;
+    if initial < 2
+        || terminal < 2
+        || initial > sample_frames
+        || terminal > sample_frames
+        || initial
+            .checked_add(terminal)
+            .is_none_or(|sum| sum > sample_frames)
+    {
+        return Err(PhysicalListeningMasterError::InvalidPolicy);
+    }
+    Ok(())
+}
+
+fn boundary_window(
+    frame: usize,
+    sample_frames: usize,
+    policy: PressureListeningMasterPolicy,
+) -> f64 {
+    let initial = policy.initial_fade_sample_frames as usize;
+    if frame < initial {
+        if frame == 0 {
+            return 0.0;
+        }
+        if frame + 1 == initial {
+            return 1.0;
+        }
+        let phase = core::f64::consts::PI * frame as f64 / (initial - 1) as f64;
+        return 0.5 * (1.0 - det::cos(phase));
+    }
+    let terminal = policy.terminal_fade_sample_frames as usize;
+    let terminal_start = sample_frames - terminal;
+    if frame >= terminal_start {
+        if frame == terminal_start {
+            return 1.0;
+        }
+        if frame + 1 == sample_frames {
+            return 0.0;
+        }
+        let phase = core::f64::consts::PI * (frame - terminal_start) as f64 / (terminal - 1) as f64;
+        return 0.5 * (1.0 + det::cos(phase));
+    }
+    1.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -306,6 +376,8 @@ fn listening_master_identity(
     ] {
         hasher.update(&value.to_bits().to_le_bytes());
     }
+    hasher.update(&policy.initial_fade_sample_frames.to_le_bytes());
+    hasher.update(&policy.terminal_fade_sample_frames.to_le_bytes());
     hasher.update(wav.wav_identity().as_bytes());
     hasher.update(&(samples.len() as u64).to_le_bytes());
     for sample in samples {
@@ -397,6 +469,45 @@ mod tests {
                 <= PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs + 1.0e-12
         );
         assert!(master.meters.integrated_loudness_lufs.is_some());
+    }
+
+    #[test]
+    fn g0_listening_boundary_window_removes_cut_click_without_mutating_pressure() {
+        let mut left = signal(2.0e-5, 3);
+        let mut right = signal(1.0e-5, 4);
+        left.pressure_pa[0] = 2.0e-5;
+        right.pressure_pa[0] = -1.0e-5;
+        let left_before = left.pressure_pa.clone();
+        let right_before = right.pressure_pa.clone();
+        assert_ne!(left_before[0].to_bits(), 0.0_f64.to_bits());
+        assert_ne!(right_before[0].to_bits(), 0.0_f64.to_bits());
+        let samples =
+            convert_pair(&left, &right, PressureListeningMasterPolicy::CRITIQUE, 1.0).unwrap();
+
+        assert_eq!(
+            samples.first().unwrap().left_fs.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            samples.first().unwrap().right_fs.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(samples.last().unwrap().left_fs.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            samples.last().unwrap().right_fs.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            boundary_window(
+                PressureListeningMasterPolicy::CRITIQUE.initial_fade_sample_frames as usize - 1,
+                samples.len(),
+                PressureListeningMasterPolicy::CRITIQUE,
+            )
+            .to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(left.pressure_pa, left_before);
+        assert_eq!(right.pressure_pa, right_before);
     }
 
     #[test]
