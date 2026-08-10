@@ -180,7 +180,9 @@ use fs_tribo::{
         RollingLossChannel, RollingLossLaw, RollingLossState, RollingPatchReceipt,
         RollingWorkOwnership,
     },
-    surface_excitation::{PeriodicHarmonicSurface, PeriodicSurfaceHarmonic},
+    surface_excitation::{
+        PeriodicHarmonicSurface, PeriodicSurfaceHarmonic, SelfAffinePeriodicProfileSpectrum,
+    },
 };
 
 use crate::specimen::{DiscProfileSpec, ResolvedDiscProfile, ResolvedDiscThermalGeometry};
@@ -819,6 +821,19 @@ impl Default for CinematicSupportPlateConfig {
     }
 }
 
+/// Spatial spectrum used to construct one periodic material-frame surface trace.
+///
+/// Both variants describe geometry upstream of contact. No temporal or audio
+/// frequency is accepted here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CinematicSurfaceSpectrumConfig {
+    /// Explicit measured or caller-declared Fourier coefficients.
+    Explicit(Vec<PeriodicSurfaceHarmonic>),
+    /// Seeded self-affine profile with an explicit RMS height, Hurst exponent,
+    /// and inclusive spatial-cycle band.
+    SelfAffine(SelfAffinePeriodicProfileSpectrum),
+}
+
 /// One measured or explicitly declared periodic material-frame surface trace.
 ///
 /// This is contact geometry, not an audio preset. The same filtered height
@@ -831,8 +846,10 @@ pub struct CinematicPeriodicSurfaceConfig {
     pub period_m: f64,
     /// Uniform samples used to realize the declared Fourier series.
     pub sample_count: usize,
-    /// Ordered spatial Fourier coefficients [m].
-    pub harmonics: Vec<PeriodicSurfaceHarmonic>,
+    /// Explicit or statistically parameterized spatial spectrum.
+    pub spectrum: CinematicSurfaceSpectrumConfig,
+    /// Honest authority ceiling for the supplied or generated geometry.
+    pub authority: InputAuthority,
     /// Measurement or estimate provenance.
     pub source_id: String,
 }
@@ -956,24 +973,23 @@ pub enum CinematicInitialMotionConfig {
 impl Default for CinematicMechanicsConfig {
     fn default() -> Self {
         let period_m = core::f64::consts::TAU * 0.0375;
-        let harmonics = (1_u32..=96)
-            .map(|cycles| {
-                let amplitude_m = 2.5e-10 / f64::from(cycles).sqrt();
-                PeriodicSurfaceHarmonic {
-                    cycles_per_track: cycles,
-                    cosine_amplitude_m: if cycles % 3 == 0 {
-                        -amplitude_m
-                    } else {
-                        amplitude_m
-                    },
-                    sine_amplitude_m: if cycles % 2 == 0 {
-                        0.5 * amplitude_m
-                    } else {
-                        -0.5 * amplitude_m
-                    },
-                }
-            })
-            .collect();
+        let disc_surface_spectrum = SelfAffinePeriodicProfileSpectrum::new(
+            // Preserve the sub-nanometre RMS scale admitted by the current
+            // tangent-linear contact rung. This is a declared estimate, not a
+            // measured finish; larger physical roughness requires nonlinear
+            // rough-contact re-solution rather than louder coefficients here.
+            4.5e-10,
+            // A representative engineering-surface Hurst exponent. It sets
+            // the spatial PSD slope only and is not fitted to the soundtrack.
+            0.8,
+            1,
+            // At the resolved rolling rates this extends the geometric forcing
+            // through the support model's 5 kHz band while remaining within a
+            // bounded 8-samples-per-shortest-period trace.
+            384,
+            0x4555_4c45_525f_0001,
+        )
+        .expect("the built-in bounded self-affine surface declaration is valid");
         Self {
             // The stiff finite-patch/contact-support transient is resolved on
             // its own mechanics clock. A 48/96/192/384 kHz refinement probe
@@ -1025,15 +1041,17 @@ impl Default for CinematicMechanicsConfig {
             rolling_contour_coefficient: 1.0e-3,
             disc_surface: CinematicPeriodicSurfaceConfig {
                 period_m,
-                sample_count: 2_048,
-                harmonics,
-                source_id: "declared nanometre-scale machined-edge Fourier topography estimate; not measured"
+                sample_count: 4_096,
+                spectrum: CinematicSurfaceSpectrumConfig::SelfAffine(disc_surface_spectrum),
+                authority: InputAuthority::Estimated,
+                source_id: "declared band-limited self-affine machined-edge profile estimate; RMS height, Hurst exponent, bandwidth, and seed explicit; not measured"
                     .to_owned(),
             },
             support_surface: CinematicPeriodicSurfaceConfig {
                 period_m,
-                sample_count: 2_048,
-                harmonics: Vec::new(),
+                sample_count: 4_096,
+                spectrum: CinematicSurfaceSpectrumConfig::Explicit(Vec::new()),
+                authority: InputAuthority::Estimated,
                 source_id: "declared optically smooth support trace estimate; not measured"
                     .to_owned(),
             },
@@ -1485,17 +1503,29 @@ impl CinematicFixtureConfig {
             ));
         }
         for surface in [&mechanics.disc_surface, &mechanics.support_surface] {
-            if !(surface.period_m.is_finite() && surface.period_m > 0.0)
-                || surface.sample_count < 4
-                || surface.source_id.trim().is_empty()
-                || surface.harmonics.iter().any(|harmonic| {
-                    harmonic.cycles_per_track == 0
-                        || !harmonic.cosine_amplitude_m.is_finite()
-                        || !harmonic.sine_amplitude_m.is_finite()
-                })
+            let harmonics = match &surface.spectrum {
+                CinematicSurfaceSpectrumConfig::Explicit(harmonics) => harmonics.clone(),
+                CinematicSurfaceSpectrumConfig::SelfAffine(spectrum) => {
+                    spectrum.realize_harmonics().map_err(|_| {
+                        CinematicFixtureError::InvalidConfig(
+                            "self-affine surface statistics or spatial band are invalid",
+                        )
+                    })?
+                }
+            };
+            if surface.source_id.trim().is_empty()
+                || PeriodicHarmonicSurface::new(
+                    "cinematic/config-validation-track",
+                    surface.source_id.clone(),
+                    surface.authority,
+                    surface.period_m,
+                    surface.sample_count,
+                    harmonics,
+                )
+                .is_err()
             {
                 return Err(CinematicFixtureError::InvalidConfig(
-                    "surface trace period, sampling, harmonics, and provenance must be finite and nondegenerate",
+                    "surface trace period, sampling, spectrum, and provenance must be finite, bounded, and resolved",
                 ));
             }
         }
@@ -2388,13 +2418,19 @@ fn realize_cinematic_surface(
     texture_frame_id: &str,
     config: &CinematicPeriodicSurfaceConfig,
 ) -> Result<fs_tribo::surface_excitation::UniformSurfaceTrace, CinematicFixtureError> {
+    let harmonics = match &config.spectrum {
+        CinematicSurfaceSpectrumConfig::Explicit(harmonics) => harmonics.clone(),
+        CinematicSurfaceSpectrumConfig::SelfAffine(spectrum) => {
+            spectrum.realize_harmonics().map_err(pipeline)?
+        }
+    };
     PeriodicHarmonicSurface::new(
         texture_frame_id,
         config.source_id.clone(),
-        InputAuthority::CallerDeclared,
+        config.authority,
         config.period_m,
         config.sample_count,
-        config.harmonics.clone(),
+        harmonics,
     )
     .and_then(|surface| surface.realize())
     .map_err(pipeline)
@@ -7970,7 +8006,7 @@ fn fixture_manifest(
             "\"digital_gain_fs_per_pa\":{:.17e},\"digital_gain_db\":{:.9},",
             "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
             "\"stereo_rms_fs\":{:.17e},\"integrated_loudness_lufs\":{},",
-            "\"listening_master_policy\":{{\"method\":\"single deterministic scalar pressure-to-digital gain; no EQ, compression, limiter, synthesis preset, or material-name dispatch\",\"target_true_peak_fs\":{:.17e}}}}}"
+            "\"listening_master_policy\":{{\"method\":\"deterministic raised-cosine media-cut boundary window followed by one scalar pressure-to-digital gain; no EQ, compression, limiter, synthesis preset, or material-name dispatch\",\"initial_fade_sample_frames\":{},\"terminal_fade_sample_frames\":{},\"target_true_peak_fs\":{:.17e}}}}}"
         ),
         SOUND_MASTER_SAMPLE_RATE_HZ,
         wav_identity.to_hex(),
@@ -8007,6 +8043,8 @@ fn fixture_manifest(
         physical_audio.master.meters.true_peak_estimate_fs,
         physical_audio.master.meters.stereo_rms_fs,
         physical_loudness,
+        PressureListeningMasterPolicy::CRITIQUE.initial_fade_sample_frames,
+        PressureListeningMasterPolicy::CRITIQUE.terminal_fade_sample_frames,
         PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs,
     );
     format!(
