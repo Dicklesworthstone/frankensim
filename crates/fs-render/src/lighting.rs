@@ -32,6 +32,11 @@ const PLANE_DISTANCE_TOLERANCE: f64 = 1.0e-12;
 /// Keeping one predicate is required for MIS: a technique must never receive
 /// weight on a direction that its forward sampler cannot produce.
 const RECTANGLE_COSINE_CUTOFF: f64 = 1.0e-9;
+/// Below this solid angle the spherical-rectangle inverse map becomes
+/// ill-conditioned. The exact uniform-area proposal remains unbiased there;
+/// forward sampling and reverse MIS evaluation select the same branch.
+const SPHERICAL_RECTANGLE_MIN_SOLID_ANGLE: f64 = 1.0e-3;
+const ONE_MINUS_EPSILON: f64 = f64::from_bits(1.0_f64.to_bits() - 1);
 const SPECTRAL_LUT_EDGE: usize = 9;
 
 /// Admission failures for rectangular and environment lighting.
@@ -806,10 +811,7 @@ impl<'a> AdmittedLighting<'a> {
         selection_probability: f64,
     ) -> Option<LightSample> {
         let light = self.rectangles.get(light_index)?;
-        let point = light
-            .corner
-            .offset(light.edge_u.scale(u1))
-            .offset(light.edge_v.scale(u2));
+        let (point, conditional_pdf) = sample_rectangle_solid_angle(light, origin, u1, u2)?;
         let direction = point.delta_from(origin);
         let distance_squared = direction.dot(direction);
         if !(distance_squared > 0.0 && distance_squared.is_finite()) {
@@ -820,7 +822,6 @@ impl<'a> AdmittedLighting<'a> {
         if cosine <= RECTANGLE_COSINE_CUTOFF {
             return None;
         }
-        let conditional_pdf = distance_squared / (cosine * light.area());
         Some(LightSample::Rectangle(RectLightSample {
             light_index,
             primitive_index: light.prim,
@@ -856,7 +857,8 @@ impl<'a> AdmittedLighting<'a> {
         if cosine <= RECTANGLE_COSINE_CUTOFF {
             0.0
         } else {
-            let conditional_pdf = distance_squared / (cosine * light.area());
+            let conditional_pdf =
+                rectangle_directional_pdf(light, origin, distance_squared, cosine);
             (weight / total) * conditional_pdf
         }
     }
@@ -1129,6 +1131,170 @@ fn select_cdf(cdf: &[f64], total: f64, sample: f64) -> Option<(usize, f64)> {
     Some((index, clamp_unit_open((target - lower) / weight)))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SphericalRectangleSetup {
+    x_axis: Vec3,
+    y_axis: Vec3,
+    z_axis: Vec3,
+    x0: f64,
+    x1: f64,
+    y0: f64,
+    y1: f64,
+    z0: f64,
+    b0: f64,
+    b1: f64,
+    lower_angle_sum: f64,
+    solid_angle: f64,
+}
+
+fn angle_between(left: Vec3, right: Vec3) -> f64 {
+    det::acos(left.dot(right).clamp(-1.0, 1.0))
+}
+
+fn normalized_cross(left: Vec3, right: Vec3) -> Option<Vec3> {
+    let value = cross(left, right);
+    let norm = value.norm();
+    (norm > 0.0 && norm.is_finite()).then(|| value.scale(1.0 / norm))
+}
+
+/// Prepare Urena et al.'s area-preserving spherical-rectangle map. The
+/// rectangle is already admitted as orthogonal, so this routine only refuses
+/// reference points whose projected rectangle is numerically degenerate.
+fn spherical_rectangle_setup(light: &RectLight, origin: Point3) -> Option<SphericalRectangleSetup> {
+    let edge_u_length = light.edge_u.norm();
+    let edge_v_length = light.edge_v.norm();
+    let x_axis = light.edge_u.scale(1.0 / edge_u_length);
+    let y_axis = light.edge_v.scale(1.0 / edge_v_length);
+    let mut z_axis = normalized_cross(x_axis, y_axis)?;
+    let displacement = light.corner.delta_from(origin);
+    let x0 = displacement.dot(x_axis);
+    let y0 = displacement.dot(y_axis);
+    let mut z0 = displacement.dot(z_axis);
+    if z0 > 0.0 {
+        z_axis = z_axis.scale(-1.0);
+        z0 = -z0;
+    }
+    let x1 = x0 + edge_u_length;
+    let y1 = y0 + edge_v_length;
+    let v00 = Vec3::new(x0, y0, z0);
+    let v01 = Vec3::new(x0, y1, z0);
+    let v10 = Vec3::new(x1, y0, z0);
+    let v11 = Vec3::new(x1, y1, z0);
+    let n0 = normalized_cross(v00, v10)?;
+    let n1 = normalized_cross(v10, v11)?;
+    let n2 = normalized_cross(v11, v01)?;
+    let n3 = normalized_cross(v01, v00)?;
+    let g0 = angle_between(n0.scale(-1.0), n1);
+    let g1 = angle_between(n1.scale(-1.0), n2);
+    let g2 = angle_between(n2.scale(-1.0), n3);
+    let g3 = angle_between(n3.scale(-1.0), n0);
+    let solid_angle = rectangle_solid_angle(light, origin);
+    let values = [x0, x1, y0, y1, z0, n0.z, n2.z, g0, g1, g2, g3, solid_angle];
+    if values.iter().any(|value| !value.is_finite())
+        || solid_angle < SPHERICAL_RECTANGLE_MIN_SOLID_ANGLE
+    {
+        return None;
+    }
+    Some(SphericalRectangleSetup {
+        x_axis,
+        y_axis,
+        z_axis,
+        x0,
+        x1,
+        y0,
+        y1,
+        z0,
+        b0: n0.z,
+        b1: n2.z,
+        lower_angle_sum: g2 + g3,
+        solid_angle,
+    })
+}
+
+fn uniform_area_rectangle_sample(
+    light: &RectLight,
+    origin: Point3,
+    u1: f64,
+    u2: f64,
+) -> Option<(Point3, f64)> {
+    let point = light
+        .corner
+        .offset(light.edge_u.scale(u1))
+        .offset(light.edge_v.scale(u2));
+    let direction = point.delta_from(origin);
+    let distance_squared = direction.dot(direction);
+    if !(distance_squared > 0.0 && distance_squared.is_finite()) {
+        return None;
+    }
+    let direction = direction.scale(1.0 / distance_squared.sqrt());
+    let cosine = light.normal().dot(direction).abs();
+    if cosine <= RECTANGLE_COSINE_CUTOFF {
+        return None;
+    }
+    Some((point, distance_squared / (cosine * light.area())))
+}
+
+fn sample_rectangle_solid_angle(
+    light: &RectLight,
+    origin: Point3,
+    u1: f64,
+    u2: f64,
+) -> Option<(Point3, f64)> {
+    let Some(setup) = spherical_rectangle_setup(light, origin) else {
+        return uniform_area_rectangle_sample(light, origin, u1, u2);
+    };
+    // Urena, Fajardo, King, and Hill (EGSR 2013), "An Area-Preserving
+    // Parametrization for Spherical Rectangles". `au` is written in its
+    // algebraically reduced form so the exact solid angle used by the PDF is
+    // also the one used by the inverse map.
+    let au = u1 * setup.solid_angle - setup.lower_angle_sum;
+    let sin_au = det::sin(au);
+    if sin_au == 0.0 || !sin_au.is_finite() {
+        return None;
+    }
+    let fu = (det::cos(au) * setup.b0 - setup.b1) / sin_au;
+    let cu_denominator = (fu * fu + setup.b0 * setup.b0).sqrt();
+    if !(cu_denominator > 0.0 && cu_denominator.is_finite()) {
+        return None;
+    }
+    let cu = (1.0 / cu_denominator)
+        .copysign(fu)
+        .clamp(-ONE_MINUS_EPSILON, ONE_MINUS_EPSILON);
+    let xu_denominator = (1.0 - cu * cu).max(0.0).sqrt();
+    if !(xu_denominator > 0.0 && xu_denominator.is_finite()) {
+        return None;
+    }
+    let xu = (-(cu * setup.z0) / xu_denominator).clamp(setup.x0, setup.x1);
+    let distance_xz = (xu * xu + setup.z0 * setup.z0).sqrt();
+    let h0 = setup.y0 / (distance_xz * distance_xz + setup.y0 * setup.y0).sqrt();
+    let h1 = setup.y1 / (distance_xz * distance_xz + setup.y1 * setup.y1).sqrt();
+    let hv = h0 + u2 * (h1 - h0);
+    let hv_squared = hv * hv;
+    let yv = if hv_squared < 1.0 - 1.0e-6 {
+        hv * distance_xz / (1.0 - hv_squared).sqrt()
+    } else {
+        setup.y1
+    }
+    .clamp(setup.y0, setup.y1);
+    let point = origin
+        .offset(setup.x_axis.scale(xu))
+        .offset(setup.y_axis.scale(yv))
+        .offset(setup.z_axis.scale(setup.z0));
+    Some((point, 1.0 / setup.solid_angle))
+}
+
+fn rectangle_directional_pdf(
+    light: &RectLight,
+    origin: Point3,
+    distance_squared: f64,
+    cosine: f64,
+) -> f64 {
+    spherical_rectangle_setup(light, origin).map_or_else(
+        || distance_squared / (cosine * light.area()),
+        |setup| 1.0 / setup.solid_angle,
+    )
+}
+
 fn rectangle_solid_angle(light: &RectLight, origin: Point3) -> f64 {
     let normal = light.normal();
     let plane_distance = light.corner.delta_from(origin).dot(normal).abs();
@@ -1295,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn g0_single_rectangle_preserves_surface_sample_arithmetic() {
+    fn g0_single_rectangle_uses_one_solid_angle_density_forward_and_reverse() {
         let light = rectangle(-0.5, 3, 4.0);
         let lights = [light];
         let admitted = AdmittedLighting::try_new(&lights, None).unwrap();
@@ -1303,20 +1469,99 @@ mod tests {
         let LightSample::Rectangle(sample) = admitted.sample(origin, 0.25, 0.75).unwrap() else {
             panic!("single rectangle selected environment");
         };
-        let expected = light
-            .corner
-            .offset(light.edge_u.scale(0.25))
-            .offset(light.edge_v.scale(0.75));
-        assert_eq!(sample.point.x.to_bits(), expected.x.to_bits());
-        assert_eq!(sample.point.y.to_bits(), expected.y.to_bits());
-        assert_eq!(sample.point.z.to_bits(), expected.z.to_bits());
         assert_eq!(sample.primitive_index, 3);
-
-        let displacement = expected.delta_from(origin);
-        let distance_squared = displacement.dot(displacement);
-        let direction = displacement.scale(1.0 / distance_squared.sqrt());
-        let expected_pdf = distance_squared / (light.normal().dot(direction).abs() * light.area());
+        let from_corner = sample.point.delta_from(light.corner);
+        let u = from_corner.dot(light.edge_u) / light.edge_u.dot(light.edge_u);
+        let v = from_corner.dot(light.edge_v) / light.edge_v.dot(light.edge_v);
+        let plane_residual = from_corner.dot(light.normal()).abs();
+        assert!((0.0..=1.0).contains(&u), "sample escaped edge_u: {u}");
+        assert!((0.0..=1.0).contains(&v), "sample escaped edge_v: {v}");
+        assert!(
+            plane_residual <= 1.0e-14,
+            "sample escaped plane: {plane_residual}"
+        );
+        let expected_pdf = 1.0 / rectangle_solid_angle(&light, origin);
         assert_eq!(sample.pdf_solid_angle.to_bits(), expected_pdf.to_bits());
+        assert_eq!(
+            admitted.rect_mixture_pdf(0, origin, sample.point).to_bits(),
+            expected_pdf.to_bits(),
+            "reverse MIS did not replay the forward spherical-rectangle density"
+        );
+    }
+
+    #[test]
+    fn g0_spherical_rectangle_map_matches_independent_area_quadrature() {
+        let light = RectLight {
+            corner: Point3::new(-1.0, 0.2, -1.0),
+            edge_u: Vec3::new(2.0, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, 0.0, 2.0),
+            prim: 9,
+            emission: (lift_rgb([1.0; 3]), 1.0),
+        };
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        let solid_angle = rectangle_solid_angle(&light, origin);
+        assert!(solid_angle > SPHERICAL_RECTANGLE_MIN_SOLID_ANGLE);
+        let side = 128_u32;
+        let mut spherical_integral = 0.0;
+        let mut area_integral = 0.0;
+        let mut spherical_constant_mean = 0.0;
+        let mut area_constant_mean = 0.0;
+        let mut area_constant_second_moment = 0.0;
+        for y in 0..side {
+            for x in 0..side {
+                let u1 = (f64::from(x) + 0.5) / f64::from(side);
+                let u2 = (f64::from(y) + 0.5) / f64::from(side);
+                let (spherical_point, spherical_pdf) =
+                    sample_rectangle_solid_angle(&light, origin, u1, u2).unwrap();
+                let spherical_direction = spherical_point.delta_from(origin);
+                let spherical_direction =
+                    spherical_direction.scale(1.0 / spherical_direction.norm());
+                let integrand = spherical_direction.x * spherical_direction.x
+                    + 0.3 * spherical_direction.z
+                    + 0.2;
+                spherical_integral += integrand / spherical_pdf;
+                spherical_constant_mean += 1.0 / spherical_pdf;
+
+                let (area_point, area_pdf) =
+                    uniform_area_rectangle_sample(&light, origin, u1, u2).unwrap();
+                let area_direction = area_point.delta_from(origin);
+                let area_direction = area_direction.scale(1.0 / area_direction.norm());
+                let area_integrand =
+                    area_direction.x * area_direction.x + 0.3 * area_direction.z + 0.2;
+                area_integral += area_integrand / area_pdf;
+                let area_constant = 1.0 / area_pdf;
+                area_constant_mean += area_constant;
+                area_constant_second_moment += area_constant * area_constant;
+            }
+        }
+        let count = f64::from(side) * f64::from(side);
+        spherical_integral /= count;
+        area_integral /= count;
+        spherical_constant_mean /= count;
+        area_constant_mean /= count;
+        area_constant_second_moment /= count;
+        assert_close(
+            spherical_integral,
+            area_integral,
+            2.0e-4,
+            "spherical map versus independent area quadrature",
+        );
+        assert_eq!(
+            spherical_constant_mean.to_bits(),
+            solid_angle.to_bits(),
+            "uniform solid-angle samples must integrate the constant function with zero variance"
+        );
+        assert_close(
+            area_constant_mean,
+            solid_angle,
+            2.0e-4,
+            "uniform-area quadrature of rectangle solid angle",
+        );
+        let area_variance = area_constant_second_moment - area_constant_mean * area_constant_mean;
+        assert!(
+            area_variance > 1.0e-2,
+            "the close-light comparison stopped exercising nontrivial area-proposal variance: {area_variance:.9e}"
+        );
     }
 
     #[test]

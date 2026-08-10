@@ -19,9 +19,11 @@
 //! platform libm), and Fresnel/roughness powers are explicit
 //! multiplications, never `powi` (the a55x/4xnt hazard class).
 //!
-//! The legacy one-rectangle/no-environment path retains its v1 random stream
-//! and non-grazing arithmetic; lighting bit-semantics v2 makes its rectangle
-//! forward/reverse support boundary identical. The opt-in lighting-v1 extension admits multiple static
+//! The legacy one-rectangle/no-environment path retains its v1 random stream.
+//! Lighting bit-semantics v2 made rectangle forward/reverse support identical;
+//! v3 maps the same two dimensions through an exact solid-angle rectangle
+//! proposal, with a matched exact uniform-area fallback for tiny projections.
+//! The opt-in lighting-v1 extension admits multiple static
 //! rectangular area lights and one canonical lat-long environment, ordered and
 //! importance-sampled independently of caller construction order. Rectangular
 //! lights are also scene geometry so BSDF paths find them (MIS-weighted both
@@ -124,7 +126,7 @@ pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.materi
 /// Bit-affecting semantics of construction-order-independent multi-light and
 /// environment sampling. The legacy one-rectangle/no-environment path remains
 /// under [`TRACER_BIT_SEMANTICS_VERSION`] and keeps its frozen stream.
-pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 2;
+pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 3;
 
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.

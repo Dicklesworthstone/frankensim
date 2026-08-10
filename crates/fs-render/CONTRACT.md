@@ -596,7 +596,13 @@ the separate source/provenance hashes retain container lineage without changing
   the sampling stream. Both NEE and BSDF-hit paths include the same selection
   probability in their solid-angle PDFs and use one shared `1e-9` rectangle
   grazing-support boundary, including the formerly mismatched `1e-12..1e-9`
-  band. This support repair is lighting tracer bit-semantics v2. At a
+  band. This support repair is lighting tracer bit-semantics v2. Lighting
+  bit-semantics v3 replaces the within-rectangle uniform-area draw with the
+  area-preserving spherical-rectangle map of Urena et al. (EGSR 2013), whose
+  conditional density is exactly `1 / solid_angle`. Projections below `1e-3`
+  steradians retain the exact uniform-area proposal because the spherical
+  inverse map is ill-conditioned there; forward sampling and reverse MIS use
+  that same branch and area-to-solid-angle Jacobian. At a
   lighting-v1 path's final permitted bounce, NEE has weight one because no
   competing BSDF continuation is evaluated.
 The exact legacy one-rectangle/no-environment lighting branch retains its
