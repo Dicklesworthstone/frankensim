@@ -57,7 +57,13 @@ impl SmoothAuthorityPolicy {
 /// Units-explicit smoothing and derivative-probe controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothRegularization {
-    /// Positive dimensionless scale for each longitudinal/lateral creepage.
+    /// Positive dimensionless deadzone scale for the tangent-plane
+    /// creepage MAGNITUDE. The smoothing is isotropic: it rescales the
+    /// creepage vector by the regularized magnitude, never the frame
+    /// components separately (a componentwise deadzone breaks the SO(2)
+    /// frame covariance the receipt claims — executed: the
+    /// frame-rotation conformance test measured a 7e-5 relative
+    /// world-force violation before this was fixed).
     pub creepage_scale: f64,
     /// Positive scale for relative torsional spin, in rad/s.
     pub torsional_spin_scale_rad_per_s: f64,
@@ -446,10 +452,20 @@ impl SmoothTangentialAdapter {
         &self,
         mut kinematics: PartialSlipKinematics,
     ) -> Result<PartialSlipKinematics, SmoothTangentialError> {
-        kinematics.creepage[0] =
-            regularize(kinematics.creepage[0], self.regularization.creepage_scale)?;
-        kinematics.creepage[1] =
-            regularize(kinematics.creepage[1], self.regularization.creepage_scale)?;
+        // Isotropic tangent-plane deadzone: regularize the creepage
+        // MAGNITUDE and rescale the vector. Componentwise smoothing is
+        // not rotation covariant, so it would make the world-frame
+        // receipt depend on the caller's tangent-frame choice.
+        let magnitude = kinematics.creepage[0].hypot(kinematics.creepage[1]);
+        let regular_magnitude = regularize(magnitude, self.regularization.creepage_scale)?;
+        if magnitude > 0.0 {
+            let factor = regular_magnitude / magnitude;
+            kinematics.creepage[0] *= factor;
+            kinematics.creepage[1] *= factor;
+        }
+        // The torsional spin is a scalar about the shared normal and is
+        // invariant under tangent-frame rotation, so its scalar deadzone
+        // is covariant as is.
         kinematics.torsional_spin_rad_per_s = regularize(
             kinematics.torsional_spin_rad_per_s,
             self.regularization.torsional_spin_scale_rad_per_s,

@@ -139,7 +139,11 @@ refuses rather than implying zero adhesion.
 `tangential::smooth` is a solver transaction adapter over the public
 `fs_tribo::partial_slip` law. Its regularization and fixed-branch derivative
 are local numerical controls, not a smoothness, friction-calibration, or
-cross-branch differentiability claim.
+cross-branch differentiability claim. The creepage deadzone acts on the
+tangent-plane slip MAGNITUDE (isotropic), never per frame component, so the
+world-frame receipt is covariant under the caller's tangent-frame rotation —
+the componentwise form was an executed defect (7e-5 relative world-force
+frame dependence) caught when the parked SO(2) conformance test first ran.
 
 ## Invariants
 

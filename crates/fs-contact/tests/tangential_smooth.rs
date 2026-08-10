@@ -286,7 +286,7 @@ fn rollback_retry_reversal_and_recontact_are_transactional() {
 fn so2_covariance_and_power_invariance_hold_for_the_adapter_receipt() {
     let adapter = adapter(1.0e-4);
     let state = state(&adapter);
-    let angle = 0.37;
+    let angle = 0.37_f64;
     let c = angle.cos();
     let s = angle.sin();
     let raw = [0.6, 0.2];
@@ -391,7 +391,7 @@ fn action_reaction_duplicate_work_and_stale_future_refuse() {
 
 #[test]
 fn authority_policy_and_checkpoint_identity_refuse_without_promotion() {
-    let adapter = SmoothTangentialAdapter::new(
+    let strict = SmoothTangentialAdapter::new(
         "smooth-adapter-v1",
         "fixture/smooth-config",
         adapter(1.0e-4).regularization(),
@@ -403,7 +403,7 @@ fn authority_policy_and_checkpoint_identity_refuse_without_promotion() {
     )
     .expect("strict adapter");
     assert!(matches!(
-        adapter.initial_state(
+        strict.initial_state(
             &law(),
             &patch(NormalPatchAuthority::SyntheticFixture),
             &interface(NormalPatchAuthority::SyntheticFixture),
