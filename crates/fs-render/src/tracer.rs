@@ -79,13 +79,13 @@ use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 use fs_rand::qmc::Sobol;
 use manifold::{PlaneFrame, solve_two_planar_interfaces, target_area_per_source_solid_angle};
-use transport::DirectionalPdfPair;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use transport::DirectionalPdfPair;
 
 mod checkpoint;
 pub use checkpoint::{
@@ -123,7 +123,7 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 8;
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 9;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -12167,11 +12167,8 @@ fn trace_path(
                         / pdf;
                 }
                 previous_bsdf = Some(PreviousBsdf {
-                    pdf: DirectionalPdfPair::continuous(
-                        pdf,
-                        bsdf_pdf(&prim.material, n, wi, wo),
-                    )
-                    .ok_or(TracerError::InvalidInput)?,
+                    pdf: DirectionalPdfPair::continuous(pdf, bsdf_pdf(&prim.material, n, wi, wo))
+                        .ok_or(TracerError::InvalidInput)?,
                     opaque_source_geometric_normal: Some(n),
                     smooth_slab: None,
                 });

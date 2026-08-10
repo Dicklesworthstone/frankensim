@@ -523,14 +523,15 @@ pub fn sample_smooth_dielectric(
     })
 }
 
-/// Continuous rough-dielectric value and the matching NDF-sampling density at
-/// one wavelength. Smooth equal-IOR null boundaries are delta distributions and
-/// therefore evaluate to zero in solid angle.
+/// Continuous rough-dielectric value and the matching visible-normal sampling
+/// density at one wavelength. Smooth equal-IOR null boundaries are delta
+/// distributions and therefore evaluate to zero in solid angle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RoughDielectricEvaluation {
     /// Radiance-mode BSDF value.
     pub value: f64,
-    /// Solid-angle density of the GGX-NDF plus Fresnel branch sampler.
+    /// Solid-angle density of the view-conditioned GGX visible-normal plus
+    /// Fresnel branch sampler.
     pub pdf: f64,
     /// Reflection or transmission hemisphere.
     pub event: DielectricEvent,
@@ -636,7 +637,8 @@ pub fn evaluate_rough_dielectric(
             });
         }
         let value = distribution * geometry * fresnel.reflectance / (4.0 * cos_o * cos_i);
-        let pdf = distribution * n_dot_m * fresnel.reflectance / (4.0 * wo_dot_m);
+        let visible_normal_pdf = distribution * smith_g1(roughness_alpha, cos_o) * wo_dot_m / cos_o;
+        let pdf = visible_normal_pdf * fresnel.reflectance / (4.0 * wo_dot_m);
         return finite_evaluation(value, pdf, event);
     }
 
@@ -667,13 +669,14 @@ pub fn evaluate_rough_dielectric(
     let value = (1.0 - fresnel.reflectance) * distribution * geometry * (wi_dot_m * wo_dot_m).abs()
         / (cos_o * cos_i.abs() * denominator2);
     let jacobian = eta * eta * wi_dot_m.abs() / denominator2;
-    let pdf = distribution * n_dot_m * (1.0 - fresnel.reflectance) * jacobian;
+    let visible_normal_pdf = distribution * smith_g1(roughness_alpha, cos_o) * wo_dot_m / cos_o;
+    let pdf = visible_normal_pdf * (1.0 - fresnel.reflectance) * jacobian;
     finite_evaluation(value, pdf, event)
 }
 
-/// Sample an isotropic GGX dielectric using `D(m) * abs(n dot m)` and an exact
-/// Fresnel branch decision. A valid but zero-contribution microfacet draw
-/// returns `Ok(None)`.
+/// Sample an isotropic GGX dielectric using Heitz's view-conditioned visible
+/// normal distribution and an exact Fresnel branch decision. A valid but
+/// zero-contribution microfacet draw returns `Ok(None)`.
 #[allow(clippy::too_many_arguments)]
 pub fn sample_rough_dielectric(
     normal: Vec3,
@@ -706,15 +709,8 @@ pub fn sample_rough_dielectric(
         }));
     }
 
-    let a2 = roughness_alpha * roughness_alpha;
-    let cos_m2 = ((1.0 - microfacet_u) / (microfacet_u * (a2 - 1.0) + 1.0)).clamp(0.0, 1.0);
-    let cos_m = cos_m2.sqrt();
-    let sin_m = (1.0 - cos_m2).max(0.0).sqrt();
-    let phi = 2.0 * PI * microfacet_v;
-    let micro_normal = to_world(
-        normal,
-        [sin_m * det::cos(phi), sin_m * det::sin(phi), cos_m],
-    );
+    let micro_normal =
+        sample_ggx_visible_normal(normal, wo, roughness_alpha, microfacet_u, microfacet_v)?;
     let wo_dot_m = wo.dot(micro_normal);
     if wo_dot_m <= 0.0 {
         return Ok(None);
@@ -918,6 +914,78 @@ fn to_world(normal: Vec3, local: [f64; 3]) -> Vec3 {
         tangent.y * local[0] + bitangent.y * local[1] + normal.y * local[2],
         tangent.z * local[0] + bitangent.z * local[1] + normal.z * local[2],
     )
+}
+
+/// Heitz's isotropic GGX visible-normal warp (JCGT 2018). Conditioning the
+/// microfacet proposal on `wo` avoids spending most grazing-incidence draws on
+/// facets hidden from the incident direction. The returned density is
+/// evaluated analytically in [`evaluate_rough_dielectric`].
+fn sample_ggx_visible_normal(
+    normal: Vec3,
+    wo: Vec3,
+    alpha: f64,
+    u1: f64,
+    u2: f64,
+) -> Result<Vec3, DielectricError> {
+    let (tangent, bitangent) = basis(normal);
+    let local_wo = [tangent.dot(wo), bitangent.dot(wo), normal.dot(wo)];
+    let stretched = [alpha * local_wo[0], alpha * local_wo[1], local_wo[2]];
+    let stretched_norm =
+        (stretched[0] * stretched[0] + stretched[1] * stretched[1] + stretched[2] * stretched[2])
+            .sqrt();
+    if !stretched_norm.is_finite() || stretched_norm <= 0.0 {
+        return Err(DielectricError::InvalidInterface);
+    }
+    let view = stretched.map(|component| component / stretched_norm);
+
+    let lensq = view[0] * view[0] + view[1] * view[1];
+    let frame_1 = if lensq > 0.0 {
+        let inverse_len = 1.0 / lensq.sqrt();
+        [-view[1] * inverse_len, view[0] * inverse_len, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let frame_2 = [
+        view[1] * frame_1[2] - view[2] * frame_1[1],
+        view[2] * frame_1[0] - view[0] * frame_1[2],
+        view[0] * frame_1[1] - view[1] * frame_1[0],
+    ];
+
+    let radius = u1.sqrt();
+    let phi = 2.0 * PI * u2;
+    let disk_1 = radius * det::cos(phi);
+    let mut disk_2 = radius * det::sin(phi);
+    let blend = 0.5 * (1.0 + view[2]);
+    disk_2 = (1.0 - blend) * (1.0 - disk_1 * disk_1).max(0.0).sqrt() + blend * disk_2;
+    let projected = (1.0 - disk_1 * disk_1 - disk_2 * disk_2).max(0.0).sqrt();
+    let stretched_normal = [
+        disk_1 * frame_1[0] + disk_2 * frame_2[0] + projected * view[0],
+        disk_1 * frame_1[1] + disk_2 * frame_2[1] + projected * view[1],
+        disk_1 * frame_1[2] + disk_2 * frame_2[2] + projected * view[2],
+    ];
+
+    let unstretched = [
+        alpha * stretched_normal[0],
+        alpha * stretched_normal[1],
+        stretched_normal[2].max(0.0),
+    ];
+    let normal_length = (unstretched[0] * unstretched[0]
+        + unstretched[1] * unstretched[1]
+        + unstretched[2] * unstretched[2])
+        .sqrt();
+    if !normal_length.is_finite() || normal_length <= 0.0 {
+        return Err(DielectricError::InvalidInterface);
+    }
+    let local_normal = unstretched.map(|component| component / normal_length);
+    let micro_normal = to_world(normal, local_normal);
+    if !micro_normal.x.is_finite()
+        || !micro_normal.y.is_finite()
+        || !micro_normal.z.is_finite()
+        || wo.dot(micro_normal) <= 0.0
+    {
+        return Err(DielectricError::InvalidInterface);
+    }
+    Ok(micro_normal)
 }
 
 #[cfg(test)]
@@ -1240,6 +1308,60 @@ mod tests {
                 "rough throughput",
             );
         }
+    }
+
+    #[test]
+    fn rough_visible_normal_pdf_mass_matches_sampler_acceptance() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let cos_o = 0.2_f64;
+        let wo = Vec3::new((1.0 - cos_o * cos_o).sqrt(), 0.0, cos_o);
+        let alpha = 0.15;
+        let sphere_rows = 128_u32;
+        let sphere_columns = 256_u32;
+        let mut pdf_sum = 0.0;
+        for row in 0..sphere_rows {
+            let z = -1.0 + 2.0 * (f64::from(row) + 0.5) / f64::from(sphere_rows);
+            let radial = (1.0 - z * z).sqrt();
+            for column in 0..sphere_columns {
+                let phi = 2.0 * PI * (f64::from(column) + 0.5) / f64::from(sphere_columns);
+                let wi = Vec3::new(radial * det::cos(phi), radial * det::sin(phi), z);
+                pdf_sum += evaluate_rough_dielectric(normal, wo, wi, 1.0, 1.5, alpha)
+                    .expect("finite directional evaluation")
+                    .pdf;
+            }
+        }
+        let sphere_count = f64::from(sphere_rows) * f64::from(sphere_columns);
+        let integrated_mass = pdf_sum * 4.0 * PI / sphere_count;
+
+        let side = 32_u32;
+        let mut accepted = 0_u32;
+        for microfacet_u in 0..side {
+            for microfacet_v in 0..side {
+                for event in 0..side {
+                    accepted += u32::from(
+                        sample_rough_dielectric(
+                            normal,
+                            wo,
+                            1.0,
+                            1.5,
+                            alpha,
+                            (f64::from(microfacet_u) + 0.5) / f64::from(side),
+                            (f64::from(microfacet_v) + 0.5) / f64::from(side),
+                            (f64::from(event) + 0.5) / f64::from(side),
+                        )
+                        .expect("finite visible-normal sample")
+                        .is_some(),
+                    );
+                }
+            }
+        }
+        let sampled_mass = f64::from(accepted) / f64::from(side * side * side);
+        assert_close(
+            integrated_mass,
+            sampled_mass,
+            1.5e-2,
+            "rough VNDF directional PDF mass versus sampler acceptance",
+        );
     }
 
     #[test]

@@ -636,9 +636,12 @@ deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
 Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
-and conductor sampling is isotropic-only, rough dielectric sampling remains an
-NDF-plus-Fresnel-branch path, conductor and dielectric GGX are single-scattering
-without multiple-scattering compensation, and emitters do not reflect. At the
+and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
+are single-scattering without multiple-scattering compensation, and emitters
+do not reflect. Dielectric tracer bit-semantics v9 replaces the rough
+dielectric's full-NDF proposal with isotropic view-conditioned visible-normal
+sampling while retaining the exact Fresnel reflection/transmission branch and
+the matching forward and reverse solid-angle densities. At the
 first smooth dielectric boundary, reflection is retained as a spectral packet
 and transmission fans out into single-wavelength continuations only when its
 Snell directions require it; their deterministic Fresnel-weighted sum retains
@@ -708,9 +711,10 @@ GGX visible-normal sampling/PDF agreement at grazing incidence and both pole
 frames, directional-PDF mass versus sampler acceptance, reciprocity,
 active-incident-medium dependence, a numerical no-energy-gain furnace, an
 independent equal-expectation furnace check, equal-draw grazing variance against
-the former NDF sampler, exact replay, and visibly distinct representative
-tungsten/stainless renders under one neutral light. The Cornell golden remains
-the legacy-material bit gate.
+the former NDF sampler, rough-dielectric visible-normal sample/PDF replay,
+exact replay, and visibly distinct representative tungsten/stainless renders
+under one neutral light. The Cornell golden remains the legacy-material bit
+gate.
 
 `lighting` inline tests and `tests/lighting_battery.rs` (feature `tracer`) cover
 rectangle admission and identity order, zero/duplicate emitters, exact

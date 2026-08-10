@@ -27,10 +27,7 @@ pub(super) struct DirectionalPdfPair {
 
 impl DirectionalPdfPair {
     /// Admit one pair of finite solid-angle densities.
-    pub(super) fn continuous(
-        forward_solid_angle: f64,
-        reverse_solid_angle: f64,
-    ) -> Option<Self> {
+    pub(super) fn continuous(forward_solid_angle: f64, reverse_solid_angle: f64) -> Option<Self> {
         if valid_pdf(forward_solid_angle) && valid_pdf(reverse_solid_angle) {
             Some(Self {
                 forward_solid_angle,
@@ -183,9 +180,7 @@ mod tests {
 
     #[test]
     fn g0_delta_event_never_masquerades_as_finite_area_density() {
-        let area = DirectionalPdfPair::delta()
-            .to_area(2.0, 0.4, 0.6)
-            .unwrap();
+        let area = DirectionalPdfPair::delta().to_area(2.0, 0.4, 0.6).unwrap();
         assert!(area.is_delta());
         assert_eq!(area.forward_area().to_bits(), 0.0_f64.to_bits());
         assert_eq!(area.reverse_area().to_bits(), 0.0_f64.to_bits());
