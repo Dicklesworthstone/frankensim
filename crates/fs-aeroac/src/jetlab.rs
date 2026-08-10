@@ -268,12 +268,24 @@ impl Rig {
         }
     }
 
-    fn settle(&mut self, steps: usize) {
-        let mut scratch = Vec::new();
-        for _ in 0..steps {
-            self.grid.step(&mut scratch);
-            self.fringe.apply(&mut self.grid);
-        }
+    /// Settle without recording. Fallible: a lattice blow-up
+    /// surfaces as fs-lbm's non-finite-density panic INSIDE
+    /// `Grid::step` (executed at delta = 12 lu, u = 0.08,
+    /// tau = 0.505 — the assert fires on the first bad cell, so no
+    /// pre-scan can precede it); the unwind is contained here and
+    /// converted to the typed refusal. The rig state is discarded by
+    /// every caller on error, so no torn state escapes.
+    fn settle(&mut self, steps: usize) -> Result<(), AeroacError> {
+        std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            let mut scratch = Vec::new();
+            for _ in 0..steps {
+                self.grid.step(&mut scratch);
+                self.fringe.apply(&mut self.grid);
+            }
+        }))
+        .map_err(|_| AeroacError::NonFinite {
+            what: "lattice destabilized during settle (fs-lbm density assert)",
+        })
     }
 
     /// Set the uniform relaxation time on every cell (the ramp's
@@ -284,41 +296,86 @@ impl Rig {
         }
     }
 
-    fn record(&mut self, steps: usize) -> RecordedSegment {
-        let mut scratch = Vec::new();
-        let mut force_series = Vec::with_capacity(steps);
-        let mut mach_max = 0.0f64;
-        let mut flux_plate = 0.0f64;
-        let mut flux_fringe = 0.0f64;
-        for t in 0..steps {
-            let exchange = self
-                .grid
-                .step_with_wall_momentum(&mut scratch, &self.plate_mask);
-            self.fringe.apply(&mut self.grid);
-            force_series.push(exchange.wall_impulse);
-            // Sampled diagnostics (every 16 steps keeps cost
-            // negligible).
-            if t % 16 == 0 {
-                for y in 0..self.grid.ny {
-                    let m = self.grid.moments(self.grid.idx(self.x_plate_plane, y));
-                    flux_plate += m.rho * m.u[0];
-                    let sp = det::sqrt(m.u[0] * m.u[0] + m.u[1] * m.u[1]);
-                    mach_max = mach_max.max(sp);
-                    let m2 = self.grid.moments(self.grid.idx(self.x_fringe_plane, y));
-                    flux_fringe += m2.rho * m2.u[0];
-                    let sp2 = det::sqrt(m2.u[0] * m2.u[0] + m2.u[1] * m2.u[1]);
-                    mach_max = mach_max.max(sp2);
+    /// Typed stability guard (executed hazard: at delta = 12 lu,
+    /// u = 0.08, tau = 0.505 the plain-BGK lattice destabilizes and
+    /// `Grid::moments` PANICS on non-finite density — a blow-up must
+    /// surface as a refusal, not a panic). Scans every populated
+    /// distribution for finiteness and positive cell mass.
+    fn check_stable(&self) -> Result<(), AeroacError> {
+        for (i, f) in self.grid.f.iter().enumerate() {
+            if matches!(self.grid.flags[i], Cell::Wall) {
+                continue;
+            }
+            let mut rho = 0.0f64;
+            for q in f {
+                if !q.is_finite() {
+                    return Err(AeroacError::NonFinite {
+                        what: "lattice destabilized (non-finite distribution)",
+                    });
                 }
+                rho += q;
+            }
+            if rho <= 0.0 {
+                return Err(AeroacError::InvalidParameter {
+                    what: "lattice destabilized (non-positive cell density)",
+                });
             }
         }
-        #[allow(clippy::cast_precision_loss)]
-        let samples = (steps / 16) as f64;
-        RecordedSegment {
-            force_series,
-            mach_max,
-            flux_plate: flux_plate / samples,
-            flux_fringe: flux_fringe / samples,
-        }
+        Ok(())
+    }
+
+    fn record(&mut self, steps: usize) -> Result<RecordedSegment, AeroacError> {
+        // Full-grid scan up front (a settle-phase blow-up already
+        // refused inside `settle`, but a ramp caller may have
+        // stepped since), then the stepping loop under the same
+        // unwind containment as `settle`, plus a cheap per-step
+        // force finiteness check.
+        self.check_stable()?;
+        let this = &mut *self;
+        std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || {
+            let mut scratch = Vec::new();
+            let mut force_series = Vec::with_capacity(steps);
+            let mut mach_max = 0.0f64;
+            let mut flux_plate = 0.0f64;
+            let mut flux_fringe = 0.0f64;
+            for t in 0..steps {
+                let exchange = this
+                    .grid
+                    .step_with_wall_momentum(&mut scratch, &this.plate_mask);
+                this.fringe.apply(&mut this.grid);
+                if !exchange.wall_impulse[0].is_finite() || !exchange.wall_impulse[1].is_finite() {
+                    return Err(AeroacError::NonFinite {
+                        what: "lattice destabilized (non-finite plate force)",
+                    });
+                }
+                force_series.push(exchange.wall_impulse);
+                // Sampled diagnostics (every 16 steps keeps cost
+                // negligible).
+                if t % 16 == 0 {
+                    for y in 0..this.grid.ny {
+                        let m = this.grid.moments(this.grid.idx(this.x_plate_plane, y));
+                        flux_plate += m.rho * m.u[0];
+                        let sp = det::sqrt(m.u[0] * m.u[0] + m.u[1] * m.u[1]);
+                        mach_max = mach_max.max(sp);
+                        let m2 = this.grid.moments(this.grid.idx(this.x_fringe_plane, y));
+                        flux_fringe += m2.rho * m2.u[0];
+                        let sp2 = det::sqrt(m2.u[0] * m2.u[0] + m2.u[1] * m2.u[1]);
+                        mach_max = mach_max.max(sp2);
+                    }
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let samples = (steps / 16) as f64;
+            Ok(RecordedSegment {
+                force_series,
+                mach_max,
+                flux_plate: flux_plate / samples,
+                flux_fringe: flux_fringe / samples,
+            })
+        }))
+        .unwrap_or(Err(AeroacError::NonFinite {
+            what: "lattice destabilized during record (fs-lbm density assert)",
+        }))
     }
 }
 
@@ -328,7 +385,9 @@ impl Rig {
 /// [`AeroacError::InvalidParameter`] on inconsistent geometry (plate
 /// reaching into the fringe, slot taller than the domain, non-power-
 /// of-two record length, degenerate sizes);
-/// [`AeroacError::NonFinite`] on bad reals.
+/// [`AeroacError::NonFinite`] on bad reals, and (with a named
+/// destabilization message) when the lattice blows up during the
+/// run — the typed alternative to fs-lbm's non-finite-density panic.
 pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError> {
     validate_config(cfg)?;
     if !cfg.steps_record.is_power_of_two() || cfg.steps_record < 64 {
@@ -338,8 +397,8 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
     }
     let mut rig = Rig::build(cfg);
     // --- Settle, then record. ---
-    rig.settle(cfg.steps_settle);
-    let seg = rig.record(cfg.steps_record);
+    rig.settle(cfg.steps_settle)?;
+    let seg = rig.record(cfg.steps_record)?;
     let nu = (cfg.tau - 0.5) / 3.0;
     Ok(JetLabiumRun {
         force_series: seg.force_series,
@@ -523,17 +582,23 @@ pub struct RampReport {
 }
 
 /// Ramp tau linearly per step from `from` to `to` while stepping the
-/// flow, then pin the exact endpoint.
-fn ramp_tau(rig: &mut Rig, from: f64, to: f64, steps: usize) {
-    let mut scratch = Vec::new();
-    for s in 1..=steps {
-        #[allow(clippy::cast_precision_loss)]
-        let tau = from + (to - from) * s as f64 / steps as f64;
-        rig.set_tau(tau);
-        rig.grid.step(&mut scratch);
-        rig.fringe.apply(&mut rig.grid);
-    }
-    rig.set_tau(to);
+/// flow, then pin the exact endpoint. Fallible under the same unwind
+/// containment as [`Rig::settle`].
+fn ramp_tau(rig: &mut Rig, from: f64, to: f64, steps: usize) -> Result<(), AeroacError> {
+    std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        let mut scratch = Vec::new();
+        for s in 1..=steps {
+            #[allow(clippy::cast_precision_loss)]
+            let tau = from + (to - from) * s as f64 / steps as f64;
+            rig.set_tau(tau);
+            rig.grid.step(&mut scratch);
+            rig.fringe.apply(&mut rig.grid);
+        }
+        rig.set_tau(to);
+    }))
+    .map_err(|_| AeroacError::NonFinite {
+        what: "lattice destabilized during ramp (fs-lbm density assert)",
+    })
 }
 
 /// Run the adiabatic hysteresis-following ramp protocol.
@@ -606,7 +671,7 @@ pub fn run_adiabatic_ramp(cfg: &RampConfig) -> Result<RampReport, AeroacError> {
         })
         .collect();
     let mut rig = Rig::build(&cfg.base);
-    rig.settle(cfg.base.steps_settle);
+    rig.settle(cfg.base.steps_settle)?;
     let mut tau_now = cfg.base.tau;
     let mut rungs = Vec::with_capacity(2 * cfg.rungs - 1);
     let measure = |rig: &mut Rig,
@@ -614,7 +679,7 @@ pub fn run_adiabatic_ramp(cfg: &RampConfig) -> Result<RampReport, AeroacError> {
                    tau: f64,
                    direction: RampDirection|
      -> Result<RampRung, AeroacError> {
-        let seg = rig.record(cfg.steps_rung_record);
+        let seg = rig.record(cfg.steps_rung_record)?;
         let peak = transverse_force_peak(
             &seg.force_series,
             cfg.base.slot_half,
@@ -635,18 +700,18 @@ pub fn run_adiabatic_ramp(cfg: &RampConfig) -> Result<RampReport, AeroacError> {
     for (i, &re) in rung_re.iter().enumerate() {
         if i > 0 {
             let tau_next = tau_of(re);
-            ramp_tau(&mut rig, tau_now, tau_next, cfg.steps_ramp);
+            ramp_tau(&mut rig, tau_now, tau_next, cfg.steps_ramp)?;
             tau_now = tau_next;
-            rig.settle(cfg.steps_rung_settle);
+            rig.settle(cfg.steps_rung_settle)?;
         }
         rungs.push(measure(&mut rig, re, tau_now, RampDirection::Up)?);
     }
     // Down leg (the top rung is shared, not re-measured).
     for &re in rung_re[..cfg.rungs - 1].iter().rev() {
         let tau_next = tau_of(re);
-        ramp_tau(&mut rig, tau_now, tau_next, cfg.steps_ramp);
+        ramp_tau(&mut rig, tau_now, tau_next, cfg.steps_ramp)?;
         tau_now = tau_next;
-        rig.settle(cfg.steps_rung_settle);
+        rig.settle(cfg.steps_rung_settle)?;
         rungs.push(measure(&mut rig, re, tau_now, RampDirection::Down)?);
     }
     Ok(RampReport {

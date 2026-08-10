@@ -49,6 +49,13 @@ scope law, pinned as data and by test).
   instrument (mean removal, guard-band skip, prominence vs median
   admitted power, unwindowed RMS floor value); reports the peak BIN
   so the +-1/(2 bin) quantization travels with every Strouhal claim.
+- Lattice destabilization is a TYPED refusal: a blow-up inside
+  fs-lbm's stepping (its density assert panics on the first bad
+  cell, so no pre-scan can precede it) is contained at the
+  settle/ramp/record boundary via `catch_unwind` and returned as a
+  named `NonFinite` refusal; the rig state is discarded on that
+  path. Executed trigger: plain-BGK destabilizes at cell Reynolds
+  `Re/delta` in (36, 48) on this rig family.
 - `jetlab::run_adiabatic_ramp` — the hysteresis-following protocol
   for the MULTI-STABLE rig: after one base lock-in, Reynolds is
   swept quasi-statically (per-step linear relaxation-time ramp at
@@ -207,9 +214,11 @@ None.
 `tests/bickley_lbm.rs` (1): the LBM-vs-Rayleigh growth-rate
 convergence fixture (invariant 8).
 
-`tests/edgetone_staging.rs` (3, ignored heavy): stage-I Strouhal vs
+`tests/edgetone_staging.rs` (4, ignored heavy): stage-I Strouhal vs
 Brown + Vaik/Paal published values; fine-lattice slit-fix regression
-(invariant 10); adiabatic ramp hysteresis protocol (invariant 13).
+(invariant 10); adiabatic ramp hysteresis protocol (invariant 13);
+turbulent-regime probe (stability-boundary bracket + tonal-window +
+typed-destabilization pins).
 
 `tests/noisetable.rs` (2): sweep + export + synth round trip;
 typed refusals.
@@ -235,9 +244,14 @@ determinism.
   stage-ladder claims above stage I remain refused.
 - Grid-convergence of source spectra across refinement levels: not
   implemented (single-resolution v1).
-- Noise tables catalog THIS rig's tonal limit cycle at low Re in
-  2D; they are not turbulent flute-noise spectra (that regime needs
-  higher Re than the rig currently reaches).
+- Noise tables catalog THIS rig's tonal limit cycle in 2D; they are
+  not turbulent flute-noise spectra. QUANTIFIED (executed probe,
+  delta = 12 lu): the plain-BGK stable window ends at cell Reynolds
+  `Re/delta` in (36, 48), and the spectrum is still an essentially
+  pure tone (flatness ~1e-15) at the last stable rung — a turbulent
+  broadband regime does not exist anywhere in this rig's stable
+  window. Reaching it requires an fs-lbm collision-model upgrade
+  (MRT/regularized/entropic) or 3D, both out of scope here.
 - Quadrupole (volume) sources: dipoles dominate at low Mach over
   rigid surfaces; the Lighthill volume term is out of scope v1.
 - Only orders 0 and 1 of the Bessel functions are provided (all the

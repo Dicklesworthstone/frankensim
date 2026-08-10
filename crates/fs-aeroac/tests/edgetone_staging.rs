@@ -382,3 +382,119 @@ fn edge_tone_adiabatic_ramp_hysteresis() {
         first.peak.bin
     );
 }
+
+/// HIGHER-RE TURBULENT-REGIME PROBE (the bead's last open scope,
+/// EXECUTED 2026-08-10): 2x-scaled rig (delta = 12 lu), Re swept by
+/// viscosity at fixed u = 0.08, asking whether the transverse-force
+/// spectrum leaves the tonal limit cycle (spectral-flatness rise)
+/// before the plain-BGK lattice destabilizes.
+///
+/// EXECUTED VERDICT — it does not: the stability boundary sits at
+/// cell Reynolds Re_cell = Re/delta in (36, 48) (Re 432 runs;
+/// Re 576 destabilizes during record; Re >= 1152 during settle;
+/// the coarse staging rig ran at Re_cell 44), and at Re 432 the
+/// spectrum is still an essentially pure tone (flatness ~1e-15,
+/// prominence ~1e20; St 0.0916 = 2.25x Brown stage I — a stage-II-
+/// scale mode on this rig scale, recorded not asserted). A
+/// turbulent broadband regime therefore DOES NOT EXIST inside
+/// plain BGK's stable window: true flute-noise spectra need a
+/// collision-model upgrade (MRT/regularized/entropic) in fs-lbm,
+/// or 3D — both out of this crate's scope, recorded as follow-up.
+///
+/// Pinned here: the Re 432 case must run and stay tonal, and every
+/// destabilization must surface as a TYPED refusal (the
+/// catch_unwind containment in jetlab — before it, fs-lbm's
+/// density assert panicked straight through the fixture).
+#[test]
+#[ignore = "heavy probe (~3 runs x 1.1G cell-updates); execute explicitly in release"]
+fn turbulent_regime_probe() {
+    for (re, tau) in [
+        (432.0, 0.506_667),
+        (576.0, 0.505),
+        (1152.0, 0.5025),
+        (2304.0, 0.501_25),
+    ] {
+        let cfg = JetLabiumConfig {
+            nx: 384,
+            ny: 128,
+            slot_half: 6.0,
+            slot_smoothing: 2.4,
+            u_jet: 0.08,
+            tau,
+            edge_distance: 120, // h/delta = 10
+            plate_length: 100,
+            fringe_width: 64,
+            fringe_sigma: 0.3,
+            steps_settle: 6000,
+            steps_record: 16_384,
+            seed_amplitude: 0.005,
+            nozzle_thickness: 4,
+        };
+        let run = match run_jet_labium(&cfg) {
+            Ok(r) => r,
+            Err(e) => {
+                println!(
+                    "{{\"suite\":\"fs-aeroac\",\"case\":\"turbulent-probe\",\"re\":{re:.0},\"verdict\":\"refused\",\"error\":\"{e}\"}}"
+                );
+                assert!(
+                    re >= 500.0,
+                    "destabilization below the executed boundary bracket: Re {re}"
+                );
+                continue;
+            }
+        };
+        assert!(
+            re < 500.0,
+            "Re {re} ran but the executed boundary bracket says it destabilizes — \
+             if a collision-model change moved the boundary, re-measure and re-pin"
+        );
+        let d = &run.diagnostics;
+        let imbalance = (d.flux_plate_plane - d.flux_fringe_plane).abs() / d.flux_plate_plane.abs();
+        match fs_aeroac::jetlab::transverse_force_peak(&run.force_series, 6.0, 0.08, 6) {
+            Ok(p) => {
+                // Spectral flatness over the admitted band: Hann
+                // periodogram, geometric/arithmetic power-mean ratio
+                // (1 = white, ~0 = pure tone).
+                let n = run.force_series.len();
+                let mean = run.force_series.iter().map(|f| f[1]).sum::<f64>() / n as f64;
+                let fft = Fft::new(n);
+                let mut buf: Vec<C64> = run
+                    .force_series
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let w = 0.5
+                            - 0.5
+                                * ((2.0 * core::f64::consts::PI * i as f64) / (n as f64 - 1.0))
+                                    .cos();
+                        C64::new((f[1] - mean) * w, 0.0)
+                    })
+                    .collect();
+                let mut scratch = vec![C64::new(0.0, 0.0); n];
+                fft.forward(&mut buf, &mut scratch);
+                let power: Vec<f64> = buf[6..n / 2].iter().map(|c| c.norm_sq()).collect();
+                let m = power.len() as f64;
+                let log_mean = power.iter().map(|p| p.max(1e-300).ln()).sum::<f64>() / m;
+                let arith = power.iter().sum::<f64>() / m;
+                let flatness = log_mean.exp() / arith.max(1e-300);
+                assert!(d.mach_max_lattice.is_finite() && p.force_rms.is_finite());
+                // The stable window is TONAL (executed flatness
+                // ~1e-15): a broadband (turbulent) spectrum inside
+                // plain BGK's stable window would falsify the
+                // recorded no-claim — surface it loudly.
+                assert!(
+                    flatness < 1.0e-6,
+                    "broadband spectrum inside the BGK stable window (flatness {flatness:.3e}) — \
+                     re-examine the turbulent no-claim"
+                );
+                println!(
+                    "{{\"suite\":\"fs-aeroac\",\"case\":\"turbulent-probe\",\"re\":{re:.0},\"tau\":{tau},\"st\":{:.5},\"bin\":{},\"prominence\":{:.3e},\"flatness\":{:.4e},\"force_rms\":{:.3e},\"imbalance\":{imbalance:.5},\"mach\":{:.3},\"verdict\":\"ran\"}}",
+                    p.strouhal, p.bin, p.prominence, flatness, p.force_rms, d.mach_max_lattice
+                );
+            }
+            Err(e) => println!(
+                "{{\"suite\":\"fs-aeroac\",\"case\":\"turbulent-probe\",\"re\":{re:.0},\"verdict\":\"peak-refused\",\"error\":\"{e}\"}}"
+            ),
+        }
+    }
+}
