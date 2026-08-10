@@ -8367,6 +8367,43 @@ mod tests {
             assert!(surface.surface_a.path_coordinate_m.is_finite());
             assert!(surface.surface_a.path_speed_m_per_s.is_finite());
             assert_ne!(surface.surface_a.path_speed_m_per_s, 0.0);
+            assert_eq!(
+                surface.surface_a.trace.authority(),
+                InputAuthority::Estimated
+            );
+            assert_eq!(
+                surface.surface_b.trace.authority(),
+                InputAuthority::Estimated
+            );
+            assert_eq!(surface.surface_a.trace.heights_m().len(), 4_096);
+            assert!(
+                surface
+                    .surface_b
+                    .trace
+                    .heights_m()
+                    .iter()
+                    .all(|height_m| height_m.to_bits() == 0.0_f64.to_bits()),
+                "the declared smooth support must not acquire generated texture"
+            );
+            let realized_disc_rms_m = fs_math::det::sqrt(
+                surface
+                    .surface_a
+                    .trace
+                    .heights_m()
+                    .iter()
+                    .map(|height_m| height_m * height_m)
+                    .sum::<f64>()
+                    / surface.surface_a.trace.heights_m().len() as f64,
+            );
+            let CinematicSurfaceSpectrumConfig::SelfAffine(disc_spectrum) =
+                &config.mechanics.disc_surface.spectrum
+            else {
+                panic!("default disc surface stopped using the physical self-affine profile");
+            };
+            assert!(
+                (realized_disc_rms_m / disc_spectrum.rms_height_m() - 1.0).abs() < 2.0e-13,
+                "realized fixture geometry changed the declared RMS height"
+            );
 
             let mechanics_steps_per_control_interval =
                 usize::try_from(config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ)
