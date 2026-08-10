@@ -36,9 +36,12 @@ pub struct NoiseEntry {
     /// (executed: total RMS was drift-dominated and read a flat
     /// velocity scaling).
     pub force_rms: f64,
-    /// Relative band levels [dB], normalized so the strongest band
-    /// is 0 dB; bands are log-spaced in Strouhal over
-    /// [`ST_LO`], [`ST_HI`].
+    /// Relative band power DENSITY levels [dB] (band power divided
+    /// by the band's bin count — density, so the shape is
+    /// record-length-independent; a band-SUM convention broke the
+    /// synth round trip by the log-band width ratio, executed),
+    /// normalized so the strongest band is 0 dB; bands are
+    /// log-spaced in Strouhal over [`ST_LO`], [`ST_HI`].
     pub band_db: [f64; N_BANDS],
 }
 
@@ -138,11 +141,22 @@ pub fn fit_noise_table(
         fft.forward(&mut buf, &mut scratch);
         let delta = 2.0 * cfg.slot_half;
         let mut band_pow = [0.0f64; N_BANDS];
+        let mut band_bins = [0usize; N_BANDS];
         for (k, c) in buf[..n / 2].iter().enumerate().skip(1) {
             #[allow(clippy::cast_precision_loss)]
             let st = (k as f64 / nf) * delta / u;
             if let Some(b) = band_of(st) {
                 band_pow[b] += c.norm_sq();
+                band_bins[b] += 1;
+            }
+        }
+        // Density: divide each band by its bin count (empty bands
+        // stay zero and read the -30 dB floor below).
+        for (p, &m) in band_pow.iter_mut().zip(&band_bins) {
+            if m > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                let mf = m as f64;
+                *p /= mf;
             }
         }
         let peak = band_pow.iter().copied().fold(f64::MIN, f64::max);

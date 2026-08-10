@@ -111,6 +111,12 @@ fn noise_table_sweep_export_and_synth_round_trip() {
             band_bins[b] += 1;
         }
     }
+    // Density normalization, matching the table's convention.
+    for (p, &m) in band_pow.iter_mut().zip(&band_bins) {
+        if m > 0 {
+            *p /= m as f64;
+        }
+    }
     let entry = &table.entries[1];
     let peak = band_pow.iter().copied().fold(f64::MIN, f64::max);
     let mut worst = 0.0f64;
