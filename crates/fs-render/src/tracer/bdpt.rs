@@ -284,16 +284,23 @@ fn publish_source_splats(film: &mut Film, splats: &mut Vec<SplatRecord>) {
 }
 
 #[derive(Clone, Copy)]
-struct SubpathRng {
+struct SubpathRng<'a> {
     pixel: u32,
     sample: u32,
     dimension: u32,
     domain: u32,
     key: [u32; 2],
+    sobol: Option<&'a Sobol>,
 }
 
-impl SubpathRng {
-    fn new(settings: &Settings, pixel: u32, sample: u32, domain: u32) -> Self {
+impl<'a> SubpathRng<'a> {
+    fn new(
+        settings: &Settings,
+        pixel: u32,
+        sample: u32,
+        domain: u32,
+        sobol: Option<&'a Sobol>,
+    ) -> Self {
         Self {
             pixel,
             sample,
@@ -303,10 +310,26 @@ impl SubpathRng {
                 (settings.seed & 0xffff_ffff) as u32,
                 (settings.seed >> 32) as u32,
             ],
+            sobol,
         }
     }
 
     fn next4(&mut self) -> [f64; 4] {
+        if let Some(sobol) = self.sobol {
+            // Each logical path block owns a separate nested Owen tree. This
+            // avoids data-dependent dimension consumption while retaining the
+            // sample index as the Sobol point index. Camera walk, light walk,
+            // and every `(s,t)` connector use disjoint domains.
+            let seed_words = philox4x32_10(
+                [self.pixel, self.domain, self.dimension, 0x4244_514d],
+                self.key,
+            );
+            let scramble_seed = u64::from(seed_words[0]) | (u64::from(seed_words[1]) << 32);
+            let mut values = [0.0; PATH_QMC_DIMENSIONS];
+            sobol.point_with_owen_scramble(self.sample, &mut values, scramble_seed);
+            self.dimension = self.dimension.wrapping_add(1);
+            return [values[0], values[1], values[2], values[3]];
+        }
         let words = philox4x32_10(
             [self.pixel, self.sample, self.dimension, self.domain],
             self.key,
@@ -596,7 +619,7 @@ fn random_walk(
     mut pdf_fwd_solid_angle: f64,
     max_vertices: usize,
     vertices: &mut Vec<Vertex>,
-    rng: &mut SubpathRng,
+    rng: &mut SubpathRng<'_>,
 ) -> Result<Option<CameraEscape>, TracerError> {
     let mut stack = MediumStack::new();
     let mut segment_origin = ray.origin;
@@ -711,6 +734,7 @@ fn generate_camera_subpath(
     wavelength_nm: f64,
     pixel: u32,
     sample: u32,
+    path_sobol: Option<&Sobol>,
 ) -> Result<CameraSubpath, TracerError> {
     let raster = physical_camera
         .pinhole_raster_sample(ray.origin.offset(ray.dir), settings.width, settings.height)?
@@ -720,7 +744,7 @@ fn generate_camera_subpath(
     }
     let mut vertices = Vec::with_capacity(settings.max_depth as usize + 2);
     vertices.push(Vertex::camera(ray.origin));
-    let mut rng = SubpathRng::new(settings, pixel, sample, CAMERA_WALK_DOMAIN);
+    let mut rng = SubpathRng::new(settings, pixel, sample, CAMERA_WALK_DOMAIN, path_sobol);
     let escape = random_walk(
         scene,
         cx,
@@ -746,8 +770,9 @@ fn generate_light_subpath(
     wavelength_nm: f64,
     pixel: u32,
     sample: u32,
+    path_sobol: Option<&Sobol>,
 ) -> Result<Vec<Vertex>, TracerError> {
-    let mut rng = SubpathRng::new(settings, pixel, sample, LIGHT_WALK_DOMAIN);
+    let mut rng = SubpathRng::new(settings, pixel, sample, LIGHT_WALK_DOMAIN, path_sobol);
     let random = rng.next4();
     let Some(emission) =
         lighting.sample_rectangle_emission(random[0], random[1], random[2], random[3])
@@ -1411,6 +1436,7 @@ fn evaluate_strategies(
     source_pixel: u32,
     sample: u32,
     wavelength_nm: f64,
+    path_sobol: Option<&Sobol>,
     light_vertices: &[Vertex],
     camera_subpath: &CameraSubpath,
     film: &mut Film,
@@ -1451,8 +1477,13 @@ fn evaluate_strategies(
                 continue;
             }
             stats.evaluated = stats.evaluated.saturating_add(1);
-            let mut connection_rng =
-                SubpathRng::new(settings, source_pixel, sample, CONNECTION_DOMAIN);
+            let mut connection_rng = SubpathRng::new(
+                settings,
+                source_pixel,
+                sample,
+                CONNECTION_DOMAIN,
+                path_sobol,
+            );
             connection_rng.dimension = ((s as u32) << 16) ^ t as u32;
             let contribution = if s == 0 {
                 if t < 2 {
@@ -1561,6 +1592,7 @@ fn render_admitted_sample_range(
     from: u32,
     to: u32,
     sobol: Option<&Sobol>,
+    path_sobol: Option<&Sobol>,
 ) -> Result<BidirectionalRenderOutput, TracerError> {
     if from > to || to > settings.spp {
         return Err(TracerError::InvalidInput);
@@ -1619,6 +1651,7 @@ fn render_admitted_sample_range(
                 wavelength_nm,
                 pixel,
                 sample,
+                path_sobol,
             )?;
             let light_subpath = generate_light_subpath(
                 scene,
@@ -1629,6 +1662,7 @@ fn render_admitted_sample_range(
                 wavelength_nm,
                 pixel,
                 sample,
+                path_sobol,
             )?;
             evaluate_strategies(
                 scene,
@@ -1640,6 +1674,7 @@ fn render_admitted_sample_range(
                 pixel,
                 sample,
                 wavelength_nm,
+                path_sobol,
                 &light_subpath,
                 &camera_subpath,
                 &mut film,
@@ -1714,6 +1749,7 @@ pub fn render_cinematic_bidirectional(
         camera_path,
     )?;
     let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let mut film = Film::try_new(settings.width, settings.height)?;
     let mut strategies = BidirectionalStrategyStats::default();
     let mut from = 0;
@@ -1732,6 +1768,7 @@ pub fn render_cinematic_bidirectional(
             from,
             to,
             sobol.as_ref(),
+            path_sobol.as_ref(),
         )?;
         merge_block(&mut film, &mut strategies, block)?;
         from = to;
@@ -1748,6 +1785,7 @@ struct BidirectionalSampleKernel<'run, 'assets> {
     settings: &'run Settings,
     shutter: ShutterInterval,
     sobol: Option<&'run Sobol>,
+    path_sobol: Option<&'run Sobol>,
     results: &'run Mutex<Vec<Option<BidirectionalRenderOutput>>>,
     failures: &'run Mutex<Option<(u64, RenderTileFailure)>>,
     sample_blocks: u64,
@@ -1805,6 +1843,7 @@ impl TileKernel for BidirectionalSampleKernel<'_, '_> {
             from,
             to,
             self.sobol,
+            self.path_sobol,
         );
         atomic_saturating_add(self.compute_ns, elapsed_ns(started));
         let result = match result {
@@ -1924,6 +1963,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
     })?;
     staged.resize_with(sample_block_len, || None);
     let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let path_sobol = path_sobol(settings.sampler);
     let results = Mutex::new(staged);
     let failures = Mutex::new(None);
     let compute_ns = AtomicU64::new(0);
@@ -1935,6 +1975,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
         settings,
         shutter,
         sobol: sobol.as_ref(),
+        path_sobol: path_sobol.as_ref(),
         results: &results,
         failures: &failures,
         sample_blocks,
@@ -1974,6 +2015,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
         .saturating_sub(block_compute_ns);
     drop(blocks);
     drop(sobol);
+    drop(path_sobol);
     drop(sampler_charge);
     drop(splat_charge);
     drop(staging_charge);
@@ -2120,6 +2162,26 @@ mod tests {
     }
 
     #[test]
+    fn g5_full_path_qmc_is_replayable_and_domain_separated() {
+        let settings = Settings {
+            width: 1,
+            height: 1,
+            spp: 16,
+            max_depth: 1,
+            sampler: Sampler::OwenSobolFullPath,
+            strategy: DirectStrategy::Mis,
+            seed: 0x514d_4342,
+        };
+        let sobol = path_sobol(settings.sampler).unwrap();
+        let draw = |domain| {
+            SubpathRng::new(&settings, 7, 5, domain, Some(&sobol)).next4()
+        };
+        assert_eq!(draw(CAMERA_WALK_DOMAIN), draw(CAMERA_WALK_DOMAIN));
+        assert_ne!(draw(CAMERA_WALK_DOMAIN), draw(LIGHT_WALK_DOMAIN));
+        assert_ne!(draw(LIGHT_WALK_DOMAIN), draw(CONNECTION_DOMAIN));
+    }
+
+    #[test]
     fn g0_medium_identity_is_not_only_an_ior_comparison() {
         let glass = DielectricGlass::representative_borosilicate();
         let left = MediumEntry {
@@ -2243,6 +2305,65 @@ mod tests {
             assert_eq!(front.film.xyz, back.film.xyz);
             assert!(front.film.xyz[0].iter().all(|value| *value > 0.0));
             assert!(front.strategies.nonzero > 0);
+        });
+    }
+
+    #[test]
+    fn g5_parallel_sample_blocks_match_serial_and_worker_counts_bitwise() {
+        let settings = Settings {
+            width: 1,
+            height: 1,
+            spp: BIDIRECTIONAL_SAMPLE_BLOCK + 1,
+            max_depth: 0,
+            sampler: Sampler::Iid,
+            strategy: DirectStrategy::Mis,
+            seed: 29,
+        };
+        with_test_cx(|cx| {
+            let (scene, camera, shutter) = direct_emitter_scene(true);
+            let serial = render_cinematic_bidirectional(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+            )
+            .unwrap();
+            let one_worker =
+                RenderExecutionConfig::try_new(1, 1, 1, 16 * 1024 * 1024, RunId(0x4244_5054))
+                    .unwrap();
+            let two_workers =
+                RenderExecutionConfig::try_new(1, 1, 2, 16 * 1024 * 1024, RunId(0x4244_5055))
+                    .unwrap();
+            let one = render_cinematic_bidirectional_with_execution(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+                &one_worker,
+            )
+            .unwrap();
+            let two = render_cinematic_bidirectional_with_execution(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+                &two_workers,
+            )
+            .unwrap();
+            assert_eq!(serial.film, one.film);
+            assert_eq!(one.film, two.film);
+            assert_eq!(serial.strategies, one.strategies);
+            assert_eq!(one.strategies, two.strategies);
+            assert_eq!(one.report.sample_blocks, 2);
+            assert_eq!(two.report.sample_blocks, 2);
+            assert_eq!(one.report.workers, 1);
+            assert_eq!(two.report.workers, 2);
         });
     }
 }

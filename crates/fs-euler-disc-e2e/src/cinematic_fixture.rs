@@ -163,9 +163,9 @@ use fs_render::{
     },
     tracer::{
         ADAPTIVE_SAMPLING_SEMANTICS_VERSION, AdaptiveFilm, AdaptiveSamplingConfig,
-        IndependentPilotAllocationConfig, IndependentPilotSamplePlan, MAX_RENDER_TILE_EDGE,
-        MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport, RenderWorkerPool,
-        Sampler, Settings, film_to_exr,
+        BidirectionalExecutionReport, IndependentPilotAllocationConfig, IndependentPilotSamplePlan,
+        MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport,
+        RenderWorkerPool, Sampler, Settings, film_to_exr,
     },
 };
 use fs_rep_frep::SquatDiscEdgeTreatment;
@@ -1122,6 +1122,16 @@ impl Default for CinematicMechanicsConfig {
     }
 }
 
+/// Light-transport estimator used for cinematic beauty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CinematicRenderIntegrator {
+    /// Camera-subpath tracing with next-event estimation and MIS.
+    #[default]
+    CameraPathMis,
+    /// Strategy-complete finite-rectangle bidirectional path tracing.
+    Bidirectional,
+}
+
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CinematicFixtureConfig {
@@ -1135,6 +1145,8 @@ pub struct CinematicFixtureConfig {
     pub frame_window: CinematicFrameWindow,
     /// Uniform path-tracing samples per pixel.
     pub samples_per_pixel: u32,
+    /// Explicit light-transport estimator for the beauty film.
+    pub render_integrator: CinematicRenderIntegrator,
     /// Optional deterministic variance-targeted raw sampling policy.
     ///
     /// Beauty, retained AOVs, and denoising guides all observe each pixel's
@@ -1202,6 +1214,7 @@ impl Default for CinematicFixtureConfig {
             frames: CRITIQUE_FRAMES,
             frame_window: CinematicFrameWindow::Full,
             samples_per_pixel: 1,
+            render_integrator: CinematicRenderIntegrator::CameraPathMis,
             adaptive_sampling: None,
             independent_pilot_sampling: None,
             render_seed_salt: 0,
@@ -1262,6 +1275,18 @@ impl CinematicFixtureConfig {
             return Err(CinematicFixtureError::InvalidConfig(
                 "samples_per_pixel must be in 1..=4096",
             ));
+        }
+        if self.render_integrator == CinematicRenderIntegrator::Bidirectional {
+            if self.adaptive_sampling.is_some() || self.independent_pilot_sampling.is_some() {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "bidirectional rendering currently requires uniform fixed SPP",
+                ));
+            }
+            if self.denoise_previews || self.retain_full_aov_exr {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "bidirectional rendering currently requires --no-denoise and --beauty-only-exr because aligned BDPT variance/AOV accumulation is not yet implemented",
+                ));
+            }
         }
         if let Some(adaptive) = self.adaptive_sampling {
             if adaptive.minimum_samples_per_pixel < 2 || adaptive.minimum_samples_per_pixel > 4_096
@@ -3167,16 +3192,59 @@ struct FixtureRenderEvidence {
     idle_worker_ns: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixtureFrameRenderReport {
+    workers: usize,
+    logical_work_units: u64,
+    traversal_ns: u64,
+    compute_ns: u64,
+    merge_ns: u64,
+    peak_memory_bytes: u64,
+    setup_ns: u64,
+    publication_ns: u64,
+    idle_worker_ns: u64,
+}
+
+impl FixtureFrameRenderReport {
+    fn camera_path(report: &RenderExecutionReport) -> Self {
+        Self {
+            workers: report.workers,
+            logical_work_units: report.layout.tile_count(),
+            traversal_ns: report.traversal_ns,
+            compute_ns: report.tile_compute_ns,
+            merge_ns: report.tile_merge_ns,
+            peak_memory_bytes: report.memory.peak_bytes,
+            setup_ns: report.setup_ns,
+            publication_ns: report.publication_ns,
+            idle_worker_ns: report.idle_worker_ns,
+        }
+    }
+
+    fn bidirectional(report: &BidirectionalExecutionReport) -> Self {
+        Self {
+            workers: report.workers,
+            logical_work_units: report.sample_blocks,
+            traversal_ns: report.traversal_ns,
+            compute_ns: report.block_compute_ns,
+            merge_ns: 0,
+            peak_memory_bytes: report.memory.peak_bytes,
+            setup_ns: report.setup_ns,
+            publication_ns: report.publication_ns,
+            idle_worker_ns: report.idle_worker_ns,
+        }
+    }
+}
+
 impl FixtureRenderEvidence {
-    fn observe(&mut self, report: &RenderExecutionReport) {
+    fn observe(&mut self, report: FixtureFrameRenderReport) {
         self.frames += 1;
         self.maximum_effective_workers = self.maximum_effective_workers.max(report.workers);
         self.maximum_peak_memory_bytes =
-            self.maximum_peak_memory_bytes.max(report.memory.peak_bytes);
+            self.maximum_peak_memory_bytes.max(report.peak_memory_bytes);
         self.setup_ns += u128::from(report.setup_ns);
         self.traversal_ns += u128::from(report.traversal_ns);
-        self.tile_compute_ns += u128::from(report.tile_compute_ns);
-        self.tile_merge_ns += u128::from(report.tile_merge_ns);
+        self.tile_compute_ns += u128::from(report.compute_ns);
+        self.tile_merge_ns += u128::from(report.merge_ns);
         self.publication_ns += u128::from(report.publication_ns);
         self.idle_worker_ns += u128::from(report.idle_worker_ns);
     }
@@ -4406,9 +4474,49 @@ pub fn run_cinematic_fixture(
             )
             .map_err(pipeline)?;
             let color = critique_color_config();
-            let (exr, preview, report, sampling_progress) = if let Some(pilot_config) =
-                config.independent_pilot_sampling
+            let (exr, preview, report, sampling_progress) = if config.render_integrator
+                == CinematicRenderIntegrator::Bidirectional
             {
+                let output = renderer
+                    .render_cinematic_bidirectional(
+                        scene.scene(),
+                        scene.camera(),
+                        prepared.cut_side(),
+                        cx,
+                        &render_settings,
+                        prepared.segments()[0].shutter(),
+                        &frame_execution,
+                    )
+                    .map_err(pipeline)?;
+                let report = FixtureFrameRenderReport::bidirectional(&output.report);
+                let strategies = output.strategies;
+                let film = output.film;
+                let exr = film_to_exr(&film).map_err(pipeline)?;
+                let [red, green, blue] = film.to_linear_srgb();
+                let preview = transform_cinematic_preview(
+                    config.width,
+                    config.height,
+                    [&red, &green, &blue],
+                    color,
+                    CinematicColorLimits::reference_4k(),
+                )
+                .map_err(pipeline)?;
+                (
+                    exr,
+                    preview,
+                    report,
+                    format!(
+                        concat!(
+                            "sampling=uniform-bdpt spp={} evaluated_strategies={} ",
+                            "nonzero_strategies={} camera_splats={}"
+                        ),
+                        config.samples_per_pixel,
+                        strategies.evaluated,
+                        strategies.nonzero,
+                        strategies.camera_splats,
+                    ),
+                )
+            } else if let Some(pilot_config) = config.independent_pilot_sampling {
                 let mut pilot_settings = render_settings;
                 pilot_settings.spp = pilot_config.pilot_samples_per_pixel;
                 pilot_settings.seed = independent_pilot_seed(render_settings.seed);
@@ -4545,7 +4653,12 @@ pub fn run_cinematic_fixture(
                     independent_pilot_seed(render_settings.seed),
                     render_settings.seed,
                 );
-                (exr, preview, output.report, sampling_progress)
+                (
+                    exr,
+                    preview,
+                    FixtureFrameRenderReport::camera_path(&output.report),
+                    sampling_progress,
+                )
             } else if let Some(policy) = adaptive_policy {
                 let adaptive_config = config
                     .adaptive_sampling
@@ -4651,7 +4764,12 @@ pub fn run_cinematic_fixture(
                     summary.converged_pixels,
                     summary.maximum_sample_pixels,
                 );
-                (exr, preview, output.report, sampling_progress)
+                (
+                    exr,
+                    preview,
+                    FixtureFrameRenderReport::camera_path(&output.report),
+                    sampling_progress,
+                )
             } else {
                 let output = renderer
                     .render_cinematic_with_aovs(
@@ -4735,26 +4853,26 @@ pub fn run_cinematic_fixture(
                 (
                     exr,
                     preview,
-                    output.report,
+                    FixtureFrameRenderReport::camera_path(&output.report),
                     format!("sampling=uniform spp={}", config.samples_per_pixel),
                 )
             };
             progress(&format!(
                 concat!(
-                    "stage=render frame={}/{} workers={} tiles={} ",
+                    "stage=render frame={}/{} workers={} logical_work_units={} ",
                     "traversal_ms={:.3} compute_ms={:.3} merge_ms={:.3} peak_mib={:.3} {}"
                 ),
                 frame - render_frame_range.start + 1,
                 render_frame_range.len(),
                 report.workers,
-                report.layout.tile_count(),
+                report.logical_work_units,
                 report.traversal_ns as f64 / 1.0e6,
-                report.tile_compute_ns as f64 / 1.0e6,
-                report.tile_merge_ns as f64 / 1.0e6,
-                report.memory.peak_bytes as f64 / (1024.0 * 1024.0),
+                report.compute_ns as f64 / 1.0e6,
+                report.merge_ns as f64 / 1.0e6,
+                report.peak_memory_bytes as f64 / (1024.0 * 1024.0),
                 sampling_progress,
             ));
-            render_evidence.observe(&report);
+            render_evidence.observe(report);
             raw_sequence.update(hash_domain("frame", &exr).as_bytes());
             write_new(&raw_directory.join(format!("frame-{frame:06}.exr")), &exr)?;
             drop(exr);
@@ -5065,6 +5183,10 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
     hasher.update(&config.frames.to_le_bytes());
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
     hasher.update(&config.render_sample_ceiling().to_le_bytes());
+    match config.render_integrator {
+        CinematicRenderIntegrator::CameraPathMis => hasher.update(b"camera-path-mis-v1"),
+        CinematicRenderIntegrator::Bidirectional => hasher.update(b"finite-light-bdpt-v1"),
+    }
     if let Some(policy) = config.independent_pilot_sampling {
         let admitted = policy
             .allocation()
@@ -8203,8 +8325,12 @@ fn fixture_sampling_manifest_json(
         adaptive.manifest_json(policy)
     } else {
         format!(
-            "{{\"mode\":\"uniform\",\"samples_per_pixel\":{}}}",
-            config.samples_per_pixel
+            "{{\"mode\":\"uniform\",\"integrator\":\"{}\",\"samples_per_pixel\":{}}}",
+            match config.render_integrator {
+                CinematicRenderIntegrator::CameraPathMis => "camera-path-mis-v1",
+                CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v1",
+            },
+            config.samples_per_pixel,
         )
     }
 }
@@ -8268,6 +8394,10 @@ fn production_fixture_manifest(
         Sampler::OwenSobol => "owen-sobol",
         Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
     };
+    let render_integrator = match config.render_integrator {
+        CinematicRenderIntegrator::CameraPathMis => "camera-path-mis-v1",
+        CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v1",
+    };
     let reconstruction_filter = fixture_reconstruction_filter_spec();
     format!(
         concat!(
@@ -8278,7 +8408,7 @@ fn production_fixture_manifest(
             "\"rendered_frame_start\":{},\"rendered_frame_end_exclusive\":{},\"duration_s\":{:.17e},",
             "\"raw_sequence_identity\":\"{}\",\"preview_sequence_identity\":\"{}\",",
             "\"over_range_linear_channels\":{},\"gamut_mapped_pixels\":{},",
-            "\"sampling\":{},\"sampler\":\"{}\",\"render_seed_salt\":{},",
+            "\"sampling\":{},\"sampler\":\"{}\",\"integrator\":\"{}\",\"render_seed_salt\":{},",
             "\"max_depth\":{},\"shutter_angle_degrees\":{},",
             "\"denoise\":{{\"applied_frames\":{},\"maximum_retained_bytes\":{},",
             "\"maximum_history_frames\":{}}},\"preview_mesh\":{}}},\n",
@@ -8334,6 +8464,7 @@ fn production_fixture_manifest(
         gamut_mapped_pixels,
         adaptive_json,
         render_sampler,
+        render_integrator,
         config.render_seed_salt,
         config.max_depth,
         config.shutter_angle_degrees,
@@ -9266,6 +9397,10 @@ mod tests {
         assert_eq!(config.frame_window, CinematicFrameWindow::Full);
         assert_eq!(config.render_seed_salt, 0);
         assert_eq!(config.render_sampler, Sampler::OwenSobolFullPath);
+        assert_eq!(
+            config.render_integrator,
+            CinematicRenderIntegrator::CameraPathMis
+        );
         assert_eq!((config.width, config.height), (320, 180));
         assert_eq!(config.azimuthal_segments, 512);
         assert_eq!(config.arc_subdivisions_per_arc, 64);
@@ -9278,6 +9413,36 @@ mod tests {
         assert!(config.spatialize_audio);
         assert_eq!(config.adaptive_sampling, None);
         assert_eq!(config.render_sample_ceiling(), config.samples_per_pixel);
+    }
+
+    #[test]
+    fn bdpt_fixture_mode_refuses_misaligned_aovs_and_adaptive_sampling() {
+        let mut config = CinematicFixtureConfig::default();
+        config.render_integrator = CinematicRenderIntegrator::Bidirectional;
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(
+                "bidirectional rendering currently requires --no-denoise and --beauty-only-exr because aligned BDPT variance/AOV accumulation is not yet implemented"
+            ))
+        ));
+
+        config.denoise_previews = false;
+        config.retain_full_aov_exr = false;
+        config.validate().unwrap();
+        config.adaptive_sampling = Some(CinematicAdaptiveSamplingConfig {
+            minimum_samples_per_pixel: 8,
+            maximum_samples_per_pixel: 64,
+            decision_batch_samples: 4,
+            absolute_error: 1.0e-4,
+            relative_error: 0.02,
+            dark_floor: 1.0e-5,
+        });
+        assert!(matches!(
+            config.validate(),
+            Err(CinematicFixtureError::InvalidConfig(
+                "bidirectional rendering currently requires uniform fixed SPP"
+            ))
+        ));
     }
 
     #[test]

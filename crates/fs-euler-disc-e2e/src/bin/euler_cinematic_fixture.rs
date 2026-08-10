@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_euler_disc_e2e::cinematic_fixture::{
     CinematicAdaptiveSamplingConfig, CinematicFixtureConfig, CinematicFrameWindow,
-    CinematicIndependentPilotSamplingConfig, CinematicInitialMotionConfig, run_cinematic_fixture,
+    CinematicIndependentPilotSamplingConfig, CinematicInitialMotionConfig,
+    CinematicRenderIntegrator, run_cinematic_fixture,
 };
 use fs_euler_disc_e2e::render_scene_bridge::{
     MAX_EULER_ARC_SUBDIVISIONS, MAX_EULER_AZIMUTHAL_SEGMENTS,
@@ -154,6 +155,10 @@ fn run() -> Result<(), String> {
             "--sampler" => {
                 config.render_sampler = parse_sampler(&next_value(&mut args, "--sampler")?)?
             }
+            "--integrator" => {
+                config.render_integrator =
+                    parse_integrator(&next_value(&mut args, "--integrator")?)?
+            }
             "--max-depth" => {
                 config.max_depth = parse(&next_value(&mut args, "--max-depth")?, "max-depth")?
             }
@@ -203,6 +208,7 @@ fn run() -> Result<(), String> {
                     "Usage: euler_cinematic_fixture [--output DIR] [--width PX] [--height PX] \
                      [--frames 192] [--frame-start N --frame-count N --no-mux] \
                      [--spp N] [--sampler iid|owen-pixel|owen-full-path] \
+                     [--integrator camera-path|bdpt] \
                      [--render-seed-salt N] [--max-depth N] [--shutter-angle 0..360] \
                      [--initial-inclination-rad 0<THETA<=0.35] \
                      [--azimuthal-segments 8..4096] [--arc-subdivisions 1..1024] \
@@ -419,6 +425,16 @@ fn parse_sampler(value: &str) -> Result<Sampler, String> {
     }
 }
 
+fn parse_integrator(value: &str) -> Result<CinematicRenderIntegrator, String> {
+    match value {
+        "camera-path" => Ok(CinematicRenderIntegrator::CameraPathMis),
+        "bdpt" => Ok(CinematicRenderIntegrator::Bidirectional),
+        _ => Err(format!(
+            "invalid integrator: {value}; expected camera-path or bdpt"
+        )),
+    }
+}
+
 fn parse_initial_inclination(value: &str) -> Result<CinematicInitialMotionConfig, String> {
     let inclination_rad: f64 = parse(value, "initial-inclination-rad")?;
     if !(inclination_rad.is_finite() && inclination_rad > 0.0 && inclination_rad <= 0.35) {
@@ -443,6 +459,19 @@ fn parse<T: core::str::FromStr>(value: &str, name: &str) -> Result<T, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrator_cli_names_are_explicit_and_fail_closed() {
+        assert_eq!(
+            parse_integrator("camera-path").unwrap(),
+            CinematicRenderIntegrator::CameraPathMis
+        );
+        assert_eq!(
+            parse_integrator("bdpt").unwrap(),
+            CinematicRenderIntegrator::Bidirectional
+        );
+        assert!(parse_integrator("path").is_err());
+    }
 
     fn complete_adaptive_options() -> AdaptiveCliOptions {
         AdaptiveCliOptions {
