@@ -184,8 +184,14 @@ test).
     overestimates FM > 4 Hz; this realisation reads ~1.5x at the
     4 Hz FM point) and gated qualitatively; the Bark formula
     cross-checks the independent Daniel-Weber BARK_FREQS table
-    within 0.35 Bark; unmodulated/silent inputs are smooth/zero;
-    refusals typed; determinism bitwise.
+    within 0.35 Bark; AM BROADBAND NOISE (the decorrelated-channel
+    class that exercises the Eq 9 cross covariance — review-executed:
+    a k := 1 mutant passed every tone gate) reads 1.849 vacil at the
+    published 1.80 point (envelope 0.9..2.7 + bandpass shape); the
+    paper's 3:1 compression worked example (0.85 -> 0.75) is pinned
+    directly (the tone battery never crosses the knee —
+    review-executed clamp mutant); unmodulated/silent inputs are
+    smooth/zero; refusals typed; determinism bitwise.
 14. Roughness: the 100% AM 1 kHz 60 dB sweep PEAKS in 55..90 Hz (the
    published ~70 Hz signature), ALL SEVEN sweep values match the
    standalone reference run within 1e-12 relative (exactness pins;
@@ -220,9 +226,10 @@ None.
 
 ## Conformance tests
 
-`tests/fluctuation.rs` (6 + 2 ignored probes): reference
-calibration; published AM curve + shape; FM behavior; smoothness;
-Bark cross-check; refusals + determinism.
+`tests/fluctuation.rs` (8 + 2 ignored probes): reference
+calibration; published AM curve + shape; FM behavior; AM broadband
+noise (cross-covariance discriminator); compression-knee pin;
+smoothness; Bark cross-check; refusals + determinism.
 
 `tests/psycho.rs` (20 + 1 ignored provenance tool): ISO signal-1
 exactness; cross-path tone
