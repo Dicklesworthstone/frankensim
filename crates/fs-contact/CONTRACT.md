@@ -64,6 +64,63 @@ checkpoint is the only rollback source. Eventful, stale, future, duplicate, and
 nonconverged samples refuse before publishing a port. The embedded transition
 retains the law receipt identities, uncertainty, and applicability fields.
 
+### Finite-gap elastic half-space contact
+
+`normal_patch::solve_finite_gap_half_space` is the reference rung for contact
+patches whose exact undeformed separation is no longer adequately represented
+by a local quadratic tangent. The caller supplies an arbitrary finite relative
+gap on a uniform tangent-plane grid and a prescribed rigid approach. Exact
+constant-rectangle integrals of the Boussinesq `1/r` surface-compliance kernel
+couple the cells; a deterministic active-set solve enforces nonnegative
+pressure, nonnegative final separation, and complementarity. The receipt
+retains the complete pressure/opening fields, resultant, pressure centroid and
+second-moment footprint, reversible elastic energy, active-set count, residual,
+and a content identity.
+
+`normal_patch::sample_finite_gap_from_chart` supplies the representation-neutral
+geometry bridge. Given any solid `fs-geom::Chart`, a caller-bound geometry
+identity, and an orthonormal support frame, it brackets the first
+outside-to-inside surface crossing along the inward normal at every grid cell.
+Its strict route requires the chart's rigorous continuous trace enclosure,
+refuses missing outside/inside brackets or an unresolved zero-straddling
+sample, and retains both endpoints of every height bracket rather than silently
+collapsing geometry uncertainty into the nominal midpoint. A caller may
+explicitly admit a finite nominal `NoClaim` chart for convergence-reference
+work; any such sign decision downgrades the complete sampling receipt to
+`Estimate`, and its retained intervals cease to be presented as rigorous
+bounds. Consequently analytic, SDF, FRep, NURBS-derived, or mesh-derived charts
+can feed the same contact solver under an explicit evidence policy; the adapter
+contains no Euler-disc profile special case.
+
+This is deliberately a convergence-reference and response-table generator,
+not a per-audio-sample dense solve. Positive pressure inside a caller-required
+boundary ring is a typed domain-size refusal, so a truncated pressure patch can
+never be presented as a physical result. G1 manufactured coverage compares an
+independently sampled paraboloid against the analytic Hertz force and footprint.
+
+`normal_patch::build_finite_gap_response_curve` performs that offline-to-hot-path
+transition without replacing the constitutive response by a fitted Hertz law.
+It runs the dense solver at explicit, strictly increasing approach nodes,
+requires nondecreasing force, and retains every underlying contact identity.
+Runtime interpolation is piecewise linear in force and analytically integrated
+over the same segment, so its tangent and stored energy obey
+`dU/d(delta) = F`. The independent dense-solve strain energy remains attached
+to every node; construction refuses when the curve-integral discrepancy exceeds
+the caller's absolute-plus-relative refinement budget. Evaluation refuses
+extrapolation rather than silently extending a table beyond its geometry/load
+domain. The curve retains the source gap's authority separately, but every
+interpolated response is explicitly `Estimate`: even an enclosed source gap
+does not promote a piecewise-linear value between dense nodes without an
+interval interpolation remainder.
+
+`normal_patch::FiniteGapResponseFamily` composes curves on one identical
+approach grid across a caller-named scalar configuration coordinate. Bilinear
+force and stored-energy interpolation preserves `dU/d(delta) = F` at fixed
+configuration, while both coordinate and approach extrapolation refuse. This
+is the reusable hot-path surface for slowly changing geometry state such as
+inclination; it remains `Estimate` and does not hide configuration-grid
+refinement error.
+
 ### Ordered material/interface binding
 
 `interface_binding` retains the complete immutable `InterfaceSystemCard`, its
@@ -249,6 +306,20 @@ through-shot's sphere-entry window survives as Retained).
   admission, not physical validation: it does not infer missing
   friction/roughness/damping values, establish a surface as representative of a
   physical specimen, or extend a solid material through a phase transition.
+
+- The finite-gap rung removes the *quadratic-gap* approximation only. It still
+  assumes frictionless, nonadhesive, small-strain linear elastic half spaces and
+  piecewise-constant pressure cells. Grid/domain refinement, half-space-depth
+  and finite-layer applicability, yield/fracture, material uncertainty,
+  roughness/load sharing, and comparison with a finite-body FEM/BEM or an
+  experiment remain caller obligations. Chart-to-gap bracketing proves one
+  first crossing along each requested normal line; it is not a global convexity,
+  single-valued-height, support-point, or topology certificate. Its
+  second-moment semiaxes summarize the pressure field; they do not assert a
+  Hertz pressure shape. A response curve is a passive table approximation to
+  its retained dense solves, not a certificate between approach nodes; approach
+  refinement and inclination/profile-state interpolation remain caller-visible
+  error dimensions.
 
 - Certified CCD verdicts remain ENCLOSURE verdicts: `PossibleContact` /
   `Retained` windows localize in time but never adjudicate contact;
