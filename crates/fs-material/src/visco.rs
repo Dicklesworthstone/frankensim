@@ -331,11 +331,24 @@ impl GeneralizedMaxwell {
     /// trapezoidal external work minus stored energy
     /// `U = ½E∞ε² + Σ ½E_j q_j²`. Returns the new stress.
     pub fn step(&self, state: &mut PronyState, strain_new: f64, dt: f64) -> f64 {
+        assert!(
+            dt.is_finite() && dt >= 0.0,
+            "Prony step requires a finite non-negative dt"
+        );
         let d_eps = strain_new - state.strain;
         let stress_old = state.stress;
         for (j, &(_e, tau)) in self.terms.iter().enumerate() {
             let a = det::exp(-dt / tau);
-            let b = tau * (1.0 - a) / dt;
+            // b = tau (1 - a) / dt via expm1: the direct 1 - exp(-h)
+            // form loses ~h significant digits for dt << tau (audio-rate
+            // stepping against long relaxation times), and at dt = 0 it
+            // is 0/0 NaN — the exact limit is b = 1 (instantaneous
+            // elastic jump of the branch strain).
+            let b = if dt == 0.0 {
+                1.0
+            } else {
+                -tau * det::expm1(-dt / tau) / dt
+            };
             state.q[j] = a * state.q[j] + b * d_eps;
         }
         let mut stress = self.e_inf * strain_new;
@@ -1030,5 +1043,26 @@ mod tests {
             assert_eq!(ta.to_bits(), tb.to_bits());
         }
         assert_eq!(a.sup_rel_err.to_bits(), b.sup_rel_err.to_bits());
+    }
+
+    #[test]
+    fn prony_step_zero_dt_is_the_exact_elastic_jump_and_small_dt_stays_accurate() {
+        let model = GeneralizedMaxwell::new(1.0e9, vec![(5.0e8, 10.0)]).expect("model");
+        // dt = 0: instantaneous strain jump, branch strain follows
+        // elastically (b = 1), nothing NaN.
+        let mut state = model.state();
+        let stress = model.step(&mut state, 1.0e-3, 0.0);
+        assert!(stress.is_finite() && state.q[0].is_finite());
+        assert!((state.q[0] - 1.0e-3).abs() < 1.0e-18);
+        assert!((stress - (1.0e9 + 5.0e8) * 1.0e-3).abs() < 1.0e-3);
+        // dt << tau: b must match the series limit 1 - h/2 + h^2/6 to
+        // machine precision (the direct 1 - exp(-h) form loses ~six
+        // digits at h = 2e-8 and returns NaN-free but wrong updates).
+        let tau = 10.0;
+        let dt = 2.0e-7; // h = 2e-8
+        let h = dt / tau;
+        let b_reference = 1.0 - h / 2.0 + h * h / 6.0;
+        let b_impl = -tau * det::expm1(-dt / tau) / dt;
+        assert!(((b_impl - b_reference) / b_reference).abs() < 1.0e-14);
     }
 }
