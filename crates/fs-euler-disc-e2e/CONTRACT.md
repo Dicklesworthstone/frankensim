@@ -1812,10 +1812,13 @@ presets remain uncalibrated look-development inputs, not predictions of a
 product, alloy, oxide/passive film, machining, or finish.
 Layered engraving, anisotropic brushing, environment lighting, measured
 specimen fitting, and final studio look development remain downstream
-capabilities. Difficult focused caustics can converge slowly in the current
-unidirectional tracer; it has no bidirectional or manifold-light-transport
-claim, and straight shadow rays do not pretend to refract through intervening
-glass.
+capabilities. The renderer has exact next-event connections through admitted
+parallel slabs and isolated convex planar two-interface smooth dielectrics,
+including the reference plate's finite bevel/side faces. Those are generic
+unbiased manifold proposals with reverse MIS, not straight undeviating shadow
+rays. The tracer still makes no general bidirectional, vertex-merging, curved
+specular-manifold, nested-media, or arbitrary caustic claim; paths outside the
+admitted connector classes may converge slowly.
 
 Frame requests resolve their shutter and contact/event policy before tracing.
 A zero-width request renders one exact time. A positive exposure crossing a
@@ -2169,6 +2172,17 @@ is a biased display derivative. In particular, primary-surface guides on glass
 do not certify the motion of reflected or refracted secondary transport, so a
 smoother preview is not evidence of raw-estimator convergence or transport
 correctness.
+
+The decoder admits uniform, adaptive-stopping, and
+`independent-pilot-fixed-v1` FinalDiagnostic sample planes. For an independent
+pilot it validates the complete canonical pilot-plan header, requires every
+retained count to remain within the declared minimum/maximum allocation, and
+requires the exact count-plane sum to equal the frame's declared retained path
+total. Temporal sequence identity binds the frame-invariant pilot seed,
+sampler, thresholds, safety factor, and allocation bounds while deliberately
+excluding that per-frame total. The discarded pilot observations are not
+available in the EXR, so neither sample inspection nor denoising upgrades the
+allocation into an image-error or convergence certificate.
 
 ## No-claim boundaries
 

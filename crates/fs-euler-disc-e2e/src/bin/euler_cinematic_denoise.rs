@@ -29,7 +29,10 @@ use fs_render::{
         CINEMATIC_AOV_CHANNEL_SEMANTICS, CINEMATIC_AOV_INVALID_SEMANTICS,
         CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS, CINEMATIC_AOV_SEMANTICS_VERSION, CinematicAovProfile,
     },
-    tracer::{ADAPTIVE_SAMPLING_SEMANTICS_VERSION, MATERIAL_CONTENT_IDENTITY_DOMAIN},
+    tracer::{
+        ADAPTIVE_SAMPLING_SEMANTICS_VERSION, INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION,
+        MATERIAL_CONTENT_IDENTITY_DOMAIN,
+    },
 };
 
 const FINAL_DIAGNOSTIC_CHANNELS: &[(&str, PixelType)] =
@@ -94,6 +97,7 @@ struct SequenceIdentity {
     sample_mode: String,
     sample_ceiling: u32,
     adaptive_policy: Option<String>,
+    independent_pilot_policy: Option<String>,
     object_palette: String,
     material_palette: String,
     object_palette_entries: u64,
@@ -127,6 +131,8 @@ fn admit_uniform_spp_transition(
         || to.sample_mode != "uniform"
         || from.adaptive_policy.is_some()
         || to.adaptive_policy.is_some()
+        || from.independent_pilot_policy.is_some()
+        || to.independent_pilot_policy.is_some()
     {
         return Err("an authorized SPP transition must remain uniform on both sides".to_owned());
     }
@@ -472,6 +478,16 @@ struct SampleCountSummary {
     at_ceiling_spp_pixels: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EstimatorVarianceSummary {
+    sample_variance_total: f64,
+    estimator_variance_total: f64,
+    estimator_variance_mean: f64,
+    estimator_standard_error_rms: f64,
+    maximum_estimator_variance: f64,
+    maximum_pixel_index: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PixelCrop {
     x_min: u32,
@@ -491,9 +507,9 @@ fn inspect_sample_counts(path: &Path) -> Result<String, String> {
 /// pairs are the exact mean and fraction evidence; decimal fields are only
 /// convenient renderings of those ratios. Quantiles use the one-based nearest-
 /// rank definition over exact integer sample counts. A count equal to the SPP
-/// ceiling does not imply nonconvergence: the samples plane cannot recover the
-/// renderer's `AdaptiveDecision`, including an error-threshold decision made at
-/// the final checkpoint.
+/// ceiling does not imply nonconvergence: the samples plane cannot recover an
+/// adaptive stopping decision or the discarded pilot observations which fixed
+/// an independent production allocation.
 fn sample_inspection_report(
     frame: &FinalDiagnosticFrame,
     frame_index: u64,
@@ -509,15 +525,21 @@ fn sample_inspection_report(
     }
     let ceiling = frame.sequence_identity.sample_ceiling;
     let full = summarize_sample_counts(frame.sample_counts.iter().copied(), ceiling)?;
+    let variance = summarize_estimator_variance(&frame.variance_luminance, &frame.sample_counts)?;
     let adaptive_policy = frame
         .sequence_identity
         .adaptive_policy
         .as_deref()
         .unwrap_or("none");
+    let independent_pilot_policy = frame
+        .sequence_identity
+        .independent_pilot_policy
+        .as_deref()
+        .unwrap_or("none");
     let mut report = String::new();
     writeln!(
         report,
-        "record=metadata schema=frankensim-euler-sample-inspection-v1 source_identity={} frame={} width={} height={} sample_mode={} sample_ceiling={} adaptive_policy={} quantile_method=nearest-rank adaptive_decision=unavailable-from-samples-plane",
+        "record=metadata schema=frankensim-euler-sample-inspection-v2 source_identity={} frame={} width={} height={} sample_mode={} sample_ceiling={} adaptive_policy={} independent_pilot_policy={} quantile_method=nearest-rank allocation_decision=unavailable-from-samples-plane",
         encoded_identity.to_hex(),
         frame_index,
         frame.width,
@@ -525,9 +547,21 @@ fn sample_inspection_report(
         frame.sequence_identity.sample_mode,
         ceiling,
         adaptive_policy,
+        independent_pilot_policy,
     )
     .expect("writing to a String cannot fail");
     append_sample_summary(&mut report, "record=summary scope=full", &full);
+    writeln!(
+        report,
+        "record=uncertainty scope=full channel=variance.Y meaning=unbiased-raw-CIE-Y-sample-variance sample_variance_total={:.17e} estimator_variance_total={:.17e} estimator_variance_mean={:.17e} estimator_standard_error_rms={:.17e} maximum_estimator_variance={:.17e} maximum_pixel_index={}",
+        variance.sample_variance_total,
+        variance.estimator_variance_total,
+        variance.estimator_variance_mean,
+        variance.estimator_standard_error_rms,
+        variance.maximum_estimator_variance,
+        variance.maximum_pixel_index,
+    )
+    .expect("writing to a String cannot fail");
     for (&samples, &pixels) in &full.histogram {
         writeln!(
             report,
@@ -566,6 +600,48 @@ fn sample_inspection_report(
         append_sample_summary(&mut report, &prefix, &summary);
     }
     Ok(report)
+}
+
+fn summarize_estimator_variance(
+    sample_variance: &[f32],
+    sample_counts: &[u32],
+) -> Result<EstimatorVarianceSummary, String> {
+    if sample_variance.is_empty() || sample_variance.len() != sample_counts.len() {
+        return Err(
+            "variance and sample-count planes must have one common nonempty raster".to_owned(),
+        );
+    }
+    let mut sample_variance_total = 0.0_f64;
+    let mut estimator_variance_total = 0.0_f64;
+    let mut maximum_estimator_variance = -1.0_f64;
+    let mut maximum_pixel_index = 0_usize;
+    for (index, (&variance, &samples)) in sample_variance.iter().zip(sample_counts).enumerate() {
+        if !variance.is_finite() || variance < 0.0 || samples == 0 {
+            return Err(format!(
+                "variance summary encountered invalid pixel {index}: variance={variance}, samples={samples}"
+            ));
+        }
+        let variance = f64::from(variance);
+        let estimator_variance = variance / f64::from(samples);
+        sample_variance_total += variance;
+        estimator_variance_total += estimator_variance;
+        if estimator_variance > maximum_estimator_variance {
+            maximum_estimator_variance = estimator_variance;
+            maximum_pixel_index = index;
+        }
+    }
+    if !sample_variance_total.is_finite() || !estimator_variance_total.is_finite() {
+        return Err("variance summary arithmetic overflowed".to_owned());
+    }
+    let estimator_variance_mean = estimator_variance_total / sample_variance.len() as f64;
+    Ok(EstimatorVarianceSummary {
+        sample_variance_total,
+        estimator_variance_total,
+        estimator_variance_mean,
+        estimator_standard_error_rms: estimator_variance_mean.sqrt(),
+        maximum_estimator_variance,
+        maximum_pixel_index,
+    })
 }
 
 fn summarize_sample_counts(
@@ -741,6 +817,11 @@ fn decode_final_diagnostic(
 ) -> Result<FinalDiagnosticFrame, String> {
     validate_dimensions(exr.width, exr.height, path)?;
     let sequence_identity = validate_final_diagnostic_attributes(&exr, path, expected_frame)?;
+    let independent_pilot_plan = (sequence_identity.sample_mode == "independent-pilot-fixed-v1")
+        .then(|| {
+            validate_independent_pilot_plan_attribute(&exr, sequence_identity.sample_ceiling, path)
+        })
+        .transpose()?;
     let timing = validate_frame_timing(&exr, path)?;
     let pixels = usize::try_from(u64::from(exr.width) * u64::from(exr.height)).map_err(|_| {
         format!(
@@ -792,6 +873,7 @@ fn decode_final_diagnostic(
     let sample_counts = exact_sample_counts(
         take_plane(&mut planes, "samples", path)?,
         &sequence_identity,
+        independent_pilot_plan.as_ref(),
         path,
     )?;
     let object_ids = exact_palette_indices(
@@ -833,6 +915,7 @@ fn decode_final_diagnostic(
 fn exact_sample_counts(
     values: Vec<f32>,
     sequence: &SequenceIdentity,
+    independent_pilot_plan: Option<&IndependentPilotPlanHeader>,
     path: &Path,
 ) -> Result<Vec<u32>, String> {
     let mut counts = Vec::new();
@@ -859,7 +942,29 @@ fn exact_sample_counts(
                 sequence.sample_ceiling,
             ));
         }
+        if let Some(plan) = independent_pilot_plan
+            && samples < plan.minimum_samples
+        {
+            return Err(format!(
+                "FinalDiagnostic EXR {} samples plane is below the independent-pilot minimum at sample {index}: value={value}, minimum={}",
+                path.display(),
+                plan.minimum_samples,
+            ));
+        }
         counts.push(samples);
+    }
+    if let Some(plan) = independent_pilot_plan {
+        let total_samples = counts
+            .iter()
+            .try_fold(0_u64, |total, &count| total.checked_add(u64::from(count)));
+        if total_samples != Some(plan.total_samples) {
+            return Err(format!(
+                "FinalDiagnostic EXR {} independent-pilot samples plane total {:?} disagrees with declared total {}",
+                path.display(),
+                total_samples,
+                plan.total_samples,
+            ));
+        }
     }
     Ok(counts)
 }
@@ -983,9 +1088,12 @@ fn validate_final_diagnostic_attributes(
     // across frames would reject every valid temporal sequence at frame 1.
     let _frame_config_hash = content_hash_attribute(exr, "frankensim.aov.configHash", path)?;
     let sample_mode = exr_attribute_string(exr, "frankensim.render.sampleMode", path)?;
-    if sample_mode != "uniform" && sample_mode != "adaptive" {
+    if sample_mode != "uniform"
+        && sample_mode != "adaptive"
+        && sample_mode != "independent-pilot-fixed-v1"
+    {
         return Err(format!(
-            "FinalDiagnostic EXR {} declares unsupported sample mode {sample_mode:?}; expected \"uniform\" or \"adaptive\"",
+            "FinalDiagnostic EXR {} declares unsupported sample mode {sample_mode:?}; expected \"uniform\", \"adaptive\", or \"independent-pilot-fixed-v1\"",
             path.display()
         ));
     }
@@ -1013,32 +1121,50 @@ fn validate_final_diagnostic_attributes(
         ));
     }
     let rendered_spp = exr_attribute_string(exr, "frankensim.render.spp", path)?;
-    let adaptive_policy = if sample_mode == "uniform" {
-        let samples_per_pixel = rendered_spp.parse::<u32>().map_err(|_| {
-            format!(
-                "FinalDiagnostic EXR {} uniform render SPP is not canonical u32",
-                path.display()
+    let (adaptive_policy, independent_pilot_policy) = match sample_mode.as_str() {
+        "uniform" => {
+            let samples_per_pixel = rendered_spp.parse::<u32>().map_err(|_| {
+                format!(
+                    "FinalDiagnostic EXR {} uniform render SPP is not canonical u32",
+                    path.display()
+                )
+            })?;
+            if samples_per_pixel.to_string() != rendered_spp || samples_per_pixel != sample_ceiling
+            {
+                return Err(format!(
+                    "FinalDiagnostic EXR {} uniform render SPP {rendered_spp:?} disagrees with SPP ceiling {sample_ceiling}",
+                    path.display()
+                ));
+            }
+            (None, None)
+        }
+        "adaptive" => {
+            if rendered_spp != "per-pixel-channel" {
+                return Err(format!(
+                    "FinalDiagnostic EXR {} adaptive render SPP must be \"per-pixel-channel\"; got {rendered_spp:?}",
+                    path.display()
+                ));
+            }
+            (
+                Some(validate_adaptive_policy_attribute(
+                    exr,
+                    sample_ceiling,
+                    path,
+                )?),
+                None,
             )
-        })?;
-        if samples_per_pixel.to_string() != rendered_spp || samples_per_pixel != sample_ceiling {
-            return Err(format!(
-                "FinalDiagnostic EXR {} uniform render SPP {rendered_spp:?} disagrees with SPP ceiling {sample_ceiling}",
-                path.display()
-            ));
         }
-        None
-    } else {
-        if rendered_spp != "per-pixel-channel" {
-            return Err(format!(
-                "FinalDiagnostic EXR {} adaptive render SPP must be \"per-pixel-channel\"; got {rendered_spp:?}",
-                path.display()
-            ));
+        "independent-pilot-fixed-v1" => {
+            if rendered_spp != "per-pixel-channel" {
+                return Err(format!(
+                    "FinalDiagnostic EXR {} independent-pilot render SPP must be \"per-pixel-channel\"; got {rendered_spp:?}",
+                    path.display()
+                ));
+            }
+            let plan = validate_independent_pilot_plan_attribute(exr, sample_ceiling, path)?;
+            (None, Some(plan.sequence_policy))
         }
-        Some(validate_adaptive_policy_attribute(
-            exr,
-            sample_ceiling,
-            path,
-        )?)
+        _ => unreachable!("sample mode was validated above"),
     };
     let (object_palette, object_palette_entries) =
         canonical_object_palette(exr, "frankensim.aov.objectPalette", path)?;
@@ -1059,6 +1185,7 @@ fn validate_final_diagnostic_attributes(
         sample_mode,
         sample_ceiling,
         adaptive_policy,
+        independent_pilot_policy,
         object_palette,
         material_palette,
         object_palette_entries,
@@ -1116,9 +1243,106 @@ fn validate_adaptive_policy_attribute(
     Ok(policy)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndependentPilotPlanHeader {
+    /// Frame-invariant allocation policy. The per-frame retained path total is
+    /// deliberately excluded so adjacent frames can share one sequence
+    /// identity while still proving their own exact count-plane total.
+    sequence_policy: String,
+    minimum_samples: u32,
+    total_samples: u64,
+}
+
+fn validate_independent_pilot_plan_attribute(
+    exr: &DecodedExr,
+    sample_ceiling: u32,
+    path: &Path,
+) -> Result<IndependentPilotPlanHeader, String> {
+    let policy = exr_attribute_string(exr, "frankensim.render.pilotPlan", path)?;
+    let mut fields = policy.split(';');
+    let version = fields
+        .next()
+        .and_then(|field| field.strip_prefix("version="));
+    let pilot_seed = fields
+        .next()
+        .and_then(|field| field.strip_prefix("pilotSeed="));
+    let pilot_sampler = fields
+        .next()
+        .and_then(|field| field.strip_prefix("pilotSampler="));
+    let minimum = fields
+        .next()
+        .and_then(|field| field.strip_prefix("minimum="));
+    let maximum = fields
+        .next()
+        .and_then(|field| field.strip_prefix("maximum="));
+    let absolute = fields
+        .next()
+        .and_then(|field| field.strip_prefix("absolute="));
+    let relative = fields
+        .next()
+        .and_then(|field| field.strip_prefix("relative="));
+    let dark_floor = fields
+        .next()
+        .and_then(|field| field.strip_prefix("darkFloor="));
+    let safety = fields
+        .next()
+        .and_then(|field| field.strip_prefix("safety="));
+    let total = fields.next().and_then(|field| field.strip_prefix("total="));
+    if fields.next().is_some()
+        || canonical_u32(version) != Some(INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION)
+    {
+        return Err(invalid_independent_pilot_plan(path));
+    }
+    let pilot_seed =
+        canonical_u64(pilot_seed).ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    let pilot_sampler = pilot_sampler
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    let minimum = canonical_u32(minimum).ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    let maximum = canonical_u32(maximum).ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    if minimum < 2 || minimum > maximum || maximum != sample_ceiling {
+        return Err(invalid_independent_pilot_plan(path));
+    }
+    for value in [absolute, relative, dark_floor] {
+        let value = value.ok_or_else(|| invalid_independent_pilot_plan(path))?;
+        let bits =
+            canonical_f64_string_bits(value).ok_or_else(|| invalid_independent_pilot_plan(path))?;
+        if f64::from_bits(bits) < 0.0 {
+            return Err(invalid_independent_pilot_plan(path));
+        }
+    }
+    let safety = safety.ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    let safety_bits =
+        canonical_f64_string_bits(safety).ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    if f64::from_bits(safety_bits) <= 0.0 {
+        return Err(invalid_independent_pilot_plan(path));
+    }
+    let total_samples = canonical_u64(total).ok_or_else(|| invalid_independent_pilot_plan(path))?;
+    if total_samples == 0 {
+        return Err(invalid_independent_pilot_plan(path));
+    }
+    let sequence_policy = format!(
+        "version={INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION};pilotSeed={pilot_seed};pilotSampler={pilot_sampler};minimum={minimum};maximum={maximum};absolute={};relative={};darkFloor={};safety={safety}",
+        absolute.expect("validated absolute field"),
+        relative.expect("validated relative field"),
+        dark_floor.expect("validated dark-floor field"),
+    );
+    Ok(IndependentPilotPlanHeader {
+        sequence_policy,
+        minimum_samples: minimum,
+        total_samples,
+    })
+}
+
 fn canonical_u32(value: Option<&str>) -> Option<u32> {
     let value = value?;
     let parsed = value.parse::<u32>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+fn canonical_u64(value: Option<&str>) -> Option<u64> {
+    let value = value?;
+    let parsed = value.parse::<u64>().ok()?;
     (parsed.to_string() == value).then_some(parsed)
 }
 
@@ -1144,6 +1368,13 @@ fn canonical_f64_string_bits(encoded: &str) -> Option<u64> {
 fn invalid_adaptive_policy(path: &Path) -> String {
     format!(
         "FinalDiagnostic EXR {} attribute frankensim.render.adaptive is not the canonical adaptive policy grammar",
+        path.display()
+    )
+}
+
+fn invalid_independent_pilot_plan(path: &Path) -> String {
+    format!(
+        "FinalDiagnostic EXR {} attribute frankensim.render.pilotPlan is not the canonical independent-pilot plan grammar",
         path.display()
     )
 }
@@ -1512,6 +1743,9 @@ fn offline_preview_manifest(
     if let Some(policy) = &source.adaptive_policy {
         render_contract.update(policy.as_bytes());
     }
+    if let Some(policy) = &source.independent_pilot_policy {
+        render_contract.update(policy.as_bytes());
+    }
     if let Some(transition) = spp_transition {
         render_contract.update(b"authorized-uniform-spp-transition-v1");
         render_contract.update(&transition.frame.to_le_bytes());
@@ -1539,6 +1773,10 @@ fn offline_preview_manifest(
         .adaptive_policy
         .as_ref()
         .map_or_else(|| "null".to_owned(), |policy| format!("\"{policy}\""));
+    let independent_pilot_policy_json = source
+        .independent_pilot_policy
+        .as_ref()
+        .map_or_else(|| "null".to_owned(), |policy| format!("\"{policy}\""));
     let spp_transition_json = spp_transition.map_or_else(
         || "null".to_owned(),
         |transition| {
@@ -1564,7 +1802,7 @@ fn offline_preview_manifest(
     Ok(format!(
         concat!(
             "{{\n",
-            "  \"schema\": \"frankensim-euler-offline-denoise-v3\",\n",
+            "  \"schema\": \"frankensim-euler-offline-denoise-v4\",\n",
             "  \"authority\": \"biased-display-derivative-not-raw-estimate\",\n",
             "  \"publication\": \"single-writer-staged-directory-rename\",\n",
             "  \"initial_boundary\": \"cut\",\n",
@@ -1581,6 +1819,7 @@ fn offline_preview_manifest(
             "  \"source_sample_mode\": \"{}\",\n",
             "  \"source_sample_ceiling\": {},\n",
             "  \"source_adaptive_policy\": {},\n",
+            "  \"source_independent_pilot_policy\": {},\n",
             "  \"authorized_uniform_spp_transition\": {},\n",
             "  \"source_object_palette_entries\": {},\n",
             "  \"source_material_palette_entries\": {},\n",
@@ -1610,6 +1849,7 @@ fn offline_preview_manifest(
         source.sample_mode,
         source.sample_ceiling,
         adaptive_policy_json,
+        independent_pilot_policy_json,
         spp_transition_json,
         source.object_palette_entries,
         source.material_palette_entries,
@@ -2236,6 +2476,50 @@ mod tests {
     }
 
     #[test]
+    fn independent_pilot_metadata_binds_policy_and_exact_count_total() {
+        let mut pilot = final_diagnostic();
+        set_attribute(
+            &mut pilot,
+            "frankensim.render.sampleMode",
+            "independent-pilot-fixed-v1",
+        );
+        set_attribute(&mut pilot, "frankensim.render.spp", "per-pixel-channel");
+        pilot.attributes.push(ExrAttribute {
+            name: "frankensim.render.pilotPlan".to_owned(),
+            ty: "string".to_owned(),
+            value: b"version=1;pilotSeed=41;pilotSampler=owen-sobol-full-path-v1;minimum=2;maximum=16;absolute=0@0x0000000000000000;relative=0.1@0x3fb999999999999a;darkFloor=0.01@0x3f847ae147ae147b;safety=1.5@0x3ff8000000000000;total=24".to_vec(),
+        });
+        pilot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.name == "samples")
+            .expect("fixture samples plane")
+            .data[1] = 8.0;
+        let frame = decode_final_diagnostic(pilot.clone(), Path::new("pilot.exr"), 0)
+            .expect("canonical independent-pilot metadata and count plane");
+        assert_eq!(
+            frame.sequence_identity.sample_mode,
+            "independent-pilot-fixed-v1"
+        );
+        assert_eq!(frame.sample_counts, [16, 8]);
+        assert_eq!(
+            frame.sequence_identity.independent_pilot_policy.as_deref(),
+            Some(
+                "version=1;pilotSeed=41;pilotSampler=owen-sobol-full-path-v1;minimum=2;maximum=16;absolute=0@0x0000000000000000;relative=0.1@0x3fb999999999999a;darkFloor=0.01@0x3f847ae147ae147b;safety=1.5@0x3ff8000000000000"
+            )
+        );
+
+        set_attribute(
+            &mut pilot,
+            "frankensim.render.pilotPlan",
+            "version=1;pilotSeed=41;pilotSampler=owen-sobol-full-path-v1;minimum=2;maximum=16;absolute=0@0x0000000000000000;relative=0.1@0x3fb999999999999a;darkFloor=0.01@0x3f847ae147ae147b;safety=1.5@0x3ff8000000000000;total=25",
+        );
+        let error = decode_final_diagnostic(pilot, Path::new("pilot.exr"), 0)
+            .expect_err("declared pilot total must match the count plane");
+        assert!(error.contains("samples plane total Some(24) disagrees with declared total 25"));
+    }
+
+    #[test]
     fn explicit_uniform_spp_transition_changes_only_sampling_bound_identity() {
         let from =
             validate_final_diagnostic_attributes(&final_diagnostic(), Path::new("frame-0.exr"), 0)
@@ -2296,6 +2580,16 @@ mod tests {
         assert_eq!(nearest_rank_quantile(&summary, 50, 100), 2);
         assert_eq!(nearest_rank_quantile(&summary, 75, 100), 8);
         assert_eq!(nearest_rank_quantile(&summary, 99, 100), 16);
+
+        let variance = summarize_estimator_variance(&[1.0, 2.0], &[16, 8])
+            .expect("finite nonnegative variance and positive counts");
+        assert_eq!(variance.sample_variance_total.to_bits(), 3.0_f64.to_bits());
+        assert_eq!(
+            variance.estimator_variance_total.to_bits(),
+            0.3125_f64.to_bits()
+        );
+        assert_eq!(variance.maximum_estimator_variance, 0.25);
+        assert_eq!(variance.maximum_pixel_index, 1);
     }
 
     #[test]
@@ -2306,9 +2600,12 @@ mod tests {
             sample_inspection_report(&frame, 0, hash_domain("sample-inspection-test", b"fixture"))
                 .expect("sample inspection report");
         assert!(
-            report.starts_with("record=metadata schema=frankensim-euler-sample-inspection-v1 ")
+            report.starts_with("record=metadata schema=frankensim-euler-sample-inspection-v2 ")
         );
-        assert!(report.contains("adaptive_decision=unavailable-from-samples-plane"));
+        assert!(report.contains("allocation_decision=unavailable-from-samples-plane"));
+        assert!(report.contains(
+            "record=uncertainty scope=full channel=variance.Y meaning=unbiased-raw-CIE-Y-sample-variance"
+        ));
         assert!(report.contains(
             "record=summary scope=full pixels=2 total_samples=32 mean_numerator=32 mean_denominator=2 mean_spp=16.000000000"
         ));

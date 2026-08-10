@@ -390,6 +390,13 @@ differentiable lift). Pure Rust throughout.
   finite and nonnegative over the admitted grazing/roughness grid. Homogeneous
   attenuation composes as `T(L1 + L2) = T(L1) T(L2)` to floating-point
   tolerance.
+- The first smooth-dielectric boundary on a path is evaluated by exact forced
+  Fresnel splitting: reflection and transmission suffixes are both traced with
+  their physical spectral weights, rather than selecting one event and dividing
+  by its probability. This is an unbiased sum of the same transport integral,
+  removes primary-interface Fresnel roulette, and is deliberately limited to
+  one boundary so internal reflection cannot create an exponential path tree.
+  Later smooth boundaries retain the stochastic Fresnel estimator.
 - The smooth parallel-slab direct-light specialization is an unbiased raw
   estimator, not a straight-through visibility shortcut. For a finite sampled
   rectangle point it solves the two-interface Snell connection, differentiates
@@ -407,6 +414,24 @@ differentiable lift). Pure Rust throughout.
   Failure to classify an ordinary sampled dielectric path as this optional slab
   proposal does not forbid BSDF transport or invent an NEE competitor: it keeps
   normal delta-emitter MIS semantics and therefore unit weight.
+- The finite smooth-dielectric manifold specialization extends that estimator
+  to an isolated convex, outward-oriented instanced triangle solid with two
+  nonparallel planar transmission faces. For each sampled finite emitter point
+  it solves the four-variable stationary Fermat path with a damped Newton method
+  and analytic Hessian, validates both finite face hits and the final emitter
+  endpoint against actual scene traversal, and applies exact spectral Snell,
+  Fresnel, Beer-Lambert, and radiance-mode eta transport. Its light-area to
+  source-solid-angle density is the implicit derivative of the same Fermat
+  system, not a finite-difference approximation. Forward NEE deterministically
+  prefers the analytic slab specialization when its wavelength-specific finite
+  connection exists, then falls back to the manifold specialization if the
+  refracted path leaves that slab face through a bevel. Reverse MIS replays that
+  per-wavelength selection and the complete manifold density, so the BSDF and
+  NEE weights partition unity. Multiple distinct admitted
+  stationary transmission paths are summed; coplanar triangulation duplicates
+  are direction-deduplicated. Non-convergence, a non-convex/inward-wound mesh,
+  rough or nested media, charts, and environment targets simply have no optional
+  manifold proposal and retain ordinary BSDF support.
 - Sampling is deterministic: analytic and low-discrepancy helpers are
   stateless, while stochastic render paths use explicitly keyed counter-based
   streams rather than ambient mutable RNG state.
@@ -449,7 +474,7 @@ invalid dimensions/film buffers/progressive ranges, backend refusal,
 uncertified traces, missing normals, invalid/colliding rigid instances,
 dielectric evaluation refusal, LIFO medium-stack mismatch/overflow, and a miss
 while still inside a declared closed medium. A transparent blocker outside the
-admitted smooth homogeneous parallel-slab NEE class returns
+admitted analytic-slab and finite-convex-planar-manifold NEE classes returns
 `UnsupportedSlabNee`; it is never silently reclassified as opaque visibility.
 Instance construction rejects zero identities, invalid transforms, and any
 scene count that cannot fit the canonical identity encoding;
@@ -614,13 +639,16 @@ Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, rough dielectric sampling remains an
 NDF-plus-Fresnel-branch path, conductor and dielectric GGX are single-scattering
 without multiple-scattering compensation, and emitters do not reflect. At the
-first wavelength-dependent dielectric boundary, the shared packet fans out once
-into four single-wavelength continuations. Every lane samples its own complete
-Fresnel event, Snell direction, throughput, and directional PDF from correlated
-uniforms; this retains transmission support when one wavelength undergoes TIR
-and another does not. A child lane cannot split again, fixed lane-order
-accumulation is deterministic, and the path-work bound is at most four times the
-declared maximum depth. Wavelength-independent boundaries retain the packet.
+first smooth dielectric boundary, reflection is retained as a spectral packet
+and transmission fans out into single-wavelength continuations only when its
+Snell directions require it; their deterministic Fresnel-weighted sum retains
+support when one wavelength undergoes TIR and another does not. A later first
+wavelength-dependent dielectric boundary can still fan an unsplit packet into
+four correlated stochastic continuations. A child wavelength lane cannot split
+again, fixed lane/branch-order accumulation is deterministic, and the combined
+forced-Fresnel plus spectral-dispersion path-work bound is at most eight times
+the declared maximum depth. Wavelength-independent transmission retains the
+packet.
 Current-vertex NEE uses each lane's native competing BSDF density.
 Absorption uses unshifted physical segment length. Smooth events have zero
 solid-angle query density and receive delta-correct MIS treatment. A strict
@@ -864,13 +892,15 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   media, or a topology certificate. GGX transmission is single-scattering and
   does not claim multiple-scattering furnace closure at appreciable roughness.
   Outside the explicitly checked smooth homogeneous local parallel-face-pair
-  specialization on an instanced mesh face satisfying thin-axis support admission, shadow rays
-  stop at the first intervening surface; they never
-  travel undeviated through glass. Curved, wedged, rough, layered, overlapping,
-  and nested specular connections are refused by that estimator, not
-  approximated. Difficult focused caustics therefore remain a slow-convergence
-  case for this unidirectional integrator; no general bidirectional/manifold
-  transport, denoising, or unbiased firefly-clamping claim is made.
+  specialization and the isolated convex planar two-interface manifold on an
+  instanced mesh, shadow rays stop at the first intervening surface; they never
+  travel undeviated through glass. Curved, rough, layered, overlapping, nested,
+  and environment-target manifold connections are refused, not approximated.
+  The manifold connector covers transmission through one finite convex planar
+  solid; it is not general bidirectional path tracing, vertex merging, or a
+  solver for arbitrary specular chains. Difficult focused caustics outside that
+  class can still converge slowly. No denoising or unbiased firefly-clamping
+  claim is made.
   The support-face/thin-axis extent check, two instanced triangle witnesses,
   and path-local probes do not constitute
   a global closed-solid, planarity, thickness-uniformity, or topology

@@ -53,7 +53,8 @@ use crate::dielectric::{
     sample_smooth_dielectric,
 };
 use crate::instances::{
-    GeometryInstance, InstanceError, InstanceHit, InstanceSurfaceFeature, SharedGeometry,
+    GeometryInstance, InstanceError, InstanceHit, InstanceSurfaceFeature, RigidTransform,
+    SharedGeometry,
 };
 use crate::lighting::{AdmittedLighting, EnvironmentMap, LightSample, LightingError};
 use crate::motion::{NormalizedShutterTime, ShutterInterval, TimedRay};
@@ -77,6 +78,7 @@ use fs_geom::{Chart, Point3, Vec3};
 use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 use fs_rand::qmc::Sobol;
+use manifold::{PlaneFrame, solve_two_planar_interfaces, target_area_per_source_solid_angle};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
@@ -98,6 +100,7 @@ pub use sharding::{
     UniformRenderShardResult, UniformRenderShardSpec, merge_uniform_shards, render_cinematic_shard,
     render_motion_shard, render_static_shard,
 };
+mod manifold;
 
 /// Bit-affecting semantic surface version of the tracer (see
 /// golden-couplings.json): the path-integrator estimator shape, the
@@ -118,7 +121,7 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 5;
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 8;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -374,6 +377,8 @@ struct PreviousBsdf {
 enum SmoothSlabPath {
     Entered(SmoothSlabEntry),
     Exited(SmoothSlabExit),
+    ManifoldEntered(PlanarManifoldEntry),
+    ManifoldExited(PlanarManifoldExit),
 }
 
 #[derive(Clone, Copy)]
@@ -393,6 +398,28 @@ struct SmoothSlabExit {
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     slab: ParallelSlab,
+    transmission_probability: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PlanarManifoldEntry {
+    source_origin: Point3,
+    source_geometric_normal: Vec3,
+    source_direction: Vec3,
+    source_pdf_solid_angle: f64,
+    boundary_primitive: usize,
+    glass: DielectricGlass,
+    entry_transmission_probability: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PlanarManifoldExit {
+    source_origin: Point3,
+    source_geometric_normal: Vec3,
+    source_direction: Vec3,
+    source_pdf_solid_angle: f64,
+    boundary_primitive: usize,
+    glass: DielectricGlass,
     transmission_probability: f64,
 }
 
@@ -428,6 +455,10 @@ struct SpectralPathState {
     /// dependent dielectric boundary, each continuation owns exactly one
     /// active lane and can never split again.
     active_lane: Option<usize>,
+    /// Exact reflection/transmission branching budget. One forced split removes
+    /// the dominant primary smooth-glass Fresnel roulette without permitting an
+    /// exponential internal-reflection tree.
+    remaining_smooth_dielectric_splits: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -476,6 +507,19 @@ struct SlabDirectLane {
     transmission_probability: f64,
     radiance_transport: f64,
     visible: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PlanarManifoldBoundary {
+    boundary_primitive: usize,
+    glass: DielectricGlass,
+    entry_triangle_index: u32,
+}
+
+#[derive(Clone, Copy)]
+struct SmoothDirectConnectors {
+    parallel_slab: Option<ParallelSlab>,
+    planar_manifold: Option<PlanarManifoldBoundary>,
 }
 
 #[derive(Clone, Copy)]
@@ -2613,9 +2657,10 @@ pub enum TracerError {
     /// The defensive nested-medium ceiling was exceeded.
     MediumStackOverflow,
     /// A direct-light sample first encountered a dielectric, but the geometry
-    /// or material was outside the exact smooth homogeneous parallel-slab
-    /// estimator.  Refusing is required: treating an unsupported transparent
-    /// blocker as either opaque or undeviating would bias the raw estimator.
+    /// or material was outside both exact smooth homogeneous connector classes:
+    /// the analytic parallel slab and the finite convex planar manifold.
+    /// Treating an unsupported transparent blocker as either opaque or
+    /// undeviating would bias the raw estimator.
     UnsupportedSlabNee {
         /// First dielectric primitive on the attempted connection.
         boundary_primitive: usize,
@@ -10080,6 +10125,413 @@ fn trace_parallel_slab_direct_lane(
     })
 }
 
+fn placed_instanced_geometry(
+    scene: &Scene,
+    primitive_index: usize,
+    ray_time: Option<&PathTime>,
+) -> Option<(SharedGeometry, RigidTransform)> {
+    match &scene.primitives.get(primitive_index)?.shape {
+        Shape::Instance(instance) => Some((instance.geometry().clone(), instance.transform())),
+        Shape::AnimatedInstance(_) => {
+            let time = ray_time?;
+            let instance = time
+                .cached_animated
+                .iter()
+                .flatten()
+                .find(|cached| cached.primitive_index == primitive_index)?;
+            Some((
+                instance.instance.geometry().clone(),
+                instance.instance.transform(),
+            ))
+        }
+        Shape::Mesh(_) | Shape::Chart(_) => None,
+    }
+}
+
+fn mesh_is_convex_with_outward_faces(mesh: &TriMesh) -> bool {
+    let coordinate_scale = mesh
+        .vertices
+        .iter()
+        .flatten()
+        .map(|coordinate| coordinate.abs())
+        .fold(1.0_f64, f64::max);
+    let tolerance = 512.0 * f64::EPSILON * coordinate_scale;
+    mesh.triangles
+        .iter()
+        .enumerate()
+        .all(|(triangle_index, triangle)| {
+            let Some(normal) = triangle_unit_normal(mesh, triangle_index as u32) else {
+                return false;
+            };
+            let Some(&origin) = mesh.vertices.get(triangle[0] as usize) else {
+                return false;
+            };
+            let origin = mesh_vertex(origin);
+            mesh.vertices
+                .iter()
+                .all(|&vertex| vec_sub(mesh_vertex(vertex), origin).dot(normal) <= tolerance)
+        })
+}
+
+fn world_triangle_plane(
+    mesh: &TriMesh,
+    transform: RigidTransform,
+    triangle_index: u32,
+) -> Option<PlaneFrame> {
+    let triangle = *mesh.triangles.get(triangle_index as usize)?;
+    let a = transform.transform_point(Point3::new(
+        mesh.vertices.get(triangle[0] as usize)?[0],
+        mesh.vertices.get(triangle[0] as usize)?[1],
+        mesh.vertices.get(triangle[0] as usize)?[2],
+    ));
+    let b = transform.transform_point(Point3::new(
+        mesh.vertices.get(triangle[1] as usize)?[0],
+        mesh.vertices.get(triangle[1] as usize)?[1],
+        mesh.vertices.get(triangle[1] as usize)?[2],
+    ));
+    let c = transform.transform_point(Point3::new(
+        mesh.vertices.get(triangle[2] as usize)?[0],
+        mesh.vertices.get(triangle[2] as usize)?[1],
+        mesh.vertices.get(triangle[2] as usize)?[2],
+    ));
+    let edge = b.delta_from(a);
+    let edge_norm = edge.norm();
+    if !edge_norm.is_finite() || edge_norm <= 0.0 {
+        return None;
+    }
+    let tangent = edge.scale(1.0 / edge_norm);
+    let outward_normal = normalized_cross(edge, c.delta_from(a))?;
+    let bitangent = cross(outward_normal, tangent);
+    Some(PlaneFrame {
+        origin: a,
+        tangent,
+        bitangent,
+        outward_normal,
+    })
+}
+
+fn discover_planar_manifold_boundary(
+    scene: &Scene,
+    first_ray: &Ray,
+    first_hit: SceneIntersection,
+    ray_time: Option<&PathTime>,
+) -> Result<PlanarManifoldBoundary, TracerError> {
+    let boundary_primitive = first_hit.primitive_index;
+    let (glass, surface) = match scene.primitives[boundary_primitive].material {
+        Material::Dielectric { glass, surface } => (glass, surface),
+        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+            return Err(slab_nee_refusal(
+                boundary_primitive,
+                "first manifold blocker is not dielectric",
+            ));
+        }
+    };
+    if !surface.is_delta() {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "first manifold dielectric blocker is rough",
+        ));
+    }
+    let entry_frame = surface_frame(&first_hit.hit, first_ray)?;
+    if !entry_frame.entering {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "first manifold interface is not an ambient entry",
+        ));
+    }
+    let Some(InstanceHit {
+        surface_feature: InstanceSurfaceFeature::MeshTriangle { triangle_index, .. },
+        ..
+    }) = first_hit.instance_hit
+    else {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "manifold interface lacks an instanced triangle face witness",
+        ));
+    };
+    let Some((geometry, transform)) =
+        placed_instanced_geometry(scene, boundary_primitive, ray_time)
+    else {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "manifold interface placement is unavailable at the path time",
+        ));
+    };
+    let SharedGeometry::Mesh(mesh) = geometry else {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "manifold interface is not a triangle mesh",
+        ));
+    };
+    if !mesh_is_convex_with_outward_faces(&mesh) {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "manifold dielectric mesh is not locally certified convex with outward faces",
+        ));
+    }
+    let plane = world_triangle_plane(&mesh, transform, triangle_index).ok_or_else(|| {
+        slab_nee_refusal(boundary_primitive, "manifold entry triangle is degenerate")
+    })?;
+    if plane.outward_normal.dot(entry_frame.geometric) < 1.0 - SLAB_PARALLEL_COSINE_TOLERANCE {
+        return Err(slab_nee_refusal(
+            boundary_primitive,
+            "manifold entry witness disagrees with the traced geometric normal",
+        ));
+    }
+    Ok(PlanarManifoldBoundary {
+        boundary_primitive,
+        glass,
+        entry_triangle_index: triangle_index,
+    })
+}
+
+fn straight_plane_seed(source: Point3, target: Point3, plane: PlaneFrame) -> Option<(f64, Point3)> {
+    let displacement = target.delta_from(source);
+    let denominator = displacement.dot(plane.outward_normal);
+    if !denominator.is_finite() || denominator.abs() <= 1.0e-14 {
+        return None;
+    }
+    let fraction = plane.origin.delta_from(source).dot(plane.outward_normal) / denominator;
+    (fraction.is_finite() && (0.0..1.0).contains(&fraction))
+        .then(|| (fraction, source.offset(displacement.scale(fraction))))
+}
+
+fn same_support_plane(left: PlaneFrame, right: PlaneFrame) -> bool {
+    left.outward_normal.dot(right.outward_normal) >= 1.0 - SLAB_PARALLEL_COSINE_TOLERANCE
+        && right
+            .origin
+            .delta_from(left.origin)
+            .dot(left.outward_normal)
+            .abs()
+            <= 4.0 * RAY_EPS
+}
+
+fn point_matches(actual: Point3, expected: Point3, scale: f64) -> bool {
+    actual.delta_from(expected).norm()
+        <= 4.0 * RAY_EPS + SLAB_CONNECTION_REL_TOLERANCE * scale.max(RAY_EPS)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_planar_manifold_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    boundary: PlanarManifoldBoundary,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
+    let DirectLightTarget::Rectangle {
+        primitive_index: light_primitive,
+        distance_m,
+        point: target_point,
+        normal: light_normal,
+    } = direct.target
+    else {
+        // The finite-face connector does not yet define the asymptotic angular
+        // map for an environment target. Ordinary BSDF transport retains that
+        // support, so absence of this optional proposal is correct.
+        return Ok(Vec::new());
+    };
+    let Some((geometry, transform)) =
+        placed_instanced_geometry(scene, boundary.boundary_primitive, ray_time)
+    else {
+        return Ok(Vec::new());
+    };
+    let SharedGeometry::Mesh(mesh) = geometry else {
+        return Ok(Vec::new());
+    };
+    let Some(entry_plane) = world_triangle_plane(&mesh, transform, boundary.entry_triangle_index)
+    else {
+        return Ok(Vec::new());
+    };
+    let source_to_target = target_point.delta_from(source_point);
+    let source_target_scale = source_to_target.norm();
+    let straight_light_cosine = light_normal.dot(direct.direction).abs();
+    let area_pdf = direct.pdf_solid_angle * straight_light_cosine / (distance_m * distance_m);
+    if !area_pdf.is_finite() || area_pdf <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let eta_glass = boundary.glass.ior().eval(wavelength_nm)?;
+    let light_tangent = basis_all_sphere(light_normal).0;
+    let light_bitangent = cross(light_normal, light_tangent);
+    let first_ray = Ray {
+        origin: dielectric_spawn_origin(source_point, source_geometric_normal, direct.direction),
+        dir: direct.direction,
+    };
+    let Some(first_hit) = intersect(scene, cx, &first_ray, ray_time)? else {
+        return Ok(Vec::new());
+    };
+    if first_hit.primitive_index != boundary.boundary_primitive {
+        return Ok(Vec::new());
+    }
+    let entry_seed = first_hit.hit.point;
+    let entry_fraction = entry_seed.delta_from(source_point).norm() / source_target_scale;
+
+    let mut admitted: Vec<(f64, SlabDirectLane)> = Vec::new();
+    for triangle_index in 0..mesh.triangles.len() {
+        cx.checkpoint()?;
+        let Some(exit_plane) = world_triangle_plane(&mesh, transform, triangle_index as u32) else {
+            continue;
+        };
+        if same_support_plane(entry_plane, exit_plane)
+            || target_point
+                .delta_from(exit_plane.origin)
+                .dot(exit_plane.outward_normal)
+                <= 0.0
+        {
+            continue;
+        }
+        let Some((exit_fraction, exit_seed)) =
+            straight_plane_seed(source_point, target_point, exit_plane)
+        else {
+            continue;
+        };
+        if exit_fraction <= entry_fraction {
+            continue;
+        }
+        let Some(connection) = solve_two_planar_interfaces(
+            source_point,
+            target_point,
+            entry_plane,
+            exit_plane,
+            eta_glass,
+            entry_seed,
+            exit_seed,
+        ) else {
+            continue;
+        };
+        let Some(area_jacobian) = target_area_per_source_solid_angle(
+            source_point,
+            target_point,
+            entry_plane,
+            exit_plane,
+            eta_glass,
+            connection,
+            light_tangent,
+            light_bitangent,
+        ) else {
+            continue;
+        };
+        let nee_pdf_solid_angle = area_pdf * area_jacobian;
+        if !nee_pdf_solid_angle.is_finite() || nee_pdf_solid_angle <= 0.0 {
+            continue;
+        }
+
+        let entry_ray = Ray {
+            origin: dielectric_spawn_origin(
+                source_point,
+                source_geometric_normal,
+                connection.incident_direction,
+            ),
+            dir: connection.incident_direction,
+        };
+        let Some(entry_hit) = intersect(scene, cx, &entry_ray, ray_time)? else {
+            continue;
+        };
+        if entry_hit.primitive_index != boundary.boundary_primitive
+            || !point_matches(
+                entry_hit.hit.point,
+                connection.entry_point,
+                source_target_scale,
+            )
+        {
+            continue;
+        }
+        let entry_frame = surface_frame(&entry_hit.hit, &entry_ray)?;
+        if !entry_frame.entering {
+            continue;
+        }
+        let (internal_direction, entry_transmission_probability) =
+            deterministic_snell_transmission(
+                entry_frame.geometric,
+                connection.incident_direction,
+                1.0,
+                eta_glass,
+            )?;
+        if !parallel_directions(internal_direction, connection.internal_direction) {
+            continue;
+        }
+        let internal_ray = Ray {
+            origin: dielectric_spawn_origin(
+                entry_hit.hit.point,
+                entry_frame.geometric,
+                internal_direction,
+            ),
+            dir: internal_direction,
+        };
+        let Some(exit_hit) = intersect(scene, cx, &internal_ray, ray_time)? else {
+            continue;
+        };
+        if exit_hit.primitive_index != boundary.boundary_primitive
+            || !point_matches(
+                exit_hit.hit.point,
+                connection.exit_point,
+                source_target_scale,
+            )
+        {
+            continue;
+        }
+        let exit_frame = surface_frame(&exit_hit.hit, &internal_ray)?;
+        if exit_frame.entering
+            || exit_frame.geometric.dot(exit_plane.outward_normal)
+                < 1.0 - SLAB_PARALLEL_COSINE_TOLERANCE
+        {
+            continue;
+        }
+        let (outgoing_direction, exit_transmission_probability) = deterministic_snell_transmission(
+            exit_frame.geometric.scale(-1.0),
+            internal_direction,
+            eta_glass,
+            1.0,
+        )?;
+        if !parallel_directions(outgoing_direction, connection.outgoing_direction) {
+            continue;
+        }
+        let exit_ray = Ray {
+            origin: dielectric_spawn_origin(
+                exit_hit.hit.point,
+                exit_frame.geometric,
+                outgoing_direction,
+            ),
+            dir: outgoing_direction,
+        };
+        let Some(light_hit) = intersect(scene, cx, &exit_ray, ray_time)? else {
+            continue;
+        };
+        if light_hit.primitive_index != light_primitive
+            || !point_matches(light_hit.hit.point, target_point, source_target_scale)
+        {
+            continue;
+        }
+
+        let internal_distance_m = exit_hit.hit.point.delta_from(entry_hit.hit.point).norm();
+        let beer = medium_transmittance(Some(boundary.glass), wavelength_nm, internal_distance_m)?;
+        let transmission_probability =
+            entry_transmission_probability * exit_transmission_probability;
+        let entry_eta_ratio = 1.0 / eta_glass;
+        let entry_btdf = entry_transmission_probability * entry_eta_ratio * entry_eta_ratio;
+        let exit_btdf = exit_transmission_probability * eta_glass * eta_glass;
+        let radiance_transport = entry_btdf * exit_btdf * beer;
+        let lane = SlabDirectLane {
+            incident_direction: connection.incident_direction,
+            nee_pdf_solid_angle,
+            transmission_probability,
+            radiance_transport,
+            visible: true,
+        };
+        if admitted.iter().any(|(_, existing)| {
+            parallel_directions(existing.incident_direction, lane.incident_direction)
+        }) {
+            continue;
+        }
+        admitted.push((connection.optical_path_length_m, lane));
+    }
+    admitted.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Ok(admitted.into_iter().map(|(_, lane)| lane).collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn previous_after_dielectric_sample(
     scene: &Scene,
@@ -10129,24 +10581,45 @@ fn previous_after_dielectric_sample(
             hit,
             instance_hit,
         };
-        let slab = match discover_parallel_slab(scene, cx, &incident_ray, first_hit, ray_time) {
-            Ok(slab) => slab,
-            // Slab NEE is optional proposal support, not a restriction on
-            // ordinary BSDF transport. Retain the delta event without a slab
-            // competitor so an eventual emissive hit receives unit MIS weight.
-            Err(TracerError::UnsupportedSlabNee { .. }) => return Ok(next),
-            Err(error) => return Err(error),
-        };
-        next.smooth_slab = Some(SmoothSlabPath::Entered(SmoothSlabEntry {
-            source_origin: previous_origin,
-            source_geometric_normal: source
-                .opaque_source_geometric_normal
-                .ok_or(TracerError::InvalidInput)?,
-            source_direction: incident_ray.dir,
-            source_pdf_solid_angle: source.pdf,
-            slab,
-            entry_transmission_probability: transmission_probability,
-        }));
+        let source_geometric_normal = source
+            .opaque_source_geometric_normal
+            .ok_or(TracerError::InvalidInput)?;
+        next.smooth_slab =
+            match discover_parallel_slab(scene, cx, &incident_ray, first_hit, ray_time) {
+                Ok(slab) => Some(SmoothSlabPath::Entered(SmoothSlabEntry {
+                    source_origin: previous_origin,
+                    source_geometric_normal,
+                    source_direction: incident_ray.dir,
+                    source_pdf_solid_angle: source.pdf,
+                    slab,
+                    entry_transmission_probability: transmission_probability,
+                })),
+                Err(TracerError::UnsupportedSlabNee { .. }) => {
+                    match discover_planar_manifold_boundary(
+                        scene,
+                        &incident_ray,
+                        first_hit,
+                        ray_time,
+                    ) {
+                        Ok(boundary) => {
+                            Some(SmoothSlabPath::ManifoldEntered(PlanarManifoldEntry {
+                                source_origin: previous_origin,
+                                source_geometric_normal,
+                                source_direction: incident_ray.dir,
+                                source_pdf_solid_angle: source.pdf,
+                                boundary_primitive: boundary.boundary_primitive,
+                                glass: boundary.glass,
+                                entry_transmission_probability: transmission_probability,
+                            }))
+                        }
+                        // Optional NEE support never restricts the ordinary random
+                        // walk. A non-admitted solid simply has no competitor.
+                        Err(TracerError::UnsupportedSlabNee { .. }) => None,
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
         return Ok(next);
     }
 
@@ -10185,6 +10658,46 @@ fn previous_after_dielectric_sample(
                     * transmission_probability,
             }));
         }
+    }
+    if !frame.entering
+        && medium_stack.len() == 1
+        && next.smooth_slab.is_none()
+        && let Some(SmoothSlabPath::Entered(entry)) = previous.and_then(|value| value.smooth_slab)
+        && entry.slab.boundary_primitive == boundary_primitive
+        && entry.slab.glass == glass
+    {
+        // A random path can enter through the broad face used by the analytic
+        // slab specialization yet leave through a bevel. Preserve that path as
+        // a generic finite-face candidate so reverse MIS replays the same
+        // per-wavelength slab-refusal fallback as forward NEE.
+        next.smooth_slab = Some(SmoothSlabPath::ManifoldExited(PlanarManifoldExit {
+            source_origin: entry.source_origin,
+            source_geometric_normal: entry.source_geometric_normal,
+            source_direction: entry.source_direction,
+            source_pdf_solid_angle: entry.source_pdf_solid_angle,
+            boundary_primitive,
+            glass,
+            transmission_probability: entry.entry_transmission_probability
+                * transmission_probability,
+        }));
+    }
+    if !frame.entering
+        && medium_stack.len() == 1
+        && let Some(SmoothSlabPath::ManifoldEntered(entry)) =
+            previous.and_then(|value| value.smooth_slab)
+        && entry.boundary_primitive == boundary_primitive
+        && entry.glass == glass
+    {
+        next.smooth_slab = Some(SmoothSlabPath::ManifoldExited(PlanarManifoldExit {
+            source_origin: entry.source_origin,
+            source_geometric_normal: entry.source_geometric_normal,
+            source_direction: entry.source_direction,
+            source_pdf_solid_angle: entry.source_pdf_solid_angle,
+            boundary_primitive,
+            glass,
+            transmission_probability: entry.entry_transmission_probability
+                * transmission_probability,
+        }));
     }
     Ok(next)
 }
@@ -10342,6 +10855,113 @@ fn completed_slab_rectangle_nee_pdf(
     Ok(connection.nee_pdf_solid_angle)
 }
 
+fn completed_manifold_rectangle_nee_pdf(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    path: PlanarManifoldExit,
+    light_index: usize,
+    light_point: Point3,
+    wavelength_nm: f64,
+) -> Result<f64, TracerError> {
+    let light = scene
+        .lights
+        .get(light_index)
+        .ok_or(TracerError::InvalidInput)?;
+    let direct_pdf = lighting.rect_mixture_pdf(light_index, path.source_origin, light_point);
+    if direct_pdf == 0.0 {
+        return Ok(0.0);
+    }
+    let displacement = light_point.delta_from(path.source_origin);
+    let distance_squared = displacement.dot(displacement);
+    if !(distance_squared > 0.0 && distance_squared.is_finite()) {
+        return Err(TracerError::InvalidInput);
+    }
+    let distance_m = distance_squared.sqrt();
+    let direction = displacement.scale(1.0 / distance_m);
+    if path.source_geometric_normal.dot(direction) <= 0.0 {
+        return Ok(0.0);
+    }
+    let shadow = Ray {
+        origin: path
+            .source_origin
+            .offset(path.source_geometric_normal.scale(RAY_EPS)),
+        dir: direction,
+    };
+    let Some(first_blocker) = intersect(scene, cx, &shadow, ray_time)? else {
+        return Ok(0.0);
+    };
+    if first_blocker.primitive_index != path.boundary_primitive {
+        return Ok(0.0);
+    }
+    let replayed_slab = match discover_parallel_slab(scene, cx, &shadow, first_blocker, ray_time) {
+        Ok(slab) => Some(slab),
+        Err(TracerError::UnsupportedSlabNee { .. }) => None,
+        Err(error) => return Err(error),
+    };
+    let boundary = match discover_planar_manifold_boundary(scene, &shadow, first_blocker, ray_time)
+    {
+        Ok(boundary) if boundary.glass == path.glass => boundary,
+        Ok(_) | Err(TracerError::UnsupportedSlabNee { .. }) => return Ok(0.0),
+        Err(error) => return Err(error),
+    };
+    let direct = PreparedDirectLight {
+        direction,
+        emission: light.emission,
+        pdf_solid_angle: direct_pdf,
+        target: DirectLightTarget::Rectangle {
+            primitive_index: light.prim,
+            distance_m,
+            point: light_point,
+            normal: light.normal(),
+        },
+    };
+    if let Some(slab) = replayed_slab {
+        match trace_parallel_slab_direct_lane(
+            scene,
+            cx,
+            ray_time,
+            path.source_origin,
+            path.source_geometric_normal,
+            slab,
+            direct,
+            wavelength_nm,
+        ) {
+            // Forward selection prefers the analytic slab only when its actual
+            // wavelength-specific finite-face connection exists. Merely
+            // admitting the straight probe is insufficient because refraction
+            // can leave that face through a bevel.
+            Ok(_) => return Ok(0.0),
+            Err(TracerError::UnsupportedSlabNee { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let connections = trace_planar_manifold_direct_lanes(
+        scene,
+        cx,
+        ray_time,
+        path.source_origin,
+        path.source_geometric_normal,
+        boundary,
+        direct,
+        wavelength_nm,
+    )?;
+    let mut matching_pdf = None;
+    for connection in connections {
+        if parallel_directions(connection.incident_direction, path.source_direction) {
+            if matching_pdf.is_some() {
+                return Err(slab_nee_refusal(
+                    path.boundary_primitive,
+                    "reverse manifold MIS found duplicate matching stationary paths",
+                ));
+            }
+            matching_pdf = Some(connection.nee_pdf_solid_angle);
+        }
+    }
+    Ok(matching_pdf.unwrap_or(0.0))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn completed_slab_environment_nee_pdf(
     scene: &Scene,
@@ -10406,6 +11026,23 @@ fn completed_slab_mis_weight(
         DirectStrategy::Mis => balance_heuristic(
             1,
             slab_path.source_pdf_solid_angle * slab_path.transmission_probability,
+            1,
+            nee_pdf_solid_angle,
+        ),
+    }
+}
+
+fn completed_manifold_mis_weight(
+    strategy: DirectStrategy,
+    path: PlanarManifoldExit,
+    nee_pdf_solid_angle: f64,
+) -> f64 {
+    match strategy {
+        DirectStrategy::BsdfOnly => 1.0,
+        DirectStrategy::NeeOnly => 0.0,
+        DirectStrategy::Mis => balance_heuristic(
+            1,
+            path.source_pdf_solid_angle * path.transmission_probability,
             1,
             nee_pdf_solid_angle,
         ),
@@ -10508,6 +11145,7 @@ fn trace_path(
             rng,
             next_depth: 0,
             active_lane: None,
+            remaining_smooth_dielectric_splits: 1,
         }
     };
     let mut radiance = [0.0f64; PACKET];
@@ -10523,6 +11161,7 @@ fn trace_path(
     let mut medium_stack = state.medium_stack;
     let mut rng = state.rng;
     let active_lane = state.active_lane;
+    let remaining_smooth_dielectric_splits = state.remaining_smooth_dielectric_splits;
     for depth in state.next_depth..s.max_depth {
         cx.checkpoint()?;
         let Some(intersection) = intersect(scene, cx, &ray, ray_time)? else {
@@ -10540,7 +11179,12 @@ fn trace_path(
             }
             let completed_slab = previous_bsdf.and_then(|previous| match previous.smooth_slab {
                 Some(SmoothSlabPath::Exited(slab)) => Some(slab),
-                Some(SmoothSlabPath::Entered(_)) | None => None,
+                Some(
+                    SmoothSlabPath::Entered(_)
+                    | SmoothSlabPath::ManifoldEntered(_)
+                    | SmoothSlabPath::ManifoldExited(_),
+                )
+                | None => None,
             });
             let environment_origin = completed_slab.map_or(prev_origin, |slab| slab.source_origin);
             if let Some(environment) = lighting.environment_evaluation(environment_origin, ray.dir)
@@ -10618,9 +11262,25 @@ fn trace_path(
             let light_index = lighting.rect_index_for_primitive(prim_idx);
             let completed_slab = previous_bsdf.and_then(|previous| match previous.smooth_slab {
                 Some(SmoothSlabPath::Exited(slab)) => Some(slab),
-                Some(SmoothSlabPath::Entered(_)) | None => None,
+                Some(
+                    SmoothSlabPath::Entered(_)
+                    | SmoothSlabPath::ManifoldEntered(_)
+                    | SmoothSlabPath::ManifoldExited(_),
+                )
+                | None => None,
             });
+            let completed_manifold =
+                previous_bsdf.and_then(|previous| match previous.smooth_slab {
+                    Some(SmoothSlabPath::ManifoldExited(path)) => Some(path),
+                    Some(
+                        SmoothSlabPath::Entered(_)
+                        | SmoothSlabPath::Exited(_)
+                        | SmoothSlabPath::ManifoldEntered(_),
+                    )
+                    | None => None,
+                });
             let ordinary_nee_pdf = if completed_slab.is_none()
+                && completed_manifold.is_none()
                 && s.strategy == DirectStrategy::Mis
                 && previous_bsdf.is_some()
             {
@@ -10631,7 +11291,9 @@ fn trace_path(
                 None
             };
             for (k, &l) in lambdas.iter().enumerate() {
-                if completed_slab.is_some() && throughput[k].to_bits() == 0.0_f64.to_bits() {
+                if (completed_slab.is_some() || completed_manifold.is_some())
+                    && throughput[k].to_bits() == 0.0_f64.to_bits()
+                {
                     continue;
                 }
                 let weight = if let (Some(slab), Some(light_index)) = (completed_slab, light_index)
@@ -10647,6 +11309,18 @@ fn trace_path(
                         l,
                     )?;
                     completed_slab_mis_weight(s.strategy, slab, nee_pdf)
+                } else if let (Some(path), Some(light_index)) = (completed_manifold, light_index) {
+                    let nee_pdf = completed_manifold_rectangle_nee_pdf(
+                        scene,
+                        lighting,
+                        cx,
+                        ray_time,
+                        path,
+                        light_index,
+                        hit.point,
+                        l,
+                    )?;
+                    completed_manifold_mis_weight(s.strategy, path, nee_pdf)
                 } else {
                     emissive_hit_weight(s.strategy, previous_bsdf, ordinary_nee_pdf)
                 };
@@ -10922,29 +11596,41 @@ fn trace_path(
                             } else if let Some(blocker) = shadow_hit
                                 && primitive_is_dielectric(scene, blocker.primitive_index)
                             {
-                                'optional_slab_nee: {
-                                    // The current slab connector models one isolated
-                                    // dielectric layer in ambient. If the source is
-                                    // already inside a medium, this would instead be a
-                                    // nested-media connection, so this optional NEE
-                                    // technique has no proposal. Ordinary BSDF transport
-                                    // remains support-complete for the path.
+                                'optional_smooth_dielectric_nee: {
+                                    // Both finite connectors model one isolated smooth
+                                    // dielectric solid in ambient. A source already in a
+                                    // medium would require a nested-interface manifold;
+                                    // ordinary BSDF transport retains that support.
                                     if medium_stack.len() != 0 {
-                                        break 'optional_slab_nee;
+                                        break 'optional_smooth_dielectric_nee;
                                     }
-                                    let slab = match discover_parallel_slab(
+                                    let parallel_slab = match discover_parallel_slab(
                                         scene, cx, &shadow, blocker, ray_time,
                                     ) {
-                                        Ok(slab) => slab,
-                                        // A bevel, sidewall, rough boundary, or other
-                                        // unsupported dielectric face simply has no
-                                        // slab-NEE proposal. Ordinary BSDF transport
-                                        // remains responsible for paths through it.
-                                        Err(TracerError::UnsupportedSlabNee { .. }) => {
-                                            break 'optional_slab_nee;
-                                        }
+                                        Ok(slab) => Some(slab),
+                                        Err(TracerError::UnsupportedSlabNee { .. }) => None,
                                         Err(error) => return Err(error),
                                     };
+                                    let planar_manifold = match discover_planar_manifold_boundary(
+                                        scene, &shadow, blocker, ray_time,
+                                    ) {
+                                        Ok(manifold) => Some(manifold),
+                                        // Rough, non-instanced, or non-convex
+                                        // geometry has no finite-manifold
+                                        // proposal. The random walk remains
+                                        // support-complete.
+                                        Err(TracerError::UnsupportedSlabNee { .. }) => None,
+                                        Err(error) => return Err(error),
+                                    };
+                                    let connectors = SmoothDirectConnectors {
+                                        parallel_slab,
+                                        planar_manifold,
+                                    };
+                                    if connectors.parallel_slab.is_none()
+                                        && connectors.planar_manifold.is_none()
+                                    {
+                                        break 'optional_smooth_dielectric_nee;
+                                    }
                                     let wo = ray.dir.scale(-1.0);
                                     let (espec, escale) = direct.emission;
                                     let competing_bsdf_path_is_evaluated = depth
@@ -10954,68 +11640,99 @@ fn trace_path(
                                         if throughput[lane].to_bits() == 0.0_f64.to_bits() {
                                             continue;
                                         }
-                                        let connection = match trace_parallel_slab_direct_lane(
-                                            scene,
-                                            cx,
-                                            ray_time,
-                                            hit.point,
-                                            frame.geometric,
-                                            slab,
-                                            direct,
-                                            lambda,
-                                        ) {
-                                            Ok(connection) => connection,
-                                            // The exact refracted connection can leave
-                                            // the admitted broad face even when the
-                                            // straight visibility probe entered it.
-                                            // That wavelength has no slab-NEE proposal;
-                                            // the BSDF random walk remains available.
-                                            Err(TracerError::UnsupportedSlabNee { .. }) => continue,
-                                            Err(error) => return Err(error),
-                                        };
-                                        let cos_connected = n.dot(connection.incident_direction);
-                                        if !connection.visible
-                                            || connection.radiance_transport == 0.0
-                                            || cos_connected <= 0.0
-                                        {
-                                            continue;
+                                        let mut single_connection = None;
+                                        let mut manifold_connections = Vec::new();
+                                        if let Some(slab) = connectors.parallel_slab {
+                                            match trace_parallel_slab_direct_lane(
+                                                scene,
+                                                cx,
+                                                ray_time,
+                                                hit.point,
+                                                frame.geometric,
+                                                slab,
+                                                direct,
+                                                lambda,
+                                            ) {
+                                                Ok(connection) => {
+                                                    single_connection = Some(connection);
+                                                }
+                                                // Slab discovery is wavelength-independent,
+                                                // but refraction can leave its finite parallel
+                                                // face through a bevel. In that case the
+                                                // generic finite-face connector is the forward
+                                                // proposal for this wavelength.
+                                                Err(TracerError::UnsupportedSlabNee { .. }) => {}
+                                                Err(error) => return Err(error),
+                                            }
                                         }
-                                        let source_bsdf_pdf = bsdf_pdf(
-                                            &prim.material,
-                                            n,
-                                            wo,
-                                            connection.incident_direction,
-                                        );
-                                        let weight = slab_nee_mis_weight(
-                                            s.strategy,
-                                            connection.nee_pdf_solid_angle,
-                                            source_bsdf_pdf,
-                                            connection.transmission_probability,
-                                            competing_bsdf_path_is_evaluated,
-                                        )?;
-                                        let f = opaque_bsdf_eval(
-                                            &prim.material,
-                                            n,
-                                            wo,
-                                            connection.incident_direction,
-                                            lambda,
-                                            None,
-                                        )?;
-                                        let before = radiance[lane];
-                                        radiance[lane] += throughput[lane]
-                                            * f
-                                            * cos_connected
-                                            * connection.radiance_transport
-                                            * espec.eval(lambda)
-                                            * escale
-                                            / connection.nee_pdf_solid_angle
-                                            * weight;
-                                        if let Some(contributions) = &mut contribution_radiance {
-                                            contributions.record(
-                                                direct_contribution_class(depth),
-                                                lane,
-                                                radiance[lane] - before,
+                                        if single_connection.is_none()
+                                            && let Some(manifold) = connectors.planar_manifold
+                                        {
+                                            manifold_connections =
+                                                trace_planar_manifold_direct_lanes(
+                                                    scene,
+                                                    cx,
+                                                    ray_time,
+                                                    hit.point,
+                                                    frame.geometric,
+                                                    manifold,
+                                                    direct,
+                                                    lambda,
+                                                )?;
+                                        }
+                                        let connections: &[SlabDirectLane] =
+                                            if single_connection.is_some() {
+                                                single_connection.as_slice()
+                                            } else {
+                                                manifold_connections.as_slice()
+                                            };
+                                        for &connection in connections {
+                                            let cos_connected =
+                                                n.dot(connection.incident_direction);
+                                            if !connection.visible
+                                                || connection.radiance_transport == 0.0
+                                                || cos_connected <= 0.0
+                                            {
+                                                continue;
+                                            }
+                                            let source_bsdf_pdf = bsdf_pdf(
+                                                &prim.material,
+                                                n,
+                                                wo,
+                                                connection.incident_direction,
                                             );
+                                            let weight = slab_nee_mis_weight(
+                                                s.strategy,
+                                                connection.nee_pdf_solid_angle,
+                                                source_bsdf_pdf,
+                                                connection.transmission_probability,
+                                                competing_bsdf_path_is_evaluated,
+                                            )?;
+                                            let f = opaque_bsdf_eval(
+                                                &prim.material,
+                                                n,
+                                                wo,
+                                                connection.incident_direction,
+                                                lambda,
+                                                None,
+                                            )?;
+                                            let before = radiance[lane];
+                                            radiance[lane] += throughput[lane]
+                                                * f
+                                                * cos_connected
+                                                * connection.radiance_transport
+                                                * espec.eval(lambda)
+                                                * escale
+                                                / connection.nee_pdf_solid_angle
+                                                * weight;
+                                            if let Some(contributions) = &mut contribution_radiance
+                                            {
+                                                contributions.record(
+                                                    direct_contribution_class(depth),
+                                                    lane,
+                                                    radiance[lane] - before,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -11038,6 +11755,216 @@ fn trace_path(
                 } else {
                     rng.path_pair(path_sobol, depth, 2).0
                 };
+                if surface.is_delta() && remaining_smooth_dielectric_splits > 0 {
+                    let proposal_lambda = lambdas[proposal_lane];
+                    let reflection_direction =
+                        vec_add(n.scale(2.0 * admitted_unit_dot(n, wo)), wo.scale(-1.0));
+                    if !finite_unit_direction(reflection_direction) {
+                        return Err(TracerError::InvalidInput);
+                    }
+                    let split_dispersion =
+                        should_split_dispersive_boundary(active_lane, &boundary, &lambdas)?;
+                    let mut reflection_weights = [0.0; PACKET];
+                    let mut transmission_weights = [0.0; PACKET];
+                    let mut transmission_directions = [None; PACKET];
+                    let incident_cosine = admitted_unit_dot(n, wo).clamp(0.0, 1.0);
+                    for (lane, &lambda) in lambdas.iter().enumerate() {
+                        let eta_i = medium_ior(boundary.incident, lambda)?;
+                        let eta_t = medium_ior(boundary.transmitted, lambda)?;
+                        let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+                        reflection_weights[lane] = fresnel.reflectance;
+                        if !fresnel.total_internal_reflection {
+                            let (direction, transmission_probability) =
+                                deterministic_snell_transmission(n, ray.dir, eta_i, eta_t)?;
+                            transmission_directions[lane] = Some(direction);
+                            let eta_ratio = eta_i / eta_t;
+                            transmission_weights[lane] =
+                                transmission_probability * eta_ratio * eta_ratio;
+                        }
+                    }
+
+                    let run_child =
+                        |direction: Vec3,
+                         child_throughput: [f64; PACKET],
+                         child_previous_bsdf: PreviousBsdf,
+                         child_medium_stack: MediumStack,
+                         child_active_lane: Option<usize>| {
+                            trace_path(
+                                scene,
+                                lighting,
+                                cx,
+                                s,
+                                kn,
+                                pixel,
+                                sample,
+                                jx,
+                                jy,
+                                ul,
+                                ray_time,
+                                camera_path,
+                                capture_primary,
+                                path_sobol,
+                                Some(SpectralPathState {
+                                    ray: Ray {
+                                        origin: dielectric_spawn_origin(
+                                            hit.point,
+                                            frame.geometric,
+                                            direction,
+                                        ),
+                                        dir: direction,
+                                    },
+                                    throughput: child_throughput,
+                                    previous_bsdf: Some(child_previous_bsdf),
+                                    prev_origin: hit.point,
+                                    segment_origin: hit.point,
+                                    medium_stack: child_medium_stack,
+                                    rng,
+                                    next_depth: depth + 1,
+                                    active_lane: child_active_lane,
+                                    remaining_smooth_dielectric_splits:
+                                        remaining_smooth_dielectric_splits - 1,
+                                }),
+                            )
+                        };
+
+                    let reflection_previous = previous_after_dielectric_sample(
+                        scene,
+                        cx,
+                        ray_time,
+                        previous_bsdf,
+                        prev_origin,
+                        &medium_stack,
+                        prim_idx,
+                        glass,
+                        surface,
+                        frame,
+                        hit,
+                        instance_hit,
+                        ray,
+                        reflection_direction,
+                        DielectricEvent::Reflection,
+                        0.0,
+                        true,
+                        proposal_lambda,
+                    )?;
+                    let mut reflection_throughput = throughput;
+                    for (lane, weight) in reflection_weights.into_iter().enumerate() {
+                        reflection_throughput[lane] *= weight;
+                    }
+                    if reflection_throughput
+                        .iter()
+                        .any(|weight| weight.to_bits() != 0.0_f64.to_bits())
+                    {
+                        let child = run_child(
+                            reflection_direction,
+                            reflection_throughput,
+                            reflection_previous,
+                            medium_stack,
+                            active_lane,
+                        )?;
+                        add_xyz(&mut resumed_xyz, child.xyz);
+                        if let Some(total) = &mut resumed_contribution_split {
+                            total.add_assign(
+                                child.contribution_split.ok_or(TracerError::InvalidInput)?,
+                            );
+                        }
+                    }
+
+                    if split_dispersion {
+                        for lane in 0..PACKET {
+                            let Some(direction) = transmission_directions[lane] else {
+                                continue;
+                            };
+                            let weight = throughput[lane] * transmission_weights[lane];
+                            if weight.to_bits() == 0.0_f64.to_bits() {
+                                continue;
+                            }
+                            let transmission_previous = previous_after_dielectric_sample(
+                                scene,
+                                cx,
+                                ray_time,
+                                previous_bsdf,
+                                prev_origin,
+                                &medium_stack,
+                                prim_idx,
+                                glass,
+                                surface,
+                                frame,
+                                hit,
+                                instance_hit,
+                                ray,
+                                direction,
+                                DielectricEvent::Transmission,
+                                0.0,
+                                true,
+                                lambdas[lane],
+                            )?;
+                            let mut child_medium_stack = medium_stack;
+                            apply_medium_transition(&mut child_medium_stack, boundary.transition)?;
+                            let mut child_throughput = [0.0; PACKET];
+                            child_throughput[lane] = weight;
+                            let child = run_child(
+                                direction,
+                                child_throughput,
+                                transmission_previous,
+                                child_medium_stack,
+                                Some(lane),
+                            )?;
+                            add_xyz(&mut resumed_xyz, child.xyz);
+                            if let Some(total) = &mut resumed_contribution_split {
+                                total.add_assign(
+                                    child.contribution_split.ok_or(TracerError::InvalidInput)?,
+                                );
+                            }
+                        }
+                    } else if let Some(direction) = transmission_directions[proposal_lane] {
+                        let transmission_previous = previous_after_dielectric_sample(
+                            scene,
+                            cx,
+                            ray_time,
+                            previous_bsdf,
+                            prev_origin,
+                            &medium_stack,
+                            prim_idx,
+                            glass,
+                            surface,
+                            frame,
+                            hit,
+                            instance_hit,
+                            ray,
+                            direction,
+                            DielectricEvent::Transmission,
+                            0.0,
+                            true,
+                            proposal_lambda,
+                        )?;
+                        let mut child_medium_stack = medium_stack;
+                        apply_medium_transition(&mut child_medium_stack, boundary.transition)?;
+                        let mut child_throughput = throughput;
+                        for (lane, weight) in transmission_weights.into_iter().enumerate() {
+                            child_throughput[lane] *= weight;
+                        }
+                        if child_throughput
+                            .iter()
+                            .any(|weight| weight.to_bits() != 0.0_f64.to_bits())
+                        {
+                            let child = run_child(
+                                direction,
+                                child_throughput,
+                                transmission_previous,
+                                child_medium_stack,
+                                active_lane,
+                            )?;
+                            add_xyz(&mut resumed_xyz, child.xyz);
+                            if let Some(total) = &mut resumed_contribution_split {
+                                total.add_assign(
+                                    child.contribution_split.ok_or(TracerError::InvalidInput)?,
+                                );
+                            }
+                        }
+                    }
+                    break;
+                }
                 if should_split_dispersive_boundary(active_lane, &boundary, &lambdas)? {
                     let continuations = sample_dispersive_dielectric_lanes(
                         n,
@@ -11122,6 +12049,7 @@ fn trace_path(
                                 rng,
                                 next_depth: depth + 1,
                                 active_lane: Some(lane),
+                                remaining_smooth_dielectric_splits,
                             }),
                         )?;
                         add_xyz(&mut resumed_xyz, child.xyz);
@@ -12592,6 +13520,102 @@ mod tests {
         )
     }
 
+    #[test]
+    fn g0_first_smooth_dielectric_boundary_sums_fresnel_branches_without_roulette() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0; 3]);
+            let black = lift_rgb([0.0; 3]);
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        shape: instanced_test_mesh(closed_test_slab(0.0, 0.2), 49),
+                        material: Material::Dielectric {
+                            glass: DielectricGlass::new(
+                                CauchyIor::try_constant(1.5).unwrap(),
+                                BeerLambertAbsorption::try_constant(0.0).unwrap(),
+                                GlassProvenance::Custom,
+                            ),
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    // The transmitted child terminates on a black absorber
+                    // before reaching the slab's second interface. With a
+                    // two-vertex budget it cannot create suffix variance.
+                    Primitive {
+                        shape: Shape::Mesh(horizontal_quad(0.1, 3.0)),
+                        material: Material::Lambertian { reflectance: black },
+                        emission: None,
+                    },
+                    // The reflected child reaches a constant emitter behind
+                    // the camera. Its contribution must be the physical
+                    // Fresnel weight on every sample, not a rare 1/p event.
+                    Primitive {
+                        shape: Shape::Mesh(horizontal_quad(-2.0, 3.0)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: Some((white, 4.0)),
+                    },
+                ],
+                lights: vec![RectLight {
+                    corner: Point3::new(-3.0, -3.0, -2.0),
+                    edge_u: Vec3::new(6.0, 0.0, 0.0),
+                    edge_v: Vec3::new(0.0, 6.0, 0.0),
+                    prim: 2,
+                    emission: (white, 4.0),
+                }],
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, -1.0),
+                    forward: Vec3::new(0.0, 0.0, 1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0,
+                },
+            };
+            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 64,
+                max_depth: 2,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::BsdfOnly,
+                seed: 0x4652_4553_4e45_4c,
+            };
+            let mut reference = None;
+            for sample in 0..settings.spp {
+                let traced = trace_path(
+                    &scene,
+                    &lighting,
+                    cx,
+                    &settings,
+                    1.0 / y_integral(),
+                    0,
+                    sample,
+                    0.5,
+                    0.5,
+                    0.5,
+                    None,
+                    CameraPath::Legacy,
+                    false,
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert!(
+                    traced
+                        .xyz
+                        .into_iter()
+                        .all(|value| value.is_finite() && value > 0.0)
+                );
+                if let Some(expected) = reference {
+                    assert_eq!(traced.xyz.map(f64::to_bits), expected);
+                } else {
+                    reference = Some(traced.xyz.map(f64::to_bits));
+                }
+            }
+        });
+    }
+
     fn instanced_test_mesh(mesh: TriMesh, object_id: u64) -> Shape {
         let identity = hash_domain(
             "org.frankensim.fs-render.test.slab-mesh",
@@ -13086,6 +14110,7 @@ mod tests {
                     },
                     next_depth: 0,
                     active_lane: None,
+                    remaining_smooth_dielectric_splits: 1,
                 }),
             );
             let sample = result.expect(
@@ -13257,6 +14282,119 @@ mod tests {
                     ..
                 })
             ));
+        });
+    }
+
+    #[test]
+    fn planar_manifold_nee_connects_nonparallel_convex_dielectric_and_replays_pdf() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0; 3]);
+            let glass = DielectricGlass::new(
+                CauchyIor::try_constant(1.5).unwrap(),
+                BeerLambertAbsorption::try_constant(0.0).unwrap(),
+                GlassProvenance::Custom,
+            );
+            let light_primitive = 1;
+            let light = RectLight {
+                corner: Point3::new(-2.0, 2.0, 2.0),
+                edge_u: Vec3::new(4.0, 0.0, 0.0),
+                edge_v: Vec3::new(0.0, -4.0, 0.0),
+                prim: light_primitive,
+                emission: (white, 8.0),
+            };
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        shape: instanced_test_mesh(closed_test_wedge(), 61),
+                        material: Material::Dielectric {
+                            glass,
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    Primitive {
+                        shape: Shape::Mesh(horizontal_quad(2.0, 2.0)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: Some(light.emission),
+                    },
+                ],
+                lights: vec![light],
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, -1.0),
+                    forward: Vec3::new(0.0, 0.0, 1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0,
+                },
+            };
+            let source = Point3::new(0.0, 0.0, -1.0);
+            let target = Point3::new(0.7, 0.0, 2.0);
+            let displacement = target.delta_from(source);
+            let distance = displacement.norm();
+            let straight_direction = displacement.scale(1.0 / distance);
+            let shadow = Ray {
+                origin: source,
+                dir: straight_direction,
+            };
+            let first = intersect(&scene, cx, &shadow, None)
+                .unwrap()
+                .expect("straight source-to-light ray must enter the wedge");
+            assert!(matches!(
+                discover_parallel_slab(&scene, cx, &shadow, first, None),
+                Err(TracerError::UnsupportedSlabNee { .. })
+            ));
+            let boundary = discover_planar_manifold_boundary(&scene, &shadow, first, None)
+                .expect("closed convex wedge must admit the finite manifold connector");
+            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let direct_pdf = lighting.rect_mixture_pdf(0, source, target);
+            let direct = PreparedDirectLight {
+                direction: straight_direction,
+                emission: light.emission,
+                pdf_solid_angle: direct_pdf,
+                target: DirectLightTarget::Rectangle {
+                    primitive_index: light_primitive,
+                    distance_m: distance,
+                    point: target,
+                    normal: light.normal(),
+                },
+            };
+            let lanes = trace_planar_manifold_direct_lanes(
+                &scene,
+                cx,
+                None,
+                source,
+                Vec3::new(0.0, 0.0, 1.0),
+                boundary,
+                direct,
+                550.0,
+            )
+            .unwrap();
+            assert_eq!(lanes.len(), 1, "convex wedge has one stationary path");
+            let lane = lanes[0];
+            assert!(lane.visible);
+            assert!(lane.nee_pdf_solid_angle > 0.0);
+            assert!(lane.radiance_transport > 0.0 && lane.radiance_transport <= 1.0);
+
+            let replayed_pdf = completed_manifold_rectangle_nee_pdf(
+                &scene,
+                &lighting,
+                cx,
+                None,
+                PlanarManifoldExit {
+                    source_origin: source,
+                    source_geometric_normal: Vec3::new(0.0, 0.0, 1.0),
+                    source_direction: lane.incident_direction,
+                    source_pdf_solid_angle: 0.25,
+                    boundary_primitive: 0,
+                    glass,
+                    transmission_probability: lane.transmission_probability,
+                },
+                0,
+                target,
+                550.0,
+            )
+            .unwrap();
+            assert_eq!(replayed_pdf.to_bits(), lane.nee_pdf_solid_angle.to_bits());
         });
     }
 
