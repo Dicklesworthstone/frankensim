@@ -1158,6 +1158,7 @@ dependencies = [
  "fs-ga",
  "fs-geom",
  "fs-ivl",
+ "fs-la",
  "fs-matdb",
  "fs-material",
  "fs-motion",

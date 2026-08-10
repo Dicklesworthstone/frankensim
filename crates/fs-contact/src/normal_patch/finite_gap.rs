@@ -682,6 +682,14 @@ pub fn solve_finite_gap_half_space(
         return build_receipt(request, gap_datum, pressure, opening, 0, 0.0);
     }
 
+    // The Boussinesq cell kernel is translation invariant on the uniform
+    // grid, so the pairwise compliance depends only on the cell index
+    // difference. Precomputing that (2 cells_x - 1) x (2 cells_y - 1)
+    // difference table once turns every later matrix/opening entry into a
+    // lookup instead of a fresh hypot + two logarithms per pair per
+    // active-set iteration (the previous per-pair evaluation dominated the
+    // solve for large patches).
+    let kernel = ComplianceKernel::build(request.grid, request.reduced_modulus_pa);
     let mut last_residual = f64::INFINITY;
     for iteration in 0..request.maximum_active_set_iterations {
         cx.checkpoint()
@@ -692,8 +700,7 @@ pub fn solve_finite_gap_half_space(
         let mut compliance = vec![0.0; n * n];
         for (row, &receiver) in active.iter().enumerate() {
             for (column, &source) in active.iter().enumerate().take(row + 1) {
-                let value =
-                    cell_compliance(request.grid, receiver, source, request.reduced_modulus_pa);
+                let value = kernel.compliance(receiver, source);
                 compliance[row * n + column] = value;
                 compliance[column * n + row] = value;
             }
@@ -737,7 +744,8 @@ pub fn solve_finite_gap_half_space(
         for (receiver, displacement) in opening.iter_mut().enumerate() {
             let mut value = 0.0;
             for &source in &active {
-                value = cell_compliance(request.grid, receiver, source, request.reduced_modulus_pa)
+                value = kernel
+                    .compliance(receiver, source)
                     .mul_add(pressure[source], value);
             }
             *displacement = value;
@@ -784,21 +792,52 @@ pub fn solve_finite_gap_half_space(
     })
 }
 
-fn cell_compliance(
-    grid: FiniteGapGrid,
-    receiver: usize,
-    source: usize,
-    reduced_modulus_pa: f64,
-) -> f64 {
-    let (receiver_x, receiver_y) = grid.center(receiver);
-    let (source_x, source_y) = grid.center(source);
-    let integral = rectangle_inverse_distance_integral(
-        source_x - receiver_x,
-        source_y - receiver_y,
-        0.5 * grid.cell_width_m,
-        0.5 * grid.cell_depth_m,
-    );
-    integral / (core::f64::consts::PI * reduced_modulus_pa)
+/// Translation-invariant cell-pair compliance, tabulated once per solve
+/// over every possible index difference. Entries are the exact
+/// rectangular-cell Boussinesq integrals evaluated at the exact
+/// difference offsets `(di * width, dj * depth)`, so the assembled matrix
+/// is exactly (bitwise) Toeplitz-symmetric.
+struct ComplianceKernel {
+    cells_x: usize,
+    cells_y: usize,
+    stride: usize,
+    values: Vec<f64>,
+}
+
+impl ComplianceKernel {
+    fn build(grid: FiniteGapGrid, reduced_modulus_pa: f64) -> Self {
+        let stride = 2 * grid.cells_x - 1;
+        let rows = 2 * grid.cells_y - 1;
+        let mut values = Vec::with_capacity(stride * rows);
+        let scale = 1.0 / (core::f64::consts::PI * reduced_modulus_pa);
+        for row in 0..rows {
+            #[allow(clippy::cast_precision_loss)]
+            let dj = row as f64 - (grid.cells_y - 1) as f64;
+            for column in 0..stride {
+                #[allow(clippy::cast_precision_loss)]
+                let di = column as f64 - (grid.cells_x - 1) as f64;
+                let integral = rectangle_inverse_distance_integral(
+                    di * grid.cell_width_m,
+                    dj * grid.cell_depth_m,
+                    0.5 * grid.cell_width_m,
+                    0.5 * grid.cell_depth_m,
+                );
+                values.push(integral * scale);
+            }
+        }
+        Self {
+            cells_x: grid.cells_x,
+            cells_y: grid.cells_y,
+            stride,
+            values,
+        }
+    }
+
+    fn compliance(&self, receiver: usize, source: usize) -> f64 {
+        let di = (source % self.cells_x) + self.cells_x - 1 - (receiver % self.cells_x);
+        let dj = (source / self.cells_x) + self.cells_y - 1 - (receiver / self.cells_x);
+        self.values[dj * self.stride + di]
+    }
 }
 
 /// Exact integral of `1/r` over a rectangle centred at `(x, y)`.
