@@ -131,3 +131,99 @@ fn edge_tone_stage_one_strouhal_matches_published() {
         "{{\"suite\":\"fs-aeroac\",\"case\":\"edge-tone-staging\",\"re\":{re:.0},\"h_over_delta\":10,\"st_measured\":{st:.5},\"st_brown\":{st_brown:.5},\"st_vaik_exp\":{st_vaik_exp:.5},\"st_vaik_cfd\":{st_vaik_cfd:.5},\"deviation_vs_brown\":{dev:.3},\"prominence\":{prominence:.0},\"flux_imbalance\":{imbalance:.5},\"verdict\":\"pass\"}}"
     );
 }
+
+/// Shared measurement: run a config, return
+/// (St, prominence, imbalance, mach, force_rms).
+fn measure_st(cfg: &JetLabiumConfig) -> (f64, f64, f64, f64, f64) {
+    let run = run_jet_labium(cfg).expect("run");
+    let d = &run.diagnostics;
+    let imbalance = (d.flux_plate_plane - d.flux_fringe_plane).abs() / d.flux_plate_plane.abs();
+    let n = run.force_series.len();
+    let mean = run.force_series.iter().map(|f| f[1]).sum::<f64>() / n as f64;
+    let rms = (run
+        .force_series
+        .iter()
+        .map(|f| (f[1] - mean) * (f[1] - mean))
+        .sum::<f64>()
+        / n as f64)
+        .sqrt();
+    let fft = Fft::new(n);
+    let mut buf: Vec<C64> = run
+        .force_series
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let w = 0.5 - 0.5 * ((2.0 * core::f64::consts::PI * i as f64) / (n as f64 - 1.0)).cos();
+            C64::new((f[1] - mean) * w, 0.0)
+        })
+        .collect();
+    let mut scratch = vec![C64::new(0.0, 0.0); n];
+    fft.forward(&mut buf, &mut scratch);
+    let power: Vec<f64> = buf[..n / 2].iter().map(|c| c.norm_sq()).collect();
+    let (peak_bin, peak_pow) = power
+        .iter()
+        .enumerate()
+        .skip(8)
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .expect("spectrum");
+    let mut sorted = power[8..].to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let prominence = peak_pow / sorted[sorted.len() / 2].max(1e-300);
+    let st = (peak_bin as f64 / n as f64) * 2.0 * cfg.slot_half / cfg.u_jet;
+    (st, prominence, imbalance, d.mach_max_lattice, rms)
+}
+
+/// SLIT-FIX REGRESSION at the finer lattice (delta = 7.5 lu,
+/// geometric similarity at 1.25x, viscosity-scaled to Re 144): the
+/// fine rig must lock a LADDER-SCALE mode — before the binary-slit
+/// fringe fix it locked a slit-lip mode at St_delta ~ 2-3 (and a
+/// non-similar config locked St 0.82). Recorded execution:
+/// St 0.04578 (1.29x Brown stage-I), prominence ~2e20, imbalance
+/// 0.02%, real amplitude. HONEST LIMIT (recorded, not hidden):
+/// strict cross-resolution convergence of the SELECTED attractor is
+/// NOT demonstrated — the rig is multi-stable (coarse at seed 0.005
+/// locks St 0.0366; coarse at seed 0.02 AND fine at seed 0.005 lock
+/// the neighboring St ~ 0.0458 state), so the gate is the ladder
+/// BAND [0.7, 1.4] x Brown, and attractor-selection convergence
+/// remains open scope on the bead.
+#[test]
+#[ignore = "heavy staging run (~5 min); execute explicitly"]
+fn edge_tone_fine_lattice_slitfix_regression() {
+    let fine = JetLabiumConfig {
+        // GEOMETRIC SIMILARITY at 1.25x (delta = 7.5 lu): every
+        // length scales with delta (executed lesson: a fine config
+        // with a shorter dimensionless domain and plate locked onto
+        // a different attractor, St 0.82 — convergence studies must
+        // scale ALL lengths, and the slow stage-I mode needs settle
+        // measured in ITS periods, ~2.7 here).
+        nx: 240,
+        ny: 80,
+        slot_half: 3.75,
+        slot_smoothing: 1.5,
+        u_jet: 0.08,
+        tau: 0.512_5,      // nu = 0.08 * 7.5 / 144 -> Re = 144
+        edge_distance: 75, // h/delta = 10
+        plate_length: 62,
+        fringe_width: 40,
+        fringe_sigma: 0.3,
+        steps_settle: 7000,
+        steps_record: 16_384,
+        seed_amplitude: 0.005,
+        nozzle_thickness: 2,
+    };
+    let (st_f, prom_f, imb_f, mach_f, rms_f) = measure_st(&fine);
+    let st_brown = (0.4659 - 12.06 / 144.0) * (0.1 - 0.007);
+    println!(
+        "{{\"suite\":\"fs-aeroac\",\"case\":\"edge-tone-slitfix-regression\",\"st_fine\":{st_f:.5},\"st_brown\":{st_brown:.5},\"prominence\":{prom_f:.0},\"imbalance\":{imb_f:.5},\"mach\":{mach_f:.3},\"force_rms\":{rms_f:.3e}}}"
+    );
+    assert!(prom_f > 50.0 && imb_f < 0.02 && mach_f < 0.25);
+    assert!(rms_f > 1.0e-6, "force at machine-noise scale: {rms_f:.3e}");
+    // Ladder-band gate (recorded execution: St 0.04578 = 1.29x
+    // Brown): the slit-lip (St_delta 2-3, i.e. >5x Brown) and
+    // free-jet (St 0.82, >20x) failure modes sit far outside.
+    let ratio = st_f / st_brown;
+    assert!(
+        (0.7..1.4).contains(&ratio),
+        "fine lattice off the stage-I ladder band: St {st_f:.4} = {ratio:.2}x Brown"
+    );
+}

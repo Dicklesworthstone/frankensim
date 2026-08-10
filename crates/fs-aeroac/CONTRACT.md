@@ -120,7 +120,18 @@ scope law, pinned as data and by test).
     locked state (St 0.0458) — edge-tone multi-stability, recorded.
     STRUCTURAL FINDING: without the nozzle the rig locks to the free
     jet's own mode (St 0.46, 12x the ladder) — the jet-root
-    receptivity edge closes Brown's loop.
+    receptivity edge closes Brown's loop. SLIT-SHOULDER FIX
+    (executed): with a nozzle the fringe target is the BINARY slit
+    profile matching the wall opening (a smooth target slammed into
+    the shoulder every wrap and fed a slit-lip mode at St_delta 2-3
+    that blocked lattice refinement); the fine-lattice regression
+    test (delta = 7.5, geometric similarity, recorded St 0.0458 =
+    1.29x Brown) gates the LADDER BAND [0.7, 1.4] x Brown.
+    HONEST OPEN SCOPE: the rig is MULTI-STABLE — attractor selection
+    varies with seed and resolution (recorded states 0.0366 and
+    0.0458) — so strict cross-resolution convergence of the selected
+    attractor and a stage-II lock both need a hysteresis-following
+    (adiabatic ramp) protocol, recorded on the bead.
 11. NOISE TABLES (the product deliverable): `noisetable` fits
     Strouhal-band power-DENSITY shapes (record-length-independent —
     a band-SUM convention broke the synth round trip by the log-band
@@ -168,8 +179,9 @@ None.
 `tests/bickley_lbm.rs` (1): the LBM-vs-Rayleigh growth-rate
 convergence fixture (invariant 8).
 
-`tests/edgetone_staging.rs` (1, ignored heavy): stage-I Strouhal vs
-Brown + Vaik/Paal published values (invariant 10).
+`tests/edgetone_staging.rs` (2, ignored heavy): stage-I Strouhal vs
+Brown + Vaik/Paal published values; fine-lattice slit-fix regression
+(invariant 10).
 
 `tests/noisetable.rs` (2): sweep + export + synth round trip;
 typed refusals.
