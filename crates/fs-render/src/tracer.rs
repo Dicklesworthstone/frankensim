@@ -104,8 +104,9 @@ pub use sharding::{
 mod bdpt;
 mod manifold;
 pub use bdpt::{
-    BIDIRECTIONAL_TRACER_SEMANTICS_VERSION, BidirectionalRenderOutput, BidirectionalStrategyStats,
-    render_cinematic_bidirectional,
+    BIDIRECTIONAL_TRACER_SEMANTICS_VERSION, BidirectionalExecutionReport,
+    BidirectionalRenderExecutionOutput, BidirectionalRenderOutput, BidirectionalStrategyStats,
+    render_cinematic_bidirectional, render_cinematic_bidirectional_with_execution,
 };
 mod transport;
 
@@ -1748,6 +1749,27 @@ impl ParkedRenderScope<'_> {
             CameraPath::Cinematic { camera, exposure },
             execution,
             self.pool,
+        )
+    }
+
+    /// Render a complete cinematic frame with strategy-complete finite-light
+    /// bidirectional path tracing on this parked worker crew. Logical work is
+    /// partitioned by fixed sample blocks rather than image tiles because
+    /// light-subpath camera connections may splat into arbitrary pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cinematic_bidirectional(
+        &self,
+        scene: &Scene,
+        camera: &AnimatedCamera,
+        cut_side: CutSide,
+        cx: &Cx<'_>,
+        settings: &Settings,
+        shutter: ShutterInterval,
+        execution: &RenderExecutionConfig,
+    ) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
+        self.validate_job(cx, execution)?;
+        bdpt::render_cinematic_bidirectional_execution_impl(
+            scene, camera, cut_side, cx, settings, shutter, execution, self.pool,
         )
     }
 

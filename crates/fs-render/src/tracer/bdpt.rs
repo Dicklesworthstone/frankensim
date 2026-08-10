@@ -37,6 +37,62 @@ pub struct BidirectionalRenderOutput {
     pub strategies: BidirectionalStrategyStats,
 }
 
+/// Execution evidence for sample-block-parallel bidirectional rendering.
+///
+/// Ordinary camera-path rendering owns disjoint image tiles. BDPT cannot use
+/// that ownership rule because `t=1` light subpaths splat into arbitrary
+/// pixels. Instead, each logical task owns a fixed sample-index block over the
+/// complete raster and the completed blocks are reduced in ascending sample
+/// order. The block shape is semantics, not a worker-count decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BidirectionalExecutionReport {
+    /// Raster geometry associated with the film. This is not the executor's
+    /// sample-block plan.
+    pub image_layout: RenderTileLayout,
+    /// Number of fixed logical sample blocks dispatched.
+    pub sample_blocks: u64,
+    /// Maximum samples in a logical block.
+    pub samples_per_block: u32,
+    /// Caller-requested worker ceiling.
+    pub requested_workers: usize,
+    /// Workers actually admitted by the executor.
+    pub workers: usize,
+    /// Bytes retained by all private sample-block films.
+    pub staging_film_bytes: u64,
+    /// Conservative concurrent per-source splat scratch admission.
+    pub splat_scratch_envelope_bytes: u64,
+    /// Shared Sobol direction-state payload charged for the run.
+    pub sampler_state_bytes: u64,
+    /// Setup and admission wall time.
+    pub setup_ns: u64,
+    /// Throughput-lane wall time, including drain on failure.
+    pub traversal_ns: u64,
+    /// Sum of sample-block compute time across workers.
+    pub block_compute_ns: u64,
+    /// Time spent publishing completed blocks in canonical order.
+    pub publication_ns: u64,
+    /// Conservative worker-capacity time not accounted for by block compute.
+    pub idle_worker_ns: u64,
+    /// Executor scheduling, completion, and cancellation diagnostics.
+    pub executor: RunReport,
+    /// Exact operation-memory admission trace after transient charges release.
+    pub memory: LeaseReceipt,
+}
+
+/// A complete sample-block-parallel BDPT render and its execution evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BidirectionalRenderExecutionOutput {
+    /// Fully published raw spectral CIE XYZ film.
+    pub film: Film,
+    /// Direct path-strategy counters.
+    pub strategies: BidirectionalStrategyStats,
+    /// Deterministic execution and memory evidence.
+    pub report: BidirectionalExecutionReport,
+}
+
+const BIDIRECTIONAL_SAMPLE_BLOCK: u32 = 8;
+const BIDIRECTIONAL_SAMPLE_KERNEL: &str = "fs-render/bidirectional-sample-block-v1";
+
 #[derive(Clone, Copy)]
 enum VertexKind {
     Camera,
@@ -1493,57 +1549,44 @@ fn evaluate_strategies(
     Ok(())
 }
 
-/// Render a fixed-SPP cinematic frame with bidirectional path tracing.
-///
-/// This first production entry point is intentionally serial: `t=1` light-
-/// tracing strategies splat into arbitrary pixels, and serial logical order
-/// preserves deterministic floating-point sums until the tile executor gains
-/// an explicitly ordered splat reduction. The estimator supports all current
-/// opaque and smooth/rough dielectric materials, finite rectangle emitters,
-/// animated geometry at sampled shutter time, and a pinhole cinematic camera.
-/// A finite aperture refuses rather than pretending an optical-centre
-/// connection represents the lens integral.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub fn render_cinematic_bidirectional(
+fn render_admitted_sample_range(
     scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
     camera: &AnimatedCamera,
-    cut_side: CutSide,
+    exposure: CameraExposure<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
     shutter: ShutterInterval,
+    from: u32,
+    to: u32,
+    sobol: Option<&Sobol>,
 ) -> Result<BidirectionalRenderOutput, TracerError> {
-    cx.checkpoint()?;
-    let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
-    let camera_path = CameraPath::Cinematic { camera, exposure };
-    let (lighting, time_mode) = preflight_render(
-        scene,
-        cx,
-        settings,
-        None,
-        0,
-        settings.spp,
-        Some(shutter),
-        camera_path,
-    )?;
+    if from > to || to > settings.spp {
+        return Err(TracerError::InvalidInput);
+    }
     let mut film = Film::try_new(settings.width, settings.height)?;
     let mut stats = BidirectionalStrategyStats::default();
     let key = [
         (settings.seed & 0xffff_ffff) as u32,
         (settings.seed >> 32) as u32,
     ];
-    let sobol = pixel_sobol(settings.sampler, settings.seed);
     let render_cx = cx.with_stream_seed(settings.seed);
     let pixel_count = settings
         .width
         .checked_mul(settings.height)
         .ok_or(TracerError::InvalidInput)?;
-    for pixel in 0..pixel_count {
+    // Sample-major traversal is load-bearing. A complete light subpath is
+    // launched for every `(sample, source_pixel)`, and all of its arbitrary
+    // raster splats publish before the next source identity. Fixed sample
+    // blocks can therefore execute in any worker order and still be merged in
+    // one canonical arithmetic order.
+    for sample in from..to {
         cx.checkpoint()?;
-        let mut source_splats = Vec::new();
-        for sample in 0..settings.spp {
+        for pixel in 0..pixel_count {
             cx.checkpoint()?;
-            let (jx, jy, wavelength_sample) =
-                pixel_dims(settings, sobol.as_ref(), key, pixel, sample)?;
+            let mut source_splats = Vec::new();
+            let (jx, jy, wavelength_sample) = pixel_dims(settings, sobol, key, pixel, sample)?;
             let wavelength_nm = LAMBDA_MIN + wavelength_sample * (LAMBDA_MAX - LAMBDA_MIN);
             let ray_time =
                 path_time_for_sample(scene, &render_cx, settings, shutter, pixel, sample)?;
@@ -1603,17 +1646,376 @@ pub fn render_cinematic_bidirectional(
                 &mut source_splats,
                 &mut stats,
             )?;
+            publish_source_splats(&mut film, &mut source_splats);
         }
-        publish_source_splats(&mut film, &mut source_splats);
     }
-    film.spp_done = settings.spp;
-    if settings.spp > 0 {
-        film.time_mode = time_mode;
-    }
+    film.spp_done = to - from;
     Ok(BidirectionalRenderOutput {
         film,
         strategies: stats,
     })
+}
+
+fn merge_block(
+    film: &mut Film,
+    strategies: &mut BidirectionalStrategyStats,
+    block: BidirectionalRenderOutput,
+) -> Result<(), TracerError> {
+    if film.width != block.film.width
+        || film.height != block.film.height
+        || film.xyz.len() != block.film.xyz.len()
+    {
+        return Err(TracerError::InvalidInput);
+    }
+    for (target, source) in film.xyz.iter_mut().zip(block.film.xyz) {
+        add_scaled_xyz(target, source);
+    }
+    film.spp_done = film.spp_done.saturating_add(block.film.spp_done);
+    strategies.evaluated = strategies
+        .evaluated
+        .saturating_add(block.strategies.evaluated);
+    strategies.nonzero = strategies.nonzero.saturating_add(block.strategies.nonzero);
+    strategies.camera_splats = strategies
+        .camera_splats
+        .saturating_add(block.strategies.camera_splats);
+    Ok(())
+}
+
+/// Render a fixed-SPP cinematic frame with bidirectional path tracing.
+///
+/// The serial oracle and parallel executor share the same fixed eight-sample
+/// reduction blocks. This keeps floating-point image bits invariant to worker
+/// count while supporting `t=1` light-tracing strategies that splat into
+/// arbitrary pixels. The estimator supports all current opaque and
+/// smooth/rough dielectric materials, finite rectangle emitters, animated
+/// geometry at sampled shutter time, and a pinhole cinematic camera. A finite
+/// aperture refuses rather than pretending an optical-centre connection
+/// represents the lens integral.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_bidirectional(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+) -> Result<BidirectionalRenderOutput, TracerError> {
+    cx.checkpoint()?;
+    let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, time_mode) = preflight_render(
+        scene,
+        cx,
+        settings,
+        None,
+        0,
+        settings.spp,
+        Some(shutter),
+        camera_path,
+    )?;
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let mut film = Film::try_new(settings.width, settings.height)?;
+    let mut strategies = BidirectionalStrategyStats::default();
+    let mut from = 0;
+    while from < settings.spp {
+        let to = from
+            .saturating_add(BIDIRECTIONAL_SAMPLE_BLOCK)
+            .min(settings.spp);
+        let block = render_admitted_sample_range(
+            scene,
+            &lighting,
+            camera,
+            exposure,
+            cx,
+            settings,
+            shutter,
+            from,
+            to,
+            sobol.as_ref(),
+        )?;
+        merge_block(&mut film, &mut strategies, block)?;
+        from = to;
+    }
+    film.time_mode = time_mode;
+    Ok(BidirectionalRenderOutput { film, strategies })
+}
+
+struct BidirectionalSampleKernel<'run, 'assets> {
+    scene: &'assets Scene,
+    lighting: &'run AdmittedLighting<'assets>,
+    camera: &'assets AnimatedCamera,
+    exposure: CameraExposure<'assets>,
+    settings: &'run Settings,
+    shutter: ShutterInterval,
+    sobol: Option<&'run Sobol>,
+    results: &'run Mutex<Vec<Option<BidirectionalRenderOutput>>>,
+    failures: &'run Mutex<Option<(u64, RenderTileFailure)>>,
+    sample_blocks: u64,
+    compute_ns: &'run AtomicU64,
+}
+
+impl BidirectionalSampleKernel<'_, '_> {
+    fn fail(&self, block: u64, failure: RenderTileFailure) -> ControlFlow<Cancelled, ()> {
+        let mut recorded = self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if recorded
+            .as_ref()
+            .is_none_or(|(recorded_block, _)| block < *recorded_block)
+        {
+            *recorded = Some((block, failure));
+        }
+        ControlFlow::Break(Cancelled)
+    }
+}
+
+impl TileKernel for BidirectionalSampleKernel<'_, '_> {
+    type Out = ();
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new(BIDIRECTIONAL_SAMPLE_KERNEL, self.sample_blocks)
+    }
+
+    fn run(&self, block: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, Self::Out> {
+        if cx.checkpoint().is_err() {
+            return ControlFlow::Break(Cancelled);
+        }
+        let Some(from) = u32::try_from(block)
+            .ok()
+            .and_then(|block| block.checked_mul(BIDIRECTIONAL_SAMPLE_BLOCK))
+        else {
+            return self.fail(
+                block,
+                RenderTileFailure::Internal("BDPT sample-block identity overflow"),
+            );
+        };
+        let to = from
+            .saturating_add(BIDIRECTIONAL_SAMPLE_BLOCK)
+            .min(self.settings.spp);
+        let started = Instant::now();
+        let result = render_admitted_sample_range(
+            self.scene,
+            self.lighting,
+            self.camera,
+            self.exposure,
+            cx,
+            self.settings,
+            self.shutter,
+            from,
+            to,
+            self.sobol,
+        );
+        atomic_saturating_add(self.compute_ns, elapsed_ns(started));
+        let result = match result {
+            Ok(result) => result,
+            Err(TracerError::Cancelled) => return ControlFlow::Break(Cancelled),
+            Err(error) => return self.fail(block, RenderTileFailure::Tracer(error)),
+        };
+        let mut results = self
+            .results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(slot) = usize::try_from(block)
+            .ok()
+            .and_then(|index| results.get_mut(index))
+        else {
+            return self.fail(
+                block,
+                RenderTileFailure::Internal("BDPT sample block outside staging plan"),
+            );
+        };
+        if slot.is_some() {
+            return self.fail(
+                block,
+                RenderTileFailure::Internal("BDPT sample block executed more than once"),
+            );
+        }
+        *slot = Some(result);
+        ControlFlow::Continue(())
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+    execution: &RenderExecutionConfig,
+    runner: &R,
+) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
+    let setup_started = Instant::now();
+    cx.checkpoint()?;
+    let exposure = camera
+        .admit_shutter(cx, shutter, cut_side)
+        .map_err(TracerError::from)?;
+    let camera_path = CameraPath::Cinematic { camera, exposure };
+    let (lighting, time_mode) = preflight_render(
+        scene,
+        cx,
+        settings,
+        None,
+        0,
+        settings.spp,
+        Some(shutter),
+        camera_path,
+    )?;
+    let image_layout = RenderTileLayout::try_new(
+        settings.width,
+        settings.height,
+        execution.tile_width,
+        execution.tile_height,
+    )
+    .map_err(RenderExecutionError::Config)?;
+    let sample_blocks = u64::from(settings.spp.div_ceil(BIDIRECTIONAL_SAMPLE_BLOCK));
+    let active_worker_ceiling = u64::try_from(execution.workers)
+        .unwrap_or(u64::MAX)
+        .min(sample_blocks);
+    let pixel_count = checked_pixel_len(settings.width, settings.height)?;
+    let film_bytes = u64::try_from(pixel_count)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<[f64; 3]>() as u64))
+        .ok_or(RenderExecutionError::Config(
+            RenderExecutionConfigError::InvalidImageDimensions,
+        ))?;
+    // Every completed block stays private until executor drain; publication
+    // then owns one additional image-sized film while reducing those blocks.
+    let staging_film_bytes = sample_blocks
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(film_bytes))
+        .ok_or(RenderExecutionError::Internal(
+            "BDPT staging-film byte accounting overflow",
+        ))?;
+    let maximum_splats_per_source = u64::from(BIDIRECTIONAL_SAMPLE_BLOCK)
+        .checked_mul(u64::from(settings.max_depth).saturating_add(1))
+        .ok_or(RenderExecutionError::Internal(
+            "BDPT splat scratch count overflow",
+        ))?;
+    let splat_scratch_envelope_bytes = maximum_splats_per_source
+        .checked_mul(size_of::<SplatRecord>() as u64)
+        .and_then(|bytes| bytes.checked_mul(active_worker_ceiling))
+        .ok_or(RenderExecutionError::Internal(
+            "BDPT splat scratch byte accounting overflow",
+        ))?;
+    let sampler_state_bytes = sampler_direction_bytes(settings.sampler);
+    let lease = OperationMemoryLease::bounded(execution.memory_limit_bytes);
+    let staging_charge = lease
+        .reserve("bdpt-sample-block-films", staging_film_bytes)
+        .map_err(RenderExecutionError::Memory)?;
+    let splat_charge = lease
+        .reserve("bdpt-source-splat-scratch", splat_scratch_envelope_bytes)
+        .map_err(RenderExecutionError::Memory)?;
+    let sampler_charge = (sampler_state_bytes != 0)
+        .then(|| lease.reserve("bdpt-sobol-directions", sampler_state_bytes))
+        .transpose()
+        .map_err(RenderExecutionError::Memory)?;
+    let mut staged = Vec::new();
+    let sample_block_len = usize::try_from(sample_blocks)
+        .map_err(|_| RenderExecutionError::Internal("BDPT sample-block count exceeds usize"))?;
+    staged.try_reserve_exact(sample_block_len).map_err(|_| {
+        RenderExecutionError::Allocation(AllocError::OutOfMemory {
+            site: "bdpt-sample-block-index",
+            requested_bytes: sample_block_len
+                .saturating_mul(size_of::<Option<BidirectionalRenderOutput>>()),
+        })
+    })?;
+    staged.resize_with(sample_block_len, || None);
+    let sobol = pixel_sobol(settings.sampler, settings.seed);
+    let results = Mutex::new(staged);
+    let failures = Mutex::new(None);
+    let compute_ns = AtomicU64::new(0);
+    let kernel = BidirectionalSampleKernel {
+        scene,
+        lighting: &lighting,
+        camera,
+        exposure,
+        settings,
+        shutter,
+        sobol: sobol.as_ref(),
+        results: &results,
+        failures: &failures,
+        sample_blocks,
+        compute_ns: &compute_ns,
+    };
+    let setup_ns = elapsed_ns(setup_started);
+    let traversal_started = Instant::now();
+    let (outcome, executor) = runner.run_render(cx, &kernel, execution.run_id, &lease);
+    let traversal_ns = elapsed_ns(traversal_started);
+    let failure = failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(error) = render_outcome_error(outcome, failure) {
+        return Err(error);
+    }
+    cx.checkpoint()?;
+    drop(kernel);
+    let mut blocks = results.into_inner().map_err(|_| {
+        RenderExecutionError::Internal("successful BDPT staging mutex was poisoned")
+    })?;
+    let publication_started = Instant::now();
+    let mut film = Film::try_new(settings.width, settings.height)?;
+    let mut strategies = BidirectionalStrategyStats::default();
+    for block in &mut blocks {
+        let block = block.take().ok_or(RenderExecutionError::Internal(
+            "successful BDPT run omitted a sample block",
+        ))?;
+        merge_block(&mut film, &mut strategies, block)?;
+    }
+    film.time_mode = time_mode;
+    let publication_ns = elapsed_ns(publication_started);
+    let block_compute_ns = compute_ns.load(Ordering::Relaxed);
+    let active_workers = executor.tiles_by_worker.len();
+    let idle_worker_ns = traversal_ns
+        .saturating_mul(active_workers as u64)
+        .saturating_sub(block_compute_ns);
+    drop(blocks);
+    drop(sobol);
+    drop(sampler_charge);
+    drop(splat_charge);
+    drop(staging_charge);
+    let memory = lease.receipt();
+    Ok(BidirectionalRenderExecutionOutput {
+        film,
+        strategies,
+        report: BidirectionalExecutionReport {
+            image_layout,
+            sample_blocks,
+            samples_per_block: BIDIRECTIONAL_SAMPLE_BLOCK,
+            requested_workers: execution.workers,
+            workers: active_workers,
+            staging_film_bytes,
+            splat_scratch_envelope_bytes,
+            sampler_state_bytes,
+            setup_ns,
+            traversal_ns,
+            block_compute_ns,
+            publication_ns,
+            idle_worker_ns,
+            executor,
+            memory,
+        },
+    })
+}
+
+/// Render a complete cinematic BDPT frame with fixed sample-block parallelism.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_bidirectional_with_execution(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+    execution: &RenderExecutionConfig,
+) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
+    let pool = build_render_pool(execution, cx.mode(), settings.seed);
+    render_cinematic_bidirectional_execution_impl(
+        scene, camera, cut_side, cx, settings, shutter, execution, &pool,
+    )
 }
 
 #[cfg(test)]
