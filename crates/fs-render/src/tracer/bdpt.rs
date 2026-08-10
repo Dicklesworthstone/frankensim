@@ -1131,8 +1131,7 @@ fn finite_mis_weight(
     for index in (1..t).rev() {
         ratio *= remap_zero(camera_path[index].pdf_rev) / remap_zero(camera_path[index].pdf_fwd);
         if !camera_path[index].delta && !camera_path[index - 1].delta {
-            sum_ratio +=
-                ratio_with_sample_multiplicity(ratio, index, t, width, height)?;
+            sum_ratio += ratio_with_sample_multiplicity(ratio, index, t, width, height)?;
         }
     }
     ratio = 1.0;
@@ -1141,13 +1140,7 @@ fn finite_mis_weight(
         let preceding_delta = index > 0 && light[index - 1].delta;
         if !light[index].delta && !preceding_delta {
             let alternative_t = t + (s - index);
-            sum_ratio += ratio_with_sample_multiplicity(
-                ratio,
-                alternative_t,
-                t,
-                width,
-                height,
-            )?;
+            sum_ratio += ratio_with_sample_multiplicity(ratio, alternative_t, t, width, height)?;
         }
     }
     let weight = 1.0 / (1.0 + sum_ratio);
@@ -1165,17 +1158,12 @@ fn ratio_with_sample_multiplicity(
     width: u32,
     height: u32,
 ) -> Result<f64, TracerError> {
-    let alternative_samples =
-        strategy_sample_multiplicity(alternative_t, width, height)?;
+    let alternative_samples = strategy_sample_multiplicity(alternative_t, width, height)?;
     let current_samples = strategy_sample_multiplicity(current_t, width, height)?;
     Ok(density_ratio * alternative_samples / current_samples)
 }
 
-fn strategy_sample_multiplicity(
-    t: usize,
-    width: u32,
-    height: u32,
-) -> Result<f64, TracerError> {
+fn strategy_sample_multiplicity(t: usize, width: u32, height: u32) -> Result<f64, TracerError> {
     if t != 1 {
         return Ok(1.0);
     }
@@ -1392,10 +1380,8 @@ fn connect_t1(
     // for every sample index.  A target pixel receives arbitrary splats from
     // that global pool, so each splat carries the ordinary 1/n estimator
     // normalization for the t=1 strategy.
-    let light_path_samples =
-        strategy_sample_multiplicity(1, settings.width, settings.height)?;
-    let value =
-        qs.beta * f * camera_importance_area * transmittance * mis / light_path_samples;
+    let light_path_samples = strategy_sample_multiplicity(1, settings.width, settings.height)?;
+    let value = qs.beta * f * camera_importance_area * transmittance * mis / light_path_samples;
     Ok((value.is_finite() && value > 0.0).then_some((raster.pixel, value)))
 }
 
@@ -2221,9 +2207,7 @@ mod tests {
             seed: 0x514d_4342,
         };
         let sobol = path_sobol(settings.sampler).unwrap();
-        let draw = |domain| {
-            SubpathRng::new(&settings, 7, 5, domain, Some(&sobol)).next4()
-        };
+        let draw = |domain| SubpathRng::new(&settings, 7, 5, domain, Some(&sobol)).next4();
         assert_eq!(draw(CAMERA_WALK_DOMAIN), draw(CAMERA_WALK_DOMAIN));
         assert_ne!(draw(CAMERA_WALK_DOMAIN), draw(LIGHT_WALK_DOMAIN));
         assert_ne!(draw(LIGHT_WALK_DOMAIN), draw(CONNECTION_DOMAIN));
@@ -2322,8 +2306,7 @@ mod tests {
     fn g0_t1_global_sample_count_closes_two_strategy_mis() {
         let width = 4;
         let height = 2;
-        let light_tracing_samples =
-            strategy_sample_multiplicity(1, width, height).unwrap();
+        let light_tracing_samples = strategy_sample_multiplicity(1, width, height).unwrap();
         assert_eq!(light_tracing_samples, 8.0);
         assert_eq!(strategy_sample_multiplicity(2, width, height).unwrap(), 1.0);
 
@@ -2331,10 +2314,8 @@ mod tests {
         // to the number of samples drawn by each strategy.  This also proves
         // the two directional ratios close to one rather than merely checking
         // a sum that could hide a strategy permutation.
-        let t2_over_t1 =
-            ratio_with_sample_multiplicity(1.0, 2, 1, width, height).unwrap();
-        let t1_over_t2 =
-            ratio_with_sample_multiplicity(1.0, 1, 2, width, height).unwrap();
+        let t2_over_t1 = ratio_with_sample_multiplicity(1.0, 2, 1, width, height).unwrap();
+        let t1_over_t2 = ratio_with_sample_multiplicity(1.0, 1, 2, width, height).unwrap();
         assert_eq!(t2_over_t1, 1.0 / 8.0);
         assert_eq!(t1_over_t2, 8.0);
         let t1_weight = 1.0 / (1.0 + t2_over_t1);
