@@ -45,6 +45,20 @@ scope law, pinned as data and by test).
   Reynolds) and embeds the scope statement.
   `jetlab::dipole_spectrum_line` radiates a caller-FFT'd force line
   through the 2D Curle dipole.
+- `jetlab::transverse_force_peak` — the shared Hann-periodogram peak
+  instrument (mean removal, guard-band skip, prominence vs median
+  admitted power, unwindowed RMS floor value); reports the peak BIN
+  so the +-1/(2 bin) quantization travels with every Strouhal claim.
+- `jetlab::run_adiabatic_ramp` — the hysteresis-following protocol
+  for the MULTI-STABLE rig: after one base lock-in, Reynolds is
+  swept quasi-statically (per-step linear relaxation-time ramp at
+  FIXED jet speed, so Mach, fringe profile, nozzle slit, and seed
+  are all unchanged) up to `reynolds_end` and back, with a spectral
+  rung measured after every transition. Returns `2 rungs - 1`
+  direction-tagged measurements; adiabaticity (ramp steps >> the
+  oscillation period) is the caller's declared obligation. Refuses
+  degenerate spans and a top-of-ramp tau at or below the 0.5005
+  stability floor.
 - `SCOPE_STATEMENT` — the no-absolute-SPL / 2D-to-3D-span-correction
   law as data (the marketing-mutation guard asserts it).
 
@@ -127,11 +141,25 @@ scope law, pinned as data and by test).
     that blocked lattice refinement); the fine-lattice regression
     test (delta = 7.5, geometric similarity, recorded St 0.0458 =
     1.29x Brown) gates the LADDER BAND [0.7, 1.4] x Brown.
-    HONEST OPEN SCOPE: the rig is MULTI-STABLE — attractor selection
-    varies with seed and resolution (recorded states 0.0366 and
-    0.0458) — so strict cross-resolution convergence of the selected
-    attractor and a stage-II lock both need a hysteresis-following
-    (adiabatic ramp) protocol, recorded on the bead.
+    MULTI-STABILITY (executed): attractor selection varies with seed
+    and resolution (recorded states 0.0366 and 0.0458), so strict
+    cross-resolution convergence of the selected attractor is not
+    claimable from fixed-parameter runs; the adiabatic ramp
+    (invariant 13) is the follow-up instrument.
+13. ADIABATIC RAMP PROTOCOL (ignored heavy test, executed on record
+    at TWO ramp rates — 15 and 3 stage-I periods per transition —
+    with qualitative agreement): branch-following over
+    Re 144 -> 264 -> 144 at h/delta = 10 stays inside the stage-I
+    NEIGHBORHOOD [0.6, 1.7] x Brown on every rung of both legs
+    (executed extremes 0.717/1.546; the slit-lip >5x, free-jet >12x,
+    and stage-II ~2.3x signatures never appear), wanders between the
+    neighboring 0.0366/0.0458 locked families (mode competition),
+    and returns to Re 144 on a DIFFERENT attractor than it started
+    from (bin 9 vs bin 7 on the committed protocol) — REAL,
+    bitwise-reproducible hysteresis. NO stage-II lock occurs by
+    Re 264 despite the literature onset ~220-250 for a wedge: a
+    recorded NO-CLAIM boundary of this two-cell-plate periodic-
+    fringe 2D rig, not a validated staging result.
 11. NOISE TABLES (the product deliverable): `noisetable` fits
     Strouhal-band power-DENSITY shapes (record-length-independent —
     a band-SUM convention broke the synth round trip by the log-band
@@ -179,15 +207,17 @@ None.
 `tests/bickley_lbm.rs` (1): the LBM-vs-Rayleigh growth-rate
 convergence fixture (invariant 8).
 
-`tests/edgetone_staging.rs` (2, ignored heavy): stage-I Strouhal vs
+`tests/edgetone_staging.rs` (3, ignored heavy): stage-I Strouhal vs
 Brown + Vaik/Paal published values; fine-lattice slit-fix regression
-(invariant 10).
+(invariant 10); adiabatic ramp hysteresis protocol (invariant 13).
 
 `tests/noisetable.rs` (2): sweep + export + synth round trip;
 typed refusals.
 
-`tests/jetlab.rs` (3): edge-tone oscillation + diagnostics +
-radiation with scope; typed refusals; bitwise determinism.
+`tests/jetlab.rs` (5): edge-tone oscillation + diagnostics +
+radiation with scope; typed refusals; bitwise determinism; ramp
+structure + rung grid + bitwise determinism; ramp + peak-instrument
+typed refusals.
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field
@@ -199,8 +229,10 @@ determinism.
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 
 - Edge-tone staging BEYOND stage I: only the stage-I point
-  (Re 144, h/delta = 10) is validated; the stage II/III ladder and
-  hysteresis are not exercised.
+  (Re 144, h/delta = 10) is validated. Hysteresis and stage-I-band
+  confinement under adiabatic ramping ARE now measured (invariant
+  13), but no stage-II/III LOCK exists on this rig by Re 264 —
+  stage-ladder claims above stage I remain refused.
 - Grid-convergence of source spectra across refinement levels: not
   implemented (single-resolution v1).
 - Noise tables catalog THIS rig's tonal limit cycle at low Re in
