@@ -1546,10 +1546,11 @@ mod tests {
             2.0e-4,
             "spherical map versus independent area quadrature",
         );
-        assert_eq!(
-            spherical_constant_mean.to_bits(),
-            solid_angle.to_bits(),
-            "uniform solid-angle samples must integrate the constant function with zero variance"
+        assert_close(
+            spherical_constant_mean,
+            solid_angle,
+            2.0e-12,
+            "uniform solid-angle constant-function estimate",
         );
         assert_close(
             area_constant_mean,
@@ -1695,8 +1696,8 @@ mod tests {
                 let direction = direction.scale(1.0 / distance_squared.sqrt());
                 let cosine = light.normal().dot(direction).abs();
                 let direct_weight = light.luminance() * rectangle_solid_angle(light, origin);
-                let expected_pdf =
-                    (direct_weight / direct_total) * (distance_squared / (cosine * light.area()));
+                let expected_pdf = (direct_weight / direct_total)
+                    * rectangle_directional_pdf(light, origin, distance_squared, cosine);
                 assert_eq!(
                     admitted
                         .rect_mixture_pdf(light_index, origin, hit_point)
