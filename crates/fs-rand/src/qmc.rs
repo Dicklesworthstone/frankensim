@@ -145,6 +145,23 @@ impl Sobol {
     /// float ladder.
     pub fn point(&self, n: u32, out: &mut [f64]) {
         assert_eq!(out.len(), self.dim(), "output slice must match dim");
+        self.point_with_optional_owen_scramble(n, out, self.scramble);
+    }
+
+    /// Evaluate the `n`-th point with one caller-selected Owen scramble.
+    ///
+    /// This deliberately uses the generator's immutable direction table but
+    /// overrides its configured scramble. It lets a consumer assign an
+    /// independent nested-uniform scramble to each logical integration block
+    /// without rebuilding or reallocating the same direction numbers. For a
+    /// fixed `seed`, the result is bit-identical to
+    /// `Sobol::scrambled(self.dim(), seed).point(n, out)`.
+    pub fn point_with_owen_scramble(&self, n: u32, out: &mut [f64], seed: u64) {
+        assert_eq!(out.len(), self.dim(), "output slice must match dim");
+        self.point_with_optional_owen_scramble(n, out, Some(seed));
+    }
+
+    fn point_with_optional_owen_scramble(&self, n: u32, out: &mut [f64], scramble: Option<u64>) {
         let gray = n ^ (n >> 1);
         for (d, slot) in out.iter_mut().enumerate() {
             let mut x = 0u32;
@@ -153,7 +170,7 @@ impl Sobol {
                     x ^= self.directions[d][k as usize];
                 }
             }
-            if let Some(seed) = self.scramble {
+            if let Some(seed) = scramble {
                 x = owen_scramble(x, seed, d as u32);
             }
             // x / 2^32: exact ladder into [0, 1).
@@ -719,6 +736,19 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-rand/qmc\",\"case\":\"owen\",\"verdict\":\"pass\",\"detail\":\"net preserved, replayable, seed-sensitive\"}}"
         );
+    }
+
+    #[test]
+    fn caller_selected_owen_scramble_reuses_directions_exactly() {
+        let directions = Sobol::new(6);
+        let rebuilt = Sobol::scrambled(6, 0x4655_4c4c_5041_5448);
+        let mut reused_point = [0.0; 6];
+        let mut rebuilt_point = [0.0; 6];
+        for index in [0, 1, 2, 7, 31, 255, u32::MAX] {
+            directions.point_with_owen_scramble(index, &mut reused_point, 0x4655_4c4c_5041_5448);
+            rebuilt.point(index, &mut rebuilt_point);
+            assert_eq!(reused_point, rebuilt_point);
+        }
     }
 
     /// The payoff test: on a smooth integrand, scrambled Sobol beats MC
