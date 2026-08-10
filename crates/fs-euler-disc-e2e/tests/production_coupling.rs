@@ -204,6 +204,7 @@ fn normal_material() -> NormalMaterialInterface {
         .expect("interface"),
         reduced_modulus_pa: 2.0e9,
         rate_response: NormalRateResponse::ElasticHertz,
+        finite_gap_response: None,
         applicability: ApplicabilityInput {
             half_space_depth_m: 1.0,
             layer_thickness_m: 1.0,

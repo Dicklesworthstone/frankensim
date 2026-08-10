@@ -119,6 +119,7 @@ fn material(dissipation: Option<f64>) -> NormalMaterialInterface {
                 dissipation_s_per_m: value,
             }
         }),
+        finite_gap_response: None,
         applicability: ApplicabilityInput {
             half_space_depth_m: 1.0,
             layer_thickness_m: 1.0,

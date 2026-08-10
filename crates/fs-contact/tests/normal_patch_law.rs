@@ -1,3 +1,4 @@
+use fs_blake3::hash_domain;
 use fs_contact::normal_patch::*;
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 
@@ -11,6 +12,7 @@ fn request(law: NormalPatchLaw) -> NormalPatchRequest {
         | NormalPatchLaw::HuntCrossleyEllipticParaboloid { .. } => {
             NormalPatchGeometry::EllipticParaboloid
         }
+        NormalPatchLaw::FiniteGapPoint { .. } => NormalPatchGeometry::FiniteGap,
     };
     NormalPatchRequest {
         identity: NormalPatchIdentity {
@@ -503,4 +505,41 @@ fn np_011_hunt_crossley_elliptic_is_passive_and_preserves_true_patch_geometry() 
         - point(minus.evaluate().unwrap()).unwrap().normal_force_n)
         / (2.0 * h);
     assert!((numerical - loading.tangent_n_per_m).abs() / loading.tangent_n_per_m < 2.0e-6);
+}
+
+#[test]
+fn np_012_finite_gap_retains_estimate_authority_and_nonlocal_applicability() {
+    let law = NormalPatchLaw::FiniteGapPoint {
+        response_identity: hash_domain("test/finite-gap-response", b"node"),
+        reference_radius_m: 1.0e-3,
+        elastic_force_n: 4.0,
+        elastic_tangent_n_per_m: 3.0e5,
+        reversible_energy_j: 2.0e-5,
+        peak_pressure_pa: 1.0e7,
+        equivalent_pressure_semiaxes_m: [3.0e-4, 6.0e-4],
+        dissipation_s_per_m: 10.0,
+    };
+    let request = request(law);
+    let receipt = point(request.evaluate().unwrap()).unwrap();
+    let factor = 1.0 + 10.0 * request.indentation_rate_m_per_s;
+    assert_eq!(receipt.authority, InputAuthority::Estimated);
+    assert!((receipt.normal_force_n - 4.0 * factor).abs() <= 1.0e-14);
+    assert!((receipt.tangent_n_per_m - 3.0e5 * factor).abs() <= 1.0e-9);
+    assert_eq!(receipt.reversible_energy_j, 2.0e-5);
+    assert!(receipt.irreversible_work_j > 0.0);
+    assert!(receipt.ratios.patch_to_radius > request.limits.max_patch_to_radius);
+    let axes = receipt.elliptic_patch_axes.unwrap();
+    assert_eq!(axes.semi_major_axis_m, 6.0e-4);
+    assert_eq!(axes.semi_minor_axis_m, 3.0e-4);
+    assert_eq!(axes.aspect_ratio, 2.0);
+
+    let mut shallow_half_space = request;
+    shallow_half_space.applicability.half_space_depth_m = 1.0e-3;
+    assert!(matches!(
+        shallow_half_space.evaluate(),
+        Err(NormalPatchError::OutsideApplicability {
+            ratio: "patch_to_depth",
+            ..
+        })
+    ));
 }

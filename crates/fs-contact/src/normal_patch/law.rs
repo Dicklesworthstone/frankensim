@@ -73,6 +73,22 @@ pub enum NormalPatchLaw {
         reduced_modulus_pa: f64,
         dissipation_s_per_m: f64,
     },
+    /// One point on a passive finite-geometry response curve.
+    ///
+    /// The force, tangent, stored energy, pressure, and pressure-equivalent
+    /// footprint must all come from the same response-curve evaluation. The
+    /// response identity binds these hot-path values to the independently
+    /// convergence-checked dense contact table.
+    FiniteGapPoint {
+        response_identity: ContentHash,
+        reference_radius_m: f64,
+        elastic_force_n: f64,
+        elastic_tangent_n_per_m: f64,
+        reversible_energy_j: f64,
+        peak_pressure_pa: f64,
+        equivalent_pressure_semiaxes_m: [f64; 2],
+        dissipation_s_per_m: f64,
+    },
 }
 
 /// Declared local geometry. The analytic rungs deliberately do not approximate
@@ -88,6 +104,11 @@ pub enum NormalPatchGeometry {
     /// This is intentionally narrower than a generic toroidal body: callers
     /// must establish the local paraboloid and supply the relative curvatures.
     EllipticParaboloid,
+    /// A finite undeformed gap sampled from the actual contacting chart.
+    ///
+    /// The small-local-patch curvature gate does not apply, but the remaining
+    /// half-space, strain, yield, rate, temperature, and adhesion limits do.
+    FiniteGap,
     /// A two-curvature or strongly elliptical patch requiring another law.
     ToroidalOrHighlyElliptical,
 }
@@ -162,7 +183,7 @@ pub struct PointPressureMoments {
 /// Semiaxes of an elliptic point-contact patch in the principal-curvature
 /// frame. The major axis lies along the smaller supplied curvature.
 ///
-/// This is present only for [`NormalPatchLaw::HertzEllipticParaboloid`]. It is
+/// This is present for elliptic Hertz and finite-gap point responses. It is
 /// not an effective-radius approximation: `patch_radius_m` is an
 /// area-equivalent reporting value retained for schema compatibility and must
 /// not be used for physical ranking or applicability decisions.
@@ -390,6 +411,28 @@ impl NormalPatchRequest {
                 reduced_modulus_pa,
                 Some(dissipation_s_per_m),
             ),
+            NormalPatchLaw::FiniteGapPoint {
+                response_identity,
+                reference_radius_m,
+                elastic_force_n,
+                elastic_tangent_n_per_m,
+                reversible_energy_j,
+                peak_pressure_pa,
+                equivalent_pressure_semiaxes_m,
+                dissipation_s_per_m,
+            } => {
+                return self.finite_gap_point(
+                    request_id,
+                    response_identity,
+                    reference_radius_m,
+                    elastic_force_n,
+                    elastic_tangent_n_per_m,
+                    reversible_energy_j,
+                    peak_pressure_pa,
+                    equivalent_pressure_semiaxes_m,
+                    dissipation_s_per_m,
+                );
+            }
         };
         match self.geometry {
             NormalPatchGeometry::SpherePlane => {
@@ -399,6 +442,9 @@ impl NormalPatchRequest {
                 geometry: self.geometry,
             }),
             NormalPatchGeometry::EllipticParaboloid => Err(NormalPatchError::GeometryLawMismatch {
+                geometry: self.geometry,
+            }),
+            NormalPatchGeometry::FiniteGap => Err(NormalPatchError::GeometryLawMismatch {
                 geometry: self.geometry,
             }),
             NormalPatchGeometry::ToroidalOrHighlyElliptical => {
@@ -618,6 +664,80 @@ impl NormalPatchRequest {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn finite_gap_point(
+        &self,
+        request_id: ContentHash,
+        _response_identity: ContentHash,
+        reference_radius_m: f64,
+        elastic_force_n: f64,
+        elastic_tangent_n_per_m: f64,
+        reversible_energy_j: f64,
+        peak_pressure_pa: f64,
+        equivalent_pressure_semiaxes_m: [f64; 2],
+        dissipation_s_per_m: f64,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        let approach = self.indentation_m;
+        let factor = 1.0 + dissipation_s_per_m * self.indentation_rate_m_per_s;
+        if factor < 0.0 {
+            return Err(NormalPatchError::OutsideApplicability {
+                ratio: "Hunt-Crossley force factor",
+                value: factor,
+                limit: 0.0,
+            });
+        }
+        let force = checked(elastic_force_n * factor, "finite_gap_normal_force")?;
+        let tangent = checked(
+            elastic_tangent_n_per_m * factor,
+            "finite_gap_normal_tangent",
+        )?;
+        let peak = checked(peak_pressure_pa * factor, "finite_gap_peak_pressure")?;
+        let mut semi_major = equivalent_pressure_semiaxes_m[0];
+        let mut semi_minor = equivalent_pressure_semiaxes_m[1];
+        if semi_minor > semi_major {
+            core::mem::swap(&mut semi_major, &mut semi_minor);
+        }
+        let aspect_ratio = if semi_minor == 0.0 {
+            1.0
+        } else {
+            checked(semi_major / semi_minor, "finite_gap_aspect_ratio")?
+        };
+        let reporting_radius = checked(
+            (semi_major * semi_minor).sqrt(),
+            "finite_gap_reporting_radius",
+        )?;
+        let ratios = self.finite_gap_ratios(semi_major, reference_radius_m, approach, peak)?;
+        let irreversible_power = elastic_force_n
+            * dissipation_s_per_m
+            * self.indentation_rate_m_per_s
+            * self.indentation_rate_m_per_s;
+        let irreversible_work = checked(
+            irreversible_power * self.step_s,
+            "finite_gap_irreversible_work",
+        )?;
+        self.estimated_elliptic_point_receipt(
+            request_id,
+            approach,
+            force,
+            tangent,
+            reporting_radius,
+            EllipticPatchAxes {
+                semi_major_axis_m: semi_major,
+                semi_minor_axis_m: semi_minor,
+                aspect_ratio,
+            },
+            peak,
+            checked(
+                (semi_major * semi_major + semi_minor * semi_minor) / 5.0,
+                "finite_gap_second_moment",
+            )?,
+            reversible_energy_j,
+            irreversible_work,
+            irreversible_power,
+            ratios,
+        )
+    }
+
     fn point_receipt(
         &self,
         request_id: ContentHash,
@@ -731,6 +851,74 @@ impl NormalPatchRequest {
             history_id: self.interface.history_id().to_owned(),
             input_source_id: self.interface.provenance().source_id().to_owned(),
             authority: self.interface.provenance().authority(),
+            approach_m: approach,
+            normal_force_n: force,
+            tangent_n_per_m: tangent,
+            patch_radius_m: reporting_radius,
+            elliptic_patch_axes: Some(axes),
+            pressure: PointPressureMoments {
+                peak_pressure_pa: peak,
+                resultant_n: force,
+                second_moment_m2: moment,
+            },
+            reversible_energy_j: reversible,
+            irreversible_work_j: irreversible,
+            dissipated_power_w: power,
+            ratios,
+            uncertainty: self.uncertainty,
+        }))
+    }
+
+    /// Publish a finite-gap interpolation without promoting its Estimate-only
+    /// numerical authority to the authority of the material/interface card.
+    #[allow(clippy::too_many_arguments)]
+    fn estimated_elliptic_point_receipt(
+        &self,
+        request_id: ContentHash,
+        approach: f64,
+        force: f64,
+        tangent: f64,
+        reporting_radius: f64,
+        axes: EllipticPatchAxes,
+        peak: f64,
+        moment: f64,
+        reversible: f64,
+        irreversible: f64,
+        power: f64,
+        ratios: ApplicabilityRatios,
+    ) -> Result<NormalPatchReceipt, NormalPatchError> {
+        self.validate_response(
+            approach,
+            force,
+            tangent,
+            reporting_radius,
+            peak,
+            reversible,
+            irreversible,
+            power,
+        )?;
+        let receipt_id = self.elliptic_receipt_id(
+            request_id,
+            approach,
+            force,
+            tangent,
+            reporting_radius,
+            axes,
+            peak,
+            moment,
+            reversible,
+            irreversible,
+            power,
+            ratios,
+        );
+        Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
+            request_id,
+            receipt_id,
+            units: POINT_SI_UNITS,
+            interface_system_id: self.interface.ordered_system_id().to_owned(),
+            history_id: self.interface.history_id().to_owned(),
+            input_source_id: self.interface.provenance().source_id().to_owned(),
+            authority: InputAuthority::Estimated,
             approach_m: approach,
             normal_force_n: force,
             tangent_n_per_m: tangent,
@@ -948,6 +1136,27 @@ impl NormalPatchRequest {
         approach: f64,
         pressure: f64,
     ) -> Result<ApplicabilityRatios, NormalPatchError> {
+        self.ratios_with_local_patch_limit(patch, radius, approach, pressure, true)
+    }
+
+    fn finite_gap_ratios(
+        &self,
+        patch: f64,
+        radius: f64,
+        approach: f64,
+        pressure: f64,
+    ) -> Result<ApplicabilityRatios, NormalPatchError> {
+        self.ratios_with_local_patch_limit(patch, radius, approach, pressure, false)
+    }
+
+    fn ratios_with_local_patch_limit(
+        &self,
+        patch: f64,
+        radius: f64,
+        approach: f64,
+        pressure: f64,
+        enforce_local_patch_limit: bool,
+    ) -> Result<ApplicabilityRatios, NormalPatchError> {
         let r = ApplicabilityRatios {
             patch_to_radius: patch / radius,
             strain: approach / radius,
@@ -984,7 +1193,7 @@ impl NormalPatchRequest {
             if !value.is_finite() {
                 return Err(NormalPatchError::Overflow { field: name });
             }
-            if value > limit {
+            if value > limit && (name != "patch_to_radius" || enforce_local_patch_limit) {
                 return Err(NormalPatchError::OutsideApplicability {
                     ratio: name,
                     value,
@@ -1130,12 +1339,44 @@ impl NormalPatchRequest {
                     });
                 }
             }
+            NormalPatchLaw::FiniteGapPoint {
+                reference_radius_m,
+                elastic_force_n,
+                elastic_tangent_n_per_m,
+                reversible_energy_j,
+                peak_pressure_pa,
+                equivalent_pressure_semiaxes_m,
+                ..
+            } => {
+                if !(reference_radius_m.is_finite()
+                    && reference_radius_m > 0.0
+                    && elastic_force_n.is_finite()
+                    && elastic_force_n >= 0.0
+                    && elastic_tangent_n_per_m.is_finite()
+                    && elastic_tangent_n_per_m >= 0.0
+                    && reversible_energy_j.is_finite()
+                    && reversible_energy_j >= 0.0
+                    && peak_pressure_pa.is_finite()
+                    && peak_pressure_pa >= 0.0
+                    && equivalent_pressure_semiaxes_m
+                        .iter()
+                        .all(|axis| axis.is_finite() && *axis >= 0.0))
+                {
+                    return Err(NormalPatchError::InvalidInput {
+                        field: "finite_gap_response",
+                    });
+                }
+            }
         }
         if let NormalPatchLaw::HuntCrossleySphere {
             dissipation_s_per_m,
             ..
         }
         | NormalPatchLaw::HuntCrossleyEllipticParaboloid {
+            dissipation_s_per_m,
+            ..
+        }
+        | NormalPatchLaw::FiniteGapPoint {
             dissipation_s_per_m,
             ..
         } = self.law
@@ -1164,7 +1405,8 @@ impl NormalPatchRequest {
             | (
                 NormalPatchLaw::HuntCrossleyEllipticParaboloid { .. },
                 NormalPatchGeometry::EllipticParaboloid,
-            ) => {}
+            )
+            | (NormalPatchLaw::FiniteGapPoint { .. }, NormalPatchGeometry::FiniteGap) => {}
             _ => {
                 return Err(NormalPatchError::GeometryLawMismatch {
                     geometry: self.geometry,

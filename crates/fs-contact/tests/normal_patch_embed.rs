@@ -11,6 +11,7 @@ fn law_request(law: NormalPatchLaw) -> NormalPatchRequest {
         | NormalPatchLaw::HuntCrossleyEllipticParaboloid { .. } => {
             NormalPatchGeometry::EllipticParaboloid
         }
+        NormalPatchLaw::FiniteGapPoint { .. } => NormalPatchGeometry::FiniteGap,
     };
     NormalPatchRequest {
         identity: NormalPatchIdentity {

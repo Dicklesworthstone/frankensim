@@ -6,13 +6,14 @@
 //! or treating an event/barrier result as compliant contact.
 
 use core::fmt;
+use std::sync::Arc;
 
 use fs_contact::interface_binding::{BoundNormalContactLaw, BoundNormalContactModel};
 use fs_contact::normal_patch::{
-    ApplicabilityInput, ApplicabilityLimits, InputUncertainty, IntegrationLane,
-    NormalPatchEmbedError, NormalPatchEmbedIdentity, NormalPatchEmbedRequest,
-    NormalPatchEmbedState, NormalPatchEmbedTransition, NormalPatchGeometry, NormalPatchLaw,
-    NormalPatchRequest,
+    ApplicabilityInput, ApplicabilityLimits, FiniteGapResponseCurveError, FiniteGapResponseFamily,
+    InputUncertainty, IntegrationLane, NormalPatchEmbedError, NormalPatchEmbedIdentity,
+    NormalPatchEmbedRequest, NormalPatchEmbedState, NormalPatchEmbedTransition,
+    NormalPatchGeometry, NormalPatchLaw, NormalPatchRequest,
 };
 use fs_mbd::Vec3;
 use fs_tribo::{InputAuthority, InterfaceSystemRef};
@@ -40,12 +41,29 @@ pub struct NormalMaterialInterface {
     /// Card-selected normal force-rate family. Geometry remains independently
     /// resolved from the actual patch and is never inferred from this field.
     pub rate_response: NormalRateResponse,
+    /// Optional finite-geometry response table replacing the local quadratic
+    /// contact law without changing the material, interface, or rate card.
+    pub finite_gap_response: Option<FiniteGapNormalResponse>,
     /// Generic half-space, yield, rate, temperature, layer, and adhesion data.
     pub applicability: ApplicabilityInput,
     /// Explicit limits for the generic applicability ratios.
     pub limits: ApplicabilityLimits,
     /// Material/load input uncertainty; curvature uncertainty is merged in.
     pub uncertainty: InputUncertainty,
+}
+
+/// One immutable finite-gap response family plus its current configuration
+/// coordinate.
+///
+/// The family is built from the actual geometry and reduced modulus outside
+/// the audio-rate loop.  Only `coordinate` changes between mechanics steps.
+/// Its response remains Estimate-only and never promotes the material card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FiniteGapNormalResponse {
+    pub family: Arc<FiniteGapResponseFamily>,
+    pub reduced_modulus_pa: f64,
+    pub coordinate: f64,
+    pub dissipation_s_per_m: f64,
 }
 
 /// Geometry-owned settings needed to adapt an admitted material/model binding
@@ -118,6 +136,7 @@ pub fn bind_normal_material_interface(
         interface: elastic.interface().interface().clone(),
         reduced_modulus_pa: elastic.reduced_modulus_pa(),
         rate_response,
+        finite_gap_response: None,
         applicability: ApplicabilityInput {
             half_space_depth_m: config.half_space_depth_m,
             layer_thickness_m: config.layer_thickness_m,
@@ -352,6 +371,8 @@ pub enum NormalContactError {
     DissipativeLineUnsupported,
     /// The generic finite-patch law or transactional embedding refused the request.
     GenericRefusal(NormalPatchEmbedError),
+    /// The finite-geometry table refused interpolation or its retained domain.
+    FiniteGapResponse(FiniteGapResponseCurveError),
 }
 
 impl fmt::Display for NormalContactError {
@@ -365,6 +386,12 @@ impl std::error::Error for NormalContactError {}
 impl From<NormalPatchEmbedError> for NormalContactError {
     fn from(value: NormalPatchEmbedError) -> Self {
         Self::GenericRefusal(value)
+    }
+}
+
+impl From<FiniteGapResponseCurveError> for NormalContactError {
+    fn from(value: FiniteGapResponseCurveError) -> Self {
+        Self::FiniteGapResponse(value)
     }
 }
 
@@ -411,8 +438,33 @@ pub fn evaluate_normal_contact(
     let curvature = resolve_curvature(&input.kinematics, input.geometry)?;
     let normal = input.kinematics.tangent_basis.normal_world;
     let approach_rate_m_per_s = -input.kinematics.normal_relative_velocity_m_per_s;
+    let approach_m = (-gap_m).max(0.0);
     let (law, geometry, line_load_n_per_m) =
-        law_from_input(&input.material, input.geometry, &curvature)?;
+        if let Some(finite_gap) = &input.material.finite_gap_response {
+            let response = finite_gap
+                .family
+                .evaluate(finite_gap.coordinate, approach_m)?;
+            let mut semiaxes = response.equivalent_pressure_semiaxes_m;
+            if semiaxes[1] > semiaxes[0] {
+                semiaxes.swap(0, 1);
+            }
+            (
+                NormalPatchLaw::FiniteGapPoint {
+                    response_identity: finite_gap.family.identity,
+                    reference_radius_m: curvature.reporting_radius_m,
+                    elastic_force_n: response.normal_force_n,
+                    elastic_tangent_n_per_m: response.normal_tangent_n_per_m,
+                    reversible_energy_j: response.reversible_energy_j,
+                    peak_pressure_pa: response.peak_pressure_pa,
+                    equivalent_pressure_semiaxes_m: semiaxes,
+                    dissipation_s_per_m: finite_gap.dissipation_s_per_m,
+                },
+                NormalPatchGeometry::FiniteGap,
+                0.0,
+            )
+        } else {
+            law_from_input(&input.material, input.geometry, &curvature)?
+        };
     let uncertainty = merged_uncertainty(input.material.uncertainty, &curvature)?;
     let request = NormalPatchRequest {
         identity: fs_contact::normal_patch::NormalPatchIdentity {
@@ -423,7 +475,7 @@ pub fn evaluate_normal_contact(
         interface: input.material.interface.clone(),
         law,
         geometry,
-        indentation_m: (-gap_m).max(0.0),
+        indentation_m: approach_m,
         indentation_rate_m_per_s: approach_rate_m_per_s,
         step_s: input.step_s,
         line_load_n_per_m,
@@ -442,7 +494,7 @@ pub fn evaluate_normal_contact(
         converged: input.converged,
         kinematics: fs_contact::normal_patch::NormalPatchKinematics {
             declared_gap_m: gap_m,
-            approach_m: (-gap_m).max(0.0),
+            approach_m,
             approach_rate_m_per_s,
             time_s: input.time_s,
             step_s: input.step_s,
@@ -511,6 +563,17 @@ fn validate_material(material: &NormalMaterialInterface) -> Result<(), NormalCon
     {
         return Err(NormalContactError::InvalidInput {
             field: "hunt_crossley_dissipation_s_per_m",
+        });
+    }
+    if let Some(finite_gap) = &material.finite_gap_response
+        && (!(finite_gap.reduced_modulus_pa.is_finite() && finite_gap.reduced_modulus_pa > 0.0)
+            || finite_gap.reduced_modulus_pa.to_bits() != material.reduced_modulus_pa.to_bits()
+            || !finite_gap.coordinate.is_finite()
+            || !(finite_gap.dissipation_s_per_m.is_finite()
+                && finite_gap.dissipation_s_per_m >= 0.0))
+    {
+        return Err(NormalContactError::InvalidInput {
+            field: "finite_gap_response",
         });
     }
     Ok(())

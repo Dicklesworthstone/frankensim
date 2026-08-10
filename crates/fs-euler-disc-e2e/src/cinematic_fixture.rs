@@ -2774,6 +2774,7 @@ fn build_fixture_production_mechanics(
             rate_response: NormalRateResponse::HuntCrossleyPoint {
                 dissipation_s_per_m: mechanics.normal_dissipation_s_per_m,
             },
+            finite_gap_response: None,
             applicability: ApplicabilityInput {
                 half_space_depth_m: profile
                     .dimensions
