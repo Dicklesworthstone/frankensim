@@ -50,8 +50,16 @@
 //! (executed); the suspected mechanism is the profile/wall mismatch
 //! at the nozzle-slit shoulder, a recorded follow-up.
 
-use fs_aeroac::jetlab::{JetLabiumConfig, run_jet_labium};
+use fs_aeroac::jetlab::{
+    JetLabiumConfig, RampConfig, RampDirection, run_adiabatic_ramp, run_jet_labium,
+};
 use fs_fft::{C64, Fft};
+
+/// Brown's (1937) stage-I Strouhal prediction (Vaik/Paal Part I,
+/// Table 1 coefficients) at h/delta = 10.
+fn st_brown_stage_one(re: f64) -> f64 {
+    (0.4659 - 12.06 / re) * (0.1 - 0.007)
+}
 
 #[test]
 #[ignore = "heavy staging run (~4 min); execute explicitly"]
@@ -225,5 +233,95 @@ fn edge_tone_fine_lattice_slitfix_regression() {
     assert!(
         (0.7..1.4).contains(&ratio),
         "fine lattice off the stage-I ladder band: St {st_f:.4} = {ratio:.2}x Brown"
+    );
+}
+
+/// ADIABATIC HYSTERESIS-FOLLOWING RAMP (the bead's recorded
+/// follow-up to the multi-stability finding): lock the stage-I
+/// attractor at Re 144, then quasi-statically sweep Reynolds
+/// (viscosity at fixed jet speed — Mach, fringe, slit, and seed all
+/// unchanged) up to Re 264 and back, measuring a spectral rung after
+/// every transition. Fixed-parameter runs cannot demonstrate stage
+/// selection on a multi-stable rig; branch-following can. Transition
+/// budget: ramp 6000 steps (~3 stage-I periods) + settle 4000 (~2
+/// periods) per rung; record 16384 (~8 periods, +-6% quantization at
+/// the stage-I bin).
+///
+/// Gates are health + the rung-0 stage-I ladder anchor; the staging
+/// structure (jump locations, hysteresis) is printed per rung and
+/// pinned only after execution — refusal beats fabrication.
+#[test]
+#[ignore = "heavy ramp protocol (~340k lattice steps); execute explicitly, prefer release"]
+fn edge_tone_adiabatic_ramp_hysteresis() {
+    let cfg = RampConfig {
+        base: JetLabiumConfig {
+            nx: 192,
+            ny: 64,
+            slot_half: 3.0,
+            slot_smoothing: 1.2,
+            u_jet: 0.08,
+            tau: 0.51, // Re0 = 144
+            edge_distance: 60,
+            plate_length: 50,
+            fringe_width: 32,
+            fringe_sigma: 0.3,
+            steps_settle: 4000,
+            steps_record: 16_384, // unused by the ramp
+            seed_amplitude: 0.005,
+            nozzle_thickness: 2,
+        },
+        reynolds_end: 264.0,
+        rungs: 7, // Re = 144, 164, ..., 264
+        steps_ramp: 6000,
+        steps_rung_settle: 4000,
+        steps_rung_record: 16_384,
+        skip_bins: 6,
+    };
+    let report = run_adiabatic_ramp(&cfg).expect("ramp");
+    assert_eq!(report.rungs.len(), 13);
+    for r in &report.rungs {
+        let dir = match r.direction {
+            RampDirection::Up => "up",
+            RampDirection::Down => "down",
+        };
+        let ratio = r.peak.strouhal / st_brown_stage_one(r.reynolds);
+        println!(
+            "{{\"suite\":\"fs-aeroac\",\"case\":\"edge-tone-ramp\",\"direction\":\"{dir}\",\"re\":{:.0},\"tau\":{:.6},\"st\":{:.5},\"bin\":{},\"ratio_vs_brown_stage1\":{:.3},\"prominence\":{:.0},\"force_rms\":{:.3e},\"imbalance\":{:.5},\"mach\":{:.3}}}",
+            r.reynolds,
+            r.tau,
+            r.peak.strouhal,
+            r.peak.bin,
+            ratio,
+            r.peak.prominence,
+            r.peak.force_rms,
+            r.flux_imbalance,
+            r.mach_max_lattice
+        );
+    }
+    // Health gates on every rung: in-regime flow, a real (seeded,
+    // saturated) oscillation, and a prominent peak.
+    for r in &report.rungs {
+        assert!(r.mach_max_lattice < 0.25, "Mach {}", r.mach_max_lattice);
+        assert!(r.flux_imbalance < 0.02, "imbalance {}", r.flux_imbalance);
+        assert!(
+            r.peak.prominence > 50.0,
+            "no oscillation at Re {}: prominence {:.1}",
+            r.reynolds,
+            r.peak.prominence
+        );
+        assert!(
+            r.peak.force_rms > 1.0e-6,
+            "machine-noise amplitude at Re {}: {:.3e}",
+            r.reynolds,
+            r.peak.force_rms
+        );
+    }
+    // Rung 0 anchors the protocol on the validated stage-I state
+    // (staging fixture: St 0.03662 = 1.03x Brown at Re 144).
+    let first = &report.rungs[0];
+    let ratio0 = first.peak.strouhal / st_brown_stage_one(first.reynolds);
+    assert!(
+        (0.7..1.4).contains(&ratio0),
+        "ramp did not start on the stage-I ladder: {ratio0:.2}x Brown"
     );
 }

@@ -4,7 +4,10 @@
 //! measured force carries the scope statement, refusals are typed,
 //! and the run is bitwise deterministic.
 
-use fs_aeroac::jetlab::{JetLabiumConfig, dipole_spectrum_line, run_jet_labium};
+use fs_aeroac::jetlab::{
+    JetLabiumConfig, RampConfig, RampDirection, dipole_spectrum_line, run_adiabatic_ramp,
+    run_jet_labium, transverse_force_peak,
+};
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 use fs_math::c64::C64;
 
@@ -165,6 +168,136 @@ fn jet_labium_refusals_are_typed() {
     assert!(matches!(
         run_jet_labium(&c),
         Err(AeroacError::NonFinite { .. })
+    ));
+}
+
+/// A geometrically valid but numerically tiny rig for structural
+/// ramp tests (Re0 = 0.08 * 5 * 300 = 120).
+fn tiny_ramp_config() -> RampConfig {
+    RampConfig {
+        base: JetLabiumConfig {
+            nx: 96,
+            ny: 32,
+            slot_half: 2.5,
+            slot_smoothing: 1.0,
+            u_jet: 0.08,
+            tau: 0.51,
+            edge_distance: 20,
+            plate_length: 20,
+            fringe_width: 24,
+            fringe_sigma: 0.3,
+            steps_settle: 200,
+            steps_record: 64, // unused by the ramp
+            seed_amplitude: 0.01,
+            nozzle_thickness: 2,
+        },
+        reynolds_end: 180.0,
+        rungs: 3,
+        steps_ramp: 32,
+        steps_rung_settle: 32,
+        steps_rung_record: 64,
+        skip_bins: 2,
+    }
+}
+
+/// Ramp structure: `2 * rungs - 1` measurements, up leg then down
+/// leg, exact rung Reynolds grid, tau consistent with each rung's
+/// Reynolds, finite measurements throughout, and bitwise
+/// determinism across two invocations.
+#[test]
+fn adiabatic_ramp_structure_and_determinism() {
+    let cfg = tiny_ramp_config();
+    let a = run_adiabatic_ramp(&cfg).expect("ramp a");
+    assert_eq!(a.scope, SCOPE_STATEMENT);
+    assert_eq!(a.rungs.len(), 5);
+    let dirs: Vec<RampDirection> = a.rungs.iter().map(|r| r.direction).collect();
+    assert_eq!(
+        dirs,
+        [
+            RampDirection::Up,
+            RampDirection::Up,
+            RampDirection::Up,
+            RampDirection::Down,
+            RampDirection::Down,
+        ]
+    );
+    let re: Vec<f64> = a.rungs.iter().map(|r| r.reynolds).collect();
+    for (got, want) in re.iter().zip([120.0, 150.0, 180.0, 150.0, 120.0]) {
+        assert!((got - want).abs() < 1e-9, "rung Re {got} vs {want}");
+    }
+    for r in &a.rungs {
+        // tau realized on the lattice must reproduce the rung's
+        // Reynolds through the definition Re = u * delta / nu.
+        let nu = (r.tau - 0.5) / 3.0;
+        let re_from_tau = 0.08 * 5.0 / nu;
+        assert!(
+            (re_from_tau - r.reynolds).abs() / r.reynolds < 1e-12,
+            "tau/Re inconsistent: {} vs {}",
+            re_from_tau,
+            r.reynolds
+        );
+        assert!(r.peak.strouhal.is_finite() && r.peak.strouhal > 0.0);
+        assert!(r.peak.prominence.is_finite() && r.peak.force_rms.is_finite());
+        assert!(r.mach_max_lattice.is_finite() && r.flux_imbalance.is_finite());
+    }
+    let b = run_adiabatic_ramp(&cfg).expect("ramp b");
+    for (x, y) in a.rungs.iter().zip(&b.rungs) {
+        assert_eq!(x.peak.strouhal.to_bits(), y.peak.strouhal.to_bits());
+        assert_eq!(x.peak.bin, y.peak.bin);
+        assert_eq!(x.peak.prominence.to_bits(), y.peak.prominence.to_bits());
+        assert_eq!(x.peak.force_rms.to_bits(), y.peak.force_rms.to_bits());
+        assert_eq!(x.mach_max_lattice.to_bits(), y.mach_max_lattice.to_bits());
+        assert_eq!(x.flux_imbalance.to_bits(), y.flux_imbalance.to_bits());
+    }
+}
+
+/// Ramp refusals, typed by name.
+#[test]
+fn adiabatic_ramp_refusals_are_typed() {
+    let mut c = tiny_ramp_config();
+    c.rungs = 1;
+    assert!(matches!(
+        run_adiabatic_ramp(&c),
+        Err(AeroacError::InvalidParameter { .. })
+    ));
+    let mut c = tiny_ramp_config();
+    c.steps_ramp = 0;
+    assert!(matches!(
+        run_adiabatic_ramp(&c),
+        Err(AeroacError::InvalidParameter { .. })
+    ));
+    let mut c = tiny_ramp_config();
+    c.steps_rung_record = 100; // not a power of two
+    assert!(matches!(
+        run_adiabatic_ramp(&c),
+        Err(AeroacError::InvalidParameter { .. })
+    ));
+    let mut c = tiny_ramp_config();
+    c.reynolds_end = 120.0; // degenerate span (equals the base Re)
+    assert!(matches!(
+        run_adiabatic_ramp(&c),
+        Err(AeroacError::InvalidParameter { .. })
+    ));
+    let mut c = tiny_ramp_config();
+    c.reynolds_end = 1.0e6; // tau would sit on the stability floor
+    assert!(matches!(
+        run_adiabatic_ramp(&c),
+        Err(AeroacError::InvalidParameter { .. })
+    ));
+    let mut c = tiny_ramp_config();
+    c.reynolds_end = f64::NAN;
+    assert!(matches!(
+        run_adiabatic_ramp(&c),
+        Err(AeroacError::NonFinite { .. })
+    ));
+    // Peak-measurement refusals.
+    assert!(matches!(
+        transverse_force_peak(&[[0.0, 0.0]; 100], 3.0, 0.08, 4),
+        Err(AeroacError::InvalidParameter { .. })
+    ));
+    assert!(matches!(
+        transverse_force_peak(&[[0.0, 0.0]; 128], 3.0, 0.08, 0),
+        Err(AeroacError::InvalidParameter { .. })
     ));
 }
 
