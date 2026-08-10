@@ -1062,6 +1062,20 @@ outside the caller's bounded height/approach fraction or if the perturbation
 would open contact. Large topography requires nonlinear contact re-resolution;
 no material name, audible frequency, or renderer setting selects this channel.
 
+The cinematic configuration may supply those periodic tracks either as
+explicit Fourier coefficients or as an `fs-tribo` band-limited self-affine
+profile. The latter retains explicit RMS height, one-dimensional Hurst
+exponent, inclusive spatial-cycle cutoffs, phase seed, source identity, and
+authority ceiling. The seed changes spatial phase only; actual contact-path
+kinematics convert wavelength to time, after which the same Hertz footprint,
+normal tangent, structural dynamics, and acoustic radiation operate unchanged.
+The built-in critique specimen uses an `Estimated` sub-nanometre profile so it
+remains inside this first-order contact rung. It is not profilometry, a
+material-name finish preset, an areal roughness field, or permission to amplify
+roughness until a desired soundtrack appears. A realistically rougher specimen
+that violates the height/approach limit must escalate to nonlinear rough-contact
+resolution rather than reuse this tangent perturbation.
+
 Localization brackets describe evaluated uncertainty bounds, not additional
 accepted states. A terminal event's retained time must exactly equal its final
 sample time, and a `ReimpactLimitExceeded` refusal's final reimpact must likewise
