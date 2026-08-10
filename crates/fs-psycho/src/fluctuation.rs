@@ -18,7 +18,8 @@
 //! Bark formula, 47 channels at 0.5 i Bark, generalised modulation
 //! depth `m* = rms(h_BP)/h_0` with a 3:1 COMPRESSION above 0.7
 //! (instead of roughness's clamp at 1), the modulation band-pass
-//! `H(fmod)` = 4th-order LPF (12 Hz) x 2nd-order HPF (3.1 Hz), the
+//! `H(fmod)` band-pass (the paper: 4th-order LPF at 12 Hz x
+//! 2nd-order HPF at 3.1 Hz; THIS realisation: see below), the
 //! normalised cross covariance between channels i and i±2, and
 //! `g(z)` falling linearly 1 -> 0.5 over 15..23.5 Bark.
 //!
@@ -78,9 +79,11 @@ const F_HP: f64 = 1.7;
 const F_LP: f64 = 13.0;
 /// Calibration constant: derived on the paper's reference stimulus
 /// (1 kHz, 60 dB SPL, m = 1, fmod = 4 Hz := 1.00 vacil) by running
-/// THIS implementation once (the conformance battery re-derives it
-/// every run and pins the reference at 1.0 — drift-proof). The
-/// paper's own 0.2490 belongs to their unstated filter realisation.
+/// THIS implementation once; the non-ignored battery asserts the
+/// reference reads 1.0 against this pinned constant (a REGRESSION
+/// pin — re-derivation itself lives in the ignored calibration
+/// probe). The paper's own 0.2490 belongs to their unstated filter
+/// realisation.
 pub const C_FS: f64 = 0.12753996479900015;
 
 /// Zwicker-Terhardt critical-band rate [Bark] (paper Eq. 3; the
@@ -93,9 +96,11 @@ pub fn bark_z(f_hz: f64) -> f64 {
     13.0 * det::atan(7.6e-4 * f_hz) + 3.5 * det::atan((f_hz / 7500.0) * (f_hz / 7500.0))
 }
 
-/// |H(fmod)|: Butterworth 4th-order low-pass at 12 Hz times
-/// 2nd-order high-pass at 3.1 Hz (magnitude only — zero-phase
-/// application, disclosed).
+/// |H(fmod)|: fitted band-pass magnitude — 3rd-order low-pass at
+/// 13 Hz times 1st-order high-pass at 1.7 Hz (BOTH the corners and
+/// the ORDERS differ from the paper's stated 4th/2nd @ 12/3.1 Hz
+/// realisation; fitted to the published AM curve per the paper's
+/// own methodology — see `F_HP`/`F_LP`). Zero-phase application.
 fn h_mod(f: f64) -> f64 {
     if f <= 0.0 {
         return 0.0;
@@ -114,6 +119,20 @@ fn g_weight(z: f64) -> f64 {
         1.0
     } else {
         1.0 - 0.5 * (z - 15.0) / (23.5 - 15.0)
+    }
+}
+
+/// The paper's 3:1 modulation-depth compression above the 0.7 knee
+/// (section 2.1.3; worked example pinned by test: 0.85 -> 0.75).
+/// Public because the tone battery never drives m* past the knee
+/// (review-executed: a clamp mutant passed every tone test) — the
+/// stage is pinned directly.
+#[must_use]
+pub fn compress_modulation_depth(m: f64) -> f64 {
+    if m > M_KNEE {
+        M_KNEE + (m - M_KNEE) / M_RATIO
+    } else {
+        m
     }
 }
 
@@ -270,11 +289,7 @@ pub fn fluctuation_strength_frame(pcm_pa: &[f64], sample_rate: f64) -> Result<f6
         // Generalised modulation depth with 3:1 compression above
         // the 0.7 knee (paper section 2.1.3).
         let m = if h0 > 0.0 { rms / h0 } else { 0.0 };
-        m_star[ch] = if m > M_KNEE {
-            M_KNEE + (m - M_KNEE) / M_RATIO
-        } else {
-            m
-        };
+        m_star[ch] = compress_modulation_depth(m);
         h_bp.push(series);
     }
     // --- Cross covariances between channels i and i+2 (Eq. 9). ---

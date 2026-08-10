@@ -126,8 +126,9 @@ pub struct Loudness {
     pub specific: Vec<f64>,
 }
 
-/// numpy-style clamped linear interpolation over a table (shared by
-/// the Daniel-Weber and fluctuation-strength chains).
+/// numpy-style clamped linear interpolation over a table (used by
+/// the fluctuation chain; `roughness` keeps its own byte-identical
+/// private copy, transcribed with its reference).
 pub(crate) fn tables_interp(x: f64, xs: &[f64], ys: &[f64]) -> f64 {
     if x <= xs[0] {
         return ys[0];
