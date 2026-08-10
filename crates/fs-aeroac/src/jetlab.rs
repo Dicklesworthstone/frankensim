@@ -163,8 +163,26 @@ pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError
     }
     // --- Build the grid: jet everywhere, plate as walls. ---
     let mut grid = Grid::uniform(cfg.nx, cfg.ny, cfg.tau);
+    // Fringe target: WITH a nozzle the target must be the BINARY
+    // slit profile matching the wall opening exactly — a smooth
+    // (tanh) target carries momentum outside the slit that slams
+    // into the wall shoulder on every wrap, continuously feeding the
+    // slit-lip shear layer (executed: a St_delta ~ 2-3 lip mode
+    // outgrew the edge tone and blocked grid convergence). Without a
+    // nozzle the smooth profile stands (no wall to mismatch).
+    #[allow(clippy::cast_precision_loss)]
+    let yc_prof = cfg.ny as f64 / 2.0 - 0.5;
     let profile: Vec<(f64, [f64; 2])> = (0..cfg.ny)
-        .map(|y| (1.0, [jet_profile(cfg, y), 0.0]))
+        .map(|y| {
+            let ux = if cfg.nozzle_thickness > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                let open = (y as f64 - yc_prof).abs() < cfg.slot_half;
+                if open { cfg.u_jet } else { 0.0 }
+            } else {
+                jet_profile(cfg, y)
+            };
+            (1.0, [ux, 0.0])
+        })
         .collect();
     for x in 0..cfg.nx {
         #[allow(clippy::cast_precision_loss)]
