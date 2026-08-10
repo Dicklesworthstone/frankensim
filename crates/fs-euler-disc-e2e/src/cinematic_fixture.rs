@@ -3866,9 +3866,18 @@ pub fn run_cinematic_fixture(
         .expect("admitted trajectory is nonempty")
         .input()
         .time_s;
-    if (retained_time_s - duration_s).abs() > 16.0 * f64::EPSILON * duration_s {
+    let accumulated_clock_steps = preroll_mechanics_steps
+        .checked_add(picture_mechanics_steps)
+        .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics clock budget overflow".into()))?;
+    let accumulated_clock_horizon_s =
+        accumulated_clock_steps as f64 / f64::from(config.mechanics.sample_rate_hz);
+    let horizon_tolerance_s = repeated_positive_addition_roundoff_bound(
+        accumulated_clock_steps,
+        accumulated_clock_horizon_s,
+    )?;
+    if (retained_time_s - duration_s).abs() > horizon_tolerance_s {
         return Err(CinematicFixtureError::Pipeline(format!(
-            "production render trajectory is {retained_time_s:.17e}s, expected {duration_s:.17e}s"
+            "production render trajectory is {retained_time_s:.17e}s, expected {duration_s:.17e}s (positive-step floating-clock bound {horizon_tolerance_s:.17e}s)"
         )));
     }
     progress("stage=mechanics complete");
@@ -4385,6 +4394,33 @@ pub fn run_cinematic_fixture(
         movie_path: completed_movie
             .map(|_| output_directory.join("euler-disc-critique-prores4444-pcm24.mov")),
     })
+}
+
+/// Forward-error bound for a clock formed by repeated addition of positive
+/// finite timesteps.
+///
+/// Higham's standard `gamma_n = n*u/(1-n*u)` bound applies to a sum of
+/// nonnegative terms in round-to-nearest arithmetic. The extra four ulps cover
+/// the subtraction of the preroll origin from the accumulated endpoint. This
+/// admits only representational clock drift; it is not a mechanics, contact,
+/// or event-time tolerance.
+fn repeated_positive_addition_roundoff_bound(
+    term_count: usize,
+    accumulated_horizon_s: f64,
+) -> Result<f64, CinematicFixtureError> {
+    if term_count == 0 || !(accumulated_horizon_s.is_finite() && accumulated_horizon_s > 0.0) {
+        return Err(CinematicFixtureError::Pipeline(
+            "floating-clock error bound requires a positive term count and horizon".into(),
+        ));
+    }
+    let n_u = term_count as f64 * f64::EPSILON;
+    if !(n_u.is_finite() && n_u < 1.0) {
+        return Err(CinematicFixtureError::Pipeline(
+            "floating-clock error bound is undefined for this step count".into(),
+        ));
+    }
+    let gamma_n = n_u / (1.0 - n_u);
+    Ok(gamma_n * accumulated_horizon_s + 4.0 * f64::EPSILON * accumulated_horizon_s.max(1.0))
 }
 
 fn pipeline(error: impl fmt::Display) -> CinematicFixtureError {
@@ -6752,10 +6788,20 @@ fn build_physical_audio(
     .map_err(pipeline)?;
     let controls =
         EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
+    let clock_roundoff_operation_count = usize::try_from(
+        u64::from(config.mechanics.sample_rate_hz)
+            .checked_mul(u64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("audio clock operation budget overflow".into())
+            })?
+            / u64::from(CRITIQUE_FPS),
+    )
+    .map_err(|_| CinematicFixtureError::Pipeline("audio clock operation budget overflow".into()))?;
     let force_reconstruction = GeneralizedForceReconstructionInput {
         declared_source_bandwidth_hz: CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
         filter: fixture_reconstruction_filter_spec(),
         boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+        clock_roundoff_operation_count,
         budget: AudioResamplingBudget::reference_film(),
     };
     let plate_maximum_contact_projection_distance_m =
@@ -8145,6 +8191,44 @@ mod tests {
             );
             operation(&cx)
         })
+    }
+
+    #[test]
+    fn g0_repeated_positive_clock_roundoff_bound_is_representation_only() {
+        let mechanics_rate_hz = 384_000_u32;
+        let preroll_steps = 16_000_usize;
+        let picture_steps = 3_072_000_usize;
+        let timestep_s = 1.0 / f64::from(mechanics_rate_hz);
+
+        let mut accumulated_time_s = 0.0;
+        for _ in 0..preroll_steps {
+            accumulated_time_s += timestep_s;
+        }
+        let picture_origin_s = accumulated_time_s;
+        for _ in 0..picture_steps {
+            accumulated_time_s += timestep_s;
+        }
+
+        let retained_time_s = accumulated_time_s - picture_origin_s;
+        let expected_duration_s = picture_steps as f64 / f64::from(mechanics_rate_hz);
+        let total_steps = preroll_steps + picture_steps;
+        let accumulated_horizon_s = total_steps as f64 / f64::from(mechanics_rate_hz);
+        let roundoff_bound_s =
+            repeated_positive_addition_roundoff_bound(total_steps, accumulated_horizon_s)
+                .expect("positive finite clock horizon");
+
+        assert!(
+            (retained_time_s - expected_duration_s).abs() <= roundoff_bound_s,
+            "observed repeated-addition drift exceeded its forward-error bound"
+        );
+        assert!(
+            roundoff_bound_s < 0.01 * timestep_s,
+            "representation tolerance must remain far below one mechanics step"
+        );
+        assert!(
+            (retained_time_s - (expected_duration_s - 1.0e-7)).abs() > roundoff_bound_s,
+            "the bound must reject a physically meaningful horizon mismatch"
+        );
     }
 
     #[test]

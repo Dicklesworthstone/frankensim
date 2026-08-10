@@ -595,8 +595,46 @@ pub struct GeneralizedForceReconstructionInput {
     pub filter: AudioReconstructionFilterSpec,
     /// Global-horizon padding rule.
     pub boundary_policy: AudioResamplingBoundaryPolicy,
+    /// Upper bound on sequential floating additions that formed the source
+    /// clock endpoints. This is used only to admit representational drift from
+    /// an otherwise integral output horizon; it never relaxes event, force, or
+    /// mechanics tolerances.
+    pub clock_roundoff_operation_count: usize,
     /// Explicit work and allocation ceilings.
     pub budget: AudioResamplingBudget,
+}
+
+pub(crate) fn fixed_rate_frame_count_with_roundoff_bound(
+    start_time_s: f64,
+    end_time_s: f64,
+    sample_rate_hz: u32,
+    clock_roundoff_operation_count: usize,
+) -> Option<usize> {
+    let duration_s = end_time_s - start_time_s;
+    let exact_frames = duration_s * f64::from(sample_rate_hz);
+    let rounded_frames = exact_frames.round();
+    let n_u = clock_roundoff_operation_count as f64 * f64::EPSILON;
+    if !(start_time_s.is_finite()
+        && end_time_s.is_finite()
+        && duration_s > 0.0
+        && exact_frames.is_finite()
+        && rounded_frames >= 1.0
+        && rounded_frames <= usize::MAX as f64
+        && clock_roundoff_operation_count > 0
+        && n_u.is_finite()
+        && n_u < 1.0)
+    {
+        return None;
+    }
+
+    // Higham's gamma_n bounds sequential round-to-nearest accumulation of
+    // nonnegative timesteps. Eight further ulps cover endpoint rebasing,
+    // subtraction, and conversion from seconds to output-frame units.
+    let clock_scale_s = start_time_s.abs().max(end_time_s.abs()).max(duration_s);
+    let gamma_n = n_u / (1.0 - n_u);
+    let tolerance_frames =
+        (gamma_n + 8.0 * f64::EPSILON) * clock_scale_s * f64::from(sample_rate_hz);
+    ((exact_frames - rounded_frames).abs() <= tolerance_frames).then_some(rounded_frames as usize)
 }
 
 /// Reconstructed fixed-rate generalized force, stored row-major by
@@ -731,23 +769,17 @@ pub fn reconstruct_generalized_force_measures(
     let last = intervals
         .last()
         .expect("nonempty generalized-force interval slice has a last item");
-    let duration_s = last.end_time_s - first.start_time_s;
-    let exact_frames = duration_s * f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
-    let rounded_frames = exact_frames.round();
-    let frame_tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
-    if !(duration_s > 0.0
-        && duration_s.is_finite()
-        && exact_frames.is_finite()
-        && rounded_frames >= 1.0
-        && rounded_frames <= u64::MAX as f64
-        && (exact_frames - rounded_frames).abs() <= frame_tolerance)
-    {
-        return Err(AudioResamplingError::InvalidSourceTimeline {
-            interval: intervals.len() - 1,
-            field: "integral 48 kHz generalized-force horizon",
-        });
-    }
-    let total_frames = rounded_frames as u64;
+    let frame_count = fixed_rate_frame_count_with_roundoff_bound(
+        first.start_time_s,
+        last.end_time_s,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        input.clock_roundoff_operation_count,
+    )
+    .ok_or(AudioResamplingError::InvalidSourceTimeline {
+        interval: intervals.len() - 1,
+        field: "integral 48 kHz generalized-force horizon within declared clock roundoff",
+    })?;
+    let total_frames = frame_count as u64;
     if total_frames > input.budget.maximum_total_audio_frames {
         return Err(AudioResamplingError::BudgetExceeded {
             artifact: "generalized-force audio frames",
@@ -779,11 +811,6 @@ pub fn reconstruct_generalized_force_measures(
         input.budget,
         &mut checkpoint,
     )?;
-    let frame_count =
-        usize::try_from(total_frames).map_err(|_| AudioResamplingError::Capacity {
-            artifact: "generalized-force audio frames",
-            requested: usize::MAX,
-        })?;
     let value_count =
         frame_count
             .checked_mul(coordinate_count)
@@ -3391,6 +3418,36 @@ mod tests {
         )
     }
 
+    #[test]
+    fn g0_integral_audio_horizon_uses_declared_clock_roundoff_only() {
+        let mechanics_rate_hz = 384_000_u32;
+        let mechanics_steps = 3_088_000_usize;
+        let mut accumulated_end_s = 0.0;
+        for _ in 0..mechanics_steps {
+            accumulated_end_s += f64::from(mechanics_rate_hz).recip();
+        }
+
+        assert_eq!(
+            fixed_rate_frame_count_with_roundoff_bound(
+                0.0,
+                accumulated_end_s,
+                SOUND_MASTER_SAMPLE_RATE_HZ,
+                mechanics_steps,
+            ),
+            Some(386_000)
+        );
+        assert_eq!(
+            fixed_rate_frame_count_with_roundoff_bound(
+                0.0,
+                accumulated_end_s,
+                SOUND_MASTER_SAMPLE_RATE_HZ,
+                1,
+            ),
+            None,
+            "an undeclared accumulated-clock error must remain a refusal"
+        );
+    }
+
     fn test_mode() -> SoundMode {
         SoundMode {
             mode_id: 1,
@@ -4057,6 +4114,7 @@ mod tests {
                         response_grid_intervals: 8_192,
                     },
                     boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+                    clock_roundoff_operation_count: interval_count,
                     budget: AudioResamplingBudget::reference_film(),
                 },
                 cx,

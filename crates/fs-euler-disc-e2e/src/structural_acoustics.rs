@@ -53,6 +53,7 @@ use fs_solid::{
     TetMaterialField,
 };
 
+use crate::audio_resampling::fixed_rate_frame_count_with_roundoff_bound;
 use crate::specimen::{DiscProfileSpec, ResolvedElasticDiscProfile};
 use crate::timeline_resampling::{EventEvaluationSide, TimelineResampler, TimelineResamplingError};
 use crate::{
@@ -1945,21 +1946,15 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 });
             }
         }
-        let duration_s = last.end_time_s - first.start_time_s;
-        let exact_frames = duration_s * f64::from(self.sample_rate_hz);
-        let rounded_frames = exact_frames.round();
-        let tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
-        if !(duration_s > 0.0
-            && duration_s.is_finite()
-            && rounded_frames >= 1.0
-            && rounded_frames <= usize::MAX as f64
-            && (exact_frames - rounded_frames).abs() <= tolerance)
-        {
-            return Err(StructuralModalBasisError::ControlTimeline {
-                what: "control horizon is not an integral number of plate-audio samples",
-            });
-        }
-        let frame_count = rounded_frames as usize;
+        let frame_count = fixed_rate_frame_count_with_roundoff_bound(
+            first.start_time_s,
+            last.end_time_s,
+            self.sample_rate_hz,
+            force_reconstruction.clock_roundoff_operation_count,
+        )
+        .ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "control horizon is not an integral number of plate-audio samples within declared clock roundoff",
+        })?;
         let mut pressure_channels = vec![Vec::new(); radiation.observers.len()];
         for channel in &mut pressure_channels {
             channel.try_reserve_exact(frame_count).map_err(|_| {
@@ -2541,22 +2536,15 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 });
             }
         }
-        let duration_s = last.end_time_s - first.start_time_s;
-        let exact_frames = duration_s * f64::from(self.sample_rate_hz);
-        let rounded_frames = exact_frames.round();
-        let frame_tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
-        if !(duration_s > 0.0
-            && duration_s.is_finite()
-            && exact_frames.is_finite()
-            && rounded_frames >= 1.0
-            && (exact_frames - rounded_frames).abs() <= frame_tolerance
-            && rounded_frames <= usize::MAX as f64)
-        {
-            return Err(StructuralModalBasisError::ControlTimeline {
-                what: "control horizon is not a positive integral number of audio samples",
-            });
-        }
-        let frame_count = rounded_frames as usize;
+        let frame_count = fixed_rate_frame_count_with_roundoff_bound(
+            first.start_time_s,
+            last.end_time_s,
+            self.sample_rate_hz,
+            force_reconstruction.clock_roundoff_operation_count,
+        )
+        .ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "control horizon is not a positive integral number of audio samples within declared clock roundoff",
+        })?;
         let mut pressure_pa = Vec::new();
         pressure_pa.try_reserve_exact(frame_count).map_err(|_| {
             StructuralModalBasisError::PressureCapacity {
@@ -2707,22 +2695,15 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
                 });
             }
         }
-        let duration_s = last.end_time_s - first.start_time_s;
-        let exact_frames = duration_s * f64::from(self.sample_rate_hz);
-        let rounded_frames = exact_frames.round();
-        let frame_tolerance = 128.0 * f64::EPSILON * exact_frames.abs().max(1.0);
-        if !(duration_s > 0.0
-            && duration_s.is_finite()
-            && exact_frames.is_finite()
-            && rounded_frames >= 1.0
-            && (exact_frames - rounded_frames).abs() <= frame_tolerance
-            && rounded_frames <= usize::MAX as f64)
-        {
-            return Err(StructuralModalBasisError::ControlTimeline {
-                what: "control horizon is not a positive integral number of audio samples",
-            });
-        }
-        let frame_count = rounded_frames as usize;
+        let frame_count = fixed_rate_frame_count_with_roundoff_bound(
+            first.start_time_s,
+            last.end_time_s,
+            self.sample_rate_hz,
+            force_reconstruction.clock_roundoff_operation_count,
+        )
+        .ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "control horizon is not a positive integral number of audio samples within declared clock roundoff",
+        })?;
         let mut pressure_channels = vec![Vec::new(); observers.len()];
         for pressure in &mut pressure_channels {
             pressure.try_reserve_exact(frame_count).map_err(|_| {
