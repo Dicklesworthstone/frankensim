@@ -163,8 +163,9 @@ use fs_render::{
     },
     tracer::{
         ADAPTIVE_SAMPLING_SEMANTICS_VERSION, AdaptiveFilm, AdaptiveSamplingConfig,
-        MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport,
-        RenderWorkerPool, Settings, film_to_exr,
+        IndependentPilotAllocationConfig, IndependentPilotSamplePlan, MAX_RENDER_TILE_EDGE,
+        MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport, RenderWorkerPool,
+        Sampler, Settings, film_to_exr,
     },
 };
 use fs_rep_frep::SquatDiscEdgeTreatment;
@@ -217,9 +218,20 @@ pub fn critique_color_config() -> CinematicColorConfig {
 }
 const AUDIO_PREROLL_POLICY_ID: &str =
     "source-bound-one-video-frame-continuous-fir-and-modal-preroll-v3";
-/// Conservative reconstruction ceiling for the sub-100 Hz trajectory-derived
-/// harmonic-one contact modulation and its slowly varying rolling envelope.
-const CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
+/// Declared bandwidth of the legacy harmonic-one diagnostic [Hz].
+const CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
+/// Maximum admitted bandwidth of the resolved physical contact drive [Hz].
+///
+/// The default self-affine edge trace retains 384 spatial cycles.  Across the
+/// admitted 8-second trajectory its material-frame contact rate rises to about
+/// 15.3 Hz, so the mechanics actually carries forcing through roughly 5.9 kHz.
+/// The physical seam now derives its actual upper frequency from retained
+/// contact-path motion and the caller's spatial spectrum.  Eight kilohertz is
+/// only its fail-closed ceiling: it retains the default geometry with margin
+/// while remaining below the 12 kHz Nyquist limit of the independently
+/// retained 24 kHz control-refinement member.  It is not invented acoustic
+/// content or a claim that an unmeasured surface spectrum is calibrated.
+const CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ: f64 = 8_000.0;
 /// Stable caller-ledgered root for animation frame render jobs.
 const CRITIQUE_RENDER_RUN: RunId = RunId(0x4555_4c45_5252_454e);
 /// Stable placement-only seed for the reusable parked render crew.
@@ -326,6 +338,50 @@ impl CinematicAdaptiveSamplingConfig {
             relative_error: policy.relative_error(),
             dark_floor: policy.dark_floor(),
         })
+    }
+}
+
+/// Discarded-pilot allocation for an unbiased fixed-count production pass.
+///
+/// The pilot is rendered from a domain-separated counter stream and is never
+/// averaged into production. Its only output is a precomputed per-pixel path
+/// count. Production then consumes every selected prefix without inspecting
+/// retained samples, preserving the renderer's fixed-count randomized-QMC
+/// interpretation while avoiding uniform oversampling of converged pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CinematicIndependentPilotSamplingConfig {
+    /// Uniform samples per pixel in the discarded pilot.
+    pub pilot_samples_per_pixel: u32,
+    /// Smallest fixed production count assigned to any pixel.
+    pub minimum_samples_per_pixel: u32,
+    /// Hard fixed production count ceiling.
+    pub maximum_samples_per_pixel: u32,
+    /// Absolute raw-XYZ allocation scale.
+    pub absolute_error: f64,
+    /// Relative raw-XYZ allocation scale.
+    pub relative_error: f64,
+    /// Lower raw-XYZ magnitude used by the relative scale.
+    pub dark_floor: f64,
+    /// Multiplicative guard applied to pilot standard deviation.
+    pub safety_factor: f64,
+}
+
+impl CinematicIndependentPilotSamplingConfig {
+    fn allocation(self) -> Result<IndependentPilotAllocationConfig, CinematicFixtureError> {
+        IndependentPilotAllocationConfig::try_new(
+            self.minimum_samples_per_pixel,
+            self.maximum_samples_per_pixel,
+            self.absolute_error,
+            self.relative_error,
+            self.dark_floor,
+            self.safety_factor,
+        )
+        .map_err(pipeline)
+    }
+
+    fn pilot_policy(self) -> Result<AdaptiveSamplingConfig, CinematicFixtureError> {
+        AdaptiveSamplingConfig::try_new(self.pilot_samples_per_pixel, 1, 0.0, 0.0, 0.0)
+            .map_err(pipeline)
     }
 }
 
@@ -975,9 +1031,10 @@ impl Default for CinematicMechanicsConfig {
         let period_m = core::f64::consts::TAU * 0.0375;
         let disc_surface_spectrum = SelfAffinePeriodicProfileSpectrum::new(
             // Preserve the sub-nanometre RMS scale admitted by the current
-            // tangent-linear contact rung. This is a declared estimate, not a
-            // measured finish; larger physical roughness requires nonlinear
-            // rough-contact re-solution rather than louder coefficients here.
+            // single-footprint nonlinear height/approach solve. This is a
+            // declared estimate, not a measured finish; larger roughness needs
+            // a resolved multiasperity/load-sharing model rather than louder
+            // coefficients here.
             4.5e-10,
             // A representative engineering-surface Hurst exponent. It sets
             // the spatial PSD slope only and is not fitted to the soundtrack.
@@ -1085,8 +1142,13 @@ pub struct CinematicFixtureConfig {
     /// authoritative per-pixel counts; denoising remains a biased display
     /// derivative and cannot affect the stopping decision.
     pub adaptive_sampling: Option<CinematicAdaptiveSamplingConfig>,
+    /// Optional discarded-pilot allocation followed by fixed-count production.
+    /// Mutually exclusive with `adaptive_sampling`.
+    pub independent_pilot_sampling: Option<CinematicIndependentPilotSamplingConfig>,
     /// Caller-selected independent scramble salt for replicated raw renders.
     pub render_seed_salt: u64,
+    /// Randomized integration rule used for camera and light-transport paths.
+    pub render_sampler: Sampler,
     /// Maximum path depth, including dielectric traversal.
     pub max_depth: u32,
     /// Render-only samples around the disc's complete revolution.
@@ -1141,7 +1203,13 @@ impl Default for CinematicFixtureConfig {
             frame_window: CinematicFrameWindow::Full,
             samples_per_pixel: 1,
             adaptive_sampling: None,
+            independent_pilot_sampling: None,
             render_seed_salt: 0,
+            // The controlled Euler-scene comparison against an independently
+            // scrambled 256-SPP reference reduced equal-32-SPP error when the
+            // randomized QMC blocks covered light, BSDF, and dielectric-event
+            // dimensions in addition to pixel and wavelength coordinates.
+            render_sampler: Sampler::OwenSobolFullPath,
             max_depth: 6,
             // The conservative 4K look-development tier: on the canonical
             // specimen 512 x 64 retains sub-micrometre meridian and azimuthal
@@ -1227,6 +1295,20 @@ impl CinematicFixtureConfig {
                 ));
             }
             adaptive.policy()?;
+        }
+        if self.adaptive_sampling.is_some() && self.independent_pilot_sampling.is_some() {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "adaptive stopping and independent-pilot fixed allocation are mutually exclusive",
+            ));
+        }
+        if let Some(pilot) = self.independent_pilot_sampling {
+            if !(2..=4_096).contains(&pilot.pilot_samples_per_pixel) {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "independent pilot samples per pixel must be in 2..=4096",
+                ));
+            }
+            pilot.allocation()?;
+            pilot.pilot_policy()?;
         }
         if self.max_depth == 0 || self.max_depth > 64 {
             return Err(CinematicFixtureError::InvalidConfig(
@@ -1572,10 +1654,15 @@ impl CinematicFixtureConfig {
     }
 
     fn render_sample_ceiling(&self) -> u32 {
-        self.adaptive_sampling
-            .map_or(self.samples_per_pixel, |policy| {
-                policy.maximum_samples_per_pixel
-            })
+        self.independent_pilot_sampling.map_or_else(
+            || {
+                self.adaptive_sampling
+                    .map_or(self.samples_per_pixel, |policy| {
+                        policy.maximum_samples_per_pixel
+                    })
+            },
+            |policy| policy.maximum_samples_per_pixel,
+        )
     }
 
     fn adaptive_policy(&self) -> Result<Option<AdaptiveSamplingConfig>, CinematicFixtureError> {
@@ -1684,6 +1771,7 @@ struct FixturePhysicalAudio {
     plate_acoustic_radiation_identity: ContentHash,
     plate_damping_model_identity: ContentHash,
     gas_model_identity: ContentHash,
+    declared_source_bandwidth_hz: f64,
     plate_left_pressure_identity: ContentHash,
     plate_right_pressure_identity: ContentHash,
     left_pressure_identity: ContentHash,
@@ -3374,6 +3462,169 @@ impl FixtureAdaptiveSamplingEvidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixtureIndependentPilotFrameEvidence {
+    frame: u32,
+    pixels: u64,
+    minimum_samples: u32,
+    maximum_samples: u32,
+    total_samples: u64,
+    pilot_seed: u64,
+    production_seed: u64,
+    sample_count_identity: ContentHash,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FixtureIndependentPilotSamplingEvidence {
+    frames: Vec<FixtureIndependentPilotFrameEvidence>,
+    pixels: u64,
+    minimum_samples: u32,
+    maximum_samples: u32,
+    total_samples: u64,
+}
+
+impl FixtureIndependentPilotSamplingEvidence {
+    fn observe(
+        &mut self,
+        frame: u32,
+        plan: &IndependentPilotSamplePlan,
+    ) -> Result<(), CinematicFixtureError> {
+        if self
+            .frames
+            .last()
+            .is_some_and(|previous| previous.frame >= frame)
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "independent-pilot evidence was not observed in increasing frame order".into(),
+            ));
+        }
+        let pixels = u64::from(plan.width())
+            .checked_mul(u64::from(plan.height()))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline(
+                    "independent-pilot pixel-count product overflowed".into(),
+                )
+            })?;
+        if plan.sample_counts().len() != usize::try_from(pixels).unwrap_or(usize::MAX) {
+            return Err(CinematicFixtureError::Pipeline(
+                "independent-pilot count map does not match its raster".into(),
+            ));
+        }
+        let minimum_samples = plan.sample_counts().iter().copied().min().ok_or_else(|| {
+            CinematicFixtureError::Pipeline("independent-pilot count map is empty".into())
+        })?;
+        let maximum_samples = plan.sample_counts().iter().copied().max().ok_or_else(|| {
+            CinematicFixtureError::Pipeline("independent-pilot count map is empty".into())
+        })?;
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-critique.pilot-sample-count-frame.v1");
+        hasher.update(&frame.to_le_bytes());
+        hasher.update(&plan.width().to_le_bytes());
+        hasher.update(&plan.height().to_le_bytes());
+        hasher.update(&plan.pilot_seed().to_le_bytes());
+        hasher.update(&plan.production_seed().to_le_bytes());
+        for samples in plan.sample_counts() {
+            hasher.update(&samples.to_le_bytes());
+        }
+        let evidence = FixtureIndependentPilotFrameEvidence {
+            frame,
+            pixels,
+            minimum_samples,
+            maximum_samples,
+            total_samples: plan.total_samples(),
+            pilot_seed: plan.pilot_seed(),
+            production_seed: plan.production_seed(),
+            sample_count_identity: hasher.finalize(),
+        };
+        self.pixels = self.pixels.checked_add(pixels).ok_or_else(|| {
+            CinematicFixtureError::Pipeline(
+                "independent-pilot rendered-pixel count overflowed".into(),
+            )
+        })?;
+        self.total_samples = self
+            .total_samples
+            .checked_add(evidence.total_samples)
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline(
+                    "independent-pilot total path count overflowed".into(),
+                )
+            })?;
+        self.minimum_samples = if self.frames.is_empty() {
+            minimum_samples
+        } else {
+            self.minimum_samples.min(minimum_samples)
+        };
+        self.maximum_samples = self.maximum_samples.max(maximum_samples);
+        self.frames.push(evidence);
+        Ok(())
+    }
+
+    fn validate_complete(
+        &self,
+        config: &CinematicFixtureConfig,
+        rendered_frames: &core::ops::Range<u32>,
+    ) -> Result<(), CinematicFixtureError> {
+        let Some(policy) = config.independent_pilot_sampling else {
+            if self.frames.is_empty() {
+                return Ok(());
+            }
+            return Err(CinematicFixtureError::Pipeline(
+                "non-pilot render unexpectedly retained pilot sampling evidence".into(),
+            ));
+        };
+        if self.frames.len() != rendered_frames.len()
+            || self.frames.first().map(|frame| frame.frame) != Some(rendered_frames.start)
+            || self.frames.last().map(|frame| frame.frame) != Some(rendered_frames.end - 1)
+            || self.minimum_samples < policy.minimum_samples_per_pixel
+            || self.maximum_samples > policy.maximum_samples_per_pixel
+        {
+            return Err(CinematicFixtureError::Pipeline(
+                "independent-pilot evidence did not cover the rendered frame window".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn sequence_identity(&self) -> ContentHash {
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-critique.pilot-sample-count-sequence.v1");
+        for frame in &self.frames {
+            hasher.update(&frame.frame.to_le_bytes());
+            hasher.update(frame.sample_count_identity.as_bytes());
+        }
+        hasher.finalize()
+    }
+
+    fn manifest_json(&self, policy: CinematicIndependentPilotSamplingConfig) -> String {
+        format!(
+            concat!(
+                "{{\"mode\":\"independent-pilot-fixed-v1\",",
+                "\"pilot_spp\":{},\"minimum_spp\":{},\"maximum_spp\":{},",
+                "\"absolute_error_xyz\":{:.17e},\"relative_error_xyz\":{:.17e},",
+                "\"dark_floor_xyz\":{:.17e},\"safety_factor\":{:.17e},",
+                "\"rendered_frames\":{},\"rendered_pixels\":{},",
+                "\"actual_minimum_spp\":{},\"actual_maximum_spp\":{},",
+                "\"total_production_paths\":{},\"sample_count_sequence_identity\":\"{}\",",
+                "\"pilot_usage\":\"discarded; count selection only\",",
+                "\"claim\":\"fixed production counts conditional on an independent pilot; allocation is not an image-error certificate\"}}"
+            ),
+            policy.pilot_samples_per_pixel,
+            policy.minimum_samples_per_pixel,
+            policy.maximum_samples_per_pixel,
+            policy.absolute_error,
+            policy.relative_error,
+            policy.dark_floor,
+            policy.safety_factor,
+            self.frames.len(),
+            self.pixels,
+            self.minimum_samples,
+            self.maximum_samples,
+            self.total_samples,
+            self.sequence_identity().to_hex(),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FixtureDenoiseEvidence {
     applied_frames: u32,
@@ -4060,6 +4311,7 @@ pub fn run_cinematic_fixture(
     let mut base_render_settings = euler_scene_smoke_settings(config.width, config.height);
     base_render_settings.spp = render_sample_ceiling;
     base_render_settings.max_depth = config.max_depth;
+    base_render_settings.sampler = config.render_sampler;
     let composition_identity = composition_identity(config, scene.scene_identity());
     let mut raw_sequence = DomainHasher::new("org.frankensim.euler-critique.raw-sequence.v1");
     let mut preview_sequence =
@@ -4068,6 +4320,8 @@ pub fn run_cinematic_fixture(
     let mut gamut_mapped_pixels = 0_u64;
     let mut render_evidence = FixtureRenderEvidence::default();
     let mut adaptive_sampling_evidence = FixtureAdaptiveSamplingEvidence::default();
+    let mut independent_pilot_sampling_evidence =
+        FixtureIndependentPilotSamplingEvidence::default();
     let mut denoise_evidence = FixtureDenoiseEvidence::default();
     let mut denoise_history: Option<TemporalDenoisedFrame> = None;
     let denoise_config = TemporalDenoiseConfig::default();
@@ -4152,7 +4406,147 @@ pub fn run_cinematic_fixture(
             )
             .map_err(pipeline)?;
             let color = critique_color_config();
-            let (exr, preview, report, sampling_progress) = if let Some(policy) = adaptive_policy {
+            let (exr, preview, report, sampling_progress) = if let Some(pilot_config) =
+                config.independent_pilot_sampling
+            {
+                let mut pilot_settings = render_settings;
+                pilot_settings.spp = pilot_config.pilot_samples_per_pixel;
+                pilot_settings.seed = independent_pilot_seed(render_settings.seed);
+                let pilot_execution = RenderExecutionConfig::try_new(
+                    config.tile_width,
+                    config.tile_height,
+                    config.render_workers,
+                    config.render_memory_limit_bytes,
+                    CRITIQUE_RENDER_RUN.derive(
+                        "org.frankensim.euler-critique.render-pilot-frame.v1",
+                        u64::from(frame),
+                    ),
+                )
+                .map_err(pipeline)?;
+                let pilot = renderer
+                    .render_cinematic_adaptive(
+                        scene.scene(),
+                        scene.camera(),
+                        prepared.cut_side(),
+                        cx,
+                        &pilot_settings,
+                        pilot_config.pilot_policy()?,
+                        prepared.segments()[0].shutter(),
+                        &pilot_execution,
+                    )
+                    .map_err(pipeline)?;
+                let plan = IndependentPilotSamplePlan::try_from_pilot(
+                    &pilot.film,
+                    render_settings.seed,
+                    pilot_config.allocation()?,
+                )
+                .map_err(pipeline)?;
+                independent_pilot_sampling_evidence.observe(frame, &plan)?;
+                let total_paths = plan.total_samples();
+                let minimum_samples = plan
+                    .sample_counts()
+                    .iter()
+                    .copied()
+                    .min()
+                    .expect("validated nonempty raster has a count plan");
+                let maximum_samples = plan
+                    .sample_counts()
+                    .iter()
+                    .copied()
+                    .max()
+                    .expect("validated nonempty raster has a count plan");
+                let output = renderer
+                    .render_cinematic_with_independent_pilot_aovs(
+                        scene.scene(),
+                        scene.camera(),
+                        prepared.cut_side(),
+                        cx,
+                        &render_settings,
+                        plan,
+                        prepared.segments()[0].shutter(),
+                        CinematicAovConfig::new(
+                            aov_profile,
+                            provenance,
+                            CinematicAovLimits::default(),
+                        ),
+                        &frame_execution,
+                    )
+                    .map_err(pipeline)?;
+                let film = output.film;
+                let [red, green, blue] = film.beauty().to_linear_srgb();
+                let preview = if config.denoise_previews {
+                    let guides = film.denoise_guides().map_err(pipeline)?;
+                    let denoise_boundary = if denoise_history.is_none() && frame != 0 {
+                        TemporalFrameBoundary::Cut
+                    } else {
+                        TemporalFrameBoundary::Continuous
+                    };
+                    let denoised = temporal_denoise_rgb(
+                        TemporalDenoiseInput {
+                            frame_index: u64::from(frame),
+                            samples_per_pixel: render_settings.spp,
+                            sample_counts_per_pixel: Some(
+                                film.beauty().sample_plan().sample_counts(),
+                            ),
+                            width: raster_width,
+                            height: raster_height,
+                            red: &red,
+                            green: &green,
+                            blue: &blue,
+                            motion_prev_x: guides.motion_prev_x(),
+                            motion_prev_y: guides.motion_prev_y(),
+                            axial_depth_m: guides.axial_depth_m(),
+                            normal_x: guides.normal_x(),
+                            normal_y: guides.normal_y(),
+                            normal_z: guides.normal_z(),
+                            primary_coverage: guides.primary_coverage(),
+                            variance_luminance: guides.variance_luminance(),
+                            object_ids: guides.object_palette_indices(),
+                            material_ids: guides.material_palette_indices(),
+                        },
+                        denoise_history.as_ref(),
+                        denoise_boundary,
+                        denoise_config,
+                        TemporalDenoiseLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?;
+                    let [denoised_red, denoised_green, denoised_blue] = denoised.linear_rgb();
+                    let preview = transform_cinematic_preview(
+                        config.width,
+                        config.height,
+                        [denoised_red, denoised_green, denoised_blue],
+                        color,
+                        CinematicColorLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?;
+                    denoise_evidence.observe(&denoised);
+                    denoise_history = Some(denoised);
+                    preview
+                } else {
+                    transform_cinematic_preview(
+                        config.width,
+                        config.height,
+                        [&red, &green, &blue],
+                        color,
+                        CinematicColorLimits::reference_4k(),
+                    )
+                    .map_err(pipeline)?
+                };
+                let exr = film.to_exr().map_err(pipeline)?;
+                let sampling_progress = format!(
+                    concat!(
+                        "sampling=independent-pilot-fixed pilot_spp={} min_spp={} ",
+                        "max_spp={} total_paths={} pilot_seed={} production_seed={}"
+                    ),
+                    pilot_config.pilot_samples_per_pixel,
+                    minimum_samples,
+                    maximum_samples,
+                    total_paths,
+                    independent_pilot_seed(render_settings.seed),
+                    render_settings.seed,
+                );
+                (exr, preview, output.report, sampling_progress)
+            } else if let Some(policy) = adaptive_policy {
                 let adaptive_config = config
                     .adaptive_sampling
                     .expect("validated adaptive policy retains its fixture configuration");
@@ -4382,6 +4776,7 @@ pub fn run_cinematic_fixture(
         Ok(())
     })?;
     adaptive_sampling_evidence.validate_complete(config, &render_frame_range)?;
+    independent_pilot_sampling_evidence.validate_complete(config, &render_frame_range)?;
     let raw_sequence_identity = raw_sequence.finalize();
     let preview_sequence_identity = preview_sequence.finalize();
     progress("stage=render complete");
@@ -4414,6 +4809,7 @@ pub fn run_cinematic_fixture(
         &render_evidence,
         preview_mesh_evidence,
         &adaptive_sampling_evidence,
+        &independent_pilot_sampling_evidence,
         &denoise_evidence,
         &mux,
     );
@@ -4578,6 +4974,7 @@ fn adaptive_beauty_to_exr(
             match settings.sampler {
                 fs_render::tracer::Sampler::Iid => "iid-philox",
                 fs_render::tracer::Sampler::OwenSobol => "owen-sobol",
+                fs_render::tracer::Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
             }
             .to_owned(),
         ),
@@ -4661,14 +5058,26 @@ fn frame_timeline_times(
 }
 
 fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> ContentHash {
-    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.composition.v4");
+    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.composition.v5");
     hasher.update(scene.as_bytes());
     hasher.update(&config.width.to_le_bytes());
     hasher.update(&config.height.to_le_bytes());
     hasher.update(&config.frames.to_le_bytes());
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
     hasher.update(&config.render_sample_ceiling().to_le_bytes());
-    if let Some(policy) = config.adaptive_sampling {
+    if let Some(policy) = config.independent_pilot_sampling {
+        let admitted = policy
+            .allocation()
+            .expect("validated fixture retains an independent-pilot allocation");
+        hasher.update(b"independent-pilot-fixed-v1");
+        hasher.update(&policy.pilot_samples_per_pixel.to_le_bytes());
+        hasher.update(&admitted.minimum_samples().to_le_bytes());
+        hasher.update(&admitted.maximum_samples().to_le_bytes());
+        hasher.update(&admitted.absolute_error().to_bits().to_le_bytes());
+        hasher.update(&admitted.relative_error().to_bits().to_le_bytes());
+        hasher.update(&admitted.dark_floor().to_bits().to_le_bytes());
+        hasher.update(&admitted.safety_factor().to_bits().to_le_bytes());
+    } else if let Some(policy) = config.adaptive_sampling {
         let admitted = policy
             .policy()
             .expect("validated fixture configuration retains an admitted adaptive policy");
@@ -4678,8 +5087,15 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
         hasher.update(&admitted.absolute_error().to_bits().to_le_bytes());
         hasher.update(&admitted.relative_error().to_bits().to_le_bytes());
         hasher.update(&admitted.dark_floor().to_bits().to_le_bytes());
+    } else {
+        hasher.update(b"uniform-fixed-spp");
     }
     hasher.update(&config.max_depth.to_le_bytes());
+    hasher.update(&[match config.render_sampler {
+        Sampler::Iid => 0,
+        Sampler::OwenSobol => 1,
+        Sampler::OwenSobolFullPath => 2,
+    }]);
     hasher.update(&config.shutter_angle_degrees.to_le_bytes());
     hasher.update(
         &euler_scene_smoke_settings(config.width, config.height)
@@ -4717,6 +5133,20 @@ fn frame_render_seed(base_seed: u64, seed_salt: u64, absolute_frame: u32) -> u64
     let mut seed = [0_u8; 8];
     seed.copy_from_slice(&digest.as_bytes()[..8]);
     u64::from_le_bytes(seed)
+}
+
+fn independent_pilot_seed(production_seed: u64) -> u64 {
+    let mut hasher = DomainHasher::new("org.frankensim.euler-critique.pilot-seed.v1");
+    hasher.update(&production_seed.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut seed_bytes = [0_u8; 8];
+    seed_bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    let candidate = u64::from_le_bytes(seed_bytes);
+    if candidate == production_seed {
+        candidate ^ 0xa5a5_5a5a_c3c3_3c3c
+    } else {
+        candidate
+    }
 }
 
 fn trajectory_diagnostics(artifact: &EulerRenderTrajectoryArtifact) -> String {
@@ -5612,6 +6042,82 @@ fn trajectory_body_contact_chirp_bounds(
     Ok((first, previous))
 }
 
+fn maximum_surface_cycle(config: &CinematicPeriodicSurfaceConfig) -> u32 {
+    match &config.spectrum {
+        CinematicSurfaceSpectrumConfig::Explicit(harmonics) => harmonics
+            .iter()
+            .map(|harmonic| harmonic.cycles_per_track)
+            .max()
+            .unwrap_or(0),
+        CinematicSurfaceSpectrumConfig::SelfAffine(spectrum) => spectrum.maximum_cycles_per_track(),
+    }
+}
+
+/// Upper frequency retained by the declared spatial surface spectra along the
+/// actual accepted contact path.
+///
+/// The disc trace advances in material-frame azimuth. The support trace used
+/// by the coupled mechanics advances in world `x`; deriving both from the same
+/// retained contact coordinates prevents an acoustic-only speed law. A small
+/// admission margin covers extrema between adjacent 48 kHz control endpoints;
+/// it changes only the passband requirement, never the force history.
+fn resolved_contact_drive_bandwidth_hz(
+    controls: &EulerControlStream<'_>,
+    mechanics: &CinematicMechanicsConfig,
+) -> Result<f64, CinematicFixtureError> {
+    const CONTROL_ENDPOINT_MARGIN: f64 = 1.05;
+    let disc_cycles = f64::from(maximum_surface_cycle(&mechanics.disc_surface));
+    let support_cycles = f64::from(maximum_surface_cycle(&mechanics.support_surface));
+    let mut maximum_disc_hz = 0.0_f64;
+    let mut maximum_support_hz = 0.0_f64;
+    let mut previous: Option<&crate::VisualizationControlPoint> = None;
+    for current in controls.visualization() {
+        if let Some(prior) = previous {
+            let duration_s = current.time_s - prior.time_s;
+            if duration_s > 0.0
+                && let (Some(prior_contact), Some(current_contact)) =
+                    (prior.contact.as_ref(), current.contact.as_ref())
+            {
+                if disc_cycles > 0.0 {
+                    let prior_phase =
+                        det::atan2(prior_contact.point_body_m.y, prior_contact.point_body_m.x);
+                    let current_phase = det::atan2(
+                        current_contact.point_body_m.y,
+                        current_contact.point_body_m.x,
+                    );
+                    let phase_delta = (current_phase - prior_phase + core::f64::consts::PI)
+                        .rem_euclid(core::f64::consts::TAU)
+                        - core::f64::consts::PI;
+                    maximum_disc_hz = maximum_disc_hz
+                        .max(phase_delta.abs() / (core::f64::consts::TAU * duration_s));
+                }
+                if support_cycles > 0.0 {
+                    let path_speed_m_per_s =
+                        (current_contact.point_world_m.x - prior_contact.point_world_m.x).abs()
+                            / duration_s;
+                    maximum_support_hz = maximum_support_hz
+                        .max(path_speed_m_per_s / mechanics.support_surface.period_m);
+                }
+            }
+        }
+        previous = Some(current);
+    }
+    let derived_hz = CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ.max(
+        CONTROL_ENDPOINT_MARGIN
+            * (disc_cycles * maximum_disc_hz).max(support_cycles * maximum_support_hz),
+    );
+    if !(derived_hz.is_finite()
+        && derived_hz > 0.0
+        && derived_hz <= CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ)
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "resolved contact-drive bandwidth {derived_hz:.6} Hz exceeds the admitted {:.6} Hz physical-audio passband",
+            CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ,
+        )));
+    }
+    Ok(derived_hz)
+}
+
 fn map_all_audio_intervals(
     mapper: &AudioExcitationMapper<'_, '_>,
     cx: &Cx<'_>,
@@ -5651,7 +6157,7 @@ fn fixture_resampling_input(
     AudioResamplingModelInput {
         video_clock,
         audio_clock,
-        declared_source_bandwidth_hz: CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
+        declared_source_bandwidth_hz: CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ,
         filter: fixture_reconstruction_filter_spec(),
         boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
         event_fractional_delay: AudioEventFractionalDelay::LinearTwoBoundaryV1,
@@ -5661,8 +6167,12 @@ fn fixture_resampling_input(
 
 fn fixture_reconstruction_filter_spec() -> AudioReconstructionFilterSpec {
     AudioReconstructionFilterSpec {
-        passband_edge_hz: 2_000.0,
-        stopband_edge_hz: 4_800.0,
+        // Preserve every declared contact-drive component while suppressing
+        // images before the 12 kHz Nyquist edge of the coarse 24 kHz
+        // convergence member.  The existing response audit admits this filter
+        // only if the stated ripple and attenuation are actually achieved.
+        passband_edge_hz: CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ,
+        stopband_edge_hz: 11_000.0,
         half_length: 128,
         maximum_passband_ripple_db: 0.1,
         minimum_stopband_attenuation_db: 80.0,
@@ -6410,7 +6920,7 @@ fn build_audio(
         ));
     }
     let (chirp_start_hz, chirp_end_hz) = trajectory_body_contact_chirp_bounds(trajectory)?;
-    if chirp_end_hz >= CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ {
+    if chirp_end_hz >= CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ {
         return Err(CinematicFixtureError::Pipeline(format!(
             "trajectory-derived chirp reaches {chirp_end_hz:.6} Hz, outside the declared reconstruction bandwidth"
         )));
@@ -6828,6 +7338,8 @@ fn build_physical_audio(
     .map_err(pipeline)?;
     let controls =
         EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
+    let declared_source_bandwidth_hz =
+        resolved_contact_drive_bandwidth_hz(&controls, &config.mechanics)?;
     let clock_roundoff_operation_count = usize::try_from(
         u64::from(config.mechanics.sample_rate_hz)
             .checked_mul(u64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES))
@@ -6838,7 +7350,7 @@ fn build_physical_audio(
     )
     .map_err(|_| CinematicFixtureError::Pipeline("audio clock operation budget overflow".into()))?;
     let force_reconstruction = GeneralizedForceReconstructionInput {
-        declared_source_bandwidth_hz: CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
+        declared_source_bandwidth_hz,
         filter: fixture_reconstruction_filter_spec(),
         boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
         clock_roundoff_operation_count,
@@ -7022,6 +7534,7 @@ fn build_physical_audio(
         plate_acoustic_radiation_identity,
         plate_damping_model_identity: physical_plate.damping_model_identity,
         gas_model_identity,
+        declared_source_bandwidth_hz,
         plate_left_pressure_identity,
         plate_right_pressure_identity,
         left_pressure_identity,
@@ -7608,6 +8121,94 @@ fn resolved_disc_manifest_json(
     )
 }
 
+fn cinematic_surface_manifest_json(config: &CinematicPeriodicSurfaceConfig) -> String {
+    let authority = match config.authority {
+        InputAuthority::CallerDeclared => "caller-declared",
+        InputAuthority::SyntheticFixture => "synthetic-fixture",
+        InputAuthority::Estimated => "estimated",
+    };
+    let mut identity =
+        DomainHasher::new("org.frankensim.euler-critique.contact-surface-spectrum.v1");
+    identity.update(&config.period_m.to_bits().to_le_bytes());
+    identity.update(&(config.sample_count as u64).to_le_bytes());
+    identity.update(&[match config.authority {
+        InputAuthority::CallerDeclared => 0,
+        InputAuthority::SyntheticFixture => 1,
+        InputAuthority::Estimated => 2,
+    }]);
+    identity.update(&(config.source_id.len() as u64).to_le_bytes());
+    identity.update(config.source_id.as_bytes());
+    let spectrum = match &config.spectrum {
+        CinematicSurfaceSpectrumConfig::Explicit(harmonics) => {
+            let mut canonical_harmonics = harmonics.clone();
+            canonical_harmonics.sort_by_key(|harmonic| harmonic.cycles_per_track);
+            identity.update(&[0]);
+            identity.update(&(canonical_harmonics.len() as u64).to_le_bytes());
+            for harmonic in &canonical_harmonics {
+                identity.update(&harmonic.cycles_per_track.to_le_bytes());
+                identity.update(&harmonic.cosine_amplitude_m.to_bits().to_le_bytes());
+                identity.update(&harmonic.sine_amplitude_m.to_bits().to_le_bytes());
+            }
+            format!(
+                "{{\"kind\":\"explicit-fourier\",\"harmonic_count\":{}}}",
+                harmonics.len()
+            )
+        }
+        CinematicSurfaceSpectrumConfig::SelfAffine(spectrum) => {
+            identity.update(&[1]);
+            identity.update(&spectrum.rms_height_m().to_bits().to_le_bytes());
+            identity.update(&spectrum.hurst_exponent().to_bits().to_le_bytes());
+            identity.update(&spectrum.minimum_cycles_per_track().to_le_bytes());
+            identity.update(&spectrum.maximum_cycles_per_track().to_le_bytes());
+            identity.update(&spectrum.phase_seed().to_le_bytes());
+            format!(
+                concat!(
+                    "{{\"kind\":\"self-affine-profile\",",
+                    "\"rms_height_m\":{:.17e},\"hurst_exponent\":{:.17e},",
+                    "\"minimum_cycles_per_track\":{},\"maximum_cycles_per_track\":{},",
+                    "\"phase_seed\":{}}}"
+                ),
+                spectrum.rms_height_m(),
+                spectrum.hurst_exponent(),
+                spectrum.minimum_cycles_per_track(),
+                spectrum.maximum_cycles_per_track(),
+                spectrum.phase_seed(),
+            )
+        }
+    };
+    let spectrum_identity = identity.finalize();
+    format!(
+        concat!(
+            "{{\"period_m\":{:.17e},\"sample_count\":{},",
+            "\"authority\":\"{}\",\"source_id\":\"{}\",",
+            "\"spectrum_identity\":\"{}\",\"spectrum\":{}}}"
+        ),
+        config.period_m,
+        config.sample_count,
+        authority,
+        json_escape(&config.source_id),
+        spectrum_identity.to_hex(),
+        spectrum,
+    )
+}
+
+fn fixture_sampling_manifest_json(
+    config: &CinematicFixtureConfig,
+    adaptive: &FixtureAdaptiveSamplingEvidence,
+    independent_pilot: &FixtureIndependentPilotSamplingEvidence,
+) -> String {
+    if let Some(policy) = config.independent_pilot_sampling {
+        independent_pilot.manifest_json(policy)
+    } else if let Some(policy) = config.adaptive_sampling {
+        adaptive.manifest_json(policy)
+    } else {
+        format!(
+            "{{\"mode\":\"uniform\",\"samples_per_pixel\":{}}}",
+            config.samples_per_pixel
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn production_fixture_manifest(
     config: &CinematicFixtureConfig,
@@ -7625,6 +8226,7 @@ fn production_fixture_manifest(
     render: &FixtureRenderEvidence,
     preview_mesh: FixturePreviewMeshEvidence,
     adaptive_sampling: &FixtureAdaptiveSamplingEvidence,
+    independent_pilot_sampling: &FixtureIndependentPilotSamplingEvidence,
     denoise: &FixtureDenoiseEvidence,
     mux: &MuxOutcome,
 ) -> String {
@@ -7656,16 +8258,17 @@ fn production_fixture_manifest(
             json_escape(&path.display().to_string())
         ),
     };
-    let adaptive_json = config.adaptive_sampling.map_or_else(
-        || {
-            format!(
-                "{{\"mode\":\"uniform\",\"samples_per_pixel\":{}}}",
-                config.samples_per_pixel
-            )
-        },
-        |policy| adaptive_sampling.manifest_json(policy),
-    );
+    let adaptive_json =
+        fixture_sampling_manifest_json(config, adaptive_sampling, independent_pilot_sampling);
     let disc_json = resolved_disc_manifest_json(&config.disc, physical_disc);
+    let disc_surface_json = cinematic_surface_manifest_json(&config.mechanics.disc_surface);
+    let support_surface_json = cinematic_surface_manifest_json(&config.mechanics.support_surface);
+    let render_sampler = match config.render_sampler {
+        Sampler::Iid => "iid-philox",
+        Sampler::OwenSobol => "owen-sobol",
+        Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
+    };
+    let reconstruction_filter = fixture_reconstruction_filter_spec();
     format!(
         concat!(
             "{{\n",
@@ -7675,7 +8278,9 @@ fn production_fixture_manifest(
             "\"rendered_frame_start\":{},\"rendered_frame_end_exclusive\":{},\"duration_s\":{:.17e},",
             "\"raw_sequence_identity\":\"{}\",\"preview_sequence_identity\":\"{}\",",
             "\"over_range_linear_channels\":{},\"gamut_mapped_pixels\":{},",
-            "\"sampling\":{},\"denoise\":{{\"applied_frames\":{},\"maximum_retained_bytes\":{},",
+            "\"sampling\":{},\"sampler\":\"{}\",\"render_seed_salt\":{},",
+            "\"max_depth\":{},\"shutter_angle_degrees\":{},",
+            "\"denoise\":{{\"applied_frames\":{},\"maximum_retained_bytes\":{},",
             "\"maximum_history_frames\":{}}},\"preview_mesh\":{}}},\n",
             "  \"mechanics\": {{\"model\":\"generic transactional rigid-profile/contact/tribology/exterior-gas/modal-support composition\",",
             "\"initial_motion\":\"{}\",",
@@ -7684,7 +8289,8 @@ fn production_fixture_manifest(
             "\"branch_transition_count\":{},\"fine_normal_impulse_n_s\":{:.17e},",
             "\"coarse_normal_impulse_n_s\":{:.17e},\"coarsening_impulse_residual_n_s\":{:.17e},",
             "\"mechanics_dt_refinement\":\"outstanding; 384 kHz passed an 85.3 ms probe after 48/96/192 kHz showed nonconverged contact transients\",",
-            "\"trajectory_identity\":\"{}\",\"disc\":{}}},\n",
+            "\"trajectory_identity\":\"{}\",\"disc\":{},",
+            "\"contact_surfaces\":{{\"disc\":{},\"support\":{}}}}},\n",
             "  \"audio\": {{\"primary\":\"physical-listening-master.pcm24.wav\",",
             "\"wav_identity\":\"{}\",\"source_peak_abs_pressure_pa\":{:.17e},",
             "\"presentation_gain_fs_per_pa\":{:.17e},\"presentation_gain_db\":{:.17e},",
@@ -7692,6 +8298,11 @@ fn production_fixture_manifest(
             "\"stereo_rms_fs\":{:.17e},\"left_pressure_identity\":\"{}\",",
             "\"right_pressure_identity\":\"{}\",\"plate_basis_identity\":\"{}\",",
             "\"plate_radiation_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
+            "\"declared_source_bandwidth_hz\":{:.17e},",
+            "\"reconstruction_filter\":{{\"passband_edge_hz\":{:.17e},",
+            "\"stopband_edge_hz\":{:.17e},\"half_length_frames\":{}}},",
+            "\"plate_modes\":{{\"retained_count\":{},\"minimum_frequency_hz\":{:.17e},",
+            "\"maximum_frequency_hz\":{:.17e}}},",
             "\"observer_model\":\"two fixed world-space ear observers with causal retarded-time radiation\",",
             "\"control_resolution_evidence\":{{\"fine_hz\":48000,\"coarse_hz\":24000,",
             "\"coarsening_impulse_residual_n_s\":{:.17e},",
@@ -7722,6 +8333,10 @@ fn production_fixture_manifest(
         over_range_channels,
         gamut_mapped_pixels,
         adaptive_json,
+        render_sampler,
+        config.render_seed_salt,
+        config.max_depth,
+        config.shutter_angle_degrees,
         denoise.applied_frames,
         denoise.maximum_retained_bytes,
         denoise.maximum_history_frames,
@@ -7738,6 +8353,8 @@ fn production_fixture_manifest(
         impulse_residual_n_s,
         trajectory.receipt().artifact_identity().to_hex(),
         disc_json,
+        disc_surface_json,
+        support_surface_json,
         wav_identity.to_hex(),
         physical_audio.master.source_peak_abs_pressure_pa,
         physical_audio.master.digital_gain_fs_per_pa,
@@ -7750,6 +8367,13 @@ fn production_fixture_manifest(
         physical_audio.plate_structural_basis_identity.to_hex(),
         physical_audio.plate_acoustic_radiation_identity.to_hex(),
         physical_audio.gas_model_identity.to_hex(),
+        physical_audio.declared_source_bandwidth_hz,
+        reconstruction_filter.passband_edge_hz,
+        reconstruction_filter.stopband_edge_hz,
+        reconstruction_filter.half_length,
+        physical_audio.plate_retained_mode_count,
+        physical_audio.plate_minimum_mode_frequency_hz,
+        physical_audio.plate_maximum_mode_frequency_hz,
         impulse_residual_n_s,
         render.frames,
         render.maximum_effective_workers,
@@ -7796,6 +8420,7 @@ fn fixture_manifest(
     render: &FixtureRenderEvidence,
     preview_mesh: FixturePreviewMeshEvidence,
     adaptive_sampling: &FixtureAdaptiveSamplingEvidence,
+    independent_pilot_sampling: &FixtureIndependentPilotSamplingEvidence,
     denoise: &FixtureDenoiseEvidence,
     spatialization: Option<&FixtureSpatialAudioEvidence>,
     mux: &MuxOutcome,
@@ -7871,7 +8496,11 @@ fn fixture_manifest(
         .literature_specimen
         .as_ref()
         .expect("source-bound fixture run retains its specimen declaration");
-    let raw_profile = if config.adaptive_sampling.is_some() && config.retain_full_aov_exr {
+    let raw_profile = if config.independent_pilot_sampling.is_some() && config.retain_full_aov_exr {
+        "independent-pilot-fixed-final-diagnostic-aov-float"
+    } else if config.independent_pilot_sampling.is_some() {
+        "independent-pilot-fixed-linear-srgb-beauty-float"
+    } else if config.adaptive_sampling.is_some() && config.retain_full_aov_exr {
         "adaptive-final-diagnostic-aov-float"
     } else if config.adaptive_sampling.is_some() {
         "adaptive-linear-srgb-beauty-plus-sample-count-float"
@@ -7880,15 +8509,8 @@ fn fixture_manifest(
     } else {
         "linear-srgb-beauty-float"
     };
-    let sampling_json = config.adaptive_sampling.map_or_else(
-        || {
-            format!(
-                "{{\"mode\":\"uniform\",\"samples_per_pixel\":{}}}",
-                config.samples_per_pixel
-            )
-        },
-        |policy| adaptive_sampling.manifest_json(policy),
-    );
+    let sampling_json =
+        fixture_sampling_manifest_json(config, adaptive_sampling, independent_pilot_sampling);
     let denoise_pipeline = if config.denoise_previews {
         TEMPORAL_DENOISE_PIPELINE_VERSION
     } else {
@@ -8052,7 +8674,7 @@ fn fixture_manifest(
             "{{\n",
             "  \"schema\": \"frankensim-euler-cinematic-critique-v8\",\n",
             "  \"authority\": \"source-bound analytical simulation visualization; delivered disc-plus-support observer-pressure audio with uncalibrated constitutive and support inputs\",\n",
-            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"sampling\": {sampling}, \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
+            "  \"video\": {{\"width\": {width}, \"height\": {height}, \"sequence_frames\": {sequence_frames}, \"rendered_first_frame\": {rendered_first}, \"rendered_frame_count\": {rendered_count}, \"complete_sequence\": {complete}, \"fps\": {fps}, \"duration_s\": {duration:.9}, \"spp\": {spp}, \"sampling\": {sampling}, \"sampler\": \"{sampler}\", \"render_seed_salt\": {seed_salt}, \"max_depth\": {max_depth}, \"shutter_angle_degrees\": {shutter_angle}, \"shutter_duration_s\": {shutter_duration:.17e}, \"shutter_convention\": \"back-loaded-frame-boundary\", \"final_shutter_closes_at_cutoff\": true, \"first_shutter_opens_at_s\": {first_shutter_open:.17e}, \"shutter_distribution\": \"stratified-counter-v1\", \"frame_seed_schedule_version\": {seed_version}, \"denoise_requested\": {denoise_requested}, \"raw_exr_profile\": \"{raw_profile}\", \"exposure_ev\": {exposure_ev}, \"raw_sequence_identity\": \"{raw_sequence}\", \"preview_sequence_identity\": \"{preview_sequence}\", \"over_range_linear_channels\": {over_range}, \"gamut_mapped_pixels\": {gamut_mapped}}},\n",
             "  \"timeline\": {{\"video_pts_convention\": \"encoded-frame-start\", \"video_first_pts_s\": 0.00000000000000000e0, \"video_final_pts_s\": {video_final_pts:.17e}, \"video_frame_interval_s\": {frame_interval:.17e}, \"audio_first_sample_time_s\": 0.00000000000000000e0, \"audio_video_clock_origins_aligned\": true, \"shutter_close_convention\": \"mechanics-frame-end\", \"first_shutter_close_time_s\": {first_shutter_close:.17e}, \"final_shutter_close_time_s\": {final_shutter_close:.17e}, \"note\": \"encoded PTS is distinct from the mechanics time at which each back-loaded shutter closes\"}},\n",
             "  \"render_execution\": {{\"policy\": \"deterministic-parked-crew-tile-v1\", \"requested_workers\": {requested_workers}, \"maximum_effective_workers\": {effective_workers}, \"tile_width\": {tile_width}, \"tile_height\": {tile_height}, \"memory_limit_bytes\": {memory_limit}, \"maximum_peak_memory_bytes\": {peak_memory}, \"measured_frames\": {measured_frames}, \"timing_ns\": {{\"setup\": {setup_ns}, \"traversal\": {traversal_ns}, \"tile_compute_sum\": {compute_ns}, \"tile_merge_sum\": {merge_ns}, \"publication\": {publication_ns}, \"idle_worker_capacity\": {idle_ns}}}}},\n",
             "  \"preview_mesh\": {preview_mesh},\n",
@@ -8079,6 +8701,11 @@ fn fixture_manifest(
         final_shutter_close = f64::from(config.frames) / f64::from(CRITIQUE_FPS),
         spp = config.render_sample_ceiling(),
         sampling = sampling_json,
+        sampler = match config.render_sampler {
+            Sampler::Iid => "iid-philox",
+            Sampler::OwenSobol => "owen-sobol",
+            Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
+        },
         seed_salt = config.render_seed_salt,
         max_depth = config.max_depth,
         shutter_angle = config.shutter_angle_degrees,
@@ -8168,7 +8795,7 @@ fn fixture_manifest(
         physical_audio = physical_audio_json,
         chirp_start = chirp_start_hz,
         chirp_end = chirp_end_hz,
-        audio_bandwidth = CRITIQUE_DECLARED_AUDIO_SOURCE_BANDWIDTH_HZ,
+        audio_bandwidth = CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ,
         modal_identity = modal_parameter_set_identity.to_hex(),
         modal_disclosure = modal_disclosure,
         warm_start_policy = AUDIO_PREROLL_POLICY_ID,
@@ -8638,6 +9265,7 @@ mod tests {
         assert_eq!(config.frames, 8 * CRITIQUE_FPS);
         assert_eq!(config.frame_window, CinematicFrameWindow::Full);
         assert_eq!(config.render_seed_salt, 0);
+        assert_eq!(config.render_sampler, Sampler::OwenSobolFullPath);
         assert_eq!((config.width, config.height), (320, 180));
         assert_eq!(config.azimuthal_segments, 512);
         assert_eq!(config.arc_subdivisions_per_arc, 64);
@@ -8718,6 +9346,71 @@ mod tests {
             dark_floor: 1.0e-5,
         });
         config
+    }
+
+    fn independent_pilot_fixture_config() -> CinematicFixtureConfig {
+        let mut config = CinematicFixtureConfig::default();
+        config.independent_pilot_sampling = Some(CinematicIndependentPilotSamplingConfig {
+            pilot_samples_per_pixel: 16,
+            minimum_samples_per_pixel: 16,
+            maximum_samples_per_pixel: 256,
+            absolute_error: 1.0e-4,
+            relative_error: 0.02,
+            dark_floor: 1.0e-5,
+            safety_factor: 2.0,
+        });
+        config
+    }
+
+    #[test]
+    fn independent_pilot_policy_is_explicit_bounded_and_seed_separated() {
+        let config = independent_pilot_fixture_config();
+        config.validate().unwrap();
+        assert_eq!(config.render_sample_ceiling(), 256);
+
+        let policy = config.independent_pilot_sampling.unwrap();
+        let allocation = policy.allocation().unwrap();
+        assert_eq!(allocation.minimum_samples(), 16);
+        assert_eq!(allocation.maximum_samples(), 256);
+        assert_eq!(allocation.absolute_error().to_bits(), 1.0e-4_f64.to_bits());
+        assert_eq!(allocation.relative_error().to_bits(), 0.02_f64.to_bits());
+        assert_eq!(allocation.dark_floor().to_bits(), 1.0e-5_f64.to_bits());
+        assert_eq!(allocation.safety_factor().to_bits(), 2.0_f64.to_bits());
+
+        for production_seed in [0, 1, u64::MAX, 0x4555_4c45_522d_4449] {
+            let first = independent_pilot_seed(production_seed);
+            let replay = independent_pilot_seed(production_seed);
+            assert_eq!(first, replay);
+            assert_ne!(first, production_seed);
+        }
+    }
+
+    #[test]
+    fn independent_pilot_policy_refuses_invalid_or_competing_controls() {
+        let mut bad_count = independent_pilot_fixture_config();
+        bad_count
+            .independent_pilot_sampling
+            .as_mut()
+            .unwrap()
+            .pilot_samples_per_pixel = 1;
+        assert!(bad_count.validate().is_err());
+
+        let mut bad_scale = independent_pilot_fixture_config();
+        bad_scale
+            .independent_pilot_sampling
+            .as_mut()
+            .unwrap()
+            .safety_factor = f64::NAN;
+        assert!(bad_scale.validate().is_err());
+
+        let mut competing = independent_pilot_fixture_config();
+        competing.adaptive_sampling = adaptive_fixture_config().adaptive_sampling;
+        assert!(matches!(
+            competing.validate(),
+            Err(CinematicFixtureError::InvalidConfig(
+                "adaptive stopping and independent-pilot fixed allocation are mutually exclusive"
+            ))
+        ));
     }
 
     #[test]

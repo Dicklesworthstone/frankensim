@@ -2661,6 +2661,7 @@ fn raw_attributes(
         match settings.sampler {
             Sampler::Iid => "iid-philox",
             Sampler::OwenSobol => "owen-sobol",
+            Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
         }
         .to_owned(),
     );

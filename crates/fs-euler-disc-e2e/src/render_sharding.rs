@@ -1850,6 +1850,7 @@ impl<'a> PlanReader<'a> {
         let sampler = match self.take(1)?[0] {
             0 => Sampler::Iid,
             1 => Sampler::OwenSobol,
+            2 => Sampler::OwenSobolFullPath,
             _ => return Err(EulerRenderShardingError::Codec("unknown sampler tag")),
         };
         let strategy = match self.take(1)?[0] {
@@ -2249,6 +2250,7 @@ const fn sampler_tag(sampler: Sampler) -> u8 {
     match sampler {
         Sampler::Iid => 0,
         Sampler::OwenSobol => 1,
+        Sampler::OwenSobolFullPath => 2,
     }
 }
 
