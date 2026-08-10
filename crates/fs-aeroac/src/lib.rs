@@ -31,6 +31,7 @@
 pub mod bessel;
 pub mod bickley;
 pub mod curle2d;
+pub mod jetlab;
 
 /// The honest-scope statement every exported artifact embeds (the
 /// bead's marketing-mutation guard asserts its presence): 2D line
