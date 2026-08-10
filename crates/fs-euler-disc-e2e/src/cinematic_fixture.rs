@@ -26,8 +26,9 @@ use crate::external_air::{
 use crate::modal_base_response::{RectangularModalBaseIdentity, RectangularModalBasePort};
 use crate::modal_synthesis::{EulerModalParameterSet, EulerModalParameterSetInput};
 use crate::normal_contact::{
-    EulerNormalContactInput, EulerNormalGeometry, NORMAL_CONTACT_ADAPTER_ID, NormalContactIdentity,
-    NormalContactIntegrationRegime, NormalMaterialInterface, NormalRateResponse,
+    EulerNormalContactInput, EulerNormalGeometry, FiniteGapNormalResponse,
+    NORMAL_CONTACT_ADAPTER_ID, NormalContactIdentity, NormalContactIntegrationRegime,
+    NormalMaterialInterface, NormalRateResponse,
 };
 use crate::patch_kinematics::{
     CurvatureMetadata, MovingOneModeBaseState, MovingOneModePatchBridgeInput,
@@ -93,7 +94,10 @@ use crate::{
 };
 use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_contact::normal_patch::{
-    ApplicabilityInput, ApplicabilityLimits, InputUncertainty, NormalPatchEmbedState,
+    ApplicabilityInput, ApplicabilityLimits, FiniteGapChartEvidenceRequirement,
+    FiniteGapChartSamplingRequest, FiniteGapContactFrame, FiniteGapGrid,
+    FiniteGapResponseCurveRequest, FiniteGapResponseFamily, InputUncertainty,
+    NormalPatchEmbedState, build_finite_gap_response_curve, sample_finite_gap_from_chart,
 };
 use fs_couple::StableId;
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
@@ -967,6 +971,61 @@ impl Default for CinematicExteriorAeroConfig {
 /// and spatial topography. Changing any of them rebuilds the same generic
 /// coupled system; no descriptive label dispatches a dynamics or sound path.
 #[derive(Clone, Debug, PartialEq)]
+pub struct CinematicFiniteGapContactConfig {
+    /// Inclination nodes indexing one common-grid response family [rad].
+    pub inclination_nodes_rad: Vec<f64>,
+    /// Square tangent-grid cell count. Odd counts retain the support point at
+    /// the centre of one cell rather than on a cell edge.
+    pub cells_per_axis: usize,
+    /// Half-width of the tangent sampling window divided by outer radius.
+    pub tangent_half_extent_to_outer_radius: f64,
+    /// Strictly increasing approach nodes divided by outer radius.
+    pub approach_nodes_to_outer_radius: Vec<f64>,
+    /// Outward root-bracketing probe divided by outer radius.
+    pub outside_probe_to_outer_radius: f64,
+    /// Inward root-bracketing reach divided by outer radius.
+    pub maximum_inward_search_to_outer_radius: f64,
+    /// Surface-root bracket divided by outer radius.
+    pub root_tolerance_to_outer_radius: f64,
+    /// Maximum chart bisections per tangent cell.
+    pub maximum_bisection_steps: usize,
+    /// Dense active-set iteration ceiling per response node.
+    pub maximum_active_set_iterations: usize,
+    /// Contact complementarity tolerance divided by outer radius.
+    pub complementarity_tolerance_to_outer_radius: f64,
+    /// Inactive boundary rings required around every solved patch.
+    pub boundary_clearance_cells: usize,
+    /// Absolute response-curve work/energy tolerance [J].
+    pub absolute_energy_tolerance_j: f64,
+    /// Relative response-curve work/energy tolerance.
+    pub relative_energy_tolerance: f64,
+}
+
+impl Default for CinematicFiniteGapContactConfig {
+    fn default() -> Self {
+        Self {
+            inclination_nodes_rad: vec![
+                0.002, 0.005, 0.01, 0.02, 0.04, 0.08, 0.12, 0.16, 0.24, 0.35,
+            ],
+            cells_per_axis: 25,
+            tangent_half_extent_to_outer_radius: 0.025,
+            approach_nodes_to_outer_radius: vec![
+                0.0, 1.0e-6, 2.0e-6, 5.0e-6, 1.0e-5, 2.0e-5, 5.0e-5, 1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3,
+            ],
+            outside_probe_to_outer_radius: 0.01,
+            maximum_inward_search_to_outer_radius: 0.05,
+            root_tolerance_to_outer_radius: 1.0e-10,
+            maximum_bisection_steps: 64,
+            maximum_active_set_iterations: 128,
+            complementarity_tolerance_to_outer_radius: 1.0e-10,
+            boundary_clearance_cells: 2,
+            absolute_energy_tolerance_j: 1.0e-12,
+            relative_energy_tolerance: 0.20,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CinematicMechanicsConfig {
     /// Fixed accepted mechanics rate [Hz].
     pub sample_rate_hz: u32,
@@ -980,6 +1039,9 @@ pub struct CinematicMechanicsConfig {
     pub normal_limits: ApplicabilityLimits,
     /// Retained relative input uncertainty.
     pub normal_uncertainty: InputUncertainty,
+    /// Optional exact-profile finite-gap table replacing the local quadratic
+    /// Hertz geometry. `None` retains the bounded local analytic rung.
+    pub finite_gap_contact: Option<CinematicFiniteGapContactConfig>,
     /// Maximum relative mismatch in the initial gravity/static-contact solve.
     pub static_preload_relative_tolerance: f64,
     /// Generic finite-patch partial-slip coefficients.
@@ -1085,6 +1147,7 @@ impl Default for CinematicMechanicsConfig {
                 modulus_relative: 0.05,
                 load_relative: 0.01,
             },
+            finite_gap_contact: Some(CinematicFiniteGapContactConfig::default()),
             static_preload_relative_tolerance: 1.0e-8,
             partial_slip: PartialSlipParameters {
                 static_mu: 0.20,
@@ -1608,6 +1671,67 @@ impl CinematicFixtureConfig {
             return Err(CinematicFixtureError::InvalidConfig(
                 "mechanics clock, initial state, or constitutive scalar is outside its admitted domain",
             ));
+        }
+        if let Some(finite_gap) = &mechanics.finite_gap_contact {
+            let initial_inclination = match mechanics.initial_motion {
+                CinematicInitialMotionConfig::SmallAngleNoSlip { inclination_rad }
+                | CinematicInitialMotionConfig::DeclaredNoSlip {
+                    inclination_rad, ..
+                } => inclination_rad,
+            };
+            let valid_nodes = finite_gap.inclination_nodes_rad.len() >= 2
+                && finite_gap
+                    .inclination_nodes_rad
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0)
+                && finite_gap
+                    .inclination_nodes_rad
+                    .windows(2)
+                    .all(|pair| pair[1] > pair[0])
+                && initial_inclination >= finite_gap.inclination_nodes_rad[0]
+                && initial_inclination
+                    <= *finite_gap
+                        .inclination_nodes_rad
+                        .last()
+                        .expect("two finite-gap inclination nodes validated");
+            let valid_approaches = finite_gap.approach_nodes_to_outer_radius.len() >= 2
+                && finite_gap.approach_nodes_to_outer_radius[0].to_bits() == 0.0_f64.to_bits()
+                && finite_gap
+                    .approach_nodes_to_outer_radius
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+                && finite_gap
+                    .approach_nodes_to_outer_radius
+                    .windows(2)
+                    .all(|pair| pair[1] > pair[0]);
+            let cell_count = finite_gap
+                .cells_per_axis
+                .checked_mul(finite_gap.cells_per_axis);
+            if !valid_nodes
+                || !valid_approaches
+                || finite_gap.cells_per_axis < 5
+                || finite_gap.cells_per_axis.is_multiple_of(2)
+                || cell_count.is_none_or(|count| count > 16_384)
+                || finite_gap.boundary_clearance_cells == 0
+                || 2 * finite_gap.boundary_clearance_cells >= finite_gap.cells_per_axis
+                || finite_gap.maximum_bisection_steps == 0
+                || finite_gap.maximum_active_set_iterations == 0
+                || [
+                    finite_gap.tangent_half_extent_to_outer_radius,
+                    finite_gap.outside_probe_to_outer_radius,
+                    finite_gap.maximum_inward_search_to_outer_radius,
+                    finite_gap.root_tolerance_to_outer_radius,
+                    finite_gap.complementarity_tolerance_to_outer_radius,
+                    finite_gap.absolute_energy_tolerance_j,
+                    finite_gap.relative_energy_tolerance,
+                ]
+                .into_iter()
+                .any(|value| !value.is_finite() || value <= 0.0)
+            {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "finite-gap contact grid, coordinate domain, approach grid, or solve controls are invalid",
+                ));
+            }
         }
         for surface in [&mechanics.disc_surface, &mechanics.support_surface] {
             let harmonics = match &surface.spectrum {
@@ -2423,6 +2547,13 @@ impl FixtureProductionMechanics {
             )?;
 
         let current_state = checkpoint.disc_state;
+        if let Some(finite_gap) = &mut input.normal.material.finite_gap_response {
+            let symmetry_axis_world = current_state
+                .pose()
+                .orientation()
+                .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+            finite_gap.coordinate = det::acos(symmetry_axis_world.z.abs().clamp(0.0, 1.0));
+        }
         let current_contact = input.patch.bridge.profile_support;
         let orientation = current_state.pose().orientation();
         let arm_body = orientation.rotate_world_to_body(current_contact.disc_arm_world_m);
@@ -2549,6 +2680,99 @@ fn realize_cinematic_surface(
     .map_err(pipeline)
 }
 
+/// Build the passive finite-geometry normal response used by the hot
+/// mechanics loop. Every table member is sampled from the same admitted
+/// axisymmetric chart, on the same dimensionless grid, at one explicit
+/// inclination. No material label or desired audible response enters here.
+fn build_fixture_finite_gap_response(
+    profile: &ResolvedDiscProfile,
+    reduced_modulus_pa: f64,
+    config: &CinematicFiniteGapContactConfig,
+    cx: &Cx<'_>,
+) -> Result<Arc<FiniteGapResponseFamily>, CinematicFixtureError> {
+    let radius_m = profile.dimensions.outer_radius_m;
+    let half_extent_m = config.tangent_half_extent_to_outer_radius * radius_m;
+    let cell_size_m = 2.0 * half_extent_m / config.cells_per_axis as f64;
+    let grid = FiniteGapGrid {
+        cells_x: config.cells_per_axis,
+        cells_y: config.cells_per_axis,
+        cell_width_m: cell_size_m,
+        cell_depth_m: cell_size_m,
+    };
+    let approach_nodes_m = config
+        .approach_nodes_to_outer_radius
+        .iter()
+        .map(|ratio| ratio * radius_m)
+        .collect::<Vec<_>>();
+    let source_geometry_id = format!("axisymmetric-profile/{}", profile.identity.0);
+    let mut curves = Vec::with_capacity(config.inclination_nodes_rad.len());
+    for &inclination_rad in &config.inclination_nodes_rad {
+        cx.checkpoint().map_err(|_| {
+            CinematicFixtureError::Pipeline(
+                "finite-gap response construction was cancelled".to_owned(),
+            )
+        })?;
+        // The production initializer uses a body-to-world rotation about +Y.
+        // Express world +Z in that body frame, then query the exact lowest
+        // support point of the same chart used for mass and rendering.
+        let sine = inclination_rad.sin();
+        let cosine = inclination_rad.cos();
+        let body_ground = GeomVec3::new(-sine, 0.0, cosine);
+        let support = profile
+            .chart
+            .minimum_support_point(body_ground, cx)
+            .map_err(pipeline)?;
+        let sampling = sample_finite_gap_from_chart(
+            &FiniteGapChartSamplingRequest {
+                chart: &profile.chart,
+                source_geometry_id: &source_geometry_id,
+                grid,
+                frame: FiniteGapContactFrame {
+                    surface_point_m: support.point,
+                    outward_normal: GeomVec3::new(sine, 0.0, -cosine),
+                    tangent_x: GeomVec3::new(0.0, 1.0, 0.0),
+                    tangent_y: GeomVec3::new(cosine, 0.0, sine),
+                },
+                evidence_requirement: FiniteGapChartEvidenceRequirement::AllowEstimate,
+                outside_probe_m: config.outside_probe_to_outer_radius * radius_m,
+                maximum_inward_search_m: config.maximum_inward_search_to_outer_radius * radius_m,
+                root_tolerance_m: config.root_tolerance_to_outer_radius * radius_m,
+                maximum_bisection_steps: config.maximum_bisection_steps,
+            },
+            cx,
+        )
+        .map_err(pipeline)?;
+        curves.push(
+            build_finite_gap_response_curve(
+                &FiniteGapResponseCurveRequest {
+                    gap_source_identity: sampling.identity,
+                    gap_source_authority: sampling.authority,
+                    grid,
+                    undeformed_gap_m: sampling.undeformed_gap_m,
+                    reduced_modulus_pa,
+                    approach_nodes_m: approach_nodes_m.clone(),
+                    maximum_active_set_iterations: config.maximum_active_set_iterations,
+                    complementarity_tolerance_m: config.complementarity_tolerance_to_outer_radius
+                        * radius_m,
+                    boundary_clearance_cells: config.boundary_clearance_cells,
+                    absolute_energy_tolerance_j: config.absolute_energy_tolerance_j,
+                    relative_energy_tolerance: config.relative_energy_tolerance,
+                },
+                cx,
+            )
+            .map_err(pipeline)?,
+        );
+    }
+    FiniteGapResponseFamily::try_new(
+        "inclination-from-support-normal",
+        "rad",
+        config.inclination_nodes_rad.clone(),
+        curves,
+    )
+    .map(Arc::new)
+    .map_err(pipeline)
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_fixture_production_mechanics(
     profile: &ResolvedDiscProfile,
@@ -2574,6 +2798,13 @@ fn build_fixture_production_mechanics(
     let reduced_modulus = disc_solid
         .reduced_modulus_against(&physical_plate.solid)
         .map_err(pipeline)?;
+    let finite_gap_family = mechanics
+        .finite_gap_contact
+        .as_ref()
+        .map(|finite_gap| {
+            build_fixture_finite_gap_response(profile, reduced_modulus.value_pa, finite_gap, cx)
+        })
+        .transpose()?;
     let disc_mass_properties = profile_mass_to_mbd(profile.mass_properties).map_err(pipeline)?;
     let maximum_steps = u64::from(config.frames)
         .checked_mul(u64::from(mechanics.sample_rate_hz))
@@ -2752,6 +2983,27 @@ fn build_fixture_production_mechanics(
         })?,
     )
     .map_err(pipeline)?;
+    let initial_inclination_rad = match mechanics.initial_motion {
+        CinematicInitialMotionConfig::SmallAngleNoSlip { inclination_rad }
+        | CinematicInitialMotionConfig::DeclaredNoSlip {
+            inclination_rad, ..
+        } => inclination_rad,
+    };
+    let finite_gap_response = finite_gap_family.map(|family| FiniteGapNormalResponse {
+        family,
+        reduced_modulus_pa: reduced_modulus.value_pa,
+        coordinate: initial_inclination_rad,
+        dissipation_s_per_m: mechanics.normal_dissipation_s_per_m,
+    });
+    let normal_model_id = finite_gap_response.as_ref().map_or_else(
+        || "fs-contact.normal-hunt-crossley-point:v1".to_owned(),
+        |response| {
+            format!(
+                "fs-contact.finite-gap-hunt-crossley-point:v1:{}",
+                response.family.identity
+            )
+        },
+    );
     let normal = EulerNormalContactInput {
         identity: NormalContactIdentity {
             case_id: model.identity.case_id.clone(),
@@ -2767,14 +3019,14 @@ fn build_fixture_production_mechanics(
                 disc_solid.resolved().identity(),
                 physical_plate.solid.resolved().identity()
             ),
-            model_id: "fs-contact.normal-hunt-crossley-point:v1".to_owned(),
+            model_id: normal_model_id,
             source_id: "cinematic/caller-declared-normal-card".to_owned(),
             interface: interface.clone(),
             reduced_modulus_pa: reduced_modulus.value_pa,
             rate_response: NormalRateResponse::HuntCrossleyPoint {
                 dissipation_s_per_m: mechanics.normal_dissipation_s_per_m,
             },
-            finite_gap_response: None,
+            finite_gap_response,
             applicability: ApplicabilityInput {
                 half_space_depth_m: profile
                     .dimensions

@@ -7,9 +7,12 @@ mod normal_contact;
 #[path = "../src/patch_kinematics.rs"]
 mod patch_kinematics;
 
+use fs_blake3::hash_domain;
 use fs_contact::normal_patch::{
-    ApplicabilityInput, ApplicabilityLimits, InputUncertainty, NormalPatchEmbedState,
-    NormalPatchPort, NormalPatchReceipt,
+    ApplicabilityInput, ApplicabilityLimits, FiniteGapChartSamplingAuthority,
+    FiniteGapResponseCurve, FiniteGapResponseCurveAuthority, FiniteGapResponseFamily,
+    FiniteGapResponseNode, InputUncertainty, NormalPatchEmbedState, NormalPatchPort,
+    NormalPatchReceipt,
 };
 use fs_couple::StableId;
 use fs_mbd::{PointKinematics, Vec3};
@@ -17,7 +20,7 @@ use fs_rep_frep::AxisymmetricSupportAuthority;
 use fs_tribo::{InputAuthority, InterfaceMedium, InterfaceSystemRef};
 use normal_contact::{
     EulerNormalContactInput, EulerNormalContactOutcome, EulerNormalGeometry,
-    NORMAL_CONTACT_ADAPTER_ID, NormalContactError, NormalContactIdentity,
+    FiniteGapNormalResponse, NORMAL_CONTACT_ADAPTER_ID, NormalContactError, NormalContactIdentity,
     NormalContactIntegrationRegime, NormalDissipation, NormalElasticStorage,
     NormalMaterialInterface, NormalRateResponse, evaluate_normal_contact,
 };
@@ -25,6 +28,7 @@ use patch_kinematics::{
     Creepage, CurvatureMetadata, OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata,
     PatchKinematics, SurfaceOrder, TangentBasis, TangentComponents, TangentGaugeSource,
 };
+use std::sync::Arc;
 
 fn id(value: &str) -> StableId {
     StableId::new(value).expect("test identity")
@@ -461,4 +465,73 @@ fn deterministic_receipt_replays_with_identical_source_identity() {
     assert_eq!(left.generic.receipt_id, right.generic.receipt_id);
     assert_eq!(left.generic.embedding_id, right.generic.embedding_id);
     assert_eq!(left.generic.receipt, right.generic.receipt);
+}
+
+fn finite_gap_curve(label: &[u8], terminal_force_n: f64) -> FiniteGapResponseCurve {
+    let node = |approach_m, normal_force_n, semiaxes| FiniteGapResponseNode {
+        approach_m,
+        contact_identity: hash_domain("test/finite-gap-contact", label),
+        normal_force_n,
+        peak_pressure_pa: normal_force_n * 1.0e6,
+        pressure_centroid_m: [0.0, 0.0],
+        equivalent_pressure_semiaxes_m: semiaxes,
+        reference_reversible_energy_j: 0.5 * normal_force_n * approach_m,
+        curve_reversible_energy_j: 0.5 * normal_force_n * approach_m,
+        energy_residual_j: 0.0,
+    };
+    FiniteGapResponseCurve {
+        identity: hash_domain("test/finite-gap-curve", label),
+        gap_source_identity: hash_domain("test/finite-gap-source", label),
+        gap_source_authority: FiniteGapChartSamplingAuthority::Estimate,
+        response_authority: FiniteGapResponseCurveAuthority::Estimate,
+        nodes: vec![
+            node(0.0, 0.0, [0.0, 0.0]),
+            node(1.0e-4, terminal_force_n, [3.0e-2, 2.0e-2]),
+        ],
+        maximum_absolute_energy_residual_j: 0.0,
+    }
+}
+
+#[test]
+fn finite_gap_family_replaces_only_the_local_quadratic_geometry_gate() {
+    let family = FiniteGapResponseFamily::try_new(
+        "inclination",
+        "rad",
+        vec![0.1, 0.2],
+        vec![finite_gap_curve(b"a", 4.0), finite_gap_curve(b"b", 8.0)],
+    )
+    .unwrap();
+    let mut request = input(
+        PatchContactStatus::Approaching,
+        (20.0, 10.0),
+        -1.0e-4,
+        -0.1,
+        EulerNormalGeometry::EllipticParaboloid,
+        Some(0.5),
+    );
+    request.material.model_id = format!("finite-gap/{}", family.identity);
+    request.material.finite_gap_response = Some(FiniteGapNormalResponse {
+        family: Arc::new(family),
+        reduced_modulus_pa: request.material.reduced_modulus_pa,
+        coordinate: 0.15,
+        dissipation_s_per_m: 0.5,
+    });
+    let result = evaluate_normal_contact(&request).unwrap();
+    let EulerNormalContactOutcome::Active(active) = result else {
+        panic!("finite-gap point contact expected")
+    };
+    let NormalPatchReceipt::Point(receipt) = active.generic.receipt else {
+        panic!("point receipt expected")
+    };
+    assert_eq!(receipt.authority, InputAuthority::Estimated);
+    assert!(receipt.ratios.patch_to_radius > request.material.limits.max_patch_to_radius);
+    assert!(receipt.normal_force_n > 6.0);
+    assert_eq!(receipt.reversible_energy_j, 3.0e-4);
+
+    request.material.applicability.half_space_depth_m = 0.1;
+    request.material.limits.max_patch_to_depth = 0.2;
+    assert!(matches!(
+        evaluate_normal_contact(&request),
+        Err(NormalContactError::GenericRefusal(_))
+    ));
 }
