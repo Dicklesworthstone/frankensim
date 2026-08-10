@@ -18,6 +18,7 @@
 //! is the explicit tangent linearization `delta_F = k_n * delta_h`.
 
 use core::fmt;
+use std::sync::Arc;
 
 use crate::{InputAuthority, InterfaceSystemRef};
 
@@ -200,7 +201,7 @@ pub struct UniformSurfaceTrace {
     source_id: String,
     authority: InputAuthority,
     sample_spacing_m: f64,
-    heights_m: Vec<f64>,
+    heights_m: Arc<[f64]>,
     boundary: SurfaceTraceBoundary,
 }
 
@@ -219,7 +220,7 @@ impl UniformSurfaceTrace {
             source_id: source_id.into(),
             authority,
             sample_spacing_m,
-            heights_m,
+            heights_m: heights_m.into(),
             boundary,
         };
         trace.validate()?;
@@ -1006,6 +1007,42 @@ mod tests {
         assert!((receipt.filtered_surface_slopes[0] - slope).abs() < 2.0e-15);
         assert!((receipt.combined_effective_height_rate_m_per_s - slope * 0.7).abs() < 2.0e-15);
         assert!((receipt.normal_force_perturbation_n - 2.0e6 * expected_height_m).abs() < 2.0e-11);
+    }
+
+    #[test]
+    fn g0_point_surface_pair_uses_the_same_geometry_and_material_derivative_signs() {
+        let rising = trace(
+            "rising-periodic",
+            0.001,
+            vec![0.0, 1.0e-6, 2.0e-6, 3.0e-6],
+            SurfaceTraceBoundary::Periodic,
+        );
+        let falling = trace(
+            "falling-periodic",
+            0.001,
+            vec![0.0, -2.0e-6, -4.0e-6, -6.0e-6],
+            SurfaceTraceBoundary::Periodic,
+        );
+        let interface = interface();
+        let receipt = evaluate_point_surface_pair(
+            &interface,
+            SurfaceTraceMotion {
+                trace: &rising,
+                path_coordinate_m: 0.0005,
+                path_speed_m_per_s: 0.25,
+            },
+            SurfaceTraceMotion {
+                trace: &falling,
+                path_coordinate_m: 0.0005,
+                path_speed_m_per_s: -0.5,
+            },
+        )
+        .expect("piecewise-linear point geometry is admitted");
+        assert!((receipt.combined_effective_height_m + 0.5e-6).abs() < 1.0e-21);
+        assert!((receipt.filtered_surface_slopes[0] - 1.0e-3).abs() < 1.0e-15);
+        assert!((receipt.filtered_surface_slopes[1] + 2.0e-3).abs() < 1.0e-15);
+        assert!((receipt.combined_effective_height_rate_m_per_s - 1.25e-3).abs() < 1.0e-15);
+        assert_eq!(receipt.projected_half_width_m.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]
