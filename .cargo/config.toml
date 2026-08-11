@@ -38,3 +38,6 @@
 # evidence. Builds with neither fail closed in crates/fs-la/build.rs.
 [env]
 FRANKENSIM_DEPGRAPH_SALT = "frankensim-workspace-dev-v1"
+
+[build]
+rustflags = ["-Z", "threads=4"]
