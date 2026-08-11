@@ -9774,6 +9774,57 @@ mod tests {
     }
 
     #[test]
+    fn g0_nonzero_contact_topography_initializes_at_the_declared_static_load() {
+        with_test_cx(|cx| {
+            let mut config = CinematicFixtureConfig::default();
+            config.support_plate.cells_x = 8;
+            config.support_plate.cells_y = 8;
+            config.support_plate.maximum_nodes = 128;
+            config.support_plate.maximum_modes = 16;
+            config.support_plate.thickness_m = 0.020;
+            config.mechanics.initial_motion = CinematicInitialMotionConfig::SmallAngleNoSlip {
+                inclination_rad: 0.0075,
+            };
+            config.mechanics.disc_surface.spectrum = CinematicSurfaceSpectrumConfig::SelfAffine(
+                SelfAffinePeriodicProfileSpectrum::new(2.0e-7, 0.8, 4, 256, 20_260_811)
+                    .expect("bounded disc topography"),
+            );
+            config.mechanics.disc_surface.authority = InputAuthority::CallerDeclared;
+            config.mechanics.disc_surface.source_id =
+                "synthetic G0 declared steel-edge topography".to_owned();
+            config.mechanics.support_surface.spectrum = CinematicSurfaceSpectrumConfig::SelfAffine(
+                SelfAffinePeriodicProfileSpectrum::new(2.0e-8, 0.8, 4, 256, 20_260_812)
+                    .expect("bounded support topography"),
+            );
+            config.mechanics.support_surface.authority = InputAuthority::CallerDeclared;
+            config.mechanics.support_surface.source_id =
+                "synthetic G0 declared glass topography".to_owned();
+            config.validate().expect("bounded topographic fixture");
+
+            let profile = config.disc.resolve_profile(cx).expect("resolved profile");
+            let physical_disc =
+                resolve_fixture_physical_disc(&profile, &config.disc, cx).expect("disc state");
+            let physical_plate =
+                resolve_fixture_physical_plate(&config.support_plate).expect("support state");
+            let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)
+                .expect("shared mechanics/acoustics plate basis");
+            let production = build_fixture_production_mechanics(
+                &profile,
+                &physical_disc,
+                &physical_plate,
+                plate_basis,
+                &config,
+                cx,
+            )
+            .expect("topography-aware static preload must initialize self-consistently");
+            production
+                .model
+                .validate_checkpoint(&production.checkpoint)
+                .expect("initialized topographic checkpoint");
+        });
+    }
+
+    #[test]
     fn g0_nonpositive_disc_mass_input_refuses_before_pipeline_work() {
         for mass in [
             CinematicDiscMassInput::DensityKgPerM3(0.0),

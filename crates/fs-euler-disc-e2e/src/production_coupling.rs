@@ -777,15 +777,6 @@ fn signed_patch_gap_m(patch: &PatchKinematics) -> Result<f64, ProductionCoupling
     }
 }
 
-fn point_force_or_zero(
-    normal_input: &EulerNormalContactInput,
-) -> Result<f64, ProductionCouplingError> {
-    match evaluate_normal_contact(normal_input).map_err(ProductionCouplingError::Normal)? {
-        EulerNormalContactOutcome::Active(active) => point_normal_force(&active),
-        EulerNormalContactOutcome::InactiveSeparated { .. } => Ok(0.0),
-    }
-}
-
 fn surface_footprint(
     normal: &ActiveNormalContact,
     travel_angle_from_patch_major_rad: f64,
@@ -823,15 +814,43 @@ fn resolve_surface_geometry_contact(
     let nominal_signed_gap_m = signed_patch_gap_m(&nominal_patch)?;
     let mut nominal_normal = normal_input.clone();
     nominal_normal.kinematics = nominal_patch;
-    let nominal_smooth_force_n = point_force_or_zero(&nominal_normal)?;
-
-    let mut filtered = evaluate_point_surface_pair(
-        &surface.interface,
-        surface.surface_a.as_motion(),
-        surface.surface_b.as_motion(),
-    )
-    .map_err(ProductionSurfaceExcitationError::Surface)
-    .map_err(ProductionCouplingError::SurfaceExcitation)?;
+    let (nominal_smooth_force_n, nominal_footprint) =
+        match evaluate_normal_contact(&nominal_normal).map_err(ProductionCouplingError::Normal)? {
+            EulerNormalContactOutcome::Active(active) => (
+                point_normal_force(&active)?,
+                Some(surface_footprint(
+                    &active,
+                    surface.travel_angle_from_patch_major_rad,
+                )?),
+            ),
+            EulerNormalContactOutcome::InactiveSeparated { .. } => (0.0, None),
+        };
+    let filtered_for_footprint = |footprint: Option<ProjectedHertzFootprint>| {
+        match footprint {
+            Some(footprint)
+                if footprint.semi_major_axis_m > 0.0 && footprint.semi_minor_axis_m > 0.0 =>
+            {
+                evaluate_hertz_filtered_surface_pair(
+                    &surface.interface,
+                    surface.surface_a.as_motion(),
+                    surface.surface_b.as_motion(),
+                    footprint,
+                )
+            }
+            _ => evaluate_point_surface_pair(
+                &surface.interface,
+                surface.surface_a.as_motion(),
+                surface.surface_b.as_motion(),
+            ),
+        }
+        .map_err(ProductionSurfaceExcitationError::Surface)
+        .map_err(ProductionCouplingError::SurfaceExcitation)
+    };
+    // Start on the finite-contact branch already selected by the nominal bulk
+    // geometry.  A point-height seed is still the correct grazing limit, but
+    // using it inside an established Hertz patch can converge to a different
+    // roughness/load branch at shallow Euler-disc inclinations.
+    let mut filtered = filtered_for_footprint(nominal_footprint)?;
     let mut last_height_residual_m = f64::INFINITY;
     let mut last_height_rate_residual_m_per_s = f64::INFINITY;
 
@@ -854,23 +873,7 @@ fn resolve_surface_geometry_contact(
         // state before a finite Hertz patch exists.  Preserve the point-limit
         // geometry at that endpoint; clamping in an artificial patch radius
         // would change both the load root and the filtered topography.
-        let next_filtered =
-            if footprint.semi_major_axis_m == 0.0 && footprint.semi_minor_axis_m == 0.0 {
-                evaluate_point_surface_pair(
-                    &surface.interface,
-                    surface.surface_a.as_motion(),
-                    surface.surface_b.as_motion(),
-                )
-            } else {
-                evaluate_hertz_filtered_surface_pair(
-                    &surface.interface,
-                    surface.surface_a.as_motion(),
-                    surface.surface_b.as_motion(),
-                    footprint,
-                )
-            }
-            .map_err(ProductionSurfaceExcitationError::Surface)
-            .map_err(ProductionCouplingError::SurfaceExcitation)?;
+        let next_filtered = filtered_for_footprint(Some(footprint))?;
         last_height_residual_m = (next_filtered.combined_effective_height_m
             - filtered.combined_effective_height_m)
             .abs();
@@ -892,17 +895,35 @@ fn resolve_surface_geometry_contact(
         if last_height_residual_m <= height_limit_m
             && last_height_rate_residual_m_per_s <= rate_limit_m_per_s
         {
-            let resolved_force_n = point_normal_force(&active)?;
+            // The receipt and the returned mechanical state must describe the
+            // same accepted filtered geometry.  Returning `active` here would
+            // expose the preceding fixed-point iterate while naming
+            // `next_filtered` in the receipt.
+            let resolved_patch =
+                compute_surface_adjusted_patch(patch_input.clone(), &next_filtered)?;
+            let mut resolved_normal = normal_input.clone();
+            resolved_normal.kinematics = resolved_patch.clone();
+            let resolved_active = match evaluate_normal_contact(&resolved_normal)
+                .map_err(ProductionCouplingError::Normal)?
+            {
+                EulerNormalContactOutcome::Active(active) => active,
+                EulerNormalContactOutcome::InactiveSeparated { .. } => {
+                    return Err(ProductionCouplingError::UnsupportedMechanism {
+                        status: PatchContactStatus::Separated,
+                    });
+                }
+            };
+            let resolved_force_n = point_normal_force(&resolved_active)?;
             return Ok((
-                patch.clone(),
-                active,
+                resolved_patch.clone(),
+                resolved_active,
                 ProductionSurfaceGeometryReceipt {
                     filtered_pair: next_filtered,
                     iterations: iteration,
                     height_residual_m: last_height_residual_m,
                     height_rate_residual_m_per_s: last_height_rate_residual_m_per_s,
                     nominal_signed_gap_m,
-                    resolved_signed_gap_m: signed_patch_gap_m(&patch)?,
+                    resolved_signed_gap_m: signed_patch_gap_m(&resolved_patch)?,
                     nominal_smooth_force_n,
                     resolved_force_n,
                 },
@@ -1638,6 +1659,57 @@ impl ProductionCouplingModel {
         )
     }
 
+    fn resolve_horizontal_plane_axisymmetric_static_contact_at_state(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        normal_state: &NormalPatchEmbedState,
+        static_contact_force_n: f64,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            ProductionBaseCheckpoint,
+            Option<(PatchKinematics, ActiveNormalContact)>,
+        ),
+        ProductionCouplingError,
+    > {
+        let (resolved, _) = self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
+        let base_state = self.base_port.initial_static_contact_checkpoint(
+            resolved.support.contact.point_world_m,
+            static_contact_force_n,
+        )?;
+        self.bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
+            input,
+            profile,
+            disc_state,
+            &base_state,
+            cx,
+        )?;
+        let mut normal_input = input.normal.clone();
+        normal_input.state = normal_state.clone();
+        normal_input.time_s = 0.0;
+        normal_input.step_s = input.duration_s;
+        let resolved_contact = if let Some(surface) = &input.surface_geometry {
+            match resolve_surface_geometry_contact(input.patch.clone(), &normal_input, surface) {
+                Ok((patch, normal, _)) => Some((patch, normal)),
+                Err(ProductionCouplingError::UnsupportedMechanism {
+                    status: PatchContactStatus::Separated,
+                }) => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            let patch = compute_moving_one_mode_patch_kinematics(input.patch.clone())
+                .map_err(ProductionCouplingError::Patch)?;
+            normal_input.kinematics = patch.clone();
+            match evaluate_normal_contact(&normal_input).map_err(ProductionCouplingError::Normal)? {
+                EulerNormalContactOutcome::Active(active) => Some((patch, active)),
+                EulerNormalContactOutcome::InactiveSeparated { .. } => None,
+            }
+        };
+        Ok((base_state, resolved_contact))
+    }
+
     /// Build a coupled checkpoint with the resolved modal support already in static equilibrium.
     ///
     /// `disc_state` must already encode the contact approach consistent with
@@ -1670,62 +1742,23 @@ impl ProductionCouplingModel {
                 field: "static contact initialization",
             });
         }
-        let (resolved, _) = self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
-        let base_state = self.base_port.initial_static_contact_checkpoint(
-            resolved.support.contact.point_world_m,
-            static_contact_force_n,
-        )?;
-        self.bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
-            input,
-            profile,
-            disc_state,
-            &base_state,
-            cx,
-        )?;
-        let mut normal_input = input.normal.clone();
-        normal_input.state = normal_state.clone();
-        normal_input.time_s = 0.0;
-        normal_input.step_s = input.duration_s;
-        let (patch_kinematics, normal) = if let Some(surface) = &input.surface_geometry {
-            let (patch, normal, _) =
-                resolve_surface_geometry_contact(input.patch.clone(), &normal_input, surface)?;
-            (patch, normal)
-        } else {
-            let patch = compute_moving_one_mode_patch_kinematics(input.patch.clone())
-                .map_err(ProductionCouplingError::Patch)?;
-            normal_input.kinematics = patch.clone();
-            let normal = match evaluate_normal_contact(&normal_input)
-                .map_err(ProductionCouplingError::Normal)?
-            {
-                EulerNormalContactOutcome::Active(active) => active,
-                EulerNormalContactOutcome::InactiveSeparated { .. } => {
-                    return Err(ProductionCouplingError::StaticPreloadMismatch {
-                        target_force_n: static_contact_force_n,
-                        observed_force_n: 0.0,
-                        maximum_relative_mismatch: maximum_relative_force_mismatch,
-                    });
-                }
-            };
-            (patch, normal)
+        let (base_state, resolved_contact) = self
+            .resolve_horizontal_plane_axisymmetric_static_contact_at_state(
+                input,
+                profile,
+                disc_state,
+                &normal_state,
+                static_contact_force_n,
+                cx,
+            )?;
+        let Some((patch_kinematics, normal)) = resolved_contact else {
+            return Err(ProductionCouplingError::StaticPreloadMismatch {
+                target_force_n: static_contact_force_n,
+                observed_force_n: 0.0,
+                maximum_relative_mismatch: maximum_relative_force_mismatch,
+            });
         };
-        let observed_force_n = point_normal_force(&normal)?
-            + input
-                .surface_excitation
-                .as_ref()
-                .map(|surface| {
-                    evaluate_surface_excitation_for_normal(
-                        &normal,
-                        &surface.interface,
-                        surface.surface_a.as_motion(),
-                        surface.surface_b.as_motion(),
-                        surface.travel_angle_from_patch_major_rad,
-                        surface.maximum_linearized_height_fraction,
-                    )
-                    .map(|receipt| receipt.normal_force_perturbation_n)
-                })
-                .transpose()
-                .map_err(ProductionCouplingError::SurfaceExcitation)?
-                .unwrap_or(0.0);
+        let observed_force_n = observed_static_normal_force(input, &normal)?;
         let relative_mismatch = (observed_force_n - static_contact_force_n).abs()
             / static_contact_force_n.max(f64::MIN_POSITIVE);
         if relative_mismatch > maximum_relative_force_mismatch {
@@ -1766,10 +1799,12 @@ impl ProductionCouplingModel {
     /// The orientation and both momenta from `seed_state` are preserved. The
     /// profile is first placed at geometric contact with the undeformed plane;
     /// the selected modal base is then initialized under `target_force_n`, and
-    /// a deterministic bisection finds the additional contact approach whose
-    /// selected finite-patch law returns that same force. Every trial goes
-    /// through the ordinary profile/patch/normal adapters and therefore retains
-    /// their applicability refusals rather than extrapolating a Hertz law.
+    /// a deterministic signed bisection finds the vertical contact offset whose
+    /// selected finite-patch law returns that same force. Positive offset moves
+    /// inward; negative offset permits a realized surface summit to touch before
+    /// the smooth profile does. Every trial goes through the ordinary
+    /// profile/patch/normal adapters and therefore retains their applicability
+    /// refusals rather than extrapolating a Hertz law.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_horizontal_plane_axisymmetric_static_contact_state(
         &self,
@@ -1835,65 +1870,31 @@ impl ProductionCouplingModel {
                 )
                 .map_err(ProductionCouplingError::Dynamics)
             };
-        let force_at_approach = |approach_m: f64,
-                                 template: &mut ProductionCouplingStepInput|
-         -> Result<(RigidBodyState, f64), ProductionCouplingError> {
+        let canonical_template = input.clone();
+        let force_at_approach = |approach_m: f64| -> Result<
+            (RigidBodyState, f64, ProductionCouplingStepInput),
+            ProductionCouplingError,
+        > {
             let state = state_at_approach(approach_m)?;
-            self.bind_initial_horizontal_plane_axisymmetric_profile_contact_with_base_state(
-                template,
-                profile,
-                state,
-                &base_state,
-                cx,
-            )?;
-            let mut normal_input = template.normal.clone();
-            normal_input.state = normal_state.clone();
-            normal_input.time_s = 0.0;
-            normal_input.step_s = template.duration_s;
-            let force_n = if let Some(surface) = &template.surface_geometry {
-                match resolve_surface_geometry_contact(
-                    template.patch.clone(),
-                    &normal_input,
-                    surface,
-                ) {
-                    Ok((_, normal, _)) => point_normal_force(&normal)?,
-                    Err(ProductionCouplingError::UnsupportedMechanism {
-                        status: PatchContactStatus::Separated,
-                    }) => 0.0,
-                    Err(error) => return Err(error),
-                }
-            } else {
-                let patch = compute_moving_one_mode_patch_kinematics(template.patch.clone())
-                    .map_err(ProductionCouplingError::Patch)?;
-                normal_input.kinematics = patch;
-                match evaluate_normal_contact(&normal_input)
-                    .map_err(ProductionCouplingError::Normal)?
-                {
-                    EulerNormalContactOutcome::Active(active) => {
-                        let nominal = point_normal_force(&active)?;
-                        nominal
-                            + template
-                                .surface_excitation
-                                .as_ref()
-                                .map(|surface| {
-                                    evaluate_surface_excitation_for_normal(
-                                        &active,
-                                        &surface.interface,
-                                        surface.surface_a.as_motion(),
-                                        surface.surface_b.as_motion(),
-                                        surface.travel_angle_from_patch_major_rad,
-                                        surface.maximum_linearized_height_fraction,
-                                    )
-                                    .map(|receipt| receipt.normal_force_perturbation_n)
-                                })
-                                .transpose()
-                                .map_err(ProductionCouplingError::SurfaceExcitation)?
-                                .unwrap_or(0.0)
-                    }
-                    EulerNormalContactOutcome::InactiveSeparated { .. } => 0.0,
-                }
-            };
-            Ok((state, force_n))
+            // Root evaluations must not inherit derived patch fields from a
+            // preceding bracket candidate.  Retain the fully rebound template
+            // alongside its state so the selected root has one coherent pair.
+            let mut template = canonical_template.clone();
+            let (_, resolved_contact) = self
+                .resolve_horizontal_plane_axisymmetric_static_contact_at_state(
+                    &mut template,
+                    profile,
+                    state,
+                    &normal_state,
+                    target_force_n,
+                    cx,
+                )?;
+            let force_n = resolved_contact
+                .as_ref()
+                .map(|(_, normal)| observed_static_normal_force(&template, normal))
+                .transpose()?
+                .unwrap_or(0.0);
+            Ok((state, force_n, template))
         };
 
         let curvature_scale_m = [
@@ -1907,37 +1908,93 @@ impl ProductionCouplingModel {
         if !curvature_scale_m.is_finite() {
             return Err(ProductionCouplingError::CurvatureUnavailable);
         }
-        let mut lower_m = 0.0_f64;
-        let mut upper_m = (curvature_scale_m * 1.0e-9).max(1.0e-15);
-        let mut upper_state;
-        let mut upper_force_n;
-        loop {
-            (upper_state, upper_force_n) = force_at_approach(upper_m, input)?;
-            if upper_force_n >= target_force_n {
-                break;
-            }
-            upper_m *= 2.0;
-            if !upper_m.is_finite() || upper_m > curvature_scale_m {
-                return Err(ProductionCouplingError::StaticPreloadMismatch {
-                    target_force_n,
-                    observed_force_n: upper_force_n,
-                    maximum_relative_mismatch: maximum_relative_force_mismatch,
-                });
-            }
-        }
-        let mut best_state = upper_state;
-        let mut best_force_n = upper_force_n;
+        let bracket_step_m = (curvature_scale_m * 1.0e-9).max(1.0e-15);
+        let (zero_state, zero_force_n, zero_template) = force_at_approach(0.0)?;
+        let (
+            mut lower_m,
+            lower_state,
+            lower_force_n,
+            lower_template,
+            mut upper_m,
+            upper_state,
+            upper_force_n,
+            upper_template,
+        ) = if zero_force_n <= target_force_n {
+            let mut trial_m = bracket_step_m;
+            let (upper_state, upper_force_n, upper_template) = loop {
+                let trial = force_at_approach(trial_m)?;
+                if trial.1 >= target_force_n {
+                    break trial;
+                }
+                trial_m *= 2.0;
+                if !trial_m.is_finite() || trial_m > curvature_scale_m {
+                    return Err(ProductionCouplingError::StaticPreloadMismatch {
+                        target_force_n,
+                        observed_force_n: trial.1,
+                        maximum_relative_mismatch: maximum_relative_force_mismatch,
+                    });
+                }
+            };
+            (
+                0.0,
+                zero_state,
+                zero_force_n,
+                zero_template,
+                trial_m,
+                upper_state,
+                upper_force_n,
+                upper_template,
+            )
+        } else {
+            // Positive topography can already compress the interface at the
+            // smooth-profile touching pose. Search outward until the selected
+            // surface/contact model falls below the declared preload; zero is
+            // not a valid lower bracket in that case.
+            let mut trial_m = -bracket_step_m;
+            let (lower_state, lower_force_n, lower_template) = loop {
+                let trial = force_at_approach(trial_m)?;
+                if trial.1 <= target_force_n {
+                    break trial;
+                }
+                trial_m *= 2.0;
+                if !trial_m.is_finite() || trial_m.abs() > curvature_scale_m {
+                    return Err(ProductionCouplingError::StaticPreloadMismatch {
+                        target_force_n,
+                        observed_force_n: trial.1,
+                        maximum_relative_mismatch: maximum_relative_force_mismatch,
+                    });
+                }
+            };
+            (
+                trial_m,
+                lower_state,
+                lower_force_n,
+                lower_template,
+                0.0,
+                zero_state,
+                zero_force_n,
+                zero_template,
+            )
+        };
+        let (mut best_state, mut best_force_n, mut best_template) =
+            if (lower_force_n - target_force_n).abs() < (upper_force_n - target_force_n).abs() {
+                (lower_state, lower_force_n, lower_template)
+            } else {
+                (upper_state, upper_force_n, upper_template)
+            };
         for _ in 0..maximum_iterations {
             let midpoint_m = 0.5 * (lower_m + upper_m);
-            let (candidate, force_n) = force_at_approach(midpoint_m, input)?;
+            let (candidate, force_n, candidate_template) = force_at_approach(midpoint_m)?;
             if (force_n - target_force_n).abs() / target_force_n.max(f64::MIN_POSITIVE)
                 <= maximum_relative_force_mismatch
             {
+                *input = candidate_template;
                 return Ok(candidate);
             }
             if (force_n - target_force_n).abs() < (best_force_n - target_force_n).abs() {
                 best_state = candidate;
                 best_force_n = force_n;
+                best_template = candidate_template;
             }
             if force_n < target_force_n {
                 lower_m = midpoint_m;
@@ -1948,6 +2005,7 @@ impl ProductionCouplingModel {
         let relative_mismatch =
             (best_force_n - target_force_n).abs() / target_force_n.max(f64::MIN_POSITIVE);
         if relative_mismatch <= maximum_relative_force_mismatch {
+            *input = best_template;
             Ok(best_state)
         } else {
             Err(ProductionCouplingError::StaticPreloadMismatch {
@@ -3422,6 +3480,30 @@ fn point_normal_force(normal: &ActiveNormalContact) -> Result<f64, ProductionCou
         return Err(ProductionCouplingError::UnsupportedLineNormalContact);
     };
     Ok(receipt.normal_force_n)
+}
+
+fn observed_static_normal_force(
+    input: &ProductionCouplingStepInput,
+    normal: &ActiveNormalContact,
+) -> Result<f64, ProductionCouplingError> {
+    let surface_perturbation_n = input
+        .surface_excitation
+        .as_ref()
+        .map(|surface| {
+            evaluate_surface_excitation_for_normal(
+                normal,
+                &surface.interface,
+                surface.surface_a.as_motion(),
+                surface.surface_b.as_motion(),
+                surface.travel_angle_from_patch_major_rad,
+                surface.maximum_linearized_height_fraction,
+            )
+            .map(|receipt| receipt.normal_force_perturbation_n)
+        })
+        .transpose()
+        .map_err(ProductionCouplingError::SurfaceExcitation)?
+        .unwrap_or(0.0);
+    Ok(point_normal_force(normal)? + surface_perturbation_n)
 }
 
 fn point_normal_wrench(
