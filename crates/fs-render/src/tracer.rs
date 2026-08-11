@@ -105,8 +105,11 @@ mod bdpt;
 mod manifold;
 pub use bdpt::{
     BIDIRECTIONAL_TRACER_SEMANTICS_VERSION, BidirectionalExecutionReport,
-    BidirectionalRenderExecutionOutput, BidirectionalRenderOutput, BidirectionalStrategyStats,
-    render_cinematic_bidirectional, render_cinematic_bidirectional_with_execution,
+    BidirectionalRenderExecutionOutput, BidirectionalRenderOutput, BidirectionalStrategySet,
+    BidirectionalStrategyStats, render_cinematic_bidirectional,
+    render_cinematic_bidirectional_with_execution,
+    render_cinematic_bidirectional_with_execution_and_strategy_set,
+    render_cinematic_bidirectional_with_strategy_set,
 };
 mod transport;
 
@@ -1769,7 +1772,43 @@ impl ParkedRenderScope<'_> {
     ) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
         self.validate_job(cx, execution)?;
         bdpt::render_cinematic_bidirectional_execution_impl(
-            scene, camera, cut_side, cx, settings, shutter, execution, self.pool,
+            scene,
+            camera,
+            cut_side,
+            cx,
+            settings,
+            shutter,
+            BidirectionalStrategySet::Complete,
+            execution,
+            self.pool,
+        )
+    }
+
+    /// Render finite-light BDPT using an explicit admitted strategy set on
+    /// this parked worker crew.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cinematic_bidirectional_with_strategy_set(
+        &self,
+        scene: &Scene,
+        camera: &AnimatedCamera,
+        cut_side: CutSide,
+        cx: &Cx<'_>,
+        settings: &Settings,
+        shutter: ShutterInterval,
+        strategy_set: BidirectionalStrategySet,
+        execution: &RenderExecutionConfig,
+    ) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
+        self.validate_job(cx, execution)?;
+        bdpt::render_cinematic_bidirectional_execution_impl(
+            scene,
+            camera,
+            cut_side,
+            cx,
+            settings,
+            shutter,
+            strategy_set,
+            execution,
+            self.pool,
         )
     }
 

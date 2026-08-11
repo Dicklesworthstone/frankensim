@@ -721,13 +721,21 @@ pub fn solve_finite_gap_half_space(
         let pressure_tolerance_pa = request.reduced_modulus_pa
             * request.complementarity_tolerance_m
             / request.grid.cell_width_m.min(request.grid.cell_depth_m);
-        if let Some((remove_position, _)) = active_pressure
+        let retained_active: Vec<usize> = active
             .iter()
-            .enumerate()
-            .filter(|(_, value)| **value < -pressure_tolerance_pa)
-            .min_by(|left, right| left.1.total_cmp(right.1))
-        {
-            active.remove(remove_position);
+            .copied()
+            .zip(active_pressure.iter().copied())
+            .filter_map(|(index, value)| (value >= -pressure_tolerance_pa).then_some(index))
+            .collect();
+        if retained_active.len() != active.len() {
+            // The unconstrained solve can identify many tensile cells at
+            // once for a long, anisotropic contact patch. Removing the whole
+            // deterministic inadmissible set is the same active-set pivot as
+            // one-at-a-time deletion, while avoiding an iteration count that
+            // scales with the initial geometric candidate count. Any cell
+            // made compressive by the block pivot is still rediscovered by
+            // the inactive-separation check below before publication.
+            active = retained_active;
             if active.is_empty() {
                 pressure.fill(0.0);
                 opening.fill(0.0);

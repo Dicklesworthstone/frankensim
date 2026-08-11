@@ -167,9 +167,10 @@ use fs_render::{
     },
     tracer::{
         ADAPTIVE_SAMPLING_SEMANTICS_VERSION, AdaptiveFilm, AdaptiveSamplingConfig,
-        BidirectionalExecutionReport, IndependentPilotAllocationConfig, IndependentPilotSamplePlan,
-        MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS, RenderExecutionConfig, RenderExecutionReport,
-        RenderWorkerPool, Sampler, Settings, film_to_exr,
+        BidirectionalExecutionReport, BidirectionalStrategySet, IndependentPilotAllocationConfig,
+        IndependentPilotSamplePlan, MAX_RENDER_TILE_EDGE, MAX_RENDER_WORKERS,
+        RenderExecutionConfig, RenderExecutionReport, RenderWorkerPool, Sampler, Settings,
+        film_to_exr,
     },
 };
 use fs_rep_frep::SquatDiscEdgeTreatment;
@@ -224,18 +225,21 @@ const AUDIO_PREROLL_POLICY_ID: &str =
     "source-bound-one-video-frame-continuous-fir-and-modal-preroll-v3";
 /// Declared bandwidth of the legacy harmonic-one diagnostic [Hz].
 const CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
-/// Maximum admitted bandwidth of the resolved physical contact drive [Hz].
+/// Passband used by the independent 48/24 kHz legacy-drive convergence pair
+/// [Hz]. This is intentionally separate from the physical contact-drive
+/// filter because its coarse member cannot represent frequencies above 12 kHz.
+const CRITIQUE_AUDIO_CONVERGENCE_PASSBAND_HZ: f64 = 8_000.0;
+/// Maximum admitted bandwidth of the mechanics-resolved physical contact drive
+/// [Hz].
 ///
-/// The default self-affine edge trace retains 384 spatial cycles.  Across the
-/// admitted 8-second trajectory its material-frame contact rate rises to about
-/// 15.3 Hz, so the mechanics actually carries forcing through roughly 5.9 kHz.
-/// The physical seam now derives its actual upper frequency from retained
-/// contact-path motion and the caller's spatial spectrum.  Eight kilohertz is
-/// only its fail-closed ceiling: it retains the default geometry with margin
-/// while remaining below the 12 kHz Nyquist limit of the independently
-/// retained 24 kHz control-refinement member.  It is not invented acoustic
-/// content or a claim that an unmeasured surface spectrum is calibrated.
-const CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ: f64 = 8_000.0;
+/// The low-inclination Euler-disc trajectory can carry the declared 384-cycle
+/// surface trace above 16 kHz. The physical 48 kHz master can represent that
+/// forcing, so its reconstruction path retains an 18 kHz passband and refuses
+/// trajectories that approach the 24 kHz Nyquist boundary. This ceiling does
+/// not invent content and does not claim the unmeasured surface spectrum is
+/// calibrated; the actual requirement is still derived from the retained
+/// contact path and declared spatial spectrum.
+const CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ: f64 = 18_000.0;
 /// Stable caller-ledgered root for animation frame render jobs.
 const CRITIQUE_RENDER_RUN: RunId = RunId(0x4555_4c45_5252_454e);
 /// Stable placement-only seed for the reusable parked render crew.
@@ -1017,13 +1021,13 @@ impl Default for CinematicFiniteGapContactConfig {
             // that physical anisotropy instead of spending a square grid on
             // empty meridional cells. Both directions remain cell-centred and
             // resolve their respective footprints without boundary truncation.
-            cells_x: 121,
-            cells_y: 41,
-            tangent_half_extent_x_to_outer_radius: 0.12,
-            tangent_half_extent_y_to_outer_radius: 0.01,
+            cells_x: 151,
+            cells_y: 49,
+            tangent_half_extent_x_to_outer_radius: 0.15,
+            tangent_half_extent_y_to_outer_radius: 0.012,
             approach_nodes_to_outer_radius: vec![
-                0.0, 0.05e-6, 0.1e-6, 0.25e-6, 0.5e-6, 1.0e-6, 2.0e-6, 3.0e-6,
-                5.0e-6, 7.5e-6, 1.0e-5,
+                0.0, 0.05e-6, 0.1e-6, 0.25e-6, 0.5e-6, 1.0e-6, 2.0e-6, 3.0e-6, 5.0e-6, 7.5e-6,
+                1.0e-5, 1.25e-5, 1.5e-5, 2.0e-5,
             ],
             outside_probe_to_outer_radius: 0.01,
             // The tangent window spans a finite part of the exact curved
@@ -1209,6 +1213,27 @@ pub enum CinematicRenderIntegrator {
     CameraPathMis,
     /// Strategy-complete finite-rectangle bidirectional path tracing.
     Bidirectional,
+    /// Finite-rectangle BDPT with the high-variance global light-splat
+    /// technique assigned zero samples and excluded from MIS normalization.
+    BidirectionalCameraConnected,
+}
+
+impl CinematicRenderIntegrator {
+    fn bidirectional_strategy_set(self) -> Option<BidirectionalStrategySet> {
+        match self {
+            Self::CameraPathMis => None,
+            Self::Bidirectional => Some(BidirectionalStrategySet::Complete),
+            Self::BidirectionalCameraConnected => Some(BidirectionalStrategySet::CameraConnected),
+        }
+    }
+
+    fn identity(self) -> &'static str {
+        match self {
+            Self::CameraPathMis => "camera-path-mis-v1",
+            Self::Bidirectional => "finite-light-bdpt-v2",
+            Self::BidirectionalCameraConnected => "finite-light-bdpt-v2-camera-connected",
+        }
+    }
 }
 
 /// Bounded settings for one watchable critique artifact.
@@ -1355,7 +1380,11 @@ impl CinematicFixtureConfig {
                 "samples_per_pixel must be in 1..=4096",
             ));
         }
-        if self.render_integrator == CinematicRenderIntegrator::Bidirectional {
+        if self
+            .render_integrator
+            .bidirectional_strategy_set()
+            .is_some()
+        {
             if self.adaptive_sampling.is_some() || self.independent_pilot_sampling.is_some() {
                 return Err(CinematicFixtureError::InvalidConfig(
                     "bidirectional rendering currently requires uniform fixed SPP",
@@ -1720,9 +1749,7 @@ impl CinematicFixtureConfig {
                     .approach_nodes_to_outer_radius
                     .windows(2)
                     .all(|pair| pair[1] > pair[0]);
-            let cell_count = finite_gap
-                .cells_x
-                .checked_mul(finite_gap.cells_y);
+            let cell_count = finite_gap.cells_x.checked_mul(finite_gap.cells_y);
             if !valid_nodes
                 || !valid_approaches
                 || finite_gap.cells_x < 5
@@ -4751,17 +4778,18 @@ pub fn run_cinematic_fixture(
             )
             .map_err(pipeline)?;
             let color = critique_color_config();
-            let (exr, preview, report, sampling_progress) = if config.render_integrator
-                == CinematicRenderIntegrator::Bidirectional
+            let (exr, preview, report, sampling_progress) = if let Some(strategy_set) =
+                config.render_integrator.bidirectional_strategy_set()
             {
                 let output = renderer
-                    .render_cinematic_bidirectional(
+                    .render_cinematic_bidirectional_with_strategy_set(
                         scene.scene(),
                         scene.camera(),
                         prepared.cut_side(),
                         cx,
                         &render_settings,
                         prepared.segments()[0].shutter(),
+                        strategy_set,
                         &frame_execution,
                     )
                     .map_err(pipeline)?;
@@ -4784,9 +4812,10 @@ pub fn run_cinematic_fixture(
                     report,
                     format!(
                         concat!(
-                            "sampling=uniform-bdpt spp={} evaluated_strategies={} ",
+                            "sampling=uniform-bdpt strategy_set={:?} spp={} evaluated_strategies={} ",
                             "nonzero_strategies={} camera_splats={}"
                         ),
+                        strategy_set,
                         config.samples_per_pixel,
                         strategies.evaluated,
                         strategies.nonzero,
@@ -5460,10 +5489,7 @@ fn composition_identity(config: &CinematicFixtureConfig, scene: ContentHash) -> 
     hasher.update(&config.frames.to_le_bytes());
     hasher.update(&CRITIQUE_FPS.to_le_bytes());
     hasher.update(&config.render_sample_ceiling().to_le_bytes());
-    match config.render_integrator {
-        CinematicRenderIntegrator::CameraPathMis => hasher.update(b"camera-path-mis-v1"),
-        CinematicRenderIntegrator::Bidirectional => hasher.update(b"finite-light-bdpt-v2"),
-    }
+    hasher.update(config.render_integrator.identity().as_bytes());
     if let Some(policy) = config.independent_pilot_sampling {
         let admitted = policy
             .allocation()
@@ -6507,11 +6533,11 @@ fn resolved_contact_drive_bandwidth_hz(
     );
     if !(derived_hz.is_finite()
         && derived_hz > 0.0
-        && derived_hz <= CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ)
+        && derived_hz <= CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ)
     {
         return Err(CinematicFixtureError::Pipeline(format!(
             "resolved contact-drive bandwidth {derived_hz:.6} Hz exceeds the admitted {:.6} Hz physical-audio passband",
-            CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ,
+            CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ,
         )));
     }
     Ok(derived_hz)
@@ -6566,12 +6592,25 @@ fn fixture_resampling_input(
 
 fn fixture_reconstruction_filter_spec() -> AudioReconstructionFilterSpec {
     AudioReconstructionFilterSpec {
-        // Preserve every declared contact-drive component while suppressing
-        // images before the 12 kHz Nyquist edge of the coarse 24 kHz
-        // convergence member.  The existing response audit admits this filter
-        // only if the stated ripple and attenuation are actually achieved.
-        passband_edge_hz: CRITIQUE_MAXIMUM_CONTACT_DRIVE_BANDWIDTH_HZ,
+        // The legacy convergence pair includes a 24 kHz source member, so this
+        // filter must remain wholly below its 12 kHz Nyquist edge.
+        passband_edge_hz: CRITIQUE_AUDIO_CONVERGENCE_PASSBAND_HZ,
         stopband_edge_hz: 11_000.0,
+        half_length: 128,
+        maximum_passband_ripple_db: 0.1,
+        minimum_stopband_attenuation_db: 80.0,
+        response_grid_intervals: 8_192,
+    }
+}
+
+fn fixture_physical_reconstruction_filter_spec() -> AudioReconstructionFilterSpec {
+    AudioReconstructionFilterSpec {
+        // The physical contact force is reconstructed directly from the 48 kHz
+        // control measure onto the 48 kHz sound master. Retain the resolved
+        // low-inclination surface drive while leaving a 2 kHz transition band
+        // before Nyquist; admission measures the actual response below.
+        passband_edge_hz: CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ,
+        stopband_edge_hz: 22_000.0,
         half_length: 128,
         maximum_passband_ripple_db: 0.1,
         minimum_stopband_attenuation_db: 80.0,
@@ -7750,7 +7789,7 @@ fn build_physical_audio(
     .map_err(|_| CinematicFixtureError::Pipeline("audio clock operation budget overflow".into()))?;
     let force_reconstruction = GeneralizedForceReconstructionInput {
         declared_source_bandwidth_hz,
-        filter: fixture_reconstruction_filter_spec(),
+        filter: fixture_physical_reconstruction_filter_spec(),
         boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
         clock_roundoff_operation_count,
         budget: AudioResamplingBudget::reference_film(),
@@ -8603,10 +8642,7 @@ fn fixture_sampling_manifest_json(
     } else {
         format!(
             "{{\"mode\":\"uniform\",\"integrator\":\"{}\",\"samples_per_pixel\":{}}}",
-            match config.render_integrator {
-                CinematicRenderIntegrator::CameraPathMis => "camera-path-mis-v1",
-                CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v2",
-            },
+            config.render_integrator.identity(),
             config.samples_per_pixel,
         )
     }
@@ -8671,11 +8707,8 @@ fn production_fixture_manifest(
         Sampler::OwenSobol => "owen-sobol",
         Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
     };
-    let render_integrator = match config.render_integrator {
-        CinematicRenderIntegrator::CameraPathMis => "camera-path-mis-v1",
-        CinematicRenderIntegrator::Bidirectional => "finite-light-bdpt-v2",
-    };
-    let reconstruction_filter = fixture_reconstruction_filter_spec();
+    let render_integrator = config.render_integrator.identity();
+    let reconstruction_filter = fixture_physical_reconstruction_filter_spec();
     format!(
         concat!(
             "{{\n",
@@ -9426,13 +9459,13 @@ mod tests {
                     grid,
                     undeformed_gap_m: sampling.undeformed_gap_m,
                     reduced_modulus_pa: 50.0e9,
-                    approach_nodes_m: config.approach_nodes_to_outer_radius
+                    approach_nodes_m: config
+                        .approach_nodes_to_outer_radius
                         .iter()
                         .map(|ratio| ratio * radius_m)
                         .collect(),
                     maximum_active_set_iterations: config.maximum_active_set_iterations,
-                    complementarity_tolerance_m: config
-                        .complementarity_tolerance_to_outer_radius
+                    complementarity_tolerance_m: config.complementarity_tolerance_to_outer_radius
                         * radius_m,
                     boundary_clearance_cells: config.boundary_clearance_cells,
                     absolute_energy_tolerance_j: config.absolute_energy_tolerance_j,
@@ -9566,19 +9599,60 @@ mod tests {
             let mechanics_steps_per_control_interval =
                 usize::try_from(config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ)
                     .expect("integer mechanics/control reduction");
-            let source = production
+            let first = production
                 .model
                 .run_eventful_control_trajectory(
                     production.checkpoint.clone(),
-                    4_096,
+                    2_048,
                     mechanics_steps_per_control_interval,
                     |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
                 )
-                .expect("bounded-memory production controls");
+                .expect("first bounded-memory production-control chunk");
+            let second = production
+                .model
+                .run_eventful_control_trajectory(
+                    first.last_accepted_checkpoint.clone(),
+                    2_048,
+                    mechanics_steps_per_control_interval,
+                    |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                )
+                .expect("second bounded-memory production-control chunk");
+            let source = first
+                .concatenate(second)
+                .expect("resolved-gap control chunks concatenate");
             assert_eq!(
                 source.accepted_mechanics_steps, 4_096,
                 "production path refused: {:?}",
                 source.termination
+            );
+            assert!(source.intervals.iter().all(|interval| {
+                interval.resolved_signed_gap_start_m.is_finite()
+                    && interval
+                        .resolved_signed_gap_end_m
+                        .is_some_and(f64::is_finite) && match interval.branch {
+                    crate::production_coupling::ProductionTrajectoryBranch::CompliantContact => {
+                        interval.resolved_signed_gap_start_m <= 0.0
+                    }
+                    crate::production_coupling::ProductionTrajectoryBranch::OpenFlight => {
+                        interval.resolved_signed_gap_start_m >= 0.0
+                    }
+                }
+            }));
+            assert!(source.intervals.windows(2).all(|pair| {
+                pair[0].resolved_signed_gap_end_m.is_some_and(|gap_m| {
+                    gap_m.to_bits() == pair[1].resolved_signed_gap_start_m.to_bits()
+                })
+            }));
+            let coarsened = source.coarsened(2).expect("resolved-gap coarsening");
+            assert_eq!(
+                coarsened
+                    .intervals
+                    .last()
+                    .and_then(|interval| interval.resolved_signed_gap_end_m),
+                source
+                    .intervals
+                    .last()
+                    .and_then(|interval| interval.resolved_signed_gap_end_m)
             );
             let render = RenderTrajectory::from_production_control_trajectory(
                 &production.model,

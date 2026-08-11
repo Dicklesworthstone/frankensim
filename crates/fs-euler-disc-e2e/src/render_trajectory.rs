@@ -1257,6 +1257,11 @@ impl RenderTrajectory {
                         })?
                 || !(interval.mean_normal_force_n.is_finite()
                     && interval.mean_normal_force_n >= 0.0)
+                || !interval.resolved_signed_gap_start_m.is_finite()
+                || (interval.branch == ProductionTrajectoryBranch::OpenFlight
+                    && interval.resolved_signed_gap_start_m < 0.0)
+                || (interval.branch == ProductionTrajectoryBranch::CompliantContact
+                    && interval.resolved_signed_gap_start_m > 0.0)
                 || (interval.normal_impulse_n_s - interval.mean_normal_force_n * duration_s).abs()
                     > 64.0 * f64::EPSILON * interval.normal_impulse_n_s.abs().max(1.0)
                 || (interval.branch == ProductionTrajectoryBranch::OpenFlight
@@ -1293,13 +1298,18 @@ impl RenderTrajectory {
                 cx,
             )
             .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
-            let signed_gap_m = endpoint_contact.contact.gap_m - interval.base_displacement_end_m;
+            let signed_gap_m = interval.resolved_signed_gap_end_m.ok_or(
+                RenderTrajectoryError::ProductionPrefixSampleMismatch {
+                    sample: index,
+                    field: "control endpoint lacks resolved surface gap",
+                },
+            )?;
             let contact_geometry = match endpoint_branch {
                 ProductionTrajectoryBranch::CompliantContact => {
                     if signed_gap_m > 0.0 {
                         return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
                             sample: index,
-                            field: "closed control endpoint has positive bulk-surface gap",
+                            field: "closed control endpoint has positive resolved surface gap",
                         });
                     }
                     Some(RenderContactGeometry {
@@ -1314,7 +1324,7 @@ impl RenderTrajectory {
                     if signed_gap_m < 0.0 {
                         return Err(RenderTrajectoryError::ProductionPrefixSampleMismatch {
                             sample: index,
-                            field: "open control endpoint has negative bulk-surface gap",
+                            field: "open control endpoint has negative resolved surface gap",
                         });
                     }
                     None

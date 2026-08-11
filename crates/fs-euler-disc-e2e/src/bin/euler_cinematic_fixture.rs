@@ -208,7 +208,7 @@ fn run() -> Result<(), String> {
                     "Usage: euler_cinematic_fixture [--output DIR] [--width PX] [--height PX] \
                      [--frames 192] [--frame-start N --frame-count N --no-mux] \
                      [--spp N] [--sampler iid|owen-pixel|owen-full-path] \
-                     [--integrator camera-path|bdpt] \
+                     [--integrator camera-path|bdpt|bdpt-camera-connected] \
                      [--render-seed-salt N] [--max-depth N] [--shutter-angle 0..360] \
                      [--initial-inclination-rad 0<THETA<=0.35] \
                      [--azimuthal-segments 8..4096] [--arc-subdivisions 1..1024] \
@@ -429,8 +429,9 @@ fn parse_integrator(value: &str) -> Result<CinematicRenderIntegrator, String> {
     match value {
         "camera-path" => Ok(CinematicRenderIntegrator::CameraPathMis),
         "bdpt" => Ok(CinematicRenderIntegrator::Bidirectional),
+        "bdpt-camera-connected" => Ok(CinematicRenderIntegrator::BidirectionalCameraConnected),
         _ => Err(format!(
-            "invalid integrator: {value}; expected camera-path or bdpt"
+            "invalid integrator: {value}; expected camera-path, bdpt, or bdpt-camera-connected"
         )),
     }
 }
@@ -469,6 +470,10 @@ mod tests {
         assert_eq!(
             parse_integrator("bdpt").unwrap(),
             CinematicRenderIntegrator::Bidirectional
+        );
+        assert_eq!(
+            parse_integrator("bdpt-camera-connected").unwrap(),
+            CinematicRenderIntegrator::BidirectionalCameraConnected
         );
         assert!(parse_integrator("path").is_err());
     }

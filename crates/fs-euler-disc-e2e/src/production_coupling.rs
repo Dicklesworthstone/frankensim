@@ -1003,6 +1003,9 @@ pub struct ProductionTrajectoryStep {
     pub end_time_s: f64,
     /// Homogeneous mechanics branch for the interval.
     pub branch: ProductionTrajectoryBranch,
+    /// Surface-resolved signed gap that selected `branch` at the interval
+    /// start [m]. This includes nonlinear footprint-filtered topography.
+    pub resolved_signed_gap_start_m: f64,
     /// Exact branch-specific receipt.
     pub receipt: ProductionTrajectoryStepReceipt,
 }
@@ -1056,6 +1059,13 @@ pub struct ProductionControlInterval {
     pub mechanics_substeps: usize,
     /// Homogeneous contact/open branch for the complete interval.
     pub branch: ProductionTrajectoryBranch,
+    /// Surface-resolved signed gap that selected the branch at interval start
+    /// [m]. This is not the nominal smooth-profile gap.
+    pub resolved_signed_gap_start_m: f64,
+    /// Surface-resolved signed gap at the accepted endpoint [m], when endpoint
+    /// classification succeeded. A refused final prefix may legitimately lack
+    /// this value and cannot mint a resolved-gap render/audio sample.
+    pub resolved_signed_gap_end_m: Option<f64>,
     /// Exact rigid state before the first reduced substep.
     pub state_before: RigidBodyState,
     /// Exact rigid state after the last reduced substep.
@@ -1115,6 +1125,9 @@ impl ProductionControlTrajectory {
                     left.end_time_s.to_bits() != right.start_time_s.to_bits()
                         || left.state_after != right.state_before
                         || left.base_next_version != right.base_parent_version
+                        || left.resolved_signed_gap_end_m.is_none_or(|gap| {
+                            gap.to_bits() != right.resolved_signed_gap_start_m.to_bits()
+                        })
                 })
         {
             return Err(ProductionCouplingError::InvalidInput {
@@ -1170,6 +1183,9 @@ impl ProductionControlTrajectory {
                 if current.end_time_s.to_bits() != interval.start_time_s.to_bits()
                     || current.state_after != interval.state_before
                     || current.base_next_version != interval.base_parent_version
+                    || current.resolved_signed_gap_end_m.is_none_or(|gap| {
+                        gap.to_bits() != interval.resolved_signed_gap_start_m.to_bits()
+                    })
                 {
                     return Err(ProductionCouplingError::InvalidInput {
                         field: "coarsened control lineage",
@@ -1189,6 +1205,7 @@ impl ProductionControlTrajectory {
                 current.base_next_version = interval.base_next_version;
                 current.disc_work_residual_j += interval.disc_work_residual_j;
                 current.mechanical_energy_end_j = interval.mechanical_energy_end_j;
+                current.resolved_signed_gap_end_m = interval.resolved_signed_gap_end_m;
                 let duration_s = current.end_time_s - current.start_time_s;
                 current.mean_normal_force_n = current.normal_impulse_n_s / duration_s;
             } else {
@@ -2452,6 +2469,7 @@ impl ProductionCouplingModel {
     ) -> Result<(ProductionCouplingCheckpoint, ProductionTrajectoryStep), ProductionCouplingError>
     {
         let patch = self.resolve_event_patch_kinematics(checkpoint, input)?;
+        let resolved_signed_gap_start_m = signed_patch_gap_m(&patch)?;
         let branch = select_event_branch(&patch, input.normal.integration_regime)?;
         let start_time_s = checkpoint.elapsed_time_s();
         let (next, receipt) = match branch {
@@ -2482,6 +2500,7 @@ impl ProductionCouplingModel {
                 start_time_s,
                 end_time_s,
                 branch,
+                resolved_signed_gap_start_m,
                 receipt,
             },
         ))
@@ -2557,6 +2576,19 @@ impl ProductionCouplingModel {
                     );
                 }
             };
+            let resolved_signed_gap_start_m = match signed_patch_gap_m(&patch) {
+                Ok(gap_m) => gap_m,
+                Err(error) => {
+                    return production_event_refusal(
+                        start_checkpoint,
+                        last_accepted_checkpoint,
+                        accepted_steps,
+                        transitions,
+                        attempted_checkpoint_version,
+                        error,
+                    );
+                }
+            };
             let start_time_s = last_accepted_checkpoint.elapsed_time_s();
             if let Some(previous) = preceding_branch
                 && previous != branch
@@ -2611,6 +2643,7 @@ impl ProductionCouplingModel {
                 start_time_s,
                 end_time_s,
                 branch,
+                resolved_signed_gap_start_m,
                 receipt,
             });
             preceding_branch = Some(branch);
@@ -2757,6 +2790,12 @@ impl ProductionCouplingModel {
                         };
                     }
                 };
+            if let Some(active) = &mut accumulator {
+                set_control_accumulator_endpoint_gap(active, step.resolved_signed_gap_start_m)?;
+            }
+            let reduction_boundary = accumulator.as_ref().is_some_and(|active| {
+                active.mechanics_substeps == mechanics_steps_per_control_interval
+            });
             if let Some(previous) = preceding_branch
                 && previous != step.branch
             {
@@ -2767,6 +2806,8 @@ impl ProductionCouplingModel {
                     bracket_start_s: preceding_start_time_s,
                     bracket_end_s: step.start_time_s,
                 });
+            } else if reduction_boundary {
+                flush_control_accumulator(&mut intervals, &mut accumulator)?;
             }
             match &mut accumulator {
                 Some(active) => extend_control_accumulator(self, active, &step)?,
@@ -2777,33 +2818,36 @@ impl ProductionCouplingModel {
                     field: "accepted mechanics step count",
                 },
             )?;
-            if accumulator.as_ref().is_some_and(|active| {
-                active.mechanics_substeps == mechanics_steps_per_control_interval
-            }) {
-                flush_control_accumulator(&mut intervals, &mut accumulator)?;
-            }
             preceding_branch = Some(step.branch);
             preceding_start_time_s = step.start_time_s;
             last_accepted_checkpoint = next_checkpoint;
         };
-        flush_control_accumulator(&mut intervals, &mut accumulator)?;
-
         // Preserve the ordinary event driver's endpoint classification without
         // advancing any constituent or consuming a work key.
         if let Some(previous) = preceding_branch {
             let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
             let endpoint = input_for_checkpoint(&last_accepted_checkpoint).and_then(|input| {
                 self.resolve_event_patch_kinematics(&last_accepted_checkpoint, &input)
-                    .and_then(|patch| select_event_branch(&patch, input.normal.integration_regime))
+                    .and_then(|patch| {
+                        Ok((
+                            select_event_branch(&patch, input.normal.integration_regime)?,
+                            signed_patch_gap_m(&patch)?,
+                        ))
+                    })
             });
             match endpoint {
-                Ok(terminal_branch) if previous != terminal_branch => {
-                    transitions.push(ProductionBranchTransition {
-                        from: previous,
-                        to: terminal_branch,
-                        bracket_start_s: preceding_start_time_s,
-                        bracket_end_s: last_accepted_checkpoint.elapsed_time_s(),
-                    });
+                Ok((terminal_branch, resolved_signed_gap_end_m)) => {
+                    if let Some(active) = &mut accumulator {
+                        set_control_accumulator_endpoint_gap(active, resolved_signed_gap_end_m)?;
+                    }
+                    if previous != terminal_branch {
+                        transitions.push(ProductionBranchTransition {
+                            from: previous,
+                            to: terminal_branch,
+                            bracket_start_s: preceding_start_time_s,
+                            bracket_end_s: last_accepted_checkpoint.elapsed_time_s(),
+                        });
+                    }
                 }
                 Err(error)
                     if matches!(
@@ -2815,6 +2859,7 @@ impl ProductionCouplingModel {
                     // physical prefix contract and must not be hidden on a
                     // nominally completed horizon. A prior in-loop refusal is
                     // retained verbatim because it is the first failed state.
+                    flush_control_accumulator(&mut intervals, &mut accumulator)?;
                     return Ok(ProductionControlTrajectory {
                         start_checkpoint,
                         last_accepted_checkpoint,
@@ -2827,9 +2872,10 @@ impl ProductionCouplingModel {
                         },
                     });
                 }
-                Ok(_) | Err(_) => {}
+                Err(_) => {}
             }
         }
+        flush_control_accumulator(&mut intervals, &mut accumulator)?;
         Ok(ProductionControlTrajectory {
             start_checkpoint,
             last_accepted_checkpoint,
@@ -3061,6 +3107,8 @@ struct ProductionControlAccumulator {
     end_time_s: f64,
     mechanics_substeps: usize,
     branch: ProductionTrajectoryBranch,
+    resolved_signed_gap_start_m: f64,
+    resolved_signed_gap_end_m: Option<f64>,
     state_before: RigidBodyState,
     state_after: RigidBodyState,
     normal_impulse_n_s: f64,
@@ -3165,6 +3213,8 @@ fn start_control_accumulator(
         end_time_s: step.end_time_s,
         mechanics_substeps: 1,
         branch: step.branch,
+        resolved_signed_gap_start_m: step.resolved_signed_gap_start_m,
+        resolved_signed_gap_end_m: None,
         state_before: rigid.state_before,
         state_after: rigid.state_after,
         normal_impulse_n_s: force_n * rigid.duration_seconds,
@@ -3189,6 +3239,9 @@ fn extend_control_accumulator(
         || accumulator.end_time_s.to_bits() != step.start_time_s.to_bits()
         || accumulator.state_after != rigid.state_before
         || accumulator.base_next_version != base.parent_version
+        || accumulator
+            .resolved_signed_gap_end_m
+            .is_none_or(|gap_m| gap_m.to_bits() != step.resolved_signed_gap_start_m.to_bits())
     {
         return Err(ProductionCouplingError::InvalidInput {
             field: "control-interval lineage",
@@ -3208,6 +3261,20 @@ fn extend_control_accumulator(
     accumulator.disc_work_residual_j +=
         production_disc_work_residual_j(model, rigid, force, moment)?;
     accumulator.mechanical_energy_end_j = rigid.diagnostics_after.mechanical_energy;
+    accumulator.resolved_signed_gap_end_m = None;
+    Ok(())
+}
+
+fn set_control_accumulator_endpoint_gap(
+    accumulator: &mut ProductionControlAccumulator,
+    resolved_signed_gap_end_m: f64,
+) -> Result<(), ProductionCouplingError> {
+    if !resolved_signed_gap_end_m.is_finite() || accumulator.resolved_signed_gap_end_m.is_some() {
+        return Err(ProductionCouplingError::InvalidInput {
+            field: "control-interval resolved endpoint gap",
+        });
+    }
+    accumulator.resolved_signed_gap_end_m = Some(resolved_signed_gap_end_m);
     Ok(())
 }
 
@@ -3220,6 +3287,10 @@ fn finish_control_accumulator(
         && duration_s > 0.0
         && mean_normal_force_n.is_finite()
         && mean_normal_force_n >= 0.0
+        && accumulator.resolved_signed_gap_start_m.is_finite()
+        && accumulator
+            .resolved_signed_gap_end_m
+            .is_none_or(f64::is_finite)
         && accumulator.disc_work_residual_j.is_finite())
     {
         return Err(ProductionCouplingError::InvalidInput {
@@ -3231,6 +3302,8 @@ fn finish_control_accumulator(
         end_time_s: accumulator.end_time_s,
         mechanics_substeps: accumulator.mechanics_substeps,
         branch: accumulator.branch,
+        resolved_signed_gap_start_m: accumulator.resolved_signed_gap_start_m,
+        resolved_signed_gap_end_m: accumulator.resolved_signed_gap_end_m,
         state_before: accumulator.state_before,
         state_after: accumulator.state_after,
         normal_impulse_n_s: accumulator.normal_impulse_n_s,

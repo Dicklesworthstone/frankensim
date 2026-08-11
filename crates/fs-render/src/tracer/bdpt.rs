@@ -15,6 +15,30 @@ use super::*;
 /// normalization of light-subpath strategies that splat into the raster.
 pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 2;
 
+/// Admitted finite-light BDPT technique set.
+///
+/// Omitting light-subpath camera splats does not clamp or alter any retained
+/// contribution. It assigns that high-variance technique zero samples and
+/// removes it from MIS normalization; camera-connected techniques retain full
+/// path-space support for the current material set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BidirectionalStrategySet {
+    /// Evaluate every finite-light `(s,t)` strategy, including `t=1` raster
+    /// splats from independently launched light subpaths.
+    #[default]
+    Complete,
+    /// Evaluate only strategies with at least one sampled camera edge
+    /// (`t>=2`). This is useful when sparse spectral splats have much higher
+    /// variance than their camera-connected alternatives.
+    CameraConnected,
+}
+
+impl BidirectionalStrategySet {
+    const fn includes_camera_splats(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 const CAMERA_WALK_DOMAIN: u32 = 0x4244_4341;
 const LIGHT_WALK_DOMAIN: u32 = 0x4244_4c49;
 const CONNECTION_DOMAIN: u32 = 0x4244_434e;
@@ -1030,6 +1054,7 @@ fn finite_mis_weight(
     wavelength_nm: f64,
     width: u32,
     height: u32,
+    strategy_set: BidirectionalStrategySet,
 ) -> Result<f64, TracerError> {
     if s + t == 2 {
         return Ok(1.0);
@@ -1133,7 +1158,8 @@ fn finite_mis_weight(
     for index in (1..t).rev() {
         ratio *= remap_zero(camera_path[index].pdf_rev) / remap_zero(camera_path[index].pdf_fwd);
         if !camera_path[index].delta && !camera_path[index - 1].delta {
-            sum_ratio += ratio_with_sample_multiplicity(ratio, index, t, width, height)?;
+            sum_ratio +=
+                ratio_with_sample_multiplicity(ratio, index, t, width, height, strategy_set)?;
         }
     }
     ratio = 1.0;
@@ -1142,7 +1168,14 @@ fn finite_mis_weight(
         let preceding_delta = index > 0 && light[index - 1].delta;
         if !light[index].delta && !preceding_delta {
             let alternative_t = t + (s - index);
-            sum_ratio += ratio_with_sample_multiplicity(ratio, alternative_t, t, width, height)?;
+            sum_ratio += ratio_with_sample_multiplicity(
+                ratio,
+                alternative_t,
+                t,
+                width,
+                height,
+                strategy_set,
+            )?;
         }
     }
     let weight = 1.0 / (1.0 + sum_ratio);
@@ -1159,15 +1192,31 @@ fn ratio_with_sample_multiplicity(
     current_t: usize,
     width: u32,
     height: u32,
+    strategy_set: BidirectionalStrategySet,
 ) -> Result<f64, TracerError> {
-    let alternative_samples = strategy_sample_multiplicity(alternative_t, width, height)?;
-    let current_samples = strategy_sample_multiplicity(current_t, width, height)?;
+    let alternative_samples =
+        strategy_sample_multiplicity(alternative_t, width, height, strategy_set)?;
+    let current_samples = strategy_sample_multiplicity(current_t, width, height, strategy_set)?;
+    if alternative_samples == 0.0 {
+        return Ok(0.0);
+    }
+    if current_samples == 0.0 {
+        return Err(TracerError::InvalidInput);
+    }
     Ok(density_ratio * alternative_samples / current_samples)
 }
 
-fn strategy_sample_multiplicity(t: usize, width: u32, height: u32) -> Result<f64, TracerError> {
+fn strategy_sample_multiplicity(
+    t: usize,
+    width: u32,
+    height: u32,
+    strategy_set: BidirectionalStrategySet,
+) -> Result<f64, TracerError> {
     if t != 1 {
         return Ok(1.0);
+    }
+    if !strategy_set.includes_camera_splats() {
+        return Ok(0.0);
     }
     let pixels = width.checked_mul(height).ok_or(TracerError::InvalidInput)?;
     if pixels == 0 {
@@ -1199,6 +1248,7 @@ fn connect_s1(
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     settings: &Settings,
+    strategy_set: BidirectionalStrategySet,
     light_vertices: &[Vertex],
     camera_vertices: &[Vertex],
     t: usize,
@@ -1307,6 +1357,7 @@ fn connect_s1(
                 wavelength_nm,
                 settings.width,
                 settings.height,
+                strategy_set,
             )?;
             let value =
                 pt.beta * f * cosine * emitted / sample.pdf_solid_angle * transmittance * mis;
@@ -1323,11 +1374,15 @@ fn connect_t1(
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     settings: &Settings,
+    strategy_set: BidirectionalStrategySet,
     light_vertices: &[Vertex],
     camera_vertices: &[Vertex],
     s: usize,
     wavelength_nm: f64,
 ) -> Result<Option<(u32, f64)>, TracerError> {
+    if !strategy_set.includes_camera_splats() {
+        return Ok(None);
+    }
     let qs = &light_vertices[s - 1];
     if !qs.is_connectible(scene) || !qs.is_surface() {
         return Ok(None);
@@ -1377,12 +1432,14 @@ fn connect_t1(
         wavelength_nm,
         settings.width,
         settings.height,
+        strategy_set,
     )?;
     // The complete raster launches width*height independent light subpaths
     // for every sample index.  A target pixel receives arbitrary splats from
     // that global pool, so each splat carries the ordinary 1/n estimator
     // normalization for the t=1 strategy.
-    let light_path_samples = strategy_sample_multiplicity(1, settings.width, settings.height)?;
+    let light_path_samples =
+        strategy_sample_multiplicity(1, settings.width, settings.height, strategy_set)?;
     let value = qs.beta * f * camera_importance_area * transmittance * mis / light_path_samples;
     Ok((value.is_finite() && value > 0.0).then_some((raster.pixel, value)))
 }
@@ -1395,6 +1452,7 @@ fn connect_general(
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     settings: &Settings,
+    strategy_set: BidirectionalStrategySet,
     light_vertices: &[Vertex],
     camera_vertices: &[Vertex],
     s: usize,
@@ -1456,6 +1514,7 @@ fn connect_general(
         wavelength_nm,
         settings.width,
         settings.height,
+        strategy_set,
     )?;
     let value = qs.beta * qs_f * pt_f * pt.beta * geometry * mis;
     Ok((value.is_finite() && value > 0.0).then_some(value))
@@ -1469,6 +1528,7 @@ fn evaluate_strategies(
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     settings: &Settings,
+    strategy_set: BidirectionalStrategySet,
     source_pixel: u32,
     sample: u32,
     wavelength_nm: f64,
@@ -1509,7 +1569,10 @@ fn evaluate_strategies(
             let Some(depth) = s.checked_add(t).and_then(|sum| sum.checked_sub(2)) else {
                 continue;
             };
-            if (s == 1 && t == 1) || depth > settings.max_depth as usize {
+            if (s == 1 && t == 1)
+                || (t == 1 && !strategy_set.includes_camera_splats())
+                || depth > settings.max_depth as usize
+            {
                 continue;
             }
             stats.evaluated = stats.evaluated.saturating_add(1);
@@ -1542,6 +1605,7 @@ fn evaluate_strategies(
                             wavelength_nm,
                             settings.width,
                             settings.height,
+                            strategy_set,
                         )?;
                         Some((source_pixel, pt.beta * emitted * mis, false))
                     }
@@ -1554,6 +1618,7 @@ fn evaluate_strategies(
                     cx,
                     ray_time,
                     settings,
+                    strategy_set,
                     light_vertices,
                     camera_vertices,
                     s,
@@ -1568,6 +1633,7 @@ fn evaluate_strategies(
                     cx,
                     ray_time,
                     settings,
+                    strategy_set,
                     light_vertices,
                     camera_vertices,
                     t,
@@ -1583,6 +1649,7 @@ fn evaluate_strategies(
                     cx,
                     ray_time,
                     settings,
+                    strategy_set,
                     light_vertices,
                     camera_vertices,
                     s,
@@ -1625,6 +1692,7 @@ fn render_admitted_sample_range(
     cx: &Cx<'_>,
     settings: &Settings,
     shutter: ShutterInterval,
+    strategy_set: BidirectionalStrategySet,
     from: u32,
     to: u32,
     sobol: Option<&Sobol>,
@@ -1707,6 +1775,7 @@ fn render_admitted_sample_range(
                 &render_cx,
                 Some(&ray_time),
                 settings,
+                strategy_set,
                 pixel,
                 sample,
                 wavelength_nm,
@@ -1771,6 +1840,34 @@ pub fn render_cinematic_bidirectional(
     settings: &Settings,
     shutter: ShutterInterval,
 ) -> Result<BidirectionalRenderOutput, TracerError> {
+    render_cinematic_bidirectional_with_strategy_set(
+        scene,
+        camera,
+        cut_side,
+        cx,
+        settings,
+        shutter,
+        BidirectionalStrategySet::Complete,
+    )
+}
+
+/// Render a fixed-SPP cinematic frame with an explicit admitted BDPT strategy set.
+///
+/// `CameraConnected` assigns zero samples to the global `t=1` light-splat
+/// technique and removes it from the balance-heuristic denominator. It does
+/// not clamp retained contributions. Current camera-connected techniques cover
+/// the complete finite-light path support of the renderer's present material
+/// set; extending the material model requires re-establishing that support.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_bidirectional_with_strategy_set(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+    strategy_set: BidirectionalStrategySet,
+) -> Result<BidirectionalRenderOutput, TracerError> {
     cx.checkpoint()?;
     let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
     let camera_path = CameraPath::Cinematic { camera, exposure };
@@ -1801,6 +1898,7 @@ pub fn render_cinematic_bidirectional(
             cx,
             settings,
             shutter,
+            strategy_set,
             from,
             to,
             sobol.as_ref(),
@@ -1820,6 +1918,7 @@ struct BidirectionalSampleKernel<'run, 'assets> {
     exposure: CameraExposure<'assets>,
     settings: &'run Settings,
     shutter: ShutterInterval,
+    strategy_set: BidirectionalStrategySet,
     sobol: Option<&'run Sobol>,
     path_sobol: Option<&'run Sobol>,
     results: &'run Mutex<Vec<Option<BidirectionalRenderOutput>>>,
@@ -1876,6 +1975,7 @@ impl TileKernel for BidirectionalSampleKernel<'_, '_> {
             cx,
             self.settings,
             self.shutter,
+            self.strategy_set,
             from,
             to,
             self.sobol,
@@ -1919,6 +2019,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
     cx: &Cx<'_>,
     settings: &Settings,
     shutter: ShutterInterval,
+    strategy_set: BidirectionalStrategySet,
     execution: &RenderExecutionConfig,
     runner: &R,
 ) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
@@ -1964,8 +2065,9 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
         .ok_or(RenderExecutionError::Internal(
             "BDPT staging-film byte accounting overflow",
         ))?;
-    let maximum_splats_per_source = u64::from(BIDIRECTIONAL_SAMPLE_BLOCK)
-        .checked_mul(u64::from(settings.max_depth).saturating_add(1))
+    let maximum_splats_per_source = u64::from(strategy_set.includes_camera_splats())
+        .checked_mul(u64::from(BIDIRECTIONAL_SAMPLE_BLOCK))
+        .and_then(|count| count.checked_mul(u64::from(settings.max_depth).saturating_add(1)))
         .ok_or(RenderExecutionError::Internal(
             "BDPT splat scratch count overflow",
         ))?;
@@ -2010,6 +2112,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
         exposure,
         settings,
         shutter,
+        strategy_set,
         sobol: sobol.as_ref(),
         path_sobol: path_sobol.as_ref(),
         results: &results,
@@ -2090,9 +2193,42 @@ pub fn render_cinematic_bidirectional_with_execution(
     shutter: ShutterInterval,
     execution: &RenderExecutionConfig,
 ) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
+    render_cinematic_bidirectional_with_execution_and_strategy_set(
+        scene,
+        camera,
+        cut_side,
+        cx,
+        settings,
+        shutter,
+        BidirectionalStrategySet::Complete,
+        execution,
+    )
+}
+
+/// Render a cinematic BDPT frame using an explicit strategy set and fixed
+/// sample-block parallelism.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cinematic_bidirectional_with_execution_and_strategy_set(
+    scene: &Scene,
+    camera: &AnimatedCamera,
+    cut_side: CutSide,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    shutter: ShutterInterval,
+    strategy_set: BidirectionalStrategySet,
+    execution: &RenderExecutionConfig,
+) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
     let pool = build_render_pool(execution, cx.mode(), settings.seed);
     render_cinematic_bidirectional_execution_impl(
-        scene, camera, cut_side, cx, settings, shutter, execution, &pool,
+        scene,
+        camera,
+        cut_side,
+        cx,
+        settings,
+        shutter,
+        strategy_set,
+        execution,
+        &pool,
     )
 }
 
@@ -2308,16 +2444,38 @@ mod tests {
     fn g0_t1_global_sample_count_closes_two_strategy_mis() {
         let width = 4;
         let height = 2;
-        let light_tracing_samples = strategy_sample_multiplicity(1, width, height).unwrap();
+        let light_tracing_samples =
+            strategy_sample_multiplicity(1, width, height, BidirectionalStrategySet::Complete)
+                .unwrap();
         assert_eq!(light_tracing_samples, 8.0);
-        assert_eq!(strategy_sample_multiplicity(2, width, height).unwrap(), 1.0);
+        assert_eq!(
+            strategy_sample_multiplicity(2, width, height, BidirectionalStrategySet::Complete,)
+                .unwrap(),
+            1.0
+        );
 
         // For equal path densities, balance-heuristic weights are proportional
         // to the number of samples drawn by each strategy.  This also proves
         // the two directional ratios close to one rather than merely checking
         // a sum that could hide a strategy permutation.
-        let t2_over_t1 = ratio_with_sample_multiplicity(1.0, 2, 1, width, height).unwrap();
-        let t1_over_t2 = ratio_with_sample_multiplicity(1.0, 1, 2, width, height).unwrap();
+        let t2_over_t1 = ratio_with_sample_multiplicity(
+            1.0,
+            2,
+            1,
+            width,
+            height,
+            BidirectionalStrategySet::Complete,
+        )
+        .unwrap();
+        let t1_over_t2 = ratio_with_sample_multiplicity(
+            1.0,
+            1,
+            2,
+            width,
+            height,
+            BidirectionalStrategySet::Complete,
+        )
+        .unwrap();
         assert_eq!(t2_over_t1, 1.0 / 8.0);
         assert_eq!(t1_over_t2, 8.0);
         let t1_weight = 1.0 / (1.0 + t2_over_t1);
@@ -2325,7 +2483,63 @@ mod tests {
         assert!((t1_weight - 8.0 / 9.0).abs() <= f64::EPSILON);
         assert!((t2_weight - 1.0 / 9.0).abs() <= f64::EPSILON);
         assert!((t1_weight + t2_weight - 1.0).abs() <= f64::EPSILON);
-        assert!(strategy_sample_multiplicity(1, 0, height).is_err());
+        assert!(
+            strategy_sample_multiplicity(1, 0, height, BidirectionalStrategySet::Complete).is_err()
+        );
+    }
+
+    #[test]
+    fn g0_camera_connected_strategy_set_removes_t1_from_sampling_and_mis() {
+        let width = 4;
+        let height = 2;
+        assert_eq!(
+            strategy_sample_multiplicity(
+                1,
+                width,
+                height,
+                BidirectionalStrategySet::CameraConnected,
+            )
+            .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            strategy_sample_multiplicity(
+                2,
+                width,
+                height,
+                BidirectionalStrategySet::CameraConnected,
+            )
+            .unwrap(),
+            1.0
+        );
+
+        // The omitted alternative has zero multiplicity, so a retained t=2
+        // technique carries the full two-technique balance weight for equal
+        // path densities. Treating t=1 as the current technique is invalid
+        // because the selected strategy set never samples it.
+        assert_eq!(
+            ratio_with_sample_multiplicity(
+                1.0,
+                1,
+                2,
+                width,
+                height,
+                BidirectionalStrategySet::CameraConnected,
+            )
+            .unwrap(),
+            0.0
+        );
+        assert!(
+            ratio_with_sample_multiplicity(
+                1.0,
+                2,
+                1,
+                width,
+                height,
+                BidirectionalStrategySet::CameraConnected,
+            )
+            .is_err()
+        );
     }
 
     #[test]

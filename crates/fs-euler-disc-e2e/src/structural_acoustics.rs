@@ -2168,30 +2168,24 @@ fn plate_reference_contact_point(
     disc_contact_point_base_m: [f64; 3],
     signed_gap_m: f64,
 ) -> Result<[f64; 3], StructuralModalBasisError> {
-    let scale_m = disc_contact_point_base_m
-        .iter()
-        .fold(signed_gap_m.abs(), |scale, coordinate| {
-            scale.max(coordinate.abs())
-        })
-        .max(1.0);
-    let consistency_tolerance_m = 256.0 * f64::EPSILON * scale_m;
     if disc_contact_point_base_m
         .iter()
         .any(|coordinate| !coordinate.is_finite())
         || !signed_gap_m.is_finite()
-        || (disc_contact_point_base_m[2] - signed_gap_m).abs() > consistency_tolerance_m
     {
         return Err(StructuralModalBasisError::IdentityMismatch {
-            what: "disc-side base-frame contact point is inconsistent with the retained signed gap",
+            what: "disc-side base-frame contact point or retained signed gap is non-finite",
         });
     }
 
-    // The contact point retained by mechanics lies on the disc surface. In a
-    // compliant closed contact it is below the displaced support by exactly
-    // the signed penetration. Plate modes, however, are defined on the
-    // undeformed z=0 reference midsurface, so their force coordinate is the
-    // corresponding support-side material point at the same in-plane
-    // location—not the penetrating disc-side point.
+    // The retained point is the actual disc material point expressed relative
+    // to the reduced base-mode origin. Its z coordinate equals the smooth
+    // profile gap, not necessarily `signed_gap_m`: the production contact law
+    // may additionally resolve a local surface-height field that is not a
+    // rigid displacement of the whole plate. Plate modes are defined on the
+    // undeformed z=0 reference midsurface, so only the material point's exact
+    // in-plane coordinates are projected onto that surface. The resolved gap
+    // is independently retained for unilateral branch/contact validation.
     Ok([
         disc_contact_point_base_m[0],
         disc_contact_point_base_m[1],
@@ -3790,10 +3784,16 @@ mod tests {
                 .expect("consistent disc-side contact and signed gap"),
             [0.012, -0.007, 0.0]
         );
-        assert!(matches!(
-            plate_reference_contact_point([0.012, -0.007, penetration_m], -2.0 * penetration_m),
-            Err(StructuralModalBasisError::IdentityMismatch { .. })
-        ));
+        assert_eq!(
+            plate_reference_contact_point(
+                [0.012, -0.007, 3.0e-6],
+                penetration_m,
+            )
+            .expect("surface-resolved gap may differ from the smooth disc-point height"),
+            [0.012, -0.007, 0.0]
+        );
+        assert!(plate_reference_contact_point([0.012, -0.007, f64::NAN], penetration_m).is_err());
+        assert!(plate_reference_contact_point([0.012, -0.007, 0.0], f64::NAN).is_err());
     }
 
     fn pressure_signal(identity_byte: u8, pressure_pa: Vec<f64>) -> PhysicalPressureSignal {
