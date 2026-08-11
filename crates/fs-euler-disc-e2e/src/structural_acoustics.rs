@@ -3785,11 +3785,8 @@ mod tests {
             [0.012, -0.007, 0.0]
         );
         assert_eq!(
-            plate_reference_contact_point(
-                [0.012, -0.007, 3.0e-6],
-                penetration_m,
-            )
-            .expect("surface-resolved gap may differ from the smooth disc-point height"),
+            plate_reference_contact_point([0.012, -0.007, 3.0e-6], penetration_m,)
+                .expect("surface-resolved gap may differ from the smooth disc-point height"),
             [0.012, -0.007, 0.0]
         );
         assert!(plate_reference_contact_point([0.012, -0.007, f64::NAN], penetration_m).is_err());

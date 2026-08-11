@@ -2230,13 +2230,12 @@ fn validate_contact_base_alignment(
         let derived =
             profile_contact_geometry(&specimen.chart, specimen.mass_properties, relative_pose, cx)
                 .map_err(|_| EulerSceneError::ContactSpecimenMismatch(index))?;
-        let derived_gap_m = derived.contact.gap_m;
-        let derived_scale_m = derived_gap_m.abs().max(sample.input().signed_gap_m.abs());
-        let derived_tolerance_m =
-            CONTACT_BASE_ALIGNMENT_TOLERANCE_M.max(256.0 * f64::EPSILON * derived_scale_m);
-        if (derived_gap_m - sample.input().signed_gap_m).abs() > derived_tolerance_m {
-            return Err(EulerSceneError::ContactSpecimenMismatch(index));
-        }
+        // `derived.contact.gap_m` is the smooth profile's distance from the
+        // displaced support plane. `signed_gap_m` is the gap admitted by the
+        // normal law and can additionally contain resolved surface height.
+        // Equating them rejects physically consistent rough-contact samples.
+        // The retained specimen point below is still checked against the exact
+        // chart, while branch/sign validation remains owned by RenderTrajectory.
         if sample.input().contact_branch != RenderContactBranch::Closed {
             continue;
         }
@@ -2244,9 +2243,7 @@ fn validate_contact_base_alignment(
             return Err(EulerSceneError::ContactBaseMismatch(index));
         };
         let observed_gap = contact.point_world_m.sub(plane_point).dot(normal);
-        let scale_m = observed_gap.abs().max(sample.input().signed_gap_m.abs());
-        let tolerance_m = CONTACT_BASE_ALIGNMENT_TOLERANCE_M.max(256.0 * f64::EPSILON * scale_m);
-        if (observed_gap - sample.input().signed_gap_m).abs() > tolerance_m
+        if !observed_gap.is_finite()
             || contact.normal_world.dot(normal) < 1.0 - CONTACT_NORMAL_ALIGNMENT_TOLERANCE
         {
             return Err(EulerSceneError::ContactBaseMismatch(index));

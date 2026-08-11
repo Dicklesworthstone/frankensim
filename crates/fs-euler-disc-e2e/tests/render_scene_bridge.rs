@@ -1189,6 +1189,24 @@ fn g3_asset_units_aliasing_discontinuities_and_cancellation_fail_closed() {
 
         let valid_contact = trajectory(&specimen, None, true, None, cx);
         let contact_metadata = valid_contact.metadata().clone();
+        let mut rough_contact_inputs = valid_contact
+            .samples()
+            .iter()
+            .map(|sample| sample.input().clone())
+            .collect::<Vec<_>>();
+        rough_contact_inputs[1].signed_gap_m = -2.0e-6;
+        let rough_contact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+            identity("rough-contact-campaign"),
+            RenderTrajectory::try_new(contact_metadata.clone(), rough_contact_inputs)
+                .expect("resolved rough gap is valid independently of the smooth chart gap"),
+            Vec::new(),
+            RenderTrajectoryCodecBudget::DEFAULT,
+            cx,
+        )
+        .expect("rough-contact artifact");
+        EulerCinematicScene::try_build(&rough_contact, &specimen, config(), cx)
+            .expect("rough-contact normal-law gap must not be equated to smooth chart height");
+
         let mut floating_inputs = valid_contact
             .samples()
             .iter()
