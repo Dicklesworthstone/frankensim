@@ -1230,8 +1230,8 @@ impl CinematicRenderIntegrator {
     fn identity(self) -> &'static str {
         match self {
             Self::CameraPathMis => "camera-path-mis-v1",
-            Self::Bidirectional => "finite-light-bdpt-v2",
-            Self::BidirectionalCameraConnected => "finite-light-bdpt-v2-camera-connected",
+            Self::Bidirectional => "finite-light-bdpt-v3-power2",
+            Self::BidirectionalCameraConnected => "finite-light-bdpt-v3-power2-camera-connected",
         }
     }
 }

@@ -3,7 +3,7 @@
 //! This module follows Veach's path-space construction: camera and finite-
 //! emitter subpaths retain reciprocal area-measure densities, every admissible
 //! `(s,t)` vertex-connection strategy is evaluated, and the strategies are
-//! combined with balance-heuristic multiple importance sampling. Infinite
+//! combined with power-heuristic multiple importance sampling. Infinite
 //! environment illumination remains a disjoint camera-subpath/NEE estimator;
 //! no finite launch surface is invented for it.
 
@@ -11,9 +11,12 @@ use super::transport::{TransportMode, refractive_transport_factor};
 use super::*;
 
 /// Bit-affecting semantics of the opt-in bidirectional path integrator.
-/// Version 2 corrects the global sample multiplicity and estimator
+/// Version 2 corrected the global sample multiplicity and estimator
 /// normalization of light-subpath strategies that splat into the raster.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 uses the squared-density power heuristic for the finite-light
+/// strategy pyramid; this remains unbiased while suppressing contributions
+/// from strategies whose path density is dominated by a better technique.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 3;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -1158,8 +1161,9 @@ fn finite_mis_weight(
     for index in (1..t).rev() {
         ratio *= remap_zero(camera_path[index].pdf_rev) / remap_zero(camera_path[index].pdf_fwd);
         if !camera_path[index].delta && !camera_path[index - 1].delta {
-            sum_ratio +=
+            let weighted_ratio =
                 ratio_with_sample_multiplicity(ratio, index, t, width, height, strategy_set)?;
+            sum_ratio += weighted_ratio * weighted_ratio;
         }
     }
     ratio = 1.0;
@@ -1168,7 +1172,7 @@ fn finite_mis_weight(
         let preceding_delta = index > 0 && light[index - 1].delta;
         if !light[index].delta && !preceding_delta {
             let alternative_t = t + (s - index);
-            sum_ratio += ratio_with_sample_multiplicity(
+            let weighted_ratio = ratio_with_sample_multiplicity(
                 ratio,
                 alternative_t,
                 t,
@@ -1176,6 +1180,7 @@ fn finite_mis_weight(
                 height,
                 strategy_set,
             )?;
+            sum_ratio += weighted_ratio * weighted_ratio;
         }
     }
     let weight = 1.0 / (1.0 + sum_ratio);
@@ -1854,7 +1859,7 @@ pub fn render_cinematic_bidirectional(
 /// Render a fixed-SPP cinematic frame with an explicit admitted BDPT strategy set.
 ///
 /// `CameraConnected` assigns zero samples to the global `t=1` light-splat
-/// technique and removes it from the balance-heuristic denominator. It does
+/// technique and removes it from the power-heuristic denominator. It does
 /// not clamp retained contributions. Current camera-connected techniques cover
 /// the complete finite-light path support of the renderer's present material
 /// set; extending the material model requires re-establishing that support.
@@ -2454,10 +2459,10 @@ mod tests {
             1.0
         );
 
-        // For equal path densities, balance-heuristic weights are proportional
-        // to the number of samples drawn by each strategy.  This also proves
-        // the two directional ratios close to one rather than merely checking
-        // a sum that could hide a strategy permutation.
+        // For equal path densities, the power heuristic squares the complete
+        // sample-count-weighted density ratio. This also proves the two
+        // directional ratios close to one rather than merely checking a sum
+        // that could hide a strategy permutation.
         let t2_over_t1 = ratio_with_sample_multiplicity(
             1.0,
             2,
@@ -2478,10 +2483,10 @@ mod tests {
         .unwrap();
         assert_eq!(t2_over_t1, 1.0 / 8.0);
         assert_eq!(t1_over_t2, 8.0);
-        let t1_weight = 1.0 / (1.0 + t2_over_t1);
-        let t2_weight = 1.0 / (1.0 + t1_over_t2);
-        assert!((t1_weight - 8.0 / 9.0).abs() <= f64::EPSILON);
-        assert!((t2_weight - 1.0 / 9.0).abs() <= f64::EPSILON);
+        let t1_weight = 1.0 / (1.0 + t2_over_t1 * t2_over_t1);
+        let t2_weight = 1.0 / (1.0 + t1_over_t2 * t1_over_t2);
+        assert!((t1_weight - 64.0 / 65.0).abs() <= f64::EPSILON);
+        assert!((t2_weight - 1.0 / 65.0).abs() <= f64::EPSILON);
         assert!((t1_weight + t2_weight - 1.0).abs() <= f64::EPSILON);
         assert!(
             strategy_sample_multiplicity(1, 0, height, BidirectionalStrategySet::Complete).is_err()

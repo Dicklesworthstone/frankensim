@@ -2178,7 +2178,7 @@ mod tests {
             assert!((actual - expected).abs() <= 2.0e-13 * expected.abs().max(1.0));
         }
         let gamma_q_series = 0.5 * dt * dt - damping * omega * dt * dt * dt / 3.0
-            + (4.0 * damping * damping - 1.0) * omega * omega * dt.powi(4) / 24.0;
+            + (4.0 * damping * damping - 1.0) * omega * omega * det::powi(dt, 4) / 24.0;
         assert!(
             (taylor.gamma_q - gamma_q_series).abs() <= 2.0e-10 * gamma_q_series.abs(),
             "gamma_q={} series={gamma_q_series}",

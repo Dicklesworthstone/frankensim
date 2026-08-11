@@ -880,7 +880,7 @@ fn filter_trace(
         let h2 = half_width_m * half_width_m;
         let primitive_height = |u: f64| {
             height_at_center_m * (u - u.powi(3) / (3.0 * h2))
-                + profile_slope * (0.5 * u * u - u.powi(4) / (4.0 * h2))
+                + profile_slope * (0.5 * u * u - det::powi(u, 4) / (4.0 * h2))
         };
         let primitive_slope =
             |u: f64| height_at_center_m * 0.5 * u * u + profile_slope * u.powi(3) / 3.0;

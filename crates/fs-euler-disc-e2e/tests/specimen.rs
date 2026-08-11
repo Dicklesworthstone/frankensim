@@ -1068,11 +1068,11 @@ fn g3_uniform_scaling_preserves_dimensional_mass_laws_for_every_profile_family()
         );
         assert_close(
             scaled.mass_properties.principal_inertia.axial,
-            scale.powi(5) * base.mass_properties.principal_inertia.axial,
+            fs_math::det::powi(scale, 5) * base.mass_properties.principal_inertia.axial,
         );
         assert_close(
             scaled.mass_properties.principal_inertia.transverse,
-            scale.powi(5) * base.mass_properties.principal_inertia.transverse,
+            fs_math::det::powi(scale, 5) * base.mass_properties.principal_inertia.transverse,
         );
     }
 }

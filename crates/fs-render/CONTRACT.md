@@ -142,7 +142,7 @@ differentiable lift). Pure Rust throughout.
 - `tracer` finite-light bidirectional transport (opt-in, [F]):
   `render_cinematic_bidirectional` constructs paired camera and rectangle-light
   subpaths, evaluates every admissible `(s,t)` connection through the declared
-  depth, and combines reciprocal area-measure densities with balance-heuristic
+  depth, and combines reciprocal area-measure densities with power-heuristic
   path-space MIS. Radiance and importance walks use their respective
   refractive transport factors. Two-sided rectangle emission has identical
   support and radiance in emitter-hit, direct-light, and launch strategies.
