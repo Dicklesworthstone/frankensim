@@ -879,13 +879,14 @@ fn filter_trace(
         let u1 = hi_m - center_m;
         let h2 = half_width_m * half_width_m;
         let primitive_height = |u: f64| {
-            height_at_center_m * (u - u.powi(3) / (3.0 * h2))
+            height_at_center_m * (u - det::powi(u, 3) / (3.0 * h2))
                 + profile_slope * (0.5 * u * u - det::powi(u, 4) / (4.0 * h2))
         };
         let primitive_slope =
-            |u: f64| height_at_center_m * 0.5 * u * u + profile_slope * u.powi(3) / 3.0;
+            |u: f64| height_at_center_m * 0.5 * u * u + profile_slope * det::powi(u, 3) / 3.0;
         height_m += 3.0 / (4.0 * half_width_m) * (primitive_height(u1) - primitive_height(u0));
-        slope += 3.0 / (2.0 * half_width_m.powi(3)) * (primitive_slope(u1) - primitive_slope(u0));
+        slope +=
+            3.0 / (2.0 * det::powi(half_width_m, 3)) * (primitive_slope(u1) - primitive_slope(u0));
     }
     Ok(FilteredTrace {
         height_m: finite(height_m, "filtered_surface_height_m")?,

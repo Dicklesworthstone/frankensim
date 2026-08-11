@@ -2671,6 +2671,7 @@ fn raw_attributes(
             DirectStrategy::NeeOnly => "nee-only",
             DirectStrategy::BsdfOnly => "bsdf-only",
             DirectStrategy::Mis => "mis",
+            DirectStrategy::PowerMis => "power-mis",
         }
         .to_owned(),
     );

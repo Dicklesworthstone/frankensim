@@ -24,6 +24,7 @@ use fs_material::state_point::{
     MaterialPropertySelection, integrate_isotropic_thermal_expansion,
     resolve_isotropic_elastic_state_point, resolve_isotropic_solid_state_point,
 };
+use fs_math::det;
 use fs_qty::{Density, Dims, Pressure, Temperature};
 use fs_rep_frep::SquatDiscEdgeTreatment;
 use fs_solid::TetThermalStrainState;
@@ -239,18 +240,18 @@ fn g0_solid_cylinder_resolution_matches_closed_form_mass_and_inertia() {
         .resolve(density, cx)
         .expect("admitted sharp cylinder")
     });
-    let volume = core::f64::consts::PI * radius.powi(2) * thickness;
+    let volume = core::f64::consts::PI * det::powi(radius, 2) * thickness;
     let mass = density * volume;
     assert_close(resolved.mass_properties.volume, volume);
     assert_close(resolved.mass_properties.mass, mass);
     assert_close(resolved.mass_properties.center_of_mass.z, 0.0);
     assert_close(
         resolved.mass_properties.principal_inertia.axial,
-        0.5 * mass * radius.powi(2),
+        0.5 * mass * det::powi(radius, 2),
     );
     assert_close(
         resolved.mass_properties.principal_inertia.transverse,
-        mass * (3.0 * radius.powi(2) + thickness.powi(2)) / 12.0,
+        mass * (3.0 * det::powi(radius, 2) + det::powi(thickness, 2)) / 12.0,
     );
 }
 
@@ -479,7 +480,7 @@ fn g0_phase_updates_preserve_mass_and_demand_the_correct_geometry_rung() {
     );
     assert_close(
         evolved.profile().mass_properties.principal_inertia.axial,
-        expected_scale.powi(2) * specimen.profile.mass_properties.principal_inertia.axial,
+        det::powi(expected_scale, 2) * specimen.profile.mass_properties.principal_inertia.axial,
     );
     let too_narrow_law = UniformIsotropicFreeExpansionLaw::try_new(
         1.0e-6,
@@ -801,7 +802,7 @@ fn g0_annular_cylinder_resolution_uses_bore_for_mass_not_only_inertia() {
         .resolve(density, cx)
         .expect("admitted annular cylinder")
     });
-    let volume = core::f64::consts::PI * (outer.powi(2) - inner.powi(2)) * thickness;
+    let volume = core::f64::consts::PI * (det::powi(outer, 2) - det::powi(inner, 2)) * thickness;
     let mass = density * volume;
     assert!(
         !resolved.chart.construction_certificate().touches_axis,
@@ -811,11 +812,11 @@ fn g0_annular_cylinder_resolution_uses_bore_for_mass_not_only_inertia() {
     assert_close(resolved.mass_properties.mass, mass);
     assert_close(
         resolved.mass_properties.principal_inertia.axial,
-        0.5 * mass * (outer.powi(2) + inner.powi(2)),
+        0.5 * mass * (det::powi(outer, 2) + det::powi(inner, 2)),
     );
     assert_close(
         resolved.mass_properties.principal_inertia.transverse,
-        mass * (3.0 * (outer.powi(2) + inner.powi(2)) + thickness.powi(2)) / 12.0,
+        mass * (3.0 * (det::powi(outer, 2) + det::powi(inner, 2)) + det::powi(thickness, 2)) / 12.0,
     );
 }
 
@@ -901,18 +902,18 @@ fn g0_true_symmetric_bicone_matches_closed_forms_and_is_centered() {
         .expect("admitted symmetric bicone")
     });
     // The profile is two equal right cones, each height thickness / 2.
-    let volume = core::f64::consts::PI * radius.powi(2) * thickness / 3.0;
+    let volume = core::f64::consts::PI * det::powi(radius, 2) * thickness / 3.0;
     let mass = density * volume;
     assert_close(resolved.mass_properties.volume, volume);
     assert_close(resolved.mass_properties.mass, mass);
     assert_close(resolved.mass_properties.center_of_mass.z, 0.0);
     assert_close(
         resolved.mass_properties.principal_inertia.axial,
-        0.3 * mass * radius.powi(2),
+        0.3 * mass * det::powi(radius, 2),
     );
     assert_close(
         resolved.mass_properties.principal_inertia.transverse,
-        mass * (6.0 * radius.powi(2) + thickness.powi(2)) / 40.0,
+        mass * (6.0 * det::powi(radius, 2) + det::powi(thickness, 2)) / 40.0,
     );
     assert!(
         resolved.chart.construction_certificate().touches_axis,
@@ -1060,11 +1061,11 @@ fn g3_uniform_scaling_preserves_dimensional_mass_laws_for_every_profile_family()
         });
         assert_close(
             scaled.mass_properties.volume,
-            scale.powi(3) * base.mass_properties.volume,
+            det::powi(scale, 3) * base.mass_properties.volume,
         );
         assert_close(
             scaled.mass_properties.mass,
-            scale.powi(3) * base.mass_properties.mass,
+            det::powi(scale, 3) * base.mass_properties.mass,
         );
         assert_close(
             scaled.mass_properties.principal_inertia.axial,

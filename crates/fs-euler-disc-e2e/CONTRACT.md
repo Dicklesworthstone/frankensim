@@ -1008,13 +1008,21 @@ way to choose those rates; neither the generic initializer nor the production
 coupling model imposes that approximation.
 For long-form product trajectories, the moving-contact modal base port consumes
 the certified rectangular plate basis directly. It projects each actual
-base-frame contact point through mesh shape functions, advances the same
+base-frame contact point through a C1 rectangular Hermite reconstruction of
+the plate solve's retained DKT displacement and slope degrees of freedom,
+advances the same
 mass-normalized modes used by structural acoustics, publishes local surface
 displacement and velocity back to contact kinematics, and retains work,
 stored-energy, viscous-loss, and closure accounting. Checkpoints keep a fixed
 size step-lineage root instead of cloning every prior step identity. The
 production coupling owner accepts either this resolved moving-contact backend
 or the older bounded one-mode estimate without changing disc/contact laws.
+This smooths the numerical moving-load field but does not yet integrate the
+finite normal-pressure distribution over the plate modes: the structural load
+is still the admitted point resultant at the resolved contact location. The
+finite-gap solver's pressure field and pressure moments remain authoritative
+for contact admission, while distributed structural projection is an explicit
+outstanding fidelity rung rather than a claimed property of this path.
 Every contact sample comes from the exact `fs-mbd`
 `StepReceipt` and retains its accepted rigid state, profile-native contact
 feature and point, normal, selected structural-base endpoint, and disc mechanical-energy
@@ -1069,12 +1077,14 @@ exponent, inclusive spatial-cycle cutoffs, phase seed, source identity, and
 authority ceiling. The seed changes spatial phase only; actual contact-path
 kinematics convert wavelength to time, after which the same Hertz footprint,
 normal tangent, structural dynamics, and acoustic radiation operate unchanged.
-The built-in critique specimen uses an `Estimated` sub-nanometre profile so it
-remains inside this first-order contact rung. It is not profilometry, a
-material-name finish preset, an areal roughness field, or permission to amplify
-roughness until a desired soundtrack appears. A realistically rougher specimen
-that violates the height/approach limit must escalate to nonlinear rough-contact
-resolution rather than reuse this tangent perturbation.
+The built-in critique specimen defaults to an explicitly ideal-smooth empty
+spectrum rather than inventing unmeasured roughness. A caller may supply an
+`Estimated` or measured spectrum through the same parameterized surface path,
+but it is not profilometry, a material-name finish preset, an areal roughness
+field, or permission to amplify roughness until a desired soundtrack appears.
+A realistically rougher specimen that violates the height/approach limit must
+escalate to nonlinear rough-contact resolution rather than reuse this tangent
+perturbation.
 
 Localization brackets describe evaluated uncertainty bounds, not additional
 accepted states. A terminal event's retained time must exactly equal its final
@@ -1644,11 +1654,38 @@ before any presentation mastering. The superposition validates a common
 observer, clock, sample count, and contact sampling convention, canonicalizes
 component identities and summation order, and emits aggregate structural,
 radiation, and damping identities. Exactly one explicit pressure-to-digital
-gain may then be applied to the composite field.
+gain may then be applied to the composite field. The cinematic listening
+derivative uses one caller-declared fixed `FS / Pa` calibration across the
+whole artifact; it is never derived from that clip's peak or loudness. If the
+fixed calibration exceeds the declared true-peak ceiling, publication refuses
+instead of normalizing, limiting, or compressing the pressure signal.
+
+The cinematic product path additionally simulates a caller-selected, integral
+number of 24 Hz frame intervals before the synchronized picture/sound cut.
+This is coupled physical history: rigid disc, contact laws, gas, rolling loss,
+and the structural base all advance through the ordinary production step, and
+the exact same prefix warms acoustic reconstruction before it is cropped. The
+default is 48 frames (2 s), with an admitted range of 1 through 240 frames.
+Its purpose is to move the media cut past the artificial free vibration caused
+by initializing a moving-load problem from instantaneous static equilibrium;
+it is not an audio-only fade, a fabricated sound source, or timestep-convergence
+evidence. The manifest records the selected preroll horizon.
+
+The production cinematic default mechanics clock is 1.536 MHz. Stability is
+horizon- and state-dependent: in the retained `0.02 rad` qualifier, 384 kHz
+produced contact-branch chatter while 768 kHz and 1.536 MHz stayed on the
+smooth-contact branch, but a later `0.01 rad` six-second qualifier produced
+4,528 branch transitions at 768 kHz and zero at 1.536 MHz, with more than a
+200-fold difference in peak radiated pressure. The 768 kHz member is therefore
+rejected for terminal audio. A caller may explicitly request the admitted
+3.072 MHz diagnostic rung to test 1.536 MHz against `dt/2`; no current default
+or single artifact establishes asymptotic timestep convergence.
 
 The fixed supported-plate path does not reuse a natural-frequency Helmholtz
 transfer for arbitrary forced motion. It advances the physical modal state
-under the contact reaction, evaluates each mode's instantaneous normal
+under the contact reaction using the same C1 rectangular reconstruction of
+retained DKT nodal displacement and slope degrees of freedom as the live modal
+support, evaluates each mode's instantaneous normal
 acceleration, and applies a causal Rayleigh-I surface integral at every
 triangle's finite sound-travel delay. Linear fractional-sample delay taps are
 fixed by panel geometry, observer position, gas sound speed, and the declared
@@ -1657,6 +1694,13 @@ forcing harmonics instead of being relabeled as a plate eigenfrequency. This
 remains linear small-displacement radiation into an infinite rigid baffle; it
 does not include the housing cavity, edge diffraction, room response, or
 two-way radiation impedance.
+
+That C1 rectangular reconstruction is a smooth moving-load evaluation field,
+not a claim that bicubic Hermite polynomials are the exact triangular DKT
+element shape functions. Distributed projection of the admitted finite contact
+pressure through the native element basis remains a higher-fidelity rung; the
+current structural port applies the accepted point resultant at the resolved
+contact location.
 
 Plate support is geometry, not an apparatus-name preset. A request may constrain
 the full perimeter or declare three centered-frame pin locations. Three-point

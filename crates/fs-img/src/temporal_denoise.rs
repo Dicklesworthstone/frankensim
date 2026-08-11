@@ -214,6 +214,10 @@ pub struct TemporalDenoiseInput<'a> {
     pub motion_prev_x: &'a [f32],
     /// Previous-minus-current raster displacement Y, in pixels.
     pub motion_prev_y: &'a [f32],
+    /// Optional per-pixel proof that the previous-motion vector exists.
+    /// `false` rejects temporal history even when the stored zero sentinel
+    /// would otherwise look like a valid static correspondence.
+    pub previous_motion_valid: Option<&'a [bool]>,
     /// Positive surface axial depth in metres; zero for background.
     pub axial_depth_m: &'a [f32],
     /// World-space unit shading-normal X; zero for background.
@@ -752,6 +756,15 @@ fn validate_input(input: TemporalDenoiseInput<'_>) -> Result<usize, TemporalDeno
             });
         }
     }
+    if let Some(previous_motion_valid) = input.previous_motion_valid
+        && previous_motion_valid.len() != pixel_count
+    {
+        return Err(TemporalDenoiseError::Shape {
+            field: "previous_motion_valid",
+            expected: pixel_count,
+            got: previous_motion_valid.len(),
+        });
+    }
     for (field, values) in [
         ("object_ids", input.object_ids),
         ("material_ids", input.material_ids),
@@ -908,6 +921,12 @@ fn validate_history(
 }
 
 fn reproject_nearest(input: TemporalDenoiseInput<'_>, index: usize) -> Option<usize> {
+    if input
+        .previous_motion_valid
+        .is_some_and(|valid| !valid[index])
+    {
+        return None;
+    }
     let x = index % input.width;
     let y = index / input.width;
     let previous_x = (x as f64 + f64::from(input.motion_prev_x[index]) + 0.5).floor();
@@ -1277,6 +1296,7 @@ mod tests {
         blue: Vec<f32>,
         motion_x: Vec<f32>,
         motion_y: Vec<f32>,
+        motion_valid: Option<Vec<bool>>,
         depth: Vec<f32>,
         normal_x: Vec<f32>,
         normal_y: Vec<f32>,
@@ -1301,6 +1321,7 @@ mod tests {
                 blue: vec![rgb[2]; count],
                 motion_x: vec![0.0; count],
                 motion_y: vec![0.0; count],
+                motion_valid: Some(vec![true; count]),
                 depth: vec![1.0; count],
                 normal_x: vec![0.0; count],
                 normal_y: vec![0.0; count],
@@ -1324,6 +1345,7 @@ mod tests {
                 blue: &self.blue,
                 motion_prev_x: &self.motion_x,
                 motion_prev_y: &self.motion_y,
+                previous_motion_valid: self.motion_valid.as_deref(),
                 axial_depth_m: &self.depth,
                 normal_x: &self.normal_x,
                 normal_y: &self.normal_y,
@@ -1479,6 +1501,28 @@ mod tests {
         assert_eq!(output.history_length()[2], 2);
         assert!(output.linear_rgb()[2][3] > 0.99 && output.linear_rgb()[0][3] < 0.01);
         assert_eq!(output.history_length()[3], 1);
+    }
+
+    #[test]
+    fn unavailable_zero_motion_restarts_instead_of_reusing_static_history() {
+        let first = Fixture::surface(2, 1, 0, [1.0, 0.0, 0.0]);
+        let mut second = Fixture::surface(2, 1, 1, [0.0, 1.0, 0.0]);
+        second.motion_valid.as_mut().unwrap()[0] = false;
+        let config = TemporalDenoiseConfig {
+            neighborhood_clamp_stddev: 0.0,
+            ..TemporalDenoiseConfig::default()
+        };
+        let first_output = run(&first, None, TemporalFrameBoundary::Continuous, config).unwrap();
+        let output = run(
+            &second,
+            Some(&first_output),
+            TemporalFrameBoundary::Continuous,
+            config,
+        )
+        .unwrap();
+        assert_eq!(output.history_length(), &[1, 2]);
+        assert_eq!(output.linear_rgb()[0][0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(output.linear_rgb()[1][0].to_bits(), 1.0_f32.to_bits());
     }
 
     #[test]

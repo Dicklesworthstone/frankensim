@@ -28,6 +28,7 @@ use fs_render::{
     aov::{
         CINEMATIC_AOV_CHANNEL_SEMANTICS, CINEMATIC_AOV_INVALID_SEMANTICS,
         CINEMATIC_AOV_PALETTE_ZERO_SEMANTICS, CINEMATIC_AOV_SEMANTICS_VERSION, CinematicAovProfile,
+        validity,
     },
     tracer::{
         ADAPTIVE_SAMPLING_SEMANTICS_VERSION, INDEPENDENT_PILOT_ALLOCATION_SEMANTICS_VERSION,
@@ -73,6 +74,7 @@ struct FinalDiagnosticFrame {
     blue: Vec<f32>,
     motion_prev_x: Vec<f32>,
     motion_prev_y: Vec<f32>,
+    previous_motion_valid: Vec<bool>,
     axial_depth_m: Vec<f32>,
     normal_x: Vec<f32>,
     normal_y: Vec<f32>,
@@ -206,6 +208,7 @@ impl FinalDiagnosticFrame {
             blue: &self.blue,
             motion_prev_x: &self.motion_prev_x,
             motion_prev_y: &self.motion_prev_y,
+            previous_motion_valid: Some(&self.previous_motion_valid),
             axial_depth_m: &self.axial_depth_m,
             normal_x: &self.normal_x,
             normal_y: &self.normal_y,
@@ -890,6 +893,14 @@ fn decode_final_diagnostic(
         sequence_identity.material_palette_entries,
         path,
     )?;
+    let motion_prev_x = take_plane(&mut planes, "motion.prev.X", path)?;
+    let motion_prev_y = take_plane(&mut planes, "motion.prev.Y", path)?;
+    let previous_motion_valid = exact_previous_motion_valid(
+        take_plane(&mut planes, "diagnostic.validity", path)?,
+        &motion_prev_x,
+        &motion_prev_y,
+        path,
+    )?;
     Ok(FinalDiagnosticFrame {
         width: exr.width,
         height: exr.height,
@@ -897,8 +908,9 @@ fn decode_final_diagnostic(
         green: take_plane(&mut planes, "G", path)?,
         red: take_plane(&mut planes, "R", path)?,
         axial_depth_m: take_plane(&mut planes, "depth.Z", path)?,
-        motion_prev_x: take_plane(&mut planes, "motion.prev.X", path)?,
-        motion_prev_y: take_plane(&mut planes, "motion.prev.Y", path)?,
+        motion_prev_x,
+        motion_prev_y,
+        previous_motion_valid,
         normal_x: take_plane(&mut planes, "normal.X", path)?,
         normal_y: take_plane(&mut planes, "normal.Y", path)?,
         normal_z: take_plane(&mut planes, "normal.Z", path)?,
@@ -910,6 +922,57 @@ fn decode_final_diagnostic(
         sequence_identity,
         timing,
     })
+}
+
+fn exact_previous_motion_valid(
+    values: Vec<f32>,
+    motion_prev_x: &[f32],
+    motion_prev_y: &[f32],
+    path: &Path,
+) -> Result<Vec<bool>, String> {
+    if values.len() != motion_prev_x.len() || values.len() != motion_prev_y.len() {
+        return Err(format!(
+            "FinalDiagnostic EXR {} validity and motion plane lengths differ",
+            path.display()
+        ));
+    }
+    let admitted_mask = validity::PRIMARY
+        | validity::ALBEDO
+        | validity::AUTHORED_SHADING_NORMAL
+        | validity::PREVIOUS_MOTION
+        | validity::OBJECT_ID
+        | validity::MATERIAL_ID
+        | validity::CONTRIBUTION_SPLIT;
+    let mut valid = Vec::new();
+    valid
+        .try_reserve_exact(values.len())
+        .map_err(|_| format!("allocate motion-validity plane for {}", path.display()))?;
+    for (index, value) in values.into_iter().enumerate() {
+        let mask = value as u32;
+        if !value.is_finite()
+            || value < 0.0
+            || value >= MAX_EXACT_F32_INTEGER as f32
+            || mask as f32 != value
+            || mask & !admitted_mask != 0
+        {
+            return Err(format!(
+                "FinalDiagnostic EXR {} diagnostic.validity sample {index} is not an admitted exact bit mask: {value}",
+                path.display()
+            ));
+        }
+        let has_previous_motion = mask & validity::PREVIOUS_MOTION != 0;
+        if !has_previous_motion
+            && (motion_prev_x[index].to_bits() != 0.0_f32.to_bits()
+                || motion_prev_y[index].to_bits() != 0.0_f32.to_bits())
+        {
+            return Err(format!(
+                "FinalDiagnostic EXR {} motion sample {index} is nonzero without PREVIOUS_MOTION validity",
+                path.display()
+            ));
+        }
+        valid.push(has_previous_motion);
+    }
+    Ok(valid)
 }
 
 fn exact_sample_counts(
@@ -2081,6 +2144,7 @@ mod tests {
                 data: match *name {
                     "samples" => vec![16.0, 16.0],
                     "primary.coverage" => vec![1.0, 1.0],
+                    "diagnostic.validity" => vec![127.0, 127.0],
                     "motion.prev.X" | "motion.prev.Y" | "normal.X" | "normal.Y" => {
                         vec![0.0, 0.0]
                     }
@@ -2716,6 +2780,37 @@ mod tests {
         let error = decode_final_diagnostic(exr, Path::new("fixture.exr"), 0)
             .expect_err("fractional categorical identity must be refused");
         assert!(error.contains("is not an exact nonnegative f32 integer palette index"));
+    }
+
+    #[test]
+    fn motion_validity_distinguishes_unavailable_from_static_zero_vectors() {
+        let mut unavailable = final_diagnostic();
+        unavailable
+            .channels
+            .iter_mut()
+            .find(|channel| channel.name == "diagnostic.validity")
+            .expect("fixture validity")
+            .data[0] = 119.0;
+        let decoded = decode_final_diagnostic(unavailable, Path::new("fixture.exr"), 0)
+            .expect("zero unavailable motion is admitted");
+        assert_eq!(decoded.previous_motion_valid, [false, true]);
+
+        let mut contradictory = final_diagnostic();
+        contradictory
+            .channels
+            .iter_mut()
+            .find(|channel| channel.name == "diagnostic.validity")
+            .expect("fixture validity")
+            .data[0] = 119.0;
+        contradictory
+            .channels
+            .iter_mut()
+            .find(|channel| channel.name == "motion.prev.X")
+            .expect("fixture motion")
+            .data[0] = 1.0;
+        let error = decode_final_diagnostic(contradictory, Path::new("fixture.exr"), 0)
+            .expect_err("nonzero motion without validity must be refused");
+        assert!(error.contains("nonzero without PREVIOUS_MOTION validity"));
     }
 
     #[test]

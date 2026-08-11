@@ -322,7 +322,7 @@ fn resolve_rectangular_plate_support(
                 });
             let [a, b, c] = resolved_points;
             let twice_area = (b[0] - a[0]).mul_add(c[1] - a[1], -(b[1] - a[1]) * (c[0] - a[0]));
-            let area_scale = width_m.max(depth_m).powi(2);
+            let area_scale = det::powi(width_m.max(depth_m), 2);
             if twice_area.abs() <= 64.0 * f64::EPSILON * area_scale {
                 return Err(StructuralModalBasisError::InvalidRequest {
                     what: "plate point supports must be non-collinear",
@@ -384,6 +384,13 @@ pub struct RectangularPlateMode {
     pub eigenvalue_residual_s2: f64,
     /// Transverse displacement at every full plate node [kg^-1/2].
     pub nodal_transverse_shape_per_sqrt_kg: Vec<f64>,
+    /// Plate-x slope at every full plate node [m^-1 kg^-1/2].
+    pub nodal_slope_x_per_m_sqrt_kg: Vec<f64>,
+    /// Plate-y slope at every full plate node [m^-1 kg^-1/2].
+    pub nodal_slope_y_per_m_sqrt_kg: Vec<f64>,
+    /// Shared nodal mixed derivative used by the C1 rectangular Hermite
+    /// reconstruction [m^-2 kg^-1/2].
+    pub nodal_mixed_slope_per_m2_sqrt_kg: Vec<f64>,
 }
 
 /// Certified supported-plate basis used for contact-force projection and
@@ -429,10 +436,8 @@ pub struct RectangularPlateModalBasis {
 pub struct PlatePointForceProjection {
     /// Zero-based structured cell containing the application point.
     pub cell: [usize; 2],
-    /// Selected triangle within that cell, zero or one.
-    pub triangle_in_cell: usize,
-    /// P1 barycentric weights on the selected triangle.
-    pub barycentric: [f64; 3],
+    /// Normalized coordinates within the selected rectangular cell.
+    pub cell_coordinates: [f64; 2],
     /// Generalized force for every retained mode [N kg^-1/2].
     pub modal_force_n_per_sqrt_kg: Vec<f64>,
 }
@@ -1466,11 +1471,27 @@ pub fn build_rectangular_plate_modal_basis(
             return Err(StructuralModalBasisError::NonPositiveCertifiedMode { mode: mode_index });
         }
         let mut nodal_transverse = vec![0.0; mesh.nodes.len()];
-        for (node, value) in nodal_transverse.iter_mut().enumerate() {
+        let mut nodal_slope_x = vec![0.0; mesh.nodes.len()];
+        let mut nodal_slope_y = vec![0.0; mesh.nodes.len()];
+        for node in 0..mesh.nodes.len() {
             if let Some(reduced) = model.dof_map[3 * node] {
-                *value = pair.phi[reduced];
+                nodal_transverse[node] = pair.phi[reduced];
+            }
+            if let Some(reduced) = model.dof_map[3 * node + 1] {
+                nodal_slope_x[node] = pair.phi[reduced];
+            }
+            if let Some(reduced) = model.dof_map[3 * node + 2] {
+                nodal_slope_y[node] = pair.phi[reduced];
             }
         }
+        let nodal_mixed_slope = rectangular_mixed_slopes(
+            &nodal_slope_x,
+            &nodal_slope_y,
+            request.cells_x,
+            request.cells_y,
+            request.width_m,
+            request.depth_m,
+        );
         let angular_frequency_rad_s = pair.lambda.sqrt();
         modes.push(RectangularPlateMode {
             eigenvalue_s2: pair.lambda,
@@ -1479,11 +1500,14 @@ pub fn build_rectangular_plate_modal_basis(
             eigenvalue_interval_s2: pair.interval,
             eigenvalue_residual_s2: pair.residual,
             nodal_transverse_shape_per_sqrt_kg: nodal_transverse,
+            nodal_slope_x_per_m_sqrt_kg: nodal_slope_x,
+            nodal_slope_y_per_m_sqrt_kg: nodal_slope_y,
+            nodal_mixed_slope_per_m2_sqrt_kg: nodal_mixed_slope,
         });
     }
     let material_state_identity = request.elastic.resolved().identity();
     let mut identity =
-        DomainHasher::new("org.frankensim.euler-disc.supported-rectangular-plate-modal-basis.v1");
+        DomainHasher::new("org.frankensim.euler-disc.supported-rectangular-plate-modal-basis.v2");
     identity.update(material_state_identity.as_bytes());
     for value in [request.width_m, request.depth_m, request.thickness_m] {
         identity.update(&value.to_bits().to_le_bytes());
@@ -1544,6 +1568,15 @@ pub fn build_rectangular_plate_modal_basis(
         for value in &mode.nodal_transverse_shape_per_sqrt_kg {
             identity.update(&value.to_bits().to_le_bytes());
         }
+        for values in [
+            &mode.nodal_slope_x_per_m_sqrt_kg,
+            &mode.nodal_slope_y_per_m_sqrt_kg,
+            &mode.nodal_mixed_slope_per_m2_sqrt_kg,
+        ] {
+            for value in values {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+        }
     }
     Ok(RectangularPlateModalBasis {
         width_m: request.width_m,
@@ -1565,9 +1598,124 @@ pub fn build_rectangular_plate_modal_basis(
     })
 }
 
+fn rectangular_mixed_slopes(
+    slope_x: &[f64],
+    slope_y: &[f64],
+    cells_x: usize,
+    cells_y: usize,
+    width_m: f64,
+    depth_m: f64,
+) -> Vec<f64> {
+    let row = cells_x + 1;
+    let dx = width_m / cells_x as f64;
+    let dy = depth_m / cells_y as f64;
+    let derivative = |values: &[f64], i: usize, j: usize, along_x: bool| {
+        if along_x {
+            let (left, right, span) = if i == 0 {
+                (j * row, j * row + 1, dx)
+            } else if i == cells_x {
+                (j * row + i - 1, j * row + i, dx)
+            } else {
+                (j * row + i - 1, j * row + i + 1, 2.0 * dx)
+            };
+            (values[right] - values[left]) / span
+        } else {
+            let (lower, upper, span) = if j == 0 {
+                (i, row + i, dy)
+            } else if j == cells_y {
+                ((j - 1) * row + i, j * row + i, dy)
+            } else {
+                ((j - 1) * row + i, (j + 1) * row + i, 2.0 * dy)
+            };
+            (values[upper] - values[lower]) / span
+        }
+    };
+    let mut mixed = vec![0.0; slope_x.len()];
+    for j in 0..=cells_y {
+        for i in 0..=cells_x {
+            let index = j * row + i;
+            // Both estimates represent d2w/(dx dy). Averaging keeps the
+            // reconstruction symmetric in the two coordinate directions and
+            // gives every adjacent cell the exact same nodal derivative.
+            mixed[index] =
+                0.5 * (derivative(slope_x, i, j, false) + derivative(slope_y, i, j, true));
+        }
+    }
+    mixed
+}
+
+fn cubic_hermite_basis(t: f64) -> [f64; 4] {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    [
+        2.0 * t3 - 3.0 * t2 + 1.0,
+        t3 - 2.0 * t2 + t,
+        -2.0 * t3 + 3.0 * t2,
+        t3 - t2,
+    ]
+}
+
+fn rectangular_mode_value(
+    mode: &RectangularPlateMode,
+    lower_left: usize,
+    row: usize,
+    u: f64,
+    v: f64,
+    cell_width_m: f64,
+    cell_depth_m: f64,
+) -> f64 {
+    let nodes = [
+        lower_left,
+        lower_left + 1,
+        lower_left + row,
+        lower_left + row + 1,
+    ];
+    let hu = cubic_hermite_basis(u);
+    let hv = cubic_hermite_basis(v);
+    let interpolate_y = |lower: usize, upper: usize, values: &[f64], derivatives: &[f64]| {
+        hv[0] * values[lower]
+            + hv[1] * cell_depth_m * derivatives[lower]
+            + hv[2] * values[upper]
+            + hv[3] * cell_depth_m * derivatives[upper]
+    };
+    let value_left = interpolate_y(
+        nodes[0],
+        nodes[2],
+        &mode.nodal_transverse_shape_per_sqrt_kg,
+        &mode.nodal_slope_y_per_m_sqrt_kg,
+    );
+    let value_right = interpolate_y(
+        nodes[1],
+        nodes[3],
+        &mode.nodal_transverse_shape_per_sqrt_kg,
+        &mode.nodal_slope_y_per_m_sqrt_kg,
+    );
+    let slope_left = interpolate_y(
+        nodes[0],
+        nodes[2],
+        &mode.nodal_slope_x_per_m_sqrt_kg,
+        &mode.nodal_mixed_slope_per_m2_sqrt_kg,
+    );
+    let slope_right = interpolate_y(
+        nodes[1],
+        nodes[3],
+        &mode.nodal_slope_x_per_m_sqrt_kg,
+        &mode.nodal_mixed_slope_per_m2_sqrt_kg,
+    );
+    hu[0] * value_left
+        + hu[1] * cell_width_m * slope_left
+        + hu[2] * value_right
+        + hu[3] * cell_width_m * slope_right
+}
+
 impl RectangularPlateModalBasis {
-    /// Project a base-frame transverse point force through the exact P1 shape
-    /// functions of the containing structured triangle.
+    /// Project a base-frame transverse point force through a C1 rectangular
+    /// Hermite reconstruction of the DKT nodal displacement and slope DOFs.
+    ///
+    /// Using the retained slope DOFs is essential for a moving load: the old
+    /// P1 projection was continuous but had artificial slope jumps at every
+    /// triangle edge, which injected mesh-crossing harmonics into both the
+    /// production support dynamics and the acoustic replay.
     pub fn project_transverse_point_force(
         &self,
         point_base_m: [f64; 3],
@@ -1614,35 +1762,20 @@ impl RectangularPlateModalBasis {
         let v = (gy - cell_y as f64).clamp(0.0, 1.0);
         let row = self.cells_x + 1;
         let lower_left = cell_y * row + cell_x;
-        let (triangle_in_cell, nodes, barycentric) = if v <= u {
-            (
-                0,
-                [lower_left, lower_left + 1, lower_left + row + 1],
-                [1.0 - u, u - v, v],
-            )
-        } else {
-            (
-                1,
-                [lower_left, lower_left + row + 1, lower_left + row],
-                [1.0 - v, u, v - u],
-            )
-        };
+        let cell_width_m = self.width_m / self.cells_x as f64;
+        let cell_depth_m = self.depth_m / self.cells_y as f64;
         let modal_force_n_per_sqrt_kg = self
             .modes
             .iter()
             .map(|mode| {
-                let shape = barycentric
-                    .iter()
-                    .zip(nodes)
-                    .map(|(weight, node)| weight * mode.nodal_transverse_shape_per_sqrt_kg[node])
-                    .sum::<f64>();
+                let shape =
+                    rectangular_mode_value(mode, lower_left, row, u, v, cell_width_m, cell_depth_m);
                 transverse_force_n * shape
             })
             .collect();
         Ok(PlatePointForceProjection {
             cell: [cell_x, cell_y],
-            triangle_in_cell,
-            barycentric,
+            cell_coordinates: [u, v],
             modal_force_n_per_sqrt_kg,
         })
     }
@@ -3777,6 +3910,37 @@ mod tests {
     }
 
     #[test]
+    fn g0_rectangular_hermite_projection_reproduces_nodal_slopes_without_edge_kinks() {
+        let width_m = 2.0;
+        let depth_m = 3.0;
+        let nodes = [
+            (0.0, 0.0),
+            (width_m, 0.0),
+            (0.0, depth_m),
+            (width_m, depth_m),
+        ];
+        let value = |x: f64, y: f64| 1.0 + 2.0 * x + 3.0 * y + 4.0 * x * y;
+        let slope_x = |_x: f64, y: f64| 2.0 + 4.0 * y;
+        let slope_y = |x: f64, _y: f64| 3.0 + 4.0 * x;
+        let mode = RectangularPlateMode {
+            eigenvalue_s2: 1.0,
+            angular_frequency_rad_s: 1.0,
+            frequency_hz: 1.0 / core::f64::consts::TAU,
+            eigenvalue_interval_s2: (1.0, 1.0),
+            eigenvalue_residual_s2: 0.0,
+            nodal_transverse_shape_per_sqrt_kg: nodes.iter().map(|&(x, y)| value(x, y)).collect(),
+            nodal_slope_x_per_m_sqrt_kg: nodes.iter().map(|&(x, y)| slope_x(x, y)).collect(),
+            nodal_slope_y_per_m_sqrt_kg: nodes.iter().map(|&(x, y)| slope_y(x, y)).collect(),
+            nodal_mixed_slope_per_m2_sqrt_kg: vec![4.0; 4],
+        };
+        for (u, v) in [(0.0, 0.0), (1.0, 1.0), (0.37, 0.61), (1.0, 0.43)] {
+            let observed = rectangular_mode_value(&mode, 0, 2, u, v, width_m, depth_m);
+            let expected = value(u * width_m, v * depth_m);
+            assert!((observed - expected).abs() <= 2.0e-14 * expected.abs().max(1.0));
+        }
+    }
+
+    #[test]
     fn g0_compliant_disc_contact_maps_to_plate_reference_surface() {
         let penetration_m = -4.005_401e-7;
         assert_eq!(
@@ -4016,7 +4180,7 @@ mod tests {
                     maximum_nodes: 128,
                     minimum_frequency_hz: 10.0,
                     maximum_frequency_hz: 5_000.0,
-                    maximum_modes: 8,
+                    maximum_modes: 16,
                     slice: SliceOptions::default(),
                 },
                 cx,

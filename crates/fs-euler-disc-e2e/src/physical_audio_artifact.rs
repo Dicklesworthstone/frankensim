@@ -22,15 +22,17 @@ use crate::audio_artifact::{
 use crate::structural_acoustics::PhysicalPressureSignal;
 
 const PHYSICAL_LISTENING_MASTER_IDENTITY_DOMAIN: &str =
-    "org.frankensim.euler-disc.physical-listening-master.v2";
+    "org.frankensim.euler-disc.physical-listening-master.v3";
 
 /// Explicit policy for the nonphysical pressure-to-digital presentation step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PressureListeningMasterPolicy {
-    /// Desired four-times-oversampled peak in digital-full-scale units.
-    pub target_true_peak_fs: f64,
-    /// Largest admitted absolute pressure-to-digital gain adjustment [dB].
-    pub maximum_absolute_gain_db: f64,
+    /// Fixed pressure-to-digital calibration [FS / Pa]. It never depends on the
+    /// rendered signal, so pressure differences remain audible differences.
+    pub digital_gain_fs_per_pa: f64,
+    /// Largest admitted four-times-oversampled peak in digital-full-scale units.
+    /// Exceeding this ceiling refuses instead of silently normalizing or limiting.
+    pub maximum_true_peak_fs: f64,
     /// Raised-cosine fade from exact zero at the media cut [sample frames].
     pub initial_fade_sample_frames: u32,
     /// Raised-cosine fade to exact zero at the media cut [sample frames].
@@ -38,12 +40,15 @@ pub struct PressureListeningMasterPolicy {
 }
 
 impl PressureListeningMasterPolicy {
-    /// Critique master with a conventional -1 dBFS estimated true-peak ceiling.
+    /// Critique master using a fixed `512 FS / Pa` review calibration and a
+    /// conventional -1 dBFS estimated true-peak ceiling. The power-of-two gain
+    /// is exact, remains constant across runs, and can be overridden explicitly
+    /// when a playback chain has a measured pressure-to-digital calibration.
     /// The short boundary windows exist only on the listening derivative; the
     /// separately identified physical pressure signals remain unchanged.
     pub const CRITIQUE: Self = Self {
-        target_true_peak_fs: 0.891_250_938_133_745_6,
-        maximum_absolute_gain_db: 180.0,
+        digital_gain_fs_per_pa: 512.0,
+        maximum_true_peak_fs: 0.891_250_938_133_745_6,
         initial_fade_sample_frames: 960,
         terminal_fade_sample_frames: 240,
     };
@@ -94,11 +99,10 @@ impl PhysicalPressureListeningMaster {
         cx: &Cx<'_>,
     ) -> Result<Self, PhysicalListeningMasterError> {
         validate_pair(left, right)?;
-        if !(policy.target_true_peak_fs > 0.0
-            && policy.target_true_peak_fs < 1.0
-            && policy.target_true_peak_fs.is_finite()
-            && policy.maximum_absolute_gain_db > 0.0
-            && policy.maximum_absolute_gain_db.is_finite())
+        if !(policy.digital_gain_fs_per_pa > 0.0 && policy.digital_gain_fs_per_pa.is_finite())
+            || !(policy.maximum_true_peak_fs > 0.0
+                && policy.maximum_true_peak_fs < 1.0
+                && policy.maximum_true_peak_fs.is_finite())
         {
             return Err(PhysicalListeningMasterError::InvalidPolicy);
         }
@@ -109,35 +113,20 @@ impl PhysicalPressureListeningMaster {
             return Err(PhysicalListeningMasterError::SilentPhysicalSignal);
         }
 
-        // First place the stored-sample peak at the requested ceiling, then
-        // account for intersample overshoot using the same declared estimator
-        // published by the WAV artifact layer.
-        let mut digital_gain_fs_per_pa = policy.target_true_peak_fs / source_peak_abs_pressure_pa;
-        let mut samples = convert_pair(left, right, policy, digital_gain_fs_per_pa)?;
-        let first_meters = measure_audio(&samples, budget, cx)?;
-        let first_peak = first_meters
-            .sample_peak_fs
-            .max(first_meters.true_peak_estimate_fs);
-        if !(first_peak > 0.0 && first_peak.is_finite()) {
-            return Err(PhysicalListeningMasterError::SilentPhysicalSignal);
-        }
-        digital_gain_fs_per_pa *= policy.target_true_peak_fs / first_peak;
+        let digital_gain_fs_per_pa = policy.digital_gain_fs_per_pa;
         let digital_gain_db = 20.0 * det::ln(digital_gain_fs_per_pa) / core::f64::consts::LN_10;
-        if !digital_gain_db.is_finite() || digital_gain_db.abs() > policy.maximum_absolute_gain_db {
-            return Err(PhysicalListeningMasterError::GainOutsidePolicy {
-                required_db: digital_gain_db,
-                maximum_absolute_db: policy.maximum_absolute_gain_db,
-            });
+        if !digital_gain_db.is_finite() {
+            return Err(PhysicalListeningMasterError::InvalidPolicy);
         }
 
-        samples = convert_pair(left, right, policy, digital_gain_fs_per_pa)?;
+        let samples = convert_pair(left, right, policy, digital_gain_fs_per_pa)?;
         let meters = measure_audio(&samples, budget, cx)?;
         let observed_peak = meters.sample_peak_fs.max(meters.true_peak_estimate_fs);
-        let tolerance = 256.0 * f64::EPSILON * policy.target_true_peak_fs;
-        if observed_peak > policy.target_true_peak_fs + tolerance {
+        let tolerance = 256.0 * f64::EPSILON * policy.maximum_true_peak_fs;
+        if observed_peak > policy.maximum_true_peak_fs + tolerance {
             return Err(PhysicalListeningMasterError::PeakTargetExceeded {
                 observed_fs: observed_peak,
-                target_fs: policy.target_true_peak_fs,
+                target_fs: policy.maximum_true_peak_fs,
             });
         }
         let (wav_bytes, wav) = encode_stereo_wav(
@@ -194,7 +183,7 @@ pub enum PhysicalListeningMasterError {
         required_db: f64,
         maximum_absolute_db: f64,
     },
-    /// The declared true-peak ceiling was not met after deterministic scaling.
+    /// The fixed calibration exceeded the declared true-peak ceiling.
     PeakTargetExceeded { observed_fs: f64, target_fs: f64 },
     /// Canonical WAV/metering/cancellation refusal.
     Artifact(AudioArtifactError),
@@ -369,8 +358,8 @@ fn listening_master_identity(
     hasher.update(left.identity.as_bytes());
     hasher.update(right.identity.as_bytes());
     for value in [
-        policy.target_true_peak_fs,
-        policy.maximum_absolute_gain_db,
+        policy.digital_gain_fs_per_pa,
+        policy.maximum_true_peak_fs,
         gain_fs_per_pa,
         source_peak_abs_pressure_pa,
     ] {
@@ -441,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn g0_physical_pressure_remains_bound_while_listening_master_is_audible() {
+    fn g0_listening_master_uses_fixed_pressure_calibration_without_normalization() {
         let left = signal(2.0e-5, 3);
         let right = signal(1.0e-5, 4);
         let master = with_cx(|cx| {
@@ -450,8 +439,7 @@ mod tests {
                 &right,
                 PressureListeningMasterPolicy::CRITIQUE,
                 &WavMetadata::try_new(Some(
-                    "physical Pa observers; presentation-normalized listening derivative"
-                        .to_owned(),
+                    "physical Pa observers; fixed-calibration listening derivative".to_owned(),
                 ))
                 .unwrap(),
                 AudioArtifactBudget::DEFAULT,
@@ -462,13 +450,39 @@ mod tests {
         assert_eq!(master.left_pressure_identity, left.identity);
         assert_eq!(master.right_pressure_identity, right.identity);
         assert_eq!(master.wav.sample_frame_count(), 48_000);
-        assert!(master.digital_gain_db > 80.0);
-        assert!(master.meters.sample_peak_fs > 0.8);
+        assert_eq!(master.digital_gain_fs_per_pa.to_bits(), 512.0_f64.to_bits());
+        assert!(master.digital_gain_db > 54.0 && master.digital_gain_db < 54.3);
+        assert!(master.meters.sample_peak_fs > 4.0e-3);
+        assert!(master.meters.sample_peak_fs < 16.0e-3);
         assert!(
             master.meters.true_peak_estimate_fs
-                <= PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs + 1.0e-12
+                <= PressureListeningMasterPolicy::CRITIQUE.maximum_true_peak_fs + 1.0e-12
         );
-        assert!(master.meters.integrated_loudness_lufs.is_some());
+    }
+
+    #[test]
+    fn g0_fixed_pressure_calibration_refuses_instead_of_normalizing_overload() {
+        let left = signal(1.0, 3);
+        let right = signal(0.5, 4);
+        let error = with_cx(|cx| {
+            PhysicalPressureListeningMaster::try_build(
+                &left,
+                &right,
+                PressureListeningMasterPolicy::CRITIQUE,
+                &WavMetadata::default(),
+                AudioArtifactBudget::DEFAULT,
+                cx,
+            )
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PhysicalListeningMasterError::PeakTargetExceeded { target_fs, .. }
+                if target_fs.to_bits()
+                    == PressureListeningMasterPolicy::CRITIQUE
+                        .maximum_true_peak_fs
+                        .to_bits()
+        ));
     }
 
     #[test]

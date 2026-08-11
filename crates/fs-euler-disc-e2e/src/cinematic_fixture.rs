@@ -195,16 +195,29 @@ use crate::specimen::{DiscProfileSpec, ResolvedDiscProfile, ResolvedDiscThermalG
 
 /// Fixed master frame rate used by the cinematic sound contract.
 pub const CRITIQUE_FPS: u32 = 24;
-/// Minimum admitted cinematic duration: 192 frames = 8 seconds.
+/// Default and maximum admitted cinematic duration: 192 frames = 8 seconds.
+///
+/// Shorter positive clips are valid and are useful when a coupled model's
+/// applicability horizon is shorter than the default presentation horizon.
 pub const CRITIQUE_FRAMES: u32 = 192;
 /// Five-millisecond deterministic taper applied at the censored soundtrack end.
 const TERMINAL_FADE_SAMPLE_FRAMES: u32 = 240;
 /// Twenty-millisecond presentation fade at the published clip onset.
 const INITIAL_FADE_SAMPLE_FRAMES: u32 = 960;
-/// One exact video frame of real source history used to warm the modal state.
-const AUDIO_PREROLL_VIDEO_FRAMES: u32 = 1;
-/// Exact 48 kHz samples in the source-bound modal warm start.
-const AUDIO_PREROLL_SAMPLE_FRAMES: u64 = 2_000;
+/// Default real coupled history before the synchronized picture/sound cut.
+///
+/// Two seconds lets the lightly damped retained plate modes shed the artificial
+/// free vibration caused by beginning a moving-load problem from an
+/// instantaneous static equilibrium. The complete preroll is still simulated
+/// by the ordinary production coupling; it is not an audio-only fade or an
+/// invented sound source.
+const DEFAULT_MECHANICS_PREROLL_VIDEO_FRAMES: u32 = 48;
+/// Highest admitted cinematic mechanics rate. One hundred twenty-eight 48 kHz
+/// substeps admit the 3.072 MHz to 6.144 MHz dt/dt2 diagnostic required after
+/// the 1.536 MHz to 3.072 MHz pair retained a measurable phase/spectral shift.
+/// Product-run work remains explicitly bounded and the finer rate is never
+/// selected implicitly.
+const MAX_CINEMATIC_MECHANICS_SAMPLE_RATE_HZ: u32 = 6_144_000;
 /// The production film compares the original benchmark's quarter-step against
 /// its eighth-step solution. The earlier dt/dt2 pair did not satisfy the
 /// preregistered mechanics-to-audio drive convergence gate.
@@ -222,7 +235,7 @@ pub fn critique_color_config() -> CinematicColorConfig {
     color
 }
 const AUDIO_PREROLL_POLICY_ID: &str =
-    "source-bound-one-video-frame-continuous-fir-and-modal-preroll-v3";
+    "source-bound-configured-coupled-mechanics-and-modal-preroll-v4";
 /// Declared bandwidth of the legacy harmonic-one diagnostic [Hz].
 const CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
 /// Passband used by the independent 48/24 kHz legacy-drive convergence pair
@@ -1116,31 +1129,17 @@ pub enum CinematicInitialMotionConfig {
 impl Default for CinematicMechanicsConfig {
     fn default() -> Self {
         let period_m = core::f64::consts::TAU * 0.0375;
-        let disc_surface_spectrum = SelfAffinePeriodicProfileSpectrum::new(
-            // Preserve the sub-nanometre RMS scale admitted by the current
-            // single-footprint nonlinear height/approach solve. This is a
-            // declared estimate, not a measured finish; larger roughness needs
-            // a resolved multiasperity/load-sharing model rather than louder
-            // coefficients here.
-            4.5e-10,
-            // A representative engineering-surface Hurst exponent. It sets
-            // the spatial PSD slope only and is not fitted to the soundtrack.
-            0.8,
-            1,
-            // At the resolved rolling rates this extends the geometric forcing
-            // through the support model's 5 kHz band while remaining within a
-            // bounded 8-samples-per-shortest-period trace.
-            384,
-            0x4555_4c45_525f_0001,
-        )
-        .expect("the built-in bounded self-affine surface declaration is valid");
         Self {
             // The stiff finite-patch/contact-support transient is resolved on
-            // its own mechanics clock. A 48/96/192/384 kHz refinement probe
-            // removed spurious separation only at 384 kHz; the accepted force
-            // measure is subsequently projected onto the independent 48 kHz
-            // sound-master cells without identifying the two clocks.
-            sample_rate_hz: 384_000,
+            // its own mechanics clock. The earlier 384 kHz floor is unstable
+            // for the production low-inclination shot: it creates contact-
+            // branch chatter that is absent at both 768 kHz and 1.536 MHz.
+            // Default to the finer stable member while retaining the explicit
+            // no-claim that a complete mechanics dt study is still outstanding.
+            // The accepted force measure is subsequently projected onto the
+            // independent 48 kHz sound-master cells without identifying the
+            // two clocks.
+            sample_rate_hz: 1_536_000,
             gravity_m_per_s2: 9.806_65,
             initial_motion: CinematicInitialMotionConfig::SmallAngleNoSlip {
                 inclination_rad: 0.12,
@@ -1187,9 +1186,14 @@ impl Default for CinematicMechanicsConfig {
             disc_surface: CinematicPeriodicSurfaceConfig {
                 period_m,
                 sample_count: 4_096,
-                spectrum: CinematicSurfaceSpectrumConfig::SelfAffine(disc_surface_spectrum),
+                // The specimen's edge topography was not measured. Default to
+                // the ideal smooth limit instead of inventing a broadband
+                // spatial spectrum that continuously excites structural modes.
+                // Callers retain both explicit measured harmonics and seeded
+                // self-affine geometry through the same parameterized path.
+                spectrum: CinematicSurfaceSpectrumConfig::Explicit(Vec::new()),
                 authority: InputAuthority::Estimated,
-                source_id: "declared band-limited self-affine machined-edge profile estimate; RMS height, Hurst exponent, bandwidth, and seed explicit; not measured"
+                source_id: "declared ideal-smooth disc-edge trace because specimen topography is unmeasured; no roughness or waviness claim"
                     .to_owned(),
             },
             support_surface: CinematicPeriodicSurfaceConfig {
@@ -1235,8 +1239,10 @@ impl CinematicRenderIntegrator {
     fn identity(self) -> &'static str {
         match self {
             Self::CameraPathMis => "camera-path-mis-v1",
-            Self::Bidirectional => "finite-light-bdpt-v3-power2",
-            Self::BidirectionalCameraConnected => "finite-light-bdpt-v3-power2-camera-connected",
+            Self::Bidirectional => "finite-light-bdpt-v6-power2-spectral4-split1-slab-nee1",
+            Self::BidirectionalCameraConnected => {
+                "finite-light-bdpt-v6-power2-spectral4-split1-slab-nee1-camera-connected"
+            }
         }
     }
 }
@@ -1248,8 +1254,15 @@ pub struct CinematicFixtureConfig {
     pub width: u32,
     /// Display and raw-master height in pixels.
     pub height: u32,
-    /// Exact 24 Hz frame count. This source-bound fixture is fixed to 192.
+    /// Exact 24 Hz frame count, in `1..=192` (up to eight seconds).
     pub frames: u32,
+    /// Coupled mechanics history simulated before the synchronized media cut,
+    /// in exact 24 Hz frame intervals.
+    ///
+    /// This is a physical settling horizon: disc, contact, gas, and structural
+    /// support all advance together. It must not be confused with a cosmetic
+    /// audio fade or with extra, disconnected modal warm-up samples.
+    pub mechanics_preroll_video_frames: u32,
     /// Complete sequence or an absolute contiguous render subset.
     pub frame_window: CinematicFrameWindow,
     /// Uniform path-tracing samples per pixel.
@@ -1295,6 +1308,9 @@ pub struct CinematicFixtureConfig {
     pub retain_full_aov_exr: bool,
     /// Whether mechanics-derived dry stems use the bounded spatial-audio path.
     pub spatialize_audio: bool,
+    /// Fixed listening-master calibration [digital full scale / Pa]. This is a
+    /// presentation mapping only; it never changes the physical pressure field.
+    pub listening_gain_fs_per_pa: f64,
     /// One parameterized geometry, mass, and material state shared by all domains.
     pub disc: CinematicDiscSpecimenConfig,
     /// Disc FEM/BEM resolution and work bounds; no prescribed modal preset.
@@ -1321,6 +1337,7 @@ impl Default for CinematicFixtureConfig {
             width: 320,
             height: 180,
             frames: CRITIQUE_FRAMES,
+            mechanics_preroll_video_frames: DEFAULT_MECHANICS_PREROLL_VIDEO_FRAMES,
             frame_window: CinematicFrameWindow::Full,
             samples_per_pixel: 1,
             render_integrator: CinematicRenderIntegrator::CameraPathMis,
@@ -1348,6 +1365,8 @@ impl Default for CinematicFixtureConfig {
             denoise_previews: true,
             retain_full_aov_exr: true,
             spatialize_audio: true,
+            listening_gain_fs_per_pa: PressureListeningMasterPolicy::CRITIQUE
+                .digital_gain_fs_per_pa,
             disc: CinematicDiscSpecimenConfig::default(),
             disc_structural_acoustics: CinematicDiscStructuralAcousticConfig::default(),
             support_plate: CinematicSupportPlateConfig::default(),
@@ -1369,9 +1388,16 @@ impl CinematicFixtureConfig {
                 "dimensions must be nonzero and no larger than 3840x2160",
             ));
         }
-        if self.frames != CRITIQUE_FRAMES {
+        if self.frames == 0 || self.frames > CRITIQUE_FRAMES {
             return Err(CinematicFixtureError::InvalidConfig(
-                "the source-bound eight-second fixture requires exactly 192 frames",
+                "cinematic frame count must be in 1..=192 (up to eight seconds at 24 Hz)",
+            ));
+        }
+        if self.mechanics_preroll_video_frames == 0
+            || self.mechanics_preroll_video_frames > 10 * CRITIQUE_FPS
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "mechanics_preroll_video_frames must be in 1..=240 (up to ten seconds)",
             ));
         }
         let range = self.render_frame_range()?;
@@ -1485,6 +1511,11 @@ impl CinematicFixtureConfig {
         if self.render_memory_limit_bytes == 0 {
             return Err(CinematicFixtureError::InvalidConfig(
                 "render_memory_limit_bytes must be nonzero",
+            ));
+        }
+        if !(self.listening_gain_fs_per_pa.is_finite() && self.listening_gain_fs_per_pa > 0.0) {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "listening_gain_fs_per_pa must be finite and positive",
             ));
         }
         if self.mux_with_ffmpeg && (self.width % 2 != 0 || self.height % 2 != 0) {
@@ -1691,7 +1722,7 @@ impl CinematicFixtureConfig {
             }
         };
         if mechanics.sample_rate_hz == 0
-            || mechanics.sample_rate_hz > 1_000_000
+            || mechanics.sample_rate_hz > MAX_CINEMATIC_MECHANICS_SAMPLE_RATE_HZ
             || mechanics.sample_rate_hz < SOUND_MASTER_SAMPLE_RATE_HZ
             || mechanics.sample_rate_hz % SOUND_MASTER_SAMPLE_RATE_HZ != 0
             || !(mechanics.gravity_m_per_s2.is_finite() && mechanics.gravity_m_per_s2 > 0.0)
@@ -2862,11 +2893,17 @@ fn build_fixture_production_mechanics(
         })
         .transpose()?;
     let disc_mass_properties = profile_mass_to_mbd(profile.mass_properties).map_err(pipeline)?;
-    let maximum_steps = u64::from(config.frames)
-        .checked_mul(u64::from(mechanics.sample_rate_hz))
-        .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
-        .and_then(|value| value.checked_add(u64::from(mechanics.sample_rate_hz)))
-        .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics step budget overflow".into()))?;
+    let maximum_steps = u64::from(
+        config
+            .frames
+            .checked_add(config.mechanics_preroll_video_frames)
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("mechanics frame budget overflow".into())
+            })?,
+    )
+    .checked_mul(u64::from(mechanics.sample_rate_hz))
+    .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
+    .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics step budget overflow".into()))?;
     let plate_port = RectangularModalBasePort::try_new(
         RectangularModalBaseIdentity {
             model_id: format!("rectangular-modal-plate/{}", plate_basis.identity),
@@ -3432,7 +3469,7 @@ impl FixtureAudioConvergenceEvidence {
     fn manifest_json(self) -> String {
         format!(
             concat!(
-                "{{\"comparison\":\"24 kHz impulse-preserving control cells versus 48 kHz control cells from one shared 384 kHz mechanics trajectory; 48 kHz alone is published\",",
+                "{{\"comparison\":\"24 kHz impulse-preserving control cells versus 48 kHz control cells from one shared mechanics trajectory; 48 kHz alone is published\",",
                 "\"full_audio_frame_count\":{},\"published_audio_frame_count\":{},\"mode_count\":{},",
                 "\"drive\":{{\"normalization_floor_n\":{:.17e},",
                 "\"localized_nrmse\":{:.17e},\"localized_normalized_peak\":{:.17e},",
@@ -4374,7 +4411,10 @@ pub fn run_cinematic_fixture(
         config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ,
     )
     .map_err(|_| CinematicFixtureError::Pipeline("mechanics/control ratio exceeds usize".into()))?;
-    let preroll_mechanics_steps = usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+    let preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
+        .checked_mul(u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS))
+        .ok_or_else(|| CinematicFixtureError::Pipeline("audio preroll frame overflow".into()))?;
+    let preroll_mechanics_steps = usize::try_from(preroll_audio_frame_count)
         .ok()
         .and_then(|frames| frames.checked_mul(mechanics_steps_per_control_interval))
         .ok_or_else(|| {
@@ -4515,14 +4555,16 @@ pub fn run_cinematic_fixture(
     progress(&format!(
         concat!(
             "stage=mechanics production=true mechanics_hz={} control_hz={} ",
-            "accepted_steps={} controls={} audio_preroll_controls={} ",
+            "accepted_steps={} controls={} preroll_s={:.6} audio_preroll_controls={} branch_transitions={} ",
             "mechanics_dt_refinement=outstanding"
         ),
         config.mechanics.sample_rate_hz,
         SOUND_MASTER_SAMPLE_RATE_HZ,
         preroll_mechanics_steps + picture_mechanics_steps,
         trajectory.samples().len(),
+        preroll_audio_frame_count as f64 / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
         audio_preroll_trajectory.samples().len(),
+        audio_control.transitions.len(),
     ));
     let retained_time_s = trajectory
         .samples()
@@ -4624,7 +4666,13 @@ pub fn run_cinematic_fixture(
     write_new(&wav_path, physical_audio.master.wav_bytes())?;
 
     progress("stage=render begin");
-    let camera = critique_camera(duration_s).map_err(pipeline)?;
+    // The mechanics clock advances by repeated positive floating additions.
+    // Its admitted final endpoint can therefore lie a few ulps beyond the
+    // exact rational picture duration while remaining inside the separately
+    // checked forward-error bound above. Cover that retained endpoint exactly;
+    // otherwise scene admission rejects a valid high-rate trajectory before
+    // tracing even though every shutter remains inside the nominal picture.
+    let camera = critique_camera(duration_s, retained_time_s).map_err(pipeline)?;
     let mut scene_config = EulerSceneConfig::reference(camera);
     // The cinematic defaults increase the actual intersected render geometry
     // so glossy highlights follow matching geometric normals instead of
@@ -4914,6 +4962,7 @@ pub fn run_cinematic_fixture(
                             blue: &blue,
                             motion_prev_x: guides.motion_prev_x(),
                             motion_prev_y: guides.motion_prev_y(),
+                            previous_motion_valid: None,
                             axial_depth_m: guides.axial_depth_m(),
                             normal_x: guides.normal_x(),
                             normal_y: guides.normal_y(),
@@ -5015,6 +5064,7 @@ pub fn run_cinematic_fixture(
                             blue: &blue,
                             motion_prev_x: guides.motion_prev_x(),
                             motion_prev_y: guides.motion_prev_y(),
+                            previous_motion_valid: None,
                             axial_depth_m: guides.axial_depth_m(),
                             normal_x: guides.normal_x(),
                             normal_y: guides.normal_y(),
@@ -5124,6 +5174,7 @@ pub fn run_cinematic_fixture(
                             blue: &blue,
                             motion_prev_x: guides.motion_prev_x(),
                             motion_prev_y: guides.motion_prev_y(),
+                            previous_motion_valid: None,
                             axial_depth_m: guides.axial_depth_m(),
                             normal_x: guides.normal_x(),
                             normal_y: guides.normal_y(),
@@ -5413,6 +5464,7 @@ fn adaptive_beauty_to_exr(
                 fs_render::tracer::DirectStrategy::NeeOnly => "nee-only",
                 fs_render::tracer::DirectStrategy::BsdfOnly => "bsdf-only",
                 fs_render::tracer::DirectStrategy::Mis => "mis",
+                fs_render::tracer::DirectStrategy::PowerMis => "power-mis",
             }
             .to_owned(),
         ),
@@ -6385,7 +6437,10 @@ fn admit_fixture_output_convergence(
     Ok(())
 }
 
-fn critique_camera(duration_s: f64) -> Result<AnimatedCamera, fs_render::camera::CameraError> {
+fn critique_camera(
+    nominal_duration_s: f64,
+    retained_trajectory_horizon_s: f64,
+) -> Result<AnimatedCamera, fs_render::camera::CameraError> {
     let eye = Point3::new(
         CRITIQUE_CAMERA_EYE_M[0],
         CRITIQUE_CAMERA_EYE_M[1],
@@ -6404,7 +6459,12 @@ fn critique_camera(duration_s: f64) -> Result<AnimatedCamera, fs_render::camera:
         target.delta_from(eye).norm(),
         Aperture::try_circular(0.0)?,
     )?;
-    AnimatedCamera::try_static(1, 0.0, duration_s, physical)
+    AnimatedCamera::try_static(
+        1,
+        0.0,
+        nominal_duration_s.max(retained_trajectory_horizon_s),
+        physical,
+    )
 }
 
 fn component(
@@ -6626,6 +6686,7 @@ fn fixture_physical_reconstruction_filter_spec() -> AudioReconstructionFilterSpe
 fn fixture_timeline_identity(
     frames: u32,
     audio_frame_count: u64,
+    preroll_audio_frame_count: u64,
     warm_start_checkpoint_identity: Option<ContentHash>,
 ) -> ContentHash {
     let mut hasher = DomainHasher::new("org.frankensim.euler-critique.master-clocks.v3");
@@ -6637,7 +6698,7 @@ fn fixture_timeline_identity(
     hasher.update(&audio_frame_count.to_le_bytes());
     if let Some(identity) = warm_start_checkpoint_identity {
         hasher.update(AUDIO_PREROLL_POLICY_ID.as_bytes());
-        hasher.update(&AUDIO_PREROLL_SAMPLE_FRAMES.to_le_bytes());
+        hasher.update(&preroll_audio_frame_count.to_le_bytes());
         hasher.update(identity.as_bytes());
     } else {
         hasher.update(b"zero-state-origin");
@@ -6771,7 +6832,7 @@ fn prepare_fixture_audio_candidate(
         resampler.filter_identity(),
         video_clock,
         audio_clock,
-        fixture_timeline_identity(video_frame_count, audio_frame_count, None),
+        fixture_timeline_identity(video_frame_count, audio_frame_count, 0, None),
         mappings.to_vec(),
     )?;
     mapper
@@ -6998,6 +7059,7 @@ fn synthesize_audio_convergence_pair(
     modal: &ModalSynthesisModel,
     mappings: &[SoundExcitationControl],
     full_audio_frame_count: u64,
+    preroll_audio_frame_count: u64,
     published_video_frame_count: u32,
     published_audio_frame_count: u64,
     output_video_clock: CinematicClock,
@@ -7011,7 +7073,7 @@ fn synthesize_audio_convergence_pair(
         ));
     }
     if full_audio_frame_count.checked_sub(published_audio_frame_count)
-        != Some(AUDIO_PREROLL_SAMPLE_FRAMES)
+        != Some(preroll_audio_frame_count)
     {
         return Err(CinematicFixtureError::Pipeline(
             "audio convergence full and published horizons do not share the exact preroll".into(),
@@ -7032,7 +7094,7 @@ fn synthesize_audio_convergence_pair(
     let coarse_initial_modal = modal.initial_checkpoint(cx).map_err(pipeline)?;
     let fine_initial_modal = modal.initial_checkpoint(cx).map_err(pipeline)?;
     let preroll_chunk_frames = NonZeroUsize::new(
-        usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+        usize::try_from(preroll_audio_frame_count)
             .expect("audio preroll frame count is representable as usize"),
     )
     .expect("audio preroll is nonzero");
@@ -7057,7 +7119,7 @@ fn synthesize_audio_convergence_pair(
     validate_audio_pair_progress(
         "resampling preroll",
         0,
-        AUDIO_PREROLL_SAMPLE_FRAMES,
+        preroll_audio_frame_count,
         coarse_preroll.diagnostics.start_audio_frame_offset,
         coarse_preroll.diagnostics.end_audio_frame_offset,
         coarse_preroll.successor.next_audio_frame_offset(),
@@ -7081,7 +7143,7 @@ fn synthesize_audio_convergence_pair(
     validate_audio_pair_progress(
         "modal preroll",
         0,
-        AUDIO_PREROLL_SAMPLE_FRAMES,
+        preroll_audio_frame_count,
         coarse_warmed.diagnostics.start_sample_frame,
         coarse_warmed.diagnostics.end_sample_frame,
         coarse_warmed.successor.next_sample_frame(),
@@ -7209,7 +7271,7 @@ fn synthesize_audio_convergence_pair(
     let coarse_crop = coarse
         .resampler
         .try_crop(
-            AUDIO_PREROLL_SAMPLE_FRAMES,
+            preroll_audio_frame_count,
             full_audio_frame_count,
             output_video_clock,
             output_audio_clock,
@@ -7218,7 +7280,7 @@ fn synthesize_audio_convergence_pair(
     let fine_crop = fine
         .resampler
         .try_crop(
-            AUDIO_PREROLL_SAMPLE_FRAMES,
+            preroll_audio_frame_count,
             full_audio_frame_count,
             output_video_clock,
             output_audio_clock,
@@ -7272,6 +7334,7 @@ fn synthesize_audio_convergence_pair(
         fixture_timeline_identity(
             published_video_frame_count,
             published_audio_frame_count,
+            preroll_audio_frame_count,
             Some(coarse_crop_binding_identity),
         ),
         mappings.to_vec(),
@@ -7287,6 +7350,7 @@ fn synthesize_audio_convergence_pair(
         fixture_timeline_identity(
             published_video_frame_count,
             published_audio_frame_count,
+            preroll_audio_frame_count,
             Some(fine_crop_binding_identity),
         ),
         mappings.to_vec(),
@@ -7352,14 +7416,17 @@ fn build_audio(
     let (audio_frame_count, video_clock, audio_clock) = fixture_master_clocks(config.frames)?;
     let preroll_video_frames = config
         .frames
-        .checked_add(AUDIO_PREROLL_VIDEO_FRAMES)
+        .checked_add(config.mechanics_preroll_video_frames)
         .ok_or_else(|| CinematicFixtureError::Pipeline("audio preroll frame overflow".into()))?;
     let (preroll_audio_frame_count, preroll_video_clock, preroll_audio_clock) =
         fixture_master_clocks(preroll_video_frames)?;
-    if preroll_audio_frame_count.checked_sub(audio_frame_count) != Some(AUDIO_PREROLL_SAMPLE_FRAMES)
+    let expected_preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
+        * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS);
+    if preroll_audio_frame_count.checked_sub(audio_frame_count)
+        != Some(expected_preroll_audio_frame_count)
     {
         return Err(CinematicFixtureError::Pipeline(
-            "audio preroll is not exactly one 24 Hz frame at 48 kHz".into(),
+            "audio preroll clocks do not match the configured 24 Hz frame horizon".into(),
         ));
     }
     let (chirp_start_hz, chirp_end_hz) = trajectory_body_contact_chirp_bounds(trajectory)?;
@@ -7490,6 +7557,7 @@ fn build_audio(
         &modal,
         &mappings,
         preroll_audio_frame_count,
+        expected_preroll_audio_frame_count,
         config.frames,
         audio_frame_count,
         video_clock,
@@ -7659,6 +7727,8 @@ fn build_physical_audio(
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
 ) -> Result<FixturePhysicalAudio, CinematicFixtureError> {
+    let expected_preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
+        * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS);
     let disc_controls = config.disc_structural_acoustics;
     let disc_has_fillet = matches!(
         physical_disc.specimen.profile.spec,
@@ -7785,7 +7855,9 @@ fn build_physical_audio(
         resolved_contact_drive_bandwidth_hz(&controls, &config.mechanics)?;
     let clock_roundoff_operation_count = usize::try_from(
         u64::from(config.mechanics.sample_rate_hz)
-            .checked_mul(u64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES))
+            .checked_mul(u64::from(
+                config.frames + config.mechanics_preroll_video_frames,
+            ))
             .ok_or_else(|| {
                 CinematicFixtureError::Pipeline("audio clock operation budget overflow".into())
             })?
@@ -7871,7 +7943,7 @@ fn build_physical_audio(
     let plate_left = plate_pressure
         .pop()
         .expect("two-channel plate result has a left signal");
-    let first = usize::try_from(AUDIO_PREROLL_SAMPLE_FRAMES)
+    let first = usize::try_from(expected_preroll_audio_frame_count)
         .map_err(|_| CinematicFixtureError::Pipeline("audio preroll exceeds usize".into()))?;
     let expected_published_frames = usize::try_from(
         u64::from(config.frames) * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS),
@@ -7907,14 +7979,18 @@ fn build_physical_audio(
     let left_pressure_identity = left.identity;
     let right_pressure_identity = right.identity;
     let metadata = WavMetadata::try_new(Some(
-        "FrankenSim Euler disc: contact-driven structural response with causal retarded-time baffled-Rayleigh plate radiation and any in-band disc FEM/BEM modes; deterministic PCM24 listening gain; uncalibrated material/support inputs"
+        "FrankenSim Euler disc: contact-driven structural response with causal retarded-time baffled-Rayleigh plate radiation and any in-band disc FEM/BEM modes; fixed-calibration PCM24 listening derivative; uncalibrated material/support inputs"
             .to_owned(),
     ))
     .map_err(pipeline)?;
+    let listening_policy = PressureListeningMasterPolicy {
+        digital_gain_fs_per_pa: config.listening_gain_fs_per_pa,
+        ..PressureListeningMasterPolicy::CRITIQUE
+    };
     let master = PhysicalPressureListeningMaster::try_build(
         &left,
         &right,
-        PressureListeningMasterPolicy::CRITIQUE,
+        listening_policy,
         &metadata,
         AudioArtifactBudget::DEFAULT,
         cx,
@@ -8730,10 +8806,11 @@ fn production_fixture_manifest(
             "  \"mechanics\": {{\"model\":\"generic transactional rigid-profile/contact/tribology/exterior-gas/modal-support composition\",",
             "\"initial_motion\":\"{}\",",
             "\"mechanics_sample_rate_hz\":{},\"control_sample_rate_hz\":{},",
+            "\"coupled_preroll_video_frames\":{},\"coupled_preroll_duration_s\":{:.17e},",
             "\"accepted_mechanics_steps\":{},\"fine_control_intervals\":{},\"coarse_audio_control_intervals\":{},",
             "\"branch_transition_count\":{},\"fine_normal_impulse_n_s\":{:.17e},",
             "\"coarse_normal_impulse_n_s\":{:.17e},\"coarsening_impulse_residual_n_s\":{:.17e},",
-            "\"mechanics_dt_refinement\":\"outstanding; 384 kHz passed an 85.3 ms probe after 48/96/192 kHz showed nonconverged contact transients\",",
+            "\"mechanics_dt_refinement\":\"outstanding; this artifact is one mechanics-timestep member and does not establish full-duration dt/dt2 convergence\",",
             "\"trajectory_identity\":\"{}\",\"disc\":{},",
             "\"contact_surfaces\":{{\"disc\":{},\"support\":{}}}}},\n",
             "  \"audio\": {{\"primary\":\"physical-listening-master.pcm24.wav\",",
@@ -8759,7 +8836,7 @@ fn production_fixture_manifest(
             "  \"mux\": {},\n",
             "  \"no_claims\": [",
             "\"constitutive cards and initial conditions are disclosed estimates, not calibration to a measured Euler-disc run\",",
-            "\"the 384 kHz mechanics timestep has a bounded startup probe but no full-duration dt/dt2 convergence certificate yet\",",
+            "\"the selected mechanics timestep has no full-duration dt/dt2 convergence certificate yet\",",
             "\"the current fixed-topology contact composition admits solid isotropic states and refuses liquid fraction, plastic flow, fracture, wear-driven geometry evolution, and remeshing\",",
             "\"temperature and phase are parameterized inputs, but transient heat transport, latent-heat evolution, melting deformation, free-surface flow, and phase-dependent optical remeshing are not yet coupled\",",
             "\"the pressure stem is an uncalibrated linear structural-radiation estimate; digital listening-master gain is presentation mastering and not an SPL claim\",",
@@ -8790,6 +8867,8 @@ fn production_fixture_manifest(
         json_escape(&format!("{:?}", config.mechanics.initial_motion)),
         config.mechanics.sample_rate_hz,
         SOUND_MASTER_SAMPLE_RATE_HZ,
+        config.mechanics_preroll_video_frames,
+        f64::from(config.mechanics_preroll_video_frames) / f64::from(CRITIQUE_FPS),
         fine_controls.accepted_mechanics_steps,
         fine_controls.intervals.len(),
         coarse_controls.intervals.len(),
@@ -9074,7 +9153,7 @@ fn fixture_manifest(
             "\"digital_gain_fs_per_pa\":{:.17e},\"digital_gain_db\":{:.9},",
             "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
             "\"stereo_rms_fs\":{:.17e},\"integrated_loudness_lufs\":{},",
-            "\"listening_master_policy\":{{\"method\":\"deterministic raised-cosine media-cut boundary window followed by one scalar pressure-to-digital gain; no EQ, compression, limiter, synthesis preset, or material-name dispatch\",\"initial_fade_sample_frames\":{},\"terminal_fade_sample_frames\":{},\"target_true_peak_fs\":{:.17e}}}}}"
+            "\"listening_master_policy\":{{\"method\":\"deterministic raised-cosine media-cut boundary window followed by caller-declared fixed pressure-to-digital calibration; no per-clip normalization, EQ, compression, limiter, synthesis preset, or material-name dispatch\",\"initial_fade_sample_frames\":{},\"terminal_fade_sample_frames\":{},\"digital_gain_fs_per_pa\":{:.17e},\"maximum_true_peak_fs\":{:.17e}}}}}"
         ),
         SOUND_MASTER_SAMPLE_RATE_HZ,
         wav_identity.to_hex(),
@@ -9113,7 +9192,8 @@ fn fixture_manifest(
         physical_loudness,
         PressureListeningMasterPolicy::CRITIQUE.initial_fade_sample_frames,
         PressureListeningMasterPolicy::CRITIQUE.terminal_fade_sample_frames,
-        PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs,
+        physical_audio.master.digital_gain_fs_per_pa,
+        PressureListeningMasterPolicy::CRITIQUE.maximum_true_peak_fs,
     );
     format!(
         concat!(
@@ -9344,6 +9424,24 @@ mod tests {
             (retained_time_s - (expected_duration_s - 1.0e-7)).abs() > roundoff_bound_s,
             "the bound must reject a physically meaningful horizon mismatch"
         );
+    }
+
+    #[test]
+    fn g0_critique_camera_covers_admitted_positive_clock_drift() {
+        with_test_cx(|cx| {
+            let nominal_duration_s = 8.0_f64;
+            let retained_horizon_s = f64::from_bits(nominal_duration_s.to_bits() + 8);
+            let camera = critique_camera(nominal_duration_s, retained_horizon_s)
+                .expect("static critique camera");
+
+            assert_eq!(
+                camera.shots()[0].end_s().to_bits(),
+                retained_horizon_s.to_bits(),
+            );
+            camera
+                .evaluate(cx, retained_horizon_s, CutSide::After)
+                .expect("retained endpoint is inside the camera shot");
+        });
     }
 
     #[test]
@@ -9581,24 +9679,14 @@ mod tests {
                     .all(|height_m| height_m.to_bits() == 0.0_f64.to_bits()),
                 "the declared smooth support must not acquire generated texture"
             );
-            let realized_disc_rms_m = fs_math::det::sqrt(
+            assert!(
                 surface
                     .surface_a
                     .trace
                     .heights_m()
                     .iter()
-                    .map(|height_m| height_m * height_m)
-                    .sum::<f64>()
-                    / surface.surface_a.trace.heights_m().len() as f64,
-            );
-            let CinematicSurfaceSpectrumConfig::SelfAffine(disc_spectrum) =
-                &config.mechanics.disc_surface.spectrum
-            else {
-                panic!("default disc surface stopped using the physical self-affine profile");
-            };
-            assert!(
-                (realized_disc_rms_m / disc_spectrum.rms_height_m() - 1.0).abs() < 2.0e-13,
-                "realized fixture geometry changed the declared RMS height"
+                    .all(|height_m| height_m.to_bits() == 0.0_f64.to_bits()),
+                "unmeasured disc topography must remain the exact ideal-smooth default"
             );
 
             let mechanics_steps_per_control_interval =
@@ -9890,14 +9978,37 @@ mod tests {
         assert!(config.denoise_previews);
         assert!(config.retain_full_aov_exr);
         assert!(config.spatialize_audio);
+        assert_eq!(
+            config.listening_gain_fs_per_pa.to_bits(),
+            512.0_f64.to_bits()
+        );
         assert_eq!(config.adaptive_sampling, None);
         assert_eq!(config.render_sample_ceiling(), config.samples_per_pixel);
+        assert_eq!(config.mechanics.sample_rate_hz, 1_536_000);
+    }
+
+    #[test]
+    fn listening_pressure_calibration_must_be_finite_and_positive() {
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut config = CinematicFixtureConfig::default();
+            config.listening_gain_fs_per_pa = invalid;
+            assert!(matches!(
+                config.validate(),
+                Err(CinematicFixtureError::InvalidConfig(
+                    "listening_gain_fs_per_pa must be finite and positive"
+                ))
+            ));
+        }
     }
 
     #[test]
     fn bdpt_fixture_mode_refuses_misaligned_aovs_and_adaptive_sampling() {
         let mut config = CinematicFixtureConfig::default();
         config.render_integrator = CinematicRenderIntegrator::Bidirectional;
+        assert_eq!(
+            config.render_integrator.identity(),
+            "finite-light-bdpt-v6-power2-spectral4-split1-slab-nee1"
+        );
         assert!(matches!(
             config.validate(),
             Err(CinematicFixtureError::InvalidConfig(
@@ -10260,18 +10371,39 @@ mod tests {
     }
 
     #[test]
-    fn source_bound_fixture_requires_exact_eight_second_frame_count() {
+    fn cinematic_duration_is_positive_and_bounded_by_eight_seconds() {
         let mut config = CinematicFixtureConfig::default();
-        config.frames = 191;
-        assert!(matches!(
-            config.validate(),
-            Err(CinematicFixtureError::InvalidConfig(_))
-        ));
+        config.frames = 1;
+        config.validate().unwrap();
+        config.frames = 144;
+        config.validate().unwrap();
+        config.frames = CRITIQUE_FRAMES;
+        config.validate().unwrap();
+
+        config.frames = 0;
+        assert!(config.validate().is_err());
         config.frames = 193;
-        assert!(matches!(
-            config.validate(),
-            Err(CinematicFixtureError::InvalidConfig(_))
-        ));
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn coupled_preroll_and_dt2_mechanics_rung_are_explicitly_bounded() {
+        let mut config = CinematicFixtureConfig::default();
+        assert_eq!(config.mechanics_preroll_video_frames, 48);
+        config.mechanics.sample_rate_hz = 1_536_000;
+        config.validate().unwrap();
+        config.mechanics.sample_rate_hz = 3_072_000;
+        config.validate().unwrap();
+        config.mechanics.sample_rate_hz = 6_144_000;
+        config.validate().unwrap();
+
+        config.mechanics_preroll_video_frames = 0;
+        assert!(config.validate().is_err());
+        config.mechanics_preroll_video_frames = 241;
+        assert!(config.validate().is_err());
+        config.mechanics_preroll_video_frames = 48;
+        config.mechanics.sample_rate_hz = 6_192_000;
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -10558,8 +10690,13 @@ mod tests {
             let benchmark = Thorne2026SteelGlassBenchmark::ambient().unwrap();
             let profile = benchmark.resolve_specimen(cx).unwrap();
             let refinement = cinematic_thorne_2026_refinement_evidence(&benchmark).unwrap();
-            let preroll_duration_s =
-                f64::from(AUDIO_PREROLL_VIDEO_FRAMES) / f64::from(CRITIQUE_FPS);
+            // The compact reduced benchmark retained by this unit test has
+            // only one video frame of pre-picture source history. Production
+            // defaults exercise the longer coupled settling horizon in the
+            // executable trajectory rather than extrapolating this fixture.
+            let preroll_video_frames = 1;
+            let preroll_audio_frames = u64::from(preroll_video_frames) * 2_000;
+            let preroll_duration_s = f64::from(preroll_video_frames) / f64::from(CRITIQUE_FPS);
             let published_duration_s = f64::from(CRITIQUE_FRAMES) / f64::from(CRITIQUE_FPS);
             let (coarse_preroll_trajectory, coarse_trajectory) =
                 RenderTrajectory::from_reduced_decay_run_with_causal_preroll(
@@ -10618,6 +10755,7 @@ mod tests {
                 );
             }
             let mut convergence_config = CinematicFixtureConfig::default();
+            convergence_config.mechanics_preroll_video_frames = preroll_video_frames;
             convergence_config.samples_per_pixel = 4;
             let convergence = fixture_output_convergence_evidence(
                 &coarse_preroll_trajectory,
@@ -10753,6 +10891,7 @@ mod tests {
             let mut expected_warm_start = None;
             for spatialize_audio in [true, false] {
                 let mut config = CinematicFixtureConfig::default();
+                config.mechanics_preroll_video_frames = preroll_video_frames;
                 config.spatialize_audio = spatialize_audio;
                 config.disc_structural_acoustics = CinematicDiscStructuralAcousticConfig {
                     core_radial_segments: 2,
@@ -10791,12 +10930,15 @@ mod tests {
                     .sample_peak_fs
                     .max(audio.physical.master.meters.true_peak_estimate_fs);
                 assert!(audio.physical.master.source_peak_abs_pressure_pa > 0.0);
-                let physical_peak_target =
-                    PressureListeningMasterPolicy::CRITIQUE.target_true_peak_fs;
+                let physical_peak_ceiling =
+                    PressureListeningMasterPolicy::CRITIQUE.maximum_true_peak_fs;
+                assert_eq!(
+                    audio.physical.master.digital_gain_fs_per_pa.to_bits(),
+                    config.listening_gain_fs_per_pa.to_bits()
+                );
                 assert!(
-                    physical_peak > 0.99 * physical_peak_target
-                        && physical_peak <= physical_peak_target + 1.0e-12,
-                    "physical listening-master peak {physical_peak} did not meet declared target {physical_peak_target}"
+                    physical_peak > 0.0 && physical_peak <= physical_peak_ceiling + 1.0e-12,
+                    "physical listening-master peak {physical_peak} exceeded declared ceiling {physical_peak_ceiling}"
                 );
                 assert!(matches!(
                     &audio.physical.disc_radiator,
@@ -10816,13 +10958,10 @@ mod tests {
                     audio.warm_start_source_identity, audio.published_trajectory_identity,
                     "full source and rebased picture trajectory must remain distinct"
                 );
-                assert_eq!(
-                    audio.crop_first_source_audio_frame,
-                    AUDIO_PREROLL_SAMPLE_FRAMES
-                );
+                assert_eq!(audio.crop_first_source_audio_frame, preroll_audio_frames);
                 assert_eq!(
                     audio.crop_end_source_audio_frame,
-                    u64::from(CRITIQUE_FRAMES + AUDIO_PREROLL_VIDEO_FRAMES) * 2_000
+                    u64::from(CRITIQUE_FRAMES + preroll_video_frames) * 2_000
                 );
                 let synthesis = audio.artifact.manifest().synthesis();
                 assert_eq!(
@@ -10875,7 +11014,7 @@ mod tests {
                 let post_fade_rms = stereo_rms(&decoded.samples[960..4_800]);
                 let startup_ratio = startup_rms / post_fade_rms;
                 eprintln!(
-                    "spatialize_audio={spatialize_audio} modal_warm_start_frames={AUDIO_PREROLL_SAMPLE_FRAMES} startup_0_10ms_rms_fs={startup_rms:.9e} post_fade_20_100ms_rms_fs={post_fade_rms:.9e} startup_ratio={startup_ratio:.9}"
+                    "spatialize_audio={spatialize_audio} modal_warm_start_frames={preroll_audio_frames} startup_0_10ms_rms_fs={startup_rms:.9e} post_fade_20_100ms_rms_fs={post_fade_rms:.9e} startup_ratio={startup_ratio:.9}"
                 );
                 assert!(startup_rms > 0.0);
                 assert!(post_fade_rms > 0.0);

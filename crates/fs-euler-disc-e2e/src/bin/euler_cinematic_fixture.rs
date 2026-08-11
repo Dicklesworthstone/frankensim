@@ -9,13 +9,15 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_euler_disc_e2e::cinematic_fixture::{
     CinematicAdaptiveSamplingConfig, CinematicFixtureConfig, CinematicFrameWindow,
     CinematicIndependentPilotSamplingConfig, CinematicInitialMotionConfig,
-    CinematicRenderIntegrator, run_cinematic_fixture,
+    CinematicPeriodicSurfaceConfig, CinematicRenderIntegrator, CinematicSurfaceSpectrumConfig,
+    run_cinematic_fixture,
 };
 use fs_euler_disc_e2e::render_scene_bridge::{
     MAX_EULER_ARC_SUBDIVISIONS, MAX_EULER_AZIMUTHAL_SEGMENTS,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_render::tracer::Sampler;
+use fs_tribo::{InputAuthority, surface_excitation::SelfAffinePeriodicProfileSpectrum};
 
 fn main() {
     if let Err(error) = run() {
@@ -166,6 +168,52 @@ fn run() -> Result<(), String> {
                 config.mechanics.initial_motion =
                     parse_initial_inclination(&next_value(&mut args, "--initial-inclination-rad")?)?
             }
+            "--support-plate-thickness-m" => {
+                config.support_plate.thickness_m = parse_support_plate_thickness(&next_value(
+                    &mut args,
+                    "--support-plate-thickness-m",
+                )?)?
+            }
+            "--mechanics-sample-rate" => {
+                config.mechanics.sample_rate_hz = parse(
+                    &next_value(&mut args, "--mechanics-sample-rate")?,
+                    "mechanics-sample-rate",
+                )?
+            }
+            "--mechanics-preroll-frames" => {
+                config.mechanics_preroll_video_frames = parse(
+                    &next_value(&mut args, "--mechanics-preroll-frames")?,
+                    "mechanics-preroll-frames",
+                )?
+            }
+            "--listening-gain-fs-per-pa" => {
+                config.listening_gain_fs_per_pa = parse(
+                    &next_value(&mut args, "--listening-gain-fs-per-pa")?,
+                    "listening-gain-fs-per-pa",
+                )?
+            }
+            "--disc-surface-self-affine" => apply_self_affine_surface(
+                &mut config.mechanics.disc_surface,
+                "disc",
+                &next_value(&mut args, "--disc-surface-self-affine")?,
+            )?,
+            "--support-surface-self-affine" => apply_self_affine_surface(
+                &mut config.mechanics.support_surface,
+                "support",
+                &next_value(&mut args, "--support-surface-self-affine")?,
+            )?,
+            "--disc-surface-samples" => {
+                config.mechanics.disc_surface.sample_count = parse(
+                    &next_value(&mut args, "--disc-surface-samples")?,
+                    "disc-surface-samples",
+                )?
+            }
+            "--support-surface-samples" => {
+                config.mechanics.support_surface.sample_count = parse(
+                    &next_value(&mut args, "--support-surface-samples")?,
+                    "support-surface-samples",
+                )?
+            }
             "--azimuthal-segments" => {
                 let value = next_value(&mut args, "--azimuthal-segments")?;
                 apply_tessellation_control(&mut config, "--azimuthal-segments", &value)?;
@@ -206,11 +254,17 @@ fn run() -> Result<(), String> {
             "--help" | "-h" => {
                 println!(
                     "Usage: euler_cinematic_fixture [--output DIR] [--width PX] [--height PX] \
-                     [--frames 192] [--frame-start N --frame-count N --no-mux] \
+                     [--frames 1..=192] [--frame-start N --frame-count N --no-mux] \
                      [--spp N] [--sampler iid|owen-pixel|owen-full-path] \
                      [--integrator camera-path|bdpt|bdpt-camera-connected] \
                      [--render-seed-salt N] [--max-depth N] [--shutter-angle 0..360] \
                      [--initial-inclination-rad 0<THETA<=0.35] \
+                     [--support-plate-thickness-m POSITIVE_METRES] \
+                     [--mechanics-sample-rate HZ] [--mechanics-preroll-frames 1..240] \
+                     [--listening-gain-fs-per-pa POSITIVE] \
+                     [--disc-surface-self-affine RMS_M,HURST,MIN_CYCLE,MAX_CYCLE,SEED] \
+                     [--support-surface-self-affine RMS_M,HURST,MIN_CYCLE,MAX_CYCLE,SEED] \
+                     [--disc-surface-samples N] [--support-surface-samples N] \
                      [--azimuthal-segments 8..4096] [--arc-subdivisions 1..1024] \
                      [--adaptive --adaptive-min-spp N --adaptive-max-spp N \
                       --adaptive-batch-spp N --adaptive-abs-error X --adaptive-rel-error X \
@@ -446,6 +500,48 @@ fn parse_initial_inclination(value: &str) -> Result<CinematicInitialMotionConfig
     Ok(CinematicInitialMotionConfig::SmallAngleNoSlip { inclination_rad })
 }
 
+fn parse_support_plate_thickness(value: &str) -> Result<f64, String> {
+    let thickness_m: f64 = parse(value, "support-plate-thickness-m")?;
+    if !(thickness_m.is_finite() && thickness_m > 0.0) {
+        return Err(format!(
+            "support-plate-thickness-m must be finite and positive: {value}"
+        ));
+    }
+    Ok(thickness_m)
+}
+
+fn apply_self_affine_surface(
+    surface: &mut CinematicPeriodicSurfaceConfig,
+    surface_name: &str,
+    value: &str,
+) -> Result<(), String> {
+    let fields = value.split(',').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(format!(
+            "invalid {surface_name} self-affine surface: expected RMS_M,HURST,MIN_CYCLE,MAX_CYCLE,SEED: {value}"
+        ));
+    }
+    let rms_height_m = parse(fields[0], &format!("{surface_name}-surface-rms-height-m"))?;
+    let hurst_exponent = parse(fields[1], &format!("{surface_name}-surface-hurst"))?;
+    let minimum_cycles_per_track = parse(fields[2], &format!("{surface_name}-surface-min-cycle"))?;
+    let maximum_cycles_per_track = parse(fields[3], &format!("{surface_name}-surface-max-cycle"))?;
+    let phase_seed = parse(fields[4], &format!("{surface_name}-surface-seed"))?;
+    let spectrum = SelfAffinePeriodicProfileSpectrum::new(
+        rms_height_m,
+        hurst_exponent,
+        minimum_cycles_per_track,
+        maximum_cycles_per_track,
+        phase_seed,
+    )
+    .map_err(|error| format!("invalid {surface_name} self-affine surface: {error}"))?;
+    surface.spectrum = CinematicSurfaceSpectrumConfig::SelfAffine(spectrum);
+    surface.authority = InputAuthority::CallerDeclared;
+    surface.source_id = format!(
+        "cli:caller-declared-self-affine:{surface_name}:rms={rms_height_m:.17e}:hurst={hurst_exponent:.17e}:cycles={minimum_cycles_per_track}..={maximum_cycles_per_track}:seed={phase_seed}"
+    );
+    Ok(())
+}
+
 fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next()
         .ok_or_else(|| format!("missing value for {flag}"))
@@ -666,6 +762,64 @@ mod tests {
         assert_eq!(
             parse_initial_inclination("NaN").unwrap_err(),
             "initial-inclination-rad must be finite and in (0, 0.35]: NaN"
+        );
+    }
+
+    #[test]
+    fn support_plate_thickness_cli_changes_the_shared_physical_plate() {
+        assert_eq!(parse_support_plate_thickness("0.020").unwrap(), 0.020);
+        assert_eq!(
+            parse_support_plate_thickness("0").unwrap_err(),
+            "support-plate-thickness-m must be finite and positive: 0"
+        );
+        assert_eq!(
+            parse_support_plate_thickness("NaN").unwrap_err(),
+            "support-plate-thickness-m must be finite and positive: NaN"
+        );
+    }
+
+    #[test]
+    fn self_affine_surface_cli_changes_upstream_contact_geometry() {
+        let mut config = CinematicFixtureConfig::default();
+        apply_self_affine_surface(
+            &mut config.mechanics.disc_surface,
+            "disc",
+            "4.5e-10,0.8,3,96,24301",
+        )
+        .unwrap();
+        assert_eq!(
+            config.mechanics.disc_surface.authority,
+            InputAuthority::CallerDeclared
+        );
+        let CinematicSurfaceSpectrumConfig::SelfAffine(spectrum) =
+            config.mechanics.disc_surface.spectrum
+        else {
+            panic!("CLI must configure self-affine contact geometry");
+        };
+        assert_eq!(spectrum.rms_height_m(), 4.5e-10);
+        assert_eq!(spectrum.hurst_exponent(), 0.8);
+        assert_eq!(spectrum.minimum_cycles_per_track(), 3);
+        assert_eq!(spectrum.maximum_cycles_per_track(), 96);
+        assert_eq!(spectrum.phase_seed(), 24_301);
+        config.validate().unwrap();
+
+        assert!(
+            apply_self_affine_surface(
+                &mut config.mechanics.support_surface,
+                "support",
+                "4.5e-10,0.8,3,96",
+            )
+            .unwrap_err()
+            .contains("expected RMS_M,HURST,MIN_CYCLE,MAX_CYCLE,SEED")
+        );
+        assert!(
+            apply_self_affine_surface(
+                &mut config.mechanics.support_surface,
+                "support",
+                "4.5e-10,1.2,3,96,24302",
+            )
+            .unwrap_err()
+            .contains("invalid support self-affine surface")
         );
     }
 }

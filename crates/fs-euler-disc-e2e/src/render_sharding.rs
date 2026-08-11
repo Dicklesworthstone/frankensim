@@ -1857,6 +1857,7 @@ impl<'a> PlanReader<'a> {
             0 => DirectStrategy::NeeOnly,
             1 => DirectStrategy::BsdfOnly,
             2 => DirectStrategy::Mis,
+            3 => DirectStrategy::PowerMis,
             _ => {
                 return Err(EulerRenderShardingError::Codec(
                     "unknown direct-strategy tag",
@@ -2259,6 +2260,7 @@ const fn strategy_tag(strategy: DirectStrategy) -> u8 {
         DirectStrategy::NeeOnly => 0,
         DirectStrategy::BsdfOnly => 1,
         DirectStrategy::Mis => 2,
+        DirectStrategy::PowerMis => 3,
     }
 }
 
