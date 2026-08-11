@@ -14,9 +14,19 @@ use super::*;
 /// Version 2 corrected the global sample multiplicity and estimator
 /// normalization of light-subpath strategies that splat into the raster.
 /// Version 3 uses the squared-density power heuristic for the finite-light
-/// strategy pyramid; this remains unbiased while suppressing contributions
-/// from strategies whose path density is dominated by a better technique.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 3;
+/// strategy pyramid. Version 4 evaluates the same four-wavelength randomized
+/// stratification as the camera-path integrator instead of spending an entire
+/// path on one hero wavelength. Version 5 deterministically enumerates the
+/// reflection and transmission terms at the first smooth camera-side
+/// dielectric boundary, while leaving subsequent boundaries sampled. These
+/// changes preserve estimator expectation and reduce chromatic and primary
+/// Fresnel variance without clamping energy or growing an exponential tree.
+/// Version 6 adds the existing exact parallel-slab finite-light proposal for
+/// camera paths whose prefix contains no non-delta surface. In that restricted
+/// path class the proposal's only admissible competitor is the camera random
+/// walk, so both sides use an explicit complementary power-heuristic weight;
+/// more general manifold-path MIS remains outside this estimator's claim.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 6;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -49,11 +59,11 @@ const CONNECTION_DOMAIN: u32 = 0x4244_434e;
 /// Counts of evaluated and nonzero path-space strategies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BidirectionalStrategyStats {
-    /// Candidate `(s,t)` strategies within the configured depth bound.
+    /// Candidate `(s,t)` strategies across spectral lanes within the depth bound.
     pub evaluated: u64,
-    /// Candidates carrying a finite, positive contribution before MIS.
+    /// Spectral-lane candidates carrying a finite, positive contribution after MIS.
     pub nonzero: u64,
-    /// Light-subpath contributions projected into a raster pixel (`t=1`).
+    /// Spectral-lane light-subpath contributions projected into a pixel (`t=1`).
     pub camera_splats: u64,
 }
 
@@ -289,13 +299,21 @@ struct CameraSubpath {
     escape: Option<CameraEscape>,
 }
 
+struct WalkOutcome {
+    escape: Option<CameraEscape>,
+    forced_smooth_event_encountered: bool,
+    forced_smooth_event_survived: bool,
+}
+
 /// One cross-pixel camera splat staged under logical, scheduling-independent
-/// identity. A source pixel publishes these records only after all of its
-/// samples finish; source pixels themselves publish in ascending order.
+/// identity. A source pixel publishes these records only after every spectral
+/// lane for the current sample finishes; source pixels publish in ascending
+/// order.
 #[derive(Clone, Copy)]
 struct SplatRecord {
     target_pixel: u32,
     sample: u32,
+    wavelength_lane: u8,
     strategy_s: usize,
     xyz: [f64; 3],
 }
@@ -306,7 +324,14 @@ fn publish_source_splats(film: &mut Film, splats: &mut Vec<SplatRecord>) {
     // reduction order. The current serial source-pixel loop bounds scratch;
     // a parallel tile implementation can retain the same per-source batches
     // and merge source ranges in ascending order.
-    splats.sort_by_key(|record| (record.target_pixel, record.sample, record.strategy_s));
+    splats.sort_by_key(|record| {
+        (
+            record.target_pixel,
+            record.sample,
+            record.wavelength_lane,
+            record.strategy_s,
+        )
+    });
     for splat in splats.drain(..) {
         add_scaled_xyz(&mut film.xyz[splat.target_pixel as usize], splat.xyz);
     }
@@ -614,6 +639,70 @@ fn sample_surface(
     }
 }
 
+fn split_smooth_dielectric_surface(
+    scene: &Scene,
+    vertex: &Vertex,
+    wavelength_nm: f64,
+    mode: TransportMode,
+    event: DielectricEvent,
+) -> Result<Option<ScatterSample>, TracerError> {
+    let VertexKind::Surface { primitive_index } = vertex.kind else {
+        return Ok(None);
+    };
+    let Material::Dielectric { surface, .. } = scene.primitives[primitive_index].material else {
+        return Ok(None);
+    };
+    if !surface.is_delta() {
+        return Ok(None);
+    }
+    let wo = vertex.wo.ok_or(TracerError::InvalidInput)?;
+    let normal = oriented_normal(vertex, wo).ok_or(TracerError::MissingNormal)?;
+    let incident = vertex.medium_toward(wo).map(|entry| entry.glass);
+    let transmitted = vertex
+        .medium_toward(wo.scale(-1.0))
+        .map(|entry| entry.glass);
+    let eta_i = medium_ior(incident, wavelength_nm)?;
+    let eta_t = medium_ior(transmitted, wavelength_nm)?;
+    let incident_cosine = admitted_unit_dot(normal, wo).clamp(0.0, 1.0);
+    let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+    let (direction, weight) = match event {
+        DielectricEvent::Reflection => {
+            let weight = fresnel.reflectance;
+            if weight == 0.0 {
+                return Ok(None);
+            }
+            let direction = vec_add(normal.scale(2.0 * incident_cosine), wo.scale(-1.0));
+            (direction, weight)
+        }
+        DielectricEvent::Transmission => {
+            if fresnel.total_internal_reflection {
+                return Ok(None);
+            }
+            let (direction, probability) =
+                deterministic_snell_transmission(normal, wo.scale(-1.0), eta_i, eta_t)?;
+            let transport = match mode {
+                TransportMode::Radiance => {
+                    refractive_transport_factor(TransportMode::Radiance, eta_i, eta_t)
+                        .ok_or(TracerError::InvalidInput)?
+                }
+                TransportMode::Importance => 1.0,
+            };
+            (direction, probability * transport)
+        }
+    };
+    if !finite_unit_direction(direction) || !weight.is_finite() || weight <= 0.0 {
+        return Err(TracerError::InvalidInput);
+    }
+    Ok(Some(ScatterSample {
+        direction,
+        weight,
+        pdf_fwd_solid_angle: 0.0,
+        pdf_rev_solid_angle: 0.0,
+        delta: true,
+        event: Some(event),
+    }))
+}
+
 fn update_stack_after_sample(
     scene: &Scene,
     vertex: &Vertex,
@@ -649,26 +738,32 @@ fn random_walk(
     max_vertices: usize,
     vertices: &mut Vec<Vertex>,
     rng: &mut SubpathRng<'_>,
-) -> Result<Option<CameraEscape>, TracerError> {
+    forced_first_smooth_event: Option<DielectricEvent>,
+) -> Result<WalkOutcome, TracerError> {
     let mut stack = MediumStack::new();
     let mut segment_origin = ray.origin;
+    let mut forced_smooth_event_encountered = false;
     while vertices.len() < max_vertices {
         cx.checkpoint()?;
         let Some(intersection) = intersect(scene, cx, &ray, ray_time)? else {
             if stack.last().is_some() {
                 return Err(TracerError::InvalidInput);
             }
-            return Ok((mode == TransportMode::Radiance).then_some(CameraEscape {
-                beta,
-                origin: segment_origin,
-                direction: ray.dir,
-                previous_pdf_solid_angle: pdf_fwd_solid_angle,
-                // A primary camera ray has no competing light-sampling
-                // strategy at a surface. Treat the sensor endpoint like a
-                // delta predecessor for the environment MIS decision.
-                previous_delta: vertices.len() == 1
-                    || vertices.last().is_some_and(|vertex| vertex.delta),
-            }));
+            return Ok(WalkOutcome {
+                escape: (mode == TransportMode::Radiance).then_some(CameraEscape {
+                    beta,
+                    origin: segment_origin,
+                    direction: ray.dir,
+                    previous_pdf_solid_angle: pdf_fwd_solid_angle,
+                    // A primary camera ray has no competing light-sampling
+                    // strategy at a surface. Treat the sensor endpoint like a
+                    // delta predecessor for the environment MIS decision.
+                    previous_delta: vertices.len() == 1
+                        || vertices.last().is_some_and(|vertex| vertex.delta),
+                }),
+                forced_smooth_event_encountered,
+                forced_smooth_event_survived: true,
+            });
         };
 
         if let Some(active) = stack.last() {
@@ -714,15 +809,36 @@ fn random_walk(
             break;
         }
 
-        let Some(sample) = sample_surface(
-            scene,
-            vertices.last().unwrap(),
-            wavelength_nm,
-            mode,
-            rng.next4(),
-        )?
-        else {
-            break;
+        let random = rng.next4();
+        let current = vertices.last().ok_or(TracerError::InvalidInput)?;
+        let force_here = !forced_smooth_event_encountered
+            && forced_first_smooth_event.is_some()
+            && matches!(
+                current.kind,
+                VertexKind::Surface { primitive_index }
+                    if matches!(
+                        scene.primitives[primitive_index].material,
+                        Material::Dielectric { surface, .. } if surface.is_delta()
+                    )
+            );
+        let sampled = if force_here {
+            forced_smooth_event_encountered = true;
+            split_smooth_dielectric_surface(
+                scene,
+                current,
+                wavelength_nm,
+                mode,
+                forced_first_smooth_event.expect("forced event exists when admitted"),
+            )?
+        } else {
+            sample_surface(scene, current, wavelength_nm, mode, random)?
+        };
+        let Some(sample) = sampled else {
+            return Ok(WalkOutcome {
+                escape: None,
+                forced_smooth_event_encountered,
+                forced_smooth_event_survived: !force_here,
+            });
         };
         let current_index = vertices.len() - 1;
         vertices[current_index].delta = sample.delta;
@@ -749,11 +865,15 @@ fn random_walk(
             dir: sample.direction,
         };
     }
-    Ok(None)
+    Ok(WalkOutcome {
+        escape: None,
+        forced_smooth_event_encountered,
+        forced_smooth_event_survived: true,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_camera_subpath(
+fn generate_camera_subpaths(
     scene: &Scene,
     cx: &Cx<'_>,
     settings: &Settings,
@@ -764,30 +884,61 @@ fn generate_camera_subpath(
     pixel: u32,
     sample: u32,
     path_sobol: Option<&Sobol>,
-) -> Result<CameraSubpath, TracerError> {
+) -> Result<Vec<CameraSubpath>, TracerError> {
     let raster = physical_camera
         .pinhole_raster_sample(ray.origin.offset(ray.dir), settings.width, settings.height)?
         .ok_or(TracerError::InvalidInput)?;
     if raster.pixel != pixel {
         return Err(TracerError::InvalidInput);
     }
-    let mut vertices = Vec::with_capacity(settings.max_depth as usize + 2);
-    vertices.push(Vertex::camera(ray.origin));
-    let mut rng = SubpathRng::new(settings, pixel, sample, CAMERA_WALK_DOMAIN, path_sobol);
-    let escape = random_walk(
-        scene,
-        cx,
-        ray_time,
-        wavelength_nm,
-        TransportMode::Radiance,
-        ray,
-        1.0,
-        raster.pdf_solid_angle,
-        settings.max_depth as usize + 2,
-        &mut vertices,
-        &mut rng,
-    )?;
-    Ok(CameraSubpath { vertices, escape })
+    let walk = |event| {
+        let mut vertices = Vec::with_capacity(settings.max_depth as usize + 2);
+        vertices.push(Vertex::camera(ray.origin));
+        let mut rng = SubpathRng::new(settings, pixel, sample, CAMERA_WALK_DOMAIN, path_sobol);
+        let outcome = random_walk(
+            scene,
+            cx,
+            ray_time,
+            wavelength_nm,
+            TransportMode::Radiance,
+            ray,
+            1.0,
+            raster.pdf_solid_angle,
+            settings.max_depth as usize + 2,
+            &mut vertices,
+            &mut rng,
+            Some(event),
+        )?;
+        Ok::<_, TracerError>((vertices, outcome))
+    };
+    let (reflection_vertices, reflection) = walk(DielectricEvent::Reflection)?;
+    if !reflection.forced_smooth_event_encountered {
+        return Ok(vec![CameraSubpath {
+            vertices: reflection_vertices,
+            escape: reflection.escape,
+        }]);
+    }
+    let mut paths = Vec::with_capacity(2);
+    if reflection.forced_smooth_event_survived {
+        paths.push(CameraSubpath {
+            vertices: reflection_vertices,
+            escape: reflection.escape,
+        });
+    }
+    let (transmission_vertices, transmission) = walk(DielectricEvent::Transmission)?;
+    if !transmission.forced_smooth_event_encountered {
+        return Err(TracerError::InvalidInput);
+    }
+    if transmission.forced_smooth_event_survived {
+        paths.push(CameraSubpath {
+            vertices: transmission_vertices,
+            escape: transmission.escape,
+        });
+    }
+    if paths.is_empty() {
+        return Err(TracerError::InvalidInput);
+    }
+    Ok(paths)
 }
 
 fn generate_light_subpath(
@@ -830,6 +981,7 @@ fn generate_light_subpath(
         settings.max_depth as usize + 1,
         &mut vertices,
         &mut rng,
+        None,
     )?;
     Ok(vertices)
 }
@@ -1245,6 +1397,189 @@ fn add_scaled_xyz(target: &mut [f64; 3], value: [f64; 3]) {
     target[2] += value[2];
 }
 
+fn primary_slab_power_weights(
+    nee_pdf_solid_angle: f64,
+    source_bsdf_pdf_solid_angle: f64,
+    transmission_probability: f64,
+) -> Result<(f64, f64), TracerError> {
+    if !nee_pdf_solid_angle.is_finite()
+        || nee_pdf_solid_angle <= 0.0
+        || !source_bsdf_pdf_solid_angle.is_finite()
+        || source_bsdf_pdf_solid_angle < 0.0
+        || !transmission_probability.is_finite()
+        || !(0.0..=1.0).contains(&transmission_probability)
+    {
+        return Err(TracerError::InvalidInput);
+    }
+    let camera_pdf = source_bsdf_pdf_solid_angle * transmission_probability;
+    let nee_weight = crate::power_heuristic(1, nee_pdf_solid_angle, 1, camera_pdf);
+    let camera_weight = crate::power_heuristic(1, camera_pdf, 1, nee_pdf_solid_angle);
+    if !nee_weight.is_finite()
+        || !camera_weight.is_finite()
+        || (nee_weight + camera_weight - 1.0).abs() > 8.0 * f64::EPSILON
+    {
+        return Err(TracerError::InvalidInput);
+    }
+    Ok((nee_weight, camera_weight))
+}
+
+fn camera_prefix_is_specular_only(camera_vertices: &[Vertex], t: usize) -> bool {
+    t >= 2
+        && t <= camera_vertices.len()
+        && camera_vertices[1..t - 1].iter().all(|vertex| vertex.delta)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn primary_parallel_slab_lane(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source: &Vertex,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Option<(ParallelSlab, SlabDirectLane)>, TracerError> {
+    let Some(source_normal) = source.geometric_normal else {
+        return Ok(None);
+    };
+    // The analytic connector currently proves one isolated dielectric solid
+    // between two ambient half-spaces. Nested media retain ordinary random-
+    // walk support rather than inheriting an invalid manifold proposal.
+    if source.medium_toward(direct.direction).is_some() {
+        return Ok(None);
+    }
+    let straight_shadow = Ray {
+        origin: dielectric_spawn_origin(source.point, source_normal, direct.direction),
+        dir: direct.direction,
+    };
+    let Some(first_blocker) = intersect(scene, cx, &straight_shadow, ray_time)? else {
+        return Ok(None);
+    };
+    if !primitive_is_dielectric(scene, first_blocker.primitive_index) {
+        return Ok(None);
+    }
+    let slab = match discover_parallel_slab(scene, cx, &straight_shadow, first_blocker, ray_time) {
+        Ok(slab) => slab,
+        Err(TracerError::UnsupportedSlabNee { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let connection = match trace_parallel_slab_direct_lane(
+        scene,
+        cx,
+        ray_time,
+        source.point,
+        source_normal,
+        slab,
+        direct,
+        wavelength_nm,
+    ) {
+        Ok(connection) => connection,
+        Err(TracerError::UnsupportedSlabNee { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(connection.visible.then_some((slab, connection)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn primary_slab_emitter_hit_mis_weight(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    camera_vertices: &[Vertex],
+    t: usize,
+    wavelength_nm: f64,
+) -> Result<Option<f64>, TracerError> {
+    // camera ... source -> slab-entry -> slab-exit -> finite emitter
+    if t < 5 || t > camera_vertices.len() {
+        return Ok(None);
+    }
+    let source_index = t - 4;
+    let entry_index = t - 3;
+    let exit_index = t - 2;
+    let emitter_index = t - 1;
+    let source = &camera_vertices[source_index];
+    let entry = &camera_vertices[entry_index];
+    let exit = &camera_vertices[exit_index];
+    let emitter = &camera_vertices[emitter_index];
+    if !source.is_surface()
+        || !source.is_connectible(scene)
+        || !entry.delta
+        || !exit.delta
+        || !camera_vertices[1..source_index]
+            .iter()
+            .all(|vertex| vertex.delta)
+    {
+        return Ok(None);
+    }
+    let Some(boundary_primitive) = endpoint_primitive(entry) else {
+        return Ok(None);
+    };
+    if endpoint_primitive(exit) != Some(boundary_primitive)
+        || !primitive_is_dielectric(scene, boundary_primitive)
+    {
+        return Ok(None);
+    }
+    let Some(light_index) = light_identity(lighting, emitter) else {
+        return Ok(None);
+    };
+    let Some(light) = scene.lights.get(light_index) else {
+        return Err(TracerError::InvalidInput);
+    };
+    let Some(emitter_primitive) = endpoint_primitive(emitter) else {
+        return Ok(None);
+    };
+    let Some((straight_direction, distance_squared)) = vector_between(source.point, emitter.point)
+    else {
+        return Ok(None);
+    };
+    let direct_pdf = lighting.rect_mixture_pdf(light_index, source.point, emitter.point);
+    if direct_pdf <= 0.0 || !direct_pdf.is_finite() {
+        return Ok(None);
+    }
+    let direct = PreparedDirectLight {
+        direction: straight_direction,
+        emission: light.emission,
+        pdf_solid_angle: direct_pdf,
+        target: DirectLightTarget::Rectangle {
+            primitive_index: emitter_primitive,
+            distance_m: distance_squared.sqrt(),
+            point: emitter.point,
+            normal: emitter.geometric_normal.ok_or(TracerError::MissingNormal)?,
+        },
+    };
+    let Some((slab, connection)) =
+        primary_parallel_slab_lane(scene, cx, ray_time, source, direct, wavelength_nm)?
+    else {
+        return Ok(None);
+    };
+    if slab.boundary_primitive != boundary_primitive {
+        return Ok(None);
+    }
+    let Some((sampled_source_direction, _)) = vector_between(source.point, entry.point) else {
+        return Ok(None);
+    };
+    if !parallel_directions(connection.incident_direction, sampled_source_direction) {
+        return Ok(None);
+    }
+    let predecessor = &camera_vertices[source_index - 1];
+    let predecessor_direction = vector_between(source.point, predecessor.point)
+        .map(|(direction, _)| direction)
+        .ok_or(TracerError::InvalidInput)?;
+    let source_pdf = surface_pdf_solid_angle(
+        scene,
+        source,
+        predecessor_direction,
+        connection.incident_direction,
+        wavelength_nm,
+    )?;
+    let (_, camera_weight) = primary_slab_power_weights(
+        connection.nee_pdf_solid_angle,
+        source_pdf,
+        connection.transmission_probability,
+    )?;
+    Ok(Some(camera_weight))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn connect_s1(
     scene: &Scene,
@@ -1347,25 +1682,85 @@ fn connect_s1(
             };
             let transmittance =
                 segment_transmittance(scene, cx, ray_time, pt, &sampled, wavelength_nm)?;
-            if transmittance <= 0.0 {
+            if transmittance > 0.0 {
+                let mis = finite_mis_weight(
+                    scene,
+                    lighting,
+                    camera,
+                    light_vertices,
+                    camera_vertices,
+                    Some(sampled),
+                    1,
+                    t,
+                    wavelength_nm,
+                    settings.width,
+                    settings.height,
+                    strategy_set,
+                )?;
+                let value =
+                    pt.beta * f * cosine * emitted / sample.pdf_solid_angle * transmittance * mis;
+                return Ok((value.is_finite() && value > 0.0).then_some(value));
+            }
+
+            // A straight shadow ray cannot represent transmission through a
+            // finite parallel slab: refraction shifts the ray laterally. For
+            // the primary/specular-prefix class, reuse the exact two-interface
+            // Snell connector and its finite-light Jacobian. Restricting the
+            // proposal to an all-delta camera prefix is what makes the stated
+            // two-strategy MIS complete rather than merely plausible.
+            let actual_depth = t.checked_add(1).ok_or(TracerError::InvalidInput)?;
+            if actual_depth > settings.max_depth as usize
+                || !camera_prefix_is_specular_only(camera_vertices, t)
+            {
                 return Ok(None);
             }
-            let mis = finite_mis_weight(
+            let direct = PreparedDirectLight {
+                direction,
+                emission: sample.emission,
+                pdf_solid_angle: sample.pdf_solid_angle,
+                target: DirectLightTarget::Rectangle {
+                    primitive_index: sample.primitive_index,
+                    distance_m: distance_squared.sqrt(),
+                    point: sample.point,
+                    normal: sample.normal,
+                },
+            };
+            let Some((_, connection)) =
+                primary_parallel_slab_lane(scene, cx, ray_time, pt, direct, wavelength_nm)?
+            else {
+                return Ok(None);
+            };
+            let connected_f = surface_scattering(
                 scene,
-                lighting,
-                camera,
-                light_vertices,
-                camera_vertices,
-                Some(sampled),
-                1,
-                t,
+                pt,
+                predecessor_direction,
+                connection.incident_direction,
                 wavelength_nm,
-                settings.width,
-                settings.height,
-                strategy_set,
+                TransportMode::Radiance,
             )?;
-            let value =
-                pt.beta * f * cosine * emitted / sample.pdf_solid_angle * transmittance * mis;
+            let connected_cosine = pt.geometric_normal.map_or(1.0, |normal| {
+                normal.dot(connection.incident_direction).abs()
+            });
+            if connected_f <= 0.0 || connected_cosine <= 0.0 || connection.radiance_transport <= 0.0
+            {
+                return Ok(None);
+            }
+            let source_pdf = surface_pdf_solid_angle(
+                scene,
+                pt,
+                predecessor_direction,
+                connection.incident_direction,
+                wavelength_nm,
+            )?;
+            let (mis, _) = primary_slab_power_weights(
+                connection.nee_pdf_solid_angle,
+                source_pdf,
+                connection.transmission_probability,
+            )?;
+            let value = pt.beta * connected_f * connected_cosine * emitted
+                / connection.nee_pdf_solid_angle
+                * connection.radiance_transport
+                * mis;
             Ok((value.is_finite() && value > 0.0).then_some(value))
         }
     }
@@ -1536,10 +1931,13 @@ fn evaluate_strategies(
     strategy_set: BidirectionalStrategySet,
     source_pixel: u32,
     sample: u32,
+    wavelength_lane: u8,
     wavelength_nm: f64,
+    spectral_normalization: f64,
     path_sobol: Option<&Sobol>,
     light_vertices: &[Vertex],
     camera_subpath: &CameraSubpath,
+    include_camera_splats: bool,
     film: &mut Film,
     splats: &mut Vec<SplatRecord>,
     stats: &mut BidirectionalStrategyStats,
@@ -1563,7 +1961,7 @@ fn evaluate_strategies(
         if value.is_finite() && value > 0.0 {
             add_scaled_xyz(
                 &mut film.xyz[source_pixel as usize],
-                scalar_to_xyz(value, wavelength_nm),
+                scalar_to_xyz(value * spectral_normalization, wavelength_nm),
             );
             stats.nonzero = stats.nonzero.saturating_add(1);
         }
@@ -1575,7 +1973,7 @@ fn evaluate_strategies(
                 continue;
             };
             if (s == 1 && t == 1)
-                || (t == 1 && !strategy_set.includes_camera_splats())
+                || (t == 1 && (!strategy_set.includes_camera_splats() || !include_camera_splats))
                 || depth > settings.max_depth as usize
             {
                 continue;
@@ -1598,7 +1996,7 @@ fn evaluate_strategies(
                     if emitted <= 0.0 {
                         None
                     } else {
-                        let mis = finite_mis_weight(
+                        let ordinary_mis = finite_mis_weight(
                             scene,
                             lighting,
                             camera,
@@ -1612,6 +2010,16 @@ fn evaluate_strategies(
                             settings.height,
                             strategy_set,
                         )?;
+                        let mis = primary_slab_emitter_hit_mis_weight(
+                            scene,
+                            lighting,
+                            cx,
+                            ray_time,
+                            camera_vertices,
+                            t,
+                            wavelength_nm,
+                        )?
+                        .unwrap_or(ordinary_mis);
                         Some((source_pixel, pt.beta * emitted * mis, false))
                     }
                 }
@@ -1667,11 +2075,12 @@ fn evaluate_strategies(
                 && value.is_finite()
                 && value > 0.0
             {
-                let xyz = scalar_to_xyz(value, wavelength_nm);
+                let xyz = scalar_to_xyz(value * spectral_normalization, wavelength_nm);
                 if splat {
                     splats.push(SplatRecord {
                         target_pixel: pixel,
                         sample,
+                        wavelength_lane,
                         strategy_s: s,
                         xyz,
                     });
@@ -1728,7 +2137,9 @@ fn render_admitted_sample_range(
             cx.checkpoint()?;
             let mut source_splats = Vec::new();
             let (jx, jy, wavelength_sample) = pixel_dims(settings, sobol, key, pixel, sample)?;
-            let wavelength_nm = LAMBDA_MIN + wavelength_sample * (LAMBDA_MAX - LAMBDA_MIN);
+            let hero_wavelength_nm = LAMBDA_MIN + wavelength_sample * (LAMBDA_MAX - LAMBDA_MIN);
+            let wavelengths =
+                hero_wavelength_packet::<PACKET>(hero_wavelength_nm, LAMBDA_MIN, LAMBDA_MAX);
             let ray_time =
                 path_time_for_sample(scene, &render_cx, settings, shutter, pixel, sample)?;
             let absolute_time_s = shutter.time_at(ray_time.normalized);
@@ -1750,47 +2161,55 @@ fn render_admitted_sample_range(
                 y_tan,
                 camera_lens_sample(key, pixel, sample)?,
             )?;
-            let camera_subpath = generate_camera_subpath(
-                scene,
-                &render_cx,
-                settings,
-                &physical,
-                ray,
-                Some(&ray_time),
-                wavelength_nm,
-                pixel,
-                sample,
-                path_sobol,
-            )?;
-            let light_subpath = generate_light_subpath(
-                scene,
-                &lighting,
-                &render_cx,
-                settings,
-                Some(&ray_time),
-                wavelength_nm,
-                pixel,
-                sample,
-                path_sobol,
-            )?;
-            evaluate_strategies(
-                scene,
-                &lighting,
-                &physical,
-                &render_cx,
-                Some(&ray_time),
-                settings,
-                strategy_set,
-                pixel,
-                sample,
-                wavelength_nm,
-                path_sobol,
-                &light_subpath,
-                &camera_subpath,
-                &mut film,
-                &mut source_splats,
-                &mut stats,
-            )?;
+            let spectral_normalization = 1.0 / PACKET as f64;
+            for (wavelength_lane, &wavelength_nm) in wavelengths.iter().enumerate() {
+                let camera_subpaths = generate_camera_subpaths(
+                    scene,
+                    &render_cx,
+                    settings,
+                    &physical,
+                    ray,
+                    Some(&ray_time),
+                    wavelength_nm,
+                    pixel,
+                    sample,
+                    path_sobol,
+                )?;
+                let light_subpath = generate_light_subpath(
+                    scene,
+                    &lighting,
+                    &render_cx,
+                    settings,
+                    Some(&ray_time),
+                    wavelength_nm,
+                    pixel,
+                    sample,
+                    path_sobol,
+                )?;
+                for (camera_branch, camera_subpath) in camera_subpaths.iter().enumerate() {
+                    evaluate_strategies(
+                        scene,
+                        &lighting,
+                        &physical,
+                        &render_cx,
+                        Some(&ray_time),
+                        settings,
+                        strategy_set,
+                        pixel,
+                        sample,
+                        u8::try_from(wavelength_lane).map_err(|_| TracerError::InvalidInput)?,
+                        wavelength_nm,
+                        spectral_normalization,
+                        path_sobol,
+                        &light_subpath,
+                        camera_subpath,
+                        camera_branch == 0,
+                        &mut film,
+                        &mut source_splats,
+                        &mut stats,
+                    )?;
+                }
+            }
             publish_source_splats(&mut film, &mut source_splats);
         }
     }
@@ -2072,6 +2491,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
         ))?;
     let maximum_splats_per_source = u64::from(strategy_set.includes_camera_splats())
         .checked_mul(u64::from(BIDIRECTIONAL_SAMPLE_BLOCK))
+        .and_then(|count| count.checked_mul(PACKET as u64))
         .and_then(|count| count.checked_mul(u64::from(settings.max_depth).saturating_add(1)))
         .ok_or(RenderExecutionError::Internal(
             "BDPT splat scratch count overflow",
@@ -2241,8 +2661,10 @@ pub fn render_cinematic_bidirectional_with_execution_and_strategy_set(
 mod tests {
     use super::*;
     use crate::camera::Aperture;
+    use crate::dielectric::{BeerLambertAbsorption, CauchyIor};
     use crate::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution};
     use crate::spectral::lift_rgb;
+    use fs_blake3::hash_domain;
     use fs_exec::{CancelGate, StreamKey};
 
     fn with_test_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -2327,6 +2749,138 @@ mod tests {
         (scene, camera, shutter)
     }
 
+    fn closed_smooth_slab(z_bottom: f64, z_top: f64) -> TriMesh {
+        let lo = -2.0;
+        let hi = 2.0;
+        TriMesh::new(
+            vec![
+                [lo, lo, z_bottom],
+                [hi, lo, z_bottom],
+                [hi, hi, z_bottom],
+                [lo, hi, z_bottom],
+                [lo, lo, z_top],
+                [hi, lo, z_top],
+                [hi, hi, z_top],
+                [lo, hi, z_top],
+            ],
+            vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+        )
+    }
+
+    fn instanced_smooth_slab(z_bottom: f64, z_top: f64) -> Shape {
+        let identity = hash_domain(
+            "org.frankensim.fs-render.bdpt-test.parallel-slab",
+            b"primary-specular-prefix",
+        );
+        Shape::Instance(
+            GeometryInstance::try_new(
+                1,
+                identity,
+                SharedGeometry::mesh(closed_smooth_slab(z_bottom, z_top)),
+                RigidTransform::identity(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn g0_first_smooth_camera_boundary_enumerates_both_fresnel_terms() {
+        with_test_cx(|cx| {
+            let glass = DielectricGlass::representative_borosilicate();
+            let scene = Scene {
+                primitives: vec![Primitive {
+                    shape: Shape::Mesh(closed_smooth_slab(0.0, 0.2)),
+                    material: Material::Dielectric {
+                        glass,
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                    emission: None,
+                }],
+                lights: Vec::new(),
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, -1.0),
+                    forward: Vec3::new(0.0, 0.0, 1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.2,
+                },
+            };
+            let physical = PhysicalCamera::try_legacy_compatible(
+                scene.camera.eye,
+                scene.camera.forward,
+                scene.camera.up,
+                scene.camera.half_tan,
+                2.0,
+                Aperture::try_circular(0.0).unwrap(),
+            )
+            .unwrap();
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 1,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 0x4652_4553,
+            };
+            let wavelength_nm = 550.0;
+            let paths = generate_camera_subpaths(
+                &scene,
+                cx,
+                &settings,
+                &physical,
+                Ray {
+                    origin: scene.camera.eye,
+                    dir: scene.camera.forward,
+                },
+                None,
+                wavelength_nm,
+                0,
+                0,
+                None,
+            )
+            .unwrap();
+            assert_eq!(paths.len(), 2);
+            let reflected = paths
+                .iter()
+                .find_map(|path| path.escape.as_ref())
+                .expect("reflection escapes back into ambient");
+            let transmitted = paths
+                .iter()
+                .find(|path| path.vertices.len() == 3)
+                .expect("transmission reaches the second slab face");
+
+            let eta = glass.ior().eval(wavelength_nm).unwrap();
+            let fresnel = fresnel_dielectric(1.0, 1.0, eta).unwrap();
+            assert!((reflected.beta - fresnel.reflectance).abs() <= 8.0 * f64::EPSILON);
+            let attenuation = glass
+                .absorption()
+                .transmittance(wavelength_nm, 0.2)
+                .unwrap();
+            let eta_ratio = 1.0 / eta;
+            let expected_transmission =
+                (1.0 - fresnel.reflectance) * eta_ratio * eta_ratio * attenuation;
+            let transmitted_beta = transmitted.vertices[2].beta;
+            assert!(
+                (transmitted_beta - expected_transmission).abs()
+                    <= 32.0 * f64::EPSILON * expected_transmission.abs().max(1.0)
+            );
+        });
+    }
+
     #[test]
     fn g0_density_conversion_obeys_area_jacobian() {
         let source = Vertex::camera(Point3::new(0.0, 0.0, 0.0));
@@ -2336,6 +2890,264 @@ mod tests {
             convert_density(&source, 4.0, &target).to_bits(),
             1.0_f64.to_bits()
         );
+    }
+
+    #[test]
+    fn g0_all_strategy_power_weights_close_on_one_constructed_path() {
+        let white = lift_rgb([1.0, 1.0, 1.0]);
+        let emission = (white, 2.0);
+        let camera_eye = Point3::new(2.0, 0.0, 1.0);
+        let camera_forward = Vec3::new(
+            -core::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+            -core::f64::consts::FRAC_1_SQRT_2,
+        );
+        let scene = Scene {
+            primitives: vec![
+                Primitive {
+                    shape: Shape::Mesh(emitter_quad(0.0)),
+                    material: Material::Lambertian { reflectance: white },
+                    emission: Some(emission),
+                },
+                Primitive {
+                    shape: Shape::Mesh(emitter_quad(1.0)),
+                    material: Material::Lambertian { reflectance: white },
+                    emission: None,
+                },
+                Primitive {
+                    shape: Shape::Mesh(emitter_quad(0.0)),
+                    material: Material::Lambertian { reflectance: white },
+                    emission: None,
+                },
+            ],
+            lights: vec![RectLight {
+                corner: Point3::new(-1.0, -1.0, 0.0),
+                edge_u: Vec3::new(2.0, 0.0, 0.0),
+                edge_v: Vec3::new(0.0, 2.0, 0.0),
+                prim: 0,
+                emission,
+            }],
+            environment: None,
+            camera: Camera {
+                eye: camera_eye,
+                forward: camera_forward,
+                up: Vec3::new(0.0, 1.0, 0.0),
+                half_tan: 1.0,
+            },
+        };
+        let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+        let camera = PhysicalCamera::try_legacy_compatible(
+            camera_eye,
+            camera_forward,
+            Vec3::new(0.0, 1.0, 0.0),
+            1.0,
+            2.0,
+            Aperture::try_circular(0.0).unwrap(),
+        )
+        .unwrap();
+        let surface = |primitive_index, point, normal| Vertex {
+            kind: VertexKind::Surface { primitive_index },
+            point,
+            geometric_normal: Some(normal),
+            wo: Some(normal),
+            beta: 1.0,
+            pdf_fwd: 0.0,
+            pdf_rev: 0.0,
+            delta: false,
+            positive_medium: None,
+            negative_medium: None,
+        };
+        // Light x0 -> lower-facing diffuse x1 -> upper-facing diffuse x2 -> camera x3.
+        // Both incident and outgoing directions occupy the same hemisphere at
+        // each diffuse vertex, so every crossover strategy has nonzero support.
+        let x0_surface = surface(0, Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0));
+        let x1 = surface(1, Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0));
+        let x2 = surface(2, Point3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0));
+        let x3 = Vertex::camera(camera_eye);
+        let light_sample = crate::lighting::RectEmissionSample {
+            light_index: 0,
+            primitive_index: 0,
+            point: x0_surface.point,
+            normal: x0_surface.geometric_normal.unwrap(),
+            direction: Vec3::new(0.0, 0.0, 1.0),
+            emission,
+            pdf_position_area: 0.25,
+            pdf_direction_solid_angle: 1.0 / (2.0 * PI),
+        };
+        let x0_light = Vertex::light(light_sample, 550.0);
+        let mut light_vertices = vec![x0_light, x1, x2];
+        let mut camera_vertices = vec![x3, x2, x1, x0_surface];
+        let wavelength_nm = 550.0;
+
+        light_vertices[0].pdf_fwd = pdf_light_origin(&lighting, &x0_light, &x1);
+        light_vertices[1].pdf_fwd = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x0_light,
+            None,
+            &x1,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        light_vertices[2].pdf_fwd = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x1,
+            Some(&x0_light),
+            &x2,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        light_vertices[0].pdf_rev = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x1,
+            Some(&x2),
+            &x0_light,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+
+        camera_vertices[1].pdf_fwd = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x3,
+            None,
+            &x2,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        camera_vertices[2].pdf_fwd = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x2,
+            Some(&x3),
+            &x1,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        camera_vertices[3].pdf_fwd = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x1,
+            Some(&x2),
+            &x0_surface,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        camera_vertices[0].pdf_rev = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x2,
+            Some(&x1),
+            &x3,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        camera_vertices[1].pdf_rev = vertex_pdf(
+            &scene,
+            &lighting,
+            &camera,
+            &x1,
+            Some(&x0_surface),
+            &x2,
+            wavelength_nm,
+            1,
+            1,
+        )
+        .unwrap();
+        for density in light_vertices
+            .iter()
+            .chain(&camera_vertices)
+            .flat_map(|vertex| [vertex.pdf_fwd, vertex.pdf_rev])
+            .filter(|density| *density != 0.0)
+        {
+            assert!(density.is_finite() && density > 0.0);
+        }
+
+        let weights = |corrupt_strategy: Option<usize>| {
+            (0..=3)
+                .map(|s| {
+                    let t = 4 - s;
+                    let light = light_vertices.clone();
+                    let mut camera_path = camera_vertices.clone();
+                    if corrupt_strategy == Some(s) {
+                        camera_path[1].pdf_fwd *= 4.0;
+                    }
+                    let sampled = if s == 1 {
+                        Some(x0_light)
+                    } else if t == 1 {
+                        Some(x3)
+                    } else {
+                        None
+                    };
+                    finite_mis_weight(
+                        &scene,
+                        &lighting,
+                        &camera,
+                        &light[..s],
+                        &camera_path[..t],
+                        sampled,
+                        s,
+                        t,
+                        wavelength_nm,
+                        1,
+                        1,
+                        BidirectionalStrategySet::Complete,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let valid = weights(None);
+        let densities = [
+            camera_vertices[1].pdf_fwd * camera_vertices[2].pdf_fwd * camera_vertices[3].pdf_fwd,
+            light_vertices[0].pdf_fwd * camera_vertices[1].pdf_fwd * camera_vertices[2].pdf_fwd,
+            light_vertices[0].pdf_fwd * light_vertices[1].pdf_fwd * camera_vertices[1].pdf_fwd,
+            light_vertices[0].pdf_fwd * light_vertices[1].pdf_fwd * light_vertices[2].pdf_fwd,
+        ];
+        let density_square_sum = densities
+            .iter()
+            .map(|density| density * density)
+            .sum::<f64>();
+        let expected = densities.map(|density| density * density / density_square_sum);
+        assert!(
+            valid
+                .iter()
+                .all(|weight| weight.is_finite() && *weight > 0.0)
+        );
+        let valid_sum = valid.iter().sum::<f64>();
+        assert!(
+            (valid_sum - 1.0).abs() <= 64.0 * f64::EPSILON,
+            "strategy weights {valid:?} sum to {valid_sum:.17e}; densities={densities:?} expected={expected:?}"
+        );
+
+        // A sum-only test is useful only if inconsistent cached densities make
+        // it fail. Corrupt one strategy's camera density without changing the
+        // others and prove this oracle notices the disagreement.
+        let corrupted = weights(Some(0));
+        assert!((corrupted.iter().sum::<f64>() - 1.0).abs() > 1.0e-6);
     }
 
     #[test]
@@ -2418,20 +3230,23 @@ mod tests {
         let records = [
             SplatRecord {
                 target_pixel: 1,
-                sample: 2,
+                sample: 0,
+                wavelength_lane: 2,
                 strategy_s: 3,
                 xyz: [1.0e16, 2.0, 3.0],
             },
             SplatRecord {
                 target_pixel: 1,
                 sample: 0,
-                strategy_s: 2,
+                wavelength_lane: 0,
+                strategy_s: 3,
                 xyz: [-1.0e16, 5.0, 7.0],
             },
             SplatRecord {
                 target_pixel: 1,
-                sample: 1,
-                strategy_s: 4,
+                sample: 0,
+                wavelength_lane: 1,
+                strategy_s: 3,
                 xyz: [1.0, 11.0, 13.0],
             },
         ];
@@ -2491,6 +3306,141 @@ mod tests {
         assert!(
             strategy_sample_multiplicity(1, 0, height, BidirectionalStrategySet::Complete).is_err()
         );
+    }
+
+    #[test]
+    fn g0_primary_slab_power_weights_close_and_reject_invalid_density() {
+        let (nee, camera) = primary_slab_power_weights(0.7, 0.4, 0.81).unwrap();
+        let camera_pdf = 0.4 * 0.81;
+        assert!((nee + camera - 1.0).abs() <= 8.0 * f64::EPSILON);
+        assert_eq!(
+            nee.to_bits(),
+            crate::power_heuristic(1, 0.7, 1, camera_pdf).to_bits()
+        );
+        assert_eq!(
+            camera.to_bits(),
+            crate::power_heuristic(1, camera_pdf, 1, 0.7).to_bits()
+        );
+        assert!(primary_slab_power_weights(0.0, 0.4, 0.81).is_err());
+        assert!(primary_slab_power_weights(0.7, 0.4, 1.01).is_err());
+    }
+
+    #[test]
+    fn g2_primary_specular_prefix_connects_rectangle_through_parallel_slab() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0, 1.0, 1.0]);
+            let glass = DielectricGlass::new(
+                CauchyIor::try_constant(1.5).unwrap(),
+                BeerLambertAbsorption::try_constant(0.0).unwrap(),
+                GlassProvenance::Custom,
+            );
+            let light_emission = (white, 2.0);
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        shape: Shape::Mesh(emitter_quad(-1.0)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: None,
+                    },
+                    Primitive {
+                        shape: instanced_smooth_slab(0.0, 0.2),
+                        material: Material::Dielectric {
+                            glass,
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    Primitive {
+                        shape: Shape::Mesh(emitter_quad(2.0)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: Some(light_emission),
+                    },
+                ],
+                lights: vec![RectLight {
+                    corner: Point3::new(-1.0, -1.0, 2.0),
+                    edge_u: Vec3::new(2.0, 0.0, 0.0),
+                    edge_v: Vec3::new(0.0, 2.0, 0.0),
+                    prim: 2,
+                    emission: light_emission,
+                }],
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, 3.0),
+                    forward: Vec3::new(0.0, 0.0, -1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.2,
+                },
+            };
+            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let camera = PhysicalCamera::try_legacy_compatible(
+                scene.camera.eye,
+                scene.camera.forward,
+                scene.camera.up,
+                scene.camera.half_tan,
+                2.0,
+                Aperture::try_circular(0.0).unwrap(),
+            )
+            .unwrap();
+            let surface_vertex = |primitive_index, point, normal, delta| Vertex {
+                kind: VertexKind::Surface { primitive_index },
+                point,
+                geometric_normal: Some(normal),
+                wo: None,
+                beta: 1.0,
+                pdf_fwd: 1.0,
+                pdf_rev: 0.0,
+                delta,
+                positive_medium: None,
+                negative_medium: None,
+            };
+            let camera_vertices = vec![
+                Vertex::camera(scene.camera.eye),
+                surface_vertex(
+                    1,
+                    Point3::new(0.0, 0.0, 0.2),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    true,
+                ),
+                surface_vertex(
+                    1,
+                    Point3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, -1.0),
+                    true,
+                ),
+                surface_vertex(
+                    0,
+                    Point3::new(0.0, 0.0, -1.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    false,
+                ),
+            ];
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 1,
+                max_depth: 5,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 0x534c_4142,
+            };
+            let contribution = connect_s1(
+                &scene,
+                &lighting,
+                &camera,
+                cx,
+                None,
+                &settings,
+                BidirectionalStrategySet::CameraConnected,
+                &[],
+                &camera_vertices,
+                camera_vertices.len(),
+                550.0,
+                [0.5; 4],
+            )
+            .unwrap()
+            .expect("the analytic slab proposal must carry finite energy");
+            assert!(contribution.is_finite() && contribution > 0.0);
+        });
     }
 
     #[test]
@@ -2582,6 +3532,55 @@ mod tests {
             assert_eq!(front.film.xyz, back.film.xyz);
             assert!(front.film.xyz[0].iter().all(|value| *value > 0.0));
             assert!(front.strategies.nonzero > 0);
+        });
+    }
+
+    #[test]
+    fn g0_primary_emitter_packet_is_the_normalized_four_lane_quadrature() {
+        let settings = Settings {
+            width: 1,
+            height: 1,
+            spp: 1,
+            max_depth: 0,
+            sampler: Sampler::Iid,
+            strategy: DirectStrategy::Mis,
+            seed: 0x5350_4543,
+        };
+        with_test_cx(|cx| {
+            let (scene, camera, shutter) = direct_emitter_scene(true);
+            let rendered = render_cinematic_bidirectional(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+            )
+            .unwrap();
+            let key = [
+                (settings.seed & 0xffff_ffff) as u32,
+                (settings.seed >> 32) as u32,
+            ];
+            let (_, _, wavelength_sample) =
+                pixel_dims(&settings, None, key, 0, 0).expect("one IID pixel sample");
+            let hero = LAMBDA_MIN + wavelength_sample * (LAMBDA_MAX - LAMBDA_MIN);
+            let wavelengths = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
+            let heap_wavelengths = hero_wavelengths(hero, PACKET, LAMBDA_MIN, LAMBDA_MAX);
+            assert_eq!(wavelengths.as_slice(), heap_wavelengths.as_slice());
+            let (emission, scale) = scene.primitives[0].emission.unwrap();
+            let mut expected = [0.0; 3];
+            for wavelength_nm in wavelengths {
+                add_scaled_xyz(
+                    &mut expected,
+                    scalar_to_xyz(
+                        emission.eval(wavelength_nm) * scale / PACKET as f64,
+                        wavelength_nm,
+                    ),
+                );
+            }
+            assert_eq!(rendered.film.xyz[0], expected);
+            assert_eq!(rendered.strategies.evaluated, PACKET as u64);
+            assert_eq!(rendered.strategies.nonzero, PACKET as u64);
         });
     }
 

@@ -1371,6 +1371,7 @@ const fn strategy_tag(strategy: DirectStrategy) -> u8 {
         DirectStrategy::NeeOnly => 0,
         DirectStrategy::BsdfOnly => 1,
         DirectStrategy::Mis => 2,
+        DirectStrategy::PowerMis => 3,
     }
 }
 
@@ -1379,6 +1380,7 @@ fn decode_strategy(tag: u8) -> Result<DirectStrategy, CinematicAovCheckpointErro
         0 => Ok(DirectStrategy::NeeOnly),
         1 => Ok(DirectStrategy::BsdfOnly),
         2 => Ok(DirectStrategy::Mis),
+        3 => Ok(DirectStrategy::PowerMis),
         _ => Err(CinematicAovCheckpointError::InvalidEnvelope),
     }
 }

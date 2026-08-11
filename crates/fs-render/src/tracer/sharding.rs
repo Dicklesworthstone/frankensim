@@ -1462,5 +1462,6 @@ const fn strategy_tag(strategy: DirectStrategy) -> u8 {
         DirectStrategy::NeeOnly => 0,
         DirectStrategy::BsdfOnly => 1,
         DirectStrategy::Mis => 2,
+        DirectStrategy::PowerMis => 3,
     }
 }

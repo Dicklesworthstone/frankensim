@@ -22,8 +22,10 @@ differentiable lift). Pure Rust throughout.
   pg)` — the weight-sum audit (nominally `1`).
 - `mis_integrate_unit(f, n)` — an unbiased MIS estimate of `∫₀¹ f` combining
   uniform + linear-importance strategies.
-- `hero_wavelengths(hero, count, min, max)` / `spectral_integral(spectrum, min,
-  max, samples)` — hero-wavelength spectral integration.
+- `hero_wavelengths(hero, count, min, max)` /
+  `hero_wavelength_packet::<N>(hero, min, max)` /
+  `spectral_integral(spectrum, min, max, samples)` — heap-backed and fixed-size
+  hero-wavelength spectral integration surfaces.
 - `dielectric` module (feature `tracer`): validated Cauchy phase-index laws in
   vacuum nanometres, homogeneous Beer-Lambert absorption in inverse metres,
   provenance-bearing representative glass presets, exact unpolarized Fresnel,
@@ -146,6 +148,21 @@ differentiable lift). Pure Rust throughout.
   path-space MIS. Radiance and importance walks use their respective
   refractive transport factors. Two-sided rectangle emission has identical
   support and radiance in emitter-hit, direct-light, and launch strategies.
+  Each logical sample evaluates the established randomized four-wavelength
+  stratification and averages its lanes, retaining unbiased spectral
+  integration while reducing single-hero chromatic variance. Spectral lane is
+  part of the canonical identity of every cross-pixel splat.
+  The first smooth camera-side dielectric interface is evaluated as the exact
+  sum of its Fresnel reflection and transmission terms; later interfaces stay
+  sampled, bounding live suffixes while removing the dominant plate-entry
+  roulette. Camera-independent `t=1` light splats are evaluated once, not once
+  per enumerated camera suffix.
+  For an all-specular camera prefix followed by a connectible surface, finite
+  rectangle lighting through one admitted parallel smooth slab reuses the
+  exact two-interface Snell/Jacobian connector. That proposal and the matching
+  camera-walk emitter hit carry complementary power-heuristic weights. General
+  manifold-path MIS with a non-delta camera prefix is not claimed and does not
+  silently inherit this restricted proposal.
   `render_cinematic_bidirectional_with_execution` and the parked-crew method
   partition work into fixed eight-sample full-raster blocks because `t=1`
   light paths may splat into arbitrary pixels; blocks publish only after full
@@ -650,6 +667,11 @@ the separate source/provenance hashes retain container lineage without changing
   that same branch and area-to-solid-angle Jacobian. At a
   lighting-v1 path's final permitted bounce, NEE has weight one because no
   competing BSDF continuation is evaluated.
+Camera-path transport exposes both balance-heuristic and squared-power-
+heuristic MIS. Both use the same reciprocal proposal densities and partition
+unity; the power variant is an unbiased variance policy, not radiance clipping
+or a change to the underlying light-transport integral. Its quality ordering
+must be measured per scene at equal SPP.
 The exact legacy one-rectangle/no-environment lighting branch retains its
 original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to

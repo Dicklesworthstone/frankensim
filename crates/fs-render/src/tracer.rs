@@ -52,6 +52,8 @@ use crate::dielectric::{
     GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric, sample_rough_dielectric,
     sample_smooth_dielectric,
 };
+#[cfg(test)]
+use crate::hero_wavelengths;
 use crate::instances::{
     GeometryInstance, InstanceError, InstanceHit, InstanceSurfaceFeature, RigidTransform,
     SharedGeometry,
@@ -66,7 +68,7 @@ use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, cie_x, cie_y, cie_z, xyz_e_to_d65, xyz_to_linear_srgb,
     y_integral,
 };
-use crate::{balance_heuristic, hero_wavelengths};
+use crate::{balance_heuristic, hero_wavelength_packet, power_heuristic};
 use core::mem::size_of;
 use fs_alloc::{AllocError, LeaseCharge, LeaseReceipt, LeaseRefusal, OperationMemoryLease};
 use fs_blake3::{ContentHash, DomainHasher};
@@ -683,6 +685,11 @@ pub enum DirectStrategy {
     BsdfOnly,
     /// Both, combined with the balance heuristic.
     Mis,
+    /// Both, combined with the squared power heuristic. This remains an
+    /// unbiased MIS estimator; compared with [`Self::Mis`], it more strongly
+    /// suppresses rare samples from a proposal whose competing proposal has a
+    /// much larger density.
+    PowerMis,
 }
 
 /// A surface material.
@@ -11133,6 +11140,12 @@ fn completed_slab_mis_weight(
             1,
             nee_pdf_solid_angle,
         ),
+        DirectStrategy::PowerMis => power_heuristic(
+            1,
+            slab_path.source_pdf_solid_angle * slab_path.transmission_probability,
+            1,
+            nee_pdf_solid_angle,
+        ),
     }
 }
 
@@ -11145,6 +11158,12 @@ fn completed_manifold_mis_weight(
         DirectStrategy::BsdfOnly => 1.0,
         DirectStrategy::NeeOnly => 0.0,
         DirectStrategy::Mis => balance_heuristic(
+            1,
+            path.source_pdf_solid_angle * path.transmission_probability,
+            1,
+            nee_pdf_solid_angle,
+        ),
+        DirectStrategy::PowerMis => power_heuristic(
             1,
             path.source_pdf_solid_angle * path.transmission_probability,
             1,
@@ -11163,8 +11182,16 @@ fn slab_nee_mis_weight(
     match strategy {
         DirectStrategy::NeeOnly => Ok(1.0),
         DirectStrategy::BsdfOnly => Err(TracerError::InvalidInput),
-        DirectStrategy::Mis if !competing_bsdf_path_is_evaluated => Ok(1.0),
+        DirectStrategy::Mis | DirectStrategy::PowerMis if !competing_bsdf_path_is_evaluated => {
+            Ok(1.0)
+        }
         DirectStrategy::Mis => Ok(balance_heuristic(
+            1,
+            nee_pdf_solid_angle,
+            1,
+            source_bsdf_pdf_solid_angle * transmission_probability,
+        )),
+        DirectStrategy::PowerMis => Ok(power_heuristic(
             1,
             nee_pdf_solid_angle,
             1,
@@ -11203,7 +11230,7 @@ fn trace_path(
     };
     // Hero wavelengths: one stratified draw covers the packet.
     let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
-    let lambdas = hero_wavelengths(hero, PACKET, LAMBDA_MIN, LAMBDA_MAX);
+    let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
     let state = if let Some(state) = resume {
         state
     } else {
@@ -11385,7 +11412,7 @@ fn trace_path(
                 });
             let ordinary_nee_pdf = if completed_slab.is_none()
                 && completed_manifold.is_none()
-                && s.strategy == DirectStrategy::Mis
+                && matches!(s.strategy, DirectStrategy::Mis | DirectStrategy::PowerMis)
                 && previous_bsdf.is_some()
             {
                 light_index.map(|light_index| {
@@ -11530,7 +11557,7 @@ fn trace_path(
                                         // there is no hero-lane proposal ratio here.
                                         let competing_pdf = evaluation.pdf;
                                         let weight = match s.strategy {
-                                            DirectStrategy::Mis
+                                            DirectStrategy::Mis | DirectStrategy::PowerMis
                                                 if depth + 1 == s.max_depth
                                                     && !lighting.is_legacy_compatibility_path() =>
                                             {
@@ -11538,6 +11565,9 @@ fn trace_path(
                                             }
                                             DirectStrategy::Mis => {
                                                 balance_heuristic(1, pdf_nee, 1, competing_pdf)
+                                            }
+                                            DirectStrategy::PowerMis => {
+                                                power_heuristic(1, pdf_nee, 1, competing_pdf)
                                             }
                                             DirectStrategy::NeeOnly => 1.0,
                                             DirectStrategy::BsdfOnly => {
@@ -11628,7 +11658,7 @@ fn trace_path(
                                 let wo = ray.dir.scale(-1.0);
                                 let bsdf_pdf = bsdf_pdf(&prim.material, n, wo, wi);
                                 let weight = match s.strategy {
-                                    DirectStrategy::Mis
+                                    DirectStrategy::Mis | DirectStrategy::PowerMis
                                         if depth + 1 == s.max_depth
                                             && !lighting.is_legacy_compatibility_path() =>
                                     {
@@ -11636,6 +11666,9 @@ fn trace_path(
                                     }
                                     DirectStrategy::Mis => {
                                         balance_heuristic(1, pdf_nee, 1, bsdf_pdf)
+                                    }
+                                    DirectStrategy::PowerMis => {
+                                        power_heuristic(1, pdf_nee, 1, bsdf_pdf)
                                     }
                                     _ => 1.0,
                                 };
@@ -12722,6 +12755,9 @@ fn emissive_hit_weight(
         DirectStrategy::NeeOnly => 0.0,
         DirectStrategy::Mis => designated_light_nee_pdf.map_or(1.0, |nee_pdf| {
             balance_heuristic(1, previous.pdf.forward_solid_angle(), 1, nee_pdf)
+        }),
+        DirectStrategy::PowerMis => designated_light_nee_pdf.map_or(1.0, |nee_pdf| {
+            power_heuristic(1, previous.pdf.forward_solid_angle(), 1, nee_pdf)
         }),
     }
 }
@@ -15017,6 +15053,23 @@ mod tests {
         assert_eq!(
             emissive_hit_weight(DirectStrategy::Mis, previous, Some(nee_pdf)).to_bits(),
             balance_heuristic(1, bsdf_pdf, 1, nee_pdf).to_bits()
+        );
+        let power_bsdf_weight =
+            emissive_hit_weight(DirectStrategy::PowerMis, previous, Some(nee_pdf));
+        let power_nee_weight = power_heuristic(1, nee_pdf, 1, bsdf_pdf);
+        assert_eq!(
+            power_bsdf_weight.to_bits(),
+            power_heuristic(1, bsdf_pdf, 1, nee_pdf).to_bits()
+        );
+        assert_eq!(
+            (power_bsdf_weight + power_nee_weight).to_bits(),
+            1.0_f64.to_bits(),
+            "the power-MIS BSDF-hit and NEE weights must partition one"
+        );
+        assert_eq!(
+            emissive_hit_weight(DirectStrategy::PowerMis, previous, None).to_bits(),
+            1.0_f64.to_bits(),
+            "power MIS must not downweight an emitter outside NEE support"
         );
         assert_eq!(
             emissive_hit_weight(DirectStrategy::NeeOnly, previous, None).to_bits(),

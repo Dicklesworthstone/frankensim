@@ -1743,14 +1743,19 @@ fn mean_pixel_variance(
 fn mis_beats_either_technique_alone() {
     let scene = cornell();
     let v_mis = mean_pixel_variance(&scene, DirectStrategy::Mis, Sampler::Iid, 4, 12);
+    let v_power_mis = mean_pixel_variance(&scene, DirectStrategy::PowerMis, Sampler::Iid, 4, 12);
     let v_nee = mean_pixel_variance(&scene, DirectStrategy::NeeOnly, Sampler::Iid, 4, 12);
     let v_bsdf = mean_pixel_variance(&scene, DirectStrategy::BsdfOnly, Sampler::Iid, 4, 12);
     println!(
-        "{{\"suite\":\"fs-render/tracer\",\"case\":\"mis-variance\",\"verdict\":\"info\",\"detail\":\"var mis {v_mis:.3e} nee {v_nee:.3e} bsdf {v_bsdf:.3e}\"}}"
+        "{{\"suite\":\"fs-render/tracer\",\"case\":\"mis-variance\",\"verdict\":\"info\",\"detail\":\"var balance_mis {v_mis:.3e} power_mis {v_power_mis:.3e} nee {v_nee:.3e} bsdf {v_bsdf:.3e}\"}}"
     );
     assert!(
         v_mis < v_nee && v_mis < v_bsdf,
         "MIS variance {v_mis:.3e} does not beat NEE {v_nee:.3e} / BSDF {v_bsdf:.3e}"
+    );
+    assert!(
+        v_power_mis < v_nee && v_power_mis < v_bsdf,
+        "power-MIS variance {v_power_mis:.3e} does not beat NEE {v_nee:.3e} / BSDF {v_bsdf:.3e}"
     );
 }
 

@@ -3210,6 +3210,7 @@ const fn direct_strategy_name(strategy: DirectStrategy) -> &'static str {
         DirectStrategy::NeeOnly => "nee-only",
         DirectStrategy::BsdfOnly => "bsdf-only",
         DirectStrategy::Mis => "mis",
+        DirectStrategy::PowerMis => "power-mis",
     }
 }
 

@@ -167,6 +167,21 @@ pub fn hero_wavelengths(hero_nm: f64, count: usize, min_nm: f64, max_nm: f64) ->
         .collect()
 }
 
+/// A fixed-size hero-wavelength packet with the same rotated stratification as
+/// [`hero_wavelengths`], without a heap allocation in the per-path hot loop.
+#[must_use]
+pub fn hero_wavelength_packet<const COUNT: usize>(
+    hero_nm: f64,
+    min_nm: f64,
+    max_nm: f64,
+) -> [f64; COUNT] {
+    let range = max_nm - min_nm;
+    std::array::from_fn(|lane| {
+        let offset = range * lane as f64 / COUNT as f64;
+        min_nm + (hero_nm - min_nm + offset).rem_euclid(range)
+    })
+}
+
 /// An unbiased hero-wavelength estimate of `∫ spectrum(λ) dλ` over
 /// `[min_nm, max_nm]`, using `samples` stratified hero draws of 4 wavelengths.
 #[must_use]
