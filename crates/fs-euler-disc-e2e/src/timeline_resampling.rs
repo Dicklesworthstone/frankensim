@@ -129,6 +129,13 @@ pub enum ExposureEventPolicy {
     Subdivide,
     /// Refuse rather than selecting an implicit cross-event blur convention.
     Refuse,
+    /// Permit contact-branch transitions while retaining hard discontinuities.
+    ///
+    /// This policy is for consumers, such as rigid-geometry rendering, whose
+    /// inputs are the continuously reconstructed pose and base state rather
+    /// than the discrete contact branch. Terminal events and producer-declared
+    /// discontinuities still refuse the exposure.
+    AllowContactTransitions,
 }
 
 /// One half-open exposure segment, except that the last end is inclusive.
@@ -143,9 +150,9 @@ pub struct ExposureSegment {
 /// Event-aware partition of a shutter exposure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExposurePartition {
-    /// Contiguous event-delimited segments.
+    /// Contiguous segments delimited by the selected policy.
     pub segments: Vec<ExposureSegment>,
-    /// Events strictly inside the requested exposure, in deterministic order.
+    /// All events strictly inside the requested exposure, in deterministic order.
     pub interior_events: Vec<TimelineEvent>,
 }
 
@@ -282,12 +289,23 @@ impl<'trajectory> TimelineResampler<'trajectory> {
             .into_iter()
             .filter(|event| open_s < event.time_s() && event.time_s() < close_s)
             .collect();
-        if policy == ExposureEventPolicy::Refuse && !interior_events.is_empty() {
+        let contains_hard_discontinuity = interior_events
+            .iter()
+            .any(|event| !matches!(event, TimelineEvent::Contact(_)));
+        if (policy == ExposureEventPolicy::Refuse && !interior_events.is_empty())
+            || (policy == ExposureEventPolicy::AllowContactTransitions
+                && contains_hard_discontinuity)
+        {
             return Err(TimelineResamplingError::ExposureSpansEvent);
         }
-        let mut segments = Vec::with_capacity(interior_events.len() + 1);
+        let partition_events = if policy == ExposureEventPolicy::Subdivide {
+            interior_events.as_slice()
+        } else {
+            &[]
+        };
+        let mut segments = Vec::with_capacity(partition_events.len() + 1);
         let mut start_s = open_s;
-        for event in &interior_events {
+        for event in partition_events {
             let end_s = event.time_s();
             if end_s > start_s {
                 segments.push(ExposureSegment { start_s, end_s });

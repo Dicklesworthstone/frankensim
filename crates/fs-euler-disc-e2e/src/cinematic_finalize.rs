@@ -4734,7 +4734,7 @@ mod tests {
                             ShutterConvention::BackLoaded
                         },
                         distribution: ShutterDistribution::UniformCounterV1,
-                        event_policy: ExposureEventPolicy::Refuse,
+                        event_policy: ExposureEventPolicy::AllowContactTransitions,
                         cut_side: CutSide::After,
                     })
                     .expect("brief-matched prepared exposure")

@@ -1867,11 +1867,15 @@ admitted connector classes may converge slowly.
 Frame requests resolve their shutter and contact/event policy before tracing.
 A zero-width request renders one exact time. A positive exposure crossing a
 retained event either refuses or yields ordered event-delimited shutters with
-explicit duration weights. Their films remain separate: v1 will not fabricate
-sample-count or time-mode provenance by silently combining them. Producer-
-declared continuation/discontinuity seams currently refuse scene construction
-because this instance representation cannot encode trustworthy one-sided
-transform keyframes. Camera gaps and poses wholly outside the trajectory
+explicit duration weights. Rigid-geometry cinematic frames may instead admit
+contact opening/reimpact boundaries because those change a discrete solver
+branch while the rendered pose and base state remain continuous; the events
+remain retained in the exposure provenance, and terminal or producer-declared
+discontinuities still refuse. Event-delimited films remain separate: v1 will
+not fabricate sample-count or time-mode provenance by silently combining them.
+Producer-declared continuation/discontinuity seams currently refuse scene
+construction because this instance representation cannot encode trustworthy
+one-sided transform keyframes. Camera gaps and poses wholly outside the trajectory
 horizon are irrelevant; source times and in-horizon camera keyframes must meet
 the declared near/far depth admission. Those depths are validation requirements
 over scene bounds, not tracer clipping planes.

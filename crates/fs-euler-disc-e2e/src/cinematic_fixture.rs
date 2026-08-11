@@ -4799,7 +4799,11 @@ pub fn run_cinematic_fixture(
                     distribution: ShutterDistribution::StratifiedCounterV1 {
                         strata: render_sample_ceiling,
                     },
-                    event_policy: ExposureEventPolicy::Refuse,
+                    // Compliant contact opening/reimpact changes a discrete
+                    // solver branch, not the continuous rigid-body pose being
+                    // blurred. True terminal or declared discontinuities still
+                    // refuse through this policy.
+                    event_policy: ExposureEventPolicy::AllowContactTransitions,
                     cut_side: CutSide::After,
                 })
                 .map_err(pipeline)?;
