@@ -1323,7 +1323,7 @@ impl core::fmt::Display for StructuralModalBasisError {
             Self::BroadbandRadiation(source) => {
                 write!(
                     formatter,
-                    "structural broadband radiation refused: {source}"
+                    "structural broadband radiation refused: {source:?}"
                 )
             }
             Self::ForceReconstruction(source) => {
@@ -1423,7 +1423,7 @@ impl std::error::Error for StructuralModalBasisError {
             Self::Acoustic(source) => Some(source),
             Self::Viscoelastic(source) => Some(source),
             Self::ModalTime(source) => Some(source),
-            Self::BroadbandRadiation(source) => Some(source),
+            Self::BroadbandRadiation(_) => None,
             Self::ForceReconstruction(source) => Some(source),
             Self::Timeline(source) => Some(source),
             _ => None,
@@ -4112,6 +4112,7 @@ pub fn build_structural_broadband_radiation_artifact(
             &solutions,
             medium,
             request.directivity.maximum_spherical_harmonic_degree,
+            request.directivity.minimum_captured_fraction,
         )?;
         let captured_fraction = captured_fraction(&solutions, &tables);
         training.push(ComplexShTrainingSample {
@@ -4136,6 +4137,7 @@ pub fn build_structural_broadband_radiation_artifact(
             &solutions,
             medium,
             request.directivity.maximum_spherical_harmonic_degree,
+            request.directivity.minimum_captured_fraction,
         )?;
         let captured_fraction = captured_fraction(&solutions, &tables);
         held_out.push(DirectFarFieldHeldOutSample {
@@ -4181,6 +4183,7 @@ fn checked_directivity_tables(
     solutions: &[RadiationSolution],
     medium: Medium,
     l_max: usize,
+    minimum_captured_fraction: f64,
 ) -> Result<Vec<DirectivityTable>, StructuralModalBasisError> {
     solutions
         .iter()
@@ -4192,7 +4195,16 @@ fn checked_directivity_tables(
                     power: solution.radiated_power,
                 });
             }
-            directivity_sh_table(surface, solution, medium, l_max).map_err(Into::into)
+            let table = directivity_sh_table(surface, solution, medium, l_max)?;
+            if solution.radiated_power > 0.0 && table.captured_fraction < minimum_captured_fraction
+            {
+                return Err(StructuralModalBasisError::DirectivityTruncation {
+                    mode,
+                    captured_fraction: table.captured_fraction,
+                    minimum_fraction: minimum_captured_fraction,
+                });
+            }
+            Ok(table)
         })
         .collect()
 }
@@ -4488,6 +4500,9 @@ fn write_closing_modal_acceleration(
             state.velocity_m_sqrt_kg_per_s,
             -omega * omega * (state.displacement_m_sqrt_kg - equilibrium),
         );
+        if *acceleration == 0.0 {
+            *acceleration = 0.0;
+        }
         if !acceleration.is_finite() {
             return Err(StructuralModalBasisError::InvalidRequest {
                 what: "closing modal acceleration became non-finite",
@@ -6010,6 +6025,18 @@ mod tests {
                 .unwrap()
                 .identity
         );
+        let replay = project_point_force_on_modes(
+            &fine.mesh,
+            &fine.enrichment_modes,
+            point,
+            [0.0, 0.0, 1.0],
+            1.0e-12,
+        )
+        .unwrap();
+        assert_eq!(
+            replay.modal_force_n_per_sqrt_kg,
+            unit.force_projection.modal_force_n_per_sqrt_kg
+        );
 
         let split = fine
             .enrichment_modes
@@ -6039,6 +6066,57 @@ mod tests {
         ] {
             assert!(metric.is_finite());
         }
+    }
+
+    #[test]
+    fn g0_g3_broadband_acceleration_sign_and_static_closure() {
+        let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+        let mode = StructuralMode {
+            eigenvalue_s2: 16.0,
+            angular_frequency_rad_s: 4.0,
+            frequency_hz: 4.0 / core::f64::consts::TAU,
+            eigenvalue_interval_s2: (15.0, 17.0),
+            eigenvalue_residual_s2: 0.0,
+            nodal_shape_per_sqrt_kg: Vec::new(),
+            panel_normal_shape_per_sqrt_kg: vec![2.0; surface.centroids().len()],
+        };
+        let (_, solved) = solve_modal_acceleration_radiation_batch(
+            &surface,
+            core::slice::from_ref(&mode),
+            10.0,
+            Medium::air(),
+            1.0,
+        )
+        .unwrap();
+        assert!(solved[0].velocity.iter().all(|v| *v == C64::new(0.0, 0.2)));
+
+        let mut acceleration = [f64::NAN];
+        let state = fs_couple::modal_acoustic_time::ModalAcousticState {
+            displacement_m_sqrt_kg: 0.5,
+            velocity_m_sqrt_kg_per_s: -0.25,
+        };
+        write_closing_modal_acceleration(
+            &[mode.clone()],
+            &[0.1],
+            &[state],
+            &[3.0],
+            &mut acceleration,
+        )
+        .unwrap();
+        assert!((acceleration[0] - (3.0 - 2.0 * 0.1 * 4.0 * -0.25 - 16.0 * 0.5)).abs() < 1.0e-15);
+        let static_state = fs_couple::modal_acoustic_time::ModalAcousticState {
+            displacement_m_sqrt_kg: 3.0 / 16.0,
+            velocity_m_sqrt_kg_per_s: 0.0,
+        };
+        write_closing_modal_acceleration(
+            &[mode],
+            &[0.1],
+            &[static_state],
+            &[3.0],
+            &mut acceleration,
+        )
+        .unwrap();
+        assert_eq!(acceleration[0].to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]

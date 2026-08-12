@@ -1645,6 +1645,21 @@ simultaneous microphones share one oscillator state so stereo phase cannot
 drift. No material name selects a frequency, decay constant, radiation gain,
 pan curve, or digital level.
 
+The broadband structural source stem reuses the certified enrichment modes of
+`StructuralResidualFlexibilityEstimateBasis` as its fixed scalar generalized-force basis; it never
+adds the static-residual response. The producer binds exact basis, operator, material, damping, gas,
+frequency-partition, and solver identities. On disjoint training and withheld grids it uses the
+`exp(-i omega t)` relation `v_n/a = +i phi_n/omega`, performs one multi-right-hand-side BEM solve per
+frequency, fits body-frame real-tesseral spherical-harmonic transfers only from training data, and
+retains direct BEM far fields for withheld validation.
+
+At runtime, existing P1 point-force projection and conservative audio-cell reconstruction drive the
+exact modal transition with zero pressure transfer. The closing state supplies
+`a = Q - 2 zeta omega qdot - omega^2 q`; a persistent passive bank emits frame-major,
+channel-ordered `Pa*m` coefficients. These are source coefficients, not listener pressure or a
+`PhysicalPressureSignal`. This `EstimateOnly` path makes no claim of calibrated absolute SPL,
+listener propagation, room response, nonlinear structure, or two-way acoustic loading.
+
 The modal initial condition is explicit. `Zero` is admissible only when the
 retained horizon begins before excitation; a cropped horizon that begins under
 a held contact force uses `StaticEquilibriumAtFirstHeldForce` so that truncating
