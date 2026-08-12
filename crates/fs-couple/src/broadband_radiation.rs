@@ -104,6 +104,9 @@ pub struct BroadbandRadiationControls {
     pub fit_iterations: usize,
     /// Vector-fit row weighting.
     pub fit_weights: WeightPreset,
+    /// Whether to fit a constant direct-feedthrough term. The improper
+    /// derivative term remains forbidden.
+    pub fit_d: bool,
     /// Absolute far-field amplitude floor in pointwise relative errors.
     pub far_field_signal_floor: f64,
     /// Maximum accepted pointwise normalized complex error.
@@ -304,7 +307,9 @@ pub fn evaluate_real_tesseral(
 /// every real-SH response is therefore conjugated before fitting. Physical
 /// frequency `omega` is presented to the continuous fit at
 /// `(2/T) tan(omega T/2)`, so an unprewarped Tustin realization samples the
-/// intended physical response at the original digital frequency.
+/// intended physical response at the original digital frequency. A caller may
+/// admit constant direct feedthrough through `controls.fit_d`; the improper
+/// `s*e` term is always disabled.
 pub fn build_broadband_radiation_artifact(
     samples: &SampledRadiationData,
     controls: BroadbandRadiationControls,
@@ -342,7 +347,7 @@ pub fn build_broadband_radiation_artifact(
         iterations: controls.fit_iterations,
         weights: controls.fit_weights,
         fit_e: false,
-        fit_d: false,
+        fit_d: controls.fit_d,
     };
     let mut maximum_fit_rms = 0.0_f64;
     let mut artifact_inputs = Vec::with_capacity(samples.input_ids.len());
@@ -362,9 +367,10 @@ pub fn build_broadband_radiation_artifact(
             }
             let fit = vector_fit(&fit_omega, &response, &fit_options)
                 .map_err(|source| BroadbandRadiationError::Fit(input_index, channel, source))?;
-            if !fit.model.is_stable() || fit.model.e != 0.0 || fit.model.d != 0.0 {
+            if !fit.model.is_stable() || fit.model.e != 0.0 || !controls.fit_d && fit.model.d != 0.0
+            {
                 return Err(BroadbandRadiationError::NumericalFailure(
-                    "fit must be stable and strictly proper",
+                    "fit must be stable and proper, with direct feedthrough only when admitted",
                 ));
             }
             if !fit.report.weighted_rms.is_finite() {
@@ -723,6 +729,7 @@ mod tests {
             fit_order: 1,
             fit_iterations: 8,
             fit_weights: WeightPreset::Uniform,
+            fit_d: true,
             far_field_signal_floor: 1.0e-12,
             maximum_normalized_error: 1.0e-7,
             rms_normalized_error: 1.0e-7,
@@ -741,7 +748,7 @@ mod tests {
         let sample_rate_hz = controls().sample_rate_hz;
         let warped = 2.0 * sample_rate_hz * det::tan(omega_rad_s / (2.0 * sample_rate_hz));
         // H_-(omega) = conj(H_+(i omega_warp)), H_+(s)=1/(s+1200).
-        C64::new(1_200.0, -warped).recip()
+        C64::new(2.5e-4, 0.0) + C64::new(1_200.0, -warped).recip()
     }
 
     fn neutral_one_pole_samples() -> SampledRadiationData {
@@ -787,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn g0_neutral_train_withhold_is_deterministic_and_strictly_proper() {
+    fn g0_neutral_train_withhold_is_deterministic_proper_and_preserves_fit_d() {
         let samples = neutral_one_pole_samples();
         let first = build_broadband_radiation_artifact(&samples, controls()).unwrap();
         let second = build_broadband_radiation_artifact(&samples, controls()).unwrap();
@@ -799,6 +806,7 @@ mod tests {
         );
         assert_eq!(first.report.held_out_comparison_count, 40);
         assert!(first.report.maximum_normalized_complex_error < 1.0e-7);
+        assert!(first.inputs[0].filters[0].d.abs() > 1.0e-6);
         assert!(
             first.inputs[0]
                 .filters
