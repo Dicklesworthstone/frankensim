@@ -16,6 +16,9 @@ use fs_conduction::material::{
     ConductivityModel, ConductivityTable, ElementMaterials, MaterialId, MaterialTable,
 };
 use fs_conduction::mesh::ConductionMesh;
+use fs_conduction::duty::{
+    DutyCycle, DutySegment, march_duty_cycle, march_duty_cycle_with_element_materials,
+};
 use fs_conduction::transient::{
     FinalStateFunctional, TransientConfig, TransientProblem, VolumetricHeatCapacity, march,
     march_with_element_materials, source_scale_gradient,
@@ -1456,6 +1459,17 @@ fn two_layer_assigned(mesh: &ConductionMesh, k1: f64, k2: f64) -> ElementMateria
     .expect("assign")
 }
 
+fn free_probe(mesh: &ConductionMesh, x_lo: f64, x_hi: f64) -> usize {
+    let mid = 0.5 * (x_lo + x_hi);
+    mesh.positions()
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p[0] > x_lo + 1e-9 && p[0] < x_hi - 1e-9)
+        .min_by(|a, b| (a.1[0] - mid).abs().total_cmp(&(b.1[0] - mid).abs()))
+        .map(|(i, _)| i)
+        .expect("a free vertex between the Dirichlet faces")
+}
+
 fn mean_interface_t(mesh: &ConductionMesh, temperature: &[f64], x: f64) -> f64 {
     let mut sum = 0.0;
     let mut n = 0usize;
@@ -2056,13 +2070,7 @@ fn assigned_one_material_transient_adjoint_matches_the_uniform_path() {
         vec![MaterialId(1); mesh.element_count()],
     )
     .expect("assign");
-    let probe = mesh
-        .positions()
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1[0].total_cmp(&b.1[0]))
-        .map(|(i, _)| i)
-        .expect("probe");
+    let probe = free_probe(&mesh, 0.0, 1.0);
     let functional = FinalStateFunctional::probe(mesh.vertex_count(), probe).expect("J");
     let assigned_g = with_cx(|cx| {
         source_scale_gradient_with_element_materials(
@@ -2098,6 +2106,10 @@ fn assigned_one_material_transient_adjoint_matches_the_uniform_path() {
         .expect("uniform")
     });
     assert!(
+        assigned_g > 0.0,
+        "more source must raise a free probe, got {assigned_g}"
+    );
+    assert!(
         (assigned_g - uniform_g).abs() < 1e-12 * uniform_g.abs().max(1.0),
         "assigned transient adjoint {assigned_g} vs uniform {uniform_g}"
     );
@@ -2128,13 +2140,7 @@ fn assigned_two_layer_transient_adjoint_matches_finite_differences() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let probe = mesh
-        .positions()
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1[0].total_cmp(&b.1[0]))
-        .map(|(i, _)| i)
-        .expect("probe");
+    let probe = free_probe(&mesh, 0.0, 2.0);
     let functional = FinalStateFunctional::probe(mesh.vertex_count(), probe).expect("J");
     let problem = TransientProblem {
         mesh: &mesh,
@@ -2241,5 +2247,195 @@ fn assigned_transient_adjoint_refuses_k_of_t() {
     assert!(
         matches!(err, ConductionError::Config { .. }),
         "k(T) transient adjoint as {err:?}"
+    );
+}
+
+fn hold_cycle(window_s: f64) -> DutyCycle {
+    DutyCycle::new(vec![DutySegment::constant(window_s, 1.0).expect("hold")]).expect("cycle")
+}
+
+#[test]
+fn assigned_one_material_duty_matches_the_uniform_march() {
+    let (complex, positions) = box_grid([3, 2, 2], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(10.0).expect("k");
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("wrong");
+    let source = ScalarField::Uniform(2.0e3);
+    let capacity = VolumetricHeatCapacity::declared(1.0).expect("c");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 1.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(1), material.clone())]).expect("table"),
+        vec![MaterialId(1); mesh.element_count()],
+    )
+    .expect("assign");
+    let initial = vec![300.0; mesh.vertex_count()];
+    let cycle = hold_cycle(8.0);
+    let problem = |k: &ConductivityModel| TransientProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: k,
+        source: &source,
+        capacity,
+    };
+    let assigned_sol = with_cx(|cx| {
+        march_duty_cycle_with_element_materials(
+            cx,
+            problem(&fallback),
+            &assigned,
+            &transient_linear(),
+            &cycle,
+            1.0,
+            &initial,
+            1.0e9,
+        )
+        .expect("assigned")
+    });
+    let uniform_sol = with_cx(|cx| {
+        march_duty_cycle(
+            cx,
+            problem(&material),
+            &transient_linear(),
+            &cycle,
+            1.0,
+            &initial,
+            1.0e9,
+        )
+        .expect("uniform")
+    });
+    let worst = assigned_sol
+        .temperature
+        .iter()
+        .zip(&uniform_sol.temperature)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst < 1e-12,
+        "assigned one-material duty differed by {worst:e}"
+    );
+}
+
+#[test]
+fn assigned_two_layer_duty_relaxes_to_the_series_interface() {
+    let (complex, positions) = box_grid([6, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let assigned = two_layer_assigned(&mesh, 1.0, 2.0);
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let source = ScalarField::Uniform(0.0);
+    let capacity = VolumetricHeatCapacity::declared(1.0).expect("c");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let initial = vec![0.5; mesh.vertex_count()];
+    let cycle = hold_cycle(32.0);
+    let solution = with_cx(|cx| {
+        march_duty_cycle_with_element_materials(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &fallback,
+                source: &source,
+                capacity,
+            },
+            &assigned,
+            &transient_linear(),
+            &cycle,
+            1.0,
+            &initial,
+            1.0e9,
+        )
+        .expect("duty")
+    });
+    let t = mean_interface_t(&mesh, &solution.temperature, 1.0);
+    assert!(
+        (t - 1.0 / 3.0).abs() < 2e-3,
+        "duty assigned series interface {t} off 1/3"
+    );
+}
+
+#[test]
+fn assigned_duty_refuses_k_of_t() {
+    let (complex, positions) = box_grid([2, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let right = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.0), (450.0, 2.0)]).expect("curve"),
+    );
+    let assigned = ElementMaterials::from_region_ids(
+        MaterialTable::new([(MaterialId(1), left.clone()), (MaterialId(2), right)]).expect("table"),
+        &two_layer_ids(&mesh),
+        &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
+    )
+    .expect("assign");
+    let source = ScalarField::Uniform(0.0);
+    let capacity = VolumetricHeatCapacity::declared(1.0).expect("c");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(290.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let initial = vec![295.0; mesh.vertex_count()];
+    let cycle = hold_cycle(2.0);
+    let err = with_cx(|cx| {
+        march_duty_cycle_with_element_materials(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &left,
+                source: &source,
+                capacity,
+            },
+            &assigned,
+            &transient_linear(),
+            &cycle,
+            1.0,
+            &initial,
+            1.0e9,
+        )
+        .expect_err("k(T)")
+    });
+    assert!(
+        matches!(err, ConductionError::Config { .. }),
+        "k(T) duty as {err:?}"
     );
 }

@@ -44,7 +44,10 @@
 //! picking a scheme and a step.
 
 use crate::ConductionError;
-use crate::assemble::{DofMap, assemble_operator, reduce_matrix_and_lift};
+use crate::assemble::{
+    DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
+};
+use crate::material::ElementMaterials;
 use crate::transient::{TransientConfig, TransientProblem, assemble_capacitance};
 use fs_exec::Cx;
 use fs_qty::Dims;
@@ -436,10 +439,71 @@ pub struct DutyCycleSolution {
 /// mismatched initial vector, [`ConductionError::LinearSolveFailed`] on a
 /// non-converging step, and [`ConductionError::Cancelled`] at a step
 /// boundary.
-#[allow(clippy::too_many_lines)]
 pub fn march_duty_cycle(
     cx: &Cx<'_>,
     problem: TransientProblem<'_>,
+    config: &TransientConfig,
+    cycle: &DutyCycle,
+    base_power_w: f64,
+    initial: &[f64],
+    limit_k: f64,
+) -> Result<DutyCycleSolution, ConductionError> {
+    march_duty_cycle_inner(
+        cx,
+        problem,
+        None,
+        config,
+        cycle,
+        base_power_w,
+        initial,
+        limit_k,
+    )
+}
+
+/// [`march_duty_cycle`] with a checked per-element constitutive assignment.
+///
+/// Every assigned model must be temperature-independent, for the same
+/// reason as [`crate::transient::march_with_element_materials`].
+///
+/// # Errors
+/// Assignment validation, a `k(T)` model on any element, and every
+/// refusal [`march_duty_cycle`] can produce.
+pub fn march_duty_cycle_with_element_materials(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    materials: &ElementMaterials,
+    config: &TransientConfig,
+    cycle: &DutyCycle,
+    base_power_w: f64,
+    initial: &[f64],
+    limit_k: f64,
+) -> Result<DutyCycleSolution, ConductionError> {
+    materials.validate_for(problem.mesh)?;
+    for e in 0..problem.mesh.element_count() {
+        if materials.model_for(e)?.is_temperature_dependent() {
+            return Err(ConductionError::Config {
+                parameter: "conductivity",
+                what: "duty-cycle marching received a temperature-dependent conductivity; the transient path admits constant conductivity only".to_string(),
+            });
+        }
+    }
+    march_duty_cycle_inner(
+        cx,
+        problem,
+        Some(materials),
+        config,
+        cycle,
+        base_power_w,
+        initial,
+        limit_k,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn march_duty_cycle_inner(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    element_materials: Option<&ElementMaterials>,
     config: &TransientConfig,
     cycle: &DutyCycle,
     base_power_w: f64,
@@ -453,7 +517,7 @@ pub fn march_duty_cycle(
         source,
         capacity,
     } = problem;
-    if material.is_temperature_dependent() {
+    if element_materials.is_none() && material.is_temperature_dependent() {
         return Err(ConductionError::Config {
             parameter: "conductivity",
             what: "duty-cycle marching received a temperature-dependent conductivity; the transient path admits constant conductivity only".to_string(),
@@ -479,7 +543,12 @@ pub fn march_duty_cycle(
 
     let dofs = DofMap::new(boundary, n)?;
     let capacitance = assemble_capacitance(cx, mesh, capacity)?;
-    let system = assemble_operator(cx, mesh, boundary, material, source, initial)?;
+    let system = match element_materials {
+        Some(assigned) => assemble_operator_with_element_materials(
+            cx, mesh, boundary, material, source, initial, assigned,
+        )?,
+        None => assemble_operator(cx, mesh, boundary, material, source, initial)?,
+    };
 
     let inverse_dt = 1.0 / dt;
     let theta = config.theta();

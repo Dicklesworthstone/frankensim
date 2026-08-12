@@ -115,6 +115,7 @@ diameter.
 | `ConductivityDesign` | the IFT adjoint hook for the LINEAR case: `dJ/dρ` over per-element conductivity multipliers. `new_with_element_materials` uses each tet's own linear `K_e`; any `k(T)` assignment is refused rather than linearized |
 | `march_with_element_materials` | the linear theta-method march using each tet's assigned constant `K_e`. One-material assignment matches the uniform march; a two-layer assignment relaxes to the series interface. Any `k(T)` assignment is refused rather than frozen across a step |
 | `source_scale_gradient_with_element_materials` | the discrete backward adjoint of `J = w · T^N` w.r.t. a uniform source scale, using each tet's assigned linear `K_e`. One-material assignment matches the uniform adjoint; a two-layer assignment matches independent finite differences. Any `k(T)` assignment is refused |
+| `march_duty_cycle_with_element_materials` | the declared duty-cycle march using each tet's assigned linear `K_e`. One-material assignment matches the uniform duty march; a two-layer assignment relaxes to the series interface. Any `k(T)` assignment is refused |
 | `ConductionError` | the total typed refusal set; `rule()` gives a stable slug |
 
 ### `ThermalBc::from_scenario_row` — the Robin seam
