@@ -11,9 +11,11 @@ use fs_rep_frep::AxisymmetricSupportAuthority;
 use fs_tribo::InputAuthority;
 use patch_kinematics::{
     Creepage, CurvatureMetadata, MovingOneModeBaseState, MovingOneModePatchBridgeInput,
-    OrderedSurfacePair, PatchContactStatus, PatchGeometryMetadata, PatchKinematicThresholds,
-    PatchKinematicsInput, ProfileSupportKinematics, SurfaceOrder, TangentGaugeInput,
-    TangentGaugeSource, bridge_moving_one_mode_patch_kinematics, compute_patch_kinematics,
+    MovingOneModePatchKinematicsInput, OrderedSurfacePair, PatchContactStatus,
+    PatchGeometryMetadata, PatchKinematicThresholds, PatchKinematicsInput,
+    ProfileSupportKinematics, SurfaceOrder, TangentGaugeInput, TangentGaugeSource,
+    bridge_moving_one_mode_patch_kinematics, compute_moving_one_mode_patch_kinematics,
+    compute_patch_kinematics,
 };
 
 fn id(value: &str) -> StableId {
@@ -161,6 +163,63 @@ fn moving_one_mode_bridge_uses_disc_material_motion_without_faking_a_base_body()
             .cross(bridge.tangent_basis.second_world),
         bridge.normal_world,
     );
+}
+
+#[test]
+fn moving_one_mode_status_uses_resolved_base_displacement_gap() {
+    let input = MovingOneModePatchKinematicsInput {
+        bridge: MovingOneModePatchBridgeInput {
+            profile_support: ProfileSupportKinematics {
+                disc_arm_world_m: Vec3::new(0.0, 0.0, -1.0),
+                disc_point_world_m: Vec3::ZERO,
+                gap_m: 0.0,
+                source_feature: 7,
+                support_authority: AxisymmetricSupportAuthority::Estimate,
+            },
+            disc_state: state(Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO, Vec3::ZERO),
+            disc_mass_properties: properties(),
+            base_mode: MovingOneModeBaseState {
+                undeformed_contact_point_world_m: Vec3::ZERO,
+                vertical_displacement_m: -0.02,
+                vertical_velocity_m_per_s: 0.0,
+            },
+            normal_world: Vec3::new(0.0, 0.0, 1.0),
+            tangent_gauge: TangentGaugeInput {
+                reference_world: Vec3::new(1.0, 0.0, 0.0),
+                rotation_rad: 0.0,
+            },
+            thresholds: thresholds(),
+        },
+        surfaces: OrderedSurfacePair::try_new(
+            id("moving-disc"),
+            id("moving-base"),
+            SurfaceOrder::DiscThenBase,
+        )
+        .expect("ordered moving surfaces"),
+        patch: PatchGeometryMetadata {
+            patch_identity: id("moving-patch"),
+            source_feature: 7,
+            gap_uncertainty_m: 0.0,
+            curvature: CurvatureMetadata::Known {
+                curvature_identity: id("moving-curvature"),
+                authority: InputAuthority::SyntheticFixture,
+                first_principal_m_inverse: 1.0,
+                second_principal_m_inverse: 1.0,
+                uncertainty_m_inverse: 0.0,
+            },
+        },
+        tangent_effort_probe_world_n: None,
+    };
+
+    let resolved =
+        compute_moving_one_mode_patch_kinematics(input).expect("moving-base separation resolves");
+    let resolved_gap_m = resolved
+        .disc_point
+        .point_world
+        .sub(resolved.base_point.point_world)
+        .dot(resolved.tangent_basis.normal_world);
+    assert_close(resolved_gap_m, 0.02);
+    assert_eq!(resolved.status, PatchContactStatus::Separated);
 }
 
 #[test]

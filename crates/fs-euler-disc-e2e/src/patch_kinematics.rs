@@ -719,7 +719,7 @@ pub fn compute_moving_one_mode_patch_kinematics(
         })
         .transpose()?;
     let status = classify_status(
-        input.bridge.profile_support.gap_m,
+        bridge.normal_gap_m,
         input.patch.gap_uncertainty_m,
         normal_relative_velocity_m_per_s,
         tangential_relative_velocity.squared_norm().sqrt(),

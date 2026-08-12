@@ -129,9 +129,15 @@ pub use structural_acoustics::{
     AcousticModeRadiation, AcousticObserver, ModalAcousticRadiation, ModalLossSpectrum,
     PhysicalContactForceSampling, PhysicalModalAudioModel, PhysicalModalInitialState,
     PhysicalModalPressureFrame, PhysicalPressureSignal, PointForceProjection,
-    ResolvedAcousticMedium, STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, StructuralMeshControls,
-    StructuralModalBasis, StructuralModalBasisError, StructuralMode, StructuralModeRequest,
-    build_structural_modal_basis, modal_loss_spectrum_from_prony,
+    ResolvedAcousticMedium, STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION,
+    STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM, STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION,
+    StructuralMeshControls, StructuralModalBasis, StructuralModalBasisError, StructuralMode,
+    StructuralModeRequest, StructuralResidualFlexibilityAuthority,
+    StructuralResidualFlexibilityControls,
+    StructuralResidualFlexibilityEstimateBasis, StructuralResidualFlexibilityEstimateComparison,
+    StructuralResidualFlexibilityEstimateResponse, build_structural_modal_basis,
+    build_structural_residual_flexibility_estimate_basis,
+    compare_structural_residual_flexibility_estimates, modal_loss_spectrum_from_prony,
     modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
 };
 pub use timeline_resampling::{

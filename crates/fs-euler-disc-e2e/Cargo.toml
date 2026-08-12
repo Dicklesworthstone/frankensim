@@ -75,6 +75,10 @@ name = "euler_cinematic_denoise"
 path = "src/bin/euler_cinematic_denoise.rs"
 required-features = ["cinematic-render"]
 
+[[bin]]
+name = "euler_cinematic_audio_gain"
+path = "src/bin/euler_cinematic_audio_gain.rs"
+
 [[test]]
 name = "render_scene_bridge"
 required-features = ["cinematic-render"]

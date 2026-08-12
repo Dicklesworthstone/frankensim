@@ -42,7 +42,7 @@ use fs_mesh::{
     RoundedCylinderMeshError, RoundedCylinderMeshSpec, RoundedCylinderTetMesh,
     rounded_cylinder_tet_mesh,
 };
-use fs_modal::{ModalError, SliceOptions, SliceStats, slice_window};
+use fs_modal::{ModalError, ModePair, SliceOptions, SliceStats, slice_window};
 use fs_plate::{
     AssemblyOptions as PlateAssemblyOptions, EdgeSupport as PlateEdgeSupport, PlateError,
     PlateMesh, PlateModel, PlateSection, assemble as assemble_plate,
@@ -64,14 +64,41 @@ use crate::{
 
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
+/// Schema version of the count-certified residual-flexibility estimate.
+pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION: u32 = 1;
+/// Exact limitation attached to every truncated residual-flexibility basis.
+pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM: &str = "Estimate-only: inertia certifies eigenvalue counts, not an enclosure of the eigenvector-derived compliance; eigenpair residuals, modes above the declared enrichment band, mesh and constitutive error, dynamic correction, and broadband radiation/audio are not bounded";
 /// Maximum number of simultaneous physical pressure observers in one pass.
 pub const MAX_PHYSICAL_PRESSURE_OBSERVERS: usize = 64;
 const STRUCTURAL_MODAL_BASIS_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-modal-basis.v1";
+const STRUCTURAL_RESIDUAL_FLEXIBILITY_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.structural-residual-flexibility.v1";
+const STRUCTURAL_RESIDUAL_RESPONSE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.structural-residual-response.v1";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
 const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-directivity.v1";
+
+/// Authority ceiling carried by residual-flexibility artifacts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StructuralResidualFlexibilityAuthority {
+    /// Truncated numerical estimate under [`STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM`].
+    EstimateOnly,
+}
+
+impl StructuralResidualFlexibilityAuthority {
+    /// Stable artifact spelling.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        "estimate-only"
+    }
+
+    const fn tag(self) -> u8 {
+        1
+    }
+}
 
 /// Resolution and resource controls, deliberately separate from physical
 /// dimensions so callers cannot accidentally restate geometry differently
@@ -172,6 +199,111 @@ pub struct StructuralModalBasis {
     pub slice_stats: SliceStats,
     /// Content identity binding all physical and numerical inputs and outputs.
     pub identity: ContentHash,
+}
+
+/// Spectral controls for the residual-flexibility complement above a forcing band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StructuralResidualFlexibilityControls {
+    /// Highest elastic frequency included in the static sum [Hz].
+    pub maximum_enrichment_frequency_hz: f64,
+    /// Hard cap on certified positive-frequency enrichment modes.
+    pub maximum_enrichment_modes: usize,
+}
+
+/// Count-certified truncated sum `u_H = sum(phi phi^T f / lambda)` with an
+/// Estimate-only authority ceiling under [`STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM`].
+#[derive(Clone, Debug)]
+pub struct StructuralResidualFlexibilityEstimateBasis {
+    /// Integrated artifact schema.
+    pub schema_version: u32,
+    /// Explicit authority ceiling; never inferred from a type name.
+    pub authority: StructuralResidualFlexibilityAuthority,
+    /// Identity of resolved geometry plus material state.
+    pub specimen_identity: ContentHash,
+    /// Geometry/density profile identity.
+    pub profile_identity: ContentHash,
+    /// Elastic material state used to assemble `(K,M)`.
+    pub material_state_identity: ContentHash,
+    /// Exact body-fitted volume and boundary panelization.
+    pub mesh: RoundedCylinderTetMesh,
+    /// Physical mass and stiffness operators whose positive spectrum was used.
+    pub assembly: TetElasticAssembly,
+    /// Exact finite-element assembly budget and quality threshold.
+    pub assembly_budget: TetAssemblyBudget,
+    /// Exact identity of mesh, panels, reduced operators, and DOF semantics.
+    pub operator_identity: ContentHash,
+    /// Six analytic free-body modes after verified M-orthonormalization.
+    pub rigid_modes_per_sqrt_kg: Vec<Vec<f64>>,
+    /// Largest relative stiffness-null residual over the rigid basis.
+    pub maximum_rigid_stiffness_relative_residual: f64,
+    /// Largest M-inner-product defect among rigid and retained elastic modes.
+    pub maximum_mass_orthogonality_error: f64,
+    /// Certified mass-normalized enrichment modes with full nodal/panel shapes.
+    pub enrichment_modes: Vec<StructuralMode>,
+    /// Declared forcing band whose upper edge begins the residual sum [Hz].
+    pub forcing_frequency_band_hz: (f64, f64),
+    /// Half-open certified enrichment band `(low, high]` [Hz].
+    pub enrichment_frequency_band_hz: (f64, f64),
+    /// Inertia-certified number of modes in the enrichment window.
+    pub certified_enrichment_mode_count: usize,
+    /// Inertia-certified number of modes inside the forcing band.
+    pub certified_in_band_mode_count: usize,
+    /// Exact inertia count over `(forcing_min, enrichment_max]`.
+    pub certified_partition_mode_count: usize,
+    /// Sparse eigensolver work accounting.
+    pub slice_stats: SliceStats,
+    /// Content identity binding physical, spectral, and numerical inputs.
+    pub identity: ContentHash,
+}
+
+/// Static elastic response to one arbitrary moving boundary point force.
+#[derive(Clone, Debug)]
+pub struct StructuralResidualFlexibilityEstimateResponse {
+    /// Residual-flexibility basis used for the response.
+    pub basis_identity: ContentHash,
+    /// Authority inherited exactly from the basis.
+    pub authority: StructuralResidualFlexibilityAuthority,
+    /// Requested body-frame force application point [m].
+    pub requested_point_m: [f64; 3],
+    /// Applied body-frame point force [N].
+    pub applied_force_n: [f64; 3],
+    /// Boundary interpolation and generalized forces for every enrichment mode.
+    pub force_projection: PointForceProjection,
+    /// Full nodal load after removal of all six rigid generalized loads [N].
+    pub inertia_relieved_nodal_force_n: Vec<[f64; 3]>,
+    /// Largest relative rigid generalized-force remainder.
+    pub maximum_rigid_force_relative_residual: f64,
+    /// Static coordinates `q_k = (phi_k^T f)/lambda_k` [m sqrt(kg)].
+    pub modal_displacement_m_sqrt_kg: Vec<f64>,
+    /// Full nodal elastic displacement reconstructed from the truncated sum [m].
+    pub nodal_displacement_m: Vec<[f64; 3]>,
+    /// Boundary-panel normal displacement for broadband radiation [m].
+    pub panel_normal_displacement_m: Vec<f64>,
+    /// Independently interpolated physical contact work `f^T u_H` [J].
+    pub elastic_work_j: f64,
+    /// Independently evaluated strain energy `u_H^T K u_H / 2` [J].
+    pub recoverable_strain_energy_j: f64,
+    /// Closure residual `f^T u_H - u_H^T K u_H` [J].
+    pub energy_closure_residual_j: f64,
+    /// Identity binding the basis, physical force, projection, and response.
+    pub identity: ContentHash,
+}
+
+/// Difference metrics for one nested residual-flexibility enrichment study.
+#[derive(Clone, Debug)]
+pub struct StructuralResidualFlexibilityEstimateComparison {
+    /// Coarser response identity.
+    pub coarse_response_identity: ContentHash,
+    /// Finer response identity.
+    pub fine_response_identity: ContentHash,
+    /// Signed added static work from the larger spectral window [J].
+    pub elastic_work_increment_j: f64,
+    /// Absolute work difference normalized by the finer work scale.
+    pub relative_elastic_work_difference: f64,
+    /// Full-nodal displacement L2 difference normalized by the finer response.
+    pub relative_nodal_displacement_l2_difference: f64,
+    /// Panel-normal displacement L2 difference normalized by the finer response.
+    pub relative_panel_normal_l2_difference: f64,
 }
 
 /// Geometric support constraint for a rectangular thin plate.
@@ -949,6 +1081,15 @@ pub enum StructuralModalBasisError {
     Timeline(TimelineResamplingError),
     /// The requested band contains no elastic modes.
     NoModesInBand,
+    /// A rigid-subspace, inertia-relief, or energy-closure check failed.
+    ResidualFlexibilityVerification {
+        /// Failed invariant.
+        what: &'static str,
+        /// Dimensionless or SI residual named by `what`.
+        residual: f64,
+        /// Corresponding admitted tolerance.
+        tolerance: f64,
+    },
     /// The certified count exceeds the caller's retained-mode budget.
     ModeBudgetExceeded {
         /// Certified in-band count.
@@ -1073,6 +1214,14 @@ impl core::fmt::Display for StructuralModalBasisError {
                 )
             }
             Self::NoModesInBand => write!(formatter, "FS-EULER-STRUCTURAL-MODE-EMPTY-BAND"),
+            Self::ResidualFlexibilityVerification {
+                what,
+                residual,
+                tolerance,
+            } => write!(
+                formatter,
+                "FS-EULER-STRUCTURAL-RESIDUAL-VERIFY: {what} residual {residual:.6e} exceeds {tolerance:.6e}"
+            ),
             Self::ModeBudgetExceeded { requested, maximum } => write!(
                 formatter,
                 "FS-EULER-STRUCTURAL-MODE-BUDGET: certified {requested} modes exceeds {maximum}"
@@ -1260,6 +1409,162 @@ pub fn build_structural_modal_basis(
     cx: &Cx<'_>,
 ) -> Result<StructuralModalBasis, StructuralModalBasisError> {
     validate_request(request)?;
+    let (mesh_spec, mesh, assembly) = assemble_structural_operators(request, cx)?;
+
+    let angular_min = core::f64::consts::TAU * request.minimum_frequency_hz;
+    let angular_max = core::f64::consts::TAU * request.maximum_frequency_hz;
+    let eigenvalue_window_s2 = (angular_min * angular_min, angular_max * angular_max);
+    let report = slice_window(
+        &assembly.stiffness,
+        &assembly.mass,
+        eigenvalue_window_s2,
+        &request.slice,
+    )?;
+    if report.expected == 0 {
+        return Err(StructuralModalBasisError::NoModesInBand);
+    }
+    if report.expected > request.maximum_modes {
+        return Err(StructuralModalBasisError::ModeBudgetExceeded {
+            requested: report.expected,
+            maximum: request.maximum_modes,
+        });
+    }
+
+    let modes = structural_modes_from_pairs(&mesh, &assembly, &report.modes)?;
+
+    let identity = basis_identity(request, mesh_spec, &mesh, &assembly, &modes);
+    Ok(StructuralModalBasis {
+        schema_version: STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION,
+        specimen_identity: request.specimen.identity,
+        profile_identity: request.specimen.profile.content_identities().profile,
+        material_state_identity: request.specimen.material_state_identity,
+        mesh,
+        assembly,
+        modes,
+        eigenvalue_window_s2,
+        certified_mode_count: report.expected,
+        slice_stats: report.stats,
+        identity,
+    })
+}
+
+/// Build a count-certified positive-spectrum complement above the forcing band.
+///
+/// # Errors
+/// Refuses malformed inputs, incomplete partitions/rigid proofs, empty enrichment, caps, or non-positive modes.
+pub fn build_structural_residual_flexibility_estimate_basis(
+    request: &StructuralModeRequest<'_>,
+    controls: StructuralResidualFlexibilityControls,
+    cx: &Cx<'_>,
+) -> Result<StructuralResidualFlexibilityEstimateBasis, StructuralModalBasisError> {
+    validate_request(request)?;
+    if !(controls.maximum_enrichment_frequency_hz.is_finite()
+        && controls.maximum_enrichment_frequency_hz > request.maximum_frequency_hz)
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "residual-flexibility enrichment maximum must be finite and exceed the forcing-band maximum",
+        });
+    }
+    if controls.maximum_enrichment_modes == 0 {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "residual-flexibility enrichment mode cap must be positive",
+        });
+    }
+    let (_mesh_spec, mesh, assembly) = assemble_structural_operators(request, cx)?;
+    let angular_low = core::f64::consts::TAU * request.minimum_frequency_hz;
+    let angular_partition = core::f64::consts::TAU * request.maximum_frequency_hz;
+    let angular_high = core::f64::consts::TAU * controls.maximum_enrichment_frequency_hz;
+    let eigenvalue_window_s2 = (angular_low * angular_low, angular_high * angular_high);
+    let report = slice_window(
+        &assembly.stiffness,
+        &assembly.mass,
+        eigenvalue_window_s2,
+        &request.slice,
+    )?;
+    verify_residual(
+        "exactly six eigenvalues below the positive-frequency window",
+        report.below_low.abs_diff(6) as f64,
+        0.0,
+    )?;
+    let partition_s2 = angular_partition * angular_partition;
+    let mut in_band_count = 0;
+    for pair in &report.modes {
+        if pair.interval.0 <= eigenvalue_window_s2.0 || pair.interval.1 > eigenvalue_window_s2.1 {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "residual-flexibility eigenvalue interval escapes its requested window",
+            });
+        }
+        if pair.interval.1 <= partition_s2 {
+            in_band_count += 1;
+        } else if pair.interval.0 <= partition_s2 {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "residual-flexibility eigenvalue interval crosses the forcing-band edge",
+            });
+        }
+    }
+    let enrichment_count = report.expected - in_band_count;
+    if enrichment_count == 0 {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "residual-flexibility enrichment window contains no elastic modes",
+        });
+    }
+    if in_band_count > request.maximum_modes {
+        return Err(StructuralModalBasisError::ModeBudgetExceeded {
+            requested: in_band_count,
+            maximum: request.maximum_modes,
+        });
+    }
+    if enrichment_count > controls.maximum_enrichment_modes {
+        return Err(StructuralModalBasisError::ModeBudgetExceeded {
+            requested: enrichment_count,
+            maximum: controls.maximum_enrichment_modes,
+        });
+    }
+    let mut all_modes = structural_modes_from_pairs(&mesh, &assembly, &report.modes)?;
+    let (rigid_modes_per_sqrt_kg, rigid_null_residual, mass_orthogonality_error) =
+        verified_rigid_subspace(&mesh, &assembly, all_modes.iter())?;
+    let operator_identity = structural_operator_identity(&mesh, &assembly);
+    let enrichment_modes = all_modes.split_off(in_band_count);
+    let mut basis = StructuralResidualFlexibilityEstimateBasis {
+        schema_version: STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION,
+        authority: StructuralResidualFlexibilityAuthority::EstimateOnly,
+        specimen_identity: request.specimen.identity,
+        profile_identity: request.specimen.profile.content_identities().profile,
+        material_state_identity: request.specimen.material_state_identity,
+        mesh,
+        assembly,
+        assembly_budget: request.assembly,
+        operator_identity,
+        rigid_modes_per_sqrt_kg,
+        maximum_rigid_stiffness_relative_residual: rigid_null_residual,
+        maximum_mass_orthogonality_error: mass_orthogonality_error,
+        enrichment_modes,
+        forcing_frequency_band_hz: (request.minimum_frequency_hz, request.maximum_frequency_hz),
+        enrichment_frequency_band_hz: (
+            request.maximum_frequency_hz,
+            controls.maximum_enrichment_frequency_hz,
+        ),
+        certified_enrichment_mode_count: enrichment_count,
+        certified_in_band_mode_count: in_band_count,
+        certified_partition_mode_count: report.expected,
+        slice_stats: report.stats,
+        identity: ContentHash([0; 32]),
+    };
+    basis.identity = basis.recomputed_identity();
+    Ok(basis)
+}
+
+fn assemble_structural_operators(
+    request: &StructuralModeRequest<'_>,
+    cx: &Cx<'_>,
+) -> Result<
+    (
+        RoundedCylinderMeshSpec,
+        RoundedCylinderTetMesh,
+        TetElasticAssembly,
+    ),
+    StructuralModalBasisError,
+> {
     let (outer_radius_m, thickness_m, fillet_radius_m) =
         rounded_cylinder_dimensions(request.specimen)?;
     let mesh_spec = RoundedCylinderMeshSpec {
@@ -1282,28 +1587,16 @@ pub fn build_structural_modal_basis(
         budget: request.assembly,
     }
     .assemble(cx)?;
+    Ok((mesh_spec, mesh, assembly))
+}
 
-    let angular_min = core::f64::consts::TAU * request.minimum_frequency_hz;
-    let angular_max = core::f64::consts::TAU * request.maximum_frequency_hz;
-    let eigenvalue_window_s2 = (angular_min * angular_min, angular_max * angular_max);
-    let report = slice_window(
-        &assembly.stiffness,
-        &assembly.mass,
-        eigenvalue_window_s2,
-        &request.slice,
-    )?;
-    if report.expected == 0 {
-        return Err(StructuralModalBasisError::NoModesInBand);
-    }
-    if report.expected > request.maximum_modes {
-        return Err(StructuralModalBasisError::ModeBudgetExceeded {
-            requested: report.expected,
-            maximum: request.maximum_modes,
-        });
-    }
-
-    let mut modes = Vec::with_capacity(report.modes.len());
-    for (mode_index, pair) in report.modes.iter().enumerate() {
+fn structural_modes_from_pairs(
+    mesh: &RoundedCylinderTetMesh,
+    assembly: &TetElasticAssembly,
+    pairs: &[ModePair],
+) -> Result<Vec<StructuralMode>, StructuralModalBasisError> {
+    let mut modes = Vec::with_capacity(pairs.len());
+    for (mode_index, pair) in pairs.iter().enumerate() {
         if !(pair.lambda > 0.0 && pair.interval.0 > 0.0 && pair.interval.1.is_finite()) {
             return Err(StructuralModalBasisError::NonPositiveCertifiedMode { mode: mode_index });
         }
@@ -1317,20 +1610,12 @@ pub fn build_structural_modal_basis(
             .iter()
             .zip(&mesh.boundary.normals)
             .map(|(triangle, normal)| {
-                let displacement = [
-                    (nodal_shape[triangle[0]][0]
-                        + nodal_shape[triangle[1]][0]
-                        + nodal_shape[triangle[2]][0])
-                        / 3.0,
-                    (nodal_shape[triangle[0]][1]
-                        + nodal_shape[triangle[1]][1]
-                        + nodal_shape[triangle[2]][1])
-                        / 3.0,
-                    (nodal_shape[triangle[0]][2]
-                        + nodal_shape[triangle[1]][2]
-                        + nodal_shape[triangle[2]][2])
-                        / 3.0,
-                ];
+                let displacement = core::array::from_fn(|component| {
+                    (nodal_shape[triangle[0]][component]
+                        + nodal_shape[triangle[1]][component]
+                        + nodal_shape[triangle[2]][component])
+                        / 3.0
+                });
                 dot(displacement, *normal)
             })
             .collect();
@@ -1345,21 +1630,128 @@ pub fn build_structural_modal_basis(
             panel_normal_shape_per_sqrt_kg: panel_normal_shape,
         });
     }
+    Ok(modes)
+}
 
-    let identity = basis_identity(request, mesh_spec, &mesh, &assembly, &modes);
-    Ok(StructuralModalBasis {
-        schema_version: STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION,
-        specimen_identity: request.specimen.identity,
-        profile_identity: request.specimen.profile.content_identities().profile,
-        material_state_identity: request.specimen.material_state_identity,
-        mesh,
-        assembly,
-        modes,
-        eigenvalue_window_s2,
-        certified_mode_count: report.expected,
-        slice_stats: report.stats,
-        identity,
-    })
+fn verified_rigid_subspace<'a>(
+    mesh: &RoundedCylinderTetMesh,
+    assembly: &TetElasticAssembly,
+    elastic_modes: impl Iterator<Item = &'a StructuralMode>,
+) -> Result<(Vec<Vec<f64>>, f64, f64), StructuralModalBasisError> {
+    let n = assembly.free_dofs.len();
+    let mut rigid = Vec::<Vec<f64>>::with_capacity(6);
+    for kind in 0..6 {
+        let mut candidate = Vec::with_capacity(n);
+        for &full_dof in &assembly.free_dofs {
+            let node = full_dof / 3;
+            let component = full_dof % 3;
+            let [x, y, z] = mesh.nodes_m[node];
+            candidate.push(match kind {
+                0..=2 => {
+                    if component == kind {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                3 => [0.0, -z, y][component],
+                4 => [z, 0.0, -x][component],
+                _ => [-y, x, 0.0][component],
+            });
+        }
+        for _ in 0..2 {
+            for prior in &rigid {
+                let mut mass_candidate = vec![0.0; n];
+                assembly.mass.spmv(&candidate, &mut mass_candidate);
+                let coefficient = dot_slice(prior, &mass_candidate);
+                for (value, basis_value) in candidate.iter_mut().zip(prior) {
+                    *value = coefficient.mul_add(-basis_value, *value);
+                }
+            }
+        }
+        let mut mass_candidate = vec![0.0; n];
+        assembly.mass.spmv(&candidate, &mut mass_candidate);
+        let norm = dot_slice(&candidate, &mass_candidate).sqrt();
+        if !(norm.is_finite() && norm > 0.0) {
+            return Err(StructuralModalBasisError::ResidualFlexibilityVerification {
+                what: "analytic rigid basis rank",
+                residual: norm,
+                tolerance: f64::MIN_POSITIVE,
+            });
+        }
+        candidate.iter_mut().for_each(|value| *value /= norm);
+        rigid.push(candidate);
+    }
+
+    let stiffness_scale = (0..assembly.stiffness.nrows())
+        .map(|row| assembly.stiffness.row(row).1.iter().map(|v| v.abs()).sum())
+        .fold(0.0_f64, f64::max);
+    let mut maximum_null_residual = 0.0_f64;
+    let mut maximum_orthogonality_error = 0.0_f64;
+    for (i, mode) in rigid.iter().enumerate() {
+        let mut stiffness_mode = vec![0.0; n];
+        assembly.stiffness.spmv(mode, &mut stiffness_mode);
+        maximum_null_residual = maximum_null_residual.max(
+            maximum_abs(&stiffness_mode)
+                / (stiffness_scale * maximum_abs(mode)).max(f64::MIN_POSITIVE),
+        );
+        let mut mass_mode = vec![0.0; n];
+        assembly.mass.spmv(mode, &mut mass_mode);
+        for (j, other) in rigid.iter().enumerate() {
+            maximum_orthogonality_error = maximum_orthogonality_error
+                .max((dot_slice(other, &mass_mode) - if i == j { 1.0 } else { 0.0 }).abs());
+        }
+    }
+    for mode in elastic_modes {
+        let reduced: Vec<f64> = assembly
+            .free_dofs
+            .iter()
+            .map(|dof| mode.nodal_shape_per_sqrt_kg[dof / 3][dof % 3])
+            .collect();
+        let mut mass_mode = vec![0.0; n];
+        assembly.mass.spmv(&reduced, &mut mass_mode);
+        for rigid_mode in &rigid {
+            maximum_orthogonality_error =
+                maximum_orthogonality_error.max(dot_slice(rigid_mode, &mass_mode).abs());
+        }
+    }
+    verify_residual(
+        "analytic rigid stiffness nullspace",
+        maximum_null_residual,
+        1.0e-10,
+    )?;
+    verify_residual(
+        "rigid/elastic M orthogonality",
+        maximum_orthogonality_error,
+        1.0e-8,
+    )?;
+    Ok((rigid, maximum_null_residual, maximum_orthogonality_error))
+}
+
+fn verify_residual(
+    what: &'static str,
+    residual: f64,
+    tolerance: f64,
+) -> Result<(), StructuralModalBasisError> {
+    if residual.is_finite() && residual <= tolerance {
+        Ok(())
+    } else {
+        Err(StructuralModalBasisError::ResidualFlexibilityVerification {
+            what,
+            residual,
+            tolerance,
+        })
+    }
+}
+
+fn dot_slice(left: &[f64], right: &[f64]) -> f64 {
+    left.iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+fn maximum_abs(values: &[f64]) -> f64 {
+    values
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()))
 }
 
 /// Assemble a certified bending basis for one resolved supported plate.
@@ -3116,67 +3508,341 @@ impl StructuralModalBasis {
         force_n: [f64; 3],
         maximum_distance_m: f64,
     ) -> Result<PointForceProjection, StructuralModalBasisError> {
-        if point_m
+        project_point_force_on_modes(
+            &self.mesh,
+            &self.modes,
+            point_m,
+            force_n,
+            maximum_distance_m,
+        )
+    }
+}
+
+impl StructuralResidualFlexibilityEstimateBasis {
+    /// Recompute the content identity from every stored semantic field.
+    #[must_use]
+    pub fn recomputed_identity(&self) -> ContentHash {
+        residual_flexibility_basis_identity(self)
+    }
+
+    /// Evaluate truncated static flexibility at any admitted moving boundary point.
+    ///
+    /// # Errors
+    /// Refuses malformed/off-boundary force inputs, non-finite reconstruction,
+    /// or a negative compliance-work defect beyond roundoff.
+    pub fn evaluate_point_force(
+        &self,
+        point_m: [f64; 3],
+        force_n: [f64; 3],
+        maximum_distance_m: f64,
+    ) -> Result<StructuralResidualFlexibilityEstimateResponse, StructuralModalBasisError> {
+        let (force_projection, inertia_relieved_nodal_force_n, rigid_force_residual) =
+            inertia_relieved_point_force(self, point_m, force_n, maximum_distance_m)?;
+        let mut modal_displacement_m_sqrt_kg = Vec::with_capacity(self.enrichment_modes.len());
+        let mut nodal_displacement_m = vec![[0.0; 3]; self.mesh.nodes_m.len()];
+        let mut panel_normal_displacement_m = vec![0.0; self.mesh.boundary.triangles.len()];
+        for (mode, generalized_force) in self
+            .enrichment_modes
             .iter()
-            .chain(force_n.iter())
+            .zip(&force_projection.modal_force_n_per_sqrt_kg)
+        {
+            let coordinate = generalized_force / mode.eigenvalue_s2;
+            if !coordinate.is_finite() {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "residual-flexibility modal displacement became non-finite",
+                });
+            }
+            modal_displacement_m_sqrt_kg.push(coordinate);
+            for (displacement, shape) in nodal_displacement_m
+                .iter_mut()
+                .zip(&mode.nodal_shape_per_sqrt_kg)
+            {
+                for component in 0..3 {
+                    displacement[component] =
+                        coordinate.mul_add(shape[component], displacement[component]);
+                }
+            }
+            for (displacement, shape) in panel_normal_displacement_m
+                .iter_mut()
+                .zip(&mode.panel_normal_shape_per_sqrt_kg)
+            {
+                *displacement = coordinate.mul_add(*shape, *displacement);
+            }
+        }
+        if nodal_displacement_m
+            .iter()
+            .flatten()
+            .chain(&panel_normal_displacement_m)
             .any(|value| !value.is_finite())
         {
             return Err(StructuralModalBasisError::InvalidRequest {
-                what: "contact point and force must be finite",
+                what: "residual-flexibility reconstruction became non-finite",
             });
         }
-        if !(maximum_distance_m.is_finite() && maximum_distance_m >= 0.0) {
-            return Err(StructuralModalBasisError::InvalidRequest {
-                what: "maximum contact-to-boundary distance must be finite and non-negative",
-            });
-        }
-        let mut best = None;
-        for (boundary_triangle, triangle) in self.mesh.boundary.triangles.iter().enumerate() {
-            let vertices = triangle.map(|node| self.mesh.nodes_m[node]);
-            let (closest, barycentric) = closest_point_on_triangle(point_m, vertices);
-            let distance_squared = norm_squared(sub(point_m, closest));
-            if best.as_ref().is_none_or(
-                |(_, _, _, best_distance): &(usize, [f64; 3], [f64; 3], f64)| {
-                    distance_squared < *best_distance
-                },
-            ) {
-                best = Some((boundary_triangle, closest, barycentric, distance_squared));
-            }
-        }
-        let (boundary_triangle, closest_point_m, barycentric, distance_squared) =
-            best.expect("a structural mesh always has a non-empty boundary");
-        let distance_to_boundary_m = distance_squared.sqrt();
-        if distance_to_boundary_m > maximum_distance_m {
-            return Err(StructuralModalBasisError::ContactOutsideTolerance {
-                distance_m: distance_to_boundary_m,
-                tolerance_m: maximum_distance_m,
-            });
-        }
-        let triangle = self.mesh.boundary.triangles[boundary_triangle];
-        let modal_force_n_per_sqrt_kg = self
-            .modes
-            .iter()
-            .map(|mode| {
-                let mut shape = [0.0; 3];
-                for corner in 0..3 {
-                    let nodal = mode.nodal_shape_per_sqrt_kg[triangle[corner]];
-                    for component in 0..3 {
-                        shape[component] =
-                            barycentric[corner].mul_add(nodal[component], shape[component]);
-                    }
-                }
-                dot(shape, force_n)
+        let triangle = self.mesh.boundary.triangles[force_projection.boundary_triangle];
+        let contact_displacement_m = core::array::from_fn(|component| {
+            (0..3).fold(0.0, |value, corner| {
+                force_projection.barycentric[corner]
+                    .mul_add(nodal_displacement_m[triangle[corner]][component], value)
             })
+        });
+        let elastic_work_j = dot(contact_displacement_m, force_n);
+        let reduced_displacement: Vec<f64> = self
+            .assembly
+            .free_dofs
+            .iter()
+            .map(|dof| nodal_displacement_m[dof / 3][dof % 3])
             .collect();
-        Ok(PointForceProjection {
-            boundary_triangle,
-            closest_point_m,
-            distance_to_boundary_m,
-            barycentric,
-            modal_force_n_per_sqrt_kg,
-        })
+        let mut stiffness_displacement = vec![0.0; reduced_displacement.len()];
+        self.assembly
+            .stiffness
+            .spmv(&reduced_displacement, &mut stiffness_displacement);
+        let recoverable_strain_energy_j =
+            0.5 * dot_slice(&reduced_displacement, &stiffness_displacement);
+        let energy_closure_residual_j = elastic_work_j - 2.0 * recoverable_strain_energy_j;
+        let energy_scale_j = elastic_work_j
+            .abs()
+            .max((2.0 * recoverable_strain_energy_j).abs())
+            .max(f64::MIN_POSITIVE);
+        let work_tolerance_j = 1.0e-8 * energy_scale_j;
+        verify_residual(
+            "non-negative residual-flexibility work [J]",
+            (-elastic_work_j.min(recoverable_strain_energy_j)).max(0.0),
+            work_tolerance_j,
+        )?;
+        verify_residual(
+            "contact-work/strain-energy closure [J]",
+            energy_closure_residual_j.abs(),
+            work_tolerance_j,
+        )?;
+        let mut response = StructuralResidualFlexibilityEstimateResponse {
+            basis_identity: self.identity,
+            authority: self.authority,
+            requested_point_m: point_m,
+            applied_force_n: force_n,
+            force_projection,
+            inertia_relieved_nodal_force_n,
+            maximum_rigid_force_relative_residual: rigid_force_residual,
+            modal_displacement_m_sqrt_kg,
+            nodal_displacement_m,
+            panel_normal_displacement_m,
+            elastic_work_j,
+            recoverable_strain_energy_j,
+            energy_closure_residual_j,
+            identity: ContentHash([0; 32]),
+        };
+        response.identity = response.recomputed_identity();
+        Ok(response)
     }
+}
 
+impl StructuralResidualFlexibilityEstimateResponse {
+    /// Recompute the content identity from every stored semantic field.
+    #[must_use]
+    pub fn recomputed_identity(&self) -> ContentHash {
+        residual_flexibility_response_identity(self)
+    }
+}
+
+/// Compare one physical point-force response across nested enrichment bands.
+///
+/// Caller owns the QoI tolerance; values bind only this force/point/mesh/cutoff pair.
+///
+/// # Errors
+/// Refuses non-nested or physically mismatched bases and every point-force
+/// evaluation error.
+pub fn compare_structural_residual_flexibility_estimates(
+    coarse: &StructuralResidualFlexibilityEstimateBasis,
+    fine: &StructuralResidualFlexibilityEstimateBasis,
+    point_m: [f64; 3],
+    force_n: [f64; 3],
+    maximum_distance_m: f64,
+) -> Result<StructuralResidualFlexibilityEstimateComparison, StructuralModalBasisError> {
+    if coarse.specimen_identity != fine.specimen_identity
+        || coarse.profile_identity != fine.profile_identity
+        || coarse.material_state_identity != fine.material_state_identity
+        || coarse.operator_identity != fine.operator_identity
+        || !pair_bits_equal(
+            coarse.forcing_frequency_band_hz,
+            fine.forcing_frequency_band_hz,
+        )
+        || coarse.enrichment_frequency_band_hz.0.to_bits()
+            != fine.enrichment_frequency_band_hz.0.to_bits()
+        || fine.enrichment_frequency_band_hz.1 <= coarse.enrichment_frequency_band_hz.1
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "residual-flexibility comparison needs nested bands on identical physical operators",
+        });
+    }
+    let coarse_response = coarse.evaluate_point_force(point_m, force_n, maximum_distance_m)?;
+    let fine_response = fine.evaluate_point_force(point_m, force_n, maximum_distance_m)?;
+    let elastic_work_increment_j = fine_response.elastic_work_j - coarse_response.elastic_work_j;
+    let work_scale = fine_response
+        .elastic_work_j
+        .abs()
+        .max(coarse_response.elastic_work_j.abs())
+        .max(f64::MIN_POSITIVE);
+    let relative_elastic_work_difference = elastic_work_increment_j.abs() / work_scale;
+    let relative_nodal_displacement_l2_difference = relative_vec3_l2_difference(
+        &coarse_response.nodal_displacement_m,
+        &fine_response.nodal_displacement_m,
+    );
+    let relative_panel_normal_l2_difference = relative_l2_difference(
+        &coarse_response.panel_normal_displacement_m,
+        &fine_response.panel_normal_displacement_m,
+    );
+    Ok(StructuralResidualFlexibilityEstimateComparison {
+        coarse_response_identity: coarse_response.identity,
+        fine_response_identity: fine_response.identity,
+        elastic_work_increment_j,
+        relative_elastic_work_difference,
+        relative_nodal_displacement_l2_difference,
+        relative_panel_normal_l2_difference,
+    })
+}
+
+fn inertia_relieved_point_force(
+    basis: &StructuralResidualFlexibilityEstimateBasis,
+    point_m: [f64; 3],
+    force_n: [f64; 3],
+    maximum_distance_m: f64,
+) -> Result<(PointForceProjection, Vec<[f64; 3]>, f64), StructuralModalBasisError> {
+    let mut projection = project_point_force_on_modes(
+        &basis.mesh,
+        &basis.enrichment_modes,
+        point_m,
+        force_n,
+        maximum_distance_m,
+    )?;
+    let full_dof_count = basis.mesh.nodes_m.len() * 3;
+    let mut reduced_by_full = vec![usize::MAX; full_dof_count];
+    for (reduced, &full) in basis.assembly.free_dofs.iter().enumerate() {
+        reduced_by_full[full] = reduced;
+    }
+    let mut relieved = vec![0.0; basis.assembly.free_dofs.len()];
+    let triangle = basis.mesh.boundary.triangles[projection.boundary_triangle];
+    for corner in 0..3 {
+        for component in 0..3 {
+            let reduced = reduced_by_full[3 * triangle[corner] + component];
+            if reduced == usize::MAX {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "residual flexibility requires a free-body nodal load",
+                });
+            }
+            relieved[reduced] += projection.barycentric[corner] * force_n[component];
+        }
+    }
+    let rigid_loads: Vec<f64> = basis
+        .rigid_modes_per_sqrt_kg
+        .iter()
+        .map(|mode| dot_slice(mode, &relieved))
+        .collect();
+    for (mode, generalized_load) in basis.rigid_modes_per_sqrt_kg.iter().zip(&rigid_loads) {
+        let mut inertial_load = vec![0.0; relieved.len()];
+        basis.assembly.mass.spmv(mode, &mut inertial_load);
+        for (load, inertial) in relieved.iter_mut().zip(inertial_load) {
+            *load = generalized_load.mul_add(-inertial, *load);
+        }
+    }
+    let rigid_scale = maximum_abs(&rigid_loads).max(f64::MIN_POSITIVE);
+    let rigid_residual = basis
+        .rigid_modes_per_sqrt_kg
+        .iter()
+        .map(|mode| dot_slice(mode, &relieved).abs() / rigid_scale)
+        .fold(0.0_f64, f64::max);
+    verify_residual(
+        "inertia-relieved rigid generalized force",
+        rigid_residual,
+        1.0e-10,
+    )?;
+    projection.modal_force_n_per_sqrt_kg = basis
+        .enrichment_modes
+        .iter()
+        .map(|mode| {
+            basis
+                .assembly
+                .free_dofs
+                .iter()
+                .zip(&relieved)
+                .map(|(dof, load)| mode.nodal_shape_per_sqrt_kg[dof / 3][dof % 3] * load)
+                .sum()
+        })
+        .collect();
+    let mut full_relieved = vec![[0.0; 3]; basis.mesh.nodes_m.len()];
+    for (&full, load) in basis.assembly.free_dofs.iter().zip(relieved) {
+        full_relieved[full / 3][full % 3] = load;
+    }
+    Ok((projection, full_relieved, rigid_residual))
+}
+
+fn project_point_force_on_modes(
+    mesh: &RoundedCylinderTetMesh,
+    modes: &[StructuralMode],
+    point_m: [f64; 3],
+    force_n: [f64; 3],
+    maximum_distance_m: f64,
+) -> Result<PointForceProjection, StructuralModalBasisError> {
+    if point_m
+        .iter()
+        .chain(force_n.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "contact point and force must be finite",
+        });
+    }
+    if !(maximum_distance_m.is_finite() && maximum_distance_m >= 0.0) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "maximum contact-to-boundary distance must be finite and non-negative",
+        });
+    }
+    let mut best = None;
+    for (boundary_triangle, triangle) in mesh.boundary.triangles.iter().enumerate() {
+        let vertices = triangle.map(|node| mesh.nodes_m[node]);
+        let (closest, barycentric) = closest_point_on_triangle(point_m, vertices);
+        let distance_squared = norm_squared(sub(point_m, closest));
+        if best.as_ref().is_none_or(
+            |(_, _, _, best_distance): &(usize, [f64; 3], [f64; 3], f64)| {
+                distance_squared < *best_distance
+            },
+        ) {
+            best = Some((boundary_triangle, closest, barycentric, distance_squared));
+        }
+    }
+    let (boundary_triangle, closest_point_m, barycentric, distance_squared) =
+        best.expect("a structural mesh always has a non-empty boundary");
+    let distance_to_boundary_m = distance_squared.sqrt();
+    if distance_to_boundary_m > maximum_distance_m {
+        return Err(StructuralModalBasisError::ContactOutsideTolerance {
+            distance_m: distance_to_boundary_m,
+            tolerance_m: maximum_distance_m,
+        });
+    }
+    let triangle = mesh.boundary.triangles[boundary_triangle];
+    let modal_force_n_per_sqrt_kg = modes
+        .iter()
+        .map(|mode| {
+            let mut shape = [0.0; 3];
+            for corner in 0..3 {
+                let nodal = mode.nodal_shape_per_sqrt_kg[triangle[corner]];
+                for component in 0..3 {
+                    shape[component] =
+                        barycentric[corner].mul_add(nodal[component], shape[component]);
+                }
+            }
+            dot(shape, force_n)
+        })
+        .collect();
+    Ok(PointForceProjection {
+        boundary_triangle,
+        closest_point_m,
+        distance_to_boundary_m,
+        barycentric,
+        modal_force_n_per_sqrt_kg,
+    })
+}
+
+impl StructuralModalBasis {
     /// Compute exterior acoustic radiation at every retained natural
     /// frequency from the same boundary-normal mode shapes used by contact.
     ///
@@ -3806,6 +4472,210 @@ fn basis_identity(
     hasher.finalize()
 }
 
+fn residual_flexibility_basis_identity(
+    basis: &StructuralResidualFlexibilityEstimateBasis,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(STRUCTURAL_RESIDUAL_FLEXIBILITY_IDENTITY_DOMAIN);
+    hasher.update(&basis.schema_version.to_le_bytes());
+    hasher.update(&[basis.authority.tag()]);
+    hasher.update(basis.specimen_identity.as_bytes());
+    hasher.update(basis.profile_identity.as_bytes());
+    hasher.update(basis.material_state_identity.as_bytes());
+    hasher.update(basis.operator_identity.as_bytes());
+    hasher.update(structural_operator_identity(&basis.mesh, &basis.assembly).as_bytes());
+    hash_f64s(
+        &mut hasher,
+        [
+            basis.assembly_budget.minimum_scaled_jacobian,
+            basis.maximum_rigid_stiffness_relative_residual,
+            basis.maximum_mass_orthogonality_error,
+            basis.forcing_frequency_band_hz.0,
+            basis.forcing_frequency_band_hz.1,
+            basis.enrichment_frequency_band_hz.0,
+            basis.enrichment_frequency_band_hz.1,
+            basis.slice_stats.shift,
+        ],
+    );
+    hash_usizes(
+        &mut hasher,
+        [
+            basis.assembly_budget.maximum_nodes,
+            basis.assembly_budget.maximum_tetrahedra,
+            basis.assembly_budget.maximum_free_dofs,
+            basis.certified_enrichment_mode_count,
+            basis.certified_in_band_mode_count,
+            basis.certified_partition_mode_count,
+            basis.slice_stats.factorizations,
+            basis.slice_stats.lanczos_iters,
+            basis.slice_stats.restarts,
+            basis.slice_stats.factor_nnz_l,
+            basis.slice_stats.factor_peak_bytes,
+            basis.slice_stats.pivots_delayed,
+            basis.rigid_modes_per_sqrt_kg.len(),
+            basis.enrichment_modes.len(),
+        ],
+    );
+    for mode in &basis.rigid_modes_per_sqrt_kg {
+        hash_f64_slice(&mut hasher, mode);
+    }
+    for mode in &basis.enrichment_modes {
+        hash_f64s(
+            &mut hasher,
+            [
+                mode.eigenvalue_s2,
+                mode.angular_frequency_rad_s,
+                mode.frequency_hz,
+                mode.eigenvalue_interval_s2.0,
+                mode.eigenvalue_interval_s2.1,
+                mode.eigenvalue_residual_s2,
+            ],
+        );
+        hash_vec3_slice(&mut hasher, &mode.nodal_shape_per_sqrt_kg);
+        hash_f64_slice(&mut hasher, &mode.panel_normal_shape_per_sqrt_kg);
+    }
+    hasher.finalize()
+}
+
+fn structural_operator_identity(
+    mesh: &RoundedCylinderTetMesh,
+    assembly: &TetElasticAssembly,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(
+        "org.frankensim.fs-euler-disc-e2e.structural-operator-and-p1-panel-normal.v1",
+    );
+    hash_usizes(
+        &mut hasher,
+        [
+            mesh.nodes_m.len(),
+            mesh.tetrahedra.len(),
+            mesh.boundary.triangles.len(),
+            assembly.free_dofs.len(),
+            assembly.element_volumes_m3.len(),
+        ],
+    );
+    hash_f64s(&mut hasher, mesh.nodes_m.iter().flatten().copied());
+    for tetrahedron in &mesh.tetrahedra {
+        hash_usizes(&mut hasher, tetrahedron.iter().copied());
+    }
+    for index in 0..mesh.boundary.triangles.len() {
+        hash_usizes(&mut hasher, mesh.boundary.triangles[index]);
+        hash_f64s(
+            &mut hasher,
+            mesh.boundary.centroids_m[index]
+                .into_iter()
+                .chain(mesh.boundary.normals[index])
+                .chain([mesh.boundary.areas_m2[index]]),
+        );
+    }
+    for matrix in [&assembly.stiffness, &assembly.mass] {
+        hash_usizes(&mut hasher, [matrix.nrows(), matrix.ncols()]);
+        for row in 0..matrix.nrows() {
+            let (columns, values) = matrix.row(row);
+            hash_usizes(&mut hasher, [columns.len()]);
+            hash_usizes(&mut hasher, columns.iter().copied());
+            hash_f64s(&mut hasher, values.iter().copied());
+        }
+    }
+    hash_usizes(&mut hasher, assembly.free_dofs.iter().copied());
+    hash_f64s(
+        &mut hasher,
+        [
+            mesh.maximum_meridian_chord_error_m,
+            mesh.maximum_azimuthal_chord_error_m,
+            assembly.total_mass_kg,
+            assembly.minimum_scaled_jacobian,
+        ]
+        .into_iter()
+        .chain(assembly.element_volumes_m3.iter().copied()),
+    );
+    hasher.finalize()
+}
+
+fn residual_flexibility_response_identity(
+    response: &StructuralResidualFlexibilityEstimateResponse,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(STRUCTURAL_RESIDUAL_RESPONSE_IDENTITY_DOMAIN);
+    hasher.update(response.basis_identity.as_bytes());
+    hasher.update(&[response.authority.tag()]);
+    hash_f64s(
+        &mut hasher,
+        response
+            .requested_point_m
+            .into_iter()
+            .chain(response.applied_force_n)
+            .chain(response.force_projection.closest_point_m)
+            .chain(response.force_projection.barycentric)
+            .chain([
+                response.force_projection.distance_to_boundary_m,
+                response.maximum_rigid_force_relative_residual,
+                response.elastic_work_j,
+                response.recoverable_strain_energy_j,
+                response.energy_closure_residual_j,
+            ]),
+    );
+    hash_usizes(
+        &mut hasher,
+        [response.force_projection.boundary_triangle],
+    );
+    hash_f64_slice(
+        &mut hasher,
+        &response.force_projection.modal_force_n_per_sqrt_kg,
+    );
+    hash_vec3_slice(&mut hasher, &response.inertia_relieved_nodal_force_n);
+    hash_f64_slice(&mut hasher, &response.modal_displacement_m_sqrt_kg);
+    hash_vec3_slice(&mut hasher, &response.nodal_displacement_m);
+    hash_f64_slice(&mut hasher, &response.panel_normal_displacement_m);
+    hasher.finalize()
+}
+
+fn hash_f64s(hasher: &mut DomainHasher, values: impl IntoIterator<Item = f64>) {
+    for value in values {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+}
+
+fn hash_f64_slice(hasher: &mut DomainHasher, values: &[f64]) {
+    hash_usizes(hasher, [values.len()]);
+    hash_f64s(hasher, values.iter().copied());
+}
+
+fn hash_vec3_slice(hasher: &mut DomainHasher, values: &[[f64; 3]]) {
+    hash_usizes(hasher, [values.len()]);
+    hash_f64s(hasher, values.iter().flatten().copied());
+}
+
+fn hash_usizes(hasher: &mut DomainHasher, values: impl IntoIterator<Item = usize>) {
+    for value in values {
+        hasher.update(&u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes());
+    }
+}
+
+fn pair_bits_equal(left: (f64, f64), right: (f64, f64)) -> bool {
+    left.0.to_bits() == right.0.to_bits() && left.1.to_bits() == right.1.to_bits()
+}
+
+fn relative_l2_difference(coarse: &[f64], fine: &[f64]) -> f64 {
+    let difference = coarse
+        .iter()
+        .zip(fine)
+        .fold(0.0_f64, |norm, (left, right)| norm.hypot(left - right));
+    let scale = fine.iter().fold(0.0_f64, |norm, value| norm.hypot(*value));
+    difference / scale.max(f64::MIN_POSITIVE)
+}
+
+fn relative_vec3_l2_difference(coarse: &[[f64; 3]], fine: &[[f64; 3]]) -> f64 {
+    let difference = coarse
+        .iter()
+        .flatten()
+        .zip(fine.iter().flatten())
+        .fold(0.0_f64, |norm, (left, right)| norm.hypot(left - right));
+    let scale = fine
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |norm, value| norm.hypot(*value));
+    difference / scale.max(f64::MIN_POSITIVE)
+}
+
 // Closest point and barycentric coordinates, following the Voronoi-region
 // construction from Real-Time Collision Detection. The selected triangle is
 // non-degenerate because fs-mesh validates every boundary panel.
@@ -4392,6 +5262,130 @@ mod tests {
             .zip(two.modal_force_n_per_sqrt_kg)
         {
             assert!((two - 2.0 * one).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn g0_g3_residual_flexibility_retains_stiff_body_response_above_empty_forcing_band() {
+        let specimen = specimen();
+        let mut request = coarse_modal_request(&specimen);
+        request.maximum_frequency_hz = 12_000.0;
+        assert!(matches!(
+            with_cx(|cx| build_structural_modal_basis(&request, cx)),
+            Err(StructuralModalBasisError::NoModesInBand)
+        ));
+
+        let build = |maximum_enrichment_frequency_hz| {
+            with_cx(|cx| {
+                build_structural_residual_flexibility_estimate_basis(
+                    &request,
+                    StructuralResidualFlexibilityControls {
+                        maximum_enrichment_frequency_hz,
+                        maximum_enrichment_modes: 64,
+                    },
+                    cx,
+                )
+                .unwrap()
+            })
+        };
+        let mut fine = build(100_000.0);
+        assert_eq!(
+            fine.authority,
+            StructuralResidualFlexibilityAuthority::EstimateOnly
+        );
+        assert_eq!(fine.authority.code(), "estimate-only");
+        assert_eq!(fine.recomputed_identity(), fine.identity);
+        let original_budget = fine.assembly_budget.maximum_free_dofs;
+        fine.assembly_budget.maximum_free_dofs ^= 1;
+        assert_ne!(fine.recomputed_identity(), fine.identity);
+        fine.assembly_budget.maximum_free_dofs = original_budget;
+        let original_rigid = fine.rigid_modes_per_sqrt_kg[0][0];
+        fine.rigid_modes_per_sqrt_kg[0][0] = f64::from_bits(original_rigid.to_bits() ^ 1);
+        assert_ne!(fine.recomputed_identity(), fine.identity);
+        fine.rigid_modes_per_sqrt_kg[0][0] = original_rigid;
+        assert_eq!(fine.rigid_modes_per_sqrt_kg.len(), 6);
+        assert_eq!(
+            fine.certified_enrichment_mode_count,
+            fine.enrichment_modes.len()
+        );
+        assert_eq!(
+            fine.certified_partition_mode_count,
+            fine.certified_in_band_mode_count + fine.certified_enrichment_mode_count
+        );
+        assert!(fine.maximum_rigid_stiffness_relative_residual <= 1.0e-10);
+        assert!(fine.maximum_mass_orthogonality_error <= 1.0e-8);
+        let cutoff_s2 = (core::f64::consts::TAU * request.maximum_frequency_hz).powi(2);
+        assert!(fine.enrichment_modes.iter().all(|mode| {
+            mode.eigenvalue_interval_s2.0 > cutoff_s2
+                && mode.frequency_hz <= fine.enrichment_frequency_band_hz.1
+        }));
+
+        let point = [0.038, 0.0, 0.0];
+        let mut unit = fine
+            .evaluate_point_force(point, [0.0, 0.0, 1.0], 1.0e-12)
+            .unwrap();
+        let doubled = fine
+            .evaluate_point_force(point, [0.0, 0.0, 2.0], 1.0e-12)
+            .unwrap();
+        assert!(unit.elastic_work_j > 0.0);
+        assert!(unit.recoverable_strain_energy_j > 0.0);
+        assert!(unit.maximum_rigid_force_relative_residual <= 1.0e-10);
+        assert!(unit.energy_closure_residual_j.abs() <= 1.0e-8 * unit.elastic_work_j);
+        assert_eq!(
+            unit.energy_closure_residual_j.to_bits(),
+            (unit.elastic_work_j - 2.0 * unit.recoverable_strain_energy_j).to_bits()
+        );
+        assert_eq!(unit.authority, fine.authority);
+        assert_eq!(unit.recomputed_identity(), unit.identity);
+        let original_panel = unit.panel_normal_displacement_m[0];
+        unit.panel_normal_displacement_m[0] = f64::from_bits(original_panel.to_bits() ^ 1);
+        assert_ne!(unit.recomputed_identity(), unit.identity);
+        unit.panel_normal_displacement_m[0] = original_panel;
+        assert_eq!(unit.nodal_displacement_m.len(), fine.mesh.nodes_m.len());
+        assert_eq!(
+            unit.panel_normal_displacement_m.len(),
+            fine.mesh.boundary.triangles.len()
+        );
+        assert!(
+            unit.panel_normal_displacement_m
+                .iter()
+                .any(|value| *value != 0.0)
+        );
+        assert!((doubled.elastic_work_j / unit.elastic_work_j - 4.0).abs() < 1.0e-12);
+        assert_ne!(
+            unit.identity,
+            fine.evaluate_point_force([0.0, 0.038, 0.0], [0.0, 0.0, 1.0], 1.0e-12)
+                .unwrap()
+                .identity
+        );
+
+        let split = fine
+            .enrichment_modes
+            .windows(2)
+            .position(|modes| modes[1].frequency_hz > modes[0].frequency_hz * (1.0 + 1.0e-10))
+            .map(|index| index + 1)
+            .expect("the coarse specimen must expose at least two distinct elastic frequencies");
+        let coarse_cutoff_hz = 0.5
+            * (fine.enrichment_modes[split - 1].frequency_hz
+                + fine.enrichment_modes[split].frequency_hz);
+        let coarse = build(coarse_cutoff_hz);
+        assert!(coarse.enrichment_modes.len() < fine.enrichment_modes.len());
+        assert_eq!(coarse.operator_identity, fine.operator_identity);
+        let comparison = compare_structural_residual_flexibility_estimates(
+            &coarse,
+            &fine,
+            point,
+            [0.0, 0.0, 1.0],
+            1.0e-12,
+        )
+        .unwrap();
+        assert!(comparison.elastic_work_increment_j >= -1.0e-12 * unit.elastic_work_j);
+        for metric in [
+            comparison.relative_elastic_work_difference,
+            comparison.relative_nodal_displacement_l2_difference,
+            comparison.relative_panel_normal_l2_difference,
+        ] {
+            assert!(metric.is_finite());
         }
     }
 
