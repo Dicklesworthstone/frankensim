@@ -457,24 +457,14 @@ fn outward_product(a: f64, b: f64) -> (f64, f64) {
 }
 
 fn outward_add(left: (f64, f64), right: (f64, f64)) -> (f64, f64) {
-    (
-        (left.0 + right.0).next_down(),
-        (left.1 + right.1).next_up(),
-    )
+    ((left.0 + right.0).next_down(), (left.1 + right.1).next_up())
 }
 
 fn outward_scale_positive(value: (f64, f64), scale: f64) -> (f64, f64) {
-    (
-        (value.0 * scale).next_down(),
-        (value.1 * scale).next_up(),
-    )
+    ((value.0 * scale).next_down(), (value.1 * scale).next_up())
 }
 
-fn evaluate_radiated_power(
-    pressure: &[C64],
-    velocity: &[C64],
-    areas: &[f64],
-) -> (f64, (f64, f64)) {
+fn evaluate_radiated_power(pressure: &[C64], velocity: &[C64], areas: &[f64]) -> (f64, (f64, f64)) {
     let mut rounded = 0.0;
     let mut enclosure = (0.0, 0.0);
     for ((&pressure, &velocity), &area) in pressure.iter().zip(velocity).zip(areas) {
@@ -483,8 +473,7 @@ fn evaluate_radiated_power(
             outward_product(pressure.re, velocity.re),
             outward_product(pressure.im, velocity.im),
         );
-        let panel_power =
-            outward_scale_positive(outward_scale_positive(real_dot, 0.5), area);
+        let panel_power = outward_scale_positive(outward_scale_positive(real_dot, 0.5), area);
         enclosure = outward_add(enclosure, panel_power);
     }
     let finite_enclosure = enclosure.0.is_finite() && enclosure.1.is_finite();
@@ -1203,6 +1192,27 @@ mod tests {
             actual.dense_cap_utilization.to_bits(),
             expected.dense_cap_utilization.to_bits()
         );
+    }
+
+    #[test]
+    fn radiated_power_roundoff_clamp_is_scale_aware_and_fail_closed() {
+        let cancelling_pressure = [
+            C64::from_re(-2.0e16),
+            C64::from_re(2.0),
+            C64::from_re(2.0e16),
+            C64::from_re(-2.0),
+        ];
+        let velocity = [C64::ONE; 4];
+        let areas = [1.0; 4];
+        let (neutral, neutral_interval) =
+            evaluate_radiated_power(&cancelling_pressure, &velocity, &areas);
+        assert_eq!(neutral.to_bits(), 0.0_f64.to_bits());
+        assert!(neutral_interval.0 <= 0.0 && neutral_interval.1 >= 0.0);
+
+        let (negative, negative_interval) =
+            evaluate_radiated_power(&[C64::from_re(-2.0)], &[C64::ONE], &[1.0]);
+        assert_eq!(negative.to_bits(), (-1.0_f64).to_bits());
+        assert!(negative_interval.1 < 0.0);
     }
 
     #[test]
@@ -2068,6 +2078,7 @@ mod tests {
             surface_fingerprint: surface_fingerprint(&surface),
             panels_per_wavelength: 10.0,
             radiated_power: 0.0,
+            radiated_power_roundoff_interval: (0.0, 0.0),
             condition_lower_bound: 1.0,
             dense_cap_utilization: 0.01,
         };

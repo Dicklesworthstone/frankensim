@@ -96,7 +96,13 @@ everywhere: this is screening, not a viscous truth source.
   `condition_lower_bound` (a probe-based LOWER bound on the 1-norm
   condition number — a warning signal, not a certificate) and
   `dense_cap_utilization` (panel count over the dense cap, the
-  headroom the aperture pilot asked for). Measured: plain CBIE's bound
+  headroom the aperture pilot asked for).
+  `radiated_power_roundoff_interval` is an outward-rounded enclosure of the
+  exact panel-power dot product over the already-computed pressure, velocity,
+  and area values. A negative rounded reduction is mapped to neutral zero only
+  when that interval straddles zero; an interval wholly below zero retains the
+  negative value. This enclosure does not bound BEM solve, quadrature,
+  discretization, or model error. Measured: plain CBIE's bound
   spikes ~21x over its own off-resonance value at the DISCRETE first
   interior resonance (ka ~ 3.20 on the 320-panel sphere — shifted from
   the continuum pi by the flat-panel discretization) while
