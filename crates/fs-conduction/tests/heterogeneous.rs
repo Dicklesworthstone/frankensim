@@ -1276,3 +1276,392 @@ fn assigned_matdb_receipts_travel_with_the_solve() {
     // The unused fallback is declared and must not overwrite the assignment.
     assert_eq!(fallback.provenance(), ProvenanceClass::Declared);
 }
+
+#[test]
+fn unused_table_entries_and_mixed_provenance_stay_honest() {
+    let claims = conductivity_claims(vec![(250.0, 10.0), (500.0, 10.0)]);
+    let sampled = ConductivityTable::from_claims(
+        &claims,
+        "thermal_conductivity",
+        &[280.0, 400.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("sampled");
+    let matdb = ConductivityModel::isotropic(sampled);
+    let declared = ConductivityModel::isotropic_declared(20.0).expect("declared");
+    let table = MaterialTable::new([
+        (MaterialId(1), matdb.clone()),
+        (MaterialId(2), declared.clone()),
+    ])
+    .expect("table");
+    assert_eq!(table.receipts().len(), 2);
+    assert_eq!(table.provenance(), ProvenanceClass::Declared);
+
+    let only_matdb = ElementMaterials::new(table.clone(), vec![MaterialId(1); 4]).expect("only");
+    assert_eq!(only_matdb.receipts().len(), 2);
+    assert_eq!(only_matdb.provenance(), ProvenanceClass::MatdbReceipts);
+
+    let mixed = ElementMaterials::new(table, vec![MaterialId(1), MaterialId(2)]).expect("mixed");
+    assert_eq!(mixed.receipts().len(), 2);
+    assert_eq!(mixed.provenance(), ProvenanceClass::Declared);
+
+    let (complex, positions) = box_grid([2, 2, 2], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(340.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 1.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    // Keep the unused declared model in the table; it must not change the report.
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(1), matdb), (MaterialId(2), declared)]).expect("unused"),
+        vec![MaterialId(1); mesh.element_count()],
+    )
+    .expect("assign-unused");
+    assert_eq!(assigned.receipts().len(), 2);
+    assert_eq!(assigned.provenance(), ProvenanceClass::MatdbReceipts);
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    assert_eq!(solution.report.material_receipts, 2);
+    assert_eq!(
+        solution.report.material_provenance,
+        ProvenanceClass::MatdbReceipts
+    );
+}
+
+fn rotated_kx(kx: f64, k_perp: f64) -> ConductivityModel {
+    // Principal axis 0 = +y, 1 = −x, 2 = +z. Conductivity along x is table 1.
+    ConductivityModel::orthotropic(
+        [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        [
+            ConductivityTable::declared(k_perp).expect("k0"),
+            ConductivityTable::declared(kx).expect("k1"),
+            ConductivityTable::declared(k_perp).expect("k2"),
+        ],
+    )
+    .expect("orthotropic")
+}
+
+#[test]
+fn rotated_orthotropic_layers_keep_the_x_series_interface() {
+    let length = 2.0;
+    let (complex, positions) = box_grid([8, 2, 2], [length, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = rotated_kx(1.0, 10.0);
+    let right = rotated_kx(2.0, 10.0);
+    let fallback = left.clone();
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], length),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    let assigned = ElementMaterials::from_region_ids(
+        table,
+        &two_layer_ids(&mesh),
+        &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
+    )
+    .expect("assign");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    let mut worst = 0.0f64;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        if (p[0] - 1.0).abs() < 1e-9 {
+            worst = worst.max((solution.temperature[v] - 1.0 / 3.0).abs());
+        }
+    }
+    assert!(
+        worst < 2e-3,
+        "rotated orthotropic x-series interface off by {worst:e}"
+    );
+}
+
+fn two_layer_assigned(mesh: &ConductionMesh, k1: f64, k2: f64) -> ElementMaterials {
+    let table = MaterialTable::new([
+        (
+            MaterialId(1),
+            ConductivityModel::isotropic_declared(k1).expect("k1"),
+        ),
+        (
+            MaterialId(2),
+            ConductivityModel::isotropic_declared(k2).expect("k2"),
+        ),
+    ])
+    .expect("table");
+    ElementMaterials::from_region_ids(
+        table,
+        &two_layer_ids(mesh),
+        &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
+    )
+    .expect("assign")
+}
+
+fn mean_interface_t(mesh: &ConductionMesh, temperature: &[f64], x: f64) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0usize;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        if (p[0] - x).abs() < 1e-9 {
+            sum += temperature[v];
+            n += 1;
+        }
+    }
+    assert!(n > 0, "no nodes at x={x}");
+    sum / n as f64
+}
+
+fn mean_qx(mesh: &ConductionMesh, assigned: &ElementMaterials, temperature: &[f64]) -> f64 {
+    let flux = element_heat_flux_assigned(mesh, assigned, temperature).expect("flux");
+    flux.iter().map(|q| q[0]).sum::<f64>() / flux.len() as f64
+}
+
+#[test]
+fn raising_the_right_layer_conductivity_raises_flux_and_drops_interface_t() {
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let mut last_q = f64::NEG_INFINITY;
+    let mut last_t = f64::INFINITY;
+    for k2 in [1.0, 2.0, 4.0] {
+        let (complex, positions) = box_grid([6, 2, 2], [2.0, 1.0, 1.0]);
+        let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+        let assigned = two_layer_assigned(&mesh, 1.0, k2);
+        let source = ScalarField::Uniform(0.0);
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "hot",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::dirichlet(1.0).expect("bc"),
+            )
+            .expect("hot")
+            .region(
+                "cold",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::dirichlet(0.0).expect("bc"),
+            )
+            .expect("cold")
+            .adiabatic_remainder()
+            .finish()
+            .expect("boundary");
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &fallback,
+            source: &source,
+        };
+        let solution = with_cx(|cx| {
+            solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+        });
+        let q = mean_qx(&mesh, &assigned, &solution.temperature);
+        let t = mean_interface_t(&mesh, &solution.temperature, 1.0);
+        assert!(
+            q > last_q + 1e-4,
+            "q should rise with k2={k2}: {q} vs previous {last_q}"
+        );
+        assert!(
+            t < last_t - 1e-4,
+            "interface T should fall with k2={k2}: {t} vs previous {last_t}"
+        );
+        last_q = q;
+        last_t = t;
+    }
+}
+
+#[test]
+fn two_ids_with_the_same_k_match_one_material() {
+    let (complex, positions) = box_grid([4, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let k = ConductivityModel::isotropic_declared(20.0).expect("k");
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("wrong");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let one = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(1), k.clone())]).expect("one"),
+        vec![MaterialId(1); mesh.element_count()],
+    )
+    .expect("one");
+    let two = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(7), k.clone()), (MaterialId(9), k)]).expect("two"),
+        two_layer_ids(&mesh)
+            .into_iter()
+            .map(|r| if r == 1 { MaterialId(7) } else { MaterialId(9) })
+            .collect(),
+    )
+    .expect("two");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let a = with_cx(|cx| solve_with_element_materials(cx, problem, &one, config()).expect("one"));
+    let b = with_cx(|cx| solve_with_element_materials(cx, problem, &two, config()).expect("two"));
+    let worst = a
+        .temperature
+        .iter()
+        .zip(&b.temperature)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst < 1e-12,
+        "identical-k two-id assignment differed by {worst:e}"
+    );
+}
+
+#[test]
+fn swapped_region_map_is_the_same_physics() {
+    let (complex, positions) = box_grid([6, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let k1 = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let k2 = ConductivityModel::isotropic_declared(2.0).expect("k2");
+    let fallback = k1.clone();
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let regions = two_layer_ids(&mesh);
+    let forward = ElementMaterials::from_region_ids(
+        MaterialTable::new([(MaterialId(1), k1.clone()), (MaterialId(2), k2.clone())])
+            .expect("fwd"),
+        &regions,
+        &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
+    )
+    .expect("fwd");
+    let swapped = ElementMaterials::from_region_ids(
+        MaterialTable::new([(MaterialId(1), k2), (MaterialId(2), k1)]).expect("swp"),
+        &regions,
+        &BTreeMap::from([(1, MaterialId(2)), (2, MaterialId(1))]),
+    )
+    .expect("swp");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let a =
+        with_cx(|cx| solve_with_element_materials(cx, problem, &forward, config()).expect("fwd"));
+    let b =
+        with_cx(|cx| solve_with_element_materials(cx, problem, &swapped, config()).expect("swp"));
+    let worst = a
+        .temperature
+        .iter()
+        .zip(&b.temperature)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst < 1e-12,
+        "swapped region map changed the field by {worst:e}"
+    );
+}
+
+#[test]
+fn two_layer_interface_tightens_under_refinement() {
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let mut last_err = f64::INFINITY;
+    for n in [4usize, 8, 12] {
+        let (complex, positions) = box_grid([n, 2, 2], [2.0, 1.0, 1.0]);
+        let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+        let assigned = two_layer_assigned(&mesh, 1.0, 2.0);
+        let source = ScalarField::Uniform(0.0);
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "hot",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::dirichlet(1.0).expect("bc"),
+            )
+            .expect("hot")
+            .region(
+                "cold",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::dirichlet(0.0).expect("bc"),
+            )
+            .expect("cold")
+            .adiabatic_remainder()
+            .finish()
+            .expect("boundary");
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &fallback,
+            source: &source,
+        };
+        let solution = with_cx(|cx| {
+            solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+        });
+        let err = (mean_interface_t(&mesh, &solution.temperature, 1.0) - 1.0 / 3.0).abs();
+        assert!(
+            err <= last_err + 1e-12,
+            "interface error grew under refinement n={n}: {err:e} vs {last_err:e}"
+        );
+        last_err = err;
+    }
+    assert!(
+        last_err < 2e-3,
+        "finest two-layer interface still off by {last_err:e}"
+    );
+}
