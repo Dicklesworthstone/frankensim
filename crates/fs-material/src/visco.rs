@@ -61,6 +61,14 @@ pub enum ViscoError {
         /// The authored gate.
         required: f64,
     },
+    /// The nonlinear fractional-Zener fit exhausted its iteration budget
+    /// without meeting the convergence criteria.
+    FitDiverged {
+        /// Final relative residual norm.
+        residual: f64,
+        /// Iterations consumed.
+        iterations: usize,
+    },
 }
 
 impl core::fmt::Display for ViscoError {
@@ -79,6 +87,14 @@ impl core::fmt::Display for ViscoError {
                 f,
                 "FS-MAT-VISCO-FIT-TOLERANCE: sup relative modulus error {achieved:.3e} \
                  exceeds the authored gate {required:.3e}"
+            ),
+            ViscoError::FitDiverged {
+                residual,
+                iterations,
+            } => write!(
+                f,
+                "FS-MAT-VISCO-FIT-DIVERGED: relative residual {residual:.3e} after \
+                 {iterations} iterations without meeting the convergence criteria"
             ),
         }
     }
@@ -681,6 +697,239 @@ fn ls_solve_subset(a: &[f64], b: &[f64], rows: usize, cols: usize, idx: &[usize]
 }
 
 // ---------------------------------------------------------------------------
+// Fitting front-end: complex-modulus data → fractional Zener
+// ---------------------------------------------------------------------------
+
+/// Result of [`fit_fractional_zener`]: the admitted model plus the
+/// per-iteration relative residual norms (the fit's replayable evidence).
+#[derive(Debug, Clone)]
+pub struct ZenerFit {
+    /// The fitted, admission-checked model.
+    pub model: FractionalZener,
+    /// Relative residual norm after each accepted iteration, ending with
+    /// the converged value.
+    pub residual_history: Vec<f64>,
+}
+
+/// Fit a [`FractionalZener`] to measured complex-modulus samples
+/// `(ω [rad/s], E′ [Pa], E″ [Pa])` by damped Gauss–Newton
+/// (Levenberg–Marquardt) over an unconstrained reparameterization that
+/// enforces the admissible region by construction:
+/// `E0 = exp(θ0)`, `E∞ = E0 + exp(θ1)`, `α = logistic(θ2)`, `τ = exp(θ3)`.
+/// Residuals are relative to each sample's complex-modulus magnitude, and
+/// the Jacobian comes from the exact AD tangents
+/// ([`FractionalZener::modulus_gradients`]) chain-ruled through the
+/// transform — no finite differences anywhere.
+///
+/// Deterministic: fixed iteration policy, fixed damping schedule, no
+/// randomness. Convergence: relative residual norm below `1e-12` or an
+/// accepted step with `‖δθ‖ < 1e-13`.
+///
+/// # Errors
+/// [`ViscoError::Parameters`] for fewer than 4 samples, non-finite or
+/// non-positive data; [`ViscoError::FitDiverged`] when `max_iters` is
+/// exhausted without convergence.
+pub fn fit_fractional_zener(
+    samples: &[(f64, f64, f64)],
+    init: &FractionalZener,
+    max_iters: usize,
+) -> Result<ZenerFit, ViscoError> {
+    if samples.len() < 4 {
+        return Err(ViscoError::Parameters {
+            what: "the 4-parameter fit needs at least 4 complex-modulus samples",
+        });
+    }
+    for &(w, ep, epp) in samples {
+        if !(w.is_finite() && ep.is_finite() && epp.is_finite() && w > 0.0 && ep > 0.0) {
+            return Err(ViscoError::Parameters {
+                what: "samples need finite omega > 0, E' > 0, finite E''",
+            });
+        }
+    }
+
+    // θ from the admitted initial model (its invariants guarantee the
+    // transforms below are well-defined).
+    let logit = |p: f64| det::ln(p / (1.0 - p));
+    let mut theta = [
+        det::ln(init.e0),
+        det::ln(init.e_inf - init.e0),
+        // α = 1 sits on the closed admission boundary but at logit's pole;
+        // nudge inside so the transform stays finite.
+        logit(init.alpha.min(1.0 - 1e-9)),
+        det::ln(init.tau),
+    ];
+    let unpack = |theta: &[f64; 4]| -> (f64, f64, f64, f64) {
+        let e0 = det::exp(theta[0]);
+        let e_inf = e0 + det::exp(theta[1]);
+        let alpha = 1.0 / (1.0 + det::exp(-theta[2]));
+        let tau = det::exp(theta[3]);
+        (e0, e_inf, alpha, tau)
+    };
+
+    // Relative residual 2-norm and (residuals, Jacobian) at θ.
+    let m = samples.len() * 2;
+    let eval = |theta: &[f64; 4], jac: Option<&mut Vec<f64>>| -> (Vec<f64>, f64) {
+        let (e0, e_inf, alpha, tau) = unpack(theta);
+        // Chain rule of the transform: rows are raw params, cols are θ.
+        let dalpha = alpha * (1.0 - alpha);
+        let chain = [
+            [e0, 0.0, 0.0, 0.0],
+            [e0, e_inf - e0, 0.0, 0.0],
+            [0.0, 0.0, dalpha, 0.0],
+            [0.0, 0.0, 0.0, tau],
+        ];
+        let mut r = Vec::with_capacity(m);
+        let mut jrows = jac;
+        if let Some(j) = jrows.as_deref_mut() {
+            j.clear();
+            j.reserve(m * 4);
+        }
+        let mut sq = 0.0f64;
+        for &(w, ep_d, epp_d) in samples {
+            let mag = det::sqrt(ep_d * ep_d + epp_d * epp_d);
+            let (ep, epp) = FractionalZener::modulus_parts(e0, e_inf, alpha, tau, w);
+            let r0 = (ep - ep_d) / mag;
+            let r1 = (epp - epp_d) / mag;
+            sq += r0 * r0 + r1 * r1;
+            r.push(r0);
+            r.push(r1);
+            if let Some(j) = jrows.as_deref_mut() {
+                let probe = FractionalZener {
+                    e0,
+                    e_inf,
+                    alpha,
+                    tau,
+                };
+                let ((_, gp), (_, gl)) = probe.modulus_gradients(w);
+                for grad in [gp, gl] {
+                    for c in 0..4 {
+                        let mut acc = 0.0;
+                        for (raw, chain_row) in chain.iter().enumerate() {
+                            acc += grad[raw] * chain_row[c];
+                        }
+                        j.push(acc / mag);
+                    }
+                }
+            }
+        }
+        (r, det::sqrt(sq / m as f64))
+    };
+
+    let mut jac = Vec::new();
+    let (mut residuals, mut norm) = eval(&theta, Some(&mut jac));
+    let mut history = vec![norm];
+    let mut lambda = 1e-3f64;
+    for iteration in 0..max_iters {
+        if norm < 1e-12 {
+            let (e0, e_inf, alpha, tau) = unpack(&theta);
+            let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
+            return Ok(ZenerFit {
+                model,
+                residual_history: history,
+            });
+        }
+        // Normal equations with Marquardt scaling on the diagonal.
+        let mut ata = [0.0f64; 16];
+        let mut atb = [0.0f64; 4];
+        for (row, &ri) in residuals.iter().enumerate() {
+            for c in 0..4 {
+                atb[c] -= jac[row * 4 + c] * ri;
+                for c2 in 0..4 {
+                    ata[c * 4 + c2] += jac[row * 4 + c] * jac[row * 4 + c2];
+                }
+            }
+        }
+        let mut damped = ata;
+        for d in 0..4 {
+            damped[d * 4 + d] += lambda * ata[d * 4 + d].max(1e-30);
+        }
+        let delta = solve4(&damped, &atb);
+        let candidate = [
+            theta[0] + delta[0],
+            theta[1] + delta[1],
+            theta[2] + delta[2],
+            theta[3] + delta[3],
+        ];
+        let (cand_res, cand_norm) = eval(&candidate, None);
+        if cand_norm < norm {
+            theta = candidate;
+            lambda = (lambda * 0.5).max(1e-12);
+            let step = det::sqrt(
+                delta[0] * delta[0]
+                    + delta[1] * delta[1]
+                    + delta[2] * delta[2]
+                    + delta[3] * delta[3],
+            );
+            let (_, refreshed_norm) = eval(&theta, Some(&mut jac));
+            residuals = cand_res;
+            norm = refreshed_norm;
+            history.push(norm);
+            if step < 1e-13 {
+                break;
+            }
+        } else {
+            lambda *= 4.0;
+            if lambda > 1e12 {
+                return Err(ViscoError::FitDiverged {
+                    residual: norm,
+                    iterations: iteration + 1,
+                });
+            }
+        }
+    }
+    if norm < 1e-9 {
+        let (e0, e_inf, alpha, tau) = unpack(&theta);
+        let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
+        return Ok(ZenerFit {
+            model,
+            residual_history: history,
+        });
+    }
+    Err(ViscoError::FitDiverged {
+        residual: norm,
+        iterations: max_iters,
+    })
+}
+
+/// Dense 4×4 solve by Gaussian elimination with partial pivoting
+/// (deterministic; the LM normal equations are tiny and well-damped).
+fn solve4(a: &[f64; 16], b: &[f64; 4]) -> [f64; 4] {
+    let mut m = *a;
+    let mut rhs = *b;
+    let mut perm = [0usize, 1, 2, 3];
+    for col in 0..4 {
+        let mut pivot = col;
+        for row in col + 1..4 {
+            if m[perm[row] * 4 + col].abs() > m[perm[pivot] * 4 + col].abs() {
+                pivot = row;
+            }
+        }
+        perm.swap(col, pivot);
+        let d = m[perm[col] * 4 + col];
+        if d.abs() < 1e-300 {
+            continue;
+        }
+        for row in col + 1..4 {
+            let f = m[perm[row] * 4 + col] / d;
+            for c in col..4 {
+                m[perm[row] * 4 + c] -= f * m[perm[col] * 4 + c];
+            }
+            rhs[perm[row]] -= f * rhs[perm[col]];
+        }
+    }
+    let mut x = [0.0f64; 4];
+    for row in (0..4).rev() {
+        let mut acc = rhs[perm[row]];
+        for c in row + 1..4 {
+            acc -= m[perm[row] * 4 + c] * x[c];
+        }
+        let d = m[perm[row] * 4 + row];
+        x[row] = if d.abs() < 1e-300 { 0.0 } else { acc / d };
+    }
+    x
+}
+
+// ---------------------------------------------------------------------------
 // Thermoelastic damping (Zener's closed form)
 // ---------------------------------------------------------------------------
 
@@ -1064,5 +1313,115 @@ mod tests {
         let b_reference = 1.0 - h / 2.0 + h * h / 6.0;
         let b_impl = -tau * det::expm1(-dt / tau) / dt;
         assert!(((b_impl - b_reference) / b_reference).abs() < 1.0e-14);
+    }
+
+    #[test]
+    fn fit_recovers_ground_truth_from_an_offset_start() {
+        let truth = FractionalZener::new(9.0e9, 1.5e10, 0.35, 2.0e-4).expect("truth");
+        let mut samples = Vec::new();
+        for k in 0..24 {
+            let w =
+                det::exp(det::ln(1.0e1) + (k as f64 / 23.0) * (det::ln(1.0e7) - det::ln(1.0e1)));
+            let (ep, epp) = truth.modulus(w);
+            samples.push((w, ep, epp));
+        }
+        // Every parameter starts far off (E0 /3, E∞ ×2.7, α ×1.7, τ /20).
+        let init = FractionalZener::new(3.0e9, 4.0e10, 0.6, 1.0e-5).expect("init");
+        let fit = fit_fractional_zener(&samples, &init, 200).expect("fit converges");
+        assert!(fit.residual_history.len() >= 2, "history is evidence");
+        let last = *fit.residual_history.last().expect("nonempty");
+        assert!(
+            last < 1.0e-10,
+            "clean data fits to the numerical floor: {last}"
+        );
+        for (got, want) in [
+            (fit.model.e0, truth.e0),
+            (fit.model.e_inf, truth.e_inf),
+            (fit.model.alpha, truth.alpha),
+            (fit.model.tau, truth.tau),
+        ] {
+            assert!(
+                ((got - want) / want).abs() < 1.0e-6,
+                "parameter recovery: {got} vs {want}"
+            );
+        }
+        // MUTATION: negated loss data describes an active material no
+        // passive fractional Zener can represent; the fit must refuse by
+        // name rather than return a silently wrong model.
+        let mut corrupted = samples.clone();
+        for s in &mut corrupted {
+            s.2 = -s.2;
+        }
+        let err = fit_fractional_zener(&corrupted, &init, 200).unwrap_err();
+        assert!(
+            err.to_string().contains("FS-MAT-VISCO-FIT-DIVERGED"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn fit_refuses_degenerate_input_by_name() {
+        let init = FractionalZener::new(1.0e9, 2.0e9, 0.5, 1.0e-3).expect("init");
+        // Under-determined: fewer samples than parameters.
+        let err = fit_fractional_zener(&[(1.0, 1.0e9, 1.0e7)], &init, 10).unwrap_err();
+        assert!(err.to_string().contains("FS-MAT-VISCO-PARAMETERS"), "{err}");
+        // Non-physical storage modulus.
+        let bad = [
+            (1.0, -1.0, 0.0),
+            (2.0, 1.0, 0.0),
+            (3.0, 1.0, 0.0),
+            (4.0, 1.0, 0.0),
+        ];
+        let err = fit_fractional_zener(&bad, &init, 10).unwrap_err();
+        assert!(err.to_string().contains("FS-MAT-VISCO-PARAMETERS"), "{err}");
+    }
+
+    #[test]
+    fn fitted_and_lowered_models_keep_eta_nonnegative_and_relaxation_monotone() {
+        // Property sweep: for admitted fractional models and their Prony
+        // lowerings, η(ω) ≥ 0 across the certified band, every lowered
+        // weight is non-negative, and the relaxation modulus
+        // G(t) = E∞ + Σ E_j·exp(−t/τ_j) is non-increasing (G′ ≤ 0 follows
+        // analytically from E_j ≥ 0; the grid check pins the
+        // implementation to that analysis).
+        for &(alpha, tau) in &[(0.2, 1.0e-4), (0.5, 1.0e-3), (0.9, 5.0e-3)] {
+            let fz = FractionalZener::new(5.0e9, 1.2e10, alpha, tau).expect("fz");
+            let lowered = lower_to_prony(&fz, 20.0, 2.0e4, 10, 0.05).expect("lowering");
+            for k in 0..=64 {
+                let t = k as f64 / 64.0;
+                let w = det::exp(
+                    det::ln(lowered.band.0)
+                        + t * (det::ln(lowered.band.1) - det::ln(lowered.band.0)),
+                )
+                .clamp(lowered.band.0, lowered.band.1);
+                assert!(fz.loss_factor(w) >= 0.0, "fractional eta at w={w}");
+                assert!(
+                    lowered.loss_factor_checked(w).expect("in band") >= 0.0,
+                    "lowered eta at w={w}"
+                );
+            }
+            for &(e, tau_j) in &lowered.model.terms {
+                assert!(e >= 0.0 && tau_j > 0.0, "admitted Prony weights");
+            }
+            let g = |t: f64| {
+                lowered.model.e_inf
+                    + lowered
+                        .model
+                        .terms
+                        .iter()
+                        .map(|&(e, tj)| e * det::exp(-t / tj))
+                        .sum::<f64>()
+            };
+            let mut prev = g(0.0);
+            for k in 1..=100 {
+                let t = 1.0e-7 * det::exp(f64::from(k) * 0.15);
+                let cur = g(t);
+                assert!(
+                    cur <= prev * (1.0 + 1.0e-15),
+                    "relaxation must be monotone: G({t}) = {cur} > {prev}"
+                );
+                prev = cur;
+            }
+        }
     }
 }

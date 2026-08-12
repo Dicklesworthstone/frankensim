@@ -1034,6 +1034,7 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-mesh",
  "fs-mms",
  "fs-qty",
  "fs-rep-mesh",
@@ -1690,6 +1691,7 @@ version = "0.0.1"
 dependencies = [
  "fs-ad",
  "fs-blake3",
+ "fs-casebook",
  "fs-evidence",
  "fs-matdb",
  "fs-math",
