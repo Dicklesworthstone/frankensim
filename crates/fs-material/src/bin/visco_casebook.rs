@@ -87,23 +87,22 @@ fn ringdown(model: &GeneralizedMaxwell, omega_target: f64, periods: usize) -> Ri
     let mut sigma = model.step(&mut state, x, 0.0);
     let mut a = -g * sigma;
     let mut peaks: Vec<(f64, f64)> = Vec::new();
-    let (mut x_prev, mut x_prev2) = (x, x);
+    let mut x_prev = x;
     for n in 0..steps {
         let x_new = x + v * dt + 0.5 * a * dt * dt;
+        // Local positive maximum: rising into the current sample, falling
+        // after it. Sub-sample refinement is unnecessary at 512
+        // steps/period because the regression below spans many peaks.
+        if n >= 1 && x > x_prev && x >= x_new && x > 0.0 {
+            #[allow(clippy::cast_precision_loss)]
+            peaks.push((n as f64 * dt, x));
+        }
         sigma = model.step(&mut state, x_new, dt);
         let a_new = -g * sigma;
         v += 0.5 * (a + a_new) * dt;
-        x_prev2 = x_prev;
         x_prev = x;
         x = x_new;
         a = a_new;
-        // Local positive maximum: quadratic-free peak logging (the
-        // regression below is over many peaks, sub-sample refinement is
-        // unnecessary at 512 steps/period).
-        if n >= 2 && x_prev > x_prev2 && x_prev >= x && x_prev > 0.0 {
-            #[allow(clippy::cast_precision_loss)]
-            peaks.push(((n as f64 - 1.0) * dt, x_prev));
-        }
     }
     assert!(peaks.len() >= 8, "ring-down must expose enough peaks");
     // Least-squares slope of ln(peak) vs peak time gives the decay rate
@@ -238,7 +237,7 @@ fn main() {
              \"omega_measured\":{:.6e},\"eta_model\":{:.6e},\"eta_measured\":{:.6e},\
              \"rel_err\":{:.3e},\"gate_rel\":{ETA_GATE_REL:e},\"dissipated\":{:.6e},\
              \"steps\":{},\"verdict\":\"{verdict}\"}}",
-            ring.omega_measured, eta_model, ring.eta_measured, ring.dissipated, ring.steps,
+            ring.omega_measured, eta_model, ring.eta_measured, rel, ring.dissipated, ring.steps,
         );
         if rel > ETA_GATE_REL {
             println!(
