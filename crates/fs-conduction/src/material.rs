@@ -723,6 +723,30 @@ impl MaterialTable {
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
+
+    /// Union of retained `fs-matdb` receipts over every stored model.
+    #[must_use]
+    pub fn receipts(&self) -> Vec<&PropertyUsageReceipt> {
+        self.models
+            .values()
+            .flat_map(ConductivityModel::receipts)
+            .collect()
+    }
+
+    /// [`ProvenanceClass::MatdbReceipts`] only when every stored model
+    /// is receipt-backed.
+    #[must_use]
+    pub fn provenance(&self) -> ProvenanceClass {
+        if self
+            .models
+            .values()
+            .all(|model| model.provenance() == ProvenanceClass::MatdbReceipts)
+        {
+            ProvenanceClass::MatdbReceipts
+        } else {
+            ProvenanceClass::Declared
+        }
+    }
 }
 
 /// One checked [`MaterialId`] per tetrahedron, plus the table they name.
@@ -829,5 +853,36 @@ impl ElementMaterials {
     #[must_use]
     pub const fn table(&self) -> &MaterialTable {
         &self.table
+    }
+
+    /// Receipts of the models actually named by the assignment.
+    ///
+    /// Unused table entries do not travel with the solve.
+    #[must_use]
+    pub fn receipts(&self) -> Vec<&PropertyUsageReceipt> {
+        let used: std::collections::BTreeSet<MaterialId> =
+            self.of_element.iter().copied().collect();
+        used.iter()
+            .filter_map(|id| self.table.models.get(id))
+            .flat_map(ConductivityModel::receipts)
+            .collect()
+    }
+
+    /// [`ProvenanceClass::MatdbReceipts`] only when every assigned model
+    /// is receipt-backed.
+    #[must_use]
+    pub fn provenance(&self) -> ProvenanceClass {
+        let used: std::collections::BTreeSet<MaterialId> =
+            self.of_element.iter().copied().collect();
+        if used.iter().all(|id| {
+            self.table
+                .models
+                .get(id)
+                .is_some_and(|model| model.provenance() == ProvenanceClass::MatdbReceipts)
+        }) {
+            ProvenanceClass::MatdbReceipts
+        } else {
+            ProvenanceClass::Declared
+        }
     }
 }

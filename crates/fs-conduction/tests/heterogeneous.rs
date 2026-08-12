@@ -17,10 +17,19 @@ use fs_conduction::material::{
 };
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::{
-    ConductionError, ConductionProblem, InitialGuess, LineSearch, LinearConfig, Nonlinearity,
-    SolveConfig, StopRule, assemble_jacobian_with_element_materials,
-    assemble_operator_with_element_materials, element_heat_flux_assigned, solve,
-    solve_with_element_materials,
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+    CONDUCTIVITY_DIMS, ConductionError, ConductionProblem, InitialGuess, InterfaceFacePair,
+    InterfaceResistance, InterfaceSurface, LineSearch, LinearConfig, Nonlinearity, ProvenanceClass,
+    SolveConfig, StopRule, TEMPERATURE_DIMS, ThermalInterfaces,
+    assemble_jacobian_with_element_materials, assemble_operator_with_element_materials,
+    element_heat_flux_assigned, solve, solve_with_element_materials,
+    solve_with_element_materials_and_interfaces, solve_with_interfaces,
+};
+use fs_evidence::ValidityDomain;
+use fs_matdb::{
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
+    SystemContext, UncertaintyModel,
 };
 use fs_mesh::{
     RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy, box_triangles, box_vertices,
@@ -908,4 +917,362 @@ fn assigned_materials_do_not_erase_an_undeclared_interface() {
         matches!(err, ConductionError::Interface { .. }),
         "undeclared coincident faces must refuse even with a material map: {err}"
     );
+}
+
+fn two_slab_contact_mesh(n: usize) -> (ConductionMesh, usize) {
+    let mut tets = Vec::new();
+    let mut positions = Vec::new();
+    let mut vertices_per_slab = 0usize;
+    for slab in 0..2 {
+        let (complex, slab_positions) = box_grid([n, n, n], [1.0, 1.0, 1.0]);
+        if slab == 0 {
+            vertices_per_slab = slab_positions.len();
+        }
+        let offset = u32::try_from(positions.len()).expect("vertex count");
+        tets.extend(
+            complex
+                .tets
+                .into_iter()
+                .map(|tet| tet.map(|vertex| vertex + offset)),
+        );
+        positions.extend(
+            slab_positions
+                .into_iter()
+                .map(|[x, y, z]| [x + slab as f64, y, z]),
+        );
+    }
+    (
+        ConductionMesh::new(TetComplex::from_tets(positions.len(), tets), positions)
+            .expect("two-slab mesh"),
+        vertices_per_slab,
+    )
+}
+
+fn contact_card(r_m2k_per_w: f64) -> InterfaceSystemCard {
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Scalar {
+                value: r_m2k_per_w,
+                dims: AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "s93ej.2 assigned-contact fixture".to_string(),
+                license: "internal-test-use".to_string(),
+                artifact: None,
+            },
+        })
+        .expect("contact claim");
+    InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: MaterialStateId {
+                chemistry: "solid-a".to_string(),
+                phase: "solid".to_string(),
+                process: "as-fixtured".to_string(),
+                revision: 0,
+            },
+            texture_frame: "interface-normal-plus-x".to_string(),
+        },
+        SurfaceSpec {
+            material: MaterialStateId {
+                chemistry: "solid-b".to_string(),
+                phase: "solid".to_string(),
+                process: "as-fixtured".to_string(),
+                revision: 0,
+            },
+            texture_frame: "interface-normal-minus-x".to_string(),
+        },
+        SystemContext {
+            medium: "dry".to_string(),
+            third_body: Some("declared-contact-layer".to_string()),
+            environment: "vacuum".to_string(),
+            history: "unaged".to_string(),
+        },
+        claims,
+        Vec::new(),
+    )
+    .expect("interface card")
+}
+
+fn oriented_pairs(mesh: &ConductionMesh) -> Vec<InterfaceFacePair> {
+    ThermalInterfaces::coincident_face_pairs(mesh)
+        .expect("coincident pairs")
+        .into_iter()
+        .map(|pair| {
+            if mesh.boundary()[pair.side_a].outward_normal[0] > 0.0 {
+                pair
+            } else {
+                InterfaceFacePair {
+                    side_a: pair.side_b,
+                    side_b: pair.side_a,
+                }
+            }
+        })
+        .collect()
+}
+
+fn bind_bondline(
+    mesh: &ConductionMesh,
+    boundary: &fs_conduction::ThermalBoundary,
+) -> ThermalInterfaces {
+    let resistance = InterfaceResistance::from_card(
+        "bondline",
+        &contact_card(0.1),
+        &QueryPoint::new(),
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("resistance");
+    let surface =
+        InterfaceSurface::new("bondline", oriented_pairs(mesh), resistance).expect("surface");
+    ThermalInterfaces::new(mesh, boundary, vec![surface]).expect("interfaces")
+}
+
+fn slab_ids(mesh: &ConductionMesh) -> Vec<MaterialId> {
+    (0..mesh.element_count())
+        .map(|e| {
+            let tet = mesh.complex().tets[e];
+            let cx = tet
+                .iter()
+                .map(|&v| mesh.positions()[v as usize][0])
+                .sum::<f64>()
+                / 4.0;
+            if cx < 1.0 {
+                MaterialId(1)
+            } else {
+                MaterialId(2)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn assigned_one_material_contact_matches_the_uniform_contact_path() {
+    let (mesh, _) = two_slab_contact_mesh(3);
+    let k = ConductivityModel::isotropic_declared(10.0).expect("k");
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("wrong");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(330.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let interfaces = bind_bondline(&mesh, &boundary);
+    let table = MaterialTable::new([(MaterialId(1), k.clone())]).expect("table");
+    let assigned =
+        ElementMaterials::new(table, vec![MaterialId(1); mesh.element_count()]).expect("assign");
+    let assigned_problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let uniform_problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &k,
+        source: &source,
+    };
+    let assigned_sol = with_cx(|cx| {
+        solve_with_element_materials_and_interfaces(
+            cx,
+            assigned_problem,
+            &assigned,
+            &interfaces,
+            config(),
+        )
+        .expect("assigned")
+    });
+    let uniform_sol = with_cx(|cx| {
+        solve_with_interfaces(cx, uniform_problem, &interfaces, config()).expect("uniform")
+    });
+    let worst = assigned_sol
+        .temperature
+        .iter()
+        .zip(&uniform_sol.temperature)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst < 1e-12,
+        "assigned one-material contact differed from uniform by {worst:e}"
+    );
+    assert_eq!(assigned_sol.report.interface_fluxes.len(), 1);
+    assert_eq!(
+        assigned_sol.report.interface_fluxes[0].heat_rate_a_to_b_w,
+        uniform_sol.report.interface_fluxes[0].heat_rate_a_to_b_w
+    );
+}
+
+#[test]
+fn assigned_two_material_contact_hits_the_series_jump() {
+    let (mesh, left_n) = two_slab_contact_mesh(3);
+    let left = ConductivityModel::isotropic_declared(10.0).expect("k1");
+    let right = ConductivityModel::isotropic_declared(20.0).expect("k2");
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("wrong");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(330.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let interfaces = bind_bondline(&mesh, &boundary);
+    let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    let assigned = ElementMaterials::new(table, slab_ids(&mesh)).expect("assign");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials_and_interfaces(cx, problem, &assigned, &interfaces, config())
+            .expect("solve")
+    });
+    // R = 1/10 + 0.1 + 1/20 = 0.25 K/W, Q = 30/0.25 = 120 W.
+    // Left: T = 330 − 12 x. Right: T = 312 − 6 x.
+    let mut worst = 0.0f64;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        let exact = if v < left_n {
+            330.0 - 12.0 * p[0]
+        } else {
+            312.0 - 6.0 * p[0]
+        };
+        worst = worst.max((solution.temperature[v] - exact).abs());
+    }
+    assert!(
+        worst < 1e-6,
+        "two-material contact profile off by {worst:e}"
+    );
+    let flux = solution
+        .report
+        .interface_fluxes
+        .first()
+        .expect("interface flux");
+    assert!((flux.heat_rate_a_to_b_w - 120.0).abs() < 1e-6);
+    assert!((flux.mean_jump_k - 12.0).abs() < 1e-6);
+}
+
+fn conductivity_claims(knots: Vec<(f64, f64)>) -> ClaimSet {
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("thermal_conductivity", CONDUCTIVITY_DIMS),
+            value: PropertyValue::Curve {
+                abscissa: "T".to_string(),
+                abscissa_dims: TEMPERATURE_DIMS,
+                knots,
+                dims: CONDUCTIVITY_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 250.0, 500.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "s93ej.2 assigned-receipt fixture".to_string(),
+                license: "internal-test-use".to_string(),
+                artifact: None,
+            },
+        })
+        .expect("claim");
+    claims
+}
+
+#[test]
+fn assigned_matdb_receipts_travel_with_the_solve() {
+    let claims_a = conductivity_claims(vec![(250.0, 10.0), (500.0, 10.0)]);
+    let claims_b = conductivity_claims(vec![(250.0, 20.0), (350.0, 20.0), (500.0, 20.0)]);
+    let table_a = ConductivityTable::from_claims(
+        &claims_a,
+        "thermal_conductivity",
+        &[280.0, 400.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("table-a");
+    let table_b = ConductivityTable::from_claims(
+        &claims_b,
+        "thermal_conductivity",
+        &[280.0, 340.0, 400.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("table-b");
+    assert_eq!(table_a.receipts().len(), 2);
+    assert_eq!(table_b.receipts().len(), 3);
+    let left = ConductivityModel::isotropic(table_a);
+    let right = ConductivityModel::isotropic(table_b);
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("declared fallback");
+    let (complex, positions) = box_grid([4, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(340.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let materials =
+        MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    assert_eq!(materials.receipts().len(), 5);
+    let assigned = ElementMaterials::from_region_ids(
+        materials,
+        &two_layer_ids(&mesh),
+        &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
+    )
+    .expect("assign");
+    assert_eq!(assigned.receipts().len(), 5);
+    assert_eq!(assigned.provenance(), ProvenanceClass::MatdbReceipts);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    assert_eq!(solution.report.material_receipts, 5);
+    assert_eq!(
+        solution.report.material_provenance,
+        ProvenanceClass::MatdbReceipts
+    );
+    // The unused fallback is declared and must not overwrite the assignment.
+    assert_eq!(fallback.provenance(), ProvenanceClass::Declared);
 }

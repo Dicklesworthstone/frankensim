@@ -1040,8 +1040,14 @@ impl<'m> ConductionSolver<'m> {
                     .expect("a converged run records its stop reason"),
                 linear: self.linear.clone(),
                 energy,
-                material_provenance: self.problem.material.provenance(),
-                material_receipts: self.problem.material.receipts().len(),
+                material_provenance: self.element_materials.map_or_else(
+                    || self.problem.material.provenance(),
+                    ElementMaterials::provenance,
+                ),
+                material_receipts: self.element_materials.map_or_else(
+                    || self.problem.material.receipts().len(),
+                    |assigned| assigned.receipts().len(),
+                ),
                 interface_fluxes,
                 robin_fluxes,
                 free_dofs: self.dofs.n(),
