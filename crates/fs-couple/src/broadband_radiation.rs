@@ -11,7 +11,9 @@
 
 use fs_math::c64::C64;
 use fs_math::det;
-use fs_vfit::discretize::{DiscreteStateSpace, DiscretizeError, bilinear_state_space};
+use fs_vfit::discretize::{
+    DiscreteStateSpace, DiscreteStateSpaceRuntime, DiscretizeError, bilinear_state_space,
+};
 use fs_vfit::{FitOptions, VfError, WeightPreset, vector_fit};
 
 /// Maximum frequencies in either offline solve grid.
@@ -178,6 +180,14 @@ pub struct BroadbandRadiationArtifact {
     pub report: BroadbandRadiationReport,
 }
 
+/// Persistent input-major/channel-major runtime bound to one exact artifact.
+pub struct BroadbandRadiationRuntime<'artifact> {
+    artifact: &'artifact BroadbandRadiationArtifact,
+    filters: Vec<DiscreteStateSpaceRuntime<'artifact>>,
+    outputs: Vec<f64>,
+    scratch_outputs: Vec<f64>,
+}
+
 /// Stable refusal surface for artifact construction and basis conversion.
 #[derive(Debug)]
 pub enum BroadbandRadiationError {
@@ -185,7 +195,7 @@ pub enum BroadbandRadiationError {
     InvalidInput(&'static str),
     /// Vector-fit failure: `(input index, real-SH channel, source)`.
     Fit(usize, usize, VfError),
-    /// Tustin failure: `(input index, real-SH channel, source)`.
+    /// Tustin or runtime-filter failure: `(input index, real-SH channel, source)`.
     Discretize(usize, usize, DiscretizeError),
     /// SH capture failure: `(measured minimum, required minimum)`.
     CapturedFraction(f64, f64),
@@ -197,6 +207,122 @@ pub enum BroadbandRadiationError {
 
 /// Honest boundary attached verbatim to every accepted report.
 pub const BROADBAND_RADIATION_NO_CLAIMS: &str = "Estimate-only sampled linear exterior-acoustic transfer about an undeformed stationary reference body. The artifact maps each source-defined scalar input to body-frame far-field amplitude before 1/r propagation; source_id, not this bridge, owns the input units and producer semantics. It does not enclose source-transfer, BEM, spherical-harmonic, vector-fit, discretization, or above-band errors beyond reported sampled metrics; and it does not model moving-surface/FW-H terms, deformation-updated geometry or normals, fluid loading back-coupling, propagation delay, Doppler/convective effects, near-field pressure, impacts, contact or air-film sound, supports, rooms, heads, or nonlinear acoustics.";
+
+impl BroadbandRadiationArtifact {
+    /// Construct zeroed state after validating artifact/filter shape.
+    pub fn try_runtime(&self) -> Result<BroadbandRadiationRuntime<'_>, BroadbandRadiationError> {
+        if self.l_max > MAX_RADIATION_SH_DEGREE {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "runtime artifact l_max is unsupported",
+            ));
+        }
+        let channel_count = self.channels.len();
+        if self.channels != real_tesseral_channels(self.l_max)
+            || self.inputs.is_empty()
+            || self.inputs.len() > MAX_BROADBAND_INPUTS
+            || !(self.sample_interval_s > 0.0 && self.sample_interval_s.is_finite())
+            || self.inputs.iter().any(|input| {
+                input.filters.len() != channel_count
+                    || input
+                        .filters
+                        .iter()
+                        .any(|filter| filter.t_s.to_bits() != self.sample_interval_s.to_bits())
+            })
+        {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "runtime artifact channels, inputs, or sample interval are inconsistent",
+            ));
+        }
+        let mut filters = Vec::with_capacity(self.inputs.len() * channel_count);
+        for (input_index, input) in self.inputs.iter().enumerate() {
+            for (channel, filter) in input.filters.iter().enumerate() {
+                filters.push(filter.try_runtime().map_err(|source| {
+                    BroadbandRadiationError::Discretize(input_index, channel, source)
+                })?);
+            }
+        }
+        Ok(BroadbandRadiationRuntime {
+            artifact: self,
+            filters,
+            outputs: vec![0.0; channel_count],
+            scratch_outputs: vec![0.0; channel_count],
+        })
+    }
+}
+
+impl BroadbandRadiationRuntime<'_> {
+    /// State of one input/channel filter, or `None` outside the bank.
+    pub fn filter_state(&self, input: usize, channel: usize) -> Option<&[f64]> {
+        let channel_count = self.artifact.channels.len();
+        if input >= self.artifact.inputs.len() || channel >= channel_count {
+            return None;
+        }
+        Some(self.filters[input * channel_count + channel].state())
+    }
+
+    /// Advance once; preflight makes every refusal state-transactional.
+    pub fn step(&mut self, inputs: &[f64]) -> Result<&[f64], BroadbandRadiationError> {
+        if inputs.len() != self.artifact.inputs.len() || inputs.iter().any(|v| !v.is_finite()) {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "runtime input vector must match the artifact input count and be finite",
+            ));
+        }
+        self.scratch_outputs.fill(0.0);
+        let channel_count = self.artifact.channels.len();
+        for (input, &value) in inputs.iter().enumerate() {
+            for channel in 0..channel_count {
+                let index = input * channel_count + channel;
+                let filter = &self.artifact.inputs[input].filters[channel];
+                let contribution =
+                    preflight_filter_step(filter, self.filters[index].state(), value).ok_or(
+                        BroadbandRadiationError::NumericalFailure(
+                            "runtime filter step must remain finite",
+                        ),
+                    )?;
+                let sum = self.scratch_outputs[channel] + contribution;
+                if !sum.is_finite() {
+                    return Err(BroadbandRadiationError::NumericalFailure(
+                        "runtime superposition must remain finite",
+                    ));
+                }
+                self.scratch_outputs[channel] = sum;
+            }
+        }
+        for (input, &value) in inputs.iter().enumerate() {
+            for channel in 0..channel_count {
+                self.filters[input * channel_count + channel]
+                    .step(value)
+                    .map_err(|source| {
+                        BroadbandRadiationError::Discretize(input, channel, source)
+                    })?;
+            }
+        }
+        self.outputs.copy_from_slice(&self.scratch_outputs);
+        Ok(&self.outputs)
+    }
+}
+
+fn preflight_filter_step(filter: &DiscreteStateSpace, state: &[f64], input: f64) -> Option<f64> {
+    let mut output = 0.0;
+    for (coefficient, state) in filter.c.iter().zip(state) {
+        output += coefficient * state;
+    }
+    output += filter.d * input;
+    if !output.is_finite() {
+        return None;
+    }
+    for row in 0..filter.n {
+        let mut next = 0.0;
+        for column in 0..filter.n {
+            next += filter.a[row * filter.n + column] * state[column];
+        }
+        next += filter.b[row] * input;
+        if !next.is_finite() {
+            return None;
+        }
+    }
+    Some(output)
+}
 
 /// Canonical channel order: degree-major, then zonal, cosine/sine pairs.
 fn real_tesseral_channels(l_max: usize) -> Vec<RealTesseralChannel> {
@@ -813,6 +939,39 @@ mod tests {
                 .iter()
                 .all(|filter| filter.e_leftover == 0.0)
         );
+    }
+
+    #[test]
+    fn g0_runtime_is_transactional_causal_superposed_and_bitwise_replayable() {
+        let mut artifact =
+            build_broadband_radiation_artifact(&neutral_one_pole_samples(), controls()).unwrap();
+        let mut second = artifact.inputs[0].clone();
+        second.id = "second-input".to_owned();
+        artifact.inputs.push(second);
+        let direct = artifact.inputs[0].filters[0].d;
+        assert_ne!(direct, 0.0);
+        let mut runtime = artifact.try_runtime().unwrap();
+        let initial = runtime.step(&[1.0, 2.0]).unwrap()[0];
+        assert_eq!(initial.to_bits(), (direct + 2.0 * direct).to_bits());
+        let tail = runtime.step(&[0.0, 0.0]).unwrap()[0];
+        assert_ne!(tail, 0.0);
+        let before = [
+            runtime.filter_state(0, 0).unwrap().to_vec(),
+            runtime.filter_state(1, 0).unwrap().to_vec(),
+        ];
+        assert!(runtime.step(&[f64::NAN, 0.0]).is_err());
+        for input in 0..2 {
+            assert_eq!(runtime.filter_state(input, 0).unwrap(), before[input]);
+        }
+        let mut replay = artifact.try_runtime().unwrap();
+        for (inputs, expected) in [([1.0, 2.0], initial), ([0.0, 0.0], tail)] {
+            assert_eq!(
+                replay.step(&inputs).unwrap()[0].to_bits(),
+                expected.to_bits()
+            );
+        }
+        assert_eq!(replay.filter_state(0, 0), runtime.filter_state(0, 0));
+        assert_eq!(replay.filter_state(1, 0), runtime.filter_state(1, 0));
     }
 
     #[test]

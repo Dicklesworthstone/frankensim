@@ -220,9 +220,10 @@ real-tesseral SH filters. Radiation solvers supply complex-SH training rows, dir
 held-out fields, source semantics, and diagnostics; `fs-couple` does not depend on them.
 It converts `exp(-i omega t)` to `fs-vfit`'s `s=+i omega`, fits prewarped abscissae, and
 applies unprewarped Tustin. Direct disjoint held-out fields gate artifacts; stable
-proper fits may retain caller-admitted constant feedthrough but always forbid the
-improper `s*e` term, and do not claim passivity. EstimateOnly covers a fixed reference
-before `1/r`, without moving-source, FW-H, near-field, feedback, room, or head claims.
+proper fits may retain caller-admitted constant feedthrough but always forbid `s*e`.
+The runtime owns visible per-filter state, superposes in fixed input order, and refuses
+whole samples transactionally. EstimateOnly covers the fixed reference before `1/r`;
+moving-source, FW-H, near-field, feedback, room, head, and passivity remain unclaimed.
 
 ## Invariants
 
@@ -328,7 +329,7 @@ None.
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
 `fs-bem`; admission, neutral replay, properness/direct-feedthrough retention, and
-held-out mutation.
+held-out mutation; causal transactional runtime superposition and bitwise replay.
 
 `src/vibroacoustic.rs` unit tests: closed-form overlaps, two-oscillator
 split + dropped-coupling mutation, added-mass first-order falsifier,
