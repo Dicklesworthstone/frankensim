@@ -32,7 +32,18 @@ mechanism and is likewise absent from the production dependency graph.
   DECLARED constants directly (exp/ln/sin/cos 3, tanh 5, sqrt 1 after
   the exact hardware sqrt), with no mirrored budget literals in the interval
   implementation. NO global rounding-mode state anywhere (thread-safe,
-  SIMD-mixing-safe, grep-lintable). When a basic operation on two finite
+  SIMD-mixing-safe, grep-lintable). This invariant is AUDITED by
+  `tests/directed_rounding_audit.rs` (bead f85xj.3.5): nudge functions are
+  verified against an independent bit-level IEEE-754 successor model
+  (MODEL v1) over exhaustive boundary-class windows plus a full f32
+  subnormal/exponent-boundary exhaustion of the same construction; every
+  `next_up`/`next_down` call site in this crate is counted and classified
+  in a registered inventory (an unregistered new site fails the build's
+  test lane); declared-budget widening is checked at boundary probes; and
+  reversed/skipped/duplicated/conditional/signed-zero/infinity nudge
+  mutants are all killed by the same harness. The audit is measured
+  evidence, not a formal model-to-code proof (that is .3.8's scope).
+  When a basic operation on two finite
   endpoints overflows, the rounded infinity is not treated as an exact
   singleton: positive overflow becomes `[f64::MAX,+∞]`, negative overflow
   becomes `[−∞,−f64::MAX]`, and endpoint hulls compose these one-sided
