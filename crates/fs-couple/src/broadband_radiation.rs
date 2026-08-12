@@ -14,7 +14,8 @@ use fs_math::det;
 use fs_vfit::discretize::{
     DiscreteStateSpace, DiscreteStateSpaceRuntime, DiscretizeError, bilinear_state_space,
 };
-use fs_vfit::{FitOptions, VfError, WeightPreset, vector_fit};
+pub use fs_vfit::WeightPreset;
+use fs_vfit::{FitOptions, VfError, vector_fit};
 
 /// Maximum frequencies in either offline solve grid.
 pub const MAX_BROADBAND_FREQUENCIES: usize = 512;
