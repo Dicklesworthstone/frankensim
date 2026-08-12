@@ -2,8 +2,7 @@
 //!
 //! One-material assignment must reproduce the uniform path. A two-layer
 //! slab with k=1 then k=2 has the series-resistance interface
-//! temperature 2/3 of the way from the cold face when the layers are
-//! equal thickness.
+//! temperature 1/3 when T(0)=1 and T(2)=0.
 
 mod support;
 
