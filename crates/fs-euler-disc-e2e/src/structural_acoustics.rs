@@ -33,7 +33,7 @@ use fs_couple::broadband_radiation::{
     BroadbandRadiationError, BroadbandRadiationRuntime, ComplexShTrainingSample,
     DirectFarFieldHeldOutSample, HarmonicTimeConvention, MAX_BROADBAND_FREQUENCIES,
     MAX_VALIDATION_DIRECTIONS, RadiationSampleDiagnostics, RealTesseralChannel,
-    SampledRadiationData, build_broadband_radiation_artifact,
+    SampledRadiationData, build_broadband_radiation_artifact, evaluate_real_tesseral,
 };
 use fs_couple::modal_acoustic_time::{
     ModalAcousticFrame, ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError,
@@ -62,6 +62,7 @@ use fs_solid::{
 };
 
 use crate::audio_resampling::fixed_rate_frame_count_with_roundoff_bound;
+use crate::render_trajectory::RenderTrajectory;
 use crate::specimen::{DiscProfileSpec, ResolvedElasticDiscProfile};
 use crate::timeline_resampling::{EventEvaluationSide, TimelineResampler, TimelineResamplingError};
 use crate::{
@@ -78,6 +79,8 @@ pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION: u32 = 1;
 pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM: &str = "Estimate-only: inertia certifies eigenvalue counts, not an enclosure of the eigenvector-derived compliance; eigenpair residuals, modes above the declared enrichment band, mesh and constitutive error, dynamic correction, and broadband radiation/audio are not bounded";
 /// Limitation carried by the broadband body-frame source artifact and stem.
 pub const STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM: &str = "Estimate-only linear source stem about the undeformed stationary body: sampled BEM, SH truncation, rational fitting, discretization, structural truncation, and constitutive damping are not certified; static residual flexibility is deliberately excluded, and no 1/r propagation, delay, Doppler, listener/room response, impact, air-film sound, mastering, or calibrated SPL is claimed";
+/// Limitation carried by the retarded rigid-source far-field observer.
+pub const RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM: &str = "Estimate-only rigid low-Mach far-field observer: causal retarded delay, emission-pose direction, 1/r spreading, and deterministic multi-observer timing are modeled; no moving-boundary/FW-H, convective Green/Jacobian or exact Doppler amplitude, near field, deformation, room/support/head scattering, absorption, backreaction, impact radiation, calibration, or certified far-field enclosure is claimed";
 /// Maximum number of simultaneous physical pressure observers in one pass.
 pub const MAX_PHYSICAL_PRESSURE_OBSERVERS: usize = 64;
 const STRUCTURAL_MODAL_BASIS_IDENTITY_DOMAIN: &str =
@@ -88,6 +91,10 @@ const STRUCTURAL_RESIDUAL_RESPONSE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-residual-response.v1";
 const STRUCTURAL_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-broadband-source.v1";
+const STRUCTURAL_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.structural-broadband-artifact.v1";
+const RETARDED_FAR_FIELD_SIGNAL_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v1";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
 const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
@@ -358,10 +365,18 @@ pub struct StructuralResidualModalLossSpectrum {
 /// `m sqrt(kg) / s^2`; each output has units `Pa m` after runtime evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructuralBroadbandRadiationArtifact {
+    /// Complete identity of the fitted, discretized physical source bank.
+    pub identity: ContentHash,
     /// Evidence ceiling inherited from the neutral broadband bridge.
     pub authority: BroadbandRadiationAuthority,
     /// Exact residual/enrichment basis identity.
     pub structural_basis_identity: ContentHash,
+    /// Gas species/EOS/transport identity used by BEM.
+    pub gas_model_identity: ContentHash,
+    /// Constant homogeneous propagation speed [m/s].
+    pub sound_speed_m_s: f64,
+    /// Maximum undeformed source extent [m].
+    pub source_diameter_m: f64,
     /// Exact constitutive damping identity.
     pub damping_model_identity: ContentHash,
     /// Audio sample rate [Hz].
@@ -386,7 +401,8 @@ pub struct FarFieldSourceCoefficientPaM(
 /// propagation. This is intentionally not a [`PhysicalPressureSignal`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructuralBroadbandSourceStem {
-    /// First sample-cell boundary on the mechanics clock [s].
+    /// Opening boundary of the first sample cell [s]. Frame zero is at
+    /// `start_time_s + 1/sample_rate_hz`.
     pub start_time_s: f64,
     /// Fixed sample rate [Hz].
     pub sample_rate_hz: u32,
@@ -396,6 +412,10 @@ pub struct StructuralBroadbandSourceStem {
     pub coefficients: Vec<FarFieldSourceCoefficientPaM>,
     /// Evidence ceiling.
     pub authority: BroadbandRadiationAuthority,
+    /// Exact broadband radiation artifact that produced the coefficients.
+    pub source_identity: ContentHash,
+    /// Exact structural basis that supplied generalized acceleration.
+    pub structural_basis_identity: ContentHash,
 }
 
 impl StructuralBroadbandSourceStem {
@@ -411,6 +431,21 @@ impl StructuralBroadbandSourceStem {
         let start = index.checked_mul(self.channels.len())?;
         self.coefficients.get(start..start + self.channels.len())
     }
+}
+
+/// Controls for the deterministic rigid-source retarded far-field evaluator.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RetardedFarFieldObserverControls {
+    /// Maximum admitted source-surface speed divided by sound speed.
+    pub maximum_surface_mach: f64,
+    /// Absolute emission-time bisection tolerance [s].
+    pub root_time_tolerance_s: f64,
+    /// Maximum deterministic bisection iterations.
+    pub maximum_root_iterations: u32,
+    /// Lanczos radius; version one requires exactly eight (16 taps).
+    pub interpolation_radius_frames: u8,
+    /// Maximum common output frames across all observers.
+    pub maximum_output_frames: usize,
 }
 
 /// Geometric support constraint for a rectangular thin plate.
@@ -4167,15 +4202,84 @@ pub fn build_structural_broadband_radiation_artifact(
     cx.checkpoint()
         .map_err(|_| StructuralModalBasisError::Cancelled)?;
     let radiation = build_broadband_radiation_artifact(&samples, request.fit)?;
+    let source_diameter_m = 2.0 * radius_m;
+    let identity = structural_broadband_artifact_identity(
+        source_identity,
+        basis.identity,
+        request.medium.gas_model_identity,
+        request.medium.gas.sound_speed,
+        source_diameter_m,
+        loss.damping_model_identity,
+        &loss.loss_factors,
+        &radiation,
+    );
     Ok(StructuralBroadbandRadiationArtifact {
+        identity,
         authority: BroadbandRadiationAuthority::EstimateOnly,
         structural_basis_identity: basis.identity,
+        gas_model_identity: request.medium.gas_model_identity,
+        sound_speed_m_s: request.medium.gas.sound_speed,
+        source_diameter_m,
         damping_model_identity: loss.damping_model_identity,
         sample_rate_hz,
         modal_loss_factors: loss.loss_factors.clone(),
         radiation,
         no_claims: STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM,
     })
+}
+
+fn structural_broadband_artifact_identity(
+    source_identity: ContentHash,
+    structural_basis_identity: ContentHash,
+    gas_model_identity: ContentHash,
+    sound_speed_m_s: f64,
+    source_diameter_m: f64,
+    damping_model_identity: ContentHash,
+    modal_loss_factors: &[f64],
+    radiation: &BroadbandRadiationArtifact,
+) -> ContentHash {
+    let mut h = DomainHasher::new(STRUCTURAL_BROADBAND_ARTIFACT_IDENTITY_DOMAIN);
+    for identity in [
+        source_identity,
+        structural_basis_identity,
+        gas_model_identity,
+        damping_model_identity,
+    ] {
+        h.update(identity.as_bytes());
+    }
+    hash_f64s(
+        &mut h,
+        [
+            sound_speed_m_s,
+            source_diameter_m,
+            radiation.sample_interval_s,
+        ],
+    );
+    hash_usizes(
+        &mut h,
+        [
+            radiation.l_max,
+            radiation.inputs.len(),
+            radiation.channels.len(),
+        ],
+    );
+    hash_f64_slice(&mut h, modal_loss_factors);
+    h.update(radiation.report.source_id.as_bytes());
+    for channel in &radiation.channels {
+        hash_usizes(&mut h, [channel.l]);
+        h.update(&channel.signed_m.to_le_bytes());
+    }
+    for input in &radiation.inputs {
+        h.update(input.id.as_bytes());
+        for filter in &input.filters {
+            hash_usizes(&mut h, [filter.n]);
+            hash_f64_slice(&mut h, &filter.a);
+            hash_f64_slice(&mut h, &filter.b);
+            hash_f64_slice(&mut h, &filter.c);
+            hash_f64s(&mut h, [filter.d, filter.e_leftover, filter.t_s]);
+        }
+    }
+    h.finalize()
 }
 
 fn checked_directivity_tables(
@@ -4307,6 +4411,19 @@ fn broadband_sample_identity(request: &StructuralBroadbandRadiationRequest<'_>) 
 }
 
 impl StructuralBroadbandRadiationArtifact {
+    fn recomputed_identity(&self) -> Result<ContentHash, StructuralModalBasisError> {
+        Ok(structural_broadband_artifact_identity(
+            broadband_source_id_from_report(&self.radiation)?,
+            self.structural_basis_identity,
+            self.gas_model_identity,
+            self.sound_speed_m_s,
+            self.source_diameter_m,
+            self.damping_model_identity,
+            &self.modal_loss_factors,
+            &self.radiation,
+        ))
+    }
+
     /// Bind this exact source bank to its residual basis and a modal budget.
     pub fn try_runtime<'a>(
         &'a self,
@@ -4315,8 +4432,12 @@ impl StructuralBroadbandRadiationArtifact {
     ) -> Result<StructuralBroadbandSourceRuntime<'a>, StructuralModalBasisError> {
         if self.authority != BroadbandRadiationAuthority::EstimateOnly
             || self.no_claims != STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM
+            || self.recomputed_identity()? != self.identity
             || basis.recomputed_identity() != basis.identity
             || self.structural_basis_identity != basis.identity
+            || self.gas_model_identity == ContentHash([0; 32])
+            || !(self.sound_speed_m_s > 0.0 && self.sound_speed_m_s.is_finite())
+            || !(self.source_diameter_m > 0.0 && self.source_diameter_m.is_finite())
             || self.damping_model_identity == ContentHash([0; 32])
             || self.modal_loss_factors.len() != basis.enrichment_modes.len()
             || self.radiation.inputs.len() != basis.enrichment_modes.len()
@@ -4469,6 +4590,8 @@ impl StructuralBroadbandSourceRuntime<'_> {
             channels: self.source.radiation.channels.clone(),
             coefficients,
             authority: BroadbandRadiationAuthority::EstimateOnly,
+            source_identity: self.source.identity,
+            structural_basis_identity: self.basis.identity,
         })
     }
 }
@@ -4510,6 +4633,496 @@ fn write_closing_modal_acceleration(
         }
     }
     Ok(())
+}
+
+/// Synthesize simultaneous world-fixed pressure signals from body-frame
+/// broadband far-field coefficients using physical retarded time.
+///
+/// Version one is interior-only: every accepted emission query has a complete
+/// 16-tap Lanczos-8 stencil. All observers are validated and synthesized into
+/// private candidates before any signal is returned.
+pub fn synthesize_retarded_far_field_world_observers(
+    source: &StructuralBroadbandRadiationArtifact,
+    stem: &StructuralBroadbandSourceStem,
+    basis: &StructuralResidualFlexibilityEstimateBasis,
+    trajectory: &RenderTrajectory,
+    observers: &[AcousticWorldObserver],
+    controls: RetardedFarFieldObserverControls,
+    cx: &Cx<'_>,
+) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
+    validate_retarded_observer_inputs(source, stem, basis, trajectory, observers, controls, cx)?;
+    let fs = f64::from(stem.sample_rate_hz);
+    let period = fs.recip();
+    let first_emission_s = stem.start_time_s + 8.0 * period;
+    let last_emission_s = stem.start_time_s + (stem.frame_count() as f64 - 8.0) * period;
+    let timeline = TimelineResampler::new(trajectory);
+    let mut arrival_bounds = Vec::with_capacity(observers.len());
+    for observer in observers {
+        let first = arrival_time(
+            &timeline,
+            *observer,
+            first_emission_s,
+            source.sound_speed_m_s,
+        )?;
+        let last = arrival_time(
+            &timeline,
+            *observer,
+            last_emission_s,
+            source.sound_speed_m_s,
+        )?;
+        arrival_bounds.push((first, last));
+    }
+    let common_start = arrival_bounds
+        .iter()
+        .map(|bound| bound.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let common_end = arrival_bounds
+        .iter()
+        .map(|bound| bound.1)
+        .fold(f64::INFINITY, f64::min);
+    let first_frame = ((common_start - stem.start_time_s) * fs).ceil().max(1.0) as usize;
+    let end_frame = ((common_end - stem.start_time_s) * fs).floor() as usize;
+    let frame_count = end_frame
+        .checked_sub(first_frame)
+        .and_then(|span| span.checked_add(1))
+        .unwrap_or(0);
+    if frame_count == 0 || frame_count > controls.maximum_output_frames {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "retarded observers have no bounded common interior arrival horizon",
+        });
+    }
+    let output_start_s = stem.start_time_s + (first_frame - 1) as f64 * period;
+    let capacity = frame_count.checked_mul(observers.len()).ok_or(
+        StructuralModalBasisError::PressureCapacity {
+            requested: usize::MAX,
+        },
+    )?;
+    let mut pressure = Vec::new();
+    pressure.try_reserve_exact(observers.len()).map_err(|_| {
+        StructuralModalBasisError::PressureCapacity {
+            requested: capacity,
+        }
+    })?;
+    for _ in observers {
+        let mut observer_pressure = Vec::new();
+        observer_pressure
+            .try_reserve_exact(frame_count)
+            .map_err(|_| StructuralModalBasisError::PressureCapacity {
+                requested: capacity,
+            })?;
+        pressure.push(observer_pressure);
+    }
+    let mut coefficient_scratch = vec![0.0; stem.channels.len()];
+    let mut complex_scratch = vec![C64::ZERO; stem.channels.len()];
+    let minimum_far_field_m = minimum_broadband_far_field_distance(source, fs);
+    for frame in 0..frame_count {
+        if frame % 64 == 0 {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        }
+        let arrival_s = stem.start_time_s + (first_frame + frame) as f64 * period;
+        for (observer_index, observer) in observers.iter().enumerate() {
+            let (emission_s, sample, direction_world, radius_m) = retarded_emission(
+                &timeline,
+                *observer,
+                arrival_s,
+                first_emission_s,
+                last_emission_s,
+                source.sound_speed_m_s,
+                controls,
+            )?;
+            validate_retarded_state(
+                source,
+                trajectory,
+                &sample,
+                radius_m,
+                minimum_far_field_m,
+                controls.maximum_surface_mach,
+            )?;
+            interpolate_stem_lanczos8(stem, emission_s, &mut coefficient_scratch)?;
+            let direction_body = sample
+                .state
+                .pose()
+                .orientation()
+                .rotate_world_to_body(direction_world);
+            for (complex, real) in complex_scratch.iter_mut().zip(&coefficient_scratch) {
+                *complex = C64::from_re(*real);
+            }
+            let far = evaluate_real_tesseral(
+                source.radiation.l_max,
+                &complex_scratch,
+                [direction_body.x, direction_body.y, direction_body.z],
+            )?;
+            let value = far.re / radius_m;
+            if !value.is_finite() {
+                return Err(StructuralModalBasisError::InvalidRequest {
+                    what: "retarded far-field pressure became non-finite",
+                });
+            }
+            pressure[observer_index].push(value);
+        }
+    }
+    Ok(observers
+        .iter()
+        .copied()
+        .zip(pressure)
+        .map(|(observer, pressure_pa)| {
+            let peak_abs_pressure_pa = pressure_pa
+                .iter()
+                .fold(0.0_f64, |peak, value| peak.max(value.abs()));
+            let observer = PhysicalPressureObserver::WorldFixed(observer);
+            let identity = retarded_pressure_identity(
+                source,
+                stem,
+                trajectory,
+                observer,
+                output_start_s,
+                controls,
+                &pressure_pa,
+            );
+            PhysicalPressureSignal {
+                start_time_s: output_start_s,
+                sample_rate_hz: stem.sample_rate_hz,
+                pressure_pa,
+                peak_abs_pressure_pa,
+                contact_force_sampling:
+                    PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
+                observer,
+                structural_basis_identity: basis.identity,
+                radiation_identity: source.identity,
+                damping_model_identity: source.damping_model_identity,
+                identity,
+            }
+        })
+        .collect())
+}
+
+fn validate_retarded_observer_inputs(
+    source: &StructuralBroadbandRadiationArtifact,
+    stem: &StructuralBroadbandSourceStem,
+    basis: &StructuralResidualFlexibilityEstimateBasis,
+    trajectory: &RenderTrajectory,
+    observers: &[AcousticWorldObserver],
+    controls: RetardedFarFieldObserverControls,
+    cx: &Cx<'_>,
+) -> Result<(), StructuralModalBasisError> {
+    drop(source.radiation.try_runtime()?);
+    if source.identity == ContentHash([0; 32])
+        || source.authority != BroadbandRadiationAuthority::EstimateOnly
+        || source.no_claims != STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM
+        || source.structural_basis_identity != basis.identity
+        || basis.recomputed_identity() != basis.identity
+        || trajectory.metadata().specimen_profile_identity != basis.profile_identity
+        || source.gas_model_identity == ContentHash([0; 32])
+        || !(source.sound_speed_m_s > 0.0 && source.sound_speed_m_s.is_finite())
+        || !(source.source_diameter_m > 0.0 && source.source_diameter_m.is_finite())
+        || stem.authority != BroadbandRadiationAuthority::EstimateOnly
+        || stem.source_identity != source.identity
+        || stem.structural_basis_identity != basis.identity
+        || stem.sample_rate_hz != source.sample_rate_hz
+        || source.radiation.sample_interval_s.to_bits()
+            != f64::from(source.sample_rate_hz).recip().to_bits()
+        || stem.channels != source.radiation.channels
+        || stem.coefficients.len() % stem.channels.len() != 0
+        || stem.frame_count() < 16
+        || !stem.start_time_s.is_finite()
+        || stem.coefficients.iter().any(|value| !value.0.is_finite())
+    {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "retarded observer source, stem, trajectory, gas, or basis identity is inconsistent",
+        });
+    }
+    if observers.is_empty()
+        || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS
+        || observers.iter().any(|observer| {
+            observer
+                .position_world_m
+                .iter()
+                .any(|value| !value.is_finite())
+        })
+        || !(controls.maximum_surface_mach > 0.0 && controls.maximum_surface_mach <= 0.1)
+        || !(controls.root_time_tolerance_s > 0.0 && controls.root_time_tolerance_s.is_finite())
+        || controls.maximum_root_iterations == 0
+        || controls.maximum_root_iterations > 256
+        || controls.interpolation_radius_frames != 8
+        || controls.maximum_output_frames == 0
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded observer set or controls are outside the version-one domain",
+        });
+    }
+    if source.recomputed_identity()? != source.identity {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "retarded observer broadband artifact identity does not recompute",
+        });
+    }
+    let timeline = TimelineResampler::new(trajectory);
+    let minimum = minimum_broadband_far_field_distance(source, f64::from(stem.sample_rate_hz));
+    for (index, sample) in trajectory.samples().iter().enumerate() {
+        if index % 64 == 0 {
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        }
+        let state = sample.state();
+        let reconstructed =
+            timeline.sample(sample.input().time_s, EventEvaluationSide::RightLimit)?;
+        for observer in observers {
+            let radius = observer_vector(*observer, state.pose().position_world()).1;
+            validate_retarded_state(
+                source,
+                trajectory,
+                &reconstructed,
+                radius,
+                minimum,
+                controls.maximum_surface_mach,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn broadband_source_id_from_report(
+    radiation: &BroadbandRadiationArtifact,
+) -> Result<ContentHash, StructuralModalBasisError> {
+    let hex = radiation
+        .report
+        .source_id
+        .strip_prefix("euler-structural-modal-acceleration-pa-m-v1:")
+        .ok_or(StructuralModalBasisError::IdentityMismatch {
+            what: "broadband producer source id has an unsupported schema",
+        })?;
+    ContentHash::from_hex(hex).ok_or(StructuralModalBasisError::IdentityMismatch {
+        what: "broadband producer source id has an invalid digest",
+    })
+}
+
+fn minimum_broadband_far_field_distance(
+    source: &StructuralBroadbandRadiationArtifact,
+    sample_rate_hz: f64,
+) -> f64 {
+    let wavelength = 2.0 * source.sound_speed_m_s / sample_rate_hz;
+    (2.0 * source.source_diameter_m)
+        .max(2.0 * source.source_diameter_m * source.source_diameter_m / wavelength)
+}
+
+fn validate_retarded_state(
+    source: &StructuralBroadbandRadiationArtifact,
+    trajectory: &RenderTrajectory,
+    sample: &crate::timeline_resampling::ResampledTimelineSample,
+    radius_m: f64,
+    minimum_far_field_m: f64,
+    maximum_surface_mach: f64,
+) -> Result<(), StructuralModalBasisError> {
+    if !(radius_m >= minimum_far_field_m && radius_m.is_finite()) {
+        return Err(StructuralModalBasisError::ObserverOutsideFarField {
+            distance_m: radius_m,
+            minimum_m: minimum_far_field_m,
+            mode: 0,
+        });
+    }
+    let properties = trajectory.metadata().mass_properties.properties;
+    let kinematics_error = |_| StructuralModalBasisError::InvalidRequest {
+        what: "retarded trajectory kinematics are invalid",
+    };
+    let linear = sample
+        .state
+        .center_of_mass_velocity_world(properties)
+        .map_err(kinematics_error)?;
+    let angular = properties
+        .angular_velocity_body_checked(sample.state.angular_momentum_body())
+        .map_err(kinematics_error)?;
+    let speed = det::sqrt(linear.norm_squared())
+        + 0.5 * source.source_diameter_m * det::sqrt(angular.norm_squared());
+    if !speed.is_finite() || speed / source.sound_speed_m_s > maximum_surface_mach {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded far-field source exceeds the admitted surface Mach number",
+        });
+    }
+    Ok(())
+}
+
+fn observer_vector(observer: AcousticWorldObserver, source_world: Vec3) -> (Vec3, f64) {
+    let offset = Vec3::new(
+        observer.position_world_m[0] - source_world.x,
+        observer.position_world_m[1] - source_world.y,
+        observer.position_world_m[2] - source_world.z,
+    );
+    let radius = det::sqrt(offset.norm_squared());
+    (offset, radius)
+}
+
+fn arrival_time(
+    timeline: &TimelineResampler<'_>,
+    observer: AcousticWorldObserver,
+    emission_s: f64,
+    sound_speed_m_s: f64,
+) -> Result<f64, StructuralModalBasisError> {
+    let sample = timeline.sample(emission_s, EventEvaluationSide::RightLimit)?;
+    let (_, radius) = observer_vector(observer, sample.state.pose().position_world());
+    let arrival = emission_s + radius / sound_speed_m_s;
+    if !(radius > 0.0 && radius.is_finite() && arrival.is_finite()) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded observer radius or arrival time is invalid",
+        });
+    }
+    Ok(arrival)
+}
+
+fn retarded_emission(
+    timeline: &TimelineResampler<'_>,
+    observer: AcousticWorldObserver,
+    arrival_s: f64,
+    low: f64,
+    high: f64,
+    sound_speed_m_s: f64,
+    controls: RetardedFarFieldObserverControls,
+) -> Result<
+    (
+        f64,
+        crate::timeline_resampling::ResampledTimelineSample,
+        Vec3,
+        f64,
+    ),
+    StructuralModalBasisError,
+> {
+    let emission_s = bisect_retarded_emission_time(
+        arrival_s,
+        low,
+        high,
+        controls.root_time_tolerance_s,
+        controls.maximum_root_iterations,
+        |time_s| arrival_time(timeline, observer, time_s, sound_speed_m_s),
+    )?;
+    let sample = timeline.sample(emission_s, EventEvaluationSide::RightLimit)?;
+    let (offset, radius_m) = observer_vector(observer, sample.state.pose().position_world());
+    if !(radius_m > 0.0 && radius_m.is_finite()) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded observer coincides with the source",
+        });
+    }
+    Ok((emission_s, sample, offset.scale(radius_m.recip()), radius_m))
+}
+
+fn bisect_retarded_emission_time(
+    arrival_s: f64,
+    mut low: f64,
+    mut high: f64,
+    tolerance_s: f64,
+    maximum_iterations: u32,
+    mut arrival_at: impl FnMut(f64) -> Result<f64, StructuralModalBasisError>,
+) -> Result<f64, StructuralModalBasisError> {
+    let mut low_residual = arrival_at(low)? - arrival_s;
+    let high_residual = arrival_at(high)? - arrival_s;
+    if low_residual > 0.0 || high_residual < 0.0 {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "arrival time has no emission root inside the complete source stencil",
+        });
+    }
+    for _ in 0..maximum_iterations {
+        let mid = 0.5 * (low + high);
+        let residual = arrival_at(mid)? - arrival_s;
+        if residual <= 0.0 {
+            low = mid;
+            low_residual = residual;
+        } else {
+            high = mid;
+        }
+        if high - low <= tolerance_s || residual == 0.0 {
+            break;
+        }
+    }
+    if high - low > tolerance_s && low_residual != 0.0 {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "retarded emission root exceeded the deterministic bisection budget",
+        });
+    }
+    Ok(if low_residual == 0.0 {
+        low
+    } else {
+        0.5 * (low + high)
+    })
+}
+
+fn interpolate_stem_lanczos8(
+    stem: &StructuralBroadbandSourceStem,
+    emission_s: f64,
+    out: &mut [f64],
+) -> Result<(), StructuralModalBasisError> {
+    if out.len() != stem.channels.len() {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded interpolation scratch has the wrong channel count",
+        });
+    }
+    let u = (emission_s - stem.start_time_s) * f64::from(stem.sample_rate_hz) - 1.0;
+    let base = u.floor() as isize;
+    if base < 7 || base + 8 >= stem.frame_count() as isize {
+        return Err(StructuralModalBasisError::ControlTimeline {
+            what: "retarded coefficient query lacks a complete Lanczos-8 stencil",
+        });
+    }
+    out.fill(0.0);
+    for tap in -7_isize..=8 {
+        let index = usize::try_from(base + tap).expect("prevalidated nonnegative stem index");
+        let x = u - index as f64;
+        let weight = lanczos8(x);
+        for (sum, coefficient) in out
+            .iter_mut()
+            .zip(stem.frame(index).expect("complete stem stencil").iter())
+        {
+            *sum = weight.mul_add(coefficient.0, *sum);
+        }
+    }
+    if out.iter().any(|value| !value.is_finite()) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded Lanczos interpolation became non-finite",
+        });
+    }
+    Ok(())
+}
+
+fn lanczos8(x: f64) -> f64 {
+    if x == 0.0 {
+        1.0
+    } else if x.abs() >= 8.0 {
+        0.0
+    } else {
+        let pix = core::f64::consts::PI * x;
+        (det::sin(pix) / pix) * (det::sin(pix / 8.0) / (pix / 8.0))
+    }
+}
+
+fn retarded_pressure_identity(
+    source: &StructuralBroadbandRadiationArtifact,
+    stem: &StructuralBroadbandSourceStem,
+    trajectory: &RenderTrajectory,
+    observer: PhysicalPressureObserver,
+    start_time_s: f64,
+    controls: RetardedFarFieldObserverControls,
+    pressure_pa: &[f64],
+) -> ContentHash {
+    let mut h = DomainHasher::new(RETARDED_FAR_FIELD_SIGNAL_IDENTITY_DOMAIN);
+    h.update(source.identity.as_bytes());
+    h.update(stem.source_identity.as_bytes());
+    h.update(trajectory.metadata().configuration_identity.as_bytes());
+    hash_pressure_observer(&mut h, observer);
+    hash_f64s(
+        &mut h,
+        [
+            start_time_s,
+            controls.maximum_surface_mach,
+            controls.root_time_tolerance_s,
+        ],
+    );
+    hash_usizes(
+        &mut h,
+        [
+            controls.maximum_root_iterations as usize,
+            controls.interpolation_radius_frames as usize,
+            pressure_pa.len(),
+        ],
+    );
+    hash_f64_slice(&mut h, pressure_pa);
+    h.finalize()
 }
 
 impl StructuralModalBasis {
@@ -6117,6 +6730,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(acceleration[0].to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn g0_g3_retarded_root_lanczos_clock_and_inverse_radius_are_analytic() {
+        let arrival_s = 3.0;
+        let sound_speed_m_s = 4.0;
+        let emission_s =
+            bisect_retarded_emission_time(arrival_s, 0.0, 4.0, 1.0e-13, 64, |time_s| {
+                Ok(time_s + (10.0 - 0.25 * time_s) / sound_speed_m_s)
+            })
+            .unwrap();
+        let expected_emission_s =
+            (arrival_s - 10.0 / sound_speed_m_s) / (1.0 - 0.25 / sound_speed_m_s);
+        let radius_m = 10.0 - 0.25 * emission_s;
+        assert!((emission_s - expected_emission_s).abs() < 2.0e-13);
+        assert!((emission_s + radius_m / sound_speed_m_s - arrival_s).abs() < 2.0e-13);
+        let stationary_emission =
+            bisect_retarded_emission_time(arrival_s, 0.0, 4.0, 1.0e-13, 64, |time_s| {
+                Ok(time_s + 10.0 / sound_speed_m_s)
+            })
+            .unwrap();
+        assert!((stationary_emission - 0.5).abs() < 2.0e-13);
+
+        let stem = StructuralBroadbandSourceStem {
+            start_time_s: 0.0,
+            sample_rate_hz: 16,
+            channels: vec![RealTesseralChannel { l: 0, signed_m: 0 }],
+            coefficients: (0..64)
+                .map(|frame| FarFieldSourceCoefficientPaM((frame + 1) as f64))
+                .collect(),
+            authority: BroadbandRadiationAuthority::EstimateOnly,
+            source_identity: ContentHash([1; 32]),
+            structural_basis_identity: ContentHash([2; 32]),
+        };
+        let mut out = [0.0];
+        interpolate_stem_lanczos8(&stem, 17.0 / 16.0, &mut out).unwrap();
+        assert!((out[0] - 17.0).abs() < 1.0e-13);
+        let y00 = 0.5 / det::sqrt(core::f64::consts::PI);
+        assert!(((out[0] * y00 / radius_m) * radius_m - out[0] * y00).abs() < 1.0e-13);
     }
 
     #[test]

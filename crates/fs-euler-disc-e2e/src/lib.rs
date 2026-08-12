@@ -129,7 +129,8 @@ pub use structural_acoustics::{
     AcousticModeRadiation, AcousticObserver, FarFieldSourceCoefficientPaM, ModalAcousticRadiation,
     ModalLossSpectrum, PhysicalContactForceSampling, PhysicalModalAudioModel,
     PhysicalModalInitialState, PhysicalModalPressureFrame, PhysicalPressureSignal,
-    PointForceProjection, ResolvedAcousticMedium, STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM,
+    PointForceProjection, RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM, ResolvedAcousticMedium,
+    RetardedFarFieldObserverControls, STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM,
     STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION, STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM,
     STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION, StructuralBroadbandRadiationArtifact,
     StructuralBroadbandRadiationRequest, StructuralBroadbandSourceRuntime,
@@ -142,6 +143,7 @@ pub use structural_acoustics::{
     build_structural_residual_flexibility_estimate_basis,
     compare_structural_residual_flexibility_estimates, modal_loss_spectrum_from_prony,
     modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
+    synthesize_retarded_far_field_world_observers,
 };
 pub use timeline_resampling::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, EULER_TIMELINE_RESAMPLER_VERSION,

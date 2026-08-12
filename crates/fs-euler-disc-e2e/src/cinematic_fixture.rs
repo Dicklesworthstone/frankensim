@@ -47,11 +47,14 @@ use crate::rolling_contact::{
 };
 use crate::structural_acoustics::{
     AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
-    PhysicalModalAudioModel, PhysicalModalInitialState, RectangularPlateModalBasis,
+    PhysicalModalInitialState, PhysicalPressureSignal, RectangularPlateModalBasis,
     RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
+    RetardedFarFieldObserverControls, StructuralBroadbandRadiationRequest,
     StructuralMeshControls, StructuralModalBasisError, StructuralModeRequest,
-    build_rectangular_plate_modal_basis, build_structural_modal_basis,
-    modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
+    StructuralResidualFlexibilityControls, StructuralResidualModalLossSpectrum,
+    build_rectangular_plate_modal_basis, build_structural_broadband_radiation_artifact,
+    build_structural_residual_flexibility_estimate_basis, superpose_pressure_signals,
+    synthesize_retarded_far_field_world_observers,
 };
 use crate::tangential_contact::{
     EulerTangentialContactAdapter, TangentialContactLane, TangentialContactRequest,
@@ -100,6 +103,7 @@ use fs_contact::normal_patch::{
     NormalPatchEmbedState, build_finite_gap_response_curve, sample_finite_gap_from_chart,
 };
 use fs_couple::StableId;
+use fs_couple::broadband_radiation::{BroadbandRadiationControls, WeightPreset};
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_evidence::{
     ValidityDomain,
@@ -263,6 +267,25 @@ const CRITIQUE_FRAME_SEED_SCHEDULE_VERSION: u16 = 1;
 const CRITIQUE_CAMERA_EYE_M: [f64; 3] = [0.18, -0.24, 0.12];
 /// World-space look target shared by picture and spatial sound.
 const CRITIQUE_CAMERA_TARGET_M: [f64; 3] = [0.0, 0.0, 0.008];
+/// Physical-pressure microphones are independent of the product camera and
+/// far enough from the 75 mm disc for the 48 kHz broadband far-field gate.
+const CRITIQUE_PHYSICAL_MICROPHONE_RADIUS_M: f64 = 1.0;
+const CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M: f64 = 0.045;
+const CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ: f64 = 21_500.0;
+const CRITIQUE_DISC_BROADBAND_TRAINING_HZ: [f64; 8] =
+    [250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 14_000.0, 20_500.0];
+const CRITIQUE_DISC_BROADBAND_HELD_OUT_HZ: [f64; 8] =
+    [350.0, 750.0, 1_500.0, 3_000.0, 6_000.0, 11_000.0, 18_000.0, 21_500.0];
+const CRITIQUE_DISC_BROADBAND_DIRECTIONS: [[f64; 3]; 8] = [
+    [1.0, 1.0, 1.0],
+    [1.0, 1.0, -1.0],
+    [1.0, -1.0, 1.0],
+    [1.0, -1.0, -1.0],
+    [-1.0, 1.0, 1.0],
+    [-1.0, 1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+    [-1.0, -1.0, -1.0],
+];
 /// Artistic near-field reference distance for the desk-scale stereo preview.
 ///
 /// The spatializer's distance gain is `reference / max(distance, reference)`.
@@ -2046,21 +2069,21 @@ struct FixturePhysicalAudio {
 }
 
 enum FixtureDiscAcousticRadiator {
-    OmittedNoModesInBand {
-        minimum_frequency_hz: f64,
-        maximum_frequency_hz: f64,
+    OmittedNoResolvableModeBelowNyquist {
+        forcing_maximum_frequency_hz: f64,
+        enrichment_maximum_frequency_hz: f64,
     },
-    Resolved {
+    ResolvedBroadband {
         structural_basis_identity: ContentHash,
-        acoustic_directivity_identity: ContentHash,
-        damping_model_identity: ContentHash,
+        broadband_radiation_identity: ContentHash,
         left_pressure_identity: ContentHash,
         right_pressure_identity: ContentHash,
         retained_mode_count: usize,
         minimum_mode_frequency_hz: f64,
         maximum_mode_frequency_hz: f64,
-        minimum_panels_per_wavelength: f64,
         minimum_directivity_captured_fraction: f64,
+        maximum_held_out_error: f64,
+        rms_held_out_error: f64,
     },
 }
 
@@ -8024,9 +8047,25 @@ fn build_physical_audio(
         slice: SliceOptions::default(),
         assembly: TetAssemblyBudget::standard(),
     };
-    let disc_basis = match build_structural_modal_basis(&disc_request, cx) {
-        Ok(basis) => Some(basis),
-        Err(StructuralModalBasisError::NoModesInBand) => None,
+    let disc_basis = match build_structural_residual_flexibility_estimate_basis(
+        &disc_request,
+        StructuralResidualFlexibilityControls {
+            maximum_enrichment_frequency_hz: CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ,
+            maximum_enrichment_modes: disc_controls.maximum_modes,
+        },
+        cx,
+    ) {
+        Ok(basis) if basis.certified_in_band_mode_count == 0 => Some(basis),
+        Ok(_) => {
+            return Err(CinematicFixtureError::Pipeline(
+                "critique broadband disc path refuses to omit certified in-band modes".into(),
+            ));
+        }
+        Err(StructuralModalBasisError::InvalidRequest { what })
+            if what == "residual-flexibility enrichment window contains no elastic modes" =>
+        {
+            None
+        }
         Err(error) => return Err(pipeline(error)),
     };
 
@@ -8040,45 +8079,59 @@ fn build_physical_audio(
     )
     .map_err(pipeline)?;
     let gas_model_identity = resolved_gas_model_identity(gas_spec, gas);
-    let listener = spatial_listener_pose();
-    let half_ear_spacing_m = 0.045;
-    let observers = [
-        AcousticWorldObserver {
-            position_world_m: core::array::from_fn(|axis| {
-                listener.position_m[axis] - half_ear_spacing_m * listener.right_unit[axis]
-            }),
-        },
-        AcousticWorldObserver {
-            position_world_m: core::array::from_fn(|axis| {
-                listener.position_m[axis] + half_ear_spacing_m * listener.right_unit[axis]
-            }),
-        },
-    ];
-    let disc_acoustics = if let Some(disc_basis) = disc_basis.as_ref() {
-        let loss = modal_loss_spectrum_from_rayleigh(
-            disc_basis,
-            &physical_disc.specimen,
-            physical_disc.rayleigh_damping,
-            physical_disc.damping_model_identity,
-        )
-        .map_err(pipeline)?;
-        let directivity = disc_basis
-            .modal_acoustic_directivity(
-                ResolvedAcousticMedium {
-                    gas: &gas,
-                    gas_model_identity,
+    let observers = physical_pressure_observers();
+    let disc_source = disc_basis
+        .as_ref()
+        .map(|basis| {
+            let loss = StructuralResidualModalLossSpectrum {
+                structural_basis_identity: basis.identity,
+                material_state_identity: basis.material_state_identity,
+                damping_model_identity: physical_disc.damping_model_identity,
+                loss_factors: basis
+                    .enrichment_modes
+                    .iter()
+                    .map(|mode| {
+                        2.0 * physical_disc
+                            .rayleigh_damping
+                            .zeta_at(mode.angular_frequency_rad_s)
+                    })
+                    .collect(),
+            };
+            build_structural_broadband_radiation_artifact(
+                &StructuralBroadbandRadiationRequest {
+                    basis,
+                    loss: &loss,
+                    medium: ResolvedAcousticMedium {
+                        gas: &gas,
+                        gas_model_identity,
+                    },
+                    training_frequency_hz: &CRITIQUE_DISC_BROADBAND_TRAINING_HZ,
+                    held_out_frequency_hz: &CRITIQUE_DISC_BROADBAND_HELD_OUT_HZ,
+                    held_out_directions_body: &CRITIQUE_DISC_BROADBAND_DIRECTIONS,
+                    directivity: AcousticDirectivityControls {
+                        maximum_spherical_harmonic_degree: disc_controls
+                            .maximum_spherical_harmonic_degree,
+                        minimum_captured_fraction: disc_controls
+                            .minimum_directivity_captured_fraction,
+                    },
+                    fit: BroadbandRadiationControls {
+                        sample_rate_hz: f64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
+                        minimum_captured_fraction: disc_controls
+                            .minimum_directivity_captured_fraction,
+                        fit_order: 4,
+                        fit_iterations: 12,
+                        fit_weights: WeightPreset::LogBand,
+                        fit_d: true,
+                        far_field_signal_floor: 1.0e-12,
+                        maximum_normalized_error: 0.25,
+                        rms_normalized_error: 0.10,
+                    },
                 },
-                AcousticDirectivityControls {
-                    maximum_spherical_harmonic_degree: disc_controls
-                        .maximum_spherical_harmonic_degree,
-                    minimum_captured_fraction: disc_controls.minimum_directivity_captured_fraction,
-                },
+                cx,
             )
-            .map_err(pipeline)?;
-        Some((loss, directivity))
-    } else {
-        None
-    };
+        })
+        .transpose()
+        .map_err(pipeline)?;
     let plate_radiation = plate_basis
         .baffled_observer_radiation(
             ResolvedAcousticMedium {
@@ -8140,8 +8193,8 @@ fn build_physical_audio(
     };
     let plate_maximum_contact_projection_distance_m =
         1.0e-8 * plate.width_m.max(plate.depth_m).max(plate.thickness_m);
-    let mut disc_pressure = if let (Some(disc_basis), Some((disc_loss, disc_directivity))) =
-        (disc_basis.as_ref(), disc_acoustics.as_ref())
+    let mut disc_pressure = if let (Some(disc_basis), Some(disc_source)) =
+        (disc_basis.as_ref(), disc_source.as_ref())
     {
         let disc_scale_m = disc_basis
             .mesh
@@ -8153,26 +8206,44 @@ fn build_physical_audio(
             * (disc_basis.mesh.maximum_meridian_chord_error_m
                 + disc_basis.mesh.maximum_azimuthal_chord_error_m)
             + 512.0 * f64::EPSILON * disc_scale_m.max(1.0);
-        let mut runtime = PhysicalModalAudioModel::try_new_with_directivity(
-            disc_basis,
-            disc_loss,
-            disc_directivity,
-            SOUND_MASTER_SAMPLE_RATE_HZ,
-            ModalAcousticTimeBudget::audible_reference(),
+        let mut runtime = disc_source
+            .try_runtime(
+                disc_basis,
+                ModalAcousticTimeBudget::audible_reference(),
+            )
+            .map_err(pipeline)?;
+        let stem = runtime
+            .synthesize_control_stream(
+                &controls,
+                PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce,
+                force_reconstruction,
+                disc_maximum_contact_projection_distance_m,
+                cx,
+            )
+            .map_err(pipeline)?;
+        let maximum_output_frames = usize::try_from(
+            u64::from(config.frames + config.mechanics_preroll_video_frames)
+                * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS)
+                + u64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
         )
-        .map_err(pipeline)?;
+        .map_err(|_| CinematicFixtureError::Pipeline("disc observer budget overflow".into()))?;
         Some(
-            runtime
-                .synthesize_control_stream_world_observers(
-                    &controls,
-                    disc_directivity,
-                    &observers,
-                    PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce,
-                    force_reconstruction,
-                    disc_maximum_contact_projection_distance_m,
-                    cx,
-                )
-                .map_err(pipeline)?,
+            synthesize_retarded_far_field_world_observers(
+                disc_source,
+                &stem,
+                disc_basis,
+                preroll_trajectory.trajectory(),
+                &observers,
+                RetardedFarFieldObserverControls {
+                    maximum_surface_mach: 0.08,
+                    root_time_tolerance_s: 1.0e-9,
+                    maximum_root_iterations: 64,
+                    interpolation_radius_frames: 8,
+                    maximum_output_frames,
+                },
+                cx,
+            )
+            .map_err(pipeline)?,
         )
     } else {
         None
@@ -8210,28 +8281,37 @@ fn build_physical_audio(
     let plate_left = plate_pressure
         .pop()
         .expect("two-channel plate result has a left signal");
-    let first = usize::try_from(expected_preroll_audio_frame_count)
-        .map_err(|_| CinematicFixtureError::Pipeline("audio preroll exceeds usize".into()))?;
     let expected_published_frames = usize::try_from(
         u64::from(config.frames) * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS),
     )
     .map_err(|_| CinematicFixtureError::Pipeline("published audio exceeds usize".into()))?;
-    let end = first
-        .checked_add(expected_published_frames)
-        .ok_or_else(|| CinematicFixtureError::Pipeline("physical audio crop overflow".into()))?;
-    let plate_left = plate_left
-        .try_crop_rebased(first, end, 0.0)
-        .map_err(pipeline)?;
-    let plate_right = plate_right
-        .try_crop_rebased(first, end, 0.0)
-        .map_err(pipeline)?;
+    let publication_start_time_s = expected_preroll_audio_frame_count as f64
+        / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let plate_left = crop_physical_pressure_window(
+        &plate_left,
+        publication_start_time_s,
+        expected_published_frames,
+    )?;
+    let plate_right = crop_physical_pressure_window(
+        &plate_right,
+        publication_start_time_s,
+        expected_published_frames,
+    )?;
     let plate_left_pressure_identity = plate_left.identity;
     let plate_right_pressure_identity = plate_right.identity;
     let disc_pair = disc_pair
         .map(|(left, right)| {
             Ok::<_, CinematicFixtureError>((
-                left.try_crop_rebased(first, end, 0.0).map_err(pipeline)?,
-                right.try_crop_rebased(first, end, 0.0).map_err(pipeline)?,
+                crop_physical_pressure_window(
+                    &left,
+                    publication_start_time_s,
+                    expected_published_frames,
+                )?,
+                crop_physical_pressure_window(
+                    &right,
+                    publication_start_time_s,
+                    expected_published_frames,
+                )?,
             ))
         })
         .transpose()?;
@@ -8246,7 +8326,7 @@ fn build_physical_audio(
     let left_pressure_identity = left.identity;
     let right_pressure_identity = right.identity;
     let metadata = WavMetadata::try_new(Some(
-        "FrankenSim Euler disc: contact-driven structural response with causal retarded-time baffled-Rayleigh plate radiation and any in-band disc FEM/BEM modes; fixed-calibration PCM24 listening derivative; uncalibrated material/support inputs"
+        "FrankenSim Euler disc: contact-driven structure at fixed world microphones; causal baffled-Rayleigh plate radiation plus any resolvable broadband disc elasticity; fixed-calibration PCM24 listening derivative; uncalibrated material/support inputs"
             .to_owned(),
     ))
     .map_err(pipeline)?;
@@ -8265,43 +8345,41 @@ fn build_physical_audio(
     .map_err(pipeline)?;
     let disc_radiator = match (
         disc_basis.as_ref(),
-        disc_acoustics.as_ref(),
+        disc_source.as_ref(),
         disc_pair.as_ref(),
     ) {
-        (Some(basis), Some((_, directivity)), Some((left, right))) => {
-            FixtureDiscAcousticRadiator::Resolved {
+        (Some(basis), Some(source), Some((left, right))) => {
+            FixtureDiscAcousticRadiator::ResolvedBroadband {
                 structural_basis_identity: basis.identity,
-                acoustic_directivity_identity: directivity.identity,
-                damping_model_identity: physical_disc.damping_model_identity,
+                broadband_radiation_identity: source.identity,
                 left_pressure_identity: left.identity,
                 right_pressure_identity: right.identity,
-                retained_mode_count: basis.modes.len(),
+                retained_mode_count: basis.enrichment_modes.len(),
                 minimum_mode_frequency_hz: basis
-                    .modes
+                    .enrichment_modes
                     .first()
-                    .expect("admitted disc structural basis contains modes")
+                    .expect("admitted residual basis contains enrichment modes")
                     .frequency_hz,
                 maximum_mode_frequency_hz: basis
-                    .modes
+                    .enrichment_modes
                     .last()
-                    .expect("admitted disc structural basis contains modes")
+                    .expect("admitted residual basis contains enrichment modes")
                     .frequency_hz,
-                minimum_panels_per_wavelength: directivity
-                    .modes
-                    .iter()
-                    .map(|mode| mode.panels_per_wavelength)
-                    .fold(f64::INFINITY, f64::min),
-                minimum_directivity_captured_fraction: directivity
-                    .modes
-                    .iter()
-                    .map(|mode| mode.directivity.captured_fraction)
-                    .fold(1.0_f64, f64::min),
+                minimum_directivity_captured_fraction: source
+                    .radiation
+                    .report
+                    .sampling_diagnostics
+                    .captured_fraction,
+                maximum_held_out_error: source.radiation.report.maximum_normalized_complex_error,
+                rms_held_out_error: source.radiation.report.rms_normalized_complex_error,
             }
         }
-        (None, None, None) => FixtureDiscAcousticRadiator::OmittedNoModesInBand {
-            minimum_frequency_hz: disc_controls.minimum_frequency_hz,
-            maximum_frequency_hz: disc_controls.maximum_frequency_hz,
-        },
+        (None, None, None) => {
+            FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
+                forcing_maximum_frequency_hz: disc_controls.maximum_frequency_hz,
+                enrichment_maximum_frequency_hz: CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ,
+            }
+        }
         _ => {
             return Err(CinematicFixtureError::Pipeline(
                 "disc structural basis, radiation, and pressure disposition diverged".into(),
@@ -8330,6 +8408,63 @@ fn build_physical_audio(
         plate_maximum_mode_frequency_hz,
         plate_minimum_panels_per_wavelength,
     })
+}
+
+fn physical_pressure_observers() -> [AcousticWorldObserver; 2] {
+    let listener = spatial_listener_pose();
+    let center = core::array::from_fn(|axis| {
+        CRITIQUE_CAMERA_TARGET_M[axis]
+            - CRITIQUE_PHYSICAL_MICROPHONE_RADIUS_M * listener.forward_unit[axis]
+    });
+    [-1.0, 1.0].map(|side| AcousticWorldObserver {
+        position_world_m: core::array::from_fn(|axis| {
+            center[axis]
+                + side
+                    * CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M
+                    * listener.right_unit[axis]
+        }),
+    })
+}
+
+fn physical_pressure_observers_manifest_json() -> String {
+    let [left, right] = physical_pressure_observers();
+    format!(
+        "[[{:.17e},{:.17e},{:.17e}],[{:.17e},{:.17e},{:.17e}]]",
+        left.position_world_m[0],
+        left.position_world_m[1],
+        left.position_world_m[2],
+        right.position_world_m[0],
+        right.position_world_m[1],
+        right.position_world_m[2],
+    )
+}
+
+fn crop_physical_pressure_window(
+    signal: &PhysicalPressureSignal,
+    absolute_start_time_s: f64,
+    frame_count: usize,
+) -> Result<PhysicalPressureSignal, CinematicFixtureError> {
+    let coordinate =
+        (absolute_start_time_s - signal.start_time_s) * f64::from(signal.sample_rate_hz);
+    let rounded = coordinate.round();
+    if !(coordinate.is_finite()
+        && rounded >= 0.0
+        && (coordinate - rounded).abs() <= 1.0e-6)
+    {
+        return Err(CinematicFixtureError::Pipeline(
+            "physical pressure does not contain the exact publication clock boundary".into(),
+        ));
+    }
+    let first = rounded as usize;
+    signal
+        .try_crop_rebased(
+            first,
+            first.checked_add(frame_count).ok_or_else(|| {
+                CinematicFixtureError::Pipeline("physical pressure crop overflow".into())
+            })?,
+            0.0,
+        )
+        .map_err(pipeline)
 }
 
 fn fixture_master_clocks(
@@ -9198,6 +9333,8 @@ fn production_fixture_manifest(
     };
     let render_integrator = config.render_integrator.identity();
     let reconstruction_filter = fixture_physical_reconstruction_filter_spec();
+    let disc_radiator_json = disc_radiator_manifest_json(&physical_audio.disc_radiator);
+    let physical_observers_json = physical_pressure_observers_manifest_json();
     format!(
         concat!(
             "{{\n",
@@ -9233,9 +9370,11 @@ fn production_fixture_manifest(
             "\"declared_source_bandwidth_hz\":{:.17e},",
             "\"reconstruction_filter\":{{\"passband_edge_hz\":{:.17e},",
             "\"stopband_edge_hz\":{:.17e},\"half_length_frames\":{}}},",
+            "\"disc_radiator\":{disc_radiator_json},",
             "\"plate_modes\":{{\"retained_count\":{},\"minimum_frequency_hz\":{:.17e},",
             "\"maximum_frequency_hz\":{:.17e}}},",
-            "\"observer_model\":\"two fixed world-space ear observers with causal retarded-time radiation\",",
+            "\"observer_model\":\"two camera-independent fixed world microphones; causal retarded-time radiation\",",
+            "\"observer_positions_world_m\":{physical_observers_json},",
             "\"control_resolution_evidence\":{{\"fine_hz\":48000,\"coarse_hz\":24000,",
             "\"coarsening_impulse_residual_n_s\":{:.17e},",
             "\"pressure_response_convergence\":\"outstanding\"}}}},\n",
@@ -9325,6 +9464,57 @@ fn production_fixture_manifest(
         render.idle_worker_ns,
         mux_json,
     )
+}
+
+fn disc_radiator_manifest_json(radiator: &FixtureDiscAcousticRadiator) -> String {
+    match radiator {
+        FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
+            forcing_maximum_frequency_hz,
+            enrichment_maximum_frequency_hz,
+        } => format!(
+            concat!(
+                "{{\"disposition\":\"omitted-no-resolvable-disc-mode-below-nyquist\",",
+                "\"geometry\":\"resolved-profile body-fitted tetrahedral elasticity\",",
+                "\"certified_forcing_band_maximum_hz\":{:.17e},",
+                "\"searched_enrichment_maximum_hz\":{:.17e},\"retained_mode_count\":0}}"
+            ),
+            forcing_maximum_frequency_hz, enrichment_maximum_frequency_hz,
+        ),
+        FixtureDiscAcousticRadiator::ResolvedBroadband {
+            structural_basis_identity,
+            broadband_radiation_identity,
+            left_pressure_identity,
+            right_pressure_identity,
+            retained_mode_count,
+            minimum_mode_frequency_hz,
+            maximum_mode_frequency_hz,
+            minimum_directivity_captured_fraction,
+            maximum_held_out_error,
+            rms_held_out_error,
+        } => format!(
+            concat!(
+                "{{\"disposition\":\"resolved-broadband-estimate\",",
+                "\"geometry\":\"resolved-profile body-fitted tetrahedral elasticity\",",
+                "\"structural_basis_identity\":\"{}\",\"broadband_radiation_identity\":\"{}\",",
+                "\"left_pressure_identity\":\"{}\",\"right_pressure_identity\":\"{}\",",
+                "\"retained_mode_count\":{},\"minimum_mode_frequency_hz\":{:.17e},",
+                "\"maximum_mode_frequency_hz\":{:.17e},",
+                "\"minimum_directivity_captured_fraction\":{:.17e},",
+                "\"withheld_maximum_normalized_error\":{:.17e},",
+                "\"withheld_rms_normalized_error\":{:.17e}}}"
+            ),
+            structural_basis_identity.to_hex(),
+            broadband_radiation_identity.to_hex(),
+            left_pressure_identity.to_hex(),
+            right_pressure_identity.to_hex(),
+            retained_mode_count,
+            minimum_mode_frequency_hz,
+            maximum_mode_frequency_hz,
+            minimum_directivity_captured_fraction,
+            maximum_held_out_error,
+            rms_held_out_error,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9502,62 +9692,17 @@ fn fixture_manifest(
             physical_audio.plate_maximum_support_snap_error_m,
         ),
     };
-    let disc_radiator_json = match &physical_audio.disc_radiator {
-        FixtureDiscAcousticRadiator::OmittedNoModesInBand {
-            minimum_frequency_hz,
-            maximum_frequency_hz,
-        } => format!(
-            concat!(
-                "{{\"disposition\":\"omitted-no-elastic-modes-in-admitted-band\",",
-                "\"geometry\":\"resolved-profile body-fitted tetrahedral elasticity\",",
-                "\"requested_minimum_frequency_hz\":{:.17e},",
-                "\"requested_maximum_frequency_hz\":{:.17e},",
-                "\"retained_mode_count\":0}}"
-            ),
-            minimum_frequency_hz, maximum_frequency_hz,
-        ),
-        FixtureDiscAcousticRadiator::Resolved {
-            structural_basis_identity,
-            acoustic_directivity_identity,
-            damping_model_identity,
-            left_pressure_identity,
-            right_pressure_identity,
-            retained_mode_count,
-            minimum_mode_frequency_hz,
-            maximum_mode_frequency_hz,
-            minimum_panels_per_wavelength,
-            minimum_directivity_captured_fraction,
-        } => format!(
-            concat!(
-                "{{\"disposition\":\"resolved\",",
-                "\"geometry\":\"resolved-profile body-fitted tetrahedral elasticity\",",
-                "\"structural_basis_identity\":\"{}\",\"acoustic_directivity_identity\":\"{}\",",
-                "\"damping_model_identity\":\"{}\",",
-                "\"left_pressure_identity\":\"{}\",\"right_pressure_identity\":\"{}\",",
-                "\"retained_mode_count\":{},\"minimum_mode_frequency_hz\":{:.17e},",
-                "\"maximum_mode_frequency_hz\":{:.17e},\"minimum_panels_per_wavelength\":{:.17e},",
-                "\"minimum_directivity_captured_fraction\":{:.17e}}}"
-            ),
-            structural_basis_identity.to_hex(),
-            acoustic_directivity_identity.to_hex(),
-            damping_model_identity.to_hex(),
-            left_pressure_identity.to_hex(),
-            right_pressure_identity.to_hex(),
-            retained_mode_count,
-            minimum_mode_frequency_hz,
-            maximum_mode_frequency_hz,
-            minimum_panels_per_wavelength,
-            minimum_directivity_captured_fraction,
-        ),
-    };
+    let disc_radiator_json = disc_radiator_manifest_json(&physical_audio.disc_radiator);
+    let physical_observers_json = physical_pressure_observers_manifest_json();
     let physical_audio_json = format!(
         concat!(
             "{{\"sample_rate_hz\":{},\"path\":\"sound/physical-listening-master.pcm24.wav\",",
-            "\"wav_identity\":\"{}\",\"authority\":\"contact-driven structure with causal retarded-time baffled-Rayleigh plate radiation and any in-band disc FEM/BEM modes\",",
+            "\"wav_identity\":\"{}\",\"authority\":\"contact-driven structure at fixed world microphones; causal plate radiation plus any resolvable broadband disc elasticity\",",
             "\"calibrated_material_or_apparatus\":false,\"procedural_texture\":false,",
             "\"force_reconstruction\":\"conservative-generalized-force-time-measures plus centered Blackman-Harris low-pass with global half-sample even reflection v1\",",
             "\"disc_material_state_identity\":\"{}\",\"plate_material_state_identity\":\"{}\",",
             "\"plate_optical_model_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
+            "\"observer_positions_world_m\":{physical_observers_json},",
             "\"left_pressure_identity\":\"{}\",\"right_pressure_identity\":\"{}\",",
             "\"plate_component_pressure_identities\":{{\"left\":\"{}\",\"right\":\"{}\"}},",
             "\"radiators\":{{",
@@ -9624,7 +9769,7 @@ fn fixture_manifest(
             "  \"audio\": {physical_audio},\n",
             "  \"legacy_audio_convergence_diagnostic\": {{\"delivered\": false, \"path\": \"sound/legacy-representative-convergence.float32.wav\", \"sample_rate_hz\": {audio_rate}, \"authority\": \"representative-preset numerical diagnostic only\", \"procedural_texture\": false, \"excitation\": \"kinematically implied interval-mean SI normal reaction applied as unit action/reaction to disc and glass modes\", \"contact_phase\": \"disc modes use body-contact harmonic-one azimuth with rate Omega*cos(theta); glass modes use the independently retained base-frame contact azimuth\", \"chirp_start_hz\": {chirp_start:.17e}, \"chirp_end_hz\": {chirp_end:.17e}, \"assumed_reconstruction_ceiling_hz\": {audio_bandwidth:.17e}, \"modal_parameter_set_identity\": \"{modal_identity}\", \"modal_parameter_set_disclosure\": \"{modal_disclosure}\", \"continuous_crop_policy\": \"{warm_start_policy}\", \"continuous_crop_first_source_audio_frame\": {crop_first_source_frame}, \"continuous_crop_end_source_audio_frame\": {crop_end_source_frame}, \"continuous_crop_source_trajectory_identity\": \"{warm_start_source_identity}\", \"continuous_crop_published_trajectory_identity\": \"{published_trajectory_identity}\", \"continuous_crop_source_sound_configuration_identity\": \"{source_sound_configuration_identity}\", \"continuous_crop_resampler_identity\": \"{crop_resampler_identity}\", \"continuous_crop_binding_identity\": \"{warm_start_checkpoint_identity}\", \"timestep_convergence\": {audio_convergence}, \"pre_master_peak_fs\": {pre_master_peak:.17e}, \"master_gain_db\": {master_gain:.9}, \"initial_fade_sample_frames\": {initial_fade}, \"terminal_fade_sample_frames\": {terminal_fade}, \"spatialization\": {spatialization}}},\n",
             "  \"mux\": {mux},\n",
-            "  \"no_claims\": [\"the analytical mechanics model reproduces published equations and a fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the source-bound cinematic dynamics admits only its exact benchmark mechanical, damping, contact-surface, and fixed-solid state; arbitrary resolved specimens require the generic coupled dynamics route and never inherit this fitted trajectory\", \"disc and support deformation receive the admitted contact force one-way for sound; their displacement and impedance do not yet feed back into the source-bound rigid-disc trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered audible radiation resolves bending of a rectangular plate under the declared geometric support constraint and includes disc elasticity only when certified modes exist in the admitted audio band; elastic feet, housing, in-plane plate motion, support impedance, room response, roughness noise, terminal impacts, and out-of-band modes are omitted\", \"the plate uses a causal finite-distance retarded-acceleration Rayleigh-I surface integral, but remains a linear small-displacement rigid-baffle model without cavity, housing, diffraction, or room response; any admitted moving-disc BEM directivity remains a narrow-band modal approximation without broadband Doppler or retarded moving-boundary history\", \"disc and plate elastic coefficients, damping, optical constants, and support geometry are disclosed estimates rather than measurements of the apparatus; structural and acoustic mesh-refinement studies remain necessary before quantitative acoustic authority\", \"fixed-topology mechanics and rendering refuse material states that enter a liquid fraction; transient heat transport, finite-strain thermomechanics, phase-dependent optics, free-surface flow, remeshing, and mode updates are not yet integrated into this cinematic fixture\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
+            "  \"no_claims\": [\"the analytical mechanics model reproduces published equations and a fitted rolling coefficient but is not a full fluid-structure-contact solve or a raw measured trajectory\", \"the source-bound cinematic dynamics admits only its exact benchmark mechanical, damping, contact-surface, and fixed-solid state; arbitrary resolved specimens require the generic coupled dynamics route and never inherit this fitted trajectory\", \"disc and support deformation receive the admitted contact force one-way for sound; their displacement and impedance do not yet feed back into the source-bound rigid-disc trajectory\", \"the output-space dt/dt2 gate establishes one encoded-model consistency pair; it is not an asymptotic convergence-order certificate, contact-law validation, acoustic calibration, psychoacoustic equivalence, or experimental validation\", \"the positive inclination cutoff is horizon censoring, not theta zero, loss of contact, or a resolved terminal impact\", \"the delivered audible radiation resolves bending of a rectangular plate and adds disc elasticity only when a count-certified mode exists above the 12 kHz forcing band and at or below the 21.5 kHz runtime ceiling; the manifest records honest omission otherwise\", \"the disc path is a sampled-BEM, fitted broadband, rigid-source low-Mach far-field estimate with causal delay, emission-pose direction, and 1/r spreading, not exact moving-boundary FW-H, near field, room/head/support scattering, or calibrated SPL\", \"disc and plate elastic coefficients, damping, optical constants, and support geometry are disclosed estimates rather than measurements of the apparatus; structural and acoustic mesh-refinement studies remain necessary before quantitative acoustic authority\", \"fixed-topology mechanics and rendering refuse material states that enter a liquid fraction; transient heat transport, finite-strain thermomechanics, phase-dependent optics, free-surface flow, remeshing, and mode updates are not yet integrated into this cinematic fixture\", \"the separate representative-preset WAV is retained only for encoded-timestep regression and is not the delivered soundtrack\", \"digital pressure-to-full-scale mastering is presentation gain, not acoustic calibration or an SPL claim\", \"the radial spin fiducial is visualization-only and excluded from specimen geometry, contact, and mass\", \"image quality is final only after native-4K sample-rung review and complete-sequence verification\"]\n",
             "}}\n"
         ),
         width = config.width,
@@ -11165,6 +11310,46 @@ mod tests {
             .sqrt();
         assert!(CRITIQUE_SPATIAL_REFERENCE_DISTANCE_M > 0.0);
         assert!(CRITIQUE_SPATIAL_REFERENCE_DISTANCE_M < target_distance_m);
+        let microphones = physical_pressure_observers();
+        for microphone in microphones {
+            let radius = microphone
+                .position_world_m
+                .iter()
+                .zip(CRITIQUE_CAMERA_TARGET_M)
+                .map(|(position, target)| (position - target) * (position - target))
+                .sum::<f64>()
+                .sqrt();
+            assert!(radius > 0.99);
+        }
+        let spacing = microphones[0]
+            .position_world_m
+            .iter()
+            .zip(microphones[1].position_world_m)
+            .map(|(left, right)| (left - right) * (left - right))
+            .sum::<f64>()
+            .sqrt();
+        assert!((spacing - 2.0 * CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M).abs() < 1.0e-14);
+    }
+
+    #[test]
+    fn physical_pressure_crop_uses_absolute_source_time() {
+        let signal = PhysicalPressureSignal {
+            start_time_s: 0.25,
+            sample_rate_hz: 8,
+            pressure_pa: (0..16).map(f64::from).collect(),
+            peak_abs_pressure_pa: 15.0,
+            contact_force_sampling: crate::structural_acoustics::PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
+            observer: crate::structural_acoustics::PhysicalPressureObserver::WorldFixed(
+                physical_pressure_observers()[0],
+            ),
+            structural_basis_identity: ContentHash([1; 32]),
+            radiation_identity: ContentHash([2; 32]),
+            damping_model_identity: ContentHash([3; 32]),
+            identity: ContentHash([4; 32]),
+        };
+        let cropped = crop_physical_pressure_window(&signal, 0.75, 4).unwrap();
+        assert_eq!(cropped.start_time_s.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(cropped.pressure_pa, vec![4.0, 5.0, 6.0, 7.0]);
     }
 
     #[test]
@@ -11445,7 +11630,7 @@ mod tests {
                 );
                 assert!(matches!(
                     &audio.physical.disc_radiator,
-                    FixtureDiscAcousticRadiator::OmittedNoModesInBand { .. }
+                    FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist { .. }
                 ));
                 assert!(audio.pre_master_peak_fs.is_finite());
                 assert!(audio.pre_master_peak_fs > 0.0);

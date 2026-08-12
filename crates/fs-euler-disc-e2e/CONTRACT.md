@@ -1660,6 +1660,19 @@ channel-ordered `Pa*m` coefficients. These are source coefficients, not listener
 `PhysicalPressureSignal`. This `EstimateOnly` path makes no claim of calibrated absolute SPL,
 listener propagation, room response, nonlinear structure, or two-way acoustic loading.
 
+The generic `InteriorOnly` retarded observer converts that body-frame source
+stem to simultaneous world-fixed pressure signals. Frame zero is explicitly at
+the closing boundary `start + 1/fs`. At each output boundary, deterministic
+bisection solves `tau + |x_observer-X(tau)|/c = t`; all real-tesseral source
+coefficients use one complete 16-tap Lanczos-8 stencil at `tau`, and their
+direction is rotated by the emission pose before physical `1/r` spreading.
+All observers share the intersection of their complete arrival-time horizons
+and are returned transactionally in caller order. Admission enforces exact
+source/basis/gas/clock identities, the conservative broadband far-field gate,
+and a caller-bounded surface Mach number. This remains `EstimateOnly` under
+`RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM`; in particular it is not moving-boundary
+FW-H, exact Doppler amplitude, near-field, room/head, or calibrated SPL.
+
 The modal initial condition is explicit. `Zero` is admissible only when the
 retained horizon begins before excitation; a cropped horizon that begins under
 a held contact force uses `StaticEquilibriumAtFirstHeldForce` so that truncating
