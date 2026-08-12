@@ -16,11 +16,14 @@ use fs_conduction::material::{
     ConductivityModel, ConductivityTable, ElementMaterials, MaterialId, MaterialTable,
 };
 use fs_conduction::mesh::ConductionMesh;
+use fs_conduction::transient::{
+    TransientConfig, TransientProblem, VolumetricHeatCapacity, march, march_with_element_materials,
+};
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     CONDUCTIVITY_DIMS, ConductionError, ConductionProblem, InitialGuess, InterfaceFacePair,
-    InterfaceResistance, InterfaceSurface, LineSearch, LinearConfig, Nonlinearity, ProvenanceClass,
-    SolveConfig, StopRule, TEMPERATURE_DIMS, ThermalInterfaces,
+    InterfaceResistance, InterfaceSurface, LineSearch, LinearConfig, Nonlinearity, PowerMap,
+    ProvenanceClass, SolveConfig, StopRule, TEMPERATURE_DIMS, ThermalInterfaces,
     assemble_jacobian_with_element_materials, assemble_operator_with_element_materials,
     element_heat_flux_assigned, solve, solve_with_element_materials,
     solve_with_element_materials_and_interfaces, solve_with_interfaces,
@@ -1679,5 +1682,345 @@ fn two_layer_interface_tightens_under_refinement() {
     assert!(
         last_err < 2e-3,
         "finest two-layer interface still off by {last_err:e}"
+    );
+}
+
+#[test]
+fn regional_source_refuses_unmapped_and_mismatched_regions() {
+    let (complex, positions) = box_grid([2, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let regions = two_layer_ids(&mesh);
+    let mut densities = BTreeMap::new();
+    densities.insert(1, 1.0e4);
+    let err = PowerMap::regional_volumetric_source(&mesh, &regions, &densities).expect_err("unmap");
+    assert!(
+        matches!(err, ConductionError::ScenarioRow { .. }),
+        "unmapped region as {err:?}"
+    );
+    densities.insert(2, 0.0);
+    let err =
+        PowerMap::regional_volumetric_source(&mesh, &regions[..1], &densities).expect_err("len");
+    assert!(
+        matches!(err, ConductionError::FieldLength { .. }),
+        "length mismatch as {err:?}"
+    );
+}
+
+#[test]
+fn regional_source_on_one_layer_delivers_volume_times_density() {
+    let (complex, positions) = box_grid([6, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let regions = two_layer_ids(&mesh);
+    let density = 1.0e4;
+    let source = PowerMap::regional_volumetric_source(
+        &mesh,
+        &regions,
+        &BTreeMap::from([(1, density), (2, 0.0)]),
+    )
+    .expect("source");
+    let left_volume: f64 = (0..mesh.element_count())
+        .filter(|&e| regions[e] == 1)
+        .map(|e| mesh.element_volume(e))
+        .sum();
+    let want = density * left_volume;
+    let k = ConductivityModel::isotropic_declared(10.0).expect("k");
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(1), k.clone())]).expect("table"),
+        vec![MaterialId(1); mesh.element_count()],
+    )
+    .expect("assign");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &k,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    assert!(
+        (solution.report.energy.source_w - want).abs() < 1e-8 * want.abs().max(1.0),
+        "delivered source {} W vs expected {want} W",
+        solution.report.energy.source_w
+    );
+    assert!(
+        solution.report.energy.closure_w.abs() < 1e-8,
+        "regional-source energy did not close: {:?}",
+        solution.report.energy
+    );
+    let mut left_t = 0.0;
+    let mut right_t = 0.0;
+    let mut n_left = 0usize;
+    let mut n_right = 0usize;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        if p[0] < 0.5 {
+            left_t += solution.temperature[v];
+            n_left += 1;
+        }
+        if p[0] > 1.5 {
+            right_t += solution.temperature[v];
+            n_right += 1;
+        }
+    }
+    left_t /= n_left as f64;
+    right_t /= n_right as f64;
+    assert!(
+        left_t > right_t + 0.05,
+        "heat in the left layer should raise left T ({left_t}) above right T ({right_t})"
+    );
+}
+
+#[test]
+fn extreme_contrast_two_layer_still_hits_the_series_limit() {
+    let (complex, positions) = box_grid([8, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let assigned = two_layer_assigned(&mesh, 1.0, 1.0e6);
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    // k2 → ∞ ⇒ almost all drop is in the left layer: T(1) → 0.
+    let t = mean_interface_t(&mesh, &solution.temperature, 1.0);
+    assert!(
+        t < 5e-3,
+        "infinite-contrast interface should sit near the cold side, got {t}"
+    );
+    let q = mean_qx(&mesh, &assigned, &solution.temperature);
+    assert!(
+        (q - 1.0).abs() < 0.05,
+        "infinite-contrast q_x should approach 1, got {q}"
+    );
+}
+
+fn transient_linear() -> TransientConfig {
+    TransientConfig::backward_euler(
+        2.0,
+        LinearConfig {
+            tolerance: 1e-12,
+            max_iterations: 2_000,
+            restart: 40,
+        },
+    )
+    .expect("dt")
+}
+
+#[test]
+fn assigned_one_material_transient_matches_the_uniform_march() {
+    let (complex, positions) = box_grid([3, 2, 2], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(10.0).expect("k");
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("wrong");
+    let source = ScalarField::Uniform(0.0);
+    let capacity = VolumetricHeatCapacity::declared(1.0).expect("c");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 1.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(1), material.clone())]).expect("table"),
+        vec![MaterialId(1); mesh.element_count()],
+    )
+    .expect("assign");
+    let initial = vec![0.5; mesh.vertex_count()];
+    let assigned_sol = with_cx(|cx| {
+        march_with_element_materials(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &fallback,
+                source: &source,
+                capacity,
+            },
+            &assigned,
+            &transient_linear(),
+            &initial,
+            8,
+        )
+        .expect("assigned")
+    });
+    let uniform_sol = with_cx(|cx| {
+        march(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+                capacity,
+            },
+            &transient_linear(),
+            &initial,
+            8,
+        )
+        .expect("uniform")
+    });
+    let worst = assigned_sol
+        .temperature
+        .iter()
+        .zip(&uniform_sol.temperature)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst < 1e-12,
+        "assigned one-material transient differed by {worst:e}"
+    );
+}
+
+#[test]
+fn assigned_two_layer_transient_relaxes_to_the_series_interface() {
+    let (complex, positions) = box_grid([6, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let assigned = two_layer_assigned(&mesh, 1.0, 2.0);
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let source = ScalarField::Uniform(0.0);
+    let capacity = VolumetricHeatCapacity::declared(1.0).expect("c");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let initial = vec![0.5; mesh.vertex_count()];
+    let solution = with_cx(|cx| {
+        march_with_element_materials(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &fallback,
+                source: &source,
+                capacity,
+            },
+            &assigned,
+            &transient_linear(),
+            &initial,
+            16,
+        )
+        .expect("march")
+    });
+    let t = mean_interface_t(&mesh, &solution.temperature, 1.0);
+    assert!(
+        (t - 1.0 / 3.0).abs() < 2e-3,
+        "transient assigned series interface {t} off 1/3"
+    );
+}
+
+#[test]
+fn assigned_transient_refuses_k_of_t() {
+    let (complex, positions) = box_grid([2, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let right = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.0), (450.0, 2.0)]).expect("curve"),
+    );
+    let table =
+        MaterialTable::new([(MaterialId(1), left.clone()), (MaterialId(2), right)]).expect("table");
+    let assigned = ElementMaterials::from_region_ids(
+        table,
+        &two_layer_ids(&mesh),
+        &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
+    )
+    .expect("assign");
+    let source = ScalarField::Uniform(0.0);
+    let capacity = VolumetricHeatCapacity::declared(1.0).expect("c");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(290.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let initial = vec![295.0; mesh.vertex_count()];
+    let err = with_cx(|cx| {
+        march_with_element_materials(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &left,
+                source: &source,
+                capacity,
+            },
+            &assigned,
+            &transient_linear(),
+            &initial,
+            1,
+        )
+        .expect_err("k(T)")
+    });
+    assert!(
+        matches!(err, ConductionError::Config { .. }),
+        "k(T) transient as {err:?}"
     );
 }

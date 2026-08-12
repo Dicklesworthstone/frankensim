@@ -318,6 +318,59 @@ impl PowerMap {
         })
     }
 
+    /// Project a per-region volumetric density onto the nodal source.
+    ///
+    /// `region_of_element[e]` names the region of tet `e`; every such
+    /// id must appear in `density_w_per_m3`. Interface vertices receive
+    /// the lumped-volume mix of the touching regions, so delivered power
+    /// is exactly `Σ_e f_e V_e` — the same identity the energy audit
+    /// uses. This is constitutive *generation*, not conductivity.
+    ///
+    /// # Errors
+    /// Length mismatch, an unmapped region, or a non-finite density.
+    pub fn regional_volumetric_source(
+        mesh: &ConductionMesh,
+        region_of_element: &[u32],
+        density_w_per_m3: &std::collections::BTreeMap<u32, f64>,
+    ) -> Result<ScalarField, ConductionError> {
+        if region_of_element.len() != mesh.element_count() {
+            return Err(ConductionError::FieldLength {
+                field: "region-of-element vector",
+                expected: mesh.element_count(),
+                found: region_of_element.len(),
+            });
+        }
+        let lumped = lumped_nodal_volumes(mesh);
+        let mut power = vec![0.0f64; mesh.vertex_count()];
+        for (e, &region) in region_of_element.iter().enumerate() {
+            let density = *density_w_per_m3.get(&region).ok_or_else(|| {
+                power_error(
+                    format!("region {region}"),
+                    format!("element {e} has unmapped region {region}"),
+                    "map every retained region id to a finite W/m³ density",
+                )
+            })?;
+            if !density.is_finite() {
+                return Err(power_error(
+                    format!("region {region}"),
+                    format!("regional source density {density} W/m³ is not finite"),
+                    "supply a finite volumetric generation rate, including zero",
+                ));
+            }
+            let share = density * mesh.element_volume(e) / 4.0;
+            for vertex in mesh.complex().tets[e] {
+                power[vertex as usize] += share;
+            }
+        }
+        let mut density = vec![0.0f64; mesh.vertex_count()];
+        for (slot, (watts, weight)) in density.iter_mut().zip(power.iter().zip(&lumped)) {
+            if *weight > 0.0 {
+                *slot = watts / *weight;
+            }
+        }
+        ScalarField::nodal("regional volumetric source", mesh.vertex_count(), density)
+    }
+
     /// Components in deterministic name order.
     #[must_use]
     pub fn components(&self) -> &[ComponentPower] {

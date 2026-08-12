@@ -94,6 +94,7 @@ diameter.
 | `ThermalResistanceTerm` / `SeriesThermalResistance` | named K/W terms and a deterministic series sum; stated half-widths combine conservatively by addition, while any unstated term keeps the complete band unknown |
 | `ComponentPower` / `PowerMap` | per-component dissipation in W bound to a mesh vertex set, plus the declared system total. Names are unique and sorted; bound vertices are sorted and deduplicated so a repeated binding cannot take a double share while the totals still balance |
 | `PowerMap::volumetric_source` | projects the map onto the nodal `W/m³` source AND returns the audit computed from that same field, so the reported delivered power is what the solve receives rather than a parallel estimate of it |
+| `PowerMap::regional_volumetric_source` | the s93ej.2 generation companion of `from_region_ids`: one finite W/m³ per region id, lumped to nodes so delivered power is exactly `Σ_e f_e V_e`. Unmapped regions and length mismatches refuse. This is generation, not conductivity |
 | `SurfaceComponentPower` / `SurfacePowerMap` | the boundary analogue: dissipation bound to boundary-face SLOTS, projected onto a nodal OUTWARD-flux field for a `ThermalBc::Neumann` region. `region_selector(mesh)` hands back the matching face predicate so the flux and the region cannot describe different face sets |
 | `SurfacePowerAudit` / `SurfacePowerAuditRow` | the surface balance, reporting both the geometric `face_area_m2` and the map-wide `lumped_area_m2` the distribution actually divides by — they differ when footprints share vertices, and the lumped one is what keeps the total exact |
 | `PowerAudit` / `PowerAuditRow` | the retained three-number balance — declared total, component sum, delivered total — with a per-component table of bound volume, applied density, and delivered watts. `total_half_width_w()` sums stated bands conservatively and returns `None` if any component is `Unstated` |
@@ -112,6 +113,7 @@ diameter.
 | `RobinFlux` | `EnergyBalance::robin_out_w` restricted to ONE declared Robin region: face count, area, area-weighted mean `h` / wall temperature / `T_ref`, and the integrated heat rate. This is what lets a conjugate driver attribute heat to a named convective trace instead of to the whole domain |
 | `ThermalBoundary::region_for` | the region index owning a boundary-face slot, or `None` in the declared adiabatic remainder — the attribution the `RobinFlux` decomposition is built on |
 | `ConductivityDesign` | the IFT adjoint hook for the LINEAR case: `dJ/dρ` over per-element conductivity multipliers. `new_with_element_materials` uses each tet's own linear `K_e`; any `k(T)` assignment is refused rather than linearized |
+| `march_with_element_materials` | the linear theta-method march using each tet's assigned constant `K_e`. One-material assignment matches the uniform march; a two-layer assignment relaxes to the series interface. Any `k(T)` assignment is refused rather than frozen across a step |
 | `ConductionError` | the total typed refusal set; `rule()` gives a stable slug |
 
 ### `ThermalBc::from_scenario_row` — the Robin seam
