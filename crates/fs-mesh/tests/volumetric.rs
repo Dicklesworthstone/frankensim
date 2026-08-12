@@ -71,46 +71,6 @@ fn remap_tris(tris: &[[u32; 3]], remap: &[u32]) -> Vec<[u32; 3]> {
         .collect()
 }
 
-fn permutation_sign(sorted: [u32; 3], tri: [u32; 3]) -> i32 {
-    // Even permutation of the sorted triple → +1, odd → −1.
-    let even = [
-        [sorted[0], sorted[1], sorted[2]],
-        [sorted[1], sorted[2], sorted[0]],
-        [sorted[2], sorted[0], sorted[1]],
-    ];
-    if even.contains(&tri) { 1 } else { -1 }
-}
-
-/// Merge closed box surfaces and drop opposite coincident pairs
-/// (the cancelled shared faces of a Boolean union).
-fn union_boxes(parts: &[Vec<[f64; 3]>]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
-    let (verts, remaps) = weld(parts);
-    let mut net: BTreeMap<[u32; 3], i32> = BTreeMap::new();
-    let mut sample: BTreeMap<[u32; 3], [u32; 3]> = BTreeMap::new();
-    for remap in &remaps {
-        for tri in remap_tris(&box_triangles(0), remap) {
-            let mut key = tri;
-            key.sort_unstable();
-            *net.entry(key).or_insert(0) += permutation_sign(key, tri);
-            sample.entry(key).or_insert(tri);
-        }
-    }
-    let tris = net
-        .into_iter()
-        .filter_map(|(key, n)| {
-            if n == 0 {
-                None
-            } else if n > 0 {
-                Some(sample[&key])
-            } else {
-                let t = sample[&key];
-                Some([t[0], t[2], t[1]])
-            }
-        })
-        .collect();
-    (verts, tris)
-}
-
 fn solid_box(
     id: u32,
     seed: [f64; 3],
@@ -164,31 +124,59 @@ fn unit_cube_is_one_solid_of_volume_one() {
     });
 }
 
+fn l_vertices() -> Vec<[f64; 3]> {
+    // 8 bottom + 8 top of the [0,2]×[0,1]×[0,1] ∪ [0,1]×[1,2]×[0,1] solid.
+    vec![
+        [0.0, 0.0, 0.0], // 0
+        [1.0, 0.0, 0.0], // 1
+        [2.0, 0.0, 0.0], // 2
+        [0.0, 1.0, 0.0], // 3
+        [1.0, 1.0, 0.0], // 4
+        [2.0, 1.0, 0.0], // 5
+        [0.0, 2.0, 0.0], // 6
+        [1.0, 2.0, 0.0], // 7
+        [0.0, 0.0, 1.0], // 8
+        [1.0, 0.0, 1.0], // 9
+        [2.0, 0.0, 1.0], // 10
+        [0.0, 1.0, 1.0], // 11
+        [1.0, 1.0, 1.0], // 12
+        [2.0, 1.0, 1.0], // 13
+        [0.0, 2.0, 1.0], // 14
+        [1.0, 2.0, 1.0], // 15
+    ]
+}
+
+fn quad(a: u32, b: u32, c: u32, d: u32) -> [[u32; 3]; 2] {
+    [[a, b, c], [a, c, d]]
+}
+
+fn l_triangles() -> Vec<[u32; 3]> {
+    let mut tris = Vec::new();
+    // Bottom, outward −z.
+    tris.extend_from_slice(&quad(0, 3, 4, 1));
+    tris.extend_from_slice(&quad(1, 4, 5, 2));
+    tris.extend_from_slice(&quad(3, 6, 7, 4));
+    // Top, outward +z.
+    tris.extend_from_slice(&quad(8, 9, 12, 11));
+    tris.extend_from_slice(&quad(9, 10, 13, 12));
+    tris.extend_from_slice(&quad(11, 12, 15, 14));
+    // Vertical perimeter, outward.
+    tris.extend_from_slice(&quad(0, 1, 9, 8)); // y = 0
+    tris.extend_from_slice(&quad(1, 2, 10, 9));
+    tris.extend_from_slice(&quad(2, 5, 13, 10)); // x = 2
+    tris.extend_from_slice(&quad(5, 4, 12, 13)); // y = 1, x ∈ [1, 2]
+    tris.extend_from_slice(&quad(4, 7, 15, 12)); // x = 1, y ∈ [1, 2]
+    tris.extend_from_slice(&quad(7, 6, 14, 15)); // y = 2
+    tris.extend_from_slice(&quad(6, 3, 11, 14)); // x = 0, y ∈ [1, 2]
+    tris.extend_from_slice(&quad(3, 0, 8, 11)); // x = 0, y ∈ [0, 1]
+    tris
+}
+
 #[test]
 fn l_shape_carves_the_convex_hull_notch() {
     with_cx(|cx| {
-        let (verts, tris) = union_boxes(&[
-            box_vertices(0.0, 1.0, 0.0, 1.0, 0.0, 1.0),
-            box_vertices(1.0, 2.0, 0.0, 1.0, 0.0, 1.0),
-            box_vertices(0.0, 1.0, 1.0, 2.0, 0.0, 1.0),
-        ]);
-        {
-            let mut directed: BTreeMap<[u32; 2], i32> = BTreeMap::new();
-            for tri in &tris {
-                for e in [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]] {
-                    *directed.entry(e).or_insert(0) += 1;
-                }
-            }
-            let bad: Vec<_> = directed
-                .iter()
-                .filter(|(e, c)| **c != 1 || directed.get(&[e[1], e[0]]) != Some(&1))
-                .collect();
-            assert!(
-                bad.is_empty(),
-                "L surface directed-edge defects: {bad:?} tris={tris:?} nverts={}",
-                verts.len()
-            );
-        }
+        let verts = l_vertices();
+        let tris = l_triangles();
         let spec = RegionSpec {
             id: RegionId(1),
             kind: RegionKind::Solid,
