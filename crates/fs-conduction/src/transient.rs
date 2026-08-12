@@ -568,6 +568,46 @@ pub fn source_scale_gradient(
     functional: &FinalStateFunctional,
     steps: usize,
 ) -> Result<f64, ConductionError> {
+    source_scale_gradient_inner(cx, problem, None, config, functional, steps)
+}
+
+/// [`source_scale_gradient`] with a checked per-element constitutive assignment.
+///
+/// Every assigned model must be temperature-independent, for the same
+/// reason as [`march_with_element_materials`]: the adjoint march is
+/// state-independent only when `K` is.
+///
+/// # Errors
+/// Assignment validation, a `k(T)` model on any element, and every
+/// refusal [`source_scale_gradient`] can produce.
+pub fn source_scale_gradient_with_element_materials(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    materials: &ElementMaterials,
+    config: &TransientConfig,
+    functional: &FinalStateFunctional,
+    steps: usize,
+) -> Result<f64, ConductionError> {
+    materials.validate_for(problem.mesh)?;
+    for e in 0..problem.mesh.element_count() {
+        if materials.model_for(e)?.is_temperature_dependent() {
+            return Err(ConductionError::Config {
+                parameter: "conductivity",
+                what: "the transient adjoint received a temperature-dependent conductivity; the state-independent-operator argument that removes checkpointing does not hold for k(T)".to_string(),
+            });
+        }
+    }
+    source_scale_gradient_inner(cx, problem, Some(materials), config, functional, steps)
+}
+
+fn source_scale_gradient_inner(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    element_materials: Option<&ElementMaterials>,
+    config: &TransientConfig,
+    functional: &FinalStateFunctional,
+    steps: usize,
+) -> Result<f64, ConductionError> {
     let TransientProblem {
         mesh,
         boundary,
@@ -575,7 +615,7 @@ pub fn source_scale_gradient(
         source,
         capacity,
     } = problem;
-    if material.is_temperature_dependent() {
+    if element_materials.is_none() && material.is_temperature_dependent() {
         return Err(ConductionError::Config {
             parameter: "conductivity",
             what: "the transient adjoint received a temperature-dependent conductivity; the state-independent-operator argument that removes checkpointing does not hold for k(T)".to_string(),
@@ -593,7 +633,12 @@ pub fn source_scale_gradient(
     let dofs = DofMap::new(boundary, n)?;
     let capacitance = assemble_capacitance(cx, mesh, capacity)?;
     let reference = vec![0.0f64; n];
-    let system = assemble_operator(cx, mesh, boundary, material, source, &reference)?;
+    let system = match element_materials {
+        Some(assigned) => assemble_operator_with_element_materials(
+            cx, mesh, boundary, material, source, &reference, assigned,
+        )?,
+        None => assemble_operator(cx, mesh, boundary, material, source, &reference)?,
+    };
 
     let inverse_dt = 1.0 / config.dt_s;
     let theta = config.theta;
