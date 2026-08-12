@@ -19,7 +19,7 @@ pub const MAX_BROADBAND_FREQUENCIES: usize = 512;
 /// Maximum input-channel-frequency cells retained for fitting.
 pub const MAX_BROADBAND_TRANSFER_SAMPLES: usize = 4_194_304;
 /// Maximum scalar inputs in one neutral sample bundle.
-pub const MAX_BROADBAND_SHAPES: usize = 256;
+pub const MAX_BROADBAND_INPUTS: usize = 256;
 /// Maximum independent directions in the held-out far-field gate.
 pub const MAX_VALIDATION_DIRECTIONS: usize = 4096;
 /// Maximum SH degree supported by the normalized recurrence in this module.
@@ -468,7 +468,7 @@ fn validate_inputs(
     let invalid = BroadbandRadiationError::InvalidInput;
     if samples.source_id.is_empty()
         || samples.input_ids.is_empty()
-        || samples.input_ids.len() > MAX_BROADBAND_SHAPES
+        || samples.input_ids.len() > MAX_BROADBAND_INPUTS
         || samples.input_ids.iter().any(String::is_empty)
         || samples
             .input_ids
