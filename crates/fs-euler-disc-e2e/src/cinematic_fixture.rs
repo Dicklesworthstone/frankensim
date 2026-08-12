@@ -73,8 +73,8 @@ use crate::{
     RenderTrajectoryCodecBudget, RepresentativeDiscMaterial, SoundWavArtifact, SourcePositionTrack,
     SpatialAudioAuthority, SpatialAudioBudget, SpatialAudioConfig, SpatialAudioOutput,
     SpatialAudioRenderInput, SpatialAudioSource, SpatialDelayPolicy, SpatialMonoSignal,
-    SpatialOutputHorizon, SpatialStemComponent, StemGainPan, StereoSample, WavMetadata,
-    WavSampleEncoding, measure_audio, mix_dry_modal_stems,
+    SpatialOutputHorizon, SpatialStemComponent, StemGainPan, StereoSample, WavCodecReceipt,
+    WavMetadata, WavSampleEncoding, measure_audio, mix_dry_modal_stems,
     reduced_decay::{
         ReducedDecayError, ReducedDecayRun, RefinementEvidence, THORNE_2026_STEEL_DISC_DIAMETER_M,
         THORNE_2026_STEEL_DISC_FILLET_RADIUS_M, THORNE_2026_STEEL_DISC_MASS_KG,
@@ -1247,6 +1247,24 @@ impl CinematicRenderIntegrator {
     }
 }
 
+/// Exact canonical mechanics and soundtrack inputs for frame-only replay.
+///
+/// A coordinator produces these artifacts once with the admitted coupled
+/// physics path. Heterogeneous render workers then verify and consume the same
+/// bytes instead of independently re-integrating a chaotic contact trajectory.
+/// The artifact identities, not their filesystem locations, own provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CinematicCanonicalMediaSource {
+    /// Canonical [`EulerRenderTrajectoryArtifact`] bytes.
+    pub trajectory_path: PathBuf,
+    /// Required out-of-band identity of every canonical trajectory byte.
+    pub trajectory_identity: ContentHash,
+    /// Canonical PCM24 listening-master bytes synchronized to the trajectory.
+    pub listening_master_path: PathBuf,
+    /// Required out-of-band identity under the FrankenSim WAV identity domain.
+    pub listening_master_identity: ContentHash,
+}
+
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CinematicFixtureConfig {
@@ -1319,6 +1337,10 @@ pub struct CinematicFixtureConfig {
     pub support_plate: CinematicSupportPlateConfig,
     /// Coupled rigid/contact/base/gas initial conditions and constitutive laws.
     pub mechanics: CinematicMechanicsConfig,
+    /// Optional exact coordinator-produced trajectory and soundtrack. When
+    /// present, this process performs no mechanics or acoustic synthesis; it
+    /// validates and republishes those canonical sources before rendering.
+    pub canonical_media_source: Option<CinematicCanonicalMediaSource>,
     /// Ambient gas temperature used by physical acoustic propagation [K].
     pub ambient_temperature_k: f64,
     /// Ambient absolute gas pressure used by physical acoustics [Pa].
@@ -1371,6 +1393,7 @@ impl Default for CinematicFixtureConfig {
             disc_structural_acoustics: CinematicDiscStructuralAcousticConfig::default(),
             support_plate: CinematicSupportPlateConfig::default(),
             mechanics: CinematicMechanicsConfig::default(),
+            canonical_media_source: None,
             ambient_temperature_k: 293.15,
             ambient_pressure_pa: 101_325.0,
             ambient_gas: GasSpec::dry_air_ussa1976(),
@@ -1386,6 +1409,14 @@ impl CinematicFixtureConfig {
         if self.width == 0 || self.height == 0 || self.width > 3_840 || self.height > 2_160 {
             return Err(CinematicFixtureError::InvalidConfig(
                 "dimensions must be nonzero and no larger than 3840x2160",
+            ));
+        }
+        if let Some(source) = &self.canonical_media_source
+            && (source.trajectory_path.as_os_str().is_empty()
+                || source.listening_master_path.as_os_str().is_empty())
+        {
+            return Err(CinematicFixtureError::InvalidConfig(
+                "canonical media paths must be nonempty",
             ));
         }
         if self.frames == 0 || self.frames > CRITIQUE_FRAMES {
@@ -3066,12 +3097,18 @@ fn build_fixture_production_mechanics(
     )
     .map_err(pipeline)?;
     let temperature_k = config.disc.material.temperature_k;
+    // Each bounded trajectory performs one dry finite-footprint evaluation at
+    // its accepted terminal endpoint. It does not advance the returned coupled
+    // checkpoint, but its logical normal-contact key must still be admissible.
+    let maximum_normal_evaluations = maximum_steps.checked_add(1).ok_or_else(|| {
+        CinematicFixtureError::Pipeline("normal-contact evaluation budget overflow".into())
+    })?;
     let normal_state = NormalPatchEmbedState::new_strict_sequence(
         0.0,
         1.0,
-        usize::try_from(maximum_steps).map_err(|_| {
+        usize::try_from(maximum_normal_evaluations).map_err(|_| {
             CinematicFixtureError::Pipeline(
-                "normal-contact step budget exceeds platform capacity".into(),
+                "normal-contact evaluation budget exceeds platform capacity".into(),
             )
         })?,
     )
@@ -4305,6 +4342,21 @@ struct FixtureAudioPairOutput {
     convergence: FixtureAudioConvergenceEvidence,
 }
 
+struct FixtureGeneratedMedia {
+    fine_controls: ProductionControlTrajectory,
+    coarse_controls: ProductionControlTrajectory,
+    audio_preroll_artifact: EulerRenderTrajectoryArtifact,
+    physical_audio: FixturePhysicalAudio,
+}
+
+enum FixtureMediaAudio {
+    Generated(FixtureGeneratedMedia),
+    Canonical {
+        wav_bytes: Vec<u8>,
+        wav_receipt: WavCodecReceipt,
+    },
+}
+
 /// Fail-closed fixture refusal; a failed run never publishes the requested root.
 #[derive(Debug)]
 pub enum CinematicFixtureError {
@@ -4344,6 +4396,104 @@ impl From<std::io::Error> for CinematicFixtureError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
+}
+
+fn load_canonical_media_source(
+    source: &CinematicCanonicalMediaSource,
+    config: &CinematicFixtureConfig,
+    cx: &Cx<'_>,
+) -> Result<(EulerRenderTrajectoryArtifact, Vec<u8>, WavCodecReceipt), CinematicFixtureError> {
+    let mut trajectory_file = File::open(&source.trajectory_path)?;
+    let trajectory = EulerRenderTrajectoryArtifact::read_from(
+        &mut trajectory_file,
+        RenderTrajectoryCodecBudget::DEFAULT,
+        cx,
+    )
+    .map_err(pipeline)?;
+    let actual_trajectory_identity = trajectory.receipt().artifact_identity();
+    if actual_trajectory_identity != source.trajectory_identity {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "canonical trajectory identity mismatch: expected {}, decoded {}",
+            source.trajectory_identity, actual_trajectory_identity,
+        )));
+    }
+    let expected_duration_s = f64::from(config.frames) / f64::from(CRITIQUE_FPS);
+    let accumulated_clock_steps = usize::try_from(
+        u64::from(config.frames)
+            .checked_add(u64::from(config.mechanics_preroll_video_frames))
+            .and_then(|frame_count| {
+                frame_count.checked_mul(u64::from(config.mechanics.sample_rate_hz))
+            })
+            .and_then(|step_count| step_count.checked_div(u64::from(CRITIQUE_FPS)))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline(
+                    "canonical replay mechanics clock budget overflow".into(),
+                )
+            })?,
+    )
+    .map_err(|_| {
+        CinematicFixtureError::Pipeline(
+            "canonical replay mechanics clock budget exceeds usize".into(),
+        )
+    })?;
+    let accumulated_clock_horizon_s =
+        accumulated_clock_steps as f64 / f64::from(config.mechanics.sample_rate_hz);
+    require_trajectory_horizon_with_clock_bound(
+        "canonical replay trajectory",
+        trajectory.trajectory(),
+        expected_duration_s,
+        accumulated_clock_steps,
+        accumulated_clock_horizon_s,
+    )?;
+
+    let wav_metadata = fs::metadata(&source.listening_master_path)?;
+    if !wav_metadata.is_file() {
+        return Err(CinematicFixtureError::Pipeline(
+            "canonical listening master is not a regular file".into(),
+        ));
+    }
+    if wav_metadata.len() > AudioArtifactBudget::DEFAULT.maximum_wav_bytes {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "canonical listening master exceeds the {}-byte WAV budget",
+            AudioArtifactBudget::DEFAULT.maximum_wav_bytes,
+        )));
+    }
+    let wav_bytes = fs::read(&source.listening_master_path)?;
+    let decoded =
+        crate::decode_stereo_wav(&wav_bytes, AudioArtifactBudget::DEFAULT, cx).map_err(pipeline)?;
+    let wav_receipt = decoded.receipt;
+    if wav_receipt.wav_identity() != source.listening_master_identity {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            "canonical listening-master identity mismatch: expected {}, decoded {}",
+            source.listening_master_identity,
+            wav_receipt.wav_identity(),
+        )));
+    }
+    let expected_sample_frames = u64::from(config.frames)
+        .checked_mul(u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS))
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline(
+                "canonical listening-master frame count overflows".into(),
+            )
+        })?;
+    if wav_receipt.sample_rate_hz() != SOUND_MASTER_SAMPLE_RATE_HZ
+        || wav_receipt.encoding() != WavSampleEncoding::Pcm24
+        || wav_receipt.sample_frame_count() != expected_sample_frames
+    {
+        return Err(CinematicFixtureError::Pipeline(format!(
+            concat!(
+                "canonical listening master must be PCM24 stereo at {} Hz with {} sample frames; ",
+                "decoded encoding={:?} rate={} frames={}"
+            ),
+            SOUND_MASTER_SAMPLE_RATE_HZ,
+            expected_sample_frames,
+            wav_receipt.encoding(),
+            wav_receipt.sample_rate_hz(),
+            wav_receipt.sample_frame_count(),
+        )));
+    }
+    drop(decoded);
+    Ok((trajectory, wav_bytes, wav_receipt))
 }
 
 fn cinematic_thorne_2026_refinement_evidence(
@@ -4394,53 +4544,96 @@ pub fn run_cinematic_fixture(
     }
     let duration_s = f64::from(config.frames) / f64::from(CRITIQUE_FPS);
 
-    progress("stage=mechanics begin");
     let profile = config.disc.resolve_profile(cx)?;
     let physical_disc = resolve_fixture_physical_disc(&profile, &config.disc, cx)?;
     let physical_plate = resolve_fixture_physical_plate(&config.support_plate)?;
-    let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)?;
-    let production = build_fixture_production_mechanics(
-        &profile,
-        &physical_disc,
-        &physical_plate,
-        plate_basis.clone(),
-        config,
-        cx,
-    )?;
-    let mechanics_steps_per_control_interval = usize::try_from(
-        config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ,
-    )
-    .map_err(|_| CinematicFixtureError::Pipeline("mechanics/control ratio exceeds usize".into()))?;
-    let preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
-        .checked_mul(u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS))
-        .ok_or_else(|| CinematicFixtureError::Pipeline("audio preroll frame overflow".into()))?;
-    let preroll_mechanics_steps = usize::try_from(preroll_audio_frame_count)
-        .ok()
-        .and_then(|frames| frames.checked_mul(mechanics_steps_per_control_interval))
-        .ok_or_else(|| {
-            CinematicFixtureError::Pipeline("audio preroll mechanics budget overflow".into())
-        })?;
-    let picture_mechanics_steps = usize::try_from(
-        u64::from(config.frames)
-            .checked_mul(u64::from(config.mechanics.sample_rate_hz))
-            .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
+    let (trajectory_artifact, media_audio, retained_time_s) = if let Some(source) =
+        &config.canonical_media_source
+    {
+        progress("stage=canonical-media begin");
+        let (trajectory_artifact, wav_bytes, wav_receipt) =
+            load_canonical_media_source(source, config, cx)?;
+        let retained_time_s = trajectory_artifact
+            .trajectory()
+            .samples()
+            .last()
             .ok_or_else(|| {
-                CinematicFixtureError::Pipeline("picture mechanics budget overflow".into())
-            })?,
-    )
-    .map_err(|_| {
-        CinematicFixtureError::Pipeline("picture mechanics budget exceeds usize".into())
-    })?;
-    let preroll_control = production
-        .model
-        .run_eventful_control_trajectory(
-            production.checkpoint.clone(),
-            preroll_mechanics_steps,
-            mechanics_steps_per_control_interval,
-            |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                CinematicFixtureError::Pipeline(
+                    "canonical replay trajectory contains no samples".into(),
+                )
+            })?
+            .input()
+            .time_s;
+        progress(&format!(
+            concat!(
+                "stage=canonical-media verified trajectory_identity={} ",
+                "configuration_identity={} wav_identity={} sample_frames={}"
+            ),
+            trajectory_artifact.receipt().artifact_identity(),
+            trajectory_artifact
+                .trajectory()
+                .metadata()
+                .configuration_identity,
+            wav_receipt.wav_identity(),
+            wav_receipt.sample_frame_count(),
+        ));
+        progress("stage=canonical-media complete");
+        (
+            trajectory_artifact,
+            FixtureMediaAudio::Canonical {
+                wav_bytes,
+                wav_receipt,
+            },
+            retained_time_s,
         )
-        .map_err(pipeline)?;
-    if preroll_control.accepted_mechanics_steps != preroll_mechanics_steps
+    } else {
+        progress("stage=mechanics begin");
+        let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)?;
+        let production = build_fixture_production_mechanics(
+            &profile,
+            &physical_disc,
+            &physical_plate,
+            plate_basis.clone(),
+            config,
+            cx,
+        )?;
+        let mechanics_steps_per_control_interval =
+            usize::try_from(config.mechanics.sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ)
+                .map_err(|_| {
+                    CinematicFixtureError::Pipeline("mechanics/control ratio exceeds usize".into())
+                })?;
+        let preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
+            .checked_mul(u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("audio preroll frame overflow".into())
+            })?;
+        let preroll_mechanics_steps = usize::try_from(preroll_audio_frame_count)
+            .ok()
+            .and_then(|frames| frames.checked_mul(mechanics_steps_per_control_interval))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("audio preroll mechanics budget overflow".into())
+            })?;
+        let picture_mechanics_steps = usize::try_from(
+            u64::from(config.frames)
+                .checked_mul(u64::from(config.mechanics.sample_rate_hz))
+                .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
+                .ok_or_else(|| {
+                    CinematicFixtureError::Pipeline("picture mechanics budget overflow".into())
+                })?,
+        )
+        .map_err(|_| {
+            CinematicFixtureError::Pipeline("picture mechanics budget exceeds usize".into())
+        })?;
+        let preroll_control = production
+            .model
+            .run_eventful_control_trajectory(
+                production.checkpoint.clone(),
+                preroll_mechanics_steps,
+                mechanics_steps_per_control_interval,
+                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+            )
+            .map_err(pipeline)?;
+        if preroll_control.accepted_mechanics_steps != preroll_mechanics_steps
         || !matches!(
             preroll_control.termination,
             crate::production_coupling::ProductionEventTrajectoryTermination::StepLimitReached { .. }
@@ -4453,39 +4646,39 @@ pub fn run_cinematic_fixture(
             preroll_control.termination
         )));
     }
-    let preroll_max_mean_force_n = preroll_control
-        .intervals
-        .iter()
-        .map(|interval| interval.mean_normal_force_n)
-        .fold(0.0_f64, f64::max);
-    progress(&format!(
-        "stage=mechanics preroll_complete accepted_steps={} control_intervals={} max_control_mean_normal_force_n={preroll_max_mean_force_n:.9e}",
-        preroll_control.accepted_mechanics_steps,
-        preroll_control.intervals.len(),
-    ));
-    // Advance in one-second chunks. This retains exactly the same mechanics
-    // steps and ownership sequence while publishing useful progress during a
-    // multi-million-step production solve.
-    let mechanics_steps_per_second = usize::try_from(config.mechanics.sample_rate_hz)
-        .map_err(|_| CinematicFixtureError::Pipeline("mechanics rate exceeds usize".into()))?;
-    let mut remaining_picture_steps = picture_mechanics_steps;
-    let mut picture_control = None;
-    while remaining_picture_steps > 0 {
-        let chunk_steps = remaining_picture_steps.min(mechanics_steps_per_second);
-        let chunk_start = picture_control.as_ref().map_or_else(
-            || preroll_control.last_accepted_checkpoint.clone(),
-            |accepted: &ProductionControlTrajectory| accepted.last_accepted_checkpoint.clone(),
-        );
-        let chunk = production
-            .model
-            .run_eventful_control_trajectory(
-                chunk_start,
-                chunk_steps,
-                mechanics_steps_per_control_interval,
-                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
-            )
-            .map_err(pipeline)?;
-        if chunk.accepted_mechanics_steps != chunk_steps
+        let preroll_max_mean_force_n = preroll_control
+            .intervals
+            .iter()
+            .map(|interval| interval.mean_normal_force_n)
+            .fold(0.0_f64, f64::max);
+        progress(&format!(
+            "stage=mechanics preroll_complete accepted_steps={} control_intervals={} max_control_mean_normal_force_n={preroll_max_mean_force_n:.9e}",
+            preroll_control.accepted_mechanics_steps,
+            preroll_control.intervals.len(),
+        ));
+        // Advance in one-second chunks. This retains exactly the same mechanics
+        // steps and ownership sequence while publishing useful progress during a
+        // multi-million-step production solve.
+        let mechanics_steps_per_second = usize::try_from(config.mechanics.sample_rate_hz)
+            .map_err(|_| CinematicFixtureError::Pipeline("mechanics rate exceeds usize".into()))?;
+        let mut remaining_picture_steps = picture_mechanics_steps;
+        let mut picture_control = None;
+        while remaining_picture_steps > 0 {
+            let chunk_steps = remaining_picture_steps.min(mechanics_steps_per_second);
+            let chunk_start = picture_control.as_ref().map_or_else(
+                || preroll_control.last_accepted_checkpoint.clone(),
+                |accepted: &ProductionControlTrajectory| accepted.last_accepted_checkpoint.clone(),
+            );
+            let chunk = production
+                .model
+                .run_eventful_control_trajectory(
+                    chunk_start,
+                    chunk_steps,
+                    mechanics_steps_per_control_interval,
+                    |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                )
+                .map_err(pipeline)?;
+            if chunk.accepted_mechanics_steps != chunk_steps
             || !matches!(
                 chunk.termination,
                 crate::production_coupling::ProductionEventTrajectoryTermination::StepLimitReached { .. }
@@ -4515,129 +4708,141 @@ pub fn run_cinematic_fixture(
                 endpoint.map(|interval| interval.state_after.pose().position_world()),
             )));
         }
-        picture_control = Some(match picture_control {
-            None => chunk,
-            Some(prefix) => prefix.concatenate(chunk).map_err(pipeline)?,
-        });
-        remaining_picture_steps -= chunk_steps;
-        progress(&format!(
-            "stage=mechanics accepted_picture_steps={}/{} simulated_picture_s={:.3}",
-            picture_mechanics_steps - remaining_picture_steps,
-            picture_mechanics_steps,
-            (picture_mechanics_steps - remaining_picture_steps) as f64
-                / f64::from(config.mechanics.sample_rate_hz),
-        ));
-    }
-    let picture_control = picture_control.ok_or_else(|| {
-        CinematicFixtureError::Pipeline("production picture horizon is empty".into())
-    })?;
-    let control_timestep_s = f64::from(SOUND_MASTER_SAMPLE_RATE_HZ).recip();
-    let trajectory = RenderTrajectory::from_production_control_trajectory(
-        &production.model,
-        &picture_control,
-        &profile,
-        control_timestep_s,
-        cx,
-    )
-    .map_err(pipeline)?;
-    let audio_control = preroll_control
-        .concatenate(picture_control)
+            picture_control = Some(match picture_control {
+                None => chunk,
+                Some(prefix) => prefix.concatenate(chunk).map_err(pipeline)?,
+            });
+            remaining_picture_steps -= chunk_steps;
+            progress(&format!(
+                "stage=mechanics accepted_picture_steps={}/{} simulated_picture_s={:.3}",
+                picture_mechanics_steps - remaining_picture_steps,
+                picture_mechanics_steps,
+                (picture_mechanics_steps - remaining_picture_steps) as f64
+                    / f64::from(config.mechanics.sample_rate_hz),
+            ));
+        }
+        let picture_control = picture_control.ok_or_else(|| {
+            CinematicFixtureError::Pipeline("production picture horizon is empty".into())
+        })?;
+        let control_timestep_s = f64::from(SOUND_MASTER_SAMPLE_RATE_HZ).recip();
+        let trajectory = RenderTrajectory::from_production_control_trajectory(
+            &production.model,
+            &picture_control,
+            &profile,
+            control_timestep_s,
+            cx,
+        )
         .map_err(pipeline)?;
-    let coarse_audio_control = audio_control.coarsened(2).map_err(pipeline)?;
-    let audio_preroll_trajectory = RenderTrajectory::from_production_control_trajectory(
-        &production.model,
-        &audio_control,
-        &profile,
-        control_timestep_s,
-        cx,
-    )
-    .map_err(pipeline)?;
-    progress(&format!(
-        concat!(
-            "stage=mechanics production=true mechanics_hz={} control_hz={} ",
-            "accepted_steps={} controls={} preroll_s={:.6} audio_preroll_controls={} branch_transitions={} ",
-            "mechanics_dt_refinement=outstanding"
-        ),
-        config.mechanics.sample_rate_hz,
-        SOUND_MASTER_SAMPLE_RATE_HZ,
-        preroll_mechanics_steps + picture_mechanics_steps,
-        trajectory.samples().len(),
-        preroll_audio_frame_count as f64 / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
-        audio_preroll_trajectory.samples().len(),
-        audio_control.transitions.len(),
-    ));
-    let retained_time_s = trajectory
-        .samples()
-        .last()
-        .expect("admitted trajectory is nonempty")
-        .input()
-        .time_s;
-    let accumulated_clock_steps = preroll_mechanics_steps
-        .checked_add(picture_mechanics_steps)
-        .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics clock budget overflow".into()))?;
-    let accumulated_clock_horizon_s =
-        accumulated_clock_steps as f64 / f64::from(config.mechanics.sample_rate_hz);
-    let horizon_tolerance_s = repeated_positive_addition_roundoff_bound(
-        accumulated_clock_steps,
-        accumulated_clock_horizon_s,
-    )?;
-    if (retained_time_s - duration_s).abs() > horizon_tolerance_s {
-        return Err(CinematicFixtureError::Pipeline(format!(
-            "production render trajectory is {retained_time_s:.17e}s, expected {duration_s:.17e}s (positive-step floating-clock bound {horizon_tolerance_s:.17e}s)"
-        )));
-    }
-    progress("stage=mechanics complete");
+        let audio_control = preroll_control
+            .concatenate(picture_control)
+            .map_err(pipeline)?;
+        let coarse_audio_control = audio_control.coarsened(2).map_err(pipeline)?;
+        let audio_preroll_trajectory = RenderTrajectory::from_production_control_trajectory(
+            &production.model,
+            &audio_control,
+            &profile,
+            control_timestep_s,
+            cx,
+        )
+        .map_err(pipeline)?;
+        progress(&format!(
+            concat!(
+                "stage=mechanics production=true mechanics_hz={} control_hz={} ",
+                "accepted_steps={} controls={} preroll_s={:.6} audio_preroll_controls={} branch_transitions={} ",
+                "mechanics_dt_refinement=outstanding"
+            ),
+            config.mechanics.sample_rate_hz,
+            SOUND_MASTER_SAMPLE_RATE_HZ,
+            preroll_mechanics_steps + picture_mechanics_steps,
+            trajectory.samples().len(),
+            preroll_audio_frame_count as f64 / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
+            audio_preroll_trajectory.samples().len(),
+            audio_control.transitions.len(),
+        ));
+        let retained_time_s = trajectory
+            .samples()
+            .last()
+            .expect("admitted trajectory is nonempty")
+            .input()
+            .time_s;
+        let accumulated_clock_steps = preroll_mechanics_steps
+            .checked_add(picture_mechanics_steps)
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("mechanics clock budget overflow".into())
+            })?;
+        let accumulated_clock_horizon_s =
+            accumulated_clock_steps as f64 / f64::from(config.mechanics.sample_rate_hz);
+        let horizon_tolerance_s = repeated_positive_addition_roundoff_bound(
+            accumulated_clock_steps,
+            accumulated_clock_horizon_s,
+        )?;
+        if (retained_time_s - duration_s).abs() > horizon_tolerance_s {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "production render trajectory is {retained_time_s:.17e}s, expected {duration_s:.17e}s (positive-step floating-clock bound {horizon_tolerance_s:.17e}s)"
+            )));
+        }
+        progress("stage=mechanics complete");
 
-    let mut campaign_hasher =
-        DomainHasher::new("org.frankensim.euler-critique.production-campaign.v1");
-    campaign_hasher.update(trajectory.metadata().configuration_identity.as_bytes());
-    campaign_hasher.update(&config.frames.to_le_bytes());
-    campaign_hasher.update(&CRITIQUE_FPS.to_le_bytes());
-    let campaign_identity = campaign_hasher.finalize();
-    let trajectory_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
-        campaign_identity,
-        trajectory,
-        Vec::new(),
-        RenderTrajectoryCodecBudget::DEFAULT,
-        cx,
-    )
-    .map_err(pipeline)?;
-    let audio_preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
-        hash_domain(
-            "org.frankensim.euler-critique.audio-preroll-source.v1",
-            trajectory_artifact.receipt().artifact_identity().as_bytes(),
-        ),
-        audio_preroll_trajectory,
-        Vec::new(),
-        RenderTrajectoryCodecBudget::DEFAULT,
-        cx,
-    )
-    .map_err(pipeline)?;
+        let mut campaign_hasher =
+            DomainHasher::new("org.frankensim.euler-critique.production-campaign.v1");
+        campaign_hasher.update(trajectory.metadata().configuration_identity.as_bytes());
+        campaign_hasher.update(&config.frames.to_le_bytes());
+        campaign_hasher.update(&CRITIQUE_FPS.to_le_bytes());
+        let campaign_identity = campaign_hasher.finalize();
+        let trajectory_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+            campaign_identity,
+            trajectory,
+            Vec::new(),
+            RenderTrajectoryCodecBudget::DEFAULT,
+            cx,
+        )
+        .map_err(pipeline)?;
+        let audio_preroll_artifact = EulerRenderTrajectoryArtifact::try_from_trajectory(
+            hash_domain(
+                "org.frankensim.euler-critique.audio-preroll-source.v1",
+                trajectory_artifact.receipt().artifact_identity().as_bytes(),
+            ),
+            audio_preroll_trajectory,
+            Vec::new(),
+            RenderTrajectoryCodecBudget::DEFAULT,
+            cx,
+        )
+        .map_err(pipeline)?;
+        // Sound construction is much cheaper than path tracing and depends only
+        // on the admitted trajectory. Fail here before spending render-hours if a
+        // synthesis, mastering, or artifact contract is unsatisfied.
+        progress("stage=audio begin");
+        let physical_audio = build_physical_audio(
+            &audio_preroll_artifact,
+            &physical_disc,
+            &physical_plate,
+            &plate_basis,
+            config,
+            cx,
+        )?;
+        progress(&format!(
+            concat!(
+                "stage=audio physical_pressure=true peak_pa={:.6e} ",
+                "presentation_gain_db={:.3} sample_peak_fs={:.6} true_peak_fs={:.6}"
+            ),
+            physical_audio.master.source_peak_abs_pressure_pa,
+            physical_audio.master.digital_gain_db,
+            physical_audio.master.meters.sample_peak_fs,
+            physical_audio.master.meters.true_peak_estimate_fs,
+        ));
+        progress("stage=audio complete");
+        (
+            trajectory_artifact,
+            FixtureMediaAudio::Generated(FixtureGeneratedMedia {
+                fine_controls: audio_control,
+                coarse_controls: coarse_audio_control,
+                audio_preroll_artifact,
+                physical_audio,
+            }),
+            retained_time_s,
+        )
+    };
     progress(&trajectory_diagnostics(&trajectory_artifact));
-
-    // Sound construction is much cheaper than path tracing and depends only
-    // on the admitted trajectory. Fail here before spending render-hours if a
-    // synthesis, mastering, or artifact contract is unsatisfied.
-    progress("stage=audio begin");
-    let physical_audio = build_physical_audio(
-        &audio_preroll_artifact,
-        &physical_disc,
-        &physical_plate,
-        &plate_basis,
-        config,
-        cx,
-    )?;
-    progress(&format!(
-        concat!(
-            "stage=audio physical_pressure=true peak_pa={:.6e} ",
-            "presentation_gain_db={:.3} sample_peak_fs={:.6} true_peak_fs={:.6}"
-        ),
-        physical_audio.master.source_peak_abs_pressure_pa,
-        physical_audio.master.digital_gain_db,
-        physical_audio.master.meters.sample_peak_fs,
-        physical_audio.master.meters.true_peak_estimate_fs,
-    ));
-    progress("stage=audio complete");
 
     fs::create_dir(&staging_directory)?;
     let trajectory_directory = staging_directory.join("trajectory");
@@ -4663,7 +4868,24 @@ pub fn run_cinematic_fixture(
         .map_err(pipeline)?;
     trajectory_file.flush()?;
     let wav_path = sound_directory.join("physical-listening-master.pcm24.wav");
-    write_new(&wav_path, physical_audio.master.wav_bytes())?;
+    match &media_audio {
+        FixtureMediaAudio::Generated(generated) => {
+            let audio_trajectory_path =
+                trajectory_directory.join("euler-audio-preroll-trajectory.fset");
+            let mut audio_trajectory_file = create_new_file(&audio_trajectory_path)?;
+            generated
+                .audio_preroll_artifact
+                .write_to(
+                    &mut audio_trajectory_file,
+                    RenderTrajectoryCodecBudget::DEFAULT,
+                    cx,
+                )
+                .map_err(pipeline)?;
+            audio_trajectory_file.flush()?;
+            write_new(&wav_path, generated.physical_audio.master.wav_bytes())?;
+        }
+        FixtureMediaAudio::Canonical { wav_bytes, .. } => write_new(&wav_path, wav_bytes)?,
+    }
 
     progress("stage=render begin");
     // The mechanics clock advances by repeated positive floating additions.
@@ -5277,26 +5499,46 @@ pub fn run_cinematic_fixture(
         _ => None,
     };
     let manifest_path = staging_directory.join("critique-manifest.json");
-    let manifest = production_fixture_manifest(
-        config,
-        duration_s,
-        &audio_control,
-        &coarse_audio_control,
-        &trajectory_artifact,
-        raw_sequence_identity,
-        preview_sequence_identity,
-        physical_audio.master.wav.wav_identity(),
-        &physical_disc,
-        &physical_audio,
-        over_range_channels,
-        gamut_mapped_pixels,
-        &render_evidence,
-        preview_mesh_evidence,
-        &adaptive_sampling_evidence,
-        &independent_pilot_sampling_evidence,
-        &denoise_evidence,
-        &mux,
-    );
+    let manifest = match &media_audio {
+        FixtureMediaAudio::Generated(generated) => Ok(production_fixture_manifest(
+            config,
+            duration_s,
+            &generated.fine_controls,
+            &generated.coarse_controls,
+            &trajectory_artifact,
+            &generated.audio_preroll_artifact,
+            raw_sequence_identity,
+            preview_sequence_identity,
+            generated.physical_audio.master.wav.wav_identity(),
+            &physical_disc,
+            &generated.physical_audio,
+            over_range_channels,
+            gamut_mapped_pixels,
+            &render_evidence,
+            preview_mesh_evidence,
+            &adaptive_sampling_evidence,
+            &independent_pilot_sampling_evidence,
+            &denoise_evidence,
+            &mux,
+        )),
+        FixtureMediaAudio::Canonical { wav_receipt, .. } => canonical_media_fixture_manifest(
+            config,
+            duration_s,
+            &trajectory_artifact,
+            *wav_receipt,
+            raw_sequence_identity,
+            preview_sequence_identity,
+            &physical_disc,
+            over_range_channels,
+            gamut_mapped_pixels,
+            &render_evidence,
+            preview_mesh_evidence,
+            &adaptive_sampling_evidence,
+            &independent_pilot_sampling_evidence,
+            &denoise_evidence,
+            &mux,
+        ),
+    }?;
     write_new(&manifest_path, manifest.as_bytes())?;
     if output_directory.exists() {
         return Err(CinematicFixtureError::OutputAlreadyExists(
@@ -6147,21 +6389,42 @@ fn require_trajectory_horizon(
     trajectory: &RenderTrajectory,
     expected_duration_s: f64,
 ) -> Result<(), CinematicFixtureError> {
+    require_trajectory_horizon_with_clock_bound(
+        label,
+        trajectory,
+        expected_duration_s,
+        trajectory.samples().len(),
+        expected_duration_s,
+    )
+}
+
+fn require_trajectory_horizon_with_clock_bound(
+    label: &str,
+    trajectory: &RenderTrajectory,
+    expected_duration_s: f64,
+    accumulated_clock_steps: usize,
+    accumulated_clock_horizon_s: f64,
+) -> Result<(), CinematicFixtureError> {
     let samples = trajectory.samples();
-    let first_time_s = samples
+    let first_interval_start_time_s = samples
         .first()
         .expect("validated trajectory is nonempty")
         .input()
-        .time_s;
+        .interval_start_time_s;
     let last_time_s = samples
         .last()
         .expect("validated trajectory is nonempty")
         .input()
         .time_s;
-    let tolerance_s = 32.0 * f64::EPSILON * expected_duration_s.max(1.0);
-    if first_time_s.abs() > tolerance_s || (last_time_s - expected_duration_s).abs() > tolerance_s {
+    let tolerance_s = repeated_positive_addition_roundoff_bound(
+        accumulated_clock_steps,
+        accumulated_clock_horizon_s,
+    )?;
+    if first_interval_start_time_s.abs() > tolerance_s
+        || (last_time_s - expected_duration_s).abs() > tolerance_s
+    {
         return Err(CinematicFixtureError::Pipeline(format!(
-            "{label} horizon [{first_time_s:.17e}, {last_time_s:.17e}] s does not match [0, {expected_duration_s:.17e}] s"
+            "{label} horizon [{first_interval_start_time_s:.17e}, {last_time_s:.17e}] s does not match [0, {expected_duration_s:.17e}] s within the {tolerance_s:.17e}s positive-step floating-clock bound"
         )));
     }
     Ok(())
@@ -8734,12 +8997,153 @@ fn fixture_sampling_manifest_json(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn canonical_media_fixture_manifest(
+    config: &CinematicFixtureConfig,
+    duration_s: f64,
+    trajectory: &EulerRenderTrajectoryArtifact,
+    wav: WavCodecReceipt,
+    raw_sequence_identity: ContentHash,
+    preview_sequence_identity: ContentHash,
+    physical_disc: &FixturePhysicalDiscState,
+    over_range_channels: u64,
+    gamut_mapped_pixels: u64,
+    render: &FixtureRenderEvidence,
+    preview_mesh: FixturePreviewMeshEvidence,
+    adaptive_sampling: &FixtureAdaptiveSamplingEvidence,
+    independent_pilot_sampling: &FixtureIndependentPilotSamplingEvidence,
+    denoise: &FixtureDenoiseEvidence,
+    mux: &MuxOutcome,
+) -> Result<String, CinematicFixtureError> {
+    let rendered_frames = config.render_frame_range()?;
+    let mux_json = match mux {
+        MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
+        MuxOutcome::Unavailable(message) => format!(
+            "{{\"status\":\"unavailable\",\"detail\":\"{}\"}}",
+            json_escape(message)
+        ),
+        MuxOutcome::Failed(code) => {
+            format!("{{\"status\":\"failed\",\"exit_code\":{code}}}")
+        }
+        MuxOutcome::Written(path) => format!(
+            "{{\"status\":\"written\",\"path\":\"{}\"}}",
+            json_escape(&path.display().to_string())
+        ),
+    };
+    let sampling =
+        fixture_sampling_manifest_json(config, adaptive_sampling, independent_pilot_sampling);
+    let metadata = trajectory.trajectory().metadata();
+    let last_time_s = trajectory
+        .trajectory()
+        .samples()
+        .last()
+        .ok_or_else(|| {
+            CinematicFixtureError::Pipeline(
+                "canonical replay trajectory contains no samples".into(),
+            )
+        })?
+        .input()
+        .time_s;
+    let wav_encoding = match wav.encoding() {
+        WavSampleEncoding::Pcm24 => "pcm-s24le",
+        WavSampleEncoding::Float32 => "float32-le",
+    };
+    Ok(format!(
+        concat!(
+            "{{\n",
+            "  \"schema\":\"frankensim-euler-canonical-media-render-v1\",\n",
+            "  \"status\":\"estimate-only-canonical-media-replay\",\n",
+            "  \"picture\":{{\"width\":{},\"height\":{},\"fps\":{},\"frames\":{},",
+            "\"rendered_frame_start\":{},\"rendered_frame_end_exclusive\":{},",
+            "\"duration_s\":{:.17e},\"raw_sequence_identity\":\"{}\",",
+            "\"preview_sequence_identity\":\"{}\",\"sampling\":{},",
+            "\"sampler\":\"{}\",\"integrator\":\"{}\",\"render_seed_salt\":{},",
+            "\"max_depth\":{},\"shutter_angle_degrees\":{},",
+            "\"over_range_linear_channels\":{},\"gamut_mapped_pixels\":{},",
+            "\"denoise\":{{\"applied_frames\":{},\"maximum_retained_bytes\":{},",
+            "\"maximum_history_frames\":{}}},\"preview_mesh\":{}}},\n",
+            "  \"canonical_mechanics\":{{\"recomputed_on_render_worker\":false,",
+            "\"trajectory_path\":\"trajectory/euler-trajectory.fset\",",
+            "\"trajectory_identity\":\"{}\",\"source_campaign_identity\":\"{}\",",
+            "\"configuration_identity\":\"{}\",\"producer_version\":\"{}\",",
+            "\"sample_count\":{},\"last_time_s\":{:.17e},",
+            "\"authority\":\"{:?}\"}},\n",
+            "  \"audio\":{{\"recomputed_on_render_worker\":false,",
+            "\"primary\":\"physical-listening-master.pcm24.wav\",",
+            "\"wav_identity\":\"{}\",\"byte_len\":{},\"sample_rate_hz\":{},",
+            "\"sample_frames\":{},\"encoding\":\"{}\",",
+            "\"authority\":\"exact canonical byte copy; physical/acoustic authority remains owned by the source run\"}},\n",
+            "  \"resolved_disc\":{},\n",
+            "  \"render_execution\":{{\"frames\":{},\"maximum_effective_workers\":{},",
+            "\"maximum_peak_memory_bytes\":{},\"setup_ns\":{},\"traversal_ns\":{},",
+            "\"tile_compute_ns\":{},\"tile_merge_ns\":{},\"publication_ns\":{},",
+            "\"idle_worker_ns\":{}}},\n",
+            "  \"mux\":{},\n",
+            "  \"no_claims\":[",
+            "\"canonical replay proves byte-identical mechanics and soundtrack inputs across render workers, not mechanics timestep convergence\",",
+            "\"replay does not add experimental calibration, acoustic calibration, or physical validation authority to its source artifacts\",",
+            "\"the biased denoised preview is a display derivative; the retained raw EXR remains the transport estimator\",",
+            "\"image quality is final only after native-resolution sequence review, complete decode, and player verification\"",
+            "]\n}}\n"
+        ),
+        config.width,
+        config.height,
+        CRITIQUE_FPS,
+        config.frames,
+        rendered_frames.start,
+        rendered_frames.end,
+        duration_s,
+        raw_sequence_identity,
+        preview_sequence_identity,
+        sampling,
+        match config.render_sampler {
+            Sampler::Iid => "iid-philox",
+            Sampler::OwenSobol => "owen-sobol",
+            Sampler::OwenSobolFullPath => "owen-sobol-full-path-v1",
+        },
+        config.render_integrator.identity(),
+        config.render_seed_salt,
+        config.max_depth,
+        config.shutter_angle_degrees,
+        over_range_channels,
+        gamut_mapped_pixels,
+        denoise.applied_frames,
+        denoise.maximum_retained_bytes,
+        denoise.maximum_history_frames,
+        preview_mesh.manifest_json(),
+        trajectory.receipt().artifact_identity(),
+        trajectory.source_campaign_identity(),
+        metadata.configuration_identity,
+        json_escape(&metadata.producer_version),
+        trajectory.receipt().sample_count(),
+        last_time_s,
+        metadata.authority,
+        wav.wav_identity(),
+        wav.byte_len(),
+        wav.sample_rate_hz(),
+        wav.sample_frame_count(),
+        wav_encoding,
+        resolved_disc_manifest_json(&config.disc, physical_disc),
+        render.frames,
+        render.maximum_effective_workers,
+        render.maximum_peak_memory_bytes,
+        render.setup_ns,
+        render.traversal_ns,
+        render.tile_compute_ns,
+        render.tile_merge_ns,
+        render.publication_ns,
+        render.idle_worker_ns,
+        mux_json,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn production_fixture_manifest(
     config: &CinematicFixtureConfig,
     duration_s: f64,
     fine_controls: &ProductionControlTrajectory,
     coarse_controls: &ProductionControlTrajectory,
     trajectory: &EulerRenderTrajectoryArtifact,
+    audio_preroll_trajectory: &EulerRenderTrajectoryArtifact,
     raw_sequence_identity: ContentHash,
     preview_sequence_identity: ContentHash,
     wav_identity: ContentHash,
@@ -8818,7 +9222,9 @@ fn production_fixture_manifest(
             "\"trajectory_identity\":\"{}\",\"disc\":{},",
             "\"contact_surfaces\":{{\"disc\":{},\"support\":{}}}}},\n",
             "  \"audio\": {{\"primary\":\"physical-listening-master.pcm24.wav\",",
-            "\"wav_identity\":\"{}\",\"source_peak_abs_pressure_pa\":{:.17e},",
+            "\"source_trajectory\":\"trajectory/euler-audio-preroll-trajectory.fset\",",
+            "\"source_trajectory_identity\":\"{}\",\"wav_identity\":\"{}\",",
+            "\"source_peak_abs_pressure_pa\":{:.17e},",
             "\"presentation_gain_fs_per_pa\":{:.17e},\"presentation_gain_db\":{:.17e},",
             "\"sample_peak_fs\":{:.17e},\"true_peak_estimate_fs\":{:.17e},",
             "\"stereo_rms_fs\":{:.17e},\"left_pressure_identity\":\"{}\",",
@@ -8884,6 +9290,10 @@ fn production_fixture_manifest(
         disc_json,
         disc_surface_json,
         support_surface_json,
+        audio_preroll_trajectory
+            .receipt()
+            .artifact_identity()
+            .to_hex(),
         wav_identity.to_hex(),
         physical_audio.master.source_peak_abs_pressure_pa,
         physical_audio.master.digital_gain_fs_per_pa,
@@ -9395,8 +9805,13 @@ mod tests {
     #[test]
     fn g0_repeated_positive_clock_roundoff_bound_is_representation_only() {
         let mechanics_rate_hz = 384_000_u32;
-        let preroll_steps = 16_000_usize;
-        let picture_steps = 3_072_000_usize;
+        // The one-second cinematic replay has two seconds of mechanically
+        // integrated preroll. Its published control stream contains only
+        // 48 kHz endpoints, but those endpoint times inherit every 384 kHz
+        // addition before the crop and therefore require the source-clock
+        // operation count in the forward-error bound.
+        let preroll_steps = 2 * mechanics_rate_hz as usize;
+        let picture_steps = mechanics_rate_hz as usize;
         let timestep_s = 1.0 / f64::from(mechanics_rate_hz);
 
         let mut accumulated_time_s = 0.0;
@@ -9415,10 +9830,19 @@ mod tests {
         let roundoff_bound_s =
             repeated_positive_addition_roundoff_bound(total_steps, accumulated_horizon_s)
                 .expect("positive finite clock horizon");
+        let published_control_only_bound_s = repeated_positive_addition_roundoff_bound(
+            picture_steps / (mechanics_rate_hz as usize / SOUND_MASTER_SAMPLE_RATE_HZ as usize),
+            expected_duration_s,
+        )
+        .expect("positive finite published-control horizon");
 
         assert!(
             (retained_time_s - expected_duration_s).abs() <= roundoff_bound_s,
             "observed repeated-addition drift exceeded its forward-error bound"
+        );
+        assert!(
+            (retained_time_s - expected_duration_s).abs() > published_control_only_bound_s,
+            "the regression fixture must distinguish source-clock accumulation from published controls"
         );
         assert!(
             roundoff_bound_s < 0.01 * timestep_s,
@@ -10038,8 +10462,32 @@ mod tests {
             512.0_f64.to_bits()
         );
         assert_eq!(config.adaptive_sampling, None);
+        assert_eq!(config.canonical_media_source, None);
         assert_eq!(config.render_sample_ceiling(), config.samples_per_pixel);
         assert_eq!(config.mechanics.sample_rate_hz, 1_536_000);
+    }
+
+    #[test]
+    fn canonical_media_paths_must_be_nonempty() {
+        let identity = ContentHash::from_slice(&[0x5a; 32]).expect("32-byte content identity");
+        for (trajectory_path, listening_master_path) in [
+            (PathBuf::new(), PathBuf::from("listening-master.wav")),
+            (PathBuf::from("trajectory.fset"), PathBuf::new()),
+        ] {
+            let mut config = CinematicFixtureConfig::default();
+            config.canonical_media_source = Some(CinematicCanonicalMediaSource {
+                trajectory_path,
+                trajectory_identity: identity,
+                listening_master_path,
+                listening_master_identity: identity,
+            });
+            assert!(matches!(
+                config.validate(),
+                Err(CinematicFixtureError::InvalidConfig(
+                    "canonical media paths must be nonempty"
+                ))
+            ));
+        }
     }
 
     #[test]

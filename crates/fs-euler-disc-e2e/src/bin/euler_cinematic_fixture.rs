@@ -6,9 +6,10 @@
 use std::path::PathBuf;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_blake3::ContentHash;
 use fs_euler_disc_e2e::cinematic_fixture::{
-    CinematicAdaptiveSamplingConfig, CinematicFixtureConfig, CinematicFrameWindow,
-    CinematicIndependentPilotSamplingConfig, CinematicInitialMotionConfig,
+    CinematicAdaptiveSamplingConfig, CinematicCanonicalMediaSource, CinematicFixtureConfig,
+    CinematicFrameWindow, CinematicIndependentPilotSamplingConfig, CinematicInitialMotionConfig,
     CinematicPeriodicSurfaceConfig, CinematicRenderIntegrator, CinematicSurfaceSpectrumConfig,
     run_cinematic_fixture,
 };
@@ -32,6 +33,10 @@ fn run() -> Result<(), String> {
     let mut frame_start = None;
     let mut frame_count = None;
     let mut uniform_spp_seen = false;
+    let mut canonical_trajectory_path = None;
+    let mut canonical_trajectory_identity = None;
+    let mut canonical_listening_master_path = None;
+    let mut canonical_listening_master_identity = None;
     let mut adaptive = AdaptiveCliOptions::default();
     let mut pilot = IndependentPilotCliOptions::default();
     let mut args = std::env::args().skip(1);
@@ -186,6 +191,30 @@ fn run() -> Result<(), String> {
                     "mechanics-preroll-frames",
                 )?
             }
+            "--canonical-trajectory" => {
+                canonical_trajectory_path = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--canonical-trajectory",
+                )?));
+            }
+            "--canonical-trajectory-identity" => {
+                canonical_trajectory_identity = Some(parse_content_hash(
+                    &next_value(&mut args, "--canonical-trajectory-identity")?,
+                    "canonical-trajectory-identity",
+                )?);
+            }
+            "--canonical-listening-master" => {
+                canonical_listening_master_path = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--canonical-listening-master",
+                )?));
+            }
+            "--canonical-listening-master-identity" => {
+                canonical_listening_master_identity = Some(parse_content_hash(
+                    &next_value(&mut args, "--canonical-listening-master-identity")?,
+                    "canonical-listening-master-identity",
+                )?);
+            }
             "--listening-gain-fs-per-pa" => {
                 config.listening_gain_fs_per_pa = parse(
                     &next_value(&mut args, "--listening-gain-fs-per-pa")?,
@@ -261,6 +290,9 @@ fn run() -> Result<(), String> {
                      [--initial-inclination-rad 0<THETA<=0.35] \
                      [--support-plate-thickness-m POSITIVE_METRES] \
                      [--mechanics-sample-rate HZ] [--mechanics-preroll-frames 1..240] \
+                     [--canonical-trajectory FSET --canonical-trajectory-identity BLAKE3 \
+                      --canonical-listening-master WAV \
+                      --canonical-listening-master-identity BLAKE3] \
                      [--listening-gain-fs-per-pa POSITIVE] \
                      [--disc-surface-self-affine RMS_M,HURST,MIN_CYCLE,MAX_CYCLE,SEED] \
                      [--support-surface-self-affine RMS_M,HURST,MIN_CYCLE,MAX_CYCLE,SEED] \
@@ -283,6 +315,33 @@ fn run() -> Result<(), String> {
     }
     adaptive.apply(&mut config, uniform_spp_seen)?;
     pilot.apply(&mut config, uniform_spp_seen)?;
+    config.canonical_media_source = match (
+        canonical_trajectory_path,
+        canonical_trajectory_identity,
+        canonical_listening_master_path,
+        canonical_listening_master_identity,
+    ) {
+        (None, None, None, None) => None,
+        (
+            Some(trajectory_path),
+            Some(trajectory_identity),
+            Some(listening_master_path),
+            Some(listening_master_identity),
+        ) => Some(CinematicCanonicalMediaSource {
+            trajectory_path,
+            trajectory_identity,
+            listening_master_path,
+            listening_master_identity,
+        }),
+        _ => {
+            return Err(concat!(
+                "canonical replay requires all four flags: --canonical-trajectory, ",
+                "--canonical-trajectory-identity, --canonical-listening-master, and ",
+                "--canonical-listening-master-identity"
+            )
+            .to_owned());
+        }
+    };
     match (frame_start, frame_count) {
         (None, None) => {}
         (Some(first_frame), Some(frame_count)) => {
@@ -553,9 +612,32 @@ fn parse<T: core::str::FromStr>(value: &str, name: &str) -> Result<T, String> {
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
+fn parse_content_hash(value: &str, name: &str) -> Result<ContentHash, String> {
+    ContentHash::from_hex(value)
+        .ok_or_else(|| format!("invalid {name}: expected exactly 64 hexadecimal characters"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_media_identities_are_exact_content_hashes() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(parse_content_hash(hex, "trajectory").unwrap().to_hex(), hex);
+        assert_eq!(
+            parse_content_hash("0123", "trajectory").unwrap_err(),
+            "invalid trajectory: expected exactly 64 hexadecimal characters"
+        );
+        assert_eq!(
+            parse_content_hash(
+                "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "trajectory"
+            )
+            .unwrap_err(),
+            "invalid trajectory: expected exactly 64 hexadecimal characters"
+        );
+    }
 
     #[test]
     fn integrator_cli_names_are_explicit_and_fail_closed() {

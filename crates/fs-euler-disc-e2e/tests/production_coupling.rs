@@ -31,7 +31,8 @@ use fs_euler_disc_e2e::production_coupling::{
     ProductionCouplingIdentity, ProductionCouplingModel, ProductionCouplingStepInput,
     ProductionEventTrajectoryTermination, ProductionOpenFlightStepInput,
     ProductionSurfaceExcitationError, ProductionSurfaceExcitationStepInput,
-    ProductionSurfaceTraceStepInput, ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt,
+    ProductionSurfaceGeometryStepInput, ProductionSurfaceTraceStepInput,
+    ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt,
     SmoothContactTrajectoryTermination,
 };
 use fs_euler_disc_e2e::rolling_contact::{
@@ -667,6 +668,226 @@ fn production_request_template() -> (
         base_load_progress_end: 0.0,
     };
     (request, normal_view, interface)
+}
+
+#[test]
+fn event_branch_uses_the_same_finite_footprint_geometry_as_contact() {
+    let (mut request, normal_view, interface) = production_request_template();
+    request.normal.integration_regime = NormalContactIntegrationRegime::CompliantTransient;
+    let adapter = tangential_adapter();
+    let model = ProductionCouplingModel {
+        identity: ProductionCouplingIdentity {
+            case_id: "synthetic/production-case".into(),
+            configuration_id: "synthetic/production-config".into(),
+            world_frame_id: "synthetic/world".into(),
+        },
+        disc_mass_properties: mass(),
+        gravity: Gravity::ZERO,
+        base_port: base_port().into(),
+        tangential_adapter: adapter.clone(),
+    };
+    let checkpoint = model
+        .initial_checkpoint(
+            disc_state(),
+            NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
+            adapter
+                .initial_state(&normal_view, &interface, 4)
+                .expect("tangent checkpoint"),
+            RollingContactState::zero(),
+            GasChannelState::ExteriorFreeGas(
+                EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                    .expect("air checkpoint"),
+            ),
+        )
+        .expect("production checkpoint");
+
+    // At x=0 the point trace is a -2 um trough, which would open this
+    // nominally 1 um overlap. Its 64 um wavelength is much smaller than the
+    // approximately 200 um Hertz footprint, so the physically resolved patch
+    // averages the trough away and remains in compliant contact.
+    let rough_disc = PeriodicHarmonicSurface::new(
+        "synthetic/short-wave-disc-track",
+        "synthetic/short-wave-disc-source",
+        InputAuthority::SyntheticFixture,
+        64.0e-6,
+        64,
+        vec![PeriodicSurfaceHarmonic {
+            cycles_per_track: 1,
+            cosine_amplitude_m: -2.0e-6,
+            sine_amplitude_m: 0.0,
+        }],
+    )
+    .and_then(|surface| surface.realize())
+    .expect("resolved short-wave disc trace");
+    let smooth_base = PeriodicHarmonicSurface::new(
+        "synthetic/smooth-base-track",
+        "synthetic/smooth-base-source",
+        InputAuthority::SyntheticFixture,
+        64.0e-6,
+        64,
+        Vec::new(),
+    )
+    .and_then(|surface| surface.realize())
+    .expect("resolved smooth base trace");
+    request.surface_geometry = Some(ProductionSurfaceGeometryStepInput {
+        interface: request.normal.material.interface.clone(),
+        surface_a: ProductionSurfaceTraceStepInput {
+            trace: rough_disc,
+            path_coordinate_m: 0.0,
+            path_speed_m_per_s: 0.0,
+        },
+        surface_b: ProductionSurfaceTraceStepInput {
+            trace: smooth_base,
+            path_coordinate_m: 0.0,
+            path_speed_m_per_s: 0.0,
+        },
+        travel_angle_from_patch_major_rad: 0.0,
+        maximum_iterations: 32,
+        absolute_height_tolerance_m: 1.0e-14,
+        absolute_height_rate_tolerance_m_per_s: 1.0e-12,
+        relative_tolerance: 1.0e-8,
+    });
+
+    let (_, direct_receipt) = model
+        .step(&checkpoint, &request)
+        .expect("finite-footprint contact solve remains active");
+    let (_, event_step) = model
+        .step_eventful_compliant(&checkpoint, &request)
+        .expect("event driver must admit the same resolved contact");
+
+    assert_eq!(
+        event_step.branch,
+        ProductionTrajectoryBranch::CompliantContact
+    );
+    assert!(event_step.resolved_signed_gap_start_m <= 0.0);
+    assert_eq!(
+        event_step.resolved_signed_gap_start_m.to_bits(),
+        direct_receipt
+            .surface_geometry
+            .expect("direct solve exposes resolved geometry")
+            .resolved_signed_gap_m
+            .to_bits(),
+        "branch classification and force evaluation must use one resolved surface geometry"
+    );
+}
+
+#[test]
+fn receding_zero_gap_resolved_contact_hands_off_to_open_flight() {
+    let (mut request, normal_view, interface) = production_request_template();
+    request.normal.integration_regime = NormalContactIntegrationRegime::CompliantTransient;
+    request.patch.bridge.profile_support.disc_point_world_m = Vec3::ZERO;
+    request.patch.bridge.profile_support.gap_m = 0.0;
+    let receding_state = RigidBodyState::new(
+        Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).expect("receding pose"),
+        Vec3::new(0.2, 0.0, 0.01),
+        Vec3::ZERO,
+    )
+    .expect("receding state");
+    request.patch.bridge.disc_state = receding_state;
+
+    let adapter = tangential_adapter();
+    let model = ProductionCouplingModel {
+        identity: ProductionCouplingIdentity {
+            case_id: "synthetic/production-case".into(),
+            configuration_id: "synthetic/production-config".into(),
+            world_frame_id: "synthetic/world".into(),
+        },
+        disc_mass_properties: mass(),
+        gravity: Gravity::ZERO,
+        base_port: base_port().into(),
+        tangential_adapter: adapter.clone(),
+    };
+    let checkpoint = model
+        .initial_checkpoint(
+            receding_state,
+            NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
+            adapter
+                .initial_state(&normal_view, &interface, 4)
+                .expect("tangent checkpoint"),
+            RollingContactState::zero(),
+            GasChannelState::ExteriorFreeGas(
+                EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                    .expect("air checkpoint"),
+            ),
+        )
+        .expect("production checkpoint");
+
+    let (_, step) = model
+        .step_eventful_compliant(&checkpoint, &request)
+        .expect("a receding dry interface at zero gap enters open flight");
+
+    assert_eq!(step.branch, ProductionTrajectoryBranch::OpenFlight);
+    assert_eq!(
+        step.resolved_signed_gap_start_m.to_bits(),
+        0.0_f64.to_bits()
+    );
+    let ProductionTrajectoryStepReceipt::OpenFlight(receipt) = step.receipt else {
+        panic!("receding zero-gap step must not retain a contact receipt");
+    };
+    assert_eq!(
+        receipt.base.receipt().compressive_normal_force_on_base_n,
+        0.0,
+        "open flight must not retain the zero-load contact footprint as force"
+    );
+}
+
+#[test]
+fn bounded_control_horizon_retains_one_normal_key_for_endpoint_classification() {
+    let (mut request, normal_view, interface) = production_request_template();
+    request.normal.integration_regime = NormalContactIntegrationRegime::CompliantTransient;
+    let adapter = tangential_adapter();
+    let model = ProductionCouplingModel {
+        identity: ProductionCouplingIdentity {
+            case_id: "synthetic/production-case".into(),
+            configuration_id: "synthetic/production-config".into(),
+            world_frame_id: "synthetic/world".into(),
+        },
+        disc_mass_properties: mass(),
+        gravity: Gravity::ZERO,
+        base_port: base_port().into(),
+        tangential_adapter: adapter.clone(),
+    };
+    let checkpoint = model
+        .initial_checkpoint(
+            disc_state(),
+            // One committed step plus one dry endpoint evaluation. The latter
+            // does not advance the returned checkpoint, but it still needs an
+            // admissible logical key to classify the terminal branch and gap.
+            NormalPatchEmbedState::new_strict_sequence(0.0, 1.0, 2)
+                .expect("bounded normal checkpoint"),
+            adapter
+                .initial_state(&normal_view, &interface, 4)
+                .expect("tangent checkpoint"),
+            RollingContactState::zero(),
+            GasChannelState::ExteriorFreeGas(
+                EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                    .expect("air checkpoint"),
+            ),
+        )
+        .expect("production checkpoint");
+
+    let trajectory = model
+        .run_eventful_control_trajectory(checkpoint, 1, 1, |accepted| {
+            Ok(request_for_checkpoint(&request, accepted))
+        })
+        .expect("bounded control trajectory");
+
+    assert_eq!(trajectory.accepted_mechanics_steps, 1);
+    assert_eq!(
+        trajectory.termination,
+        ProductionEventTrajectoryTermination::StepLimitReached {
+            maximum_accepted_steps: 1
+        }
+    );
+    assert_eq!(trajectory.last_accepted_checkpoint.committed_version, 1);
+    assert!(
+        trajectory
+            .intervals
+            .last()
+            .and_then(|interval| interval.resolved_signed_gap_end_m)
+            .is_some(),
+        "the terminal classification must publish its resolved endpoint gap"
+    );
 }
 
 #[test]
