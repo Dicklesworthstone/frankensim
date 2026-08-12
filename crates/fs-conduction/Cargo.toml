@@ -30,6 +30,7 @@ fs-evidence = { path = "../fs-evidence" }
 # Dev-only, and deliberately so: the ingestion e2e (f85xj.11.7) needs the
 # quarantine parser, but the production graph must stay free of fs-io.
 fs-io = { path = "../fs-io" }
+fs-mesh = { path = "../fs-mesh" }
 fs-mms = { path = "../fs-mms" }
 fs-vvreg = { path = "../fs-vvreg" }
 

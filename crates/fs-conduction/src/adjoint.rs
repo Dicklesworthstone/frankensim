@@ -37,7 +37,10 @@ use fs_exec::Cx;
 use fs_solver::{CsrOp, norm2};
 
 use crate::ConductionError;
-use crate::assemble::{DofMap, assemble_operator_scaled, element_stiffness, reduce};
+use crate::assemble::{
+    DofMap, assemble_operator_scaled_with_interfaces, element_stiffness, reduce,
+};
+use crate::material::ElementMaterials;
 use crate::solve::{ConductionProblem, LinearConfig};
 
 /// A conduction problem parameterized by per-element conductivity
@@ -46,7 +49,11 @@ pub struct ConductivityDesign<'m> {
     problem: ConductionProblem<'m>,
     dofs: DofMap,
     linear: LinearConfig,
-    base_tensor: [[f64; 3]; 3],
+    element_materials: Option<&'m ElementMaterials>,
+    /// Per-element LINEAR conductivity tensor at construction. A
+    /// temperature-dependent model is refused, so this is not a
+    /// linearization of `k(T)`.
+    element_tensors: Vec<[[f64; 3]; 3]>,
 }
 
 /// A primal solve at one design point.
@@ -74,7 +81,33 @@ impl<'m> ConductivityDesign<'m> {
         problem: ConductionProblem<'m>,
         linear: LinearConfig,
     ) -> Result<ConductivityDesign<'m>, ConductionError> {
-        if problem.material.is_temperature_dependent() {
+        Self::new_inner(problem, None, linear)
+    }
+
+    /// Bind a design problem whose base tensor varies by tet.
+    ///
+    /// `ρ_e` still multiplies that element's own linear `K_e`. Every
+    /// assigned model must be temperature-independent.
+    ///
+    /// # Errors
+    /// The same refusals as [`ConductivityDesign::new`], plus assignment
+    /// validation and a `k(T)` model on any element.
+    pub fn new_with_element_materials(
+        problem: ConductionProblem<'m>,
+        materials: &'m ElementMaterials,
+        linear: LinearConfig,
+    ) -> Result<ConductivityDesign<'m>, ConductionError> {
+        Self::new_inner(problem, Some(materials), linear)
+    }
+
+    fn new_inner(
+        problem: ConductionProblem<'m>,
+        materials: Option<&'m ElementMaterials>,
+        linear: LinearConfig,
+    ) -> Result<ConductivityDesign<'m>, ConductionError> {
+        if let Some(assigned) = materials {
+            assigned.validate_for(problem.mesh)?;
+        } else if problem.material.is_temperature_dependent() {
             return Err(ConductionError::Conductivity {
                 what: "the IFT hook in this crate covers the LINEAR case only; a k(T) model \
                        needs the nonsymmetric Newton Jacobian and its own verification"
@@ -85,12 +118,28 @@ impl<'m> ConductivityDesign<'m> {
         if dofs.fixed().is_empty() && !problem.boundary.has_robin() {
             return Err(ConductionError::SingularPureNeumann);
         }
-        let base_tensor = problem.material.tensor_at(0.0)?;
+        let ne = problem.mesh.element_count();
+        let mut element_tensors = Vec::with_capacity(ne);
+        for e in 0..ne {
+            let model = match materials {
+                Some(assigned) => assigned.model_for(e)?,
+                None => problem.material,
+            };
+            if model.is_temperature_dependent() {
+                return Err(ConductionError::Conductivity {
+                    what: "the IFT hook in this crate covers the LINEAR case only; a k(T) model \
+                           needs the nonsymmetric Newton Jacobian and its own verification"
+                        .to_string(),
+                });
+            }
+            element_tensors.push(model.tensor_at(0.0)?);
+        }
         Ok(ConductivityDesign {
             problem,
             dofs,
             linear,
-            base_tensor,
+            element_materials: materials,
+            element_tensors,
         })
     }
 
@@ -168,7 +217,7 @@ impl<'m> ConductivityDesign<'m> {
         rho: &[f64],
     ) -> Result<(fs_sparse::Csr, Vec<f64>), ConductionError> {
         let zero = vec![0.0f64; self.problem.mesh.vertex_count()];
-        let system = assemble_operator_scaled(
+        let system = assemble_operator_scaled_with_interfaces(
             cx,
             self.problem.mesh,
             self.problem.boundary,
@@ -176,6 +225,8 @@ impl<'m> ConductivityDesign<'m> {
             self.problem.source,
             &zero,
             Some(rho),
+            None,
+            self.element_materials,
         )?;
         Ok(reduce(&system, &self.dofs))
     }
@@ -254,7 +305,7 @@ impl<'m> ConductivityDesign<'m> {
         let mut out = vec![0.0f64; mesh.element_count()];
         for (e, slot) in out.iter_mut().enumerate() {
             let tet = mesh.complex().tets[e];
-            let ke = element_stiffness(mesh, e, &self.base_tensor);
+            let ke = element_stiffness(mesh, e, &self.element_tensors[e]);
             let mut acc = 0.0f64;
             for a in 0..4 {
                 let ia = self.dofs.slot_of(tet[a] as usize);
