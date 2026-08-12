@@ -33,7 +33,7 @@ use fs_ivl::{Sign, orient2d};
 use std::collections::BTreeSet;
 
 /// Recovery policy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryOptions {
     /// Bisection depth cap per segment (2^depth sub-edges at worst).
     pub max_depth: u32,

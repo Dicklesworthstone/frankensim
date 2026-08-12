@@ -35,6 +35,19 @@ half-edge round-trips, closed-manifold audits).
   ordered), `points()`, `hull()` (outward-oriented `Soup`),
   `complex()` (fs-rep-mesh `TetComplex`, δδ = 0), `stats()`,
   `audit(full_insphere)`.
+- `volumetricize(UnverifiedPlc, VolumetricPolicy, cx)`: constrained
+  multi-region PLC volumetricization (bead s93ej.1). Type-state is
+  `UnverifiedPlc` → `AdmittedPlc` → `ConstraintRecoveredPlc` →
+  `LabeledTetComplex` → `AuditedLabeledTetComplex`. Each region is a
+  closed oriented 2-manifold with a strictly interior seed. Segment and
+  facet recovery reuse the existing conforming kernels; recovered faces
+  are walls; seed-flood assigns chambers; exterior leftover that can
+  reach a ghost without crossing a wall is carved; cavities are
+  discarded; only the independently audited type is a geometry
+  authority. The auditor reclassifies every retained tet by
+  `winding_exact` of each region's own surface, requires positive
+  orientation, and checks tet volume against the closed-surface
+  triple-product identity with a second, distinct tet-volume formula.
 - `rounded_cylinder_tet_mesh`: deterministic conforming P1 tetrahedra for a
   solid cylinder with equal circular outer-rim fillets. Geometry, fillet,
   radial/azimuthal/axial resolution, and count budgets are explicit. The
@@ -374,6 +387,15 @@ assertions.
 
 ## No-claim boundaries
 
+- Multi-region volumetricization does not yet claim general-position
+  Steiner exactness (inherited from `recover_facets`: f64 midpoints are
+  exactly coplanar only on axis-aligned planes), quality/conformity
+  beyond the recovered-face walls, the parent conduction E2E runner, or
+  a cross-ISA mesh-byte identity. Self-intersection of distinct region
+  surfaces is refused only when both windings claim the same retained
+  tet, not by a complete triangle-triangle predicate sweep. The
+  discarded cavity/exterior volume fields on the witness are producer
+  diagnostics and are not an independent certificate.
 - The rounded-cylinder primitive is a piecewise-planar approximation of the
   exact circular meridian and circular revolution. Its output reports the
   meridian and azimuthal chord-error estimates; neither the volume mesh nor its

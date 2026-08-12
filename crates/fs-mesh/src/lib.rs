@@ -36,6 +36,7 @@ mod recovery;
 mod refine;
 mod remesh;
 mod rounded_cylinder;
+mod volumetric;
 
 pub use adaptivity::{
     ADAPTIVITY_RECEIPT_SCHEMA_V1, AdaptivityAction, AdaptivityEffects, AdaptivityError,
@@ -58,6 +59,11 @@ pub use remesh::{MetricField, RemeshOptions, RemeshStats, UniformMetric, remesh}
 pub use rounded_cylinder::{
     BoundaryPanelMesh, RoundedCylinderMeshError, RoundedCylinderMeshSpec, RoundedCylinderTetMesh,
     rounded_cylinder_tet_mesh,
+};
+pub use volumetric::{
+    AdmittedPlc, AuditedLabeledTetComplex, ConstraintRecoveredPlc, LabeledTetComplex, RegionId,
+    RegionKind, RegionSpec, UnverifiedPlc, VolumeConservationWitness, VolumeMethod,
+    VolumetricError, VolumetricPolicy, box_triangles, box_vertices, volumetricize,
 };
 
 /// Crate version, re-exported for provenance stamping.
