@@ -743,14 +743,14 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap");
     assert_eq!(refusal.stage, Some("conduction"));
-    assert_eq!(refusal.dependency, Some("frankensim-frn2i"));
+    assert_eq!(refusal.dependency, Some("frankensim-s93ej"));
     assert!(refusal.recorded_op.is_some(), "the gap refusal is ledgered");
     let run = refusal.run.clone().expect("run id derived");
     assert_eq!(run, SolveRunId::derive(&decoded, &fixture_cards()).to_hex());
 
-    // Three completed stage ops plus one recorded refusal op landed.
+    // Four completed stage ops plus one recorded refusal op landed.
     let ops_after_solve = ledger.table_count("ops").expect("count");
-    assert_eq!(ops_after_solve, ops_after_import + 4);
+    assert_eq!(ops_after_solve, ops_after_import + 5);
 
     // Every executing stage reported progress.
     assert!(progress.iter().any(|line| line.contains("import-verify")));
@@ -760,6 +760,10 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
             .iter()
             .any(|line| line.contains("material-resolve")),
         "material-resolve now executes rather than refusing"
+    );
+    assert!(
+        progress.iter().any(|line| line.contains("flow-network")),
+        "flow-network now executes rather than refusing"
     );
 
     // Every solve op carries the run identity as its session.
@@ -912,7 +916,7 @@ fn g4_resume_recovers_card_packs_and_reproduces_material_evidence() {
     );
 
     let receipts = stage_receipt_hashes(&ledger, &run);
-    assert_eq!(receipts.len(), 3);
+    assert_eq!(receipts.len(), 4);
     let resumed_receipt = artifact_bytes(&ledger, &receipts[2]);
 
     // An uninterrupted run of the same project and packs must produce the
@@ -1159,12 +1163,19 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
             None,
             u64::MAX,
         ),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 0),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 1),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 2),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 3),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 4),
+        (SolveEvidencePhase::FlowNetworkSolve, None, 5),
+        (SolveEvidencePhase::FlowNetworkSolve, None, u64::MAX),
         (SolveEvidencePhase::PrePublication, None, 0),
     ];
     assert_eq!(
         phases.len(),
-        65,
-        "every fresh-run solve-owned evidence phase, canonical-render entry/completion/tile boundary, duplicate-set entry/face/name traversal, and final pre-publication boundary is listed"
+        72,
+        "every fresh-run solve-owned evidence phase, canonical-render entry/completion/tile boundary, duplicate-set entry/face/name traversal, per-vent flow-network lowering/solve boundaries, and final pre-publication boundary is listed"
     );
 
     let bytes = tetra_stl();
@@ -1178,6 +1189,10 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
     import_fixture(&two_prefix_ledger, &spec, bytes.clone());
     let _ = run_to_stage_prefix(&two_prefix_ledger, &decoded, 2);
     let two_stage_prefix = solve_publication_counts(&two_prefix_ledger);
+    let three_prefix_ledger = Ledger::open(":memory:").expect("prefix ledger");
+    import_fixture(&three_prefix_ledger, &spec, bytes.clone());
+    let _ = run_to_stage_prefix(&three_prefix_ledger, &decoded, 3);
+    let three_stage_prefix = solve_publication_counts(&three_prefix_ledger);
     for (phase, source_index, after_units) in phases {
         let ledger = Ledger::open(":memory:").expect("ledger");
         import_fixture(&ledger, &spec, bytes.clone());
@@ -1207,6 +1222,7 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
         // import-verify, which is why only its source-index-free spelling
         // sits inside the assign stage.
         let durable_stages = match phase {
+            SolveEvidencePhase::FlowNetworkSolve => 3,
             SolveEvidencePhase::MaterialBindingResolution => 2,
             SolveEvidencePhase::AssignmentDerivation if source_index.is_none() => 1,
             _ => 0,
@@ -1242,7 +1258,8 @@ fn g4_in_stage_evidence_cancellation_preserves_atomic_prefixes_at_every_owned_ph
             match durable_stages {
                 0 => before,
                 1 => one_stage_prefix,
-                _ => two_stage_prefix,
+                2 => two_stage_prefix,
+                _ => three_stage_prefix,
             },
             "phase {phase:?} changes no publication beyond its durable prefix"
         );
@@ -1423,13 +1440,13 @@ fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
     .expect_err("resume still refuses at the gap");
     assert_eq!(resumed.code, "cli-solve-stage-gap");
     assert_eq!(resumed.stage, Some("conduction"));
-    assert_eq!(resumed.dependency, Some("frankensim-frn2i"));
+    assert_eq!(resumed.dependency, Some("frankensim-s93ej"));
 
     // The interrupted-then-resumed evidence equals the uninterrupted run's:
     // identical stage receipt artifact hashes, in order.
     let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
     let resumed_receipts = stage_receipt_hashes(&interrupted, &run);
-    assert_eq!(reference_receipts.len(), 3);
+    assert_eq!(reference_receipts.len(), 4);
     assert_eq!(
         reference_receipts, resumed_receipts,
         "stage evidence is bit-identical across interruption"
@@ -1605,7 +1622,7 @@ fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
     assert_eq!(retry.stage, Some("conduction"));
     assert_eq!(
         stage_receipt_hashes(&ledger, &run).len(),
-        3,
+        4,
         "the normal retry preserves the complete durable stage prefix"
     );
 }
@@ -1706,7 +1723,7 @@ fn g5_independent_fresh_runs_retain_identical_stage_evidence() {
         let run = refusal.run.clone().expect("run id");
         all_receipts.push(stage_receipt_hashes(&ledger, &run));
     }
-    assert_eq!(all_receipts[0].len(), 3);
+    assert_eq!(all_receipts[0].len(), 4);
     assert_eq!(
         all_receipts[0], all_receipts[1],
         "replay reproduces identical content identities"
@@ -2635,7 +2652,7 @@ fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
     let run_hex = initial.run.expect("run id");
     let run = SolveRunId::parse_hex(&run_hex).expect("run id parses");
     let receipts_before = stage_receipt_hashes(&ledger, &run_hex);
-    assert_eq!(receipts_before.len(), 3, "fixture has a valid checkpoint");
+    assert_eq!(receipts_before.len(), 4, "fixture has a valid checkpoint");
 
     ledger.begin().expect("begin wide fixture transaction");
     let unrelated = ledger
@@ -2858,5 +2875,263 @@ fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings()
     assert!(
         !stripped_decoded.findings().is_empty(),
         "a project with no thermal requirement must not admit silently"
+    );
+}
+
+/// Extract the string payload of a `"name":"value"` field from a receipt.
+fn receipt_str_field(receipt: &str, name: &str) -> String {
+    let key = format!("\"{name}\":\"");
+    let start = receipt
+        .find(&key)
+        .unwrap_or_else(|| panic!("receipt field `{name}` present"))
+        + key.len();
+    let rest = &receipt[start..];
+    let end = rest.find('"').expect("field is terminated");
+    rest[..end].to_string()
+}
+
+/// The flow-network stage (bead frankensim-frn2i.2) executes on the reference
+/// fixture and retains an interval-certified operating-point receipt.
+///
+/// The density check is an independent oracle: the ideal-gas value is
+/// recomputed here from the declared envelope, with the stage's own operation
+/// order, and must appear verbatim. The flow bracket must sit strictly inside
+/// the declared curve's admitted domain — the stage may not certify a root the
+/// declaration does not admit.
+#[test]
+fn g0_flow_network_stage_retains_an_interval_certified_operating_point_receipt() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (refusal, _) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.stage, Some("conduction"), "flow-network passed");
+    let run = refusal.run.clone().expect("run");
+
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(
+        receipts.len(),
+        4,
+        "flow-network retained the fourth receipt"
+    );
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[3])).expect("receipt is utf-8");
+
+    assert!(receipt.contains("\"schema\":\"frankensim.cli.solve-flow-network-receipt.v1\""));
+    assert_balanced_json(&receipt);
+    assert!(
+        receipt.contains(
+            "\"authority\":\"lossless-project-lowering-plus-interval-certified-operating-point\""
+        ),
+        "the receipt states its authority boundary"
+    );
+    assert!(
+        receipt.contains("does not authenticate manufacturer curve data"),
+        "the no-claim travels with the receipt"
+    );
+    assert!(
+        receipt.contains("\"composite\":\"solve-fixture-curve-v1\""),
+        "the composite curve carries the declared source identity"
+    );
+    assert!(receipt.contains("\"vent_count\":1"));
+
+    // Independent density oracle, replicating the stage's exact operation
+    // order on the declared envelope values.
+    let ambient_mid = (293.15_f64 + 313.15_f64) / 2.0;
+    let expected_density = 101_325.0_f64 / (287.05_f64 * ambient_mid);
+    assert!(
+        receipt.contains(&format!(
+            "\"density_estimate\":\"ideal-gas:{expected_density}\""
+        )),
+        "the density is exactly the declared envelope's ideal-gas value: {receipt}"
+    );
+
+    // The certified bracket is ordered and sits inside the declared curve's
+    // admitted domain (min flow 0.001, terminal point 0.08 m^3/s).
+    let flow_lo: f64 = receipt_str_field(&receipt, "flow_lo").parse().expect("lo");
+    let flow_mid: f64 = receipt_str_field(&receipt, "flow_mid")
+        .parse()
+        .expect("mid");
+    let flow_hi: f64 = receipt_str_field(&receipt, "flow_hi").parse().expect("hi");
+    assert!(
+        flow_lo <= flow_mid && flow_mid <= flow_hi,
+        "ordered bracket"
+    );
+    assert!(
+        flow_lo > 0.001 && flow_hi < 0.08,
+        "the certified root stays inside the declared admitted domain: [{flow_lo}, {flow_hi}]"
+    );
+    let pressure_lo: f64 = receipt_str_field(&receipt, "pressure_lo")
+        .parse()
+        .expect("p lo");
+    let pressure_hi: f64 = receipt_str_field(&receipt, "pressure_hi")
+        .parse()
+        .expect("p hi");
+    assert!(pressure_lo <= pressure_hi && pressure_lo > 0.0);
+    let leakage_fraction: f64 = receipt_str_field(&receipt, "leakage_fraction")
+        .parse()
+        .expect("leakage fraction");
+    assert!(
+        leakage_fraction > 0.0 && leakage_fraction < 1.0,
+        "a declared leakage branch carries a nonzero, non-total share: {leakage_fraction}"
+    );
+}
+
+/// Declarations the flow-network stage requires but validation deliberately
+/// leaves optional refuse at the stage with typed codes, and never publish a
+/// flow checkpoint.
+#[test]
+fn g3_flow_network_missing_optional_declarations_refuse_with_typed_codes() {
+    let bytes = tetra_stl();
+    let cases: [(&str, fn(&mut ProjectSpec)); 3] = [
+        ("cli-solve-flow-network-no-fan-system", |spec| {
+            spec.cooling.as_mut().expect("cooling").fan_system = None;
+        }),
+        ("cli-solve-flow-network-no-leakage", |spec| {
+            spec.cooling.as_mut().expect("cooling").airflow_leakage = None;
+        }),
+        ("cli-solve-flow-network-no-vents", |spec| {
+            spec.cooling.as_mut().expect("cooling").vents = Vec::new();
+        }),
+    ];
+    for (code, mutate) in cases {
+        let mut spec = fixture_project(7, &bytes);
+        mutate(&mut spec);
+        let decoded = decode(&spec);
+        assert!(
+            decoded.findings().is_empty(),
+            "{code}: the mutated project still admits, so the refusal below is \
+             attributable to the flow-network stage, not validation"
+        );
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, code);
+        assert_eq!(refusal.stage, Some("flow-network"), "{code}");
+        let run = refusal.run.clone().expect("run");
+        assert_eq!(
+            stage_receipt_hashes(&ledger, &run).len(),
+            3,
+            "{code}: the refused flow stage publishes no receipt"
+        );
+    }
+}
+
+/// Missing `cooling` or `envelope` sections are project-validation findings,
+/// so the flow-network stage's own codes for them are shadowed by earlier
+/// guards. This pins the shadowing at its actual reachable boundary: the
+/// product refuses such a project at geometry import, before any solve stage
+/// (or even solve validation) can run.
+#[test]
+fn g3_flow_network_mandatory_sections_refuse_before_any_stage() {
+    let bytes = tetra_stl();
+    for (code, strip) in [
+        (
+            "project-cooling-missing",
+            (|spec: &mut ProjectSpec| spec.cooling = None) as fn(&mut ProjectSpec),
+        ),
+        ("project-envelope-missing", |spec| spec.envelope = None),
+    ] {
+        let mut spec = fixture_project(7, &bytes);
+        strip(&mut spec);
+        // Not `decode()`: that helper asserts a clean fixture, and this test
+        // exists precisely because these projects carry findings.
+        let source = print_sexpr(&spec).expect("stripped fixture still renders");
+        let decoded =
+            fs_project::parse_sexpr(&source).expect("stripped fixture still parses strictly");
+        assert!(!decoded.findings().is_empty());
+
+        let artifact = &spec.geometry.as_ref().expect("geometry")[0];
+        let mut raw = RawGeometryLibrary::new();
+        assert!(!raw.insert_mesh(
+            artifact,
+            "fixtures/enclosure.stl",
+            bytes.clone(),
+            "m",
+            0,
+            Vec::new(),
+        ));
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        let gate = CancelGate::new_clock_free();
+        let refusal = with_cx(&gate, |cx| {
+            import_project_geometry(&spec, &raw, &ledger, GeometryImportLimits::DEFAULT, cx)
+                .expect_err("a project missing a mandatory section cannot import")
+        });
+        assert_eq!(
+            refusal.code, code,
+            "the outer guard names the missing section: {refusal:?}"
+        );
+    }
+}
+
+/// A declared network whose resistance admits no root inside the declared
+/// curve domain refuses with the solver's own code and publishes nothing for
+/// the stage.
+#[test]
+fn g3_flow_network_without_an_admitted_root_refuses_with_the_solver_code() {
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    {
+        let cooling = spec.cooling.as_mut().expect("cooling");
+        // A near-sealed enclosure: micro-orifice vent and leakage push the
+        // operating flow far below the declared minimum admissible flow.
+        cooling.vents = vec![Vent {
+            region: "air".to_string(),
+            area: QtyAny::new(1e-9, fs_project::spec::dims::AREA),
+        }];
+        cooling.airflow_leakage = Some(AirflowLeakage {
+            area: QtyAny::new(1e-9, fs_project::spec::dims::AREA),
+        });
+    }
+    let decoded = decode(&spec);
+    assert!(decoded.findings().is_empty(), "the sealed project admits");
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, "cli-solve-flow-network-solve");
+    assert_eq!(refusal.stage, Some("flow-network"));
+    let run = refusal.run.clone().expect("run");
+    assert_eq!(stage_receipt_hashes(&ledger, &run).len(), 3);
+}
+
+/// Cancelling after the flow-network stage published and resuming re-attests
+/// the retained flow receipt: the resumed run lands on the conduction gap and
+/// the four-stage evidence equals an uninterrupted run's, byte for byte.
+#[test]
+fn g4_resume_reattests_the_flow_network_receipt() {
+    let bytes = tetra_stl();
+    let spec = fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+
+    let reference = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&reference, &spec, bytes.clone());
+    let (reference_gap, _) = run_to_gap(&reference, &decoded);
+    let reference_run = reference_gap.run.expect("run");
+    let reference_receipts = stage_receipt_hashes(&reference, &reference_run);
+    assert_eq!(reference_receipts.len(), 4);
+
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (cancelled, _) = run_to_stage_prefix(&ledger, &decoded, 4);
+    let run = cancelled.run.clone().expect("run");
+    assert_eq!(run, reference_run);
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        4,
+        "the flow receipt is durable before the cancellation fired"
+    );
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("resume re-attests the prefix and stops at the conduction gap");
+    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(resumed.stage, Some("conduction"));
+    assert_eq!(resumed.dependency, Some("frankensim-s93ej"));
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run),
+        reference_receipts,
+        "re-attested flow evidence is bit-identical to the uninterrupted run"
     );
 }

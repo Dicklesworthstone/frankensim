@@ -35,7 +35,7 @@ GEOMETRY="${FIXTURE_DIR}/plate.stl"
 MATERIAL_PACK="${FIXTURE_DIR}/aa6061.fsmcdpk"
 
 PROFILE="pr"
-THROUGH="material-resolve"
+THROUGH="flow-network"
 ARTIFACT_DIR=""
 BINARY="${FRANKENSIM_BIN:-}"
 
@@ -48,7 +48,7 @@ declare -A GAP_OWNER=(
   [import-verify]=""
   [assign]=""
   [material-resolve]=""
-  [flow-network]="frankensim-frn2i"
+  [flow-network]=""
   [conduction]="frankensim-s93ej"
   [qoi]="frankensim-s2l9v"
 )
@@ -187,14 +187,17 @@ check "STL facet count is the expected tetrahedron (4)" test "${STL_FACETS}" = "
 
 # --------------------------------------------------------- phase 3: solve
 log phase "solve: staged producers through ${THROUGH}"
-# flow-network is the first gap, so a full invocation is EXPECTED to stop
-# there with exit 5 (UNAVAILABLE) naming its owning bead.
+# conduction is the first gap, so a full invocation is EXPECTED to stop
+# there with exit 5 (UNAVAILABLE) naming its owning bead. flow-network
+# EXECUTES on the way (bead frankensim-frn2i.2): fan-system lowering,
+# envelope-derived density, orifice vents/leakage, and the
+# interval-certified operating point all run inside the real binary.
 run_cli solve 5 -- --json solve "${PROJECT}" "${LEDGER}" --materials "${MATERIAL_PACK}"
 
 check "solve stopped as unavailable"   contains "${ARTIFACT_DIR}/solve.stdout" '"status":"unavailable"'
-check "solve names the gapped stage"   contains "${ARTIFACT_DIR}/solve.stdout" '"stage":"flow-network"'
-check "solve names the owning bead"    contains "${ARTIFACT_DIR}/solve.stdout" '"dependency":"frankensim-frn2i"'
-check "gap owner matches the table"    test "${GAP_OWNER[flow-network]}" = "frankensim-frn2i"
+check "solve names the gapped stage"   contains "${ARTIFACT_DIR}/solve.stdout" '"stage":"conduction"'
+check "solve names the owning bead"    contains "${ARTIFACT_DIR}/solve.stdout" '"dependency":"frankensim-s93ej"'
+check "gap owner matches the table"    test "${GAP_OWNER[conduction]}" = "frankensim-s93ej"
 
 # Every stage up to --through must have emitted an ok progress line.
 for stage in "${STAGES[@]}"; do
@@ -262,7 +265,7 @@ run_cli drill_dup_pack 5 -- --json solve "${PROJECT}" "${DUP_DB}" \
 check "byte-identical duplicate packs are idempotent, not a conflict" \
   not_contains "${ARTIFACT_DIR}/drill_dup_pack.stderr" 'cli-solve-card-pack-conflict'
 check "duplicate-pack run still reaches the same gap" \
-  contains "${ARTIFACT_DIR}/drill_dup_pack.stdout" '"dependency":"frankensim-frn2i"'
+  contains "${ARTIFACT_DIR}/drill_dup_pack.stdout" '"dependency":"frankensim-s93ej"'
 
 # report/package are unconditional fail-closed stages today.
 run_cli drill_report 5 -- --json report some-run-id
@@ -289,7 +292,7 @@ if [[ "${PROFILE}" == "full" || "${PROFILE}" == "recovery" ]]; then
     log phase "resume: re-attest retained bytes with no pack flags at all"
     run_cli resume 5 -- --json solve --resume "${RUN_A}" "${LEDGER}"
     check "resume reaches the same gap without re-supplying packs" \
-      contains "${ARTIFACT_DIR}/resume.stdout" '"dependency":"frankensim-frn2i"'
+      contains "${ARTIFACT_DIR}/resume.stdout" '"dependency":"frankensim-s93ej"'
   fi
 fi
 
@@ -308,9 +311,9 @@ cat > "${ARTIFACT_DIR}/summary.json" <<JSON
   "failures": ${FAILURES},
   "stages_executing": ${STAGES_EXECUTING},
   "stages_total": ${#STAGES[@]},
-  "first_gap": "flow-network",
-  "first_gap_owner": "frankensim-frn2i",
-  "no_claim": "proves the executing producer prefix and its refusal boundary only; no physics stage runs, so this is NOT an end-to-end simulation result"
+  "first_gap": "conduction",
+  "first_gap_owner": "frankensim-s93ej",
+  "no_claim": "proves the executing producer prefix and its refusal boundary only; flow-network solves a declared-physics operating point, but conduction and qoi remain typed gaps, so this is NOT an end-to-end simulation result"
 }
 JSON
 
@@ -321,5 +324,5 @@ if [[ "${FAILURES}" -ne 0 ]]; then
   printf 'FAILED: %d of %d checks\n' "${FAILURES}" "${CHECKS}" >&2
   exit 1
 fi
-printf 'OK: %d checks passed; %d of %d solve stages execute (first gap: flow-network, bead frankensim-frn2i)\n' \
+printf 'OK: %d checks passed; %d of %d solve stages execute (first gap: conduction, bead frankensim-s93ej)\n' \
   "${CHECKS}" "${STAGES_EXECUTING}" "${#STAGES[@]}"

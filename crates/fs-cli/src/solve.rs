@@ -13,10 +13,12 @@
 //! presented as an integrated solve.
 //!
 //! Executing boundary (stated, not implied): `import-verify` and `assign`
-//! execute against retained import evidence, and `material-resolve` executes
-//! against caller-supplied normalized card packs (bead frankensim-hp7tb);
-//! `flow-network` (frankensim-frn2i), `conduction` (frankensim-s93ej), and
-//! `qoi` (frankensim-s2l9v) remain typed gaps.
+//! execute against retained import evidence, `material-resolve` executes
+//! against caller-supplied normalized card packs (bead frankensim-hp7tb),
+//! and `flow-network` executes the declared Cooling lowering to an
+//! interval-certified operating point (bead frankensim-frn2i.2);
+//! `conduction` (frankensim-s93ej) and `qoi` (frankensim-s2l9v) remain
+//! typed gaps.
 //!
 //! Card packs are invocation inputs, so their canonical set root is bound
 //! into the run identity: a different pack set is a different run, never the
@@ -549,7 +551,8 @@ pub enum SolveStage {
     /// Resolve declared material/interface bindings against the admitted
     /// card packs (built at frankensim-hp7tb).
     MaterialResolve,
-    /// Solve the enclosure flow network (gap: frankensim-frn2i).
+    /// Solve the enclosure flow network from the declared Cooling section
+    /// (executes; bead frankensim-frn2i.2).
     FlowNetwork,
     /// Conduction/conjugate coupling solve (gap: frankensim-s93ej).
     Conduction,
