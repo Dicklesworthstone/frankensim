@@ -188,8 +188,11 @@ fn l_shape_carves_the_convex_hull_notch() {
         assert!((vol - 3.0).abs() < 1e-9, "L surface volume {vol}");
         let retained = out.witness().per_region_producer[0].1;
         assert!((retained - 3.0).abs() < 1e-9, "L retained {retained}");
+        // Convex hull of these 16 vertices is a pentagonal prism: the
+        // missing corner (2,2) is not present, so the carved notch is
+        // the right triangle (1,1)-(2,1)-(1,2) extruded through z, volume 1/2.
         assert!(
-            out.witness().excluded_exterior > 0.5,
+            (out.witness().excluded_exterior - 0.5).abs() < 1e-9,
             "notch must be carved, exterior {}",
             out.witness().excluded_exterior
         );
@@ -423,5 +426,123 @@ fn permutation_of_region_triangles_is_deterministic() {
         assert_eq!(a.labeled().tets(), b.labeled().tets());
         let _ = verts;
         let _ = spec;
+    });
+}
+
+#[test]
+fn axis_permutation_is_a_rigid_transform_of_volume_one() {
+    with_cx(|cx| {
+        let (verts, mut spec) = solid_box(1, [0.5, 0.5, 0.5], 0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
+        let verts: Vec<[f64; 3]> = verts.iter().map(|p| [p[1], p[2], p[0]]).collect();
+        spec.seed = [0.5, 0.5, 0.5];
+        let out = volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy(), cx)
+            .expect("permuted axes");
+        let vol = out.witness().per_region_surface[0].1;
+        assert!((vol - 1.0).abs() < 1e-12, "permuted volume {vol}");
+    });
+}
+
+#[test]
+fn unit_rescaling_scales_volume_by_the_cube() {
+    with_cx(|cx| {
+        let (verts, mut spec) = solid_box(1, [0.5, 0.5, 0.5], 0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
+        let verts: Vec<[f64; 3]> = verts
+            .iter()
+            .map(|p| [2.0 * p[0], 2.0 * p[1], 2.0 * p[2]])
+            .collect();
+        spec.seed = [1.0, 1.0, 1.0];
+        let out =
+            volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy(), cx).expect("scaled");
+        let vol = out.witness().per_region_producer[0].1;
+        assert!((vol - 8.0).abs() < 1e-12, "scaled volume {vol}");
+    });
+}
+
+#[test]
+fn thin_slab_keeps_its_analytic_volume() {
+    with_cx(|cx| {
+        let (verts, spec) = solid_box(1, [0.5, 0.5, 0.005], 0.0, 1.0, 0.0, 1.0, 0.0, 0.01);
+        let out = volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy(), cx).expect("slab");
+        let vol = out.witness().per_region_producer[0].1;
+        assert!((vol - 0.01).abs() < 1e-12, "slab volume {vol}");
+    });
+}
+
+#[test]
+fn overlapping_solids_refuse_the_unlabeled_intersection() {
+    with_cx(|cx| {
+        let a = box_vertices(0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
+        let b = box_vertices(0.5, 1.5, 0.0, 1.0, 0.0, 1.0);
+        let (verts, remaps) = weld(&[a, b]);
+        let regions = vec![
+            RegionSpec {
+                id: RegionId(1),
+                kind: RegionKind::Solid,
+                seed: [0.25, 0.5, 0.5],
+                triangles: remap_tris(&box_triangles(0), &remaps[0]),
+            },
+            RegionSpec {
+                id: RegionId(2),
+                kind: RegionKind::Solid,
+                seed: [1.25, 0.5, 0.5],
+                triangles: remap_tris(&box_triangles(0), &remaps[1]),
+            },
+        ];
+        let err =
+            volumetricize(UnverifiedPlc::new(verts, regions), policy(), cx).expect_err("overlap");
+        assert!(
+            matches!(
+                err,
+                VolumetricError::UnlabeledChamber
+                    | VolumetricError::AmbiguousChamber { .. }
+                    | VolumetricError::Audit { .. }
+            ),
+            "overlap refused as {err:?}"
+        );
+    });
+}
+
+#[test]
+fn vertex_budget_refuses_before_meshing() {
+    with_cx(|cx| {
+        let (verts, spec) = solid_box(1, [0.5, 0.5, 0.5], 0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
+        let mut pol = policy();
+        pol.max_vertices = 4;
+        let err = volumetricize(UnverifiedPlc::new(verts, vec![spec]), pol, cx).expect_err("cap");
+        assert!(matches!(
+            err,
+            VolumetricError::Budget {
+                what: "vertices",
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
+fn pre_cancelled_context_refuses_without_an_audited_mesh() {
+    let gate = CancelGate::new();
+    gate.request();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x593E_1001,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        let (verts, spec) = solid_box(1, [0.5, 0.5, 0.5], 0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
+        let err = volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy(), &cx)
+            .expect_err("cancelled");
+        assert!(
+            matches!(err, VolumetricError::Mesh(fs_mesh::MeshError::Cancelled)),
+            "cancelled as {err:?}"
+        );
     });
 }

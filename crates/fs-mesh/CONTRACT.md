@@ -188,7 +188,15 @@ half-edge round-trips, closed-manifold audits).
     balance tolerance. Non-negative inputs plus admitted non-negative fractions
     cannot publish a negative target value. Signed-zero outputs and report
     totals canonicalize to positive zero.
-14. Every public remesh call validates its two floating-point policy controls
+14. `volumetricize` on a closed axis-aligned multi-region PLC retains only
+    declared solid tets, assigns exactly one region to each, carves hull
+    fill that is not a declared solid, discards seeded cavities, and
+    matches the closed-surface volume identity under two independent
+    tet-volume formulas. Open, non-manifold, unlabeled-enclosed, boundary-seed,
+    and duplicate-region inputs refuse without an audited mesh (s93ej.1
+    corpus). General-position Steiner residual and the parent conduction
+    E2E remain no-claims.
+15. Every public remesh call validates its two floating-point policy controls
     before geometry-dependent work. Exact endpoints admit; the adjacent
     representable value outside either interval refuses with stable field,
     rejected bits, and exact inclusive bound bits. Geometry translation or
