@@ -9,12 +9,15 @@ mod support;
 use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::{box_grid, on_box_face};
-use fs_conduction::material::{ConductivityModel, ElementMaterials, MaterialId, MaterialTable};
+use fs_conduction::material::{
+    ConductivityModel, ConductivityTable, ElementMaterials, MaterialId, MaterialTable,
+};
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::{
     ConductionError, ConductionProblem, InitialGuess, LinearConfig, Nonlinearity, SolveConfig,
-    StopRule, solve, solve_with_element_materials,
+    StopRule, element_heat_flux_assigned, solve, solve_with_element_materials,
 };
+use std::collections::BTreeMap;
 use support::with_cx;
 
 fn config() -> SolveConfig {
@@ -165,5 +168,144 @@ fn two_layer_slab_hits_the_series_interface_temperature() {
     assert!(
         worst < 2e-3,
         "interface temperature off by {worst:e} from 1/3"
+    );
+    let flux = element_heat_flux_assigned(&mesh, &assigned, &solution.temperature).expect("flux");
+    let want = 2.0 / 3.0;
+    let worst_qx = flux
+        .iter()
+        .map(|q| (q[0] - want).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst_qx < 0.05,
+        "recovered q_x off by {worst_qx} from series {want}"
+    );
+}
+
+fn two_layer_ids(mesh: &ConductionMesh) -> Vec<u32> {
+    (0..mesh.element_count())
+        .map(|e| {
+            let tet = mesh.complex().tets[e];
+            let cx = tet
+                .iter()
+                .map(|&v| mesh.positions()[v as usize][0])
+                .sum::<f64>()
+                / 4.0;
+            if cx < 1.0 { 1 } else { 2 }
+        })
+        .collect()
+}
+
+#[test]
+fn region_map_refuses_an_unmapped_label_and_accepts_a_complete_map() {
+    let table = MaterialTable::new([
+        (
+            MaterialId(10),
+            ConductivityModel::isotropic_declared(1.0).expect("k1"),
+        ),
+        (
+            MaterialId(20),
+            ConductivityModel::isotropic_declared(2.0).expect("k2"),
+        ),
+    ])
+    .expect("table");
+    let mut map = BTreeMap::new();
+    map.insert(1, MaterialId(10));
+    let err =
+        ElementMaterials::from_region_ids(table.clone(), &[1, 2], &map).expect_err("unmapped");
+    assert!(matches!(err, ConductionError::MaterialAssignment { .. }));
+    map.insert(2, MaterialId(20));
+    let assigned = ElementMaterials::from_region_ids(table, &[1, 2, 1], &map).expect("map");
+    assert_eq!(
+        assigned.of_element(),
+        &[MaterialId(10), MaterialId(20), MaterialId(10)]
+    );
+}
+
+#[test]
+fn assignment_length_mismatch_refuses_at_bind() {
+    let (complex, positions) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic_declared(1.0).expect("k");
+    let table = MaterialTable::new([(MaterialId(1), material.clone())]).expect("table");
+    let assigned = ElementMaterials::new(table, vec![MaterialId(1)]).expect("one");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 1.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+    };
+    let err = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect_err("len")
+    });
+    assert!(matches!(
+        err,
+        ConductionError::FieldLength {
+            field: "element material assignment",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn temperature_dependent_layer_refuses_outside_its_span() {
+    let (complex, positions) = box_grid([4, 1, 1], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let right = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(0.0, 2.0), (1.0, 2.0)]).expect("curve"),
+    );
+    let fallback = left.clone();
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(400.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    let regions = two_layer_ids(&mesh);
+    let mut map = BTreeMap::new();
+    map.insert(1, MaterialId(1));
+    map.insert(2, MaterialId(2));
+    let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let err = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect_err("span")
+    });
+    assert!(
+        matches!(err, ConductionError::OutsideTemperatureSpan { .. }),
+        "out-of-span as {err:?}"
     );
 }

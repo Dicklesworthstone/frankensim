@@ -758,6 +758,36 @@ impl ElementMaterials {
         Ok(Self { table, of_element })
     }
 
+    /// Map a labeled tet vector (region id per element) through a
+    /// region→material table. This is the s93ej.1 → s93ej.2 handoff:
+    /// mesh labels never become conductivity by themselves.
+    ///
+    /// # Errors
+    /// Empty assignment, unmapped region, or an unknown material id.
+    pub fn from_region_ids(
+        table: MaterialTable,
+        region_of_element: &[u32],
+        region_to_material: &std::collections::BTreeMap<u32, MaterialId>,
+    ) -> Result<Self, ConductionError> {
+        if region_of_element.is_empty() {
+            return Err(ConductionError::MaterialAssignment {
+                what: "region-of-element vector is empty".to_string(),
+                fix: "supply one region id per tetrahedron".to_string(),
+            });
+        }
+        let mut of_element = Vec::with_capacity(region_of_element.len());
+        for (e, &region) in region_of_element.iter().enumerate() {
+            let id = *region_to_material.get(&region).ok_or_else(|| {
+                ConductionError::MaterialAssignment {
+                    what: format!("element {e} has unmapped region {region}"),
+                    fix: "map every retained region id to a MaterialId".to_string(),
+                }
+            })?;
+            of_element.push(id);
+        }
+        Self::new(table, of_element)
+    }
+
     /// Require the assignment length to match the mesh.
     ///
     /// # Errors

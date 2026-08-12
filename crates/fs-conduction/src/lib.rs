@@ -105,8 +105,8 @@ pub use radiation::{
 pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
     EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
-    RobinFlux, SolveConfig, StopReason, StopRule, solve, solve_with_element_materials,
-    solve_with_interfaces,
+    RobinFlux, SolveConfig, StopReason, StopRule, element_heat_flux, element_heat_flux_assigned,
+    solve, solve_with_element_materials, solve_with_interfaces,
 };
 
 /// Crate version, re-exported for provenance stamping.

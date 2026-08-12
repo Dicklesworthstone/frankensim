@@ -1251,6 +1251,38 @@ pub fn element_heat_flux(
     Ok(out)
 }
 
+/// [`element_heat_flux`] using the constitutive model assigned to each tet.
+///
+/// # Errors
+/// Assignment validation plus [`element_heat_flux`].
+pub fn element_heat_flux_assigned(
+    mesh: &ConductionMesh,
+    materials: &ElementMaterials,
+    temperature: &[f64],
+) -> Result<Vec<[f64; 3]>, ConductionError> {
+    materials.validate_for(mesh)?;
+    let mut out = Vec::with_capacity(mesh.element_count());
+    for e in 0..mesh.element_count() {
+        let tet = mesh.complex().tets[e];
+        let t_e = crate::assemble::element_temperature(mesh, e, temperature);
+        let k = materials.model_for(e)?.tensor_at(t_e)?;
+        let g = &mesh.geometry().grads[e];
+        let mut grad = [0.0f64; 3];
+        for (b, gb) in g.iter().enumerate() {
+            let tb = temperature[tet[b] as usize];
+            for i in 0..3 {
+                grad[i] = tb.mul_add(gb[i], grad[i]);
+            }
+        }
+        let mut q = [0.0f64; 3];
+        for (i, qi) in q.iter_mut().enumerate() {
+            *qi = -k[i][0].mul_add(grad[0], k[i][1].mul_add(grad[1], k[i][2] * grad[2]));
+        }
+        out.push(q);
+    }
+    Ok(out)
+}
+
 /// Solve a steady conduction problem to the configured stop rule.
 ///
 /// # Errors
