@@ -133,10 +133,9 @@ pub use structural_acoustics::{
     STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM, STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION,
     StructuralMeshControls, StructuralModalBasis, StructuralModalBasisError, StructuralMode,
     StructuralModeRequest, StructuralResidualFlexibilityAuthority,
-    StructuralResidualFlexibilityControls,
-    StructuralResidualFlexibilityEstimateBasis, StructuralResidualFlexibilityEstimateComparison,
-    StructuralResidualFlexibilityEstimateResponse, build_structural_modal_basis,
-    build_structural_residual_flexibility_estimate_basis,
+    StructuralResidualFlexibilityControls, StructuralResidualFlexibilityEstimateBasis,
+    StructuralResidualFlexibilityEstimateComparison, StructuralResidualFlexibilityEstimateResponse,
+    build_structural_modal_basis, build_structural_residual_flexibility_estimate_basis,
     compare_structural_residual_flexibility_estimates, modal_loss_spectrum_from_prony,
     modal_loss_spectrum_from_rayleigh, superpose_pressure_signals,
 };

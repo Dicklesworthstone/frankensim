@@ -23,16 +23,16 @@
 use fs_bem::BemError;
 use fs_bem::helmholtz::{
     DirectivityTable, Formulation as HelmholtzFormulation, HelmholtzError,
-    MAX_RADIATION_FIELDS_PER_BATCH, MAX_SH_DEGREE, Medium, RadiationSolution,
-    directivity_sh_table, far_field, solve_radiation, solve_radiation_batch,
+    MAX_RADIATION_FIELDS_PER_BATCH, MAX_SH_DEGREE, Medium, RadiationSolution, directivity_sh_table,
+    far_field, solve_radiation, solve_radiation_batch,
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_couple::broadband_radiation::{
     BroadbandRadiationArtifact, BroadbandRadiationAuthority, BroadbandRadiationControls,
     BroadbandRadiationError, BroadbandRadiationRuntime, ComplexShTrainingSample,
-    DirectFarFieldHeldOutSample, HarmonicTimeConvention, RadiationSampleDiagnostics,
-    MAX_BROADBAND_FREQUENCIES, MAX_VALIDATION_DIRECTIONS, RealTesseralChannel,
+    DirectFarFieldHeldOutSample, HarmonicTimeConvention, MAX_BROADBAND_FREQUENCIES,
+    MAX_VALIDATION_DIRECTIONS, RadiationSampleDiagnostics, RealTesseralChannel,
     SampledRadiationData, build_broadband_radiation_artifact,
 };
 use fs_couple::modal_acoustic_time::{
@@ -1321,7 +1321,10 @@ impl core::fmt::Display for StructuralModalBasisError {
                 )
             }
             Self::BroadbandRadiation(source) => {
-                write!(formatter, "structural broadband radiation refused: {source}")
+                write!(
+                    formatter,
+                    "structural broadband radiation refused: {source}"
+                )
             }
             Self::ForceReconstruction(source) => {
                 write!(
@@ -3539,9 +3542,18 @@ fn modal_force_for_control_interval(
         .start_visualization_index
         .and_then(|index| visualization.get(index));
     let (point, orientation, normal_world) = if let Some(contact) = end.contact {
-        (Some(contact.point_body_m), end.disc_pose.orientation(), Some(contact.normal_world))
-    } else if let Some((start, contact)) = start.and_then(|start| start.contact.map(|c| (start, c))) {
-        (Some(contact.point_body_m), start.disc_pose.orientation(), Some(contact.normal_world))
+        (
+            Some(contact.point_body_m),
+            end.disc_pose.orientation(),
+            Some(contact.normal_world),
+        )
+    } else if let Some((start, contact)) = start.and_then(|start| start.contact.map(|c| (start, c)))
+    {
+        (
+            Some(contact.point_body_m),
+            start.disc_pose.orientation(),
+            Some(contact.normal_world),
+        )
     } else {
         (None, end.disc_pose.orientation(), None)
     };
@@ -4037,10 +4049,7 @@ pub fn build_structural_broadband_radiation_artifact(
         || request.directivity.maximum_spherical_harmonic_degree > MAX_SH_DEGREE
         || !(request.directivity.minimum_captured_fraction > 0.0
             && request.directivity.minimum_captured_fraction <= 1.0
-            && request
-                .directivity
-                .minimum_captured_fraction
-                .is_finite())
+            && request.directivity.minimum_captured_fraction.is_finite())
     {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "broadband basis partition, grids, directions, SH controls, or sample clock are inconsistent",
@@ -4060,8 +4069,7 @@ pub fn build_structural_broadband_radiation_artifact(
             mode.panel_normal_shape_per_sqrt_kg.len() != basis.mesh.boundary.triangles.len()
                 || !(mode.angular_frequency_rad_s > 0.0
                     && mode.angular_frequency_rad_s.is_finite()
-                    && mode.eigenvalue_interval_s2.0
-                        > (core::f64::consts::TAU * forcing.1).powi(2)
+                    && mode.eigenvalue_interval_s2.0 > (core::f64::consts::TAU * forcing.1).powi(2)
                     && mode.frequency_hz <= enrichment.1
                     && mode.frequency_hz < 0.5 * request.fit.sample_rate_hz)
         })
@@ -4353,13 +4361,18 @@ impl StructuralBroadbandSourceRuntime<'_> {
             });
         }
         let intervals = controls.audio();
-        let first = intervals.first().ok_or(StructuralModalBasisError::ControlTimeline {
-            what: "control stream has no positive-duration audio intervals",
-        })?;
-        let last = intervals.last().expect("nonempty interval slice has a last item");
-        if intervals.windows(2).any(|pair| {
-            pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits()
-        }) {
+        let first = intervals
+            .first()
+            .ok_or(StructuralModalBasisError::ControlTimeline {
+                what: "control stream has no positive-duration audio intervals",
+            })?;
+        let last = intervals
+            .last()
+            .expect("nonempty interval slice has a last item");
+        if intervals
+            .windows(2)
+            .any(|pair| pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits())
+        {
             return Err(StructuralModalBasisError::ControlTimeline {
                 what: "mechanics audio intervals are not exactly contiguous",
             });
@@ -4375,7 +4388,8 @@ impl StructuralBroadbandSourceRuntime<'_> {
         })?;
         let mut modal_forces = Vec::with_capacity(intervals.len());
         for interval in intervals {
-            cx.checkpoint().map_err(|_| StructuralModalBasisError::Cancelled)?;
+            cx.checkpoint()
+                .map_err(|_| StructuralModalBasisError::Cancelled)?;
             modal_forces.push(modal_force_for_control_interval(
                 &self.basis.mesh,
                 &self.basis.enrichment_modes,
@@ -4395,22 +4409,31 @@ impl StructuralBroadbandSourceRuntime<'_> {
         }
         if initial_state == PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce {
             self.modal_runtime.initialize_static_equilibrium(
-                reconstructed.frame(0).expect("positive frame count has a force row"),
+                reconstructed
+                    .frame(0)
+                    .expect("positive frame count has a force row"),
             )?;
         }
         let channel_count = self.source.radiation.channels.len();
         let capacity = frame_count.checked_mul(channel_count).ok_or(
-            StructuralModalBasisError::PressureCapacity { requested: usize::MAX },
+            StructuralModalBasisError::PressureCapacity {
+                requested: usize::MAX,
+            },
         )?;
         let mut coefficients = Vec::new();
         coefficients.try_reserve_exact(capacity).map_err(|_| {
-            StructuralModalBasisError::PressureCapacity { requested: capacity }
+            StructuralModalBasisError::PressureCapacity {
+                requested: capacity,
+            }
         })?;
         for frame in 0..frame_count {
             if frame % 64 == 0 {
-                cx.checkpoint().map_err(|_| StructuralModalBasisError::Cancelled)?;
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
             }
-            let force = reconstructed.frame(frame).expect("validated force frame count");
+            let force = reconstructed
+                .frame(frame)
+                .expect("validated force frame count");
             self.modal_runtime
                 .step_duration(force, self.modal_runtime.sample_period_s())?;
             write_closing_modal_acceleration(
@@ -4445,17 +4468,17 @@ fn write_closing_modal_acceleration(
     force: &[f64],
     out: &mut [f64],
 ) -> Result<(), StructuralModalBasisError> {
-    if modes.len() != damping.len() || modes.len() != states.len() || modes.len() != force.len() || modes.len() != out.len() {
+    if modes.len() != damping.len()
+        || modes.len() != states.len()
+        || modes.len() != force.len()
+        || modes.len() != out.len()
+    {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "closing modal-acceleration rows must have identical cardinality",
         });
     }
-    for ((((mode, damping_ratio), state), applied), acceleration) in modes
-        .iter()
-        .zip(damping)
-        .zip(states)
-        .zip(force)
-        .zip(out)
+    for ((((mode, damping_ratio), state), applied), acceleration) in
+        modes.iter().zip(damping).zip(states).zip(force).zip(out)
     {
         let omega = mode.angular_frequency_rad_s;
         let equilibrium = applied / (omega * omega);
@@ -5245,10 +5268,7 @@ fn residual_flexibility_response_identity(
                 response.energy_closure_residual_j,
             ]),
     );
-    hash_usizes(
-        &mut hasher,
-        [response.force_projection.boundary_triangle],
-    );
+    hash_usizes(&mut hasher, [response.force_projection.boundary_triangle]);
     hash_f64_slice(
         &mut hasher,
         &response.force_projection.modal_force_n_per_sqrt_kg,
