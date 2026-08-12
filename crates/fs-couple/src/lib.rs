@@ -31,6 +31,7 @@
 //! [`iterate_aitken`]. Deterministic; depends only on the neutral `fs-iface`
 //! vocabulary and `fs-qty`'s six-base dimension vector.
 
+pub mod broadband_radiation;
 pub mod modal_acoustic_time;
 pub mod vibroacoustic;
 

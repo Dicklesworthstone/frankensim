@@ -133,6 +133,35 @@ pub enum DiscretizeError {
     },
     /// Non-positive sample interval.
     BadSampleInterval,
+    /// A public state-space field does not match the declared state
+    /// dimension.
+    InvalidRuntimeDimensions {
+        /// Field whose length is inconsistent.
+        field: &'static str,
+        /// Required number of scalar entries.
+        expected: usize,
+        /// Supplied number of scalar entries.
+        actual: usize,
+    },
+    /// Squaring the declared state dimension overflowed `usize`.
+    RuntimeDimensionOverflow {
+        /// Declared state dimension.
+        n: usize,
+    },
+    /// A runtime input, coefficient, state coordinate, or computed result is
+    /// not finite.
+    NonFiniteRuntimeValue {
+        /// Value source.
+        field: &'static str,
+        /// Coordinate for vector/matrix fields; absent for scalars.
+        index: Option<usize>,
+    },
+    /// The proper state-space step cannot silently omit the Tustin
+    /// differentiator represented by `e_leftover`.
+    UnrealizedImproperTerm {
+        /// Coefficient requiring a separate differentiator section.
+        e_leftover: f64,
+    },
 }
 
 impl core::fmt::Display for DiscretizeError {
@@ -145,6 +174,25 @@ impl core::fmt::Display for DiscretizeError {
                 )
             }
             DiscretizeError::BadSampleInterval => write!(f, "sample interval must be positive"),
+            DiscretizeError::InvalidRuntimeDimensions {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "runtime state-space field {field} has length {actual}, expected {expected}"
+            ),
+            DiscretizeError::RuntimeDimensionOverflow { n } => {
+                write!(f, "runtime state dimension {n} cannot be squared")
+            }
+            DiscretizeError::NonFiniteRuntimeValue { field, index } => match index {
+                Some(index) => write!(f, "runtime value {field}[{index}] must be finite"),
+                None => write!(f, "runtime value {field} must be finite"),
+            },
+            DiscretizeError::UnrealizedImproperTerm { e_leftover } => write!(
+                f,
+                "runtime state-space step cannot realize e_leftover={e_leftover}; use the separate differentiator section"
+            ),
         }
     }
 }
@@ -267,6 +315,21 @@ pub struct DiscreteStateSpace {
     pub t_s: f64,
 }
 
+/// Mutable, allocation-free-after-construction runtime for one proper
+/// [`DiscreteStateSpace`] realization.
+///
+/// The lifetime binds the state to the exact realization used to construct it;
+/// callers cannot accidentally step that state with a different realization.
+/// A nonzero [`DiscreteStateSpace::e_leftover`] is refused at construction
+/// because silently dropping its separate differentiator section would change
+/// the transfer function.
+#[derive(Debug)]
+pub struct DiscreteStateSpaceRuntime<'realization> {
+    realization: &'realization DiscreteStateSpace,
+    state: Vec<f64>,
+    next_state: Vec<f64>,
+}
+
 /// Tustin state-space discretization (see [`DiscreteStateSpace`]).
 ///
 /// # Errors
@@ -350,6 +413,46 @@ pub fn bilinear_state_space(
 }
 
 impl DiscreteStateSpace {
+    /// Construct a zero-state runtime bound to this proper realization.
+    ///
+    /// # Errors
+    /// Returns [`DiscretizeError`] if public realization fields are malformed
+    /// or nonfinite, or if `e_leftover` requires the separate differentiator
+    /// section.
+    pub fn try_runtime(&self) -> Result<DiscreteStateSpaceRuntime<'_>, DiscretizeError> {
+        self.validate_runtime_realization()?;
+        Ok(DiscreteStateSpaceRuntime {
+            realization: self,
+            state: vec![0.0; self.n],
+            next_state: vec![0.0; self.n],
+        })
+    }
+
+    fn validate_runtime_realization(&self) -> Result<(), DiscretizeError> {
+        let matrix_len = self
+            .n
+            .checked_mul(self.n)
+            .ok_or(DiscretizeError::RuntimeDimensionOverflow { n: self.n })?;
+        require_len("a", self.a.len(), matrix_len)?;
+        require_len("b", self.b.len(), self.n)?;
+        require_len("c", self.c.len(), self.n)?;
+        require_finite("a", &self.a)?;
+        require_finite("b", &self.b)?;
+        require_finite("c", &self.c)?;
+        require_finite_scalar("d", self.d)?;
+        require_finite_scalar("e_leftover", self.e_leftover)?;
+        require_finite_scalar("t_s", self.t_s)?;
+        if self.t_s <= 0.0 {
+            return Err(DiscretizeError::BadSampleInterval);
+        }
+        if self.e_leftover != 0.0 {
+            return Err(DiscretizeError::UnrealizedImproperTerm {
+                e_leftover: self.e_leftover,
+            });
+        }
+        Ok(())
+    }
+
     /// Frequency response `Cd (z I - Ad)^{-1} Bd + Dd` at `z =
     /// e^{i*omega*t_s}` (the `e_leftover` term is the caller's
     /// section).
@@ -374,5 +477,170 @@ impl DiscreteStateSpace {
             acc = acc + xi.scale(*ci);
         }
         Ok(acc)
+    }
+}
+
+impl DiscreteStateSpaceRuntime<'_> {
+    /// Current realization state in canonical coordinate order.
+    #[must_use]
+    pub fn state(&self) -> &[f64] {
+        &self.state
+    }
+
+    /// Advance one scalar sample using `y = Cx + D u`, followed by
+    /// `x_next = A x + B u`.
+    ///
+    /// Arithmetic order is fixed by row and coordinate index. If finite inputs
+    /// overflow, the call refuses without committing the partially computed
+    /// next state.
+    ///
+    /// # Errors
+    /// [`DiscretizeError::NonFiniteRuntimeValue`] for a nonfinite input or
+    /// computed output/state coordinate.
+    pub fn step(&mut self, input: f64) -> Result<f64, DiscretizeError> {
+        require_finite_scalar("input", input)?;
+
+        let mut output = 0.0;
+        for index in 0..self.realization.n {
+            output += self.realization.c[index] * self.state[index];
+        }
+        output += self.realization.d * input;
+        require_finite_scalar("output", output)?;
+
+        for row in 0..self.realization.n {
+            let mut value = 0.0;
+            for column in 0..self.realization.n {
+                value += self.realization.a[row * self.realization.n + column] * self.state[column];
+            }
+            value += self.realization.b[row] * input;
+            if !value.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "next_state",
+                    index: Some(row),
+                });
+            }
+            self.next_state[row] = value;
+        }
+        core::mem::swap(&mut self.state, &mut self.next_state);
+        Ok(output)
+    }
+}
+
+fn require_len(field: &'static str, actual: usize, expected: usize) -> Result<(), DiscretizeError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(DiscretizeError::InvalidRuntimeDimensions {
+            field,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn require_finite(field: &'static str, values: &[f64]) -> Result<(), DiscretizeError> {
+    if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+        Err(DiscretizeError::NonFiniteRuntimeValue {
+            field,
+            index: Some(index),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_finite_scalar(field: &'static str, value: f64) -> Result<(), DiscretizeError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(DiscretizeError::NonFiniteRuntimeValue { field, index: None })
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    fn first_order() -> DiscreteStateSpace {
+        DiscreteStateSpace {
+            n: 1,
+            a: vec![0.5],
+            b: vec![1.0],
+            c: vec![2.0],
+            d: 3.0,
+            e_leftover: 0.0,
+            t_s: 0.01,
+        }
+    }
+
+    #[test]
+    fn g0_runtime_step_matches_analytic_first_order_recurrence() {
+        let system = first_order();
+        let mut runtime = system.try_runtime().expect("proper realization");
+        assert_eq!(runtime.step(1.0).unwrap(), 3.0);
+        assert_eq!(runtime.state(), [1.0]);
+        assert_eq!(runtime.step(2.0).unwrap(), 8.0);
+        assert_eq!(runtime.state(), [2.5]);
+    }
+
+    #[test]
+    fn g0_runtime_replay_is_bitwise() {
+        let system = first_order();
+        let mut left = system.try_runtime().unwrap();
+        let mut right = system.try_runtime().unwrap();
+        for input in [1.0, -0.25, 0.0, 2.5, -4.0] {
+            assert_eq!(
+                left.step(input).unwrap().to_bits(),
+                right.step(input).unwrap().to_bits()
+            );
+            assert_eq!(left.state(), right.state());
+        }
+    }
+
+    #[test]
+    fn g0_zero_state_and_input_remain_zero() {
+        let mut system = first_order();
+        system.d = 0.0;
+        let mut runtime = system.try_runtime().unwrap();
+        assert_eq!(runtime.step(0.0).unwrap().to_bits(), 0.0f64.to_bits());
+        assert_eq!(runtime.state(), [0.0]);
+    }
+
+    #[test]
+    fn g0_runtime_refuses_malformed_nonfinite_and_improper_inputs() {
+        let mut malformed = first_order();
+        malformed.a.clear();
+        assert!(matches!(
+            malformed.try_runtime(),
+            Err(DiscretizeError::InvalidRuntimeDimensions { field: "a", .. })
+        ));
+        let mut improper = first_order();
+        improper.e_leftover = 0.25;
+        assert!(matches!(
+            improper.try_runtime(),
+            Err(DiscretizeError::UnrealizedImproperTerm { .. })
+        ));
+        let system = first_order();
+        let mut runtime = system.try_runtime().unwrap();
+        assert!(matches!(
+            runtime.step(f64::NAN),
+            Err(DiscretizeError::NonFiniteRuntimeValue { field: "input", .. })
+        ));
+        assert_eq!(runtime.state(), [0.0]);
+    }
+
+    #[test]
+    fn g0_impulse_response_agrees_with_frequency_evaluation() {
+        let system = first_order();
+        let omega = 37.0;
+        let expected = system.eval(omega).unwrap();
+        let mut runtime = system.try_runtime().unwrap();
+        let mut measured = C64::ZERO;
+        for sample in 0..96 {
+            let output = runtime.step(if sample == 0 { 1.0 } else { 0.0 }).unwrap();
+            let phase = -(sample as f64) * omega * system.t_s;
+            measured = measured + C64::new(det::cos(phase), det::sin(phase)).scale(output);
+        }
+        assert!((measured - expected).abs() < 1.0e-12);
     }
 }
