@@ -812,6 +812,37 @@ impl ElementMaterials {
         Self::new(table, of_element)
     }
 
+    /// Lower an independently labeled tet volume into a conduction mesh
+    /// and a checked constitutive assignment.
+    ///
+    /// Region labels never become conductivity by themselves: they only
+    /// name rows in `region_to_material`. This crate does not depend on
+    /// a particular mesher; the caller supplies the audited complex.
+    ///
+    /// # Errors
+    /// [`ElementMaterials::from_region_ids`] refusals plus
+    /// [`crate::mesh::ConductionMesh::new`] refusals and a length
+    /// mismatch between tets and region ids.
+    pub fn bind_labeled_volume(
+        table: MaterialTable,
+        complex: fs_rep_mesh::TetComplex,
+        positions: Vec<[f64; 3]>,
+        region_of_element: &[u32],
+        region_to_material: &std::collections::BTreeMap<u32, MaterialId>,
+    ) -> Result<(crate::mesh::ConductionMesh, Self), ConductionError> {
+        if region_of_element.len() != complex.tets.len() {
+            return Err(ConductionError::FieldLength {
+                field: "region-of-element vector",
+                expected: complex.tets.len(),
+                found: region_of_element.len(),
+            });
+        }
+        let assigned = Self::from_region_ids(table, region_of_element, region_to_material)?;
+        let mesh = crate::mesh::ConductionMesh::new(complex, positions)?;
+        assigned.validate_for(&mesh)?;
+        Ok((mesh, assigned))
+    }
+
     /// Require the assignment length to match the mesh.
     ///
     /// # Errors

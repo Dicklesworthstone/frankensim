@@ -446,8 +446,6 @@ fn labeled_adjacent_volumes_solve_as_two_materials() {
         .expect("volume")
     });
     let labeled = audited.labeled();
-    let complex = TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec());
-    let mesh = ConductionMesh::new(complex, labeled.positions().to_vec()).expect("mesh");
     let k1 = ConductivityModel::isotropic_declared(1.0).expect("k1");
     let k2 = ConductivityModel::isotropic_declared(2.0).expect("k2");
     let fallback = k1.clone();
@@ -456,7 +454,25 @@ fn labeled_adjacent_volumes_solve_as_two_materials() {
     let mut map = BTreeMap::new();
     map.insert(1, MaterialId(1));
     map.insert(2, MaterialId(2));
-    let assigned = ElementMaterials::from_region_ids(table, &region_ids, &map).expect("assign");
+    let too_short = ElementMaterials::bind_labeled_volume(
+        table.clone(),
+        TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
+        labeled.positions().to_vec(),
+        &region_ids[..region_ids.len().saturating_sub(1)],
+        &map,
+    );
+    assert!(
+        matches!(too_short, Err(ConductionError::FieldLength { .. })),
+        "tet/region length mismatch must refuse: {too_short:?}"
+    );
+    let (mesh, assigned) = ElementMaterials::bind_labeled_volume(
+        table,
+        TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
+        labeled.positions().to_vec(),
+        &region_ids,
+        &map,
+    )
+    .expect("lower");
     let source = ScalarField::Uniform(0.0);
     let boundary = ThermalBoundaryBuilder::new(&mesh)
         .region(
