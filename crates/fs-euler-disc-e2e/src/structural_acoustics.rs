@@ -22,11 +22,19 @@
 
 use fs_bem::BemError;
 use fs_bem::helmholtz::{
-    DirectivityTable, Formulation as HelmholtzFormulation, HelmholtzError, MAX_SH_DEGREE, Medium,
-    directivity_sh_table, far_field, solve_radiation,
+    DirectivityTable, Formulation as HelmholtzFormulation, HelmholtzError,
+    MAX_RADIATION_FIELDS_PER_BATCH, MAX_SH_DEGREE, Medium, RadiationSolution,
+    directivity_sh_table, far_field, solve_radiation, solve_radiation_batch,
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_couple::broadband_radiation::{
+    BroadbandRadiationArtifact, BroadbandRadiationAuthority, BroadbandRadiationControls,
+    BroadbandRadiationError, BroadbandRadiationRuntime, ComplexShTrainingSample,
+    DirectFarFieldHeldOutSample, HarmonicTimeConvention, RadiationSampleDiagnostics,
+    MAX_BROADBAND_FREQUENCIES, MAX_VALIDATION_DIRECTIONS, RealTesseralChannel,
+    SampledRadiationData, build_broadband_radiation_artifact,
+};
 use fs_couple::modal_acoustic_time::{
     ModalAcousticFrame, ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError,
     ModalAcousticTimeModel,
@@ -68,6 +76,8 @@ pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
 pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION: u32 = 1;
 /// Exact limitation attached to every truncated residual-flexibility basis.
 pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM: &str = "Estimate-only: inertia certifies eigenvalue counts, not an enclosure of the eigenvector-derived compliance; eigenpair residuals, modes above the declared enrichment band, mesh and constitutive error, dynamic correction, and broadband radiation/audio are not bounded";
+/// Limitation carried by the broadband body-frame source artifact and stem.
+pub const STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM: &str = "Estimate-only linear source stem about the undeformed stationary body: sampled BEM, SH truncation, rational fitting, discretization, structural truncation, and constitutive damping are not certified; static residual flexibility is deliberately excluded, and no 1/r propagation, delay, Doppler, listener/room response, impact, air-film sound, mastering, or calibrated SPL is claimed";
 /// Maximum number of simultaneous physical pressure observers in one pass.
 pub const MAX_PHYSICAL_PRESSURE_OBSERVERS: usize = 64;
 const STRUCTURAL_MODAL_BASIS_IDENTITY_DOMAIN: &str =
@@ -76,6 +86,8 @@ const STRUCTURAL_RESIDUAL_FLEXIBILITY_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-residual-flexibility.v1";
 const STRUCTURAL_RESIDUAL_RESPONSE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-residual-response.v1";
+const STRUCTURAL_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.structural-broadband-source.v1";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
 const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
@@ -304,6 +316,101 @@ pub struct StructuralResidualFlexibilityEstimateComparison {
     pub relative_nodal_displacement_l2_difference: f64,
     /// Panel-normal displacement L2 difference normalized by the finer response.
     pub relative_panel_normal_l2_difference: f64,
+}
+
+/// Offline BEM sampling and causal-fit request for the residual basis's fixed
+/// scalar modal-acceleration coordinates.
+pub struct StructuralBroadbandRadiationRequest<'a> {
+    /// Count-certified source basis; only `enrichment_modes` are dynamic.
+    pub basis: &'a StructuralResidualFlexibilityEstimateBasis,
+    /// Loss factors evaluated in the exact enrichment-mode order.
+    pub loss: &'a StructuralResidualModalLossSpectrum,
+    /// Evidence-bound exterior gas state.
+    pub medium: ResolvedAcousticMedium<'a>,
+    /// Strictly increasing positive training frequencies [Hz].
+    pub training_frequency_hz: &'a [f64],
+    /// Strictly increasing, disjoint validation frequencies [Hz].
+    pub held_out_frequency_hz: &'a [f64],
+    /// Independent nonzero body-frame directions for direct held-out BEM data.
+    pub held_out_directions_body: &'a [[f64; 3]],
+    /// Spherical-harmonic truncation controls.
+    pub directivity: AcousticDirectivityControls,
+    /// Rational-fit, validation, and audio-clock controls.
+    pub fit: BroadbandRadiationControls,
+}
+
+/// Constitutive damping samples bound specifically to one residual basis's
+/// enrichment-mode order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralResidualModalLossSpectrum {
+    /// Exact residual basis identity.
+    pub structural_basis_identity: ContentHash,
+    /// Exact elastic material-state identity.
+    pub material_state_identity: ContentHash,
+    /// Constitutive damping model/evidence identity.
+    pub damping_model_identity: ContentHash,
+    /// Loss factor `eta(omega_k)` in enrichment-mode order.
+    pub loss_factors: Vec<f64>,
+}
+
+/// Identity-bound body-frame radiation bank from modal acceleration to
+/// far-field source amplitude. Each filter input has units
+/// `m sqrt(kg) / s^2`; each output has units `Pa m` after runtime evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralBroadbandRadiationArtifact {
+    /// Evidence ceiling inherited from the neutral broadband bridge.
+    pub authority: BroadbandRadiationAuthority,
+    /// Exact residual/enrichment basis identity.
+    pub structural_basis_identity: ContentHash,
+    /// Exact constitutive damping identity.
+    pub damping_model_identity: ContentHash,
+    /// Audio sample rate [Hz].
+    pub sample_rate_hz: u32,
+    /// Loss factors in enrichment-mode/input order.
+    pub modal_loss_factors: Vec<f64>,
+    /// Solver-neutral fitted real-tesseral filter bank.
+    pub radiation: BroadbandRadiationArtifact,
+    /// Explicit applicability boundary.
+    pub no_claims: &'static str,
+}
+
+/// One real body-frame far-field source coefficient in pascal-metres.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FarFieldSourceCoefficientPaM(
+    /// Coefficient value [Pa m].
+    pub f64,
+);
+
+/// Fixed-rate body-frame real-tesseral source stem, before listener
+/// propagation. This is intentionally not a [`PhysicalPressureSignal`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralBroadbandSourceStem {
+    /// First sample-cell boundary on the mechanics clock [s].
+    pub start_time_s: f64,
+    /// Fixed sample rate [Hz].
+    pub sample_rate_hz: u32,
+    /// Canonical coefficient channel order.
+    pub channels: Vec<RealTesseralChannel>,
+    /// Frame-major coefficients [Pa m].
+    pub coefficients: Vec<FarFieldSourceCoefficientPaM>,
+    /// Evidence ceiling.
+    pub authority: BroadbandRadiationAuthority,
+}
+
+impl StructuralBroadbandSourceStem {
+    /// Number of complete coefficient frames.
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.coefficients.len() / self.channels.len()
+    }
+
+    /// One complete coefficient frame in canonical channel order.
+    #[must_use]
+    pub fn frame(&self, index: usize) -> Option<&[FarFieldSourceCoefficientPaM]> {
+        let start = index.checked_mul(self.channels.len())?;
+        self.coefficients.get(start..start + self.channels.len())
+    }
 }
 
 /// Geometric support constraint for a rectangular thin plate.
@@ -1045,6 +1152,16 @@ pub struct PhysicalModalAudioModel<'basis> {
     pub damping_model_identity: ContentHash,
 }
 
+/// Persistent enrichment-mode oscillator plus causal broadband radiation bank.
+pub struct StructuralBroadbandSourceRuntime<'artifact> {
+    basis: &'artifact StructuralResidualFlexibilityEstimateBasis,
+    source: &'artifact StructuralBroadbandRadiationArtifact,
+    modal_runtime: ModalAcousticTimeModel,
+    modal_damping_ratios: Vec<f64>,
+    radiation_runtime: BroadbandRadiationRuntime<'artifact>,
+    modal_acceleration: Vec<f64>,
+}
+
 /// Typed refusal from structural-mode construction or force projection.
 #[derive(Debug)]
 pub enum StructuralModalBasisError {
@@ -1075,6 +1192,8 @@ pub enum StructuralModalBasisError {
     Viscoelastic(ViscoError),
     /// The exact time-domain modal runtime refused.
     ModalTime(ModalAcousticTimeError),
+    /// Broadband fitting or persistent radiation filtering refused.
+    BroadbandRadiation(BroadbandRadiationError),
     /// Conservative generalized-force reconstruction refused.
     ForceReconstruction(AudioResamplingError),
     /// Pose reconstruction for a world-fixed observer refused.
@@ -1201,6 +1320,9 @@ impl core::fmt::Display for StructuralModalBasisError {
                     "structural modal time integration refused: {source}"
                 )
             }
+            Self::BroadbandRadiation(source) => {
+                write!(formatter, "structural broadband radiation refused: {source}")
+            }
             Self::ForceReconstruction(source) => {
                 write!(
                     formatter,
@@ -1298,6 +1420,7 @@ impl std::error::Error for StructuralModalBasisError {
             Self::Acoustic(source) => Some(source),
             Self::Viscoelastic(source) => Some(source),
             Self::ModalTime(source) => Some(source),
+            Self::BroadbandRadiation(source) => Some(source),
             Self::ForceReconstruction(source) => Some(source),
             Self::Timeline(source) => Some(source),
             _ => None,
@@ -1350,6 +1473,12 @@ impl From<ViscoError> for StructuralModalBasisError {
 impl From<ModalAcousticTimeError> for StructuralModalBasisError {
     fn from(source: ModalAcousticTimeError) -> Self {
         Self::ModalTime(source)
+    }
+}
+
+impl From<BroadbandRadiationError> for StructuralModalBasisError {
+    fn from(source: BroadbandRadiationError) -> Self {
+        Self::BroadbandRadiation(source)
     }
 }
 
@@ -3382,64 +3511,71 @@ impl<'basis> PhysicalModalAudioModel<'basis> {
         interval: &crate::AudioControlInterval,
         maximum_contact_distance_m: f64,
     ) -> Result<Vec<f64>, StructuralModalBasisError> {
-        let visualization = controls.visualization();
-        let end = visualization
-            .get(interval.visual_coverage.end_visualization_index)
-            .ok_or(StructuralModalBasisError::ControlTimeline {
-                what: "audio interval closing visualization index is out of bounds",
-            })?;
-        let start = interval
-            .visual_coverage
-            .start_visualization_index
-            .and_then(|index| visualization.get(index));
-        let (point, orientation, normal_world) = if let Some(contact) = end.contact {
-            (
-                Some(contact.point_body_m),
-                end.disc_pose.orientation(),
-                Some(contact.normal_world),
-            )
-        } else if let Some((start, contact)) =
-            start.and_then(|start| start.contact.map(|c| (start, c)))
-        {
-            (
-                Some(contact.point_body_m),
-                start.disc_pose.orientation(),
-                Some(contact.normal_world),
-            )
-        } else {
-            (None, end.disc_pose.orientation(), None)
-        };
-        let force_world = match interval.channels.contact {
-            ChannelControl::Available(contact) => contact.mean_force_world_n,
-            ChannelControl::Unavailable => {
-                if let (Some(normal_force), Some(normal)) =
-                    (interval.mean_base_normal_contact_force_n, normal_world)
-                {
-                    normal.scale(normal_force)
-                } else if interval.interval_contact_active {
-                    return Err(StructuralModalBasisError::MissingContactForce {
-                        source_sample: interval.source_sample_index,
-                    });
-                } else {
-                    fs_mbd::Vec3::ZERO
-                }
-            }
-        };
-        if force_world.norm_squared() == 0.0 {
-            return Ok(vec![0.0; self.basis.modes.len()]);
-        }
-        let point = point.ok_or(StructuralModalBasisError::MissingContactLocation {
-            source_sample: interval.source_sample_index,
-        })?;
-        let force_body = orientation.rotate_world_to_body(force_world);
-        self.basis
-            .project_point_force(
-                [point.x, point.y, point.z],
-                [force_body.x, force_body.y, force_body.z],
-                maximum_contact_distance_m,
-            )
-            .map(|projection| projection.modal_force_n_per_sqrt_kg)
+        modal_force_for_control_interval(
+            &self.basis.mesh,
+            &self.basis.modes,
+            controls,
+            interval,
+            maximum_contact_distance_m,
+        )
     }
+}
+
+fn modal_force_for_control_interval(
+    mesh: &RoundedCylinderTetMesh,
+    modes: &[StructuralMode],
+    controls: &EulerControlStream<'_>,
+    interval: &crate::AudioControlInterval,
+    maximum_contact_distance_m: f64,
+) -> Result<Vec<f64>, StructuralModalBasisError> {
+    let visualization = controls.visualization();
+    let end = visualization
+        .get(interval.visual_coverage.end_visualization_index)
+        .ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "audio interval closing visualization index is out of bounds",
+        })?;
+    let start = interval
+        .visual_coverage
+        .start_visualization_index
+        .and_then(|index| visualization.get(index));
+    let (point, orientation, normal_world) = if let Some(contact) = end.contact {
+        (Some(contact.point_body_m), end.disc_pose.orientation(), Some(contact.normal_world))
+    } else if let Some((start, contact)) = start.and_then(|start| start.contact.map(|c| (start, c))) {
+        (Some(contact.point_body_m), start.disc_pose.orientation(), Some(contact.normal_world))
+    } else {
+        (None, end.disc_pose.orientation(), None)
+    };
+    let force_world = match interval.channels.contact {
+        ChannelControl::Available(contact) => contact.mean_force_world_n,
+        ChannelControl::Unavailable => {
+            if let (Some(force), Some(normal)) =
+                (interval.mean_base_normal_contact_force_n, normal_world)
+            {
+                normal.scale(force)
+            } else if interval.interval_contact_active {
+                return Err(StructuralModalBasisError::MissingContactForce {
+                    source_sample: interval.source_sample_index,
+                });
+            } else {
+                Vec3::ZERO
+            }
+        }
+    };
+    if force_world.norm_squared() == 0.0 {
+        return Ok(vec![0.0; modes.len()]);
+    }
+    let point = point.ok_or(StructuralModalBasisError::MissingContactLocation {
+        source_sample: interval.source_sample_index,
+    })?;
+    let force_body = orientation.rotate_world_to_body(force_world);
+    project_point_force_on_modes(
+        mesh,
+        modes,
+        [point.x, point.y, point.z],
+        [force_body.x, force_body.y, force_body.z],
+        maximum_contact_distance_m,
+    )
+    .map(|projection| projection.modal_force_n_per_sqrt_kg)
 }
 
 fn hash_pressure_observer(hasher: &mut DomainHasher, observer: PhysicalPressureObserver) {
@@ -3840,6 +3976,502 @@ fn project_point_force_on_modes(
         barycentric,
         modal_force_n_per_sqrt_kg,
     })
+}
+
+/// Build a causal broadband body-frame source bank from the exact residual
+/// basis, material loss evidence, gas state, and disjoint BEM grids.
+///
+/// At drive frequency `omega`, unit generalized modal acceleration implies
+/// `q = -1/omega^2` and therefore `v_n = +i phi_n/omega` under
+/// `exp(-i omega t)`. One shared BEM factorization serves every modal input at
+/// each frequency. Static residual flexibility is never an input to this path.
+pub fn build_structural_broadband_radiation_artifact(
+    request: &StructuralBroadbandRadiationRequest<'_>,
+    cx: &Cx<'_>,
+) -> Result<StructuralBroadbandRadiationArtifact, StructuralModalBasisError> {
+    let basis = request.basis;
+    let loss = request.loss;
+    let sample_rate_hz = request.fit.sample_rate_hz as u32;
+    let forcing = basis.forcing_frequency_band_hz;
+    let enrichment = basis.enrichment_frequency_band_hz;
+    let grids_valid = |grid: &[f64]| {
+        !grid.is_empty()
+            && grid.len() <= MAX_BROADBAND_FREQUENCIES
+            && grid.iter().enumerate().all(|(index, &frequency)| {
+                frequency > 0.0
+                    && frequency <= enrichment.1
+                    && frequency < 0.5 * request.fit.sample_rate_hz
+                    && frequency.is_finite()
+                    && (index == 0 || grid[index - 1] < frequency)
+            })
+    };
+    if basis.schema_version != STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION
+        || basis.authority != StructuralResidualFlexibilityAuthority::EstimateOnly
+        || basis.recomputed_identity() != basis.identity
+        || basis.operator_identity == ContentHash([0; 32])
+        || basis.enrichment_modes.is_empty()
+        || basis.enrichment_modes.len() > MAX_RADIATION_FIELDS_PER_BATCH
+        || basis.certified_enrichment_mode_count != basis.enrichment_modes.len()
+        || basis.certified_partition_mode_count
+            != basis
+                .certified_in_band_mode_count
+                .checked_add(basis.certified_enrichment_mode_count)
+                .unwrap_or(usize::MAX)
+        || forcing.1.to_bits() != enrichment.0.to_bits()
+        || !(forcing.0 > 0.0 && forcing.0 < forcing.1 && enrichment.0 < enrichment.1)
+        || sample_rate_hz == 0
+        || f64::from(sample_rate_hz).to_bits() != request.fit.sample_rate_hz.to_bits()
+        || !grids_valid(request.training_frequency_hz)
+        || !grids_valid(request.held_out_frequency_hz)
+        || request.held_out_frequency_hz.iter().any(|held| {
+            request
+                .training_frequency_hz
+                .iter()
+                .any(|training| training.to_bits() == held.to_bits())
+        })
+        || !(8..=MAX_VALIDATION_DIRECTIONS).contains(&request.held_out_directions_body.len())
+        || request.held_out_directions_body.iter().any(|direction| {
+            let norm = norm_squared(*direction);
+            !(norm > 0.0 && norm.is_finite())
+        })
+        || request.directivity.maximum_spherical_harmonic_degree > MAX_SH_DEGREE
+        || !(request.directivity.minimum_captured_fraction > 0.0
+            && request.directivity.minimum_captured_fraction <= 1.0
+            && request
+                .directivity
+                .minimum_captured_fraction
+                .is_finite())
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "broadband basis partition, grids, directions, SH controls, or sample clock are inconsistent",
+        });
+    }
+    validate_acoustic_medium(request.medium.gas)?;
+    if request.medium.gas_model_identity == ContentHash([0; 32])
+        || loss.structural_basis_identity != basis.identity
+        || loss.material_state_identity != basis.material_state_identity
+        || loss.damping_model_identity == ContentHash([0; 32])
+        || loss.loss_factors.len() != basis.enrichment_modes.len()
+        || loss
+            .loss_factors
+            .iter()
+            .any(|value| !(value.is_finite() && *value >= 0.0))
+        || basis.enrichment_modes.iter().any(|mode| {
+            mode.panel_normal_shape_per_sqrt_kg.len() != basis.mesh.boundary.triangles.len()
+                || !(mode.angular_frequency_rad_s > 0.0
+                    && mode.angular_frequency_rad_s.is_finite()
+                    && mode.eigenvalue_interval_s2.0
+                        > (core::f64::consts::TAU * forcing.1).powi(2)
+                    && mode.frequency_hz <= enrichment.1
+                    && mode.frequency_hz < 0.5 * request.fit.sample_rate_hz)
+        })
+    {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "broadband damping, medium, or enrichment modes do not match the exact residual basis",
+        });
+    }
+
+    let surface = SpherePanels::new(
+        basis.mesh.boundary.centroids_m.clone(),
+        basis.mesh.boundary.normals.clone(),
+        basis.mesh.boundary.areas_m2.clone(),
+    )?;
+    let medium = Medium {
+        density: request.medium.gas.density,
+        sound_speed: request.medium.gas.sound_speed,
+    };
+    let radius_m = basis
+        .mesh
+        .nodes_m
+        .iter()
+        .map(|point| norm_squared(*point).sqrt())
+        .fold(0.0_f64, f64::max);
+    let mut training = Vec::with_capacity(request.training_frequency_hz.len());
+    let mut held_out = Vec::with_capacity(request.held_out_frequency_hz.len());
+    for &frequency_hz in request.training_frequency_hz {
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        let omega = core::f64::consts::TAU * frequency_hz;
+        let (_, solutions) = solve_modal_acceleration_radiation_batch(
+            &surface,
+            &basis.enrichment_modes,
+            omega,
+            medium,
+            radius_m,
+        )?;
+        let tables = checked_directivity_tables(
+            &surface,
+            &solutions,
+            medium,
+            request.directivity.maximum_spherical_harmonic_degree,
+        )?;
+        let captured_fraction = captured_fraction(&solutions, &tables);
+        training.push(ComplexShTrainingSample {
+            omega_rad_s: omega,
+            coefficients_by_input: tables.into_iter().map(|table| table.coefficients).collect(),
+            diagnostics: radiation_sample_diagnostics(&solutions, captured_fraction),
+        });
+    }
+    for &frequency_hz in request.held_out_frequency_hz {
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        let omega = core::f64::consts::TAU * frequency_hz;
+        let (_, solutions) = solve_modal_acceleration_radiation_batch(
+            &surface,
+            &basis.enrichment_modes,
+            omega,
+            medium,
+            radius_m,
+        )?;
+        let tables = checked_directivity_tables(
+            &surface,
+            &solutions,
+            medium,
+            request.directivity.maximum_spherical_harmonic_degree,
+        )?;
+        let captured_fraction = captured_fraction(&solutions, &tables);
+        held_out.push(DirectFarFieldHeldOutSample {
+            omega_rad_s: omega,
+            directions: request.held_out_directions_body.to_vec(),
+            far_field_by_input: solutions
+                .iter()
+                .map(|solution| {
+                    far_field(&surface, solution, medium, request.held_out_directions_body)
+                })
+                .collect(),
+            diagnostics: radiation_sample_diagnostics(&solutions, captured_fraction),
+        });
+    }
+    let input_ids: Vec<String> = (0..basis.enrichment_modes.len())
+        .map(|mode| format!("enrichment-mode-{mode:04}-qddot[m*sqrt(kg)/s^2]"))
+        .collect();
+    let source_identity = broadband_sample_identity(request);
+    let samples = SampledRadiationData {
+        source_id: format!("euler-structural-modal-acceleration-pa-m-v1:{source_identity}"),
+        harmonic_time_convention: HarmonicTimeConvention::ExpNegativeIOmegaT,
+        l_max: request.directivity.maximum_spherical_harmonic_degree,
+        input_ids,
+        training,
+        held_out,
+    };
+    cx.checkpoint()
+        .map_err(|_| StructuralModalBasisError::Cancelled)?;
+    let radiation = build_broadband_radiation_artifact(&samples, request.fit)?;
+    Ok(StructuralBroadbandRadiationArtifact {
+        authority: BroadbandRadiationAuthority::EstimateOnly,
+        structural_basis_identity: basis.identity,
+        damping_model_identity: loss.damping_model_identity,
+        sample_rate_hz,
+        modal_loss_factors: loss.loss_factors.clone(),
+        radiation,
+        no_claims: STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM,
+    })
+}
+
+fn checked_directivity_tables(
+    surface: &SpherePanels,
+    solutions: &[RadiationSolution],
+    medium: Medium,
+    l_max: usize,
+) -> Result<Vec<DirectivityTable>, StructuralModalBasisError> {
+    solutions
+        .iter()
+        .enumerate()
+        .map(|(mode, solution)| {
+            if solution.radiated_power < 0.0 {
+                return Err(StructuralModalBasisError::NegativeRadiatedPower {
+                    mode,
+                    power: solution.radiated_power,
+                });
+            }
+            directivity_sh_table(surface, solution, medium, l_max).map_err(Into::into)
+        })
+        .collect()
+}
+
+fn captured_fraction(solutions: &[RadiationSolution], tables: &[DirectivityTable]) -> f64 {
+    solutions
+        .iter()
+        .zip(tables)
+        .filter(|(solution, _)| solution.radiated_power > 0.0)
+        .map(|(_, table)| table.captured_fraction)
+        .fold(1.0_f64, f64::min)
+}
+
+fn solve_modal_acceleration_radiation_batch(
+    surface: &SpherePanels,
+    modes: &[StructuralMode],
+    omega_rad_s: f64,
+    medium: Medium,
+    radius_m: f64,
+) -> Result<(HelmholtzFormulation, Vec<RadiationSolution>), HelmholtzError> {
+    let velocity: Vec<Vec<C64>> = modes
+        .iter()
+        .map(|mode| {
+            mode.panel_normal_shape_per_sqrt_kg
+                .iter()
+                .map(|shape| C64::new(0.0, shape / omega_rad_s))
+                .collect()
+        })
+        .collect();
+    let fields: Vec<&[C64]> = velocity.iter().map(Vec::as_slice).collect();
+    let k = omega_rad_s / medium.sound_speed;
+    let formulation = if k * radius_m < 0.5 {
+        HelmholtzFormulation::PlainCbie
+    } else {
+        HelmholtzFormulation::BurtonMiller
+    };
+    solve_radiation_batch(surface, k, medium, &fields, formulation)
+        .map(|solutions| (formulation, solutions))
+}
+
+fn radiation_sample_diagnostics(
+    solutions: &[RadiationSolution],
+    captured_fraction: f64,
+) -> RadiationSampleDiagnostics {
+    RadiationSampleDiagnostics {
+        captured_fraction,
+        panels_per_wavelength: solutions
+            .iter()
+            .map(|solution| solution.panels_per_wavelength)
+            .fold(f64::INFINITY, f64::min),
+        condition_lower_bound: solutions
+            .iter()
+            .map(|solution| solution.condition_lower_bound)
+            .fold(1.0_f64, f64::max),
+    }
+}
+
+fn broadband_sample_identity(request: &StructuralBroadbandRadiationRequest<'_>) -> ContentHash {
+    let mut h = DomainHasher::new(STRUCTURAL_BROADBAND_SOURCE_IDENTITY_DOMAIN);
+    for identity in [
+        request.basis.identity,
+        request.basis.operator_identity,
+        request.basis.material_state_identity,
+        request.loss.damping_model_identity,
+        request.medium.gas_model_identity,
+    ] {
+        h.update(identity.as_bytes());
+    }
+    hash_usizes(
+        &mut h,
+        [
+            request.basis.enrichment_modes.len(),
+            request.directivity.maximum_spherical_harmonic_degree,
+            request.fit.fit_order,
+            request.fit.fit_iterations,
+        ],
+    );
+    h.update(request.fit.fit_weights.label().as_bytes());
+    h.update(&[u8::from(request.fit.fit_d)]);
+    hash_f64s(
+        &mut h,
+        [
+            request.fit.sample_rate_hz,
+            request.fit.minimum_captured_fraction,
+            request.fit.far_field_signal_floor,
+            request.fit.maximum_normalized_error,
+            request.fit.rms_normalized_error,
+            request.directivity.minimum_captured_fraction,
+            request.medium.gas.temperature,
+            request.medium.gas.pressure,
+            request.medium.gas.density,
+            request.medium.gas.sound_speed,
+        ],
+    );
+    hash_f64_slice(&mut h, &request.loss.loss_factors);
+    hash_f64_slice(&mut h, request.training_frequency_hz);
+    hash_f64_slice(&mut h, request.held_out_frequency_hz);
+    hash_vec3_slice(&mut h, request.held_out_directions_body);
+    h.finalize()
+}
+
+impl StructuralBroadbandRadiationArtifact {
+    /// Bind this exact source bank to its residual basis and a modal budget.
+    pub fn try_runtime<'a>(
+        &'a self,
+        basis: &'a StructuralResidualFlexibilityEstimateBasis,
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<StructuralBroadbandSourceRuntime<'a>, StructuralModalBasisError> {
+        if self.authority != BroadbandRadiationAuthority::EstimateOnly
+            || self.no_claims != STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM
+            || basis.recomputed_identity() != basis.identity
+            || self.structural_basis_identity != basis.identity
+            || self.damping_model_identity == ContentHash([0; 32])
+            || self.modal_loss_factors.len() != basis.enrichment_modes.len()
+            || self.radiation.inputs.len() != basis.enrichment_modes.len()
+            || !self
+                .radiation
+                .report
+                .source_id
+                .starts_with("euler-structural-modal-acceleration-pa-m-v1:")
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "broadband source artifact does not match the exact residual basis",
+            });
+        }
+        let modes = basis
+            .enrichment_modes
+            .iter()
+            .zip(&self.modal_loss_factors)
+            .map(|(mode, loss)| ModalAcousticMode {
+                angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                damping_ratio: loss_factor_to_zeta(*loss),
+                pressure_per_modal_velocity: C64::ZERO,
+            })
+            .collect();
+        Ok(StructuralBroadbandSourceRuntime {
+            basis,
+            source: self,
+            modal_runtime: ModalAcousticTimeModel::try_new(self.sample_rate_hz, modes, budget)?,
+            modal_damping_ratios: self
+                .modal_loss_factors
+                .iter()
+                .map(|loss| loss_factor_to_zeta(*loss))
+                .collect(),
+            radiation_runtime: self.radiation.try_runtime()?,
+            modal_acceleration: vec![0.0; basis.enrichment_modes.len()],
+        })
+    }
+}
+
+impl StructuralBroadbandSourceRuntime<'_> {
+    /// Project the moving contact, conservatively reconstruct its modal force
+    /// measures, advance the oscillators, and emit closing-boundary Pa-m
+    /// source coefficients. A listener/pressure/WAV stage is intentionally absent.
+    pub fn synthesize_control_stream(
+        &mut self,
+        controls: &EulerControlStream<'_>,
+        initial_state: PhysicalModalInitialState,
+        force_reconstruction: GeneralizedForceReconstructionInput,
+        maximum_contact_distance_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<StructuralBroadbandSourceStem, StructuralModalBasisError> {
+        if controls.source().metadata().specimen_profile_identity != self.basis.profile_identity {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "control trajectory profile does not match broadband structural source",
+            });
+        }
+        let intervals = controls.audio();
+        let first = intervals.first().ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "control stream has no positive-duration audio intervals",
+        })?;
+        let last = intervals.last().expect("nonempty interval slice has a last item");
+        if intervals.windows(2).any(|pair| {
+            pair[0].end_time_s.to_bits() != pair[1].start_time_s.to_bits()
+        }) {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "mechanics audio intervals are not exactly contiguous",
+            });
+        }
+        let frame_count = fixed_rate_frame_count_with_roundoff_bound(
+            first.start_time_s,
+            last.end_time_s,
+            self.source.sample_rate_hz,
+            force_reconstruction.clock_roundoff_operation_count,
+        )
+        .ok_or(StructuralModalBasisError::ControlTimeline {
+            what: "control horizon is not an integral number of broadband audio samples",
+        })?;
+        let mut modal_forces = Vec::with_capacity(intervals.len());
+        for interval in intervals {
+            cx.checkpoint().map_err(|_| StructuralModalBasisError::Cancelled)?;
+            modal_forces.push(modal_force_for_control_interval(
+                &self.basis.mesh,
+                &self.basis.enrichment_modes,
+                controls,
+                interval,
+                maximum_contact_distance_m,
+            )?);
+        }
+        let reconstructed =
+            reconstruct_projected_modal_forces(intervals, &modal_forces, force_reconstruction, cx)?;
+        if reconstructed.sample_rate_hz != self.source.sample_rate_hz
+            || reconstructed.frame_count() != frame_count
+        {
+            return Err(StructuralModalBasisError::ControlTimeline {
+                what: "reconstructed force clock does not match broadband source clock",
+            });
+        }
+        if initial_state == PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce {
+            self.modal_runtime.initialize_static_equilibrium(
+                reconstructed.frame(0).expect("positive frame count has a force row"),
+            )?;
+        }
+        let channel_count = self.source.radiation.channels.len();
+        let capacity = frame_count.checked_mul(channel_count).ok_or(
+            StructuralModalBasisError::PressureCapacity { requested: usize::MAX },
+        )?;
+        let mut coefficients = Vec::new();
+        coefficients.try_reserve_exact(capacity).map_err(|_| {
+            StructuralModalBasisError::PressureCapacity { requested: capacity }
+        })?;
+        for frame in 0..frame_count {
+            if frame % 64 == 0 {
+                cx.checkpoint().map_err(|_| StructuralModalBasisError::Cancelled)?;
+            }
+            let force = reconstructed.frame(frame).expect("validated force frame count");
+            self.modal_runtime
+                .step_duration(force, self.modal_runtime.sample_period_s())?;
+            write_closing_modal_acceleration(
+                &self.basis.enrichment_modes,
+                &self.modal_damping_ratios,
+                self.modal_runtime.states(),
+                force,
+                &mut self.modal_acceleration,
+            )?;
+            coefficients.extend(
+                self.radiation_runtime
+                    .step(&self.modal_acceleration)?
+                    .iter()
+                    .copied()
+                    .map(FarFieldSourceCoefficientPaM),
+            );
+        }
+        Ok(StructuralBroadbandSourceStem {
+            start_time_s: first.start_time_s,
+            sample_rate_hz: self.source.sample_rate_hz,
+            channels: self.source.radiation.channels.clone(),
+            coefficients,
+            authority: BroadbandRadiationAuthority::EstimateOnly,
+        })
+    }
+}
+
+fn write_closing_modal_acceleration(
+    modes: &[StructuralMode],
+    damping: &[f64],
+    states: &[fs_couple::modal_acoustic_time::ModalAcousticState],
+    force: &[f64],
+    out: &mut [f64],
+) -> Result<(), StructuralModalBasisError> {
+    if modes.len() != damping.len() || modes.len() != states.len() || modes.len() != force.len() || modes.len() != out.len() {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "closing modal-acceleration rows must have identical cardinality",
+        });
+    }
+    for ((((mode, damping_ratio), state), applied), acceleration) in modes
+        .iter()
+        .zip(damping)
+        .zip(states)
+        .zip(force)
+        .zip(out)
+    {
+        let omega = mode.angular_frequency_rad_s;
+        let equilibrium = applied / (omega * omega);
+        // Algebraically Q - 2*zeta*omega*qdot - omega^2*q. Centering the
+        // elastic term preserves an exactly held static equilibrium.
+        *acceleration = (-2.0 * damping_ratio * omega).mul_add(
+            state.velocity_m_sqrt_kg_per_s,
+            -omega * omega * (state.displacement_m_sqrt_kg - equilibrium),
+        );
+        if !acceleration.is_finite() {
+            return Err(StructuralModalBasisError::InvalidRequest {
+                what: "closing modal acceleration became non-finite",
+            });
+        }
+    }
+    Ok(())
 }
 
 impl StructuralModalBasis {
