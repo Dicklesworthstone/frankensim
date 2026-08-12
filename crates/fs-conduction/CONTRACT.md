@@ -105,6 +105,7 @@ diameter.
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them |
 | `LumpedThermalTransport` | one reduced-body conductivity/emissivity pair, either explicitly provenance-free declared constants or temperature-grid samples queried from one immutable material card with every conductivity and emissivity receipt retained; sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
+| `MaterialId` / `MaterialTable` / `ElementMaterials` | a checked constitutive table plus one id per tet. Assembly and Newton use the named model at the element mean temperature. This is constitutive selection, not `element_scale`. Unknown/duplicate/empty/length-mismatched assignments refuse. `solve_with_element_materials` is the product entry; the uniform `ConductionProblem::material` path is unchanged |
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
 | `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
 | `ConductionSolution`, `ConductionReport`, `EnergyBalance`, `LinearSolveEvidence` | the field and everything established about how it was produced |

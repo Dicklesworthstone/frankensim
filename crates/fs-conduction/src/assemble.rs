@@ -42,7 +42,7 @@ use crate::ConductionError;
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
 use crate::interface::ThermalInterfaces;
-use crate::material::ConductivityModel;
+use crate::material::{ConductivityModel, ElementMaterials};
 use crate::mesh::ConductionMesh;
 
 /// Elements (or faces) processed between cancellation polls.
@@ -189,6 +189,26 @@ pub fn element_temperature(mesh: &ConductionMesh, element: usize, temperature: &
     sum / 4.0
 }
 
+fn conductivity_model<'a>(
+    material: &'a ConductivityModel,
+    assigned: Option<&'a ElementMaterials>,
+    element: usize,
+) -> Result<&'a ConductivityModel, ConductionError> {
+    match assigned {
+        Some(map) => map.model_for(element),
+        None => Ok(material),
+    }
+}
+
+fn conductivity_at(
+    material: &ConductivityModel,
+    assigned: Option<&ElementMaterials>,
+    element: usize,
+    temperature: f64,
+) -> Result<[[f64; 3]; 3], ConductionError> {
+    conductivity_model(material, assigned, element)?.tensor_at(temperature)
+}
+
 /// Assemble `A(T)` and the load `b`.
 ///
 /// # Errors
@@ -211,6 +231,7 @@ pub fn assemble_operator(
         material,
         source,
         temperature,
+        None,
         None,
         None,
     )
@@ -239,6 +260,7 @@ pub fn assemble_operator_with_interfaces(
         temperature,
         None,
         Some(interfaces),
+        None,
     )
 }
 
@@ -271,6 +293,7 @@ pub fn assemble_operator_scaled(
         temperature,
         element_scale,
         None,
+        None,
     )
 }
 
@@ -283,11 +306,15 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
     temperature: &[f64],
     element_scale: Option<&[f64]>,
     interfaces: Option<&ThermalInterfaces>,
+    element_materials: Option<&ElementMaterials>,
 ) -> Result<AssembledSystem, ConductionError> {
     if let Some(interfaces) = interfaces {
         interfaces.validate_for(mesh, boundary)?;
     } else {
         ThermalInterfaces::require_no_undeclared(mesh)?;
+    }
+    if let Some(assigned) = element_materials {
+        assigned.validate_for(mesh)?;
     }
     let n = mesh.vertex_count();
     if let Some(scale) = element_scale
@@ -318,7 +345,7 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
         for e in start..end {
             let tet = mesh.complex().tets[e];
             let t_e = element_temperature(mesh, e, temperature);
-            let k = material.tensor_at(t_e)?;
+            let k = conductivity_at(material, element_materials, e, t_e)?;
             let mut ke = element_stiffness(mesh, e, &k);
             if let Some(scale) = element_scale {
                 for row in &mut ke {
@@ -426,7 +453,15 @@ pub fn assemble_jacobian(
     material: &ConductivityModel,
     temperature: &[f64],
 ) -> Result<Csr, ConductionError> {
-    assemble_jacobian_with_optional_interfaces(cx, mesh, boundary, material, temperature, None)
+    assemble_jacobian_with_optional_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        temperature,
+        None,
+        None,
+    )
 }
 
 /// [`assemble_jacobian`] with the constant matching-face contact block.
@@ -445,6 +480,7 @@ pub fn assemble_jacobian_with_interfaces(
         material,
         temperature,
         Some(interfaces),
+        None,
     )
 }
 
@@ -455,11 +491,15 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
     material: &ConductivityModel,
     temperature: &[f64],
     interfaces: Option<&ThermalInterfaces>,
+    element_materials: Option<&ElementMaterials>,
 ) -> Result<Csr, ConductionError> {
     if let Some(interfaces) = interfaces {
         interfaces.validate_for(mesh, boundary)?;
     } else {
         ThermalInterfaces::require_no_undeclared(mesh)?;
+    }
+    if let Some(assigned) = element_materials {
+        assigned.validate_for(mesh)?;
     }
     let n = mesh.vertex_count();
     if temperature.len() != n {
@@ -469,7 +509,6 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
             found: temperature.len(),
         });
     }
-    let nonlinear = material.is_temperature_dependent();
     let mut coo = Coo::new(n, n);
     let mut discard = vec![0.0f64; n];
     let ne = mesh.element_count();
@@ -480,17 +519,18 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
         for e in start..end {
             let tet = mesh.complex().tets[e];
             let t_e = element_temperature(mesh, e, temperature);
-            let k = material.tensor_at(t_e)?;
+            let model = conductivity_model(material, element_materials, e)?;
+            let k = model.tensor_at(t_e)?;
             let ke = element_stiffness(mesh, e, &k);
             for a in 0..4 {
                 for b in 0..4 {
                     coo.push(tet[a] as usize, tet[b] as usize, ke[a][b]);
                 }
             }
-            if !nonlinear {
+            if !model.is_temperature_dependent() {
                 continue;
             }
-            let kp = material.tensor_derivative_at(t_e)?;
+            let kp = model.tensor_derivative_at(t_e)?;
             let g = &mesh.geometry().grads[e];
             let volume = mesh.element_volume(e);
             // ∇T_h on this element (constant).

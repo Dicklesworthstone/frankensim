@@ -57,7 +57,7 @@ use crate::assemble::{
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
 use crate::interface::{InterfaceFlux, ThermalInterfaces};
-use crate::material::{ConductivityModel, ProvenanceClass};
+use crate::material::{ConductivityModel, ElementMaterials, ProvenanceClass};
 use crate::mesh::ConductionMesh;
 
 /// The pieces a conduction solve needs, borrowed together.
@@ -549,6 +549,7 @@ struct Evaluated {
 pub struct ConductionSolver<'m> {
     problem: ConductionProblem<'m>,
     interfaces: Option<&'m ThermalInterfaces>,
+    element_materials: Option<&'m ElementMaterials>,
     dofs: DofMap,
     config: SolveConfig,
     state: ConductionState,
@@ -605,6 +606,24 @@ impl<'m> ConductionSolver<'m> {
         Self::new_inner(problem, Some(interfaces), config)
     }
 
+    /// Bind a checked per-element constitutive assignment.
+    ///
+    /// The uniform [`ConductionProblem::material`] remains the fallback
+    /// only when this is never called. After a successful bind, every
+    /// assembled element uses the named model; `element_scale` is still
+    /// a density multiplier, not a material identity.
+    ///
+    /// # Errors
+    /// Length mismatch or an unknown / empty assignment.
+    pub fn bind_element_materials(
+        &mut self,
+        materials: &'m ElementMaterials,
+    ) -> Result<(), ConductionError> {
+        materials.validate_for(self.problem.mesh)?;
+        self.element_materials = Some(materials);
+        Ok(())
+    }
+
     fn new_inner(
         problem: ConductionProblem<'m>,
         interfaces: Option<&'m ThermalInterfaces>,
@@ -622,6 +641,7 @@ impl<'m> ConductionSolver<'m> {
         Ok(ConductionSolver {
             problem,
             interfaces,
+            element_materials: None,
             dofs,
             config,
             state: ConductionState {
@@ -704,6 +724,7 @@ impl<'m> ConductionSolver<'m> {
             &full,
             None,
             self.interfaces,
+            self.element_materials,
         ) {
             Ok(system) => Ok(Some(norm2(&residual(&system, &self.dofs, &full)))),
             Err(ConductionError::OutsideTemperatureSpan { .. }) => Ok(None),
@@ -726,6 +747,7 @@ impl<'m> ConductionSolver<'m> {
             &full,
             None,
             self.interfaces,
+            self.element_materials,
         )?;
         let (a_ff, b_f) = reduce(&system, &self.dofs);
         let r = residual(&system, &self.dofs, &full);
@@ -824,6 +846,7 @@ impl<'m> ConductionSolver<'m> {
                     self.problem.material,
                     &ev.full,
                     self.interfaces,
+                    self.element_materials,
                 )?;
                 let (j_ff, _) = reduce_matrix_and_lift(&jacobian, &self.dofs);
                 let rhs: Vec<f64> = ev.r.iter().map(|v| -v).collect();
@@ -1253,4 +1276,19 @@ pub fn solve_with_interfaces(
     config: SolveConfig,
 ) -> Result<ConductionSolution, ConductionError> {
     ConductionSolver::new_with_interfaces(problem, interfaces, config)?.run(cx)
+}
+
+/// Solve with a checked per-element constitutive assignment.
+///
+/// # Errors
+/// Assignment validation plus every refusal [`solve`] can produce.
+pub fn solve_with_element_materials(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    materials: &ElementMaterials,
+    config: SolveConfig,
+) -> Result<ConductionSolution, ConductionError> {
+    let mut solver = ConductionSolver::new(problem, config)?;
+    solver.bind_element_materials(materials)?;
+    solver.run(cx)
 }

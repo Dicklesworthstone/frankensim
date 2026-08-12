@@ -662,3 +662,142 @@ impl ConductivityModel {
         }
     }
 }
+
+/// Stable constitutive identity. Caller-chosen, unique in one table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MaterialId(pub u32);
+
+/// Checked set of conductivity models keyed by [`MaterialId`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterialTable {
+    models: std::collections::BTreeMap<MaterialId, ConductivityModel>,
+}
+
+impl MaterialTable {
+    /// Admit a nonempty table with unique ids.
+    ///
+    /// # Errors
+    /// [`ConductionError::MaterialAssignment`] when empty or duplicated.
+    pub fn new(
+        entries: impl IntoIterator<Item = (MaterialId, ConductivityModel)>,
+    ) -> Result<Self, ConductionError> {
+        let mut models = std::collections::BTreeMap::new();
+        for (id, model) in entries {
+            if models.insert(id, model).is_some() {
+                return Err(ConductionError::MaterialAssignment {
+                    what: format!("duplicate material id {}", id.0),
+                    fix: "give each constitutive model a unique MaterialId".to_string(),
+                });
+            }
+        }
+        if models.is_empty() {
+            return Err(ConductionError::MaterialAssignment {
+                what: "material table is empty".to_string(),
+                fix: "supply at least one conductivity model".to_string(),
+            });
+        }
+        Ok(Self { models })
+    }
+
+    /// The model for `id`.
+    ///
+    /// # Errors
+    /// Unknown id.
+    pub fn get(&self, id: MaterialId) -> Result<&ConductivityModel, ConductionError> {
+        self.models
+            .get(&id)
+            .ok_or_else(|| ConductionError::MaterialAssignment {
+                what: format!("unknown material id {}", id.0),
+                fix: "assign only ids present in the material table".to_string(),
+            })
+    }
+
+    /// How many models are stored.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.models.len()
+    }
+
+    /// True when the table has no models. Constructor refuses this.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.models.is_empty()
+    }
+}
+
+/// One checked [`MaterialId`] per tetrahedron, plus the table they name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementMaterials {
+    table: MaterialTable,
+    of_element: Vec<MaterialId>,
+}
+
+impl ElementMaterials {
+    /// Bind a table to a per-element id vector.
+    ///
+    /// # Errors
+    /// Empty assignment, unknown id, or an empty table (via [`MaterialTable::new`]).
+    pub fn new(table: MaterialTable, of_element: Vec<MaterialId>) -> Result<Self, ConductionError> {
+        if of_element.is_empty() {
+            return Err(ConductionError::MaterialAssignment {
+                what: "element material assignment is empty".to_string(),
+                fix: "supply one MaterialId per tetrahedron".to_string(),
+            });
+        }
+        for (e, &id) in of_element.iter().enumerate() {
+            table.get(id).map_err(|err| match err {
+                ConductionError::MaterialAssignment { what, fix } => {
+                    ConductionError::MaterialAssignment {
+                        what: format!("element {e}: {what}"),
+                        fix,
+                    }
+                }
+                other => other,
+            })?;
+        }
+        Ok(Self { table, of_element })
+    }
+
+    /// Require the assignment length to match the mesh.
+    ///
+    /// # Errors
+    /// [`ConductionError::FieldLength`] on a length mismatch.
+    pub fn validate_for(&self, mesh: &crate::mesh::ConductionMesh) -> Result<(), ConductionError> {
+        if self.of_element.len() != mesh.element_count() {
+            return Err(ConductionError::FieldLength {
+                field: "element material assignment",
+                expected: mesh.element_count(),
+                found: self.of_element.len(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The constitutive model of tetrahedron `element`.
+    ///
+    /// # Errors
+    /// Out-of-range element or unknown id (the latter is constructor-closed).
+    pub fn model_for(&self, element: usize) -> Result<&ConductivityModel, ConductionError> {
+        let id = *self
+            .of_element
+            .get(element)
+            .ok_or(ConductionError::FieldLength {
+                field: "element material assignment",
+                expected: self.of_element.len(),
+                found: element,
+            })?;
+        self.table.get(id)
+    }
+
+    /// Per-element ids, in mesh element order.
+    #[must_use]
+    pub fn of_element(&self) -> &[MaterialId] {
+        &self.of_element
+    }
+
+    /// The admitted table.
+    #[must_use]
+    pub const fn table(&self) -> &MaterialTable {
+        &self.table
+    }
+}

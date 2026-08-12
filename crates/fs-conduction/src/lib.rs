@@ -87,7 +87,8 @@ pub use interface::{
     ThermalInterfaces, ThermalResistanceTerm,
 };
 pub use material::{
-    CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ProvenanceClass, TemperatureSpan,
+    CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ElementMaterials, MaterialId,
+    MaterialTable, ProvenanceClass, TemperatureSpan,
 };
 pub use mesh::{BoundaryFace, ConductionMesh};
 pub use power::{
@@ -104,7 +105,8 @@ pub use radiation::{
 pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
     EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
-    RobinFlux, SolveConfig, StopReason, StopRule, solve, solve_with_interfaces,
+    RobinFlux, SolveConfig, StopReason, StopRule, solve, solve_with_element_materials,
+    solve_with_interfaces,
 };
 
 /// Crate version, re-exported for provenance stamping.
@@ -198,6 +200,13 @@ pub enum ConductionError {
     Conductivity {
         /// Diagnosis.
         what: String,
+    },
+    /// A heterogeneous material table or per-element assignment is not admissible.
+    MaterialAssignment {
+        /// Diagnosis.
+        what: String,
+        /// How to repair it.
+        fix: String,
     },
     /// A thermal interface declaration, material-card binding, or matching
     /// trace is not admissible.
@@ -361,6 +370,9 @@ impl fmt::Display for ConductionError {
             ConductionError::Conductivity { what } => {
                 write!(f, "inadmissible conductivity model: {what}")
             }
+            ConductionError::MaterialAssignment { what, fix } => {
+                write!(f, "inadmissible material assignment: {what}; {fix}")
+            }
             ConductionError::Interface {
                 interface,
                 what,
@@ -456,6 +468,7 @@ impl ConductionError {
             ConductionError::NoFreeDofs => "conduction-no-free-dofs",
             ConductionError::SingularPureNeumann => "conduction-singular-pure-neumann",
             ConductionError::Conductivity { .. } => "conduction-conductivity",
+            ConductionError::MaterialAssignment { .. } => "conduction-material-assignment",
             ConductionError::Interface { .. } => "conduction-interface",
             ConductionError::Radiation { .. } => "conduction-radiation",
             ConductionError::OutsideTemperatureSpan { .. } => "conduction-outside-span",
