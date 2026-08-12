@@ -188,6 +188,14 @@ pub struct RadiationSolution {
     pub panels_per_wavelength: f64,
     /// Radiated power W = 1/2 Re SUM p conj(v) A [W].
     pub radiated_power: f64,
+    /// Outward-rounded enclosure of the exact panel-power dot product [W].
+    ///
+    /// This covers only floating-point evaluation of already-computed
+    /// pressure, velocity, and area values. It does not bound BEM solve,
+    /// quadrature, discretization, or model error. If this interval straddles
+    /// zero, a negative rounded sum is published as neutral zero rather than
+    /// as evidence of non-passivity.
+    pub radiated_power_roundoff_interval: (f64, f64),
     /// LOWER BOUND on the 1-norm condition number of the assembled
     /// system, from `||A||_1` times the largest `||A^{-1} b||_1` over a
     /// fixed set of deterministic unit-1-norm probe solves. A large
@@ -425,10 +433,8 @@ impl<'a> RadiationOperator<'a> {
         }
         self.lu.solve(&mut pressure);
 
-        let mut radiated_power = 0.0;
-        for j in 0..n {
-            radiated_power += 0.5 * (pressure[j] * velocity[j].conj()).re * self.surface.areas()[j];
-        }
+        let (radiated_power, radiated_power_roundoff_interval) =
+            evaluate_radiated_power(&pressure, velocity, self.surface.areas());
 
         RadiationSolution {
             pressure,
@@ -438,10 +444,54 @@ impl<'a> RadiationOperator<'a> {
             surface_fingerprint: surface_fingerprint(self.surface),
             panels_per_wavelength: self.panels_per_wavelength,
             radiated_power,
+            radiated_power_roundoff_interval,
             condition_lower_bound: self.condition_lower_bound,
             dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
         }
     }
+}
+
+fn outward_product(a: f64, b: f64) -> (f64, f64) {
+    let product = a * b;
+    (product.next_down(), product.next_up())
+}
+
+fn outward_add(left: (f64, f64), right: (f64, f64)) -> (f64, f64) {
+    (
+        (left.0 + right.0).next_down(),
+        (left.1 + right.1).next_up(),
+    )
+}
+
+fn outward_scale_positive(value: (f64, f64), scale: f64) -> (f64, f64) {
+    (
+        (value.0 * scale).next_down(),
+        (value.1 * scale).next_up(),
+    )
+}
+
+fn evaluate_radiated_power(
+    pressure: &[C64],
+    velocity: &[C64],
+    areas: &[f64],
+) -> (f64, (f64, f64)) {
+    let mut rounded = 0.0;
+    let mut enclosure = (0.0, 0.0);
+    for ((&pressure, &velocity), &area) in pressure.iter().zip(velocity).zip(areas) {
+        rounded += 0.5 * (pressure * velocity.conj()).re * area;
+        let real_dot = outward_add(
+            outward_product(pressure.re, velocity.re),
+            outward_product(pressure.im, velocity.im),
+        );
+        let panel_power =
+            outward_scale_positive(outward_scale_positive(real_dot, 0.5), area);
+        enclosure = outward_add(enclosure, panel_power);
+    }
+    let finite_enclosure = enclosure.0.is_finite() && enclosure.1.is_finite();
+    if rounded < 0.0 && finite_enclosure && enclosure.0 <= 0.0 && enclosure.1 >= 0.0 {
+        rounded = 0.0;
+    }
+    (rounded, enclosure)
 }
 
 /// Evaluate complex acoustic pressure [Pa] at finite exterior points [m].
@@ -1136,6 +1186,14 @@ mod tests {
         assert_eq!(
             actual.radiated_power.to_bits(),
             expected.radiated_power.to_bits()
+        );
+        assert_eq!(
+            actual.radiated_power_roundoff_interval.0.to_bits(),
+            expected.radiated_power_roundoff_interval.0.to_bits()
+        );
+        assert_eq!(
+            actual.radiated_power_roundoff_interval.1.to_bits(),
+            expected.radiated_power_roundoff_interval.1.to_bits()
         );
         assert_eq!(
             actual.condition_lower_bound.to_bits(),
