@@ -74,6 +74,9 @@ everywhere: this is screening, not a viscous truth source.
   solves; feeds the vibroacoustic-coupling bead.
 - `far_field` — sampled directivity amplitudes (monopole uniform to
   0.00%, dipole cos-theta correlation 1.0000 measured).
+- `exterior_pressure_at_points` — deterministic batched finite-distance
+  pressure via `SUM (dG/dn_y p - G i omega rho v) A`; mismatched source
+  surface or medium and invalid/non-exterior points are refused.
 - `directivity_sh_table` / `DirectivityTable` — far field projected
   onto orthonormal complex spherical harmonics (Condon–Shortley,
   `Y_{l,-m} = (-1)^m conj(Y_lm)`) up to `l_max <= MAX_SH_DEGREE = 64`
@@ -214,6 +217,8 @@ NASA marks it as U.S. Government work with public use permitted.
    bound inflates across the fictitious-frequency band while
    Burton-Miller's stays flat (measured 20.8x vs 1.4x; asserted > 2x
    separation with the peak found by a coarse-then-refined scan).
+7. Pulsating-sphere finite pressure matches within 8% at `ka = 1` and
+   converges to the direct far field (2% remainder).
 
 ## No-claim boundaries
 
@@ -250,4 +255,5 @@ NASA marks it as U.S. Government work with public use permitted.
   (dense cap 8192 panels), no scattering/incident-field path,
   no half-space or impedance boundary conditions, no Bessel-backed
   piston closed form (small-ka series only until the duct bead's special
-  functions land).
+  functions land). Finite-point admission is a non-certifying discrete
+  solid-angle guard and retains centroid-panel error.

@@ -131,7 +131,7 @@ impl core::fmt::Display for HelmholtzError {
 impl std::error::Error for HelmholtzError {}
 
 /// Acoustic medium (SI): density and sound speed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Medium {
     /// Ambient density rho [kg/m^3].
     pub density: f64,
@@ -180,6 +180,10 @@ pub struct RadiationSolution {
     pub velocity: Vec<C64>,
     /// Wavenumber k [1/m].
     pub k: f64,
+    /// Acoustic medium used to turn velocity into Neumann data.
+    pub medium: Medium,
+    /// Source-panel fingerprint: a cross-wiring guard, not a certificate.
+    pub surface_fingerprint: u64,
     /// Measured panels per wavelength (the refusal diagnostic).
     pub panels_per_wavelength: f64,
     /// Radiated power W = 1/2 Re SUM p conj(v) A [W].
@@ -271,6 +275,21 @@ fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
         max_area = max_area.max(a);
     }
     max_area.sqrt()
+}
+
+fn surface_fingerprint(surface: &SpherePanels) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    hash ^= surface.centroids().len() as u64;
+    for j in 0..surface.centroids().len() {
+        for value in surface.centroids()[j]
+            .into_iter()
+            .chain(surface.normals()[j])
+            .chain([surface.areas()[j]])
+        {
+            hash = (hash ^ value.to_bits()).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 /// Solve the exterior Neumann radiation problem: prescribed complex
@@ -415,12 +434,104 @@ impl<'a> RadiationOperator<'a> {
             pressure,
             velocity: velocity.to_vec(),
             k: self.k,
+            medium: self.medium,
+            surface_fingerprint: surface_fingerprint(self.surface),
             panels_per_wavelength: self.panels_per_wavelength,
             radiated_power,
             condition_lower_bound: self.condition_lower_bound,
             dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
         }
     }
+}
+
+/// Evaluate complex acoustic pressure [Pa] at finite exterior points [m].
+/// `p(x) = SUM_j [dG(x,y_j)/dn_y p_j - G(x,y_j) q_j] A_j`, with
+/// `q_j = i omega rho v_j`; output order matches `points` order.
+/// Its discrete solid-angle guard is not a topology certificate.
+///
+/// # Errors
+/// [`HelmholtzError`] for mismatched/malformed solution data or a non-finite,
+/// centroid-coincident, or non-exterior point.
+pub fn exterior_pressure_at_points(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    points: &[[f64; 3]],
+) -> Result<Vec<C64>, HelmholtzError> {
+    let n = surface.centroids().len();
+    if solution.pressure.len() != n || solution.velocity.len() != n {
+        return Err(HelmholtzError::ShapeMismatch {
+            what: "solution fields must match the panel count",
+        });
+    }
+    if solution.surface_fingerprint != surface_fingerprint(surface) {
+        return Err(HelmholtzError::ShapeMismatch {
+            what: "solution surface fingerprint must match the evaluation surface",
+        });
+    }
+    if solution.medium.density.to_bits() != medium.density.to_bits()
+        || solution.medium.sound_speed.to_bits() != medium.sound_speed.to_bits()
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "evaluation medium must exactly match the solved medium",
+        });
+    }
+    if !(medium.density > 0.0
+        && medium.density.is_finite()
+        && medium.sound_speed > 0.0
+        && medium.sound_speed.is_finite()
+        && solution.k > 0.0
+        && solution.k.is_finite())
+        || solution
+            .pressure
+            .iter()
+            .chain(&solution.velocity)
+            .any(|z| !z.re.is_finite() || !z.im.is_finite())
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "radiation solution must contain finite fields and positive finite k",
+        });
+    }
+
+    let k = solution.k;
+    let omega_rho = k * medium.sound_speed * medium.density;
+    let four_pi = 4.0 * core::f64::consts::PI;
+    let mut pressure = Vec::with_capacity(points.len());
+    for &x in points {
+        if x.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(HelmholtzError::BadParameter {
+                what: "evaluation points must be finite",
+            });
+        }
+        let mut value = C64::ZERO;
+        let mut solid_angle = 0.0;
+        for j in 0..n {
+            let d = sub(x, surface.centroids()[j]);
+            let r = norm(d);
+            if !(r > 0.0 && r.is_finite()) {
+                return Err(HelmholtzError::BadParameter {
+                    what: "evaluation points must not coincide with panel centroids",
+                });
+            }
+            let normal_projection = dot(surface.normals()[j], d);
+            solid_angle += normal_projection * surface.areas()[j] / (four_pi * r * r * r);
+            let dgdny = green_dr(k, r).scale(-normal_projection / r);
+            let q = solution.velocity[j] * C64::new(0.0, omega_rho);
+            value =
+                value + (dgdny * solution.pressure[j] - green(k, r) * q).scale(surface.areas()[j]);
+        }
+        if !solid_angle.is_finite()
+            || solid_angle.abs() >= 0.5
+            || !value.re.is_finite()
+            || !value.im.is_finite()
+        {
+            return Err(HelmholtzError::BadParameter {
+                what: "evaluation points must lie in the discrete exterior",
+            });
+        }
+        pressure.push(value);
+    }
+    Ok(pressure)
 }
 
 /// Probe-based lower bound on `cond_1(A) = ||A||_1 ||A^{-1}||_1`:
@@ -1016,6 +1127,8 @@ mod tests {
             assert_complex_bits(actual, expected);
         }
         assert_eq!(actual.k.to_bits(), expected.k.to_bits());
+        assert_eq!(actual.medium, expected.medium);
+        assert_eq!(actual.surface_fingerprint, expected.surface_fingerprint);
         assert_eq!(
             actual.panels_per_wavelength.to_bits(),
             expected.panels_per_wavelength.to_bits()
@@ -1179,6 +1292,44 @@ mod tests {
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"pulsating-sphere\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
         );
+    }
+
+    #[test]
+    fn finite_exterior_pressure_matches_pulsating_sphere_and_far_field() {
+        let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
+        let medium = Medium::air();
+        let k = 1.0;
+        let solution = solve_radiation(
+            &surface,
+            k,
+            medium,
+            &uniform_velocity(surface.centroids().len()),
+            Formulation::PlainCbie,
+        )
+        .expect("solve");
+        let radii = [2.0, 8.0, 64.0];
+        let points = radii.map(|r| [0.0, 0.0, r]);
+        let finite = exterior_pressure_at_points(&surface, &solution, medium, &points)
+            .expect("finite exterior pressure");
+        let surface_pressure = pulsating_sphere_impedance(k, 1.0);
+        for (&r, &actual) in radii.iter().zip(&finite) {
+            let expected = surface_pressure.scale(1.0 / r) * expik(k * (r - 1.0));
+            let relative_error = (actual - expected).abs() / expected.abs();
+            assert!(
+                relative_error < 0.08,
+                "r={r}: finite pressure {actual:?} vs analytic {expected:?}, rel {relative_error:.4}"
+            );
+        }
+        let far = far_field(&surface, &solution, medium, &[[0.0, 0.0, 1.0]])[0];
+        let scaled = |index: usize| finite[index].scale(radii[index]) * expik(-k * radii[index]);
+        let near_error = (scaled(1) - far).abs();
+        let distant_error = (scaled(2) - far).abs();
+        assert!(distant_error < near_error);
+        assert!(distant_error < 0.02 * far.abs());
+        assert!(matches!(
+            exterior_pressure_at_points(&surface, &solution, medium, &[[0.0, 0.0, 0.0]]),
+            Err(HelmholtzError::BadParameter { .. })
+        ));
     }
 
     #[test]
@@ -1855,6 +2006,8 @@ mod tests {
             pressure: vec![C64::ZERO; n],
             velocity: vec![C64::ZERO; n],
             k: ka,
+            medium: Medium::air(),
+            surface_fingerprint: surface_fingerprint(&surface),
             panels_per_wavelength: 10.0,
             radiated_power: 0.0,
             condition_lower_bound: 1.0,
