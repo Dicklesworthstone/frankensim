@@ -50,6 +50,172 @@ pub(super) struct PlanarDielectricConnection {
     pub(super) optical_path_length_m: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PlanarDielectricReflectionConnection {
+    pub(super) entry_point: Point3,
+    pub(super) reflection_point: Point3,
+    pub(super) exit_point: Point3,
+    pub(super) incident_direction: Vec3,
+    pub(super) internal_incident_direction: Vec3,
+    pub(super) internal_reflected_direction: Vec3,
+    pub(super) outgoing_direction: Vec3,
+    pub(super) optical_path_length_m: f64,
+}
+
+/// Exact target-area to source-solid-angle Jacobian for a stationary
+/// transmission/reflection/transmission connection.
+pub(super) fn reflected_target_area_per_source_solid_angle(
+    source: Point3,
+    target: Point3,
+    entry: PlaneFrame,
+    reflection: PlaneFrame,
+    exit: PlaneFrame,
+    eta_glass: f64,
+    connection: PlanarDielectricReflectionConnection,
+    target_tangent: Vec3,
+    target_bitangent: Vec3,
+) -> Option<f64> {
+    if !finite_vec(target_tangent)
+        || !finite_vec(target_bitangent)
+        || (target_tangent.norm() - 1.0).abs() > 2.0e-10
+        || (target_bitangent.norm() - 1.0).abs() > 2.0e-10
+        || target_tangent.dot(target_bitangent).abs() > 2.0e-10
+    {
+        return None;
+    }
+    let p = entry.coordinates(connection.entry_point);
+    let r = reflection.coordinates(connection.reflection_point);
+    let q = exit.coordinates(connection.exit_point);
+    let parameters = [p[0], p[1], r[0], r[1], q[0], q[1]];
+    let system = reflected_fermat_system(
+        source, target, entry, reflection, exit, eta_glass, parameters,
+    )?;
+    let (_, source_direction_hessian) =
+        direction_hessian(connection.entry_point.delta_from(source))?;
+    let (_, target_direction_hessian) =
+        direction_hessian(target.delta_from(connection.exit_point))?;
+    let exit_basis = [exit.tangent, exit.bitangent];
+    let target_basis = [target_tangent, target_bitangent];
+    let mut direction_derivatives = [Vec3::new(0.0, 0.0, 0.0); 2];
+    for target_axis in 0..2 {
+        let mut rhs = [0.0; 6];
+        for row in 0..2 {
+            rhs[row + 4] = bilinear(
+                exit_basis[row],
+                target_direction_hessian,
+                target_basis[target_axis],
+            );
+        }
+        let derivative = solve_square(system.hessian, rhs)?;
+        let entry_derivative = add(
+            entry.tangent.scale(derivative[0]),
+            entry.bitangent.scale(derivative[1]),
+        );
+        direction_derivatives[target_axis] =
+            matrix_vector(source_direction_hessian, entry_derivative);
+    }
+    let solid_angle_per_area = connection
+        .incident_direction
+        .dot(cross(direction_derivatives[0], direction_derivatives[1]))
+        .abs();
+    (solid_angle_per_area.is_finite() && solid_angle_per_area > 0.0)
+        .then(|| 1.0 / solid_angle_per_area)
+}
+
+/// Find the stationary path that transmits into a homogeneous dielectric,
+/// reflects once from a prescribed internal face, and transmits back out.
+pub(super) fn solve_three_planar_interfaces_one_reflection(
+    source: Point3,
+    target: Point3,
+    entry: PlaneFrame,
+    reflection: PlaneFrame,
+    exit: PlaneFrame,
+    eta_glass: f64,
+    entry_seed: Point3,
+    reflection_seed: Point3,
+    exit_seed: Point3,
+) -> Option<PlanarDielectricReflectionConnection> {
+    if !finite_point(source)
+        || !finite_point(target)
+        || !valid_frame(entry)
+        || !valid_frame(reflection)
+        || !valid_frame(exit)
+        || !eta_glass.is_finite()
+        || eta_glass <= 1.0
+        || source.delta_from(entry.origin).dot(entry.outward_normal) <= 0.0
+        || target.delta_from(exit.origin).dot(exit.outward_normal) <= 0.0
+    {
+        return None;
+    }
+    let p = entry.coordinates(entry_seed);
+    let r = reflection.coordinates(reflection_seed);
+    let q = exit.coordinates(exit_seed);
+    let mut parameters = [p[0], p[1], r[0], r[1], q[0], q[1]];
+    let mut previous_objective = reflected_optical_length(
+        source, target, entry, reflection, exit, eta_glass, parameters,
+    )?;
+
+    for _ in 0..MAX_NEWTON_STEPS {
+        let system = reflected_fermat_system(
+            source, target, entry, reflection, exit, eta_glass, parameters,
+        )?;
+        let gradient_norm = system
+            .gradient
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        if gradient_norm <= GRADIENT_TOLERANCE {
+            return finish_reflected_connection(
+                source, target, entry, reflection, exit, eta_glass, parameters,
+            );
+        }
+        let rhs = system.gradient.map(|value| -value);
+        let step = solve_square(system.hessian, rhs)?;
+        let step_norm = step.into_iter().map(f64::abs).fold(0.0, f64::max);
+        let directional_derivative = dot(system.gradient, step);
+        if !step_norm.is_finite()
+            || !directional_derivative.is_finite()
+            || directional_derivative >= 0.0
+        {
+            return None;
+        }
+        let mut scale = 1.0;
+        let mut accepted = None;
+        for _ in 0..24 {
+            let candidate = std::array::from_fn(|index| parameters[index] + scale * step[index]);
+            if let Some(objective) = reflected_optical_length(
+                source, target, entry, reflection, exit, eta_glass, candidate,
+            ) && objective <= previous_objective + 1.0e-4 * scale * directional_derivative
+            {
+                accepted = Some((candidate, objective));
+                break;
+            }
+            scale *= 0.5;
+        }
+        let (candidate, objective) = accepted?;
+        parameters = candidate;
+        previous_objective = objective;
+        if scale * step_norm <= STEP_TOLERANCE {
+            let system = reflected_fermat_system(
+                source, target, entry, reflection, exit, eta_glass, parameters,
+            )?;
+            if system
+                .gradient
+                .into_iter()
+                .map(f64::abs)
+                .fold(0.0, f64::max)
+                <= 8.0 * GRADIENT_TOLERANCE
+            {
+                return finish_reflected_connection(
+                    source, target, entry, reflection, exit, eta_glass, parameters,
+                );
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// Exact local change of variables from a target-area proposal to source
 /// solid angle for one admitted stationary connection.
 ///
@@ -219,6 +385,151 @@ struct FermatSystem {
     hessian: [[f64; 4]; 4],
 }
 
+#[derive(Clone, Copy)]
+struct ReflectedFermatSystem {
+    gradient: [f64; 6],
+    hessian: [[f64; 6]; 6],
+}
+
+fn reflected_fermat_system(
+    source: Point3,
+    target: Point3,
+    entry: PlaneFrame,
+    reflection: PlaneFrame,
+    exit: PlaneFrame,
+    eta_glass: f64,
+    parameters: [f64; 6],
+) -> Option<ReflectedFermatSystem> {
+    let p = entry.point([parameters[0], parameters[1]]);
+    let r = reflection.point([parameters[2], parameters[3]]);
+    let q = exit.point([parameters[4], parameters[5]]);
+    let (u_source, h_source) = direction_hessian(p.delta_from(source))?;
+    let (u_first, h_first) = direction_hessian(r.delta_from(p))?;
+    let (u_second, h_second) = direction_hessian(q.delta_from(r))?;
+    let (u_target, h_target) = direction_hessian(target.delta_from(q))?;
+    let bases = [
+        [entry.tangent, entry.bitangent],
+        [reflection.tangent, reflection.bitangent],
+        [exit.tangent, exit.bitangent],
+    ];
+    let vector_gradient = [
+        sub(u_source, u_first.scale(eta_glass)),
+        sub(u_first.scale(eta_glass), u_second.scale(eta_glass)),
+        sub(u_second.scale(eta_glass), u_target),
+    ];
+    let diagonal = [
+        matrix_add(h_source, matrix_scale(h_first, eta_glass)),
+        matrix_scale(matrix_add(h_first, h_second), eta_glass),
+        matrix_add(matrix_scale(h_second, eta_glass), h_target),
+    ];
+    let adjacent = [
+        matrix_scale(h_first, -eta_glass),
+        matrix_scale(h_second, -eta_glass),
+    ];
+    let mut gradient = [0.0; 6];
+    let mut hessian = [[0.0; 6]; 6];
+    for vertex in 0..3 {
+        for row in 0..2 {
+            let matrix_row = 2 * vertex + row;
+            gradient[matrix_row] = bases[vertex][row].dot(vector_gradient[vertex]);
+            for column in 0..2 {
+                hessian[matrix_row][2 * vertex + column] =
+                    bilinear(bases[vertex][row], diagonal[vertex], bases[vertex][column]);
+            }
+        }
+    }
+    for edge in 0..2 {
+        for row in 0..2 {
+            for column in 0..2 {
+                let value = bilinear(bases[edge][row], adjacent[edge], bases[edge + 1][column]);
+                hessian[2 * edge + row][2 * (edge + 1) + column] = value;
+                hessian[2 * (edge + 1) + column][2 * edge + row] = value;
+            }
+        }
+    }
+    gradient
+        .iter()
+        .chain(hessian.iter().flatten())
+        .all(|value| value.is_finite())
+        .then_some(ReflectedFermatSystem { gradient, hessian })
+}
+
+fn finish_reflected_connection(
+    source: Point3,
+    target: Point3,
+    entry: PlaneFrame,
+    reflection: PlaneFrame,
+    exit: PlaneFrame,
+    eta_glass: f64,
+    parameters: [f64; 6],
+) -> Option<PlanarDielectricReflectionConnection> {
+    let entry_point = entry.point([parameters[0], parameters[1]]);
+    let reflection_point = reflection.point([parameters[2], parameters[3]]);
+    let exit_point = exit.point([parameters[4], parameters[5]]);
+    let incident_direction = unit(entry_point.delta_from(source))?;
+    let internal_incident_direction = unit(reflection_point.delta_from(entry_point))?;
+    let internal_reflected_direction = unit(exit_point.delta_from(reflection_point))?;
+    let outgoing_direction = unit(target.delta_from(exit_point))?;
+    if incident_direction.dot(entry.outward_normal) >= 0.0
+        || internal_incident_direction.dot(entry.outward_normal) >= 0.0
+        || internal_incident_direction.dot(reflection.outward_normal) <= 0.0
+        || internal_reflected_direction.dot(reflection.outward_normal) >= 0.0
+        || internal_reflected_direction.dot(exit.outward_normal) <= 0.0
+        || outgoing_direction.dot(exit.outward_normal) <= 0.0
+    {
+        return None;
+    }
+    let system = reflected_fermat_system(
+        source, target, entry, reflection, exit, eta_glass, parameters,
+    )?;
+    if system
+        .gradient
+        .into_iter()
+        .map(f64::abs)
+        .fold(0.0, f64::max)
+        > 8.0 * GRADIENT_TOLERANCE
+    {
+        return None;
+    }
+    Some(PlanarDielectricReflectionConnection {
+        entry_point,
+        reflection_point,
+        exit_point,
+        incident_direction,
+        internal_incident_direction,
+        internal_reflected_direction,
+        outgoing_direction,
+        optical_path_length_m: reflected_optical_length(
+            source, target, entry, reflection, exit, eta_glass, parameters,
+        )?,
+    })
+}
+
+fn reflected_optical_length(
+    source: Point3,
+    target: Point3,
+    entry: PlaneFrame,
+    reflection: PlaneFrame,
+    exit: PlaneFrame,
+    eta_glass: f64,
+    parameters: [f64; 6],
+) -> Option<f64> {
+    let p = entry.point([parameters[0], parameters[1]]);
+    let r = reflection.point([parameters[2], parameters[3]]);
+    let q = exit.point([parameters[4], parameters[5]]);
+    let first = p.delta_from(source).norm();
+    let internal_first = r.delta_from(p).norm();
+    let internal_second = q.delta_from(r).norm();
+    let last = target.delta_from(q).norm();
+    let value = first + eta_glass * (internal_first + internal_second) + last;
+    (first > MIN_SEGMENT_M
+        && internal_first > MIN_SEGMENT_M
+        && internal_second > MIN_SEGMENT_M
+        && last > MIN_SEGMENT_M
+        && value.is_finite())
+    .then_some(value)
+}
+
 fn fermat_system(
     source: Point3,
     target: Point3,
@@ -369,6 +680,39 @@ fn solve_4x4(mut matrix: [[f64; 4]; 4], mut rhs: [f64; 4]) -> Option<[f64; 4]> {
         .then_some(solution)
 }
 
+fn solve_square<const N: usize>(mut matrix: [[f64; N]; N], mut rhs: [f64; N]) -> Option<[f64; N]> {
+    for column in 0..N {
+        let pivot = (column..N).max_by(|left, right| {
+            matrix[*left][column]
+                .abs()
+                .total_cmp(&matrix[*right][column].abs())
+        })?;
+        if !matrix[pivot][column].is_finite() || matrix[pivot][column].abs() <= MIN_PIVOT {
+            return None;
+        }
+        matrix.swap(column, pivot);
+        rhs.swap(column, pivot);
+        for row in column + 1..N {
+            let factor = matrix[row][column] / matrix[column][column];
+            for inner in column..N {
+                matrix[row][inner] -= factor * matrix[column][inner];
+            }
+            rhs[row] -= factor * rhs[column];
+        }
+    }
+    let mut solution = [0.0; N];
+    for row in (0..N).rev() {
+        let tail = (row + 1..N)
+            .map(|column| matrix[row][column] * solution[column])
+            .sum::<f64>();
+        solution[row] = (rhs[row] - tail) / matrix[row][row];
+    }
+    solution
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(solution)
+}
+
 fn valid_frame(frame: PlaneFrame) -> bool {
     if !finite_point(frame.origin)
         || !finite_vec(frame.tangent)
@@ -450,6 +794,10 @@ fn cross(left: Vec3, right: Vec3) -> Vec3 {
 }
 
 fn dot4(left: [f64; 4], right: [f64; 4]) -> f64 {
+    left.into_iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+fn dot<const N: usize>(left: [f64; N], right: [f64; N]) -> f64 {
     left.into_iter().zip(right).map(|(a, b)| a * b).sum()
 }
 
@@ -645,5 +993,90 @@ mod tests {
             finite_difference,
             2.0e-7 * finite_difference,
         );
+    }
+
+    #[test]
+    fn one_internal_reflection_is_reciprocal_and_has_exact_area_jacobian() {
+        let source = Point3::new(-0.35, 0.08, -0.9);
+        let target = Point3::new(0.55, -0.12, -0.7);
+        let lower = frame(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -1.0));
+        let upper = frame(Point3::new(0.0, 0.0, 0.25), Vec3::new(0.0, 0.0, 1.0));
+        let connection = solve_three_planar_interfaces_one_reflection(
+            source,
+            target,
+            lower,
+            upper,
+            lower,
+            1.52,
+            Point3::new(-0.2, 0.04, 0.0),
+            Point3::new(0.0, 0.0, 0.25),
+            Point3::new(0.25, -0.05, 0.0),
+        )
+        .unwrap();
+        let reverse = solve_three_planar_interfaces_one_reflection(
+            target,
+            source,
+            lower,
+            upper,
+            lower,
+            1.52,
+            connection.exit_point,
+            connection.reflection_point,
+            connection.entry_point,
+        )
+        .unwrap();
+        assert!(reverse.entry_point.delta_from(connection.exit_point).norm() <= 2.0e-10);
+        assert!(
+            reverse
+                .reflection_point
+                .delta_from(connection.reflection_point)
+                .norm()
+                <= 2.0e-10
+        );
+        assert!(reverse.exit_point.delta_from(connection.entry_point).norm() <= 2.0e-10);
+
+        let target_tangent = Vec3::new(1.0, 0.0, 0.0);
+        let target_bitangent = Vec3::new(0.0, 1.0, 0.0);
+        let exact = reflected_target_area_per_source_solid_angle(
+            source,
+            target,
+            lower,
+            upper,
+            lower,
+            1.52,
+            connection,
+            target_tangent,
+            target_bitangent,
+        )
+        .unwrap();
+        let epsilon = 1.0e-5;
+        let shifted = |axis: Vec3, sign: f64| {
+            solve_three_planar_interfaces_one_reflection(
+                source,
+                target.offset(axis.scale(sign * epsilon)),
+                lower,
+                upper,
+                lower,
+                1.52,
+                connection.entry_point,
+                connection.reflection_point,
+                connection.exit_point,
+            )
+            .unwrap()
+            .incident_direction
+        };
+        let derivative_x =
+            sub(shifted(target_tangent, 1.0), shifted(target_tangent, -1.0)).scale(0.5 / epsilon);
+        let derivative_y = sub(
+            shifted(target_bitangent, 1.0),
+            shifted(target_bitangent, -1.0),
+        )
+        .scale(0.5 / epsilon);
+        let finite_difference = 1.0
+            / connection
+                .incident_direction
+                .dot(super::cross(derivative_x, derivative_y))
+                .abs();
+        assert_near(exact, finite_difference, 4.0e-7 * finite_difference);
     }
 }

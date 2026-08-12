@@ -80,7 +80,11 @@ use fs_geom::{Chart, Point3, Vec3};
 use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 use fs_rand::qmc::Sobol;
-use manifold::{PlaneFrame, solve_two_planar_interfaces, target_area_per_source_solid_angle};
+use manifold::{
+    PlaneFrame, reflected_target_area_per_source_solid_angle,
+    solve_three_planar_interfaces_one_reflection, solve_two_planar_interfaces,
+    target_area_per_source_solid_angle,
+};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
@@ -134,7 +138,7 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 9;
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 14;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -151,6 +155,11 @@ const CAMERA_LENS_SAMPLE_DOMAIN_V1: u32 = 0x6c65_6e73;
 const PI: f64 = core::f64::consts::PI;
 /// Hero-wavelength packet width (the bead's 4-wavelength packets).
 pub const PACKET: usize = 4;
+/// Path-local cap on exact smooth-dielectric reflection/transmission splits.
+///
+/// Two boundaries cover entry followed by the immediate internal
+/// reflection/exit decision without permitting an unbounded specular tree.
+const SMOOTH_DIELECTRIC_SPLIT_BUDGET: u8 = 2;
 #[cfg(test)]
 const FORCED_TRANSMISSION_EVENT_SAMPLE: f64 = 1.0 - f64::EPSILON;
 /// Self-intersection offset along the normal when spawning rays.
@@ -391,6 +400,8 @@ enum SmoothSlabPath {
     Exited(SmoothSlabExit),
     ManifoldEntered(PlanarManifoldEntry),
     ManifoldExited(PlanarManifoldExit),
+    ReflectedManifoldExited(PlanarReflectedManifoldExit),
+    ManifoldReflected(PlanarManifoldReflected),
 }
 
 #[derive(Clone, Copy)]
@@ -400,7 +411,7 @@ struct SmoothSlabEntry {
     source_direction: Vec3,
     source_pdf_solid_angle: f64,
     slab: ParallelSlab,
-    entry_transmission_probability: f64,
+    entry_event_probability: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -421,7 +432,7 @@ struct PlanarManifoldEntry {
     source_pdf_solid_angle: f64,
     boundary_primitive: usize,
     glass: DielectricGlass,
-    entry_transmission_probability: f64,
+    entry_event_probability: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -433,6 +444,30 @@ struct PlanarManifoldExit {
     boundary_primitive: usize,
     glass: DielectricGlass,
     transmission_probability: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PlanarReflectedManifoldExit {
+    source_origin: Point3,
+    source_geometric_normal: Vec3,
+    source_direction: Vec3,
+    source_pdf_solid_angle: f64,
+    boundary_primitive: usize,
+    glass: DielectricGlass,
+    reflection_triangle_index: u32,
+    event_probability: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PlanarManifoldReflected {
+    source_origin: Point3,
+    source_geometric_normal: Vec3,
+    source_direction: Vec3,
+    source_pdf_solid_angle: f64,
+    boundary_primitive: usize,
+    glass: DielectricGlass,
+    reflection_triangle_index: u32,
+    entry_reflection_probability: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -467,9 +502,9 @@ struct SpectralPathState {
     /// dependent dielectric boundary, each continuation owns exactly one
     /// active lane and can never split again.
     active_lane: Option<usize>,
-    /// Exact reflection/transmission branching budget. One forced split removes
-    /// the dominant primary smooth-glass Fresnel roulette without permitting an
-    /// exponential internal-reflection tree.
+    /// Exact reflection/transmission branching budget. Two forced splits remove
+    /// primary and immediate secondary smooth-glass Fresnel roulette; every
+    /// child consumes one split so the remaining specular tree stays bounded.
     remaining_smooth_dielectric_splits: u8,
 }
 
@@ -513,12 +548,23 @@ struct SlabConnectionGeometry {
 }
 
 #[derive(Clone, Copy)]
+struct EnvironmentManifoldGeometry {
+    entry_point: Point3,
+    exit_point: Point3,
+    incident_direction: Vec3,
+    internal_direction: Vec3,
+    target_solid_angle_per_source_solid_angle: f64,
+}
+
+#[derive(Clone, Copy)]
 struct SlabDirectLane {
     incident_direction: Vec3,
     nee_pdf_solid_angle: f64,
     transmission_probability: f64,
+    entry_transmission_probability: f64,
     radiance_transport: f64,
     visible: bool,
+    reflection_triangle_index: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -9925,6 +9971,84 @@ fn slab_connection_to_environment(
     })
 }
 
+/// Exact target-at-infinity connector for two planar dielectric interfaces.
+///
+/// Reverse Snell transport fixes both segment directions without a nonlinear
+/// solve; their positive intersections with the support planes then fix the
+/// finite points. The angular Jacobian is the two-interface etendue ratio.
+/// Both endpoints are ambient, so the two `eta^2` factors cancel.
+fn planar_manifold_connection_to_environment(
+    source: Point3,
+    entry: PlaneFrame,
+    exit: PlaneFrame,
+    target_direction: Vec3,
+    eta_glass: f64,
+) -> Option<EnvironmentManifoldGeometry> {
+    if !finite_unit_direction(target_direction)
+        || !finite_unit_direction(entry.outward_normal)
+        || !finite_unit_direction(exit.outward_normal)
+        || !eta_glass.is_finite()
+        || eta_glass < 1.0
+        || target_direction.dot(exit.outward_normal) <= 0.0
+    {
+        return None;
+    }
+    let reverse_outgoing = target_direction.scale(-1.0);
+    let (reverse_internal, _) =
+        deterministic_snell_transmission(exit.outward_normal, reverse_outgoing, 1.0, eta_glass)
+            .ok()?;
+    let internal_direction = reverse_internal.scale(-1.0);
+    let (reverse_incident, _) = deterministic_snell_transmission(
+        entry.outward_normal.scale(-1.0),
+        reverse_internal,
+        eta_glass,
+        1.0,
+    )
+    .ok()?;
+    let incident_direction = reverse_incident.scale(-1.0);
+
+    let entry_denominator = incident_direction.dot(entry.outward_normal);
+    if !entry_denominator.is_finite() || entry_denominator >= -1.0e-14 {
+        return None;
+    }
+    let entry_distance =
+        entry.origin.delta_from(source).dot(entry.outward_normal) / entry_denominator;
+    if !entry_distance.is_finite() || entry_distance <= RAY_EPS {
+        return None;
+    }
+    let entry_point = source.offset(incident_direction.scale(entry_distance));
+
+    let exit_denominator = internal_direction.dot(exit.outward_normal);
+    if !exit_denominator.is_finite() || exit_denominator <= 1.0e-14 {
+        return None;
+    }
+    let internal_distance =
+        exit.origin.delta_from(entry_point).dot(exit.outward_normal) / exit_denominator;
+    if !internal_distance.is_finite() || internal_distance <= RAY_EPS {
+        return None;
+    }
+    let exit_point = entry_point.offset(internal_direction.scale(internal_distance));
+
+    let source_cosine = -incident_direction.dot(entry.outward_normal);
+    let internal_entry_cosine = -internal_direction.dot(entry.outward_normal);
+    let internal_exit_cosine = internal_direction.dot(exit.outward_normal);
+    let target_cosine = target_direction.dot(exit.outward_normal);
+    let target_solid_angle_per_source_solid_angle =
+        source_cosine * internal_exit_cosine / (internal_entry_cosine * target_cosine);
+    if !target_solid_angle_per_source_solid_angle.is_finite()
+        || target_solid_angle_per_source_solid_angle <= 0.0
+    {
+        return None;
+    }
+    Some(EnvironmentManifoldGeometry {
+        entry_point,
+        exit_point,
+        incident_direction,
+        internal_direction,
+        target_solid_angle_per_source_solid_angle,
+    })
+}
+
 fn deterministic_snell_transmission(
     normal_toward_incident: Vec3,
     travel_direction: Vec3,
@@ -10034,8 +10158,10 @@ fn trace_parallel_slab_direct_lane(
             incident_direction: geometry.incident_direction,
             nee_pdf_solid_angle,
             transmission_probability: 0.0,
+            entry_transmission_probability: 0.0,
             radiance_transport: 0.0,
             visible: false,
+            reflection_triangle_index: None,
         });
     }
     require_instanced_mesh_face_witness(
@@ -10194,8 +10320,10 @@ fn trace_parallel_slab_direct_lane(
         incident_direction: geometry.incident_direction,
         nee_pdf_solid_angle,
         transmission_probability,
+        entry_transmission_probability,
         radiance_transport,
         visible,
+        reflection_triangle_index: None,
     })
 }
 
@@ -10284,6 +10412,49 @@ fn world_triangle_plane(
     })
 }
 
+/// Return the lowest triangle index whose world-space support plane contains
+/// `triangle_index`. A tessellated planar face is one optical interface, not
+/// one interface per triangle: retaining a raw triangle ID would make forward
+/// manifold NEE and reverse BSDF replay disagree on opposite sides of a quad's
+/// diagonal.
+fn canonical_support_plane_triangle_index(
+    mesh: &TriMesh,
+    transform: RigidTransform,
+    triangle_index: u32,
+) -> Option<u32> {
+    let plane = world_triangle_plane(mesh, transform, triangle_index)?;
+    for candidate in 0..triangle_index {
+        if world_triangle_plane(mesh, transform, candidate)
+            .is_some_and(|candidate_plane| same_support_plane(candidate_plane, plane))
+        {
+            return Some(candidate);
+        }
+    }
+    Some(triangle_index)
+}
+
+/// Enumerate each finite planar interface once, retaining its deterministic
+/// lowest-index triangle as the support-plane identity.
+fn canonical_world_triangle_planes(
+    mesh: &TriMesh,
+    transform: RigidTransform,
+) -> Vec<(u32, PlaneFrame)> {
+    let mut planes = Vec::new();
+    for triangle_index in 0..mesh.triangles.len() {
+        let Some(plane) = world_triangle_plane(mesh, transform, triangle_index as u32) else {
+            continue;
+        };
+        if planes
+            .iter()
+            .any(|(_, canonical)| same_support_plane(*canonical, plane))
+        {
+            continue;
+        }
+        planes.push((triangle_index as u32, plane));
+    }
+    planes
+}
+
 fn discover_planar_manifold_boundary(
     scene: &Scene,
     first_ray: &Ray,
@@ -10359,6 +10530,53 @@ fn discover_planar_manifold_boundary(
     })
 }
 
+/// Deterministically enumerate the canonical entry support faces for the
+/// bounded T-R-T proposal. Unlike the zero-reflection connector, a same-side
+/// reflected path need not intersect the dielectric on the straight
+/// source-to-target chord. Admission therefore starts from the scene's already
+/// supported isolated-convex representation, while actual traversal below
+/// still rejects overlap, nesting, and finite-face misses.
+fn reflected_manifold_boundaries(
+    scene: &Scene,
+    source: Point3,
+    target: Point3,
+    ray_time: Option<&PathTime>,
+) -> Vec<PlanarManifoldBoundary> {
+    let mut boundaries = Vec::new();
+    for (boundary_primitive, primitive) in scene.primitives.iter().enumerate() {
+        let Material::Dielectric { glass, surface } = primitive.material else {
+            continue;
+        };
+        if !surface.is_delta() {
+            continue;
+        }
+        let Some((geometry, transform)) =
+            placed_instanced_geometry(scene, boundary_primitive, ray_time)
+        else {
+            continue;
+        };
+        let SharedGeometry::Mesh(mesh) = geometry else {
+            continue;
+        };
+        if !mesh_is_convex_with_outward_faces(&mesh) {
+            continue;
+        }
+        for (triangle_index, plane) in canonical_world_triangle_planes(&mesh, transform) {
+            if source.delta_from(plane.origin).dot(plane.outward_normal) <= RAY_EPS
+                || target.delta_from(plane.origin).dot(plane.outward_normal) <= RAY_EPS
+            {
+                continue;
+            }
+            boundaries.push(PlanarManifoldBoundary {
+                boundary_primitive,
+                glass,
+                entry_triangle_index: triangle_index,
+            });
+        }
+    }
+    boundaries
+}
+
 fn straight_plane_seed(source: Point3, target: Point3, plane: PlaneFrame) -> Option<(f64, Point3)> {
     let displacement = target.delta_from(source);
     let denominator = displacement.dot(plane.outward_normal);
@@ -10380,6 +10598,55 @@ fn same_support_plane(left: PlaneFrame, right: PlaneFrame) -> bool {
             <= 4.0 * RAY_EPS
 }
 
+/// Necessary angular-support test for a planar `T-R-T` stationary path.
+///
+/// Air-to-glass Snell transmission confines the internal incident direction to
+/// a cone of half-angle `theta` about the inward entry normal, with
+/// `sin(theta) = 1 / eta`. Specular reflection is an orthogonal map, so it maps
+/// that cone to an equal cone about the reflected entry axis. A subsequent
+/// glass-to-air transmission must lie within the equal critical cone about the
+/// outward exit normal. If those cones are strictly disjoint, or the entry cone
+/// cannot point toward the reflection plane, no finite-face Fermat solution can
+/// exist. The comparison guard deliberately fails open at either boundary.
+fn reflected_manifold_cones_may_connect(
+    entry_outward_normal: Vec3,
+    reflection_outward_normal: Vec3,
+    exit_outward_normal: Vec3,
+    eta_glass: f64,
+) -> bool {
+    if !finite_unit_direction(entry_outward_normal)
+        || !finite_unit_direction(reflection_outward_normal)
+        || !finite_unit_direction(exit_outward_normal)
+        || !eta_glass.is_finite()
+        || eta_glass < 1.0
+    {
+        // This is only an optional impossibility cull. Retain the solver's
+        // existing validation and refusal behavior for malformed inputs.
+        return true;
+    }
+
+    let inverse_eta = eta_glass.recip();
+    let comparison_guard = SLAB_PARALLEL_COSINE_TOLERANCE
+        + 32.0 * f64::EPSILON * (1.0 + eta_glass.abs() + inverse_eta.abs());
+    let entry_axis = entry_outward_normal.scale(-1.0);
+
+    // C(entry_axis, theta) contains a direction that can hit the reflection
+    // plane only if entry_axis . n_r >= -sin(theta). Equality is tangential;
+    // retain it conservatively instead of making a rounding-sensitive cull.
+    if entry_axis.dot(reflection_outward_normal) + comparison_guard < -inverse_eta {
+        return false;
+    }
+
+    let reflected_entry_axis = vec_add(
+        reflection_outward_normal.scale(-2.0 * entry_axis.dot(reflection_outward_normal)),
+        entry_axis,
+    );
+    // Equal cones intersect only if their axes differ by at most 2*theta.
+    // cos(2*theta) = 1 - 2*sin(theta)^2 avoids inverse trigonometry entirely.
+    let minimum_axis_cosine = 1.0 - 2.0 * inverse_eta * inverse_eta;
+    reflected_entry_axis.dot(exit_outward_normal) + comparison_guard >= minimum_axis_cosine
+}
+
 fn point_matches(actual: Point3, expected: Point3, scale: f64) -> bool {
     actual.delta_from(expected).norm()
         <= 4.0 * RAY_EPS + SLAB_CONNECTION_REL_TOLERANCE * scale.max(RAY_EPS)
@@ -10396,6 +10663,41 @@ fn trace_planar_manifold_direct_lanes(
     direct: PreparedDirectLight,
     wavelength_nm: f64,
 ) -> Result<Vec<SlabDirectLane>, TracerError> {
+    match direct.target {
+        DirectLightTarget::Rectangle { .. } => trace_planar_manifold_rectangle_direct_lanes(
+            scene,
+            cx,
+            ray_time,
+            source_point,
+            source_geometric_normal,
+            boundary,
+            direct,
+            wavelength_nm,
+        ),
+        DirectLightTarget::Environment => trace_planar_manifold_environment_direct_lanes(
+            scene,
+            cx,
+            ray_time,
+            source_point,
+            source_geometric_normal,
+            boundary,
+            direct,
+            wavelength_nm,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_planar_manifold_rectangle_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    boundary: PlanarManifoldBoundary,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
     let DirectLightTarget::Rectangle {
         primitive_index: light_primitive,
         distance_m,
@@ -10403,9 +10705,6 @@ fn trace_planar_manifold_direct_lanes(
         normal: light_normal,
     } = direct.target
     else {
-        // The finite-face connector does not yet define the asymptotic angular
-        // map for an environment target. Ordinary BSDF transport retains that
-        // support, so absence of this optional proposal is correct.
         return Ok(Vec::new());
     };
     let Some((geometry, transform)) =
@@ -10592,8 +10891,10 @@ fn trace_planar_manifold_direct_lanes(
             incident_direction: connection.incident_direction,
             nee_pdf_solid_angle,
             transmission_probability,
+            entry_transmission_probability,
             radiance_transport,
             visible: true,
+            reflection_triangle_index: None,
         };
         if admitted.iter().any(|(_, existing)| {
             parallel_directions(existing.incident_direction, lane.incident_direction)
@@ -10601,6 +10902,494 @@ fn trace_planar_manifold_direct_lanes(
             continue;
         }
         admitted.push((connection.optical_path_length_m, lane));
+    }
+    admitted.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Ok(admitted.into_iter().map(|(_, lane)| lane).collect())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_planar_reflected_manifold_rectangle_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    boundary: PlanarManifoldBoundary,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
+    let DirectLightTarget::Rectangle {
+        primitive_index: light_primitive,
+        distance_m,
+        point: target_point,
+        normal: light_normal,
+    } = direct.target
+    else {
+        return Ok(Vec::new());
+    };
+    let Some((geometry, transform)) =
+        placed_instanced_geometry(scene, boundary.boundary_primitive, ray_time)
+    else {
+        return Ok(Vec::new());
+    };
+    let SharedGeometry::Mesh(mesh) = geometry else {
+        return Ok(Vec::new());
+    };
+    let Some(entry_plane) = world_triangle_plane(&mesh, transform, boundary.entry_triangle_index)
+    else {
+        return Ok(Vec::new());
+    };
+    let canonical_planes = canonical_world_triangle_planes(&mesh, transform);
+    let source_target_scale = target_point.delta_from(source_point).norm();
+    let straight_light_cosine = light_normal.dot(direct.direction).abs();
+    let area_pdf = direct.pdf_solid_angle * straight_light_cosine / (distance_m * distance_m);
+    if !area_pdf.is_finite() || area_pdf <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let eta_glass = boundary.glass.ior().eval(wavelength_nm)?;
+    let light_tangent = basis_all_sphere(light_normal).0;
+    let light_bitangent = cross(light_normal, light_tangent);
+    let midpoint = Point3::new(
+        0.5 * (source_point.x + target_point.x),
+        0.5 * (source_point.y + target_point.y),
+        0.5 * (source_point.z + target_point.z),
+    );
+    let entry_seed = midpoint.offset(
+        entry_plane.outward_normal.scale(
+            -midpoint
+                .delta_from(entry_plane.origin)
+                .dot(entry_plane.outward_normal),
+        ),
+    );
+    let mut admitted: Vec<(f64, SlabDirectLane)> = Vec::new();
+    for &(reflection_triangle, reflection_plane) in &canonical_planes {
+        if same_support_plane(entry_plane, reflection_plane) {
+            continue;
+        }
+        let reflection_seed = midpoint.offset(
+            reflection_plane.outward_normal.scale(
+                -midpoint
+                    .delta_from(reflection_plane.origin)
+                    .dot(reflection_plane.outward_normal),
+            ),
+        );
+        for &(_, exit_plane) in &canonical_planes {
+            cx.checkpoint()?;
+            if same_support_plane(reflection_plane, exit_plane)
+                || target_point
+                    .delta_from(exit_plane.origin)
+                    .dot(exit_plane.outward_normal)
+                    <= 0.0
+                || !reflected_manifold_cones_may_connect(
+                    entry_plane.outward_normal,
+                    reflection_plane.outward_normal,
+                    exit_plane.outward_normal,
+                    eta_glass,
+                )
+            {
+                continue;
+            }
+            let exit_seed = target_point.offset(
+                exit_plane.outward_normal.scale(
+                    -target_point
+                        .delta_from(exit_plane.origin)
+                        .dot(exit_plane.outward_normal),
+                ),
+            );
+            let Some(connection) = solve_three_planar_interfaces_one_reflection(
+                source_point,
+                target_point,
+                entry_plane,
+                reflection_plane,
+                exit_plane,
+                eta_glass,
+                entry_seed,
+                reflection_seed,
+                exit_seed,
+            ) else {
+                continue;
+            };
+            let Some(area_jacobian) = reflected_target_area_per_source_solid_angle(
+                source_point,
+                target_point,
+                entry_plane,
+                reflection_plane,
+                exit_plane,
+                eta_glass,
+                connection,
+                light_tangent,
+                light_bitangent,
+            ) else {
+                continue;
+            };
+            let nee_pdf_solid_angle = area_pdf * area_jacobian;
+            if !nee_pdf_solid_angle.is_finite() || nee_pdf_solid_angle <= 0.0 {
+                continue;
+            }
+
+            let entry_ray = Ray {
+                origin: dielectric_spawn_origin(
+                    source_point,
+                    source_geometric_normal,
+                    connection.incident_direction,
+                ),
+                dir: connection.incident_direction,
+            };
+            let Some(entry_hit) = intersect(scene, cx, &entry_ray, ray_time)? else {
+                continue;
+            };
+            if entry_hit.primitive_index != boundary.boundary_primitive
+                || !point_matches(
+                    entry_hit.hit.point,
+                    connection.entry_point,
+                    source_target_scale,
+                )
+            {
+                continue;
+            }
+            let entry_frame = surface_frame(&entry_hit.hit, &entry_ray)?;
+            let (internal_incident, entry_transmission) = deterministic_snell_transmission(
+                entry_frame.geometric,
+                connection.incident_direction,
+                1.0,
+                eta_glass,
+            )?;
+            if !entry_frame.entering
+                || !parallel_directions(internal_incident, connection.internal_incident_direction)
+            {
+                continue;
+            }
+            let reflection_ray = Ray {
+                origin: dielectric_spawn_origin(
+                    entry_hit.hit.point,
+                    entry_frame.geometric,
+                    internal_incident,
+                ),
+                dir: internal_incident,
+            };
+            let Some(reflection_hit) = intersect(scene, cx, &reflection_ray, ray_time)? else {
+                continue;
+            };
+            if reflection_hit.primitive_index != boundary.boundary_primitive
+                || !point_matches(
+                    reflection_hit.hit.point,
+                    connection.reflection_point,
+                    source_target_scale,
+                )
+            {
+                continue;
+            }
+            let reflection_frame = surface_frame(&reflection_hit.hit, &reflection_ray)?;
+            if reflection_frame.entering
+                || reflection_frame
+                    .geometric
+                    .dot(reflection_plane.outward_normal)
+                    < 1.0 - SLAB_PARALLEL_COSINE_TOLERANCE
+            {
+                continue;
+            }
+            let reflected = vec_add(
+                reflection_frame
+                    .geometric
+                    .scale(-2.0 * internal_incident.dot(reflection_frame.geometric)),
+                internal_incident,
+            );
+            if !parallel_directions(reflected, connection.internal_reflected_direction) {
+                continue;
+            }
+            let reflection_fresnel = fresnel_dielectric(
+                internal_incident
+                    .dot(reflection_frame.geometric)
+                    .clamp(0.0, 1.0),
+                eta_glass,
+                1.0,
+            )?;
+            let exit_ray = Ray {
+                origin: dielectric_spawn_origin(
+                    reflection_hit.hit.point,
+                    reflection_frame.geometric,
+                    reflected,
+                ),
+                dir: reflected,
+            };
+            let Some(exit_hit) = intersect(scene, cx, &exit_ray, ray_time)? else {
+                continue;
+            };
+            if exit_hit.primitive_index != boundary.boundary_primitive
+                || !point_matches(
+                    exit_hit.hit.point,
+                    connection.exit_point,
+                    source_target_scale,
+                )
+            {
+                continue;
+            }
+            let exit_frame = surface_frame(&exit_hit.hit, &exit_ray)?;
+            let (outgoing, exit_transmission) = deterministic_snell_transmission(
+                exit_frame.geometric.scale(-1.0),
+                reflected,
+                eta_glass,
+                1.0,
+            )?;
+            if exit_frame.entering
+                || exit_frame.geometric.dot(exit_plane.outward_normal)
+                    < 1.0 - SLAB_PARALLEL_COSINE_TOLERANCE
+                || !parallel_directions(outgoing, connection.outgoing_direction)
+            {
+                continue;
+            }
+            let light_ray = Ray {
+                origin: dielectric_spawn_origin(exit_hit.hit.point, exit_frame.geometric, outgoing),
+                dir: outgoing,
+            };
+            let Some(light_hit) = intersect(scene, cx, &light_ray, ray_time)? else {
+                continue;
+            };
+            if light_hit.primitive_index != light_primitive
+                || !point_matches(light_hit.hit.point, target_point, source_target_scale)
+            {
+                continue;
+            }
+            let internal_distance = reflection_hit
+                .hit
+                .point
+                .delta_from(entry_hit.hit.point)
+                .norm()
+                + exit_hit
+                    .hit
+                    .point
+                    .delta_from(reflection_hit.hit.point)
+                    .norm();
+            let beer =
+                medium_transmittance(Some(boundary.glass), wavelength_nm, internal_distance)?;
+            let event_probability =
+                entry_transmission * reflection_fresnel.reflectance * exit_transmission;
+            let radiance_transport = event_probability * beer;
+            let lane = SlabDirectLane {
+                incident_direction: connection.incident_direction,
+                nee_pdf_solid_angle,
+                transmission_probability: event_probability,
+                entry_transmission_probability: entry_transmission,
+                radiance_transport,
+                visible: true,
+                reflection_triangle_index: Some(reflection_triangle),
+            };
+            if admitted.iter().any(|(_, existing)| {
+                parallel_directions(existing.incident_direction, lane.incident_direction)
+            }) {
+                continue;
+            }
+            admitted.push((connection.optical_path_length_m, lane));
+        }
+    }
+    admitted.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Ok(admitted.into_iter().map(|(_, lane)| lane).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_reflected_manifold_rectangle_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
+    let DirectLightTarget::Rectangle { point: target, .. } = direct.target else {
+        return Ok(Vec::new());
+    };
+    let mut admitted = Vec::new();
+    for boundary in reflected_manifold_boundaries(scene, source_point, target, ray_time) {
+        for lane in trace_planar_reflected_manifold_rectangle_direct_lanes(
+            scene,
+            cx,
+            ray_time,
+            source_point,
+            source_geometric_normal,
+            boundary,
+            direct,
+            wavelength_nm,
+        )? {
+            if admitted.iter().any(|existing: &SlabDirectLane| {
+                parallel_directions(existing.incident_direction, lane.incident_direction)
+            }) {
+                continue;
+            }
+            admitted.push(lane);
+        }
+    }
+    Ok(admitted)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_planar_manifold_environment_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    boundary: PlanarManifoldBoundary,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
+    if !matches!(direct.target, DirectLightTarget::Environment)
+        || !direct.pdf_solid_angle.is_finite()
+        || direct.pdf_solid_angle <= 0.0
+    {
+        return Ok(Vec::new());
+    }
+    let Some((geometry, transform)) =
+        placed_instanced_geometry(scene, boundary.boundary_primitive, ray_time)
+    else {
+        return Ok(Vec::new());
+    };
+    let SharedGeometry::Mesh(mesh) = geometry else {
+        return Ok(Vec::new());
+    };
+    let Some(entry_plane) = world_triangle_plane(&mesh, transform, boundary.entry_triangle_index)
+    else {
+        return Ok(Vec::new());
+    };
+    let first_ray = Ray {
+        origin: dielectric_spawn_origin(source_point, source_geometric_normal, direct.direction),
+        dir: direct.direction,
+    };
+    let Some(first_hit) = intersect(scene, cx, &first_ray, ray_time)? else {
+        return Ok(Vec::new());
+    };
+    if first_hit.primitive_index != boundary.boundary_primitive {
+        return Ok(Vec::new());
+    }
+    let eta_glass = boundary.glass.ior().eval(wavelength_nm)?;
+    let mut admitted: Vec<(f64, SlabDirectLane)> = Vec::new();
+    for triangle_index in 0..mesh.triangles.len() {
+        cx.checkpoint()?;
+        let Some(exit_plane) = world_triangle_plane(&mesh, transform, triangle_index as u32) else {
+            continue;
+        };
+        if same_support_plane(entry_plane, exit_plane)
+            || direct.direction.dot(exit_plane.outward_normal) <= 0.0
+        {
+            continue;
+        }
+        let Some(connection) = planar_manifold_connection_to_environment(
+            source_point,
+            entry_plane,
+            exit_plane,
+            direct.direction,
+            eta_glass,
+        ) else {
+            continue;
+        };
+        let nee_pdf_solid_angle =
+            direct.pdf_solid_angle * connection.target_solid_angle_per_source_solid_angle;
+        if !nee_pdf_solid_angle.is_finite() || nee_pdf_solid_angle <= 0.0 {
+            continue;
+        }
+
+        let entry_ray = Ray {
+            origin: dielectric_spawn_origin(
+                source_point,
+                source_geometric_normal,
+                connection.incident_direction,
+            ),
+            dir: connection.incident_direction,
+        };
+        let Some(entry_hit) = intersect(scene, cx, &entry_ray, ray_time)? else {
+            continue;
+        };
+        let connection_scale = connection.exit_point.delta_from(source_point).norm();
+        if entry_hit.primitive_index != boundary.boundary_primitive
+            || !point_matches(
+                entry_hit.hit.point,
+                connection.entry_point,
+                connection_scale,
+            )
+        {
+            continue;
+        }
+        let entry_frame = surface_frame(&entry_hit.hit, &entry_ray)?;
+        if !entry_frame.entering {
+            continue;
+        }
+        let (internal_direction, entry_transmission_probability) =
+            deterministic_snell_transmission(
+                entry_frame.geometric,
+                connection.incident_direction,
+                1.0,
+                eta_glass,
+            )?;
+        if !parallel_directions(internal_direction, connection.internal_direction) {
+            continue;
+        }
+        let internal_ray = Ray {
+            origin: dielectric_spawn_origin(
+                entry_hit.hit.point,
+                entry_frame.geometric,
+                internal_direction,
+            ),
+            dir: internal_direction,
+        };
+        let Some(exit_hit) = intersect(scene, cx, &internal_ray, ray_time)? else {
+            continue;
+        };
+        if exit_hit.primitive_index != boundary.boundary_primitive
+            || !point_matches(exit_hit.hit.point, connection.exit_point, connection_scale)
+        {
+            continue;
+        }
+        let exit_frame = surface_frame(&exit_hit.hit, &internal_ray)?;
+        if exit_frame.entering
+            || exit_frame.geometric.dot(exit_plane.outward_normal)
+                < 1.0 - SLAB_PARALLEL_COSINE_TOLERANCE
+        {
+            continue;
+        }
+        let (outgoing_direction, exit_transmission_probability) = deterministic_snell_transmission(
+            exit_frame.geometric.scale(-1.0),
+            internal_direction,
+            eta_glass,
+            1.0,
+        )?;
+        if !parallel_directions(outgoing_direction, direct.direction) {
+            continue;
+        }
+        let exit_ray = Ray {
+            origin: dielectric_spawn_origin(
+                exit_hit.hit.point,
+                exit_frame.geometric,
+                outgoing_direction,
+            ),
+            dir: outgoing_direction,
+        };
+        if intersect(scene, cx, &exit_ray, ray_time)?.is_some() {
+            continue;
+        }
+
+        let internal_distance_m = exit_hit.hit.point.delta_from(entry_hit.hit.point).norm();
+        let beer = medium_transmittance(Some(boundary.glass), wavelength_nm, internal_distance_m)?;
+        let transmission_probability =
+            entry_transmission_probability * exit_transmission_probability;
+        let entry_eta_ratio = 1.0 / eta_glass;
+        let entry_btdf = entry_transmission_probability * entry_eta_ratio * entry_eta_ratio;
+        let exit_btdf = exit_transmission_probability * eta_glass * eta_glass;
+        let radiance_transport = entry_btdf * exit_btdf * beer;
+        let lane = SlabDirectLane {
+            incident_direction: connection.incident_direction,
+            nee_pdf_solid_angle,
+            transmission_probability,
+            entry_transmission_probability,
+            radiance_transport,
+            visible: true,
+            reflection_triangle_index: None,
+        };
+        if admitted.iter().any(|(_, existing)| {
+            parallel_directions(existing.incident_direction, lane.incident_direction)
+        }) {
+            continue;
+        }
+        admitted.push((internal_distance_m, lane));
     }
     admitted.sort_by(|left, right| left.0.total_cmp(&right.0));
     Ok(admitted.into_iter().map(|(_, lane)| lane).collect())
@@ -10623,6 +11412,7 @@ fn previous_after_dielectric_sample(
     incident_ray: Ray,
     sampled_direction: Vec3,
     sampled_event: DielectricEvent,
+    sampled_event_is_forced: bool,
     sampled_pdf: f64,
     sampled_delta: bool,
     wavelength_nm: f64,
@@ -10646,6 +11436,67 @@ fn previous_after_dielectric_sample(
         opaque_source_geometric_normal: None,
         smooth_slab: None,
     };
+    if surface.is_delta()
+        && sampled_event == DielectricEvent::Reflection
+        && !frame.entering
+        && medium_stack.len() == 1
+        && let Some(entry) = previous.and_then(|value| match value.smooth_slab {
+            Some(SmoothSlabPath::Entered(entry)) => Some(PlanarManifoldEntry {
+                source_origin: entry.source_origin,
+                source_geometric_normal: entry.source_geometric_normal,
+                source_direction: entry.source_direction,
+                source_pdf_solid_angle: entry.source_pdf_solid_angle,
+                boundary_primitive: entry.slab.boundary_primitive,
+                glass: entry.slab.glass,
+                entry_event_probability: entry.entry_event_probability,
+            }),
+            Some(SmoothSlabPath::ManifoldEntered(entry)) => Some(entry),
+            _ => None,
+        })
+        && entry.boundary_primitive == boundary_primitive
+        && entry.glass == glass
+    {
+        let actual_reflection_triangle_index = match instance_hit {
+            Some(InstanceHit {
+                surface_feature: InstanceSurfaceFeature::MeshTriangle { triangle_index, .. },
+                ..
+            }) => triangle_index,
+            _ => return Ok(next),
+        };
+        let Some((geometry, transform)) =
+            placed_instanced_geometry(scene, boundary_primitive, ray_time)
+        else {
+            return Ok(next);
+        };
+        let SharedGeometry::Mesh(mesh) = geometry else {
+            return Ok(next);
+        };
+        let Some(reflection_triangle_index) = canonical_support_plane_triangle_index(
+            &mesh,
+            transform,
+            actual_reflection_triangle_index,
+        ) else {
+            return Ok(next);
+        };
+        let eta_glass = glass.ior().eval(wavelength_nm)?;
+        let reflection_probability = fresnel_dielectric(
+            incident_ray.dir.dot(frame.geometric).clamp(0.0, 1.0),
+            eta_glass,
+            1.0,
+        )?
+        .reflectance;
+        next.smooth_slab = Some(SmoothSlabPath::ManifoldReflected(PlanarManifoldReflected {
+            source_origin: entry.source_origin,
+            source_geometric_normal: entry.source_geometric_normal,
+            source_direction: entry.source_direction,
+            source_pdf_solid_angle: entry.source_pdf_solid_angle,
+            boundary_primitive,
+            glass,
+            reflection_triangle_index,
+            entry_reflection_probability: entry.entry_event_probability * reflection_probability,
+        }));
+        return Ok(next);
+    }
     if !surface.is_delta() || sampled_event != DielectricEvent::Transmission {
         return Ok(next);
     }
@@ -10678,7 +11529,11 @@ fn previous_after_dielectric_sample(
                     source_direction: incident_ray.dir,
                     source_pdf_solid_angle: source.pdf.forward_solid_angle(),
                     slab,
-                    entry_transmission_probability: transmission_probability,
+                    entry_event_probability: if sampled_event_is_forced {
+                        1.0
+                    } else {
+                        transmission_probability
+                    },
                 })),
                 Err(TracerError::UnsupportedSlabNee { .. }) => {
                     match discover_planar_manifold_boundary(
@@ -10695,7 +11550,11 @@ fn previous_after_dielectric_sample(
                                 source_pdf_solid_angle: source.pdf.forward_solid_angle(),
                                 boundary_primitive: boundary.boundary_primitive,
                                 glass: boundary.glass,
-                                entry_transmission_probability: transmission_probability,
+                                entry_event_probability: if sampled_event_is_forced {
+                                    1.0
+                                } else {
+                                    transmission_probability
+                                },
                             }))
                         }
                         // Optional NEE support never restricts the ordinary random
@@ -10709,6 +11568,29 @@ fn previous_after_dielectric_sample(
         return Ok(next);
     }
 
+    if !frame.entering
+        && medium_stack.len() == 1
+        && let Some(reflected) = previous.and_then(|value| match value.smooth_slab {
+            Some(SmoothSlabPath::ManifoldReflected(path)) => Some(path),
+            _ => None,
+        })
+        && reflected.boundary_primitive == boundary_primitive
+        && reflected.glass == glass
+    {
+        next.smooth_slab = Some(SmoothSlabPath::ReflectedManifoldExited(
+            PlanarReflectedManifoldExit {
+                source_origin: reflected.source_origin,
+                source_geometric_normal: reflected.source_geometric_normal,
+                source_direction: reflected.source_direction,
+                source_pdf_solid_angle: reflected.source_pdf_solid_angle,
+                boundary_primitive,
+                glass,
+                reflection_triangle_index: reflected.reflection_triangle_index,
+                event_probability: reflected.entry_reflection_probability
+                    * transmission_probability,
+            },
+        ));
+    }
     if !frame.entering
         && medium_stack.len() == 1
         && let Some(SmoothSlabPath::Entered(entry)) = previous.and_then(|value| value.smooth_slab)
@@ -10740,8 +11622,7 @@ fn previous_after_dielectric_sample(
                 source_direction: entry.source_direction,
                 source_pdf_solid_angle: entry.source_pdf_solid_angle,
                 slab: entry.slab,
-                transmission_probability: entry.entry_transmission_probability
-                    * transmission_probability,
+                transmission_probability: entry.entry_event_probability * transmission_probability,
             }));
         }
     }
@@ -10763,8 +11644,7 @@ fn previous_after_dielectric_sample(
             source_pdf_solid_angle: entry.source_pdf_solid_angle,
             boundary_primitive,
             glass,
-            transmission_probability: entry.entry_transmission_probability
-                * transmission_probability,
+            transmission_probability: entry.entry_event_probability * transmission_probability,
         }));
     }
     if !frame.entering
@@ -10781,8 +11661,7 @@ fn previous_after_dielectric_sample(
             source_pdf_solid_angle: entry.source_pdf_solid_angle,
             boundary_primitive,
             glass,
-            transmission_probability: entry.entry_transmission_probability
-                * transmission_probability,
+            transmission_probability: entry.entry_event_probability * transmission_probability,
         }));
     }
     Ok(next)
@@ -11074,6 +11953,79 @@ fn completed_manifold_rectangle_nee_pdf(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn completed_reflected_manifold_rectangle_nee_pdf(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    path: PlanarReflectedManifoldExit,
+    light_index: usize,
+    light_point: Point3,
+    wavelength_nm: f64,
+) -> Result<f64, TracerError> {
+    let light = scene
+        .lights
+        .get(light_index)
+        .ok_or(TracerError::InvalidInput)?;
+    let direct_pdf = lighting.rect_mixture_pdf(light_index, path.source_origin, light_point);
+    if direct_pdf == 0.0 {
+        return Ok(0.0);
+    }
+    let displacement = light_point.delta_from(path.source_origin);
+    let distance_squared = displacement.dot(displacement);
+    if !(distance_squared > 0.0 && distance_squared.is_finite()) {
+        return Err(TracerError::InvalidInput);
+    }
+    let distance_m = distance_squared.sqrt();
+    let direction = displacement.scale(1.0 / distance_m);
+    if path.source_geometric_normal.dot(direction) <= 0.0 {
+        return Ok(0.0);
+    }
+    let direct = PreparedDirectLight {
+        direction,
+        emission: light.emission,
+        pdf_solid_angle: direct_pdf,
+        target: DirectLightTarget::Rectangle {
+            primitive_index: light.prim,
+            distance_m,
+            point: light_point,
+            normal: light.normal(),
+        },
+    };
+    let mut matching_pdf = None;
+    for boundary in reflected_manifold_boundaries(scene, path.source_origin, light_point, ray_time)
+        .into_iter()
+        .filter(|boundary| {
+            boundary.boundary_primitive == path.boundary_primitive && boundary.glass == path.glass
+        })
+    {
+        for connection in trace_planar_reflected_manifold_rectangle_direct_lanes(
+            scene,
+            cx,
+            ray_time,
+            path.source_origin,
+            path.source_geometric_normal,
+            boundary,
+            direct,
+            wavelength_nm,
+        )? {
+            if connection.reflection_triangle_index == Some(path.reflection_triangle_index)
+                && parallel_directions(connection.incident_direction, path.source_direction)
+            {
+                if matching_pdf.is_some() {
+                    return Err(slab_nee_refusal(
+                        path.boundary_primitive,
+                        "reverse reflected-manifold MIS found duplicate matching stationary paths",
+                    ));
+                }
+                matching_pdf = Some(connection.nee_pdf_solid_angle);
+            }
+        }
+    }
+    Ok(matching_pdf.unwrap_or(0.0))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn completed_slab_environment_nee_pdf(
     scene: &Scene,
     cx: &Cx<'_>,
@@ -11126,6 +12078,94 @@ fn completed_slab_environment_nee_pdf(
     Ok(connection.nee_pdf_solid_angle)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn completed_manifold_environment_nee_pdf(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    path: PlanarManifoldExit,
+    direction: Vec3,
+    direct_pdf: f64,
+    wavelength_nm: f64,
+) -> Result<f64, TracerError> {
+    if !direct_pdf.is_finite()
+        || direct_pdf <= 0.0
+        || path.source_geometric_normal.dot(direction) <= 0.0
+    {
+        return Ok(0.0);
+    }
+    let shadow = Ray {
+        origin: dielectric_spawn_origin(
+            path.source_origin,
+            path.source_geometric_normal,
+            direction,
+        ),
+        dir: direction,
+    };
+    let Some(first_blocker) = intersect(scene, cx, &shadow, ray_time)? else {
+        return Ok(0.0);
+    };
+    if first_blocker.primitive_index != path.boundary_primitive {
+        return Ok(0.0);
+    }
+    let replayed_slab = match discover_parallel_slab(scene, cx, &shadow, first_blocker, ray_time) {
+        Ok(slab) => Some(slab),
+        Err(TracerError::UnsupportedSlabNee { .. }) => None,
+        Err(error) => return Err(error),
+    };
+    let boundary = match discover_planar_manifold_boundary(scene, &shadow, first_blocker, ray_time)
+    {
+        Ok(boundary) if boundary.glass == path.glass => boundary,
+        Ok(_) | Err(TracerError::UnsupportedSlabNee { .. }) => return Ok(0.0),
+        Err(error) => return Err(error),
+    };
+    let direct = PreparedDirectLight {
+        direction,
+        emission: (LiftedSpectrum { c: [0.0; 3] }, 1.0),
+        pdf_solid_angle: direct_pdf,
+        target: DirectLightTarget::Environment,
+    };
+    if let Some(slab) = replayed_slab {
+        match trace_parallel_slab_direct_lane(
+            scene,
+            cx,
+            ray_time,
+            path.source_origin,
+            path.source_geometric_normal,
+            slab,
+            direct,
+            wavelength_nm,
+        ) {
+            Ok(_) => return Ok(0.0),
+            Err(TracerError::UnsupportedSlabNee { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let connections = trace_planar_manifold_direct_lanes(
+        scene,
+        cx,
+        ray_time,
+        path.source_origin,
+        path.source_geometric_normal,
+        boundary,
+        direct,
+        wavelength_nm,
+    )?;
+    let mut matching_pdf = None;
+    for connection in connections {
+        if parallel_directions(connection.incident_direction, path.source_direction) {
+            if matching_pdf.is_some() {
+                return Err(slab_nee_refusal(
+                    path.boundary_primitive,
+                    "reverse environment manifold MIS found duplicate stationary paths",
+                ));
+            }
+            matching_pdf = Some(connection.nee_pdf_solid_angle);
+        }
+    }
+    Ok(matching_pdf.unwrap_or(0.0))
+}
+
 fn completed_slab_mis_weight(
     strategy: DirectStrategy,
     slab_path: SmoothSlabExit,
@@ -11172,6 +12212,29 @@ fn completed_manifold_mis_weight(
     }
 }
 
+fn completed_reflected_manifold_mis_weight(
+    strategy: DirectStrategy,
+    path: PlanarReflectedManifoldExit,
+    nee_pdf_solid_angle: f64,
+) -> f64 {
+    match strategy {
+        DirectStrategy::BsdfOnly => 1.0,
+        DirectStrategy::NeeOnly => 0.0,
+        DirectStrategy::Mis => balance_heuristic(
+            1,
+            path.source_pdf_solid_angle * path.event_probability,
+            1,
+            nee_pdf_solid_angle,
+        ),
+        DirectStrategy::PowerMis => power_heuristic(
+            1,
+            path.source_pdf_solid_angle * path.event_probability,
+            1,
+            nee_pdf_solid_angle,
+        ),
+    }
+}
+
 fn slab_nee_mis_weight(
     strategy: DirectStrategy,
     nee_pdf_solid_angle: f64,
@@ -11198,6 +12261,29 @@ fn slab_nee_mis_weight(
             source_bsdf_pdf_solid_angle * transmission_probability,
         )),
     }
+}
+
+fn competing_dielectric_event_probability(
+    full_event_probability: f64,
+    entry_transmission_probability: f64,
+    entry_was_forced: bool,
+) -> Result<f64, TracerError> {
+    if !full_event_probability.is_finite()
+        || full_event_probability < 0.0
+        || !entry_transmission_probability.is_finite()
+        || entry_transmission_probability <= 0.0
+        || entry_transmission_probability > 1.0
+    {
+        return Err(TracerError::InvalidInput);
+    }
+    let probability = if entry_was_forced {
+        full_event_probability / entry_transmission_probability
+    } else {
+        full_event_probability
+    };
+    (probability.is_finite() && (0.0..=1.0).contains(&probability))
+        .then_some(probability)
+        .ok_or(TracerError::InvalidInput)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one integrator, one story
@@ -11276,7 +12362,7 @@ fn trace_path(
             rng,
             next_depth: 0,
             active_lane: None,
-            remaining_smooth_dielectric_splits: 1,
+            remaining_smooth_dielectric_splits: SMOOTH_DIELECTRIC_SPLIT_BUDGET,
         }
     };
     let mut radiance = [0.0f64; PACKET];
@@ -11313,20 +12399,38 @@ fn trace_path(
                 Some(
                     SmoothSlabPath::Entered(_)
                     | SmoothSlabPath::ManifoldEntered(_)
-                    | SmoothSlabPath::ManifoldExited(_),
+                    | SmoothSlabPath::ManifoldExited(_)
+                    | SmoothSlabPath::ManifoldReflected(_)
+                    | SmoothSlabPath::ReflectedManifoldExited(_),
                 )
                 | None => None,
             });
-            let environment_origin = completed_slab.map_or(prev_origin, |slab| slab.source_origin);
+            let completed_manifold =
+                previous_bsdf.and_then(|previous| match previous.smooth_slab {
+                    Some(SmoothSlabPath::ManifoldExited(path)) => Some(path),
+                    Some(
+                        SmoothSlabPath::Entered(_)
+                        | SmoothSlabPath::Exited(_)
+                        | SmoothSlabPath::ManifoldEntered(_)
+                        | SmoothSlabPath::ManifoldReflected(_)
+                        | SmoothSlabPath::ReflectedManifoldExited(_),
+                    )
+                    | None => None,
+                });
+            let environment_origin = completed_slab
+                .map(|slab| slab.source_origin)
+                .or_else(|| completed_manifold.map(|path| path.source_origin))
+                .unwrap_or(prev_origin);
             if let Some(environment) = lighting.environment_evaluation(environment_origin, ray.dir)
             {
-                let ordinary_weight = completed_slab.is_none().then(|| {
-                    emissive_hit_weight(
-                        s.strategy,
-                        previous_bsdf,
-                        previous_bsdf.map(|_| environment.pdf_solid_angle),
-                    )
-                });
+                let ordinary_weight = (completed_slab.is_none() && completed_manifold.is_none())
+                    .then(|| {
+                        emissive_hit_weight(
+                            s.strategy,
+                            previous_bsdf,
+                            previous_bsdf.map(|_| environment.pdf_solid_angle),
+                        )
+                    });
                 let (spectrum, scale) = environment.emission;
                 for (lane, &lambda) in lambdas.iter().enumerate() {
                     let weight = if let Some(slab) = completed_slab {
@@ -11340,6 +12444,17 @@ fn trace_path(
                             lambda,
                         )?;
                         completed_slab_mis_weight(s.strategy, slab, nee_pdf)
+                    } else if let Some(path) = completed_manifold {
+                        let nee_pdf = completed_manifold_environment_nee_pdf(
+                            scene,
+                            cx,
+                            ray_time,
+                            path,
+                            ray.dir,
+                            environment.pdf_solid_angle,
+                            lambda,
+                        )?;
+                        completed_manifold_mis_weight(s.strategy, path, nee_pdf)
                     } else {
                         ordinary_weight.expect("ordinary environment MIS weight")
                     };
@@ -11396,7 +12511,9 @@ fn trace_path(
                 Some(
                     SmoothSlabPath::Entered(_)
                     | SmoothSlabPath::ManifoldEntered(_)
-                    | SmoothSlabPath::ManifoldExited(_),
+                    | SmoothSlabPath::ManifoldExited(_)
+                    | SmoothSlabPath::ManifoldReflected(_)
+                    | SmoothSlabPath::ReflectedManifoldExited(_),
                 )
                 | None => None,
             });
@@ -11406,12 +12523,20 @@ fn trace_path(
                     Some(
                         SmoothSlabPath::Entered(_)
                         | SmoothSlabPath::Exited(_)
-                        | SmoothSlabPath::ManifoldEntered(_),
+                        | SmoothSlabPath::ManifoldEntered(_)
+                        | SmoothSlabPath::ManifoldReflected(_)
+                        | SmoothSlabPath::ReflectedManifoldExited(_),
                     )
                     | None => None,
                 });
+            let completed_reflected_manifold =
+                previous_bsdf.and_then(|previous| match previous.smooth_slab {
+                    Some(SmoothSlabPath::ReflectedManifoldExited(path)) => Some(path),
+                    _ => None,
+                });
             let ordinary_nee_pdf = if completed_slab.is_none()
                 && completed_manifold.is_none()
+                && completed_reflected_manifold.is_none()
                 && matches!(s.strategy, DirectStrategy::Mis | DirectStrategy::PowerMis)
                 && previous_bsdf.is_some()
             {
@@ -11422,7 +12547,9 @@ fn trace_path(
                 None
             };
             for (k, &l) in lambdas.iter().enumerate() {
-                if (completed_slab.is_some() || completed_manifold.is_some())
+                if (completed_slab.is_some()
+                    || completed_manifold.is_some()
+                    || completed_reflected_manifold.is_some())
                     && throughput[k].to_bits() == 0.0_f64.to_bits()
                 {
                     continue;
@@ -11452,6 +12579,20 @@ fn trace_path(
                         l,
                     )?;
                     completed_manifold_mis_weight(s.strategy, path, nee_pdf)
+                } else if let (Some(path), Some(light_index)) =
+                    (completed_reflected_manifold, light_index)
+                {
+                    let nee_pdf = completed_reflected_manifold_rectangle_nee_pdf(
+                        scene,
+                        lighting,
+                        cx,
+                        ray_time,
+                        path,
+                        light_index,
+                        hit.point,
+                        l,
+                    )?;
+                    completed_reflected_manifold_mis_weight(s.strategy, path, nee_pdf)
                 } else {
                     emissive_hit_weight(s.strategy, previous_bsdf, ordinary_nee_pdf)
                 };
@@ -11639,6 +12780,86 @@ fn trace_path(
                                 (DirectLightTarget::Rectangle { .. }, None)
                                 | (DirectLightTarget::Environment, Some(_)) => false,
                             };
+                            // A one-reflection path can return to the same side of
+                            // a dielectric without the straight source-light chord
+                            // touching it. Enumerate this bounded technique
+                            // independently; the zero-reflection TT route below
+                            // intentionally remains first-blocker gated.
+                            if medium_stack.len() == 0
+                                && matches!(direct.target, DirectLightTarget::Rectangle { .. })
+                            {
+                                let wo = ray.dir.scale(-1.0);
+                                let (espec, escale) = direct.emission;
+                                for (lane, &lambda) in lambdas.iter().enumerate() {
+                                    if throughput[lane].to_bits() == 0.0_f64.to_bits() {
+                                        continue;
+                                    }
+                                    for connection in
+                                        trace_reflected_manifold_rectangle_direct_lanes(
+                                            scene,
+                                            cx,
+                                            ray_time,
+                                            hit.point,
+                                            frame.geometric,
+                                            direct,
+                                            lambda,
+                                        )?
+                                    {
+                                        let cos_connected = n.dot(connection.incident_direction);
+                                        if !connection.visible
+                                            || connection.radiance_transport == 0.0
+                                            || cos_connected <= 0.0
+                                        {
+                                            continue;
+                                        }
+                                        let source_bsdf_pdf = bsdf_pdf(
+                                            &prim.material,
+                                            n,
+                                            wo,
+                                            connection.incident_direction,
+                                        );
+                                        let competing_bsdf_path_is_evaluated =
+                                            depth.checked_add(4).is_some_and(|emitter_depth| {
+                                                emitter_depth < s.max_depth
+                                            });
+                                        let weight = slab_nee_mis_weight(
+                                            s.strategy,
+                                            connection.nee_pdf_solid_angle,
+                                            source_bsdf_pdf,
+                                            competing_dielectric_event_probability(
+                                                connection.transmission_probability,
+                                                connection.entry_transmission_probability,
+                                                remaining_smooth_dielectric_splits > 0,
+                                            )?,
+                                            competing_bsdf_path_is_evaluated,
+                                        )?;
+                                        let f = opaque_bsdf_eval(
+                                            &prim.material,
+                                            n,
+                                            wo,
+                                            connection.incident_direction,
+                                            lambda,
+                                            None,
+                                        )?;
+                                        let before = radiance[lane];
+                                        radiance[lane] += throughput[lane]
+                                            * f
+                                            * cos_connected
+                                            * connection.radiance_transport
+                                            * espec.eval(lambda)
+                                            * escale
+                                            / connection.nee_pdf_solid_angle
+                                            * weight;
+                                        if let Some(contributions) = &mut contribution_radiance {
+                                            contributions.record(
+                                                direct_contribution_class(depth),
+                                                lane,
+                                                radiance[lane] - before,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             if visible {
                                 if matches!(direct.target, DirectLightTarget::Environment)
                                     && let Some(active) = medium_stack.last()
@@ -11770,9 +12991,6 @@ fn trace_path(
                                     }
                                     let wo = ray.dir.scale(-1.0);
                                     let (espec, escale) = direct.emission;
-                                    let competing_bsdf_path_is_evaluated = depth
-                                        .checked_add(3)
-                                        .is_some_and(|emitter_depth| emitter_depth < s.max_depth);
                                     for (lane, &lambda) in lambdas.iter().enumerate() {
                                         if throughput[lane].to_bits() == 0.0_f64.to_bits() {
                                             continue;
@@ -11838,11 +13056,19 @@ fn trace_path(
                                                 wo,
                                                 connection.incident_direction,
                                             );
+                                            let competing_bsdf_path_is_evaluated =
+                                                depth.checked_add(3).is_some_and(|emitter_depth| {
+                                                    emitter_depth < s.max_depth
+                                                });
                                             let weight = slab_nee_mis_weight(
                                                 s.strategy,
                                                 connection.nee_pdf_solid_angle,
                                                 source_bsdf_pdf,
-                                                connection.transmission_probability,
+                                                competing_dielectric_event_probability(
+                                                    connection.transmission_probability,
+                                                    connection.entry_transmission_probability,
+                                                    remaining_smooth_dielectric_splits > 0,
+                                                )?,
                                                 competing_bsdf_path_is_evaluated,
                                             )?;
                                             let f = opaque_bsdf_eval(
@@ -11893,6 +13119,9 @@ fn trace_path(
                     rng.path_pair(path_sobol, depth, 2).0
                 };
                 if surface.is_delta() && remaining_smooth_dielectric_splits > 0 {
+                    let child_smooth_dielectric_splits =
+                        consume_smooth_dielectric_split(remaining_smooth_dielectric_splits)
+                            .ok_or(TracerError::InvalidInput)?;
                     let proposal_lambda = lambdas[proposal_lane];
                     let reflection_direction =
                         vec_add(n.scale(2.0 * admitted_unit_dot(n, wo)), wo.scale(-1.0));
@@ -11959,7 +13188,7 @@ fn trace_path(
                                     next_depth: depth + 1,
                                     active_lane: child_active_lane,
                                     remaining_smooth_dielectric_splits:
-                                        remaining_smooth_dielectric_splits - 1,
+                                        child_smooth_dielectric_splits,
                                 }),
                             )
                         };
@@ -11980,6 +13209,7 @@ fn trace_path(
                         ray,
                         reflection_direction,
                         DielectricEvent::Reflection,
+                        true,
                         0.0,
                         true,
                         proposal_lambda,
@@ -12032,6 +13262,7 @@ fn trace_path(
                                 ray,
                                 direction,
                                 DielectricEvent::Transmission,
+                                true,
                                 0.0,
                                 true,
                                 lambdas[lane],
@@ -12071,6 +13302,7 @@ fn trace_path(
                             ray,
                             direction,
                             DielectricEvent::Transmission,
+                            true,
                             0.0,
                             true,
                             proposal_lambda,
@@ -12144,6 +13376,7 @@ fn trace_path(
                             ray,
                             continuation.direction,
                             continuation.event,
+                            false,
                             continuation.pdf,
                             continuation.delta,
                             lambdas[lane],
@@ -12231,6 +13464,7 @@ fn trace_path(
                     ray,
                     sampled.direction,
                     sampled.event,
+                    false,
                     sampled.pdf,
                     sampled.delta,
                     lambdas[proposal_lane],
@@ -12549,9 +13783,43 @@ fn should_split_dispersive_boundary(
     boundary_direction_is_wavelength_dependent(boundary, lambdas)
 }
 
+const fn consume_smooth_dielectric_split(remaining: u8) -> Option<u8> {
+    if remaining == 0 {
+        None
+    } else {
+        Some(remaining - 1)
+    }
+}
+
+#[cfg(test)]
+const fn maximum_spectral_suffixes(active_lane: bool, remaining_splits: u8) -> u64 {
+    if remaining_splits == 0 {
+        // An unsplit packet can still encounter its one stochastic dispersive
+        // fan-out after the forced-split budget is exhausted. A lane child can
+        // never fan out again.
+        if active_lane { 1 } else { PACKET as u64 }
+    } else if active_lane {
+        // A monochromatic child retains both exact Fresnel suffixes.
+        2 * maximum_spectral_suffixes(true, remaining_splits - 1)
+    } else {
+        let packet_child = maximum_spectral_suffixes(false, remaining_splits - 1);
+        let lane_child = maximum_spectral_suffixes(true, remaining_splits - 1);
+        // A nondispersive boundary creates two packet children. At a
+        // dispersive boundary reflection remains a packet while transmission
+        // creates one child per wavelength lane. Take the larger support set.
+        let nondispersive = 2 * packet_child;
+        let dispersive = packet_child + PACKET as u64 * lane_child;
+        if nondispersive > dispersive {
+            nondispersive
+        } else {
+            dispersive
+        }
+    }
+}
+
 #[cfg(test)]
 const fn maximum_spectral_traversals(max_depth: u32) -> u64 {
-    max_depth as u64 * PACKET as u64
+    max_depth as u64 * maximum_spectral_suffixes(false, SMOOTH_DIELECTRIC_SPLIT_BUDGET)
 }
 
 /// Sample one complete dielectric continuation for every wavelength at the
@@ -13625,6 +14893,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forced_entry_mis_density_omits_only_the_unsampled_entry_event() {
+        let entry_t = 0.91;
+        let exit_t = 0.83;
+        let internal_r = 0.17;
+        let tt_physical = entry_t * exit_t;
+        let trt_physical = entry_t * internal_r * exit_t;
+        assert_near(
+            competing_dielectric_event_probability(tt_physical, entry_t, true).unwrap(),
+            exit_t,
+            2.0 * f64::EPSILON,
+            "forced TT event density",
+        );
+        assert_near(
+            competing_dielectric_event_probability(tt_physical, entry_t, false).unwrap(),
+            entry_t * exit_t,
+            2.0 * f64::EPSILON,
+            "sampled TT event density",
+        );
+        assert_near(
+            competing_dielectric_event_probability(trt_physical, entry_t, true).unwrap(),
+            internal_r * exit_t,
+            2.0 * f64::EPSILON,
+            "forced TRT event density",
+        );
+        assert_near(
+            competing_dielectric_event_probability(trt_physical, entry_t, false).unwrap(),
+            entry_t * internal_r * exit_t,
+            2.0 * f64::EPSILON,
+            "sampled TRT event density",
+        );
+        let nee_pdf = 0.37;
+        let source_pdf = 0.29;
+        for event_probability in [exit_t, entry_t * exit_t, internal_r * exit_t, trt_physical] {
+            for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                let nee =
+                    slab_nee_mis_weight(strategy, nee_pdf, source_pdf, event_probability, true)
+                        .unwrap();
+                let bsdf = match strategy {
+                    DirectStrategy::Mis => {
+                        balance_heuristic(1, source_pdf * event_probability, 1, nee_pdf)
+                    }
+                    DirectStrategy::PowerMis => {
+                        power_heuristic(1, source_pdf * event_probability, 1, nee_pdf)
+                    }
+                    _ => unreachable!(),
+                };
+                assert_near(
+                    nee + bsdf,
+                    1.0,
+                    2.0 * f64::EPSILON,
+                    "independent forced/sampled event-density MIS partition",
+                );
+            }
+        }
+    }
+
     fn closed_test_slab(z_bottom: f64, z_top: f64) -> TriMesh {
         closed_test_slab_with_extent(z_bottom, z_top, 4.0)
     }
@@ -13680,8 +15005,8 @@ mod tests {
                         emission: None,
                     },
                     // The transmitted child terminates on a black absorber
-                    // before reaching the slab's second interface. With a
-                    // two-vertex budget it cannot create suffix variance.
+                    // before reaching the slab's second interface, so no
+                    // secondary branch can contribute to this fixture.
                     Primitive {
                         shape: Shape::Mesh(horizontal_quad(0.1, 3.0)),
                         material: Material::Lambertian { reflectance: black },
@@ -13751,6 +15076,159 @@ mod tests {
                     assert_eq!(traced.xyz.map(f64::to_bits), expected);
                 } else {
                     reference = Some(traced.xyz.map(f64::to_bits));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn g0_second_smooth_dielectric_boundary_sums_internal_reflection_without_roulette() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0; 3]);
+            // Retain crown-like dispersion while removing the preset's tint:
+            // this fixture isolates exact Fresnel branching, while absorption
+            // is covered independently by the dielectric battery.
+            let glass = DielectricGlass::new(
+                CauchyIor::try_new(1.5046, 0.004_20, 0.0).unwrap(),
+                BeerLambertAbsorption::CLEAR,
+                GlassProvenance::Custom,
+            );
+            let emission_scale = 4.0;
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        shape: instanced_test_mesh(closed_test_slab(0.0, 0.2), 50),
+                        material: Material::Dielectric {
+                            glass,
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    // This internal emitter is behind the resumed ray, so it
+                    // is reached only by the reflection suffix at the slab's
+                    // second boundary. It isolates that estimator transition;
+                    // it is not intended as a physical luminaire model.
+                    Primitive {
+                        shape: Shape::Mesh(horizontal_quad(0.05, 0.5)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: Some((white, emission_scale)),
+                    },
+                ],
+                lights: vec![RectLight {
+                    corner: Point3::new(-0.5, -0.5, 0.05),
+                    edge_u: Vec3::new(1.0, 0.0, 0.0),
+                    edge_v: Vec3::new(0.0, 1.0, 0.0),
+                    prim: 1,
+                    emission: (white, emission_scale),
+                }],
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, -1.0),
+                    forward: Vec3::new(0.0, 0.0, 1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0,
+                },
+            };
+            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 64,
+                max_depth: 2,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::BsdfOnly,
+                seed: 0x5345_434f_4e44_5254,
+            };
+            let kn = 1.0 / y_integral();
+            let ul = 0.5;
+            let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
+            let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
+            let remaining_after_entry =
+                consume_smooth_dielectric_split(SMOOTH_DIELECTRIC_SPLIT_BUDGET).unwrap();
+            assert_eq!(remaining_after_entry, 1);
+
+            for lane in 0..PACKET {
+                let wavelength = lambdas[lane];
+                let ior = glass.ior().eval(wavelength).unwrap();
+                let entry = fresnel_dielectric(1.0, 1.0, ior).unwrap();
+                let exit = fresnel_dielectric(1.0, ior, 1.0).unwrap();
+                assert!(!entry.total_internal_reflection);
+                assert!(!exit.total_internal_reflection);
+
+                // This is the exact throughput of the corresponding
+                // single-wavelength child after the already-forced entry
+                // transmission. The reciprocal eta factor is the radiance-
+                // transport convention used by the production branch.
+                let mut throughput = [0.0; PACKET];
+                throughput[lane] = (1.0 - entry.reflectance) * (1.0 / ior) * (1.0 / ior);
+                let mut expected_radiance = [0.0; PACKET];
+                expected_radiance[lane] =
+                    throughput[lane] * exit.reflectance * white.eval(wavelength) * emission_scale;
+                let expected_xyz = packet_radiance_to_xyz(expected_radiance, &lambdas, kn);
+
+                let mut medium_stack = MediumStack::new();
+                medium_stack
+                    .push(MediumEntry {
+                        boundary_primitive: 0,
+                        glass,
+                    })
+                    .unwrap();
+                let origin = Point3::new(0.0, 0.0, 0.1);
+                let mut reference_bits = None;
+                for sample in 0..settings.spp {
+                    let traced = trace_path(
+                        &scene,
+                        &lighting,
+                        cx,
+                        &settings,
+                        kn,
+                        0,
+                        sample,
+                        0.5,
+                        0.5,
+                        ul,
+                        None,
+                        CameraPath::Legacy,
+                        false,
+                        None,
+                        Some(SpectralPathState {
+                            ray: Ray {
+                                origin,
+                                dir: Vec3::new(0.0, 0.0, 1.0),
+                            },
+                            throughput,
+                            previous_bsdf: None,
+                            prev_origin: origin,
+                            segment_origin: origin,
+                            medium_stack,
+                            rng: PathRng {
+                                pixel: 0,
+                                sample,
+                                dim: 1,
+                                key: [0x5345_434f, 0x4e44_5254],
+                                qmc_depth: 0,
+                                qmc_values: [0.0; PATH_QMC_DIMENSIONS],
+                                qmc_valid: false,
+                            },
+                            next_depth: 0,
+                            active_lane: Some(lane),
+                            remaining_smooth_dielectric_splits: remaining_after_entry,
+                        }),
+                    )
+                    .unwrap();
+                    for channel in 0..3 {
+                        assert_relative_close(
+                            traced.xyz[channel],
+                            expected_xyz[channel],
+                            4.0e-12,
+                            "second-interface exact Fresnel energy",
+                        );
+                    }
+                    if let Some(expected_bits) = reference_bits {
+                        assert_eq!(traced.xyz.map(f64::to_bits), expected_bits);
+                    } else {
+                        reference_bits = Some(traced.xyz.map(f64::to_bits));
+                    }
                 }
             }
         });
@@ -14250,7 +15728,7 @@ mod tests {
                     },
                     next_depth: 0,
                     active_lane: None,
-                    remaining_smooth_dielectric_splits: 1,
+                    remaining_smooth_dielectric_splits: SMOOTH_DIELECTRIC_SPLIT_BUDGET,
                 }),
             );
             let sample = result.expect(
@@ -14535,6 +16013,530 @@ mod tests {
             )
             .unwrap();
             assert_eq!(replayed_pdf.to_bits(), lane.nee_pdf_solid_angle.to_bits());
+        });
+    }
+
+    #[test]
+    fn g0_reflected_manifold_cone_cull_keeps_and_separates_exact_boundaries() {
+        let eta_glass: f64 = 1.5;
+        let inverse_eta = 1.0 / eta_glass;
+        let entry_normal = Vec3::new(0.0, 0.0, 1.0);
+        let entry_axis = entry_normal.scale(-1.0);
+
+        let reflection_boundary =
+            Vec3::new((1.0 - inverse_eta * inverse_eta).sqrt(), 0.0, inverse_eta);
+        let reflected_boundary_axis = vec_add(
+            reflection_boundary.scale(-2.0 * entry_axis.dot(reflection_boundary)),
+            entry_axis,
+        );
+        assert!(
+            reflected_manifold_cones_may_connect(
+                entry_normal,
+                reflection_boundary,
+                reflected_boundary_axis,
+                eta_glass,
+            ),
+            "the reflection-reachability equality must fail open"
+        );
+
+        let separated_reflection_z = inverse_eta + 1.0e-6;
+        let separated_reflection = Vec3::new(
+            (1.0 - separated_reflection_z * separated_reflection_z).sqrt(),
+            0.0,
+            separated_reflection_z,
+        );
+        assert!(
+            !reflected_manifold_cones_may_connect(
+                entry_normal,
+                separated_reflection,
+                reflected_boundary_axis,
+                eta_glass,
+            ),
+            "a reflection plane strictly outside the entry Snell cone is impossible"
+        );
+
+        let reflection_normal = Vec3::new(0.0, 0.0, -1.0);
+        let double_angle_cosine = 1.0 - 2.0 * inverse_eta * inverse_eta;
+        let exit_boundary = Vec3::new(
+            (1.0 - double_angle_cosine * double_angle_cosine).sqrt(),
+            0.0,
+            double_angle_cosine,
+        );
+        assert!(
+            reflected_manifold_cones_may_connect(
+                entry_normal,
+                reflection_normal,
+                exit_boundary,
+                eta_glass,
+            ),
+            "touching reflected and exit cones must fail open"
+        );
+
+        let separated_exit_cosine = double_angle_cosine - 1.0e-6;
+        let separated_exit = Vec3::new(
+            (1.0 - separated_exit_cosine * separated_exit_cosine).sqrt(),
+            0.0,
+            separated_exit_cosine,
+        );
+        assert!(
+            !reflected_manifold_cones_may_connect(
+                entry_normal,
+                reflection_normal,
+                separated_exit,
+                eta_glass,
+            ),
+            "strictly separated reflected and exit Snell cones are impossible"
+        );
+        assert!(reflected_manifold_cones_may_connect(
+            entry_normal,
+            reflection_normal,
+            Vec3::new(0.0, 0.0, 1.0),
+            eta_glass,
+        ));
+    }
+
+    #[test]
+    fn reflected_planar_manifold_canonicalizes_second_triangle_for_reverse_mis() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0; 3]);
+            let glass = DielectricGlass::new(
+                CauchyIor::try_constant(1.5).unwrap(),
+                BeerLambertAbsorption::try_constant(0.0).unwrap(),
+                GlassProvenance::Custom,
+            );
+            // Swapping x and y in the reciprocal kernel's reference fixture
+            // places the stationary reflection strictly in x < y: the second
+            // triangle of the upper quad, whose canonical support-plane ID is
+            // the first triangle.
+            let source = Point3::new(0.08, -0.35, -0.9);
+            let target = Point3::new(-0.12, 0.55, -0.7);
+            let light_primitive = 1;
+            let light = RectLight {
+                corner: Point3::new(-0.32, 0.75, -0.7),
+                edge_u: Vec3::new(0.4, 0.0, 0.0),
+                edge_v: Vec3::new(0.0, -0.4, 0.0),
+                prim: light_primitive,
+                emission: (white, 8.0),
+            };
+            let scene = Scene {
+                primitives: vec![
+                    Primitive {
+                        shape: instanced_test_mesh(closed_test_slab(0.0, 0.25), 63),
+                        material: Material::Dielectric {
+                            glass,
+                            surface: DielectricSurface::SMOOTH,
+                        },
+                        emission: None,
+                    },
+                    Primitive {
+                        shape: Shape::Mesh(horizontal_quad_at(-0.7, -0.12, 0.55, 0.2)),
+                        material: Material::Lambertian { reflectance: white },
+                        emission: Some(light.emission),
+                    },
+                ],
+                lights: vec![light],
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(-0.35, 0.08, -0.9),
+                    forward: Vec3::new(0.0, 0.0, 1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0,
+                },
+            };
+            let displacement = target.delta_from(source);
+            let distance = displacement.norm();
+            let direction = displacement.scale(1.0 / distance);
+            let shadow = Ray {
+                origin: source,
+                dir: direction,
+            };
+            assert_eq!(
+                intersect(&scene, cx, &shadow, None)
+                    .unwrap()
+                    .expect("straight chord must reach the sampled light")
+                    .primitive_index,
+                light_primitive,
+                "canonical same-side T-R-T path must not rely on a dielectric blocker"
+            );
+            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let direct_pdf = lighting.rect_mixture_pdf(0, source, target);
+            let direct = PreparedDirectLight {
+                direction,
+                emission: light.emission,
+                pdf_solid_angle: direct_pdf,
+                target: DirectLightTarget::Rectangle {
+                    primitive_index: light_primitive,
+                    distance_m: distance,
+                    point: target,
+                    normal: light.normal(),
+                },
+            };
+            let lanes = trace_reflected_manifold_rectangle_direct_lanes(
+                &scene,
+                cx,
+                None,
+                source,
+                Vec3::new(0.0, 0.0, 1.0),
+                direct,
+                550.0,
+            )
+            .unwrap();
+            let lane = *lanes
+                .first()
+                .expect("fixture must have a finite T-R-T stationary path");
+            let source_normal = Vec3::new(0.0, 0.0, 1.0);
+            let entry_ray = Ray {
+                origin: dielectric_spawn_origin(source, source_normal, lane.incident_direction),
+                dir: lane.incident_direction,
+            };
+            let entry_hit = intersect(&scene, cx, &entry_ray, None)
+                .unwrap()
+                .expect("stationary path must enter the slab");
+            let entry_frame = surface_frame(&entry_hit.hit, &entry_ray).unwrap();
+            let (internal_direction, _) = deterministic_snell_transmission(
+                entry_frame.geometric,
+                lane.incident_direction,
+                1.0,
+                1.5,
+            )
+            .unwrap();
+            let reflection_ray = Ray {
+                origin: dielectric_spawn_origin(
+                    entry_hit.hit.point,
+                    entry_frame.geometric,
+                    internal_direction,
+                ),
+                dir: internal_direction,
+            };
+            let reflection_hit = intersect(&scene, cx, &reflection_ray, None)
+                .unwrap()
+                .expect("stationary path must reach the upper reflecting face");
+            let reflection_frame = surface_frame(&reflection_hit.hit, &reflection_ray).unwrap();
+            let actual_triangle = match reflection_hit.instance_hit {
+                Some(InstanceHit {
+                    surface_feature: InstanceSurfaceFeature::MeshTriangle { triangle_index, .. },
+                    ..
+                }) => triangle_index,
+                _ => panic!("reflection must retain its finite triangle witness"),
+            };
+            let (geometry, transform) = placed_instanced_geometry(&scene, 0, None).unwrap();
+            let SharedGeometry::Mesh(mesh) = geometry else {
+                panic!("fixture boundary must remain an instanced mesh");
+            };
+            let canonical_triangle =
+                canonical_support_plane_triangle_index(&mesh, transform, actual_triangle).unwrap();
+            assert_eq!(
+                actual_triangle, 3,
+                "path must hit the quad's second triangle"
+            );
+            assert_eq!(
+                canonical_triangle, 2,
+                "upper support plane uses its lowest ID"
+            );
+            let mut medium_stack = MediumStack::new();
+            medium_stack
+                .push(MediumEntry {
+                    boundary_primitive: 0,
+                    glass,
+                })
+                .unwrap();
+            let reflected_direction = vec_add(
+                reflection_frame
+                    .geometric
+                    .scale(-2.0 * internal_direction.dot(reflection_frame.geometric)),
+                internal_direction,
+            );
+            let reflected_previous = previous_after_dielectric_sample(
+                &scene,
+                cx,
+                None,
+                Some(PreviousBsdf {
+                    pdf: DirectionalPdfPair::delta(),
+                    opaque_source_geometric_normal: None,
+                    smooth_slab: Some(SmoothSlabPath::ManifoldEntered(PlanarManifoldEntry {
+                        source_origin: source,
+                        source_geometric_normal: source_normal,
+                        source_direction: lane.incident_direction,
+                        source_pdf_solid_angle: 0.25,
+                        boundary_primitive: 0,
+                        glass,
+                        entry_event_probability: 1.0,
+                    })),
+                }),
+                entry_hit.hit.point,
+                &medium_stack,
+                0,
+                glass,
+                DielectricSurface::SMOOTH,
+                reflection_frame,
+                reflection_hit.hit,
+                reflection_hit.instance_hit,
+                reflection_ray,
+                reflected_direction,
+                DielectricEvent::Reflection,
+                true,
+                0.0,
+                true,
+                550.0,
+            )
+            .unwrap();
+            let stored_reflection_triangle = match reflected_previous.smooth_slab {
+                Some(SmoothSlabPath::ManifoldReflected(path)) => path.reflection_triangle_index,
+                _ => panic!("random walk must retain the reflected-manifold marker"),
+            };
+            assert_eq!(
+                stored_reflection_triangle, canonical_triangle,
+                "random-walk marker must canonicalize the actual second-triangle hit"
+            );
+            assert_eq!(
+                lane.reflection_triangle_index,
+                Some(stored_reflection_triangle),
+                "forward NEE must record the same canonical ID as random-walk replay"
+            );
+            assert!(
+                lane.transmission_probability > 0.0 && lane.transmission_probability < 1.0,
+                "non-grazing T-R-T event probability must retain a strict Fresnel R factor"
+            );
+            let replayed_pdf = completed_reflected_manifold_rectangle_nee_pdf(
+                &scene,
+                &lighting,
+                cx,
+                None,
+                PlanarReflectedManifoldExit {
+                    source_origin: source,
+                    source_geometric_normal: source_normal,
+                    source_direction: lane.incident_direction,
+                    source_pdf_solid_angle: 0.25,
+                    boundary_primitive: 0,
+                    glass,
+                    reflection_triangle_index: stored_reflection_triangle,
+                    event_probability: lane.transmission_probability,
+                },
+                0,
+                target,
+                550.0,
+            )
+            .unwrap();
+            assert_eq!(replayed_pdf.to_bits(), lane.nee_pdf_solid_angle.to_bits());
+            for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                let nee_weight = slab_nee_mis_weight(
+                    strategy,
+                    lane.nee_pdf_solid_angle,
+                    0.25,
+                    lane.transmission_probability,
+                    true,
+                )
+                .unwrap();
+                let bsdf_weight = completed_reflected_manifold_mis_weight(
+                    strategy,
+                    PlanarReflectedManifoldExit {
+                        source_origin: source,
+                        source_geometric_normal: source_normal,
+                        source_direction: lane.incident_direction,
+                        source_pdf_solid_angle: 0.25,
+                        boundary_primitive: 0,
+                        glass,
+                        reflection_triangle_index: stored_reflection_triangle,
+                        event_probability: lane.transmission_probability,
+                    },
+                    replayed_pdf,
+                );
+                assert_near(
+                    nee_weight + bsdf_weight,
+                    1.0,
+                    4.0 * f64::EPSILON,
+                    "forward/reverse reflected-manifold MIS partition",
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn planar_manifold_environment_connector_has_exact_pdf_and_reverse_replay() {
+        with_test_cx(|cx| {
+            let white = lift_rgb([1.0; 3]);
+            let glass = DielectricGlass::new(
+                CauchyIor::try_constant(1.5).unwrap(),
+                BeerLambertAbsorption::try_constant(0.0).unwrap(),
+                GlassProvenance::Custom,
+            );
+            let scene = Scene {
+                primitives: vec![Primitive {
+                    shape: instanced_test_mesh(closed_test_wedge(), 62),
+                    material: Material::Dielectric {
+                        glass,
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                    emission: None,
+                }],
+                lights: Vec::new(),
+                environment: None,
+                camera: Camera {
+                    eye: Point3::new(0.0, 0.0, -1.0),
+                    forward: Vec3::new(0.0, 0.0, 1.0),
+                    up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.0,
+                },
+            };
+            let source = scene.camera.eye;
+            let source_normal = scene.camera.forward;
+            let environment_direction = unit(Vec3::new(0.2, 0.05, 1.0));
+            let shadow = Ray {
+                origin: source.offset(source_normal.scale(RAY_EPS)),
+                dir: environment_direction,
+            };
+            let first = intersect(&scene, cx, &shadow, None)
+                .unwrap()
+                .expect("straight environment sample must enter the wedge");
+            assert!(matches!(
+                discover_parallel_slab(&scene, cx, &shadow, first, None),
+                Err(TracerError::UnsupportedSlabNee { .. })
+            ));
+            let boundary = discover_planar_manifold_boundary(&scene, &shadow, first, None)
+                .expect("closed convex wedge admits the environment manifold connector");
+            let direct_pdf = 0.37;
+            let direct = PreparedDirectLight {
+                direction: environment_direction,
+                emission: (white, 2.0),
+                pdf_solid_angle: direct_pdf,
+                target: DirectLightTarget::Environment,
+            };
+            let lanes = trace_planar_manifold_direct_lanes(
+                &scene,
+                cx,
+                None,
+                source,
+                source_normal,
+                boundary,
+                direct,
+                550.0,
+            )
+            .unwrap();
+            assert_eq!(lanes.len(), 1, "convex wedge has one stationary path");
+            let lane = lanes[0];
+            assert!(lane.visible);
+            assert!(lane.radiance_transport > 0.0 && lane.radiance_transport <= 1.0);
+
+            let (SharedGeometry::Mesh(mesh), transform) =
+                placed_instanced_geometry(&scene, 0, None).unwrap()
+            else {
+                unreachable!();
+            };
+            let entry_plane =
+                world_triangle_plane(&mesh, transform, boundary.entry_triangle_index).unwrap();
+            let exit_plane = world_triangle_plane(&mesh, transform, 2).unwrap();
+            let geometry = planar_manifold_connection_to_environment(
+                source,
+                entry_plane,
+                exit_plane,
+                environment_direction,
+                1.5,
+            )
+            .unwrap();
+            let transparent_limit = planar_manifold_connection_to_environment(
+                source,
+                entry_plane,
+                exit_plane,
+                environment_direction,
+                1.0,
+            )
+            .expect("the admitted unit-index limit is an undeviated connector");
+            assert!(parallel_directions(
+                transparent_limit.incident_direction,
+                environment_direction
+            ));
+            assert_near(
+                transparent_limit.target_solid_angle_per_source_solid_angle,
+                1.0,
+                8.0 * f64::EPSILON,
+                "unit-index environment angular map",
+            );
+            assert!(parallel_directions(
+                geometry.incident_direction,
+                lane.incident_direction
+            ));
+            assert_near(
+                lane.nee_pdf_solid_angle,
+                direct_pdf * geometry.target_solid_angle_per_source_solid_angle,
+                2.0e-15,
+                "analytic environment angular density",
+            );
+
+            let target_tangent = basis_all_sphere(environment_direction).0;
+            let target_bitangent = cross(environment_direction, target_tangent);
+            let epsilon = 1.0e-5;
+            let perturbed_incident = |axis: Vec3, sign: f64| {
+                let perturbed = unit(vec_add(environment_direction, axis.scale(sign * epsilon)));
+                planar_manifold_connection_to_environment(
+                    source,
+                    entry_plane,
+                    exit_plane,
+                    perturbed,
+                    1.5,
+                )
+                .unwrap()
+                .incident_direction
+            };
+            let derivative_tangent = vec_sub(
+                perturbed_incident(target_tangent, 1.0),
+                perturbed_incident(target_tangent, -1.0),
+            )
+            .scale(0.5 / epsilon);
+            let derivative_bitangent = vec_sub(
+                perturbed_incident(target_bitangent, 1.0),
+                perturbed_incident(target_bitangent, -1.0),
+            )
+            .scale(0.5 / epsilon);
+            let finite_difference = 1.0
+                / geometry
+                    .incident_direction
+                    .dot(cross(derivative_tangent, derivative_bitangent))
+                    .abs();
+            assert_near(
+                geometry.target_solid_angle_per_source_solid_angle,
+                finite_difference,
+                3.0e-7 * finite_difference,
+                "environment angular Jacobian central difference",
+            );
+
+            let retained_path = PlanarManifoldExit {
+                source_origin: source,
+                source_geometric_normal: source_normal,
+                source_direction: lane.incident_direction,
+                source_pdf_solid_angle: 0.25,
+                boundary_primitive: 0,
+                glass,
+                transmission_probability: lane.transmission_probability,
+            };
+            let replayed_pdf = completed_manifold_environment_nee_pdf(
+                &scene,
+                cx,
+                None,
+                retained_path,
+                environment_direction,
+                direct_pdf,
+                550.0,
+            )
+            .unwrap();
+            assert_eq!(replayed_pdf.to_bits(), lane.nee_pdf_solid_angle.to_bits());
+            for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                let nee_weight = slab_nee_mis_weight(
+                    strategy,
+                    lane.nee_pdf_solid_angle,
+                    retained_path.source_pdf_solid_angle,
+                    lane.transmission_probability,
+                    true,
+                )
+                .unwrap();
+                let bsdf_weight =
+                    completed_manifold_mis_weight(strategy, retained_path, replayed_pdf);
+                assert_near(
+                    nee_weight + bsdf_weight,
+                    1.0,
+                    4.0 * f64::EPSILON,
+                    "forward/reverse manifold MIS partition",
+                );
+            }
         });
     }
 
@@ -15352,17 +17354,34 @@ mod tests {
     }
 
     #[test]
-    fn split_work_is_bounded_and_nondispersive_boundaries_retain_packet_bits() {
+    fn two_forced_splits_consume_budget_and_bound_spectral_work() {
+        assert_eq!(SMOOTH_DIELECTRIC_SPLIT_BUDGET, 2);
+        let remaining_after_first =
+            consume_smooth_dielectric_split(SMOOTH_DIELECTRIC_SPLIT_BUDGET).unwrap();
+        assert_eq!(remaining_after_first, 1);
+        let remaining_after_second =
+            consume_smooth_dielectric_split(remaining_after_first).unwrap();
+        assert_eq!(remaining_after_second, 0);
+        assert_eq!(
+            consume_smooth_dielectric_split(remaining_after_second),
+            None
+        );
+
+        assert_eq!(maximum_spectral_suffixes(false, 0), PACKET as u64);
+        assert_eq!(maximum_spectral_suffixes(false, remaining_after_first), 8);
+        assert_eq!(maximum_spectral_suffixes(true, remaining_after_first), 2);
+        assert_eq!(maximum_spectral_suffixes(true, remaining_after_second), 1);
+        assert_eq!(
+            maximum_spectral_suffixes(true, SMOOTH_DIELECTRIC_SPLIT_BUDGET),
+            4
+        );
+        assert_eq!(
+            maximum_spectral_suffixes(false, SMOOTH_DIELECTRIC_SPLIT_BUDGET),
+            16
+        );
         for max_depth in 0..64_u32 {
             let bound = maximum_spectral_traversals(max_depth);
-            assert!(u64::from(max_depth) <= bound);
-            for split_depth in 0..max_depth {
-                let prefix = u64::from(split_depth + 1);
-                let suffix = u64::from(max_depth - split_depth - 1);
-                for children in 0..=PACKET as u64 {
-                    assert!(prefix + children * suffix <= bound);
-                }
-            }
+            assert_eq!(bound, u64::from(max_depth) * 16);
         }
 
         let glass = DielectricGlass::new(

@@ -427,13 +427,15 @@ differentiable lift). Pure Rust throughout.
   finite and nonnegative over the admitted grazing/roughness grid. Homogeneous
   attenuation composes as `T(L1 + L2) = T(L1) T(L2)` to floating-point
   tolerance.
-- The first smooth-dielectric boundary on a path is evaluated by exact forced
-  Fresnel splitting: reflection and transmission suffixes are both traced with
-  their physical spectral weights, rather than selecting one event and dividing
-  by its probability. This is an unbiased sum of the same transport integral,
-  removes primary-interface Fresnel roulette, and is deliberately limited to
-  one boundary so internal reflection cannot create an exponential path tree.
-  Later smooth boundaries retain the stochastic Fresnel estimator.
+- The first two smooth-dielectric boundaries encountered along every path
+  suffix are evaluated by exact forced Fresnel splitting: reflection and
+  transmission suffixes are both traced with their physical spectral weights,
+  rather than selecting one event and dividing by its probability. Every child
+  consumes one unit of the private path-local budget before it can continue.
+  This is an unbiased sum of the same transport integral, removes roulette at
+  the primary interface and its immediate internal reflection/exit decision,
+  and still prevents an unbounded specular tree. Third and later smooth
+  boundaries retain the stochastic Fresnel estimator.
 - The smooth parallel-slab direct-light specialization is an unbiased raw
   estimator, not a straight-through visibility shortcut. For a finite sampled
   rectangle point it solves the two-interface Snell connection, differentiates
@@ -443,7 +445,11 @@ differentiable lift). Pure Rust throughout.
   media and parallel interfaces make the external angular map the identity.
   Both paths apply the two exact Fresnel BTDF radiance factors and physical
   Beer-Lambert length. MIS compares the NEE density with the opaque BSDF density
-  times both sampled transmission-event probabilities; the reciprocal weights
+  times the event probabilities that the competing BSDF strategy actually
+  sampled: a deterministically split first entry contributes probability one,
+  while a roulette-sampled entry and every later sampled exit contribute their
+  Fresnel probabilities. Physical radiance throughput retains every Fresnel
+  factor independently of that sampling density, and the reciprocal weights
   partition unity. Reverse MIS replays the exact forward straight shadow-ray
   spawn from the retained opaque-source geometric normal. Its competing NEE
   density is zero unless that ray first meets the same admitted local slab face
@@ -455,11 +461,15 @@ differentiable lift). Pure Rust throughout.
   to an isolated convex, outward-oriented instanced triangle solid with two
   nonparallel planar transmission faces. For each sampled finite emitter point
   it solves the four-variable stationary Fermat path with a damped Newton method
-  and analytic Hessian, validates both finite face hits and the final emitter
-  endpoint against actual scene traversal, and applies exact spectral Snell,
-  Fresnel, Beer-Lambert, and radiance-mode eta transport. Its light-area to
-  source-solid-angle density is the implicit derivative of the same Fermat
-  system, not a finite-difference approximation. Forward NEE deterministically
+  and analytic Hessian. For an environment direction, exact inverse Snell
+  transport fixes both segment directions and their support-plane intersections;
+  the induced source density uses the reciprocal two-interface etendue Jacobian,
+  with the ambient-to-glass and glass-to-ambient eta-squared factors cancelling.
+  Both forms validate the finite face hits and final target against actual scene
+  traversal and apply exact spectral Snell, Fresnel, Beer-Lambert, and
+  radiance-mode eta transport. The finite light-area to source-solid-angle
+  density is the implicit derivative of the same Fermat system, not a
+  finite-difference approximation. Forward NEE deterministically
   prefers the analytic slab specialization when its wavelength-specific finite
   connection exists, then falls back to the manifold specialization if the
   refracted path leaves that slab face through a bevel. Reverse MIS replays that
@@ -467,8 +477,27 @@ differentiable lift). Pure Rust throughout.
   NEE weights partition unity. Multiple distinct admitted
   stationary transmission paths are summed; coplanar triangulation duplicates
   are direction-deduplicated. Non-convergence, a non-convex/inward-wound mesh,
-  rough or nested media, charts, and environment targets simply have no optional
-  manifold proposal and retain ordinary BSDF support.
+  rough or nested media, and charts simply have no optional manifold proposal
+  and retain ordinary BSDF support.
+- For finite rectangle endpoints, that same isolated-convex-planar admission
+  additionally covers exactly one internal specular reflection (`T-R-T`). The
+  six-variable stationary Fermat solve, its analytic Hessian, and implicit
+  target-area Jacobian define the forward density; actual entry, reflection,
+  exit, and light hits must match the named finite support planes. Coplanar mesh
+  triangles share one deterministic lowest-index interface identity in forward
+  enumeration, the sampled random walk, and reverse replay. Throughput applies
+  exact spectral `T*R*T`, radiance-mode eta transport, and Beer-Lambert length.
+  Before Newton iteration, a necessary angular-support test rejects only strict
+  impossibilities: air-to-glass Snell transmission bounds the incident internal
+  direction to `sin(theta) = 1/eta`, specular reflection maps that cone exactly,
+  and glass-to-air transmission requires overlap with the equal exit cone. The
+  implementation compares `cos(2*theta) = 1 - 2/eta^2` algebraically and retains
+  both equality boundaries under a roundoff guard. This cull changes neither
+  finite-path support nor density; finite-face traversal remains authoritative.
+  Reverse MIS replays the same reflection support plane and stationary solution,
+  so its event-probability density partitions with the forward proposal. This
+  is deliberately not arbitrary `T-R^k-T`, an environment reflection connector,
+  or a general manifold-next-event solver.
 - Sampling is deterministic: analytic and low-discrepancy helpers are
   stateless, while stochastic render paths use explicitly keyed counter-based
   streams rather than ambient mutable RNG state.
@@ -680,18 +709,33 @@ expectation.
 Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
 are single-scattering without multiple-scattering compensation, and emitters
-do not reflect. Dielectric tracer bit-semantics v9 replaces the rough
-dielectric's full-NDF proposal with isotropic view-conditioned visible-normal
-sampling while retaining the exact Fresnel reflection/transmission branch and
-the matching forward and reverse solid-angle densities. At the
-first smooth dielectric boundary, reflection is retained as a spectral packet
-and transmission fans out into single-wavelength continuations only when its
-Snell directions require it; their deterministic Fresnel-weighted sum retains
-support when one wavelength undergoes TIR and another does not. A later first
-wavelength-dependent dielectric boundary can still fan an unsplit packet into
-four correlated stochastic continuations. A child wavelength lane cannot split
-again, fixed lane/branch-order accumulation is deterministic, and the combined
-forced-Fresnel plus spectral-dispersion path-work bound is at most eight times
+do not reflect. Dielectric tracer bit-semantics v14 retains v13's isotropic
+view-conditioned visible-normal rough-dielectric proposal, exact environment
+endpoint, finite-rectangle one-internal-reflection manifold connector,
+coplanar-interface canonicalization, and support-preserving `T-R-T` cone cull.
+It raises the private path-local smooth-dielectric forced-split budget from one
+to two: the first and immediate second smooth boundaries on every suffix use
+the exact Fresnel reflection/transmission sum, every child consumes one budget
+unit, and the third and later boundaries remain sampled. Version 13
+canonicalizes every coplanar triangulated interface to its lowest triangle ID
+for both forward enumeration and reverse BSDF replay; this removes duplicate
+Fermat solves and prevents a quad-diagonal hit from losing its competing NEE
+density. It also rejects strictly disjoint `T-R-T` Snell/specular direction
+cones before Newton iteration, using the same support-preserving test in forward
+enumeration and reverse replay. Physical Fresnel transport remains distinct from
+the actual competing BSDF event density: either deterministically split
+interface contributes
+physical `T` to throughput but probability one to MIS, whereas a stochastically
+selected entry contributes `T` to both. At the
+first two smooth dielectric boundaries, reflection is retained as a spectral
+packet and transmission fans out into single-wavelength continuations only when
+its Snell directions require it; their deterministic Fresnel-weighted sum
+retains support when one wavelength undergoes TIR and another does not. After
+the forced budget is exhausted, a later first wavelength-dependent dielectric
+boundary can still fan an unsplit packet into four correlated stochastic
+continuations. A child wavelength lane cannot fan out spectrally again, fixed
+lane/branch-order accumulation is deterministic, and the combined
+forced-Fresnel plus spectral-dispersion path-work bound is at most sixteen times
 the declared maximum depth. Wavelength-independent transmission retains the
 packet.
 Current-vertex NEE uses each lane's native competing BSDF density.
@@ -730,7 +774,9 @@ NEE with target-medium attenuation; cancellation; and bitwise progressive
 replay. Inline analytic tests add independent Fresnel, Snell/critical-angle,
 signed-vector refraction, Walter rough-transmission, eta-factor, signed-zero,
 grazing, pole-frame, adjacent-IOR, packet retention at nondispersive boundaries,
-one-time dispersive fan-out, and wavelength-straddled TIR support fixtures. The Cornell tracer
+one-time dispersive fan-out, wavelength-straddled TIR support, exact primary and
+immediate-secondary forced-split energy, and two-unit child-budget/traversal-bound
+fixtures. The Cornell tracer
 battery is deliberately re-frozen when tracer bit
 semantics change and remains the opaque-path non-regression gate.
 Inline slab-NEE tests additionally pin the equal-IOR reduction, the closed-form
@@ -938,12 +984,14 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   media, or a topology certificate. GGX transmission is single-scattering and
   does not claim multiple-scattering furnace closure at appreciable roughness.
   Outside the explicitly checked smooth homogeneous local parallel-face-pair
-  specialization and the isolated convex planar two-interface manifold on an
+  specialization and the isolated convex planar two-transmission-interface
+  manifold (optionally with one finite-rectangle internal reflection) on an
   instanced mesh, shadow rays stop at the first intervening surface; they never
-  travel undeviated through glass. Curved, rough, layered, overlapping, nested,
-  and environment-target manifold connections are refused, not approximated.
+  travel undeviated through glass. Curved, rough, layered, overlapping, and
+  nested manifold connections are refused, not approximated.
   The manifold connector covers transmission through one finite convex planar
-  solid; it is not general bidirectional path tracing, vertex merging, or a
+  solid with zero or one internal reflection; it is not general bidirectional
+  path tracing, vertex merging, or a
   solver for arbitrary specular chains. Difficult focused caustics outside that
   class can still converge slowly. No denoising or unbiased firefly-clamping
   claim is made.
