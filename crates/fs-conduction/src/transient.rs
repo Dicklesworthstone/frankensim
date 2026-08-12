@@ -53,10 +53,12 @@
 //! than linearizing it.
 
 use crate::ConductionError;
-use crate::assemble::{DofMap, assemble_operator, reduce_matrix_and_lift};
+use crate::assemble::{
+    DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
+};
 use crate::bc::ThermalBoundary;
 use crate::field::ScalarField;
-use crate::material::ConductivityModel;
+use crate::material::{ConductivityModel, ElementMaterials};
 use crate::mesh::ConductionMesh;
 use crate::solve::{LinearConfig, spd_preconditioner};
 use fs_exec::Cx;
@@ -313,6 +315,45 @@ pub fn march(
     initial: &[f64],
     steps: usize,
 ) -> Result<TransientSolution, ConductionError> {
+    march_inner(cx, problem, None, config, initial, steps)
+}
+
+/// [`march`] with a checked per-element constitutive assignment.
+///
+/// Every assigned model must be temperature-independent. `ρ_e` is not
+/// a material identity; the named model of each tet is.
+///
+/// # Errors
+/// Assignment validation, a `k(T)` model on any element, and every
+/// refusal [`march`] can produce.
+pub fn march_with_element_materials(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    materials: &ElementMaterials,
+    config: &TransientConfig,
+    initial: &[f64],
+    steps: usize,
+) -> Result<TransientSolution, ConductionError> {
+    materials.validate_for(problem.mesh)?;
+    for e in 0..problem.mesh.element_count() {
+        if materials.model_for(e)?.is_temperature_dependent() {
+            return Err(ConductionError::Config {
+                parameter: "conductivity",
+                what: "transient marching received a temperature-dependent conductivity; supply a constant one, because freezing k(T) across a step is a different scheme with its own error behaviour and is not adopted silently".to_string(),
+            });
+        }
+    }
+    march_inner(cx, problem, Some(materials), config, initial, steps)
+}
+
+fn march_inner(
+    cx: &Cx<'_>,
+    problem: TransientProblem<'_>,
+    element_materials: Option<&ElementMaterials>,
+    config: &TransientConfig,
+    initial: &[f64],
+    steps: usize,
+) -> Result<TransientSolution, ConductionError> {
     let TransientProblem {
         mesh,
         boundary,
@@ -320,7 +361,7 @@ pub fn march(
         source,
         capacity,
     } = problem;
-    if material.is_temperature_dependent() {
+    if element_materials.is_none() && material.is_temperature_dependent() {
         return Err(ConductionError::Config {
             parameter: "conductivity",
             what: "transient marching received a temperature-dependent conductivity; supply a constant one, because freezing k(T) across a step is a different scheme with its own error behaviour and is not adopted silently".to_string(),
@@ -343,7 +384,12 @@ pub fn march(
 
     // K and b are temperature independent here, so one assembly serves every
     // step. That is exactly why k(T) is refused rather than re-assembled.
-    let system = assemble_operator(cx, mesh, boundary, material, source, initial)?;
+    let system = match element_materials {
+        Some(assigned) => assemble_operator_with_element_materials(
+            cx, mesh, boundary, material, source, initial, assigned,
+        )?,
+        None => assemble_operator(cx, mesh, boundary, material, source, initial)?,
+    };
     let stiffness = &system.operator;
     let load = &system.load;
 
