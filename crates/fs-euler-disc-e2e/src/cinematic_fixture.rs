@@ -49,10 +49,10 @@ use crate::structural_acoustics::{
     AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
     PhysicalModalInitialState, PhysicalPressureSignal, RectangularPlateModalBasis,
     RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
-    RetardedFarFieldObserverControls, StructuralBroadbandRadiationRequest,
-    StructuralMeshControls, StructuralModalBasisError, StructuralModeRequest,
-    StructuralResidualFlexibilityControls, StructuralResidualModalLossSpectrum,
-    build_rectangular_plate_modal_basis, build_structural_broadband_radiation_artifact,
+    RetardedFarFieldObserverControls, StructuralBroadbandRadiationRequest, StructuralMeshControls,
+    StructuralModalBasisError, StructuralModeRequest, StructuralResidualFlexibilityControls,
+    StructuralResidualModalLossSpectrum, build_rectangular_plate_modal_basis,
+    build_structural_broadband_radiation_artifact,
     build_structural_residual_flexibility_estimate_basis, superpose_pressure_signals,
     synthesize_retarded_far_field_world_observers,
 };
@@ -272,10 +272,12 @@ const CRITIQUE_CAMERA_TARGET_M: [f64; 3] = [0.0, 0.0, 0.008];
 const CRITIQUE_PHYSICAL_MICROPHONE_RADIUS_M: f64 = 1.0;
 const CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M: f64 = 0.045;
 const CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ: f64 = 21_500.0;
-const CRITIQUE_DISC_BROADBAND_TRAINING_HZ: [f64; 8] =
-    [250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 14_000.0, 20_500.0];
-const CRITIQUE_DISC_BROADBAND_HELD_OUT_HZ: [f64; 8] =
-    [350.0, 750.0, 1_500.0, 3_000.0, 6_000.0, 11_000.0, 18_000.0, 21_500.0];
+const CRITIQUE_DISC_BROADBAND_TRAINING_HZ: [f64; 8] = [
+    250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 14_000.0, 20_500.0,
+];
+const CRITIQUE_DISC_BROADBAND_HELD_OUT_HZ: [f64; 8] = [
+    350.0, 750.0, 1_500.0, 3_000.0, 6_000.0, 11_000.0, 18_000.0, 21_500.0,
+];
 const CRITIQUE_DISC_BROADBAND_DIRECTIONS: [[f64; 3]; 8] = [
     [1.0, 1.0, 1.0],
     [1.0, 1.0, -1.0],
@@ -8207,10 +8209,7 @@ fn build_physical_audio(
                 + disc_basis.mesh.maximum_azimuthal_chord_error_m)
             + 512.0 * f64::EPSILON * disc_scale_m.max(1.0);
         let mut runtime = disc_source
-            .try_runtime(
-                disc_basis,
-                ModalAcousticTimeBudget::audible_reference(),
-            )
+            .try_runtime(disc_basis, ModalAcousticTimeBudget::audible_reference())
             .map_err(pipeline)?;
         let stem = runtime
             .synthesize_control_stream(
@@ -8285,8 +8284,8 @@ fn build_physical_audio(
         u64::from(config.frames) * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS),
     )
     .map_err(|_| CinematicFixtureError::Pipeline("published audio exceeds usize".into()))?;
-    let publication_start_time_s = expected_preroll_audio_frame_count as f64
-        / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let publication_start_time_s =
+        expected_preroll_audio_frame_count as f64 / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
     let plate_left = crop_physical_pressure_window(
         &plate_left,
         publication_start_time_s,
@@ -8374,12 +8373,10 @@ fn build_physical_audio(
                 rms_held_out_error: source.radiation.report.rms_normalized_complex_error,
             }
         }
-        (None, None, None) => {
-            FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
-                forcing_maximum_frequency_hz: disc_controls.maximum_frequency_hz,
-                enrichment_maximum_frequency_hz: CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ,
-            }
-        }
+        (None, None, None) => FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
+            forcing_maximum_frequency_hz: disc_controls.maximum_frequency_hz,
+            enrichment_maximum_frequency_hz: CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ,
+        },
         _ => {
             return Err(CinematicFixtureError::Pipeline(
                 "disc structural basis, radiation, and pressure disposition diverged".into(),
@@ -8412,16 +8409,14 @@ fn build_physical_audio(
 
 fn physical_pressure_observers() -> [AcousticWorldObserver; 2] {
     let listener = spatial_listener_pose();
-    let center = core::array::from_fn(|axis| {
+    let center: [f64; 3] = core::array::from_fn(|axis| {
         CRITIQUE_CAMERA_TARGET_M[axis]
             - CRITIQUE_PHYSICAL_MICROPHONE_RADIUS_M * listener.forward_unit[axis]
     });
     [-1.0, 1.0].map(|side| AcousticWorldObserver {
         position_world_m: core::array::from_fn(|axis| {
             center[axis]
-                + side
-                    * CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M
-                    * listener.right_unit[axis]
+                + side * CRITIQUE_PHYSICAL_MICROPHONE_HALF_SPACING_M * listener.right_unit[axis]
         }),
     })
 }
@@ -8447,10 +8442,7 @@ fn crop_physical_pressure_window(
     let coordinate =
         (absolute_start_time_s - signal.start_time_s) * f64::from(signal.sample_rate_hz);
     let rounded = coordinate.round();
-    if !(coordinate.is_finite()
-        && rounded >= 0.0
-        && (coordinate - rounded).abs() <= 1.0e-6)
-    {
+    if !(coordinate.is_finite() && rounded >= 0.0 && (coordinate - rounded).abs() <= 1.0e-6) {
         return Err(CinematicFixtureError::Pipeline(
             "physical pressure does not contain the exact publication clock boundary".into(),
         ));
@@ -9370,11 +9362,11 @@ fn production_fixture_manifest(
             "\"declared_source_bandwidth_hz\":{:.17e},",
             "\"reconstruction_filter\":{{\"passband_edge_hz\":{:.17e},",
             "\"stopband_edge_hz\":{:.17e},\"half_length_frames\":{}}},",
-            "\"disc_radiator\":{disc_radiator_json},",
+            "\"disc_radiator\":{},",
             "\"plate_modes\":{{\"retained_count\":{},\"minimum_frequency_hz\":{:.17e},",
             "\"maximum_frequency_hz\":{:.17e}}},",
             "\"observer_model\":\"two camera-independent fixed world microphones; causal retarded-time radiation\",",
-            "\"observer_positions_world_m\":{physical_observers_json},",
+            "\"observer_positions_world_m\":{},",
             "\"control_resolution_evidence\":{{\"fine_hz\":48000,\"coarse_hz\":24000,",
             "\"coarsening_impulse_residual_n_s\":{:.17e},",
             "\"pressure_response_convergence\":\"outstanding\"}}}},\n",
@@ -9449,9 +9441,11 @@ fn production_fixture_manifest(
         reconstruction_filter.passband_edge_hz,
         reconstruction_filter.stopband_edge_hz,
         reconstruction_filter.half_length,
+        disc_radiator_json,
         physical_audio.plate_retained_mode_count,
         physical_audio.plate_minimum_mode_frequency_hz,
         physical_audio.plate_maximum_mode_frequency_hz,
+        physical_observers_json,
         impulse_residual_n_s,
         render.frames,
         render.maximum_effective_workers,
@@ -9702,7 +9696,7 @@ fn fixture_manifest(
             "\"force_reconstruction\":\"conservative-generalized-force-time-measures plus centered Blackman-Harris low-pass with global half-sample even reflection v1\",",
             "\"disc_material_state_identity\":\"{}\",\"plate_material_state_identity\":\"{}\",",
             "\"plate_optical_model_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
-            "\"observer_positions_world_m\":{physical_observers_json},",
+            "\"observer_positions_world_m\":{},",
             "\"left_pressure_identity\":\"{}\",\"right_pressure_identity\":\"{}\",",
             "\"plate_component_pressure_identities\":{{\"left\":\"{}\",\"right\":\"{}\"}},",
             "\"radiators\":{{",
@@ -9720,6 +9714,7 @@ fn fixture_manifest(
         physical_audio.plate_material_state_identity.to_hex(),
         physical_audio.plate_optical_model_identity.to_hex(),
         physical_audio.gas_model_identity.to_hex(),
+        physical_observers_json,
         physical_audio.left_pressure_identity.to_hex(),
         physical_audio.right_pressure_identity.to_hex(),
         physical_audio.plate_left_pressure_identity.to_hex(),
