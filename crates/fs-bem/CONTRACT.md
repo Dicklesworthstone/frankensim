@@ -58,6 +58,11 @@ everywhere: this is screening, not a viscous truth source.
   `e^{-i omega t}`, `G = e^{ikr}/(4 pi r)`; with the module's HBIE row
   sign, the Burton-Miller coupling is `alpha = -i/k` (pinned by the
   interior-resonance contrast, not by convention label).
+- `solve_radiation_batch(surface, k, medium, velocity_fields, formulation)` —
+  the same solve semantics for a nonempty, bounded batch (at most 256 fields)
+  at one frequency, preserving input order while sharing one validated dense
+  matrix, LU factorization, and condition diagnostic across every right-hand
+  side.
 - `Formulation::{PlainCbie, BurtonMiller, BurtonMillerWrongAlphaSign}` —
   measured roles: PlainCbie is the accurate non-resonant arm (1.7-3.4%
   on the pulsating sphere across ka in [0.05, 5]); BurtonMiller is the
@@ -195,8 +200,9 @@ NASA marks it as U.S. Government work with public use permitted.
 3. Pulsating-sphere impedance within the authored per-arm envelopes
    above; radiated power positive for mesh-resolved velocity fields;
    area-weighted impedance-matrix reciprocity to 0.5% measured.
-4. Repeat solves are bitwise identical, including the condition
-   diagnostic and spherical-harmonic coefficient tables.
+4. Repeat solves are bitwise identical, including batched solves, their
+   equivalence to independent single-field solves, the condition diagnostic,
+   and spherical-harmonic coefficient tables.
 5. The spherical-harmonic basis is self-checked: Gauss–Legendre weight
    and moment identities to 1e-13 and normalized associated-Legendre
    orthonormality to 1e-12 under the same quadrature the projection

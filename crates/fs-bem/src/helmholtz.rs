@@ -54,7 +54,7 @@
 //! rigorous estimator (the fictitious-frequency contrast remains the
 //! physics-level diagnostic).
 
-use fs_la::eigen_complex::lu_complex;
+use fs_la::eigen_complex::{LuComplex, lu_complex};
 use fs_math::c64::C64;
 use fs_math::det;
 
@@ -64,6 +64,12 @@ use crate::panel3d::SpherePanels;
 /// refused rather than silently thrashing (n^2 * 16 bytes; 8192 panels
 /// is already a 1 GiB matrix). The FMM path is the recorded follow-up.
 pub const MAX_DENSE_PANELS: usize = 8192;
+
+/// Maximum number of boundary-velocity fields solved against one shared
+/// Helmholtz factorization. This bounds the aggregate output and triangular
+/// solve work while still covering modal/directivity batches without forcing
+/// callers back to one factorization per field.
+pub const MAX_RADIATION_FIELDS_PER_BATCH: usize = 256;
 
 /// Minimum panels per wavelength before the solver refuses: below ~6 the
 /// centroid-collocation solution degrades silently, so the boundary is a
@@ -281,75 +287,140 @@ pub fn solve_radiation(
     velocity: &[C64],
     formulation: Formulation,
 ) -> Result<RadiationSolution, HelmholtzError> {
-    if !(k > 0.0 && k.is_finite()) {
-        return Err(HelmholtzError::BadParameter {
-            what: "wavenumber k must be positive and finite",
-        });
-    }
-    if !(medium.density > 0.0
-        && medium.density.is_finite()
-        && medium.sound_speed > 0.0
-        && medium.sound_speed.is_finite())
-    {
-        return Err(HelmholtzError::BadParameter {
-            what: "medium density and sound speed must be positive and finite",
-        });
-    }
-    let n = surface.centroids().len();
-    if velocity.len() != n {
-        return Err(HelmholtzError::ShapeMismatch {
-            what: "velocity length must equal the panel count",
-        });
-    }
-    if n > MAX_DENSE_PANELS {
-        return Err(HelmholtzError::WorkCap { panels: n });
-    }
-    let wavelength = 2.0 * core::f64::consts::PI / k;
-    let ppw = wavelength / characteristic_panel_size(surface);
-    if ppw < MIN_PANELS_PER_WAVELENGTH {
-        return Err(HelmholtzError::TooCoarse {
-            panels_per_wavelength: ppw,
-        });
-    }
+    let fields = [velocity];
+    let operator = RadiationOperator::prepare(surface, k, medium, &fields, formulation)?;
+    Ok(operator.solve(velocity))
+}
 
-    let alpha = alpha_for(formulation, k);
-
-    // q = i omega rho v.
-    let omega_rho = k * medium.sound_speed * medium.density;
-    let q: Vec<C64> = velocity
+/// Solve a nonempty batch of exterior Neumann radiation problems at one
+/// frequency. All fields share the exact same validated Helmholtz matrix, LU
+/// factorization, condition diagnostic, and panels-per-wavelength diagnostic;
+/// returned solutions remain in input order and otherwise have exactly the
+/// semantics of [`solve_radiation`].
+///
+/// # Errors
+/// [`HelmholtzError`] on the same admissions as [`solve_radiation`], if any
+/// velocity field has the wrong panel count, or if the batch is empty or
+/// exceeds [`MAX_RADIATION_FIELDS_PER_BATCH`].
+pub fn solve_radiation_batch(
+    surface: &SpherePanels,
+    k: f64,
+    medium: Medium,
+    velocity_fields: &[&[C64]],
+    formulation: Formulation,
+) -> Result<Vec<RadiationSolution>, HelmholtzError> {
+    let operator = RadiationOperator::prepare(surface, k, medium, velocity_fields, formulation)?;
+    Ok(velocity_fields
         .iter()
-        .map(|&v| v * C64::new(0.0, omega_rho))
-        .collect();
+        .map(|&velocity| operator.solve(velocity))
+        .collect())
+}
 
-    let (matrix, bmat) = assemble_dense(surface, k, alpha);
-    let mut rhs = vec![C64::ZERO; n];
-    for i in 0..n {
-        let mut b = C64::ZERO;
-        for j in 0..n {
-            b = b + bmat[i * n + j] * q[j];
+/// One admitted and factorized exterior-radiation operator. Keeping this
+/// private makes it impossible to mix a factorization with a different
+/// surface, medium, frequency, or formulation.
+struct RadiationOperator<'a> {
+    surface: &'a SpherePanels,
+    k: f64,
+    medium: Medium,
+    panels_per_wavelength: f64,
+    bmat: Vec<C64>,
+    lu: LuComplex,
+    condition_lower_bound: f64,
+}
+
+impl<'a> RadiationOperator<'a> {
+    fn prepare(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        velocity_fields: &[&[C64]],
+        formulation: Formulation,
+    ) -> Result<Self, HelmholtzError> {
+        if !(k > 0.0 && k.is_finite()) {
+            return Err(HelmholtzError::BadParameter {
+                what: "wavenumber k must be positive and finite",
+            });
         }
-        rhs[i] = b;
+        if !(medium.density > 0.0
+            && medium.density.is_finite()
+            && medium.sound_speed > 0.0
+            && medium.sound_speed.is_finite())
+        {
+            return Err(HelmholtzError::BadParameter {
+                what: "medium density and sound speed must be positive and finite",
+            });
+        }
+        let n = surface.centroids().len();
+        if velocity_fields.is_empty() || velocity_fields.len() > MAX_RADIATION_FIELDS_PER_BATCH {
+            return Err(HelmholtzError::BadParameter {
+                what: "velocity-field batch must be nonempty and within MAX_RADIATION_FIELDS_PER_BATCH",
+            });
+        }
+        if velocity_fields.iter().any(|velocity| velocity.len() != n) {
+            return Err(HelmholtzError::ShapeMismatch {
+                what: "velocity length must equal the panel count",
+            });
+        }
+        if n > MAX_DENSE_PANELS {
+            return Err(HelmholtzError::WorkCap { panels: n });
+        }
+        let wavelength = 2.0 * core::f64::consts::PI / k;
+        let ppw = wavelength / characteristic_panel_size(surface);
+        if ppw < MIN_PANELS_PER_WAVELENGTH {
+            return Err(HelmholtzError::TooCoarse {
+                panels_per_wavelength: ppw,
+            });
+        }
+
+        let alpha = alpha_for(formulation, k);
+        let (matrix, bmat) = assemble_dense(surface, k, alpha);
+        let lu = lu_complex(&matrix, n).map_err(|_| HelmholtzError::Singular)?;
+        let condition_lower_bound = condition_lower_bound(&matrix, n, &lu);
+        Ok(Self {
+            surface,
+            k,
+            medium,
+            panels_per_wavelength: ppw,
+            bmat,
+            lu,
+            condition_lower_bound,
+        })
     }
 
-    let lu = lu_complex(&matrix, n).map_err(|_| HelmholtzError::Singular)?;
-    let condition_lower_bound = condition_lower_bound(&matrix, n, &lu);
-    let mut pressure = rhs;
-    lu.solve(&mut pressure);
+    fn solve(&self, velocity: &[C64]) -> RadiationSolution {
+        let n = self.surface.centroids().len();
+        let omega_rho = self.k * self.medium.sound_speed * self.medium.density;
+        // q = i omega rho v.
+        let q: Vec<C64> = velocity
+            .iter()
+            .map(|&v| v * C64::new(0.0, omega_rho))
+            .collect();
+        let mut pressure = vec![C64::ZERO; n];
+        for i in 0..n {
+            let mut b = C64::ZERO;
+            for (j, &qj) in q.iter().enumerate() {
+                b = b + self.bmat[i * n + j] * qj;
+            }
+            pressure[i] = b;
+        }
+        self.lu.solve(&mut pressure);
 
-    let mut radiated_power = 0.0;
-    for j in 0..n {
-        radiated_power += 0.5 * (pressure[j] * velocity[j].conj()).re * surface.areas()[j];
+        let mut radiated_power = 0.0;
+        for j in 0..n {
+            radiated_power += 0.5 * (pressure[j] * velocity[j].conj()).re * self.surface.areas()[j];
+        }
+
+        RadiationSolution {
+            pressure,
+            velocity: velocity.to_vec(),
+            k: self.k,
+            panels_per_wavelength: self.panels_per_wavelength,
+            radiated_power,
+            condition_lower_bound: self.condition_lower_bound,
+            dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
+        }
     }
-
-    Ok(RadiationSolution {
-        pressure,
-        velocity: velocity.to_vec(),
-        k,
-        panels_per_wavelength: ppw,
-        radiated_power,
-        condition_lower_bound,
-        dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
-    })
 }
 
 /// Probe-based lower bound on `cond_1(A) = ||A||_1 ||A^{-1}||_1`:
@@ -931,6 +1002,38 @@ mod tests {
         num.scale(1.0 / den)
     }
 
+    fn assert_solution_bitwise_equal(actual: &RadiationSolution, expected: &RadiationSolution) {
+        let assert_complex_bits = |actual: C64, expected: C64| {
+            assert_eq!(actual.re.to_bits(), expected.re.to_bits());
+            assert_eq!(actual.im.to_bits(), expected.im.to_bits());
+        };
+        assert_eq!(actual.pressure.len(), expected.pressure.len());
+        for (&actual, &expected) in actual.pressure.iter().zip(expected.pressure.iter()) {
+            assert_complex_bits(actual, expected);
+        }
+        assert_eq!(actual.velocity.len(), expected.velocity.len());
+        for (&actual, &expected) in actual.velocity.iter().zip(expected.velocity.iter()) {
+            assert_complex_bits(actual, expected);
+        }
+        assert_eq!(actual.k.to_bits(), expected.k.to_bits());
+        assert_eq!(
+            actual.panels_per_wavelength.to_bits(),
+            expected.panels_per_wavelength.to_bits()
+        );
+        assert_eq!(
+            actual.radiated_power.to_bits(),
+            expected.radiated_power.to_bits()
+        );
+        assert_eq!(
+            actual.condition_lower_bound.to_bits(),
+            expected.condition_lower_bound.to_bits()
+        );
+        assert_eq!(
+            actual.dense_cap_utilization.to_bits(),
+            expected.dense_cap_utilization.to_bits()
+        );
+    }
+
     #[test]
     fn kernels_match_finite_differences_of_green() {
         // The four point kernels against central differences of G — the
@@ -1369,6 +1472,92 @@ mod tests {
             a.condition_lower_bound.to_bits(),
             b.condition_lower_bound.to_bits()
         );
+    }
+
+    #[test]
+    fn g0_batched_radiation_matches_independent_solves_bitwise() {
+        let surface = SpherePanels::icosphere(1.0, 1).expect("icosphere");
+        let n = surface.centroids().len();
+        let uniform = uniform_velocity(n);
+        let dipole: Vec<C64> = surface
+            .normals()
+            .iter()
+            .map(|normal| C64::from_re(normal[0]))
+            .collect();
+        let mixed: Vec<C64> = surface
+            .normals()
+            .iter()
+            .map(|normal| C64::new(normal[1] + 0.25 * normal[2], -0.3 * normal[0]))
+            .collect();
+        let fields = [uniform.as_slice(), dipole.as_slice(), mixed.as_slice()];
+        let batched = solve_radiation_batch(
+            &surface,
+            1.3,
+            Medium::air(),
+            &fields,
+            Formulation::BurtonMiller,
+        )
+        .expect("batched solve");
+        let replay = solve_radiation_batch(
+            &surface,
+            1.3,
+            Medium::air(),
+            &fields,
+            Formulation::BurtonMiller,
+        )
+        .expect("deterministic batched replay");
+        assert_eq!(batched.len(), fields.len());
+        for (index, &velocity) in fields.iter().enumerate() {
+            let independent = solve_radiation(
+                &surface,
+                1.3,
+                Medium::air(),
+                velocity,
+                Formulation::BurtonMiller,
+            )
+            .expect("independent solve");
+            assert_solution_bitwise_equal(&batched[index], &independent);
+            assert_solution_bitwise_equal(&replay[index], &batched[index]);
+        }
+        assert!(
+            batched
+                .windows(2)
+                .all(|pair| pair[0].pressure != pair[1].pressure)
+        );
+
+        let empty: [&[C64]; 0] = [];
+        assert!(matches!(
+            solve_radiation_batch(
+                &surface,
+                1.3,
+                Medium::air(),
+                &empty,
+                Formulation::BurtonMiller
+            ),
+            Err(HelmholtzError::BadParameter { .. })
+        ));
+        let short = vec![C64::ZERO; n - 1];
+        assert!(matches!(
+            solve_radiation_batch(
+                &surface,
+                1.3,
+                Medium::air(),
+                &[uniform.as_slice(), short.as_slice()],
+                Formulation::BurtonMiller
+            ),
+            Err(HelmholtzError::ShapeMismatch { .. })
+        ));
+        let oversized = vec![uniform.as_slice(); MAX_RADIATION_FIELDS_PER_BATCH + 1];
+        assert!(matches!(
+            solve_radiation_batch(
+                &surface,
+                1.3,
+                Medium::air(),
+                &oversized,
+                Formulation::BurtonMiller
+            ),
+            Err(HelmholtzError::BadParameter { .. })
+        ));
     }
 
     #[test]
