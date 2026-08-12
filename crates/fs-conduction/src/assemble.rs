@@ -264,6 +264,33 @@ pub fn assemble_operator_with_interfaces(
     )
 }
 
+/// [`assemble_operator`] with a checked per-element constitutive assignment.
+///
+/// `material` is used only if `element_materials` is `None`; after a
+/// successful bind every tet uses its named model. `element_scale` is
+/// not a material identity.
+pub fn assemble_operator_with_element_materials(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    source: &ScalarField,
+    temperature: &[f64],
+    element_materials: &ElementMaterials,
+) -> Result<AssembledSystem, ConductionError> {
+    assemble_operator_scaled_with_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        source,
+        temperature,
+        None,
+        None,
+        Some(element_materials),
+    )
+}
+
 /// [`assemble_operator`] with an optional per-element multiplier on the
 /// conduction block: `K_e ← ρ_e · K(T̄_e)`.
 ///
@@ -481,6 +508,26 @@ pub fn assemble_jacobian_with_interfaces(
         temperature,
         Some(interfaces),
         None,
+    )
+}
+
+/// [`assemble_jacobian`] with a checked per-element constitutive assignment.
+pub fn assemble_jacobian_with_element_materials(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    temperature: &[f64],
+    element_materials: &ElementMaterials,
+) -> Result<Csr, ConductionError> {
+    assemble_jacobian_with_optional_interfaces(
+        cx,
+        mesh,
+        boundary,
+        material,
+        temperature,
+        None,
+        Some(element_materials),
     )
 }
 

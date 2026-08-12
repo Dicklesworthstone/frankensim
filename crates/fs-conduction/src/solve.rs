@@ -1324,3 +1324,23 @@ pub fn solve_with_element_materials(
     solver.bind_element_materials(materials)?;
     solver.run(cx)
 }
+
+/// Solve with a checked constitutive assignment and matching-face contact.
+///
+/// Region materials cannot replace or erase an interface binding: coincident
+/// traces still require an explicit [`ThermalInterfaces`] card.
+///
+/// # Errors
+/// Assignment validation plus every refusal [`solve_with_interfaces`] can
+/// produce.
+pub fn solve_with_element_materials_and_interfaces(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    materials: &ElementMaterials,
+    interfaces: &ThermalInterfaces,
+    config: SolveConfig,
+) -> Result<ConductionSolution, ConductionError> {
+    let mut solver = ConductionSolver::new_with_interfaces(problem, interfaces, config)?;
+    solver.bind_element_materials(materials)?;
+    solver.run(cx)
+}

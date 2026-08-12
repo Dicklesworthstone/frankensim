@@ -8,6 +8,7 @@ mod support;
 
 use fs_adjoint::verify_gradient;
 use fs_conduction::adjoint::ConductivityDesign;
+use fs_conduction::assemble::{DofMap, residual};
 use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::{box_grid, on_box_face};
@@ -16,8 +17,10 @@ use fs_conduction::material::{
 };
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::{
-    ConductionError, ConductionProblem, InitialGuess, LinearConfig, Nonlinearity, SolveConfig,
-    StopRule, element_heat_flux_assigned, solve, solve_with_element_materials,
+    ConductionError, ConductionProblem, InitialGuess, LineSearch, LinearConfig, Nonlinearity,
+    SolveConfig, StopRule, assemble_jacobian_with_element_materials,
+    assemble_operator_with_element_materials, element_heat_flux_assigned, solve,
+    solve_with_element_materials,
 };
 use fs_mesh::{
     RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy, box_triangles, box_vertices,
@@ -54,11 +57,12 @@ fn empty_table_and_unknown_id_refuse() {
         MaterialTable::new(Vec::new()),
         Err(ConductionError::MaterialAssignment { .. })
     ));
-    let table = MaterialTable::new([(
-        MaterialId(1),
-        ConductivityModel::isotropic_declared(1.0).expect("k"),
-    )])
-    .expect("table");
+    let k = ConductivityModel::isotropic_declared(1.0).expect("k");
+    assert!(matches!(
+        MaterialTable::new([(MaterialId(1), k.clone()), (MaterialId(1), k.clone()),]),
+        Err(ConductionError::MaterialAssignment { .. })
+    ));
+    let table = MaterialTable::new([(MaterialId(1), k)]).expect("table");
     let err = ElementMaterials::new(table, vec![MaterialId(2)]).expect_err("unknown");
     assert!(matches!(err, ConductionError::MaterialAssignment { .. }));
 }
@@ -583,4 +587,325 @@ fn assigned_linear_adjoint_refuses_k_of_t_and_matches_finite_differences() {
         verdict.max_rel_err, verdict.informative_directions, verdict.pairs
     );
     assert_eq!(verdict.informative_directions, dirs.len());
+}
+
+fn three_layer_ids(mesh: &ConductionMesh) -> Vec<MaterialId> {
+    (0..mesh.element_count())
+        .map(|e| {
+            let tet = mesh.complex().tets[e];
+            let cx = tet
+                .iter()
+                .map(|&v| mesh.positions()[v as usize][0])
+                .sum::<f64>()
+                / 4.0;
+            if cx < 1.0 {
+                MaterialId(1)
+            } else if cx < 2.0 {
+                MaterialId(2)
+            } else {
+                MaterialId(3)
+            }
+        })
+        .collect()
+}
+
+fn newton_config() -> SolveConfig {
+    SolveConfig {
+        nonlinearity: Nonlinearity::Newton {
+            line_search: LineSearch::default(),
+        },
+        stop: StopRule {
+            residual_rtol: 1e-12,
+            residual_atol: 1e-14,
+            step_atol: 1e-12,
+            max_iterations: 16,
+        },
+        linear: LinearConfig {
+            tolerance: 1e-14,
+            max_iterations: 400,
+            restart: 40,
+        },
+        initial: InitialGuess::DirichletMean,
+    }
+}
+
+#[test]
+fn three_layer_slab_hits_the_series_interface_temperatures() {
+    let length = 3.0;
+    let (complex, positions) = box_grid([9, 2, 2], [length, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let k1 = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let k2 = ConductivityModel::isotropic_declared(2.0).expect("k2");
+    let k3 = ConductivityModel::isotropic_declared(4.0).expect("k3");
+    let fallback = k1.clone();
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], length),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let table = MaterialTable::new([
+        (MaterialId(1), k1),
+        (MaterialId(2), k2),
+        (MaterialId(3), k3),
+    ])
+    .expect("table");
+    let assigned = ElementMaterials::new(table, three_layer_ids(&mesh)).expect("assign");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    // Equal thicknesses, k = 1, 2, 4, T(0)=1, T(3)=0.
+    // R = 1 + 1/2 + 1/4 = 7/4, q = 4/7, T(1)=3/7, T(2)=1/7.
+    let mut worst_1 = 0.0f64;
+    let mut worst_2 = 0.0f64;
+    let mut counted_1 = 0usize;
+    let mut counted_2 = 0usize;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        if (p[0] - 1.0).abs() < 1e-9 {
+            worst_1 = worst_1.max((solution.temperature[v] - 3.0 / 7.0).abs());
+            counted_1 += 1;
+        }
+        if (p[0] - 2.0).abs() < 1e-9 {
+            worst_2 = worst_2.max((solution.temperature[v] - 1.0 / 7.0).abs());
+            counted_2 += 1;
+        }
+    }
+    assert!(counted_1 > 0 && counted_2 > 0, "missing series interfaces");
+    assert!(
+        worst_1 < 3e-3 && worst_2 < 3e-3,
+        "three-layer interfaces off by {worst_1:e} and {worst_2:e}"
+    );
+    let flux = element_heat_flux_assigned(&mesh, &assigned, &solution.temperature).expect("flux");
+    let want = 4.0 / 7.0;
+    let worst_qx = flux
+        .iter()
+        .map(|q| (q[0] - want).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst_qx < 0.06,
+        "recovered q_x off by {worst_qx} from series {want}"
+    );
+    // Source-free Dirichlet–Dirichlet: net Dirichlet inflow cancels, so
+    // `relative_closure` is vacuous. The assembled residual must still
+    // close in Watts.
+    assert!(
+        solution.report.energy.closure_w.abs() < 1e-12,
+        "three-layer energy did not close: {:?}",
+        solution.report.energy
+    );
+}
+
+#[test]
+fn assigned_temperature_dependent_newton_solves_inside_span() {
+    let (complex, positions) = box_grid([6, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.0), (450.0, 1.0)]).expect("left"),
+    );
+    let right = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.5), (450.0, 2.5)]).expect("right"),
+    );
+    let fallback = left.clone();
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(340.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    let regions = two_layer_ids(&mesh);
+    let mut map = BTreeMap::new();
+    map.insert(1, MaterialId(1));
+    map.insert(2, MaterialId(2));
+    let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, newton_config()).expect("newton")
+    });
+    assert!(
+        solution.report.energy.closure_w.abs() < 1e-8,
+        "assigned k(T) energy did not close: {:?}",
+        solution.report.energy
+    );
+    for &t in &solution.temperature {
+        assert!(
+            (300.0..=340.0).contains(&t),
+            "assigned k(T) temperature {t} left the Dirichlet interval"
+        );
+    }
+    let flux = element_heat_flux_assigned(&mesh, &assigned, &solution.temperature).expect("flux");
+    assert!(
+        flux.iter().all(|q| q[0] > 0.0),
+        "heat must flow +x from the hot face"
+    );
+}
+
+#[test]
+fn assigned_newton_jacobian_matches_central_differences() {
+    let (complex, positions) = box_grid([3, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let right = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.5), (450.0, 4.5)]).expect("curve"),
+    );
+    let fallback = left.clone();
+    let source = ScalarField::Uniform(2.0e3);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(320.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    let regions = two_layer_ids(&mesh);
+    let mut map = BTreeMap::new();
+    map.insert(1, MaterialId(1));
+    map.insert(2, MaterialId(2));
+    let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
+    let dofs = DofMap::new(&boundary, mesh.vertex_count()).expect("dofs");
+    let free: Vec<f64> = (0..dofs.n())
+        .map(|i| 305.0 + 7.0 * ((i % 5) as f64) - 3.0 * ((i % 3) as f64))
+        .collect();
+    let residual_at = |free: &[f64]| -> Vec<f64> {
+        let full = dofs.scatter(free);
+        with_cx(|cx| {
+            let system = assemble_operator_with_element_materials(
+                cx, &mesh, &boundary, &fallback, &source, &full, &assigned,
+            )
+            .expect("asm");
+            residual(&system, &dofs, &full)
+        })
+    };
+    let base = residual_at(&free);
+    assert!(
+        base.iter().any(|v| v.abs() > 1e-6),
+        "the probe iterate must produce a non-trivial residual"
+    );
+    let jacobian = with_cx(|cx| {
+        let full = dofs.scatter(&free);
+        assemble_jacobian_with_element_materials(cx, &mesh, &boundary, &fallback, &full, &assigned)
+            .expect("jacobian")
+    });
+    let (j_ff, _) = fs_conduction::assemble::reduce_matrix_and_lift(&jacobian, &dofs);
+    let eps = 1e-4;
+    let mut worst = 0.0f64;
+    let mut scale = 0.0f64;
+    for c in 0..dofs.n() {
+        let mut plus = free.clone();
+        let mut minus = free.clone();
+        plus[c] += eps;
+        minus[c] -= eps;
+        let rp = residual_at(&plus);
+        let rm = residual_at(&minus);
+        for row in 0..dofs.n() {
+            let fd = (rp[row] - rm[row]) / (2.0 * eps);
+            let analytic = j_ff.get(row, c);
+            scale = scale.max(fd.abs()).max(analytic.abs());
+            worst = worst.max((fd - analytic).abs());
+        }
+    }
+    assert!(
+        worst <= 1e-5 * scale,
+        "assigned Jacobian vs FD off by {worst:e} against scale {scale:e}"
+    );
+}
+
+#[test]
+fn assigned_materials_do_not_erase_an_undeclared_interface() {
+    // Two tets share a geometrically coincident triangle on distinct
+    // vertices. Region materials cannot stand in for the contact card.
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(positions.len(), vec![[0, 1, 2, 3], [4, 5, 6, 7]]),
+        positions,
+    )
+    .expect("two-tet contact mesh");
+    let left = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let right = ConductivityModel::isotropic_declared(2.0).expect("k2");
+    let fallback = left.clone();
+    let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
+    let assigned =
+        ElementMaterials::new(table, vec![MaterialId(1), MaterialId(2)]).expect("assign");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| f.centroid[2] < -0.2 && f.centroid[0] > 0.2 && f.centroid[1] > 0.2,
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| f.centroid[2] > 0.2 && f.centroid[0] > 0.2 && f.centroid[1] > 0.2,
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let err = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect_err("interface")
+    });
+    assert!(
+        matches!(err, ConductionError::Interface { .. }),
+        "undeclared coincident faces must refuse even with a material map: {err}"
+    );
 }

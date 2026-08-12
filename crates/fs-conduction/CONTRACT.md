@@ -105,7 +105,7 @@ diameter.
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them |
 | `LumpedThermalTransport` | one reduced-body conductivity/emissivity pair, either explicitly provenance-free declared constants or temperature-grid samples queried from one immutable material card with every conductivity and emissivity receipt retained; sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
-| `MaterialId` / `MaterialTable` / `ElementMaterials` | a checked constitutive table plus one id per tet. `from_region_ids` maps labeled mesh regions onto that table. Assembly, Newton, and `element_heat_flux_assigned` use the named model at the element mean temperature. This is constitutive selection, not `element_scale`. Unknown/duplicate/empty/unmapped-region/length-mismatched assignments refuse. `solve_with_element_materials` is the product entry; the uniform `ConductionProblem::material` path is unchanged. A dev-only composition test feeds an `fs-mesh` labeled adjacent volume through that map; that is not yet the parent solve-stage E2E |
+| `MaterialId` / `MaterialTable` / `ElementMaterials` | a checked constitutive table plus one id per tet. `from_region_ids` maps labeled mesh regions onto that table. Assembly, Newton, `assemble_operator_with_element_materials` / `assemble_jacobian_with_element_materials`, and `element_heat_flux_assigned` use the named model at the element mean temperature. This is constitutive selection, not `element_scale`. Unknown/duplicate/empty/unmapped-region/length-mismatched assignments refuse. `solve_with_element_materials` is the product entry; `solve_with_element_materials_and_interfaces` is the joint contact path. Region materials cannot erase undeclared coincident faces. The uniform `ConductionProblem::material` path is unchanged. A two-layer and three-layer series slab, assigned `k(T)` Newton, assigned Jacobian-vs-FD, assigned IFT vs FD, and a dev-only `fs-mesh` labeled adjacent volume are covered; that last case is not yet the parent solve-stage E2E |
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
 | `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
 | `ConductionSolution`, `ConductionReport`, `EnergyBalance`, `LinearSolveEvidence` | the field and everything established about how it was produced |
@@ -523,6 +523,11 @@ None. Everything here is `[S]` solid work on the default path.
 - `tests/adjoint.rs` — the linear IFT gradient against central differences
   through `fs_adjoint::verify_gradient`, plus G1 manufactured P1 and P2 dual L2
   ladders with per-rung discrete primal/dual identity checks (4 tests).
+- `tests/heterogeneous.rs` — regionwise constitutive assignment: one-material
+  parity, two- and three-layer series slabs, anisotropic x-series, assigned
+  `k(T)` Newton, assigned Jacobian vs central differences, assigned linear IFT
+  vs FD, labeled-mesh handoff, mapping/span/length refusals, and the claim
+  that a material map does not erase undeclared coincident faces.
 - `tests/pcb_homogenization.rs` — G3 model/QoI handoff: fs-matdb's
   receipt-backed laminate tensor enters the production steady solve; the
   bounded lower/nominal/upper in-plane conductivities bracket the heat-flux

@@ -75,8 +75,9 @@ pub mod transient;
 use core::fmt;
 
 pub use assemble::{
-    ASSEMBLY_TILE, AssembledSystem, DofMap, assemble_jacobian, assemble_jacobian_with_interfaces,
-    assemble_operator, assemble_operator_with_interfaces,
+    ASSEMBLY_TILE, AssembledSystem, DofMap, assemble_jacobian,
+    assemble_jacobian_with_element_materials, assemble_jacobian_with_interfaces, assemble_operator,
+    assemble_operator_with_element_materials, assemble_operator_with_interfaces,
 };
 pub use bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 pub use field::ScalarField;
@@ -106,7 +107,8 @@ pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
     EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
     RobinFlux, SolveConfig, StopReason, StopRule, element_heat_flux, element_heat_flux_assigned,
-    solve, solve_with_element_materials, solve_with_interfaces,
+    solve, solve_with_element_materials, solve_with_element_materials_and_interfaces,
+    solve_with_interfaces,
 };
 
 /// Crate version, re-exported for provenance stamping.
