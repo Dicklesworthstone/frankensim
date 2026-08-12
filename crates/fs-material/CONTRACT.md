@@ -125,6 +125,29 @@ is pinned ABSOLUTELY by the monatomic identity Pr = 2/3 (exact,
 mu-independent), alongside the relative Eucken-vs-USSA divergence
 envelope.
 
+### `visco` — viscoelastic damping tiers (bead ybc75)
+
+Four tiers, one runtime path. `RayleighDamping` (tier 0: αM + βK
+coefficients and the two-point fit); `FractionalZener` (fitting
+canonical, 4 params, `Real`-generic so exact AD parameter tangents share
+the value's code path); `GeneralizedMaxwell` (runtime Prony series with
+the unconditionally stable exact-exponential recursion for
+piecewise-linear strain and a per-step work/stored/dissipated energy
+ledger); `lower_to_prony` (deterministic relaxation-time ladder + NNLS,
+emitting a `LoweredModel` whose certificate is the MEASURED supremum
+relative modulus error over a dense in-band grid and whose evaluation
+REFUSES outside the certified band, `FS-MAT-VISCO-OUT-OF-BAND`);
+`ThermoelasticZener` (closed-form beam/plate thermoelastic loss);
+`fit_fractional_zener` (deterministic Levenberg–Marquardt over an
+admissibility-preserving reparameterization, exact AD Jacobian, and a
+caller-AUTHORED residual budget `tol_rel`: a stationary point above the
+budget refuses with `FS-MAT-VISCO-FIT-DIVERGED` instead of returning a
+model the data cannot support). The e2e evidence lane is the
+`visco_casebook` binary: synthesize (deterministic FNV-keyed ±0.1%
+perturbation, no RNG state) → fit → lower → single-DOF velocity-Verlet
+ring-down → re-measure η from the decay envelope, one JSON line per
+stage, bit-identical across reruns except `elapsed_ms`.
+
 ## Invariants
 
 1. **Tangent consistency (the merge gate)**: every law's tangent matches
@@ -177,6 +200,18 @@ mt-005 calibration round-trip (+ degenerate refusals); mt-006 rank-one
 convexity sampling for NH/MR, constructor refusals, card completeness,
 Evidence domain flagging.
 
+Visco (inline in `src/visco.rs`, 14 tests): closed forms over six
+decades, α→1 classical-Zener reduction, Prony recursion vs direct
+convolution at 1e-12, dissipation-ledger closure with sign-flip
+mutation, ≤8-term plateau lowering with out-of-band refusal and
+dropped-term mutation, modal injection vs exact quadratic roots, AD
+gradients vs finite differences, bitwise-deterministic lowering,
+dt→0 elastic-jump/small-dt expm1 regression, LM fit ground-truth
+recovery from an offset start with negated-loss mutation refusal,
+degenerate-input refusals, and the η ≥ 0 / monotone-relaxation property
+sweep. `visco_casebook` is the end-to-end lane (fit noise floor,
+certified lowering, ring-down η within an authored, measured gate).
+
 ## No-claim boundaries
 
 - **Ogden is staged, not shipped**: its principal-stretch energy needs
@@ -200,6 +235,16 @@ Evidence domain flagging.
 - **Homogenization hooks**: homogenized laws register as ordinary
   `ModelCard`-carrying laws; the unit-cell pipeline itself is the
   lattice bead's scope.
+- **Visco lowering certificates are measured, not analytic**: the
+  `LoweredModel` bound is a dense-grid supremum on the stated band —
+  no global proof, and nothing is claimed outside the band (evaluation
+  there refuses). The casebook's ring-down comparison is a NUMERICAL
+  consistency check of the fit/lower/step chain against its own
+  declared physics; it calibrates no real material, and its η gate is
+  authored from an observed run with headroom, not derived from an
+  integrator error bound. The fractional→Prony path serves 3D FEM via
+  fs-time's damping seam; a spatially assembled viscoelastic FEM
+  operator is NOT part of this crate's claim.
 
 ## Authority-separated multi-case identifiability schema (bead I10.1)
 

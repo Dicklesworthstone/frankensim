@@ -722,18 +722,34 @@ pub struct ZenerFit {
 /// transform — no finite differences anywhere.
 ///
 /// Deterministic: fixed iteration policy, fixed damping schedule, no
-/// randomness. Convergence: relative residual norm below `1e-12` or an
-/// accepted step with `‖δθ‖ < 1e-13`.
+/// randomness.
+///
+/// `tol_rel` is the caller-AUTHORED residual budget: measured data cannot
+/// fit below its own noise floor, so the caller states what residual level
+/// counts as a successful fit (budgets-first, like every other gate in
+/// this workspace). Convergence is stationarity — an accepted step with
+/// `‖δθ‖ < 1e-13`, a damping factor no improving step can beat, or an
+/// early residual below `1e-12` — and a stationary point is accepted only
+/// when its relative residual norm is within `tol_rel`; otherwise the fit
+/// REFUSES rather than returning a model that cannot represent the data
+/// (e.g. active/negative-loss samples fed to a passive model).
 ///
 /// # Errors
 /// [`ViscoError::Parameters`] for fewer than 4 samples, non-finite or
-/// non-positive data; [`ViscoError::FitDiverged`] when `max_iters` is
-/// exhausted without convergence.
+/// non-positive data, or a non-finite/non-positive `tol_rel`;
+/// [`ViscoError::FitDiverged`] when the fit goes stationary or exhausts
+/// `max_iters` above the authored budget.
 pub fn fit_fractional_zener(
     samples: &[(f64, f64, f64)],
     init: &FractionalZener,
     max_iters: usize,
+    tol_rel: f64,
 ) -> Result<ZenerFit, ViscoError> {
+    if !(tol_rel.is_finite() && tol_rel > 0.0) {
+        return Err(ViscoError::Parameters {
+            what: "the residual budget tol_rel must be finite and positive",
+        });
+    }
     if samples.len() < 4 {
         return Err(ViscoError::Parameters {
             what: "the 4-parameter fit needs at least 4 complex-modulus samples",
@@ -819,7 +835,7 @@ pub fn fit_fractional_zener(
     let (mut residuals, mut norm) = eval(&theta, Some(&mut jac));
     let mut history = vec![norm];
     let mut lambda = 1e-3f64;
-    for iteration in 0..max_iters {
+    for _iteration in 0..max_iters {
         if norm < 1e-12 {
             let (e0, e_inf, alpha, tau) = unpack(&theta);
             let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
@@ -870,14 +886,13 @@ pub fn fit_fractional_zener(
         } else {
             lambda *= 4.0;
             if lambda > 1e12 {
-                return Err(ViscoError::FitDiverged {
-                    residual: norm,
-                    iterations: iteration + 1,
-                });
+                // No improving step exists at any damping: numerically
+                // stationary. Acceptance is decided by the budget below.
+                break;
             }
         }
     }
-    if norm < 1e-9 {
+    if norm <= tol_rel {
         let (e0, e_inf, alpha, tau) = unpack(&theta);
         let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
         return Ok(ZenerFit {
@@ -887,7 +902,7 @@ pub fn fit_fractional_zener(
     }
     Err(ViscoError::FitDiverged {
         residual: norm,
-        iterations: max_iters,
+        iterations: history.len() - 1,
     })
 }
 
@@ -1327,7 +1342,7 @@ mod tests {
         }
         // Every parameter starts far off (E0 /3, E∞ ×2.7, α ×1.7, τ /20).
         let init = FractionalZener::new(3.0e9, 4.0e10, 0.6, 1.0e-5).expect("init");
-        let fit = fit_fractional_zener(&samples, &init, 200).expect("fit converges");
+        let fit = fit_fractional_zener(&samples, &init, 200, 1.0e-10).expect("fit converges");
         assert!(fit.residual_history.len() >= 2, "history is evidence");
         let last = *fit.residual_history.last().expect("nonempty");
         assert!(
@@ -1352,7 +1367,7 @@ mod tests {
         for s in &mut corrupted {
             s.2 = -s.2;
         }
-        let err = fit_fractional_zener(&corrupted, &init, 200).unwrap_err();
+        let err = fit_fractional_zener(&corrupted, &init, 200, 1.0e-3).unwrap_err();
         assert!(
             err.to_string().contains("FS-MAT-VISCO-FIT-DIVERGED"),
             "{err}"
@@ -1363,7 +1378,7 @@ mod tests {
     fn fit_refuses_degenerate_input_by_name() {
         let init = FractionalZener::new(1.0e9, 2.0e9, 0.5, 1.0e-3).expect("init");
         // Under-determined: fewer samples than parameters.
-        let err = fit_fractional_zener(&[(1.0, 1.0e9, 1.0e7)], &init, 10).unwrap_err();
+        let err = fit_fractional_zener(&[(1.0, 1.0e9, 1.0e7)], &init, 10, 1.0e-3).unwrap_err();
         assert!(err.to_string().contains("FS-MAT-VISCO-PARAMETERS"), "{err}");
         // Non-physical storage modulus.
         let bad = [
@@ -1372,7 +1387,7 @@ mod tests {
             (3.0, 1.0, 0.0),
             (4.0, 1.0, 0.0),
         ];
-        let err = fit_fractional_zener(&bad, &init, 10).unwrap_err();
+        let err = fit_fractional_zener(&bad, &init, 10, 1.0e-3).unwrap_err();
         assert!(err.to_string().contains("FS-MAT-VISCO-PARAMETERS"), "{err}");
     }
 
