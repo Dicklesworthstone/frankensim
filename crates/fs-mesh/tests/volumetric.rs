@@ -172,6 +172,23 @@ fn l_shape_carves_the_convex_hull_notch() {
             box_vertices(1.0, 2.0, 0.0, 1.0, 0.0, 1.0),
             box_vertices(0.0, 1.0, 1.0, 2.0, 0.0, 1.0),
         ]);
+        {
+            let mut directed: BTreeMap<[u32; 2], i32> = BTreeMap::new();
+            for tri in &tris {
+                for e in [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]] {
+                    *directed.entry(e).or_insert(0) += 1;
+                }
+            }
+            let bad: Vec<_> = directed
+                .iter()
+                .filter(|(e, c)| **c != 1 || directed.get(&[e[1], e[0]]) != Some(&1))
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "L surface directed-edge defects: {bad:?} tris={tris:?} nverts={}",
+                verts.len()
+            );
+        }
         let spec = RegionSpec {
             id: RegionId(1),
             kind: RegionKind::Solid,

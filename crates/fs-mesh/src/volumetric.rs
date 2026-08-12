@@ -985,10 +985,13 @@ fn tet_volume_triple(positions: &[[f64; 3]], tet: [u32; 4]) -> f64 {
     let w = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
     let det = u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
         + u[2] * (v[0] * w[1] - v[1] * w[0]);
-    det / 6.0
+    // Shewchuk Positive (the kernel storage convention) is the opposite
+    // of this origin-edge triple product, so the solid volume is −det/6.
+    -det / 6.0
 }
 
-/// Auditor volume: (1/6) determinant of the 4×4 homogeneous matrix.
+/// Auditor volume: (1/6) determinant of the 4×4 homogeneous matrix,
+/// negated to match Shewchuk Positive storage.
 fn tet_volume_homog(positions: &[[f64; 3]], tet: [u32; 4]) -> f64 {
     let p = [
         positions[tet[0] as usize],
@@ -999,7 +1002,7 @@ fn tet_volume_homog(positions: &[[f64; 3]], tet: [u32; 4]) -> f64 {
     // det |x y z 1| expanded on the last column of ones.
     let det = det3(p[1], p[2], p[3]) - det3(p[0], p[2], p[3]) + det3(p[0], p[1], p[3])
         - det3(p[0], p[1], p[2]);
-    det / 6.0
+    -det / 6.0
 }
 
 fn det3(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
@@ -1061,23 +1064,23 @@ pub fn box_vertices(x0: f64, x1: f64, y0: f64, y1: f64, z0: f64, z1: f64) -> Vec
 pub fn box_triangles(base: u32) -> Vec<[u32; 3]> {
     let i = |k: u32| base + k;
     vec![
-        // z = z0, outward −z (CCW when looking toward +z from below)
-        [i(0), i(1), i(2)],
-        [i(0), i(2), i(3)],
+        // z = z0, outward −z
+        [i(0), i(2), i(1)],
+        [i(0), i(3), i(2)],
         // z = z1, outward +z
-        [i(4), i(6), i(5)],
-        [i(4), i(7), i(6)],
+        [i(4), i(5), i(6)],
+        [i(4), i(6), i(7)],
         // y = y0, outward −y
-        [i(0), i(5), i(1)],
-        [i(0), i(4), i(5)],
+        [i(0), i(1), i(5)],
+        [i(0), i(5), i(4)],
         // y = y1, outward +y
-        [i(3), i(2), i(6)],
-        [i(3), i(6), i(7)],
+        [i(3), i(7), i(6)],
+        [i(3), i(6), i(2)],
         // x = x0, outward −x
-        [i(0), i(3), i(7)],
-        [i(0), i(7), i(4)],
+        [i(0), i(4), i(7)],
+        [i(0), i(7), i(3)],
         // x = x1, outward +x
-        [i(1), i(5), i(6)],
-        [i(1), i(6), i(2)],
+        [i(1), i(2), i(6)],
+        [i(1), i(6), i(5)],
     ]
 }
