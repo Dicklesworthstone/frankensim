@@ -208,6 +208,23 @@ impl GasState {
             characteristic_impedance: density * sound_speed,
         })
     }
+
+    /// Classical Stokes–Kirchhoff absorption coefficient [1/m].
+    ///
+    /// `α = ω² / (2 ρ c³) · [4μ/3 + (γ−1) κ / c_p]`. This is the
+    /// viscothermal bulk law for a calorically perfect gas, not ISO
+    /// 9613 humidity relaxation and not a measured outdoor curve.
+    #[must_use]
+    pub fn stokes_kirchhoff_absorption(&self, omega: f64) -> f64 {
+        if !(omega.is_finite() && omega > 0.0) {
+            return 0.0;
+        }
+        let shear = 4.0 / 3.0 * self.dynamic_viscosity;
+        let thermal = (self.gamma - 1.0) * self.thermal_conductivity / self.specific_heat_cp;
+        let num = omega * omega * (shear + thermal);
+        let den = 2.0 * self.density * self.sound_speed * self.sound_speed * self.sound_speed;
+        if den > 0.0 { num / den } else { 0.0 }
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +259,9 @@ mod tests {
             "kappa {}",
             state.thermal_conductivity
         );
+        let a1 = state.stokes_kirchhoff_absorption(1.0e3);
+        let a2 = state.stokes_kirchhoff_absorption(2.0e3);
+        assert!(a1 > 0.0 && (a2 / a1 - 4.0).abs() < 1.0e-9);
         // Ideal-gas round trip is exact by construction.
         let p_back = state.density * state.specific_gas_constant * state.temperature;
         assert!((p_back - 101_325.0).abs() < 1e-6);
