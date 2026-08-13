@@ -1,9 +1,11 @@
 //! Compose a [`BernoulliAperture`] onto a characteristic line.
 //!
 //! The time port is the TMM reflectance FIR
-//! ([`crate::driving_point`]). Reed lay is an [`fs_dcontact`] obstacle,
-//! not a private Hunt–Crossley. Vocal folds, lip reeds, and relief
-//! valves are the same objects.
+//! ([`crate::driving_point`]). Reed lay is an [`fs_dcontact`] obstacle
+//! whose Hunt–Crossley `χ` is matched to the existing viscous damper
+//! (not a private impact law). The observer path is Stokes–Kirchhoff
+//! absorption from [`crate::air_path`]. Vocal folds, lip reeds, and
+//! relief valves are the same objects.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
@@ -58,8 +60,12 @@ pub fn realize_reed_bore(
     let mut reed_y = reed.rest_opening_m;
     let mut reed_v = 0.0;
     let lay = if reed.mass_kg > 0.0 {
+        let k_lay = 1.0e7 * reed.width_m;
+        let (_k, r_damp) = reed_structural(reed);
+        let chi = r_damp / (k_lay * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
         Some(
-            slit_lay(1.0e7 * reed.width_m, 2.0)
+            slit_lay(k_lay, 2.0)
+                .and_then(|o| o.with_internal_loss(chi))
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
         )
     } else {
@@ -126,6 +132,7 @@ pub fn realize_reed_bore(
         p_obs += gas.density * dfdt / (4.0 * core::f64::consts::PI * listener_m * gas.sound_speed);
         p_bore_hist[i] = p_obs;
     }
+    crate::air_path::absorb_pressure_history(&mut p_bore_hist, dt, listener_m, gas);
     Ok(p_bore_hist)
 }
 
@@ -155,6 +162,17 @@ fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
     reed.blowing_pressure_pa * 0.5 * (1.0 - det::cos(core::f64::consts::PI * x))
 }
 
+fn reed_structural(reed: BeatingReed) -> (f64, f64) {
+    let face = reed.width_m * 0.025;
+    let k = if reed.stiffness_n_m > 0.0 {
+        reed.stiffness_n_m
+    } else {
+        reed.closing_pressure_pa * face / reed.rest_opening_m
+    };
+    let r_damp = 2.0 * 0.35 * det::sqrt((k * reed.mass_kg).max(0.0));
+    (k, r_damp)
+}
+
 fn aperture_of(reed: BeatingReed) -> BernoulliAperture {
     BernoulliAperture {
         rest_opening_m: reed.rest_opening_m,
@@ -176,12 +194,7 @@ fn step_massive_reed(
     lay: Option<&Obstacle>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     let face = reed.width_m * 0.025;
-    let k = if reed.stiffness_n_m > 0.0 {
-        reed.stiffness_n_m
-    } else {
-        reed.closing_pressure_pa * face / reed.rest_opening_m
-    };
-    let r_damp = 2.0 * 0.35 * det::sqrt(k * reed.mass_kg);
+    let (k, r_damp) = reed_structural(reed);
     let p_plus = solve_reed_wave(reed, rho, zc, 0.0, p_minus, p_m, 2.0 * p_minus, u_body)?;
     let p_bore = p_plus + p_minus;
     let dp = p_m - p_bore;
@@ -191,7 +204,8 @@ fn step_massive_reed(
     if let Some(obstacle) = lay {
         let contact = slit_contact_force(obstacle, y1)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        acc += contact / reed.mass_kg;
+        let hc = obstacle.dissipative_modal_forces(1, &[y1, v], &[v])[0];
+        acc += (contact + hc) / reed.mass_kg;
         v1 = v + dt * acc;
         y1 = y + dt * v1;
     }

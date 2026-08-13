@@ -32,6 +32,7 @@
 //! vocabulary and `fs-qty`'s six-base dimension vector.
 
 pub mod acoustic_realize;
+pub mod air_path;
 pub mod bernoulli_aperture;
 pub mod broadband_radiation;
 pub mod cavity_phs;
