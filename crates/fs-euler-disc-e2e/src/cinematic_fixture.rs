@@ -6935,11 +6935,13 @@ fn admit_physical_force_bandwidth(
         return Err(CinematicFixtureError::Pipeline(format!(
             concat!(
                 "physical contact force has no certified sub-Nyquist band limit: ",
-                "source-grid Nyquist requires {mechanics_force_requirement_hz:.6} Hz and ",
-                "the surface path requires {surface_path_requirement_hz:.6} Hz, but the ",
+                "source-grid Nyquist requires {:.6} Hz and the surface path requires ",
+                "{:.6} Hz, but the ",
                 "physical-audio reconstruction passband admits only {:.6} Hz; provide ",
                 "mechanics-derived band-limit authority before reconstruction"
             ),
+            mechanics_force_requirement_hz,
+            surface_path_requirement_hz,
             CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ,
         )));
     }
