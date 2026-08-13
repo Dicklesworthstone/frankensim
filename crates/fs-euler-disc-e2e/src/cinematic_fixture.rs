@@ -49,10 +49,11 @@ use crate::structural_acoustics::{
     AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
     PhysicalModalInitialState, PhysicalPressureSignal, RectangularPlateModalBasis,
     RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
-    RetardedFarFieldObserverControls, StructuralBroadbandRadiationRequest, StructuralMeshControls,
-    StructuralModalBasisError, StructuralModeRequest, StructuralResidualFlexibilityControls,
-    StructuralResidualModalLossSpectrum, build_rectangular_plate_modal_basis,
-    build_structural_broadband_radiation_artifact,
+    RetardedFarFieldObserverControls, StructuralBroadbandRadiationArtifact,
+    StructuralBroadbandRadiationRequest, StructuralMeshControls, StructuralModalBasisError,
+    StructuralModeRequest, StructuralResidualFlexibilityControls,
+    StructuralResidualFlexibilityEstimateBasis, StructuralResidualModalLossSpectrum,
+    build_rectangular_plate_modal_basis, build_structural_broadband_radiation_artifact,
     build_structural_residual_flexibility_estimate_basis, superpose_pressure_signals,
     synthesize_retarded_far_field_world_observers,
 };
@@ -2070,11 +2071,18 @@ struct FixturePhysicalAudio {
     plate_minimum_panels_per_wavelength: f64,
 }
 
+struct FixturePreparedDiscAcoustics {
+    basis: Option<StructuralResidualFlexibilityEstimateBasis>,
+    source: Option<StructuralBroadbandRadiationArtifact>,
+    nonpassivity_diagnostic: Option<String>,
+}
+
 enum FixtureDiscAcousticRadiator {
     OmittedNoResolvableModeBelowNyquist {
         forcing_maximum_frequency_hz: f64,
         enrichment_maximum_frequency_hz: f64,
     },
+    OmittedNonpassiveBem(String),
     ResolvedBroadband {
         structural_basis_identity: ContentHash,
         broadband_radiation_identity: ContentHash,
@@ -4612,6 +4620,9 @@ pub fn run_cinematic_fixture(
             retained_time_s,
         )
     } else {
+        progress("stage=acoustic-preflight begin");
+        let prepared_disc_acoustics = prepare_fixture_disc_acoustics(&physical_disc, config, cx)?;
+        progress("stage=acoustic-preflight complete");
         progress("stage=mechanics begin");
         let plate_basis = build_fixture_plate_basis(&config.support_plate, &physical_plate, cx)?;
         let production = build_fixture_production_mechanics(
@@ -4842,6 +4853,7 @@ pub fn run_cinematic_fixture(
             &physical_disc,
             &physical_plate,
             &plate_basis,
+            &prepared_disc_acoustics,
             config,
             cx,
         )?;
@@ -7701,6 +7713,7 @@ fn build_audio(
     physical_disc: &FixturePhysicalDiscState,
     physical_plate: &FixturePhysicalPlateState,
     plate_basis: &RectangularPlateModalBasis,
+    prepared_disc_acoustics: &FixturePreparedDiscAcoustics,
     gravity_m_per_s2: f64,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
@@ -7987,6 +8000,7 @@ fn build_audio(
         physical_disc,
         physical_plate,
         plate_basis,
+        prepared_disc_acoustics,
         config,
         cx,
     )?;
@@ -8011,16 +8025,11 @@ fn build_audio(
     })
 }
 
-fn build_physical_audio(
-    preroll_trajectory: &EulerRenderTrajectoryArtifact,
+fn prepare_fixture_disc_acoustics(
     physical_disc: &FixturePhysicalDiscState,
-    physical_plate: &FixturePhysicalPlateState,
-    plate_basis: &RectangularPlateModalBasis,
     config: &CinematicFixtureConfig,
     cx: &Cx<'_>,
-) -> Result<FixturePhysicalAudio, CinematicFixtureError> {
-    let expected_preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
-        * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS);
+) -> Result<FixturePreparedDiscAcoustics, CinematicFixtureError> {
     let disc_controls = config.disc_structural_acoustics;
     let disc_has_fillet = matches!(
         physical_disc.specimen.profile.spec,
@@ -8071,8 +8080,6 @@ fn build_physical_audio(
         Err(error) => return Err(pipeline(error)),
     };
 
-    let plate = &config.support_plate;
-
     let gas_spec = config.ambient_gas;
     let gas = GasState::try_new(
         &gas_spec,
@@ -8081,7 +8088,6 @@ fn build_physical_audio(
     )
     .map_err(pipeline)?;
     let gas_model_identity = resolved_gas_model_identity(gas_spec, gas);
-    let observers = physical_pressure_observers();
     let disc_source = disc_basis
         .as_ref()
         .map(|basis| {
@@ -8132,8 +8138,45 @@ fn build_physical_audio(
                 cx,
             )
         })
-        .transpose()
-        .map_err(pipeline)?;
+        .transpose();
+    let (disc_source, nonpassivity_diagnostic) = match disc_source {
+        Ok(source) => (source, None),
+        Err(StructuralModalBasisError::BroadbandNegativeRadiatedPower(diagnostic)) => {
+            (None, Some(diagnostic))
+        }
+        Err(error) => return Err(pipeline(error)),
+    };
+    Ok(FixturePreparedDiscAcoustics {
+        basis: disc_basis,
+        source: disc_source,
+        nonpassivity_diagnostic,
+    })
+}
+
+fn build_physical_audio(
+    preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    physical_disc: &FixturePhysicalDiscState,
+    physical_plate: &FixturePhysicalPlateState,
+    plate_basis: &RectangularPlateModalBasis,
+    prepared_disc_acoustics: &FixturePreparedDiscAcoustics,
+    config: &CinematicFixtureConfig,
+    cx: &Cx<'_>,
+) -> Result<FixturePhysicalAudio, CinematicFixtureError> {
+    let expected_preroll_audio_frame_count = u64::from(config.mechanics_preroll_video_frames)
+        * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS);
+    let disc_controls = config.disc_structural_acoustics;
+    let disc_basis = &prepared_disc_acoustics.basis;
+    let disc_source = &prepared_disc_acoustics.source;
+    let plate = &config.support_plate;
+    let gas_spec = config.ambient_gas;
+    let gas = GasState::try_new(
+        &gas_spec,
+        config.ambient_temperature_k,
+        config.ambient_pressure_pa,
+    )
+    .map_err(pipeline)?;
+    let gas_model_identity = resolved_gas_model_identity(gas_spec, gas);
+    let observers = physical_pressure_observers();
     let plate_radiation = plate_basis
         .baffled_observer_radiation(
             ResolvedAcousticMedium {
@@ -8346,8 +8389,9 @@ fn build_physical_audio(
         disc_basis.as_ref(),
         disc_source.as_ref(),
         disc_pair.as_ref(),
+        prepared_disc_acoustics.nonpassivity_diagnostic.as_deref(),
     ) {
-        (Some(basis), Some(source), Some((left, right))) => {
+        (Some(basis), Some(source), Some((left, right)), None) => {
             FixtureDiscAcousticRadiator::ResolvedBroadband {
                 structural_basis_identity: basis.identity,
                 broadband_radiation_identity: source.identity,
@@ -8373,10 +8417,15 @@ fn build_physical_audio(
                 rms_held_out_error: source.radiation.report.rms_normalized_complex_error,
             }
         }
-        (None, None, None) => FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
-            forcing_maximum_frequency_hz: disc_controls.maximum_frequency_hz,
-            enrichment_maximum_frequency_hz: CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ,
-        },
+        (None, None, None, None) => {
+            FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
+                forcing_maximum_frequency_hz: disc_controls.maximum_frequency_hz,
+                enrichment_maximum_frequency_hz: CRITIQUE_DISC_ENRICHMENT_MAXIMUM_HZ,
+            }
+        }
+        (Some(_), None, None, Some(diagnostic)) => {
+            FixtureDiscAcousticRadiator::OmittedNonpassiveBem(diagnostic.to_owned())
+        }
         _ => {
             return Err(CinematicFixtureError::Pipeline(
                 "disc structural basis, radiation, and pressure disposition diverged".into(),
@@ -9474,6 +9523,10 @@ fn disc_radiator_manifest_json(radiator: &FixtureDiscAcousticRadiator) -> String
             ),
             forcing_maximum_frequency_hz, enrichment_maximum_frequency_hz,
         ),
+        FixtureDiscAcousticRadiator::OmittedNonpassiveBem(diagnostic) => format!(
+            "{{\"disposition\":\"omitted-nonpassive-bem\",\"error_code\":\"FS-EULER-ACOUSTIC-NONPASSIVE\",\"diagnostic\":\"{}\",\"no_claim\":\"disc broadband radiation omitted after the exact BEM passivity gate refused; the listening master contains plate radiation only\"}}",
+            json_escape(diagnostic)
+        ),
         FixtureDiscAcousticRadiator::ResolvedBroadband {
             structural_basis_identity,
             broadband_radiation_identity,
@@ -9940,6 +9993,28 @@ mod tests {
             );
             operation(&cx)
         })
+    }
+
+    #[test]
+    #[ignore = "exact production FEM/BEM preflight; run through RCH"]
+    fn production_disc_broadband_preflight() {
+        with_test_cx(|cx| {
+            let config = CinematicFixtureConfig::default();
+            let profile = config.disc.resolve_profile(cx).expect("disc profile");
+            let physical_disc =
+                resolve_fixture_physical_disc(&profile, &config.disc, cx).expect("disc state");
+            let prepared = prepare_fixture_disc_acoustics(&physical_disc, &config, cx)
+                .expect("production disc broadband preflight");
+            assert!(matches!(
+                (
+                    prepared.basis.as_ref(),
+                    prepared.source.as_ref(),
+                    prepared.nonpassivity_diagnostic.as_deref()
+                ),
+                (Some(_), None, Some(diagnostic))
+                    if diagnostic.starts_with("grid=training frequency_hz=2.50000000000000000e2")
+            ));
+        });
     }
 
     #[test]
@@ -11594,6 +11669,8 @@ mod tests {
                 let physical_plate = resolve_fixture_physical_plate(&config.support_plate).unwrap();
                 let plate_basis =
                     build_fixture_plate_basis(&config.support_plate, &physical_plate, cx).unwrap();
+                let prepared_disc_acoustics =
+                    prepare_fixture_disc_acoustics(&physical_disc, &config, cx).unwrap();
                 let audio = build_audio(
                     &artifact,
                     &coarse_preroll_artifact,
@@ -11601,6 +11678,7 @@ mod tests {
                     &physical_disc,
                     &physical_plate,
                     &plate_basis,
+                    &prepared_disc_acoustics,
                     refinement.fine.parameters.gravity_m_per_s2,
                     &config,
                     cx,

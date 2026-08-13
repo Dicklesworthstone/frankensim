@@ -1279,6 +1279,8 @@ pub enum StructuralModalBasisError {
         /// Returned power coefficient.
         power: f64,
     },
+    /// A broadband sample failed passivity after its diagnostic far field was evaluated.
+    BroadbandNegativeRadiatedPower(String),
     /// A spherical-harmonic table omitted more far-field power than the
     /// caller admitted.
     DirectivityTruncation {
@@ -1409,6 +1411,9 @@ impl core::fmt::Display for StructuralModalBasisError {
                 formatter,
                 "FS-EULER-ACOUSTIC-NONPASSIVE: mode {mode} returned {power:.6e} W per squared modal velocity"
             ),
+            Self::BroadbandNegativeRadiatedPower(diagnostic) => {
+                write!(formatter, "FS-EULER-ACOUSTIC-NONPASSIVE: {diagnostic}")
+            }
             Self::DirectivityTruncation {
                 mode,
                 captured_fraction,
@@ -4145,9 +4150,12 @@ pub fn build_structural_broadband_radiation_artifact(
         let tables = checked_directivity_tables(
             &surface,
             &solutions,
+            &basis.enrichment_modes,
             medium,
             request.directivity.maximum_spherical_harmonic_degree,
             request.directivity.minimum_captured_fraction,
+            "training",
+            frequency_hz,
         )?;
         let captured_fraction = captured_fraction(&solutions, &tables);
         training.push(ComplexShTrainingSample {
@@ -4170,9 +4178,12 @@ pub fn build_structural_broadband_radiation_artifact(
         let tables = checked_directivity_tables(
             &surface,
             &solutions,
+            &basis.enrichment_modes,
             medium,
             request.directivity.maximum_spherical_harmonic_degree,
             request.directivity.minimum_captured_fraction,
+            "held-out",
+            frequency_hz,
         )?;
         let captured_fraction = captured_fraction(&solutions, &tables);
         held_out.push(DirectFarFieldHeldOutSample {
@@ -4285,21 +4296,34 @@ fn structural_broadband_artifact_identity(
 fn checked_directivity_tables(
     surface: &SpherePanels,
     solutions: &[RadiationSolution],
+    modes: &[StructuralMode],
     medium: Medium,
     l_max: usize,
     minimum_captured_fraction: f64,
+    grid: &'static str,
+    frequency_hz: f64,
 ) -> Result<Vec<DirectivityTable>, StructuralModalBasisError> {
     solutions
         .iter()
         .enumerate()
         .map(|(mode, solution)| {
-            if solution.radiated_power < 0.0 {
-                return Err(StructuralModalBasisError::NegativeRadiatedPower {
-                    mode,
-                    power: solution.radiated_power,
-                });
-            }
             let table = directivity_sh_table(surface, solution, medium, l_max)?;
+            if solution.radiated_power < 0.0 {
+                let d = solution.power_diagnostics;
+                let sh_norm: f64 = table.coefficients.iter().map(|value| value.norm_sq()).sum();
+                let sh_power = sh_norm / (2.0 * medium.density * medium.sound_speed);
+                let direct_power = if table.captured_fraction > 0.0 {
+                    sh_power / table.captured_fraction
+                } else { 0.0 };
+                return Err(StructuralModalBasisError::BroadbandNegativeRadiatedPower(format!(
+                    "grid={grid} frequency_hz={frequency_hz:.17e} shape={mode} shape_frequency_hz={:.17e} Ssurf=({:.17e},{:.17e})W interval=[{:.17e},{:.17e}]W positive={:.17e}W negative={:.17e}W apparent={:.17e}W Pref={:.17e}W signed_efficiency={:.17e} Pinf_sh={sh_power:.17e}W Pinf_direct={direct_power:.17e}W captured_fraction={:.17e} ppw={:.17e} condition_lower_bound={:.17e}",
+                    modes[mode].frequency_hz, d.surface_power.re, d.surface_power.im,
+                    solution.radiated_power_roundoff_interval.0, solution.radiated_power_roundoff_interval.1,
+                    d.positive_real_power, d.negative_real_power, d.apparent_power,
+                    d.plane_wave_reference_power, d.surface_power.re / d.plane_wave_reference_power,
+                    table.captured_fraction, solution.panels_per_wavelength, solution.condition_lower_bound,
+                )));
+            }
             if solution.radiated_power > 0.0 && table.captured_fraction < minimum_captured_fraction
             {
                 return Err(StructuralModalBasisError::DirectivityTruncation {
