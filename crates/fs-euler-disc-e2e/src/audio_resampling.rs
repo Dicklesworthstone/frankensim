@@ -689,7 +689,7 @@ impl ReconstructedGeneralizedForce {
 pub struct MechanicsModalDecimationDiagnostics {
     pub stage_count: u32,
     pub maximum_taps_per_stage: usize,
-    pub stage_half_lengths: [u16; 7],
+    pub stage_half_lengths: [u16; 8],
     pub maximum_stage_passband_ripple_db: f64,
     pub minimum_stage_alias_rejection_db: f64,
     pub group_delay_output_frames: usize,
@@ -875,7 +875,7 @@ impl MechanicsModalAccelerationDecimator {
         let mut maximum_ripple_db = 0.0_f64;
         let mut minimum_rejection_db = f64::INFINITY;
         let mut maximum_taps = 0usize;
-        let mut stage_half_lengths = [0u16; 7];
+        let mut stage_half_lengths = [0u16; 8];
         while stage_input_rate_hz > SOUND_MASTER_SAMPLE_RATE_HZ {
             checkpoint_fn()?;
             let stage_output_rate_hz = stage_input_rate_hz / 2;
@@ -1052,7 +1052,7 @@ fn decimation_ratio(input_sample_rate_hz: u32) -> Result<usize, AudioResamplingE
     }
     let ratio = usize::try_from(input_sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ)
         .map_err(|_| AudioResamplingError::InvalidFilter("mechanics decimation ratio"))?;
-    if !ratio.is_power_of_two() || !(2..=128).contains(&ratio) {
+    if !ratio.is_power_of_two() || !(2..=256).contains(&ratio) {
         return Err(AudioResamplingError::InvalidFilter(
             "mechanics decimation ratio is a supported power of two",
         ));
@@ -1074,6 +1074,7 @@ fn decimator_stage_half_length(
         768_000 => Ok(9),
         1_536_000 => Ok(8),
         3_072_000 | 6_144_000 => Ok(8),
+        12_288_000 => Ok(16),
         _ => Err(AudioResamplingError::InvalidFilter(
             "unsupported mechanics decimator stage rate",
         )),
@@ -4592,7 +4593,7 @@ mod tests {
             minimum_stopband_attenuation_db: 80.0,
             response_grid_intervals: 8_192,
         };
-        for input_rate_hz in [1_536_000, 3_072_000, 6_144_000] {
+        for input_rate_hz in [1_536_000, 3_072_000, 6_144_000, 12_288_000] {
             let ratio = input_rate_hz as usize / SOUND_MASTER_SAMPLE_RATE_HZ as usize;
             let output_frames = 512usize;
             let input_frames = (output_frames + 48) * ratio;

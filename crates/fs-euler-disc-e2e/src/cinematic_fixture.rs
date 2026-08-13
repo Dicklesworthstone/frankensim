@@ -218,12 +218,14 @@ const INITIAL_FADE_SAMPLE_FRAMES: u32 = 960;
 /// by the ordinary production coupling; it is not an audio-only fade or an
 /// invented sound source.
 const DEFAULT_MECHANICS_PREROLL_VIDEO_FRAMES: u32 = 48;
-/// Highest admitted cinematic mechanics rate. One hundred twenty-eight 48 kHz
+/// Highest ordinarily admitted cinematic mechanics rate. One hundred twenty-eight 48 kHz
 /// substeps admit the 3.072 MHz to 6.144 MHz dt/dt2 diagnostic required after
 /// the 1.536 MHz to 3.072 MHz pair retained a measurable phase/spectral shift.
 /// Product-run work remains explicitly bounded and the finer rate is never
 /// selected implicitly.
 const MAX_CINEMATIC_MECHANICS_SAMPLE_RATE_HZ: u32 = 6_144_000;
+/// Exact next-refinement rate admitted only for the bounded `dt/2` diagnostic.
+const CINEMATIC_MECHANICS_DIAGNOSTIC_SAMPLE_RATE_HZ: u32 = 12_288_000;
 /// The production film compares the original benchmark's quarter-step against
 /// its eighth-step solution. The earlier dt/dt2 pair did not satisfy the
 /// preregistered mechanics-to-audio drive convergence gate.
@@ -1779,7 +1781,8 @@ impl CinematicFixtureConfig {
             }
         };
         if mechanics.sample_rate_hz == 0
-            || mechanics.sample_rate_hz > MAX_CINEMATIC_MECHANICS_SAMPLE_RATE_HZ
+            || (mechanics.sample_rate_hz > MAX_CINEMATIC_MECHANICS_SAMPLE_RATE_HZ
+                && mechanics.sample_rate_hz != CINEMATIC_MECHANICS_DIAGNOSTIC_SAMPLE_RATE_HZ)
             || mechanics.sample_rate_hz < SOUND_MASTER_SAMPLE_RATE_HZ
             || mechanics.sample_rate_hz % SOUND_MASTER_SAMPLE_RATE_HZ != 0
             || !(mechanics.gravity_m_per_s2.is_finite() && mechanics.gravity_m_per_s2 > 0.0)
@@ -11361,6 +11364,8 @@ mod tests {
         config.validate().unwrap();
         config.mechanics.sample_rate_hz = 6_144_000;
         config.validate().unwrap();
+        config.mechanics.sample_rate_hz = 12_288_000;
+        config.validate().unwrap();
 
         config.mechanics_preroll_video_frames = 0;
         assert!(config.validate().is_err());
@@ -11368,6 +11373,8 @@ mod tests {
         assert!(config.validate().is_err());
         config.mechanics_preroll_video_frames = 48;
         config.mechanics.sample_rate_hz = 6_192_000;
+        assert!(config.validate().is_err());
+        config.mechanics.sample_rate_hz = 12_336_000;
         assert!(config.validate().is_err());
     }
 

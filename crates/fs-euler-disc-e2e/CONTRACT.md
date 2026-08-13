@@ -1713,8 +1713,9 @@ smooth-contact branch, but a later `0.01 rad` six-second qualifier produced
 4,528 branch transitions at 768 kHz and zero at 1.536 MHz, with more than a
 200-fold difference in peak radiated pressure. The 768 kHz member is therefore
 rejected for terminal audio. A caller may explicitly request the admitted
-3.072 MHz diagnostic rung to test 1.536 MHz against `dt/2`; no current default
-or single artifact establishes asymptotic timestep convergence.
+3.072 MHz and 6.144 MHz diagnostic rungs; exact 12.288 MHz is additionally
+admitted only as their bounded next-refinement diagnostic. No current default,
+pair, or single artifact establishes asymptotic timestep convergence.
 
 The fixed supported-plate path does not reuse a natural-frequency Helmholtz
 transfer for arbitrary forced motion. It advances the physical modal state
