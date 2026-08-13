@@ -88,6 +88,18 @@ assemble_scratch() {
     cp -R "${REPO_ROOT}/crates/${crate}" "${dest}/crates/${crate}"
   done
   cp "${REPO_ROOT}/rust-toolchain.toml" "${dest}/"
+  # fs-math's dev-only frankenscipy oracle is a PATH reference whose
+  # manifest cargo insists on reading even though a non-member's dev-deps
+  # never build; the sibling does not exist under the scratch root, so the
+  # copied manifest drops that single dev-dep line. Code is untouched and
+  # the positive control validates the modified cone.
+  python3 - "${dest}/crates/fs-math/Cargo.toml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+lines = [l for l in open(path).read().splitlines(keepends=True)
+         if 'fsci-special' not in l]
+open(path, 'w').writelines(lines)
+PYEOF
   # Minimal root: fs-ivl is the ONLY member, so fs-math's dev-only
   # frankenscipy oracle reference is never resolved (the tools/oracle
   # precedent). The real workspace.lints tables are carried verbatim so
