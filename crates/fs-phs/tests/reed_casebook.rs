@@ -20,24 +20,9 @@
 //! this casebook validates the pHS recast and its energy discipline in
 //! the quasi-static regime where an exact analytic answer exists.
 
-use fs_math::det;
-use fs_phs::{mass_spring_damper, modal_bank, step};
+use fs_phs::{bernoulli_volume_flow, mass_spring_damper, modal_bank, step};
 
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
-
-/// Bernoulli reed-channel flow, TWO-SIDED: `U = sign(dp) * w * h *
-/// sqrt(2 |dp| / rho)` for `h > 0` (backflow reverses with the
-/// pressure difference), 0 for a closed channel. Dissipativity
-/// `dp * U >= 0` is then a real property of the law on BOTH branches
-/// — not a guard baked into the function (review finding: the
-/// one-sided version made the dissipativity assert a tautology).
-fn valve_flow(w: f64, h: f64, dp: f64, rho: f64) -> f64 {
-    if h <= 0.0 {
-        return 0.0;
-    }
-    let mag = w * h * det::sqrt(2.0 * dp.abs() / rho);
-    if dp < 0.0 { -mag } else { mag }
-}
 
 #[test]
 fn reed_as_phs_quasi_static_equilibrium_and_energy_audit() {
@@ -72,7 +57,7 @@ fn reed_as_phs_quasi_static_equilibrium_and_energy_audit() {
         let q = x_reed[0];
         let h = (h0 - q).max(0.0);
         let dp = pm - p_bore;
-        let flow = valve_flow(w_r, h, dp, rho);
+        let flow = bernoulli_volume_flow(w_r, h, dp, rho);
         // Valve dissipativity: the jet destroys head, never creates.
         let valve_power = dp * flow;
         worst_valve_power = worst_valve_power.min(valve_power);
@@ -115,7 +100,7 @@ fn reed_as_phs_quasi_static_equilibrium_and_energy_audit() {
     // Quasi-static equilibrium vs the ANALYTIC solution.
     let q_star = s_r * pm / k_r;
     let h_star = h0 - q_star;
-    let u_star = valve_flow(w_r, h_star, pm, rho);
+    let u_star = bernoulli_volume_flow(w_r, h_star, pm, rho);
     let p_bore_end = bore.output(&x_bore)[0];
     assert!(
         (x_reed[0] - q_star).abs() <= 1.0e-4 * q_star,
@@ -131,7 +116,7 @@ fn reed_as_phs_quasi_static_equilibrium_and_energy_audit() {
         p_bore_end.abs() <= 1.0e-6 * pm,
         "bore DC pressure must vanish (modal bank has no DC mode): {p_bore_end:.3e}"
     );
-    let flow_end = valve_flow(w_r, (h0 - x_reed[0]).max(0.0), pm - p_bore_end, rho);
+    let flow_end = bernoulli_volume_flow(w_r, (h0 - x_reed[0]).max(0.0), pm - p_bore_end, rho);
     assert!(
         (flow_end - u_star).abs() <= 1.0e-4 * u_star,
         "steady flow {flow_end:.6e} vs analytic {u_star:.6e}"

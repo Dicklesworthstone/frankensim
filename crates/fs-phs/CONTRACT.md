@@ -46,6 +46,13 @@ stepping, and Galerkin reduction preserves the structure.
 - Zoo: `mass_spring_damper`, `lc_ladder`, `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
+- Memoryless dissipative ports: `bernoulli_volume_flow` is the
+  two-sided jet `U = w h sgn(Δp) √(2|Δp|/ρ)` (dissipative on both
+  branches); `quasistatic_aperture_opening` is the zero-mass
+  reduction of a linearly restoring slit. A beating reed, a vocal
+  fold, a relief valve, and a leaflet are fillings of that port
+  plus a 1-DOF `mass_spring_damper` or the quasistatic reduction.
+  Music is not a special case.
 
 ## Invariants
 
@@ -102,6 +109,10 @@ exactness, fs-vfit passivity certification of the reduced impedance,
 realized H-error inside an authored 2% envelope with the measurement
 recorded).
 
+Inline `valve_ports` (2): two-sided Bernoulli jet is odd, dissipative,
+and scales as `√Δp`; the quasistatic aperture closes at the named
+pressure.
+
 `tests/reed_casebook.rs` (1): single-reed exciter as pHS components —
 reed lamella (msd pHS) + modal bore bank + TWO-SIDED Bernoulli valve
 (backflow reverses with dp, so `dp * U >= 0` is a property of the
@@ -127,11 +138,12 @@ matches the dissipation ledger within 2%.
   certified statement is the t = 0 energy deficit plus the measured
   realized error under an authored envelope.
 - Oscillation-regime reed validation (threshold pressures, limit
-  cycles) belongs to the distributed-contact/exciter follow-up
-  (q6nmy); the casebook validates the quasi-static regime where an
-  exact analytic answer exists.
-- The bead's "reproduces the existing reed solver" premise was STALE:
-  no reed solver exists in-tree (verified 2026-08-09); the analytic
-  quasi-static pin replaces it.
+  cycles) is not a pHS claim. The casebook validates the
+  quasi-static regime where an exact analytic answer exists. A
+  time-domain aperture ⊕ traveling-wave composition lives in
+  fs-couple as a consumer of these ports, not as an instrument
+  algebra.
+- The jet and aperture maps are nameless fluid/solid ports. They
+  do not mint a clarinet, voice, or valve product.
 - fs-time strategy wiring is a follow-up owned at L3 (fs-time depends
   down, not up).

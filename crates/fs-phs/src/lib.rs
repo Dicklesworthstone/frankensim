@@ -7,6 +7,11 @@
 //! an audit after the fact, and ANY power-conjugate interconnection of
 //! such systems is again passive by construction.
 //!
+//! Memoryless dissipative ports ([`bernoulli_volume_flow`],
+//! [`quasistatic_aperture_opening`]) are first-class: a valve, a
+//! vocal fold, and a beating reed are the same jet plus a 1-DOF
+//! [`mass_spring_damper`] or its quasistatic reduction.
+//!
 //! Three pillars:
 //! - **Admission**: `J`/`R` structure is verified at construction
 //!   (skewness bound, symmetric eigenvalue check for `R >= 0`) and
@@ -1026,4 +1031,80 @@ pub fn duffing_oscillator(m: f64, k: f64, k3: f64, c: f64) -> Result<PortHamilto
     let r = vec![0.0, 0.0, 0.0, c];
     let g = vec![0.0, 1.0];
     PortHamiltonian::new(2, 1, j, r, g, Box::new(DuffingStorage { m, k, k3 }))
+}
+
+// ---------------------------------------------------------------------
+// Memoryless dissipative ports
+// ---------------------------------------------------------------------
+
+/// Two-sided Bernoulli jet through a slit.
+///
+/// `U = w h sgn(Δp) √(2|Δp|/ρ)` for `h > 0` and `ρ > 0`, else 0.
+/// Dissipativity `Δp · U ≥ 0` is a property of the law: backflow
+/// reverses with the pressure difference. This is the same port for a
+/// relief valve, a vocal fold, a leaflet, or a beating reed — music
+/// is not a special case.
+#[must_use]
+pub fn bernoulli_volume_flow(width_m: f64, opening_m: f64, dp_pa: f64, density: f64) -> f64 {
+    if !(opening_m > 0.0)
+        || !(width_m > 0.0)
+        || !(density > 0.0)
+        || !width_m.is_finite()
+        || !opening_m.is_finite()
+        || !dp_pa.is_finite()
+        || !density.is_finite()
+        || dp_pa.abs() < 1.0e-12
+    {
+        return 0.0;
+    }
+    let mag = width_m * opening_m * det::sqrt(2.0 * dp_pa.abs() / density);
+    if dp_pa < 0.0 { -mag } else { mag }
+}
+
+/// Quasistatic linearly restoring aperture: `h = H max(0, 1 − Δp/P_c)`.
+///
+/// This is the infinite-stiffness / zero-mass reduction of a 1-DOF
+/// [`mass_spring_damper`] whose restoring force balances a
+/// `P_c`-scaled pressure on the face. Finite-mass leaflets keep the
+/// pHS and feed its opening into [`bernoulli_volume_flow`].
+#[must_use]
+pub fn quasistatic_aperture_opening(
+    rest_opening_m: f64,
+    closing_pressure_pa: f64,
+    dp_pa: f64,
+) -> f64 {
+    if !(rest_opening_m > 0.0)
+        || !(closing_pressure_pa > 0.0)
+        || !rest_opening_m.is_finite()
+        || !closing_pressure_pa.is_finite()
+        || !dp_pa.is_finite()
+    {
+        return 0.0;
+    }
+    let open = (1.0 - dp_pa / closing_pressure_pa).clamp(0.0, 1.0);
+    rest_opening_m * open
+}
+
+#[cfg(test)]
+mod valve_ports {
+    use super::{bernoulli_volume_flow, quasistatic_aperture_opening};
+
+    #[test]
+    fn bernoulli_jet_is_odd_dissipative_and_scales_as_sqrt_dp() {
+        let u = bernoulli_volume_flow(0.01, 4.0e-4, 100.0, 1.2);
+        let back = bernoulli_volume_flow(0.01, 4.0e-4, -100.0, 1.2);
+        assert!((u + back).abs() < 1.0e-16);
+        assert!(100.0 * u >= 0.0);
+        assert!((-100.0) * back >= 0.0);
+        let u4 = bernoulli_volume_flow(0.01, 4.0e-4, 400.0, 1.2);
+        assert!((u4 / u - 2.0).abs() < 1.0e-12);
+        assert_eq!(bernoulli_volume_flow(0.01, 0.0, 100.0, 1.2), 0.0);
+    }
+
+    #[test]
+    fn quasistatic_aperture_closes_at_the_named_pressure() {
+        assert_eq!(quasistatic_aperture_opening(4.0e-4, 1_000.0, 1_000.0), 0.0);
+        assert!((quasistatic_aperture_opening(4.0e-4, 1_000.0, 0.0) - 4.0e-4).abs() < 1.0e-16);
+        assert!((quasistatic_aperture_opening(4.0e-4, 1_000.0, 400.0) - 2.4e-4).abs() < 1.0e-16);
+    }
 }
