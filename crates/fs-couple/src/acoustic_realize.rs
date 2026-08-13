@@ -356,12 +356,8 @@ fn realize_linear_string(
                 .iter()
                 .map(|s| s.displacement_m_sqrt_kg / mass_scale)
                 .collect();
-            p += plate.drive_and_radiate(
-                bridge_force(string, &q_phys),
-                dt,
-                gas.density,
-                listener_m,
-            );
+            p +=
+                plate.drive_and_radiate(bridge_force(string, &q_phys), dt, gas.density, listener_m);
         }
         out.push(p);
     }
@@ -426,7 +422,8 @@ fn realize_kc_string(
         } else {
             vec![0.0]
         };
-        let rec = step(&sys, &x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let rec =
+            step(&sys, &x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         x = rec.x;
         let mut p = 0.0;
         let mut q_phys = vec![0.0; string.n_modes];
@@ -445,12 +442,8 @@ fn realize_kc_string(
             }
         }
         if let Some(plate) = plate.as_mut() {
-            p += plate.drive_and_radiate(
-                bridge_force(string, &q_phys),
-                dt,
-                gas.density,
-                listener_m,
-            );
+            p +=
+                plate.drive_and_radiate(bridge_force(string, &q_phys), dt, gas.density, listener_m);
         }
         out.push(p);
     }
@@ -467,8 +460,8 @@ fn triangular_pluck_modal(pluck: Pluck, k: usize) -> f64 {
 fn bow_force(bow: BowStroke, v_string: f64) -> f64 {
     let v_rel = bow.velocity_m_s - v_string;
     let phi = v_rel / bow.stribeck_m_s;
-    let mu = bow.mu_dynamic * phi.tanh()
-        + (bow.mu_static - bow.mu_dynamic) * phi / (1.0 + phi * phi);
+    let mu =
+        bow.mu_dynamic * phi.tanh() + (bow.mu_static - bow.mu_dynamic) * phi / (1.0 + phi * phi);
     mu * bow.normal_force_n
 }
 

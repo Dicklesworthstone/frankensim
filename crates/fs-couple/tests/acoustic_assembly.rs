@@ -4,8 +4,9 @@
 use fs_couple::acoustic_realize::{AcousticRealizeError, assembly_wav, realize_assembly};
 use fs_couple::pcm_wav::{WavError, encode_pcm16_wav};
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, CylinderSegment, Listener, Pluck, PrestressedString,
-    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, CylinderSegment, Listener, Pluck,
+    PrestressedString, RadiatingPlate, ToneHole, ViscothermalDuct, VolumeVelocityPulse,
+    WaveguideEnd,
 };
 
 fn empty_base() -> AcousticAssembly {
@@ -14,7 +15,10 @@ fn empty_base() -> AcousticAssembly {
         string: None,
         duct: None,
         pluck: None,
+        bow: None,
         blow: None,
+        reed: None,
+        soundboard: None,
         listener: Listener { distance_m: 1.0 },
         sample_rate_hz: 8_000,
         duration_s: 0.06,
@@ -30,6 +34,7 @@ fn nylon_like(tension_n: f64, lin_density_kg_m: f64) -> PrestressedString {
         width_m: 0.01,
         n_modes: 4,
         damping_ratio: 0.004,
+        rayleigh: None,
     }
 }
 
@@ -55,6 +60,7 @@ fn closed_duct(temperature_k: f64) -> AcousticAssembly {
                 radius_m: 0.012,
                 length_m: 0.34,
             }],
+            tone_holes: vec![],
             termination: WaveguideEnd::Closed,
         }),
         blow: Some(VolumeVelocityPulse {
@@ -64,6 +70,21 @@ fn closed_duct(temperature_k: f64) -> AcousticAssembly {
         duration_s: 0.08,
         ..empty_base()
     }
+}
+
+/// Mean period from interpolated falling zero crossings, in samples.
+fn zero_cross_period(x: &[f64]) -> f64 {
+    let mut prev = x[0];
+    let mut times = Vec::new();
+    for (i, &s) in x.iter().enumerate().skip(1) {
+        if prev > 0.0 && s <= 0.0 {
+            let frac = prev / (prev - s);
+            times.push(i as f64 - 1.0 + frac);
+        }
+        prev = s;
+    }
+    assert!(times.len() >= 3, "need crossings, got {}", times.len());
+    (times[times.len() - 1] - times[0]) / (times.len() - 1) as f64
 }
 
 /// Lag of the strongest positive autocorrelation in `[min_lag, max_lag]`.
@@ -229,4 +250,137 @@ fn empty_or_invalid_wav_refuses() {
         encode_pcm16_wav(&[0.1], 8_000, 0.0),
         Err(WavError::InvalidInput { .. })
     ));
+}
+
+#[test]
+fn kirchhoff_carrier_loud_pluck_raises_pitch() {
+    let mut soft = plucked(70.0, 0.005, 4.0e-4);
+    if let Some(s) = soft.string.as_mut() {
+        s.axial_stiffness_n = 4.0e4;
+        s.n_modes = 3;
+    }
+    let mut loud = soft.clone();
+    loud.pluck = Some(Pluck {
+        station_frac: 0.25,
+        height_m: 3.5e-3,
+    });
+    let p_soft = realize_assembly(&soft).expect("soft KC");
+    let p_loud = realize_assembly(&loud).expect("loud KC");
+    let t_soft = zero_cross_period(&p_soft.pressure_pa);
+    let t_loud = zero_cross_period(&p_loud.pressure_pa);
+    assert!(
+        t_loud < t_soft * 0.997,
+        "KC pitch glide must raise f0 at larger amplitude ({t_loud:.3} vs {t_soft:.3} samples)"
+    );
+}
+
+#[test]
+fn open_tone_hole_shortens_bore_period() {
+    let mut closed = empty_base();
+    closed.duration_s = 0.08;
+    closed.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    closed.duct = Some(ViscothermalDuct {
+        segments: vec![
+            CylinderSegment {
+                radius_m: 0.012,
+                length_m: 0.08,
+            },
+            CylinderSegment {
+                radius_m: 0.012,
+                length_m: 0.26,
+            },
+        ],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    let mut vented = closed.clone();
+    if let Some(duct) = vented.duct.as_mut() {
+        duct.tone_holes = vec![ToneHole {
+            after_segment: 0,
+            radius_m: 0.003,
+            chimney_m: 0.003,
+            open: true,
+        }];
+    }
+    let a = realize_assembly(&closed).expect("plain");
+    let b = realize_assembly(&vented).expect("hole");
+    let ta = zero_cross_period(&a.pressure_pa);
+    let tb = zero_cross_period(&b.pressure_pa);
+    assert!(
+        tb < ta * 0.98,
+        "an open tone hole must raise the ringing frequency ({tb:.2} vs {ta:.2})"
+    );
+}
+
+#[test]
+fn beating_reed_locks_near_the_quarter_wave() {
+    let mut a = empty_base();
+    a.duration_s = 0.10;
+    a.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.0075,
+            length_m: 0.50,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::UnflangedOpen,
+    });
+    a.reed = Some(BeatingReed {
+        rest_opening_m: 4.0e-4,
+        width_m: 0.013,
+        closing_pressure_pa: 6_000.0,
+        blowing_pressure_pa: 2_000.0,
+        attack_s: 0.008,
+    });
+    let out = realize_assembly(&a).expect("reed");
+    let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
+    let rms: f64 = (tail.iter().map(|p| p * p).sum::<f64>() / tail.len() as f64).sqrt();
+    assert!(rms > 1.0, "reed-bore must self-oscillate, rms={rms}");
+    let period = dominant_period_samples(tail, 12, 90);
+    let quarter = 4.0 * 0.50 / out.gas.sound_speed * f64::from(a.sample_rate_hz);
+    let twelfth = quarter / 3.0;
+    let p = period as f64;
+    assert!(
+        (p - quarter).abs() < 0.22 * quarter || (p - twelfth).abs() < 0.22 * twelfth,
+        "reed lock {period} samples vs quarter-wave {quarter:.1} or twelfth {twelfth:.1}"
+    );
+}
+
+#[test]
+fn soundboard_adds_body_radiation() {
+    let bare = plucked(80.0, 0.006, 0.003);
+    let mut body = bare.clone();
+    body.soundboard = Some(RadiatingPlate {
+        area_m2: 0.12,
+        mass_kg: 0.18,
+        frequency_hz: 110.0,
+        damping_ratio: 0.03,
+    });
+    let a = realize_assembly(&bare).expect("bare");
+    let b = realize_assembly(&body).expect("body");
+    assert!(
+        peak_abs(&b.pressure_pa) > peak_abs(&a.pressure_pa) * 1.05,
+        "a driven soundboard must add observer pressure"
+    );
+}
+
+#[test]
+fn bow_stroke_is_a_live_excitation() {
+    let mut a = empty_base();
+    a.string = Some(nylon_like(80.0, 0.006));
+    a.bow = Some(BowStroke {
+        station_frac: 0.12,
+        normal_force_n: 0.8,
+        velocity_m_s: 0.4,
+        mu_static: 0.8,
+        mu_dynamic: 0.3,
+        stribeck_m_s: 0.05,
+    });
+    let out = realize_assembly(&a).expect("bow");
+    assert!(
+        peak_abs(&out.pressure_pa) > 1.0e-4,
+        "a bow stroke must drive the string"
+    );
 }

@@ -1119,6 +1119,8 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-modal",
+ "fs-nlmodal",
+ "fs-phs",
  "fs-plate",
  "fs-qty",
  "fs-scenario",

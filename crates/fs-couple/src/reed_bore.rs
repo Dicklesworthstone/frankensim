@@ -51,19 +51,15 @@ pub fn realize_reed_bore(
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut p_plus = vec![0.0; n];
     let mut p_bore = vec![0.0; n];
+    let mut prev = 5.0;
+    p_plus[0] = 5.0;
     for i in 0..n {
         let t = i as f64 * dt;
         let p_m = blowing_envelope(reed, t);
         let p_minus_hist = convolve_tail(&r, &p_plus, i);
-        let p_plus_i = solve_reed_wave(
-            reed,
-            gas.density,
-            zc,
-            r[0],
-            p_minus_hist,
-            p_m,
-        )?;
+        let p_plus_i = solve_reed_wave(reed, gas.density, zc, r[0], p_minus_hist, p_m, prev)?;
         p_plus[i] = p_plus_i;
+        prev = p_plus_i;
         let p_minus = p_minus_hist + r[0] * p_plus_i;
         p_bore[i] = p_plus_i + p_minus;
     }
@@ -149,44 +145,57 @@ fn solve_reed_wave(
     r0: f64,
     p_minus_hist: f64,
     p_m: f64,
+    guess: f64,
 ) -> Result<f64, AcousticRealizeError> {
-    // Scalar Newton on p⁺. Residual: U_reed − (p⁺ − p⁻)/Zc.
-    let mut p_plus = 0.0;
-    for _ in 0..16 {
-        let (res, deriv) = reed_residual(reed, rho, zc, r0, p_minus_hist, p_m, p_plus);
-        if res.abs() < 1.0e-10 * (1.0 + p_m.abs()) {
-            return Ok(p_plus);
+    let denom = (1.0 - r0).clamp(-0.999, 0.999);
+    let closed_plus = p_minus_hist / denom;
+    let p_bore_closed = closed_plus + (p_minus_hist + r0 * closed_plus);
+    if p_m - p_bore_closed >= reed.closing_pressure_pa {
+        return Ok(closed_plus);
+    }
+    let span = (2.0 * reed.closing_pressure_pa)
+        .max(2.0 * p_m.abs())
+        .max(1.0);
+    let mut lo = guess - span;
+    let mut hi = guess + span;
+    let mut f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo);
+    let mut f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi);
+    if f_lo * f_hi > 0.0 {
+        lo = -span;
+        hi = span;
+        f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo);
+        f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi);
+    }
+    if f_lo * f_hi > 0.0 {
+        let mut best = guess;
+        let mut best_a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, guess).abs();
+        for k in 0..21 {
+            let x = -span + (2.0 * span) * k as f64 / 20.0;
+            let a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, x).abs();
+            if a < best_a {
+                best_a = a;
+                best = x;
+            }
         }
-        let step = if deriv.abs() < 1.0e-18 {
-            -res * 1.0e-3
+        return Ok(best);
+    }
+    let mut mid = 0.5 * (lo + hi);
+    for _ in 0..48 {
+        mid = 0.5 * (lo + hi);
+        let f_mid = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, mid);
+        if f_mid.abs() < 1.0e-8 * (1.0 + p_m.abs()) {
+            return Ok(mid);
+        }
+        if f_lo * f_mid <= 0.0 {
+            hi = mid;
+            f_hi = f_mid;
         } else {
-            -res / deriv
-        };
-        p_plus += step.clamp(-0.5 * reed.closing_pressure_pa, 0.5 * reed.closing_pressure_pa);
-        if !p_plus.is_finite() {
-            return Err(AcousticRealizeError::Reed {
-                what: "reed-bore Newton left the finite set",
-            });
+            lo = mid;
+            f_lo = f_mid;
         }
     }
-    Err(AcousticRealizeError::Reed {
-        what: "reed-bore Newton did not converge",
-    })
-}
-
-fn reed_residual(
-    reed: BeatingReed,
-    rho: f64,
-    zc: f64,
-    r0: f64,
-    p_minus_hist: f64,
-    p_m: f64,
-    p_plus: f64,
-) -> (f64, f64) {
-    let eps = 1.0e-2;
-    let f = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_plus);
-    let fp = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_plus + eps);
-    (f, (fp - f) / eps)
+    let _ = f_hi;
+    Ok(mid)
 }
 
 fn reed_flow_mismatch(
@@ -211,5 +220,3 @@ fn reed_flow_mismatch(
     let u_wave = (p_plus - p_minus) / zc;
     flow - u_wave
 }
-
-
