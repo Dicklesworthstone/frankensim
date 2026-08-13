@@ -191,6 +191,18 @@ fn kirchhoff_carrier_beta_matches_hand_formula_and_glide() {
 }
 
 #[test]
+fn prestressed_beam_is_harmonic_without_ei_and_inharmonic_with_it() {
+    let p = guitar_string();
+    let r_flex = fs_nlmodal::prestressed_beam_omega(p.length, p.tension, p.lin_density, 0.0, 2)
+        / fs_nlmodal::prestressed_beam_omega(p.length, p.tension, p.lin_density, 0.0, 1);
+    assert!((r_flex - 2.0).abs() < 1.0e-14);
+    let ei = 2.0e11 * core::f64::consts::PI * (6.0e-4_f64).powi(4) / 4.0;
+    let r_stiff = fs_nlmodal::prestressed_beam_omega(p.length, p.tension, p.lin_density, ei, 2)
+        / fs_nlmodal::prestressed_beam_omega(p.length, p.tension, p.lin_density, ei, 1);
+    assert!(r_stiff > 2.01);
+}
+
+#[test]
 fn energy_conserved_undamped() {
     let model =
         von_karman_ss_plate(&steel_plate(), &modes_grid(2, 2), &modes_grid(3, 3)).expect("plate");

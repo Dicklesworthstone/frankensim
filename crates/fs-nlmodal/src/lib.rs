@@ -609,6 +609,29 @@ pub fn kirchhoff_carrier_string(
     })
 }
 
+/// Linear angular frequency of sine mode `k` (1-based) on a prestressed
+/// Euler–Bernoulli beam: `ω = n π c / L √(1 + B n²)` with
+/// `c = √(T/μ)` and `B = π² EI / (T L²)`. `ei == 0` is the flexible
+/// taut-string limit. This is a 1-D waveguide law (cables, stays,
+/// guy wires, strings), not an instrument primitive.
+#[must_use]
+pub fn prestressed_beam_omega(
+    length: f64,
+    tension: f64,
+    lin_density: f64,
+    ei: f64,
+    k: usize,
+) -> f64 {
+    let n = k as f64;
+    let wave = det::sqrt(tension / lin_density);
+    let omega_flex = n * core::f64::consts::PI * wave / length;
+    if !(ei > 0.0) {
+        return omega_flex;
+    }
+    let inharm = core::f64::consts::PI * core::f64::consts::PI * ei / (tension * length * length);
+    omega_flex * det::sqrt(1.0 + inharm * n * n)
+}
+
 /// First-order Duffing backbone: for
 /// `qddot + w0^2 q + beta q^3 = 0`, the amplitude-dependent frequency
 /// is `w(a) = w0 (1 + 3 beta a^2 / (8 w0^2))` — the analytic
