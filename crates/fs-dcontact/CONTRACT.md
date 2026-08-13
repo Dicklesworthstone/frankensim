@@ -117,11 +117,11 @@ typed parameter refusals.
 
 - NORMAL contact only: tangential friction (bowing) is its own future
   bead (stated in the bead's polish round).
-- No contact-internal viscous loss (Hunt-Crossley damping inside the
-  collision): the bare potential's restitution is exactly 1 and
-  losses enter through the modal damping `R`; the lossy contact law
-  is a recorded follow-up (it needs state-dependent `R`, outside the
-  constant-R pHS form).
+- Hunt–Crossley internal loss is a **dissipative port force**
+  `χ K [p]_+^α ṗ` ([`ContactStorage::dissipative_modal_forces`]), not
+  a term in `H` and not a state-dependent `R`. `χ = 0` (the default)
+  keeps elastic restitution 1. Tangential friction is still
+  `fs-tribo`, not this crate.
 - `1 < alpha < 2` laws carry an unbounded contact Hessian at the
   boundary (at `alpha = 1` the Hessian coefficient vanishes and the
   FORCE has a C^0 kink instead — review-corrected); the tight-graze

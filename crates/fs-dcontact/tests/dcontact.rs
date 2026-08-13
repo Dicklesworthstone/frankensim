@@ -144,6 +144,74 @@ fn bouncing_mass_restitution_and_max_penetration() {
     );
 }
 
+#[test]
+fn hunt_crossley_lowers_restitution() {
+    let m = 1.0;
+    let g = 9.81;
+    let (k_c, alpha) = (1.0e6, 2.0);
+    let floor = Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.5],
+        vec![1.0],
+        k_c,
+        alpha,
+        "test-fixture: authored Hunt-Crossley".to_string(),
+    )
+    .expect("floor")
+    .with_internal_loss(0.8)
+    .expect("chi");
+    let storage =
+        ContactStorage::new(Box::new(FreeMass { m }), 1, vec![floor.clone()]).expect("st");
+    let sys = PortHamiltonian::new(
+        2,
+        1,
+        symplectic_j(1),
+        vec![0.0; 4],
+        vec![0.0, 1.0],
+        Box::new(storage),
+    )
+    .expect("sys");
+    let dt = 1.0e-5;
+    let mut x = vec![0.0, 0.0];
+    let mut v_impact = 0.0f64;
+    let mut v_out = 0.0f64;
+    let mut in_contact_prev = false;
+    for _ in 0..40_000 {
+        let v = x[1] / m;
+        let extra = floor.dissipative_modal_forces(1, &x, &[v]);
+        let rec = step(&sys, &x, &[m * g + extra[0]], dt).expect("step");
+        x = rec.x;
+        let pen = (x[0] - 0.5).max(0.0);
+        let in_contact = pen > 0.0;
+        if in_contact && !in_contact_prev {
+            v_impact = x[1] / m;
+        }
+        if !in_contact && in_contact_prev {
+            v_out = x[1] / m;
+            break;
+        }
+        in_contact_prev = in_contact;
+    }
+    assert!(v_impact > 0.0, "ball never hit the floor");
+    let restitution = (v_out / v_impact).abs();
+    assert!(
+        restitution < 0.97,
+        "Hunt-Crossley must dissipate, restitution {restitution:.4}"
+    );
+    assert!(
+        restitution > 0.2,
+        "Hunt-Crossley must still rebound, restitution {restitution:.4}"
+    );
+    assert!(
+        Obstacle::new(vec![1.0], 1, 1, vec![0.0], vec![1.0], 1.0, 2.0, "x".into(),)
+            .unwrap()
+            .with_internal_loss(-1.0)
+            .is_err()
+    );
+}
+
 /// The string + flat-fret fixture used by several tests.
 fn fret_system(n_modes: usize, gap: f64, k_c: f64) -> (PortHamiltonian, ContactStorage, Vec<f64>) {
     let (length, tension, mu) = (0.65, 70.0, 5.0e-3);

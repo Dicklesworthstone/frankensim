@@ -19,13 +19,13 @@
 //! `solver_residual`) — one frozen solver law, not a second one.
 //!
 //! Honest scope (stated): NORMAL contact only — tangential friction
-//! (bowing) is its own future bead; contact-internal viscous loss
-//! (Hunt-Crossley-style damping inside the collision) is a recorded
-//! follow-up, so restitution of the bare potential is exactly 1 and
-//! losses enter through the modal damping `R`; contact-law parameters
-//! `(K, alpha)` are caller-supplied with a PROVENANCE string logged —
-//! a matdb lookup is deferred until packs carrying contact-law
-//! parameters exist (no fake wiring).
+//! (bowing) is its own bead (`fs-tribo`). Contact-internal viscous
+//! loss is the Hunt–Crossley increment `χ K [p]_+^α ṗ`, a
+//! **dissipative port force** ([`ContactStorage::dissipative_modal_forces`]),
+//! not a gradient of `H`. `χ = 0` recovers the elastic potential
+//! (restitution 1). Contact-law parameters `(K, alpha, χ)` are
+//! caller-supplied with a PROVENANCE string — a matdb lookup is
+//! deferred until packs carrying contact-law parameters exist.
 
 use fs_math::det;
 use fs_phs::Storage;
@@ -43,6 +43,8 @@ pub struct Obstacle {
     weights: Vec<f64>,
     stiffness: f64,
     alpha: f64,
+    /// Hunt–Crossley internal-loss coefficient `χ` [s/m]. Zero is elastic.
+    internal_loss: f64,
     provenance: String,
 }
 
@@ -133,8 +135,25 @@ impl Obstacle {
             weights,
             stiffness,
             alpha,
+            internal_loss: 0.0,
             provenance,
         })
+    }
+
+    /// Hunt–Crossley internal loss `χ ≥ 0` [s/m]. Zero is the elastic
+    /// potential (restitution 1). Nonzero adds `χ K [p]_+^α ṗ` as a
+    /// dissipative force, not a term in `H`.
+    ///
+    /// # Errors
+    /// [`DContactError::Parameter`] if `chi` is negative or non-finite.
+    pub fn with_internal_loss(mut self, chi: f64) -> Result<Self, DContactError> {
+        if !chi.is_finite() || chi < 0.0 {
+            return Err(DContactError::Parameter {
+                what: "Hunt-Crossley chi must be finite and non-negative",
+            });
+        }
+        self.internal_loss = chi;
+        Ok(self)
     }
 
     /// Bypass admission — for mutation batteries and trusted callers
@@ -158,6 +177,7 @@ impl Obstacle {
             weights,
             stiffness,
             alpha,
+            internal_loss: 0.0,
             provenance,
         }
     }
@@ -198,6 +218,12 @@ impl Obstacle {
         self.alpha
     }
 
+    /// Hunt–Crossley internal-loss coefficient `χ` [s/m].
+    #[must_use]
+    pub fn internal_loss(&self) -> f64 {
+        self.internal_loss
+    }
+
     /// Contact-law provenance (logged, never invented).
     #[must_use]
     pub fn provenance(&self) -> &str {
@@ -216,6 +242,43 @@ impl Obstacle {
                 (disp - self.gaps[i]).max(0.0)
             })
             .collect()
+    }
+
+    /// Hunt–Crossley modal forces `f_k = −Σ_i w_i χ K [p_i]_+^α ṗ_i Φ_ik`.
+    ///
+    /// `velocities[k]` is the physical modal velocity (the inner
+    /// storage's `∂H/∂p_k`). `χ = 0` returns zeros. This is **not** a
+    /// gradient of `H`.
+    #[must_use]
+    pub fn dissipative_modal_forces(
+        &self,
+        n_modes: usize,
+        x: &[f64],
+        velocities: &[f64],
+    ) -> Vec<f64> {
+        let mut forces = vec![0.0; n_modes];
+        if !(self.internal_loss > 0.0) || velocities.len() != n_modes {
+            return forces;
+        }
+        let pens = self.penetrations(n_modes, x);
+        for (i, &p) in pens.iter().enumerate() {
+            if p <= 0.0 {
+                continue;
+            }
+            let mut pdot = 0.0;
+            for k in 0..n_modes {
+                pdot += self.collocation[i * n_modes + k] * velocities[k];
+            }
+            let f = self.weights[i]
+                * self.internal_loss
+                * self.stiffness
+                * det::pow(p, self.alpha)
+                * pdot;
+            for k in 0..n_modes {
+                forces[k] -= f * self.collocation[i * n_modes + k];
+            }
+        }
+        forces
     }
 }
 
@@ -304,6 +367,28 @@ impl ContactStorage {
             max_penetration: max_p,
             contact_energy: energy,
         }
+    }
+
+    /// Hunt–Crossley modal forces at state `x`.
+    ///
+    /// Velocities come from the inner storage gradient (`∂H/∂p_k`),
+    /// so a free mass (`p = m v`) and a mass-normalized modal bank
+    /// (`p = v`) are both correct. `χ = 0` on every obstacle returns
+    /// zeros. Add the result to the mechanical port input; do not
+    /// fold it into `H`.
+    #[must_use]
+    pub fn dissipative_modal_forces(&self, x: &[f64]) -> Vec<f64> {
+        let mut g = vec![0.0; 2 * self.n_modes];
+        self.inner.gradient(x, &mut g);
+        let velocities: Vec<f64> = (0..self.n_modes).map(|k| g[2 * k + 1]).collect();
+        let mut forces = vec![0.0; self.n_modes];
+        for ob in &self.obstacles {
+            let extra = ob.dissipative_modal_forces(self.n_modes, x, &velocities);
+            for (f, e) in forces.iter_mut().zip(extra) {
+                *f += e;
+            }
+        }
+        forces
     }
 }
 
