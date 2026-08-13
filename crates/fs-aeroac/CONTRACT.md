@@ -255,9 +255,14 @@ determinism.
   stability wall — the same rig runs through Re 2304 (Re_cell 192),
   now selectable via `JetLabiumConfig::collision` — but every
   executed rung REMAINS an essentially pure tone (flatness ~1e-18;
-  free-jet-scale St ~ 0.467 at Re >= 1152), so broadband flute
-  noise is reachable territory yet still NOT demonstrated, and the
-  2D inverse-cascade caveat stands.
+  free-jet-scale St ~ 0.467 at Re >= 1152). Bead l011o records that
+  landscape as [`crate::regime::PINNED_2D_CENTRAL_MOMENT_TONAL`] and
+  [`crate::regime::two_d_broadband_refusal`]: cataloging those rows as
+  broadband flute noise is a typed refusal. The D3Q19 central-moment
+  operator is live ([`crate::regime::evaluate_slot_jet_3d_operator`])
+  but no 3D Re-sweep has been executed; a demonstrated 3D broadband
+  regime remains a no-claim. The 2D inverse-cascade mechanism is the
+  recorded physics boundary.
 - Quadrupole (volume) sources: dipoles dominate at low Mach over
   rigid surfaces; the Lighthill volume term is out of scope v1.
 - Only orders 0 and 1 of the Bessel functions are provided (all the
