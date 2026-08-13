@@ -42,10 +42,14 @@ CONE=(fs-ivl fs-math fs-evidence fs-blake3 fs-obs fs-casebook fs-propcheck)
 ARTIFACT_DIR=""
 ONLY_MUTANT=""
 KEEP_SCRATCH=0
+SCRATCH_OVERRIDE=""
+CONTROL_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact-dir) ARTIFACT_DIR="${2:-}"; shift 2 ;;
     --mutant)       ONLY_MUTANT="${2:-}"; shift 2 ;;
+    --scratch)      SCRATCH_OVERRIDE="${2:-}"; KEEP_SCRATCH=1; shift 2 ;;
+    --control-only) CONTROL_ONLY=1; shift ;;
     --keep-scratch) KEEP_SCRATCH=1; shift ;;
     -h|--help)      sed -n '3,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
     *) printf 'FATAL: unknown argument %s\n' "$1" >&2; exit 2 ;;
@@ -56,10 +60,15 @@ if [[ -z "${ARTIFACT_DIR}" ]]; then
   ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/extreal-audit-XXXXXX")"
 fi
 mkdir -p "${ARTIFACT_DIR}"
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/extreal-audit-scratch-XXXXXX")"
+if [[ -n "${SCRATCH_OVERRIDE}" ]]; then
+  SCRATCH="${SCRATCH_OVERRIDE}"
+  mkdir -p "${SCRATCH}"
+else
+  SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/extreal-audit-scratch-XXXXXX")"
+fi
 TARGET_BASE="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_mutation"
 MATRIX="${ARTIFACT_DIR}/kill-matrix.jsonl"
-: > "${MATRIX}"
+touch "${MATRIX}"
 
 log() {
   printf '{"suite":"fs-extreal-arithmetic-audit","kind":"%s","message":"%s"}\n' "$1" "$2" \
@@ -176,62 +185,86 @@ if count != 1:
 path.write_text(text.replace(old, new))
 # Application integrity: the mutated file must now differ.
 assert path.read_text() != text
-print(f"applied {name} to {rel}")
+print(rel)
 PYEOF
 }
 
 MUTANTS=(flip-next-up flip-next-down drop-next-up budget-off-by-one swap-add-outward weaken-orient-filter)
 if [[ -n "${ONLY_MUTANT}" ]]; then MUTANTS=("${ONLY_MUTANT}"); fi
 
-# run_layer1 <scratch> <label> -> exit code; log tail retained per run.
+# run_layer1 <label> -> exit code; log retained per run. ONE workspace and
+# ONE target dir: mutants apply in place and are restored from the real
+# repo file afterwards, so successive invocations build incrementally
+# instead of paying a cold 7-crate build per mutant.
 run_layer1() {
-  local dest="$1" label="$2"
+  local label="$1"
   local out="${ARTIFACT_DIR}/${label}.log"
   local rc=0
   (
-    cd "${dest}"
-    CARGO_TARGET_DIR="${TARGET_BASE}/${label}" cargo test -q -p fs-ivl
+    cd "${BASE}"
+    CARGO_TARGET_DIR="${TARGET_BASE}/shared" cargo test -q -p fs-ivl
   ) > "${out}" 2>&1 || rc=$?
   return ${rc}
 }
 
+# restore_file <repo-relative path>: revert the mutated file from the real
+# repo (whose integrity hash brackets the campaign).
+restore_file() {
+  cp "${REPO_ROOT}/$1" "${BASE}/$1"
+}
+
 # --------------------------------------------------- positive control
-log phase "positive control: unmutated scratch cone must be green"
 BASE="${SCRATCH}/base"
-assemble_scratch "${BASE}"
-if ! run_layer1 "${BASE}" control; then
-  log control "POSITIVE CONTROL RED - campaign inconclusive (see control.log)"
-  printf '{"mutant":"__control__","outcome":"inconclusive-control-red"}\n' >> "${MATRIX}"
-  exit 2
+if [[ ! -d "${BASE}" ]]; then
+  assemble_scratch "${BASE}"
 fi
-log control "positive control green"
+if [[ -n "${ONLY_MUTANT}" && -f "${ARTIFACT_DIR}/control.log" ]] \
+  && grep -q 'positive control green' "${MATRIX}"; then
+  log control "reusing the recorded green positive control"
+else
+  log phase "positive control: unmutated scratch cone must be green"
+  if ! run_layer1 control; then
+    log control "POSITIVE CONTROL RED - campaign inconclusive (see control.log)"
+    printf '{"mutant":"__control__","outcome":"inconclusive-control-red"}\n' >> "${MATRIX}"
+    exit 2
+  fi
+  log control "positive control green"
+fi
+if [[ "${CONTROL_ONLY}" -eq 1 ]]; then
+  log summary "control-only invocation complete"
+  exit 0
+fi
 
 # --------------------------------------------------------- the campaign
 SURVIVORS=0
 INCONCLUSIVE=0
 for mutant in "${MUTANTS[@]}"; do
   log phase "mutant ${mutant}"
-  M="${SCRATCH}/${mutant}"
-  assemble_scratch "${M}"
-  if ! apply_mutation "${M}" "${mutant}" >> "${ARTIFACT_DIR}/apply.log" 2>&1; then
+  MUTATED_FILE="$(apply_mutation "${BASE}" "${mutant}" 2>> "${ARTIFACT_DIR}/apply.log")" || {
     printf '{"mutant":"%s","outcome":"inapplicable-source-drift"}\n' "${mutant}" >> "${MATRIX}"
     INCONCLUSIVE=$((INCONCLUSIVE + 1))
     continue
-  fi
+  }
   start_s=${SECONDS}
-  if run_layer1 "${M}" "${mutant}"; then
+  if run_layer1 "${mutant}"; then
+    restore_file "${MUTATED_FILE}"
     printf '{"mutant":"%s","outcome":"SURVIVED","layer":"L1-fs-ivl","seconds":%s}\n' \
       "${mutant}" "$((SECONDS - start_s))" >> "${MATRIX}"
     log survivor "${mutant} SURVIVED the fs-ivl battery - file a test-gap bead"
     SURVIVORS=$((SURVIVORS + 1))
   else
     rc=$?
+    restore_file "${MUTATED_FILE}"
     # Distinguish red tests (kill) from a broken build (inconclusive):
     # cargo test exits 101 for test failures AND build errors, so classify
     # by the presence of test-harness output.
     if grep -qE 'test result: FAILED|panicked at' "${ARTIFACT_DIR}/${mutant}.log"; then
-      killer="$(grep -oE '^test [a-z0-9_:]+ \.\.\. FAILED' "${ARTIFACT_DIR}/${mutant}.log" \
-                | head -3 | sed 's/^test //; s/ \.\.\. FAILED//' | paste -sd, -)"
+      # -q cargo output lists failing test names under a `failures:`
+      # heading rather than as `test ... FAILED` lines; harvest from both
+      # shapes and never let an empty harvest kill the script (pipefail).
+      killer="$( (grep -A20 '^failures:$' "${ARTIFACT_DIR}/${mutant}.log" \
+                  | grep -oE '^    [a-z0-9_:]+' | head -3 \
+                  | sed 's/^    //' | paste -sd, -) 2>/dev/null || true)"
       printf '{"mutant":"%s","outcome":"killed","layer":"L1-fs-ivl","killed_by":"%s","seconds":%s}\n' \
         "${mutant}" "${killer:-panic}" "$((SECONDS - start_s))" >> "${MATRIX}"
       log kill "${mutant} killed by L1 (${killer:-panic})"
