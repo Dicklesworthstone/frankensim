@@ -170,6 +170,21 @@ run_cli validate 0 -- --json validate "${PROJECT}"
 check "validate reports ok"          contains "${ARTIFACT_DIR}/validate.stdout" '"status":"ok"'
 check "validate reports zero findings" contains "${ARTIFACT_DIR}/validate.stdout" '"finding_count":0'
 
+# ------------------------------------ phase 1.5: worked-example fixtures
+# examples/refusal-loop teaches the refusal/fix loop (bead f85xj.6.12); its
+# fixture must keep refusing with exactly the documented code, and its
+# documented one-token distance from the tracked project must stay true.
+log phase "worked examples: the refusal-loop fixture refuses by name"
+BROKEN="${REPO_ROOT}/examples/refusal-loop/broken.fsim"
+check "refusal-loop fixture is tracked" test -f "${BROKEN}"
+check "refusal-loop delta is exactly the duty token" \
+  bash -c "diff <(sed 's/:duty 2.0/:duty 1.0/' '${BROKEN}') '${PROJECT}' >/dev/null"
+run_cli example_refusal 4 -- --json validate "${BROKEN}"
+check "refusal names project-duty-range" \
+  contains "${ARTIFACT_DIR}/example_refusal.stderr" 'project-duty-range'
+check "refusal carries the concrete fix" \
+  contains "${ARTIFACT_DIR}/example_refusal.stderr" 'duty must lie in 0.0..=1.0'
+
 # --------------------------------------------------------- phase 2: import
 LEDGER="${WORK}/run.db"
 log phase "import: geometry into a fresh ledger"

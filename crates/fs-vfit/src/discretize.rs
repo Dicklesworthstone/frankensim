@@ -356,6 +356,8 @@ pub struct DelayedFilter {
     frac: f64,
     filter: DigitalFilter,
     state: DigitalFilterState,
+    /// Residual (or full) impulse response. Empty means the IIR bank.
+    fir: Vec<f64>,
     last: f64,
 }
 
@@ -387,6 +389,51 @@ impl DelayedFilter {
             frac,
             state: filter.zero_state(),
             filter,
+            fir: Vec::new(),
+            last: 0.0,
+        })
+    }
+
+    /// A characteristic port whose reflectance is a tabulated impulse
+    /// response (delay included). This is the exact linear scattering
+    /// map of a sampled `R(ω)`, not a rational fit.
+    ///
+    /// # Errors
+    /// Non-finite samples, a non-positive sample interval, or an IR
+    /// shorter than 4 samples.
+    pub fn from_impulse_response(t_s: f64, ir: Vec<f64>) -> Result<Self, DiscretizeError> {
+        if !(t_s > 0.0 && t_s.is_finite()) {
+            return Err(DiscretizeError::BadSampleInterval);
+        }
+        if ir.len() < 4 {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "impulse_response",
+                expected: 4,
+                actual: ir.len(),
+            });
+        }
+        for (i, &h) in ir.iter().enumerate() {
+            if !h.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "impulse_response",
+                    index: Some(i),
+                });
+            }
+        }
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 0.0,
+            t_s,
+            prewarp: 0.0,
+        };
+        Ok(Self {
+            buf: vec![0.0; ir.len()],
+            write: 0,
+            delay_int: 0,
+            frac: 0.0,
+            state: filter.zero_state(),
+            filter,
+            fir: ir,
             last: 0.0,
         })
     }
@@ -418,6 +465,22 @@ impl DelayedFilter {
         require_finite_scalar("outgoing", outgoing)?;
         let n = self.buf.len();
         self.buf[self.write] = outgoing;
+        if !self.fir.is_empty() {
+            let mut acc = 0.0;
+            for (k, &h) in self.fir.iter().enumerate() {
+                let idx = (self.write + n - k) % n;
+                acc += h * self.buf[idx];
+            }
+            if !acc.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "fir_output",
+                    index: None,
+                });
+            }
+            self.write = (self.write + 1) % n;
+            self.last = acc;
+            return Ok(acc);
+        }
         let i1 = (self.write + n - self.delay_int) % n;
         let i0 = (i1 + n - 1) % n;
         let delayed = (1.0 - self.frac) * self.buf[i1] + self.frac * self.buf[i0];
@@ -437,6 +500,17 @@ impl DelayedFilter {
     /// A self-oscillating loop needs the speaking-frequency loop gain,
     /// not only an impulse-correct fit.
     pub fn pin_magnitude_at(&mut self, omega: f64, target_abs: f64) {
+        if !self.fir.is_empty() {
+            let h = fir_dtft(&self.fir, omega, self.filter.t_s).abs();
+            if h > 1.0e-12 && target_abs >= 0.0 && target_abs.is_finite() {
+                let gain = target_abs / h;
+                for s in &mut self.fir {
+                    *s *= gain;
+                }
+            }
+            self.last = 0.0;
+            return;
+        }
         let h = self.filter.eval(omega).abs();
         if !(h > 1.0e-12) || !(target_abs >= 0.0 && target_abs.is_finite()) {
             return;
@@ -458,10 +532,33 @@ impl DelayedFilter {
     /// Call this after [`Self::pin_magnitude_at`] so a speaking-frequency
     /// gain pin cannot create an active band elsewhere.
     pub fn enforce_scattering_passivity(&mut self, omegas: &[f64]) {
+        if !self.fir.is_empty() {
+            let peak = omegas
+                .iter()
+                .map(|&w| fir_dtft(&self.fir, w, self.filter.t_s).abs())
+                .fold(0.0_f64, f64::max);
+            if peak > 1.0 {
+                let gain = 1.0 / peak;
+                for s in &mut self.fir {
+                    *s *= gain;
+                }
+            }
+            self.last = 0.0;
+            return;
+        }
         self.filter.enforce_abs_bound(omegas, 1.0);
         self.state = self.filter.zero_state();
         self.last = 0.0;
     }
+}
+
+fn fir_dtft(ir: &[f64], omega: f64, t_s: f64) -> C64 {
+    let mut acc = C64::ZERO;
+    for (k, &h) in ir.iter().enumerate() {
+        let phase = -omega * t_s * k as f64;
+        acc = acc + C64::new(h * det::cos(phase), h * det::sin(phase));
+    }
+    acc
 }
 
 fn is_lossless_differentiator(s: &Biquad) -> bool {
