@@ -1,6 +1,7 @@
 //! Acoustic-assembly *descriptions*: typed data that compose generic
 //! physics crates. There is no instrument module here — a guitar or
-//! clarinet is a description of strings, ducts, gas, and events.
+//! clarinet is a description of strings, ducts, reeds, bows, plates,
+//! gas, and events.
 
 /// First-principles dry air (USSA 1976 constants live in fs-material).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,8 +38,19 @@ pub struct PrestressedString {
     pub width_m: f64,
     /// Retained sine modes.
     pub n_modes: usize,
-    /// Viscous modal damping ratio (same for every mode in v1).
+    /// Viscous modal damping ratio used when [`Self::rayleigh`] is `None`.
     pub damping_ratio: f64,
+    /// Optional Rayleigh `ζ(ω) = α/(2ω) + βω/2` (air + internal).
+    pub rayleigh: Option<RayleighParams>,
+}
+
+/// Rayleigh damping coefficients for a modal family.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayleighParams {
+    /// Mass-proportional coefficient α [1/s].
+    pub alpha_per_s: f64,
+    /// Stiffness-proportional coefficient β [s].
+    pub beta_s: f64,
 }
 
 /// One cylindrical waveguide segment.
@@ -64,8 +76,23 @@ pub enum WaveguideEnd {
 pub struct ViscothermalDuct {
     /// Inlet-first segments.
     pub segments: Vec<CylinderSegment>,
+    /// Compact tone holes inserted after the named segment index.
+    pub tone_holes: Vec<ToneHole>,
     /// Outlet termination.
     pub termination: WaveguideEnd,
+}
+
+/// One compact-limit tone hole on a 1D bore.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneHole {
+    /// Insert after this inlet-first cylinder index.
+    pub after_segment: usize,
+    /// Chimney radius [m].
+    pub radius_m: f64,
+    /// Chimney height [m].
+    pub chimney_m: f64,
+    /// Open to the exterior (`true`) or pad-closed (`false`).
+    pub open: bool,
 }
 
 /// Instantaneous point displacement of a taut string (the static
@@ -94,6 +121,55 @@ pub struct Listener {
     pub distance_m: f64,
 }
 
+/// Beating single reed (quasistatic Bernoulli valve).
+///
+/// Closing pressure is `k H / S_r` in the massless limit: the rest
+/// opening shuts when the mouthpiece pressure drop reaches
+/// [`Self::closing_pressure_pa`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeatingReed {
+    /// Rest opening `H` [m].
+    pub rest_opening_m: f64,
+    /// Slit width [m].
+    pub width_m: f64,
+    /// Pressure drop that just closes the reed [Pa].
+    pub closing_pressure_pa: f64,
+    /// Blowing (mouth) pressure [Pa].
+    pub blowing_pressure_pa: f64,
+    /// Raised-cosine attack to the blowing pressure [s].
+    pub attack_s: f64,
+}
+
+/// Regularized hyperbolic bow stroke (Stribeck + viscous Coulomb).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BowStroke {
+    /// Contact station as a fraction of speaking length in (0, 1).
+    pub station_frac: f64,
+    /// Normal force [N].
+    pub normal_force_n: f64,
+    /// Bow velocity [m/s] (signed).
+    pub velocity_m_s: f64,
+    /// Static friction coefficient.
+    pub mu_static: f64,
+    /// Dynamic friction coefficient.
+    pub mu_dynamic: f64,
+    /// Stribeck velocity scale [m/s].
+    pub stribeck_m_s: f64,
+}
+
+/// One radiating body mode driven by the string's bridge force.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadiatingPlate {
+    /// Radiating area [m²].
+    pub area_m2: f64,
+    /// Effective modal mass [kg].
+    pub mass_kg: f64,
+    /// Natural frequency [Hz].
+    pub frequency_hz: f64,
+    /// Viscous damping ratio.
+    pub damping_ratio: f64,
+}
+
 /// A described acoustic assembly. Empty of both string and duct is
 /// refused at realization, not here — this type is data.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,8 +182,14 @@ pub struct AcousticAssembly {
     pub duct: Option<ViscothermalDuct>,
     /// Optional string pluck.
     pub pluck: Option<Pluck>,
+    /// Optional bow stroke (may replace or accompany a pluck IC).
+    pub bow: Option<BowStroke>,
     /// Optional inlet volume-velocity pulse.
     pub blow: Option<VolumeVelocityPulse>,
+    /// Optional beating reed (replaces a prescribed blow on a duct).
+    pub reed: Option<BeatingReed>,
+    /// Optional radiating body driven by the string bridge force.
+    pub soundboard: Option<RadiatingPlate>,
     /// Observer.
     pub listener: Listener,
     /// Output sample rate [Hz].
