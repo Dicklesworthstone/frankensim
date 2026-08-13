@@ -162,8 +162,8 @@ MUTATIONS = {
     ),
     "swap-add-outward": (
         "crates/fs-ivl/src/interval.rs",
-        "            (Some(lo), Some(hi)) => Interval {\n                lo: lo.lo,\n                hi: hi.hi,\n            },",
-        "            (Some(lo), Some(hi)) => Interval {\n                lo: lo.hi,\n                hi: hi.lo,\n            },",
+        "    /// Addition, outward-rounded.\n    fn add(self, o: Interval) -> Interval {\n        let lo = enclose_rounded_binary(self.lo + o.lo, self.lo.is_finite() && o.lo.is_finite());\n        let hi = enclose_rounded_binary(self.hi + o.hi, self.hi.is_finite() && o.hi.is_finite());",
+        "    /// Addition, outward-rounded.\n    fn add(self, o: Interval) -> Interval {\n        let hi = enclose_rounded_binary(self.lo + o.lo, self.lo.is_finite() && o.lo.is_finite());\n        let lo = enclose_rounded_binary(self.hi + o.hi, self.hi.is_finite() && o.hi.is_finite());",
     ),
     "weaken-orient-filter": (
         "crates/fs-ivl/src/predicates.rs",
