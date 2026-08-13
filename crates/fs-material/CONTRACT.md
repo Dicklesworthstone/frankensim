@@ -137,7 +137,8 @@ ledger); `lower_to_prony` (deterministic relaxation-time ladder + NNLS,
 emitting a `LoweredModel` whose certificate is the MEASURED supremum
 relative modulus error over a dense in-band grid and whose evaluation
 REFUSES outside the certified band, `FS-MAT-VISCO-OUT-OF-BAND`);
-`ThermoelasticZener` (closed-form beam/plate thermoelastic loss);
+`ThermoelasticZener` (closed-form beam/plate thermoelastic loss,
+  plus handbook `aluminum` / `structural_steel` constructors);
 `fit_fractional_zener` (deterministic Levenberg–Marquardt over an
 admissibility-preserving reparameterization, exact AD Jacobian, and a
 caller-AUTHORED residual budget `tol_rel`: a stationary point above the

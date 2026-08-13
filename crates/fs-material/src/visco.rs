@@ -1256,6 +1256,15 @@ mod tests {
     }
 
     #[test]
+    fn handbook_metals_are_admitted() {
+        let al = ThermoelasticZener::aluminum(293.0).expect("al");
+        let st = ThermoelasticZener::structural_steel(293.0).expect("st");
+        assert!(al.loss_factor(1.0e3, 0.002) > 0.0);
+        assert!(st.loss_factor(1.0e3, 0.002) > 0.0);
+        assert!(ThermoelasticZener::aluminum(0.0).is_err());
+    }
+
+    #[test]
     fn thermoelastic_zener_peak_and_aluminum_magnitude() {
         // Aluminum: E=70 GPa, α=23e-6/K, T=293K, ρ=2700, cp=900, κ=237.
         let ted = ThermoelasticZener {
