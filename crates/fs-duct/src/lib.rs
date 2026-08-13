@@ -565,6 +565,72 @@ fn segment_matrix(segment: &Segment, wave: &SegmentWave) -> Result<[C64; 4], Duc
     Ok(m)
 }
 
+/// Compact-mouth radiation impedance of an open termination.
+///
+/// Public name for the same Levine–Schwinger / flanged fit the TMM
+/// already uses. Ideal and closed terminations refuse — they are not
+/// radiation loads.
+///
+/// # Errors
+/// [`DuctError::RadiationKaTooLarge`] or [`DuctError::BadParameter`].
+pub fn compact_radiation_impedance(
+    termination: Termination,
+    state: &GasState,
+    radius: f64,
+    omega: f64,
+) -> Result<C64, DuctError> {
+    match termination {
+        Termination::UnflangedOpen | Termination::FlangedOpen => {
+            termination_impedance(termination, state, radius, omega)?
+                .0
+                .ok_or(DuctError::BadParameter {
+                    what: "open radiation load missing impedance",
+                })
+        }
+        Termination::Closed | Termination::IdealOpen => Err(DuctError::BadParameter {
+            what: "compact radiation impedance is defined for radiating mouths only",
+        }),
+    }
+}
+
+/// Free-field observer amplitude after compact radiation: spherical
+/// spreading times ISO 9613-1 molecular absorption.
+///
+/// Humidity is explicit. This does **not** add Stokes–Kirchhoff on
+/// top of ISO (ISO already includes a classical term).
+///
+/// # Errors
+/// ISO window refusals or a non-positive range.
+pub fn absorbed_spherical_pressure(
+    mouth_pressure: f64,
+    state: &GasState,
+    omega: f64,
+    range_m: f64,
+    relative_humidity: f64,
+) -> Result<f64, DuctError> {
+    if !(range_m > 0.0 && range_m.is_finite() && mouth_pressure.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "observer range must be positive and pressures finite",
+        });
+    }
+    let alpha = fs_material::iso9613::iso9613_absorption(state, relative_humidity, omega).map_err(
+        |err| DuctError::BadParameter {
+            what: match err {
+                fs_material::MaterialError::Parameters { .. } => {
+                    "ISO 9613 humidity/temperature/pressure window refused"
+                }
+                _ => "ISO 9613 evaluation refused",
+            },
+        },
+    )?;
+    Ok(mouth_pressure
+        * fs_material::iso9613::range_factor(
+            range_m,
+            alpha,
+            fs_material::iso9613::Spreading::Spherical,
+        ))
+}
+
 /// Termination impedance at the outlet.
 ///
 /// # Errors
@@ -1798,5 +1864,34 @@ mod tone_hole_tests {
         println!(
             "{{\"suite\":\"fs-duct\",\"case\":\"tone-hole-algebra\",\"f_open\":{f_open:.1},\"f_closed\":{f_closed:.1},\"verdict\":\"pass\"}}"
         );
+    }
+}
+
+#[cfg(test)]
+mod radiation_and_free_field {
+    use super::*;
+    use fs_material::gas::{GasSpec, GasState};
+
+    #[test]
+    fn compact_radiation_matches_the_tmm_load() {
+        let state =
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
+        let z =
+            compact_radiation_impedance(Termination::FlangedOpen, &state, 0.02, 2.0e3).expect("z");
+        assert!(z.re > 0.0 && z.im < 0.0);
+        let zu = compact_radiation_impedance(Termination::UnflangedOpen, &state, 0.02, 2.0e3)
+            .expect("zu");
+        assert!(z.re > zu.re);
+        assert!(compact_radiation_impedance(Termination::Closed, &state, 0.02, 2.0e3).is_err());
+    }
+
+    #[test]
+    fn iso_absorption_on_a_spherical_observer_kills_high_frequency() {
+        let state =
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
+        let lo = absorbed_spherical_pressure(1.0, &state, 2.0e3, 200.0, 0.50).expect("lo");
+        let hi = absorbed_spherical_pressure(1.0, &state, 2.0e4, 200.0, 0.50).expect("hi");
+        assert!(hi < lo, "high frequency {hi} must fall below low {lo}");
+        assert!(absorbed_spherical_pressure(1.0, &state, 2.0e3, 0.0, 0.50).is_err());
     }
 }

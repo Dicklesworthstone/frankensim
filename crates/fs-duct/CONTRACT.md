@@ -21,6 +21,11 @@ same object, and every medium property derives from
 - `Termination::{Closed, IdealOpen, UnflangedOpen, FlangedOpen}` —
   ideal limits plus the classic low-`ka` radiation fits (end
   corrections 0.6133a / 0.8216a) with a named `ka` ceiling.
+- `compact_radiation_impedance` — the radiating-mouth load as a
+  named primitive (same fit the TMM already uses).
+- `absorbed_spherical_pressure` — free-field observer: spherical
+  spreading times ISO 9613-1 molecular absorption. Humidity is an
+  explicit `[0, 1]` argument. Do not add Stokes–Kirchhoff on top.
 - `segment_wave` — complex `k` and characteristic impedance from the
   gas state: `k = k0 [1 + (1+i)/(sqrt2 rv)(1 + (gamma-1)/sqrt Pr)]`,
   `Zc` with the `(1 - (gamma-1)/sqrt Pr)` factor; shear number
