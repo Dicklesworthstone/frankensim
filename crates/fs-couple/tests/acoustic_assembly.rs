@@ -1,7 +1,9 @@
 //! Description → waveform: prestressed string + viscothermal duct,
 //! gas/material parameter motion, deterministic PCM16, typed refusals.
 
-use fs_couple::acoustic_realize::{AcousticRealizeError, assembly_wav, realize_assembly};
+use fs_couple::acoustic_realize::{
+    AcousticRealizeError, assembly_wav, realize_assembly, string_mode_omega,
+};
 use fs_couple::pcm_wav::{WavError, encode_pcm16_wav};
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, CylinderSegment, Listener, Pluck,
@@ -19,6 +21,7 @@ fn empty_base() -> AcousticAssembly {
         blow: None,
         reed: None,
         soundboard: None,
+        body_modes: vec![],
         listener: Listener { distance_m: 1.0 },
         sample_rate_hz: 8_000,
         duration_s: 0.06,
@@ -35,6 +38,8 @@ fn nylon_like(tension_n: f64, lin_density_kg_m: f64) -> PrestressedString {
         n_modes: 4,
         damping_ratio: 0.004,
         rayleigh: None,
+        bending_stiffness_n_m2: 0.0,
+        polarization_detune: 0.0,
     }
 }
 
@@ -333,6 +338,8 @@ fn beating_reed_locks_near_the_quarter_wave() {
         closing_pressure_pa: 6_000.0,
         blowing_pressure_pa: 2_800.0,
         attack_s: 0.008,
+        mass_kg: 0.0,
+        stiffness_n_m: 0.0,
     });
     let out = realize_assembly(&a).expect("reed");
     let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
@@ -341,9 +348,11 @@ fn beating_reed_locks_near_the_quarter_wave() {
     let rms: f64 = (ac.iter().map(|p| p * p).sum::<f64>() / ac.len() as f64).sqrt();
     assert!(rms > 5.0, "reed-bore must self-oscillate, rms={rms}");
     let period = zero_cross_period(&ac);
+    let quarter = 4.0 * 0.50 / out.gas.sound_speed * f64::from(a.sample_rate_hz);
     assert!(
-        (4.0..120.0).contains(&period),
-        "reed-bore must be periodic, period={period:.2} samples"
+        (period - quarter).abs() < 0.28 * quarter
+            || (period - quarter / 3.0).abs() < 0.28 * (quarter / 3.0),
+        "reed lock {period:.2} vs quarter-wave {quarter:.1} or twelfth"
     );
     let mut silent = a.clone();
     if let Some(reed) = silent.reed.as_mut() {
@@ -391,4 +400,98 @@ fn bow_stroke_is_a_live_excitation() {
         peak_abs(&out.pressure_pa) > 1.0e-4,
         "a bow stroke must drive the string"
     );
+}
+
+#[test]
+fn bending_stiffness_makes_partials_inharmonic() {
+    let mut flex = nylon_like(80.0, 0.006);
+    flex.n_modes = 4;
+    let mut stiff = flex;
+    // Wound-string stand-in: E=200 GPa, r=0.6 mm → I=π r^4/4.
+    // B = π² EI/(T L²) is then large enough that f2/f1 is obviously > 2.
+    let r: f64 = 6.0e-4;
+    stiff.bending_stiffness_n_m2 = 2.0e11 * core::f64::consts::PI * r.powi(4) / 4.0;
+    let r12_flex = string_mode_omega(flex, 2) / string_mode_omega(flex, 1);
+    let r12_stiff = string_mode_omega(stiff, 2) / string_mode_omega(stiff, 1);
+    assert!((r12_flex - 2.0).abs() < 1.0e-12);
+    assert!(
+        r12_stiff > 2.01,
+        "Fletcher inharmonicity must push f2/f1 above 2, got {r12_stiff}"
+    );
+    let mut a = plucked(80.0, 0.006, 0.003);
+    a.string = Some(stiff);
+    realize_assembly(&a).expect("stiff pluck must realize");
+}
+
+#[test]
+fn two_polarizations_beat() {
+    let mut a = plucked(80.0, 0.006, 0.003);
+    a.duration_s = 0.20;
+    if let Some(s) = a.string.as_mut() {
+        s.polarization_detune = 0.012;
+        s.n_modes = 2;
+        s.damping_ratio = 0.001;
+    }
+    let out = realize_assembly(&a).expect("two-pol");
+    let hop = 80usize;
+    let mut env = Vec::new();
+    for chunk in out.pressure_pa.chunks(hop) {
+        let e = (chunk.iter().map(|p| p * p).sum::<f64>() / chunk.len() as f64).sqrt();
+        env.push(e);
+    }
+    let max_e = env.iter().copied().fold(0.0_f64, f64::max);
+    let min_e = env.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        max_e > 1.4 * min_e,
+        "two polarizations must beat the envelope ({max_e} vs {min_e})"
+    );
+}
+
+#[test]
+fn sitka_body_pair_adds_low_frequency_energy() {
+    let mut a = plucked(80.0, 0.006, 0.003);
+    a.duration_s = 0.10;
+    // Two compact radiators — the same object as any other 1-DOF
+    // modal monopole. Frequencies sit in a published guitar-body
+    // band; the type does not know that.
+    a.body_modes = vec![
+        RadiatingPlate {
+            area_m2: 0.10,
+            mass_kg: 0.16,
+            frequency_hz: 98.0,
+            damping_ratio: 0.5 / 37.0,
+        },
+        RadiatingPlate {
+            area_m2: 0.06,
+            mass_kg: 0.12,
+            frequency_hz: 181.0,
+            damping_ratio: 0.5 / 22.0,
+        },
+    ];
+    let bare = plucked(80.0, 0.006, 0.003);
+    let with = realize_assembly(&a).expect("body");
+    let without = realize_assembly(&bare).expect("bare");
+    assert!(
+        peak_abs(&with.pressure_pa) > peak_abs(&without.pressure_pa),
+        "Carcagno-band body modes must radiate"
+    );
+}
+
+#[test]
+fn bowed_rich_spectrum_has_even_partials() {
+    let mut a = empty_base();
+    a.duration_s = 0.08;
+    let mut s = nylon_like(80.0, 0.006);
+    s.n_modes = 12;
+    a.string = Some(s);
+    a.bow = Some(BowStroke {
+        station_frac: 0.13,
+        normal_force_n: 1.2,
+        velocity_m_s: 0.35,
+        mu_static: 0.85,
+        mu_dynamic: 0.25,
+        stribeck_m_s: 0.03,
+    });
+    let out = realize_assembly(&a).expect("bow helmholtz");
+    assert!(peak_abs(&out.pressure_pa) > 1.0e-3);
 }

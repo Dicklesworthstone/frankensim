@@ -228,18 +228,29 @@ moving-source, FW-H, near-field, feedback, room, head, and passivity remain uncl
 ### `acoustic_realize` / `pcm_wav`
 
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
-pressure. There is no instrument crate: a guitar or clarinet is a description.
+pressure by composing nameless primitives: a prestressed Euler–Bernoulli
+waveguide (`fs-nlmodal::prestressed_beam_omega` / Kirchhoff–Carrier), a
+`bernoulli_aperture`, a `stribeck_friction` contact, a
+`traveling_wave_line`, `ModalAcousticTime`, and compact modal radiators.
+There is no instrument crate and no instrument algebra. A guitar or
+clarinet is one filling of those objects.
 
 - String path, `EA = 0`: triangular-pluck (or bow) modal ICs marched by
   `ModalAcousticTimeModel`, compact transfer
-  `H = i ω ρ A_odd / (4 π r √(μ L / 2))`.
+  `H = i ω ρ A_odd / (4 π r √(μ L / 2))`. Fletcher inharmonicity
+  `ω_n = n ω_1 √(1+B n²)` when `EI > 0`. Stokes air drag from
+  `GasState` plus the authored internal floor. A second polarization
+  at `1+detune` produces beating.
 - String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string` + Gonzalez
-  pHS step. Pitch glide and modal coupling are live. Bridge force
-  `T_eff y'(0)` can drive an optional 1-DOF `RadiatingPlate`.
-- Bow: regularized Stribeck/Coulomb `μ(v)` at a station, projected onto
-  the modal basis. Not an elastoplastic bristle or measured rosin curve.
-- Reed path: quasistatic beating Bernoulli valve on the TMM reflection
-  function (`LossModel::AllRegime`). Self-oscillation is the product.
+  pHS step, with the same stiff-string frequencies overwriting the
+  linear ω_n. Bridge force `T_eff y'(0)` drives every listed body mode
+  (Carcagno-band Sitka pair is a constructor, not a named guitar).
+- Bow: MWS regularized friction (steep stiction ramp + falling kinetic
+  shoulder). Helmholtz motion is possible with enough modes; it is not
+  guaranteed and not a measured rosin curve.
+- Reed path: quasistatic or massive beating Bernoulli valve on a
+  fractional-delay `2L/c` loop whose gain and one-pole loss come from
+  AllRegime TMM. Self-oscillation is the product.
 - Duct path without reed: `p(t) = IFFT[H(ω) U(ω)]` with AllRegime
   viscothermal losses (Poiseuille below the wide-tube floor — never
   lossless fallback). Tone holes are compact TMM shunts. Unflanged-open

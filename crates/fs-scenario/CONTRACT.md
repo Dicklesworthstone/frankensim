@@ -21,12 +21,13 @@ flagships.
 
 ## Public types and semantics
 
-- `acoustic` — description-only types for composing generic musical-acoustics
-  physics (`AmbientGas`, `PrestressedString`, `ViscothermalDuct`, `ToneHole`,
-  `Pluck`, `BowStroke`, `BeatingReed`, `RadiatingPlate`, `RayleighParams`,
-  `VolumeVelocityPulse`, `Listener`, `AcousticAssembly`). A guitar or clarinet
-  is a filled assembly, not a crate. Realization lives in `fs-couple`; this
-  module does not integrate, radiate, or emit audio.
+- `acoustic` — description-only types for composing generic physics
+  (`AmbientGas`, `PrestressedString` as a 1-D prestressed waveguide,
+  `ViscothermalDuct`, `ToneHole`, `Pluck`, `BowStroke` as Stribeck
+  friction, `BeatingReed` as a Bernoulli aperture, `RadiatingPlate` as a
+  compact modal monopole, `RayleighParams`, `VolumeVelocityPulse`,
+  `Listener`, `AcousticAssembly`). A guitar or clarinet is a filled
+  assembly, not a crate and not a type. Realization lives in `fs-couple`.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared

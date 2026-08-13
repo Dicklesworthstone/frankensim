@@ -11,6 +11,7 @@ use crate::modal_acoustic_time::{
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::realize_reed_bore;
+use crate::stribeck_friction::StribeckFriction;
 use fs_duct::{
     Duct, DuctError, HoleState, LossModel, MAX_RADIATION_KA, Segment, Termination, input_impedance,
 };
@@ -19,7 +20,7 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_material::visco::RayleighDamping;
 use fs_math::c64::C64;
 use fs_math::det;
-use fs_nlmodal::{KcStringParams, assemble, kirchhoff_carrier_string};
+use fs_nlmodal::{KcStringParams, assemble, kirchhoff_carrier_string, prestressed_beam_omega};
 use fs_phs::step;
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, Pluck, PrestressedString, RadiatingPlate,
@@ -119,6 +120,7 @@ pub fn realize_assembly(
             assembly.pluck,
             assembly.bow,
             assembly.soundboard,
+            &assembly.body_modes,
             &gas,
             assembly.listener.distance_m,
             assembly.sample_rate_hz,
@@ -182,7 +184,23 @@ fn sample_count(rate_hz: u32, duration_s: f64) -> Result<usize, AcousticRealizeE
     Ok(n.floor() as usize)
 }
 
-fn mode_zeta(string: PrestressedString, omega: f64) -> Result<f64, AcousticRealizeError> {
+/// Prestressed Euler–Bernoulli frequency of sine mode `k` (1-based).
+#[must_use]
+pub fn string_mode_omega(string: PrestressedString, k: usize) -> f64 {
+    prestressed_beam_omega(
+        string.length_m,
+        string.tension_n,
+        string.lin_density_kg_m,
+        string.bending_stiffness_n_m2,
+        k,
+    )
+}
+
+fn mode_zeta(
+    string: PrestressedString,
+    omega: f64,
+    gas: &GasState,
+) -> Result<f64, AcousticRealizeError> {
     if let Some(RayleighParams {
         alpha_per_s,
         beta_s,
@@ -193,10 +211,22 @@ fn mode_zeta(string: PrestressedString, omega: f64) -> Result<f64, AcousticReali
                 what: "Rayleigh coefficients must be finite and non-negative",
             }
         })?;
-        Ok(r.zeta_at(omega))
-    } else {
-        Ok(string.damping_ratio)
+        return Ok(r.zeta_at(omega));
     }
+    // Stokes air drag on a cylinder of radius ≈ width/2, plus the
+    // caller-authored internal floor, plus a stiffness-proportional
+    // term from bending (Valette–Cuesta / Chaigne class).
+    let radius = 0.5 * string.width_m;
+    let stokes = core::f64::consts::PI
+        * radius
+        * det::sqrt(2.0 * gas.dynamic_viscosity * gas.density / omega.max(1.0))
+        / (2.0 * string.lin_density_kg_m * det::sqrt(omega.max(1.0)));
+    let bend = if string.bending_stiffness_n_m2 > 0.0 {
+        2.0e-7 * omega
+    } else {
+        0.0
+    };
+    Ok(string.damping_ratio + stokes + bend)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,35 +235,74 @@ fn realize_string(
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     soundboard: Option<RadiatingPlate>,
+    body_modes: &[RadiatingPlate],
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     validate_string(string, pluck, bow)?;
-    if string.axial_stiffness_n > 0.0 {
+    let mut hist = if string.axial_stiffness_n > 0.0 {
         realize_kc_string(
             string,
             pluck,
             bow,
             soundboard,
+            body_modes,
             gas,
             listener_m,
             sample_rate_hz,
             n,
-        )
+            1.0,
+        )?
     } else {
         realize_linear_string(
             string,
             pluck,
             bow,
             soundboard,
+            body_modes,
             gas,
             listener_m,
             sample_rate_hz,
             n,
-        )
+            1.0,
+        )?
+    };
+    if string.polarization_detune > 0.0 {
+        let mut twin = string;
+        twin.polarization_detune = 0.0;
+        twin.tension_n *= (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
+        let other = if string.axial_stiffness_n > 0.0 {
+            realize_kc_string(
+                twin,
+                pluck,
+                bow,
+                None,
+                &[],
+                gas,
+                listener_m,
+                sample_rate_hz,
+                n,
+                0.85,
+            )?
+        } else {
+            realize_linear_string(
+                twin,
+                pluck,
+                bow,
+                None,
+                &[],
+                gas,
+                listener_m,
+                sample_rate_hz,
+                n,
+                0.85,
+            )?
+        };
+        add_in_place(&mut hist, &other);
     }
+    Ok(hist)
 }
 
 fn validate_string(
@@ -248,6 +317,8 @@ fn validate_string(
         && string.width_m > 0.0
         && string.n_modes > 0
         && string.damping_ratio >= 0.0
+        && string.bending_stiffness_n_m2 >= 0.0
+        && string.polarization_detune >= 0.0
         && string.length_m.is_finite()
         && string.tension_n.is_finite()
         && string.lin_density_kg_m.is_finite())
@@ -284,12 +355,13 @@ fn realize_linear_string(
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     soundboard: Option<RadiatingPlate>,
+    body_modes: &[RadiatingPlate],
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
+    radiation_scale: f64,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    let wave = det::sqrt(string.tension_n / string.lin_density_kg_m);
     let pi = core::f64::consts::PI;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let mut modes = Vec::with_capacity(string.n_modes);
@@ -297,7 +369,7 @@ fn realize_linear_string(
     let mut phi_bow = vec![0.0; string.n_modes];
     for k in 1..=string.n_modes {
         let kf = k as f64;
-        let omega = kf * pi * wave / string.length_m;
+        let omega = string_mode_omega(string, k);
         let q_phys = pluck.map_or(0.0, |p| triangular_pluck_modal(p, k));
         let q = mass_scale * q_phys;
         let monopole_area = if k % 2 == 1 {
@@ -307,11 +379,12 @@ fn realize_linear_string(
         };
         let transfer = C64::new(
             0.0,
-            omega * gas.density * monopole_area / (4.0 * pi * listener_m * mass_scale),
+            radiation_scale * omega * gas.density * monopole_area
+                / (4.0 * pi * listener_m * mass_scale),
         );
         modes.push(ModalAcousticMode {
             angular_frequency_rad_s: omega,
-            damping_ratio: mode_zeta(string, omega)?,
+            damping_ratio: mode_zeta(string, omega, gas)?,
             pressure_per_modal_velocity: transfer,
         });
         states.push(ModalAcousticState {
@@ -331,7 +404,7 @@ fn realize_linear_string(
     model
         .restore_states(&states)
         .map_err(AcousticRealizeError::Modal)?;
-    let mut plate = soundboard.map(PlateState::new).transpose()?;
+    let mut plates = plate_bank(soundboard, body_modes)?;
     let mut out = Vec::with_capacity(n);
     let dt = 1.0 / f64::from(sample_rate_hz);
     for _ in 0..n {
@@ -350,14 +423,16 @@ fn realize_linear_string(
         }
         let frame = model.step(&force).map_err(AcousticRealizeError::Modal)?;
         let mut p = frame.observer_pressure_pa;
-        if let Some(plate) = plate.as_mut() {
+        if !plates.is_empty() {
             let q_phys: Vec<f64> = model
                 .states()
                 .iter()
                 .map(|s| s.displacement_m_sqrt_kg / mass_scale)
                 .collect();
-            p +=
-                plate.drive_and_radiate(bridge_force(string, &q_phys), dt, gas.density, listener_m);
+            let fb = bridge_force(string, &q_phys);
+            for plate in &mut plates {
+                p += plate.drive_and_radiate(fb, dt, gas.density, listener_m);
+            }
         }
         out.push(p);
     }
@@ -370,12 +445,14 @@ fn realize_kc_string(
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     soundboard: Option<RadiatingPlate>,
+    body_modes: &[RadiatingPlate],
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
+    radiation_scale: f64,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    let storage = kirchhoff_carrier_string(
+    let mut storage = kirchhoff_carrier_string(
         &KcStringParams {
             length: string.length_m,
             tension: string.tension_n,
@@ -385,10 +462,15 @@ fn realize_kc_string(
         string.n_modes,
     )
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    if string.bending_stiffness_n_m2 > 0.0 {
+        for (k, w) in storage.omegas.iter_mut().enumerate() {
+            *w = string_mode_omega(string, k + 1);
+        }
+    }
     let zetas: Result<Vec<f64>, _> = storage
         .omegas
         .iter()
-        .map(|&w| mode_zeta(string, w))
+        .map(|&w| mode_zeta(string, w, gas))
         .collect();
     let zetas = zetas?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
@@ -408,7 +490,7 @@ fn realize_kc_string(
         }
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut plate = soundboard.map(PlateState::new).transpose()?;
+    let mut plates = plate_bank(soundboard, body_modes)?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let u = if let Some(bow) = bow {
@@ -430,20 +512,20 @@ fn realize_kc_string(
         for k in 0..string.n_modes {
             let kf = (k + 1) as f64;
             let q = x[2 * k];
-            let qdot = x[2 * k + 1];
             q_phys[k] = q / mass_scale;
             if k % 2 == 0 {
-                let omega = kf * pi * det::sqrt(string.tension_n / string.lin_density_kg_m)
-                    / string.length_m;
+                let omega = string_mode_omega(string, k + 1);
                 let area = string.width_m * 2.0 * string.length_m / (kf * pi);
-                let h_im = omega * gas.density * area / (4.0 * pi * listener_m * mass_scale);
+                let h_im = radiation_scale * omega * gas.density * area
+                    / (4.0 * pi * listener_m * mass_scale);
                 p += h_im * omega * q;
-                let _ = qdot;
             }
         }
-        if let Some(plate) = plate.as_mut() {
-            p +=
-                plate.drive_and_radiate(bridge_force(string, &q_phys), dt, gas.density, listener_m);
+        if !plates.is_empty() {
+            let fb = bridge_force(string, &q_phys);
+            for plate in &mut plates {
+                p += plate.drive_and_radiate(fb, dt, gas.density, listener_m);
+            }
         }
         out.push(p);
     }
@@ -458,11 +540,26 @@ fn triangular_pluck_modal(pluck: Pluck, k: usize) -> f64 {
 }
 
 fn bow_force(bow: BowStroke, v_string: f64) -> f64 {
-    let v_rel = bow.velocity_m_s - v_string;
-    let phi = v_rel / bow.stribeck_m_s;
-    let mu =
-        bow.mu_dynamic * phi.tanh() + (bow.mu_static - bow.mu_dynamic) * phi / (1.0 + phi * phi);
-    mu * bow.normal_force_n
+    StribeckFriction {
+        mu_static: bow.mu_static,
+        mu_dynamic: bow.mu_dynamic,
+        stiction_m_s: bow.stribeck_m_s,
+    }
+    .traction(bow.velocity_m_s - v_string, bow.normal_force_n)
+}
+
+fn plate_bank(
+    soundboard: Option<RadiatingPlate>,
+    extra: &[RadiatingPlate],
+) -> Result<Vec<PlateState>, AcousticRealizeError> {
+    let mut out = Vec::with_capacity(extra.len() + 1);
+    if let Some(spec) = soundboard {
+        out.push(PlateState::new(spec)?);
+    }
+    for &spec in extra {
+        out.push(PlateState::new(spec)?);
+    }
+    Ok(out)
 }
 
 fn bridge_force(string: PrestressedString, q_phys: &[f64]) -> f64 {

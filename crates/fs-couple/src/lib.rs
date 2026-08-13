@@ -32,10 +32,13 @@
 //! vocabulary and `fs-qty`'s six-base dimension vector.
 
 pub mod acoustic_realize;
+pub mod bernoulli_aperture;
 pub mod broadband_radiation;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
 pub mod reed_bore;
+pub mod stribeck_friction;
+pub mod traveling_wave_line;
 pub mod vibroacoustic;
 
 use core::num::NonZeroUsize;

@@ -1,7 +1,7 @@
 //! Acoustic-assembly *descriptions*: typed data that compose generic
-//! physics crates. There is no instrument module here — a guitar or
-//! clarinet is a description of strings, ducts, reeds, bows, plates,
-//! gas, and events.
+//! physics. A guitar or clarinet is not a type — it is a prestressed
+//! waveguide, a Bernoulli aperture, a frictional contact, a modal
+//! radiator, and a viscothermal duct filled in together.
 
 /// First-principles dry air (USSA 1976 constants live in fs-material).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +42,12 @@ pub struct PrestressedString {
     pub damping_ratio: f64,
     /// Optional Rayleigh `ζ(ω) = α/(2ω) + βω/2` (air + internal).
     pub rayleigh: Option<RayleighParams>,
+    /// Bending stiffness `E I` [N m²]. Zero is the ideal flexible string.
+    /// Nonzero gives Fletcher inharmonicity `ω_n = n ω_1 √(1 + B n²)`.
+    pub bending_stiffness_n_m2: f64,
+    /// Second-polarization fractional detune. Zero keeps one polarization.
+    /// A few 10⁻³ is a typical bridge-rocking split and produces beating.
+    pub polarization_detune: f64,
 }
 
 /// Rayleigh damping coefficients for a modal family.
@@ -121,10 +127,10 @@ pub struct Listener {
     pub distance_m: f64,
 }
 
-/// Beating single reed (quasistatic Bernoulli valve).
+/// A pressure-driven Bernoulli aperture (reed, vocal fold, valve).
 ///
-/// Closing pressure is `k H / S_r` in the massless limit: the rest
-/// opening shuts when the mouthpiece pressure drop reaches
+/// Closing pressure is `k H / S` in the massless limit: the rest
+/// opening shuts when the pressure drop reaches
 /// [`Self::closing_pressure_pa`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BeatingReed {
@@ -138,9 +144,13 @@ pub struct BeatingReed {
     pub blowing_pressure_pa: f64,
     /// Raised-cosine attack to the blowing pressure [s].
     pub attack_s: f64,
+    /// Effective reed mass [kg]. Zero selects the quasistatic valve.
+    pub mass_kg: f64,
+    /// Reed stiffness [N/m]. Ignored when `mass_kg == 0`.
+    pub stiffness_n_m: f64,
 }
 
-/// Regularized hyperbolic bow stroke (Stribeck + viscous Coulomb).
+/// Regularized Stribeck friction at a station (bow, brake, fault).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BowStroke {
     /// Contact station as a fraction of speaking length in (0, 1).
@@ -157,7 +167,7 @@ pub struct BowStroke {
     pub stribeck_m_s: f64,
 }
 
-/// One radiating body mode driven by the string's bridge force.
+/// One compact modal monopole (a body mode, a panel, a loudspeaker).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadiatingPlate {
     /// Radiating area [m²].
@@ -190,6 +200,9 @@ pub struct AcousticAssembly {
     pub reed: Option<BeatingReed>,
     /// Optional radiating body driven by the string bridge force.
     pub soundboard: Option<RadiatingPlate>,
+    /// Extra body modes (top + Helmholtz, bracing, …) driven by the
+    /// same bridge force as [`Self::soundboard`].
+    pub body_modes: Vec<RadiatingPlate>,
     /// Observer.
     pub listener: Listener,
     /// Output sample rate [Hz].
