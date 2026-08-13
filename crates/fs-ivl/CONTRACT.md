@@ -216,6 +216,11 @@ Bit-deterministic CROSS-ISA by construction (straight-line IEEE arithmetic
 DAG enclosure endpoints + affine collapses = `0x3712_a4c1_2d5e_5864`,
 recorded on aarch64-apple (M4 Pro), required to match on x86-64
 (Threadripper) in tests/conformance.rs. Golden-evidence policy applies.
+Beyond the two recorded hashes, the committed
+`trust-root-determinism-matrix.jsonl` (bead f85xj.3.4;
+`scripts/ci/trust_root_determinism_matrix.sh`) holds the full battery
+green across both ISAs × both cargo profiles on the pinned nightly, with
+unexecuted axes recorded as explicit NOT-RUN cells.
 The Taylor/root battery separately pins `0x2cdd_5d22_d018_9466`, re-frozen on
 remote x86-64 after reciprocal-factorial and exponential scalars became
 outward intervals, and required to match on aarch64-apple. The same test
