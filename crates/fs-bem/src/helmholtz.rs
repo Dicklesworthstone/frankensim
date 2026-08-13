@@ -171,6 +171,21 @@ pub enum Formulation {
     BurtonMillerWrongAlphaSign,
 }
 
+/// Scale diagnostics for the discrete surface-power quadrature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadiationPowerDiagnostics {
+    /// Raw complex surface power `1/2 SUM p conj(v) A` [W].
+    pub surface_power: C64,
+    /// Sum of non-negative real panel-power terms [W].
+    pub positive_real_power: f64,
+    /// Sum of negative real panel-power terms [W].
+    pub negative_real_power: f64,
+    /// Sum of panel-power magnitudes `1/2 SUM |p| |v| A` [W].
+    pub apparent_power: f64,
+    /// Plane-wave reference `1/2 rho c SUM |v|^2 A` [W].
+    pub plane_wave_reference_power: f64,
+}
+
 /// A solved exterior radiation problem.
 #[derive(Debug, Clone)]
 pub struct RadiationSolution {
@@ -196,6 +211,8 @@ pub struct RadiationSolution {
     /// zero, a negative rounded sum is published as neutral zero rather than
     /// as evidence of non-passivity.
     pub radiated_power_roundoff_interval: (f64, f64),
+    /// Signed, reactive, cancellation, and plane-wave reference scales.
+    pub power_diagnostics: RadiationPowerDiagnostics,
     /// LOWER BOUND on the 1-norm condition number of the assembled
     /// system, from `||A||_1` times the largest `||A^{-1} b||_1` over a
     /// fixed set of deterministic unit-1-norm probe solves. A large
@@ -433,8 +450,8 @@ impl<'a> RadiationOperator<'a> {
         }
         self.lu.solve(&mut pressure);
 
-        let (radiated_power, radiated_power_roundoff_interval) =
-            evaluate_radiated_power(&pressure, velocity, self.surface.areas());
+        let (radiated_power, radiated_power_roundoff_interval, power_diagnostics) =
+            evaluate_radiated_power(&pressure, velocity, self.surface.areas(), self.medium);
 
         RadiationSolution {
             pressure,
@@ -445,6 +462,7 @@ impl<'a> RadiationOperator<'a> {
             panels_per_wavelength: self.panels_per_wavelength,
             radiated_power,
             radiated_power_roundoff_interval,
+            power_diagnostics,
             condition_lower_bound: self.condition_lower_bound,
             dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
         }
@@ -464,11 +482,31 @@ fn outward_scale_positive(value: (f64, f64), scale: f64) -> (f64, f64) {
     ((value.0 * scale).next_down(), (value.1 * scale).next_up())
 }
 
-fn evaluate_radiated_power(pressure: &[C64], velocity: &[C64], areas: &[f64]) -> (f64, (f64, f64)) {
+fn evaluate_radiated_power(
+    pressure: &[C64],
+    velocity: &[C64],
+    areas: &[f64],
+    medium: Medium,
+) -> (f64, (f64, f64), RadiationPowerDiagnostics) {
     let mut rounded = 0.0;
+    let mut reactive = 0.0;
+    let mut positive = 0.0;
+    let mut negative = 0.0;
+    let mut apparent = 0.0;
+    let mut mean_square_velocity = 0.0;
     let mut enclosure = (0.0, 0.0);
     for ((&pressure, &velocity), &area) in pressure.iter().zip(velocity).zip(areas) {
-        rounded += 0.5 * (pressure * velocity.conj()).re * area;
+        let dot = pressure * velocity.conj();
+        let real_power = 0.5 * dot.re * area;
+        rounded += real_power;
+        reactive += 0.5 * dot.im * area;
+        if real_power >= 0.0 {
+            positive += real_power;
+        } else {
+            negative += real_power;
+        }
+        apparent += 0.5 * pressure.abs() * velocity.abs() * area;
+        mean_square_velocity += velocity.norm_sq() * area;
         let real_dot = outward_add(
             outward_product(pressure.re, velocity.re),
             outward_product(pressure.im, velocity.im),
@@ -476,11 +514,22 @@ fn evaluate_radiated_power(pressure: &[C64], velocity: &[C64], areas: &[f64]) ->
         let panel_power = outward_scale_positive(outward_scale_positive(real_dot, 0.5), area);
         enclosure = outward_add(enclosure, panel_power);
     }
+    let raw_real = rounded;
     let finite_enclosure = enclosure.0.is_finite() && enclosure.1.is_finite();
     if rounded < 0.0 && finite_enclosure && enclosure.0 <= 0.0 && enclosure.1 >= 0.0 {
         rounded = 0.0;
     }
-    (rounded, enclosure)
+    let diagnostics = RadiationPowerDiagnostics {
+        surface_power: C64::new(raw_real, reactive),
+        positive_real_power: positive,
+        negative_real_power: negative,
+        apparent_power: apparent,
+        plane_wave_reference_power: 0.5
+            * medium.density
+            * medium.sound_speed
+            * mean_square_velocity,
+    };
+    (rounded, enclosure, diagnostics)
 }
 
 /// Evaluate complex acoustic pressure [Pa] at finite exterior points [m].
@@ -1184,6 +1233,7 @@ mod tests {
             actual.radiated_power_roundoff_interval.1.to_bits(),
             expected.radiated_power_roundoff_interval.1.to_bits()
         );
+        assert_eq!(actual.power_diagnostics, expected.power_diagnostics);
         assert_eq!(
             actual.condition_lower_bound.to_bits(),
             expected.condition_lower_bound.to_bits()
@@ -1204,13 +1254,22 @@ mod tests {
         ];
         let velocity = [C64::ONE; 4];
         let areas = [1.0; 4];
-        let (neutral, neutral_interval) =
-            evaluate_radiated_power(&cancelling_pressure, &velocity, &areas);
+        let medium = Medium::air();
+        let (neutral, neutral_interval, diagnostics) =
+            evaluate_radiated_power(&cancelling_pressure, &velocity, &areas, medium);
         assert_eq!(neutral.to_bits(), 0.0_f64.to_bits());
         assert!(neutral_interval.0 <= 0.0 && neutral_interval.1 >= 0.0);
+        assert_eq!(diagnostics.surface_power, C64::from_re(-1.0));
+        assert_eq!(diagnostics.positive_real_power, 1.0e16 + 1.0);
+        assert_eq!(diagnostics.negative_real_power, -1.0e16 - 1.0);
+        assert_eq!(diagnostics.apparent_power, 2.0e16 + 2.0);
+        assert_eq!(
+            diagnostics.plane_wave_reference_power,
+            2.0 * medium.density * medium.sound_speed
+        );
 
-        let (negative, negative_interval) =
-            evaluate_radiated_power(&[C64::from_re(-2.0)], &[C64::ONE], &[1.0]);
+        let (negative, negative_interval, _) =
+            evaluate_radiated_power(&[C64::from_re(-2.0)], &[C64::ONE], &[1.0], medium);
         assert_eq!(negative.to_bits(), (-1.0_f64).to_bits());
         assert!(negative_interval.1 < 0.0);
     }
@@ -2079,6 +2138,13 @@ mod tests {
             panels_per_wavelength: 10.0,
             radiated_power: 0.0,
             radiated_power_roundoff_interval: (0.0, 0.0),
+            power_diagnostics: RadiationPowerDiagnostics {
+                surface_power: C64::ZERO,
+                positive_real_power: 0.0,
+                negative_real_power: 0.0,
+                apparent_power: 0.0,
+                plane_wave_reference_power: 0.0,
+            },
             condition_lower_bound: 1.0,
             dense_cap_utilization: 0.01,
         };
