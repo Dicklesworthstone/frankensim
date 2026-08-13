@@ -21,11 +21,13 @@
 //! facet plane using `orient2d` for the ear and containment tests
 //! (bead iw3l item (a): interior/non-convex PLC facets) — a loop that
 //! is not a simple non-degenerate polygon is counted `unrecovered`,
-//! never faked. General-position (non-axis-aligned) planes remain the
-//! recorded successor: f64 midpoints stay EXACTLY coplanar only when
-//! the plane is axis-aligned (bitwise-equal coordinate), so the
-//! correspondence verification measures the residual rather than
-//! assuming it.
+//! never faked. Steiner midpoints are snapped onto the parent facet's
+//! supporting plane (Newell normal through the first loop vertex)
+//! before insertion, so a planar facet stays planar under bisection
+//! even when it is not axis-aligned. A point already on the plane
+//! (`t == 0`) is left bitwise unchanged, which keeps the axis-aligned
+//! identity. Crease-edge twins across two non-coplanar parent facets
+//! still adopt the first inserter.
 
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
 use fs_exec::Cx;
@@ -299,7 +301,9 @@ fn face_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 3]> {
 /// the two remaining coordinates VERBATIM (exact sub-coordinates, so `orient2d`
 /// on them stays exact). Newell's method gives a robust normal for any
 /// near-planar simple loop.
-fn project_facet(points: &[[f64; 3]], loop_verts: &[u32]) -> Vec<[f64; 2]> {
+/// Newell's polygon normal. Used both to pick the 2-D drop axis and
+/// to snap Steiner midpoints back onto the supporting plane.
+fn newell_normal(points: &[[f64; 3]], loop_verts: &[u32]) -> [f64; 3] {
     let m = loop_verts.len();
     let mut nrm = [0.0f64; 3];
     for i in 0..m {
@@ -309,6 +313,36 @@ fn project_facet(points: &[[f64; 3]], loop_verts: &[u32]) -> Vec<[f64; 2]> {
         nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
         nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
     }
+    nrm
+}
+
+/// Orthogonal projection onto the plane through `origin` with
+/// unnormalized `normal`. A point already on the plane (`t == 0`) is
+/// returned unchanged so axis-aligned bitwise identity survives.
+fn snap_to_plane(point: [f64; 3], origin: [f64; 3], normal: [f64; 3]) -> [f64; 3] {
+    let nn = normal[0].mul_add(
+        normal[0],
+        normal[1].mul_add(normal[1], normal[2] * normal[2]),
+    );
+    if nn == 0.0 || !nn.is_finite() {
+        return point;
+    }
+    let w0 = point[0] - origin[0];
+    let w1 = point[1] - origin[1];
+    let w2 = point[2] - origin[2];
+    let t = w0.mul_add(normal[0], w1.mul_add(normal[1], w2 * normal[2])) / nn;
+    if t == 0.0 {
+        return point;
+    }
+    [
+        point[0] - t * normal[0],
+        point[1] - t * normal[1],
+        point[2] - t * normal[2],
+    ]
+}
+
+fn project_facet(points: &[[f64; 3]], loop_verts: &[u32]) -> Vec<[f64; 2]> {
+    let nrm = newell_normal(points, loop_verts);
     // Dominant axis = largest |component|; keep the other two in ascending
     // axis order (a fixed, deterministic choice).
     let mut ax = 0usize;
@@ -503,6 +537,8 @@ pub fn recover_facets(
             stats.unrecovered += 1;
             continue;
         };
+        let origin = tetra.mesh.points[loop_verts[0] as usize];
+        let normal = newell_normal(&tetra.mesh.points, loop_verts);
         let mut failed = false;
         let mut round = 0u32;
         loop {
@@ -560,11 +596,15 @@ pub fn recover_facets(
                     break;
                 }
                 let (pu, pv) = (tetra.mesh.points[u as usize], tetra.mesh.points[v as usize]);
-                let mid = [
-                    f64::midpoint(pu[0], pv[0]),
-                    f64::midpoint(pu[1], pv[1]),
-                    f64::midpoint(pu[2], pv[2]),
-                ];
+                let mid = snap_to_plane(
+                    [
+                        f64::midpoint(pu[0], pv[0]),
+                        f64::midpoint(pu[1], pv[1]),
+                        f64::midpoint(pu[2], pv[2]),
+                    ],
+                    origin,
+                    normal,
+                );
                 let bits = [mid[0].to_bits(), mid[1].to_bits(), mid[2].to_bits()];
                 let m = if let Some(&twin) = by_bits.get(&bits) {
                     twin

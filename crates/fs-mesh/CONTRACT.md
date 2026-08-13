@@ -194,8 +194,9 @@ half-edge round-trips, closed-manifold audits).
     matches the closed-surface volume identity under two independent
     tet-volume formulas. Open, non-manifold, unlabeled-enclosed, boundary-seed,
     and duplicate-region inputs refuse without an audited mesh (s93ej.1
-    corpus). General-position Steiner residual and the parent conduction
-    E2E remain no-claims.
+    corpus). Parent conduction E2E remains a no-claim. Facet Steiner
+    midpoints snap to the parent supporting plane, so a planar facet
+    stays planar under bisection even when it is not axis-aligned.
 15. Every public remesh call validates its two floating-point policy controls
     before geometry-dependent work. Exact endpoints admit; the adjacent
     representable value outside either interval refuses with stable field,
@@ -395,15 +396,16 @@ assertions.
 
 ## No-claim boundaries
 
-- Multi-region volumetricization does not yet claim general-position
-  Steiner exactness (inherited from `recover_facets`: f64 midpoints are
-  exactly coplanar only on axis-aligned planes), quality/conformity
+- Multi-region volumetricization does not claim quality/conformity
   beyond the recovered-face walls, the parent conduction E2E runner, or
-  a cross-ISA mesh-byte identity. Self-intersection of distinct region
-  surfaces is refused only when both windings claim the same retained
-  tet, not by a complete triangle-triangle predicate sweep. The
-  discarded cavity/exterior volume fields on the witness are producer
-  diagnostics and are not an independent certificate.
+  a cross-ISA mesh-byte identity. Facet Steiner midpoints are snapped
+  onto the parent supporting plane; a point already on the plane is
+  left bitwise unchanged. Crease-edge twins across two non-coplanar
+  parent facets still adopt the first inserter. Self-intersection of
+  distinct region surfaces is refused only when both windings claim the
+  same retained tet, not by a complete triangle-triangle predicate
+  sweep. The discarded cavity/exterior volume fields on the witness are
+  producer diagnostics and are not an independent certificate.
 - The rounded-cylinder primitive is a piecewise-planar approximation of the
   exact circular meridian and circular revolution. Its output reports the
   meridian and azimuthal chord-error estimates; neither the volume mesh nor its
@@ -420,11 +422,10 @@ assertions.
   MEASURED to starve at the rounds cap; batching finished the fixture
   in 7 rounds), twin adoption via the shared coordinate-bits index,
   a facet correspondence table re-verified against the finished mesh,
-  and honest starved-budget counters. Remaining no-claims:
-  NON-CONVEX facets (fan triangulation needs convexity) and
-  general-position planes (f64 midpoints stay exactly coplanar only
-  when the plane is axis-aligned — the battery gates the bitwise case
-  and the residual is measured, not assumed). Full-Ruppert QUALITY:
+  and honest starved-budget counters. Steiner midpoints snap to the
+  parent supporting plane (tmesh-018), so a planar facet stays planar
+  when it is not axis-aligned. Remaining no-claim:
+  Full-Ruppert QUALITY:
   the diametral encroachment machinery cut the hull-split regression
   ~8× (tmesh-011); the residual is coupled to boundary-layer
   refinement — still successor scope.

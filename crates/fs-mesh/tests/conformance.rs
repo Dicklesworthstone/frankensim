@@ -32,6 +32,7 @@ const TMESH_014_INPUT_SEED: u64 = 0x1001_2026_0708_0014;
 const TMESH_015_INPUT_SEED: u64 = 0x1001_2026_0709_0015;
 const TMESH_016_INPUT_SEED: u64 = 0x160B_2026_0709_0016;
 const TMESH_017_INPUT_SEED: u64 = TMESH_011_INPUT_SEED;
+const TMESH_018_INPUT_SEED: u64 = 0x1001_2026_0812_0018;
 
 fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
     let mut emitter = fs_obs::Emitter::new(SUITE, case);
@@ -1618,8 +1619,7 @@ fn tmesh_015_facet_recovery_accepts_existing_face_at_zero_depth() {
 /// verified mesh face, correspondence rows are exactly coplanar (the
 /// axis-aligned bitwise argument), the exact audit stays clean, the
 /// build replays bitwise, and the honesty counters fire on a starved
-/// budget instead of lying. Non-convex facets and general-position
-/// planes remain the recorded successors.
+/// budget instead of lying. General-position planes are tmesh-018.
 #[test]
 #[allow(clippy::too_many_lines)] // one recovery narrative, five gates
 #[allow(clippy::float_cmp)] // coplanarity on an axis-aligned plane is bitwise
@@ -1825,6 +1825,135 @@ fn tmesh_016_non_convex_facet_recovery() {
             t1.tets() == t2.tets() && rows == rows2 && stats.to_json() == stats2.to_json(),
             "mesh, correspondence, and ledger replay bitwise",
             TMESH_016_INPUT_SEED,
+        );
+    });
+}
+
+/// 3-4-5 rotation so an axis-aligned diaphragm becomes a general-position
+/// plane. Coordinates stay dyadic enough that Delaunay still builds.
+fn rotate_general_position(p: Point3) -> Point3 {
+    let (cy, sy) = (0.8f64, 0.6);
+    let x1 = cy.mul_add(p.x, sy * p.z);
+    let y1 = p.y;
+    let z1 = (-sy).mul_add(p.x, cy * p.z);
+    let (cz, sz) = (0.6f64, 0.8);
+    Point3::new(cz.mul_add(x1, -sz * y1), sz.mul_add(x1, cz * y1), z1)
+}
+
+fn plane_distance(p: Point3, origin: Point3, normal: [f64; 3]) -> f64 {
+    let nn = normal[0].mul_add(
+        normal[0],
+        normal[1].mul_add(normal[1], normal[2] * normal[2]),
+    );
+    if nn == 0.0 {
+        return 0.0;
+    }
+    let w = [p.x - origin.x, p.y - origin.y, p.z - origin.z];
+    w[0].mul_add(normal[0], w[1].mul_add(normal[1], w[2] * normal[2]))
+        .abs()
+        / nn.sqrt()
+}
+
+/// tmesh-018: general-position interior facet recovery. The tmesh-015
+/// diaphragm is rotated off-axis so no coordinate is bitwise constant
+/// on the plane. Steiner midpoints snap to the supporting plane:
+/// correspondence vertices stay within a tight residual, the facet
+/// recovers, the exact audit stays clean, and the build replays.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn tmesh_018_general_position_facet_recovery() {
+    with_cx(|cx| {
+        let mut pts: Vec<Point3> = Vec::new();
+        for i in 0..2i32 {
+            for j in 0..2i32 {
+                for k in 0..2i32 {
+                    pts.push(rotate_general_position(Point3::new(
+                        f64::from(i),
+                        f64::from(j),
+                        f64::from(k),
+                    )));
+                }
+            }
+        }
+        let z = 0.5f64;
+        pts.push(rotate_general_position(Point3::new(0.0, 0.0, z))); // 8
+        pts.push(rotate_general_position(Point3::new(1.0, 0.0, z))); // 9
+        pts.push(rotate_general_position(Point3::new(1.0, 1.0, z))); // 10
+        pts.push(rotate_general_position(Point3::new(0.0, 1.0, z))); // 11
+        let mut rng = Lcg(TMESH_018_INPUT_SEED);
+        for s in 0..40 {
+            let d = |r: &mut Lcg| 0.8f64.mul_add(r.dyadic(), 0.1);
+            let zz = if s % 2 == 0 {
+                0.3f64.mul_add(rng.dyadic(), 0.55)
+            } else {
+                0.3f64.mul_add(rng.dyadic(), 0.15)
+            };
+            pts.push(rotate_general_position(Point3::new(
+                d(&mut rng),
+                d(&mut rng),
+                zz,
+            )));
+        }
+        let facets: Vec<Vec<u32>> = vec![vec![8, 9, 10, 11]];
+        let origin = pts[8];
+        let a = pts[9];
+        let b = pts[10];
+        let u = [a.x - origin.x, a.y - origin.y, a.z - origin.z];
+        let v = [b.x - origin.x, b.y - origin.y, b.z - origin.z];
+        let normal = [
+            u[1].mul_add(v[2], -(u[2] * v[1])),
+            u[2].mul_add(v[0], -(u[0] * v[2])),
+            u[0].mul_add(v[1], -(u[1] * v[0])),
+        ];
+        let run = |cx: &Cx<'_>| -> (
+            Tetrahedralization,
+            fs_mesh::FacetRecoveryStats,
+            Vec<([u32; 3], u32)>,
+        ) {
+            let mut t = delaunay(&pts, cx).expect("delaunay");
+            let (stats, table) =
+                fs_mesh::recover_facets(&mut t, &facets, RecoveryOptions::default(), cx)
+                    .expect("facet recovery");
+            (t, stats, table.rows)
+        };
+        let (t1, stats, rows) = run(cx);
+        verdict(
+            "tmesh-018-recovered",
+            stats.recovered == 1 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
+            &format!(
+                "general-position facet recovery ledger: {}",
+                stats.to_json()
+            ),
+            TMESH_018_INPUT_SEED,
+        );
+        let ptsv = t1.points();
+        let residual = rows
+            .iter()
+            .flat_map(|(f, _)| f.iter())
+            .map(|&vid| plane_distance(ptsv[vid as usize], origin, normal))
+            .fold(0.0f64, f64::max);
+        verdict(
+            "tmesh-018-plane",
+            !rows.is_empty() && residual < 1e-14,
+            &format!(
+                "{} sub-faces, max supporting-plane residual {residual:e}",
+                rows.len()
+            ),
+            TMESH_018_INPUT_SEED,
+        );
+        let audit = t1.audit(true);
+        verdict(
+            "tmesh-018-audit",
+            audit.clean(),
+            &format!("exact audit after general-position recovery: {audit:?}"),
+            TMESH_018_INPUT_SEED,
+        );
+        let (t2, stats2, rows2) = run(cx);
+        verdict(
+            "tmesh-018-replay",
+            t1.tets() == t2.tets() && rows == rows2 && stats.to_json() == stats2.to_json(),
+            "mesh, correspondence, and ledger replay bitwise",
+            TMESH_018_INPUT_SEED,
         );
     });
 }
