@@ -284,6 +284,12 @@ pub struct DuctResponse {
     pub min_shear_number: f64,
     /// `ka` at the radiating mouth (0 for closed/ideal terminations).
     pub mouth_ka: f64,
+    /// Mouth volume-velocity over inlet volume-velocity from the ABCD
+    /// chain and `Z_L`. Zero at a closed termination.
+    pub u_mouth_over_u_in: C64,
+    /// Mouth pressure over inlet volume-velocity (`Z_L U_mouth / U_in`).
+    /// Zero at a closed termination.
+    pub p_mouth_over_u_in: C64,
 }
 
 /// Viscothermal wavenumber and characteristic impedance for a tube of
@@ -594,16 +600,26 @@ pub fn input_impedance(
         .expect("non-empty checked above")
         .outlet_radius();
     let (z_load, mouth_ka) = termination_impedance(termination, state, mouth_radius, omega)?;
-    let impedance = match z_load {
-        // Z_in = (A Z_L + B)/(C Z_L + D); closed end is the C, D limit.
-        Some(zl) => (m[0] * zl + m[1]) * (m[2] * zl + m[3]).recip(),
-        None => m[0] * m[2].recip(),
+    // Z_in = (A Z_L + B)/(C Z_L + D); U_mouth/U_in = 1/(C Z_L + D).
+    // Closed (U_mouth = 0) is the C, D limit of Z_in with a zero mouth ratio.
+    let (impedance, u_mouth_over_u_in, p_mouth_over_u_in) = match z_load {
+        Some(zl) => {
+            let denom = m[2] * zl + m[3];
+            (
+                (m[0] * zl + m[1]) * denom.recip(),
+                denom.recip(),
+                zl * denom.recip(),
+            )
+        }
+        None => (m[0] * m[2].recip(), C64::ZERO, C64::ZERO),
     };
     Ok(DuctResponse {
         omega,
         impedance,
         min_shear_number: min_rv,
         mouth_ka,
+        u_mouth_over_u_in,
+        p_mouth_over_u_in,
     })
 }
 
@@ -692,6 +708,12 @@ mod tests {
                 "closed at {f} Hz: {:?} vs {expected:?}",
                 closed.impedance
             );
+            assert_eq!(
+                closed.u_mouth_over_u_in,
+                C64::ZERO,
+                "closed termination has zero mouth flow"
+            );
+            assert_eq!(closed.p_mouth_over_u_in, C64::ZERO);
             let open = input_impedance(
                 &duct,
                 &state,
@@ -705,6 +727,15 @@ mod tests {
                 (open.impedance - expected).abs() < 1e-9 * expected.abs().max(zc),
                 "open at {f} Hz: {:?} vs {expected:?}",
                 open.impedance
+            );
+            assert!(
+                open.u_mouth_over_u_in.abs() > 0.0,
+                "ideal-open mouth flow ratio must be live"
+            );
+            assert_eq!(
+                open.p_mouth_over_u_in,
+                C64::ZERO,
+                "ideal-open Z_L = 0 so mouth pressure vanishes"
             );
         }
         println!(
