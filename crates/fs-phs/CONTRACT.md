@@ -46,16 +46,28 @@ stepping, and Galerkin reduction preserves the structure.
 - Zoo: `mass_spring_damper`, `helmholtz_resonator` (pressure-driven
   lumped acoustic 1-DOF with unflanged neck correction),
   `helmholtz_resonator_flow` (dual port: injected volume velocity
-  in, pressure out), `lc_ladder`, `modal_bank`
+  in, pressure out), `helmholtz_resonator_radiating` (damper =
+  compact-mouth `Re Z_rad(ω₀)`), `lc_ladder`,
+  `lc_ladder_terminated` (resistive far-end load — compact
+  radiation on a discrete waveguide), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
+- `compact_radiation_impedance` — low-`ka` Levine–Schwinger /
+  flanged piston `(R, X)` under `e^{-iωt}` (mass-like `X < 0`),
+  refused above `ka = 1`. Same numbers as `fs_duct::Termination`.
+- `series_impedance_ports` — ODE series of two 1-port impedance
+  systems (same `u`, `y = y_a + y_b`). Not Kirchhoff common-effort
+  (same `p`, opposite `U`), which remains a deferred DAE Dirac
+  structure.
 - Memoryless dissipative ports: `bernoulli_volume_flow` is the
   two-sided jet `U = w h sgn(Δp) √(2|Δp|/ρ)` (dissipative on both
   branches); `quasistatic_aperture_opening` is the zero-mass
-  reduction of a linearly restoring slit. A beating reed, a vocal
-  fold, a relief valve, and a leaflet are fillings of that port
-  plus a 1-DOF `mass_spring_damper` or the quasistatic reduction.
-  Music is not a special case.
+  reduction of a linearly restoring slit; `regularized_coulomb`
+  is `F = −μ N tanh(v/v_reg)` (dissipative, stick-slip by
+  construction). A beating reed, a vocal fold, a relief valve, a
+  leaflet, a bow, and a brake are fillings of those ports plus a
+  1-DOF `mass_spring_damper` or a `modal_bank`. Music is not a
+  special case.
 
 ## Invariants
 

@@ -973,6 +973,154 @@ pub fn helmholtz_resonator_flow(
     PortHamiltonian::new(2, 1, j, r, g, storage)
 }
 
+/// Mouth baffle for the low-`ka` radiation load.
+///
+/// Coefficients match `fs_duct::Termination` (Levine–Schwinger
+/// unflanged, flanged 0.8216). This crate stays L2 and does not
+/// depend on the duct TMM; the numbers are the same physical fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouthFlange {
+    /// Unflanged open pipe: `R / Z0 = (ka)²/4`, end correction `0.6133 a`.
+    Unflanged,
+    /// Infinite-baffle / flanged: `R / Z0 = (ka)²/2`, end correction `0.8216 a`.
+    Flanged,
+}
+
+/// Compact-piston radiation impedance `(R, X)` [Pa s / m³] under the
+/// workspace `e^{-iωt}` convention (mass-like `X < 0`).
+///
+/// Refused above `ka = 1` — the same ceiling as the duct TMM. This is
+/// the resistive *and* reactive load of a compact opening, not a
+/// far-field observer model.
+///
+/// # Errors
+/// [`PhsError::NotPsd`] on non-physical inputs or `ka > 1`.
+pub fn compact_radiation_impedance(
+    density: f64,
+    sound_speed: f64,
+    radius: f64,
+    omega: f64,
+    flange: MouthFlange,
+) -> Result<(f64, f64), PhsError> {
+    if !(density > 0.0
+        && sound_speed > 0.0
+        && radius > 0.0
+        && omega > 0.0
+        && density.is_finite()
+        && sound_speed.is_finite()
+        && radius.is_finite()
+        && omega.is_finite())
+    {
+        return Err(PhsError::NotPsd {
+            what: "compact radiation parameters",
+        });
+    }
+    let ka = omega / sound_speed * radius;
+    if ka > 1.0 {
+        return Err(PhsError::NotPsd {
+            what: "compact radiation ka > 1 (low-ka fit ceiling)",
+        });
+    }
+    let area = core::f64::consts::PI * radius * radius;
+    let z0 = density * sound_speed / area;
+    let (r_over, x_over) = match flange {
+        MouthFlange::Unflanged => (0.25 * ka * ka, -0.6133 * ka),
+        MouthFlange::Flanged => (0.50 * ka * ka, -0.8216 * ka),
+    };
+    Ok((r_over * z0, x_over * z0))
+}
+
+/// [`helmholtz_resonator`] whose damper is the compact-mouth radiation
+/// resistance evaluated at the lossless natural frequency.
+///
+/// Added mass stays the neck end correction already inside
+/// [`helmholtz_parts`]; this only turns `Re Z_rad(ω₀)` into the pHS
+/// `R` entry. Frequency-dependent `R(ω)` is the tabulated-impedance
+/// path, not this lumped zoo member.
+///
+/// # Errors
+/// Admission errors from the resonator or the radiation fit.
+pub fn helmholtz_resonator_radiating(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    flange: MouthFlange,
+) -> Result<PortHamiltonian, PhsError> {
+    let (m_ac, stiffness, _) =
+        helmholtz_parts(volume, neck_radius, neck_length, density, sound_speed, 0.0)?;
+    let omega0 = det::sqrt(stiffness / m_ac);
+    let (r_rad, _) =
+        compact_radiation_impedance(density, sound_speed, neck_radius, omega0, flange)?;
+    mass_spring_damper(m_ac, stiffness, r_rad)
+}
+
+/// Series connection of two impedance-causal 1-ports: same `u`,
+/// `y = y_a + y_b`.
+///
+/// This is the ODE-form of stacked impedances (`Z = Z_a + Z_b`). It is
+/// **not** Kirchhoff common-effort (same `p`, opposite `U`), which
+/// remains a deferred DAE Dirac structure. Both systems must expose
+/// exactly one port.
+///
+/// # Errors
+/// [`PhsError::BadPortPairing`] unless both are 1-port; admission
+/// errors on the composite.
+pub fn series_impedance_ports(
+    a: PortHamiltonian,
+    b: PortHamiltonian,
+) -> Result<PortHamiltonian, PhsError> {
+    if a.m != 1 || b.m != 1 {
+        return Err(PhsError::BadPortPairing);
+    }
+    let (na, nb) = (a.n, b.n);
+    let n = na + nb;
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for i in 0..na {
+        for k in 0..na {
+            j[i * n + k] = a.j[i * na + k];
+            r[i * n + k] = a.r[i * na + k];
+        }
+    }
+    for i in 0..nb {
+        for k in 0..nb {
+            j[(na + i) * n + na + k] = b.j[i * nb + k];
+            r[(na + i) * n + na + k] = b.r[i * nb + k];
+        }
+    }
+    let mut g = vec![0.0; n];
+    for i in 0..na {
+        g[i] = a.g[i];
+    }
+    for i in 0..nb {
+        g[na + i] = b.g[i];
+    }
+    let storage = Box::new(SumStorage {
+        a: (a.storage, na),
+        b: (b.storage, nb),
+    });
+    PortHamiltonian::new(n, 1, j, r, g, storage)
+}
+
+/// Regularized Coulomb traction [N]: `F = −μ N tanh(v / v_reg)`.
+///
+/// Dissipative by construction (`F v ≤ 0`). This is the memoryless
+/// friction port — a bow, a brake, and a fault are the same law. The
+/// stick reaction at exact rest is the `v_reg → 0` limit, not a
+/// complementary constraint.
+#[must_use]
+pub fn regularized_coulomb(mu: f64, normal_n: f64, velocity: f64, v_reg: f64) -> f64 {
+    if !(mu >= 0.0 && v_reg > 0.0 && mu.is_finite() && v_reg.is_finite())
+        || !normal_n.is_finite()
+        || !velocity.is_finite()
+    {
+        return 0.0;
+    }
+    -mu * normal_n.abs() * det::tanh(velocity / v_reg)
+}
+
 fn helmholtz_parts(
     volume: f64,
     neck_radius: f64,
@@ -1044,6 +1192,34 @@ pub fn lc_ladder(
     g[0] = 1.0;
     let storage = Box::new(QuadraticStorage::new(q, n)?);
     PortHamiltonian::new(n, 1, j, r, g, storage)
+}
+
+/// [`lc_ladder`] with a resistive termination on the last cell's
+/// flux — the lumped image of a compact radiation (or any passive
+/// load) at the far end of a discrete waveguide. `r_load = 0` is
+/// the lossless ladder.
+///
+/// # Errors
+/// Admission errors on non-physical parameters.
+pub fn lc_ladder_terminated(
+    cells: usize,
+    inductance: f64,
+    capacitance: f64,
+    r_load: f64,
+) -> Result<PortHamiltonian, PhsError> {
+    if r_load < 0.0 || !r_load.is_finite() {
+        return Err(PhsError::NotPsd {
+            what: "lc ladder termination resistance",
+        });
+    }
+    let mut sys = lc_ladder(cells, inductance, capacitance)?;
+    if r_load == 0.0 {
+        return Ok(sys);
+    }
+    let n = sys.n;
+    let last_p = n - 1;
+    sys.r[last_p * n + last_p] = r_load;
+    PortHamiltonian::new(n, sys.m, sys.j, sys.r, sys.g, sys.storage)
 }
 
 /// Modal bank from mass-normalized modes — the first-class bridge from

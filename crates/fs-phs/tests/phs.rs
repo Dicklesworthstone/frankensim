@@ -7,9 +7,11 @@
 
 use fs_math::c64::C64;
 use fs_phs::{
-    PhsError, PortHamiltonian, QuadraticStorage, Storage, discrete_gradient, duffing_oscillator,
-    helmholtz_resonator, helmholtz_resonator_flow, interconnect, lc_ladder, mass_spring_damper,
-    modal_bank, reduce_galerkin, step,
+    MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage, compact_radiation_impedance,
+    discrete_gradient, duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
+    helmholtz_resonator_radiating, interconnect, lc_ladder, lc_ladder_terminated,
+    mass_spring_damper, modal_bank, reduce_galerkin, regularized_coulomb, series_impedance_ports,
+    step,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -615,4 +617,162 @@ fn reduction_refuses_tiny_scale_nonlinear_storage_and_admits_tiny_quadratic() {
     let msd = fs_phs::mass_spring_damper(1.0, 1.0e-10, 0.0).expect("msd");
     let reduced = fs_phs::reduce_galerkin(&msd, &identity, 2).expect("tiny quadratic reduces");
     assert_eq!(reduced.state_dim(), 2);
+}
+
+#[test]
+fn compact_radiation_flanged_resists_more_than_unflanged() {
+    let (ru, xu) = compact_radiation_impedance(1.2, 343.0, 0.02, 2.0e3, MouthFlange::Unflanged)
+        .expect("unflanged");
+    let (rf, xf) = compact_radiation_impedance(1.2, 343.0, 0.02, 2.0e3, MouthFlange::Flanged)
+        .expect("flanged");
+    assert!(ru > 0.0 && rf > ru, "flanged R {rf} vs unflanged {ru}");
+    assert!(xu < 0.0 && xf < xu, "flanged mass load {xf} vs {xu}");
+    assert!(compact_radiation_impedance(1.2, 343.0, 0.2, 2.0e4, MouthFlange::Flanged).is_err());
+}
+
+#[test]
+fn radiating_helmholtz_dissipates_stored_energy() {
+    let sys = helmholtz_resonator_radiating(0.002, 0.012, 0.03, 1.2, 343.0, MouthFlange::Flanged)
+        .expect("radiating");
+    let mut x = vec![1.0e-6, 0.0];
+    let h0 = sys.hamiltonian(&x);
+    for _ in 0..4000 {
+        x = step(&sys, &x, &[0.0], 5.0e-5).expect("step").x;
+    }
+    let h1 = sys.hamiltonian(&x);
+    assert!(
+        h1 < 0.85 * h0,
+        "mouth radiation must drain H ({h1} vs {h0})"
+    );
+}
+
+#[test]
+fn series_flow_cavities_add_pressure() {
+    let one = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("one");
+    let series = series_impedance_ports(
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a"),
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b"),
+    )
+    .expect("series");
+    let dt = 1.0e-5;
+    let mut x1 = vec![0.0, 0.0];
+    let mut xs = vec![0.0; 4];
+    for _ in 0..30 {
+        x1 = step(&one, &x1, &[1.0e-4], dt).expect("1").x;
+        xs = step(&series, &xs, &[1.0e-4], dt).expect("s").x;
+    }
+    let p1 = one.output(&x1)[0];
+    let ps = series.output(&xs)[0];
+    assert!(p1 > 0.0);
+    assert!(
+        (ps / p1 - 2.0).abs() < 0.05,
+        "series impedances must add pressures ({ps} vs 2*{p1})"
+    );
+    assert!(matches!(
+        series_impedance_ports(mass_spring_damper(0.01, 10.0, 0.0).expect("a"), {
+            let q = vec![10.0, 0.0, 0.0, 100.0];
+            PortHamiltonian::new(
+                2,
+                2,
+                vec![0.0, 1.0, -1.0, 0.0],
+                vec![0.0; 4],
+                vec![0.0, 1.0, 0.0, 1.0],
+                Box::new(QuadraticStorage::new(q, 2).expect("q")),
+            )
+            .expect("two-port")
+        },),
+        Err(PhsError::BadPortPairing)
+    ));
+}
+
+#[test]
+fn stick_slip_on_a_modal_string_locks_the_bow() {
+    assert!(regularized_coulomb(0.4, 1.0, 1.0, 0.01) < 0.0);
+    assert!(
+        (regularized_coulomb(0.4, 1.0, 0.3, 0.02) + regularized_coulomb(0.4, 1.0, -0.3, 0.02))
+            .abs()
+            < 1.0e-15
+    );
+
+    // 1-DOF slider: stick when |k q| < μN, then slip. Soft enough
+    // that a laboratory bow force actually holds.
+    let slider = mass_spring_damper(0.02, 80.0, 0.05).expect("slider");
+    let v_bow = 0.08;
+    let dt = 1.0e-4;
+    let mut x = vec![0.0, 0.0];
+    let mut stuck = 0usize;
+    let mut seen = 0usize;
+    let mut slips = 0usize;
+    let mut last_stuck = true;
+    for i in 0..8_000 {
+        let v = slider.output(&x)[0];
+        let f = regularized_coulomb(0.5, 4.0, v - v_bow, 0.003);
+        x = step(&slider, &x, &[f], dt).expect("step").x;
+        if i > 2_000 {
+            seen += 1;
+            let holding = (v - v_bow).abs() < 0.02;
+            if holding {
+                stuck += 1;
+            } else if last_stuck {
+                slips += 1;
+            }
+            last_stuck = holding;
+        }
+    }
+    let frac = stuck as f64 / seen as f64;
+    assert!(
+        frac > 0.15 && frac < 0.98,
+        "Coulomb port must stick a Helmholtz-like fraction of the cycle (stuck {frac})"
+    );
+    assert!(slips >= 1, "stick-slip must break at least once");
+
+    // Same port on a modal string bowed at 1/4: even modes are silent
+    // in a linear pluck at that point? No — sin(n π/4) is 1 at n=2.
+    // The nonlinear force just has to put energy into mode 2.
+    let omega1 = 2.0 * core::f64::consts::PI * 40.0;
+    let omegas: Vec<f64> = (1..=4).map(|n| omega1 * n as f64).collect();
+    let zetas = vec![0.004; 4];
+    let drive: Vec<f64> = (1..=4)
+        .map(|n| fs_math::det::sin(n as f64 * core::f64::consts::PI * 0.25))
+        .collect();
+    let string = modal_bank(&omegas, &zetas, &drive).expect("string");
+    let mut xs = vec![0.0; 8];
+    for _ in 0..4_000 {
+        let v = string.output(&xs)[0];
+        let f = regularized_coulomb(0.6, 8.0, v - 0.05, 0.004);
+        xs = step(&string, &xs, &[f], 5.0e-5).expect("string").x;
+    }
+    let e1 = 0.5 * (xs[1] * xs[1] + omegas[0] * omegas[0] * xs[0] * xs[0]);
+    let e2 = 0.5 * (xs[3] * xs[3] + omegas[1] * omegas[1] * xs[2] * xs[2]);
+    assert!(
+        e1 > 0.0 && e2 > 0.05 * e1,
+        "even string mode from friction ({e2} vs {e1})"
+    );
+}
+
+#[test]
+fn terminated_ladder_radiates_while_lossless_holds() {
+    let live = lc_ladder(6, 1.0e-3, 2.0e-6).expect("live");
+    let load = lc_ladder_terminated(6, 1.0e-3, 2.0e-6, 8.0).expect("load");
+    let mut xl = vec![0.0; 12];
+    let mut xd = vec![0.0; 12];
+    xl[0] = 1.0e-4;
+    xd[0] = 1.0e-4;
+    let h0 = live.hamiltonian(&xl);
+    let dt = 2.0e-5;
+    for _ in 0..2500 {
+        xl = step(&live, &xl, &[0.0], dt).expect("live").x;
+        xd = step(&load, &xd, &[0.0], dt).expect("load").x;
+    }
+    let hl = live.hamiltonian(&xl);
+    let hd = load.hamiltonian(&xd);
+    assert!(
+        (hl - h0).abs() <= 1.0e-8 * h0.abs().max(1.0e-18),
+        "lossless ladder must hold H ({hl} vs {h0})"
+    );
+    assert!(
+        hd < 0.5 * h0,
+        "terminated ladder must radiate ({hd} vs {h0})"
+    );
+    assert!(lc_ladder_terminated(6, 1.0e-3, 2.0e-6, -1.0).is_err());
 }
