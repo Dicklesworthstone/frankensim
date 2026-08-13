@@ -2,8 +2,9 @@
 
 > Status: ACTIVE (FrankenScript core, IR language v3). Owns the typed AST,
 > both concrete syntaxes, study recognition, and verb lowering. Admission
-> (dimensional/chart/budget/capability checks) is the gp3.5 bead's;
-> the operator catalog is gp3.6's.
+> (dimensional/chart/budget/capability checks) is the gp3.5 bead's. The
+> generated `Catalog::builtin` documented below is LIVE in this crate;
+> gp3.6 owns its continued expansion, not its existence.
 
 ## Purpose and layer
 

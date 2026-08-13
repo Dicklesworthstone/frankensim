@@ -609,9 +609,16 @@ authority.
 
 **Physics scope.**
 
-- STEADY ONLY. There is no time derivative, no heat capacity, no transient
-  staging, and no initial condition. `ConductionState` is an ITERATION state,
-  not a time state.
+- THE CORE SOLVE IS STEADY. `ConductionState` is an ITERATION state, not a
+  time state, and the assembled operator carries no time derivative. The
+  transient surfaces that DO exist are the separately documented staged
+  drivers above (`tests/transient.rs` theta-method marching, `tests/duty.rs`
+  duty-cycle drivers, and `march_duty_cycle_with_element_materials`): they
+  march the steady operator with declared capacity data and are scoped by
+  their own rows — this bullet no longer denies them (that denial was a live
+  README/CONTRACT contradiction, bead f85xj.16.9). No claim beyond those
+  staged drivers: no general transient frontend, no adaptive time stepping,
+  no k(T) marching.
 - RADIATION IS A SURFACE-ONLY FIRST RUNG. Linearized surface-to-ambient exchange
   and diffuse-gray closed-enclosure exchange are implemented. This crate does
   not generate view factors from geometry, run its own QMC rays, or validate an
