@@ -232,6 +232,9 @@ pub struct UnilateralObstacle {
     pub stiffness: f64,
     /// Power-law exponent `α >= 1`.
     pub alpha: f64,
+    /// Kinetic friction coefficient at the contact. Zero is frictionless
+    /// (normal-only). Nonzero composes `fs-tribo` on the same stations.
+    pub mu_kinetic: f64,
     /// Caller provenance; never invented.
     pub provenance: String,
 }

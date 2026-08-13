@@ -4,6 +4,7 @@
 //! lay, a snare, and a cable against a stay are fillings.
 
 use fs_dcontact::{ContactStorage, DContactError, Obstacle, string_collocation};
+use fs_math::det;
 use fs_phs::Storage;
 use fs_scenario::{PrestressedString, UnilateralObstacle};
 
@@ -89,7 +90,41 @@ pub fn modal_contact_forces(
     let storage = ContactStorage::new(Box::new(ZeroStorage), string.n_modes, obs?)?;
     let mut g = vec![0.0; 2 * string.n_modes];
     storage.gradient(x, &mut g);
-    Ok((0..string.n_modes).map(|k| -g[2 * k]).collect())
+    let mut forces: Vec<f64> = (0..string.n_modes).map(|k| -g[2 * k]).collect();
+    let mass_scale = (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
+    let pi = core::f64::consts::PI;
+    for spec in obstacles {
+        if !(spec.mu_kinetic > 0.0) {
+            continue;
+        }
+        let law = fs_tribo::FrictionLaw::Coulomb {
+            static_mu: spec.mu_kinetic,
+            kinetic_mu: spec.mu_kinetic,
+        };
+        for (i, &s) in spec.stations.iter().enumerate() {
+            let mut y = 0.0;
+            let mut v = 0.0;
+            for k in 0..string.n_modes {
+                let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
+                y += x[2 * k] * ph;
+                v += x[2 * k + 1] * ph;
+            }
+            let gap = spec.gaps_m[i];
+            let pen = (y - gap).max(0.0);
+            if pen <= 0.0 {
+                continue;
+            }
+            let normal = spec.stiffness * det::pow(pen, spec.alpha) / spec.stations.len() as f64;
+            let ft = law
+                .regularized_traction_1d(-v, normal, 1.0e-3)
+                .unwrap_or(0.0);
+            for k in 0..string.n_modes {
+                let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
+                forces[k] += ft * ph;
+            }
+        }
+    }
+    Ok(forces)
 }
 
 struct ZeroStorage;

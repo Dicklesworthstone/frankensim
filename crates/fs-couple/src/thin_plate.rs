@@ -82,7 +82,8 @@ impl CompactBody {
     /// Compact monopole pressure at distance `listener_m`.
     #[must_use]
     pub fn radiate(&self, acc: f64, rho: f64, listener_m: f64) -> f64 {
-        rho * self.area_m2 * acc / (4.0 * core::f64::consts::PI * listener_m)
+        // Baffled half-space (same piston as the self-load), not free-space.
+        rho * self.area_m2 * acc / (2.0 * core::f64::consts::PI * listener_m)
     }
 
     /// Volume velocity of the monopole [m³/s].
@@ -192,7 +193,7 @@ impl VkBody {
             let v0 = self.x[2 * k + 1];
             let v1 = rec.x[2 * k + 1];
             let acc = (v1 - v0) / dt;
-            p += rho * self.areas[k] * acc / (4.0 * core::f64::consts::PI * listener_m);
+            p += rho * self.areas[k] * acc / (2.0 * core::f64::consts::PI * listener_m);
             u += self.areas[k] * v1;
         }
         self.x = rec.x;
