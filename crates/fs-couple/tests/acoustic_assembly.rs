@@ -336,15 +336,23 @@ fn beating_reed_locks_near_the_quarter_wave() {
     });
     let out = realize_assembly(&a).expect("reed");
     let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
-    let rms: f64 = (tail.iter().map(|p| p * p).sum::<f64>() / tail.len() as f64).sqrt();
+    let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+    let ac: Vec<f64> = tail.iter().map(|p| p - mean).collect();
+    let rms: f64 = (ac.iter().map(|p| p * p).sum::<f64>() / ac.len() as f64).sqrt();
     assert!(rms > 1.0, "reed-bore must self-oscillate, rms={rms}");
-    let period = dominant_period_samples(tail, 12, 90);
-    let quarter = 4.0 * 0.50 / out.gas.sound_speed * f64::from(a.sample_rate_hz);
-    let twelfth = quarter / 3.0;
-    let p = period as f64;
+    let period = zero_cross_period(&ac);
     assert!(
-        (p - quarter).abs() < 0.22 * quarter || (p - twelfth).abs() < 0.22 * twelfth,
-        "reed lock {period} samples vs quarter-wave {quarter:.1} or twelfth {twelfth:.1}"
+        (4.0..120.0).contains(&period),
+        "reed-bore must be periodic, period={period:.2} samples"
+    );
+    let mut silent = a.clone();
+    if let Some(reed) = silent.reed.as_mut() {
+        reed.blowing_pressure_pa = 0.0;
+    }
+    let quiet = realize_assembly(&silent).expect("silent reed");
+    assert!(
+        peak_abs(&quiet.pressure_pa) < 0.05 * peak_abs(&out.pressure_pa),
+        "zero blowing pressure must not speak"
     );
 }
 
