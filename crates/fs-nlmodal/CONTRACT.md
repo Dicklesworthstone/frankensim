@@ -29,8 +29,9 @@ the crash cascade with structurally exact energy accounting.
   (unit-normalized; both are biharmonic eigenfunctions on the SS
   rectangle, in-plane movable edges). Channel coefficients
   `E h / (2 xi_j^4)`. Coupling integrals by Gauss-Legendre quadrature
-  whose order SCALES with the highest half-wave sum (a fixed order
-  left ~5 points per wave — executed), certified by a second
+  whose order SCALES with the highest half-wave **index sum**
+  `m+n` (not `max(m,n)` — a 0.20×0.15×2 mm panel with three odd–odd
+  modes sat at 1.3e-8). Certified by a second
   independent order judged against max(channel scale, 1e-12 x global
   scale) — entrywise relative comparison falsely refuses
   analytically-zero entries, and an ALL-zero channel's own scale is

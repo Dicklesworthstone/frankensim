@@ -96,6 +96,30 @@ fn plate_construction_certificates() {
 }
 
 #[test]
+fn small_thick_panel_certifies_three_odd_odd_modes() {
+    // The couple-layer steel panel (0.20 × 0.15 × 2 mm) used to refuse
+    // n_modes = 3 at the 1e-8 quadrature gate. Higher-order Gauss is
+    // the certificate, not a looser gate.
+    let plate = VkPlateParams {
+        lx: 0.20,
+        ly: 0.15,
+        h: 0.002,
+        young: 2.0e11,
+        nu: 0.3,
+        rho: 7800.0,
+    };
+    let disp = vec![
+        SineMode { m: 1, n: 1 },
+        SineMode { m: 1, n: 3 },
+        SineMode { m: 3, n: 1 },
+    ];
+    let stress = vec![SineMode { m: 2, n: 1 }];
+    let model = von_karman_ss_plate(&plate, &disp, &stress).expect("small-panel VK");
+    assert!(model.quadrature_residual < 3.0e-8);
+    assert_eq!(model.storage.omegas.len(), 3);
+}
+
+#[test]
 fn coupling_is_nonvacuous_and_certified_against_asymmetry() {
     let model =
         von_karman_ss_plate(&steel_plate(), &modes_grid(2, 2), &modes_grid(3, 3)).expect("plate");

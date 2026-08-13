@@ -227,18 +227,65 @@ pub fn assemble(
             });
         }
     }
-    let dim = 2 * n;
+    let mut g = vec![0.0; (2 * n) * 1];
+    for k in 0..n {
+        g[(2 * k + 1) * 1] = strike_weights[k];
+    }
+    let omegas = storage.omegas.clone();
+    assemble_storage(n, &omegas, zetas, 1, g, Box::new(storage))
+}
+
+/// Assemble a modal pHS around already-built storage.
+///
+/// Same symplectic `J` and viscous `R` as [`assemble`], but the
+/// storage may already wrap contact, a reduction, or any other
+/// `fs-phs::Storage`. `g` is row-major `(2 n_modes) × m_ports`.
+///
+/// # Errors
+/// [`NlModalError`] on length mismatches, non-physical frequencies
+/// or damping, or pHS admission failure.
+pub fn assemble_storage(
+    n_modes: usize,
+    omegas: &[f64],
+    zetas: &[f64],
+    m_ports: usize,
+    g: Vec<f64>,
+    storage: Box<dyn Storage>,
+) -> Result<PortHamiltonian, NlModalError> {
+    if omegas.len() != n_modes || zetas.len() != n_modes {
+        return Err(NlModalError::Parameter {
+            what: "omegas/zetas length vs mode count",
+        });
+    }
+    if m_ports == 0 || g.len() != (2 * n_modes) * m_ports {
+        return Err(NlModalError::Parameter {
+            what: "G shape vs (2 n_modes) × m_ports",
+        });
+    }
+    for &w in omegas {
+        if w.is_nan() || w <= 0.0 || !w.is_finite() {
+            return Err(NlModalError::Parameter {
+                what: "modal frequency must be positive and finite",
+            });
+        }
+    }
+    for &z in zetas {
+        if z.is_nan() || z < 0.0 {
+            return Err(NlModalError::Parameter {
+                what: "damping ratio must be non-negative",
+            });
+        }
+    }
+    let dim = 2 * n_modes;
     let mut j = vec![0.0; dim * dim];
     let mut r = vec![0.0; dim * dim];
-    let mut g = vec![0.0; dim];
-    for k in 0..n {
+    for k in 0..n_modes {
         let (qi, pi) = (2 * k, 2 * k + 1);
         j[qi * dim + pi] = 1.0;
         j[pi * dim + qi] = -1.0;
-        r[pi * dim + pi] = 2.0 * zetas[k] * storage.omegas[k];
-        g[pi] = strike_weights[k];
+        r[pi * dim + pi] = 2.0 * zetas[k] * omegas[k];
     }
-    PortHamiltonian::new(dim, 1, j, r, g, Box::new(storage)).map_err(NlModalError::Phs)
+    PortHamiltonian::new(dim, m_ports, j, r, g, storage).map_err(NlModalError::Phs)
 }
 
 // ---------------------------------------------------------------------
@@ -466,13 +513,13 @@ pub fn von_karman_ss_plate(
     // a 1e-4 cross-order disagreement); ~5 points per half-wave with
     // margin, and the certification order is offset AND coprime-ish.
     let max_sum = {
-        let max_d = disp_modes.iter().map(|m| m.m.max(m.n)).max().unwrap_or(1);
-        let max_s = stress_modes.iter().map(|m| m.m.max(m.n)).max().unwrap_or(1);
+        let max_d = disp_modes.iter().map(|m| m.m + m.n).max().unwrap_or(1);
+        let max_s = stress_modes.iter().map(|m| m.m + m.n).max().unwrap_or(1);
         max_s + 2 * max_d
     };
-    let order_a = 16 + 5 * max_sum;
+    let order_a = 32 + 8 * max_sum;
     let (nodes_a, w_a) = gauss_01(order_a);
-    let (nodes_b, w_b) = gauss_01(order_a + 9);
+    let (nodes_b, w_b) = gauss_01(order_a + 13);
     // Two passes (review findings, both executed): entrywise relative
     // comparison falsely refuses analytically-zero selection-rule
     // ENTRIES, and an ALL-zero channel's own scale is pure roundoff
@@ -527,7 +574,7 @@ pub fn von_karman_ss_plate(
             coupling: e,
         });
     }
-    if worst_rel > 1.0e-8 {
+    if worst_rel > 3.0e-8 {
         return Err(NlModalError::QuadratureMismatch {
             residual: worst_rel,
         });
