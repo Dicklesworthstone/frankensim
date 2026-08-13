@@ -250,6 +250,75 @@ fn adjacent_solids_keep_the_interface_and_two_volumes() {
     });
 }
 
+/// 3-4-5 rotation so the shared interface is a general-position plane.
+fn rotate_34_5(p: [f64; 3]) -> [f64; 3] {
+    let (cy, sy) = (0.8f64, 0.6);
+    let x1 = cy.mul_add(p[0], sy * p[2]);
+    let y1 = p[1];
+    let z1 = (-sy).mul_add(p[0], cy * p[2]);
+    let (cz, sz) = (0.6f64, 0.8);
+    [cz.mul_add(x1, -sz * y1), sz.mul_add(x1, cz * y1), z1]
+}
+
+#[test]
+fn rotated_adjacent_solids_keep_the_interface_and_two_volumes() {
+    with_cx(|cx| {
+        let left: Vec<[f64; 3]> = box_vertices(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+            .into_iter()
+            .map(rotate_34_5)
+            .collect();
+        let right: Vec<[f64; 3]> = box_vertices(1.0, 2.0, 0.0, 1.0, 0.0, 1.0)
+            .into_iter()
+            .map(rotate_34_5)
+            .collect();
+        let (verts, remaps) = weld(&[left, right]);
+        let regions = vec![
+            RegionSpec {
+                id: RegionId(1),
+                kind: RegionKind::Solid,
+                seed: rotate_34_5([0.5, 0.5, 0.5]),
+                triangles: remap_tris(&box_triangles(0), &remaps[0]),
+            },
+            RegionSpec {
+                id: RegionId(2),
+                kind: RegionKind::Solid,
+                seed: rotate_34_5([1.5, 0.5, 0.5]),
+                triangles: remap_tris(&box_triangles(0), &remaps[1]),
+            },
+        ];
+        let out = volumetricize(UnverifiedPlc::new(verts, regions), policy(), cx)
+            .expect("rotated adjacent");
+        let mut by_region = BTreeMap::new();
+        for &(id, vol) in &out.witness().per_region_producer {
+            by_region.insert(id, vol);
+        }
+        assert!(
+            (by_region[&RegionId(1)] - 1.0).abs() < 1e-9,
+            "rotated left volume {}",
+            by_region[&RegionId(1)]
+        );
+        assert!(
+            (by_region[&RegionId(2)] - 1.0).abs() < 1e-9,
+            "rotated right volume {}",
+            by_region[&RegionId(2)]
+        );
+        let n1 = out
+            .labeled()
+            .region_of_tet()
+            .iter()
+            .filter(|r| **r == RegionId(1))
+            .count();
+        let n2 = out
+            .labeled()
+            .region_of_tet()
+            .iter()
+            .filter(|r| **r == RegionId(2))
+            .count();
+        assert!(n1 > 0 && n2 > 0, "rotated regions empty: n1={n1} n2={n2}");
+        assert!(!out.labeled().source_faces().is_empty());
+    });
+}
+
 #[test]
 fn nested_cavity_is_discarded_from_the_solid() {
     with_cx(|cx| {

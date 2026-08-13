@@ -11,7 +11,9 @@
 //! finished mesh anyway. Depth/budget caps are counted honestly
 //! (`unrecovered`), never silently dropped. Segment Steiner midpoints
 //! snap onto the original parent chord so a general-position segment
-//! stays on the line under bisection.
+//! stays on the line under bisection. Vertices already on the chord
+//! (a second diagonal crossing the first at its centre) are harvested
+//! into the chain instead of minting a near-duplicate Steiner.
 //!
 //! INTERIOR FACET recovery ([`recover_facets`], the uee3/iw3l successor
 //! slice): every SIMPLE planar PLC facet becomes a union of mesh FACES
@@ -160,10 +162,39 @@ pub fn recover_segments(
         // Chain of on-segment vertices, kept in parameter order: the
         // recursion only ever SPLITS an interval, so a sorted list of
         // (dyadic parameter, vertex) is the whole bookkeeping.
+        // Harvest vertices already on the parent chord — two PLC
+        // diagonals that cross at a shared centre after a
+        // general-position rotation do not share bitwise midpoints,
+        // and inserting a second centre was measured to storm the
+        // Steiner budget.
+        let (oa, ob) = (tetra.mesh.points[a as usize], tetra.mesh.points[b as usize]);
         let mut chain: Vec<(f64, u32)> = vec![(0.0, a), (1.0, b)];
+        for (i, p) in tetra.mesh.points.iter().enumerate() {
+            let vid = u32::try_from(i).expect("point count fits u32");
+            if vid == a || vid == b {
+                continue;
+            }
+            if let Some(t) = parameter_on_segment(*p, oa, ob) {
+                chain.push((t, vid));
+            }
+        }
+        chain.sort_by(|x, y| x.0.partial_cmp(&y.0).expect("finite"));
+        let mut dedup: Vec<(f64, u32)> = Vec::with_capacity(chain.len());
+        for item in chain {
+            if let Some(last) = dedup.last() {
+                if (item.0 - last.0).abs() < 1e-14 {
+                    continue;
+                }
+            }
+            dedup.push(item);
+        }
+        chain = dedup;
         // Work stack of open sub-intervals (param lo, vert lo, param
         // hi, vert hi, depth).
-        let mut stack: Vec<(f64, u32, f64, u32, u32)> = vec![(0.0, a, 1.0, b, 0)];
+        let mut stack: Vec<(f64, u32, f64, u32, u32)> = chain
+            .windows(2)
+            .map(|w| (w[0].0, w[0].1, w[1].0, w[1].1, 0))
+            .collect();
         let mut failed = false;
         while let Some((tlo, vlo, thi, vhi, depth)) = stack.pop() {
             let key = if vlo < vhi { [vlo, vhi] } else { [vhi, vlo] };
@@ -182,7 +213,6 @@ pub fn recover_segments(
                 tetra.mesh.points[vlo as usize],
                 tetra.mesh.points[vhi as usize],
             );
-            let (oa, ob) = (tetra.mesh.points[a as usize], tetra.mesh.points[b as usize]);
             let mid = snap_to_line(
                 [
                     f64::midpoint(pa[0], pb[0]),
@@ -325,6 +355,34 @@ fn newell_normal(points: &[[f64; 3]], loop_verts: &[u32]) -> [f64; 3] {
         nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
     }
     nrm
+}
+
+/// Parameter `t ∈ (0, 1)` if `p` lies on the open segment `ab`
+/// within a relative residual of `1e-12` of the chord length.
+fn parameter_on_segment(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> Option<f64> {
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let dd = d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2]));
+    if dd == 0.0 || !dd.is_finite() {
+        return None;
+    }
+    let w = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+    let t = w[0].mul_add(d[0], w[1].mul_add(d[1], w[2] * d[2])) / dd;
+    if t <= 0.0 || t >= 1.0 {
+        return None;
+    }
+    let q = [
+        t.mul_add(d[0], a[0]),
+        t.mul_add(d[1], a[1]),
+        t.mul_add(d[2], a[2]),
+    ];
+    let res2 = (p[0] - q[0]).mul_add(
+        p[0] - q[0],
+        (p[1] - q[1]).mul_add(p[1] - q[1], (p[2] - q[2]) * (p[2] - q[2])),
+    );
+    if res2 > 1e-24 * dd {
+        return None;
+    }
+    Some(t)
 }
 
 /// Orthogonal projection onto the line through `a` and `b`. A point

@@ -194,9 +194,12 @@ half-edge round-trips, closed-manifold audits).
     matches the closed-surface volume identity under two independent
     tet-volume formulas. Open, non-manifold, unlabeled-enclosed, boundary-seed,
     and duplicate-region inputs refuse without an audited mesh (s93ej.1
-    corpus). Parent conduction E2E remains a no-claim. Facet Steiner
-    midpoints snap to the parent supporting plane, so a planar facet
-    stays planar under bisection even when it is not axis-aligned.
+    corpus). A general-position (rotated) pair of adjacent solids keeps
+    both unit volumes and a labeled interface through the production
+    `volumetricize` path. Parent conduction E2E remains a no-claim.
+    Facet Steiner midpoints snap to the parent supporting plane, so a
+    planar facet stays planar under bisection even when it is not
+    axis-aligned.
 15. Every public remesh call validates its two floating-point policy controls
     before geometry-dependent work. Exact endpoints admit; the adjacent
     representable value outside either interval refuses with stable field,
