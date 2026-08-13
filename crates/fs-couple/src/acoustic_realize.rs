@@ -11,8 +11,7 @@ use crate::modal_acoustic_time::{
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::realize_reed_bore;
-use crate::stribeck_friction::StribeckFriction;
-use crate::thin_plate::{CompactBody, certified_radiators};
+use crate::thin_plate::{PlateBank, VkBody, certified_radiators};
 use crate::unilateral_contact::modal_contact_forces;
 use fs_duct::{
     Duct, DuctError, HoleState, LossModel, MAX_RADIATION_KA, Segment, Termination, input_impedance,
@@ -25,9 +24,16 @@ use fs_math::det;
 use fs_nlmodal::{KcStringParams, assemble, kirchhoff_carrier_string, prestressed_beam_omega};
 use fs_phs::step;
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, Pluck, PrestressedString, RadiatingPlate,
-    RayleighParams, ThinPlate, UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse,
-    WaveguideEnd,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, Pluck, PrestressedString,
+    RadiatingPlate, RayleighParams, ThinPlate, UnilateralObstacle, ViscothermalDuct,
+    VolumeVelocityPulse, WaveguideEnd,
+};
+use fs_tribo::{
+    InputAuthority, InterfaceMedium, InterfaceSystemRef,
+    surface_excitation::{
+        PeriodicHarmonicSurface, SelfAffinePeriodicProfileSpectrum, SurfaceTraceMotion,
+        UniformSurfaceTrace, evaluate_point_surface_pair,
+    },
 };
 
 /// Typed realization refusal.
@@ -113,6 +119,10 @@ pub fn realize_assembly(
     let n = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     let mut pressure_pa = vec![0.0; n];
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
+    bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz);
+    if assembly.string.is_some() && assembly.duct.is_some() {
+        return realize_coupled(assembly, &gas, &mut bodies, n);
+    }
     if let Some(string) = assembly.string {
         if assembly.pluck.is_none() && assembly.bow.is_none() {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -123,6 +133,7 @@ pub fn realize_assembly(
             string,
             assembly.pluck,
             assembly.bow,
+            assembly.contact_texture,
             &mut bodies,
             &assembly.obstacles,
             &gas,
@@ -165,6 +176,365 @@ pub fn realize_assembly(
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
         gas,
+    })
+}
+
+/// One shared clock: string, plate, and duct exchange force and flow
+/// every sample. Sequential string-then-duct is not this function.
+fn realize_coupled(
+    assembly: &AcousticAssembly,
+    gas: &GasState,
+    plates: &mut PlateBank,
+    n: usize,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    use crate::driving_point::characteristic_line;
+    use crate::reed_bore::solve_reed_wave;
+    use crate::traveling_wave_line::TravelingWaveLine;
+    let string = assembly.string.expect("checked");
+    let duct = assembly.duct.as_ref().expect("checked");
+    if assembly.pluck.is_none() && assembly.bow.is_none() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "a string member requires a pluck or a bow",
+        });
+    }
+    if assembly.reed.is_none() && assembly.blow.is_none() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "a coupled duct requires a reed or a volume-velocity pulse",
+        });
+    }
+    validate_string(string, assembly.pluck, assembly.bow)?;
+    let physics = physics_duct(duct)?;
+    let termination = match duct.termination {
+        WaveguideEnd::Closed => Termination::Closed,
+        WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
+    };
+    refuse_open_nyquist(duct, gas, assembly.sample_rate_hz)?;
+    let inlet_r = physics
+        .segments
+        .first()
+        .ok_or(AcousticRealizeError::InvalidDescription {
+            what: "duct has no segments",
+        })?
+        .outlet_radius();
+    let area = core::f64::consts::PI * inlet_r * inlet_r;
+    let zc = gas.density * gas.sound_speed / area;
+    let dt = 1.0 / f64::from(assembly.sample_rate_hz);
+    let listener_m = assembly.listener.distance_m;
+    let mut fitted =
+        characteristic_line(&physics, gas, termination, assembly.sample_rate_hz, n, zc).ok();
+    let mut delay = if fitted.is_none() {
+        Some(
+            TravelingWaveLine::from_duct(
+                &physics,
+                gas,
+                termination,
+                assembly.sample_rate_hz,
+                n,
+                zc,
+            )
+            .map_err(|e| match e {
+                crate::traveling_wave_line::TravelingWaveError::Invalid { what } => {
+                    AcousticRealizeError::Reed { what }
+                }
+                crate::traveling_wave_line::TravelingWaveError::Duct(d) => {
+                    AcousticRealizeError::Duct(d)
+                }
+            })?,
+        )
+    } else {
+        None
+    };
+    let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
+    if string.axial_stiffness_n > 0.0 {
+        return realize_coupled_kc(
+            assembly,
+            gas,
+            plates,
+            n,
+            fitted,
+            delay,
+            zc,
+            area,
+            &mut texture,
+        );
+    }
+    let pi = core::f64::consts::PI;
+    let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
+    let mut modes = Vec::new();
+    let mut states = Vec::new();
+    let mut phi_bow = vec![0.0; string.n_modes];
+    for k in 1..=string.n_modes {
+        let kf = k as f64;
+        let omega = string_mode_omega(string, k);
+        let q_phys = assembly.pluck.map_or(0.0, |p| triangular_pluck_modal(p, k));
+        let monopole_area = if k % 2 == 1 {
+            string.width_m * 2.0 * string.length_m / (kf * pi)
+        } else {
+            0.0
+        };
+        modes.push(ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: mode_zeta(string, omega, gas)?,
+            pressure_per_modal_velocity: C64::new(
+                0.0,
+                omega * gas.density * monopole_area / (4.0 * pi * listener_m * mass_scale),
+            ),
+        });
+        states.push(ModalAcousticState {
+            displacement_m_sqrt_kg: mass_scale * q_phys,
+            velocity_m_sqrt_kg_per_s: 0.0,
+        });
+        if let Some(bow) = assembly.bow {
+            phi_bow[k - 1] = det::sin(kf * pi * bow.station_frac) / mass_scale;
+        }
+    }
+    let mut model = ModalAcousticTimeModel::try_new(
+        assembly.sample_rate_hz,
+        modes,
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .map_err(AcousticRealizeError::Modal)?;
+    model
+        .restore_states(&states)
+        .map_err(AcousticRealizeError::Modal)?;
+    let mut p_plus_prev = 5.0;
+    let mut out = vec![0.0; n];
+    for i in 0..n {
+        let mut force = vec![0.0; string.n_modes];
+        if let Some(bow) = assembly.bow {
+            let v_string: f64 = model
+                .states()
+                .iter()
+                .zip(phi_bow.iter())
+                .map(|(s, phi)| s.velocity_m_sqrt_kg_per_s * phi)
+                .sum();
+            let f_bow = bow_force(bow, v_string, texture.delta_n(bow.velocity_m_s, dt));
+            for (f, phi) in force.iter_mut().zip(phi_bow.iter()) {
+                *f = f_bow * *phi;
+            }
+        }
+        if !assembly.obstacles.is_empty() {
+            let x: Vec<f64> = model
+                .states()
+                .iter()
+                .flat_map(|s| [s.displacement_m_sqrt_kg, s.velocity_m_sqrt_kg_per_s])
+                .collect();
+            let extra = modal_contact_forces(string, &assembly.obstacles, &x)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            for (f, c) in force.iter_mut().zip(extra) {
+                *f += c;
+            }
+        }
+        let frame = model.step(&force).map_err(AcousticRealizeError::Modal)?;
+        let q_phys: Vec<f64> = model
+            .states()
+            .iter()
+            .map(|s| s.displacement_m_sqrt_kg / mass_scale)
+            .collect();
+        let fb = bridge_force(string, &q_phys);
+        let p_minus = if let Some(line) = fitted.as_ref() {
+            line.incoming()
+        } else {
+            delay.as_ref().expect("line").incoming()
+        };
+        let u_body = plates.volume_velocity();
+        let t = i as f64 * dt;
+        let p_plus = if let Some(reed) = assembly.reed {
+            let p_m = if reed.attack_s <= 0.0 {
+                reed.blowing_pressure_pa
+            } else if t >= reed.attack_s {
+                reed.blowing_pressure_pa
+            } else {
+                let x = t / reed.attack_s;
+                reed.blowing_pressure_pa * 0.5 * (1.0 - det::cos(core::f64::consts::PI * x))
+            };
+            solve_reed_wave(
+                reed,
+                gas.density,
+                zc,
+                0.0,
+                p_minus,
+                p_m,
+                p_plus_prev,
+                u_body,
+            )?
+        } else {
+            let blow = assembly.blow.expect("checked");
+            let u_blow = if t < blow.duration_s {
+                blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+            } else {
+                0.0
+            };
+            p_minus + zc * (u_blow + u_body)
+        };
+        p_plus_prev = p_plus;
+        let p_minus_now = if let Some(line) = fitted.as_mut() {
+            line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+                what: "characteristic line left the finite set",
+            })?
+        } else {
+            delay.as_mut().expect("line").push(p_plus)
+        };
+        let p_bore = p_plus + p_minus_now;
+        let mut p = frame.observer_pressure_pa + p_bore;
+        p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
+        out[i] = p;
+    }
+    Ok(RealizedAssembly {
+        sample_rate_hz: assembly.sample_rate_hz,
+        pressure_pa: out,
+        gas: gas.clone(),
+    })
+}
+
+/// Shared clock with a Kirchhoff–Carrier string (EA > 0).
+#[allow(clippy::too_many_arguments)]
+fn realize_coupled_kc(
+    assembly: &AcousticAssembly,
+    gas: &GasState,
+    plates: &mut PlateBank,
+    n: usize,
+    mut fitted: Option<fs_vfit::discretize::DelayedFilter>,
+    mut delay: Option<crate::traveling_wave_line::TravelingWaveLine>,
+    zc: f64,
+    area: f64,
+    texture: &mut TextureDrive,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    use crate::reed_bore::solve_reed_wave;
+    let string = assembly.string.expect("checked");
+    let mut storage = kirchhoff_carrier_string(
+        &KcStringParams {
+            length: string.length_m,
+            tension: string.tension_n,
+            lin_density: string.lin_density_kg_m,
+            ea: string.axial_stiffness_n,
+        },
+        string.n_modes,
+    )
+    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    if string.bending_stiffness_n_m2 > 0.0 {
+        for (k, w) in storage.omegas.iter_mut().enumerate() {
+            *w = string_mode_omega(string, k + 1);
+        }
+    }
+    let zetas: Result<Vec<f64>, _> = storage
+        .omegas
+        .iter()
+        .map(|&w| mode_zeta(string, w, gas))
+        .collect();
+    let zetas = zetas?;
+    let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
+    let pi = core::f64::consts::PI;
+    let mut strike = vec![0.0; string.n_modes];
+    if let Some(bow) = assembly.bow {
+        for k in 1..=string.n_modes {
+            strike[k - 1] = det::sin(k as f64 * pi * bow.station_frac) / mass_scale;
+        }
+    }
+    let sys = assemble(storage, &zetas, &strike)
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let mut x = vec![0.0; 2 * string.n_modes];
+    if let Some(pluck) = assembly.pluck {
+        for k in 1..=string.n_modes {
+            x[2 * (k - 1)] = mass_scale * triangular_pluck_modal(pluck, k);
+        }
+    }
+    let dt = 1.0 / f64::from(assembly.sample_rate_hz);
+    let listener_m = assembly.listener.distance_m;
+    let mut p_plus_prev = 5.0;
+    let mut out = vec![0.0; n];
+    for i in 0..n {
+        let u = if let Some(bow) = assembly.bow {
+            let v_string: f64 = (0..string.n_modes)
+                .map(|k| {
+                    let phi = det::sin((k + 1) as f64 * pi * bow.station_frac) / mass_scale;
+                    x[2 * k + 1] * phi
+                })
+                .sum();
+            vec![bow_force(
+                bow,
+                v_string,
+                texture.delta_n(bow.velocity_m_s, dt),
+            )]
+        } else {
+            vec![0.0]
+        };
+        let rec =
+            step(&sys, &x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        x = rec.x;
+        if !assembly.obstacles.is_empty() {
+            let extra = modal_contact_forces(string, &assembly.obstacles, &x)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            for k in 0..string.n_modes {
+                x[2 * k + 1] += dt * extra[k];
+            }
+        }
+        let mut q_phys = vec![0.0; string.n_modes];
+        let mut p_string = 0.0;
+        for k in 0..string.n_modes {
+            let kf = (k + 1) as f64;
+            let q = x[2 * k];
+            q_phys[k] = q / mass_scale;
+            if k % 2 == 0 {
+                let omega = string_mode_omega(string, k + 1);
+                let monopole = string.width_m * 2.0 * string.length_m / (kf * pi);
+                let h_im = omega * gas.density * monopole / (4.0 * pi * listener_m * mass_scale);
+                p_string += h_im * omega * q;
+            }
+        }
+        let fb = bridge_force(string, &q_phys);
+        let p_minus = if let Some(line) = fitted.as_ref() {
+            line.incoming()
+        } else {
+            delay.as_ref().expect("line").incoming()
+        };
+        let u_body = plates.volume_velocity();
+        let t = i as f64 * dt;
+        let p_plus = if let Some(reed) = assembly.reed {
+            let p_m = if reed.attack_s <= 0.0 {
+                reed.blowing_pressure_pa
+            } else if t >= reed.attack_s {
+                reed.blowing_pressure_pa
+            } else {
+                let frac = t / reed.attack_s;
+                reed.blowing_pressure_pa * 0.5 * (1.0 - det::cos(core::f64::consts::PI * frac))
+            };
+            solve_reed_wave(
+                reed,
+                gas.density,
+                zc,
+                0.0,
+                p_minus,
+                p_m,
+                p_plus_prev,
+                u_body,
+            )?
+        } else {
+            let blow = assembly.blow.expect("checked");
+            let u_blow = if t < blow.duration_s {
+                blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+            } else {
+                0.0
+            };
+            p_minus + zc * (u_blow + u_body)
+        };
+        p_plus_prev = p_plus;
+        let p_minus_now = if let Some(line) = fitted.as_mut() {
+            line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+                what: "characteristic line left the finite set",
+            })?
+        } else {
+            delay.as_mut().expect("line").push(p_plus)
+        };
+        let p_bore = p_plus + p_minus_now;
+        let mut p = p_string + p_bore;
+        p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
+        out[i] = p;
+    }
+    Ok(RealizedAssembly {
+        sample_rate_hz: assembly.sample_rate_hz,
+        pressure_pa: out,
+        gas: gas.clone(),
     })
 }
 
@@ -254,7 +624,8 @@ fn realize_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
-    plates: &mut [CompactBody],
+    texture: Option<ContactTexture>,
+    plates: &mut PlateBank,
     obstacles: &[UnilateralObstacle],
     gas: &GasState,
     listener_m: f64,
@@ -267,6 +638,7 @@ fn realize_string(
             string,
             pluck,
             bow,
+            texture,
             plates,
             obstacles,
             gas,
@@ -280,6 +652,7 @@ fn realize_string(
             string,
             pluck,
             bow,
+            texture,
             plates,
             obstacles,
             gas,
@@ -293,12 +666,14 @@ fn realize_string(
         let mut twin = string;
         twin.polarization_detune = 0.0;
         twin.tension_n *= (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
+        let mut unused_bodies = PlateBank::default();
         let other = if string.axial_stiffness_n > 0.0 {
             realize_kc_string(
                 twin,
                 pluck,
                 bow,
-                &mut [],
+                None,
+                &mut unused_bodies,
                 &[],
                 gas,
                 listener_m,
@@ -311,7 +686,8 @@ fn realize_string(
                 twin,
                 pluck,
                 bow,
-                &mut [],
+                None,
+                &mut unused_bodies,
                 &[],
                 gas,
                 listener_m,
@@ -374,7 +750,8 @@ fn realize_linear_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
-    plates: &mut [CompactBody],
+    texture: Option<ContactTexture>,
+    plates: &mut PlateBank,
     obstacles: &[UnilateralObstacle],
     gas: &GasState,
     listener_m: f64,
@@ -382,6 +759,7 @@ fn realize_linear_string(
     n: usize,
     radiation_scale: f64,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    let mut texture = TextureDrive::try_new(texture)?;
     let pi = core::f64::consts::PI;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let mut modes = Vec::with_capacity(string.n_modes);
@@ -435,7 +813,7 @@ fn realize_linear_string(
                 .zip(phi_bow.iter())
                 .map(|(s, phi)| s.velocity_m_sqrt_kg_per_s * phi)
                 .sum();
-            let f_bow = bow_force(bow, v_string);
+            let f_bow = bow_force(bow, v_string, texture.delta_n(bow.velocity_m_s, dt));
             for (f, phi) in force.iter_mut().zip(phi_bow.iter()) {
                 *f = f_bow * *phi;
             }
@@ -461,9 +839,7 @@ fn realize_linear_string(
                 .map(|s| s.displacement_m_sqrt_kg / mass_scale)
                 .collect();
             let fb = bridge_force(string, &q_phys);
-            for plate in plates.iter_mut() {
-                p += plate.drive_and_radiate(fb, dt, gas.density, listener_m);
-            }
+            p += plates.drive_and_radiate(fb, dt, gas.density, listener_m)?;
         }
         out.push(p);
     }
@@ -475,7 +851,8 @@ fn realize_kc_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
-    plates: &mut [CompactBody],
+    texture: Option<ContactTexture>,
+    plates: &mut PlateBank,
     obstacles: &[UnilateralObstacle],
     gas: &GasState,
     listener_m: f64,
@@ -483,6 +860,7 @@ fn realize_kc_string(
     n: usize,
     radiation_scale: f64,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    let mut texture = TextureDrive::try_new(texture)?;
     let mut storage = kirchhoff_carrier_string(
         &KcStringParams {
             length: string.length_m,
@@ -530,7 +908,11 @@ fn realize_kc_string(
                     x[2 * k + 1] * phi
                 })
                 .sum();
-            vec![bow_force(bow, v_string)]
+            vec![bow_force(
+                bow,
+                v_string,
+                texture.delta_n(bow.velocity_m_s, dt),
+            )]
         } else {
             vec![0.0]
         };
@@ -560,9 +942,7 @@ fn realize_kc_string(
         }
         if !plates.is_empty() {
             let fb = bridge_force(string, &q_phys);
-            for plate in plates.iter_mut() {
-                p += plate.drive_and_radiate(fb, dt, gas.density, listener_m);
-            }
+            p += plates.drive_and_radiate(fb, dt, gas.density, listener_m)?;
         }
         out.push(p);
     }
@@ -576,29 +956,140 @@ fn triangular_pluck_modal(pluck: Pluck, k: usize) -> f64 {
     2.0 * pluck.height_m * det::sin(kf * pi * xi) / (kf * kf * pi * pi * xi * (1.0 - xi))
 }
 
-fn bow_force(bow: BowStroke, v_string: f64) -> f64 {
-    StribeckFriction {
-        mu_static: bow.mu_static,
-        mu_dynamic: bow.mu_dynamic,
-        stiction_m_s: bow.stribeck_m_s,
+fn bow_force(bow: BowStroke, v_string: f64, normal_delta_n: f64) -> f64 {
+    let law = fs_tribo::FrictionLaw::Stribeck {
+        static_mu: bow.mu_static,
+        kinetic_mu: bow.mu_dynamic,
+        characteristic_speed: bow.stribeck_m_s,
+        viscous_per_speed: 0.0,
+    };
+    let normal = (bow.normal_force_n + normal_delta_n).max(0.0);
+    // Driven-body sign: + when the driver is faster.
+    law.regularized_traction_1d(bow.velocity_m_s - v_string, normal, bow.stribeck_m_s)
+        .map(|f| -f)
+        .unwrap_or(0.0)
+}
+
+/// Declared surface-height drive of the contact normal.
+struct TextureDrive {
+    inner: Option<TextureInner>,
+}
+
+struct TextureInner {
+    iface: InterfaceSystemRef,
+    moving: UniformSurfaceTrace,
+    fixed: UniformSurfaceTrace,
+    kn: f64,
+    path_m: f64,
+}
+
+impl TextureDrive {
+    fn try_new(spec: Option<ContactTexture>) -> Result<Self, AcousticRealizeError> {
+        let Some(spec) = spec else {
+            return Ok(Self { inner: None });
+        };
+        if !(spec.rms_height_m > 0.0
+            && spec.track_length_m > 0.0
+            && spec.tangent_stiffness_n_m > 0.0)
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "contact texture must have positive height, track, and stiffness",
+            });
+        }
+        let spectrum = SelfAffinePeriodicProfileSpectrum::new(
+            spec.rms_height_m,
+            spec.hurst_exponent,
+            spec.min_cycles,
+            spec.max_cycles,
+            spec.phase_seed,
+        )
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let harmonics = spectrum
+            .realize_harmonics()
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let samples = (spec.max_cycles as usize).saturating_mul(8).max(32);
+        let moving = PeriodicHarmonicSurface::new(
+            "contact.moving",
+            "fs-scenario.ContactTexture",
+            InputAuthority::CallerDeclared,
+            spec.track_length_m,
+            samples,
+            harmonics,
+        )
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
+        .realize()
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let fixed = PeriodicHarmonicSurface::new(
+            "contact.fixed",
+            "fs-scenario.ContactTexture",
+            InputAuthority::CallerDeclared,
+            spec.track_length_m,
+            samples,
+            Vec::new(),
+        )
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
+        .realize()
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let iface = InterfaceSystemRef::new(
+            "assembly.contact.a-b",
+            "assembly.contact.history",
+            "fs-scenario.ContactTexture",
+            InputAuthority::CallerDeclared,
+            InterfaceMedium::Dry,
+        )
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        Ok(Self {
+            inner: Some(TextureInner {
+                iface,
+                moving,
+                fixed,
+                kn: spec.tangent_stiffness_n_m,
+                path_m: 0.0,
+            }),
+        })
     }
-    .traction(bow.velocity_m_s - v_string, bow.normal_force_n)
+
+    fn delta_n(&mut self, speed_m_s: f64, dt: f64) -> f64 {
+        let Some(inner) = self.inner.as_mut() else {
+            return 0.0;
+        };
+        inner.path_m += speed_m_s.abs() * dt;
+        let motion_a = SurfaceTraceMotion {
+            trace: &inner.moving,
+            path_coordinate_m: inner.path_m,
+            path_speed_m_per_s: speed_m_s,
+        };
+        let motion_b = SurfaceTraceMotion {
+            trace: &inner.fixed,
+            path_coordinate_m: 0.0,
+            path_speed_m_per_s: 0.0,
+        };
+        evaluate_point_surface_pair(&inner.iface, motion_a, motion_b)
+            .map(|r| inner.kn * r.combined_effective_height_m)
+            .unwrap_or(0.0)
+    }
 }
 
 fn plate_bank(
     soundboard: Option<RadiatingPlate>,
     extra: &[RadiatingPlate],
     plate: Option<ThinPlate>,
-) -> Result<Vec<CompactBody>, AcousticRealizeError> {
-    let mut out = Vec::new();
+) -> Result<PlateBank, AcousticRealizeError> {
+    let mut out = PlateBank::default();
     if let Some(mesh) = plate {
-        out.extend(certified_radiators(mesh)?);
+        if mesh.geometric_nonlinearity {
+            out.vk = Some(VkBody::from_plate(mesh)?);
+        } else {
+            out.linear.extend(certified_radiators(mesh)?);
+        }
     }
     if let Some(spec) = soundboard {
-        out.push(CompactBody::from_radiator(spec)?);
+        out.linear
+            .push(crate::thin_plate::CompactBody::from_radiator(spec)?);
     }
     for &spec in extra {
-        out.push(CompactBody::from_radiator(spec)?);
+        out.linear
+            .push(crate::thin_plate::CompactBody::from_radiator(spec)?);
     }
     Ok(out)
 }
@@ -620,7 +1111,7 @@ fn bridge_force(string: PrestressedString, q_phys: &[f64]) -> f64 {
 fn realize_reed_on_duct(
     duct: &ViscothermalDuct,
     reed: BeatingReed,
-    plates: &mut [CompactBody],
+    plates: &mut PlateBank,
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
@@ -647,7 +1138,7 @@ fn realize_reed_on_duct(
 fn realize_blown_duct(
     duct: &ViscothermalDuct,
     blow: VolumeVelocityPulse,
-    plates: &mut [CompactBody],
+    plates: &mut PlateBank,
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
@@ -676,6 +1167,10 @@ fn realize_blown_duct(
             n,
         );
     }
+    // Isolated linear blow: IFFT of the TMM driving point is the
+    // exact linear response, including tone-hole shortening. The
+    // characteristic line is the time port when a body or valve
+    // exchanges volume velocity — it cannot yet replace this oracle.
     let n_fft = n.next_power_of_two();
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut drive = vec![0.0; n_fft];
@@ -714,7 +1209,7 @@ fn realize_blown_duct(
 fn realize_blown_with_body(
     physics: &Duct,
     blow: VolumeVelocityPulse,
-    plates: &mut [CompactBody],
+    plates: &mut PlateBank,
     gas: &GasState,
     termination: Termination,
     listener_m: f64,
@@ -757,7 +1252,7 @@ fn realize_blown_with_body(
         } else {
             0.0
         };
-        let u_body: f64 = plates.iter().map(CompactBody::volume_velocity).sum();
+        let u_body = plates.volume_velocity();
         let p_minus = if let Some(line) = fitted.as_ref() {
             line.incoming()
         } else {
@@ -773,9 +1268,7 @@ fn realize_blown_with_body(
         };
         let p_bore = p_plus + p_minus_now;
         let mut p_obs = p_bore;
-        for plate in plates.iter_mut() {
-            p_obs += plate.drive_and_radiate(p_bore * area, dt, gas.density, listener_m);
-        }
+        p_obs += plates.drive_and_radiate(p_bore * area, dt, gas.density, listener_m)?;
         out[i] = p_obs;
     }
     Ok(out)

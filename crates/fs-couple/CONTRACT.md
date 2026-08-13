@@ -259,10 +259,28 @@ clarinet is one filling of those objects.
   (structure–bore).
 - String obstacles are `fs-dcontact` power-law potentials on sine
   collocation.
-- Duct path without reed: `p(t) = IFFT[H(ω) U(ω)]` with AllRegime
-  viscothermal losses (Poiseuille below the wide-tube floor — never
-  lossless fallback). Tone holes are compact TMM shunts. Unflanged-open
-  Nyquist `ka > 1` is refused.
+- Duct path without reed, no body: `p(t) = IFFT[Z_in(ω) U(ω)]` with
+  AllRegime viscothermal losses (Poiseuille below the wide-tube floor —
+  never lossless fallback). Tone-hole shortening is that exact TMM
+  response. Unflanged-open Nyquist `ka > 1` is refused. When a plate
+  or reed is present the time port is the characteristic line (TMM
+  `Z_in` → `R` → delay from the speaking-register `|Z|` peak → residual
+  `|R| ≤ 1` after pin). The delay+residual fit is not yet a substitute
+  for the isolated IFFT oracle.
+- Plate damping: a single authored viscous ratio is the two-point
+  Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
+  4ω₀ so higher certified modes sit on the stiffness limb. Radiation
+  reaction on linear compact radiators is the baffled-piston small-`ka`
+  series (the `fs-bem` Rayleigh-integral oracle) fitted and
+  passivity-repaired by `fs-vfit`. `fs-bem` is not a production
+  dependency of this crate (cycle through `fs-feec`). Compact monopole
+  pressure remains the far-field observer, not a BEM field.
+- Bow roughness: an optional `ContactTexture` is a declared
+  self-affine height spectrum. `fs-tribo::surface_excitation` samples
+  it; the height perturbs the normal load that Stribeck sees. No
+  measured rosin is invented.
+- Three-way clock: when `EA > 0` the string member is Kirchhoff–
+  Carrier, not a second linear modal bank.
 - `encode_pcm16_wav` maps pascals through a declared full-scale. It never
   peak-normalizes.
 
@@ -427,12 +445,12 @@ determinism.
 
 - `acoustic_realize` is a composed description→waveform, not a named
   instrument product and not a 3D jet. Bow is regularized friction, not
-  measured rosin or Helmholtz-guaranteed. A `ThinPlate` is DKT +
-  certified modes + compact monopoles, not a von Karman shell or a
-  BEM body. Simultaneous string+duct+plate still evolves the plate
-  sequentially (string then duct), not as one three-way Dirac
-  interconnection. 3D broadband jet noise remains a no-claim. WAV
-  encoding is a physical-scale dump, not mastering.
+  measured rosin or Helmholtz-guaranteed. A linear `ThinPlate` is DKT +
+  certified modes + compact monopoles. `geometric_nonlinearity` selects
+  the isotropic von Karman modal pHS, not a full shell or a BEM body.
+  String+duct+plate share one sample clock; that is not a certified
+  Dirac interconnection of three pHS. 3D broadband jet noise remains a
+  no-claim. WAV encoding is a physical-scale dump, not mastering.
 - `vibroacoustic` is frequency-domain only: time-domain realization is
   the vector-fitting bead's scope; non-rectangular cavity bases beyond
   the lumped Helmholtz mode arrive through the same `CavityModes`

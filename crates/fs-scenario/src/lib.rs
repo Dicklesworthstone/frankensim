@@ -29,9 +29,9 @@ pub mod sensor;
 pub mod signal;
 
 pub use acoustic::{
-    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, CylinderSegment, Listener, Pluck,
-    PrestressedString, RadiatingPlate, RayleighParams, ThinPlate, ToneHole, UnilateralObstacle,
-    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, CylinderSegment,
+    Listener, Pluck, PrestressedString, RadiatingPlate, RayleighParams, ThinPlate, ToneHole,
+    UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
 pub use bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 pub use ensemble::{

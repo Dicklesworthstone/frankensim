@@ -24,6 +24,7 @@ fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
 fs-qty = { path = "../fs-qty" }
 fs-scenario = { path = "../fs-scenario" }
+fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]

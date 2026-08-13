@@ -1125,6 +1125,7 @@ dependencies = [
  "fs-plate",
  "fs-qty",
  "fs-scenario",
+ "fs-tribo",
  "fs-vfit",
 ]
 

@@ -10,7 +10,7 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
 use crate::driving_point::characteristic_line;
-use crate::thin_plate::CompactBody;
+use crate::thin_plate::PlateBank;
 use crate::traveling_wave_line::{TravelingWaveError, TravelingWaveLine};
 use crate::unilateral_contact::{slit_contact_force, slit_lay};
 use fs_dcontact::Obstacle;
@@ -29,7 +29,7 @@ pub fn realize_reed_bore(
     gas: &GasState,
     reed: BeatingReed,
     termination: Termination,
-    plates: &mut [CompactBody],
+    plates: &mut PlateBank,
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
@@ -74,7 +74,7 @@ pub fn realize_reed_bore(
     for i in 0..n {
         let p_m = blowing_envelope(reed, i as f64 * dt);
         let p_minus = line.incoming();
-        let u_body: f64 = plates.iter().map(CompactBody::volume_velocity).sum();
+        let u_body = plates.volume_velocity();
         let p_plus = if reed.mass_kg > 0.0 {
             let (pp, y, v) = step_massive_reed(
                 reed,
@@ -107,9 +107,7 @@ pub fn realize_reed_bore(
         let p_minus_now = line.push(p_plus)?;
         let p_bore = p_plus + p_minus_now;
         let mut p_obs = p_bore;
-        for plate in plates.iter_mut() {
-            p_obs += plate.drive_and_radiate(p_bore * area_bore, dt, gas.density, listener_m);
-        }
+        p_obs += plates.drive_and_radiate(p_bore * area_bore, dt, gas.density, listener_m)?;
         p_bore_hist[i] = p_obs;
     }
     Ok(p_bore_hist)
@@ -222,7 +220,7 @@ fn step_massive_reed(
     Ok((p_plus, y1, v1))
 }
 
-fn solve_reed_wave(
+pub(crate) fn solve_reed_wave(
     reed: BeatingReed,
     rho: f64,
     zc: f64,

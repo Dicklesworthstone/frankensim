@@ -6,9 +6,9 @@ use fs_couple::acoustic_realize::{
 };
 use fs_couple::pcm_wav::{WavError, encode_pcm16_wav};
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, CylinderSegment, Listener, Pluck,
-    PrestressedString, RadiatingPlate, ThinPlate, ToneHole, UnilateralObstacle, ViscothermalDuct,
-    VolumeVelocityPulse, WaveguideEnd,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, CylinderSegment,
+    Listener, Pluck, PrestressedString, RadiatingPlate, ThinPlate, ToneHole, UnilateralObstacle,
+    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
 
 fn empty_base() -> AcousticAssembly {
@@ -24,6 +24,7 @@ fn empty_base() -> AcousticAssembly {
         body_modes: vec![],
         plate: None,
         obstacles: vec![],
+        contact_texture: None,
         listener: Listener { distance_m: 1.0 },
         sample_rate_hz: 8_000,
         duration_s: 0.06,
@@ -510,6 +511,7 @@ fn steel_panel() -> ThinPlate {
         g12_pa: 200e9 / (2.0 * 1.3),
         damping_ratio: 0.02,
         n_modes: 2,
+        geometric_nonlinearity: false,
     }
 }
 
@@ -568,5 +570,128 @@ fn mouth_pressure_drives_the_plate_back_into_the_duct() {
     assert!(
         err > 1.0e-6,
         "a different plate termination must change the mouth pressure"
+    );
+}
+
+#[test]
+fn string_plate_and_duct_share_one_clock() {
+    let mut coupled = plucked(80.0, 0.006, 0.003);
+    let air = closed_duct(288.15);
+    coupled.duct = air.duct;
+    coupled.blow = air.blow;
+    coupled.plate = Some(steel_panel());
+    coupled.duration_s = 0.06;
+    let mut string_only = plucked(80.0, 0.006, 0.003);
+    string_only.plate = Some(steel_panel());
+    string_only.duration_s = 0.06;
+    let mut duct_only = closed_duct(288.15);
+    duct_only.plate = Some(steel_panel());
+    duct_only.duration_s = 0.06;
+    let c = realize_assembly(&coupled).expect("three-way");
+    let s = realize_assembly(&string_only).expect("string");
+    let d = realize_assembly(&duct_only).expect("duct");
+    let mut superposed = s.pressure_pa;
+    add_vec(&mut superposed, &d.pressure_pa);
+    let err: f64 = c
+        .pressure_pa
+        .iter()
+        .zip(&superposed)
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        err > 1.0e-5,
+        "a shared plate must not equal independently evolved members"
+    );
+}
+
+fn add_vec(acc: &mut [f64], add: &[f64]) {
+    for (a, b) in acc.iter_mut().zip(add) {
+        *a += *b;
+    }
+}
+
+#[test]
+fn von_karman_plate_is_a_body_not_a_guitar() {
+    let mut a = plucked(80.0, 0.006, 0.006);
+    let mut plate = steel_panel();
+    plate.n_modes = 1;
+    plate.geometric_nonlinearity = true;
+    a.plate = Some(plate);
+    let nl = realize_assembly(&a).expect("vk");
+    plate.geometric_nonlinearity = false;
+    a.plate = Some(plate);
+    let lin = realize_assembly(&a).expect("linear plate");
+    let err: f64 = nl
+        .pressure_pa
+        .iter()
+        .zip(&lin.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-8, "von Karman must differ from the linear bank");
+}
+
+#[test]
+fn kirchhoff_carrier_three_way_is_not_the_linear_string() {
+    let mut linear = plucked(80.0, 0.006, 0.003);
+    let air = closed_duct(288.15);
+    linear.duct = air.duct;
+    linear.blow = air.blow;
+    linear.plate = Some(steel_panel());
+    linear.duration_s = 0.06;
+    let mut kc = linear.clone();
+    if let Some(s) = kc.string.as_mut() {
+        s.axial_stiffness_n = 4.0e4;
+        s.n_modes = 3;
+    }
+    if let Some(s) = linear.string.as_mut() {
+        s.n_modes = 3;
+    }
+    let a = realize_assembly(&linear).expect("linear three-way");
+    let b = realize_assembly(&kc).expect("KC three-way");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "EA > 0 must change the shared-clock string member"
+    );
+}
+
+#[test]
+fn declared_contact_texture_modulates_the_bow() {
+    let mut smooth = empty_base();
+    smooth.string = Some(nylon_like(80.0, 0.006));
+    smooth.bow = Some(BowStroke {
+        station_frac: 0.12,
+        normal_force_n: 0.8,
+        velocity_m_s: 0.4,
+        mu_static: 0.8,
+        mu_dynamic: 0.3,
+        stribeck_m_s: 0.05,
+    });
+    let mut rough = smooth.clone();
+    rough.contact_texture = Some(ContactTexture {
+        rms_height_m: 8.0e-6,
+        hurst_exponent: 0.8,
+        min_cycles: 2,
+        max_cycles: 8,
+        phase_seed: 7,
+        track_length_m: 0.12,
+        tangent_stiffness_n_m: 2.0e5,
+    });
+    let a = realize_assembly(&smooth).expect("smooth bow");
+    let b = realize_assembly(&rough).expect("textured bow");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-8,
+        "a declared contact texture must change the bowed waveform"
     );
 }

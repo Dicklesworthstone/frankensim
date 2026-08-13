@@ -3,7 +3,9 @@
 //!
 //! This file is the coupling-layer filling of that nameless port. A
 //! bore, a muffler, an HVAC run, and a pulse tube are the same object.
-use fs_duct::{Duct, DuctError, LossModel, Termination, impedance_sweep, input_impedance};
+use fs_duct::{
+    Duct, DuctError, LossModel, Termination, impedance_peaks, impedance_sweep, input_impedance,
+};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_vfit::FitOptions;
@@ -70,15 +72,9 @@ pub fn characteristic_line(
         });
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let delay_samples = 2.0 * length / gas.sound_speed / dt;
-    if !(delay_samples >= 2.0 && delay_samples < n as f64 - 2.0) {
-        return Err(DrivingPointError::Invalid {
-            what: "round-trip delay does not fit the realized history",
-        });
-    }
-    let omega0 = core::f64::consts::PI * gas.sound_speed / (2.0 * length);
-    let omega_lo = 0.25 * omega0;
-    let omega_hi = (12.0 * omega0).min(0.45 * core::f64::consts::PI / dt);
+    let geo_omega = core::f64::consts::PI * gas.sound_speed / (2.0 * length);
+    let omega_lo = 0.25 * geo_omega;
+    let omega_hi = (12.0 * geo_omega).min(0.45 * core::f64::consts::PI / dt);
     if !(omega_hi > omega_lo) {
         return Err(DrivingPointError::Invalid {
             what: "impedance sweep band is empty at this sample rate",
@@ -94,6 +90,35 @@ pub fn characteristic_line(
         termination,
     )
     .map_err(DrivingPointError::Duct)?;
+    let peaks = impedance_peaks(&sweep);
+    // Speaking register: the |Z| peak nearest the geometric closed
+    // half-wave / open quarter-wave. The first peak in a vented sweep
+    // can be a leaky Helmholtz bump below the bore; locking the delay
+    // there lengthens the line instead of shortening it.
+    let target = match termination {
+        Termination::Closed => 2.0 * geo_omega,
+        _ => geo_omega,
+    };
+    let omega0 = peaks
+        .iter()
+        .map(|&i| sweep[i].omega)
+        .filter(|&w| w > 0.0)
+        .min_by(|a, b| {
+            (a - target)
+                .abs()
+                .partial_cmp(&(b - target).abs())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        })
+        .unwrap_or(target);
+    let delay_samples = match termination {
+        Termination::Closed => core::f64::consts::TAU / omega0 / dt,
+        _ => core::f64::consts::PI / omega0 / dt,
+    };
+    if !(delay_samples >= 2.0 && delay_samples < n as f64 - 2.0) {
+        return Err(DrivingPointError::Invalid {
+            what: "round-trip delay does not fit the realized history",
+        });
+    }
     let omega: Vec<f64> = sweep.iter().map(|r| r.omega).collect();
     // Duct is e^{-iωt}; vfit is e^{+iωt}. Conjugate, then peel delay.
     let r_fit: Vec<C64> = sweep
@@ -121,5 +146,8 @@ pub fn characteristic_line(
             fs_math::det::sin(omega0 * tau),
         );
     line.pin_magnitude_at(omega0, peeled.abs().clamp(0.05, 0.99));
+    // Pin is a uniform scale at the speaking frequency. Re-project
+    // so the residual cannot become an active scatterer elsewhere.
+    line.enforce_scattering_passivity(&omega);
     Ok(line)
 }

@@ -27,7 +27,8 @@ flagships.
   friction, `BeatingReed` as a Bernoulli aperture, `RadiatingPlate` as a
   compact modal monopole, `ThinPlate` as an orthotropic panel whose
   modes are not data, `UnilateralObstacle` as a distributed contact
-  profile, `RayleighParams`, `VolumeVelocityPulse`, `Listener`,
+  profile, `ContactTexture` as a declared self-affine height spectrum,
+  `RayleighParams`, `VolumeVelocityPulse`, `Listener`,
   `AcousticAssembly`). A guitar or clarinet is a filled assembly, not
   a crate and not a type. Realization lives in `fs-couple`.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;

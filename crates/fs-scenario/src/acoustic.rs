@@ -167,6 +167,28 @@ pub struct BowStroke {
     pub stribeck_m_s: f64,
 }
 
+/// A declared one-dimensional contact-path height spectrum.
+///
+/// This is surface geometry, not a bow or a rosin curve. Realization
+/// asks `fs-tribo::surface_excitation` to sample it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactTexture {
+    /// RMS height of the periodic profile [m].
+    pub rms_height_m: f64,
+    /// One-dimensional self-affine Hurst exponent in (0, 1).
+    pub hurst_exponent: f64,
+    /// Inclusive lowest retained spatial cycle.
+    pub min_cycles: u32,
+    /// Inclusive highest retained spatial cycle.
+    pub max_cycles: u32,
+    /// Deterministic phase seed.
+    pub phase_seed: u64,
+    /// Material-frame track length [m].
+    pub track_length_m: f64,
+    /// Linearized contact stiffness `dF_n / dh` [N/m].
+    pub tangent_stiffness_n_m: f64,
+}
+
 /// A thin orthotropic plate (a panel, a soundboard, a bulkhead).
 ///
 /// Modes are not data. Realization asks `fs-plate` + `fs-modal` for
@@ -193,6 +215,9 @@ pub struct ThinPlate {
     pub damping_ratio: f64,
     /// How many certified modes to keep.
     pub n_modes: usize,
+    /// If true and the section is isotropic, the plate is a von
+    /// Karman modal pHS (`fs-nlmodal`), not a linear modal bank.
+    pub geometric_nonlinearity: bool,
 }
 
 /// A distributed unilateral obstacle under a taut span (a fretboard,
@@ -253,6 +278,9 @@ pub struct AcousticAssembly {
     pub plate: Option<ThinPlate>,
     /// Distributed obstacles under the string (rattle, frets, a stay).
     pub obstacles: Vec<UnilateralObstacle>,
+    /// Optional declared contact-path texture. When a bow is present
+    /// this height trace modulates the normal load that friction sees.
+    pub contact_texture: Option<ContactTexture>,
     /// Observer.
     pub listener: Listener,
     /// Output sample rate [Hz].
