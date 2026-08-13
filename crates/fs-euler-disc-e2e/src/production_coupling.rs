@@ -332,6 +332,12 @@ impl ProductionCouplingCheckpoint {
     pub const fn committed_contact_intervals(&self) -> u64 {
         self.tangential_state.committed_version()
     }
+
+    /// Complete accepted tangential checkpoint, including reversible history.
+    #[must_use]
+    pub const fn tangential_state(&self) -> &TangentialContactState {
+        &self.tangential_state
+    }
 }
 
 /// All caller-owned cards and one explicit selection for one attempted substep.
@@ -500,6 +506,8 @@ struct PreparedProductionContact {
     rolling: RollingContactProposal,
     gas_channel: GasChannelReceipt,
     normal_force_n: f64,
+    applied_tangential_force_world_n: Vec3,
+    applied_tangential_free_torsional_torque_world_nm: Vec3,
     total_force_world_n: Vec3,
     total_moment_about_com_world_n_m: Vec3,
 }
@@ -617,6 +625,10 @@ pub struct ProductionCouplingReceipt {
     pub surface_geometry: Option<ProductionSurfaceGeometryReceipt>,
     /// Prepared and accepted tangential response.
     pub tangential: TangentialContactReceipt,
+    /// Tangential force actually included in the rigid-body midpoint wrench [N].
+    pub applied_tangential_force_world_n: Vec3,
+    /// Free tangential torque actually included in the midpoint wrench [N m].
+    pub applied_tangential_free_torsional_torque_world_nm: Vec3,
     /// Prepared and accepted rolling response.
     pub rolling: RollingContactProposal,
     /// The one gas-channel receipt contributing its real wrench to fs-mbd.
@@ -2297,6 +2309,7 @@ impl ProductionCouplingModel {
             input,
             checkpoint.disc_state,
             resolved_contact,
+            false,
         )?;
         let contact_point = prepared.patch_kinematics.base_point.point_world;
         let base = self.base_port.propose(
@@ -2334,6 +2347,7 @@ impl ProductionCouplingModel {
         input: &ProductionCouplingStepInput,
         disc_state: RigidBodyState,
         resolved_contact: ResolvedProductionContact,
+        apply_tangential_midpoint_probe: bool,
     ) -> Result<PreparedProductionContact, ProductionCouplingError> {
         let ResolvedProductionContact {
             patch_kinematics,
@@ -2393,6 +2407,24 @@ impl ProductionCouplingModel {
             .tangential_adapter
             .prepare(&checkpoint.tangential_state, &tangential_request)
             .map_err(ProductionCouplingError::Tangential)?;
+        let (applied_tangential_force_world_n, applied_tangential_free_torsional_torque_world_nm) =
+            if apply_tangential_midpoint_probe {
+                let mut probe_request = tangential_request.clone();
+                probe_request.dt_s *= 0.5;
+                let probe = self
+                    .tangential_adapter
+                    .prepare(&checkpoint.tangential_state, &probe_request)
+                    .map_err(ProductionCouplingError::Tangential)?;
+                (
+                    probe.force_on_disc_world_n,
+                    probe.free_torsional_torque_on_disc_world_nm,
+                )
+            } else {
+                (
+                    tangential.force_on_disc_world_n,
+                    tangential.free_torsional_torque_on_disc_world_nm,
+                )
+            };
 
         let mut rolling_input = input.rolling.clone();
         rolling_input.patch = rolling_patch;
@@ -2439,10 +2471,10 @@ impl ProductionCouplingModel {
         }
         let tangential_moment = tangential
             .application_arm_world_m
-            .cross(tangential.force_on_disc_world_n)
-            .add(tangential.free_torsional_torque_on_disc_world_nm);
+            .cross(applied_tangential_force_world_n)
+            .add(applied_tangential_free_torsional_torque_world_nm);
         let total_force_world_n = normal_force
-            .add(tangential.force_on_disc_world_n)
+            .add(applied_tangential_force_world_n)
             .add(rolling.step.body_wrench.contour_force_world_n)
             .add(gas_force);
         let total_moment_about_com_world_n_m = normal_moment
@@ -2463,6 +2495,8 @@ impl ProductionCouplingModel {
             rolling,
             gas_channel,
             normal_force_n,
+            applied_tangential_force_world_n,
+            applied_tangential_free_torsional_torque_world_nm,
             total_force_world_n,
             total_moment_about_com_world_n_m,
         })
@@ -2485,6 +2519,8 @@ impl ProductionCouplingModel {
             rolling,
             gas_channel,
             normal_force_n: _,
+            applied_tangential_force_world_n,
+            applied_tangential_free_torsional_torque_world_nm,
             total_force_world_n,
             total_moment_about_com_world_n_m,
         } = prepared;
@@ -2534,6 +2570,8 @@ impl ProductionCouplingModel {
                 surface_excitation,
                 surface_geometry,
                 tangential,
+                applied_tangential_force_world_n,
+                applied_tangential_free_torsional_torque_world_nm,
                 rolling,
                 gas_channel,
                 base,
@@ -2753,8 +2791,13 @@ impl ProductionCouplingModel {
             ));
         };
 
-        let start =
-            self.prepare_contact_channels(checkpoint, input, checkpoint.disc_state, contact)?;
+        let start = self.prepare_contact_channels(
+            checkpoint,
+            input,
+            checkpoint.disc_state,
+            contact,
+            false,
+        )?;
         let half_duration_s = 0.5 * input.duration_s;
         let predicted_disc_state = RigidBodyIntegrator::new(self.gravity)
             .step(
@@ -2820,6 +2863,7 @@ impl ProductionCouplingModel {
             &midpoint_input,
             predicted_disc_state,
             midpoint_contact,
+            true,
         )?;
         let rigid_step = RigidBodyIntegrator::new(self.gravity)
             .step(

@@ -41,6 +41,7 @@ use fs_euler_disc_e2e::rolling_contact::{
 use fs_euler_disc_e2e::specimen::DiscProfileSpec;
 use fs_euler_disc_e2e::tangential_contact::{
     EulerTangentialContactAdapter, TangentialContactLane, TangentialContactRequest,
+    TangentialContactState,
 };
 use fs_euler_disc_e2e::{
     BaseGeometryScope, BaseResponseInput, ContactLoadScope, LevelSupportInput, MovingContactLoad,
@@ -62,7 +63,7 @@ use fs_solid::{
 };
 use fs_tribo::partial_slip::{
     GeneralizedWorkOwnership, NormalPatchAuthority, NormalPatchView, PARTIAL_SLIP_MODEL_ID,
-    PartialSlipInterface, PartialSlipLaw, PartialSlipParameters,
+    PartialSlipInterface, PartialSlipLaw, PartialSlipParameters, PartialSlipStateKind,
 };
 use fs_tribo::rolling_loss::{
     CoulombContourCard, LEINE_STYLE_CONTOUR_LAW_ID, RollingLossApplicability, RollingLossChannel,
@@ -1636,7 +1637,7 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             })
         ));
         assert_eq!(checkpoint, checkpoint_before_refusal);
-        let (accepted_after_refusal, _) = model
+        let (accepted_after_refusal, accepted_step) = model
             .step_eventful_profile_midpoint(
                 &checkpoint,
                 &midpoint_template,
@@ -1646,8 +1647,42 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             )
             .expect("the refused predictor did not consume any candidate key");
         assert_eq!(accepted_after_refusal.committed_version, 1);
+        let ProductionTrajectoryStepReceipt::CompliantContact(accepted_receipt) =
+            accepted_step.receipt
+        else {
+            panic!("fixed-contact midpoint step changed branch");
+        };
+        assert_eq!(
+            accepted_receipt.tangential.mode,
+            PartialSlipStateKind::Sticking
+        );
+        assert_eq!(
+            accepted_after_refusal.tangential_state(),
+            &accepted_receipt.tangential.checkpoint
+        );
+        let is_half = |applied: Vec3, endpoint: Vec3| {
+            applied.sub(endpoint.scale(0.5)).norm_squared().sqrt()
+                <= 64.0 * f64::EPSILON * endpoint.norm_squared().sqrt().max(1.0)
+        };
+        let endpoint_tangent = &accepted_receipt.tangential;
+        assert!(
+            is_half(
+                accepted_receipt.applied_tangential_force_world_n,
+                endpoint_tangent.force_on_disc_world_n,
+            ) && is_half(
+                accepted_receipt.applied_tangential_free_torsional_torque_world_nm,
+                endpoint_tangent.free_torsional_torque_on_disc_world_nm,
+            ),
+            "zero-history sticking probe must apply the half-step wrench"
+        );
 
-        let horizon_s = 4.0e-5;
+        // G1 is limited to the smooth fixed-contact, sticking, exterior-gas
+        // branch; the ThinGap endpoint-pressure update has no order claim here.
+        assert!(matches!(
+            &midpoint_template.gas_channel,
+            GasChannelStepInput::ExteriorFreeGas { .. }
+        ));
+        let horizon_s = 2.0e-5;
         let evolve = |substeps: usize| {
             let mut accepted = checkpoint.clone();
             let dt_s = horizon_s / substeps as f64;
@@ -1655,10 +1690,6 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
                 let mut input = request_for_checkpoint(&midpoint_template, &accepted);
                 input.duration_s = dt_s;
                 input.time_s = accepted.elapsed_time_s();
-                input.normal.time_s = input.time_s;
-                input.normal.step_s = dt_s;
-                input.tangential.dt_s = dt_s;
-                input.rolling.interval_s = dt_s;
                 input.base_load_progress_start = input.time_s;
                 input.base_load_progress_end = input.time_s + dt_s;
                 model
@@ -1673,35 +1704,48 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             }
             accepted
         };
-        let coarse = evolve(1);
-        let medium = evolve(2);
-        let fine = evolve(4);
+        let coarse = evolve(2);
+        let medium = evolve(4);
+        let fine = evolve(8);
+        let radius_m = profile.dimensions.outer_radius_m;
+        let tangential_internal =
+            |value: &ProductionCouplingCheckpoint| match value.tangential_state() {
+                TangentialContactState::PartialSlip { checkpoint, .. } => {
+                    checkpoint.state().elastic_displacement_m()
+                }
+                TangentialContactState::Smooth { .. } => panic!("fixture selected partial slip"),
+            };
         let state_distance = |left: &ProductionCouplingCheckpoint,
                               right: &ProductionCouplingCheckpoint| {
-            let position = left
+            let position_delta = left
                 .disc_state
                 .pose()
                 .position_world()
-                .sub(right.disc_state.pose().position_world())
-                .squared_norm()
-                .sqrt();
-            let velocity = left
+                .sub(right.disc_state.pose().position_world());
+            let velocity_delta = left
                 .disc_state
                 .linear_momentum_world()
                 .sub(right.disc_state.linear_momentum_world())
-                .scale(disc_mass_properties.mass().recip())
-                .squared_norm()
-                .sqrt();
-            position
-                + horizon_s * velocity
+                .scale(disc_mass_properties.mass().recip());
+            let (left_d, right_d) = (tangential_internal(left), tangential_internal(right));
+            let tangential =
+                ((left_d[0] - right_d[0]).powi(2) + (left_d[1] - right_d[1]).powi(2)).sqrt();
+            position_delta.norm_squared().sqrt()
+                + horizon_s * velocity_delta.norm_squared().sqrt()
                 + (left.base_displacement_m() - right.base_displacement_m()).abs()
                 + horizon_s * (left.base_velocity_m_per_s() - right.base_velocity_m_per_s()).abs()
+                + tangential
         };
         let coarse_delta = state_distance(&coarse, &medium);
         let fine_delta = state_distance(&medium, &fine);
+        let ratio = coarse_delta / fine_delta;
         assert!(
-            coarse_delta > 2.5 * fine_delta,
-            "shared-midpoint refinement must be near second order: coarse={coarse_delta:.17e}, fine={fine_delta:.17e}"
+            coarse_delta > 4_096.0 * f64::EPSILON * radius_m,
+            "refinement signal must clear the roundoff floor: coarse={coarse_delta:.17e}"
+        );
+        assert!(
+            (3.0..5.0).contains(&ratio),
+            "shared-midpoint refinement ratio must approach four: ratio={ratio:.9}, coarse={coarse_delta:.17e}, fine={fine_delta:.17e}"
         );
 
         let production_prefix =
