@@ -167,6 +167,50 @@ pub struct BowStroke {
     pub stribeck_m_s: f64,
 }
 
+/// A thin orthotropic plate (a panel, a soundboard, a bulkhead).
+///
+/// Modes are not data. Realization asks `fs-plate` + `fs-modal` for
+/// certified eigenpairs and radiates those. Music is not a special case.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThinPlate {
+    /// Side length along material axis 1 [m].
+    pub length_m: f64,
+    /// Side length along material axis 2 [m].
+    pub width_m: f64,
+    /// Thickness [m].
+    pub thickness_m: f64,
+    /// Density [kg/m³].
+    pub density_kg_m3: f64,
+    /// Young's modulus along axis 1 [Pa].
+    pub e1_pa: f64,
+    /// Young's modulus along axis 2 [Pa].
+    pub e2_pa: f64,
+    /// Poisson ratio ν12.
+    pub nu12: f64,
+    /// In-plane shear modulus G12 [Pa].
+    pub g12_pa: f64,
+    /// Viscous modal damping ratio.
+    pub damping_ratio: f64,
+    /// How many certified modes to keep.
+    pub n_modes: usize,
+}
+
+/// A distributed unilateral obstacle under a taut span (a fretboard,
+/// a reed lay, a snare wire, a cable against a stay).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnilateralObstacle {
+    /// Sample stations as a fraction of span in (0, 1).
+    pub stations: Vec<f64>,
+    /// Gaps from the rest span to the obstacle [m]. Positive is clearance.
+    pub gaps_m: Vec<f64>,
+    /// Contact stiffness `K`.
+    pub stiffness: f64,
+    /// Power-law exponent `α >= 1`.
+    pub alpha: f64,
+    /// Caller provenance; never invented.
+    pub provenance: String,
+}
+
 /// One compact modal monopole (a body mode, a panel, a loudspeaker).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadiatingPlate {
@@ -203,6 +247,12 @@ pub struct AcousticAssembly {
     /// Extra body modes (top + Helmholtz, bracing, …) driven by the
     /// same bridge force as [`Self::soundboard`].
     pub body_modes: Vec<RadiatingPlate>,
+    /// Optional thin plate whose certified modes replace a named-Hertz
+    /// soundboard. Driven by bridge force and, when a duct is present,
+    /// by mouth pressure (structure–bore).
+    pub plate: Option<ThinPlate>,
+    /// Distributed obstacles under the string (rattle, frets, a stay).
+    pub obstacles: Vec<UnilateralObstacle>,
     /// Observer.
     pub listener: Listener,
     /// Output sample rate [Hz].

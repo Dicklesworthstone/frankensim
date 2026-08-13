@@ -25,9 +25,11 @@ flagships.
   (`AmbientGas`, `PrestressedString` as a 1-D prestressed waveguide,
   `ViscothermalDuct`, `ToneHole`, `Pluck`, `BowStroke` as Stribeck
   friction, `BeatingReed` as a Bernoulli aperture, `RadiatingPlate` as a
-  compact modal monopole, `RayleighParams`, `VolumeVelocityPulse`,
-  `Listener`, `AcousticAssembly`). A guitar or clarinet is a filled
-  assembly, not a crate and not a type. Realization lives in `fs-couple`.
+  compact modal monopole, `ThinPlate` as an orthotropic panel whose
+  modes are not data, `UnilateralObstacle` as a distributed contact
+  profile, `RayleighParams`, `VolumeVelocityPulse`, `Listener`,
+  `AcousticAssembly`). A guitar or clarinet is a filled assembly, not
+  a crate and not a type. Realization lives in `fs-couple`.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared
