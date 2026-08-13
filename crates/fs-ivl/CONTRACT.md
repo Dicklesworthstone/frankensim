@@ -244,6 +244,19 @@ the corresponding `fs_ivl::expansion` sum/product components. The second pins
 seeded endpoint-reference corruption must produce one byte-replayable red
 record and make the Casebook merge assertion refuse it.
 
+`tests/containment_fuzz.rs` (bead f85xj.3.2-adjacent .3.3): boundary-class
+containment fuzzing — deterministic `fs_propcheck::Stream`-keyed samplers
+aimed at subnormal, near-overflow, cancellation, signed-zero, power-of-two
+and general-normal neighborhoods for interval add/sub/mul/div and affine
+add/sub/mul, checked against a double-double witness (in an exact 2^600
+scaled frame for the subnormal class, because double-double widens the
+mantissa, not the exponent). Detection power is proven, not assumed: a
+planted one-ULP inward fault must be found in every class, un-nudged and
+inward-rounded mutant ops must be killed, and sampler coverage of each
+declared neighborhood is asserted. Near-overflow affine coverage is
+explicitly suppressed (pinned at zero checks) by the known
+`frankensim-loq51` overflow-panic defect this battery discovered.
+
 `tests/structured_conformance_casebook.rs`: the cheap per-crate structured PR
 entrypoint. Three fixed-order records cover interval/affine containment and
 zero-divisor policy, bounded Taylor/root admission and incomplete-work
