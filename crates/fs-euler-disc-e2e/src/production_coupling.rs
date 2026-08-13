@@ -8,7 +8,7 @@ use core::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_contact::normal_patch::{NormalPatchEmbedState, NormalPatchPort, NormalPatchReceipt};
-use fs_couple::StableId;
+use fs_couple::{StableId, modal_acoustic_time::ModalAcousticState};
 use fs_exec::Cx;
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
@@ -248,6 +248,15 @@ impl ProductionBaseStepProposal {
     pub const fn receipt(&self) -> &ProductionBaseStepReceipt {
         &self.receipt
     }
+
+    fn rectangular_modal_audio_parts(&self) -> Option<(&[f64], &[ModalAcousticState])> {
+        match &self.backend {
+            ProductionBaseProposalBackend::RectangularModal(proposal) => {
+                Some((proposal.modal_force_n_per_sqrt_kg(), proposal.next_states()))
+            }
+            ProductionBaseProposalBackend::ReducedOneMode(_) => None,
+        }
+    }
 }
 
 /// Immutable adapters and rigid-body properties used by a production substep.
@@ -480,6 +489,19 @@ struct ResolvedProductionContact {
     patch_kinematics: PatchKinematics,
     normal: ActiveNormalContact,
     surface_geometry: Option<ProductionSurfaceGeometryReceipt>,
+}
+
+struct PreparedProductionContact {
+    patch_kinematics: PatchKinematics,
+    normal: ActiveNormalContact,
+    surface_excitation: Option<HertzRoughnessExcitationReceipt>,
+    surface_geometry: Option<ProductionSurfaceGeometryReceipt>,
+    tangential: TangentialContactReceipt,
+    rolling: RollingContactProposal,
+    gas_channel: GasChannelReceipt,
+    normal_force_n: f64,
+    total_force_world_n: Vec3,
+    total_moment_about_com_world_n_m: Vec3,
 }
 
 enum ResolvedProductionEvent {
@@ -1058,6 +1080,35 @@ pub struct ProductionTrajectoryStep {
     pub receipt: ProductionTrajectoryStepReceipt,
 }
 
+/// Borrowed plate-acoustic data from one actually accepted mechanics step.
+#[derive(Debug, Clone, Copy)]
+pub struct ProductionModalAudioStep<'a> {
+    /// Accepted interval start [s].
+    pub start_time_s: f64,
+    /// Accepted interval end [s].
+    pub end_time_s: f64,
+    /// Held generalized force for every retained plate mode.
+    pub modal_force_n_per_sqrt_kg: &'a [f64],
+    /// Actual accepted modal state at the closing boundary.
+    pub accepted_states: &'a [ModalAcousticState],
+}
+
+impl ProductionTrajectoryStep {
+    fn modal_audio_step(&self) -> Option<ProductionModalAudioStep<'_>> {
+        let base = match &self.receipt {
+            ProductionTrajectoryStepReceipt::CompliantContact(receipt) => &receipt.base,
+            ProductionTrajectoryStepReceipt::OpenFlight(receipt) => &receipt.base,
+        };
+        let (modal_force_n_per_sqrt_kg, accepted_states) = base.rectangular_modal_audio_parts()?;
+        Some(ProductionModalAudioStep {
+            start_time_s: self.start_time_s,
+            end_time_s: self.end_time_s,
+            modal_force_n_per_sqrt_kg,
+            accepted_states,
+        })
+    }
+}
+
 /// Terminal state of a bounded event-aware compliant trajectory attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProductionEventTrajectoryTermination {
@@ -1428,7 +1479,9 @@ impl ProductionBasePort {
         step_id: String,
         duration_s: f64,
         compressive_normal_force_on_base_n: f64,
-        contact_point_world_m: Vec3,
+        contact_point_start_world_m: Vec3,
+        contact_point_force_world_m: Vec3,
+        contact_point_end_world_m: Vec3,
         legacy_load_progress_start: f64,
         legacy_load_progress_end: f64,
     ) -> Result<ProductionBaseStepProposal, ProductionCouplingError> {
@@ -1470,7 +1523,7 @@ impl ProductionBasePort {
                 })
             }
             (Self::RectangularModal(port), ProductionBaseCheckpoint::RectangularModal(state)) => {
-                let point = [contact_point_world_m.x, contact_point_world_m.y, 0.0];
+                let point = |world: Vec3| [world.x, world.y, 0.0];
                 let proposal = port
                     .propose(
                         state,
@@ -1478,9 +1531,9 @@ impl ProductionBasePort {
                             step_id,
                             expected_version: state.accepted_version(),
                             duration_s,
-                            contact_point_start_base_m: point,
-                            contact_point_force_base_m: point,
-                            contact_point_end_base_m: point,
+                            contact_point_start_base_m: point(contact_point_start_world_m),
+                            contact_point_force_base_m: point(contact_point_force_world_m),
+                            contact_point_end_base_m: point(contact_point_end_world_m),
                             compressive_normal_force_on_base_n,
                         },
                     )
@@ -2057,22 +2110,38 @@ impl ProductionCouplingModel {
         cx: &Cx<'_>,
     ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
         self.validate_checkpoint(checkpoint)?;
-        let (resolved, disc_mass_properties) =
-            self.resolve_axisymmetric_profile_contact(profile, checkpoint.disc_state, cx)?;
-        let (base_displacement_m, base_velocity_m_per_s) = self.base_port.surface_state(
-            &checkpoint.base_state,
-            resolved.support.contact.point_world_m,
-        )?;
-        let resolved = bind_horizontal_plane_axisymmetric_profile_contact_input(
+        let resolved = self.bind_horizontal_plane_axisymmetric_profile_contact_at_states(
             input,
-            resolved,
-            disc_mass_properties,
+            profile,
             checkpoint.disc_state,
-            base_displacement_m,
-            base_velocity_m_per_s,
+            &checkpoint.base_state,
+            cx,
         )?;
         input.expected_checkpoint_version = checkpoint.committed_version;
         Ok(resolved)
+    }
+
+    fn bind_horizontal_plane_axisymmetric_profile_contact_at_states(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        disc_state: RigidBodyState,
+        base_state: &ProductionBaseCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        let (resolved, disc_mass_properties) =
+            self.resolve_axisymmetric_profile_contact(profile, disc_state, cx)?;
+        let (base_displacement_m, base_velocity_m_per_s) = self
+            .base_port
+            .surface_state(base_state, resolved.support.contact.point_world_m)?;
+        bind_horizontal_plane_axisymmetric_profile_contact_input(
+            input,
+            resolved,
+            disc_mass_properties,
+            disc_state,
+            base_displacement_m,
+            base_velocity_m_per_s,
+        )
     }
 
     fn resolve_axisymmetric_profile_contact(
@@ -2219,14 +2288,58 @@ impl ProductionCouplingModel {
                 field: "mutually exclusive surface coupling modes",
             });
         }
+        let resolved_contact = match resolved_contact {
+            Some(contact) => contact,
+            None => self.resolve_active_contact(checkpoint, input)?,
+        };
+        let prepared = self.prepare_contact_channels(
+            checkpoint,
+            input,
+            checkpoint.disc_state,
+            resolved_contact,
+        )?;
+        let contact_point = prepared.patch_kinematics.base_point.point_world;
+        let base = self.base_port.propose(
+            &checkpoint.base_state,
+            input.base_step_id.clone(),
+            input.duration_s,
+            prepared.normal_force_n,
+            contact_point,
+            contact_point,
+            contact_point,
+            input.base_load_progress_start,
+            input.base_load_progress_end,
+        )?;
+        let rigid_step = RigidBodyIntegrator::new(self.gravity)
+            .step(
+                checkpoint.disc_state,
+                self.disc_mass_properties,
+                Wrench {
+                    force_world: prepared.total_force_world_n,
+                    torque_body: checkpoint
+                        .disc_state
+                        .pose()
+                        .orientation()
+                        .rotate_world_to_body(prepared.total_moment_about_com_world_n_m),
+                },
+                input.duration_s,
+            )
+            .map_err(ProductionCouplingError::Dynamics)?;
+        self.commit_contact_step(checkpoint, prepared, base, rigid_step)
+    }
+
+    fn prepare_contact_channels(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+        disc_state: RigidBodyState,
+        resolved_contact: ResolvedProductionContact,
+    ) -> Result<PreparedProductionContact, ProductionCouplingError> {
         let ResolvedProductionContact {
             patch_kinematics,
             normal,
             surface_geometry,
-        } = match resolved_contact {
-            Some(contact) => contact,
-            None => self.resolve_active_contact(checkpoint, input)?,
-        };
+        } = resolved_contact;
         if matches!(
             patch_kinematics.patch.curvature,
             CurvatureMetadata::Unavailable { .. }
@@ -2294,7 +2407,7 @@ impl ProductionCouplingModel {
         let (gas_channel, gas_force, gas_moment) = prepare_gas_channel(
             &input.gas_channel,
             &checkpoint.gas_channel_state,
-            checkpoint.disc_state,
+            disc_state,
             self.disc_mass_properties,
             input.duration_s,
         )?;
@@ -2309,16 +2422,6 @@ impl ProductionCouplingModel {
                 field: "topography-perturbed normal force",
             });
         }
-        let base = self.base_port.propose(
-            &checkpoint.base_state,
-            input.base_step_id.clone(),
-            input.duration_s,
-            normal_force_n,
-            patch_kinematics.base_point.point_world,
-            input.base_load_progress_start,
-            input.base_load_progress_end,
-        )?;
-
         let (mut normal_force, mut normal_moment) = point_normal_wrench(&normal)?;
         if surface_excitation.is_some() {
             if !(nominal_normal_force_n.is_finite() && nominal_normal_force_n > 0.0) {
@@ -2351,23 +2454,41 @@ impl ProductionCouplingModel {
                 field: "summed wrench",
             });
         }
-        let rigid_step = RigidBodyIntegrator::new(self.gravity)
-            .step_kick_drift(
-                checkpoint.disc_state,
-                self.disc_mass_properties,
-                Wrench {
-                    force_world: total_force_world_n,
-                    torque_body: checkpoint
-                        .disc_state
-                        .pose()
-                        .orientation()
-                        .rotate_world_to_body(total_moment_about_com_world_n_m),
-                },
-                input.duration_s,
-            )
-            .map_err(ProductionCouplingError::Dynamics)?;
-        let next_disc_state = rigid_step.state_after;
+        Ok(PreparedProductionContact {
+            patch_kinematics,
+            normal,
+            surface_excitation,
+            surface_geometry,
+            tangential,
+            rolling,
+            gas_channel,
+            normal_force_n,
+            total_force_world_n,
+            total_moment_about_com_world_n_m,
+        })
+    }
 
+    fn commit_contact_step(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        prepared: PreparedProductionContact,
+        base: ProductionBaseStepProposal,
+        rigid_step: StepReceipt,
+    ) -> Result<(ProductionCouplingCheckpoint, ProductionCouplingReceipt), ProductionCouplingError>
+    {
+        let PreparedProductionContact {
+            patch_kinematics,
+            normal,
+            surface_excitation,
+            surface_geometry,
+            tangential,
+            rolling,
+            gas_channel,
+            normal_force_n: _,
+            total_force_world_n,
+            total_moment_about_com_world_n_m,
+        } = prepared;
+        let next_disc_state = rigid_step.state_after;
         let committed_version = checkpoint.committed_version.checked_add(1).ok_or(
             ProductionCouplingError::InvalidInput {
                 field: "committed_version",
@@ -2457,12 +2578,15 @@ impl ProductionCouplingModel {
             self.disc_mass_properties,
             input.duration_s,
         )?;
+        let contact_point = checkpoint.base_state.last_contact_point_world_m();
         let base = self.base_port.propose(
             &checkpoint.base_state,
             input.base_step_id.clone(),
             input.duration_s,
             0.0,
-            checkpoint.base_state.last_contact_point_world_m(),
+            contact_point,
+            contact_point,
+            contact_point,
             input.base_load_progress_start,
             input.base_load_progress_end,
         )?;
@@ -2580,6 +2704,160 @@ impl ProductionCouplingModel {
                 branch,
                 resolved_signed_gap_start_m,
                 receipt,
+            },
+        ))
+    }
+
+    /// Advances one profile-bound interval from a shared predicted midpoint.
+    ///
+    /// The start evaluation and both half-step predictors are discard-only. All
+    /// constitutive candidates are prepared again from `checkpoint` at the
+    /// coupled midpoint and only those full-step candidates are committed.
+    pub fn step_eventful_profile_midpoint<R>(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        cx: &Cx<'_>,
+        mut refresh_midpoint_input: R,
+    ) -> Result<(ProductionCouplingCheckpoint, ProductionTrajectoryStep), ProductionCouplingError>
+    where
+        R: FnMut(
+            &mut ProductionCouplingStepInput,
+            RigidBodyState,
+        ) -> Result<(), ProductionCouplingError>,
+    {
+        let resolved = self.resolve_production_event(checkpoint, input)?;
+        let resolved_signed_gap_start_m = signed_patch_gap_m(resolved.patch_kinematics())?;
+        let start_time_s = checkpoint.elapsed_time_s();
+        let ResolvedProductionEvent::CompliantContact(contact) = resolved else {
+            let open = ProductionOpenFlightStepInput {
+                expected_checkpoint_version: input.expected_checkpoint_version,
+                duration_s: input.duration_s,
+                gas_channel: input.gas_channel.clone(),
+                base_step_id: input.base_step_id.clone(),
+                base_load_progress_start: input.base_load_progress_start,
+                base_load_progress_end: input.base_load_progress_end,
+            };
+            let (next, receipt) = self.step_open_flight(checkpoint, &open)?;
+            let end_time_s = next.elapsed_time_s();
+            return Ok((
+                next,
+                ProductionTrajectoryStep {
+                    start_time_s,
+                    end_time_s,
+                    branch: ProductionTrajectoryBranch::OpenFlight,
+                    resolved_signed_gap_start_m,
+                    receipt: ProductionTrajectoryStepReceipt::OpenFlight(receipt),
+                },
+            ));
+        };
+
+        let start =
+            self.prepare_contact_channels(checkpoint, input, checkpoint.disc_state, contact)?;
+        let half_duration_s = 0.5 * input.duration_s;
+        let predicted_disc_state = RigidBodyIntegrator::new(self.gravity)
+            .step(
+                checkpoint.disc_state,
+                self.disc_mass_properties,
+                Wrench {
+                    force_world: start.total_force_world_n,
+                    torque_body: checkpoint
+                        .disc_state
+                        .pose()
+                        .orientation()
+                        .rotate_world_to_body(start.total_moment_about_com_world_n_m),
+                },
+                half_duration_s,
+            )
+            .map_err(ProductionCouplingError::Dynamics)?
+            .state_after;
+        let start_point = start.patch_kinematics.base_point.point_world;
+        let midpoint_progress = input.base_load_progress_start
+            + 0.5 * (input.base_load_progress_end - input.base_load_progress_start);
+        let predicted_base = self.base_port.propose(
+            &checkpoint.base_state,
+            input.base_step_id.clone(),
+            half_duration_s,
+            start.normal_force_n,
+            start_point,
+            start_point,
+            start_point,
+            input.base_load_progress_start,
+            midpoint_progress,
+        )?;
+        let predicted_base_state = self
+            .base_port
+            .accept(&checkpoint.base_state, predicted_base)?;
+
+        let mut midpoint_input = input.clone();
+        midpoint_input.time_s += half_duration_s;
+        self.bind_horizontal_plane_axisymmetric_profile_contact_at_states(
+            &mut midpoint_input,
+            profile,
+            predicted_disc_state,
+            &predicted_base_state,
+            cx,
+        )?;
+        refresh_midpoint_input(&mut midpoint_input, predicted_disc_state)?;
+        validate_step_identity(&self.identity, &midpoint_input)?;
+        let midpoint_contact = self.resolve_active_contact_from_patch(
+            checkpoint,
+            &midpoint_input,
+            midpoint_input.patch.clone(),
+        )?;
+        if select_event_branch(
+            &midpoint_contact.patch_kinematics,
+            midpoint_input.normal.integration_regime,
+        )? != ProductionTrajectoryBranch::CompliantContact
+        {
+            return Err(ProductionCouplingError::UnsupportedMechanism {
+                status: midpoint_contact.patch_kinematics.status,
+            });
+        }
+        let midpoint = self.prepare_contact_channels(
+            checkpoint,
+            &midpoint_input,
+            predicted_disc_state,
+            midpoint_contact,
+        )?;
+        let rigid_step = RigidBodyIntegrator::new(self.gravity)
+            .step(
+                checkpoint.disc_state,
+                self.disc_mass_properties,
+                Wrench {
+                    force_world: midpoint.total_force_world_n,
+                    torque_body: predicted_disc_state
+                        .pose()
+                        .orientation()
+                        .rotate_world_to_body(midpoint.total_moment_about_com_world_n_m),
+                },
+                input.duration_s,
+            )
+            .map_err(ProductionCouplingError::Dynamics)?;
+        let force_point = midpoint.patch_kinematics.base_point.point_world;
+        let end_point = force_point.scale(2.0).sub(start_point);
+        let base = self.base_port.propose(
+            &checkpoint.base_state,
+            input.base_step_id.clone(),
+            input.duration_s,
+            midpoint.normal_force_n,
+            start_point,
+            force_point,
+            end_point,
+            input.base_load_progress_start,
+            input.base_load_progress_end,
+        )?;
+        let (next, receipt) = self.commit_contact_step(checkpoint, midpoint, base, rigid_step)?;
+        let end_time_s = next.elapsed_time_s();
+        Ok((
+            next,
+            ProductionTrajectoryStep {
+                start_time_s,
+                end_time_s,
+                branch: ProductionTrajectoryBranch::CompliantContact,
+                resolved_signed_gap_start_m,
+                receipt: ProductionTrajectoryStepReceipt::CompliantContact(receipt),
             },
         ))
     }
@@ -2726,12 +3004,114 @@ impl ProductionCouplingModel {
         start_checkpoint: ProductionCouplingCheckpoint,
         maximum_accepted_steps: usize,
         mechanics_steps_per_control_interval: usize,
-        mut input_for_checkpoint: F,
+        input_for_checkpoint: F,
     ) -> Result<ProductionControlTrajectory, ProductionCouplingError>
     where
         F: FnMut(
             &ProductionCouplingCheckpoint,
         ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+    {
+        self.run_eventful_control_trajectory_observed(
+            start_checkpoint,
+            maximum_accepted_steps,
+            mechanics_steps_per_control_interval,
+            input_for_checkpoint,
+            |_| {},
+        )
+    }
+
+    /// Runs the reduced-control trajectory while observing each accepted
+    /// rectangular-modal mechanics step before its information is reduced.
+    ///
+    /// The observer is never called for a refused proposal or for the dry
+    /// terminal branch classification. It receives only borrowed data and must
+    /// reduce it during the call rather than archive every mechanics receipt.
+    pub fn run_eventful_control_trajectory_observed<F, O>(
+        &self,
+        start_checkpoint: ProductionCouplingCheckpoint,
+        maximum_accepted_steps: usize,
+        mechanics_steps_per_control_interval: usize,
+        input_for_checkpoint: F,
+        observe_modal_audio_step: O,
+    ) -> Result<ProductionControlTrajectory, ProductionCouplingError>
+    where
+        F: FnMut(
+            &ProductionCouplingCheckpoint,
+        ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+        O: for<'step> FnMut(ProductionModalAudioStep<'step>),
+    {
+        self.run_eventful_control_trajectory_observed_with(
+            start_checkpoint,
+            maximum_accepted_steps,
+            mechanics_steps_per_control_interval,
+            input_for_checkpoint,
+            |checkpoint, input| self.step_eventful_compliant(checkpoint, input),
+            observe_modal_audio_step,
+        )
+    }
+
+    /// Runs profile-native controls with one shared contact/rigid/base midpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_eventful_profile_midpoint_control_trajectory_observed<F, R, O>(
+        &self,
+        start_checkpoint: ProductionCouplingCheckpoint,
+        maximum_accepted_steps: usize,
+        mechanics_steps_per_control_interval: usize,
+        profile: &ResolvedDiscProfile,
+        cx: &Cx<'_>,
+        input_for_checkpoint: F,
+        mut refresh_midpoint_input: R,
+        observe_modal_audio_step: O,
+    ) -> Result<ProductionControlTrajectory, ProductionCouplingError>
+    where
+        F: FnMut(
+            &ProductionCouplingCheckpoint,
+        ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+        R: FnMut(
+            &mut ProductionCouplingStepInput,
+            RigidBodyState,
+        ) -> Result<(), ProductionCouplingError>,
+        O: for<'step> FnMut(ProductionModalAudioStep<'step>),
+    {
+        self.run_eventful_control_trajectory_observed_with(
+            start_checkpoint,
+            maximum_accepted_steps,
+            mechanics_steps_per_control_interval,
+            input_for_checkpoint,
+            |checkpoint, input| {
+                self.step_eventful_profile_midpoint(
+                    checkpoint,
+                    input,
+                    profile,
+                    cx,
+                    |input, state| refresh_midpoint_input(input, state),
+                )
+            },
+            observe_modal_audio_step,
+        )
+    }
+
+    fn run_eventful_control_trajectory_observed_with<F, S, O>(
+        &self,
+        start_checkpoint: ProductionCouplingCheckpoint,
+        maximum_accepted_steps: usize,
+        mechanics_steps_per_control_interval: usize,
+        mut input_for_checkpoint: F,
+        mut advance: S,
+        mut observe_modal_audio_step: O,
+    ) -> Result<ProductionControlTrajectory, ProductionCouplingError>
+    where
+        F: FnMut(
+            &ProductionCouplingCheckpoint,
+        ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+        S: FnMut(
+            &ProductionCouplingCheckpoint,
+            &ProductionCouplingStepInput,
+        ) -> Result<
+            (ProductionCouplingCheckpoint, ProductionTrajectoryStep),
+            ProductionCouplingError,
+        >,
+        O: for<'step> FnMut(ProductionModalAudioStep<'step>),
     {
         if mechanics_steps_per_control_interval == 0 {
             return Err(ProductionCouplingError::InvalidInput {
@@ -2773,16 +3153,18 @@ impl ProductionCouplingModel {
                     };
                 }
             };
-            let (next_checkpoint, step) =
-                match self.step_eventful_compliant(&last_accepted_checkpoint, &input) {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        break ProductionEventTrajectoryTermination::Refused {
-                            attempted_checkpoint_version,
-                            error,
-                        };
-                    }
-                };
+            let (next_checkpoint, step) = match advance(&last_accepted_checkpoint, &input) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    break ProductionEventTrajectoryTermination::Refused {
+                        attempted_checkpoint_version,
+                        error,
+                    };
+                }
+            };
+            if let Some(modal_audio_step) = step.modal_audio_step() {
+                observe_modal_audio_step(modal_audio_step);
+            }
             if let Some(active) = &mut accumulator {
                 set_control_accumulator_endpoint_gap(active, step.resolved_signed_gap_start_m)?;
             }
@@ -2895,12 +3277,21 @@ impl ProductionCouplingModel {
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
     ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
+        let patch_input = self.prepared_patch_input(checkpoint, input)?;
+        self.resolve_active_contact_from_patch(checkpoint, input, patch_input)
+    }
+
+    fn resolve_active_contact_from_patch(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+        patch_input: MovingOneModePatchKinematicsInput,
+    ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
         if input.surface_excitation.is_some() && input.surface_geometry.is_some() {
             return Err(ProductionCouplingError::InvalidInput {
                 field: "mutually exclusive surface coupling modes",
             });
         }
-        let patch_input = self.prepared_patch_input(checkpoint, input)?;
         let mut normal_input = input.normal.clone();
         normal_input.state = checkpoint.normal_state.clone();
         normal_input.time_s = input.time_s;

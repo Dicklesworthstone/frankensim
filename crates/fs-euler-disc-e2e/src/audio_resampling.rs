@@ -64,6 +64,8 @@ const CHUNK_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-drive-
 const CROP_IDENTITY_DOMAIN: &str = "org.frankensim.euler-cinematic.audio-resampler-crop.v1";
 const CHECKPOINT_IDENTITY_DOMAIN: &str =
     "org.frankensim.euler-cinematic.audio-resampler-checkpoint.v1";
+const MECHANICS_DECIMATOR_IDENTITY_DOMAIN: &str =
+    "org.frankensim.euler-cinematic.mechanics-modal-decimator.v1";
 const LN_10: f64 = core::f64::consts::LN_10;
 
 /// Boundary extension used by the centered FIR.
@@ -680,6 +682,401 @@ impl ReconstructedGeneralizedForce {
         let start = frame.checked_mul(self.coordinate_count)?;
         let end = start.checked_add(self.coordinate_count)?;
         self.force.get(start..end)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MechanicsModalDecimationDiagnostics {
+    pub stage_count: u32,
+    pub maximum_taps_per_stage: usize,
+    pub stage_half_lengths: [u16; 7],
+    pub maximum_stage_passband_ripple_db: f64,
+    pub minimum_stage_alias_rejection_db: f64,
+    pub group_delay_output_frames: usize,
+    pub required_postroll_input_frames: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecimatedModalAcceleration {
+    pub start_time_s: f64,
+    pub sample_rate_hz: u32,
+    coordinate_count: usize,
+    pub(crate) plate_model_identity: [ContentHash; 2],
+    acceleration_m_sqrt_kg_per_s2: Vec<f64>,
+    pub diagnostics: MechanicsModalDecimationDiagnostics,
+    pub identity: ContentHash,
+}
+
+impl DecimatedModalAcceleration {
+    #[must_use]
+    pub const fn coordinate_count(&self) -> usize {
+        self.coordinate_count
+    }
+
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.acceleration_m_sqrt_kg_per_s2.len() / self.coordinate_count
+    }
+
+    #[must_use]
+    pub fn frame(&self, frame: usize) -> Option<&[f64]> {
+        let first = frame.checked_mul(self.coordinate_count)?;
+        self.acceleration_m_sqrt_kg_per_s2
+            .get(first..first.checked_add(self.coordinate_count)?)
+    }
+
+    /// Consume and crop an exact compensated interval without resampling.
+    pub fn into_crop_rebased(
+        mut self,
+        first_frame: usize,
+        frame_count: usize,
+        start_time_s: f64,
+    ) -> Result<Self, AudioResamplingError> {
+        let end_frame = first_frame.checked_add(frame_count).ok_or(
+            AudioResamplingError::InvalidSourceTimeline {
+                interval: first_frame,
+                field: "decimated modal crop range",
+            },
+        )?;
+        if !start_time_s.is_finite() || end_frame > self.frame_count() {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: first_frame,
+                field: "decimated modal crop within real causal output",
+            });
+        }
+        let first_value = first_frame * self.coordinate_count;
+        let end_value = end_frame * self.coordinate_count;
+        self.acceleration_m_sqrt_kg_per_s2
+            .copy_within(first_value..end_value, 0);
+        self.acceleration_m_sqrt_kg_per_s2
+            .truncate(frame_count * self.coordinate_count);
+        let mut identity = DomainHasher::new(MECHANICS_DECIMATOR_IDENTITY_DOMAIN);
+        identity.update(self.identity.as_bytes());
+        identity.update(&(first_frame as u64).to_le_bytes());
+        identity.update(&(frame_count as u64).to_le_bytes());
+        identity.update(&start_time_s.to_bits().to_le_bytes());
+        for value in &self.acceleration_m_sqrt_kg_per_s2 {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        self.start_time_s = start_time_s;
+        self.identity = identity.finalize();
+        Ok(self)
+    }
+}
+
+struct CausalFactorTwoStage {
+    coefficients: Vec<f64>,
+    history: Vec<f64>,
+    coordinate_count: usize,
+    write_frame: usize,
+    input_frames: usize,
+}
+
+impl CausalFactorTwoStage {
+    fn push(&mut self, input: &[f64], output: &mut [f64]) -> bool {
+        let taps = self.coefficients.len();
+        let row = self.write_frame * self.coordinate_count;
+        self.history[row..row + self.coordinate_count].copy_from_slice(input);
+        // Inputs are accepted closing-boundary samples. Keep the second sample
+        // of each pair so output rows remain 48 kHz closing boundaries.
+        let emit = self.input_frames % 2 == 1;
+        if emit {
+            for coordinate in 0..self.coordinate_count {
+                let mut sum = CompensatedSum::new();
+                for (lag, coefficient) in self.coefficients.iter().copied().enumerate() {
+                    let history_frame = (self.write_frame + taps - lag) % taps;
+                    sum.add(
+                        coefficient
+                            * self.history[history_frame * self.coordinate_count + coordinate],
+                    );
+                }
+                output[coordinate] = sum.total();
+            }
+        }
+        self.write_frame = (self.write_frame + 1) % taps;
+        self.input_frames += 1;
+        emit
+    }
+}
+
+pub struct MechanicsModalAccelerationDecimator {
+    input_sample_rate_hz: u32,
+    coordinate_count: usize,
+    plate_model_identity: [ContentHash; 2],
+    ratio: usize,
+    stages: Vec<CausalFactorTwoStage>,
+    scratch: Vec<Vec<f64>>,
+    output: Vec<f64>,
+    source_identity: DomainHasher,
+    diagnostics: MechanicsModalDecimationDiagnostics,
+}
+
+impl MechanicsModalAccelerationDecimator {
+    pub fn required_postroll_input_frames(
+        input_sample_rate_hz: u32,
+        _filter: AudioReconstructionFilterSpec,
+    ) -> Result<usize, AudioResamplingError> {
+        let ratio = decimation_ratio(input_sample_rate_hz)?;
+        let mut stage_rate_hz = input_sample_rate_hz;
+        let mut scale_at_input = 1usize;
+        let mut input_delay = 0usize;
+        while stage_rate_hz > SOUND_MASTER_SAMPLE_RATE_HZ {
+            input_delay = input_delay
+                .checked_add(
+                    usize::from(decimator_stage_half_length(
+                        input_sample_rate_hz,
+                        stage_rate_hz,
+                    )?)
+                    .checked_mul(scale_at_input)
+                    .ok_or(AudioResamplingError::InvalidFilter(
+                        "decimator delay overflow",
+                    ))?,
+                )
+                .ok_or(AudioResamplingError::InvalidFilter(
+                    "decimator delay overflow",
+                ))?;
+            stage_rate_hz /= 2;
+            scale_at_input *= 2;
+        }
+        if input_delay % ratio != 0 {
+            return Err(AudioResamplingError::InvalidFilter(
+                "decimator delay is not integral on the output clock",
+            ));
+        }
+        Ok(input_delay)
+    }
+
+    /// Admit filters and allocate only bounded FIR state plus 48 kHz output.
+    pub fn try_new(
+        input_sample_rate_hz: u32,
+        coordinate_count: usize,
+        expected_input_frames: usize,
+        plate_model_identity: [ContentHash; 2],
+        filter: AudioReconstructionFilterSpec,
+        cx: &Cx<'_>,
+    ) -> Result<Self, AudioResamplingError> {
+        if coordinate_count == 0 {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: 0,
+                field: "positive mechanics modal coordinate count",
+            });
+        }
+        let ratio = decimation_ratio(input_sample_rate_hz)?;
+        if expected_input_frames == 0 || expected_input_frames % ratio != 0 {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: expected_input_frames,
+                field: "mechanics horizon exactly divisible by audio ratio",
+            });
+        }
+        let mut checkpoint_fn = || checkpoint(cx);
+        let mut stages = Vec::new();
+        let mut scratch = Vec::new();
+        let mut stage_input_rate_hz = input_sample_rate_hz;
+        let mut maximum_ripple_db = 0.0_f64;
+        let mut minimum_rejection_db = f64::INFINITY;
+        let mut maximum_taps = 0usize;
+        let mut stage_half_lengths = [0u16; 7];
+        while stage_input_rate_hz > SOUND_MASTER_SAMPLE_RATE_HZ {
+            checkpoint_fn()?;
+            let stage_output_rate_hz = stage_input_rate_hz / 2;
+            let (passband_hz, stopband_hz) = if stage_output_rate_hz == SOUND_MASTER_SAMPLE_RATE_HZ
+            {
+                (filter.passband_edge_hz, filter.stopband_edge_hz)
+            } else {
+                (
+                    filter.stopband_edge_hz,
+                    f64::from(stage_output_rate_hz) - filter.stopband_edge_hz,
+                )
+            };
+            if !(passband_hz.is_finite()
+                && stopband_hz.is_finite()
+                && passband_hz > 0.0
+                && stopband_hz > passband_hz
+                && stopband_hz < 0.5 * f64::from(stage_input_rate_hz))
+            {
+                return Err(AudioResamplingError::InvalidFilter(
+                    "mechanics decimator stage edges",
+                ));
+            }
+            let half_length =
+                decimator_stage_half_length(input_sample_rate_hz, stage_input_rate_hz)?;
+            let taps = usize::from(half_length) * 2 + 1;
+            let stage_index = stages.len();
+            stage_half_lengths[stage_index] = half_length;
+            maximum_taps = maximum_taps.max(taps);
+            let coefficients = design_windowed_lowpass_at_rate(
+                0.5 * (passband_hz + stopband_hz),
+                half_length,
+                stage_input_rate_hz,
+                &mut checkpoint_fn,
+            )?;
+            let (ripple_db, rejection_db) = measure_lowpass_response_at_rate(
+                &coefficients,
+                passband_hz,
+                stopband_hz,
+                stage_input_rate_hz,
+                filter.response_grid_intervals,
+                &mut checkpoint_fn,
+            )?;
+            if ripple_db > filter.maximum_passband_ripple_db
+                || rejection_db < filter.minimum_stopband_attenuation_db
+            {
+                return Err(AudioResamplingError::InvalidFilter(
+                    "mechanics decimator measured alias contract",
+                ));
+            }
+            maximum_ripple_db = maximum_ripple_db.max(ripple_db);
+            minimum_rejection_db = minimum_rejection_db.min(rejection_db);
+            stages.push(CausalFactorTwoStage {
+                history: vec![0.0; taps * coordinate_count],
+                coefficients,
+                coordinate_count,
+                write_frame: 0,
+                input_frames: 0,
+            });
+            scratch.push(vec![0.0; coordinate_count]);
+            stage_input_rate_hz = stage_output_rate_hz;
+        }
+        let required_postroll_input_frames =
+            Self::required_postroll_input_frames(input_sample_rate_hz, filter)?;
+        let group_delay_output_frames = required_postroll_input_frames / ratio;
+        let output_values = expected_input_frames / ratio * coordinate_count;
+        let mut output = Vec::new();
+        reserve_exact(
+            &mut output,
+            output_values,
+            "mechanics modal decimator output",
+        )?;
+        let diagnostics = MechanicsModalDecimationDiagnostics {
+            stage_count: stages.len() as u32,
+            maximum_taps_per_stage: maximum_taps,
+            stage_half_lengths,
+            maximum_stage_passband_ripple_db: maximum_ripple_db,
+            minimum_stage_alias_rejection_db: minimum_rejection_db,
+            group_delay_output_frames,
+            required_postroll_input_frames,
+        };
+        let mut source_identity = DomainHasher::new(MECHANICS_DECIMATOR_IDENTITY_DOMAIN);
+        source_identity.update(&input_sample_rate_hz.to_le_bytes());
+        source_identity.update(&(coordinate_count as u64).to_le_bytes());
+        source_identity.update(&(ratio as u64).to_le_bytes());
+        for identity in plate_model_identity {
+            source_identity.update(identity.as_bytes());
+        }
+        for stage in &stages {
+            for coefficient in &stage.coefficients {
+                source_identity.update(&coefficient.to_bits().to_le_bytes());
+            }
+        }
+        Ok(Self {
+            input_sample_rate_hz,
+            coordinate_count,
+            plate_model_identity,
+            ratio,
+            stages,
+            scratch,
+            output,
+            source_identity,
+            diagnostics,
+        })
+    }
+
+    /// Consume one accepted mechanics boundary. No output is published on error.
+    pub fn push(&mut self, modal_acceleration: &[f64]) -> Result<(), AudioResamplingError> {
+        if modal_acceleration.len() != self.coordinate_count
+            || modal_acceleration.iter().any(|value| !value.is_finite())
+        {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: self.stages[0].input_frames,
+                field: "finite fixed-width mechanics modal acceleration",
+            });
+        }
+        for value in modal_acceleration {
+            self.source_identity.update(&value.to_bits().to_le_bytes());
+        }
+        for stage_index in 0..self.stages.len() {
+            let emitted = if stage_index == 0 {
+                self.stages[stage_index].push(modal_acceleration, &mut self.scratch[stage_index])
+            } else {
+                let (prior, current) = self.scratch.split_at_mut(stage_index);
+                self.stages[stage_index].push(&prior[stage_index - 1], &mut current[0])
+            };
+            if !emitted {
+                return Ok(());
+            }
+        }
+        self.output
+            .extend_from_slice(self.scratch.last().expect("decimator has stages"));
+        Ok(())
+    }
+
+    /// Atomically publish the complete causal output and its bound latency.
+    pub fn finish(self) -> Result<DecimatedModalAcceleration, AudioResamplingError> {
+        let input_frames = self.stages[0].input_frames;
+        if input_frames % self.ratio != 0
+            || self.output.len() / self.coordinate_count != input_frames / self.ratio
+        {
+            return Err(AudioResamplingError::InvalidSourceTimeline {
+                interval: input_frames,
+                field: "complete mechanics decimator horizon",
+            });
+        }
+        let source_identity = self.source_identity.finalize();
+        let mut identity = DomainHasher::new(MECHANICS_DECIMATOR_IDENTITY_DOMAIN);
+        identity.update(source_identity.as_bytes());
+        identity.update(&self.input_sample_rate_hz.to_le_bytes());
+        identity.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
+        identity.update(&(self.diagnostics.group_delay_output_frames as u64).to_le_bytes());
+        for value in &self.output {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        Ok(DecimatedModalAcceleration {
+            start_time_s: 0.0,
+            sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
+            coordinate_count: self.coordinate_count,
+            plate_model_identity: self.plate_model_identity,
+            acceleration_m_sqrt_kg_per_s2: self.output,
+            diagnostics: self.diagnostics,
+            identity: identity.finalize(),
+        })
+    }
+}
+
+fn decimation_ratio(input_sample_rate_hz: u32) -> Result<usize, AudioResamplingError> {
+    if input_sample_rate_hz < SOUND_MASTER_SAMPLE_RATE_HZ
+        || input_sample_rate_hz % SOUND_MASTER_SAMPLE_RATE_HZ != 0
+    {
+        return Err(AudioResamplingError::InvalidFilter(
+            "mechanics rate is an integer multiple of 48 kHz",
+        ));
+    }
+    let ratio = usize::try_from(input_sample_rate_hz / SOUND_MASTER_SAMPLE_RATE_HZ)
+        .map_err(|_| AudioResamplingError::InvalidFilter("mechanics decimation ratio"))?;
+    if !ratio.is_power_of_two() || !(2..=128).contains(&ratio) {
+        return Err(AudioResamplingError::InvalidFilter(
+            "mechanics decimation ratio is a supported power of two",
+        ));
+    }
+    Ok(ratio)
+}
+
+fn decimator_stage_half_length(
+    root_input_sample_rate_hz: u32,
+    stage_input_sample_rate_hz: u32,
+) -> Result<u16, AudioResamplingError> {
+    match stage_input_sample_rate_hz {
+        96_000 => Ok(85),
+        192_000 if root_input_sample_rate_hz == 1_536_000 => Ok(14),
+        192_000 => Ok(13),
+        384_000 if root_input_sample_rate_hz == 3_072_000 => Ok(11),
+        384_000 => Ok(10),
+        768_000 if root_input_sample_rate_hz != 6_144_000 => Ok(8),
+        768_000 => Ok(9),
+        1_536_000 => Ok(8),
+        3_072_000 | 6_144_000 => Ok(8),
+        _ => Err(AudioResamplingError::InvalidFilter(
+            "unsupported mechanics decimator stage rate",
+        )),
     }
 }
 
@@ -2653,9 +3050,23 @@ fn design_windowed_lowpass(
     half_length: u16,
     checkpoint_fn: &mut impl FnMut() -> Result<(), AudioResamplingError>,
 ) -> Result<Vec<f64>, AudioResamplingError> {
+    design_windowed_lowpass_at_rate(
+        cutoff_hz,
+        half_length,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        checkpoint_fn,
+    )
+}
+
+fn design_windowed_lowpass_at_rate(
+    cutoff_hz: f64,
+    half_length: u16,
+    sample_rate_hz: u32,
+    checkpoint_fn: &mut impl FnMut() -> Result<(), AudioResamplingError>,
+) -> Result<Vec<f64>, AudioResamplingError> {
     let radius = usize::from(half_length);
     let tap_count = radius * 2 + 1;
-    let normalized_cutoff = cutoff_hz / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let normalized_cutoff = cutoff_hz / f64::from(sample_rate_hz);
     let mut coefficients = Vec::new();
     reserve_exact(&mut coefficients, tap_count, "filter coefficients")?;
     coefficients.resize(tap_count, 0.0);
@@ -2701,18 +3112,38 @@ fn measure_lowpass_response(
     grid_intervals: u32,
     checkpoint_fn: &mut impl FnMut() -> Result<(), AudioResamplingError>,
 ) -> Result<(f64, f64), AudioResamplingError> {
+    measure_lowpass_response_at_rate(
+        coefficients,
+        passband_hz,
+        stopband_hz,
+        SOUND_MASTER_SAMPLE_RATE_HZ,
+        grid_intervals,
+        checkpoint_fn,
+    )
+}
+
+fn measure_lowpass_response_at_rate(
+    coefficients: &[f64],
+    passband_hz: f64,
+    stopband_hz: f64,
+    sample_rate_hz: u32,
+    grid_intervals: u32,
+    checkpoint_fn: &mut impl FnMut() -> Result<(), AudioResamplingError>,
+) -> Result<(f64, f64), AudioResamplingError> {
     let mut maximum_ripple_db = 0.0_f64;
     let mut maximum_stop_amplitude = 0.0_f64;
-    let nyquist = 0.5 * f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let nyquist = 0.5 * f64::from(sample_rate_hz);
     for index in 0..=grid_intervals {
         checkpoint_fn()?;
         let alpha = f64::from(index) / f64::from(grid_intervals);
         let pass_frequency = passband_hz * alpha;
-        let pass_amplitude = centered_frequency_response(coefficients, pass_frequency).abs();
+        let pass_amplitude =
+            centered_frequency_response_at_rate(coefficients, pass_frequency, sample_rate_hz).abs();
         maximum_ripple_db = maximum_ripple_db.max(amplitude_db(pass_amplitude).abs());
         let stop_frequency = (nyquist - stopband_hz).mul_add(alpha, stopband_hz);
-        maximum_stop_amplitude = maximum_stop_amplitude
-            .max(centered_frequency_response(coefficients, stop_frequency).abs());
+        maximum_stop_amplitude = maximum_stop_amplitude.max(
+            centered_frequency_response_at_rate(coefficients, stop_frequency, sample_rate_hz).abs(),
+        );
     }
     let attenuation_db = if maximum_stop_amplitude == 0.0 {
         f64::INFINITY
@@ -2723,9 +3154,17 @@ fn measure_lowpass_response(
 }
 
 fn centered_frequency_response(coefficients: &[f64], frequency_hz: f64) -> f64 {
+    centered_frequency_response_at_rate(coefficients, frequency_hz, SOUND_MASTER_SAMPLE_RATE_HZ)
+}
+
+fn centered_frequency_response_at_rate(
+    coefficients: &[f64],
+    frequency_hz: f64,
+    sample_rate_hz: u32,
+) -> f64 {
     debug_assert!(!coefficients.is_empty() && coefficients.len() % 2 == 1);
     let radius = coefficients.len() / 2;
-    let omega = 2.0 * PI * frequency_hz / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let omega = 2.0 * PI * frequency_hz / f64::from(sample_rate_hz);
     let mut response = CompensatedSum::new();
     response.add(coefficients[radius]);
     for offset in 1..=radius {
@@ -4140,6 +4579,79 @@ mod tests {
                 .map(|interval| interval.force_time_measure[coordinate])
                 .sum::<f64>();
             assert_close(output_measure, source_measure, 2.0e-15);
+        }
+    }
+
+    #[test]
+    fn g0_g3_mechanics_modal_decimator_phase_passband_and_alias_contract() {
+        let spec = AudioReconstructionFilterSpec {
+            passband_edge_hz: 18_000.0,
+            stopband_edge_hz: 22_000.0,
+            half_length: 128,
+            maximum_passband_ripple_db: 0.1,
+            minimum_stopband_attenuation_db: 80.0,
+            response_grid_intervals: 8_192,
+        };
+        for input_rate_hz in [1_536_000, 3_072_000, 6_144_000] {
+            let ratio = input_rate_hz as usize / SOUND_MASTER_SAMPLE_RATE_HZ as usize;
+            let output_frames = 512usize;
+            let input_frames = (output_frames + 48) * ratio;
+            let mut decimator = with_cx(|cx| {
+                MechanicsModalAccelerationDecimator::try_new(
+                    input_rate_hz,
+                    3,
+                    input_frames,
+                    [DomainHasher::new("test.mechanics-modal-decimator").finalize(); 2],
+                    spec,
+                    cx,
+                )
+                .unwrap()
+            });
+            assert_eq!(decimator.diagnostics.group_delay_output_frames, 48);
+            assert_eq!(
+                decimator.diagnostics.required_postroll_input_frames,
+                48 * ratio
+            );
+            for frame in 0..input_frames {
+                let time_s = (frame + 1) as f64 / f64::from(input_rate_hz);
+                decimator
+                    .push(&[
+                        if frame + 1 == ratio { 1.0 } else { 0.0 },
+                        det::sin(2.0 * PI * 18_000.0 * time_s),
+                        det::sin(2.0 * PI * 30_000.0 * time_s),
+                    ])
+                    .unwrap();
+            }
+            let output = decimator
+                .finish()
+                .unwrap()
+                .into_crop_rebased(48, output_frames, 0.0)
+                .unwrap();
+            let marker = (0..output.frame_count())
+                .max_by(|left, right| {
+                    output.frame(*left).unwrap()[0]
+                        .abs()
+                        .total_cmp(&output.frame(*right).unwrap()[0].abs())
+                })
+                .unwrap();
+            assert_eq!(marker, 0, "{input_rate_hz} Hz closing-boundary phase");
+            let powers = (128..output.frame_count()).fold([0.0; 2], |mut sum, frame| {
+                let row = output.frame(frame).unwrap();
+                sum[0] += row[1].powi(2);
+                sum[1] += row[2].powi(2);
+                sum
+            });
+            let count = (output.frame_count() - 128) as f64;
+            let pass_amplitude = (2.0 * powers[0] / count).sqrt();
+            let alias_rms = (powers[1] / count).sqrt();
+            assert!(
+                (pass_amplitude - 1.0).abs() < 0.012,
+                "{input_rate_hz} Hz passband amplitude {pass_amplitude}"
+            );
+            assert!(
+                alias_rms < 5.0e-5,
+                "{input_rate_hz} Hz alias RMS {alias_rms}"
+            );
         }
     }
 }

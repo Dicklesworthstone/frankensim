@@ -179,6 +179,7 @@ pub struct RectangularModalBaseStepReceipt {
 pub struct RectangularModalBaseProposal {
     parent: RectangularModalBaseCheckpoint,
     next: RectangularModalBaseCheckpoint,
+    force_projection: PlatePointForceProjection,
     receipt: RectangularModalBaseStepReceipt,
 }
 
@@ -187,6 +188,18 @@ impl RectangularModalBaseProposal {
     #[must_use]
     pub const fn receipt(&self) -> &RectangularModalBaseStepReceipt {
         &self.receipt
+    }
+
+    /// Held moving-contact force projected into the actual mechanics modes.
+    #[must_use]
+    pub(crate) fn modal_force_n_per_sqrt_kg(&self) -> &[f64] {
+        &self.force_projection.modal_force_n_per_sqrt_kg
+    }
+
+    /// Modal state at the accepted closing boundary of this proposal.
+    #[must_use]
+    pub(crate) fn next_states(&self) -> &[ModalAcousticState] {
+        self.next.states()
     }
 }
 
@@ -354,6 +367,7 @@ impl RectangularModalBasePort {
         Ok(RectangularModalBaseProposal {
             parent: checkpoint.clone(),
             next,
+            force_projection,
             receipt: RectangularModalBaseStepReceipt {
                 parent_version: checkpoint.accepted_version,
                 next_version: checkpoint.accepted_version + 1,

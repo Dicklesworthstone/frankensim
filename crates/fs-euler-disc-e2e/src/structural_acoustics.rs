@@ -61,7 +61,9 @@ use fs_solid::{
     TetMaterialField,
 };
 
-use crate::audio_resampling::fixed_rate_frame_count_with_roundoff_bound;
+use crate::audio_resampling::{
+    DecimatedModalAcceleration, fixed_rate_frame_count_with_roundoff_bound,
+};
 use crate::render_trajectory::RenderTrajectory;
 use crate::specimen::{DiscProfileSpec, ResolvedElasticDiscProfile};
 use crate::timeline_resampling::{EventEvaluationSide, TimelineResampler, TimelineResamplingError};
@@ -706,7 +708,7 @@ pub struct RectangularPlateModalBasis {
 }
 
 /// Modal projection of one transverse point force on the supported plate.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlatePointForceProjection {
     /// Zero-based structured cell containing the application point.
     pub cell: [usize; 2],
@@ -947,6 +949,10 @@ pub enum PhysicalContactForceSampling {
     /// structural integration. Spatial projection still uses the closing
     /// contact endpoint, falling back to the opening endpoint when required.
     IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1,
+    /// Actual mechanics-cadence moving-contact modal acceleration was filtered
+    /// before each factor-two sample removal, then causal delay was compensated
+    /// using real mechanics postroll. No second structural integration occurs.
+    MechanicsModalAccelerationAntiAliasedDecimatedV1,
 }
 
 /// Explicit modal state at the first retained mechanics boundary.
@@ -2791,6 +2797,113 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
             .collect())
     }
 
+    /// Apply the fixed-plate retarded radiation FIR directly to modal
+    /// acceleration from the accepted coupled-mechanics state.
+    pub fn synthesize_decimated_acceleration_observers(
+        &self,
+        acceleration: &DecimatedModalAcceleration,
+        radiation: &BaffledPlateObserverRadiation,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
+        if radiation.identity != self.radiation_identity
+            || radiation.structural_basis_identity != self.basis.identity
+            || acceleration.plate_model_identity
+                != [self.basis.identity, self.damping_model_identity]
+            || acceleration.sample_rate_hz != self.sample_rate_hz
+            || acceleration.coordinate_count() != self.basis.modes.len()
+            || acceleration.frame_count() == 0
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "decimated mechanics acceleration does not match plate radiation",
+            });
+        }
+        let frame_count = acceleration.frame_count();
+        let history_length = radiation.maximum_retarded_delay_frames;
+        let history_cells = self.basis.modes.len().checked_mul(history_length).ok_or(
+            StructuralModalBasisError::PressureCapacity {
+                requested: usize::MAX,
+            },
+        )?;
+        let mut history = vec![0.0_f64; history_cells];
+        let mut history_head = history_length - 1;
+        let mut channels = vec![Vec::new(); radiation.observers.len()];
+        let mut peaks = vec![0.0_f64; radiation.observers.len()];
+        for channel in &mut channels {
+            channel.try_reserve_exact(frame_count).map_err(|_| {
+                StructuralModalBasisError::PressureCapacity {
+                    requested: frame_count,
+                }
+            })?;
+        }
+        for frame in 0..frame_count {
+            if frame % 64 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            }
+            let row = acceleration
+                .frame(frame)
+                .expect("admitted acceleration frame");
+            history_head = (history_head + 1) % history_length;
+            for (mode, value) in row.iter().copied().enumerate() {
+                history[mode * history_length + history_head] = value;
+            }
+            for (observer, mode_kernels) in radiation
+                .pressure_per_modal_acceleration_fir
+                .iter()
+                .enumerate()
+            {
+                let mut pressure = 0.0_f64;
+                let mut correction = 0.0_f64;
+                for (mode, kernel) in mode_kernels.iter().enumerate() {
+                    for (lag, coefficient) in kernel.iter().copied().enumerate() {
+                        let index = (history_head + history_length - lag) % history_length;
+                        let value =
+                            coefficient * history[mode * history_length + index] - correction;
+                        let next = pressure + value;
+                        correction = (next - pressure) - value;
+                        pressure = next;
+                    }
+                }
+                if !pressure.is_finite() || pressure.abs() > self.maximum_abs_pressure_pa {
+                    return Err(StructuralModalBasisError::InvalidRequest {
+                        what: "retarded plate pressure exceeded its finite safety envelope",
+                    });
+                }
+                peaks[observer] = peaks[observer].max(pressure.abs());
+                channels[observer].push(pressure);
+            }
+        }
+        Ok(radiation
+            .observers
+            .iter()
+            .copied()
+            .zip(channels)
+            .zip(peaks)
+            .map(|((observer, pressure_pa), peak_abs_pressure_pa)| {
+                let observer = PhysicalPressureObserver::WorldFixed(observer);
+                let identity = baffled_plate_decimated_pressure_signal_identity(
+                    self,
+                    acceleration,
+                    observer,
+                    &pressure_pa,
+                );
+                PhysicalPressureSignal {
+                    start_time_s: acceleration.start_time_s,
+                    sample_rate_hz: self.sample_rate_hz,
+                    pressure_pa,
+                    peak_abs_pressure_pa,
+                    contact_force_sampling:
+                        PhysicalContactForceSampling::MechanicsModalAccelerationAntiAliasedDecimatedV1,
+                    observer,
+                    structural_basis_identity: self.basis.identity,
+                    radiation_identity: self.radiation_identity,
+                    damping_model_identity: self.damping_model_identity,
+                    identity,
+                }
+            })
+            .collect())
+    }
+
     fn modal_force_for_interval(
         &self,
         controls: &EulerControlStream<'_>,
@@ -2913,6 +3026,26 @@ fn baffled_plate_pressure_signal_identity(
     hasher.update(&model.sample_rate_hz.to_le_bytes());
     hasher.update(&start_time_s.to_bits().to_le_bytes());
     hasher.update(force_reconstruction_identity.as_bytes());
+    hash_pressure_observer(&mut hasher, observer);
+    for pressure in pressure_pa {
+        hasher.update(&pressure.to_bits().to_le_bytes());
+    }
+    hasher.finalize()
+}
+
+fn baffled_plate_decimated_pressure_signal_identity(
+    model: &BaffledPlateModalAudioModel<'_>,
+    acceleration: &DecimatedModalAcceleration,
+    observer: PhysicalPressureObserver,
+    pressure_pa: &[f64],
+) -> ContentHash {
+    let mut hasher =
+        DomainHasher::new("org.frankensim.euler-disc.baffled-plate-pressure-signal.v3");
+    hasher.update(model.basis.identity.as_bytes());
+    hasher.update(model.radiation_identity.as_bytes());
+    hasher.update(model.damping_model_identity.as_bytes());
+    hasher.update(acceleration.identity.as_bytes());
+    hasher.update(&acceleration.start_time_s.to_bits().to_le_bytes());
     hash_pressure_observer(&mut hasher, observer);
     for pressure in pressure_pa {
         hasher.update(&pressure.to_bits().to_le_bytes());

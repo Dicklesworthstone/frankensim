@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::audio_resampling::{DecimatedModalAcceleration, MechanicsModalAccelerationDecimator};
 use crate::contact_dynamics::{
     declared_profile_rolling_initializer, profile_mass_to_mbd,
     small_angle_rolling_profile_initializer,
@@ -39,7 +40,7 @@ use crate::patch_kinematics::{
 use crate::production_coupling::{
     GasChannelState, GasChannelStepInput, ProductionControlTrajectory,
     ProductionCouplingCheckpoint, ProductionCouplingIdentity, ProductionCouplingModel,
-    ProductionCouplingStepInput, ProductionSurfaceGeometryStepInput,
+    ProductionCouplingStepInput, ProductionModalAudioStep, ProductionSurfaceGeometryStepInput,
     ProductionSurfaceTraceStepInput,
 };
 use crate::rolling_contact::{
@@ -2076,6 +2077,54 @@ struct FixturePreparedDiscAcoustics {
     nonpassivity_diagnostic: Option<String>,
 }
 
+struct FixturePlateAudioDecimator {
+    angular_frequency_rad_s: Vec<f64>,
+    damping_ratio: Vec<f64>,
+    acceleration: Vec<f64>,
+    decimator: MechanicsModalAccelerationDecimator,
+    error: Option<crate::AudioResamplingError>,
+}
+
+impl FixturePlateAudioDecimator {
+    fn observe(&mut self, step: ProductionModalAudioStep<'_>) {
+        if self.error.is_some() {
+            return;
+        }
+        if step.modal_force_n_per_sqrt_kg.len() != self.acceleration.len()
+            || step.accepted_states.len() != self.acceleration.len()
+        {
+            self.error = Some(crate::AudioResamplingError::InvalidSourceTimeline {
+                interval: 0,
+                field: "mechanics plate modal observer width",
+            });
+            return;
+        }
+        for (index, acceleration) in self.acceleration.iter_mut().enumerate() {
+            let omega = self.angular_frequency_rad_s[index];
+            let state = step.accepted_states[index];
+            *acceleration = step.modal_force_n_per_sqrt_kg[index]
+                - 2.0 * self.damping_ratio[index] * omega * state.velocity_m_sqrt_kg_per_s
+                - omega * omega * state.displacement_m_sqrt_kg;
+        }
+        if let Err(error) = self.decimator.push(&self.acceleration) {
+            self.error = Some(error);
+        }
+    }
+
+    fn check(&self) -> Result<(), CinematicFixtureError> {
+        self.error
+            .as_ref()
+            .map_or(Ok(()), |error| Err(pipeline(error.clone())))
+    }
+
+    fn finish(self) -> Result<DecimatedModalAcceleration, CinematicFixtureError> {
+        if let Some(error) = self.error {
+            return Err(pipeline(error));
+        }
+        self.decimator.finish().map_err(pipeline)
+    }
+}
+
 enum FixtureDiscAcousticRadiator {
     OmittedNoResolvableModeBelowNyquist {
         forcing_maximum_frequency_hz: f64,
@@ -2691,8 +2740,19 @@ impl FixtureProductionMechanics {
             .bind_horizontal_plane_axisymmetric_profile_contact(
                 &mut input, profile, checkpoint, cx,
             )?;
+        self.refresh_state_dependent_input(profile, &mut input, checkpoint.disc_state, cx)?;
+        Ok(input)
+    }
 
-        let current_state = checkpoint.disc_state;
+    fn refresh_state_dependent_input(
+        &self,
+        profile: &ResolvedDiscProfile,
+        input: &mut ProductionCouplingStepInput,
+        current_state: RigidBodyState,
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::production_coupling::ProductionCouplingError> {
+        use crate::production_coupling::ProductionCouplingError;
+
         if let Some(finite_gap) = &mut input.normal.material.finite_gap_response {
             let symmetry_axis_world = current_state
                 .pose()
@@ -2780,7 +2840,7 @@ impl FixtureProductionMechanics {
                 .dot(patch_kinematics.tangent_basis.second_world)
                 .atan2(travel.dot(patch_kinematics.tangent_basis.first_world));
         }
-        Ok(input)
+        Ok(())
     }
 }
 
@@ -2956,7 +3016,7 @@ fn build_fixture_production_mechanics(
         })
         .transpose()?;
     let disc_mass_properties = profile_mass_to_mbd(profile.mass_properties).map_err(pipeline)?;
-    let maximum_steps = u64::from(
+    let source_steps = u64::from(
         config
             .frames
             .checked_add(config.mechanics_preroll_video_frames)
@@ -2967,6 +3027,17 @@ fn build_fixture_production_mechanics(
     .checked_mul(u64::from(mechanics.sample_rate_hz))
     .and_then(|value| value.checked_div(u64::from(CRITIQUE_FPS)))
     .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics step budget overflow".into()))?;
+    let audio_postroll_steps = u64::try_from(
+        MechanicsModalAccelerationDecimator::required_postroll_input_frames(
+            mechanics.sample_rate_hz,
+            fixture_physical_reconstruction_filter_spec(),
+        )
+        .map_err(pipeline)?,
+    )
+    .map_err(|_| CinematicFixtureError::Pipeline("audio postroll exceeds u64".into()))?;
+    let maximum_steps = source_steps
+        .checked_add(audio_postroll_steps)
+        .ok_or_else(|| CinematicFixtureError::Pipeline("mechanics step budget overflow".into()))?;
     let plate_port = RectangularModalBasePort::try_new(
         RectangularModalBaseIdentity {
             model_id: format!("rectangular-modal-plate/{}", plate_basis.identity),
@@ -4659,15 +4730,61 @@ pub fn run_cinematic_fixture(
         .map_err(|_| {
             CinematicFixtureError::Pipeline("picture mechanics budget exceeds usize".into())
         })?;
+        let plate_audio_filter = fixture_physical_reconstruction_filter_spec();
+        let postroll_mechanics_steps =
+            MechanicsModalAccelerationDecimator::required_postroll_input_frames(
+                config.mechanics.sample_rate_hz,
+                plate_audio_filter,
+            )
+            .map_err(pipeline)?;
+        let observed_mechanics_steps = preroll_mechanics_steps
+            .checked_add(picture_mechanics_steps)
+            .and_then(|value| value.checked_add(postroll_mechanics_steps))
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("plate audio mechanics horizon overflow".into())
+            })?;
+        let decimator = MechanicsModalAccelerationDecimator::try_new(
+            config.mechanics.sample_rate_hz,
+            plate_basis.modes.len(),
+            observed_mechanics_steps,
+            [plate_basis.identity, physical_plate.damping_model_identity],
+            plate_audio_filter,
+            cx,
+        )
+        .map_err(pipeline)?;
+        let mut plate_audio = FixturePlateAudioDecimator {
+            angular_frequency_rad_s: plate_basis
+                .modes
+                .iter()
+                .map(|mode| mode.angular_frequency_rad_s)
+                .collect(),
+            damping_ratio: plate_basis
+                .modes
+                .iter()
+                .map(|mode| {
+                    physical_plate
+                        .rayleigh_damping
+                        .zeta_at(mode.angular_frequency_rad_s)
+                })
+                .collect(),
+            acceleration: vec![0.0; plate_basis.modes.len()],
+            decimator,
+            error: None,
+        };
         let preroll_control = production
             .model
-            .run_eventful_control_trajectory(
+            .run_eventful_profile_midpoint_control_trajectory_observed(
                 production.checkpoint.clone(),
                 preroll_mechanics_steps,
                 mechanics_steps_per_control_interval,
+                &profile,
+                cx,
                 |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                |input, state| production.refresh_state_dependent_input(&profile, input, state, cx),
+                |step| plate_audio.observe(step),
             )
             .map_err(pipeline)?;
+        plate_audio.check()?;
         if preroll_control.accepted_mechanics_steps != preroll_mechanics_steps
         || !matches!(
             preroll_control.termination,
@@ -4706,13 +4823,20 @@ pub fn run_cinematic_fixture(
             );
             let chunk = production
                 .model
-                .run_eventful_control_trajectory(
+                .run_eventful_profile_midpoint_control_trajectory_observed(
                     chunk_start,
                     chunk_steps,
                     mechanics_steps_per_control_interval,
+                    &profile,
+                    cx,
                     |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                    |input, state| {
+                        production.refresh_state_dependent_input(&profile, input, state, cx)
+                    },
+                    |step| plate_audio.observe(step),
                 )
                 .map_err(pipeline)?;
+            plate_audio.check()?;
             if chunk.accepted_mechanics_steps != chunk_steps
             || !matches!(
                 chunk.termination,
@@ -4759,6 +4883,58 @@ pub fn run_cinematic_fixture(
         let picture_control = picture_control.ok_or_else(|| {
             CinematicFixtureError::Pipeline("production picture horizon is empty".into())
         })?;
+        let postroll_control = production
+            .model
+            .run_eventful_profile_midpoint_control_trajectory_observed(
+                picture_control.last_accepted_checkpoint.clone(),
+                postroll_mechanics_steps,
+                mechanics_steps_per_control_interval,
+                &profile,
+                cx,
+                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                |input, state| production.refresh_state_dependent_input(&profile, input, state, cx),
+                |step| plate_audio.observe(step),
+            )
+            .map_err(pipeline)?;
+        plate_audio.check()?;
+        if postroll_control.accepted_mechanics_steps != postroll_mechanics_steps
+            || !matches!(
+                postroll_control.termination,
+                crate::production_coupling::ProductionEventTrajectoryTermination::StepLimitReached { .. }
+            )
+        {
+            return Err(CinematicFixtureError::Pipeline(format!(
+                "production audio postroll stopped after {}/{} mechanics steps: {:?}",
+                postroll_control.accepted_mechanics_steps,
+                postroll_mechanics_steps,
+                postroll_control.termination,
+            )));
+        }
+        let aligned_audio_frames = usize::try_from(preroll_audio_frame_count)
+            .ok()
+            .and_then(|frames| {
+                frames.checked_add(picture_mechanics_steps / mechanics_steps_per_control_interval)
+            })
+            .ok_or_else(|| {
+                CinematicFixtureError::Pipeline("aligned plate audio frame count overflow".into())
+            })?;
+        let plate_modal_acceleration = plate_audio.finish()?;
+        let causal_delay_frames = plate_modal_acceleration
+            .diagnostics
+            .group_delay_output_frames;
+        let plate_modal_acceleration = plate_modal_acceleration
+            .into_crop_rebased(causal_delay_frames, aligned_audio_frames, 0.0)
+            .map_err(pipeline)?;
+        progress(&format!(
+            concat!(
+                "stage=mechanics plate_audio_antialias=true stages={} maximum_taps_per_stage={} ",
+                "causal_delay_audio_frames={} real_postroll_mechanics_steps={}"
+            ),
+            plate_modal_acceleration.diagnostics.stage_count,
+            plate_modal_acceleration.diagnostics.maximum_taps_per_stage,
+            causal_delay_frames,
+            postroll_mechanics_steps,
+        ));
         let control_timestep_s = f64::from(SOUND_MASTER_SAMPLE_RATE_HZ).recip();
         let trajectory = RenderTrajectory::from_production_control_trajectory(
             &production.model,
@@ -4849,6 +5025,7 @@ pub fn run_cinematic_fixture(
         progress("stage=audio begin");
         let physical_audio = build_physical_audio(
             &audio_preroll_artifact,
+            Some(&plate_modal_acceleration),
             &physical_disc,
             &physical_plate,
             &plate_basis,
@@ -8032,6 +8209,7 @@ fn build_audio(
     };
     let physical = build_physical_audio(
         fine_preroll_trajectory,
+        None,
         physical_disc,
         physical_plate,
         plate_basis,
@@ -8190,6 +8368,7 @@ fn prepare_fixture_disc_acoustics(
 
 fn build_physical_audio(
     preroll_trajectory: &EulerRenderTrajectoryArtifact,
+    plate_modal_acceleration: Option<&DecimatedModalAcceleration>,
     physical_disc: &FixturePhysicalDiscState,
     physical_plate: &FixturePhysicalPlateState,
     plate_basis: &RectangularPlateModalBasis,
@@ -8251,8 +8430,13 @@ fn build_physical_audio(
     .map_err(pipeline)?;
     let controls =
         EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
-    let declared_source_bandwidth_hz =
-        resolved_contact_drive_bandwidth_hz(&controls, &config.mechanics)?;
+    let needs_raw_control_reconstruction =
+        disc_source.is_some() || plate_modal_acceleration.is_none();
+    let declared_source_bandwidth_hz = if needs_raw_control_reconstruction {
+        resolved_contact_drive_bandwidth_hz(&controls, &config.mechanics)?
+    } else {
+        0.5 * f64::from(SOUND_MASTER_SAMPLE_RATE_HZ)
+    };
     let clock_roundoff_operation_count = usize::try_from(
         u64::from(config.mechanics.sample_rate_hz)
             .checked_mul(u64::from(
@@ -8264,13 +8448,14 @@ fn build_physical_audio(
             / u64::from(CRITIQUE_FPS),
     )
     .map_err(|_| CinematicFixtureError::Pipeline("audio clock operation budget overflow".into()))?;
-    let force_reconstruction = GeneralizedForceReconstructionInput {
-        declared_source_bandwidth_hz,
-        filter: fixture_physical_reconstruction_filter_spec(),
-        boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
-        clock_roundoff_operation_count,
-        budget: AudioResamplingBudget::reference_film(),
-    };
+    let force_reconstruction =
+        needs_raw_control_reconstruction.then_some(GeneralizedForceReconstructionInput {
+            declared_source_bandwidth_hz,
+            filter: fixture_physical_reconstruction_filter_spec(),
+            boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+            clock_roundoff_operation_count,
+            budget: AudioResamplingBudget::reference_film(),
+        });
     let plate_maximum_contact_projection_distance_m =
         1.0e-8 * plate.width_m.max(plate.depth_m).max(plate.thickness_m);
     let mut disc_pressure = if let (Some(disc_basis), Some(disc_source)) =
@@ -8293,7 +8478,7 @@ fn build_physical_audio(
             .synthesize_control_stream(
                 &controls,
                 PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce,
-                force_reconstruction,
+                force_reconstruction.expect("resolved disc requires raw-control admission"),
                 disc_maximum_contact_projection_distance_m,
                 cx,
             )
@@ -8325,15 +8510,22 @@ fn build_physical_audio(
     } else {
         None
     };
-    let mut plate_pressure = plate_runtime
-        .synthesize_control_stream_observers(
+    let mut plate_pressure = if let Some(acceleration) = plate_modal_acceleration {
+        plate_runtime.synthesize_decimated_acceleration_observers(
+            acceleration,
+            &plate_radiation,
+            cx,
+        )
+    } else {
+        plate_runtime.synthesize_control_stream_observers(
             &controls,
             &plate_radiation,
-            force_reconstruction,
+            force_reconstruction.expect("fallback plate requires raw-control admission"),
             plate_maximum_contact_projection_distance_m,
             cx,
         )
-        .map_err(pipeline)?;
+    }
+    .map_err(pipeline)?;
     if disc_pressure
         .as_ref()
         .is_some_and(|pressure| pressure.len() != 2)
@@ -9444,7 +9636,7 @@ fn production_fixture_manifest(
             "\"right_pressure_identity\":\"{}\",\"plate_basis_identity\":\"{}\",",
             "\"plate_radiation_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
             "\"declared_source_bandwidth_hz\":{:.17e},",
-            "\"reconstruction_filter\":{{\"passband_edge_hz\":{:.17e},",
+            "\"legacy_raw_control_reconstruction_filter\":{{\"passband_edge_hz\":{:.17e},",
             "\"stopband_edge_hz\":{:.17e},\"half_length_frames\":{}}},",
             "\"disc_radiator\":{},",
             "\"plate_modes\":{{\"retained_count\":{},\"minimum_frequency_hz\":{:.17e},",
@@ -9781,7 +9973,7 @@ fn fixture_manifest(
             "{{\"sample_rate_hz\":{},\"path\":\"sound/physical-listening-master.pcm24.wav\",",
             "\"wav_identity\":\"{}\",\"authority\":\"contact-driven structure at fixed world microphones; causal plate radiation plus any resolvable broadband disc elasticity\",",
             "\"calibrated_material_or_apparatus\":false,\"procedural_texture\":false,",
-            "\"force_reconstruction\":\"conservative-generalized-force-time-measures plus centered Blackman-Harris low-pass with global half-sample even reflection v1\",",
+            "\"force_reconstruction\":\"accepted mechanics-cadence modal acceleration plus causal staged Blackman-Harris anti-alias decimation with real postroll delay compensation v1; legacy raw-control fallback remains fail-closed\",",
             "\"disc_material_state_identity\":\"{}\",\"plate_material_state_identity\":\"{}\",",
             "\"plate_optical_model_identity\":\"{}\",\"gas_model_identity\":\"{}\",",
             "\"observer_positions_world_m\":{},",
