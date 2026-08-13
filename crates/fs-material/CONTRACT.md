@@ -105,7 +105,10 @@ bottoms-up — ideal gas + Sutherland + a declared conductivity model
 Atmosphere 1976 constants and reproduces its printed sea-level values
 (rho 1.2250, c 340.294, mu 1.7894e-5) to printed precision; evaluated
 at 20 C it IS the pair the acoustic crates' `air()` conveniences
-hardcode (asserted in the fs-couple casebook). Pr is DERIVED, never an
+hardcode (asserted in the fs-couple casebook).
+`GasState::stokes_kirchhoff_absorption(ω)` is the classical
+viscothermal `α ~ ω²` law from `(μ, κ, γ, c_p)`, not ISO 9613
+humidity relaxation. Pr is DERIVED, never an
 input — the emergent ~0.71 for air is the built-in kinetic-theory
 falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
 200..600 K, monotone-worsening) is asserted as the relation's honest
@@ -133,7 +136,8 @@ canonical, 4 params, `Real`-generic so exact AD parameter tangents share
 the value's code path); `GeneralizedMaxwell` (runtime Prony series with
 the unconditionally stable exact-exponential recursion for
 piecewise-linear strain and a per-step work/stored/dissipated energy
-ledger); `lower_to_prony` (deterministic relaxation-time ladder + NNLS,
+ledger; `matching_loss` builds one branch that hits an authored
+`η(ω₀)`); `lower_to_prony` (deterministic relaxation-time ladder + NNLS,
 emitting a `LoweredModel` whose certificate is the MEASURED supremum
 relative modulus error over a dense in-band grid and whose evaluation
 REFUSES outside the certified band, `FS-MAT-VISCO-OUT-OF-BAND`);
