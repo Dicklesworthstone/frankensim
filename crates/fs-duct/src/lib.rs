@@ -124,6 +124,10 @@ pub enum LossModel {
     Lossless,
     /// First-order wide-tube Zwikker–Kosten viscothermal losses.
     WideTube,
+    /// All-regime viscothermal law: wide-tube ZK above
+    /// [`MIN_SHEAR_NUMBER`], Poiseuille + isothermal-tending thermal
+    /// shunt below. Never silently drops losses.
+    AllRegime,
 }
 
 /// Open/closed state of a tone hole (a bounded continuous vent
@@ -325,29 +329,80 @@ pub fn segment_wave(
             specific_impedance: C64::from_re(state.density * state.sound_speed),
             shear_number: f64::INFINITY,
         }),
-        LossModel::WideTube => {
+        LossModel::WideTube => wide_tube_wave(state, radius, omega, k0, z0, true),
+        LossModel::AllRegime => {
             let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
-            if rv < MIN_SHEAR_NUMBER {
-                return Err(DuctError::TooNarrow { shear_number: rv });
+            if rv >= MIN_SHEAR_NUMBER {
+                wide_tube_wave(state, radius, omega, k0, z0, false)
+            } else {
+                poiseuille_wave(state, radius, omega, rv)
             }
-            let thermal = (state.gamma - 1.0) / state.prandtl.sqrt();
-            let scale = 1.0 / (core::f64::consts::SQRT_2 * rv);
-            // (1 + i) scale (1 +- thermal): Im k > 0 decays under
-            // e^{i(kx - omega t)}. The eps_k signs are pinned by the
-            // passivity/flattening/Q oracles; eps_z is pinned by the
-            // independent sqrt(Z_series/Y_shunt) route oracle (a
-            // review found every eps_z mutation survived the physics
-            // oracles — the impedance correction needs its own pin).
-            let eps_k = C64::new(1.0, 1.0).scale(scale * (1.0 + thermal));
-            let eps_z = C64::new(1.0, 1.0).scale(scale * (1.0 - thermal));
-            Ok(SegmentWave {
-                wavenumber: (C64::ONE + eps_k).scale(k0),
-                characteristic_impedance: (C64::ONE + eps_z).scale(z0),
-                specific_impedance: (C64::ONE + eps_z).scale(state.density * state.sound_speed),
-                shear_number: rv,
-            })
         }
     }
+}
+
+fn wide_tube_wave(
+    state: &GasState,
+    radius: f64,
+    omega: f64,
+    k0: f64,
+    z0: f64,
+    refuse_narrow: bool,
+) -> Result<SegmentWave, DuctError> {
+    let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+    if refuse_narrow && rv < MIN_SHEAR_NUMBER {
+        return Err(DuctError::TooNarrow { shear_number: rv });
+    }
+    let thermal = (state.gamma - 1.0) / state.prandtl.sqrt();
+    let scale = 1.0 / (core::f64::consts::SQRT_2 * rv);
+    // (1 + i) scale (1 +- thermal): Im k > 0 decays under
+    // e^{i(kx - omega t)}. The eps_k signs are pinned by the
+    // passivity/flattening/Q oracles; eps_z is pinned by the
+    // independent sqrt(Z_series/Y_shunt) route oracle (a
+    // review found every eps_z mutation survived the physics
+    // oracles — the impedance correction needs its own pin).
+    let eps_k = C64::new(1.0, 1.0).scale(scale * (1.0 + thermal));
+    let eps_z = C64::new(1.0, 1.0).scale(scale * (1.0 - thermal));
+    Ok(SegmentWave {
+        wavenumber: (C64::ONE + eps_k).scale(k0),
+        characteristic_impedance: (C64::ONE + eps_z).scale(z0),
+        specific_impedance: (C64::ONE + eps_z).scale(state.density * state.sound_speed),
+        shear_number: rv,
+    })
+}
+
+/// Narrow-tube (Poiseuille) series impedance plus an isothermal-tending
+/// thermal shunt. Used only below [`MIN_SHEAR_NUMBER`].
+fn poiseuille_wave(
+    state: &GasState,
+    radius: f64,
+    omega: f64,
+    rv: f64,
+) -> Result<SegmentWave, DuctError> {
+    let area = core::f64::consts::PI * radius * radius;
+    let r_visc = 8.0 * state.dynamic_viscosity / (area * radius * radius);
+    let l_ax = 4.0 * state.density / (3.0 * area);
+    let c_ad = area / (state.density * state.sound_speed * state.sound_speed);
+    let rt = rv * state.prandtl.sqrt();
+    let iso_frac = 1.0 / (1.0 + 0.25 * rt * rt);
+    let c_eff = c_ad * (1.0 + (state.gamma - 1.0) * iso_frac);
+    let g_th = (state.gamma - 1.0) * c_ad * omega * (rt * rt / 16.0).min(0.5);
+    let z_series = C64::new(r_visc, omega * l_ax);
+    let y_shunt = C64::new(g_th.max(0.0), omega * c_eff);
+    let mut k = (z_series * y_shunt).sqrt();
+    if k.im < 0.0 {
+        k = k.scale(-1.0);
+    }
+    let mut zc = (z_series * y_shunt.recip()).sqrt();
+    if zc.re < 0.0 {
+        zc = zc.scale(-1.0);
+    }
+    Ok(SegmentWave {
+        wavenumber: k,
+        characteristic_impedance: zc,
+        specific_impedance: zc.scale(area),
+        shear_number: rv,
+    })
 }
 
 fn cis(theta: f64) -> C64 {
@@ -575,7 +630,7 @@ pub fn input_impedance(
             // but the chimney is often the narrowest element, so its
             // shear number still folds into the reported margin
             // (review finding: the diagnostic must see it).
-            if loss == LossModel::WideTube {
+            if matches!(loss, LossModel::WideTube | LossModel::AllRegime) {
                 let rv = hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt();
                 min_rv = min_rv.min(rv);
             }
