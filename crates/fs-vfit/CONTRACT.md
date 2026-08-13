@@ -82,10 +82,14 @@ to parallel biquad sections and discrete state-space.
   parallel bank. `reflectance` is the scattering map
   `(Z−Zc)/(Z+Zc)`. `modulate_delay` peels or applies a known
   bulk delay. `realize_tabulated` is the foundry-to-runtime door:
-  vector-fit + bilinear. `DelayedFilter` is a characteristic port
-  (delay ⊕ residual filter). A TMM bore, a muffler, a pulse tube,
-  and a BEM radiation load are fillings of that port. Music is not
-  a special case.
+  vector-fit + bilinear. `realize_tabulated_impedance` is the same
+  door after `repair_passivity` (`Re Z ≥ 0`); repair exhaustion
+  keeps the raw stable fit. `DigitalFilter::enforce_abs_bound` is
+  the scattering projection `|H| ≤ bound`. `DelayedFilter` is a
+  characteristic port (delay ⊕ residual filter) with
+  `enforce_scattering_passivity` (`|R| ≤ 1` on a caller grid). A
+  TMM bore, a muffler, a pulse tube, and a BEM radiation load are
+  fillings of that port. Music is not a special case.
 
 ## Invariants
 

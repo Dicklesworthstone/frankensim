@@ -62,3 +62,23 @@ fn open_cylinder_reflectance_returns_an_inverted_pulse() {
     );
     assert!(peak > -1.05, "passive |R| <= 1, got {peak}");
 }
+
+#[test]
+fn scattering_passivity_caps_an_active_residual() {
+    let filter = fs_vfit::discretize::DigitalFilter {
+        sections: Vec::new(),
+        direct: 1.25,
+        t_s: 1.0 / 16_000.0,
+        prewarp: 0.0,
+    };
+    let mut line = DelayedFilter::new(8.0, filter).expect("line");
+    line.enforce_scattering_passivity(&[200.0, 800.0, 2_000.0]);
+    let mut y = 0.0;
+    for _ in 0..12 {
+        y = line.push(1.0).expect("step");
+    }
+    assert!(
+        y.abs() <= 1.0 + 1.0e-12,
+        "passive residual cannot amplify, got {y}"
+    );
+}

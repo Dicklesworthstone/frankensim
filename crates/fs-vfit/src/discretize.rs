@@ -116,6 +116,40 @@ impl DigitalFilter {
         }
     }
 
+    /// Scale every numerator (and the direct term) by `gain`.
+    pub fn scale(&mut self, gain: f64) {
+        self.direct *= gain;
+        for section in &mut self.sections {
+            section.b[0] *= gain;
+            section.b[1] *= gain;
+            section.b[2] *= gain;
+        }
+    }
+
+    /// Peak `|H(ω)|` on a caller grid.
+    #[must_use]
+    pub fn peak_abs(&self, omegas: &[f64]) -> f64 {
+        omegas
+            .iter()
+            .map(|&omega| self.eval(omega).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Uniformly scale so `max |H|` on `omegas` does not exceed `bound`.
+    ///
+    /// This is the scattering-form passivity projection `|R| ≤ 1`. It
+    /// is not impedance-form residue repair; use
+    /// [`realize_tabulated_impedance`] for `Re Z ≥ 0`.
+    ///
+    /// Returns the peak magnitude before scaling.
+    pub fn enforce_abs_bound(&mut self, omegas: &[f64], bound: f64) -> f64 {
+        let peak = self.peak_abs(omegas);
+        if peak > bound && bound > 0.0 && peak.is_finite() {
+            self.scale(bound / peak);
+        }
+        peak
+    }
+
     /// Advance one sample through the parallel bank.
     ///
     /// Each section is transposed direct form II. Arithmetic order is
@@ -237,6 +271,38 @@ pub fn realize_tabulated(
     let fit = crate::vf::vector_fit(omega, h, opts).map_err(RealizeError::Fit)?;
     let nyquist = core::f64::consts::PI / t_s;
     let model = band_limit_to_nyquist(fit.model, nyquist);
+    bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
+}
+
+/// Fit tabulated **impedance** `Z(iω)`, convex-repair passivity, then
+/// bilinear-discretize.
+///
+/// `repair_passivity` is the impedance-form primitive (`Re Z ≥ 0`).
+/// A raw fit that is already passive is returned unchanged. Repair
+/// exhaustion keeps the raw stable fit — it does not invent residues.
+///
+/// Conjugate `e^{-iωt}` acoustics data before calling.
+///
+/// # Errors
+/// Vector-fitting or bilinear refusals. Passivity repair failure is
+/// not an error; the unrepaired model is discretized.
+pub fn realize_tabulated_impedance(
+    omega: &[f64],
+    z: &[C64],
+    t_s: f64,
+    opts: &crate::vf::FitOptions,
+    prewarp: f64,
+) -> Result<DigitalFilter, RealizeError> {
+    let fit = crate::vf::vector_fit(omega, z, opts).map_err(RealizeError::Fit)?;
+    let nyquist = core::f64::consts::PI / t_s;
+    let mut model = band_limit_to_nyquist(fit.model, nyquist);
+    if let (Some(&lo), Some(&hi)) = (omega.first(), omega.last())
+        && hi > lo
+        && model.is_stable()
+        && let Ok((repaired, _)) = crate::passivity::repair_passivity(&model, (lo, hi))
+    {
+        model = repaired;
+    }
     bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
 }
 
@@ -382,6 +448,17 @@ impl DelayedFilter {
             section.b[1] *= gain;
             section.b[2] *= gain;
         }
+        self.state = self.filter.zero_state();
+        self.last = 0.0;
+    }
+
+    /// Project the residual so `|H(ω)| ≤ 1` on `omegas`.
+    ///
+    /// A passive 1-D scatterer cannot return more than it is sent.
+    /// Call this after [`Self::pin_magnitude_at`] so a speaking-frequency
+    /// gain pin cannot create an active band elsewhere.
+    pub fn enforce_scattering_passivity(&mut self, omegas: &[f64]) {
+        self.filter.enforce_abs_bound(omegas, 1.0);
         self.state = self.filter.zero_state();
         self.last = 0.0;
     }
@@ -1007,5 +1084,20 @@ mod runtime_tests {
         let mut state = filter.zero_state();
         let y0 = filter.step(&mut state, 1.0).unwrap();
         assert!((y0 - 0.7).abs() < 0.08);
+    }
+
+    #[test]
+    fn enforce_abs_bound_is_scattering_passivity() {
+        let mut filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.4,
+            t_s: 1.0 / 8_000.0,
+            prewarp: 0.0,
+        };
+        let omegas = [100.0, 1_000.0, 4_000.0];
+        let peak = filter.enforce_abs_bound(&omegas, 1.0);
+        assert!((peak - 1.4).abs() < 1.0e-12);
+        assert!(filter.peak_abs(&omegas) <= 1.0 + 1.0e-12);
+        assert!((filter.direct - 1.0).abs() < 1.0e-12);
     }
 }
