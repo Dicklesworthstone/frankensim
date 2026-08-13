@@ -932,8 +932,14 @@ pub fn helmholtz_resonator(
     sound_speed: f64,
     resistance: f64,
 ) -> Result<PortHamiltonian, PhsError> {
-    let (m_ac, stiffness, resistance) =
-        helmholtz_parts(volume, neck_radius, neck_length, density, sound_speed, resistance)?;
+    let (m_ac, stiffness, resistance) = helmholtz_parts(
+        volume,
+        neck_radius,
+        neck_length,
+        density,
+        sound_speed,
+        resistance,
+    )?;
     mass_spring_damper(m_ac, stiffness, resistance)
 }
 
@@ -951,8 +957,14 @@ pub fn helmholtz_resonator_flow(
     sound_speed: f64,
     resistance: f64,
 ) -> Result<PortHamiltonian, PhsError> {
-    let (m_ac, stiffness, resistance) =
-        helmholtz_parts(volume, neck_radius, neck_length, density, sound_speed, resistance)?;
+    let (m_ac, stiffness, resistance) = helmholtz_parts(
+        volume,
+        neck_radius,
+        neck_length,
+        density,
+        sound_speed,
+        resistance,
+    )?;
     let q = vec![stiffness, 0.0, 0.0, 1.0 / m_ac];
     let storage = Box::new(QuadraticStorage::new(q, 2)?);
     let j = vec![0.0, 1.0, -1.0, 0.0];
