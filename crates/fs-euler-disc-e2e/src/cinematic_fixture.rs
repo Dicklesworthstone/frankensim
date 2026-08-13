@@ -247,17 +247,16 @@ const CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ: f64 = 256.0;
 /// [Hz]. This is intentionally separate from the physical contact-drive
 /// filter because its coarse member cannot represent frequencies above 12 kHz.
 const CRITIQUE_AUDIO_CONVERGENCE_PASSBAND_HZ: f64 = 8_000.0;
-/// Maximum admitted bandwidth of the mechanics-resolved physical contact drive
+/// Passband of the mechanics-resolved physical contact-force reconstruction
 /// [Hz].
 ///
 /// The low-inclination Euler-disc trajectory can carry the declared 384-cycle
 /// surface trace above 16 kHz. The physical 48 kHz master can represent that
-/// forcing, so its reconstruction path retains an 18 kHz passband and refuses
-/// trajectories that approach the 24 kHz Nyquist boundary. This ceiling does
-/// not invent content and does not claim the unmeasured surface spectrum is
-/// calibrated; the actual requirement is still derived from the retained
-/// contact path and declared spatial spectrum.
-const CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ: f64 = 18_000.0;
+/// forcing, so the existing reconstruction filter retains an 18 kHz passband.
+/// Admission independently accounts for the retained contact path, declared
+/// spatial spectrum, and mechanics-force bandwidth authority; this passband
+/// does not itself establish any of those source properties.
+const CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ: f64 = 18_000.0;
 /// Stable caller-ledgered root for animation frame render jobs.
 const CRITIQUE_RENDER_RUN: RunId = RunId(0x4555_4c45_5252_454e);
 /// Stable placement-only seed for the reusable parked render crew.
@@ -6862,6 +6861,11 @@ fn resolved_contact_drive_bandwidth_hz(
     const CONTROL_ENDPOINT_MARGIN: f64 = 1.05;
     let disc_cycles = f64::from(maximum_surface_cycle(&mechanics.disc_surface));
     let support_cycles = f64::from(maximum_surface_cycle(&mechanics.support_surface));
+    let maximum_control_interval_duration_s = controls
+        .audio()
+        .iter()
+        .map(|interval| interval.duration_s)
+        .fold(0.0_f64, f64::max);
     let mut maximum_disc_hz = 0.0_f64;
     let mut maximum_support_hz = 0.0_f64;
     let mut previous: Option<&crate::VisualizationControlPoint> = None;
@@ -6896,20 +6900,50 @@ fn resolved_contact_drive_bandwidth_hz(
         }
         previous = Some(current);
     }
-    let derived_hz = CRITIQUE_LEGACY_AUDIO_SOURCE_BANDWIDTH_HZ.max(
-        CONTROL_ENDPOINT_MARGIN
-            * (disc_cycles * maximum_disc_hz).max(support_cycles * maximum_support_hz),
-    );
-    if !(derived_hz.is_finite()
-        && derived_hz > 0.0
-        && derived_hz <= CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ)
+    let surface_path_requirement_hz = CONTROL_ENDPOINT_MARGIN
+        * (disc_cycles * maximum_disc_hz).max(support_cycles * maximum_support_hz);
+    admit_physical_force_bandwidth(
+        surface_path_requirement_hz,
+        maximum_control_interval_duration_s,
+    )
+}
+
+fn admit_physical_force_bandwidth(
+    surface_path_requirement_hz: f64,
+    maximum_control_interval_duration_s: f64,
+) -> Result<f64, CinematicFixtureError> {
+    if !(surface_path_requirement_hz.is_finite()
+        && surface_path_requirement_hz >= 0.0
+        && maximum_control_interval_duration_s.is_finite()
+        && maximum_control_interval_duration_s > 0.0)
     {
+        return Err(CinematicFixtureError::Pipeline(
+            "physical contact-drive bandwidth inputs are invalid source data".into(),
+        ));
+    }
+    // Interval force measures do not prove a sub-Nyquist spectrum. Until their
+    // producer supplies such authority, admission must reserve the entire
+    // discrete source band independently of any smooth spatial surface model.
+    let mechanics_force_requirement_hz = 0.5 / maximum_control_interval_duration_s;
+    if !mechanics_force_requirement_hz.is_finite() {
+        return Err(CinematicFixtureError::Pipeline(
+            "physical contact-drive source-grid Nyquist is not finite".into(),
+        ));
+    }
+    let required_hz = surface_path_requirement_hz.max(mechanics_force_requirement_hz);
+    if required_hz > CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ {
         return Err(CinematicFixtureError::Pipeline(format!(
-            "resolved contact-drive bandwidth {derived_hz:.6} Hz exceeds the admitted {:.6} Hz physical-audio passband",
-            CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ,
+            concat!(
+                "physical contact force has no certified sub-Nyquist band limit: ",
+                "source-grid Nyquist requires {mechanics_force_requirement_hz:.6} Hz and ",
+                "the surface path requires {surface_path_requirement_hz:.6} Hz, but the ",
+                "physical-audio reconstruction passband admits only {:.6} Hz; provide ",
+                "mechanics-derived band-limit authority before reconstruction"
+            ),
+            CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ,
         )));
     }
-    Ok(derived_hz)
+    Ok(required_hz)
 }
 
 fn map_all_audio_intervals(
@@ -6974,11 +7008,10 @@ fn fixture_reconstruction_filter_spec() -> AudioReconstructionFilterSpec {
 
 fn fixture_physical_reconstruction_filter_spec() -> AudioReconstructionFilterSpec {
     AudioReconstructionFilterSpec {
-        // The physical contact force is reconstructed directly from the 48 kHz
-        // control measure onto the 48 kHz sound master. Retain the resolved
-        // low-inclination surface drive while leaving a 2 kHz transition band
-        // before Nyquist; admission measures the actual response below.
-        passband_edge_hz: CRITIQUE_MAXIMUM_PHYSICAL_CONTACT_DRIVE_BANDWIDTH_HZ,
+        // This existing 18/22 kHz design leaves a 2 kHz transition before the
+        // 48 kHz master's Nyquist. Source admission separately requires a
+        // mechanics-derived band limit that fits this passband.
+        passband_edge_hz: CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ,
         stopband_edge_hz: 22_000.0,
         half_length: 128,
         maximum_passband_ripple_db: 0.1,
@@ -10680,6 +10713,26 @@ mod tests {
         assert_eq!(config.canonical_media_source, None);
         assert_eq!(config.render_sample_ceiling(), config.samples_per_pixel);
         assert_eq!(config.mechanics.sample_rate_hz, 1_536_000);
+    }
+
+    #[test]
+    fn g0_smooth_48khz_force_without_bandlimit_refuses_18khz_passband() {
+        let config = CinematicFixtureConfig::default();
+        assert!(matches!(
+            config.mechanics.initial_motion,
+            CinematicInitialMotionConfig::SmallAngleNoSlip { inclination_rad }
+                if inclination_rad.to_bits() == 0.12_f64.to_bits()
+        ));
+        assert_eq!(maximum_surface_cycle(&config.mechanics.disc_surface), 0);
+        assert_eq!(maximum_surface_cycle(&config.mechanics.support_surface), 0);
+
+        let error =
+            admit_physical_force_bandwidth(0.0, f64::from(SOUND_MASTER_SAMPLE_RATE_HZ).recip())
+                .expect_err("an uncertified force stream requires its full 24 kHz source band");
+        let message = error.to_string();
+        assert!(message.contains("source-grid Nyquist requires 24000.000000 Hz"));
+        assert!(message.contains("passband admits only 18000.000000 Hz"));
+        assert!(message.contains("provide mechanics-derived band-limit authority"));
     }
 
     #[test]

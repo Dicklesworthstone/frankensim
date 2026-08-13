@@ -1347,6 +1347,13 @@ bandwidth declaration, and output value. This prevents a mechanics update clock
 from becoming an acoustic tone while avoiding any Euler-object, material-name,
 or modal-family preset in the reconstruction layer.
 
+The cinematic physical fixture does not treat a smooth or empty surface spectrum
+as a bandwidth certificate for the coupled normal-force and base response. An
+interval-measure force stream without producer-supplied band-limit authority is
+admitted only against its full conservative source-grid Nyquist. Consequently,
+the current 48 kHz force grid refuses the fixture's 18 kHz reconstruction
+passband; no physical listening master is claimed until that authority exists.
+
 `AudioResamplingCrop` is the only admitted way to publish a nonzero-offset
 subrange while preserving that global boundary condition. Its half-open source
 range must begin and end on exact video/audio alignment markers, must fit the
