@@ -10,15 +10,15 @@ use fs_adjoint::verify_gradient;
 use fs_conduction::adjoint::ConductivityDesign;
 use fs_conduction::assemble::{DofMap, residual};
 use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
+use fs_conduction::duty::{
+    DutyCycle, DutySegment, march_duty_cycle, march_duty_cycle_with_element_materials,
+};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::material::{
     ConductivityModel, ConductivityTable, ElementMaterials, MaterialId, MaterialTable,
 };
 use fs_conduction::mesh::ConductionMesh;
-use fs_conduction::duty::{
-    DutyCycle, DutySegment, march_duty_cycle, march_duty_cycle_with_element_materials,
-};
 use fs_conduction::transient::{
     FinalStateFunctional, TransientConfig, TransientProblem, VolumetricHeatCapacity, march,
     march_with_element_materials, source_scale_gradient,
@@ -2285,17 +2285,16 @@ fn assigned_one_material_duty_matches_the_uniform_march() {
     .expect("assign");
     let initial = vec![300.0; mesh.vertex_count()];
     let cycle = hold_cycle(8.0);
-    let problem = |k: &ConductivityModel| TransientProblem {
-        mesh: &mesh,
-        boundary: &boundary,
-        material: k,
-        source: &source,
-        capacity,
-    };
     let assigned_sol = with_cx(|cx| {
         march_duty_cycle_with_element_materials(
             cx,
-            problem(&fallback),
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &fallback,
+                source: &source,
+                capacity,
+            },
             &assigned,
             &transient_linear(),
             &cycle,
@@ -2308,7 +2307,13 @@ fn assigned_one_material_duty_matches_the_uniform_march() {
     let uniform_sol = with_cx(|cx| {
         march_duty_cycle(
             cx,
-            problem(&material),
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+                capacity,
+            },
             &transient_linear(),
             &cycle,
             1.0,
