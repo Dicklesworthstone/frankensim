@@ -315,7 +315,7 @@ fn base_port() -> ReducedBasePort {
             timestep_s: 1.0e-6,
             steps: 1,
         },
-        4,
+        8,
     )
     .expect("synthetic base port")
 }
@@ -1589,10 +1589,10 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
                 penetrated_state,
                 NormalPatchEmbedState::new(0.0, 1.0).expect("normal checkpoint"),
                 GasChannelState::ExteriorFreeGas(
-                    EulerExternalAirWorkState::new("synthetic/exterior-work", 4)
+                    EulerExternalAirWorkState::new("synthetic/exterior-work", 8)
                         .expect("air checkpoint"),
                 ),
-                4,
+                8,
                 cx,
             )
             .expect("profile-native production initialization");
