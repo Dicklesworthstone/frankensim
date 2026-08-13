@@ -8,7 +8,8 @@
 use fs_math::c64::C64;
 use fs_phs::{
     PhsError, PortHamiltonian, QuadraticStorage, Storage, discrete_gradient, duffing_oscillator,
-    interconnect, lc_ladder, mass_spring_damper, modal_bank, reduce_galerkin, step,
+    helmholtz_resonator, interconnect, lc_ladder, mass_spring_damper, modal_bank, reduce_galerkin,
+    step,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -218,6 +219,26 @@ fn monolithic_msd_pair(
     let g = vec![]; // no external ports after pairing
     let storage = Box::new(QuadraticStorage::new(q, n).expect("q"));
     PortHamiltonian::new(n, 0, j, r, g, storage).expect("monolithic")
+}
+
+#[test]
+fn helmholtz_resonator_interconnects_with_a_modal_bank() {
+    let cavity = helmholtz_resonator(0.0135, 0.043, 0.02, 1.2, 343.0, 0.0).expect("helmholtz");
+    let plate = modal_bank(&[2.0e3], &[0.0], &[1.0]).expect("plate");
+    let coupled = interconnect(plate, cavity, &[(0, 0)]).expect("plate+cavity");
+    assert_eq!(coupled.state_dim(), 4);
+    assert_eq!(coupled.port_dim(), 0);
+    let mut x = vec![1.0e-4, 0.0, 0.0, 0.0];
+    let h0 = coupled.hamiltonian(&x);
+    for _ in 0..200 {
+        x = step(&coupled, &x, &[], 1.0e-5).expect("step").x;
+    }
+    let h1 = coupled.hamiltonian(&x);
+    assert!(
+        (h1 - h0).abs() <= 1.0e-8 * h0.abs().max(1.0e-18),
+        "lossless plate+cavity must hold H ({h1} vs {h0})"
+    );
+    assert!(helmholtz_resonator(0.0, 0.01, 0.01, 1.2, 343.0, 0.0).is_err());
 }
 
 #[test]

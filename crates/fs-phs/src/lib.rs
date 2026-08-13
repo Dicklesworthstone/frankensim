@@ -914,6 +914,86 @@ pub fn mass_spring_damper(m: f64, k: f64, c: f64) -> Result<PortHamiltonian, Phs
     PortHamiltonian::new(2, 1, j, r, g, storage)
 }
 
+/// Lumped Helmholtz resonator as a 1-DOF acoustic pHS.
+///
+/// Acoustic mass `ρ L_eff / S` and compliance `V / (ρ c²)` with the
+/// unflanged end correction `L_eff = L + 2 (8/3π) a`. State is
+/// volume displacement and its momentum; the port is pressure
+/// (effort) × volume velocity (flow). A bottle, a vented enclosure,
+/// and a Helmholtz cavity are the same object.
+///
+/// # Errors
+/// Admission errors on non-physical geometry or gas.
+pub fn helmholtz_resonator(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    resistance: f64,
+) -> Result<PortHamiltonian, PhsError> {
+    let (m_ac, stiffness, resistance) =
+        helmholtz_parts(volume, neck_radius, neck_length, density, sound_speed, resistance)?;
+    mass_spring_damper(m_ac, stiffness, resistance)
+}
+
+/// Flow-driven dual of [`helmholtz_resonator`]: `u` is injected
+/// volume velocity, `y` is cavity pressure. A plate monopole dumps
+/// `A v` into this port and reads `p` back.
+///
+/// # Errors
+/// Same admission as [`helmholtz_resonator`].
+pub fn helmholtz_resonator_flow(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    resistance: f64,
+) -> Result<PortHamiltonian, PhsError> {
+    let (m_ac, stiffness, resistance) =
+        helmholtz_parts(volume, neck_radius, neck_length, density, sound_speed, resistance)?;
+    let q = vec![stiffness, 0.0, 0.0, 1.0 / m_ac];
+    let storage = Box::new(QuadraticStorage::new(q, 2)?);
+    let j = vec![0.0, 1.0, -1.0, 0.0];
+    let r = vec![0.0, 0.0, 0.0, resistance];
+    let g = vec![1.0, 0.0];
+    PortHamiltonian::new(2, 1, j, r, g, storage)
+}
+
+fn helmholtz_parts(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    resistance: f64,
+) -> Result<(f64, f64, f64), PhsError> {
+    if !(volume > 0.0
+        && neck_radius > 0.0
+        && neck_length >= 0.0
+        && density > 0.0
+        && sound_speed > 0.0
+        && resistance >= 0.0
+        && volume.is_finite()
+        && neck_radius.is_finite()
+        && neck_length.is_finite()
+        && density.is_finite()
+        && sound_speed.is_finite()
+        && resistance.is_finite())
+    {
+        return Err(PhsError::NotPsd {
+            what: "helmholtz resonator parameters",
+        });
+    }
+    let pi = core::f64::consts::PI;
+    let area = pi * neck_radius * neck_radius;
+    let l_eff = neck_length + 2.0 * (8.0 / (3.0 * pi)) * neck_radius;
+    let m_ac = density * l_eff / area;
+    let c_ac = volume / (density * sound_speed * sound_speed);
+    Ok((m_ac, 1.0 / c_ac, resistance))
+}
+
 /// Lossless LC ladder (discrete transmission line) with `cells` LC
 /// cells: states alternate `[q_1, phi_1, q_2, phi_2, ...]` with
 /// `H = sum q^2/(2C) + phi^2/(2L)`; the port drives the first cell.
