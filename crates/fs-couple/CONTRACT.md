@@ -248,9 +248,17 @@ clarinet is one filling of those objects.
 - Bow: MWS regularized friction (steep stiction ramp + falling kinetic
   shoulder). Helmholtz motion is possible with enough modes; it is not
   guaranteed and not a measured rosin curve.
-- Reed path: quasistatic or massive beating Bernoulli valve on a
-  fractional-delay `2L/c` loop whose gain and one-pole loss come from
-  AllRegime TMM. Self-oscillation is the product.
+- Reed path: quasistatic or massive Bernoulli valve on a causal
+  TMM driving-point (`driving_point::characteristic_line`, loop
+  gain pinned at the quarter-wave). Delay ⊕ one-pole is the
+  identification fallback. Reed lay is `fs-dcontact` (not a private
+  Hunt–Crossley).
+- `ThinPlate` modes come from `fs-plate` + `fs-modal` (certified
+  eigenpairs), not caller Hertz. Mouth pressure × area drives the
+  plate; plate volume velocity returns to the waveguide
+  (structure–bore).
+- String obstacles are `fs-dcontact` power-law potentials on sine
+  collocation.
 - Duct path without reed: `p(t) = IFFT[H(ω) U(ω)]` with AllRegime
   viscothermal losses (Poiseuille below the wide-tube floor — never
   lossless fallback). Tone holes are compact TMM shunts. Unflanged-open
@@ -418,12 +426,13 @@ determinism.
 ## No-claim boundaries
 
 - `acoustic_realize` is a composed description→waveform, not a named
-  instrument product and not a 3D jet. Reed is quasistatic (no reed-mass
-  ODE). Bow is regularized friction, not measured rosin or Helmholtz
-  motion-guaranteed. Soundboard is one driven mode, not a von Karman
-  plate or BEM body. String and duct still superpose linearly — there
-  is no structure–bore feedback. 3D broadband flute-noise remains a
-  no-claim. WAV encoding is a physical-scale dump, not mastering.
+  instrument product and not a 3D jet. Bow is regularized friction, not
+  measured rosin or Helmholtz-guaranteed. A `ThinPlate` is DKT +
+  certified modes + compact monopoles, not a von Karman shell or a
+  BEM body. Simultaneous string+duct+plate still evolves the plate
+  sequentially (string then duct), not as one three-way Dirac
+  interconnection. 3D broadband jet noise remains a no-claim. WAV
+  encoding is a physical-scale dump, not mastering.
 - `vibroacoustic` is frequency-domain only: time-domain realization is
   the vector-fitting bead's scope; non-rectangular cavity bases beyond
   the lumped Helmholtz mode arrive through the same `CavityModes`

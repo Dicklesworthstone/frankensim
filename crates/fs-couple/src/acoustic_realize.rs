@@ -12,6 +12,8 @@ use crate::modal_acoustic_time::{
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::realize_reed_bore;
 use crate::stribeck_friction::StribeckFriction;
+use crate::thin_plate::{CompactBody, certified_radiators};
+use crate::unilateral_contact::modal_contact_forces;
 use fs_duct::{
     Duct, DuctError, HoleState, LossModel, MAX_RADIATION_KA, Segment, Termination, input_impedance,
 };
@@ -24,7 +26,8 @@ use fs_nlmodal::{KcStringParams, assemble, kirchhoff_carrier_string, prestressed
 use fs_phs::step;
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, Pluck, PrestressedString, RadiatingPlate,
-    RayleighParams, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+    RayleighParams, ThinPlate, UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse,
+    WaveguideEnd,
 };
 
 /// Typed realization refusal.
@@ -109,6 +112,7 @@ pub fn realize_assembly(
     let gas = gas_state(assembly.ambient)?;
     let n = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     let mut pressure_pa = vec![0.0; n];
+    let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
     if let Some(string) = assembly.string {
         if assembly.pluck.is_none() && assembly.bow.is_none() {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -119,8 +123,8 @@ pub fn realize_assembly(
             string,
             assembly.pluck,
             assembly.bow,
-            assembly.soundboard,
-            &assembly.body_modes,
+            &mut bodies,
+            &assembly.obstacles,
             &gas,
             assembly.listener.distance_m,
             assembly.sample_rate_hz,
@@ -130,14 +134,30 @@ pub fn realize_assembly(
     }
     if let Some(duct) = assembly.duct.as_ref() {
         let hist = if let Some(reed) = assembly.reed {
-            realize_reed_on_duct(duct, reed, &gas, assembly.sample_rate_hz, n)?
+            realize_reed_on_duct(
+                duct,
+                reed,
+                &mut bodies,
+                &gas,
+                assembly.listener.distance_m,
+                assembly.sample_rate_hz,
+                n,
+            )?
         } else {
             let blow = assembly
                 .blow
                 .ok_or(AcousticRealizeError::InvalidDescription {
                     what: "a duct member requires a volume-velocity pulse or a reed",
                 })?;
-            realize_blown_duct(duct, blow, &gas, assembly.sample_rate_hz, n)?
+            realize_blown_duct(
+                duct,
+                blow,
+                &mut bodies,
+                &gas,
+                assembly.listener.distance_m,
+                assembly.sample_rate_hz,
+                n,
+            )?
         };
         add_in_place(&mut pressure_pa, &hist);
     }
@@ -234,8 +254,8 @@ fn realize_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
-    soundboard: Option<RadiatingPlate>,
-    body_modes: &[RadiatingPlate],
+    plates: &mut [CompactBody],
+    obstacles: &[UnilateralObstacle],
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
@@ -247,8 +267,8 @@ fn realize_string(
             string,
             pluck,
             bow,
-            soundboard,
-            body_modes,
+            plates,
+            obstacles,
             gas,
             listener_m,
             sample_rate_hz,
@@ -260,8 +280,8 @@ fn realize_string(
             string,
             pluck,
             bow,
-            soundboard,
-            body_modes,
+            plates,
+            obstacles,
             gas,
             listener_m,
             sample_rate_hz,
@@ -278,7 +298,7 @@ fn realize_string(
                 twin,
                 pluck,
                 bow,
-                None,
+                &mut [],
                 &[],
                 gas,
                 listener_m,
@@ -291,7 +311,7 @@ fn realize_string(
                 twin,
                 pluck,
                 bow,
-                None,
+                &mut [],
                 &[],
                 gas,
                 listener_m,
@@ -354,8 +374,8 @@ fn realize_linear_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
-    soundboard: Option<RadiatingPlate>,
-    body_modes: &[RadiatingPlate],
+    plates: &mut [CompactBody],
+    obstacles: &[UnilateralObstacle],
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
@@ -404,7 +424,6 @@ fn realize_linear_string(
     model
         .restore_states(&states)
         .map_err(AcousticRealizeError::Modal)?;
-    let mut plates = plate_bank(soundboard, body_modes)?;
     let mut out = Vec::with_capacity(n);
     let dt = 1.0 / f64::from(sample_rate_hz);
     for _ in 0..n {
@@ -421,6 +440,18 @@ fn realize_linear_string(
                 *f = f_bow * *phi;
             }
         }
+        if !obstacles.is_empty() {
+            let x: Vec<f64> = model
+                .states()
+                .iter()
+                .flat_map(|s| [s.displacement_m_sqrt_kg, s.velocity_m_sqrt_kg_per_s])
+                .collect();
+            let extra = modal_contact_forces(string, obstacles, &x)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            for (f, c) in force.iter_mut().zip(extra) {
+                *f += c;
+            }
+        }
         let frame = model.step(&force).map_err(AcousticRealizeError::Modal)?;
         let mut p = frame.observer_pressure_pa;
         if !plates.is_empty() {
@@ -430,7 +461,7 @@ fn realize_linear_string(
                 .map(|s| s.displacement_m_sqrt_kg / mass_scale)
                 .collect();
             let fb = bridge_force(string, &q_phys);
-            for plate in &mut plates {
+            for plate in plates.iter_mut() {
                 p += plate.drive_and_radiate(fb, dt, gas.density, listener_m);
             }
         }
@@ -444,8 +475,8 @@ fn realize_kc_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
-    soundboard: Option<RadiatingPlate>,
-    body_modes: &[RadiatingPlate],
+    plates: &mut [CompactBody],
+    obstacles: &[UnilateralObstacle],
     gas: &GasState,
     listener_m: f64,
     sample_rate_hz: u32,
@@ -490,7 +521,6 @@ fn realize_kc_string(
         }
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut plates = plate_bank(soundboard, body_modes)?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let u = if let Some(bow) = bow {
@@ -507,6 +537,13 @@ fn realize_kc_string(
         let rec =
             step(&sys, &x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         x = rec.x;
+        if !obstacles.is_empty() {
+            let extra = modal_contact_forces(string, obstacles, &x)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            for k in 0..string.n_modes {
+                x[2 * k + 1] += dt * extra[k];
+            }
+        }
         let mut p = 0.0;
         let mut q_phys = vec![0.0; string.n_modes];
         for k in 0..string.n_modes {
@@ -523,7 +560,7 @@ fn realize_kc_string(
         }
         if !plates.is_empty() {
             let fb = bridge_force(string, &q_phys);
-            for plate in &mut plates {
+            for plate in plates.iter_mut() {
                 p += plate.drive_and_radiate(fb, dt, gas.density, listener_m);
             }
         }
@@ -551,13 +588,17 @@ fn bow_force(bow: BowStroke, v_string: f64) -> f64 {
 fn plate_bank(
     soundboard: Option<RadiatingPlate>,
     extra: &[RadiatingPlate],
-) -> Result<Vec<PlateState>, AcousticRealizeError> {
-    let mut out = Vec::with_capacity(extra.len() + 1);
+    plate: Option<ThinPlate>,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    let mut out = Vec::new();
+    if let Some(mesh) = plate {
+        out.extend(certified_radiators(mesh)?);
+    }
     if let Some(spec) = soundboard {
-        out.push(PlateState::new(spec)?);
+        out.push(CompactBody::from_radiator(spec)?);
     }
     for &spec in extra {
-        out.push(PlateState::new(spec)?);
+        out.push(CompactBody::from_radiator(spec)?);
     }
     Ok(out)
 }
@@ -576,46 +617,12 @@ fn bridge_force(string: PrestressedString, q_phys: &[f64]) -> f64 {
     t_eff * slope
 }
 
-struct PlateState {
-    spec: RadiatingPlate,
-    omega: f64,
-    y: f64,
-    v: f64,
-}
-
-impl PlateState {
-    fn new(spec: RadiatingPlate) -> Result<Self, AcousticRealizeError> {
-        if !(spec.area_m2 > 0.0
-            && spec.mass_kg > 0.0
-            && spec.frequency_hz > 0.0
-            && spec.damping_ratio >= 0.0)
-        {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "soundboard parameters must be physical",
-            });
-        }
-        Ok(Self {
-            spec,
-            omega: core::f64::consts::TAU * spec.frequency_hz,
-            y: 0.0,
-            v: 0.0,
-        })
-    }
-
-    fn drive_and_radiate(&mut self, force_n: f64, dt: f64, rho: f64, listener_m: f64) -> f64 {
-        let acc = force_n / self.spec.mass_kg
-            - 2.0 * self.spec.damping_ratio * self.omega * self.v
-            - self.omega * self.omega * self.y;
-        self.v += dt * acc;
-        self.y += dt * self.v;
-        rho * self.spec.area_m2 * acc / (4.0 * core::f64::consts::PI * listener_m)
-    }
-}
-
 fn realize_reed_on_duct(
     duct: &ViscothermalDuct,
     reed: BeatingReed,
+    plates: &mut [CompactBody],
     gas: &GasState,
+    listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
@@ -625,13 +632,24 @@ fn realize_reed_on_duct(
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
-    realize_reed_bore(&physics, gas, reed, termination, sample_rate_hz, n)
+    realize_reed_bore(
+        &physics,
+        gas,
+        reed,
+        termination,
+        plates,
+        listener_m,
+        sample_rate_hz,
+        n,
+    )
 }
 
 fn realize_blown_duct(
     duct: &ViscothermalDuct,
     blow: VolumeVelocityPulse,
+    plates: &mut [CompactBody],
     gas: &GasState,
+    listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
@@ -646,6 +664,18 @@ fn realize_blown_duct(
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
+    if !plates.is_empty() {
+        return realize_blown_with_body(
+            &physics,
+            blow,
+            plates,
+            gas,
+            termination,
+            listener_m,
+            sample_rate_hz,
+            n,
+        );
+    }
     let n_fft = n.next_power_of_two();
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut drive = vec![0.0; n_fft];
@@ -679,6 +709,76 @@ fn realize_blown_duct(
     }
     fft.inverse(&mut buf, &mut scratch);
     Ok(buf[..n].iter().map(|c| c.re).collect())
+}
+
+fn realize_blown_with_body(
+    physics: &Duct,
+    blow: VolumeVelocityPulse,
+    plates: &mut [CompactBody],
+    gas: &GasState,
+    termination: Termination,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+) -> Result<Vec<f64>, AcousticRealizeError> {
+    use crate::driving_point::characteristic_line;
+    use crate::traveling_wave_line::TravelingWaveLine;
+    let inlet_r = physics
+        .segments
+        .first()
+        .ok_or(AcousticRealizeError::InvalidDescription {
+            what: "duct has no segments",
+        })?
+        .outlet_radius();
+    let area = core::f64::consts::PI * inlet_r * inlet_r;
+    let zc = gas.density * gas.sound_speed / area;
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    let mut fitted = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc).ok();
+    let mut delay = if fitted.is_none() {
+        Some(
+            TravelingWaveLine::from_duct(physics, gas, termination, sample_rate_hz, n, zc)
+                .map_err(|e| match e {
+                    crate::traveling_wave_line::TravelingWaveError::Invalid { what } => {
+                        AcousticRealizeError::Reed { what }
+                    }
+                    crate::traveling_wave_line::TravelingWaveError::Duct(d) => {
+                        AcousticRealizeError::Duct(d)
+                    }
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut out = vec![0.0; n];
+    for i in 0..n {
+        let t = i as f64 * dt;
+        let u_blow = if t < blow.duration_s {
+            blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+        } else {
+            0.0
+        };
+        let u_body: f64 = plates.iter().map(CompactBody::volume_velocity).sum();
+        let p_minus = if let Some(line) = fitted.as_ref() {
+            line.incoming()
+        } else {
+            delay.as_ref().expect("line").incoming()
+        };
+        let p_plus = p_minus + zc * (u_blow + u_body);
+        let p_minus_now = if let Some(line) = fitted.as_mut() {
+            line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+                what: "characteristic line left the finite set",
+            })?
+        } else {
+            delay.as_mut().expect("line").push(p_plus)
+        };
+        let p_bore = p_plus + p_minus_now;
+        let mut p_obs = p_bore;
+        for plate in plates.iter_mut() {
+            p_obs += plate.drive_and_radiate(p_bore * area, dt, gas.density, listener_m);
+        }
+        out[i] = p_obs;
+    }
+    Ok(out)
 }
 
 fn physics_duct(duct: &ViscothermalDuct) -> Result<Duct, AcousticRealizeError> {

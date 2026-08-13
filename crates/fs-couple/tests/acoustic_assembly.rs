@@ -7,8 +7,8 @@ use fs_couple::acoustic_realize::{
 use fs_couple::pcm_wav::{WavError, encode_pcm16_wav};
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, CylinderSegment, Listener, Pluck,
-    PrestressedString, RadiatingPlate, ToneHole, ViscothermalDuct, VolumeVelocityPulse,
-    WaveguideEnd,
+    PrestressedString, RadiatingPlate, ThinPlate, ToneHole, UnilateralObstacle, ViscothermalDuct,
+    VolumeVelocityPulse, WaveguideEnd,
 };
 
 fn empty_base() -> AcousticAssembly {
@@ -22,6 +22,8 @@ fn empty_base() -> AcousticAssembly {
         reed: None,
         soundboard: None,
         body_modes: vec![],
+        plate: None,
+        obstacles: vec![],
         listener: Listener { distance_m: 1.0 },
         sample_rate_hz: 8_000,
         duration_s: 0.06,
@@ -494,4 +496,77 @@ fn bowed_rich_spectrum_has_even_partials() {
     });
     let out = realize_assembly(&a).expect("bow helmholtz");
     assert!(peak_abs(&out.pressure_pa) > 1.0e-3);
+}
+
+fn steel_panel() -> ThinPlate {
+    ThinPlate {
+        length_m: 0.20,
+        width_m: 0.15,
+        thickness_m: 0.002,
+        density_kg_m3: 7800.0,
+        e1_pa: 200e9,
+        e2_pa: 200e9,
+        nu12: 0.3,
+        g12_pa: 200e9 / (2.0 * 1.3),
+        damping_ratio: 0.02,
+        n_modes: 2,
+    }
+}
+
+#[test]
+fn certified_plate_radiates_without_named_hertz() {
+    let bare = plucked(80.0, 0.006, 0.003);
+    let mut with = bare.clone();
+    with.plate = Some(steel_panel());
+    let a = realize_assembly(&bare).expect("bare");
+    let b = realize_assembly(&with).expect("plate");
+    assert!(
+        peak_abs(&b.pressure_pa) > peak_abs(&a.pressure_pa),
+        "a certified plate must add observer pressure"
+    );
+}
+
+#[test]
+fn taut_span_obstacle_changes_the_waveform() {
+    let bare = plucked(80.0, 0.006, 0.008);
+    let mut rattle = bare.clone();
+    rattle.obstacles = vec![UnilateralObstacle {
+        stations: vec![0.25, 0.5, 0.75],
+        gaps_m: vec![0.001, 0.001, 0.001],
+        stiffness: 5.0e5,
+        alpha: 2.0,
+        provenance: "fixture/stay".into(),
+    }];
+    let a = realize_assembly(&bare).expect("bare");
+    let b = realize_assembly(&rattle).expect("rattle");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-6, "an obstacle must change the string waveform");
+}
+
+#[test]
+fn mouth_pressure_drives_the_plate_back_into_the_duct() {
+    let mut thin = closed_duct(288.15);
+    thin.duration_s = 0.06;
+    thin.plate = Some(steel_panel());
+    let mut thick = thin.clone();
+    if let Some(p) = thick.plate.as_mut() {
+        p.thickness_m *= 2.0;
+    }
+    let a = realize_assembly(&thin).expect("thin panel");
+    let b = realize_assembly(&thick).expect("thick panel");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "a different plate termination must change the mouth pressure"
+    );
 }

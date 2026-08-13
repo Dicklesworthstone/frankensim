@@ -1,15 +1,24 @@
-//! Compose a [`BernoulliAperture`] onto a [`TravelingWaveLine`].
+//! Compose a [`BernoulliAperture`] onto a characteristic line.
 //!
-//! A clarinet reed on a bore is one filling of that composition.
-//! Vocal folds, lip reeds, and relief valves are the same objects.
+//! The time port is a fitted TMM driving-point
+//! ([`crate::driving_point`]) with loop gain pinned at the
+//! quarter-wave; delay ⊕ one-pole is the fallback if identification
+//! refuses. Reed lay is an [`fs_dcontact`] obstacle, not a private
+//! Hunt–Crossley. Vocal folds, lip reeds, and relief valves are the
+//! same objects.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
+use crate::driving_point::characteristic_line;
+use crate::thin_plate::CompactBody;
 use crate::traveling_wave_line::{TravelingWaveError, TravelingWaveLine};
+use crate::unilateral_contact::{slit_contact_force, slit_lay};
+use fs_dcontact::Obstacle;
 use fs_duct::{Duct, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
 use fs_scenario::BeatingReed;
+use fs_vfit::discretize::DelayedFilter;
 
 /// Realize mouthpiece pressure from a beating reed on a TMM bore.
 ///
@@ -20,6 +29,8 @@ pub fn realize_reed_bore(
     gas: &GasState,
     reed: BeatingReed,
     termination: Termination,
+    plates: &mut [CompactBody],
+    listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
@@ -45,31 +56,104 @@ pub fn realize_reed_bore(
         .outlet_radius();
     let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area_bore;
-    let mut line = TravelingWaveLine::from_duct(physics, gas, termination, sample_rate_hz, n, zc)
-        .map_err(map_line)?;
+    let mut line = CharLine::open(physics, gas, termination, sample_rate_hz, n, zc)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut reed_y = reed.rest_opening_m;
     let mut reed_v = 0.0;
+    let lay = if reed.mass_kg > 0.0 {
+        Some(
+            slit_lay(1.0e7 * reed.width_m, 2.0)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
+        )
+    } else {
+        None
+    };
     let mut p_bore_hist = vec![0.0; n];
     let mut p_plus_prev = 5.0;
-    let _ = line.push(p_plus_prev);
+    let _ = line.push(p_plus_prev)?;
     for i in 0..n {
         let p_m = blowing_envelope(reed, i as f64 * dt);
         let p_minus = line.incoming();
+        let u_body: f64 = plates.iter().map(CompactBody::volume_velocity).sum();
         let p_plus = if reed.mass_kg > 0.0 {
-            let (pp, y, v) =
-                step_massive_reed(reed, gas.density, zc, p_minus, p_m, reed_y, reed_v, dt)?;
+            let (pp, y, v) = step_massive_reed(
+                reed,
+                gas.density,
+                zc,
+                p_minus,
+                p_m,
+                reed_y,
+                reed_v,
+                dt,
+                u_body,
+                lay.as_ref(),
+            )?;
             reed_y = y;
             reed_v = v;
             pp
         } else {
-            solve_reed_wave(reed, gas.density, zc, 0.0, p_minus, p_m, p_plus_prev)?
+            solve_reed_wave(
+                reed,
+                gas.density,
+                zc,
+                0.0,
+                p_minus,
+                p_m,
+                p_plus_prev,
+                u_body,
+            )?
         };
         p_plus_prev = p_plus;
-        let p_minus_now = line.push(p_plus);
-        p_bore_hist[i] = p_plus + p_minus_now;
+        let p_minus_now = line.push(p_plus)?;
+        let p_bore = p_plus + p_minus_now;
+        let mut p_obs = p_bore;
+        for plate in plates.iter_mut() {
+            p_obs += plate.drive_and_radiate(p_bore * area_bore, dt, gas.density, listener_m);
+        }
+        p_bore_hist[i] = p_obs;
     }
     Ok(p_bore_hist)
+}
+
+enum CharLine {
+    Fitted(DelayedFilter),
+    Delay(TravelingWaveLine),
+}
+
+impl CharLine {
+    fn open(
+        physics: &Duct,
+        gas: &GasState,
+        termination: Termination,
+        sample_rate_hz: u32,
+        n: usize,
+        zc: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        match characteristic_line(physics, gas, termination, sample_rate_hz, n, zc) {
+            Ok(line) => Ok(Self::Fitted(line)),
+            Err(_) => {
+                TravelingWaveLine::from_duct(physics, gas, termination, sample_rate_hz, n, zc)
+                    .map(Self::Delay)
+                    .map_err(map_line)
+            }
+        }
+    }
+
+    fn push(&mut self, outgoing: f64) -> Result<f64, AcousticRealizeError> {
+        match self {
+            Self::Fitted(line) => line.push(outgoing).map_err(|_| AcousticRealizeError::Reed {
+                what: "characteristic filter left the finite set",
+            }),
+            Self::Delay(line) => Ok(line.push(outgoing)),
+        }
+    }
+
+    fn incoming(&self) -> f64 {
+        match self {
+            Self::Fitted(line) => line.incoming(),
+            Self::Delay(line) => line.incoming(),
+        }
+    }
 }
 
 fn map_line(err: TravelingWaveError) -> AcousticRealizeError {
@@ -107,6 +191,8 @@ fn step_massive_reed(
     y: f64,
     v: f64,
     dt: f64,
+    u_body: f64,
+    lay: Option<&Obstacle>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     let face = reed.width_m * 0.025;
     let k = if reed.stiffness_n_m > 0.0 {
@@ -115,21 +201,18 @@ fn step_massive_reed(
         reed.closing_pressure_pa * face / reed.rest_opening_m
     };
     let r_damp = 2.0 * 0.35 * det::sqrt(k * reed.mass_kg);
-    let p_plus = solve_reed_wave(reed, rho, zc, 0.0, p_minus, p_m, 2.0 * p_minus)?;
+    let p_plus = solve_reed_wave(reed, rho, zc, 0.0, p_minus, p_m, 2.0 * p_minus, u_body)?;
     let p_bore = p_plus + p_minus;
     let dp = p_m - p_bore;
     let mut acc = (-k * (y - reed.rest_opening_m) - r_damp * v - face * dp) / reed.mass_kg;
     let mut y1 = y + dt * v;
     let mut v1 = v + dt * acc;
-    if y1 < 0.0 {
-        // Hunt–Crossley beating: k_c |x|^1.5 (1 + 1.5 χ ẋ)
-        let depth = -y1;
-        let kc = 1.0e7 * reed.width_m;
-        let contact = kc * depth.powf(1.5) * (1.0 + 1.5 * 0.6 * v1.max(0.0));
-        acc -= contact / reed.mass_kg;
+    if let Some(obstacle) = lay {
+        let contact = slit_contact_force(obstacle, y1)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        acc += contact / reed.mass_kg;
         v1 = v + dt * acc;
-        y1 = (y + dt * v1).min(0.0);
-        v1 = v1.min(0.0);
+        y1 = y + dt * v1;
     }
     if !y1.is_finite() || !v1.is_finite() {
         return Err(AcousticRealizeError::Reed {
@@ -147,6 +230,7 @@ fn solve_reed_wave(
     p_minus_hist: f64,
     p_m: f64,
     guess: f64,
+    u_body: f64,
 ) -> Result<f64, AcousticRealizeError> {
     let denom = (1.0 - r0).clamp(-0.999, 0.999);
     let closed_plus = p_minus_hist / denom;
@@ -159,20 +243,21 @@ fn solve_reed_wave(
         .max(1.0);
     let mut lo = guess - span;
     let mut hi = guess + span;
-    let mut f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo);
-    let mut f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi);
+    let mut f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo, u_body);
+    let mut f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi, u_body);
     if f_lo * f_hi > 0.0 {
         lo = -span;
         hi = span;
-        f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo);
-        f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi);
+        f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo, u_body);
+        f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi, u_body);
     }
     if f_lo * f_hi > 0.0 {
         let mut best = guess;
-        let mut best_a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, guess).abs();
+        let mut best_a =
+            reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body).abs();
         for k in 0..21 {
             let x = -span + (2.0 * span) * k as f64 / 20.0;
-            let a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, x).abs();
+            let a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, x, u_body).abs();
             if a < best_a {
                 best_a = a;
                 best = x;
@@ -183,7 +268,7 @@ fn solve_reed_wave(
     let mut mid = 0.5 * (lo + hi);
     for _ in 0..48 {
         mid = 0.5 * (lo + hi);
-        let f_mid = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, mid);
+        let f_mid = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, mid, u_body);
         if f_mid.abs() < 1.0e-8 * (1.0 + p_m.abs()) {
             return Ok(mid);
         }
@@ -207,11 +292,12 @@ fn reed_flow_mismatch(
     p_minus_hist: f64,
     p_m: f64,
     p_plus: f64,
+    u_body: f64,
 ) -> f64 {
     let p_minus = p_minus_hist + r0 * p_plus;
     let p_bore = p_plus + p_minus;
     let dp = p_m - p_bore;
     let flow = aperture_of(reed).volume_flow(dp, rho);
     let u_wave = (p_plus - p_minus) / zc;
-    flow - u_wave
+    flow + u_body - u_wave
 }

@@ -34,11 +34,14 @@
 pub mod acoustic_realize;
 pub mod bernoulli_aperture;
 pub mod broadband_radiation;
+pub mod driving_point;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
 pub mod reed_bore;
 pub mod stribeck_friction;
+pub mod thin_plate;
 pub mod traveling_wave_line;
+pub mod unilateral_contact;
 pub mod vibroacoustic;
 
 use core::num::NonZeroUsize;
