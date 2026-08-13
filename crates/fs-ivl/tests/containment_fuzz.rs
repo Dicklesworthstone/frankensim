@@ -23,9 +23,14 @@
 //! Oracle choice, logged per class: the double-double witness (`fs_math::dd`,
 //! error-free two-sum/two-product transforms) — exact for single add/sub/mul
 //! on f64 operands and ~2^-104 for division, far below the 1-ULP outward
-//! nudge under audit. The quarantined MPFR oracle (e03/.3.1) cannot link
-//! into workspace tests by design; elementary-function containment is
-//! covered by the budget-widening audit (.3.5) and the e03 lane instead.
+//! nudge under audit. For the SUBNORMAL class the witness runs in a scaled
+//! frame (operands pre-scaled by an exact 2^600, endpoints compared in the
+//! same frame), because double-double widens the mantissa, not the exponent
+//! — a product of two subnormals underflows inside a naive oracle, a
+//! vacuity this battery's own planted-fault self-check exposed on its first
+//! run. The quarantined MPFR oracle (e03/.3.1) cannot link into workspace
+//! tests by design; elementary-function containment is covered by the
+//! budget-widening audit (.3.5) and the e03 lane instead.
 //!
 //! Fault classes (allocation, worker, I/O, process) are N/A by type: pure
 //! computation, no allocation on the audited path beyond test bookkeeping,
@@ -121,19 +126,22 @@ fn sample_pair(class: Class, stream: &mut Stream) -> (f64, f64) {
     };
     match class {
         Class::Subnormal => {
-            let a = signed(stream, stream.next_u64() & ((1u64 << 52) - 1));
-            let b = signed(stream, stream.next_u64() & ((1u64 << 52) - 1));
+            let ma = stream.next_u64() & ((1u64 << 52) - 1);
+            let a = signed(stream, ma);
+            let mb = stream.next_u64() & ((1u64 << 52) - 1);
+            let b = signed(stream, mb);
             (a, b)
         }
         Class::NearOverflow => {
             let near_max = |s: &mut Stream| {
-                let back = s.next_u64() % 4096;
-                signed(s, f64::MAX.to_bits() - back)
+                let magnitude = f64::MAX.to_bits() - s.next_u64() % 4096;
+                signed(s, magnitude)
             };
             (near_max(stream), near_max(stream))
         }
         Class::Cancellation => {
-            let a = signed(stream, normal_bits(stream));
+            let magnitude = normal_bits(stream);
+            let a = signed(stream, magnitude);
             let offset = stream.next_u64() % 64;
             let b_bits = if stream.next_u64() & 1 == 0 {
                 a.to_bits().wrapping_add(offset)
@@ -149,7 +157,8 @@ fn sample_pair(class: Class, stream: &mut Stream) -> (f64, f64) {
             } else {
                 -0.0
             };
-            let other = signed(stream, normal_bits(stream));
+            let magnitude = normal_bits(stream);
+            let other = signed(stream, magnitude);
             if stream.next_u64() & 1 == 0 {
                 (zero, other)
             } else {
@@ -170,10 +179,13 @@ fn sample_pair(class: Class, stream: &mut Stream) -> (f64, f64) {
             };
             (pow2_near(stream), pow2_near(stream))
         }
-        Class::GeneralNormal => (
-            signed(stream, normal_bits(stream)),
-            signed(stream, normal_bits(stream)),
-        ),
+        Class::GeneralNormal => {
+            let ma = normal_bits(stream);
+            let a = signed(stream, ma);
+            let mb = normal_bits(stream);
+            let b = signed(stream, mb);
+            (a, b)
+        }
     }
 }
 
@@ -229,6 +241,40 @@ fn dd_contains(iv: Interval, v: Dd) -> bool {
     above_lo && below_hi
 }
 
+/// Class-aware containment check. For the subnormal class the plain dd
+/// witness is VACUOUS for products: double-double widens the mantissa, not
+/// the exponent, so a product of two subnormals underflows inside the
+/// oracle itself (this battery's own planted-fault self-check exposed
+/// that). The repair is exact power-of-two rescaling: operands are scaled
+/// by 2^600 (exact), the witness is computed in the normal range, and the
+/// result endpoints are compared inside the same scaled frame (endpoint
+/// scaling by a power of two is exact while finite).
+fn contained(class: Class, op: OpKind, result: Interval, pa: f64, pb: f64) -> bool {
+    if class != Class::Subnormal {
+        return dd_contains(result, op.witness(pa, pb));
+    }
+    let s = f64::from_bits((600 + 1023) << 52); // 2^600, exact
+    let (witness, frame_powers) = match op {
+        OpKind::Add => (Dd::from_f64(pa * s) + Dd::from_f64(pb * s), 1u32),
+        OpKind::Sub => (Dd::from_f64(pa * s) - Dd::from_f64(pb * s), 1),
+        OpKind::Mul => (Dd::from_f64(pa * s) * Dd::from_f64(pb * s), 2),
+        OpKind::Div => (Dd::from_f64(pa * s) / Dd::from_f64(pb * s), 0),
+    };
+    let frame = |e: f64| -> f64 {
+        let mut v = e;
+        for _ in 0..frame_powers {
+            v *= s;
+        }
+        v
+    };
+    let (lo, hi) = (frame(result.lo()), frame(result.hi()));
+    // Subnormal-class results are tiny, so the framed endpoints stay finite;
+    // an infinite endpoint (WHOLE etc.) remains trivially containing.
+    let above_lo = lo == f64::NEG_INFINITY || !witness.lt(Dd::from_f64(lo));
+    let below_hi = hi == f64::INFINITY || !Dd::from_f64(hi).lt(witness);
+    above_lo && below_hi
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Violation {
     case_index: u64,
@@ -266,9 +312,8 @@ fn fuzz_class(
         let result = apply(a, b);
         for &pa in &[a.lo(), a.hi()] {
             for &pb in &[b.lo(), b.hi()] {
-                let witness = op.witness(pa, pb);
                 checked += 1;
-                if !dd_contains(result, witness) {
+                if !contained(class, op, result, pa, pb) {
                     return (
                         checked,
                         Some(Violation {
@@ -289,6 +334,7 @@ fn fuzz_class(
 /// Shrink a failing operand pair toward simple values (halving the bit
 /// distance to 1.0) while the violation persists under the same faulty op.
 fn shrink(
+    class: Class,
     op: OpKind,
     apply: &dyn Fn(Interval, Interval) -> Interval,
     mut a: f64,
@@ -300,23 +346,26 @@ fn shrink(
         if matches!(op, OpKind::Div) && ib.contains_zero() {
             return false;
         }
-        !dd_contains(apply(ia, ib), op.witness(a, b))
+        !contained(class, op, apply(ia, ib), a, b)
     };
     if !violates(a, b) {
         return (a, b);
     }
+    let goal = 1.0f64.to_bits();
     for _ in 0..128 {
         let mut advanced = false;
-        for target in [&mut a, &mut b] {
-            let bits = target.to_bits();
-            let goal = 1.0f64.to_bits();
-            let candidate = f64::from_bits(bits / 2 + goal / 2);
-            let old = *target;
-            *target = candidate;
-            if violates(a, b) {
-                advanced = true;
+        for which in 0..2usize {
+            let current = if which == 0 { a } else { b };
+            let candidate = f64::from_bits(current.to_bits() / 2 + goal / 2);
+            let (na, nb) = if which == 0 {
+                (candidate, b)
             } else {
-                *target = old;
+                (a, candidate)
+            };
+            if violates(na, nb) {
+                a = na;
+                b = nb;
+                advanced = true;
             }
         }
         if !advanced {
@@ -338,7 +387,7 @@ fn g0_boundary_class_containment_holds_for_every_load_bearing_op() {
             let (checked, violation) =
                 fuzz_class(class, op, &|a, b| op.apply(a, b), CASES_PER_CLASS);
             if let Some(v) = violation {
-                let (sa, sb) = shrink(op, &|a, b| op.apply(a, b), v.a, v.b);
+                let (sa, sb) = shrink(class, op, &|a, b| op.apply(a, b), v.a, v.b);
                 panic!(
                     "containment violation: class {} op {} case {} probes ({:e},{:e}); \
                      minimal ({sa:e},{sb:e}) [{:016x},{:016x}] — commit to \
@@ -570,6 +619,100 @@ fn g3_unnudged_and_inward_mutant_ops_are_killed() {
         println!(
             "{{\"suite\":\"fs-ivl-containment-fuzz\",\"case\":\"mutant\",\"name\":\"{name}\",\
              \"killed_by_class\":\"{}\",\"case_index\":{case_index},\"verdict\":\"killed\"}}",
+            class.name()
+        );
+    }
+}
+
+#[test]
+fn g0_affine_boundary_class_containment_holds_for_add_sub_mul() {
+    // Affine forms concentrate their rounding conservatism in the noise
+    // radius; the containment law is the same — the represented interval of
+    // an affine op result must contain the double-double witness of the
+    // endpoint probes. Same samplers, same class-aware scaled oracle.
+    use fs_ivl::AffineCtx;
+    for class in CLASSES {
+        let mut checked = 0u64;
+        for op in [OpKind::Add, OpKind::Sub, OpKind::Mul] {
+            for case_index in 0..512u64 {
+                let mut stream = Stream::for_case(
+                    SUITE_SEED ^ 0xAFF1_2E00 ^ (class as u64) << 8 ^ (op as u64),
+                    case_index,
+                );
+                let (a1, a2) = sample_pair(class, &mut stream);
+                let (b1, b2) = sample_pair(class, &mut stream);
+                if !(a1.is_finite() && a2.is_finite() && b1.is_finite() && b2.is_finite()) {
+                    continue;
+                }
+                let ia = Interval::new(a1.min(a2), a1.max(a2));
+                let ib = Interval::new(b1.min(b2), b1.max(b2));
+                let mut ctx = AffineCtx::new();
+                let fa = ctx.from_interval(ia);
+                let fb = ctx.from_interval(ib);
+                // KNOWN DEFECT GUARD (bead frankensim-loq51, found by this
+                // fuzzer): an overflowing affine op yields inf center/radius
+                // and to_interval panics on the resulting NaN endpoints.
+                // Skip inputs whose op overflows until the library
+                // saturates to WHOLE; remove with loq51's fix.
+                let overflow_risk = [fa.center(), fa.radius(), fb.center(), fb.radius()]
+                    .iter()
+                    .any(|v| v.abs() > f64::MAX / 2.0);
+                if overflow_risk {
+                    continue;
+                }
+                let affine_result = match op {
+                    OpKind::Add => &fa + &fb,
+                    OpKind::Sub => &fa - &fb,
+                    OpKind::Mul => &fa * &fb,
+                    OpKind::Div => unreachable!(),
+                };
+                if !(affine_result.center().is_finite() && affine_result.radius().is_finite()) {
+                    continue;
+                }
+                let result = affine_result.to_interval();
+                for &pa in &[ia.lo(), ia.hi()] {
+                    for &pb in &[ib.lo(), ib.hi()] {
+                        checked += 1;
+                        assert!(
+                            contained(class, op, result, pa, pb),
+                            "affine {} containment: class {} case {case_index} \
+                             probes ({pa:e},{pb:e}) result [{:e},{:e}]",
+                            op.name(),
+                            class.name(),
+                            result.lo(),
+                            result.hi()
+                        );
+                    }
+                }
+            }
+        }
+        if class == Class::NearOverflow {
+            // EXPLICIT SUPPRESSION, not a weakened gate: every affine
+            // near-overflow case is currently excluded by the loq51 guard
+            // above, so this class contributes ZERO affine checks until the
+            // library saturates instead of panicking. Pinning the exact
+            // count keeps the suppression visible: when loq51 lands and the
+            // guard is removed, this arm must be deleted and the class must
+            // meet the ordinary non-vacuity floor.
+            assert_eq!(
+                checked, 0,
+                "near-overflow affine coverage changed; revisit the loq51 guard"
+            );
+            println!(
+                "{{\"suite\":\"fs-ivl-containment-fuzz\",\"case\":\"affine-class\",\
+                 \"class\":\"near-overflow\",\"checks\":0,\
+                 \"verdict\":\"suppressed-by-frankensim-loq51\"}}"
+            );
+            continue;
+        }
+        assert!(
+            checked > 4_000,
+            "affine class {} not vacuous: {checked}",
+            class.name()
+        );
+        println!(
+            "{{\"suite\":\"fs-ivl-containment-fuzz\",\"case\":\"affine-class\",\"class\":\"{}\",\
+             \"oracle\":\"dd\",\"checks\":{checked},\"violations\":0,\"verdict\":\"pass\"}}",
             class.name()
         );
     }
