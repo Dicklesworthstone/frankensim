@@ -186,3 +186,92 @@ fn pd_005_invalid_numeric_domains_fail_closed() {
         "all four public predicates rejected non-finite coordinates and finite-coordinate overflow",
     );
 }
+
+/// Bead frankensim-d8yax (mutation-campaign survivor): the stage-A filter
+/// threshold was never load-bearing on any committed input, because every
+/// prior fixture's naive determinant is EXACT (integer lattices, small
+/// dyadics) — a 64× overconfident CCWERRBOUND_A survived the whole battery.
+/// This fixture family makes the threshold load-bearing: two points exactly
+/// on `y = x` at ~1e7 with a third displaced by k tiny steps produce a
+/// catastrophically cancelled naive determinant whose float value is
+/// rounding garbage BELOW the true stage-A bound. The battery asserts, for
+/// every case that lands inside a would-be-weakened acceptance band, that
+/// (a) the ladder does NOT resolve at the filtered stage, and (b) the
+/// returned sign equals the sign known by construction. A filter accepting
+/// inside its proven bound fails (a) immediately and (b) whenever the
+/// cancellation garbage disagrees — this is the test that kills the
+/// `weaken-orient-filter` mutant in scripts/ci/e2e_extreal_arithmetic_audit.sh.
+#[test]
+fn pd_006_stage_a_filter_threshold_is_load_bearing_on_inexact_determinants() {
+    // Shewchuk's bound, recomputed independently of the crate's private
+    // constant (half-ulp epsilon).
+    let eps = f64::EPSILON / 2.0;
+    let ccwerrbound_a = (3.0 + 16.0 * eps) * eps;
+    // The mutant under audit scales the bound by 2^-6; the band between the
+    // two is where an overconfident filter resolves and the real one must
+    // not. Checking a FAMILY of weakenings (2^-1 .. 2^-6) kills any
+    // wrong-side scaling, not just the campaign's exact operator.
+    let weakest = ccwerrbound_a * 0.015_625;
+
+    let base1 = 10_000_001.0f64;
+    let base2 = 10_000_002.0f64; // b2 − b1 = 1 exactly
+    let c = 0.5f64;
+    let step = f64::EPSILON; // displacement quantum for the off-line point
+
+    let mut in_band = 0u64;
+    let mut checked = 0u64;
+    for k in 1..=512i64 {
+        for sign in [1.0f64, -1.0] {
+            #[allow(clippy::cast_precision_loss)]
+            let delta = sign * (k as f64) * step;
+            let pa = [base1, base1];
+            let pb = [base2, base2];
+            let pc = [c, c + delta];
+            // Recompute the naive stage-A quantities exactly as the ladder
+            // arranges them, to classify this case's band membership.
+            let acx = pa[0] - pc[0];
+            let bcx = pb[0] - pc[0];
+            let acy = pa[1] - pc[1];
+            let bcy = pb[1] - pc[1];
+            let det = acx * bcy - acy * bcx;
+            let detsum = (acx * bcy).abs() + (acy * bcx).abs();
+            if det == 0.0 {
+                continue;
+            }
+            let inside_true_bound = det.abs() <= ccwerrbound_a * detsum;
+            let above_weakest = det.abs() > weakest * detsum;
+            if !(inside_true_bound && above_weakest) {
+                continue;
+            }
+            in_band += 1;
+            // Exact truth by construction: det_exact = δ·(b2−b1) = δ.
+            let expected = if delta > 0.0 {
+                Sign::Positive
+            } else {
+                Sign::Negative
+            };
+            let (got, stage) = orient2d_with_stage(pa, pb, pc);
+            assert_eq!(
+                got, expected,
+                "k={k} sign={sign}: cancellation garbage must not decide the sign"
+            );
+            assert_ne!(
+                stage,
+                Stage::Filtered,
+                "k={k} sign={sign}: |det| is inside the proven stage-A error \
+                 bound; a filter resolving here is running a weakened bound"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        in_band >= 64,
+        "the fixture family must actually populate the weakened acceptance \
+         band, or this battery is vacuous: {in_band}"
+    );
+    assert_eq!(in_band, checked);
+    verdict(
+        "pd-006",
+        &format!("{in_band} inexact-determinant cases pinned the stage-A threshold"),
+    );
+}

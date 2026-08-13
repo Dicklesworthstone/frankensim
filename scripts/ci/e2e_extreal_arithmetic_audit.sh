@@ -44,12 +44,14 @@ ONLY_MUTANT=""
 KEEP_SCRATCH=0
 SCRATCH_OVERRIDE=""
 CONTROL_ONLY=0
+REFRESH=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact-dir) ARTIFACT_DIR="${2:-}"; shift 2 ;;
     --mutant)       ONLY_MUTANT="${2:-}"; shift 2 ;;
     --scratch)      SCRATCH_OVERRIDE="${2:-}"; KEEP_SCRATCH=1; shift 2 ;;
     --control-only) CONTROL_ONLY=1; shift ;;
+    --refresh)      REFRESH=1; shift ;;
     --keep-scratch) KEEP_SCRATCH=1; shift ;;
     -h|--help)      sed -n '3,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
     *) printf 'FATAL: unknown argument %s\n' "$1" >&2; exit 2 ;;
@@ -92,9 +94,9 @@ log integrity "pre-campaign trust-root index hash ${PRE_HASH}"
 # ------------------------------------------------------- scratch assembly
 assemble_scratch() {
   local dest="$1"
-  mkdir -p "${dest}/crates"
   for crate in "${CONE[@]}"; do
-    cp -R "${REPO_ROOT}/crates/${crate}" "${dest}/crates/${crate}"
+    mkdir -p "${dest}/crates/${crate}"
+    cp -R "${REPO_ROOT}/crates/${crate}/." "${dest}/crates/${crate}/"
   done
   cp "${REPO_ROOT}/rust-toolchain.toml" "${dest}/"
   # fs-math's dev-only frankenscipy oracle is a PATH reference whose
@@ -215,10 +217,13 @@ restore_file() {
 
 # --------------------------------------------------- positive control
 BASE="${SCRATCH}/base"
-if [[ ! -d "${BASE}" ]]; then
+if [[ ! -d "${BASE}" || "${REFRESH}" -eq 1 ]]; then
+  # --refresh re-copies the cone over the persistent base (add/update only,
+  # never deletes) so committed test changes reach the campaign; the
+  # positive control must be re-proven after a refresh.
   assemble_scratch "${BASE}"
 fi
-if [[ -n "${ONLY_MUTANT}" && -f "${ARTIFACT_DIR}/control.log" ]] \
+if [[ "${REFRESH}" -eq 0 && -n "${ONLY_MUTANT}" && -f "${ARTIFACT_DIR}/control.log" ]] \
   && grep -q 'positive control green' "${MATRIX}"; then
   log control "reusing the recorded green positive control"
 else
