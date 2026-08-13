@@ -1,8 +1,8 @@
 //! l011o: 2D tonal-lock refusal, broadband admission gate, 3D operator smoke.
 
 use fs_aeroac::regime::{
-    PINNED_2D_CENTRAL_MOMENT_TONAL, TONAL_FLATNESS_CEILING, TWO_D_INVERSE_CASCADE,
-    SlotJet3dFollowUp, admit_broadband_spectrum, evaluate_slot_jet_3d_operator,
+    PINNED_2D_CENTRAL_MOMENT_TONAL, SlotJet3dFollowUp, TONAL_FLATNESS_CEILING,
+    TWO_D_INVERSE_CASCADE, admit_broadband_spectrum, evaluate_slot_jet_3d_operator,
     two_d_broadband_refusal,
 };
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
@@ -46,9 +46,6 @@ fn slot_jet_3d_follow_up_operator_is_live_but_does_not_claim_broadband() {
         !smoke.broadband_demonstrated,
         "a smoke must not mint a 3D broadband claim"
     );
-    let bad = SlotJet3dFollowUp {
-        nx: 3,
-        ..spec
-    };
+    let bad = SlotJet3dFollowUp { nx: 3, ..spec };
     assert!(bad.validate().is_err());
 }

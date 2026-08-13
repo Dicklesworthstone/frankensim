@@ -70,6 +70,12 @@ scope law, pinned as data and by test).
   stability floor.
 - `SCOPE_STATEMENT` — the no-absolute-SPL / 2D-to-3D-span-correction
   law as data (the marketing-mutation guard asserts it).
+- `regime` — bead l011o: pinned CentralMoment 2D tonal-lock rows
+  (`PINNED_2D_CENTRAL_MOMENT_TONAL`), the named inverse-cascade mechanism,
+  `admit_broadband_spectrum` (refuses flatness at or below
+  `TONAL_FLATNESS_CEILING`), and `evaluate_slot_jet_3d_operator` (D3Q19
+  CentralMoment smoke). The smoke proves the 3D operator is live; it does
+  not mint a broadband table.
 
 ## Invariants
 

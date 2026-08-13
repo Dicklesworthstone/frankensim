@@ -27,6 +27,10 @@
 //!   Bickley jet `U = sech^2(y)` — the analytic reference the fs-lbm
 //!   jet runs are validated against. Its own pins are SELF-VERIFIED
 //!   exact eigenmodes (machine-zero ODE residuals re-proven per run).
+//! - [`regime`]: recorded 2D CentralMoment tonal-lock landscape (bead
+//!   l011o), the inverse-cascade refusal to catalog those spectra as
+//!   broadband flute noise, and a D3Q19 operator smoke that does not
+//!   claim a 3D broadband regime.
 
 pub mod bessel;
 pub mod bickley;
