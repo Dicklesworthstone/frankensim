@@ -107,6 +107,284 @@ impl DigitalFilter {
             .iter()
             .all(|s| s.is_stable() || is_lossless_differentiator(s))
     }
+
+    /// Zero DF-II memory for every parallel section.
+    #[must_use]
+    pub fn zero_state(&self) -> DigitalFilterState {
+        DigitalFilterState {
+            w: vec![[0.0; 2]; self.sections.len()],
+        }
+    }
+
+    /// Advance one sample through the parallel bank.
+    ///
+    /// Each section is transposed direct form II. Arithmetic order is
+    /// section index then coefficient index. A non-finite result
+    /// refuses without committing the section memories.
+    ///
+    /// # Errors
+    /// [`DiscretizeError::NonFiniteRuntimeValue`] or a state/section
+    /// length mismatch.
+    pub fn step(&self, state: &mut DigitalFilterState, input: f64) -> Result<f64, DiscretizeError> {
+        require_finite_scalar("input", input)?;
+        if state.w.len() != self.sections.len() {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "filter_state",
+                expected: self.sections.len(),
+                actual: state.w.len(),
+            });
+        }
+        let mut output = self.direct * input;
+        let mut next = vec![[0.0; 2]; self.sections.len()];
+        for (i, section) in self.sections.iter().enumerate() {
+            let [w1, w2] = state.w[i];
+            let w0 = input - section.a[0] * w1 - section.a[1] * w2;
+            let y = section.b[0] * w0 + section.b[1] * w1 + section.b[2] * w2;
+            if !w0.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "biquad_w",
+                    index: Some(i),
+                });
+            }
+            if !y.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "biquad_y",
+                    index: Some(i),
+                });
+            }
+            output += y;
+            next[i] = [w0, w1];
+        }
+        require_finite_scalar("output", output)?;
+        state.w = next;
+        Ok(output)
+    }
+}
+
+/// Per-section DF-II memory of a [`DigitalFilter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigitalFilterState {
+    w: Vec<[f64; 2]>,
+}
+
+/// Driving-point reflectance `R = (Z − Zc) / (Z + Zc)`.
+///
+/// This is the scattering map of any 1-D characteristic port
+/// (a duct, a transmission line, a pulse tube), not an instrument
+/// primitive.
+#[must_use]
+pub fn reflectance(impedance: C64, z_characteristic: f64) -> C64 {
+    let zc = C64::from_re(z_characteristic);
+    (impedance - zc) * (impedance + zc).recip()
+}
+
+/// Multiply tabulated `H(ω)` by `exp(i · sign · ω · τ)` in this
+/// crate's `e^{+iωt}` convention. `sign = +1` peels a pure delay of
+/// `τ` seconds from a delayed response.
+///
+/// # Errors
+/// Length mismatch or a non-finite argument.
+pub fn modulate_delay(
+    omega: &[f64],
+    h: &[C64],
+    tau_s: f64,
+    sign: f64,
+) -> Result<Vec<C64>, DiscretizeError> {
+    if omega.len() != h.len() {
+        return Err(DiscretizeError::InvalidRuntimeDimensions {
+            field: "modulate_delay",
+            expected: omega.len(),
+            actual: h.len(),
+        });
+    }
+    require_finite_scalar("tau_s", tau_s)?;
+    require_finite_scalar("delay_sign", sign)?;
+    let mut out = Vec::with_capacity(h.len());
+    for (i, (&w, &hi)) in omega.iter().zip(h.iter()).enumerate() {
+        require_finite_scalar("omega", w).map_err(|_| DiscretizeError::NonFiniteRuntimeValue {
+            field: "omega",
+            index: Some(i),
+        })?;
+        if !hi.re.is_finite() || !hi.im.is_finite() {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "h",
+                index: Some(i),
+            });
+        }
+        let phase = sign * w * tau_s;
+        let rot = C64::new(det::cos(phase), det::sin(phase));
+        out.push(hi * rot);
+    }
+    Ok(out)
+}
+
+/// Fit tabulated `H(iω)` (this crate's `e^{+iωt}` convention) and
+/// bilinear-discretize it to a parallel [`DigitalFilter`].
+///
+/// A TMM impedance, a BEM radiation load, and a mobility are the
+/// same object: a tabulated driving-point response. Conjugate
+/// `e^{-iωt}` acoustics data before calling.
+///
+/// # Errors
+/// Vector-fitting or bilinear refusals.
+pub fn realize_tabulated(
+    omega: &[f64],
+    h: &[C64],
+    t_s: f64,
+    opts: &crate::vf::FitOptions,
+    prewarp: f64,
+) -> Result<DigitalFilter, RealizeError> {
+    let fit = crate::vf::vector_fit(omega, h, opts).map_err(RealizeError::Fit)?;
+    let nyquist = core::f64::consts::PI / t_s;
+    let model = band_limit_to_nyquist(fit.model, nyquist);
+    bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
+}
+
+/// Drop poles that bilinear cannot represent at this sample rate.
+/// Aliasing them would change the transfer function silently.
+fn band_limit_to_nyquist(
+    mut model: crate::model::RationalModel,
+    nyquist: f64,
+) -> crate::model::RationalModel {
+    model.terms.retain(|term| {
+        let omega = match *term {
+            crate::model::PoleTerm::Real { pole, .. } => pole.abs(),
+            crate::model::PoleTerm::Pair { pole, .. } => pole.abs(),
+        };
+        omega < nyquist
+    });
+    model
+}
+
+/// Typed failure from tabulated-response realization.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RealizeError {
+    /// Identification refused.
+    Fit(crate::vf::VfError),
+    /// Bilinear map refused.
+    Discretize(DiscretizeError),
+}
+
+impl core::fmt::Display for RealizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Fit(e) => write!(f, "tabulated realization fit refused: {e}"),
+            Self::Discretize(e) => write!(f, "tabulated realization discretize refused: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RealizeError {}
+
+/// A known bulk delay followed by a causal [`DigitalFilter`].
+///
+/// This is the time-domain characteristic port of any 1-D waveguide:
+/// peel `exp(-iωτ)` out of a driving-point reflectance, fit the
+/// residual, and run `delay ⊕ filter` at the sample rate. A bore, a
+/// muffler, an HVAC run, and a pulse tube share this object.
+#[derive(Debug, Clone)]
+pub struct DelayedFilter {
+    buf: Vec<f64>,
+    write: usize,
+    delay_int: usize,
+    frac: f64,
+    filter: DigitalFilter,
+    state: DigitalFilterState,
+    last: f64,
+}
+
+impl DelayedFilter {
+    /// Build a line whose delay is `delay_samples` (must be at least 2
+    /// and strictly inside the allocated buffer).
+    ///
+    /// # Errors
+    /// A delay that does not fit, or a non-positive sample interval
+    /// on the filter.
+    pub fn new(delay_samples: f64, filter: DigitalFilter) -> Result<Self, DiscretizeError> {
+        if !(delay_samples >= 2.0 && delay_samples.is_finite()) {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "delay_samples",
+                expected: 2,
+                actual: delay_samples.max(0.0) as usize,
+            });
+        }
+        if !(filter.t_s > 0.0) {
+            return Err(DiscretizeError::BadSampleInterval);
+        }
+        let delay_int = delay_samples.floor() as usize;
+        let frac = delay_samples - delay_int as f64;
+        let n = delay_int + 4;
+        Ok(Self {
+            buf: vec![0.0; n],
+            write: 0,
+            delay_int,
+            frac,
+            state: filter.zero_state(),
+            filter,
+            last: 0.0,
+        })
+    }
+
+    /// Fit the delay-peeled response `H(ω) exp(+iωτ)` and build the
+    /// line. `delay_samples = τ / t_s`.
+    ///
+    /// # Errors
+    /// Peeling, fitting, bilinear, or delay-buffer refusals.
+    pub fn from_tabulated(
+        omega: &[f64],
+        h: &[C64],
+        delay_samples: f64,
+        t_s: f64,
+        opts: &crate::vf::FitOptions,
+        prewarp: f64,
+    ) -> Result<Self, RealizeError> {
+        let peeled =
+            modulate_delay(omega, h, delay_samples * t_s, 1.0).map_err(RealizeError::Discretize)?;
+        let filter = realize_tabulated(omega, &peeled, t_s, opts, prewarp)?;
+        Self::new(delay_samples, filter).map_err(RealizeError::Discretize)
+    }
+
+    /// Inject an outgoing sample and return the incoming wave.
+    ///
+    /// # Errors
+    /// Non-finite input or filter overflow.
+    pub fn push(&mut self, outgoing: f64) -> Result<f64, DiscretizeError> {
+        require_finite_scalar("outgoing", outgoing)?;
+        let n = self.buf.len();
+        self.buf[self.write] = outgoing;
+        let i1 = (self.write + n - self.delay_int) % n;
+        let i0 = (i1 + n - 1) % n;
+        let delayed = (1.0 - self.frac) * self.buf[i1] + self.frac * self.buf[i0];
+        self.write = (self.write + 1) % n;
+        self.last = self.filter.step(&mut self.state, delayed)?;
+        Ok(self.last)
+    }
+
+    /// Incoming wave from the previous [`Self::push`].
+    #[must_use]
+    pub fn incoming(&self) -> f64 {
+        self.last
+    }
+
+    /// Scale the residual so `|H(ω)|` equals `target_abs`.
+    ///
+    /// A self-oscillating loop needs the speaking-frequency loop gain,
+    /// not only an impulse-correct fit.
+    pub fn pin_magnitude_at(&mut self, omega: f64, target_abs: f64) {
+        let h = self.filter.eval(omega).abs();
+        if !(h > 1.0e-12) || !(target_abs >= 0.0 && target_abs.is_finite()) {
+            return;
+        }
+        let gain = target_abs / h;
+        self.filter.direct *= gain;
+        for section in &mut self.filter.sections {
+            section.b[0] *= gain;
+            section.b[1] *= gain;
+            section.b[2] *= gain;
+        }
+        self.state = self.filter.zero_state();
+        self.last = 0.0;
+    }
 }
 
 fn is_lossless_differentiator(s: &Biquad) -> bool {
@@ -642,5 +920,92 @@ mod runtime_tests {
             measured = measured + C64::new(det::cos(phase), det::sin(phase)).scale(output);
         }
         assert!((measured - expected).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn digital_filter_df2_matches_first_order_recurrence() {
+        let filter = DigitalFilter {
+            sections: vec![Biquad {
+                b: [1.0, 0.0, 0.0],
+                a: [-0.5, 0.0],
+            }],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut state = filter.zero_state();
+        let mut y = Vec::new();
+        for k in 0..6 {
+            y.push(
+                filter
+                    .step(&mut state, if k == 0 { 1.0 } else { 0.0 })
+                    .unwrap(),
+            );
+        }
+        let expect = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125];
+        for (got, want) in y.iter().zip(expect) {
+            assert!((got - want).abs() < 1.0e-15);
+        }
+    }
+
+    #[test]
+    fn reflectance_is_the_scattering_map() {
+        let zc = 100.0;
+        let matched = reflectance(C64::from_re(zc), zc);
+        assert!(matched.abs() < 1.0e-15);
+        let open = reflectance(C64::from_re(0.0), zc);
+        assert!((open + C64::from_re(1.0)).abs() < 1.0e-15);
+        let rigid = reflectance(C64::from_re(1.0e12), zc);
+        assert!((rigid - C64::from_re(1.0)).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn modulate_delay_peels_a_pure_delay() {
+        let tau = 0.003;
+        let omega: Vec<f64> = (1..40).map(|k| 200.0 * f64::from(k)).collect();
+        let h: Vec<C64> = omega
+            .iter()
+            .map(|&w| C64::new(det::cos(-w * tau), det::sin(-w * tau)).scale(0.8))
+            .collect();
+        let peeled = modulate_delay(&omega, &h, tau, 1.0).expect("peel");
+        for z in peeled {
+            assert!((z.re - 0.8).abs() < 1.0e-12);
+            assert!(z.im.abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn delayed_filter_is_a_pure_delay_when_the_filter_is_one() {
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.0,
+            t_s: 1.0 / 8_000.0,
+            prewarp: 0.0,
+        };
+        let mut line = DelayedFilter::new(4.0, filter).expect("line");
+        let mut out = Vec::new();
+        for k in 0..8 {
+            out.push(line.push(if k == 0 { 1.0 } else { 0.0 }).unwrap());
+        }
+        assert!(out[0].abs() < 1.0e-15);
+        assert!(out[1].abs() < 1.0e-15);
+        assert!(out[2].abs() < 1.0e-15);
+        assert!(out[3].abs() < 1.0e-15);
+        assert!((out[4] - 1.0).abs() < 1.0e-15);
+        assert!(out[5].abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn realize_tabulated_constant_is_a_direct_term() {
+        let omega: Vec<f64> = (1..80).map(|k| 50.0 * f64::from(k)).collect();
+        let h = vec![C64::from_re(0.7); omega.len()];
+        let mut opts = crate::vf::FitOptions::new(2);
+        opts.fit_e = false;
+        let filter = realize_tabulated(&omega, &h, 1.0 / 16_000.0, &opts, 0.0).expect("fit");
+        assert!((filter.direct - 0.7).abs() < 0.05);
+        assert!(filter.is_stable());
+        let mut state = filter.zero_state();
+        let y0 = filter.step(&mut state, 1.0).unwrap();
+        assert!((y0 - 0.7).abs() < 0.08);
     }
 }

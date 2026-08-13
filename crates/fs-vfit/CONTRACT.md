@@ -78,6 +78,14 @@ to parallel biquad sections and discrete state-space.
   map in Tustin state-space form; the improper coefficient is returned
   as `e_leftover` for the caller's extra section (a named seam, not a
   silent drop).
+- `discretize::DigitalFilter::step` — transposed DF-II runtime of the
+  parallel bank. `reflectance` is the scattering map
+  `(Z−Zc)/(Z+Zc)`. `modulate_delay` peels or applies a known
+  bulk delay. `realize_tabulated` is the foundry-to-runtime door:
+  vector-fit + bilinear. `DelayedFilter` is a characteristic port
+  (delay ⊕ residual filter). A TMM bore, a muffler, a pulse tube,
+  and a BEM radiation load are fillings of that port. Music is not
+  a special case.
 
 ## Invariants
 
@@ -135,6 +143,14 @@ derived from Q-amplified bilinear warp; dropped-prewarp mutation 10x
 visible; state-space vs sections parity; non-vacuous f32 probe);
 auto-order plateau + overfit refusal; weight-preset visibility (the
 inverse-magnitude fit must win at the antiresonance); typed refusals.
+
+Inline discretize runtime tests: DF-II first-order recurrence,
+reflectance scattering map, delay peel of a pure `e^{-iωτ}`, identity
+`DelayedFilter` delay, tabulated-constant realization.
+
+`tests/characteristic_line.rs` (1): an open viscothermal cylinder's
+`Z_in` becomes a characteristic `DelayedFilter`; an impulse returns
+inverted near `2L/c` with `|R| < 1`. The same port as a muffler.
 
 `tests/clarinet_casebook.rs` (1): fs-duct TMM clarinet-class bore
 (USSA-1976 air, Zwikker-Kosten losses, unflanged radiation) -> 24-pole
