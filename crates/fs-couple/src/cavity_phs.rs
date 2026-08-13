@@ -177,10 +177,10 @@ mod tests {
 
     fn panel(volume: f64) -> PlateCavitySpec {
         PlateCavitySpec {
-            omegas: vec![2.0e3],
-            zetas: vec![0.01],
+            omegas: vec![6.0e2],
+            zetas: vec![0.006],
             drive: vec![1.0],
-            areas: vec![0.04],
+            areas: vec![0.08],
             thickness_m: 0.002,
             plate_density_kg_m3: 2_700.0,
             volume_m3: volume,
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn larger_cavity_lowers_the_coupled_frequency() {
-        let f = pulse(1_200, 2.0);
+        let f = pulse(2_000, 8.0);
         let small = realize_plate_cavity(&panel(0.004), &f, 8_000, 1.0).expect("small V");
         let large = realize_plate_cavity(&panel(0.016), &f, 8_000, 1.0).expect("large V");
         let ts = period(&small);
