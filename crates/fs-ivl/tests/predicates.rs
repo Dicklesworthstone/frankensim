@@ -216,7 +216,13 @@ fn pd_006_stage_a_filter_threshold_is_load_bearing_on_inexact_determinants() {
     let base1 = 10_000_001.0f64;
     let base2 = 10_000_002.0f64; // b2 − b1 = 1 exactly
     let c = 0.5f64;
-    let step = f64::EPSILON; // displacement quantum for the off-line point
+    // Displacement quantum = ULP at the ~1e7 magnitude (2^-29, exact bit
+    // construction): the ladder's pc-relative subtractions then preserve δ
+    // exactly, while the ~1e14 products still round — cancellation garbage
+    // with a known true sign. A smaller δ silently rounds away in the
+    // subtraction and every determinant is exactly zero (this test's own
+    // vacuity guard caught that on its first run).
+    let step = f64::from_bits((1023u64 - 29) << 52);
 
     let mut in_band = 0u64;
     let mut checked = 0u64;
