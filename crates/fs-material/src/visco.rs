@@ -306,6 +306,40 @@ impl GeneralizedMaxwell {
         Ok(GeneralizedMaxwell { e_inf, terms })
     }
 
+    /// One Maxwell branch that matches loss factor `η` at `omega`
+    /// with relaxation time `τ = 1/ω`.
+    ///
+    /// At `ωτ = 1`, `η = E₁ / (2 E∞ + E₁)`, so
+    /// `E₁ = 2 η E∞ / (1 − η)`. This is the integer-order runtime
+    /// stand-in for a single authored `η(ω₀)`, not a wood spectrum.
+    ///
+    /// # Errors
+    /// [`ViscoError::Parameters`] if `e_inf` is not positive, `omega`
+    /// is not positive, or `η` is not in `(0, 1)`.
+    pub fn matching_loss(
+        e_inf: f64,
+        omega: f64,
+        eta: f64,
+    ) -> Result<GeneralizedMaxwell, ViscoError> {
+        if !(e_inf > 0.0 && e_inf.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "equilibrium modulus must be positive",
+            });
+        }
+        if !(omega > 0.0 && omega.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "match frequency must be positive",
+            });
+        }
+        if !(eta > 0.0 && eta < 1.0 && eta.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "loss factor must lie in (0, 1)",
+            });
+        }
+        let e1 = 2.0 * eta * e_inf / (1.0 - eta);
+        GeneralizedMaxwell::new(e_inf, vec![(e1, 1.0 / omega)])
+    }
+
     /// `(E′, E″)` at ω [rad/s].
     #[must_use]
     pub fn modulus(&self, omega: f64) -> (f64, f64) {
@@ -325,6 +359,19 @@ impl GeneralizedMaxwell {
     pub fn loss_factor(&self, omega: f64) -> f64 {
         let (ep, epp) = self.modulus(omega);
         epp / ep
+    }
+
+    /// Modal damping ratios `ζ_k = η(ω_k)/2` from this Prony series.
+    ///
+    /// Runtime bridge into a modal bank: one authored
+    /// [`Self::matching_loss`] (or a lowered fractional model) becomes
+    /// a frequency-dependent `ζ` vector. It is not Rayleigh `αM+βK`.
+    #[must_use]
+    pub fn modal_zetas(&self, omegas: &[f64]) -> Vec<f64> {
+        omegas
+            .iter()
+            .map(|&w| loss_factor_to_zeta(self.loss_factor(w)))
+            .collect()
     }
 
     /// Fresh time-stepping state (all internal variables relaxed, ledger
@@ -1253,6 +1300,22 @@ mod tests {
         let im = det::sqrt(-disc) / 2.0;
         assert!((re - re_want).abs() < 1e-9 * omega0);
         assert!((im - im_want).abs() < 1e-9 * omega0);
+    }
+
+    #[test]
+    fn maxwell_matching_loss_hits_the_authored_eta() {
+        let gm = GeneralizedMaxwell::matching_loss(2.0e9, 1.0e3, 0.04).expect("match");
+        let eta = gm.loss_factor(1.0e3);
+        assert!((eta - 0.04).abs() < 1.0e-9, "eta={eta}");
+        assert!(GeneralizedMaxwell::matching_loss(2.0e9, 1.0e3, 1.5).is_err());
+        let z = gm.modal_zetas(&[1.0e3, 4.0e3]);
+        assert!((z[0] - 0.02).abs() < 1.0e-9);
+        assert!(
+            (z[1] - z[0]).abs() > 1.0e-4,
+            "Prony ζ must move with ω (got {} vs {})",
+            z[1],
+            z[0]
+        );
     }
 
     #[test]
