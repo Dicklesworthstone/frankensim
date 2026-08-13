@@ -1112,6 +1112,8 @@ name = "fs-couple"
 version = "0.0.1"
 dependencies = [
  "fs-bem",
+ "fs-duct",
+ "fs-fft",
  "fs-iface",
  "fs-la",
  "fs-material",
@@ -1119,6 +1121,7 @@ dependencies = [
  "fs-modal",
  "fs-plate",
  "fs-qty",
+ "fs-scenario",
  "fs-vfit",
 ]
 

@@ -225,6 +225,38 @@ The runtime owns visible per-filter state, superposes in fixed input order, and 
 whole samples transactionally. EstimateOnly covers the fixed reference before `1/r`;
 moving-source, FW-H, near-field, feedback, room, head, and passivity remain unclaimed.
 
+### `acoustic_realize` / `pcm_wav`
+
+`realize_assembly` turns an `fs_scenario::AcousticAssembly` (data: gas, prestressed
+string, viscothermal duct, pluck, volume-velocity pulse, listener) into observer
+pressure. There is no instrument crate: a guitar or clarinet is a description
+that composes these generic members.
+
+- String path: triangular-pluck modal initial conditions on the linear
+  Kirchhoff–Carrier sine family, marched by `ModalAcousticTimeModel`, observed
+  through the compact first-principles transfer
+  `H = i ω ρ A_odd / (4 π r √(μ L / 2))` from `GasState` and listener distance.
+  Even modes have zero net monopole area and do not radiate in this compact
+  model.
+- Duct path: `p(t) = IFFT[H(ω) U(ω)]` with `U` a half-sine inlet volume-velocity
+  pulse. Closed termination observes inlet pressure `Z_in U`. Unflanged-open
+  termination observes mouth pressure `Z_L U_mouth`, with `U_mouth / U_in` from
+  the ABCD chain. Wide-tube ZK is used where the shear number admits it;
+  bins below `MIN_SHEAR_NUMBER` fall back to lossless `Z` (losses at those
+  bins are a no-claim). Unflanged-open realizations whose Nyquist `ka` exceeds
+  `MAX_RADIATION_KA` are refused rather than inventing a high-`ka` radiation
+  law.
+- `encode_pcm16_wav` maps pascals through a caller-declared full-scale onto
+  little-endian PCM16. It never peak-normalizes.
+
+### No-claim boundaries added by this path
+
+- Structure–bore coupling, reed/bow constitutive laws, Kirchhoff–Carrier
+  geometric nonlinearity (`axial_stiffness_n` is accepted and unused),
+  far-field retarded time, 3D BEM radiation, and absolute SPL are not claimed.
+- Linear superposition of independently realized members is not a coupled
+  instrument.
+
 ## Invariants
 
 - The Dirac interconnection conserves interface power EXACTLY (to roundoff) —
@@ -384,6 +416,11 @@ determinism.
 
 ## No-claim boundaries
 
+- `acoustic_realize` is a linear description→waveform composition, not a
+  musical-instrument product: no reed, bow, or soundboard; no structure–bore
+  feedback; no 3D broadband jet-labium source. `axial_stiffness_n` is stored
+  on the description and unused (the nonlinear Kirchhoff–Carrier path is a
+  recorded no-claim). WAV encoding is a physical-scale dump, not mastering.
 - `vibroacoustic` is frequency-domain only: time-domain realization is
   the vector-fitting bead's scope; non-rectangular cavity bases beyond
   the lumped Helmholtz mode arrive through the same `CavityModes`

@@ -11,10 +11,10 @@
 
 use fs_math::c64::C64;
 use fs_math::det;
+pub use fs_vfit::WeightPreset;
 use fs_vfit::discretize::{
     DiscreteStateSpace, DiscreteStateSpaceRuntime, DiscretizeError, bilinear_state_space,
 };
-pub use fs_vfit::WeightPreset;
 use fs_vfit::{FitOptions, VfError, vector_fit};
 
 /// Maximum frequencies in either offline solve grid.

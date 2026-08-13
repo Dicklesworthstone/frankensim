@@ -11,10 +11,14 @@ description = "Multiphysics composition through typed port-thermodynamic relatio
 layer = "L3"
 
 [dependencies]
+fs-duct = { path = "../fs-duct" }
+fs-fft = { path = "../fs-fft" }
 fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
+fs-scenario = { path = "../fs-scenario" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
