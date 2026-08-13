@@ -681,13 +681,24 @@ mod tests {
         let negative_tail = Interval::new(f64::NEG_INFINITY, -f64::MAX);
         let one = Interval::point(1.0);
 
+        // The exact sum MAX + 1 exceeds MAX, so MAX itself is a valid lower
+        // bound — but `enclose_rounded_binary`'s documented contract is the
+        // direction-blind one-ULP outward nudge, so the endpoint may sit one
+        // step below. The load-bearing property (per this test's own intent
+        // note below) is that no limit value is OMITTED, with at most that
+        // documented single outward step of slack. The previous exact bit
+        // pin demanded tightness the contract never promised and had never
+        // been executed (code-first commit 526aa56d; caught when the .3.7
+        // mutation campaign's positive control first ran this battery).
         let shifted_positive = positive_tail + one;
-        assert_eq!(shifted_positive.lo().to_bits(), f64::MAX.to_bits());
+        assert!(shifted_positive.contains(f64::MAX));
+        assert!(shifted_positive.lo() >= fs_math::next_down(f64::MAX));
         assert_eq!(shifted_positive.hi(), f64::INFINITY);
 
         let shifted_negative = negative_tail - one;
         assert_eq!(shifted_negative.lo(), f64::NEG_INFINITY);
-        assert_eq!(shifted_negative.hi().to_bits(), (-f64::MAX).to_bits());
+        assert!(shifted_negative.contains(-f64::MAX));
+        assert!(shifted_negative.hi() <= fs_math::next_up(-f64::MAX));
 
         // The quotient image approaches zero at the infinite endpoint and
         // reaches 2/MAX at the finite endpoint.  Outward rounding may include
