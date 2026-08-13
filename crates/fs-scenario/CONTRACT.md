@@ -21,6 +21,11 @@ flagships.
 
 ## Public types and semantics
 
+- `acoustic` — description-only types for composing generic musical-acoustics
+  physics (`AmbientGas`, `PrestressedString`, `ViscothermalDuct`, `Pluck`,
+  `VolumeVelocityPulse`, `Listener`, `AcousticAssembly`). A guitar or clarinet
+  is a filled assembly, not a crate. Realization lives in `fs-couple`; this
+  module does not integrate, radiate, or emit audio.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared
@@ -719,6 +724,11 @@ None.
   instrumented-temperature handoff row.
 
 ## No-claim boundaries
+
+- **Acoustic assemblies are descriptions, not instruments**:
+  `AcousticAssembly` does not own a reed, bow, soundboard, or named instrument
+  law. Empty assemblies are valid data and are refused at realization. There is
+  no `fs-clarinet` / `fs-guitar` crate and this module must not grow one.
 
 - **Payload sources are declarations, not evaluators or stochastic proofs**:
   this crate validates table structure and distribution parameter/support

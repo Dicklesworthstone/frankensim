@@ -15,6 +15,7 @@
 //! scenarios as canonical-IR artifacts — that integration lives ABOVE this layer
 //! (exercised here via a dev-dependency in conformance tests).
 
+pub mod acoustic;
 pub mod bc;
 pub mod design;
 pub mod ensemble;
@@ -27,6 +28,10 @@ pub mod scenario;
 pub mod sensor;
 pub mod signal;
 
+pub use acoustic::{
+    AcousticAssembly, AmbientGas, CylinderSegment, Listener, Pluck, PrestressedString,
+    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+};
 pub use bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 pub use ensemble::{
     DEFAULT_REALIZATION_BUDGET, Realization, RealizationBudget, SpectrumModel, StochasticEnsemble,
