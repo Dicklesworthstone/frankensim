@@ -194,9 +194,10 @@ half-edge round-trips, closed-manifold audits).
     matches the closed-surface volume identity under two independent
     tet-volume formulas. Open, non-manifold, unlabeled-enclosed, boundary-seed,
     and duplicate-region inputs refuse without an audited mesh (s93ej.1
-    corpus). A general-position (rotated) pair of adjacent solids keeps
-    both unit volumes and a labeled interface through the production
-    `volumetricize` path. Parent conduction E2E remains a no-claim.
+    corpus). A sheared (non-axis-aligned, exactly planar) pair of
+    adjacent solids keeps both unit volumes and a labeled interface
+    through the production `volumetricize` path. Parent conduction E2E
+    remains a no-claim.
     Facet Steiner midpoints snap to the parent supporting plane, so a
     planar facet stays planar under bisection even when it is not
     axis-aligned.
@@ -444,8 +445,9 @@ assertions.
   (built by construction, re-verified against the finished mesh), and
   honest `unrecovered` counters at depth/budget caps. Steiner midpoints
   snap onto the original parent chord (tmesh-020) so a general-position
-  segment stays on the line. Convex hull-facet conformity is gated
-  test-side.
+  segment stays on the line. Crossing diagonals that no longer share a
+  bitwise midpoint adopt the existing centre if it lies on the chord.
+  Convex hull-facet conformity is gated test-side.
 - Refinement is radius-edge with the minimum-new-edge policy floor;
   full local-feature-size Ruppert guarantees remain successor scope
   (sliver exudation ships in `exude`).

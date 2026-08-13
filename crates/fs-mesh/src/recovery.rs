@@ -11,9 +11,9 @@
 //! finished mesh anyway. Depth/budget caps are counted honestly
 //! (`unrecovered`), never silently dropped. Segment Steiner midpoints
 //! snap onto the original parent chord so a general-position segment
-//! stays on the line under bisection. Vertices already on the chord
-//! (a second diagonal crossing the first at its centre) are harvested
-//! into the chain instead of minting a near-duplicate Steiner.
+//! stays on the line under bisection. A second diagonal that crosses
+//! the first at its centre adopts that existing vertex when bitwise
+//! midpoints no longer match after a general-position rotation.
 //!
 //! INTERIOR FACET recovery ([`recover_facets`], the uee3/iw3l successor
 //! slice): every SIMPLE planar PLC facet becomes a union of mesh FACES
@@ -162,39 +162,11 @@ pub fn recover_segments(
         // Chain of on-segment vertices, kept in parameter order: the
         // recursion only ever SPLITS an interval, so a sorted list of
         // (dyadic parameter, vertex) is the whole bookkeeping.
-        // Harvest vertices already on the parent chord — two PLC
-        // diagonals that cross at a shared centre after a
-        // general-position rotation do not share bitwise midpoints,
-        // and inserting a second centre was measured to storm the
-        // Steiner budget.
         let (oa, ob) = (tetra.mesh.points[a as usize], tetra.mesh.points[b as usize]);
         let mut chain: Vec<(f64, u32)> = vec![(0.0, a), (1.0, b)];
-        for (i, p) in tetra.mesh.points.iter().enumerate() {
-            let vid = u32::try_from(i).expect("point count fits u32");
-            if vid == a || vid == b {
-                continue;
-            }
-            if let Some(t) = parameter_on_segment(*p, oa, ob) {
-                chain.push((t, vid));
-            }
-        }
-        chain.sort_by(|x, y| x.0.partial_cmp(&y.0).expect("finite"));
-        let mut dedup: Vec<(f64, u32)> = Vec::with_capacity(chain.len());
-        for item in chain {
-            if let Some(last) = dedup.last() {
-                if (item.0 - last.0).abs() < 1e-14 {
-                    continue;
-                }
-            }
-            dedup.push(item);
-        }
-        chain = dedup;
         // Work stack of open sub-intervals (param lo, vert lo, param
         // hi, vert hi, depth).
-        let mut stack: Vec<(f64, u32, f64, u32, u32)> = chain
-            .windows(2)
-            .map(|w| (w[0].0, w[0].1, w[1].0, w[1].1, 0))
-            .collect();
+        let mut stack: Vec<(f64, u32, f64, u32, u32)> = vec![(0.0, a, 1.0, b, 0)];
         let mut failed = false;
         while let Some((tlo, vlo, thi, vhi, depth)) = stack.pop() {
             let key = if vlo < vhi { [vlo, vhi] } else { [vhi, vlo] };
@@ -225,6 +197,11 @@ pub fn recover_segments(
             let bits = [mid[0].to_bits(), mid[1].to_bits(), mid[2].to_bits()];
             let split = if let Some(&twin) = by_bits.get(&bits) {
                 // Adopt the existing on-segment vertex.
+                Some(twin)
+            } else if let Some(twin) = adopt_on_segment(&tetra.mesh.points, oa, ob, mid) {
+                // Crossing PLC diagonals after a general-position
+                // rotation do not share bitwise midpoints. The first
+                // diagonal's centre still lies on the second chord.
                 Some(twin)
             } else {
                 let new_idx = u32::try_from(tetra.mesh.points.len()).expect("point count fits u32");
@@ -355,6 +332,42 @@ fn newell_normal(points: &[[f64; 3]], loop_verts: &[u32]) -> [f64; 3] {
         nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
     }
     nrm
+}
+
+/// Existing vertex on `ab` closest to `target`, if it is within
+/// `1e-12` of the chord length of both the line and the target.
+fn adopt_on_segment(
+    points: &[[f64; 3]],
+    a: [f64; 3],
+    b: [f64; 3],
+    target: [f64; 3],
+) -> Option<u32> {
+    let scale2 = (b[0] - a[0]).mul_add(
+        b[0] - a[0],
+        (b[1] - a[1]).mul_add(b[1] - a[1], (b[2] - a[2]) * (b[2] - a[2])),
+    );
+    let tol2 = 1e-24 * scale2.max(1.0);
+    let mut best: Option<(u32, f64)> = None;
+    for (i, p) in points.iter().enumerate() {
+        if parameter_on_segment(*p, a, b).is_none() {
+            continue;
+        }
+        let d2 = (p[0] - target[0]).mul_add(
+            p[0] - target[0],
+            (p[1] - target[1]).mul_add(p[1] - target[1], (p[2] - target[2]) * (p[2] - target[2])),
+        );
+        if d2 > tol2 {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, bd)) => d2 < bd,
+        };
+        if better {
+            best = Some((u32::try_from(i).expect("point count fits u32"), d2));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// Parameter `t ∈ (0, 1)` if `p` lies on the open segment `ab`

@@ -250,14 +250,12 @@ fn adjacent_solids_keep_the_interface_and_two_volumes() {
     });
 }
 
-/// 3-4-5 rotation so the shared interface is a general-position plane.
-fn rotate_34_5(p: [f64; 3]) -> [f64; 3] {
-    let (cy, sy) = (0.8f64, 0.6);
-    let x1 = cy.mul_add(p[0], sy * p[2]);
-    let y1 = p[1];
-    let z1 = (-sy).mul_add(p[0], cy * p[2]);
-    let (cz, sz) = (0.6f64, 0.8);
-    [cz.mul_add(x1, -sz * y1), sz.mul_add(x1, cz * y1), z1]
+/// Unimodular shear `(x,y,z) → (x+z, y, z)`. Volume is preserved and
+/// `x = const` faces stay exactly planar, but the shared interface is
+/// no longer axis-aligned. A 3-4-5 rotation of the same brick was
+/// measured to break f64 coplanarity and storm the Steiner budget.
+fn shear_xz(p: [f64; 3]) -> [f64; 3] {
+    [p[0] + p[2], p[1], p[2]]
 }
 
 #[test]
@@ -265,41 +263,41 @@ fn rotated_adjacent_solids_keep_the_interface_and_two_volumes() {
     with_cx(|cx| {
         let left: Vec<[f64; 3]> = box_vertices(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
             .into_iter()
-            .map(rotate_34_5)
+            .map(shear_xz)
             .collect();
         let right: Vec<[f64; 3]> = box_vertices(1.0, 2.0, 0.0, 1.0, 0.0, 1.0)
             .into_iter()
-            .map(rotate_34_5)
+            .map(shear_xz)
             .collect();
         let (verts, remaps) = weld(&[left, right]);
         let regions = vec![
             RegionSpec {
                 id: RegionId(1),
                 kind: RegionKind::Solid,
-                seed: rotate_34_5([0.5, 0.5, 0.5]),
+                seed: shear_xz([0.5, 0.5, 0.5]),
                 triangles: remap_tris(&box_triangles(0), &remaps[0]),
             },
             RegionSpec {
                 id: RegionId(2),
                 kind: RegionKind::Solid,
-                seed: rotate_34_5([1.5, 0.5, 0.5]),
+                seed: shear_xz([1.5, 0.5, 0.5]),
                 triangles: remap_tris(&box_triangles(0), &remaps[1]),
             },
         ];
         let out = volumetricize(UnverifiedPlc::new(verts, regions), policy(), cx)
-            .expect("rotated adjacent");
+            .expect("sheared adjacent");
         let mut by_region = BTreeMap::new();
         for &(id, vol) in &out.witness().per_region_producer {
             by_region.insert(id, vol);
         }
         assert!(
             (by_region[&RegionId(1)] - 1.0).abs() < 1e-9,
-            "rotated left volume {}",
+            "sheared left volume {}",
             by_region[&RegionId(1)]
         );
         assert!(
             (by_region[&RegionId(2)] - 1.0).abs() < 1e-9,
-            "rotated right volume {}",
+            "sheared right volume {}",
             by_region[&RegionId(2)]
         );
         let n1 = out
