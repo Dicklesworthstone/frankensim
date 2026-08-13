@@ -522,6 +522,113 @@ fn labeled_adjacent_volumes_solve_as_two_materials() {
     );
 }
 
+fn rotate_34_5(p: [f64; 3]) -> [f64; 3] {
+    let (cy, sy) = (0.8f64, 0.6);
+    let x1 = cy.mul_add(p[0], sy * p[2]);
+    let y1 = p[1];
+    let z1 = (-sy).mul_add(p[0], cy * p[2]);
+    let (cz, sz) = (0.6f64, 0.8);
+    [cz.mul_add(x1, -sz * y1), sz.mul_add(x1, cz * y1), z1]
+}
+
+fn unrotate_34_5(p: [f64; 3]) -> [f64; 3] {
+    let (cy, sy) = (0.8f64, 0.6);
+    let (cz, sz) = (0.6f64, 0.8);
+    let x1 = cz.mul_add(p[0], sz * p[1]);
+    let y1 = (-sz).mul_add(p[0], cz * p[1]);
+    let z1 = p[2];
+    [cy.mul_add(x1, -sy * z1), y1, sy.mul_add(x1, cy * z1)]
+}
+
+#[test]
+fn rotated_labeled_adjacent_volumes_solve_as_two_materials() {
+    let left: Vec<[f64; 3]> = box_vertices(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+        .into_iter()
+        .map(rotate_34_5)
+        .collect();
+    let right: Vec<[f64; 3]> = box_vertices(1.0, 2.0, 0.0, 1.0, 0.0, 1.0)
+        .into_iter()
+        .map(rotate_34_5)
+        .collect();
+    let (verts, remaps) = weld(&[left, right]);
+    let regions = vec![
+        RegionSpec {
+            id: RegionId(1),
+            kind: RegionKind::Solid,
+            seed: rotate_34_5([0.5, 0.5, 0.5]),
+            triangles: remap_tris(&box_triangles(0), &remaps[0]),
+        },
+        RegionSpec {
+            id: RegionId(2),
+            kind: RegionKind::Solid,
+            seed: rotate_34_5([1.5, 0.5, 0.5]),
+            triangles: remap_tris(&box_triangles(0), &remaps[1]),
+        },
+    ];
+    let audited = with_cx(|cx| {
+        volumetricize(
+            UnverifiedPlc::new(verts, regions),
+            VolumetricPolicy::fixture_default("m"),
+            cx,
+        )
+        .expect("rotated volume")
+    });
+    let labeled = audited.labeled();
+    let k1 = ConductivityModel::isotropic_declared(1.0).expect("k1");
+    let k2 = ConductivityModel::isotropic_declared(2.0).expect("k2");
+    let fallback = k1.clone();
+    let table = MaterialTable::new([(MaterialId(1), k1), (MaterialId(2), k2)]).expect("table");
+    let region_ids: Vec<u32> = labeled.region_of_tet().iter().map(|r| r.0).collect();
+    let map = BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]);
+    let (mesh, assigned) = ElementMaterials::bind_labeled_volume(
+        table,
+        TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
+        labeled.positions().to_vec(),
+        &region_ids,
+        &map,
+    )
+    .expect("lower");
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(unrotate_34_5(f.centroid)[0], 0.0),
+            ThermalBc::dirichlet(1.0).expect("bc"),
+        )
+        .expect("hot")
+        .region(
+            "cold",
+            |f| on_box_face(unrotate_34_5(f.centroid)[0], 2.0),
+            ThermalBc::dirichlet(0.0).expect("bc"),
+        )
+        .expect("cold")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_with_element_materials(cx, problem, &assigned, config()).expect("solve")
+    });
+    let mut worst = 0.0f64;
+    let mut counted = 0usize;
+    for (v, &p) in mesh.positions().iter().enumerate() {
+        if (unrotate_34_5(p)[0] - 1.0).abs() < 1e-9 {
+            worst = worst.max((solution.temperature[v] - 1.0 / 3.0).abs());
+            counted += 1;
+        }
+    }
+    assert!(counted > 0, "no rotated interface nodes");
+    assert!(
+        worst < 5e-2,
+        "rotated labeled-mesh two-material interface off by {worst:e}"
+    );
+}
+
 #[test]
 fn assigned_linear_adjoint_refuses_k_of_t_and_matches_finite_differences() {
     let (complex, positions) = box_grid([4, 2, 2], [2.0, 1.0, 1.0]);
