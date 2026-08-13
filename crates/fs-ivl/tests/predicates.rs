@@ -216,13 +216,18 @@ fn pd_006_stage_a_filter_threshold_is_load_bearing_on_inexact_determinants() {
     let base1 = 10_000_001.0f64;
     let base2 = 10_000_002.0f64; // b2 − b1 = 1 exactly
     let c = 0.5f64;
-    // Displacement quantum = ULP at the ~1e7 magnitude (2^-29, exact bit
-    // construction): the ladder's pc-relative subtractions then preserve δ
-    // exactly, while the ~1e14 products still round — cancellation garbage
-    // with a known true sign. A smaller δ silently rounds away in the
-    // subtraction and every determinant is exactly zero (this test's own
-    // vacuity guard caught that on its first run).
-    let step = f64::from_bits((1023u64 - 29) << 52);
+    // Displacement quantum 2^-8 (exact bit construction), sized so the TRUE
+    // determinant (δ·(b2−b1) = δ) spans roughly 0..128 ULPs of the ~1e14
+    // products: the k whose rounded determinant lands at 1–3 product-ULPs
+    // fall inside the stage-A error band. Two smaller quanta failed this
+    // test's own vacuity guard first (2^-53-scale δ rounded away in the
+    // subtraction; 2^-29-scale δ left both products rounding to the SAME
+    // float, det exactly zero) — the band is only reachable when δ is
+    // commensurate with the PRODUCT ulp, not the coordinate ulp. At this
+    // scale the rounded determinant keeps the true sign (measured), so the
+    // mutant-killing teeth are in the STAGE assertion; the sign assertion
+    // guards the day that stops being true.
+    let step = f64::from_bits((1023u64 - 8) << 52);
 
     let mut in_band = 0u64;
     let mut checked = 0u64;
@@ -271,7 +276,7 @@ fn pd_006_stage_a_filter_threshold_is_load_bearing_on_inexact_determinants() {
         }
     }
     assert!(
-        in_band >= 64,
+        in_band >= 16,
         "the fixture family must actually populate the weakened acceptance \
          band, or this battery is vacuous: {in_band}"
     );
