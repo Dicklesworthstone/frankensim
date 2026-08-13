@@ -93,13 +93,67 @@ pub fn characteristic_line(
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
         let response = input_impedance(physics, gas, omega, LossModel::AllRegime, termination)
             .map_err(DrivingPointError::Duct)?;
-        let rac = reflectance(
-            C64::new(response.impedance.re, response.impedance.im),
-            zc,
-        );
-        buf[k] = FftC64::new(rac.re, rac.im);
+        let rac = reflectance(C64::new(response.impedance.re, response.impedance.im), zc);
+        // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal.
+        buf[k] = FftC64::new(rac.re, -rac.im);
         if k != n_fft / 2 {
-            buf[n_fft - k] = FftC64::new(rac.re, -rac.im);
+            buf[n_fft - k] = FftC64::new(rac.re, rac.im);
+        }
+    }
+    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
+    fft.inverse(&mut buf, &mut scratch);
+    let ir: Vec<f64> = buf.iter().map(|c| c.re).collect();
+    DelayedFilter::from_impulse_response(dt, ir).map_err(DrivingPointError::Discrete)
+}
+
+/// Causal driving-point impedance as the same FIR port object.
+///
+/// Samples `Z(ω)` (closed) or the mouth transfer `p/u` (open) on the
+/// DFT grid of the run and inverse-transforms it. Isolated linear
+/// blow is then streaming convolution against that IR — the same
+/// `DelayedFilter` a reed or a body uses for `R(ω)`. A tone hole
+/// changes `Z` and therefore the impulse. There is no one-pole
+/// fallback and no block-wise `U(ω) Z(ω)` special case.
+///
+/// `Z(0)` is taken as zero so a DC volume-velocity does not mint a
+/// static pressure. TMM `Z` is stored on the DFT grid without a
+/// further conjugate: the historical block `U(ω) Z(ω)` path and a
+/// vented tone-hole period both require that convention.
+///
+/// # Errors
+/// Empty geometry, TMM, or DFT.
+pub fn impedance_line(
+    physics: &Duct,
+    gas: &GasState,
+    termination: Termination,
+    sample_rate_hz: u32,
+    n: usize,
+) -> Result<DelayedFilter, DrivingPointError> {
+    if physics.segments.is_empty() {
+        return Err(DrivingPointError::Invalid {
+            what: "line needs positive axial length",
+        });
+    }
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    let n_fft = n.next_power_of_two().clamp(256, 8192);
+    let fft = Fft::new(n_fft);
+    let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
+    for k in 1..=n_fft / 2 {
+        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
+        let response = input_impedance(physics, gas, omega, LossModel::AllRegime, termination)
+            .map_err(DrivingPointError::Duct)?;
+        let z = match termination {
+            Termination::Closed => response.impedance,
+            Termination::IdealOpen | Termination::UnflangedOpen | Termination::FlangedOpen => {
+                response.p_mouth_over_u_in
+            }
+        };
+        // Same convention as the historical block `U(ω) Z(ω)` path:
+        // TMM `Z` is already the DFT-side sample; conjugating it
+        // time-reverses a vented IR and lengthens the measured period.
+        buf[k] = FftC64::new(z.re, z.im);
+        if k != n_fft / 2 {
+            buf[n_fft - k] = FftC64::new(z.re, -z.im);
         }
     }
     let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];

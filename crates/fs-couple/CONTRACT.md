@@ -237,10 +237,13 @@ clarinet is one filling of those objects.
 
 - String path, `EA = 0`: triangular-pluck (or bow) modal ICs marched by
   `ModalAcousticTimeModel`, compact transfer
-  `H = i ω ρ A_odd / (4 π r √(μ L / 2))`. Fletcher inharmonicity
-  `ω_n = n ω_1 √(1+B n²)` when `EI > 0`. Stokes air drag from
-  `GasState` plus the authored internal floor. A second polarization
-  at `1+detune` produces beating.
+  `H = i ω ρ A_odd / (4 π r √(μ L / 2))` for odd sine modes. Even
+  modes have vanishing monopole area and radiate as compact dipoles
+  `p ∝ ρ Π̈ / (4 π r c)` with `Π = w ∫ φ (x−L/2) dx`. Fletcher
+  inharmonicity `ω_n = n ω_1 √(1+B n²)` when `EI > 0`. Stokes air
+  drag from `GasState` plus the authored internal floor. A second
+  polarization at `1+detune` is a second member on the same clock
+  and shares every plate (it is not an independent unused body).
 - String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string` + Gonzalez
   pHS step, with the same stiff-string frequencies overwriting the
   linear ω_n. Bridge force `T_eff y'(0)` drives every listed body mode
@@ -258,29 +261,47 @@ clarinet is one filling of those objects.
   plate; plate volume velocity returns to the waveguide
   (structure–bore).
 - String obstacles are `fs-dcontact` power-law potentials on sine
-  collocation.
-- Duct path without reed, no body: `p(t) = IFFT[Z_in(ω) U(ω)]` with
-  AllRegime viscothermal losses (Poiseuille below the wide-tube floor —
-  never lossless fallback). Tone-hole shortening is that exact TMM
-  response. Unflanged-open Nyquist `ka > 1` is refused. When a plate
-  or reed is present the time port is the characteristic line (TMM
-  `Z_in` → `R` → delay from the speaking-register `|Z|` peak → residual
-  `|R| ≤ 1` after pin). The delay+residual fit is not yet a substitute
-  for the isolated IFFT oracle.
+  collocation. On the Kirchhoff–Carrier path the conservative
+  potential is `ContactStorage` wrapping the KC Hamiltonian, so
+  Gonzalez sees the contact energy. Optional `mu_kinetic` adds
+  `fs-tribo` Coulomb traction as a modal port force (not a gradient
+  of `H`). The linear modal path still applies both as a force.
+  Hunt–Crossley damping inside the collision remains a dcontact
+  no-claim.
+- Reed and structure–bore time port: TMM `R(ω)` sampled on the DFT
+  grid and inverse-transformed to an FIR. Isolated linear blow (no
+  body) is the same `DelayedFilter` object filled with `IFFT[Z_in]`
+  (or the mouth transfer `p/u` when the end is open). A vented
+  reflectance FIR does not ring a measurable period; the impedance
+  FIR does, so tone-hole shortening is TMM-emergent on one port
+  type. There is no one-pole `TravelingWaveLine` fallback on those
+  paths. Unflanged-open Nyquist `ka > 1` is refused.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Radiation
   reaction on linear compact radiators is the baffled-piston small-`ka`
   series (the `fs-bem` Rayleigh-integral oracle) fitted and
   passivity-repaired by `fs-vfit`. `fs-bem` is not a production
-  dependency of this crate (cycle through `fs-feec`). Compact monopole
-  pressure remains the far-field observer, not a BEM field.
+  dependency of this crate (cycle through `fs-feec`). The far-field
+  observer is the baffled on-axis piston `p = ρ A ÿ / (2 π r)`, the
+  same half-space as the self-load, not a free-space monopole.
 - Bow roughness: an optional `ContactTexture` is a declared
   self-affine height spectrum. `fs-tribo::surface_excitation` samples
   it; the height perturbs the normal load that Stribeck sees. No
   measured rosin is invented.
 - Three-way clock: when `EA > 0` the string member is Kirchhoff–
-  Carrier, not a second linear modal bank.
+  Carrier with contact inside `H`. Polarizations share the plate and
+  the duct FIR. A certified three-pHS Dirac interconnection is still
+  a no-claim: the sine series has fixed ends (no bridge velocity
+  port) and the duct is an FIR scatterer, not an ODE pHS. `fs-phs`
+  is ODE-form only.
+- Von Karman geometric nonlinearity is the isotropic simply-supported
+  analytic primitive. Orthotropic or clamped VK is
+  a no-claim; those plates stay the linear DKT + `fs-modal` bank.
+- Reed observer adds the compact far-field dipole of the slit force
+  `F = Δp · w · y`. That is not 3-D jet broadband and not the
+  fs-aeroac 2-D Curle Hankel kernel. 3-D jet broadband remains a
+  no-claim. There is no instrument crate.
 - `encode_pcm16_wav` maps pascals through a declared full-scale. It never
   peak-normalizes.
 
@@ -448,8 +469,10 @@ determinism.
   measured rosin or Helmholtz-guaranteed. A linear `ThinPlate` is DKT +
   certified modes + compact monopoles. `geometric_nonlinearity` selects
   the isotropic von Karman modal pHS, not a full shell or a BEM body.
-  String+duct+plate share one sample clock; that is not a certified
-  Dirac interconnection of three pHS. 3D broadband jet noise remains a
+  String+duct+plate share one sample clock and, when `EA > 0`, a
+  Gonzalez string whose contact lives in `H`; that is not a certified
+  Dirac interconnection of three pHS. Isolated blow is an impedance
+  FIR, not a reflectance FIR. 3D broadband jet noise remains a
   no-claim. WAV encoding is a physical-scale dump, not mastering.
 - `vibroacoustic` is frequency-domain only: time-domain realization is
   the vector-fitting bead's scope; non-rectangular cavity bases beyond

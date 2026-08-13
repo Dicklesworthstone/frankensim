@@ -87,9 +87,11 @@ to parallel biquad sections and discrete state-space.
   keeps the raw stable fit. `DigitalFilter::enforce_abs_bound` is
   the scattering projection `|H| ≤ bound`. `DelayedFilter` is a
   characteristic port (delay ⊕ residual filter) with
-  `enforce_scattering_passivity` (`|R| ≤ 1` on a caller grid). A
-  TMM bore, a muffler, a pulse tube, and a BEM radiation load are
-  fillings of that port. Music is not a special case.
+  `enforce_scattering_passivity` (`|R| ≤ 1` on a caller grid).
+  `from_impulse_response` is the exact sampled-`R(ω)` or sampled-`Z(ω)`
+  FIR filling of the same port (scattering vs impedance). A TMM bore,
+  a muffler, a pulse tube, and a BEM radiation load are fillings of
+  that port. Music is not a special case.
 
 ## Invariants
 

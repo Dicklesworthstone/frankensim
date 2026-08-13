@@ -130,6 +130,9 @@ impl VkBody {
         }
         let n = plate.n_modes.max(1).min(3);
         let disp = odd_odd_modes(n);
+        // Extra Airy channels above (2,1) trip the nlmodal quadrature
+        // certificate on this mesh; more displacement modes still
+        // couple through the one certified membrane channel.
         let stress = vec![fs_nlmodal::SineMode { m: 2, n: 1 }];
         let model = fs_nlmodal::von_karman_ss_plate(
             &fs_nlmodal::VkPlateParams {

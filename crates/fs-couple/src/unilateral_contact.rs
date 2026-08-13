@@ -127,6 +127,75 @@ pub fn modal_contact_forces(
     Ok(forces)
 }
 
+/// Wrap modal storage with the conservative contact potential.
+///
+/// Friction is not a gradient of `H` and stays a port force
+/// ([`modal_friction_forces`]). An empty obstacle list returns the
+/// inner storage unchanged.
+///
+/// # Errors
+/// Obstacle shape or dcontact admission.
+pub fn wrap_modal_contact(
+    inner: Box<dyn Storage>,
+    string: PrestressedString,
+    obstacles: &[UnilateralObstacle],
+) -> Result<Box<dyn Storage>, DContactError> {
+    if obstacles.is_empty() {
+        return Ok(inner);
+    }
+    let obs: Result<Vec<_>, _> = obstacles.iter().map(|o| span_obstacle(string, o)).collect();
+    Ok(Box::new(ContactStorage::new(inner, string.n_modes, obs?)?))
+}
+
+/// Tangential Coulomb traction at contacting stations, as modal forces.
+///
+/// Conservative contact lives in [`wrap_modal_contact`]. This is only
+/// the non-gradient `fs-tribo` remainder.
+///
+/// # Errors
+/// None today; `Result` matches [`modal_contact_forces`].
+pub fn modal_friction_forces(
+    string: PrestressedString,
+    obstacles: &[UnilateralObstacle],
+    x: &[f64],
+) -> Result<Vec<f64>, DContactError> {
+    let mut forces = vec![0.0; string.n_modes];
+    let mass_scale = (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
+    let pi = core::f64::consts::PI;
+    for spec in obstacles {
+        if !(spec.mu_kinetic > 0.0) {
+            continue;
+        }
+        let law = fs_tribo::FrictionLaw::Coulomb {
+            static_mu: spec.mu_kinetic,
+            kinetic_mu: spec.mu_kinetic,
+        };
+        for (i, &s) in spec.stations.iter().enumerate() {
+            let mut y = 0.0;
+            let mut v = 0.0;
+            for k in 0..string.n_modes {
+                let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
+                y += x[2 * k] * ph;
+                v += x[2 * k + 1] * ph;
+            }
+            let gap = spec.gaps_m[i];
+            let pen = (y - gap).max(0.0);
+            if pen <= 0.0 {
+                continue;
+            }
+            let normal = spec.stiffness * det::pow(pen, spec.alpha) / spec.stations.len() as f64;
+            let ft = law
+                .regularized_traction_1d(-v, normal, 1.0e-3)
+                .unwrap_or(0.0);
+            for k in 0..string.n_modes {
+                let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
+                forces[k] += ft * ph;
+            }
+        }
+    }
+    Ok(forces)
+}
+
 struct ZeroStorage;
 
 impl Storage for ZeroStorage {

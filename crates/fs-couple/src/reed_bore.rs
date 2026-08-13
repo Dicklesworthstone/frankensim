@@ -1,11 +1,9 @@
 //! Compose a [`BernoulliAperture`] onto a characteristic line.
 //!
-//! The time port is a fitted TMM driving-point
-//! ([`crate::driving_point`]) with loop gain pinned at the
-//! quarter-wave; delay ⊕ one-pole is the fallback if identification
-//! refuses. Reed lay is an [`fs_dcontact`] obstacle, not a private
-//! Hunt–Crossley. Vocal folds, lip reeds, and relief valves are the
-//! same objects.
+//! The time port is the TMM reflectance FIR
+//! ([`crate::driving_point`]). Reed lay is an [`fs_dcontact`] obstacle,
+//! not a private Hunt–Crossley. Vocal folds, lip reeds, and relief
+//! valves are the same objects.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
@@ -54,8 +52,8 @@ pub fn realize_reed_bore(
         .outlet_radius();
     let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area_bore;
-    let mut line = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc)
-        .map_err(map_drive)?;
+    let mut line =
+        characteristic_line(physics, gas, termination, sample_rate_hz, n, zc).map_err(map_drive)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut reed_y = reed.rest_opening_m;
     let mut reed_v = 0.0;
@@ -69,7 +67,12 @@ pub fn realize_reed_bore(
     };
     let mut p_bore_hist = vec![0.0; n];
     let mut p_plus_prev = 5.0;
-    let _ = line.push(p_plus_prev)?;
+    let mut f_jet_prev = 0.0;
+    let _ = line
+        .push(p_plus_prev)
+        .map_err(|_| AcousticRealizeError::Reed {
+            what: "characteristic line left the finite set",
+        })?;
     for i in 0..n {
         let p_m = blowing_envelope(reed, i as f64 * dt);
         let p_minus = line.incoming();
@@ -103,10 +106,24 @@ pub fn realize_reed_bore(
             )?
         };
         p_plus_prev = p_plus;
-        let p_minus_now = line.push(p_plus)?;
+        let p_minus_now = line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+            what: "characteristic line left the finite set",
+        })?;
         let p_bore = p_plus + p_minus_now;
         let mut p_obs = p_bore;
         p_obs += plates.drive_and_radiate(p_bore * area_bore, dt, gas.density, listener_m)?;
+        // Compact far-field dipole of the slit force. This is the
+        // same Green's family as the string dipole, not a 3-D jet
+        // and not fs-aeroac 2-D Curle (cylindrical Hankel).
+        let opening = if reed.mass_kg > 0.0 {
+            reed_y.max(0.0)
+        } else {
+            aperture_of(reed).opening_m(p_m - p_bore).max(0.0)
+        };
+        let f_jet = (p_m - p_bore) * reed.width_m * opening;
+        let dfdt = (f_jet - f_jet_prev) / dt;
+        f_jet_prev = f_jet;
+        p_obs += gas.density * dfdt / (4.0 * core::f64::consts::PI * listener_m * gas.sound_speed);
         p_bore_hist[i] = p_obs;
     }
     Ok(p_bore_hist)

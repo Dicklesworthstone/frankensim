@@ -537,6 +537,7 @@ fn taut_span_obstacle_changes_the_waveform() {
         gaps_m: vec![0.001, 0.001, 0.001],
         stiffness: 5.0e5,
         alpha: 2.0,
+        mu_kinetic: 0.0,
         provenance: "fixture/stay".into(),
     }];
     let a = realize_assembly(&bare).expect("bare");
@@ -548,6 +549,19 @@ fn taut_span_obstacle_changes_the_waveform() {
         .map(|(x, y)| (x - y).abs())
         .sum();
     assert!(err > 1.0e-6, "an obstacle must change the string waveform");
+    let mut sticky = rattle.clone();
+    sticky.obstacles[0].mu_kinetic = 0.4;
+    let c = realize_assembly(&sticky).expect("sticky");
+    let err_mu: f64 = b
+        .pressure_pa
+        .iter()
+        .zip(&c.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err_mu > 1.0e-8,
+        "tangential tribo on an obstacle must change the waveform"
+    );
 }
 
 #[test]
@@ -693,5 +707,89 @@ fn declared_contact_texture_modulates_the_bow() {
     assert!(
         err > 1.0e-8,
         "a declared contact texture must change the bowed waveform"
+    );
+}
+
+#[test]
+fn even_mode_compact_dipole_reaches_the_observer() {
+    let mut odd = plucked(80.0, 0.006, 0.003);
+    if let Some(s) = odd.string.as_mut() {
+        s.n_modes = 1;
+    }
+    let mut both = odd.clone();
+    if let Some(s) = both.string.as_mut() {
+        s.n_modes = 2;
+    }
+    let a = realize_assembly(&odd).expect("odd monopole");
+    let b = realize_assembly(&both).expect("odd+even");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-8,
+        "even sine modes must radiate as compact dipoles ({err})"
+    );
+}
+
+#[test]
+fn kc_contact_is_inside_the_hamiltonian() {
+    let mut bare = plucked(70.0, 0.005, 0.004);
+    if let Some(s) = bare.string.as_mut() {
+        s.axial_stiffness_n = 4.0e4;
+        s.n_modes = 3;
+    }
+    let mut rattle = bare.clone();
+    rattle.obstacles = vec![UnilateralObstacle {
+        stations: vec![0.25, 0.5, 0.75],
+        gaps_m: vec![0.001, 0.001, 0.001],
+        stiffness: 5.0e5,
+        alpha: 2.0,
+        mu_kinetic: 0.0,
+        provenance: "fixture/stay".into(),
+    }];
+    let a = realize_assembly(&bare).expect("bare KC");
+    let b = realize_assembly(&rattle).expect("KC contact");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "ContactStorage wrapping KC must change the waveform ({err})"
+    );
+}
+
+#[test]
+fn polarizations_share_the_plate() {
+    let mut a = plucked(80.0, 0.006, 0.003);
+    a.duration_s = 0.16;
+    if let Some(s) = a.string.as_mut() {
+        s.polarization_detune = 0.012;
+        s.n_modes = 2;
+        s.damping_ratio = 0.001;
+    }
+    a.soundboard = Some(RadiatingPlate {
+        area_m2: 0.12,
+        mass_kg: 0.18,
+        frequency_hz: 110.0,
+        damping_ratio: 0.03,
+    });
+    let out = realize_assembly(&a).expect("shared-plate polarizations");
+    let hop = 80usize;
+    let mut env = Vec::new();
+    for chunk in out.pressure_pa.chunks(hop) {
+        let e = (chunk.iter().map(|p| p * p).sum::<f64>() / chunk.len() as f64).sqrt();
+        env.push(e);
+    }
+    let max_e = env.iter().copied().fold(0.0_f64, f64::max);
+    let min_e = env.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        max_e > 1.2 * min_e,
+        "two polarizations on one plate must still beat ({max_e} vs {min_e})"
     );
 }
