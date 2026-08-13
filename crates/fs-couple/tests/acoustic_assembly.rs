@@ -331,7 +331,7 @@ fn beating_reed_locks_near_the_quarter_wave() {
         rest_opening_m: 4.0e-4,
         width_m: 0.013,
         closing_pressure_pa: 6_000.0,
-        blowing_pressure_pa: 2_000.0,
+        blowing_pressure_pa: 2_800.0,
         attack_s: 0.008,
     });
     let out = realize_assembly(&a).expect("reed");
@@ -339,7 +339,7 @@ fn beating_reed_locks_near_the_quarter_wave() {
     let mean = tail.iter().sum::<f64>() / tail.len() as f64;
     let ac: Vec<f64> = tail.iter().map(|p| p - mean).collect();
     let rms: f64 = (ac.iter().map(|p| p * p).sum::<f64>() / ac.len() as f64).sqrt();
-    assert!(rms > 1.0, "reed-bore must self-oscillate, rms={rms}");
+    assert!(rms > 5.0, "reed-bore must self-oscillate, rms={rms}");
     let period = zero_cross_period(&ac);
     assert!(
         (4.0..120.0).contains(&period),

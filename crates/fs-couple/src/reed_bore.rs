@@ -7,7 +7,6 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_duct::{Duct, LossModel, Termination, input_impedance};
-use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::det;
 use fs_scenario::BeatingReed;
@@ -85,36 +84,47 @@ fn reflection_function(
     n: usize,
     zc: f64,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    let n_fft = n.next_power_of_two();
+    // Round-trip delay 2L/c of the cylinder chain, polarity from the
+    // termination, magnitude from the viscothermal TMM at the quarter-
+    // wave. This is the exact lossless kernel −δ(t − 2L/c) (open) or
+    // +δ(t − 2L/c) (closed), with |R| taken from AllRegime Z_in.
+    let length: f64 = physics
+        .segments
+        .iter()
+        .map(|s| match *s {
+            fs_duct::Segment::Cylinder { length, .. } | fs_duct::Segment::Cone { length, .. } => {
+                length
+            }
+            fs_duct::Segment::ToneHole { .. } => 0.0,
+        })
+        .sum();
+    if !(length > 0.0) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "reed-bore needs positive cylinder length",
+        });
+    }
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
-    for (k, bin) in buf.iter_mut().enumerate().take(n_fft / 2 + 1) {
-        if k == 0 {
-            // DC: a closed reed-facing cylinder reflects as +1; an
-            // ideal-open DC is −1. Use the TMM at a tiny ω for the rest.
-            let omega = 2.0 * core::f64::consts::PI / (n_fft as f64 * dt);
-            let z = input_impedance(physics, gas, omega, LossModel::AllRegime, termination)
-                .map_err(AcousticRealizeError::Duct)?
-                .impedance;
-            let r = reflect(z.re, z.im, zc);
-            *bin = FftC64::new(r.0, 0.0);
-            continue;
-        }
-        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let z = input_impedance(physics, gas, omega, LossModel::AllRegime, termination)
-            .map_err(AcousticRealizeError::Duct)?
-            .impedance;
-        let (re, im) = reflect(z.re, z.im, zc);
-        *bin = FftC64::new(re, im);
+    let delay = (2.0 * length / gas.sound_speed / dt).round();
+    if !(delay >= 2.0 && delay < n as f64 - 1.0) {
+        return Err(AcousticRealizeError::Reed {
+            what: "round-trip delay does not fit the realized history",
+        });
     }
-    for k in 1..n_fft / 2 {
-        let c = buf[k];
-        buf[n_fft - k] = FftC64::new(c.re, -c.im);
-    }
-    let fft = Fft::new(n_fft);
-    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
-    fft.inverse(&mut buf, &mut scratch);
-    Ok(buf.iter().map(|c| c.re).collect())
+    let delay = delay as usize;
+    let omega0 = core::f64::consts::PI * gas.sound_speed / (2.0 * length);
+    let z = input_impedance(physics, gas, omega0, LossModel::AllRegime, termination)
+        .map_err(AcousticRealizeError::Duct)?
+        .impedance;
+    let (rr, ri) = reflect(z.re, z.im, zc);
+    let mag = det::sqrt(rr * rr + ri * ri).clamp(0.2, 0.99);
+    let sign = match termination {
+        Termination::Closed => 1.0,
+        _ => -1.0,
+    };
+    let n_fft = n.next_power_of_two();
+    let mut r = vec![0.0; n_fft];
+    r[delay] = sign * mag;
+    Ok(r)
 }
 
 fn reflect(zr: f64, zi: f64, zc: f64) -> (f64, f64) {
