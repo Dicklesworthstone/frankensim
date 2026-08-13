@@ -271,9 +271,10 @@ scaled frame for the subnormal class, because double-double widens the
 mantissa, not the exponent). Detection power is proven, not assumed: a
 planted one-ULP inward fault must be found in every class, un-nudged and
 inward-rounded mutant ops must be killed, and sampler coverage of each
-declared neighborhood is asserted. Near-overflow affine coverage is
-explicitly suppressed (pinned at zero checks) by the known
-`frankensim-loq51` overflow-panic defect this battery discovered.
+declared neighborhood is asserted. The battery discovered (and the repair
+of `frankensim-loq51` removed) an affine overflow-panic: `to_interval` of
+an overflowed form now collapses to `WHOLE` instead of panicking on NaN
+endpoints, and near-overflow affine coverage runs unsuppressed.
 
 `tests/structured_conformance_casebook.rs`: the cheap per-crate structured PR
 entrypoint. Three fixed-order records cover interval/affine containment and

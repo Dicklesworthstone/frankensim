@@ -649,26 +649,12 @@ fn g0_affine_boundary_class_containment_holds_for_add_sub_mul() {
                 let mut ctx = AffineCtx::new();
                 let fa = ctx.from_interval(ia);
                 let fb = ctx.from_interval(ib);
-                // KNOWN DEFECT GUARD (bead frankensim-loq51, found by this
-                // fuzzer): an overflowing affine op yields inf center/radius
-                // and to_interval panics on the resulting NaN endpoints.
-                // Skip inputs whose op overflows until the library
-                // saturates to WHOLE; remove with loq51's fix.
-                let overflow_risk = [fa.center(), fa.radius(), fb.center(), fb.radius()]
-                    .iter()
-                    .any(|v| v.abs() > f64::MAX / 2.0);
-                if overflow_risk {
-                    continue;
-                }
                 let affine_result = match op {
                     OpKind::Add => &fa + &fb,
                     OpKind::Sub => &fa - &fb,
                     OpKind::Mul => &fa * &fb,
                     OpKind::Div => unreachable!(),
                 };
-                if !(affine_result.center().is_finite() && affine_result.radius().is_finite()) {
-                    continue;
-                }
                 let result = affine_result.to_interval();
                 for &pa in &[ia.lo(), ia.hi()] {
                     for &pb in &[ib.lo(), ib.hi()] {
@@ -685,25 +671,6 @@ fn g0_affine_boundary_class_containment_holds_for_add_sub_mul() {
                     }
                 }
             }
-        }
-        if class == Class::NearOverflow {
-            // EXPLICIT SUPPRESSION, not a weakened gate: every affine
-            // near-overflow case is currently excluded by the loq51 guard
-            // above, so this class contributes ZERO affine checks until the
-            // library saturates instead of panicking. Pinning the exact
-            // count keeps the suppression visible: when loq51 lands and the
-            // guard is removed, this arm must be deleted and the class must
-            // meet the ordinary non-vacuity floor.
-            assert_eq!(
-                checked, 0,
-                "near-overflow affine coverage changed; revisit the loq51 guard"
-            );
-            println!(
-                "{{\"suite\":\"fs-ivl-containment-fuzz\",\"case\":\"affine-class\",\
-                 \"class\":\"near-overflow\",\"checks\":0,\
-                 \"verdict\":\"suppressed-by-frankensim-loq51\"}}"
-            );
-            continue;
         }
         assert!(
             checked > 4_000,

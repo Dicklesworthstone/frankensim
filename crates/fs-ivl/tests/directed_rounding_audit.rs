@@ -320,11 +320,13 @@ fn g3_ordering_involution_reflection_and_pow2_scaling_laws() {
 const REGISTERED_SITES: &[(&str, usize, usize, &str)] = &[
     (
         "src/interval.rs",
-        3,
-        3,
+        2,
+        2,
         "up_k/down_k budget loops (paired outward); pi enclosure (down on lo, \
-         up on hi around a correctly-rounded constant); strictly_outside \
-         (up/down define the strict-exclusion boundary, not an enclosure)",
+         up on hi around a correctly-rounded constant). The strictly_outside \
+         helper and test-module assertions sit under #[cfg(test)] and are \
+         excluded by the production cutoff: they are expectations about \
+         nudges, not outward-rounding sites",
     ),
     (
         "src/affine.rs",
@@ -358,9 +360,13 @@ fn g0_every_outward_rounding_call_site_is_registered_and_classified() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (file, want_up, want_down, classification) in REGISTERED_SITES {
         let source = std::fs::read_to_string(root.join(file)).expect("fs-ivl source readable");
+        // The inventory audits PRODUCTION nudge sites: counting stops at the
+        // in-file test module, whose assertions may legitimately use nudges
+        // as expectations without being outward-rounding sites.
+        let production = source.split("#[cfg(test)]").next().unwrap_or("");
         let mut got_up = 0usize;
         let mut got_down = 0usize;
-        for line in source.lines() {
+        for line in production.lines() {
             // Strip line comments so doc text does not count as a site.
             let code = line.split("//").next().unwrap_or("");
             got_up += code.matches("next_up").count();

@@ -93,10 +93,22 @@ impl Affine {
     }
 
     /// Collapse to a rigorous interval enclosure.
+    ///
+    /// An overflowed form (non-finite center or radius, e.g. from
+    /// multiplying near-`MAX` operands) has no useful enclosure; it
+    /// collapses to [`Interval::WHOLE`] — the same "no useful enclosure is
+    /// an answer, not a panic" posture as interval division by a
+    /// zero-straddling divisor. Without this, `±inf − inf = NaN` endpoints
+    /// would panic in `Interval::new` (bead frankensim-loq51, found by the
+    /// .3.3 containment fuzzer).
     #[must_use]
     pub fn to_interval(&self) -> Interval {
         let r = self.radius();
-        Interval::new((self.center - r).next_down(), (self.center + r).next_up())
+        let (lo, hi) = ((self.center - r).next_down(), (self.center + r).next_up());
+        if lo.is_nan() || hi.is_nan() || lo > hi {
+            return Interval::WHOLE;
+        }
+        Interval::new(lo, hi)
     }
 
     /// Scale by a constant.
@@ -350,5 +362,26 @@ mod tests {
         let c = Affine::constant(2.5);
         assert_eq!(c.to_interval().midpoint().to_bits(), 2.5f64.to_bits());
         assert!(c.to_interval().width() < 1e-15);
+    }
+
+    #[test]
+    fn overflowed_forms_collapse_to_whole_instead_of_panicking() {
+        // Bead frankensim-loq51 (found by the .3.3 containment fuzzer):
+        // multiplying near-MAX forms overflows center/radius to inf, and
+        // the old to_interval computed inf − inf = NaN endpoints, panicking
+        // inside Interval::new. The admitted posture is WHOLE.
+        let mut ctx = AffineCtx::new();
+        let big = ctx.from_interval(Interval::new(f64::MAX / 2.0, f64::MAX));
+        let product = &big * &big;
+        assert!(
+            !product.center().is_finite() || !product.radius().is_finite(),
+            "the fixture must actually overflow"
+        );
+        let collapsed = product.to_interval();
+        assert_eq!(collapsed.lo(), f64::NEG_INFINITY);
+        assert_eq!(collapsed.hi(), f64::INFINITY);
+        // WHOLE is a valid (maximally pessimistic) enclosure: containment
+        // of any probe holds trivially and no panic path remains.
+        assert!(collapsed.contains(0.0));
     }
 }
