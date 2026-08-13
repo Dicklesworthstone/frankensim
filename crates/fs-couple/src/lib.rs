@@ -34,6 +34,7 @@
 pub mod acoustic_realize;
 pub mod bernoulli_aperture;
 pub mod broadband_radiation;
+pub mod cavity_phs;
 pub mod driving_point;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
