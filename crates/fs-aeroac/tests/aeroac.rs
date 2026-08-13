@@ -7,7 +7,10 @@
 
 use fs_aeroac::bessel::{hankel0_outgoing, j0, j1, y0, y1};
 use fs_aeroac::bickley::{JetSymmetry, bickley_rayleigh_mode, rayleigh_residual_closed_form};
-use fs_aeroac::curle2d::dipole_pressure;
+use fs_aeroac::curle2d::{
+    dipole_pressure, modulate_observer_by_tone, strouhal_at_reynolds, tonal_dipole_observer,
+    tonal_lock_frequency,
+};
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 use fs_math::c64::C64;
 use fs_math::det;
@@ -202,6 +205,43 @@ fn curle_refusals_are_typed() {
         dipole_pressure(bad, 5.0, [1.0, 0.0], [0.0, 0.0]),
         Err(AeroacError::NonFinite { .. })
     ));
+}
+
+#[test]
+fn pinned_strouhal_ladder_is_interpolated_not_invented() {
+    let st_lo = strouhal_at_reynolds(432.0).expect("432");
+    let st_hi = strouhal_at_reynolds(2_304.0).expect("2304");
+    assert!((st_lo - 0.092).abs() < 1.0e-12);
+    assert!((st_hi - 0.467).abs() < 1.0e-12);
+    let mid = strouhal_at_reynolds(500.0).expect("mid");
+    assert!(mid > st_lo && mid < 0.101);
+    assert!(strouhal_at_reynolds(0.0).is_none());
+    let f = tonal_lock_frequency(432.0, 20.0, 0.006).expect("f");
+    assert!((f - 0.092 * 20.0 / 0.006).abs() < 1.0e-12);
+}
+
+#[test]
+fn tonal_dipole_is_observer_side_and_nulls_off_axis() {
+    let on = tonal_dipole_observer(1.2, 20.0, 0.006, 432.0, 0.4, 343.0, [2.0, 0.0], [0.0, 0.0])
+        .expect("on");
+    let off = tonal_dipole_observer(1.2, 20.0, 0.006, 432.0, 0.4, 343.0, [0.0, 2.0], [0.0, 0.0])
+        .expect("off");
+    assert!(on.pressure.abs() > 0.0);
+    assert_eq!(off.pressure.abs(), 0.0);
+    assert_eq!(on.scope, SCOPE_STATEMENT);
+}
+
+#[test]
+fn observer_tone_modulation_does_not_invent_broadband() {
+    let n = 512;
+    let dt = 1.0 / 8_192.0;
+    let mut p = vec![1.0; n];
+    modulate_observer_by_tone(&mut p, dt, 256.0, 0.5);
+    // Mean stays 1 (zero-mean sine). Peak-to-peak is the depth.
+    let max = p.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min = p.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!((max - 1.5).abs() < 1.0e-9);
+    assert!((min - 0.5).abs() < 1.0e-9);
 }
 
 /// The analytic pins, SELF-VERIFIED: `phi = sech^2` at

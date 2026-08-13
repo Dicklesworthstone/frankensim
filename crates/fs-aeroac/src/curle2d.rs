@@ -83,3 +83,114 @@ pub fn dipole_pressure(
         scope: SCOPE_STATEMENT,
     })
 }
+
+/// Locked Strouhal number from the pinned 2-D CentralMoment ladder
+/// (`slot_half = 6`, the executed Re sweep).
+///
+/// Log-linear interpolation in Reynolds number between neighbouring
+/// rows. Outside the table the nearest endpoint is returned — that is
+/// an observation bound, not an extrapolation claim. The jump near
+/// Re ~ 10³ is in the recorded data (stage change), not smoothed away.
+/// This does **not** mint 3-D broadband: every row is tonal.
+#[must_use]
+pub fn strouhal_at_reynolds(reynolds: f64) -> Option<f64> {
+    if !(reynolds > 0.0 && reynolds.is_finite()) {
+        return None;
+    }
+    let mut rows: Vec<(f64, f64)> = crate::regime::PINNED_2D_CENTRAL_MOMENT_TONAL
+        .iter()
+        .filter(|row| (row.slot_half - 6.0).abs() < 1.0e-12 && row.ran_in_regime)
+        .map(|row| (row.reynolds, row.strouhal))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+    if reynolds <= rows[0].0 {
+        return Some(rows[0].1);
+    }
+    if reynolds >= rows[rows.len() - 1].0 {
+        return Some(rows[rows.len() - 1].1);
+    }
+    for pair in rows.windows(2) {
+        let (re0, st0) = pair[0];
+        let (re1, st1) = pair[1];
+        if reynolds >= re0 && reynolds <= re1 {
+            let ln0 = det::ln(re0);
+            let t = (det::ln(reynolds) - ln0) / (det::ln(re1) - ln0);
+            return Some(st0 + t * (st1 - st0));
+        }
+    }
+    None
+}
+
+/// Tonal lock frequency [Hz]: `f = St(Re) · U / δ`.
+///
+/// `slot_width` is the same `delta` the pinned table uses (slot half
+/// in lattice units, or the physical slot scale the caller binds).
+#[must_use]
+pub fn tonal_lock_frequency(reynolds: f64, u_jet: f64, slot_width: f64) -> Option<f64> {
+    if !(u_jet > 0.0 && slot_width > 0.0 && u_jet.is_finite() && slot_width.is_finite()) {
+        return None;
+    }
+    strouhal_at_reynolds(reynolds).map(|st| st * u_jet / slot_width)
+}
+
+/// Compact 2-D Curle dipole of a locked slot-jet tone at an observer.
+///
+/// Force per unit span is the caller-authored lift coefficient times
+/// `½ ρ U² δ`. Shape and scaling only — see [`crate::SCOPE_STATEMENT`].
+/// This is observer-side radiation of the existing 2-D lock, not a
+/// 3-D jet-noise spectrum.
+///
+/// # Errors
+/// [`AeroacError`] from the dipole kernel, or missing Strouhal lock.
+pub fn tonal_dipole_observer(
+    density: f64,
+    u_jet: f64,
+    slot_width: f64,
+    reynolds: f64,
+    lift_coeff: f64,
+    sound_speed: f64,
+    observer: [f64; 2],
+    source: [f64; 2],
+) -> Result<DipoleField, AeroacError> {
+    if ![density, u_jet, slot_width, lift_coeff, sound_speed]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+    {
+        return Err(AeroacError::NonFinite {
+            what: "tonal dipole inputs",
+        });
+    }
+    let freq =
+        tonal_lock_frequency(reynolds, u_jet, slot_width).ok_or(AeroacError::InvalidParameter {
+            what: "no pinned 2D Strouhal lock at this Reynolds number",
+        })?;
+    let omega = 2.0 * core::f64::consts::PI * freq;
+    let k = omega / sound_speed;
+    let force_amp = 0.5 * density * u_jet * u_jet * slot_width * lift_coeff;
+    dipole_pressure(
+        [C64::new(force_amp, 0.0), C64::new(0.0, 0.0)],
+        k,
+        observer,
+        source,
+    )
+}
+
+/// Observer-only amplitude modulation by a locked 2-D tone.
+///
+/// Multiplies an existing pressure history by
+/// `1 + depth · sin(2π f t)`. It does **not** enter a reed/bore lock
+/// loop. `depth` is clamped to `[0, 1]`.
+pub fn modulate_observer_by_tone(pressure: &mut [f64], dt: f64, frequency_hz: f64, depth: f64) {
+    if !(dt > 0.0 && frequency_hz > 0.0 && dt.is_finite() && frequency_hz.is_finite()) {
+        return;
+    }
+    let depth = depth.clamp(0.0, 1.0);
+    let omega = 2.0 * core::f64::consts::PI * frequency_hz;
+    for (i, sample) in pressure.iter_mut().enumerate() {
+        let phase = omega * dt * i as f64;
+        *sample *= 1.0 + depth * det::sin(phase);
+    }
+}
