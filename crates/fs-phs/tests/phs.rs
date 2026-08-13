@@ -8,8 +8,8 @@
 use fs_math::c64::C64;
 use fs_phs::{
     PhsError, PortHamiltonian, QuadraticStorage, Storage, discrete_gradient, duffing_oscillator,
-    helmholtz_resonator, interconnect, lc_ladder, mass_spring_damper, modal_bank, reduce_galerkin,
-    step,
+    helmholtz_resonator, helmholtz_resonator_flow, interconnect, lc_ladder, mass_spring_damper,
+    modal_bank, reduce_galerkin, step,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -239,6 +239,19 @@ fn helmholtz_resonator_interconnects_with_a_modal_bank() {
         "lossless plate+cavity must hold H ({h1} vs {h0})"
     );
     assert!(helmholtz_resonator(0.0, 0.01, 0.01, 1.2, 343.0, 0.0).is_err());
+}
+
+#[test]
+fn flow_driven_helmholtz_pressure_tracks_injected_volume() {
+    let cav = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("flow");
+    let mut x = vec![0.0, 0.0];
+    let dt = 1.0e-5;
+    for _ in 0..20 {
+        x = step(&cav, &x, &[1.0e-4], dt).expect("step").x;
+    }
+    let p = cav.output(&x)[0];
+    assert!(p > 0.0, "injected volume must raise cavity pressure, p={p}");
+    assert!(helmholtz_resonator_flow(0.0, 0.02, 0.03, 1.2, 343.0, 0.0).is_err());
 }
 
 #[test]

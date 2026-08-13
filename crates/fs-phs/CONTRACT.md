@@ -43,9 +43,10 @@ stepping, and Galerkin reduction preserves the structure.
   automatically and are re-admitted anyway. v1 requires quadratic
   storage (probed and refused otherwise); the reduced energy deficit
   at t = 0 equals the energy outside the basis exactly.
-- Zoo: `mass_spring_damper`, `helmholtz_resonator` (lumped acoustic
-  1-DOF with unflanged neck correction — a bottle and a vented
-  enclosure are the same object), `lc_ladder`, `modal_bank`
+- Zoo: `mass_spring_damper`, `helmholtz_resonator` (pressure-driven
+  lumped acoustic 1-DOF with unflanged neck correction),
+  `helmholtz_resonator_flow` (dual port: injected volume velocity
+  in, pressure out), `lc_ladder`, `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - Memoryless dissipative ports: `bernoulli_volume_flow` is the
