@@ -737,6 +737,35 @@ mod tests {
     }
 
     #[test]
+    fn all_regime_keeps_losses_below_the_wide_tube_floor() {
+        let state = air();
+        // r = 1 mm, f = 40 Hz → rv ≈ 3.3 < 10.
+        let wave = segment_wave(
+            &state,
+            0.001,
+            2.0 * core::f64::consts::PI * 40.0,
+            LossModel::AllRegime,
+        )
+        .expect("all-regime");
+        assert!(wave.shear_number < MIN_SHEAR_NUMBER);
+        assert!(
+            wave.wavenumber.im > 0.0,
+            "narrow-tube k must decay: {:?}",
+            wave.wavenumber
+        );
+        assert!(wave.characteristic_impedance.re > 0.0);
+        assert!(
+            segment_wave(
+                &state,
+                0.001,
+                2.0 * core::f64::consts::PI * 40.0,
+                LossModel::WideTube
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn lossless_cylinder_matches_closed_forms() {
         // Under e^{-i omega t}: closed pipe Z_in = +i Zc cot(kL),
         // ideal-open pipe Z_in = -i Zc tan(kL) — both exact, computed
