@@ -33,6 +33,8 @@ const TMESH_015_INPUT_SEED: u64 = 0x1001_2026_0709_0015;
 const TMESH_016_INPUT_SEED: u64 = 0x160B_2026_0709_0016;
 const TMESH_017_INPUT_SEED: u64 = TMESH_011_INPUT_SEED;
 const TMESH_018_INPUT_SEED: u64 = 0x1001_2026_0812_0018;
+const TMESH_019_INPUT_SEED: u64 = 0x1001_2026_0813_0019;
+const TMESH_020_INPUT_SEED: u64 = 0x1001_2026_0813_0020;
 
 fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
     let mut emitter = fs_obs::Emitter::new(SUITE, case);
@@ -1954,6 +1956,232 @@ fn tmesh_018_general_position_facet_recovery() {
             t1.tets() == t2.tets() && rows == rows2 && stats.to_json() == stats2.to_json(),
             "mesh, correspondence, and ledger replay bitwise",
             TMESH_018_INPUT_SEED,
+        );
+    });
+}
+
+fn point_on_segment(p: Point3, a: Point3, b: Point3) -> bool {
+    let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+    let ap = [p.x - a.x, p.y - a.y, p.z - a.z];
+    let ab2 = ab[0].mul_add(ab[0], ab[1].mul_add(ab[1], ab[2] * ab[2]));
+    if ab2 == 0.0 {
+        return false;
+    }
+    let t = ap[0].mul_add(ab[0], ap[1].mul_add(ab[1], ap[2] * ab[2])) / ab2;
+    if !(0.0..=1.0).contains(&t) {
+        return false;
+    }
+    let q = Point3::new(
+        t.mul_add(ab[0], a.x),
+        t.mul_add(ab[1], a.y),
+        t.mul_add(ab[2], a.z),
+    );
+    plane_distance(p, q, [p.x - q.x, p.y - q.y, p.z - q.z]) < 1e-12 || {
+        let d = [p.x - q.x, p.y - q.y, p.z - q.z];
+        d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2])).sqrt() < 1e-12
+    }
+}
+
+/// tmesh-019: two non-coplanar parent facets share a crease. After a
+/// general-position rotation, constraint-edge midpoints stay raw so
+/// both parents adopt the same Steiner vertices. A plane-snap on the
+/// crease would have minted a near-duplicate pair.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn tmesh_019_crease_twins_share_steiner_vertices() {
+    with_cx(|cx| {
+        let mut raw: Vec<Point3> = Vec::new();
+        for i in 0..2i32 {
+            for j in 0..2i32 {
+                for k in 0..2i32 {
+                    raw.push(Point3::new(f64::from(i), f64::from(j), f64::from(k)));
+                }
+            }
+        }
+        raw.push(Point3::new(0.0, 0.0, 0.5)); // 8
+        raw.push(Point3::new(1.0, 0.0, 0.5)); // 9  crease end
+        raw.push(Point3::new(1.0, 1.0, 0.5)); // 10 crease end
+        raw.push(Point3::new(0.0, 1.0, 0.5)); // 11
+        raw.push(Point3::new(0.85, 0.5, 0.35)); // 12 encroacher, off both planes
+        let mut rng = Lcg(TMESH_019_INPUT_SEED);
+        for s in 0..36 {
+            let d = |r: &mut Lcg| 0.8f64.mul_add(r.dyadic(), 0.1);
+            let zz = if s % 2 == 0 {
+                0.3f64.mul_add(rng.dyadic(), 0.55)
+            } else {
+                0.3f64.mul_add(rng.dyadic(), 0.15)
+            };
+            raw.push(Point3::new(d(&mut rng), d(&mut rng), zz));
+        }
+        let pts: Vec<Point3> = raw.into_iter().map(rotate_general_position).collect();
+        let crease_a = pts[9];
+        let crease_b = pts[10];
+        // A: z=0.5 diaphragm. B: x=1 wall above the crease.
+        // Box (1,0,1)=5, (1,1,1)=7 under i-j-k packing.
+        let facets: Vec<Vec<u32>> = vec![vec![8, 9, 10, 11], vec![9, 5, 7, 10]];
+        let run = |cx: &Cx<'_>| -> (
+            Tetrahedralization,
+            fs_mesh::FacetRecoveryStats,
+            Vec<([u32; 3], u32)>,
+        ) {
+            let mut t = delaunay(&pts, cx).expect("delaunay");
+            let (stats, table) =
+                fs_mesh::recover_facets(&mut t, &facets, RecoveryOptions::default(), cx)
+                    .expect("facet recovery");
+            (t, stats, table.rows)
+        };
+        let (t1, stats, rows) = run(cx);
+        verdict(
+            "tmesh-019-recovered",
+            stats.recovered == 2 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
+            &format!("crease twin ledger: {}", stats.to_json()),
+            TMESH_019_INPUT_SEED,
+        );
+        let ptsv = t1.points();
+        let mut near = None;
+        for i in t1.steiner_from as usize..ptsv.len() {
+            for j in (i + 1)..ptsv.len() {
+                let d = [
+                    ptsv[i].x - ptsv[j].x,
+                    ptsv[i].y - ptsv[j].y,
+                    ptsv[i].z - ptsv[j].z,
+                ];
+                let dist = d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2])).sqrt();
+                if dist < 1e-9 {
+                    near = Some((i, j, dist));
+                }
+            }
+        }
+        verdict(
+            "tmesh-019-no-duplicate-steiners",
+            near.is_none(),
+            &format!("near-duplicate Steiner pair: {near:?}"),
+            TMESH_019_INPUT_SEED,
+        );
+        let crease_of = |fid: u32| -> std::collections::BTreeSet<u32> {
+            rows.iter()
+                .filter(|(_, p)| *p == fid)
+                .flat_map(|(f, _)| f.iter().copied())
+                .filter(|&v| point_on_segment(ptsv[v as usize], crease_a, crease_b))
+                .collect()
+        };
+        let a_crease = crease_of(0);
+        let b_crease = crease_of(1);
+        verdict(
+            "tmesh-019-shared-crease",
+            !a_crease.is_empty() && a_crease == b_crease,
+            &format!("A crease verts {a_crease:?} vs B {b_crease:?}"),
+            TMESH_019_INPUT_SEED,
+        );
+        let audit = t1.audit(true);
+        verdict(
+            "tmesh-019-audit",
+            audit.clean(),
+            &format!("exact audit after crease recovery: {audit:?}"),
+            TMESH_019_INPUT_SEED,
+        );
+        let (t2, stats2, rows2) = run(cx);
+        verdict(
+            "tmesh-019-replay",
+            t1.tets() == t2.tets() && rows == rows2 && stats.to_json() == stats2.to_json(),
+            "mesh, correspondence, and ledger replay bitwise",
+            TMESH_019_INPUT_SEED,
+        );
+    });
+}
+
+fn line_distance(p: Point3, a: Point3, b: Point3) -> f64 {
+    let d = [b.x - a.x, b.y - a.y, b.z - a.z];
+    let dd = d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2]));
+    if dd == 0.0 {
+        return 0.0;
+    }
+    let w = [p.x - a.x, p.y - a.y, p.z - a.z];
+    let c = [
+        w[1].mul_add(d[2], -(w[2] * d[1])),
+        w[2].mul_add(d[0], -(w[0] * d[2])),
+        w[0].mul_add(d[1], -(w[1] * d[0])),
+    ];
+    c[0].mul_add(c[0], c[1].mul_add(c[1], c[2] * c[2])).sqrt() / dd.sqrt()
+}
+
+/// tmesh-020: general-position segment recovery. The tmesh-014 box
+/// diagonals are rotated off-axis so no coordinate is bitwise constant
+/// on a chord. Steiner midpoints snap to the parent line: every
+/// correspondence vertex stays within a tight residual, all four
+/// diagonals recover, the exact audit stays clean, and the build
+/// replays.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn tmesh_020_general_position_segment_recovery() {
+    with_cx(|cx| {
+        let mut raw: Vec<Point3> = Vec::new();
+        for i in 0..2i32 {
+            for j in 0..2i32 {
+                for k in 0..2i32 {
+                    raw.push(Point3::new(f64::from(i), f64::from(j), f64::from(k)));
+                }
+            }
+        }
+        let mut rng = Lcg(TMESH_020_INPUT_SEED);
+        for _ in 0..48 {
+            let d = |r: &mut Lcg| 0.44f64.mul_add(r.dyadic(), 0.5);
+            raw.push(Point3::new(d(&mut rng), d(&mut rng), d(&mut rng)));
+        }
+        let pts: Vec<Point3> = raw.into_iter().map(rotate_general_position).collect();
+        let segments: Vec<[u32; 2]> = vec![[0, 7], [1, 6], [2, 5], [3, 4]];
+        let run = |cx: &Cx<'_>| -> (
+            Tetrahedralization,
+            fs_mesh::RecoveryStats,
+            Vec<([u32; 2], u32)>,
+        ) {
+            let mut t = delaunay(&pts, cx).expect("delaunay");
+            let (stats, table) =
+                recover_segments(&mut t, &segments, RecoveryOptions::default(), cx)
+                    .expect("recovery");
+            (t, stats, table.rows)
+        };
+        let (t1, stats, rows) = run(cx);
+        verdict(
+            "tmesh-020-recovered",
+            stats.recovered == 4 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
+            &format!("general-position segment ledger: {}", stats.to_json()),
+            TMESH_020_INPUT_SEED,
+        );
+        let ptsv = t1.points();
+        let residual = rows
+            .iter()
+            .map(|(e, sid)| {
+                let [a, b] = segments[*sid as usize];
+                line_distance(ptsv[e[0] as usize], ptsv[a as usize], ptsv[b as usize]).max(
+                    line_distance(ptsv[e[1] as usize], ptsv[a as usize], ptsv[b as usize]),
+                )
+            })
+            .fold(0.0f64, f64::max);
+        verdict(
+            "tmesh-020-line",
+            !rows.is_empty() && residual < 1e-14,
+            &format!(
+                "{} sub-edges, max parent-line residual {residual:e}",
+                rows.len()
+            ),
+            TMESH_020_INPUT_SEED,
+        );
+        let audit = t1.audit(true);
+        verdict(
+            "tmesh-020-audit",
+            audit.clean(),
+            &format!("exact audit after general-position segments: {audit:?}"),
+            TMESH_020_INPUT_SEED,
+        );
+        let (t2, stats2, rows2) = run(cx);
+        verdict(
+            "tmesh-020-replay",
+            canonical_tets(&t1) == canonical_tets(&t2)
+                && rows == rows2
+                && stats.to_json() == stats2.to_json(),
+            "mesh, correspondence, and ledger replay bitwise",
+            TMESH_020_INPUT_SEED,
         );
     });
 }

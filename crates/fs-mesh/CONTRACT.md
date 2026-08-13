@@ -400,8 +400,9 @@ assertions.
   beyond the recovered-face walls, the parent conduction E2E runner, or
   a cross-ISA mesh-byte identity. Facet Steiner midpoints are snapped
   onto the parent supporting plane; a point already on the plane is
-  left bitwise unchanged. Crease-edge twins across two non-coplanar
-  parent facets still adopt the first inserter. Self-intersection of
+  left bitwise unchanged. Constraint-edge (crease) midpoints stay raw
+  so two non-coplanar parent facets adopt the same Steiner vertex
+  (tmesh-019). Self-intersection of
   distinct region surfaces is refused only when both windings claim the
   same retained tet, not by a complete triangle-triangle predicate
   sweep. The discarded cavity/exterior volume fields on the witness are
@@ -424,7 +425,8 @@ assertions.
   a facet correspondence table re-verified against the finished mesh,
   and honest starved-budget counters. Steiner midpoints snap to the
   parent supporting plane (tmesh-018), so a planar facet stays planar
-  when it is not axis-aligned. Remaining no-claim:
+  when it is not axis-aligned. Constraint-edge midpoints stay raw so a
+  crease shared by two parent planes twins (tmesh-019). Remaining no-claim:
   Full-Ruppert QUALITY:
   the diametral encroachment machinery cut the hull-split regression
   ~8× (tmesh-011); the residual is coupled to boundary-layer
@@ -437,9 +439,10 @@ assertions.
   to strand 3 of 4 segments before adoption landed), a boundary
   CORRESPONDENCE table mapping every sub-edge to its parent segment
   (built by construction, re-verified against the finished mesh), and
-  honest `unrecovered` counters at depth/budget caps. Convex
-  hull-facet conformity is gated test-side; interior/non-convex FACET
-  recovery (true constrained DT) remains the successor.
+  honest `unrecovered` counters at depth/budget caps. Steiner midpoints
+  snap onto the original parent chord (tmesh-020) so a general-position
+  segment stays on the line. Convex hull-facet conformity is gated
+  test-side.
 - Refinement is radius-edge with the minimum-new-edge policy floor;
   full local-feature-size Ruppert guarantees remain successor scope
   (sliver exudation ships in `exude`).

@@ -9,7 +9,9 @@
 //! (the recursion knows which points it created for which segment) —
 //! and the battery re-verifies each recorded sub-edge against the
 //! finished mesh anyway. Depth/budget caps are counted honestly
-//! (`unrecovered`), never silently dropped.
+//! (`unrecovered`), never silently dropped. Segment Steiner midpoints
+//! snap onto the original parent chord so a general-position segment
+//! stays on the line under bisection.
 //!
 //! INTERIOR FACET recovery ([`recover_facets`], the uee3/iw3l successor
 //! slice): every SIMPLE planar PLC facet becomes a union of mesh FACES
@@ -21,13 +23,15 @@
 //! facet plane using `orient2d` for the ear and containment tests
 //! (bead iw3l item (a): interior/non-convex PLC facets) — a loop that
 //! is not a simple non-degenerate polygon is counted `unrecovered`,
-//! never faked. Steiner midpoints are snapped onto the parent facet's
-//! supporting plane (Newell normal through the first loop vertex)
-//! before insertion, so a planar facet stays planar under bisection
-//! even when it is not axis-aligned. A point already on the plane
-//! (`t == 0`) is left bitwise unchanged, which keeps the axis-aligned
-//! identity. Crease-edge twins across two non-coplanar parent facets
-//! still adopt the first inserter.
+//! never faked. Steiner midpoints on INTERIOR triangulation edges are
+//! snapped onto the parent facet's supporting plane (Newell normal
+//! through the first loop vertex) so a planar facet stays planar under
+//! bisection even when it is not axis-aligned. A point already on the
+//! plane (`t == 0`) is left bitwise unchanged, which keeps the
+//! axis-aligned identity. Constraint edges — the original loop and
+//! every bisection descendant — keep the raw midpoint so two
+//! non-coplanar parent facets that share a crease adopt the same
+//! Steiner vertex.
 
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
 use fs_exec::Cx;
@@ -171,16 +175,23 @@ pub fn recover_segments(
                 continue;
             }
             // Midpoint Steiner point (exact halving of the parameter;
-            // coordinates via f64::midpoint per axis).
+            // coordinates via f64::midpoint per axis, then snapped onto
+            // the ORIGINAL parent segment so later generations cannot
+            // walk off a general-position chord).
             let (pa, pb) = (
                 tetra.mesh.points[vlo as usize],
                 tetra.mesh.points[vhi as usize],
             );
-            let mid = [
-                f64::midpoint(pa[0], pb[0]),
-                f64::midpoint(pa[1], pb[1]),
-                f64::midpoint(pa[2], pb[2]),
-            ];
+            let (oa, ob) = (tetra.mesh.points[a as usize], tetra.mesh.points[b as usize]);
+            let mid = snap_to_line(
+                [
+                    f64::midpoint(pa[0], pb[0]),
+                    f64::midpoint(pa[1], pb[1]),
+                    f64::midpoint(pa[2], pb[2]),
+                ],
+                oa,
+                ob,
+            );
             let bits = [mid[0].to_bits(), mid[1].to_bits(), mid[2].to_bits()];
             let split = if let Some(&twin) = by_bits.get(&bits) {
                 // Adopt the existing on-segment vertex.
@@ -314,6 +325,28 @@ fn newell_normal(points: &[[f64; 3]], loop_verts: &[u32]) -> [f64; 3] {
         nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
     }
     nrm
+}
+
+/// Orthogonal projection onto the line through `a` and `b`. A point
+/// already on the line is returned unchanged so axis-aligned bitwise
+/// identity and concurrent-segment twins survive.
+fn snap_to_line(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let dd = d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2]));
+    if dd == 0.0 || !dd.is_finite() {
+        return point;
+    }
+    let w = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
+    let t = w[0].mul_add(d[0], w[1].mul_add(d[1], w[2] * d[2])) / dd;
+    let q = [
+        t.mul_add(d[0], a[0]),
+        t.mul_add(d[1], a[1]),
+        t.mul_add(d[2], a[2]),
+    ];
+    if q[0] == point[0] && q[1] == point[1] && q[2] == point[2] {
+        return point;
+    }
+    q
 }
 
 /// Orthogonal projection onto the plane through `origin` with
@@ -539,6 +572,13 @@ pub fn recover_facets(
         };
         let origin = tetra.mesh.points[loop_verts[0] as usize];
         let normal = newell_normal(&tetra.mesh.points, loop_verts);
+        let mut constraint_edges: BTreeSet<[u32; 2]> = BTreeSet::new();
+        let nloop = loop_verts.len();
+        for i in 0..nloop {
+            let a = loop_verts[i];
+            let b = loop_verts[(i + 1) % nloop];
+            constraint_edges.insert(if a < b { [a, b] } else { [b, a] });
+        }
         let mut failed = false;
         let mut round = 0u32;
         loop {
@@ -596,15 +636,21 @@ pub fn recover_facets(
                     break;
                 }
                 let (pu, pv) = (tetra.mesh.points[u as usize], tetra.mesh.points[v as usize]);
-                let mid = snap_to_plane(
-                    [
-                        f64::midpoint(pu[0], pv[0]),
-                        f64::midpoint(pu[1], pv[1]),
-                        f64::midpoint(pu[2], pv[2]),
-                    ],
-                    origin,
-                    normal,
-                );
+                let raw = [
+                    f64::midpoint(pu[0], pv[0]),
+                    f64::midpoint(pu[1], pv[1]),
+                    f64::midpoint(pu[2], pv[2]),
+                ];
+                let edge = if u < v { [u, v] } else { [v, u] };
+                let on_constraint = constraint_edges.contains(&edge);
+                let mid = if on_constraint {
+                    // Shared crease edges must agree across parent
+                    // planes; the raw midpoint of two constraint
+                    // vertices is the twin key.
+                    raw
+                } else {
+                    snap_to_plane(raw, origin, normal)
+                };
                 let bits = [mid[0].to_bits(), mid[1].to_bits(), mid[2].to_bits()];
                 let m = if let Some(&twin) = by_bits.get(&bits) {
                     twin
@@ -621,6 +667,10 @@ pub fn recover_facets(
                         break;
                     }
                 };
+                if on_constraint {
+                    constraint_edges.insert(if u < m { [u, m] } else { [m, u] });
+                    constraint_edges.insert(if v < m { [v, m] } else { [m, v] });
+                }
                 // Split EVERY facet triangle sharing edge (u, v) so
                 // the facet triangulation stays edge-conforming.
                 let mut next: Vec<[u32; 3]> = Vec::with_capacity(tris.len() + 2);
