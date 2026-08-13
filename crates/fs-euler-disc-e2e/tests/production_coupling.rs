@@ -27,12 +27,12 @@ use fs_euler_disc_e2e::patch_kinematics::{
     compute_moving_one_mode_patch_kinematics,
 };
 use fs_euler_disc_e2e::production_coupling::{
-    GasChannelReceipt, GasChannelState, GasChannelStepInput, ProductionCouplingError,
-    ProductionCouplingIdentity, ProductionCouplingModel, ProductionCouplingStepInput,
-    ProductionEventTrajectoryTermination, ProductionOpenFlightStepInput,
-    ProductionSurfaceExcitationError, ProductionSurfaceExcitationStepInput,
-    ProductionSurfaceGeometryStepInput, ProductionSurfaceTraceStepInput,
-    ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt,
+    GasChannelReceipt, GasChannelState, GasChannelStepInput, ProductionCouplingCheckpoint,
+    ProductionCouplingError, ProductionCouplingIdentity, ProductionCouplingModel,
+    ProductionCouplingStepInput, ProductionEventTrajectoryTermination,
+    ProductionOpenFlightStepInput, ProductionSurfaceExcitationError,
+    ProductionSurfaceExcitationStepInput, ProductionSurfaceGeometryStepInput,
+    ProductionSurfaceTraceStepInput, ProductionTrajectoryBranch, ProductionTrajectoryStepReceipt,
     SmoothContactTrajectoryTermination,
 };
 use fs_euler_disc_e2e::rolling_contact::{
@@ -1609,6 +1609,100 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             .expect("deterministic repeated profile binding");
         assert_eq!(resolved, repeated_resolved);
         assert_eq!(first_request, repeated_request);
+
+        // G1/G3: the profile-native coupled step must converge from its shared
+        // midpoint, while a refusal after both predictors consumes no state or
+        // exactly-once work key.
+        let mut midpoint_template = first_request.clone();
+        midpoint_template.surface_excitation = None;
+        midpoint_template.normal.integration_regime =
+            NormalContactIntegrationRegime::CompliantTransient;
+        let checkpoint_before_refusal = checkpoint.clone();
+        let refused = model.step_eventful_profile_midpoint(
+            &checkpoint,
+            &midpoint_template,
+            &profile,
+            cx,
+            |_, _| {
+                Err(ProductionCouplingError::InvalidInput {
+                    field: "injected midpoint refusal",
+                })
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(ProductionCouplingError::InvalidInput {
+                field: "injected midpoint refusal"
+            })
+        ));
+        assert_eq!(checkpoint, checkpoint_before_refusal);
+        let (accepted_after_refusal, _) = model
+            .step_eventful_profile_midpoint(
+                &checkpoint,
+                &midpoint_template,
+                &profile,
+                cx,
+                |_, _| Ok(()),
+            )
+            .expect("the refused predictor did not consume any candidate key");
+        assert_eq!(accepted_after_refusal.committed_version, 1);
+
+        let horizon_s = 4.0e-5;
+        let evolve = |substeps: usize| {
+            let mut accepted = checkpoint.clone();
+            let dt_s = horizon_s / substeps as f64;
+            for _ in 0..substeps {
+                let mut input = request_for_checkpoint(&midpoint_template, &accepted);
+                input.duration_s = dt_s;
+                input.time_s = accepted.elapsed_time_s();
+                input.normal.time_s = input.time_s;
+                input.normal.step_s = dt_s;
+                input.tangential.dt_s = dt_s;
+                input.rolling.interval_s = dt_s;
+                input.base_load_progress_start = input.time_s;
+                input.base_load_progress_end = input.time_s + dt_s;
+                model
+                    .bind_horizontal_plane_axisymmetric_profile_contact(
+                        &mut input, &profile, &accepted, cx,
+                    )
+                    .expect("profile-bound manufactured midpoint input");
+                accepted = model
+                    .step_eventful_profile_midpoint(&accepted, &input, &profile, cx, |_, _| Ok(()))
+                    .expect("fixed-branch manufactured midpoint step")
+                    .0;
+            }
+            accepted
+        };
+        let coarse = evolve(1);
+        let medium = evolve(2);
+        let fine = evolve(4);
+        let state_distance = |left: &ProductionCouplingCheckpoint,
+                              right: &ProductionCouplingCheckpoint| {
+            let position = left
+                .disc_state
+                .pose()
+                .position_world()
+                .sub(right.disc_state.pose().position_world())
+                .squared_norm()
+                .sqrt();
+            let velocity = left
+                .disc_state
+                .linear_momentum_world()
+                .sub(right.disc_state.linear_momentum_world())
+                .scale(disc_mass_properties.mass().recip())
+                .squared_norm()
+                .sqrt();
+            position
+                + horizon_s * velocity
+                + (left.base_displacement_m() - right.base_displacement_m()).abs()
+                + horizon_s * (left.base_velocity_m_per_s() - right.base_velocity_m_per_s()).abs()
+        };
+        let coarse_delta = state_distance(&coarse, &medium);
+        let fine_delta = state_distance(&medium, &fine);
+        assert!(
+            coarse_delta > 2.5 * fine_delta,
+            "shared-midpoint refinement must be near second order: coarse={coarse_delta:.17e}, fine={fine_delta:.17e}"
+        );
 
         let production_prefix =
             model.run_smooth_contact_trajectory(checkpoint.clone(), 1, |accepted| {
