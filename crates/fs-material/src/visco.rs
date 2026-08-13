@@ -989,6 +989,46 @@ impl ThermoelasticZener {
         let wt = omega * tau;
         self.relaxation_strength() * wt / (1.0 + wt * wt)
     }
+
+    /// Handbook aluminum (6061-class) at temperature `t0` [K].
+    ///
+    /// # Errors
+    /// [`ViscoError::Parameters`] if `t0` is not positive and finite.
+    pub fn aluminum(t0: f64) -> Result<Self, ViscoError> {
+        if !(t0 > 0.0 && t0.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "thermoelastic T0 must be positive and finite",
+            });
+        }
+        Ok(Self {
+            e: 69.0e9,
+            alpha_t: 23.1e-6,
+            t0,
+            rho: 2_700.0,
+            cp: 897.0,
+            conductivity: 167.0,
+        })
+    }
+
+    /// Handbook structural steel at temperature `t0` [K].
+    ///
+    /// # Errors
+    /// [`ViscoError::Parameters`] if `t0` is not positive and finite.
+    pub fn structural_steel(t0: f64) -> Result<Self, ViscoError> {
+        if !(t0 > 0.0 && t0.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "thermoelastic T0 must be positive and finite",
+            });
+        }
+        Ok(Self {
+            e: 200.0e9,
+            alpha_t: 11.7e-6,
+            t0,
+            rho: 7_850.0,
+            cp: 486.0,
+            conductivity: 51.9,
+        })
+    }
 }
 
 #[cfg(test)]
