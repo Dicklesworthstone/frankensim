@@ -35,6 +35,7 @@ pub mod acoustic_realize;
 pub mod broadband_radiation;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
+pub mod reed_bore;
 pub mod vibroacoustic;
 
 use core::num::NonZeroUsize;

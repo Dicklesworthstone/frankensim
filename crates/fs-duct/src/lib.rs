@@ -226,7 +226,9 @@ impl Segment {
         }
     }
 
-    fn outlet_radius(&self) -> f64 {
+    /// Radius at the segment's outlet plane.
+    #[must_use]
+    pub fn outlet_radius(&self) -> f64 {
         match *self {
             Segment::Cylinder { radius, .. } => radius,
             Segment::Cone { outlet_radius, .. } => outlet_radius,

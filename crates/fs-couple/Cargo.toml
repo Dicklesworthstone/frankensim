@@ -17,6 +17,8 @@ fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
+fs-nlmodal = { path = "../fs-nlmodal" }
+fs-phs = { path = "../fs-phs" }
 fs-qty = { path = "../fs-qty" }
 fs-scenario = { path = "../fs-scenario" }
 fs-vfit = { path = "../fs-vfit" }
