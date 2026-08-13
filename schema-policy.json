@@ -369,12 +369,6 @@
   ],
   "not_promised": [
     {
-      "constant": "FAN_SYSTEM_DECL_VERSION",
-      "location": "crates/fs-project/src/fansystem.rs",
-      "reason_class": "internal-wire",
-      "reason": "declaration-struct version for the bead frn2i.1 fan system; the serialized promise is the .fsim envelope version (project.fsim v2), and this constant never appears on the wire"
-    },
-    {
       "constant": "INITIAL_SEMANTIC_SCHEMA_VERSION",
       "location": "crates/fs-checker/src/semantic.rs",
       "reason_class": "internal-wire",
@@ -409,6 +403,156 @@
       "location": "crates/fs-crosswalk/src/lib.rs",
       "reason_class": "internal-wire",
       "reason": "versions the standards-vocabulary mapping text, not a serialized artifact another tool parses"
+    },
+    {
+      "constant": "AUDIO_ARTIFACT_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/audio_artifact.rs",
+      "reason_class": "internal-wire",
+      "reason": "cinematic audio-stem artifact framing for the euler campaign's own renderer/consumer pair; run evidence, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_WAV_CODEC_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/audio_artifact.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "AUDIO_EXCITATION_ALGORITHM_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/audio_excitation.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "AUDIO_RECONSTRUCTION_FILTER_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/audio_resampling.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "AUDIO_RESAMPLING_ALGORITHM_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/audio_resampling.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "CINEMATIC_FINALIZATION_PLAN_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/cinematic_finalize.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "CINEMATIC_FINALIZATION_REPORT_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/cinematic_finalize.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "CINEMATIC_JOB_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/cinematic_job.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_CONTROL_STREAM_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/control_stream.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_MODAL_PARAMETER_SET_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/modal_synthesis.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "MODAL_SYNTHESIS_ALGORITHM_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/modal_synthesis.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_COMPOSITION_PORT_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/ports.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_RENDER_CHECKPOINT_IDENTITY_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_checkpoint.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_RENDER_MOTION_BRIDGE_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_motion_bridge.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_RENDER_SCENE_BRIDGE_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_scene_bridge.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_RENDER_SHARD_PLAN_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_sharding.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_RENDER_TRAJECTORY_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_trajectory.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "PRODUCTION_COUPLING_RENDER_BRIDGE_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_trajectory.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "PRODUCTION_EVENT_RENDER_BRIDGE_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_trajectory.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "REDUCED_DECAY_RENDER_BRIDGE_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_trajectory.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_RENDER_TRAJECTORY_CODEC_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/render_trajectory_codec.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "SPATIAL_AUDIO_ALGORITHM_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/spatial_audio.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/structural_acoustics.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/structural_acoustics.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
+    },
+    {
+      "constant": "EULER_TIMELINE_RESAMPLER_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/timeline_resampling.rs",
+      "reason_class": "internal-wire",
+      "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
     },
     {
       "constant": "COLOR_DEMOTION_ROW_SCHEMA_VERSION",
@@ -697,6 +841,12 @@
       "location": "crates/fs-package/src/receipt_catalog.rs",
       "reason_class": "identity-domain",
       "reason": "content-hash domain separator"
+    },
+    {
+      "constant": "FAN_SYSTEM_DECL_VERSION",
+      "location": "crates/fs-project/src/fansystem.rs",
+      "reason_class": "internal-wire",
+      "reason": "declaration-struct version for the bead frn2i.1 fan system; the serialized promise is the .fsim envelope version (project.fsim v2), and this constant never appears on the wire"
     },
     {
       "constant": "DESIGN_EXTENSION_SCHEMA_VERSION",

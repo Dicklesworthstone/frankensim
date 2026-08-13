@@ -2,15 +2,15 @@
   "schema": "frankensim-spine-metrics-v2",
   "bead": "frankensim-o5et9",
   "beads": {
-    "issues_fnv1a64": "37bb33f474187d83",
-    "open": 2012,
-    "blocked": 1657,
-    "actionable": 355
+    "issues_fnv1a64": "4d8c45daae25306a",
+    "open": 2160,
+    "blocked": 1791,
+    "actionable": 369
   },
   "e2e": {
     "status": "measured",
-    "stages_green": 3,
-    "receipt_fnv1a64": "eb31f19f9050236d"
+    "stages_green": 4,
+    "receipt_fnv1a64": "88b10cb60bb31baa"
   },
   "no_claim": "counts a deliberately regenerated tracker snapshot; the live tracker moves on every br op, so this trails it by design. e2e measured means the retained spine-e2e-summary.json receipt attests the executing prefix; no-retained-receipt means the lane runs green out-of-band but no tracked receipt exists yet"
 }
