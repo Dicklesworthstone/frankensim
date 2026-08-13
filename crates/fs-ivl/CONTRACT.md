@@ -244,6 +244,24 @@ the corresponding `fs_ivl::expansion` sum/product components. The second pins
 seeded endpoint-reference corruption must produce one byte-replayable red
 record and make the Casebook merge assertion refuse it.
 
+`tests/exact_corpus.rs` + `tests/fixtures/exact_corpus.txt` (bead
+f85xj.3.2): the exact rational/algebraic G0 corpus — committed,
+content-addressed fixture (FNV root on the `end` line) whose ground truth
+is all-integer i128 dyadic arithmetic or hand-derivable lattice/algebraic
+identities, no oracle in the loop. Rows cover exact dyadic add/sub/mul/div
+chains (reducible spellings, signed zeros, subnormal and near-overflow
+scales, exact cancellation), perfect-square sqrt, integer-witnessed
+irrational sqrt enclosures (lo² ≤ n ≤ hi² checked in integers),
+Newton/Krawczyk certified rational roots and no-root refusals, Taylor-model
+evaluation at exact rationals, orient2d/orient3d/incircle lattice sign
+classes including exact degeneracies, expansion `prod_diff` sign ties, and
+extended-real singletons. A drift guard pins the tracked bytes to the
+in-file generator; decoder refusals (malformed, unknown tag, duplicate id,
+bad integer, truncation, count/root mismatch, oversize) are typed and
+tested; mutation drills (numerator, operand direction, classification
+flip) must fail. Every dyadic is admitted only after bit-exact integer
+reconstruction. The corpus proves its stated rows only.
+
 `tests/containment_fuzz.rs` (bead f85xj.3.2-adjacent .3.3): boundary-class
 containment fuzzing — deterministic `fs_propcheck::Stream`-keyed samplers
 aimed at subnormal, near-overflow, cancellation, signed-zero, power-of-two
