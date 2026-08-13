@@ -536,6 +536,56 @@ impl FrictionLaw {
         nonnegative_finite(candidate, "kinetic_coefficient")?;
         Ok(candidate)
     }
+
+    /// Kinetic coefficient `μ(|v|)` at a strictly positive slip speed.
+    ///
+    /// # Errors
+    /// Non-physical law parameters or a non-positive speed.
+    pub fn kinetic_coefficient(&self, speed: f64) -> Result<f64, TriboError> {
+        self.validate()?;
+        positive_finite(speed, "slip_speed")?;
+        self.kinetic_mu(speed)
+    }
+
+    /// Regularized 1-D traction for an explicit ODE embedding.
+    ///
+    /// [`Self::evaluate`] still returns zero traction at rest: it never
+    /// invents a stick reaction. This map is the 1-D analogue of the
+    /// fs-contact smooth adapter. A declared scale `regularization_m_s`
+    /// turns the static limit into a linear ramp through the origin,
+    /// then follows [`Self::kinetic_coefficient`]. The force on the
+    /// body whose relative velocity is `v_rel` opposes that velocity,
+    /// so `-F v_rel ≥ 0`.
+    ///
+    /// A bow, a brake pad, and a fault are the same law. Music is not
+    /// a special case.
+    ///
+    /// # Errors
+    /// Non-physical coefficients, a non-positive regularization, or a
+    /// non-finite input.
+    pub fn regularized_traction_1d(
+        &self,
+        v_rel: f64,
+        normal_n: f64,
+        regularization_m_s: f64,
+    ) -> Result<f64, TriboError> {
+        self.validate()?;
+        nonnegative_finite(normal_n, "normal_force")?;
+        positive_finite(regularization_m_s, "regularization_m_s")?;
+        finite(v_rel, "relative_velocity")?;
+        let speed = v_rel.abs();
+        if speed == 0.0 {
+            return Ok(0.0);
+        }
+        let mu = if speed < regularization_m_s {
+            self.static_mu() * speed / regularization_m_s
+        } else {
+            self.kinetic_mu(speed)?
+        };
+        let force = -mu * normal_n * v_rel.signum();
+        finite(force, "regularized_traction")?;
+        Ok(force)
+    }
 }
 
 /// Contact solver branch represented by a friction response.
@@ -1738,6 +1788,30 @@ mod tests {
         close(reversed.dissipated_power_w(), a.dissipated_power_w());
         assert_eq!(a.provenance().authority(), InputAuthority::SyntheticFixture);
         assert_eq!(a.provenance().source_id(), "fixture/synthetic");
+    }
+
+    #[test]
+    fn regularized_1d_traction_is_odd_dissipative_and_falls_to_kinetic() {
+        let law = FrictionLaw::Stribeck {
+            static_mu: 0.8,
+            kinetic_mu: 0.3,
+            characteristic_speed: 0.05,
+            viscous_per_speed: 0.0,
+        };
+        let f = law.regularized_traction_1d(0.01, 2.0, 0.05).expect("ramp");
+        let back = law.regularized_traction_1d(-0.01, 2.0, 0.05).expect("ramp");
+        assert!((f + back).abs() < 1.0e-15);
+        assert!(-f * 0.01 >= 0.0);
+        let slope = law.regularized_traction_1d(0.01, 1.0, 0.05).expect("slope") / 0.01;
+        assert!((slope + 0.8 / 0.05).abs() < 1.0e-12);
+        let kinetic = law
+            .regularized_traction_1d(10.0, 1.0, 0.05)
+            .expect("kinetic");
+        assert!((kinetic + 0.3).abs() < 0.02);
+        assert_eq!(
+            law.regularized_traction_1d(0.0, 1.0, 0.05).expect("rest"),
+            0.0
+        );
     }
 
     #[test]

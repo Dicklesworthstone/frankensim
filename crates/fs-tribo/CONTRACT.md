@@ -29,7 +29,13 @@ reactions, and residual embedding.
   only a finite velocity with no material normal component; it refuses rather
   than silently projects a closing/separating velocity into friction.
 - `FrictionLaw` provides Coulomb, velocity-dependent, and Stribeck rungs. At
-  zero slip it reports static capacity only; it never invents a stick reaction.
+  zero slip `evaluate` reports static capacity only; it never invents a stick
+  reaction. `kinetic_coefficient` exposes `μ(|v|)` for a strictly positive
+  speed. `regularized_traction_1d` is the declared ODE embedding: a linear
+  stiction ramp through the origin at scale `v_reg`, then the kinetic rung,
+  with force opposing `v_rel`. That map is a solver regularization (the 1-D
+  analogue of the fs-contact smooth adapter), not complementarity. A bow, a
+  brake pad, and a fault are the same law.
 - `HertzSpherePlane` and `HertzCylinderPlane` are G1 elastic closed forms,
   expressed in SI. They use caller-supplied radius/modulus and retain the
   caller ceiling; a mathematical closed form does not validate its inputs.
