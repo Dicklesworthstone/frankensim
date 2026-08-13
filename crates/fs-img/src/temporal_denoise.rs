@@ -1,9 +1,10 @@
 //! Deterministic animation-aware RGB denoising.
 //!
 //! The filter consumes raw RGB plus aligned motion/visibility guides and an
-//! optional result from the immediately preceding frame. Spatial color weights
-//! widen with the measured Monte Carlo luminance variance so isolated noisy
-//! energy is filtered instead of being mistaken for a stable scene edge. Its public result
+//! optional result from the immediately preceding frame. Spatial weights use
+//! scene-linear luminance contrast, matching the measured Monte Carlo
+//! luminance variance, so isolated chromatic energy is not mistaken for a
+//! stable scene edge. Its public result
 //! type has private fields and is always biased: there is deliberately no
 //! constructor or conversion that can relabel filtered pixels as a raw
 //! estimator.  Motion is `previous - current` in raster pixels, matching the
@@ -14,7 +15,7 @@ use core::fmt;
 use std::mem::size_of;
 
 /// Frozen implementation/version identity for temporal denoising.
-pub const TEMPORAL_DENOISE_PIPELINE_VERSION: &str = "fs-img-temporal-rgb-nearest-reprojection-v2";
+pub const TEMPORAL_DENOISE_PIPELINE_VERSION: &str = "fs-img-temporal-rgb-nearest-reprojection-v3";
 
 /// Exact byte length of a canonical temporal-denoiser configuration.
 pub const TEMPORAL_DENOISE_CONFIG_CANONICAL_BYTES: usize = 48;
@@ -22,9 +23,16 @@ pub const TEMPORAL_DENOISE_CONFIG_CANONICAL_BYTES: usize = 48;
 /// Largest supported number of spatial à-trous passes.
 pub const MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS: u8 = 8;
 
-const CONFIG_MAGIC: [u8; 8] = *b"FSTDNV2\0";
-const CONFIG_VERSION: u16 = 2;
+const CONFIG_MAGIC: [u8; 8] = *b"FSTDNV3\0";
+const CONFIG_VERSION: u16 = 3;
 const B3: [f64; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
+// Inverse of fs-render's frozen E-XYZ -> Bradford D65 -> linear-sRGB transform,
+// selecting the source CIE-Y row carried by `variance_luminance`.
+const RAW_CIE_Y_FROM_LINEAR_SRGB: [f64; 3] = [
+    0.222_853_687_870_429_03,
+    0.708_672_666_023_707_7,
+    0.068_473_658_307_786_68,
+];
 
 /// Frozen mapping from current pixels to the previous raster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +88,9 @@ pub struct TemporalDenoiseConfig {
     /// Number of joint-RGB 5x5 à-trous refinement passes. At least one pass is
     /// required so reset frames remain explicitly filtered derivatives.
     pub spatial_iterations: u8,
-    /// Absolute scene-linear RGB edge-stopping sigma for spatial refinement.
+    /// Absolute scene-linear luminance edge-stopping sigma for spatial
+    /// refinement. The field name is retained for source compatibility with
+    /// version two configurations.
     pub spatial_sigma_rgb: f32,
 }
 
@@ -243,7 +253,7 @@ pub struct TemporalDenoiseInput<'a> {
 pub enum TemporalDenoiseProvenance {
     /// Animation-aware temporal and spatial filtering was applied. The pixels
     /// are biased and must never serve as a raw/converged estimator.
-    BiasedTemporalDenoisedV2 {
+    BiasedTemporalDenoisedV3 {
         /// Exact versioned configuration identity.
         config_identity: TemporalDenoiseConfigIdentity,
     },
@@ -321,7 +331,7 @@ impl TemporalDenoisedFrame {
     /// Permanent biased provenance. There is no raw relabeling surface.
     #[must_use]
     pub const fn provenance(&self) -> TemporalDenoiseProvenance {
-        TemporalDenoiseProvenance::BiasedTemporalDenoisedV2 {
+        TemporalDenoiseProvenance::BiasedTemporalDenoisedV3 {
             config_identity: self.config_identity,
         }
     }
@@ -1151,20 +1161,34 @@ fn spatial_atrous_pass(
                 if !guides_match_current(input, center, sample, config) {
                     continue;
                 }
-                let difference_squared = (0..3)
-                    .map(|channel| current[channel][sample])
-                    .zip(center_rgb)
-                    .map(|(left, right)| f64::from(left) - f64::from(right))
+                let differences = core::array::from_fn::<_, 3, _>(|channel| {
+                    f64::from(current[channel][sample] - center_rgb[channel])
+                });
+                let luminance_difference = differences
+                    .into_iter()
+                    .zip(RAW_CIE_Y_FROM_LINEAR_SRGB)
+                    .map(|(difference, weight)| difference * weight)
+                    .sum::<f64>();
+                let luminance_difference_squared = luminance_difference * luminance_difference;
+                let rgb_difference_squared = differences
+                    .into_iter()
                     .map(|difference| difference * difference)
                     .sum::<f64>();
                 // `estimate_variance` is the sample-count-adjusted variance of
-                // the pixel mean. Three times the center/sample sum is a
-                // joint-RGB noise scale: noisy estimates admit compatible
-                // neighbors, while converged color edges still use the
-                // configured absolute sigma floor. Geometry and identity guides
-                // above remain hard edge stops in both cases.
-                let noise_scale_squared = 3.0
-                    * (f64::from(estimate_variance[center]) + f64::from(estimate_variance[sample]));
+                // the luminance mean, so it is compared only with luminance
+                // contrast. Comparing it with an RGB norm incorrectly protects
+                // high-chroma, low-luminance Monte Carlo outliers as color
+                // edges. Geometry and identity guides above remain hard stops.
+                let noise_scale_squared =
+                    f64::from(estimate_variance[center]) + f64::from(estimate_variance[sample]);
+                // Retain full RGB edge stopping for converged color detail, but
+                // progressively distrust chroma contrast when the only aligned
+                // variance evidence says this pixel is noisy. This is an
+                // explicit display bias, not a raw-energy clamp.
+                let chroma_confidence = sigma_squared / (sigma_squared + noise_scale_squared);
+                let difference_squared = luminance_difference_squared
+                    + chroma_confidence
+                        * (rgb_difference_squared - luminance_difference_squared).max(0.0);
                 let color_scale_squared = sigma_squared + noise_scale_squared;
                 let weight =
                     weight_x * weight_y * (-difference_squared / color_scale_squared).exp();
@@ -1459,6 +1483,32 @@ mod tests {
         assert!(
             stable_edge.linear_rgb()[0][center] > 3.9,
             "without variance evidence the same contrast remains a protected color feature"
+        );
+    }
+
+    #[test]
+    fn luminance_variance_suppresses_a_high_chroma_blue_firefly() {
+        let mut noisy = Fixture::surface(9, 9, 0, [0.2, 0.2, 0.2]);
+        let center = 4 * 9 + 4;
+        noisy.blue[center] = 4.0;
+        noisy.variance[center] = 0.5;
+        let config = TemporalDenoiseConfig {
+            spatial_iterations: 2,
+            ..TemporalDenoiseConfig::default()
+        };
+
+        let filtered = run(&noisy, None, TemporalFrameBoundary::Cut, config).unwrap();
+        let filtered_blue = filtered.linear_rgb()[2][center];
+        assert!(
+            filtered_blue < 1.0,
+            "measured luminance variance must not preserve a {filtered_blue} blue firefly"
+        );
+
+        noisy.variance.fill(0.0);
+        let stable_edge = run(&noisy, None, TemporalFrameBoundary::Cut, config).unwrap();
+        assert!(
+            stable_edge.linear_rgb()[2][center] > 2.5,
+            "without variance evidence the same chromatic contrast remains protected"
         );
     }
 
@@ -1854,7 +1904,7 @@ mod tests {
         let output = run(&fixture, None, TemporalFrameBoundary::Continuous, config).unwrap();
         assert_eq!(
             output.provenance(),
-            TemporalDenoiseProvenance::BiasedTemporalDenoisedV2 {
+            TemporalDenoiseProvenance::BiasedTemporalDenoisedV3 {
                 config_identity: config.identity().unwrap()
             }
         );

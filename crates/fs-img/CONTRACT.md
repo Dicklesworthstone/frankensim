@@ -66,12 +66,15 @@ own** outputs, not the world's files.
   rejects coverage, depth, normal, stable-ID, and nonfinite disagreement.
   Accepted history is 3x3-neighborhood clamped, combined under both the exact
   per-pixel sample-variance/count-derived and history-length-derived weight
-  ceilings, and followed by joint-RGB 5x5 B3-spline à-trous refinement with
-  shared channel weights.
+  ceilings, and followed by 5x5 B3-spline à-trous refinement whose shared
+  RGB-channel weight compares scene-linear luminance contrast with the aligned
+  luminance variance and variance-damps chroma contrast only while that
+  uncertainty remains high. Geometry and categorical guides remain hard edge
+  stops.
   `TemporalDenoisedFrame` has private fields and no public constructor or raw
   conversion. Its planar `linear_rgb()` slices feed the existing cinematic
   color transform without a full-frame repack. Its only provenance is
-  `BiasedTemporalDenoisedV2 { config_identity }`; exact versioned canonical
+  `BiasedTemporalDenoisedV3 { config_identity }`; exact versioned canonical
   config bytes travel with every history result.
 - `TemporalDenoiseLimits` admits pixels and exact newly allocated
   result-plus-spatial-scratch bytes before allocation. `reference_4k()` covers
@@ -176,7 +179,7 @@ own** outputs, not the world's files.
 3. **The bias label cannot be dropped**: `atrous_denoise` output is always
    `BiasedDenoised`; `temporal_denoise_rgb` returns only the private-field
    `TemporalDenoisedFrame` whose sole provenance is
-   `BiasedTemporalDenoisedV2`. Neither API can relabel output as
+   `BiasedTemporalDenoisedV3`. Neither API can relabel output as
    `RawEstimate`.
 4. **Structured rejection**: readers never decode garbage silently — every
    checksum (CRC-32, Adler-32) is verified, every length is bounds-checked,
