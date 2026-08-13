@@ -11,14 +11,12 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
 use crate::driving_point::characteristic_line;
 use crate::thin_plate::PlateBank;
-use crate::traveling_wave_line::{TravelingWaveError, TravelingWaveLine};
 use crate::unilateral_contact::{slit_contact_force, slit_lay};
 use fs_dcontact::Obstacle;
 use fs_duct::{Duct, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
 use fs_scenario::BeatingReed;
-use fs_vfit::discretize::DelayedFilter;
 
 /// Realize mouthpiece pressure from a beating reed on a TMM bore.
 ///
@@ -56,7 +54,8 @@ pub fn realize_reed_bore(
         .outlet_radius();
     let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area_bore;
-    let mut line = CharLine::open(physics, gas, termination, sample_rate_hz, n, zc)?;
+    let mut line = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc)
+        .map_err(map_drive)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut reed_y = reed.rest_opening_m;
     let mut reed_v = 0.0;
@@ -113,51 +112,18 @@ pub fn realize_reed_bore(
     Ok(p_bore_hist)
 }
 
-enum CharLine {
-    Fitted(DelayedFilter),
-    Delay(TravelingWaveLine),
-}
-
-impl CharLine {
-    fn open(
-        physics: &Duct,
-        gas: &GasState,
-        termination: Termination,
-        sample_rate_hz: u32,
-        n: usize,
-        zc: f64,
-    ) -> Result<Self, AcousticRealizeError> {
-        match characteristic_line(physics, gas, termination, sample_rate_hz, n, zc) {
-            Ok(line) => Ok(Self::Fitted(line)),
-            Err(_) => {
-                TravelingWaveLine::from_duct(physics, gas, termination, sample_rate_hz, n, zc)
-                    .map(Self::Delay)
-                    .map_err(map_line)
-            }
-        }
-    }
-
-    fn push(&mut self, outgoing: f64) -> Result<f64, AcousticRealizeError> {
-        match self {
-            Self::Fitted(line) => line.push(outgoing).map_err(|_| AcousticRealizeError::Reed {
-                what: "characteristic filter left the finite set",
-            }),
-            Self::Delay(line) => Ok(line.push(outgoing)),
-        }
-    }
-
-    fn incoming(&self) -> f64 {
-        match self {
-            Self::Fitted(line) => line.incoming(),
-            Self::Delay(line) => line.incoming(),
-        }
-    }
-}
-
-fn map_line(err: TravelingWaveError) -> AcousticRealizeError {
+fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
     match err {
-        TravelingWaveError::Invalid { what } => AcousticRealizeError::Reed { what },
-        TravelingWaveError::Duct(e) => AcousticRealizeError::Duct(e),
+        crate::driving_point::DrivingPointError::Invalid { what } => {
+            AcousticRealizeError::Reed { what }
+        }
+        crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
+        crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
+            what: "characteristic realization refused",
+        },
+        crate::driving_point::DrivingPointError::Discrete(_) => AcousticRealizeError::Reed {
+            what: "characteristic line left the finite set",
+        },
     }
 }
 

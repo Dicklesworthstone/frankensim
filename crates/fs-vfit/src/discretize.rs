@@ -1170,6 +1170,21 @@ mod runtime_tests {
     }
 
     #[test]
+    fn impulse_response_line_is_exact_convolution() {
+        let ir = vec![0.0, 0.0, 0.0, -0.8, 0.1];
+        let mut line = DelayedFilter::from_impulse_response(1.0 / 8_000.0, ir).expect("fir");
+        let mut out = Vec::new();
+        for k in 0..8 {
+            out.push(line.push(if k == 0 { 1.0 } else { 0.0 }).unwrap());
+        }
+        assert!(out[0].abs() < 1.0e-15);
+        assert!(out[1].abs() < 1.0e-15);
+        assert!(out[2].abs() < 1.0e-15);
+        assert!((out[3] + 0.8).abs() < 1.0e-15);
+        assert!((out[4] - 0.1).abs() < 1.0e-15);
+    }
+
+    #[test]
     fn realize_tabulated_constant_is_a_direct_term() {
         let omega: Vec<f64> = (1..80).map(|k| 50.0 * f64::from(k)).collect();
         let h = vec![C64::from_re(0.7); omega.len()];

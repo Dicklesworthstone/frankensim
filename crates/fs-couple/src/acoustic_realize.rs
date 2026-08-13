@@ -13,10 +13,7 @@ use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::realize_reed_bore;
 use crate::thin_plate::{PlateBank, VkBody, certified_radiators};
 use crate::unilateral_contact::modal_contact_forces;
-use fs_duct::{
-    Duct, DuctError, HoleState, LossModel, MAX_RADIATION_KA, Segment, Termination, input_impedance,
-};
-use fs_fft::{C64 as FftC64, Fft};
+use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::visco::RayleighDamping;
 use fs_math::c64::C64;
@@ -189,7 +186,6 @@ fn realize_coupled(
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::driving_point::characteristic_line;
     use crate::reed_bore::solve_reed_wave;
-    use crate::traveling_wave_line::TravelingWaveLine;
     let string = assembly.string.expect("checked");
     let duct = assembly.duct.as_ref().expect("checked");
     if assembly.pluck.is_none() && assembly.bow.is_none() {
@@ -221,42 +217,11 @@ fn realize_coupled(
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let listener_m = assembly.listener.distance_m;
     let mut fitted =
-        characteristic_line(&physics, gas, termination, assembly.sample_rate_hz, n, zc).ok();
-    let mut delay = if fitted.is_none() {
-        Some(
-            TravelingWaveLine::from_duct(
-                &physics,
-                gas,
-                termination,
-                assembly.sample_rate_hz,
-                n,
-                zc,
-            )
-            .map_err(|e| match e {
-                crate::traveling_wave_line::TravelingWaveError::Invalid { what } => {
-                    AcousticRealizeError::Reed { what }
-                }
-                crate::traveling_wave_line::TravelingWaveError::Duct(d) => {
-                    AcousticRealizeError::Duct(d)
-                }
-            })?,
-        )
-    } else {
-        None
-    };
+        characteristic_line(&physics, gas, termination, assembly.sample_rate_hz, n, zc)
+            .map_err(map_drive)?;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
     if string.axial_stiffness_n > 0.0 {
-        return realize_coupled_kc(
-            assembly,
-            gas,
-            plates,
-            n,
-            fitted,
-            delay,
-            zc,
-            area,
-            &mut texture,
-        );
+        return realize_coupled_kc(assembly, gas, plates, n, fitted, zc, area, &mut texture);
     }
     let pi = core::f64::consts::PI;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
@@ -308,7 +273,7 @@ fn realize_coupled(
                 .zip(phi_bow.iter())
                 .map(|(s, phi)| s.velocity_m_sqrt_kg_per_s * phi)
                 .sum();
-            let f_bow = bow_force(bow, v_string, texture.delta_n(bow.velocity_m_s, dt));
+            let f_bow = bow_force(bow, v_string, texture.delta_n(bow.velocity_m_s - v_string, dt));
             for (f, phi) in force.iter_mut().zip(phi_bow.iter()) {
                 *f = f_bow * *phi;
             }
@@ -332,11 +297,7 @@ fn realize_coupled(
             .map(|s| s.displacement_m_sqrt_kg / mass_scale)
             .collect();
         let fb = bridge_force(string, &q_phys);
-        let p_minus = if let Some(line) = fitted.as_ref() {
-            line.incoming()
-        } else {
-            delay.as_ref().expect("line").incoming()
-        };
+        let p_minus = fitted.incoming();
         let u_body = plates.volume_velocity();
         let t = i as f64 * dt;
         let p_plus = if let Some(reed) = assembly.reed {
@@ -368,13 +329,11 @@ fn realize_coupled(
             p_minus + zc * (u_blow + u_body)
         };
         p_plus_prev = p_plus;
-        let p_minus_now = if let Some(line) = fitted.as_mut() {
-            line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+        let p_minus_now = fitted
+            .push(p_plus)
+            .map_err(|_| AcousticRealizeError::Reed {
                 what: "characteristic line left the finite set",
-            })?
-        } else {
-            delay.as_mut().expect("line").push(p_plus)
-        };
+            })?;
         let p_bore = p_plus + p_minus_now;
         let mut p = frame.observer_pressure_pa + p_bore;
         p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
@@ -394,8 +353,7 @@ fn realize_coupled_kc(
     gas: &GasState,
     plates: &mut PlateBank,
     n: usize,
-    mut fitted: Option<fs_vfit::discretize::DelayedFilter>,
-    mut delay: Option<crate::traveling_wave_line::TravelingWaveLine>,
+    mut fitted: fs_vfit::discretize::DelayedFilter,
     zc: f64,
     area: f64,
     texture: &mut TextureDrive,
@@ -454,7 +412,7 @@ fn realize_coupled_kc(
             vec![bow_force(
                 bow,
                 v_string,
-                texture.delta_n(bow.velocity_m_s, dt),
+                texture.delta_n(bow.velocity_m_s - v_string, dt),
             )]
         } else {
             vec![0.0]
@@ -483,11 +441,7 @@ fn realize_coupled_kc(
             }
         }
         let fb = bridge_force(string, &q_phys);
-        let p_minus = if let Some(line) = fitted.as_ref() {
-            line.incoming()
-        } else {
-            delay.as_ref().expect("line").incoming()
-        };
+        let p_minus = fitted.incoming();
         let u_body = plates.volume_velocity();
         let t = i as f64 * dt;
         let p_plus = if let Some(reed) = assembly.reed {
@@ -519,13 +473,11 @@ fn realize_coupled_kc(
             p_minus + zc * (u_blow + u_body)
         };
         p_plus_prev = p_plus;
-        let p_minus_now = if let Some(line) = fitted.as_mut() {
-            line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+        let p_minus_now = fitted
+            .push(p_plus)
+            .map_err(|_| AcousticRealizeError::Reed {
                 what: "characteristic line left the finite set",
-            })?
-        } else {
-            delay.as_mut().expect("line").push(p_plus)
-        };
+            })?;
         let p_bore = p_plus + p_minus_now;
         let mut p = p_string + p_bore;
         p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
@@ -552,6 +504,21 @@ pub fn assembly_wav(
         full_scale_pa,
     )
     .map_err(AcousticRealizeError::Wav)
+}
+
+fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
+    match err {
+        crate::driving_point::DrivingPointError::Invalid { what } => {
+            AcousticRealizeError::Reed { what }
+        }
+        crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
+        crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
+            what: "characteristic realization refused",
+        },
+        crate::driving_point::DrivingPointError::Discrete(_) => AcousticRealizeError::Reed {
+            what: "characteristic line left the finite set",
+        },
+    }
 }
 
 fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
@@ -813,7 +780,7 @@ fn realize_linear_string(
                 .zip(phi_bow.iter())
                 .map(|(s, phi)| s.velocity_m_sqrt_kg_per_s * phi)
                 .sum();
-            let f_bow = bow_force(bow, v_string, texture.delta_n(bow.velocity_m_s, dt));
+            let f_bow = bow_force(bow, v_string, texture.delta_n(bow.velocity_m_s - v_string, dt));
             for (f, phi) in force.iter_mut().zip(phi_bow.iter()) {
                 *f = f_bow * *phi;
             }
@@ -911,7 +878,7 @@ fn realize_kc_string(
             vec![bow_force(
                 bow,
                 v_string,
-                texture.delta_n(bow.velocity_m_s, dt),
+                texture.delta_n(bow.velocity_m_s - v_string, dt),
             )]
         } else {
             vec![0.0]
@@ -1155,55 +1122,19 @@ fn realize_blown_duct(
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
-    if !plates.is_empty() {
-        return realize_blown_with_body(
-            &physics,
-            blow,
-            plates,
-            gas,
-            termination,
-            listener_m,
-            sample_rate_hz,
-            n,
-        );
-    }
-    // Isolated linear blow: IFFT of the TMM driving point is the
-    // exact linear response, including tone-hole shortening. The
-    // characteristic line is the time port when a body or valve
-    // exchanges volume velocity — it cannot yet replace this oracle.
-    let n_fft = n.next_power_of_two();
-    let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut drive = vec![0.0; n_fft];
-    for (i, sample) in drive.iter_mut().enumerate() {
-        let t = i as f64 * dt;
-        if t < blow.duration_s {
-            *sample = blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s);
-        }
-    }
-    let fft = Fft::new(n_fft);
-    let mut buf: Vec<FftC64> = drive.iter().map(|&u| FftC64::new(u, 0.0)).collect();
-    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
-    fft.forward(&mut buf, &mut scratch);
-    for (k, bin) in buf.iter_mut().enumerate().take(n_fft / 2 + 1) {
-        if k == 0 {
-            *bin = FftC64::new(0.0, 0.0);
-            continue;
-        }
-        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = input_impedance(&physics, gas, omega, LossModel::AllRegime, termination)
-            .map_err(AcousticRealizeError::Duct)?;
-        let h = match duct.termination {
-            WaveguideEnd::Closed => response.impedance,
-            WaveguideEnd::UnflangedOpen => response.p_mouth_over_u_in,
-        };
-        *bin = FftC64::new(bin.re * h.re - bin.im * h.im, bin.re * h.im + bin.im * h.re);
-    }
-    for k in 1..n_fft / 2 {
-        let conj = buf[k];
-        buf[n_fft - k] = FftC64::new(conj.re, -conj.im);
-    }
-    fft.inverse(&mut buf, &mut scratch);
-    Ok(buf[..n].iter().map(|c| c.re).collect())
+    // Isolated or loaded: the same TMM reflectance FIR. IFFT of Z_in
+    // is the same linear map when there is no body; the FIR port also
+    // accepts volume velocity from a plate.
+    realize_blown_with_body(
+        &physics,
+        blow,
+        plates,
+        gas,
+        termination,
+        listener_m,
+        sample_rate_hz,
+        n,
+    )
 }
 
 fn realize_blown_with_body(
@@ -1217,7 +1148,6 @@ fn realize_blown_with_body(
     n: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     use crate::driving_point::characteristic_line;
-    use crate::traveling_wave_line::TravelingWaveLine;
     let inlet_r = physics
         .segments
         .first()
@@ -1228,22 +1158,8 @@ fn realize_blown_with_body(
     let area = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area;
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut fitted = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc).ok();
-    let mut delay = if fitted.is_none() {
-        Some(
-            TravelingWaveLine::from_duct(physics, gas, termination, sample_rate_hz, n, zc)
-                .map_err(|e| match e {
-                    crate::traveling_wave_line::TravelingWaveError::Invalid { what } => {
-                        AcousticRealizeError::Reed { what }
-                    }
-                    crate::traveling_wave_line::TravelingWaveError::Duct(d) => {
-                        AcousticRealizeError::Duct(d)
-                    }
-                })?,
-        )
-    } else {
-        None
-    };
+    let mut line = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc)
+        .map_err(map_drive)?;
     let mut out = vec![0.0; n];
     for i in 0..n {
         let t = i as f64 * dt;
@@ -1253,19 +1169,11 @@ fn realize_blown_with_body(
             0.0
         };
         let u_body = plates.volume_velocity();
-        let p_minus = if let Some(line) = fitted.as_ref() {
-            line.incoming()
-        } else {
-            delay.as_ref().expect("line").incoming()
-        };
+        let p_minus = line.incoming();
         let p_plus = p_minus + zc * (u_blow + u_body);
-        let p_minus_now = if let Some(line) = fitted.as_mut() {
-            line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
-                what: "characteristic line left the finite set",
-            })?
-        } else {
-            delay.as_mut().expect("line").push(p_plus)
-        };
+        let p_minus_now = line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
+            what: "characteristic line left the finite set",
+        })?;
         let p_bore = p_plus + p_minus_now;
         let mut p_obs = p_bore;
         p_obs += plates.drive_and_radiate(p_bore * area, dt, gas.density, listener_m)?;
