@@ -91,6 +91,18 @@ const CONDUCTIVITY_DIMS: fs_qty::Dims = fs_qty::Dims([1, 1, -3, -1, 0, 0]);
 /// binding range at both endpoints; a narrower domain is what
 /// `project-binding-domain-uncovered` exists to catch.
 fn material_pack_bytes(chemistry: &str, pack_id: &str) -> Vec<u8> {
+    material_pack_bytes_with_domain(chemistry, pack_id, 200.0, 450.0)
+}
+
+/// Pack fixture with a caller-chosen conductivity validity domain (bead
+/// frankensim-ejo12: the domain-uncovered refusal needs a card whose claim
+/// validity is NARROWER than the binding's admitted range).
+fn material_pack_bytes_with_domain(
+    chemistry: &str,
+    pack_id: &str,
+    t_lo: f64,
+    t_hi: f64,
+) -> Vec<u8> {
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
         ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
@@ -121,7 +133,7 @@ fn material_pack_bytes(chemistry: &str, pack_id: &str) -> Vec<u8> {
                 value: 167.0,
                 dims: CONDUCTIVITY_DIMS,
             },
-            validity: fs_evidence::ValidityDomain::unconstrained().with("T", 200.0, 450.0),
+            validity: fs_evidence::ValidityDomain::unconstrained().with("T", t_lo, t_hi),
             uncertainty: UncertaintyModel::HalfWidth {
                 half_width: 3.0,
                 confidence: 0.95,
@@ -3134,4 +3146,74 @@ fn g4_resume_reattests_the_flow_network_receipt() {
         reference_receipts,
         "re-attested flow evidence is bit-identical to the uninterrupted run"
     );
+}
+
+/// hp7tb residue (bead frankensim-ejo12). Precondition diversity over code
+/// coverage: the CLI forwards every binding diagnostic through one
+/// statement, so a second test with merely a different CODE proves almost
+/// nothing. These two are chosen because their refusal PRECONDITIONS
+/// differ from `project-material-card-unknown`'s: the first fails with a
+/// correct card hash (lookup succeeds), the second with a correct hash AND
+/// matching state (only the validity geometry is wrong).
+#[test]
+fn g3_binding_state_spelling_mismatch_refuses_at_material_resolve() {
+    // Card hash is the admitted fixture card's, so card-unknown cannot
+    // fire; only the human-readable state string names a different
+    // revision than the pack's state identity.
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    spec.materials.as_mut().expect("materials")[0].state = "AA6061/wrought/T6 rev 1".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (refusal, _) = run_to_gap_expect_code(&ledger, &decoded, "project-material-state-mismatch");
+    assert_eq!(refusal.stage, Some("material-resolve"));
+    assert!(
+        refusal.recorded_op.is_some(),
+        "the binding refusal is ledgered like any other stage refusal"
+    );
+    let run = refusal.run.clone().expect("run");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        2,
+        "the refused material stage publishes no receipt"
+    );
+}
+
+#[test]
+fn g3_binding_admitted_range_wider_than_card_validity_refuses_domain_uncovered() {
+    // Lookup succeeds and the state matches; the card's claim validity
+    // (T in [250, 300] K) is strictly narrower than the binding's admitted
+    // range [233.15, 398.15] K, so the binding admits temperatures the
+    // card cannot cover and must refuse rather than extrapolate.
+    let narrow = CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/narrow.fsmcdpk",
+        material_pack_bytes_with_domain("AA6061", "solve-fixture-narrow", 250.0, 300.0),
+    )])
+    .expect("the narrow pack admits");
+    let (card_hex, state) = {
+        let pack = &narrow.materials()[0];
+        (pack.card().to_hex(), pack.identity().to_string())
+    };
+    let bytes = tetra_stl();
+    let mut spec = fixture_project(7, &bytes);
+    {
+        let binding = &mut spec.materials.as_mut().expect("materials")[0];
+        binding.card = card_hex;
+        binding.state = state;
+    }
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &narrow, &mut progress)
+        .expect_err("an uncovered admitted range cannot resolve");
+    assert_eq!(
+        refusal.code, "project-binding-domain-uncovered",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("material-resolve"));
 }
