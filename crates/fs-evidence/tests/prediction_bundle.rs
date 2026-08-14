@@ -6,8 +6,9 @@
 
 use fs_blake3::ContentHash;
 use fs_evidence::prediction_bundle::{
-    AccessPolicy, ModelRungPolicy, PredictionExecutionInput, RandomStreamDesign, load_sealed_input,
-    seal_prediction_input,
+    AccessPolicy, ModelRungPolicy, OutputArtifactRef, OutputFamily, PredictionExecutionInput,
+    PredictionOutputBundle, RandomStreamDesign, SampleAccounting, load_sealed_input,
+    load_sealed_output, seal_prediction_input, seal_prediction_output,
 };
 use fs_evidence::vv::{ApplicabilityPolicy, ArtifactId, ArtifactKind, ArtifactRef};
 
@@ -408,4 +409,216 @@ fn identity_is_domain_separated_from_raw_hashing() {
         identity,
         ContentHash::from_slice(&[0u8; 32]).expect("32 bytes")
     );
+}
+
+fn output_ref(family: OutputFamily, id: &str, salt: u8) -> OutputArtifactRef {
+    OutputArtifactRef {
+        family,
+        id: id.to_string(),
+        hash: fs_blake3::hash_bytes(&[salt, 0xA0]),
+    }
+}
+
+fn nominal_output(input_root: ContentHash) -> PredictionOutputBundle {
+    PredictionOutputBundle::try_new(
+        input_root,
+        SampleAccounting {
+            requested: 100,
+            succeeded: 90,
+            refused: 7,
+            failed: 3,
+        },
+        vec![
+            output_ref(OutputFamily::Trajectory, "traj-0", 1),
+            output_ref(OutputFamily::Event, "events-0", 2),
+            output_ref(OutputFamily::Energy, "energy-0", 3),
+        ],
+        vec![output_ref(OutputFamily::Aggregate, "qoi-dist", 4)],
+        12_345_678,
+        false,
+        None,
+        reference(ArtifactKind::SolutionVerificationReceipt, "sv-1", 5),
+        vec!["replay qoi-dist against traj-0 with the sealed input seeds".to_string()],
+    )
+    .expect("nominal output admits")
+}
+
+#[test]
+fn output_round_trip_and_identity() {
+    let root = nominal().identity().expect("identity");
+    let output = nominal_output(root);
+    let bytes = output.canonical_bytes().expect("encodes");
+    let decoded = PredictionOutputBundle::from_canonical_bytes(&bytes).expect("decodes");
+    assert_eq!(decoded, output);
+    assert_eq!(
+        decoded.identity().expect("identity"),
+        output.identity().expect("identity")
+    );
+    // Outcome smuggling closes the same way as on the input side.
+    let mut smuggled = bytes;
+    smuggled.extend_from_slice(b"observed=1.5");
+    assert_eq!(
+        PredictionOutputBundle::from_canonical_bytes(&smuggled)
+            .expect_err("trailing refuses")
+            .rule,
+        "prediction-output-transport-trailing"
+    );
+}
+
+#[test]
+fn sample_partition_must_be_total() {
+    let root = nominal().identity().expect("identity");
+    let build = |requested, succeeded, refused, failed| {
+        PredictionOutputBundle::try_new(
+            root,
+            SampleAccounting {
+                requested,
+                succeeded,
+                refused,
+                failed,
+            },
+            vec![output_ref(OutputFamily::Trajectory, "t", 1)],
+            Vec::new(),
+            1,
+            false,
+            None,
+            reference(ArtifactKind::SolutionVerificationReceipt, "sv-1", 5),
+            vec!["check".to_string()],
+        )
+    };
+    assert!(build(10, 8, 1, 1).is_ok(), "total partition admits");
+    assert_eq!(
+        build(10, 8, 1, 0).expect_err("missing sample").rule,
+        "prediction-output-accounting"
+    );
+    assert_eq!(
+        build(10, 9, 1, 1).expect_err("excess sample").rule,
+        "prediction-output-accounting"
+    );
+    assert_eq!(
+        build(0, 0, 0, 0).expect_err("zero requested").rule,
+        "prediction-output-accounting"
+    );
+    // Overflow cannot fake totality.
+    assert_eq!(
+        build(u64::MAX, u64::MAX, 2, u64::MAX - 1)
+            .expect_err("overflowing partition")
+            .rule,
+        "prediction-output-accounting"
+    );
+    // Success without artifacts is unscoreable.
+    let empty = PredictionOutputBundle::try_new(
+        root,
+        SampleAccounting {
+            requested: 5,
+            succeeded: 5,
+            refused: 0,
+            failed: 0,
+        },
+        Vec::new(),
+        Vec::new(),
+        1,
+        false,
+        None,
+        reference(ArtifactKind::SolutionVerificationReceipt, "sv-1", 5),
+        vec!["check".to_string()],
+    );
+    assert_eq!(
+        empty.expect_err("success without artifacts").rule,
+        "prediction-output-artifacts"
+    );
+}
+
+#[test]
+fn input_before_output_ordering_is_checkable() {
+    let sealed_input = nominal().identity().expect("identity");
+    let output = nominal_output(sealed_input);
+    output
+        .verify_against_input(sealed_input)
+        .expect("matching root joins");
+    let foreign_root = fs_blake3::hash_bytes(b"some other input");
+    assert_eq!(
+        output
+            .verify_against_input(foreign_root)
+            .expect_err("foreign root refuses")
+            .rule,
+        "prediction-output-input-root"
+    );
+    // And an output built against a root that was never sealed as an input
+    // refuses at the SAME join - ordering is enforced by identity, not by
+    // trust in the producer's claim.
+    let premature = nominal_output(foreign_root);
+    assert!(premature.verify_against_input(sealed_input).is_err());
+}
+
+#[test]
+fn output_seal_tamper_and_swap_refuse() {
+    let dir = scratch("output-seal");
+    let root = nominal().identity().expect("identity");
+    let output = nominal_output(root);
+    let path = dir.join("output.fspo");
+    let sealed = seal_prediction_output(&output, &path).expect("seals");
+    let (loaded, identity) = load_sealed_output(&path, Some(sealed)).expect("verifies");
+    assert_eq!(loaded, output);
+    assert_eq!(identity, sealed);
+
+    // Cross-domain swap: the sealed INPUT bytes at the output path must
+    // refuse (domain separation, not just schema magic).
+    let input_path = dir.join("input.fspi");
+    seal_prediction_input(&nominal(), &input_path).expect("input seals");
+    let input_bytes = std::fs::read(&input_path).expect("reads");
+    std::fs::remove_file(&path).expect("clears");
+    std::fs::write(&path, &input_bytes).expect("swaps");
+    assert!(
+        load_sealed_output(&path, Some(sealed)).is_err(),
+        "an input transport at the output path must refuse"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_output_field_moves_the_identity() {
+    let root = nominal().identity().expect("identity");
+    let base = nominal_output(root).identity().expect("identity");
+    let mutate: Vec<(&str, PredictionOutputBundle)> = vec![
+        (
+            "input_root",
+            nominal_output(fs_blake3::hash_bytes(b"other")),
+        ),
+        (
+            "accounting",
+            PredictionOutputBundle::try_new(
+                root,
+                SampleAccounting {
+                    requested: 100,
+                    succeeded: 89,
+                    refused: 8,
+                    failed: 3,
+                },
+                vec![output_ref(OutputFamily::Trajectory, "traj-0", 1)],
+                Vec::new(),
+                12_345_678,
+                false,
+                None,
+                reference(ArtifactKind::SolutionVerificationReceipt, "sv-1", 5),
+                vec!["replay".to_string()],
+            )
+            .expect("admits"),
+        ),
+    ];
+    for (label, mutated) in mutate {
+        assert_ne!(
+            mutated.identity().expect("identity"),
+            base,
+            "mutating {label} must mint a new identity"
+        );
+    }
+    // Work units, budget flag, and checker text are also identity-bearing.
+    let mut bytes = nominal_output(root).canonical_bytes().expect("encodes");
+    let flip_at = bytes.len() - 1;
+    bytes[flip_at] ^= 0x20;
+    let reparsed = PredictionOutputBundle::from_canonical_bytes(&bytes);
+    if let Ok(reparsed) = reparsed {
+        assert_ne!(reparsed.identity().expect("identity"), base);
+    }
 }

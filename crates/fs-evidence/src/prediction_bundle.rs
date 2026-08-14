@@ -747,6 +747,13 @@ pub fn seal_prediction_input(
 ) -> Result<ContentHash, PredictionBundleError> {
     let bytes = input.canonical_bytes()?;
     let identity = input.identity()?;
+    seal_bytes(&bytes, path)?;
+    Ok(identity)
+}
+
+/// Shared atomic publication: partial write, fsync, rename; an existing
+/// sealed path refuses (seals are immutable).
+fn seal_bytes(bytes: &[u8], path: &Path) -> Result<(), PredictionBundleError> {
     if path.exists() {
         return Err(refuse(
             "prediction-input-seal-immutable",
@@ -757,7 +764,7 @@ pub fn seal_prediction_input(
     let partial: PathBuf = path.with_extension(format!("partial.{}", std::process::id()));
     let write = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&partial)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&partial, path)
     })();
@@ -769,7 +776,7 @@ pub fn seal_prediction_input(
             format!("sealing failed: {error}"),
         ));
     }
-    Ok(identity)
+    Ok(())
 }
 
 /// Load and independently verify a sealed input from artifact bytes alone.
@@ -800,4 +807,473 @@ pub fn load_sealed_input(
         ));
     }
     Ok((input, identity))
+}
+
+/// Versioned domain for the output bundle's semantic identity.
+pub const PREDICTION_OUTPUT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-evidence.prediction-output-bundle.v1";
+/// Canonical transport magic (output bundle).
+const OUTPUT_MAGIC: &[u8; 4] = b"FSPO";
+
+/// Family of one produced output artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFamily {
+    /// Time-series trajectory artifact.
+    Trajectory,
+    /// Detected-event artifact.
+    Event,
+    /// Energy/consistency-track artifact.
+    Energy,
+    /// Registered aggregate distribution or effect.
+    Aggregate,
+}
+
+impl OutputFamily {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Trajectory => 0,
+            Self::Event => 1,
+            Self::Energy => 2,
+            Self::Aggregate => 3,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, PredictionBundleError> {
+        Ok(match tag {
+            0 => Self::Trajectory,
+            1 => Self::Event,
+            2 => Self::Energy,
+            3 => Self::Aggregate,
+            other => {
+                return Err(refuse(
+                    "prediction-output-artifact-family",
+                    "artifacts.family",
+                    format!("unknown output-family tag {other}"),
+                ));
+            }
+        })
+    }
+}
+
+/// Content-addressed reference to one produced output artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputArtifactRef {
+    /// Artifact family.
+    pub family: OutputFamily,
+    /// Stable producer-scoped identity.
+    pub id: String,
+    /// Digest of the artifact's canonical bytes.
+    pub hash: ContentHash,
+}
+
+/// Exact sample accounting: the denominators a scorer divides by.
+///
+/// The partition is total by construction: `succeeded + refused + failed`
+/// must equal `requested`, so a dropped sample cannot vanish silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleAccounting {
+    /// Samples the input design requested.
+    pub requested: u64,
+    /// Samples that produced admitted artifacts.
+    pub succeeded: u64,
+    /// Samples refused by declared policy (e.g. applicability).
+    pub refused: u64,
+    /// Samples that failed outside declared policy.
+    pub failed: u64,
+}
+
+/// The complete claimed output of one blind prediction run.
+///
+/// Binds EXACTLY ONE sealed input root; a scorer joins output to input by
+/// identity and [`PredictionOutputBundle::verify_against_input`] refuses a
+/// root mismatch, so input-before-output ordering is checkable, not
+/// conventional.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredictionOutputBundle {
+    input_root: ContentHash,
+    accounting: SampleAccounting,
+    artifacts: Vec<OutputArtifactRef>,
+    registered_aggregates: Vec<OutputArtifactRef>,
+    work_units: u128,
+    budget_exceeded: bool,
+    discrepancy: Option<OutputArtifactRef>,
+    numerical_evidence: ArtifactRef,
+    checker_instructions: Vec<String>,
+}
+
+impl PredictionOutputBundle {
+    /// Validate and canonicalize one output bundle.
+    ///
+    /// # Errors
+    /// Typed refusals for a non-total sample partition, zero requested
+    /// samples, unbounded collections, duplicate artifact hashes, a
+    /// non-verification numerical-evidence reference, and malformed text.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one transaction admits the complete output or none of it                   (the input-side precedent)"
+    )]
+    pub fn try_new(
+        input_root: ContentHash,
+        accounting: SampleAccounting,
+        artifacts: Vec<OutputArtifactRef>,
+        registered_aggregates: Vec<OutputArtifactRef>,
+        work_units: u128,
+        budget_exceeded: bool,
+        discrepancy: Option<OutputArtifactRef>,
+        numerical_evidence: ArtifactRef,
+        checker_instructions: Vec<String>,
+    ) -> Result<Self, PredictionBundleError> {
+        if accounting.requested == 0 {
+            return Err(refuse(
+                "prediction-output-accounting",
+                "accounting.requested",
+                "a run that requested zero samples has nothing to claim",
+            ));
+        }
+        let partition = accounting
+            .succeeded
+            .checked_add(accounting.refused)
+            .and_then(|sum| sum.checked_add(accounting.failed));
+        if partition != Some(accounting.requested) {
+            return Err(refuse(
+                "prediction-output-accounting",
+                "accounting",
+                format!(
+                    "succeeded {} + refused {} + failed {} must equal requested {}                      exactly; a sample cannot vanish from the denominator",
+                    accounting.succeeded,
+                    accounting.refused,
+                    accounting.failed,
+                    accounting.requested
+                ),
+            ));
+        }
+        if accounting.succeeded > 0 && artifacts.is_empty() {
+            return Err(refuse(
+                "prediction-output-artifacts",
+                "artifacts",
+                "succeeded samples without any produced artifact are unscoreable",
+            ));
+        }
+        bounded_output_refs("artifacts", &artifacts)?;
+        bounded_output_refs("registered_aggregates", &registered_aggregates)?;
+        if let Some(reference) = &discrepancy {
+            checked_text("discrepancy.id", &reference.id)?;
+        }
+        expect_kind(
+            "numerical_evidence",
+            &numerical_evidence,
+            ArtifactKind::SolutionVerificationReceipt,
+        )?;
+        if checker_instructions.is_empty() || checker_instructions.len() > MAX_BUNDLE_ITEMS {
+            return Err(refuse(
+                "prediction-output-checker",
+                "checker_instructions",
+                format!("must declare 1..={MAX_BUNDLE_ITEMS} instructions"),
+            ));
+        }
+        for instruction in &checker_instructions {
+            checked_text("checker_instructions", instruction)?;
+        }
+        Ok(Self {
+            input_root,
+            accounting,
+            artifacts,
+            registered_aggregates,
+            work_units,
+            budget_exceeded,
+            discrepancy,
+            numerical_evidence,
+            checker_instructions,
+        })
+    }
+
+    /// Canonical transport bytes (versioned, bounded, deterministic).
+    ///
+    /// # Errors
+    /// Refuses when the encoding would exceed [`MAX_PREDICTION_BUNDLE_BYTES`].
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, PredictionBundleError> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(OUTPUT_MAGIC);
+        bytes.push(TRANSPORT_VERSION);
+        bytes.extend_from_slice(self.input_root.as_bytes());
+        bytes.extend_from_slice(&self.accounting.requested.to_le_bytes());
+        bytes.extend_from_slice(&self.accounting.succeeded.to_le_bytes());
+        bytes.extend_from_slice(&self.accounting.refused.to_le_bytes());
+        bytes.extend_from_slice(&self.accounting.failed.to_le_bytes());
+        push_output_refs(&mut bytes, &self.artifacts)?;
+        push_output_refs(&mut bytes, &self.registered_aggregates)?;
+        bytes.extend_from_slice(&self.work_units.to_le_bytes());
+        bytes.push(u8::from(self.budget_exceeded));
+        match &self.discrepancy {
+            None => bytes.push(0),
+            Some(reference) => {
+                bytes.push(1);
+                push_output_ref(&mut bytes, reference);
+            }
+        }
+        push_ref(&mut bytes, &self.numerical_evidence);
+        push_u32(
+            &mut bytes,
+            cast_len("checker_instructions", self.checker_instructions.len())?,
+        );
+        for instruction in &self.checker_instructions {
+            push_text(&mut bytes, instruction);
+        }
+        if bytes.len() > MAX_PREDICTION_BUNDLE_BYTES {
+            return Err(refuse(
+                "prediction-output-transport-bounds",
+                "canonical_bytes",
+                format!("encoding exceeds {MAX_PREDICTION_BUNDLE_BYTES} bytes"),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Decode canonical transport bytes, refusing trailing or foreign data.
+    ///
+    /// # Errors
+    /// Typed refusals mirroring the input decoder, with the same
+    /// trailing-byte rule closing the outcome-smuggling route.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, PredictionBundleError> {
+        if bytes.len() > MAX_PREDICTION_BUNDLE_BYTES {
+            return Err(refuse(
+                "prediction-output-transport-bounds",
+                "from_canonical_bytes",
+                "transport exceeds the declared maximum",
+            ));
+        }
+        let mut reader = Reader { bytes, offset: 0 };
+        if reader.take(4)? != OUTPUT_MAGIC {
+            return Err(refuse(
+                "prediction-output-transport-magic",
+                "magic",
+                "not a prediction-output-bundle transport",
+            ));
+        }
+        if reader.take(1)?[0] != TRANSPORT_VERSION {
+            return Err(refuse(
+                "prediction-output-transport-version",
+                "version",
+                "unknown transport version",
+            ));
+        }
+        let root_bytes: [u8; 32] = reader.take(32)?.try_into().expect("32 bytes");
+        let input_root = ContentHash::from_slice(&root_bytes).expect("32 bytes");
+        let requested = u64::from_le_bytes(reader.take(8)?.try_into().expect("8 bytes"));
+        let succeeded = u64::from_le_bytes(reader.take(8)?.try_into().expect("8 bytes"));
+        let refused = u64::from_le_bytes(reader.take(8)?.try_into().expect("8 bytes"));
+        let failed = u64::from_le_bytes(reader.take(8)?.try_into().expect("8 bytes"));
+        let artifacts = reader.output_refs()?;
+        let registered_aggregates = reader.output_refs()?;
+        let work_units = u128::from_le_bytes(reader.take(16)?.try_into().expect("16 bytes"));
+        let budget_exceeded = match reader.take(1)?[0] {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(refuse(
+                    "prediction-output-transport-bounds",
+                    "budget_exceeded",
+                    format!("boolean tag must be 0 or 1, found {other}"),
+                ));
+            }
+        };
+        let discrepancy = match reader.take(1)?[0] {
+            0 => None,
+            1 => Some(reader.output_ref()?),
+            other => {
+                return Err(refuse(
+                    "prediction-output-transport-bounds",
+                    "discrepancy",
+                    format!("option tag must be 0 or 1, found {other}"),
+                ));
+            }
+        };
+        let numerical_evidence = reader.artifact_ref()?;
+        let instruction_count = reader.u32_bounded("checker_instructions")?;
+        let mut checker_instructions = Vec::new();
+        for _ in 0..instruction_count {
+            checker_instructions.push(reader.text()?);
+        }
+        if reader.offset != bytes.len() {
+            return Err(refuse(
+                "prediction-output-transport-trailing",
+                "from_canonical_bytes",
+                format!(
+                    "{} undeclared trailing byte(s)",
+                    bytes.len() - reader.offset
+                ),
+            ));
+        }
+        Self::try_new(
+            input_root,
+            SampleAccounting {
+                requested,
+                succeeded,
+                refused,
+                failed,
+            },
+            artifacts,
+            registered_aggregates,
+            work_units,
+            budget_exceeded,
+            discrepancy,
+            numerical_evidence,
+            checker_instructions,
+        )
+    }
+
+    /// Semantic identity in the versioned output domain.
+    ///
+    /// # Errors
+    /// Propagates canonical-encoding refusals.
+    pub fn identity(&self) -> Result<ContentHash, PredictionBundleError> {
+        Ok(fs_blake3::hash_domain(
+            PREDICTION_OUTPUT_IDENTITY_DOMAIN,
+            &self.canonical_bytes()?,
+        ))
+    }
+
+    /// The single input root this output claims to answer.
+    #[must_use]
+    pub const fn input_root(&self) -> ContentHash {
+        self.input_root
+    }
+
+    /// Exact sample accounting.
+    #[must_use]
+    pub const fn accounting(&self) -> SampleAccounting {
+        self.accounting
+    }
+
+    /// Enforce input-before-output ordering: this output is scoreable only
+    /// against the exact sealed input it was produced from.
+    ///
+    /// # Errors
+    /// Refuses when the bound root differs from `sealed_input_identity`.
+    pub fn verify_against_input(
+        &self,
+        sealed_input_identity: ContentHash,
+    ) -> Result<(), PredictionBundleError> {
+        if self.input_root == sealed_input_identity {
+            Ok(())
+        } else {
+            Err(refuse(
+                "prediction-output-input-root",
+                "input_root",
+                "output binds a different input root; scoring it against this                  input would break the blind-prediction join",
+            ))
+        }
+    }
+}
+
+fn bounded_output_refs(
+    field: &str,
+    references: &[OutputArtifactRef],
+) -> Result<(), PredictionBundleError> {
+    if references.len() > MAX_BUNDLE_ITEMS {
+        return Err(refuse(
+            "prediction-output-artifacts",
+            field,
+            format!("must declare at most {MAX_BUNDLE_ITEMS} references"),
+        ));
+    }
+    let mut hashes: Vec<[u8; 32]> = references
+        .iter()
+        .map(|reference| *reference.hash.as_bytes())
+        .collect();
+    hashes.sort_unstable();
+    if hashes.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(refuse(
+            "prediction-output-artifacts",
+            field,
+            "duplicate referenced hashes are not admissible",
+        ));
+    }
+    for reference in references {
+        checked_text(field, &reference.id)?;
+    }
+    Ok(())
+}
+
+fn push_output_ref(bytes: &mut Vec<u8>, reference: &OutputArtifactRef) {
+    bytes.push(reference.family.tag());
+    push_text(bytes, &reference.id);
+    bytes.extend_from_slice(reference.hash.as_bytes());
+}
+
+fn push_output_refs(
+    bytes: &mut Vec<u8>,
+    references: &[OutputArtifactRef],
+) -> Result<(), PredictionBundleError> {
+    push_u32(bytes, cast_len("output_refs", references.len())?);
+    for reference in references {
+        push_output_ref(bytes, reference);
+    }
+    Ok(())
+}
+
+impl Reader<'_> {
+    fn output_ref(&mut self) -> Result<OutputArtifactRef, PredictionBundleError> {
+        let family = OutputFamily::from_tag(self.take(1)?[0])?;
+        let id = self.text()?;
+        let hash_bytes: [u8; 32] = self.take(32)?.try_into().expect("32 bytes");
+        Ok(OutputArtifactRef {
+            family,
+            id,
+            hash: ContentHash::from_slice(&hash_bytes).expect("32 bytes"),
+        })
+    }
+
+    fn output_refs(&mut self) -> Result<Vec<OutputArtifactRef>, PredictionBundleError> {
+        let count = self.u32_bounded("output_refs")?;
+        let mut references = Vec::new();
+        for _ in 0..count {
+            references.push(self.output_ref()?);
+        }
+        Ok(references)
+    }
+}
+
+/// Atomically seal an output bundle (same partial-then-rename contract as
+/// [`seal_prediction_input`]; an interrupted publication is unscoreable).
+///
+/// # Errors
+/// Encoding refusals, an already-sealed path, and I/O failures.
+pub fn seal_prediction_output(
+    output: &PredictionOutputBundle,
+    path: &Path,
+) -> Result<ContentHash, PredictionBundleError> {
+    let bytes = output.canonical_bytes()?;
+    let identity = output.identity()?;
+    seal_bytes(&bytes, path)?;
+    Ok(identity)
+}
+
+/// Load and independently verify a sealed output from artifact bytes alone.
+///
+/// # Errors
+/// Transport refusals and identity mismatch when `expected` is given.
+pub fn load_sealed_output(
+    path: &Path,
+    expected: Option<ContentHash>,
+) -> Result<(PredictionOutputBundle, ContentHash), PredictionBundleError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        refuse(
+            "prediction-output-seal-io",
+            path.to_string_lossy(),
+            format!("cannot read sealed bundle: {error}"),
+        )
+    })?;
+    let output = PredictionOutputBundle::from_canonical_bytes(&bytes)?;
+    let identity = fs_blake3::hash_domain(PREDICTION_OUTPUT_IDENTITY_DOMAIN, &bytes);
+    if let Some(expected) = expected
+        && expected != identity
+    {
+        return Err(refuse(
+            "prediction-output-seal-identity",
+            path.to_string_lossy(),
+            "sealed bytes do not match the expected identity (stale, swapped, or tampered)",
+        ));
+    }
+    Ok((output, identity))
 }
