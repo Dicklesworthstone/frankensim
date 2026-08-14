@@ -244,7 +244,9 @@ clarinet is one filling of those objects.
   drag from `GasState` plus the authored internal floor. A second
   polarization at `1+detune` is a second member on the same clock
   and shares every plate (it is not an independent unused body).
-- String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string` + Gonzalez
+- String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string`
+  (fixed-fixed) or `kirchhoff_carrier_moving_end` (Dirac join)
+  + Gonzalez
   pHS step, with the same stiff-string frequencies overwriting the
   linear ω_n. Bridge force `T_eff y'(0)` drives every listed body mode
   (Carcagno-band Sitka pair is a constructor, not a named guitar).
@@ -252,8 +254,9 @@ clarinet is one filling of those objects.
   shoulder). Helmholtz motion is possible with enough modes; it is not
   guaranteed and not a measured rosin curve.
 - Reed path: quasistatic or massive Bernoulli valve. Isolated
-  cylindrical bores use the inviscid `acoustic_chain` ODE (massive
-  reed = `mass_spring_damper` + jet + face flow). Coupled
+  cylindrical bores use the `acoustic_chain` ODE with a
+  `ViscothermalPin` (massive
+  reed = `mass_spring_damper` + jet + face flow). Blow/reed on
   string×duct and von Karman plates stay on the causal TMM
   driving-point (`driving_point::characteristic_line`). Reed lay
   is `fs-dcontact` (not a private Hunt–Crossley).
@@ -312,19 +315,24 @@ clarinet is one filling of those objects.
 - Three-way clock: when `EA > 0` the string member is Kirchhoff–
   Carrier with contact inside `H`. Polarizations share the plate and
   the duct FIR. The certified three-pHS Dirac interconnection is
-  `common_flow_dirac(moving_end_waveguide, transformer(plate, cavity))`
+  `common_flow_dirac(moving_end_waveguide, transformer(plate, load))`
   in `fs-phs` (free-end attachment port, area transformer, Kirchhoff
-  star). `PrestressedString.moving_end` selects that clock in
-  `realize_assembly` when there is no duct, bow, obstacle, or von
-  Karman plate. Fixed-fixed sines keep the one-way bridge force.
-  A cylindrical bore (uniform or stepped) is the inviscid
-  `acoustic_chain` LC ladder. Open tone holes are `AcousticTap`
-  side-branch inertances. A quasistatic reed is the Bernoulli
-  port on that inlet; a massive reed is `mass_spring_damper`
-  plus the same jet, face-velocity flow, and a Hunt–Crossley
-  lay as a dissipative port force (not a term in H). With a
-  linear plate the mouth is a transformer. Viscothermal losses,
-  von Karman plates, and string×duct stay on the FIR TMM. Plate ×
+  star). The load is a Helmholtz cavity or an `acoustic_chain`
+  duct — the same object. `PrestressedString.moving_end` selects
+  that clock when there is no bow, obstacle, von Karman plate,
+  reed, or blow. `EA > 0` is `kirchhoff_carrier_moving_end` on
+  the same free-fixed port. Fixed-fixed sines keep the one-way
+  bridge force.
+  A cylindrical bore (uniform or stepped) is the
+  `acoustic_chain` LC ladder with a wide-tube
+  `ViscothermalPin` from `GasState` (`μ`, `γ`, `Pr` at the
+  quarter-wave). Open tone holes are `AcousticTap` side-branch
+  inertances. A quasistatic reed is the Bernoulli port on that
+  inlet; a massive reed is `mass_spring_damper` plus the same
+  jet, face-velocity flow, and a Hunt–Crossley lay as a
+  dissipative port force (not a term in H). With a linear plate
+  the mouth is a transformer. Blow/reed on string×duct, von
+  Karman plates, and all-regime TMM stay on the FIR TMM. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported

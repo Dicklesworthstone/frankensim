@@ -127,15 +127,19 @@ impl VkBody {
     /// # Errors
     /// Section, modal-window, or nlmodal admission refusals.
     pub fn from_plate(plate: ThinPlate) -> Result<Self, AcousticRealizeError> {
+        Self::from_plate_ports(plate, false)
+    }
+
+    fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         let isotropic = (plate.e1_pa - plate.e2_pa).abs() <= 1.0e-6 * plate.e1_pa.abs();
         if isotropic && !plate.clamped {
-            Self::from_ss_sine(plate)
+            Self::from_ss_sine(plate, with_area)
         } else {
-            Self::from_sampled_fe(plate)
+            Self::from_sampled_fe(plate, with_area)
         }
     }
 
-    fn from_ss_sine(plate: ThinPlate) -> Result<Self, AcousticRealizeError> {
+    fn from_ss_sine(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         let n = plate.n_modes.max(1).min(3);
         let disp = odd_odd_modes(n);
         // Extra Airy channels above (2,1) trip the nlmodal quadrature
@@ -180,10 +184,10 @@ impl VkBody {
             let phi = norm * det::sin(mf * pi * 0.25) * det::sin(nf * pi * 0.5);
             drive.push(phi);
         }
-        finish_vk(model.storage, &zetas, &drive, areas)
+        finish_vk(model.storage, &zetas, &drive, areas, with_area)
     }
 
-    fn from_sampled_fe(plate: ThinPlate) -> Result<Self, AcousticRealizeError> {
+    fn from_sampled_fe(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         if plate.n_modes == 0 {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "thin plate needs at least one mode",
@@ -298,7 +302,7 @@ impl VkBody {
             plate.damping_ratio,
             &vk.storage.omegas,
         );
-        finish_vk(vk.storage, &zetas, &drive, areas)
+        finish_vk(vk.storage, &zetas, &drive, areas, with_area)
     }
 
     fn n_modes(&self) -> usize {
@@ -352,15 +356,36 @@ fn finish_vk(
     zetas: &[f64],
     drive: &[f64],
     areas: Vec<f64>,
+    with_area: bool,
 ) -> Result<VkBody, AcousticRealizeError> {
-    let n_state = 2 * areas.len();
-    let sys = fs_nlmodal::assemble(storage, zetas, drive)
+    let n = areas.len();
+    let m = if with_area { 2 } else { 1 };
+    let mut g = vec![0.0; (2 * n) * m];
+    for k in 0..n {
+        g[(2 * k + 1) * m] = drive[k];
+        if with_area {
+            g[(2 * k + 1) * m + 1] = areas[k];
+        }
+    }
+    let omegas = storage.omegas.clone();
+    let sys = fs_nlmodal::assemble_storage(n, &omegas, zetas, m, g, Box::new(storage))
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
     Ok(VkBody {
         sys,
-        x: vec![0.0; n_state],
+        x: vec![0.0; 2 * n],
         areas,
     })
+}
+
+/// Von Karman plate as a 1- or 2-port pHS (bridge, optional face).
+///
+/// # Errors
+/// Same as [`VkBody::from_plate`].
+pub fn vk_plate_phs(
+    plate: ThinPlate,
+    with_area: bool,
+) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
+    Ok(VkBody::from_plate_ports(plate, with_area)?.sys)
 }
 
 fn bilinear_sample(w: &[f64], nx: usize, ny: usize, lx: f64, ly: f64, x: f64, y: f64) -> f64 {

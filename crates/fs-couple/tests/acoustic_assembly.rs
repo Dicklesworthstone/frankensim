@@ -411,6 +411,41 @@ fn stepped_bore_shifts_the_ode_period() {
 }
 
 #[test]
+fn narrow_bore_decays_faster_from_the_viscothermal_pin() {
+    let make = |radius_m: f64| {
+        let mut a = empty_base();
+        a.duration_s = 0.08;
+        a.blow = Some(VolumeVelocityPulse {
+            peak_m3_s: 2.0e-5,
+            duration_s: 0.002,
+        });
+        a.duct = Some(ViscothermalDuct {
+            segments: vec![CylinderSegment {
+                radius_m,
+                length_m: 0.34,
+            }],
+            tone_holes: vec![],
+            termination: WaveguideEnd::Closed,
+        });
+        a
+    };
+    let wide = realize_assembly(&make(0.016)).expect("wide");
+    let narrow = realize_assembly(&make(0.004)).expect("narrow");
+    let decay = |p: &[f64]| {
+        let peak = p.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let tail = &p[p.len() * 3 / 4..];
+        let rms = (tail.iter().map(|x| x * x).sum::<f64>() / tail.len() as f64).sqrt();
+        rms / peak.max(1.0e-18)
+    };
+    let d_wide = decay(&wide.pressure_pa);
+    let d_narrow = decay(&narrow.pressure_pa);
+    assert!(
+        d_narrow < d_wide * 0.85,
+        "wide-tube R ∝ 1/a must damp a narrower bore faster ({d_narrow} vs {d_wide})"
+    );
+}
+
+#[test]
 fn massive_reed_speaks_on_the_ode_clock() {
     let mut a = empty_base();
     a.duration_s = 0.12;
@@ -993,6 +1028,62 @@ fn moving_end_with_cavity_is_a_three_phs_clock() {
         .map(|(x, y)| (x - y).abs())
         .sum();
     assert!(err > 1.0e-8, "the cavity transformer must load the join");
+}
+
+#[test]
+fn moving_end_kc_dirac_is_not_the_linear_moving_end() {
+    let mut linear = plucked(70.0, 0.005, 3.5e-3);
+    if let Some(s) = linear.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 3;
+    }
+    linear.plate = Some(steel_panel());
+    linear.duration_s = 0.05;
+    let mut kc = linear.clone();
+    if let Some(s) = kc.string.as_mut() {
+        s.axial_stiffness_n = 4.0e4;
+    }
+    let a = realize_assembly(&linear).expect("linear moving-end");
+    let b = realize_assembly(&kc).expect("KC moving-end Dirac");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "free-fixed KC must change the Dirac join, not reprint the linear waveguide"
+    );
+}
+
+#[test]
+fn moving_end_with_duct_is_a_three_phs_clock() {
+    let mut a = plucked(80.0, 0.006, 0.004);
+    if let Some(s) = a.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 2;
+    }
+    a.plate = Some(steel_panel());
+    a.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.012,
+            length_m: 0.34,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    a.duration_s = 0.04;
+    let with = realize_assembly(&a).expect("string-plate-duct");
+    a.duct = None;
+    let bare = realize_assembly(&a).expect("no duct");
+    let err: f64 = with
+        .pressure_pa
+        .iter()
+        .zip(&bare.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-8, "the duct transformer must load the join");
 }
 
 #[test]
