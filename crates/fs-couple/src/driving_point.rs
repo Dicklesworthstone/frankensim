@@ -91,7 +91,7 @@ pub fn characteristic_line(
     };
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = input_impedance(physics, gas, omega, LossModel::AllRegime, termination)
+        let response = input_impedance(physics, gas, omega, LossModel::Bessel, termination)
             .map_err(DrivingPointError::Duct)?;
         let rac = reflectance(C64::new(response.impedance.re, response.impedance.im), zc);
         // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal.
@@ -140,7 +140,7 @@ pub fn impedance_line(
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = input_impedance(physics, gas, omega, LossModel::AllRegime, termination)
+        let response = input_impedance(physics, gas, omega, LossModel::Bessel, termination)
             .map_err(DrivingPointError::Duct)?;
         let z = match termination {
             Termination::Closed => response.impedance,

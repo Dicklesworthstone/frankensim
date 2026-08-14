@@ -258,8 +258,10 @@ clarinet is one filling of those objects.
   `ViscothermalPin` (massive
   reed = `mass_spring_damper` + jet + face flow). Blow/reed on a
   moving-end string×plate×duct is a leftover `join_port` inlet.
-  Fixed-fixed string×duct without a plate stays the causal TMM
-  driving-point.
+  Moving-end string×duct without a plate is
+  `transformer(waveguide, chain, A_inlet)`. Fixed-fixed
+  string×duct without a plate shares the ODE clock without
+  a force port (`φ(0)=0`).
   Reed lay
   is `fs-dcontact` (not a private Hunt–Crossley).
 - `ThinPlate` modes come from `fs-plate` + `fs-modal` (certified
@@ -328,16 +330,22 @@ clarinet is one filling of those objects.
   free-fixed port. Fixed-fixed sines keep the one-way bridge
   force; with a plate the duct is still the ODE chain
   (bridge force on the leftover plate port), not the FIR line.
-  A cylindrical bore (uniform or stepped) is the
+  Without a plate the same cylindrical chain is still the ODE
+  clock. A cylindrical bore (uniform or stepped) is the
   `acoustic_chain` LC ladder with an all-regime
-  `ViscothermalPin` from `GasState` (`μ`, `γ`, `Pr` at the
-  quarter-wave: wide-tube or Poiseuille). Open tone holes are `AcousticTap` side-branch
+  `ViscothermalPin` from `GasState` (`μ`, `γ`, `Pr`;
+  series `R` and thermal `G` are three-term Foster networks
+  collocated to Bessel Zwikker–Kosten `F(r_v)`, all shear
+  numbers). A linear radius taper is an exact frustum
+  T-network (`L = ρ dx/(π r_in r_out)`, frustum volume `C`),
+  not the spherical-wave frequency TMM. Open tone holes are `AcousticTap` side-branch
   inertances. A quasistatic reed is the Bernoulli port on that
   inlet; a massive reed is `mass_spring_damper` plus the same
   jet, face-velocity flow, and a Hunt–Crossley lay as a
   dissipative port force (not a term in H). With a linear plate
-  the mouth is a transformer. All-regime TMM stays the FIR
-  fallback. 3-D jet broadband remains a no-claim. Plate ×
+  the mouth is a transformer. Frequency-by-frequency Bessel TMM
+  (`LossModel::Bessel`, spherical-wave cones included) is the FIR
+  path. 3-D jet broadband remains a no-claim. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported

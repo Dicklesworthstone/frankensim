@@ -70,6 +70,7 @@ fn closed_duct(temperature_k: f64) -> AcousticAssembly {
             segments: vec![CylinderSegment {
                 radius_m: 0.012,
                 length_m: 0.34,
+                outlet_radius_m: 0.012,
             }],
             tone_holes: vec![],
             termination: WaveguideEnd::Closed,
@@ -298,10 +299,12 @@ fn open_tone_hole_shortens_bore_period() {
             CylinderSegment {
                 radius_m: 0.012,
                 length_m: 0.08,
+                outlet_radius_m: 0.012,
             },
             CylinderSegment {
                 radius_m: 0.012,
                 length_m: 0.26,
+                outlet_radius_m: 0.012,
             },
         ],
         tone_holes: vec![],
@@ -334,6 +337,7 @@ fn beating_reed_locks_near_the_quarter_wave() {
         segments: vec![CylinderSegment {
             radius_m: 0.0075,
             length_m: 0.50,
+            outlet_radius_m: 0.0075,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::UnflangedOpen,
@@ -383,6 +387,7 @@ fn stepped_bore_shifts_the_ode_period() {
         segments: vec![CylinderSegment {
             radius_m: 0.012,
             length_m: 0.34,
+            outlet_radius_m: 0.012,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
@@ -393,10 +398,12 @@ fn stepped_bore_shifts_the_ode_period() {
             CylinderSegment {
                 radius_m: 0.012,
                 length_m: 0.17,
+                outlet_radius_m: 0.012,
             },
             CylinderSegment {
                 radius_m: 0.006,
                 length_m: 0.17,
+                outlet_radius_m: 0.006,
             },
         ];
     }
@@ -407,6 +414,33 @@ fn stepped_bore_shifts_the_ode_period() {
     assert!(
         (tb - ta).abs() > 0.02 * ta,
         "an area jump must move the ringing period ({tb:.2} vs {ta:.2})"
+    );
+}
+
+#[test]
+fn linear_taper_shifts_the_ode_period() {
+    let mut uniform = empty_base();
+    uniform.duration_s = 0.08;
+    uniform.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    uniform.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment::cylinder(0.008, 0.34)],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    let mut flare = uniform.clone();
+    if let Some(duct) = flare.duct.as_mut() {
+        duct.segments = vec![CylinderSegment::taper(0.008, 0.020, 0.34)];
+    }
+    let a = realize_assembly(&uniform).expect("cylinder");
+    let b = realize_assembly(&flare).expect("taper");
+    let ta = zero_cross_period(&a.pressure_pa);
+    let tb = zero_cross_period(&b.pressure_pa);
+    assert!(
+        (tb - ta).abs() > 0.02 * ta,
+        "a linear flare must move the ODE period ({tb:.2} vs {ta:.2})"
     );
 }
 
@@ -423,6 +457,7 @@ fn narrow_bore_decays_faster_from_the_viscothermal_pin() {
             segments: vec![CylinderSegment {
                 radius_m,
                 length_m: 0.34,
+                outlet_radius_m: radius_m,
             }],
             tone_holes: vec![],
             termination: WaveguideEnd::Closed,
@@ -453,6 +488,7 @@ fn massive_reed_speaks_on_the_ode_clock() {
         segments: vec![CylinderSegment {
             radius_m: 0.0075,
             length_m: 0.50,
+            outlet_radius_m: 0.0075,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::UnflangedOpen,
@@ -747,6 +783,7 @@ fn fixed_fixed_string_plate_duct_ode_loads_the_chain() {
         segments: vec![CylinderSegment {
             radius_m: 0.012,
             length_m: 0.34,
+            outlet_radius_m: 0.012,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
@@ -1177,6 +1214,7 @@ fn von_karman_duct_dirac_is_not_the_linear_plate_duct() {
         segments: vec![CylinderSegment {
             radius_m: 0.012,
             length_m: 0.34,
+            outlet_radius_m: 0.012,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
@@ -1212,6 +1250,7 @@ fn blow_on_moving_end_string_plate_duct_loads_the_join() {
         segments: vec![CylinderSegment {
             radius_m: 0.012,
             length_m: 0.34,
+            outlet_radius_m: 0.012,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
@@ -1247,6 +1286,7 @@ fn reed_on_moving_end_string_plate_duct_speaks() {
         segments: vec![CylinderSegment {
             radius_m: 0.0075,
             length_m: 0.50,
+            outlet_radius_m: 0.0075,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::UnflangedOpen,
@@ -1291,6 +1331,7 @@ fn moving_end_with_duct_is_a_three_phs_clock() {
         segments: vec![CylinderSegment {
             radius_m: 0.012,
             length_m: 0.34,
+            outlet_radius_m: 0.012,
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
@@ -1306,6 +1347,80 @@ fn moving_end_with_duct_is_a_three_phs_clock() {
         .map(|(x, y)| (x - y).abs())
         .sum();
     assert!(err > 1.0e-8, "the duct transformer must load the join");
+}
+
+#[test]
+fn moving_end_string_duct_without_plate_is_an_area_transformer() {
+    let mut coupled = plucked(80.0, 0.006, 0.004);
+    if let Some(s) = coupled.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 2;
+    }
+    let air = closed_duct(288.15);
+    coupled.duct = air.duct;
+    coupled.blow = air.blow;
+    coupled.duration_s = 0.05;
+    let mut string_only = coupled.clone();
+    string_only.duct = None;
+    string_only.blow = None;
+    let mut duct_only = coupled.clone();
+    duct_only.string = None;
+    duct_only.pluck = None;
+    let c = realize_assembly(&coupled).expect("string×duct transformer");
+    let s = realize_assembly(&string_only).expect("string");
+    let d = realize_assembly(&duct_only).expect("duct");
+    let mut superposed = s.pressure_pa;
+    add_vec(&mut superposed, &d.pressure_pa);
+    let err: f64 = c
+        .pressure_pa
+        .iter()
+        .zip(&superposed)
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        err > 1.0e-5,
+        "a free end transformer-joined to the chain must not equal superposition"
+    );
+}
+
+#[test]
+fn fixed_fixed_string_duct_without_plate_is_ode_superposition() {
+    let mut coupled = plucked(80.0, 0.006, 0.004);
+    let air = closed_duct(288.15);
+    coupled.duct = air.duct;
+    coupled.blow = air.blow;
+    coupled.duration_s = 0.05;
+    let mut string_only = coupled.clone();
+    string_only.duct = None;
+    string_only.blow = None;
+    let mut duct_only = coupled.clone();
+    duct_only.string = None;
+    duct_only.pluck = None;
+    let c = realize_assembly(&coupled).expect("ff string+duct ODE");
+    let s = realize_assembly(&string_only).expect("string");
+    let d = realize_assembly(&duct_only).expect("duct");
+    let err_string: f64 = c
+        .pressure_pa
+        .iter()
+        .zip(&s.pressure_pa)
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        err_string > 1.0e-6,
+        "the ODE chain must speak on the shared clock"
+    );
+    let residual: Vec<f64> = c
+        .pressure_pa
+        .iter()
+        .zip(&s.pressure_pa)
+        .map(|(a, b)| a - b)
+        .collect();
+    let p_res = dominant_period_samples(&residual, 8, 40);
+    let p_duct = dominant_period_samples(&d.pressure_pa, 8, 40);
+    assert!(
+        (p_res as i32 - p_duct as i32).abs() <= 2,
+        "fixed-fixed without a plate must reuse the ODE chain period, not a FIR line ({p_res} vs {p_duct})"
+    );
 }
 
 #[test]

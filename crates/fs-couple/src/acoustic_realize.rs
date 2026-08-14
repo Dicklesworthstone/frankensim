@@ -128,12 +128,10 @@ pub fn realize_assembly(
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
     bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz);
     let dirac_base = assembly.string.is_some_and(|s| s.moving_end);
-    let has_plate = !bodies.linear.is_empty() || bodies.vk.is_some();
     let dirac_string_only = dirac_base && assembly.duct.is_none();
     let dirac_string_duct = dirac_base
         && assembly.duct.is_some()
         && assembly.cavity.is_none()
-        && has_plate
         && assembly
             .duct
             .as_ref()
@@ -171,11 +169,10 @@ pub fn realize_assembly(
         return Ok(finish_observer(assembly, &gas, pressure_pa));
     }
     if assembly.string.is_some() && assembly.duct.is_some() {
-        if has_plate
-            && assembly
-                .duct
-                .as_ref()
-                .is_some_and(|d| bore_spec(d).is_some())
+        if assembly
+            .duct
+            .as_ref()
+            .is_some_and(|d| bore_spec(d).is_some())
         {
             return realize_coupled_ode(assembly, &gas, &mut bodies, n);
         }
@@ -254,10 +251,12 @@ pub fn realize_assembly(
     Ok(finish_observer(assembly, &gas, pressure_pa))
 }
 
-/// One-way string (fixed-fixed, `φ(0)=0`) plus a transformer
-/// plate × [`acoustic_chain`]. The string cannot Dirac-join; the
-/// bridge force is a leftover port on the plate. Blow/reed use
-/// the second leftover. Shared clock, not FIR.
+/// One-way string (fixed-fixed, `φ(0)=0`) plus an
+/// [`acoustic_chain`]. With a plate the bridge force is a leftover
+/// port of `transformer(plate, chain)`. Without a plate the
+/// support does no work (`φ(0)=0`) so the members share a clock
+/// but not a force — the chain is driven only by blow/reed.
+/// Shared clock, not FIR.
 fn realize_coupled_ode(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -276,22 +275,9 @@ fn realize_coupled_ode(
     let (sections, taps) = bore_spec(duct).ok_or(AcousticRealizeError::InvalidDescription {
         what: "ODE coupled duct expected a cylindrical chain",
     })?;
+    let has_plate = !plates.linear.is_empty() || plates.vk.is_some();
     let need_drive = assembly.reed.is_some() || assembly.blow.is_some();
-    let inlets = if need_drive { 2 } else { 1 };
-    let plate = if plates.vk.is_some() {
-        vk_plate_phs(
-            assembly
-                .plate
-                .ok_or(AcousticRealizeError::InvalidDescription {
-                    what: "von Karman coupled ODE needs the plate description",
-                })?,
-            true,
-        )?
-    } else {
-        plate_modal_ports(plates, true)?.ok_or(AcousticRealizeError::InvalidDescription {
-            what: "ODE coupled duct expected a linear plate bank",
-        })?
-    };
+    let inlets = if has_plate && need_drive { 2 } else { 1 };
     let chain = acoustic_chain(
         &sections,
         gas.density,
@@ -302,14 +288,34 @@ fn realize_coupled_ode(
         Some(&viscothermal_pin(gas)),
     )
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-    let face = if inlets == 2 { 1 } else { 0 };
-    let body = transformer(plate, chain, 1, face, 1.0)
-        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let body = if has_plate {
+        let plate = if plates.vk.is_some() {
+            vk_plate_phs(
+                assembly
+                    .plate
+                    .ok_or(AcousticRealizeError::InvalidDescription {
+                        what: "von Karman coupled ODE needs the plate description",
+                    })?,
+                true,
+            )?
+        } else {
+            plate_modal_ports(plates, true)?.ok_or(AcousticRealizeError::InvalidDescription {
+                what: "ODE coupled duct expected a linear plate bank",
+            })?
+        };
+        let face = if inlets == 2 { 1 } else { 0 };
+        transformer(plate, chain, 1, face, 1.0)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
+    } else {
+        chain
+    };
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let listener_m = assembly.listener.distance_m;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
-    let n_plate = if let Some(vk) = plates.vk.as_ref() {
+    let n_plate = if !has_plate {
+        0
+    } else if let Some(vk) = plates.vk.as_ref() {
         2 * vk.areas.len()
     } else {
         2 * plates.linear.len()
@@ -367,10 +373,20 @@ fn realize_coupled_ode(
                 p_string += p_m;
                 fb += bridge_force(member_string, &q_phys);
             }
-            let rec =
-                step_plate_chain(&body, &x_body, fb, assembly.reed, assembly.blow, gas, t, dt)?;
+            let rec = step_string_chain(
+                &body,
+                &x_body,
+                fb,
+                n_plate,
+                assembly.reed,
+                assembly.blow,
+                gas,
+                t,
+                dt,
+            )?;
             out[i] = p_string
-                + plate_chain_radiation(plates, &rec.x, &x_body, n_plate, gas, listener_m, dt);
+                + plate_chain_radiation(plates, &rec.x, &x_body, n_plate, gas, listener_m, dt)
+                + chain_inlet_pressure(&body, &rec.x, n_plate);
             x_body = rec.x;
         }
         return Ok(finish_observer(assembly, gas, out));
@@ -428,12 +444,80 @@ fn realize_coupled_ode(
                 .collect();
             fb += bridge_force(member_string, &q_phys);
         }
-        let rec = step_plate_chain(&body, &x_body, fb, assembly.reed, assembly.blow, gas, t, dt)?;
-        out[i] =
-            p_string + plate_chain_radiation(plates, &rec.x, &x_body, n_plate, gas, listener_m, dt);
+        let rec = step_string_chain(
+            &body,
+            &x_body,
+            fb,
+            n_plate,
+            assembly.reed,
+            assembly.blow,
+            gas,
+            t,
+            dt,
+        )?;
+        out[i] = p_string
+            + plate_chain_radiation(plates, &rec.x, &x_body, n_plate, gas, listener_m, dt)
+            + chain_inlet_pressure(&body, &rec.x, n_plate);
         x_body = rec.x;
     }
     Ok(finish_observer(assembly, gas, out))
+}
+
+fn step_string_chain(
+    body: &fs_phs::PortHamiltonian,
+    x: &[f64],
+    f_bridge: f64,
+    n_plate: usize,
+    reed: Option<BeatingReed>,
+    blow: Option<VolumeVelocityPulse>,
+    gas: &GasState,
+    t: f64,
+    dt: f64,
+) -> Result<fs_phs::StepRecord, AcousticRealizeError> {
+    if n_plate == 0 {
+        return step_chain_inlet(body, x, reed, blow, gas, t, dt);
+    }
+    step_plate_chain(body, x, f_bridge, reed, blow, gas, t, dt)
+}
+
+fn chain_inlet_pressure(body: &fs_phs::PortHamiltonian, x: &[f64], n_plate: usize) -> f64 {
+    if n_plate != 0 {
+        return 0.0;
+    }
+    body.output(x).first().copied().unwrap_or(0.0)
+}
+
+fn step_chain_inlet(
+    body: &fs_phs::PortHamiltonian,
+    x: &[f64],
+    reed: Option<BeatingReed>,
+    blow: Option<VolumeVelocityPulse>,
+    gas: &GasState,
+    t: f64,
+    dt: f64,
+) -> Result<fs_phs::StepRecord, AcousticRealizeError> {
+    let m = body.port_dim();
+    let y = body.output(x);
+    let mut u = vec![0.0; m];
+    if m > 0 {
+        if let Some(reed) = reed {
+            let p_m = blowing_envelope(reed, t);
+            let p_bore = y.first().copied().unwrap_or(0.0);
+            let h = quasistatic_aperture_opening(
+                reed.rest_opening_m,
+                reed.closing_pressure_pa,
+                p_m - p_bore,
+            );
+            u[0] = bernoulli_volume_flow(reed.width_m, h, p_m - p_bore, gas.density);
+        } else if let Some(blow) = blow {
+            u[0] = if t < blow.duration_s {
+                blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+            } else {
+                0.0
+            };
+        }
+    }
+    step(body, x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
 fn step_plate_chain(
@@ -505,7 +589,7 @@ fn plate_chain_radiation(
 
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
-/// not a cylindrical chain or there is no plate.
+/// not a cylindrical chain.
 fn realize_coupled(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -995,19 +1079,44 @@ fn realize_dirac_join(
         plate_modal_ports(plates, need_area)?
     };
     let drive_inlet = reed.is_some() || blow.is_some();
-    let (waveguide, sys) = match (body, cavity, duct) {
-        (None, _, Some(_)) => {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "string×duct Dirac needs a plate for the area law",
-            });
+    let (waveguide, sys, ode_start) = match (body, cavity, duct) {
+        (None, _, Some(line)) => {
+            refuse_open_nyquist(line, gas, sample_rate_hz)?;
+            let (sections, taps) =
+                bore_spec(line).ok_or(AcousticRealizeError::InvalidDescription {
+                    what: "Dirac duct expected a cylindrical chain",
+                })?;
+            let inlets = if drive_inlet { 2 } else { 1 };
+            let chain = acoustic_chain(
+                &sections,
+                gas.density,
+                gas.sound_speed,
+                matches!(line.termination, WaveguideEnd::UnflangedOpen),
+                inlets,
+                &taps,
+                Some(&viscothermal_pin(gas)),
+            )
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            let chain_face = if inlets == 2 { 1 } else { 0 };
+            let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
+            let area = core::f64::consts::PI * radius * radius;
+            (
+                Some(
+                    transformer(waveguide, chain, 0, chain_face, area)
+                        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
+                ),
+                None,
+                0,
+            )
         }
-        (None, _, None) => (Some(waveguide), None),
+        (None, _, None) => (Some(waveguide), None, 1),
         (Some(plate), None, None) => (
             None,
             Some(
                 join_port(waveguide, plate, 0, 0)
                     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
             ),
+            0,
         ),
         (Some(plate), Some(cav), None) => {
             let flow = helmholtz_flow_cavity(cav, gas)
@@ -1020,6 +1129,7 @@ fn realize_dirac_join(
                     join_port(waveguide, plate_cav, 0, 0)
                         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
                 ),
+                0,
             )
         }
         (Some(plate), None, Some(line)) => {
@@ -1048,6 +1158,7 @@ fn realize_dirac_join(
                     join_port(waveguide, plate_line, 0, 0)
                         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
                 ),
+                0,
             )
         }
         (Some(_), Some(_), Some(_)) => {
@@ -1058,7 +1169,13 @@ fn realize_dirac_join(
     };
     let mut x = match &sys {
         Some(s) => vec![0.0; s.state_dim()],
-        None => vec![0.0; n_string],
+        None => vec![
+            0.0;
+            waveguide
+                .as_ref()
+                .map(fs_phs::PortHamiltonian::state_dim)
+                .unwrap_or(n_string)
+        ],
     };
     if let Some(pluck) = pluck {
         for k in 0..n_s {
@@ -1092,7 +1209,21 @@ fn realize_dirac_join(
                 .x
         } else {
             let wg = waveguide.as_ref().expect("waveguide-only clock");
-            let u = leftover_u_ode(wg, &x, n_s, string, bow, obstacles, dt, &mut texture)?;
+            let u = leftover_u_ode(
+                wg,
+                &x,
+                n_s,
+                string,
+                bow,
+                obstacles,
+                reed,
+                blow,
+                gas,
+                t,
+                dt,
+                &mut texture,
+                ode_start,
+            )?;
             step(wg, &x, &u, dt)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
                 .x
@@ -1117,6 +1248,13 @@ fn realize_dirac_join(
                 let acc = (rec_x[base + 2 * k + 1] - x[base + 2 * k + 1]) / dt;
                 p += gas.density * area * acc / (2.0 * pi * listener_m);
             }
+        }
+        if plates.linear.is_empty()
+            && plates.vk.is_none()
+            && duct.is_some()
+            && let Some(wg) = waveguide.as_ref()
+        {
+            p += wg.effort(&rec_x).get(n_string).copied().unwrap_or(0.0);
         }
         if !p.is_finite() {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -1248,16 +1386,21 @@ fn leftover_u_ode(
     string: PrestressedString,
     bow: Option<BowStroke>,
     obstacles: &[UnilateralObstacle],
+    reed: Option<BeatingReed>,
+    blow: Option<VolumeVelocityPulse>,
+    gas: &GasState,
+    t: f64,
     dt: f64,
     texture: &mut TextureDrive,
+    start_col: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let m = sys.port_dim();
     let y = sys.output(x);
     let mut u = vec![0.0; m];
-    if m <= 1 {
+    let mut col = start_col;
+    if col >= m {
         return Ok(u);
     }
-    let mut col = 1;
     if let Some(bow) = bow {
         let v = y.get(col).copied().unwrap_or(0.0);
         u[col] = bow_force(bow, v, texture.delta_n(bow.velocity_m_s - v, dt));
@@ -1265,6 +1408,9 @@ fn leftover_u_ode(
     }
     for spec in obstacles {
         for (i, &s) in spec.stations.iter().enumerate() {
+            if col >= m {
+                break;
+            }
             let opening = moving_end_opening(string, x, n_s, s);
             let v = y.get(col).copied().unwrap_or(0.0);
             let gap = spec.gaps_m.get(i).copied().unwrap_or(0.0);
@@ -1272,6 +1418,24 @@ fn leftover_u_ode(
             let fel = -spec.stiffness * det::pow(pen, spec.alpha);
             u[col] = fel - spec.internal_loss * spec.stiffness * det::pow(pen, spec.alpha) * v;
             col += 1;
+        }
+    }
+    if col < m {
+        if let Some(reed) = reed {
+            let p_m = blowing_envelope(reed, t);
+            let p_bore = y.get(col).copied().unwrap_or(0.0);
+            let h = quasistatic_aperture_opening(
+                reed.rest_opening_m,
+                reed.closing_pressure_pa,
+                p_m - p_bore,
+            );
+            u[col] = bernoulli_volume_flow(reed.width_m, h, p_m - p_bore, gas.density);
+        } else if let Some(blow) = blow {
+            u[col] = if t < blow.duration_s {
+                blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+            } else {
+                0.0
+            };
         }
     }
     Ok(u)
@@ -2027,6 +2191,7 @@ fn viscothermal_pin(gas: &GasState) -> ViscothermalPin {
         dynamic_viscosity: gas.dynamic_viscosity,
         gamma: gas.gamma,
         prandtl: gas.prandtl,
+        foster_branches: 3,
     }
 }
 
@@ -2035,7 +2200,7 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
         || duct
             .segments
             .iter()
-            .any(|s| !(s.radius_m > 0.0 && s.length_m > 0.0))
+            .any(|s| !(s.radius_m > 0.0 && s.length_m > 0.0 && s.outlet_radius_m > 0.0))
     {
         return None;
     }
@@ -2044,15 +2209,16 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
         return None;
     }
     const BUDGET: f64 = 8.0;
-    let sections: Vec<AcousticSection> = duct
-        .segments
-        .iter()
-        .map(|s| AcousticSection {
+    let mut sections = Vec::new();
+    for s in &duct.segments {
+        let n = ((BUDGET * s.length_m / total).round() as usize).max(2);
+        sections.push(AcousticSection {
             length: s.length_m,
             radius: s.radius_m,
-            cells: ((BUDGET * s.length_m / total).round() as usize).max(2),
-        })
-        .collect();
+            outlet_radius: s.outlet_radius_m,
+            cells: n,
+        });
+    }
     let mut taps = Vec::new();
     let mut acc = 0.0;
     for (i, s) in duct.segments.iter().enumerate() {
@@ -2405,10 +2571,18 @@ fn physics_duct(duct: &ViscothermalDuct) -> Result<Duct, AcousticRealizeError> {
     }
     let mut segments = Vec::new();
     for (i, s) in duct.segments.iter().enumerate() {
-        segments.push(Segment::Cylinder {
-            radius: s.radius_m,
-            length: s.length_m,
-        });
+        if s.is_taper() {
+            segments.push(Segment::Cone {
+                inlet_radius: s.radius_m,
+                outlet_radius: s.outlet_radius_m,
+                length: s.length_m,
+            });
+        } else {
+            segments.push(Segment::Cylinder {
+                radius: s.radius_m,
+                length: s.length_m,
+            });
+        }
         for hole in &duct.tone_holes {
             if hole.after_segment == i {
                 segments.push(Segment::ToneHole {
@@ -2439,7 +2613,7 @@ fn refuse_open_nyquist(
         .segments
         .last()
         .expect("non-empty checked above")
-        .radius_m;
+        .outlet_radius_m;
     let ka_nyquist = core::f64::consts::PI * f64::from(sample_rate_hz) * mouth_r / gas.sound_speed;
     if ka_nyquist > MAX_RADIATION_KA {
         return Err(AcousticRealizeError::Duct(DuctError::RadiationKaTooLarge {

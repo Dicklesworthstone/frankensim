@@ -51,7 +51,7 @@ pub struct TravelingWaveLine {
 impl TravelingWaveLine {
     /// Build a round-trip line from a TMM duct.
     ///
-    /// Gain is `±|R|` at the quarter-wave from AllRegime `Z_in`.
+    /// Gain is `±|R|` at the quarter-wave from Bessel `Z_in`.
     /// The one-pole is mild HF leak from `Im k` at `f0` vs `3 f0`.
     ///
     /// # Errors
@@ -88,7 +88,7 @@ impl TravelingWaveLine {
         let delay_int = delay_f.floor() as usize;
         let frac = delay_f - delay_int as f64;
         let omega0 = core::f64::consts::PI * gas.sound_speed / (2.0 * length);
-        let z = input_impedance(physics, gas, omega0, LossModel::AllRegime, termination)
+        let z = input_impedance(physics, gas, omega0, LossModel::Bessel, termination)
             .map_err(TravelingWaveError::Duct)?
             .impedance;
         let mag = reflection_magnitude(z.re, z.im, zc).clamp(0.2, 0.99);
@@ -100,9 +100,9 @@ impl TravelingWaveLine {
             .segments
             .first()
             .map_or(0.007, fs_duct::Segment::outlet_radius);
-        let k1 = segment_wave(gas, radius, omega0, LossModel::AllRegime)
+        let k1 = segment_wave(gas, radius, omega0, LossModel::Bessel)
             .map_err(TravelingWaveError::Duct)?;
-        let k3 = segment_wave(gas, radius, 3.0 * omega0, LossModel::AllRegime)
+        let k3 = segment_wave(gas, radius, 3.0 * omega0, LossModel::Bessel)
             .map_err(TravelingWaveError::Duct)?;
         let att1 = det::exp(-2.0 * k1.wavenumber.im * length);
         let att3 = det::exp(-2.0 * k3.wavenumber.im * length);
