@@ -67,13 +67,44 @@ pub struct RayleighParams {
     pub beta_s: f64,
 }
 
-/// One cylindrical waveguide segment.
+/// One waveguide run: a cylinder when the radii match, a
+/// truncated cone when they differ.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CylinderSegment {
-    /// Radius [m].
+    /// Inlet radius [m].
     pub radius_m: f64,
     /// Axial length [m].
     pub length_m: f64,
+    /// Outlet radius [m]. Equal to [`Self::radius_m`] is a cylinder.
+    pub outlet_radius_m: f64,
+}
+
+impl CylinderSegment {
+    /// Uniform cylinder.
+    #[must_use]
+    pub const fn cylinder(radius_m: f64, length_m: f64) -> Self {
+        Self {
+            radius_m,
+            length_m,
+            outlet_radius_m: radius_m,
+        }
+    }
+
+    /// Linear radius taper (truncated cone).
+    #[must_use]
+    pub const fn taper(inlet_radius_m: f64, outlet_radius_m: f64, length_m: f64) -> Self {
+        Self {
+            radius_m: inlet_radius_m,
+            length_m,
+            outlet_radius_m,
+        }
+    }
+
+    /// True when the end radii differ.
+    #[must_use]
+    pub fn is_taper(self) -> bool {
+        (self.outlet_radius_m - self.radius_m).abs() > 1.0e-15 * (1.0 + self.radius_m)
+    }
 }
 
 /// Far-end termination of a 1D waveguide.
