@@ -20,6 +20,13 @@
 > (§9), the product output surface gets a track (T-Out),
 > known duplications get owners (§10), and the plan is
 > FROZEN — further revisions require executed beads (§17).
+> **v8.1** (2026-08-14, citing executed beads per the
+> freeze rule — commits 3b03427b, 5b409581, 4962f2cd):
+> reconciled to the full 73-bead execution graph under
+> `frankensim-music-v8-root-3ez8g`, which supersedes this
+> document as the working record; two citation fixes
+> (free-free bar oracle §5.8; MM ownership split out of
+> bead zolja §5.2).
 >
 > Tags: `[S]` `[F]` `[M]`. Date: 2026-08-14.
 
@@ -247,7 +254,7 @@ gas, mouth flange.
 | Image | Class | Good for | Failure mode | Owner |
 | --- | --- | --- | --- | --- |
 | **TMM** | X-Consist / X-Struct (ZK) | Peaks, design, Ernoult, R(ω) oracle | No attack, no live `σ(t)` | `fs-duct` — live |
-| **Char + lumped holes + ZK Foster** ◆ | X-Exact delay + X-Struct loss/holes | Played phrases, slurs | Bad if junctions don’t match TMM R | `fs_vfit::DelayedFilter` ⊕ `fs_couple::{driving_point, reed_bore}`; holes via `fs_phs` side-hole lengths — live |
+| **Char + lumped holes + ZK Foster** ◆ | X-Exact delay + X-Struct loss/holes | Played phrases, slurs | Bad if junctions don’t match TMM R | `fs_vfit::DelayedFilter` ⊕ `fs_couple::{driving_point, reed_bore}` — live (holes enter through the TMM `R` via fs-duct’s tone-hole junctions; the `fs_phs` side-hole elements serve the pHS-chain image) |
 | **Fine LC/pHS + `step`** | X-Consist | Short chambers; TD oracle vs Gonzalez | HF dispersion if `Δx` large (disclose `f_Ny`) | `fs_phs::{lc_ladder, acoustic_chain*}` + `fs_phs::step` — live |
 | **VFIT/IRKA 1-port of TMM R** | X-Struct | Held fingering, cheap sustain | Live `σ`; out-of-band | `fs-vfit` — live (clarinet casebook) |
 | **HB + TMM Z(nω)** | X-Struct | “Will this reed speak?” | Transients, multiphonics | NEW: i09 periodic-orbit facility |
@@ -265,9 +272,9 @@ pHS if `f_Ny` covers the claim.
 
 | Image | Class | Good for | Failure | Owner |
 | --- | --- | --- | --- | --- |
-| **Multimodal TMM** | X-Consist | Impedance, cutoff, design | No lips in time | NEW: `fs-duct` MM expansion — its own recorded deferral; bead zolja |
+| **Multimodal TMM** | X-Consist | Impedance, cutoff, design | No lips in time | NEW: `fs-duct` MM expansion — its own recorded deferral; bead 3ez8g.4.1 |
 | **HB / describing function** ◆ lock | X-Struct | Slot, pitch lock | Attack, lipping | NEW: i09 periodic-orbit facility |
-| **MM characteristic lines + lip island** ◆ play | X-Exact per mode + island | Attack, slurs, slide | If plane-wave only, dull / won’t lock | lines NEW (zolja); island = `fs_phs::bernoulli_volume_flow` + msd — live |
+| **MM characteristic lines + lip island** ◆ play | X-Exact per mode + island | Attack, slurs, slide | If plane-wave only, dull / won’t lock | lines NEW (bead 3ez8g.4.2); island = `fs_phs::bernoulli_volume_flow` + msd — live |
 | **BEM-baked `Z_L(ω)`** | X-Struct / X-Est | Unflanged mouth | In-loop BEM | solver live (`fs_bem::helmholtz` Burton–Miller, batch solves, convention-matched); NEW: sweep driver + `fs-duct Termination::Tabulated` (zolja) |
 | **Plane-wave char (5.1)** | — | Debug / mute | **Not** a trumpet claim | live (5.1 stack) |
 
@@ -275,7 +282,8 @@ Plane-wave and multimodal **both stay on the menu**.
 The trumpet *claim* requires MM. A brass mute study
 might use plane-wave + table. Honest status: MM does
 not exist yet, so **no trumpet claim is currently
-possible** — that is exactly what bead zolja unblocks.
+possible** — that is exactly what bead zolja (the bell
+load) and beads 3ez8g.4.1/.4.2 (MM bore + lines) unblock.
 
 ### 5.3 Jet-pipes (flute, recorder, flue, organ rank)
 
@@ -393,7 +401,7 @@ the hysteresis stack. A linear spring is debug only.
 
 | Image | Class | Good for | Failure | Owner |
 | --- | --- | --- | --- | --- |
-| **1-D beam modal** ◆ | X-Exact truncated | Xylophone, bar | 3-D bell | compose: analytic ω (`fs_nlmodal::prestressed_beam_omega`) + ZOH runtime (parts live) |
+| **1-D beam modal** ◆ | X-Exact truncated | Xylophone, bar | 3-D bell | compose: analytic FREE-FREE bar ω — the cosh·cos = 1 roots (βL = 4.730, 7.853, …; f₂/f₁ ≈ 2.756), computed in-fixture — + ZOH runtime (parts live). `fs_nlmodal::prestressed_beam_omega` is the PINNED tensioned family (stiff strings) and is **not** the bar oracle (v8.1 fix; bead 3ez8g.12.1) |
 | **DKT plate modal** ◆ | X-Exact truncated | Gongs, soundboards | Deep shell | `fs-plate` — live (Leissa-gated) |
 | **Axisymmetric shell** `[F]` | X-Consist | Bells | Cost, mesh | NEW: the flat-facet-shell follow-up `fs-plate`’s own CONTRACT records — **not** a new crate, and **not** `fs-solid::shell` (that is an estimate-only Euler-disc surrogate, §10) |
 | **Strike island** | X-Struct | Attack | — | `fs-contact` / `fs-dcontact` — live |
@@ -980,7 +988,7 @@ Not yet, with owners, and we will not fake them:
   pack — NEW (bead 87zbd); felt / cane / tissue / gut
   packs are the missing matdb families
 - Multimodal horn — NEW in `fs-duct` (its recorded
-  deferral; the trumpet-claim gate; bead zolja)
+  deferral; the trumpet-claim gate; bead 3ez8g.4.1)
 - `Z_L(ω)` bake plumbing — NEW: sweep driver over
   `solve_radiation_batch` + `Termination::Tabulated`
   (bead zolja). The BEM physics is done
@@ -1154,6 +1162,15 @@ them:
   - `frankensim-music-t-piano-felt-87zbd`
   - `frankensim-music-t-out-render-ib15w`
   - `frankensim-music-claims-registry-mc31g`
+
+  v8.1: these four are retro-parented into the full
+  73-bead execution graph under
+  `frankensim-music-v8-root-3ez8g` (13 track epics +
+  root tasks; commits 3b03427b, 5b409581, 4962f2cd; the
+  root bead’s NAVIGATION MAP comment is the index).
+  zolja was narrowed to the Z_L bake (MM split to
+  .4.1/.4.2); ib15w to PCM-owner + render CLI
+  (.2.1–.2.3 own the block API, budget lane, gestures).
 - **Hygiene debts (recorded, not expanded here).**
   `fs-duct` and `fs-plate` have no `tests/` directories
   (inline-only batteries); the acoustics crates are not
@@ -1167,21 +1184,26 @@ them:
 
 Tracks own their menus. **No shared M1.**
 
-| Track | First slice (does not block others) | Bead |
+v8.1: beadified in full — the graph root is
+`frankensim-music-v8-root-3ez8g` (below: `.N` = its
+children); per-track labels scope `bv`.
+
+| Track | First slice (does not block others) | Bead(s) |
 | --- | --- | --- |
-| T-Brass | `Z_L(ω)` bake driver → `Termination::Tabulated` → MM lines (the trumpet-claim unblock); MM TMM + HB follow | **zolja** |
-| T-Piano | Wool-felt `Uniaxial` + felt pack + `FiniteGapPoint` island + 1 string + 1 board; Hunt–Crossley (fs-contact’s) is the debug image | **87zbd** |
-| T-Out | Block render API + one pascals→PCM owner + the budget lane | **ib15w** |
-| T-Claims | `instrument-claims.json` + xtask gate + corpus rows | **mc31g** |
-| T-Wind | Char+holes+valve **and** TMM R gate; VFIT hold as second image (mostly live — needs registry rows) | next |
-| T-String | Modal ZOH gate (exists); optional dispersive-WG bake-off | next |
-| T-NL | KC on N modes (exists — needs registry rows) | next |
-| T-Bow | Friction island (exists — determinism row honest re fs-tribo) | next |
-| T-Voice | Two `A(x)` + 1-DOF **and** TMM formants; two-mass as second valve (greenfield product on live ports) | later |
-| T-EM | `DescriptorPortHamiltonian` Kirchhoff DAE (the named fs-phs trigger) + Faraday port + device cards (greenfield) | later |
-| T-Jet | 3-D sweep → lab card + one pipe (2-D refuses broadband by type) | later |
-| T-Shell | Bar modal; fs-plate flat-facet shell later | later |
-| T-Sched | Selector module in fs-couple; calls kernels; no physics | later |
+| T-Brass | `Z_L(ω)` bake → `Termination::Tabulated` (**zolja**) ∥ MM TMM (.4.1) → MM lines (.4.2) → loop (.4.3) → gates (.4.4); HB follows | **zolja**, .4.1–.4.4 |
+| T-Piano | Wool-felt `Uniaxial` + felt pack + `FiniteGapPoint` island (**87zbd**) → assembly → gates; Hunt–Crossley (fs-contact’s) is the debug image | **87zbd**, .5.1–.5.4 |
+| T-Out | Block render API (.2.1) → budget lane (.2.2); gestures (.2.3); one pascals→PCM owner + CLI (**ib15w**) | **ib15w**, .2.1–.2.3 |
+| T-Claims | `instrument-claims.json` + xtask gate (**mc31g**) → corpora, listening receipts, determinism rows, bake-off receipts | **mc31g**, .1.1–.1.4 |
+| T-Wind | Registry rows (Ernoult promotion), reed card, articulation/hop, fractional-delay decision | .6.1–.6.4 |
+| T-String / T-NL | Registry rows + selector thresholds; dispersive-WG bake-off | .7.1–.7.2, .7.4 |
+| T-Bow | Bowed gates (emergent Helmholtz motion) + fs-tribo determinism resolution | .7.5, .7.3 |
+| T-Voice | Tract charts + glottal islands → vowel gates | .8.1–.8.3 |
+| T-EM | Kirchhoff DAE (the named fs-phs trigger) ∥ Faraday port → devices, speaker → chain gates | .9.1–.9.5 |
+| T-Jet | 3-D sweep → jet card → island → gates; mean-flow record (2-D refuses broadband by type) | .10.1–.10.5 |
+| T-Shell | Free-free bar modal (quick win); fs-plate flat-facet shell for bells | .12.1–.12.2 |
+| T-Sched | Selector module in fs-couple (no physics); program e2e script lanes | .14, .16 |
+| Ingest | Bore extractor, crook ΔL, lip/reed reduce lab, felt/plate charts, moist air, packs | .3.1–.3.9 |
+| Consolidation | Contact packs, tests/ dirs, clippy, cross-ISA goldens, TWL disposition | .13.1–.13.5 |
 
 Fuse **after that track’s bake-off**, per kernel (§9.2).
 
@@ -1292,11 +1314,18 @@ menus**, not the constitution of every filling.
 
 ## 17. Planning-workflow next — and the freeze
 
-The v7 request (“beadify menus”) is **done**: zolja
-(T-Brass), 87zbd (T-Piano), ib15w (T-Out), mc31g
-(T-Claims), labels `music-plan` /
-`musical-acoustics-gap`. Do not bead “the” instrument
-stepper.
+Beadification is **executed in full** (v8.1): the
+73-bead graph under `frankensim-music-v8-root-3ez8g`
+(13 track epics, 49 blocking deps task→task only, zero
+cycles) landed at 3b03427b and survived two adversarial
+polish rounds — 5b409581 added three missing pieces
+(bowed/violin gates .7.5, plate-chart ingest .3.9, the
+e2e script lanes .16) plus the program testing law;
+4962f2cd caught two physics citation blunders (the
+free-free bar oracle and a Schelleng inversion), both
+also fixed here in v8.1. The graph supersedes this
+document as the working record. Do not bead “the”
+instrument stepper.
 
 **Freeze rule.** This plan went v3→v8 in one day. The
 next unit of value is a bead executed against it, not
