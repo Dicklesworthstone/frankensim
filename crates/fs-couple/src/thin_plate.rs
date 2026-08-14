@@ -118,7 +118,8 @@ impl CompactBody {
 pub struct VkBody {
     sys: fs_phs::PortHamiltonian,
     x: Vec<f64>,
-    areas: Vec<f64>,
+    /// Modal monopole areas [m²].
+    pub areas: Vec<f64>,
 }
 
 impl VkBody {

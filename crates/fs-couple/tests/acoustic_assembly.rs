@@ -739,6 +739,34 @@ fn string_plate_and_duct_share_one_clock() {
     );
 }
 
+#[test]
+fn fixed_fixed_string_plate_duct_ode_loads_the_chain() {
+    let mut a = plucked(80.0, 0.006, 0.004);
+    a.plate = Some(steel_panel());
+    a.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.012,
+            length_m: 0.34,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    a.duration_s = 0.05;
+    let with = realize_assembly(&a).expect("ff string-plate-duct");
+    a.duct = None;
+    let bare = realize_assembly(&a).expect("no duct");
+    let err: f64 = with
+        .pressure_pa
+        .iter()
+        .zip(&bare.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "a one-way bridge into the ODE chain must load the plate"
+    );
+}
+
 fn add_vec(acc: &mut [f64], add: &[f64]) {
     for (a, b) in acc.iter_mut().zip(add) {
         *a += *b;
@@ -1054,6 +1082,200 @@ fn moving_end_kc_dirac_is_not_the_linear_moving_end() {
     assert!(
         err > 1.0e-6,
         "free-fixed KC must change the Dirac join, not reprint the linear waveguide"
+    );
+}
+
+#[test]
+fn bow_on_moving_end_dirac_is_a_live_port() {
+    let mut a = empty_base();
+    a.duration_s = 0.06;
+    let mut s = nylon_like(80.0, 0.006);
+    s.moving_end = true;
+    s.n_modes = 4;
+    a.string = Some(s);
+    a.plate = Some(steel_panel());
+    a.bow = Some(BowStroke {
+        station_frac: 0.13,
+        normal_force_n: 1.0,
+        velocity_m_s: 0.35,
+        mu_static: 0.8,
+        mu_dynamic: 0.3,
+        stribeck_m_s: 0.04,
+    });
+    let bowed = realize_assembly(&a).expect("bowed Dirac");
+    assert!(
+        peak_abs(&bowed.pressure_pa) > 1.0e-4,
+        "a bow on the leftover Dirac port must drive the string"
+    );
+    a.bow = None;
+    a.pluck = Some(Pluck {
+        station_frac: 0.25,
+        height_m: 0.003,
+    });
+    let plucked = realize_assembly(&a).expect("plucked Dirac");
+    let err: f64 = bowed
+        .pressure_pa
+        .iter()
+        .zip(&plucked.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-6, "bow drive must not reprint a pluck");
+}
+
+#[test]
+fn obstacle_on_moving_end_dirac_changes_the_waveform() {
+    let mut a = plucked(80.0, 0.006, 0.008);
+    if let Some(s) = a.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 3;
+    }
+    a.plate = Some(steel_panel());
+    a.duration_s = 0.05;
+    let bare = realize_assembly(&a).expect("bare Dirac");
+    a.obstacles = vec![UnilateralObstacle {
+        stations: vec![0.3],
+        gaps_m: vec![0.001],
+        stiffness: 5.0e5,
+        alpha: 2.0,
+        mu_kinetic: 0.0,
+        internal_loss: 0.0,
+        provenance: "fixture/stay".into(),
+    }];
+    let rattle = realize_assembly(&a).expect("obstacle Dirac");
+    let err: f64 = bare
+        .pressure_pa
+        .iter()
+        .zip(&rattle.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "an obstacle leftover port must change the join"
+    );
+    a.obstacles[0].internal_loss = 0.8;
+    let lossy = realize_assembly(&a).expect("HC Dirac");
+    let err_hc: f64 = rattle
+        .pressure_pa
+        .iter()
+        .zip(&lossy.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err_hc > 1.0e-8, "Hunt–Crossley on Dirac must drain");
+}
+
+#[test]
+fn von_karman_duct_dirac_is_not_the_linear_plate_duct() {
+    let mut lin = plucked(80.0, 0.006, 0.005);
+    if let Some(s) = lin.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 2;
+    }
+    let mut plate = steel_panel();
+    plate.n_modes = 1;
+    lin.plate = Some(plate);
+    lin.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.012,
+            length_m: 0.34,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    lin.duration_s = 0.04;
+    let mut vk = lin.clone();
+    if let Some(p) = vk.plate.as_mut() {
+        p.geometric_nonlinearity = true;
+    }
+    let a = realize_assembly(&lin).expect("linear plate×duct");
+    let b = realize_assembly(&vk).expect("VK×duct");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-8,
+        "von Karman×duct must differ from the linear join"
+    );
+}
+
+#[test]
+fn blow_on_moving_end_string_plate_duct_loads_the_join() {
+    let mut a = plucked(80.0, 0.006, 0.004);
+    if let Some(s) = a.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 2;
+    }
+    a.plate = Some(steel_panel());
+    a.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.012,
+            length_m: 0.34,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    a.duration_s = 0.04;
+    let quiet = realize_assembly(&a).expect("no blow");
+    a.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    let blown = realize_assembly(&a).expect("blow leftover");
+    let err: f64 = quiet
+        .pressure_pa
+        .iter()
+        .zip(&blown.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "a leftover blow port must load the Dirac join"
+    );
+}
+
+#[test]
+fn reed_on_moving_end_string_plate_duct_speaks() {
+    let mut a = plucked(80.0, 0.006, 0.004);
+    if let Some(s) = a.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 2;
+    }
+    a.plate = Some(steel_panel());
+    a.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.0075,
+            length_m: 0.50,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::UnflangedOpen,
+    });
+    a.reed = Some(BeatingReed {
+        rest_opening_m: 4.0e-4,
+        width_m: 0.013,
+        closing_pressure_pa: 6_000.0,
+        blowing_pressure_pa: 2_800.0,
+        attack_s: 0.008,
+        mass_kg: 0.0,
+        stiffness_n_m: 0.0,
+    });
+    a.duration_s = 0.08;
+    let out = realize_assembly(&a).expect("reed leftover");
+    let mut silent = a.clone();
+    if let Some(reed) = silent.reed.as_mut() {
+        reed.blowing_pressure_pa = 0.0;
+    }
+    let quiet = realize_assembly(&silent).expect("silent leftover reed");
+    let err: f64 = out
+        .pressure_pa
+        .iter()
+        .zip(&quiet.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "a leftover Bernoulli reed must change the Dirac join"
     );
 }
 

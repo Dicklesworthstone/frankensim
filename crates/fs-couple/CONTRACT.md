@@ -256,9 +256,11 @@ clarinet is one filling of those objects.
 - Reed path: quasistatic or massive Bernoulli valve. Isolated
   cylindrical bores use the `acoustic_chain` ODE with a
   `ViscothermalPin` (massive
-  reed = `mass_spring_damper` + jet + face flow). Blow/reed on
-  string×duct and von Karman plates stay on the causal TMM
-  driving-point (`driving_point::characteristic_line`). Reed lay
+  reed = `mass_spring_damper` + jet + face flow). Blow/reed on a
+  moving-end string×plate×duct is a leftover `join_port` inlet.
+  Fixed-fixed string×duct without a plate stays the causal TMM
+  driving-point.
+  Reed lay
   is `fs-dcontact` (not a private Hunt–Crossley).
 - `ThinPlate` modes come from `fs-plate` + `fs-modal` (certified
   eigenpairs), not caller Hertz. Mouth pressure × area drives the
@@ -319,20 +321,23 @@ clarinet is one filling of those objects.
   in `fs-phs` (free-end attachment port, area transformer, Kirchhoff
   star). The load is a Helmholtz cavity or an `acoustic_chain`
   duct — the same object. `PrestressedString.moving_end` selects
-  that clock when there is no bow, obstacle, von Karman plate,
-  reed, or blow. `EA > 0` is `kirchhoff_carrier_moving_end` on
-  the same free-fixed port. Fixed-fixed sines keep the one-way
-  bridge force.
+  that clock. Bow, obstacle stations, and blow/reed are leftover
+  ports of `join_port` (Stribeck and Hunt–Crossley stay port
+  forces). Von Karman is the same plate pHS with quartic storage.
+  `EA > 0` is `kirchhoff_carrier_moving_end` on the same
+  free-fixed port. Fixed-fixed sines keep the one-way bridge
+  force; with a plate the duct is still the ODE chain
+  (bridge force on the leftover plate port), not the FIR line.
   A cylindrical bore (uniform or stepped) is the
-  `acoustic_chain` LC ladder with a wide-tube
+  `acoustic_chain` LC ladder with an all-regime
   `ViscothermalPin` from `GasState` (`μ`, `γ`, `Pr` at the
-  quarter-wave). Open tone holes are `AcousticTap` side-branch
+  quarter-wave: wide-tube or Poiseuille). Open tone holes are `AcousticTap` side-branch
   inertances. A quasistatic reed is the Bernoulli port on that
   inlet; a massive reed is `mass_spring_damper` plus the same
   jet, face-velocity flow, and a Hunt–Crossley lay as a
   dissipative port force (not a term in H). With a linear plate
-  the mouth is a transformer. Blow/reed on string×duct, von
-  Karman plates, and all-regime TMM stay on the FIR TMM. Plate ×
+  the mouth is a transformer. All-regime TMM stays the FIR
+  fallback. 3-D jet broadband remains a no-claim. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
