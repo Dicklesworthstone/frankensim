@@ -5011,6 +5011,190 @@ pub mod snapshot_v2 {
             authority_evidence: inspection.authority_evidence,
         })
     }
+
+    /// Post-decode manifest the SOLVER recomputes from a decoded state
+    /// (bead sj31i.52.5.2). Byte/identity admission proves the envelope;
+    /// this proves the decoded value still says what the retained context
+    /// says about the stochastic cursor and budget state.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DecodedStateManifestV2 {
+        /// Stochastic cursor recomputed from the decoded state.
+        pub rng_counter: SnapshotRngCounterIdV2,
+        /// Budget state recomputed from the decoded state.
+        pub budget: SnapshotBudgetStateIdV2,
+    }
+
+    /// Typed refusals of [`prepare_resume`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PrepareResumeErrorV2 {
+        /// The solver-derived expectation disagrees with the context the
+        /// snapshot was admitted under; the named field is the first
+        /// divergence.
+        SolverContextMismatch {
+            /// First divergent semantic field.
+            field: SnapshotContextFieldV2,
+        },
+        /// The post-decode recomputed manifest disagrees with the retained
+        /// context; the named field is the divergence.
+        DecodedManifestMismatch {
+            /// Divergent manifest field.
+            field: SnapshotContextFieldV2,
+        },
+    }
+
+    impl fmt::Display for PrepareResumeErrorV2 {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::SolverContextMismatch { field } => write!(
+                    formatter,
+                    "prepare-resume refused: the ACTUAL solver instance's {} \
+                     disagrees with the admitted snapshot context",
+                    field.as_str()
+                ),
+                Self::DecodedManifestMismatch { field } => write!(
+                    formatter,
+                    "prepare-resume refused: the post-decode recomputed {} \
+                     disagrees with the retained context",
+                    field.as_str()
+                ),
+            }
+        }
+    }
+
+    impl core::error::Error for PrepareResumeErrorV2 {}
+
+    /// Activation-ready resume: decoded state bound to the actual solver
+    /// instance's expectation AND a post-decode recomputed manifest.
+    ///
+    /// Non-forgeable by construction: the only constructor is
+    /// [`prepare_resume`], the fields are private, and a raw
+    /// [`OpenedSnapshotV2`] is deliberately NOT activatable through
+    /// [`super::drive_v2_prepared`].
+    #[derive(Debug)]
+    pub struct PreparedResume<S> {
+        state: S,
+        content_id: SnapshotContentIdV2,
+        resume: IdentityReceipt<SnapshotResumeIdV2>,
+        authority_subject: IdentityReceipt<SnapshotAuthoritySubjectIdV2>,
+        expected_context: ExpectedResumeContextV2,
+        admission: SnapshotAdmissionV2,
+        manifest: DecodedStateManifestV2,
+    }
+
+    impl<S> PreparedResume<S> {
+        /// Borrow the prepared state.
+        #[must_use]
+        pub const fn state(&self) -> &S {
+            &self.state
+        }
+
+        /// Exact whole-envelope identity the preparation is bound to.
+        #[must_use]
+        pub const fn content_id(&self) -> SnapshotContentIdV2 {
+            self.content_id
+        }
+
+        /// Typed semantic resume identity.
+        #[must_use]
+        pub const fn resume_id(&self) -> SnapshotResumeIdV2 {
+            self.resume.id()
+        }
+
+        /// Complete semantic resume receipt.
+        #[must_use]
+        pub const fn resume_receipt(&self) -> IdentityReceipt<SnapshotResumeIdV2> {
+            self.resume
+        }
+
+        /// Authority-subject receipt carried from admission.
+        #[must_use]
+        pub const fn authority_subject_receipt(
+            &self,
+        ) -> IdentityReceipt<SnapshotAuthoritySubjectIdV2> {
+            self.authority_subject
+        }
+
+        /// The exact context both the solver and the snapshot agreed on.
+        #[must_use]
+        pub const fn expected_context(&self) -> &ExpectedResumeContextV2 {
+            &self.expected_context
+        }
+
+        /// Admission evidence class carried from opening.
+        #[must_use]
+        pub const fn admission(&self) -> SnapshotAdmissionV2 {
+            self.admission
+        }
+
+        /// The post-decode recomputed manifest that matched.
+        #[must_use]
+        pub const fn manifest(&self) -> DecodedStateManifestV2 {
+            self.manifest
+        }
+
+        /// Consume into the state for activation. Deliberately crate-private:
+        /// only [`super::drive_v2_prepared`] activates a preparation, so a
+        /// prepared state cannot leak into an unprepared drive path.
+        pub(crate) fn into_activation(self) -> S {
+            self.state
+        }
+    }
+
+    /// Bind an opened snapshot to the ACTUAL solver instance about to run
+    /// (bead sj31i.52.5.2).
+    ///
+    /// Exact comparison of the solver-derived context precedes any use of
+    /// the decoded value; the solver then recomputes a post-decode manifest
+    /// from the state and it must match the retained context field-exactly.
+    ///
+    /// # Errors
+    /// [`PrepareResumeErrorV2::SolverContextMismatch`] naming the first
+    /// divergent field, or [`PrepareResumeErrorV2::DecodedManifestMismatch`].
+    pub fn prepare_resume<R>(
+        solver: &R,
+        opened: OpenedSnapshotV2<R::State>,
+    ) -> Result<PreparedResume<R::State>, PrepareResumeErrorV2>
+    where
+        R: super::PreparableSolverV2,
+    {
+        let solver_context = solver.expected_resume_context();
+        if let Some(field) = first_context_mismatch(
+            solver_context.context(),
+            opened.expected_context().context(),
+        ) {
+            return Err(PrepareResumeErrorV2::SolverContextMismatch { field });
+        }
+        let manifest = solver.decoded_state_manifest(opened.state());
+        let retained = opened.expected_context().context();
+        if manifest.rng_counter != retained.rng_counter {
+            return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: SnapshotContextFieldV2::RngCounter,
+            });
+        }
+        if manifest.budget != retained.budget {
+            return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: SnapshotContextFieldV2::Budget,
+            });
+        }
+        let OpenedSnapshotV2 {
+            state,
+            content_id,
+            resume,
+            authority_subject,
+            expected_context,
+            admission,
+            authority_evidence: _,
+        } = opened;
+        Ok(PreparedResume {
+            state,
+            content_id,
+            resume,
+            authority_subject,
+            expected_context,
+            admission,
+            manifest,
+        })
+    }
 }
 
 macro_rules! legacy_migration_binding_id {
@@ -5870,6 +6054,35 @@ pub trait ResumableSolverV2 {
     /// Advance one bounded v2 step. Implementations may poll `cx` internally
     /// for finer-grained cancellation inside expensive steps.
     fn step_v2(&self, state: &mut Self::State, cx: &Cx<'_>) -> StepVerdict<Self::Out>;
+}
+
+/// A v2 solver that can derive its OWN expected resume context and
+/// recompute a post-decode manifest (bead sj31i.52.5.2). This is what turns
+/// snapshot admission from "these bytes match what the caller retained"
+/// into "these bytes match the solver instance about to run".
+pub trait PreparableSolverV2: ResumableSolverV2 {
+    /// The exact context this ACTUAL instance requires: algorithm/code
+    /// version, complete problem/configuration, RNG stream/counter
+    /// manifest, execution/ISA/numeric fingerprint, budget state, pause
+    /// boundary, and provenance. Deriving it from live configuration (not
+    /// from the candidate snapshot) is the whole point.
+    fn expected_resume_context(&self) -> snapshot_v2::ExpectedResumeContextV2;
+
+    /// Recompute the stochastic-cursor and budget manifest from a decoded
+    /// state. Called only after envelope admission; must be a pure
+    /// function of the state.
+    fn decoded_state_manifest(&self, state: &Self::State) -> snapshot_v2::DecodedStateManifestV2;
+}
+
+/// Drive a PREPARED resume to completion or pause. The only activation
+/// path for a [`snapshot_v2::PreparedResume`]; a raw
+/// [`snapshot_v2::OpenedSnapshotV2`] cannot reach this function.
+pub fn drive_v2_prepared<R: PreparableSolverV2>(
+    solver: &R,
+    prepared: snapshot_v2::PreparedResume<R::State>,
+    cx: &Cx<'_>,
+) -> SolverProgress<R::State, R::Out> {
+    drive_v2(solver, prepared.into_activation(), cx)
 }
 
 /// The outcome of [`drive_v1`] or [`drive_v2`]: finished, or paused holding the
@@ -8684,6 +8897,200 @@ mod tests {
             xa[0].to_bits(),
             xb[0].to_bits(),
             "forks with different inputs stay independent"
+        );
+    }
+
+    /// Test solver whose solver-side context and post-decode manifest are
+    /// injectable, so each prepare-resume refusal is exercised
+    /// independently (bead sj31i.52.5.2).
+    struct PreparableJacobi {
+        inner: Jacobi,
+        context: snapshot_v2::ExpectedResumeContextV2,
+        manifest: snapshot_v2::DecodedStateManifestV2,
+    }
+
+    impl ResumableSolverV2 for PreparableJacobi {
+        type State = JacobiState;
+        type Out = ();
+
+        fn step_v2(&self, state: &mut Self::State, cx: &Cx<'_>) -> StepVerdict<Self::Out> {
+            self.inner.step_v2(state, cx)
+        }
+    }
+
+    impl PreparableSolverV2 for PreparableJacobi {
+        fn expected_resume_context(&self) -> snapshot_v2::ExpectedResumeContextV2 {
+            self.context.clone()
+        }
+
+        fn decoded_state_manifest(
+            &self,
+            _state: &Self::State,
+        ) -> snapshot_v2::DecodedStateManifestV2 {
+            self.manifest
+        }
+    }
+
+    fn matching_manifest(
+        context: &snapshot_v2::ExpectedResumeContextV2,
+    ) -> snapshot_v2::DecodedStateManifestV2 {
+        snapshot_v2::DecodedStateManifestV2 {
+            rng_counter: context.context().rng_counter(),
+            budget: context.context().budget(),
+        }
+    }
+
+    fn opened_jacobi() -> (JacobiState, snapshot_v2::OpenedSnapshotV2<JacobiState>) {
+        let (_, state) = jacobi();
+        let context = base_v2_context::<JacobiState>();
+        let limits = v2_limits(64, 64);
+        let sealed = state.seal_v2(&context, limits, || false).expect("v2 seal");
+        let expected = sealed.expectation();
+        let opened = JacobiState::unseal_v2_expected(sealed.bytes(), &expected, limits, || false)
+            .expect("exact retained roots authorize decoding");
+        (state, opened)
+    }
+
+    #[test]
+    fn prepare_resume_binds_the_actual_solver_and_activates_only_prepared() {
+        let (state, opened) = opened_jacobi();
+        let context = base_v2_context::<JacobiState>();
+        let solver = PreparableJacobi {
+            inner: jacobi().0,
+            manifest: matching_manifest(&context),
+            context,
+        };
+        let content_id = opened.content_id();
+        let resume_id = opened.resume_id();
+        let prepared = snapshot_v2::prepare_resume(&solver, opened).expect("prepares");
+        assert_eq!(prepared.state(), &state);
+        assert_eq!(prepared.content_id(), content_id);
+        assert_eq!(prepared.resume_id(), resume_id);
+        assert_eq!(
+            prepared.admission(),
+            snapshot_v2::SnapshotAdmissionV2::ExpectedRootsMatched
+        );
+        // Deterministic preparation receipt: preparing the same snapshot
+        // again binds identical identities and manifest.
+        let (_, reopened) = opened_jacobi();
+        let again = snapshot_v2::prepare_resume(&solver, reopened).expect("prepares");
+        assert_eq!(again.content_id(), prepared.content_id());
+        assert_eq!(again.resume_id(), prepared.resume_id());
+        assert_eq!(again.manifest(), prepared.manifest());
+        // The prepared state activates through the dedicated drive path.
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 1,
+                    kernel_id: 9,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            match drive_v2_prepared(&solver, prepared, &cx) {
+                SolverProgress::Done(()) | SolverProgress::Paused(_) => {}
+            }
+        });
+    }
+
+    #[test]
+    fn prepare_resume_refuses_a_solver_whose_actual_configuration_differs() {
+        // Wrong algorithm version (stale code about to run).
+        let (_, opened) = opened_jacobi();
+        let wrong_version = v2_context::<JacobiState>(
+            0x11,
+            8,
+            0x22,
+            0x33,
+            snapshot_v2::SnapshotDeterminismV2::Deterministic,
+            0x3f,
+            0x44,
+            0x55,
+            paused_boundary(0x66, 9, 17, 2),
+        );
+        let solver = PreparableJacobi {
+            inner: jacobi().0,
+            manifest: matching_manifest(&wrong_version),
+            context: wrong_version,
+        };
+        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        assert_eq!(
+            error,
+            snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
+                field: snapshot_v2::SnapshotContextFieldV2::AlgorithmVersion,
+            }
+        );
+
+        // Wrong problem/configuration (different rhs/tolerances/steps class).
+        let (_, opened) = opened_jacobi();
+        let wrong_problem = v2_context::<JacobiState>(
+            0x11,
+            7,
+            0x23,
+            0x33,
+            snapshot_v2::SnapshotDeterminismV2::Deterministic,
+            0x3f,
+            0x44,
+            0x55,
+            paused_boundary(0x66, 9, 17, 2),
+        );
+        let solver = PreparableJacobi {
+            inner: jacobi().0,
+            manifest: matching_manifest(&wrong_problem),
+            context: wrong_problem,
+        };
+        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        assert_eq!(
+            error,
+            snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
+                field: snapshot_v2::SnapshotContextFieldV2::Problem,
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_resume_refuses_a_post_decode_manifest_that_disagrees() {
+        let context = base_v2_context::<JacobiState>();
+        // RNG cursor drifted between retained context and decoded state.
+        let (_, opened) = opened_jacobi();
+        let solver = PreparableJacobi {
+            inner: jacobi().0,
+            manifest: snapshot_v2::DecodedStateManifestV2 {
+                rng_counter: snapshot_v2::SnapshotRngCounterIdV2::from_bytes([0x99; 32]),
+                budget: context.context().budget(),
+            },
+            context: context.clone(),
+        };
+        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        assert_eq!(
+            error,
+            snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: snapshot_v2::SnapshotContextFieldV2::RngCounter,
+            }
+        );
+
+        // Budget state drifted.
+        let (_, opened) = opened_jacobi();
+        let solver = PreparableJacobi {
+            inner: jacobi().0,
+            manifest: snapshot_v2::DecodedStateManifestV2 {
+                rng_counter: context.context().rng_counter(),
+                budget: snapshot_v2::SnapshotBudgetStateIdV2::from_bytes([0x98; 32]),
+            },
+            context: context.clone(),
+        };
+        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        assert_eq!(
+            error,
+            snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: snapshot_v2::SnapshotContextFieldV2::Budget,
+            }
         );
     }
 }
