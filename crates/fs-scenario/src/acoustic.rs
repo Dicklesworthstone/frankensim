@@ -134,7 +134,8 @@ pub struct ViscothermalDuct {
 }
 
 /// Locally reacting duct wall: specific impedance
-/// `Z' = r + jωσ + K/(jω)`.
+/// `Z' = r − iωσ + i K/ω` under `e^{-iωt}`. `None` on the
+/// duct is a rigid wall.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LocallyReactingWall {
     /// Surface density `σ` [kg/m²].

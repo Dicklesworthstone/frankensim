@@ -349,7 +349,8 @@ clarinet is one filling of those objects.
   The same `ViscothermalPin` sits on a lumped neck or
   on each chimney cell of a line.
   A scenario `LocallyReactingWall` is the ODE `WallPin`
-  (per-cell shunt LC) and the TMM `Y'` addend on the
+  (per-cell shunt LC, `A_w = 2π a dx` with slant on a
+  taper) and the TMM `Y' = 2π a slant / Z'` addend on the
   FIR `Z(ω)` / `R(ω)` path, including tone-hole chimneys.
   Same numbers both clocks. The one-pole `TravelingWaveLine`
   is not that path.

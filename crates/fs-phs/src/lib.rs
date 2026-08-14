@@ -2192,10 +2192,12 @@ impl Default for ViscothermalPin {
 
 /// Locally reacting wall on an [`acoustic_chain`].
 ///
-/// Specific impedance `Z' = r + jωσ + K/(jω)`. Acoustic shunt
-/// on a cell of wall area `A_w = 2π a dx` is the same LC the
+/// Specific impedance under `e^{-iωt}` is `Z' = r − iωσ + i K/ω`
+/// ([`wall_specific_impedance`]). Acoustic shunt on a cell of wall
+/// area `A_w = 2π a dx` (`×√(1+s²)` on a taper) is the same LC the
 /// bore already is: `L = σ / A_w`, `C = A_w / K`, series `R = r / A_w`,
-/// joined at the cell compliance. Zero pin is a rigid wall.
+/// joined at the cell compliance. `None` is a rigid wall; a
+/// non-physical pin (`σ ≤ 0` or `K ≤ 0`) is refused.
 /// This is not a plate, not a 3-D shell, and not mean flow.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WallPin {

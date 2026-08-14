@@ -143,13 +143,16 @@ refusals; bitwise determinism.
   fs-math Bessel functions, shared with the piston closed form).
 - Straight smooth isothermal walls. A [`fs_phs::WallPin`] on
   `input_impedance_wall` adds the locally reacting shunt
-  `Y' = 2π a / (r − iωσ + i K/ω)` to the gas `Y'` (same pin
+  `Y' = 2π a slant / (r − iωσ + i K/ω)` to the gas `Y'`
+  (`slant = √(1+(dr/dx)²)`, `1` on a cylinder; same pin
   as the ODE cell shunt). `input_impedance` is rigid.
   No roughness, no porous liners, no mean flow, no nonlinear
   (high amplitude) propagation.
 - Lossy cones cascade spherical substations with `k, Zc` at each
-  slice's own mid-radius (lossless stays the exact one-shot
-  `e^{±ikx}/x` 2-port). Strongly flaring horns may still need
+  slice's own mid-radius (lossless without a wall stays the
+  exact one-shot `e^{±ikx}/x` 2-port; a wall follows the
+  local radius and slant, so that path slices too). Strongly
+  flaring horns may still need
   the multimodal expansion — the recorded trigger is a bell
   mismatch beyond authored tolerance in a future validation
   against measured instrument impedance.

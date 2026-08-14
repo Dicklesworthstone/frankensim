@@ -370,28 +370,37 @@ pub fn segment_wave(
 /// Reconstructs the telegraph pair `Z' = i k Zc`, `Y' = i k / Zc`
 /// (`Im Z' > 0` for inertance, same as Poiseuille), adds the wall
 /// shunt with Im flipped from the `e^{-iωt}` [`WallPin`] into that
-/// telegraph convention, and rebuilds `k` and `Zc`.
+/// telegraph convention, and rebuilds Helmholtz `k` (`e^{ikx}`) and
+/// `Zc`. `slant` is `√(1 + (dr/dx)²)` so `Y'` is per *axial* metre
+/// on the physical surface (`1` on a cylinder).
 fn apply_wall_to_wave(
     wave: SegmentWave,
     radius: f64,
     omega: f64,
     wall: &WallPin,
+    slant: f64,
 ) -> Result<SegmentWave, DuctError> {
+    if !(slant > 0.0 && slant.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "wall slant must be positive and finite",
+        });
+    }
     let y_phs =
         wall_admittance_per_metre(wall, radius, omega).map_err(|_| DuctError::BadParameter {
             what: "wall pin surface density, stiffness, and resistance",
         })?;
-    let y_w = C64::new(y_phs.re, -y_phs.im);
+    // Cylinder `Y' = 2πa/Z'` is per axial metre. A taper's surface
+    // element is `ds = slant dx`.
+    let y_w = C64::new(y_phs.re, -y_phs.im).scale(slant);
     let j = C64::new(0.0, 1.0);
     let z_series = j * wave.wavenumber * wave.characteristic_impedance;
     let y_gas = j * wave.wavenumber * wave.characteristic_impedance.recip();
     let y_shunt = y_gas + y_w;
-    // Lossless Z'Y' = −k². `sqrt(Z'Y')` would return `i k`; the
-    // basis wants the Helmholtz `k` in `e^{ikx}`.
-    let mut k = (z_series * y_shunt).scale(-1.0).sqrt();
-    if k.re < 0.0 {
-        k = k.scale(-1.0);
-    }
+    // Helmholtz `k` from `k² = −Z'Y'`. Prefer the decaying forward
+    // branch (`Im k >= 0`, then `Re k >= 0`). `sqrt(Z'Y')` is the
+    // telegraph `γ`; a mass-dominated wall makes `Z'Y'` positive
+    // real, where `-i sqrt(Z'Y')` is the *growing* wave.
+    let k = select_forward_decaying((z_series * y_shunt).scale(-1.0).sqrt());
     let mut zc = (z_series * y_shunt.recip()).sqrt();
     if zc.re < 0.0 {
         zc = zc.scale(-1.0);
@@ -403,6 +412,21 @@ fn apply_wall_to_wave(
         specific_impedance: zc.scale(area),
         shear_number: wave.shear_number,
     })
+}
+
+/// Pick `±k` in the first quadrant when either sign lives there;
+/// otherwise keep `Im k >= 0` (decay under `e^{ikx}`).
+fn select_forward_decaying(k: C64) -> C64 {
+    let flip = k.scale(-1.0);
+    if k.re >= 0.0 && k.im >= 0.0 {
+        k
+    } else if flip.re >= 0.0 && flip.im >= 0.0 {
+        flip
+    } else if k.im >= 0.0 {
+        k
+    } else {
+        flip
+    }
 }
 
 fn wide_tube_wave(
@@ -870,7 +894,9 @@ fn cone_lossy_matrix(
             Err(e) => return Err(e),
         };
         if let Some(w) = wall {
-            wave = apply_wall_to_wave(wave, r_loc, omega, w)?;
+            let slope = (rb - ra) / dx;
+            let slant = (1.0 + slope * slope).sqrt();
+            wave = apply_wall_to_wave(wave, r_loc, omega, w, slant)?;
         }
         min_rv = min_rv.min(wave.shear_number);
         let s = segment_matrix(
@@ -1067,8 +1093,11 @@ pub fn input_impedance(
 /// [`input_impedance`] with a locally reacting wall.
 ///
 /// The same [`WallPin`] the ODE shunt uses: `Y'` of the gas plus
-/// `2π a / Z'_w` with `Z'_w = r − iωσ + i K/ω` under `e^{-iωt}`.
+/// `2π a slant / Z'_w` with `Z'_w = r − iωσ + i K/ω` under
+/// `e^{-iωt}` and `slant = √(1+(dr/dx)²)` (`1` on a cylinder).
 /// `None` is a rigid wall. Tone-hole chimneys use the same pin.
+/// A lossless cone with a wall is sliced like a lossy cone:
+/// `Y'` follows the local radius.
 ///
 /// # Errors
 /// As [`input_impedance`], plus a bad wall pin.
@@ -1156,8 +1185,11 @@ pub fn input_impedance_wall(
             outlet_radius,
             length,
         } = *segment
-            && !matches!(loss, LossModel::Lossless)
+            && (wall.is_some() || !matches!(loss, LossModel::Lossless))
         {
+            // A wall makes `Y'` (and therefore `k`) vary with local
+            // radius and slant, so the lossless one-shot spherical
+            // 2-port is no longer exact.
             let (s, rv) = cone_lossy_matrix(
                 inlet_radius,
                 outlet_radius,
@@ -1172,7 +1204,7 @@ pub fn input_impedance_wall(
         } else {
             let mut wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
             if let Some(w) = wall {
-                wave = apply_wall_to_wave(wave, segment.mean_radius(), omega, w)?;
+                wave = apply_wall_to_wave(wave, segment.mean_radius(), omega, w, 1.0)?;
             }
             min_rv = min_rv.min(wave.shear_number);
             segment_matrix(segment, &wave)?
@@ -2754,6 +2786,43 @@ mod tone_hole_tests {
             )
             .is_err()
         );
+        // A wall on a taper is not the lossless one-shot spherical
+        // 2-port with a mean-radius pin: Y' follows local r and slant.
+        let cone = Duct {
+            segments: vec![Segment::Cone {
+                inlet_radius: 0.006,
+                outlet_radius: 0.018,
+                length: 0.34,
+            }],
+        };
+        let z_cone = input_impedance_wall(
+            &cone,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+            Some(&soft),
+        )
+        .expect("cone wall");
+        let mid = f64::midpoint(0.006, 0.018);
+        let wave = segment_wave(&state, mid, omega, LossModel::Lossless).expect("mean");
+        let waved = apply_wall_to_wave(wave, mid, omega, &soft, 1.0).expect("mean wall");
+        let m = segment_matrix(
+            &Segment::Cone {
+                inlet_radius: 0.006,
+                outlet_radius: 0.018,
+                length: 0.34,
+            },
+            &waved,
+        )
+        .expect("mean M");
+        let z_mean = m[0] * m[2].recip();
+        assert!(
+            (z_cone.impedance - z_mean).abs() > 1.0e-3 * z_mean.abs().max(1.0),
+            "a walled lossless cone must not reprint the mean-radius pin ({:?} vs {z_mean:?})",
+            z_cone.impedance
+        );
+        assert!(z_cone.impedance.re.is_finite() && z_cone.impedance.im.is_finite());
     }
 
     #[test]

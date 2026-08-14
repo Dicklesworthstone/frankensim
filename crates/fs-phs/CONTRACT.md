@@ -74,9 +74,10 @@ stepping, and Galerkin reduction preserves the structure.
   constriction, a cone sliced into cylinders),
   `WallPin` / `acoustic_chain_mouth_wall` (locally reacting
   wall: per-cell shunt `L = σ/A_w`, `C = A_w/K`,
-  `R = r/A_w` on `A_w = 2π a dx`; TMM
-  `input_impedance_wall` adds the same `Y' = 2π a / Z'`
-  to the gas shunt; not a plate and not mean flow),
+  `R = r/A_w` on `A_w = 2π a dx` — `×√(1+s²)` on a
+  taper; TMM `input_impedance_wall` adds the same
+  `Y' = 2π a slant / Z'` to the gas shunt; `None` is
+  rigid; not a plate and not mean flow),
   `ViscothermalPin` (all-regime pin: wide-tube ZK for
   `r_v ≥ 10`, Poiseuille + isothermal-tending shunt below;
   zero `μ` is the lossless mutation; `foster_branches`
