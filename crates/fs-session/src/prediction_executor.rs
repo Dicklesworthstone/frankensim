@@ -159,6 +159,27 @@ impl EnsembleRun {
         self.input_root
     }
 
+    /// Extract the resumable checkpoint from a cancelled run: the executed
+    /// prefix, bound to input root and rung. A completed run has nothing to
+    /// resume and refuses.
+    ///
+    /// # Errors
+    /// Refuses on a completed run.
+    pub fn checkpoint(&self) -> Result<EnsembleCheckpoint, ExecutorRefusal> {
+        let RunDisposition::Cancelled { drained_from } = self.disposition else {
+            return Err(refuse(
+                "prediction-executor-nothing-to-resume",
+                "a completed run has no resumable remainder",
+            ));
+        };
+        Ok(EnsembleCheckpoint {
+            input_root: self.input_root,
+            rung: self.rung.clone(),
+            executed: self.outcomes[..usize::try_from(drained_from).expect("bounded by cap")]
+                .to_vec(),
+        })
+    }
+
     /// Project the exact output-bundle accounting from the retained
     /// outcomes. A cancelled run has NO accounting: partial denominators
     /// are partial authority, and the sealer must never see them.
@@ -295,6 +316,165 @@ where
     Ok(EnsembleRun {
         input_root,
         rung: rung.to_string(),
+        outcomes,
+        disposition,
+    })
+}
+
+/// The executed prefix of a cancelled run, bound to its input root and
+/// rung so resume lineage is attestable: [`EnsembleCheckpoint::identity`]
+/// moves if ANY retained outcome, the rung, or the input root changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsembleCheckpoint {
+    input_root: fs_blake3::ContentHash,
+    rung: String,
+    executed: Vec<SampleOutcome>,
+}
+
+/// Versioned domain for checkpoint lineage identities.
+pub const CHECKPOINT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.prediction-checkpoint.v1";
+
+impl EnsembleCheckpoint {
+    /// Number of executed samples in the prefix.
+    #[must_use]
+    pub fn executed_len(&self) -> u64 {
+        self.executed.len() as u64
+    }
+
+    /// Lineage identity binding input root, rung, and every retained
+    /// prefix outcome byte-exactly.
+    #[must_use]
+    pub fn identity(&self) -> fs_blake3::ContentHash {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(self.input_root.as_bytes());
+        payload.extend_from_slice(self.rung.as_bytes());
+        payload.push(0);
+        for outcome in &self.executed {
+            match outcome {
+                SampleOutcome::Succeeded { artifact_hashes } => {
+                    payload.push(1);
+                    payload.extend_from_slice(&(artifact_hashes.len() as u64).to_le_bytes());
+                    for hash in artifact_hashes {
+                        payload.extend_from_slice(hash.as_bytes());
+                    }
+                }
+                SampleOutcome::Refused { rule } => {
+                    payload.push(2);
+                    payload.extend_from_slice(&(rule.len() as u64).to_le_bytes());
+                    payload.extend_from_slice(rule.as_bytes());
+                }
+                SampleOutcome::Failed { rule } => {
+                    payload.push(3);
+                    payload.extend_from_slice(&(rule.len() as u64).to_le_bytes());
+                    payload.extend_from_slice(rule.as_bytes());
+                }
+                SampleOutcome::Cancelled => payload.push(4),
+            }
+        }
+        fs_blake3::hash_domain(CHECKPOINT_IDENTITY_DOMAIN, &payload)
+    }
+}
+
+/// Resume a cancelled ensemble from its checkpoint.
+///
+/// The retained prefix is trusted verbatim (its lineage identity is the
+/// caller's attestation surface); execution continues from the first
+/// unexecuted sample with the SAME coordinate-derived seeds, so an
+/// uninterrupted run and a resumed run are bit-identical.
+///
+/// # Errors
+/// Admission refusals plus: a checkpoint whose input root differs from
+/// this input, whose rung differs from the requested rung, whose prefix
+/// contains a drain marker, or whose prefix is not shorter than
+/// `requested`.
+pub fn resume_ensemble<M>(
+    cx: &Cx<'_>,
+    input: &PredictionExecutionInput,
+    checkpoint: &EnsembleCheckpoint,
+    requested: u64,
+    mut model: M,
+) -> Result<EnsembleRun, ExecutorRefusal>
+where
+    M: FnMut(&SampleCoordinates, &SampleSeeds) -> SampleOutcome,
+{
+    if requested == 0 || requested > MAX_ENSEMBLE_SAMPLES {
+        return Err(refuse(
+            "prediction-executor-ensemble-bounds",
+            format!("requested must lie in 1..={MAX_ENSEMBLE_SAMPLES}, got {requested}"),
+        ));
+    }
+    let input_root = input.identity().map_err(|error: PredictionBundleError| {
+        refuse(
+            "prediction-executor-input-identity",
+            format!("cannot derive the input root: {error}"),
+        )
+    })?;
+    if checkpoint.input_root != input_root {
+        return Err(refuse(
+            "prediction-executor-foreign-checkpoint",
+            "checkpoint binds a different input root; resuming it here would              splice two ensembles",
+        ));
+    }
+    if !input
+        .model_rungs()
+        .allowed_rungs
+        .iter()
+        .any(|allowed| *allowed == checkpoint.rung)
+    {
+        return Err(refuse(
+            "prediction-executor-rung-not-admitted",
+            format!("checkpoint rung {:?} is not admitted", checkpoint.rung),
+        ));
+    }
+    if checkpoint.executed.len() as u64 >= requested {
+        return Err(refuse(
+            "prediction-executor-checkpoint-bounds",
+            format!(
+                "checkpoint holds {} executed sample(s), not a strict prefix of {requested}",
+                checkpoint.executed.len()
+            ),
+        ));
+    }
+    if checkpoint
+        .executed
+        .iter()
+        .any(|outcome| *outcome == SampleOutcome::Cancelled)
+    {
+        return Err(refuse(
+            "prediction-executor-checkpoint-bounds",
+            "a checkpoint prefix holds executed outcomes only; a drain marker              inside it means the checkpoint was cut past the cancellation point",
+        ));
+    }
+
+    let mut outcomes = checkpoint.executed.clone();
+    let mut disposition = RunDisposition::Completed;
+    for sample_index in checkpoint.executed.len() as u64..requested {
+        if cx.checkpoint().is_err() {
+            for _ in sample_index..requested {
+                outcomes.push(SampleOutcome::Cancelled);
+            }
+            disposition = RunDisposition::Cancelled {
+                drained_from: sample_index,
+            };
+            break;
+        }
+        let coordinates = SampleCoordinates {
+            sample_index,
+            rung: checkpoint.rung.clone(),
+        };
+        let seeds = sample_seeds(input, sample_index);
+        let outcome = model(&coordinates, &seeds);
+        if outcome == SampleOutcome::Cancelled {
+            return Err(refuse(
+                "prediction-executor-reserved-outcome",
+                "the Cancelled drain marker is the executor's alone",
+            ));
+        }
+        outcomes.push(outcome);
+    }
+    Ok(EnsembleRun {
+        input_root,
+        rung: checkpoint.rung.clone(),
         outcomes,
         disposition,
     })
