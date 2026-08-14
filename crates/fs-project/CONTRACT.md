@@ -77,8 +77,9 @@ bindings; it runs no solves and admits no scenarios itself.
   are `Option`s so
   recognition stays lenient and validation can name every omission at once.
 - `Seeds.root` and canonical `(seeds :root 0x...)` name the root of every
-  logical RNG derivation. Schema v1 is pre-freeze, so there is one spelling:
-  the superseded keyword is refused as unknown rather than retained as an
+  logical RNG derivation. There is one spelling: the superseded keyword was
+  refused as unknown during pre-freeze v1 and stays refused under the frozen
+  schema (now v2 per `schema-policy.json`), never retained as an
   identity-ambiguous compatibility alias.
 - `Metadata::permits_indeterminate()` is the context gate consumed by the
   decision layer: only `ScopingEstimate` with a non-safety-critical consequence
@@ -397,11 +398,13 @@ refuse atomically.
   `receipt.selected` against the project's pin, exactly as matdb's CONTRACT
   states.
 - The optional `claim` pin was added to version 1 before the schema freeze
-  (.16.5): version 1 is still pre-freeze (see below), absence of the field
-  is the canonical spelling of "no pin", and pre-pin documents are
-  byte-identical under the extended grammar.
-- The mandatory `assignments` section was also added to version 1 before the
-  schema freeze. Unlike the optional claim pin, this intentionally makes old
+  (.16.5). The schema has since FROZEN at version 2 (`schema-policy.json`
+  row `project.fsim`, current_version 2, v1 migrates with a receipt);
+  absence of the field remains the canonical spelling of "no pin", and
+  pre-pin v1 documents were byte-identical under the extended grammar
+  before their receipted migration.
+- The mandatory `assignments` section was also added to version 1 before
+  the freeze. Unlike the optional claim pin, this intentionally makes old
   pre-freeze documents incomplete: they must declare one selector per
   region/interface before becoming admissible again. No compatibility shim
   invents geometric intent.
