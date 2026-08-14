@@ -85,6 +85,9 @@ stepping, and Galerkin reduction preserves the structure.
   finite bore, plus wall-flanged `0.8216 b`. Same `t_eff` as
   the fs-duct open-hole shunt. An open `AcousticTap` uses this
   length and flanged `Re Z_rad`.
+- `side_hole_series_length` — Nederveen `t_s = −0.37 b²/a`. The
+  TMM open hole is the T-junction `series(Z_s/2)·shunt·series(Z_s/2)`;
+  the ODE tap subtracts that inertance from the station cell.
 - `series_impedance_ports` — ODE series of two 1-port impedance
   systems (same `u`, `y = y_a + y_b`).
 - `common_effort_capacitor` — two-port `C` with shared pressure

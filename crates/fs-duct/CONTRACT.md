@@ -38,7 +38,9 @@ same object, and every medium property derives from
 - `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — compact-limit
   lumped side branch (`[[1,0],[1/Z_h,1]]`): OPEN = chimney mass with
   Dalmont–Nederveen–Joly inner matching on `b/a` plus wall-flanged
-  `0.8216 b` and flanged radiation resistance; CLOSED = chimney
+  `0.8216 b` and flanged radiation resistance. An OPEN hole is the
+  T-junction `series(Z_s/2)·shunt(Z_h)·series(Z_s/2)` with
+  Nederveen `t_s = −0.37 b²/a`; CLOSED = chimney
   cavity compliance. A non-lossless `LossModel` adds the bore's
   wall law on that lumped `L` (open series `R`) or thermal `G`
   on the cavity (closed). A compact chimney is not a 2-port wave

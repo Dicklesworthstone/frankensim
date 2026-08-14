@@ -170,8 +170,9 @@ pub enum Segment {
         length: f64,
     },
     /// A tone hole: a zero-axial-length side branch at this point in
-    /// the chain — compact-limit lumped shunt (`[[1, 0], [1/Z_h, 1]]`
-    /// T-junction; series corrections are a recorded follow-up).
+    /// the chain — compact T-junction `series(Z_s/2) · shunt(Z_h) ·
+    /// series(Z_s/2)` with Nederveen `t_s = −0.37 b²/a` on an open
+    /// hole (closed pads stay a pure shunt).
     /// OPEN: chimney mass with Dalmont inner matching on `b/a`
     /// plus wall-flanged `0.8216 b` and flanged radiation resistance.
     /// CLOSED: the chimney cavity's compliance.
@@ -2023,11 +2024,18 @@ mod tone_hole_tests {
             bore,
         )
         .expect("shunt");
-        let z_parallel = (z_down.recip() + shunt.recip()).recip();
-        // Push z_parallel through the upstream tube's 2-port.
+        let ts = side_hole_series_length(3.0e-3, bore);
+        let zs = C64::new(
+            0.0,
+            -omega * state.density * ts / (core::f64::consts::PI * bore * bore),
+        );
+        let z_after = zs.scale(0.5) + z_down;
+        let z_par = (z_after.recip() + shunt.recip()).recip();
+        let z_at = zs.scale(0.5) + z_par;
+        // Push the T-junction load through the upstream tube's 2-port.
         let wave = segment_wave(&state, bore, omega, LossModel::WideTube).expect("wave");
         let m = segment_matrix(&up, &wave).expect("matrix");
-        let z_hand = (m[0] * z_parallel + m[1]) * (m[2] * z_parallel + m[3]).recip();
+        let z_hand = (m[0] * z_at + m[1]) * (m[2] * z_at + m[3]).recip();
         assert!(
             (z_full - z_hand).abs() < 1e-12 * z_hand.abs(),
             "cascade algebra: {z_full:?} vs {z_hand:?}"

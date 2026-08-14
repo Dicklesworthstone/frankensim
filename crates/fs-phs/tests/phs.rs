@@ -14,8 +14,8 @@ use fs_phs::{
     helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
     join_port, kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper,
     modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
-    series_impedance_ports, side_hole_inner_length, side_hole_neck_length, slice_linear_taper,
-    spherical_cone, step, step_descriptor, transformer, zwikker_kosten_f,
+    series_impedance_ports, side_hole_inner_length, side_hole_neck_length, side_hole_series_length,
+    slice_linear_taper, spherical_cone, step, step_descriptor, transformer, zwikker_kosten_f,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -1044,6 +1044,9 @@ fn side_hole_inner_length_shortens_on_a_finite_bore() {
     );
     let t = side_hole_neck_length(1.7e-3, b, 2.0e-3);
     assert!((t - (1.7e-3 + on_bore + 0.8216 * b)).abs() < 1.0e-15);
+    let ts = side_hole_series_length(b, 2.0e-3);
+    assert!(ts < 0.0 && ts > -b);
+    assert_eq!(side_hole_series_length(b, 0.0), 0.0);
 }
 
 #[test]
