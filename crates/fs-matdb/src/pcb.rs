@@ -803,41 +803,8 @@ impl PcbStackup {
             });
         }
 
-        let nominal = effective_principal(&self.layers, None);
-        let mut in_plane_lower_numerator = 0.0f64;
-        let mut in_plane_upper_numerator = 0.0f64;
-        let mut through_lower_denominator = 0.0f64;
-        let mut through_upper_denominator = 0.0f64;
-        for layer in &self.layers {
-            let (lower, upper) = layer_conductivity_bounds(layer);
-            in_plane_lower_numerator = lower.mul_add(layer.thickness_m, in_plane_lower_numerator);
-            in_plane_upper_numerator = upper.mul_add(layer.thickness_m, in_plane_upper_numerator);
-            through_lower_denominator += layer.thickness_m / lower;
-            through_upper_denominator += layer.thickness_m / upper;
-        }
-        let in_plane_lower = in_plane_lower_numerator / total_thickness;
-        let in_plane_upper = in_plane_upper_numerator / total_thickness;
-        let through_lower = total_thickness / through_lower_denominator;
-        let through_upper = total_thickness / through_upper_denominator;
-
-        let mut reuss_denominator = 0.0f64;
-        for layer in &self.layers {
-            let weight = layer.thickness_m / total_thickness;
-            let coverage = layer.coverage.nominal;
-            reuss_denominator += weight
-                * (coverage / layer.copper.nominal_w_mk
-                    + (1.0 - coverage) / layer.matrix.nominal_w_mk);
-        }
-        let structural_bounds = PcbStructuralBounds {
-            reuss_w_mk: 1.0 / reuss_denominator,
-            voigt_w_mk: nominal[0],
-        };
-
-        let principal = PcbPrincipalConductivity {
-            nominal_w_mk: nominal,
-            lower_w_mk: [in_plane_lower, in_plane_lower, through_lower],
-            upper_w_mk: [in_plane_upper, in_plane_upper, through_upper],
-        };
+        let (principal, structural_bounds) =
+            principal_and_structural(&self.layers, total_thickness);
         let tensor = rotate_principal(self.frame.axes, principal.nominal_w_mk);
         let coverage_influences = self
             .layers
@@ -892,6 +859,49 @@ impl PcbStackup {
             identity,
         })
     }
+}
+
+/// Principal interval bounds (series/parallel per axis) and the
+/// Reuss/Voigt structural bracket (stage of [`PcbStackup::homogenize`];
+/// summation order preserved exactly).
+fn principal_and_structural(
+    layers: &[PcbLayer],
+    total_thickness: f64,
+) -> (PcbPrincipalConductivity, PcbStructuralBounds) {
+    let nominal = effective_principal(layers, None);
+    let mut in_plane_lower_numerator = 0.0f64;
+    let mut in_plane_upper_numerator = 0.0f64;
+    let mut through_lower_denominator = 0.0f64;
+    let mut through_upper_denominator = 0.0f64;
+    for layer in layers {
+        let (lower, upper) = layer_conductivity_bounds(layer);
+        in_plane_lower_numerator = lower.mul_add(layer.thickness_m, in_plane_lower_numerator);
+        in_plane_upper_numerator = upper.mul_add(layer.thickness_m, in_plane_upper_numerator);
+        through_lower_denominator += layer.thickness_m / lower;
+        through_upper_denominator += layer.thickness_m / upper;
+    }
+    let in_plane_lower = in_plane_lower_numerator / total_thickness;
+    let in_plane_upper = in_plane_upper_numerator / total_thickness;
+    let through_lower = total_thickness / through_lower_denominator;
+    let through_upper = total_thickness / through_upper_denominator;
+
+    let mut reuss_denominator = 0.0f64;
+    for layer in layers {
+        let weight = layer.thickness_m / total_thickness;
+        let coverage = layer.coverage.nominal;
+        reuss_denominator += weight
+            * (coverage / layer.copper.nominal_w_mk + (1.0 - coverage) / layer.matrix.nominal_w_mk);
+    }
+    let structural_bounds = PcbStructuralBounds {
+        reuss_w_mk: 1.0 / reuss_denominator,
+        voigt_w_mk: nominal[0],
+    };
+    let principal = PcbPrincipalConductivity {
+        nominal_w_mk: nominal,
+        lower_w_mk: [in_plane_lower, in_plane_lower, through_lower],
+        upper_w_mk: [in_plane_upper, in_plane_upper, through_upper],
+    };
+    (principal, structural_bounds)
 }
 
 fn mix(coverage: f64, copper: f64, matrix: f64) -> f64 {
