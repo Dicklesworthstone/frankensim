@@ -415,12 +415,7 @@ where
             "checkpoint binds a different input root; resuming it here would              splice two ensembles",
         ));
     }
-    if !input
-        .model_rungs()
-        .allowed_rungs
-        .iter()
-        .any(|allowed| *allowed == checkpoint.rung)
-    {
+    if !input.model_rungs().allowed_rungs.contains(&checkpoint.rung) {
         return Err(refuse(
             "prediction-executor-rung-not-admitted",
             format!("checkpoint rung {:?} is not admitted", checkpoint.rung),
@@ -435,11 +430,7 @@ where
             ),
         ));
     }
-    if checkpoint
-        .executed
-        .iter()
-        .any(|outcome| *outcome == SampleOutcome::Cancelled)
-    {
+    if checkpoint.executed.contains(&SampleOutcome::Cancelled) {
         return Err(refuse(
             "prediction-executor-checkpoint-bounds",
             "a checkpoint prefix holds executed outcomes only; a drain marker              inside it means the checkpoint was cut past the cancellation point",
