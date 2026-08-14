@@ -1,411 +1,378 @@
 # Comprehensive Plan for Optimal Music-Oriented Building Blocks
 
-> Nameless physics, emergent sound, two lanes, one set of
-> equations. Real-time by *splitting integrators and
-> structure-preserving reduction* — not by fitting a second
-> invented waveguide, and not by running Gonzalez Newton on a
-> linear bore.
+> Nameless physics. Emergent sound. The *same PDE*, split the
+> way it wants to be split: **characteristics for the wave,
+> Cauer/Foster for electrically short bits and relaxation,
+> a tiny implicit island for the valve/felt/bow.**
+>
+> TMM is the frequency oracle of that PDE, not a source of
+> fitted delay lines. A 6-cell LC ladder is not “the”
+> physics of a 34 cm bore — it is already a reduction, and
+> a dispersive one.
 >
 > Companion to `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md` and
-> `COMPREHENSIVE_PLAN_TO_EXTEND_FRANKENSIM_TO_NEW_DOMAINS.md`
-> §5.11. Does **not** amend the Decalogue.
+> the new-domains plan §5.11. Does not amend the Decalogue.
 >
-> Status: **v3**. v1 = doctrine + naïve FIR bake. v2 = playable
-> scatter + valve loop + ear-weighted gate. v3 = the same
-> physics as the authority, cheaper *because* we respect
-> linearity, pHS structure, and multiple time scales.
+> Status: **v4**. v1 FIR bake. v2 playable scatter + loop.
+> v3 don’t Newton a linear pHS. v4 don’t replace d’Alembert
+> with a coarse ladder and call that accuracy.
 >
-> Tags: `[S]` solid, `[F]` frontier, `[M]` moonshot.
-> Date: 2026-08-14.
+> Tags: `[S]` `[F]` `[M]`. Date: 2026-08-14.
 
 ---
 
 ## 0. How to read this
 
-Load-bearing: §1.4 (the category error), §2, §6 (split
-stepper + 1-port Schur + parameterized reduction), §12
-(M1 is now “linear duct cheap, valve small”).
-
-If a section names “trumpet” or “ooh,” it is a *filling*,
-never a crate.
+The argument is §1.4–§1.5 and §6. Doctrine §2. Order of
+work §12. Family names are fillings, never crates.
 
 ---
 
 ## 1. Intent
 
-### 1.1 What we want to hear
+### 1.1 Hear physics, play physics
 
-Notes whose pitch, timbre, attack, and *playing response*
-come from materials + geometry + gesture + air: reed and
-holes, lips and flare, jet and pipe, string and plate,
-felt and soundboard, shell strike, vocal `A(x)`, pickup
-and circuit and cone. No samples, no instrument types.
+Materials + geometry + gesture + air. Reed, lips, jet,
+string, felt, shell, vocal `A(x)`, pickup/circuit/cone.
+No samples. No instrument types.
 
-### 1.2 Success (all five)
+### 1.2 Success
 
-1. **Honesty** — named primitive, material, geometry, tier
-   or no-claim.
-2. **Same equations** — the audible stepper is a
-   discretization or Galerkin image of the authority
-   network, not a separately invented delay line.
-3. **Playability** — holes, `A(x)`, slide, bow force change
-   without a rebake-per-key and without energy clicks.
-4. **Perceptual adequacy** — ear-weighted residual +
-   `fs-psycho` + listening. Metrics do not replace ears.
-5. **Budget** — 48 kHz on one named Mac core for a *played
-   phrase*, zero heap in the audio loop. Authority may be
-   slow.
-
-Fail (5) → scientific renderer. Fail (1)–(2) → synth.
-Fail (3) → sampler of our own notes. Fail (4) → paper.
+Honesty, **same PDE**, playability (time-varying geometry
+without rebake-per-key), perceptual adequacy, named 48 kHz
+budget on a *phrase*. Fail the budget → renderer. Fail the
+PDE → synth. Fail playability → sampler of our own notes.
 
 ### 1.3 Workflows
 
-W1 author → W2 authority solve → W3 bake (parameterized
-*realization of the same network*, plus optional modal
-image) → W4 play (split stepper) → W5 gate → W6 escalate
-→ W7 `[F]` calibrate cards with adjoints (never ship the
-recording).
+Author → authority (TMM + well-resolved TD) → **split
+realization** (not a second theory) → play → ear-weighted
+gate on **R(ω) at the valve** and radiated `p` → escalate
+→ optional adjoint calibration of *cards*.
 
-### 1.4 The category error (why v2 was still not optimal)
+### 1.4 Three category errors (v1–v3)
 
-We already write the bore as a **port-Hamiltonian LC
-ladder** with linear Foster wall laws and a **tiny
-nonlinear valve**. Then we time-step the *whole* thing
-with Gonzalez approximate-Newton, as if the duct were a
-von Karman plate.
+**E1. Frozen `Z_in` FIR as the instrument.** (v1) A
+fingering phrase is not `2^N` impulse responses.
 
-For quadratic `H` and linear `(J,R,G)`, Gonzalez **is**
-implicit midpoint: **one linear system per step**, or
-**one factorization per control-rate geometry**. There is
-no Jacobian to difference. Treating a linear bore as a
-generic nonlinear DAE is why couple tests take minutes
-and why a synth seems impossible.
+**E2. Newton on a linear bore.** (v3) Quadratic `H`,
+state-independent `(J,R)` ⇒ linear midpoint or ZOH, one
+factor per control tick.
 
-v2’s “identify a scatter-chain from TMM at a pin
-frequency” is the next-order version of
-`TravelingWaveLine`: a *fit* that forgets
-frequency-dependent `Zc` and then patches Foster on the
-side. The honest scatter/WDF object is the **bilinear
-transform of the same LC graph we already have**, not a
-curve-fit.
+**E3. “The LC graph we already wrote is the physics.”**
+(v3’s remaining miss.) `acoustic_chain` with ~6 cells on
+a speaking length `L` has `Δx ~ L/6` and a spatial
+Nyquist `c/(2Δx) ~ 3c/L` — about 3 kHz on a 34 cm air
+column. Brightness, reed locking on upper harmonics, and
+brass flare live *above* that. TMM does not have that
+dispersion. A bilinear WDF of those 6 cells **inherits
+it**. Making Newton cheap on a wrong spatial operator
+does not make a better clarinet.
 
-**Optimal and more correct is the same statement:**
+The one-pole `TravelingWaveLine` was wrong about *loss*.
+It was not wrong that **1-D lossless acoustics is a
+delay**. That is d’Alembert, not a hack.
 
-> Linear (or linear-at-control-rate) pHS → structure-
-> preserving *linear* stepper or Galerkin. Nonlinear
-> islands (valve, felt, bow, jet, KC, von Karman) stay
-> small and implicit. Spatial/model order is
-> *goal-oriented* toward the listener, not uniform.
+### 1.5 The statement that is both more accurate and cheaper
 
-That is physically the telegraph + ZK + Bernoulli system.
-It is also what real-time circuit simulators do.
+The linear duct is a **singularly perturbed hyperbolic
+system**: a principal wave part plus a stiff, spatially
+local viscothermal relaxation (ZK / Foster).
+
+```text
+∂t u + A(x) ∂x u  =  B(x) u  +  (memory / Foster)
+     \_________/     \___________________________/
+      exact shift         local ODE / Cauer
+      (characteristics)   (electrically short)
+```
+
+**Optimal discretization** (operator split, `[S]`):
+
+| Piece | Electrical length | Realization | Cost |
+| --- | --- | --- | --- |
+| Lossless principal part | `kℓ ≳ 0.2` | Characteristics: delay of `ψ` or `(p±Zc U)` | O(1) per section, **no HF ladder dispersion** |
+| Area jump, sphere factor `1/x` | interface | Scattering / transformer (already `x` on ψ) | O(1) |
+| Hole, pad, mouth, wall, ZK | `kℓ ≪ 1` or local in `ω` | Cauer/Foster / T-junction, bilinear or ZOH | O(n_br) |
+| Short chamber, mouthpiece, compact neck | `kℓ ≪ 1` | Lumped LC (already the chimney rule) | O(1) |
+| Valve, felt, bow, jet, KC `H` | — | Small implicit island | O(1)–O(10) |
+
+TMM is the **symbol** of the left-hand side in `ω`. A
+split stepper is correct when its driving-point
+**R(ω)** (what the reed sees) and radiated **p/U** match
+TMM inside an ear-weighted band.
+
+This is Smith/Bilbao *as a splitting of our PDE*, not as
+a pin-frequency fit, and not as “throw away the delay
+and keep 6 inductors.”
+
+We already half-do this: compact chimneys lump; long
+necks become a line; cones use `ψ = xp` (the spherical
+characteristic). v4 **makes that the global rule.**
 
 ---
 
 ## 2. Doctrine
 
-D1 nameless primitives. D2 materials+geometry, recordings
-test-only. D3 two lanes, three rates (gesture / control /
-audio). D4 reduce, do not invent a second physics; WDF
-and modal banks are *images* of our network. D5
-correctness before fusion. D6 Franken-only + `fs-io`
-quarantine. D7 certificates. D8 named RT budget. D9
-`fs-psycho` judges, does not sing. D10 moonshots flagged.
-D11 time-varying ports stay passive. D12 no `fs-bake` /
-`fs-synth` crate. D13 calibrate cards, do not clone WAVs.
+D1–D13 as in v3 (nameless, no samples, two lanes / three
+rates, reduce don’t invent, correctness first, Franken-
+only, certificates, named RT budget, psycho judges, flags,
+passive time-varying ports, no synth crate, calibrate
+cards).
 
-**D14. Do not Newton a linear pHS.** `[S]`
-If `H` is quadratic and `(J,R)` do not depend on `x`,
-the stepper is a linear solve (or a closed ZOH in a
-modal basis). Finite-difference Newton on that system is
-a bug.
+**D14.** Do not Newton a linear pHS.
 
-**D15. Same graph, coarsened — not a new graph.** `[S]`
-Performance spatial meshes are child charts of the
-authority mesh (fewer cells, fewer Foster branches),
-with a goal-oriented residual (first impedance peaks,
-ERB-weighted `Z`, radiated `p`). A Kelly–Lochbaum chain
-is legal only as the bilinear/WDF of that child LC
-graph.
+**D15.** Child charts are coarsenings with a QoI receipt —
+but **do not coarsen a long hyperbolic section into few
+LC cells** to “save states.” That spends states on
+numerical dispersion. Spend them on Foster/junctions.
 
-**D16. Multi-rate by stiffness, not by folklore.** `[S]`
-Felt impact (~µs), string/bore (48 kHz), board radiation
-(can be coarser), gesture (100 Hz). Substep only the
-stiff island. One rate for everything is how pianos miss
-RT *and* how impacts go unstable.
+**D16.** Multi-rate by stiffness (felt µs, audio, control).
 
-**D17. State must lift when the image changes.** `[S]`
-Changing `σ` or the reduced basis is a change of
-coordinates. Define `x_r⁺ = Π(σ⁺) x` (or `V(σ⁺)⁺ x`)
-so energy and the audible wave do not jump. Coefficient
-interpolation without a lift is how slurs click.
+**D17.** Lift state when `σ`, delay length, or reduced
+basis changes.
+
+**D18. Split by electrical length.** `[S]`
+`k_max ℓ < ε` (ε ~ 0.2, same spirit as `tap_is_line`) ⇒
+lump. Else ⇒ characteristics (+ local relaxation).
+Cone long-wave ⇒ characteristics on `ψ`, not a stack of
+cylinders unless multimodal.
+
+**D19. The valve-loop QoI is R(ω), not only Z_in.** `[S]`
+Playability is the reflection the island sees. Radiated
+timbre is a second QoI (`p_rad / U_mouth` or baffled `p`).
+Gates and DWR mark cells/branches against **those**, not
+L2(`p`) in the bore.
+
+**D20. Strang (or WDF) pieces must each be passive; the
+composition needs a receipt.** `[S]`
+Midpoint of a passive linear pHS is passive. WDF of a
+passive adaptor is passive. Naive split of shift + loss
+can drift. G10 below.
 
 ---
 
 ## 3. Relation to existing plans
 
-Constitution wins. `fs-acoustics` in the new-domains plan
-is the 3-D/NVH stack we *consume* (exterior tables,
-shells). Live `fs-phs` already has Gonzalez, Galerkin
-reduction, Bernoulli, LC/ψ ducts — v3 **uses that
-algebra**, it does not replace it with a synth engine.
-Mega-fused doctrine applies after the split stepper
-exists, on the remaining hot inner products.
+Constitution wins. `fs-acoustics` / `fs-bem` supply
+exterior tables and shells. `fs-phs` Galerkin stays the
+tool for **modal** islands (strings, plates, frozen
+1-ports), not the default for a long played bore.
+Mega-fused work waits until the split 1-port×island
+exists.
 
 ---
 
-## 4. Current state, reread
+## 4. Current state, reread again
 
-We have the *right objects* (pHS duct, TMM, reed, string,
-plate) and the *wrong default integrator* for the linear
-majority of the state. Bessel `k` is now Helmholtz. Ernoult
-frozen peaks work. We cannot slur a hole cheaply. FIR `R(ω)`
-is a frozen-note renderer. `reduce_galerkin` exists and is
-not the audio path. `fs-dwr` exists and is not used to
-coarsen bores. `fs-vfit` already passivity-repairs radiation
-filters.
+TMM + ODE + reed + string + plate are real. Ernoult
+frozen peaks are real. Helmholtz `k` is real.
 
-Missing physics (still): multimodal tube, lip pair, jet
-card, felt, pickup+circuit+speaker, `A(x)` chart, thin
-shell, unflanged `Z_L` table, mean flow.
+What we do not have: a **characteristic image** of the
+duct that TMM would recognize above the ladder Nyquist;
+a **linear** stepper for the LTI piece; a slur that is
+not Newton-on-80-states; R(ω)-weighted gates; lip/jet/
+felt/pickup physics.
+
+`TravelingWaveLine` stays dead (one-pole loss). Its delay
+is rehabilitated as d’Alembert of the principal part.
 
 ---
 
 ## 5. Atlas
 
-Media, geometry charts, valves, strings, plates, contact,
-pickup/circuit/speaker, radiation, stochastic physics:
-as in v2. Changes below are the ones that matter.
+Media, meshes, valves, strings, plates, felt, pickup,
+circuit, speaker, stochastic sources: as before.
 
-### 5.1 The linear acoustic network (authority)
+### 5.1 Linear acoustics — three equivalent writings
 
-The 1-D duct **is** the telegraph system
+1. **TMM** — exact (to the section model) in `ω`. Oracle
+   for R, Z, peaks. Bessel ZK, cones, holes, walls.
+2. **Well-resolved pHS** — Cauer of the same telegraph
+   system with `Δx` set by `k_max`, *or* characteristics
+   + Foster. Time-domain authority for transients and
+   nonlinear coupling.
+3. **Split performance image** — D18. Same operators,
+   cheap.
+
+6-cell `acoustic_chain` is a **debug / low-band** child,
+not the gold standard. If we keep it, say so: “valid
+below `f_Ny`.” Do not gate brightness against it.
+
+### 5.2 Characteristic sections `[S]`
+
+Wave variables (cylinder): `w^± = (p ± Z0 U)/2` with
+`Z0 = ρc/S` of the **inviscid** principal part. Advance:
+shift by `Δt` corresponding to `ℓ/c`. Fractional delay:
+Thiran/allpass, error in the ear band gated.
+
+Sphere: same on `ψ = x p`, `U` reconstructed as we
+already do (near-field shunt is a **lump** on `ψ`, D18).
+
+Viscothermal: do **not** put `c_eff(ω)` into the delay
+every sample. Keep delay at `c`. Put ZK in a **local
+passive operator** on `w^±` (Foster of the boundary
+layer / `F(r_v)` remainder). TMM checks the composite.
+
+### 5.3 Junctions `[S]`
+
+Area jump: lossless scatter from `S_L, S_R` (exact).
+Hole: existing T-junction + `Y(σ,ω)` → low-order Foster
+in `σ` (evaluate at control rate). Mouth: mass + Foster
+`R(ω)` or table `Z_L`. Wall: existing `WallPin` as shunt
+Foster. Mutual hole series: extra `t_s` as now.
+
+Time-varying `σ`: interpolate **Foster parameters** under
+D11, lift junction state (D17).
+
+### 5.4 When modal / VFIT 1-port wins
+
+Frozen (or slowly varying) linear map as seen by one
+port: **IRKA / `fs-vfit` / Galerkin onto peaks** of TMM
+`Z_in` or `R`. Fewest states per ear residual. Attack
+or slur uses the spatial split; after `σ` settles, **drop
+to the 1-port** with a lift (two-phase note). Sustain of
+a clarinet can be ~10–20 passive states + delay memory,
+not 80 LC cells.
+
+### 5.5 Nonlinear island + Schur 1-port
 
 ```text
-∂p/∂x = −Z'(ω) U ,   ∂U/∂x = −Y'(ω) p
+(w^-, x_F)  --linear split-->  p_face
+u_face = F(p_up − p_face, y)     # Bernoulli / jet
+y' = f(y, p_face)                # MSD / two-mass / felt
 ```
 
-with ZK `Z',Y'` (Bessel in frequency, Foster/Cauer in
-time), plus T-junctions, pad `C`, mouth `Z_L`, walls.
-ODE `acoustic_chain` is a spatial finite-volume / Cauer
-of that system. TMM is the same system in `ω`.
+Implicit in `F,y` only. Linear piece: shift + ZOH Foster
++ scatter. Gate vs Gonzalez on a **short** fixture and
+vs TMM `R` on the long fixture.
 
-**These two must stay certified against each other**
-(ear-weighted `Z_in`, peak cents). Today they can drift
-(convention bugs already taught us that). One composition
-picks **one** time-domain authority (pHS) and uses TMM
-as the frequency oracle, or the reverse for frozen linear
-maps.
+### 5.6 Goal-oriented coarsening
 
-### 5.2 Child discretizations (performance, same graph)
+Adjoint of **R(ω)** at the reed and of **p_rad**. Delete
+Foster branches / extra slices that do not move those
+QoIs by more than the ear budget. Never delete the
+optical length (the delay).
 
-| Image | What it is | When |
-| --- | --- | --- |
-| **Fine LC + linear midpoint** | Same pHS, D14 stepper | Authority-quality TD, or RT if `n` small |
-| **Coarse LC / WDF** | Bilinear of the child graph | Time-varying holes, vowels, slides |
-| **Modal / Krylov / IRKA** | Galerkin or pH-IRKA of the *linear* operator | Frozen or slowly varying geometry; strings; plates; shells |
-| **Parameterized MOR `[F]`** | `V(σ)`, interpolatory pMOR | Fast `σ` *and* few global modes |
-| **Driving-point 1-port** | Schur complement of the linear network at the valve | Always, as the loop interface |
-| **FIR** | IFFT of a *frozen* 1-port | Held note, radiation, pickup |
+### 5.7 Describing function / HB `[F]`
 
-Scatter-chain in v2 **is** the WDF/bilinear row, once it
-is derived from the LC graph rather than identified at
-one `ω_pin`.
+For lock: valve describing function + `Z(nω)` from TMM
+(Fletcher). Brass/voice “will this speak?” without a
+transient. Attacks still TD.
 
-### 5.3 Nonlinear islands
+### 5.8 Multi-rate
 
-Bernoulli, MSD, two-mass, Hunt–Crossley, hysteretic felt,
-Stribeck, `JetOscillator`, KC `H`, von Karman `H`.
-These keep Gonzalez or a small Newton / K-method.
-They never swallow the linear duct’s Jacobian.
-
-### 5.4 `ImplicitPortLoop` = Schur + small island
-
-At each audio sample (geometry frozen on the control
-interval):
-
-```text
-p = C x + D u          # linear 1-port of the duct
-ẋ = A x + B u          # or scatter step; A,B,C,D from factorization
-u = F(p_up − p, y)     # Bernoulli / jet
-ẏ = f_island(y, p)     # reed/lip/fold ODE
-```
-
-`A,B,C,D` (or the WDF adaptor list) are **rebuilt at
-control rate**, not identified from a pin frequency.
-The nonlinear solve is 1–3 scalars, not 80.
-
-If `F` is monotone dissipative, a scalar Newton or a
-WDF adaptor is enough. Gate the discrete loop against
-full Gonzalez on a tiny fixture (one cell + valve)
-*and* against the fine network on Ernoult.
-
-### 5.5 Goal-oriented coarsening `[S/F]`
-
-Use the listener (or the first `N` impedance peaks) as
-the QoI. `fs-dwr` / adjoint of `Z_in` or radiated `p`
-marks cells and Foster branches that do not pay. Coarsen
-there. This is how a 40-slice cone becomes 8 *for the
-ear*, with a receipt, instead of a vibe.
-
-### 5.6 Multi-rate islands
-
-| Island | Rate |
-| --- | --- |
-| Felt / impact | sub-audio (fixed substeps or event) |
-| Valve loop + bore / string | 48 kHz |
-| Plate/shell radiation, ISO path | block or 2× downsample if gated |
-| `σ`, `A(x)`, gas, slide | control (0.5–2 kHz) |
-| Score / MIDI | gesture |
-
-### 5.7 Harmonic-balance authority `[F]`
-
-For *periodic* brass/reed lock, frequency-domain HB of
-the valve + multimodal `Z(nω)` is the right *existence*
-oracle (does this lip + this flare lock at this pitch?).
-Cheaper than a long Gonzalez transient. Attacks still
-need TD. Two authorities, one physics.
+Felt substep. Board radiation may run at block rate if
+G9 says so. Control: `σ`, `A(x)`, `T`, slide.
 
 ---
 
 ## 6. Architecture
 
 ```
-        geometry + materials + gesture
-                     │
-                     ▼
-           pHS network + TMM oracle
-           (fine LC, Foster, valve)
-                     │
-         child mesh / Galerkin / pMOR
-                     │
-         ┌───────────┴───────────┐
-         │  control tick         │
-         │  factor A(σ), lift x  │
-         └───────────┬───────────┘
-                     │
-         audio: 1-port linear step
-              + 1–3 dim island
-                     │
-                  pascals
+ geometry + gas + gesture
+           │
+           ▼
+    TMM oracle  (R, Z, peaks, p_rad/U)
+           │
+    split realization (D18)
+      delays ‖ lumps ‖ Foster
+           │
+    control tick: update σ, A, c(T); lift; D11
+           │
+    audio: shift + scatter + ZOH Foster
+         + 1–3 dim island
+           │
+    optional: settle → VFIT 1-port sustain
+           │
+        observer (piston / table / ISO)
 ```
 
-### 6.1 Control tick (the real “bake update”)
+### 6.1 Why this is more accurate *and* faster
 
-On `σ`, `A(x)`, `T`, `μ` change:
+| Approach | HF accuracy | Playable `σ(t)` | Cost / sample |
+| --- | --- | --- | --- |
+| 6-cell Gonzalez | Poor (dispersion) | Yes, expensive | Newton ~ n²–n³ |
+| 6-cell linear midpoint (v3) | Still poor | Yes | Factor at control, O(n) audio |
+| Fine LC (80 cells) midpoint | Good | Yes | Heavy memory + factor |
+| Pin-fit scatter (v2) | Accidental | Yes | Cheap, wrong Zc(ω) |
+| **Split D18** | Good if TMM-gated | Yes | **O(sections + n_br)** , mostly shift |
+| Frozen VFIT 1-port | Good in-band | No | O(n_red) |
 
-1. Rebuild child network or `V(σ)`.
-2. **Lift state** (D17).
-3. Factor the linear midpoint / scatter map, or refresh
-   modal `e^{A Δt}`.
-4. Check D11 on the discrete energy.
+### 6.2 Control tick
 
-This is O(n) to O(n³) at 1 kHz for n ~ 20–80 — cheap
-compared to Newton-every-sample on the same `n`.
+Rebuild junction Foster from `σ`. Warp delays by `c(T)`.
+Lift `w^±` and Foster states. D11 ramp test in CI, not
+every note.
 
-### 6.2 Audio tick
+### 6.3 Audio tick
 
-Linear 1-port step (matrix–vector or WDF sweep) +
-scalar/small island. Fuse those two (mega-fused target).
-No heap. SoA. SIMD on modal/FIR inner products only
-after this is green.
-
-### 6.3 Which image when
-
-| Geometry in time | Prefer |
-| --- | --- |
-| Holes, vowels, slide | Child LC / WDF + lift |
-| Held note, string, plate, bell | Modal / IRKA 1-port |
-| Fast `σ` *and* few global peaks | pMOR `[F]` |
-| Studio | Fine LC + linear midpoint, Gonzalez on islands |
+The mega-fused target is **shift + 2×2 scatter + island
+solve**. Not a sparse 80×80.
 
 ### 6.4 Quality knob
 
-Same gesture. `{fine, child, modal_lo}`. Each is a
-gated image, not a different constitutive law.
+`{TMM-offline, split-fine, split-coarse, VFIT-sustain}`.
+Same PDE, different Δx / n_br / 1-port switch.
 
-### 6.5 Polyphony scheduler
+### 6.5 Inverse calibration
 
-Steal decaying modal tails; drop multimodal lines;
-never drop the foreground valve loop; substep felt only
-on attacks.
-
-### 6.6 Inverse calibration `[F]`
-
-Adjoint/DFO on cards (`A(x)`, wall `r`, felt, lip rest
-length) so *authority* matches a cited Z(ω) or held
-note. Runtime still plays the network.
-
-### 6.7 Hardware truth (audio, not GEMM)
-
-Delay lines and modal states are **bandwidth**. Keep
-one voice’s delays contiguous. Do not parallelize inside
-a 3 ms line. Unified memory: avoid extra transposes.
-Fingerprint cycles/sample; ledger or shut up.
+Fit `A(x)`, wall `r`, lip rest, felt — so **TMM + island**
+match a cited fixture. Do not ship the fixture WAV.
 
 ---
 
 ## 7. Geometry
 
-Cited meshes/tables → `fs-io` → extractors → charts →
-**fine network** → **child** under DWR/ear gate.
-`A(x)` papers skip meshing. No scraped CAD.
+Cited mesh/table → `fs-io` → centerline/`A(x)`/shell →
+**section list tagged lump vs characteristic** (D18) →
+TMM + split image. MRI vowels are already `A(x)`.
 
 ---
 
-## 8. Family fillings
+## 8. Fillings
 
-Unchanged morally from v2; the *stepper* underneath
-changes.
-
-- **Reed winds:** valve island + child LC/WDF of the
-  bore + `σ(t)`. Mouthpiece = sections. MVP = slur on
-  Ernoult geometry with D14/D17, not a new FIR.
-- **Brass:** lip island + multimodal child + HB lock
-  oracle + `Z_L` table. Slide = delay length at control
-  rate + lift.
-- **Jet:** lab-minted island or refuse.
-- **Strings:** already modal/KC; KC keeps Gonzalez (true
-  nonlinear `H`); linear strings are ZOH (D14).
-- **Bow:** Stribeck island + string.
-- **Piano:** felt island *substepped* (D16) + modal
-  strings + modal board.
-- **Bells:** modal shell + strike island.
-- **Voice:** glottal island + `A(x)` child network;
-  source–filter interaction is the 1-port. Tissue =
-  `WallPin`. Ooh/aah = two `A(x)` cards.
-- **Electric:** Faraday + circuit island + speaker
-  1-port. Circuit may be stiff → same split (linear RLC
-  factored, nonlinear device as island).
+- **Reed winds:** island + characteristic bore + lumped
+  holes. MVP: Ernoult *slur* with R(ω) vs TMM, not a
+  brighter 6-cell Newton.
+- **Brass:** lip island + multimodal characteristics
+  (higher modes are extra delay lines above cutoff) +
+  `Z_L` table + HB/describing-function lock.
+- **Jet:** lab card or refuse.
+- **Strings:** modal/KC as now; linear strings are
+  already characteristics in mode space (ZOH).
+- **Piano:** D16 felt + modal strings/board.
+- **Voice:** glottal island + `A(x)` characteristics
+  (classic Kelly–Lochbaum **as D18 of the tract PDE**).
+  Ooh/aah = two cards. Interaction = R(ω) of the tract.
+- **Electric:** Faraday + circuit island (split RLC vs
+  device) + speaker 1-port.
 
 ---
 
 ## 9. Validation
 
-G0–G6 as v2 (passivity, Ernoult, ear-weighted, psycho).
+| Gate | Question |
+| --- | --- |
+| G0 | pHS / passivity / D11 |
+| G2 | Ernoult, published Z, Fant `A(x)` |
+| G6 | Ear-weighted **R** and **p_rad** vs TMM |
+| G7 | Slur / vibrato: no click, supply-rate |
+| G8 | Island+split vs Gonzalez on a *short* nonlinear fixture |
+| G9 | Child vs fine split (n_br, Δx) on R and p_rad |
+| **G10** | Split vs TMM: max ear-weighted \|R−R_TMM\|; composition passivity |
+| **G11** | Spatial Nyquist disclosed; no brightness claim above it |
 
-**G7 played phrase** (slur / vibrato / crescendo): no
-click, no extra ring, supply-rate holds.
-
-**G8 split-vs-monolithic:** on a fixture, linear-midpoint
-+ island versus full Gonzalez: energy and audible peaks
-inside a declared band. This *is* the proof that D14 did
-not change the physics.
-
-**G9 child-vs-fine:** ear-weighted `Z` and G7 on the
-coarsened graph.
-
-Reference WAVs remain test-only.
+Reference audio: test-only.
 
 ---
 
 ## 10. Never
 
-Samples, cabinet IRs as truth, instrument crates, in-loop
-CFD/BEM, brightness EQ, one-pole bores, fake mean flow,
-`2^N` FIR fingering banks, Newton on linear pHS, a second
-waveguide theory fitted at one frequency.
+Samples, IR cabinets as truth, instrument crates, in-loop
+CFD, fake mean flow, one-pole *loss*, Newton on linear
+pHS, **claiming a coarse ladder matches TMM in the
+partials**, `2^N` FIR keymaps, pin-frequency delay fits
+that ignore `Zc(ω)`.
 
 ---
 
@@ -413,144 +380,135 @@ waveguide theory fitted at one frequency.
 
 | ID | Question | Blocks |
 | --- | --- | --- |
-| OQ-1 | WDF sweep vs factored implicit midpoint vs modal 1-port as the *first* M1 linear image? Implement midpoint first (it is already Gonzalez for quadratic H). Compare WDF as a child. | M1 |
-| OQ-2 | Control rate vs factor cost on the Mac fingerprint. | M1 |
-| OQ-3 | Lift operator: energy projection vs interpolation of distributed `p,U`. | M1 |
-| OQ-4 | Licensed `A(x)` sets. | M2 |
-| OQ-5 | Two-mass vs beam lips. | M5 |
-| OQ-6 | Felt constitutive paper. | M4 |
-| OQ-7 | HB brass oracle: how many harmonics. | M5 |
-| OQ-8 | Listening budgets, then tighten. | M1 |
+| OQ-1 | ZK on characteristics: per-junction Foster vs distributed splitting along the delay? Start junction-local (matches TMM stations). | M1 |
+| OQ-2 | Fractional delay: Thiran order vs ear-band group-delay error. | M1 |
+| OQ-3 | When to hop spatial split → VFIT sustain (dwell time, residual). | M1 |
+| OQ-4 | Licensed `A(x)`. | M2 |
+| OQ-5 | Lip pair vs beam. | M5 |
+| OQ-6 | Felt paper. | M4 |
+| OQ-7 | How many multimodal lines for a flare before the ear saturates. | M5 |
 
 ---
 
 ## 12. Phases
 
-**M0** — Document D14–D17. Add a linear-pHS fast path
-*detection* (quadratic H, state-independent J,R) in
-`fs-phs::step` or a sibling `step_linear`. This is
-product, not ceremony: the same API, a cheaper correct
-integrator.
+**M0** — D14 `step_linear` for true LTI pHS (plates
+lumps, short necks). D18 tagging on sections. G11
+Nyquist printed on every `acoustic_chain` used as a
+claim. TMM remains the linear oracle.
 
 **M1 — Load-bearing** `[S]`
-Reed + cylinder + live vents:
+Characteristic image of a **cylinder + holes + reed**:
 
-1. Linear midpoint (or factored implicit) on the existing
-   LC+Foster graph (D14).
-2. Valve as the only Newton/K-method island.
-3. Control-rate `σ` + state lift (D17) + D11.
-4. G7 slur + G8 vs Gonzalez + Ernoult frozen G2.
+1. Delays + lumped T-junctions + mouth Foster (physics
+   we already have, new assembly).
+2. ZK as junction Foster, G10 vs TMM `R`.
+3. Valve island, G8 vs Gonzalez on a 1-section fixture.
+4. `σ(t)` + lift + G7 slur on Ernoult.
+5. Optional VFIT hop on a held fingering (OQ-3).
 
-Optional child: bilinear WDF of the *same* cells, G9.
+**Do not** implement WDF-of-6-cells as M1. That repeats
+E3.
 
-If M1 is late, stop adding Foster branches for “RT.”
+**M2** — `A(x)` characteristics (vowels, cones as `ψ`
+delays).
 
-**M2** — `A(x)` + vowels + cones on the same stepper.
+**M3** — Pickup + circuit split + speaker.
 
-**M3** — Pickup + circuit island + speaker (circuit uses
-the same split).
+**M4** — Felt D16 + board modal.
 
-**M4** — Felt island + D16 substep + board modal.
+**M5** — Multimodal delays + lips + `Z_L` + describing
+function / HB.
 
-**M5** — Multimodal child + lips + `Z_L` table + HB
-oracle.
-
-**M6** — Jet island from the lab, or refuse.
+**M6** — Jet card or refuse.
 
 **M7** — Shell modal.
 
-**M8** — Fuse the 1-port×island inner loop; SIMD modal/
-FIR; scheduler; fingerprint ledger. **After G7/G8.**
+**M8** — Fuse shift×scatter×island; SIMD on VFIT/modal;
+scheduler. After G7+G10.
 
-**M9** — Gesture skin (`σ(t)`, pressure). Still no
-instrument crate.
+**M9** — Gesture skin.
 
 ```
-D14 step_linear → island valve → lift σ → G7/G8 = M1
-        ↘ A(x) → M2
-        ↘ circuit split → M3
-        ↘ felt substep → M4
+D18 cylinder image → G10 vs TMM → island → G7 slur = M1
+        ↘ A(x)/ψ → M2
+        ↘ circuit → M3
+        ↘ felt → M4
 multimodal + HB → M5
-jet card → M6
+jet → M6
 shell → M7
-G7 green → M8 fusion
+G7∧G10 → M8
 ```
 
 ---
 
-## 13. Work packages (M1 first)
+## 13. M1 work packages
 
-- `step_linear` / detect quadratic+LTI pHS; test = bit or
-  tight residual vs Gonzalez on a lossless cylinder.
-- Schur 1-port of `acoustic_chain` at the reed face.
-- Valve island (K-method or 1–2 Newton) + G8.
-- Control-rate `σ` + lift + D11 ramp + G7 slur.
-- Ear-weighted `Z` residual helper (ERB + peak align).
-- Child WDF only after midpoint path is green (G9).
-- DWR coarsen cells against first peaks `[F]` after M1.
-
-Do not bead M5–M7 until M1 has slurred.
+- Section tagger: lump vs characteristic (shared ε with
+  `tap_is_line`).
+- Characteristic stepper: `w^±` shift, fractional delay,
+  area-jump scatter.
+- Hole/mouth/ZK as existing Foster/T-junction **on the
+  wave variables**.
+- G10: R(ω) vs `input_impedance` / `input_impedance_wall`.
+- Valve island + G8.
+- Lift + D11 + G7 on Ernoult `xxxx→xxxo`.
+- Ear-weighted R residual helper.
+- Disclose `f_Ny` on ladder children (G11).
 
 ---
 
 ## 14. Advice condensed
 
-1. **The bore is linear. Stop Newtoning it.** That is the
-   highest-leverage correctness *and* speed move in the
-   repo today.
-2. **WDF/scatter is the bilinear of our LC graph**, not
-   a pin-frequency fit. Fitting is how we re-invent
-   `TravelingWaveLine`.
-3. **Galerkin / IRKA for frozen geometry; spatial child
-   for moving holes.** pMOR later if both are true.
-4. **Condense the duct to a 1-port; implicit only the
-   valve/felt/bow.** Schur + island.
-5. **Lift state when `σ` or `V` changes.** Passive
-   coefficients are not enough.
-6. **Coarsen with an adjoint/ear QoI**, not a slice
-   count guessed in a comment.
-7. **Substep stiff contact.** One rate is neither
-   accurate nor fast.
-8. **HB for brass lock, TD for attacks.**
-9. **Meshes → extractors → fine network → child.**
-   Not 48 kHz FEM, not handmade formants.
-10. **Fuse last**, on the 1-port×island product, after
-    G7/G8.
+1. **A long bore is a delay plus local operators**, not
+   a handful of inductors. That is more accurate at 3–8 kHz
+   and mostly a memmove.
+2. **TMM judges R(ω) and p_rad.** The time stepper is
+   wrong until those match, not until energy on a 6-cell
+   toy matches Gonzalez.
+3. **Newton only the island.** Linear midpoint for lumps
+   that really are lumps.
+4. **Playable holes are local Y(σ), not a new FIR.**
+5. **Sustain may collapse to a VFIT 1-port** after the
+   slur; lift into it.
+6. **Coarsen Foster, never optical length.**
+7. **Voice is Kelly–Lochbaum as D18 of A(x)**, not a
+   formant filter, not 6 tract cells.
+8. **Brass is extra modal delays + lips + HB**, not a
+   brighter cone ladder.
+9. **Fuse the shift×island product last.**
+10. **Calibrate cards; never ship the take.**
 
 ---
 
-## 15. Diff from v2 (reviewers)
+## 15. Diff from v3
 
-| v2 | v3 |
+| v3 | v4 |
 | --- | --- |
-| Identify scatter at `ω_pin` | Bilinear/WDF of the *same* LC; or don’t scatter yet |
-| Gonzalez vs “cheap image” | Gonzalez for nonlinear `H`; linear midpoint for the bore |
-| Bake as a new object family | Child chart + factored linear map + small island |
-| Valve loop as a glue primitive | Schur 1-port + island (the loop is the interface) |
-| Passive coefficient interp | That **plus** state lift (D17) |
-| Uniform then ERB residual | Goal-oriented spatial coarsening too |
-| One audio rate | Multi-rate by stiffness |
-| Brass = multimodal scatter | Plus HB lock authority |
-| M1 = scatter + slur | M1 = D14 linear duct + island + lift + slur |
+| Same LC graph, cheaper integrator | Same *PDE*; LC only if electrically short |
+| WDF = bilinear of 6 cells | That WDF still lies above ~c/(2Δx) |
+| Scatter identified or inherited | Scatter = characteristics + TMM junctions |
+| QoI ≈ ear-weighted Z_in | **R at the valve** + radiated p |
+| M1 = step_linear on acoustic_chain | M1 = characteristic cylinder + TMM G10 + slur |
+| Delay lines as a possible image | Delay is the *principal-part solution* |
 
-v2 was right that frozen FIR cannot play, and that the
-valve–bore loop is the instrument. It still proposed a
-*second* waveguide. v3 says: **play the network we
-already wrote, with the integrator it always deserved.**
+v3’s D14–D17 stay. They apply to lumps, plates, Foster,
+and islands. They do not justify a coarse ladder as a
+trumpet.
 
 ---
 
 ## 16. Planning-workflow next
 
-v3 is the first plan that is simultaneously more
-accurate and more likely to be real-time. Next review
-should attack OQ-1 (midpoint vs WDF first) and the
-lift operator (OQ-3). Beadify **only** M0–M1
-(`step_linear`, 1-port, island, lift, G7/G8).
+Review should try to break D18 (when does a ladder beat
+characteristics? very short, very nonlinear, 3-D).
+Beadify **only** M0–M1: tagger, `w^±` stepper, G10, island,
+Ernoult slur. If G10 cannot meet TMM R in the ear band,
+the split is wrong — fix the ZK junction, do not add
+cells.
 
 ---
 
-*End of v3. Constitution:
-`COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`. The cheap stepper
-is a theorem about linear pHS, not a new instrument
-engine.*
+*End of v4. Constitution:
+`COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md`. The cheap, correct
+1-D wave is d’Alembert; Cauer is for what is not a wave.*
