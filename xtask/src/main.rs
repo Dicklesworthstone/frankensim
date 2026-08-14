@@ -64,6 +64,7 @@ mod manifest_fixture;
 mod matdb_pack;
 mod maturity;
 mod moonshot_policy;
+mod portfolio_candidate;
 mod program_metrics;
 mod schemas;
 mod source_manifest;
@@ -8543,6 +8544,10 @@ fn main() -> ExitCode {
             vec![source_manifest::CHECK, source_manifest::SPDX_CHECK],
         ),
         "check-vv-scorecard" => (vv_scorecard::check(&root), vec![vv_scorecard::CHECK]),
+        "check-portfolio-candidate" => (
+            portfolio_candidate::check(&root),
+            vec![portfolio_candidate::CHECK],
+        ),
         "check-constellation-drift" => {
             let report = constellation_drift::check(&root);
             policy_notes = report.notes;
@@ -8627,6 +8632,7 @@ fn main() -> ExitCode {
             policy_notes.extend(drift_report.notes);
             v.extend(source_manifest::check(&root));
             v.extend(vv_scorecard::check(&root));
+            v.extend(portfolio_candidate::check(&root));
             let manifest_report = manifest_fixture::check_manifest_fixture(&root);
             v.extend(manifest_report.violations);
             policy_notes = manifest_report.decisions;
@@ -8686,6 +8692,7 @@ fn main() -> ExitCode {
                     source_manifest::CHECK,
                     source_manifest::SPDX_CHECK,
                     vv_scorecard::CHECK,
+                    portfolio_candidate::CHECK,
                     "manifest-fixture",
                     "doc-facts",
                     "capability-matrix",
