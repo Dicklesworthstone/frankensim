@@ -2173,7 +2173,8 @@ pub fn spherical_cone(
     let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { cells * n_br * 2 } else { 0 };
-    let n = n_line + n_nf + n_tap + n_foster;
+    let n_tap_foster = if foster { n_tap * n_br } else { 0 };
+    let n = n_line + n_nf + n_tap + n_tap_foster + n_foster;
     let l_psi = density * dx / alpha;
     let c_psi = alpha * dx / (density * sound_speed * sound_speed);
     let mut x_mid = Vec::with_capacity(cells);
@@ -2237,7 +2238,7 @@ pub fn spherical_cone(
                     omega_pin * 8.0,
                     n_br,
                 )?;
-                let off = n_line + n_nf + n_tap + cell * n_br * 2;
+                let off = n_line + n_nf + n_tap + n_tap_foster + cell * n_br * 2;
                 for (k, &(gk, wk)) in terms_r.iter().enumerate() {
                     let lam = off + k;
                     let g_psi = gk * x2.abs();
@@ -2314,13 +2315,12 @@ pub fn spherical_cone(
         let ts = tap_open_series_length(tap, radii[cell], taps, length);
         apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / alpha);
         let phi = n_line + n_nf + open_i;
+        let tap_off = (n_tap_foster > 0).then_some(n_line + n_nf + n_tap + open_i * n_br);
         open_i += 1;
         let a_h = core::f64::consts::PI * b_eff * b_eff;
         let l_eff = side_hole_neck_length(tap.neck_length, b_eff, radii[cell]);
         let l_h = density * l_eff.max(1.0e-6) / a_h;
         let scale = 1.0 / x_mid[cell];
-        let (r_wall, l_used) = tap_viscothermal(l_h, b_eff, density, omega_pin, viscothermal);
-        q[phi * n + phi] = 1.0 / l_used;
         j[tap_q * n + phi] = -scale;
         j[phi * n + tap_q] = scale;
         let r_ac = compact_radiation_impedance(
@@ -2332,7 +2332,19 @@ pub fn spherical_cone(
         )
         .map(|(rr, _)| rr)
         .unwrap_or(0.0);
-        r[phi * n + phi] = r_ac + r_wall;
+        apply_tap_neck_wall(
+            &mut q,
+            &mut r,
+            n,
+            phi,
+            l_h,
+            b_eff,
+            density,
+            omega_pin,
+            r_ac,
+            viscothermal,
+            tap_off,
+        )?;
     }
     let mut g = vec![0.0; n * inlets];
     let gin = 1.0 / x_in;
@@ -2460,7 +2472,8 @@ fn hybrid_sphere_cylinder_chain(
     let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { n_cells * n_br * 2 } else { 0 };
-    let n = n_line + n_nf + n_tap + n_foster;
+    let n_tap_foster = if foster { n_tap * n_br } else { 0 };
+    let n = n_line + n_nf + n_tap + n_tap_foster + n_foster;
     let mut nf_of = vec![0usize; n_cells];
     let mut next_nf = n_line;
     for cell in 0..n_cells {
@@ -2537,7 +2550,7 @@ fn hybrid_sphere_cylinder_chain(
                         omega_pin * 8.0,
                         n_br,
                     )?;
-                    let off = n_line + n_nf + n_tap + cell * n_br * 2;
+                    let off = n_line + n_nf + n_tap + n_tap_foster + cell * n_br * 2;
                     for (k, &(gk, wk)) in terms_r.iter().enumerate() {
                         let lam = off + k;
                         let g_psi = gk * x2.abs();
@@ -2600,7 +2613,7 @@ fn hybrid_sphere_cylinder_chain(
                         omega_pin * 8.0,
                         n_br,
                     )?;
-                    let off = n_line + n_nf + n_tap + cell * n_br * 2;
+                    let off = n_line + n_nf + n_tap + n_tap_foster + cell * n_br * 2;
                     for (k, &(gk, wk)) in terms_r.iter().enumerate() {
                         let lam = off + k;
                         q[lam * n + lam] = wk / gk;
@@ -2679,6 +2692,7 @@ fn hybrid_sphere_cylinder_chain(
         };
         apply_t_junction_series(&mut q, n, tap_q + 1, l_add);
         let phi = n_line + n_nf + open_i;
+        let tap_off = (n_tap_foster > 0).then_some(n_line + n_nf + n_tap + open_i * n_br);
         open_i += 1;
         let a_h = core::f64::consts::PI * b_eff * b_eff;
         let l_eff = side_hole_neck_length(tap.neck_length, b_eff, radii[cell]);
@@ -2688,8 +2702,6 @@ fn hybrid_sphere_cylinder_chain(
         } else {
             1.0
         };
-        let (r_wall, l_used) = tap_viscothermal(l_h, b_eff, density, omega_pin, viscothermal);
-        q[phi * n + phi] = 1.0 / l_used;
         j[tap_q * n + phi] = -scale;
         j[phi * n + tap_q] = scale;
         let r_ac = compact_radiation_impedance(
@@ -2701,7 +2713,19 @@ fn hybrid_sphere_cylinder_chain(
         )
         .map(|(rr, _)| rr)
         .unwrap_or(0.0);
-        r[phi * n + phi] = r_ac + r_wall;
+        apply_tap_neck_wall(
+            &mut q,
+            &mut r,
+            n,
+            phi,
+            l_h,
+            b_eff,
+            density,
+            omega_pin,
+            r_ac,
+            viscothermal,
+            tap_off,
+        )?;
     }
     let mut g = vec![0.0; n * inlets];
     let gin = if cone_s.first().copied().unwrap_or(false) {
@@ -2732,9 +2756,11 @@ fn hybrid_sphere_cylinder_chain(
 /// each inertance and thermal `G` on each compliance at that
 /// same pin. `foster_branches > 0` replaces wide-tube series `R`
 /// and thermal `G` with Foster `√ω` networks (extra states).
-/// A [`ViscothermalPin`] also sits on each chimney neck (lumped
-/// series `R`, same all-regime law as the bore; no extra Foster
-/// states). Full-spectrum TMM remains the Bessel fallback.
+/// A [`ViscothermalPin`] also sits on each chimney neck (same
+/// all-regime series `R` as the bore). `foster_branches > 0`
+/// adds the bore's Foster series on that neck (extra states;
+/// thermal Foster stays on the cell `C`, not a sealed pad).
+/// Full-spectrum TMM remains the Bessel fallback.
 ///
 /// # Errors
 /// Empty chain, non-physical geometry, `inlets` not in `{1, 2}`,
@@ -2849,9 +2875,10 @@ pub fn acoustic_chain(
     // Two Foster networks per wide-tube cell: series √ω on the
     // inertance and the dual thermal √ω shunt on the compliance.
     let n_foster = cell_foster.iter().filter(|&&b| b).count() * n_br * 2;
-    let n = n_line + n_tap + n_foster;
+    let n_tap_foster = tap_foster_count(n_tap, viscothermal);
+    let n = n_line + n_tap + n_tap_foster + n_foster;
     let mut foster_off = vec![0usize; n_cells];
-    let mut next_foster = n_line + n_tap;
+    let mut next_foster = n_line + n_tap + n_tap_foster;
     for cell in 0..n_cells {
         foster_off[cell] = next_foster;
         if cell_foster[cell] {
@@ -2973,12 +3000,11 @@ pub fn acoustic_chain(
         let a_bore = core::f64::consts::PI * radii[cell] * radii[cell];
         apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / a_bore);
         let phi = n_line + open_i;
+        let tap_off = (n_tap_foster > 0).then_some(n_line + n_tap + open_i * n_br);
         open_i += 1;
         let a_h = core::f64::consts::PI * b_eff * b_eff;
         let l_eff = side_hole_neck_length(tap.neck_length, b_eff, radii[cell]);
         let l_h = density * l_eff.max(1.0e-6) / a_h;
-        let (r_wall, l_used) = tap_viscothermal(l_h, b_eff, density, omega_pin, viscothermal);
-        q[phi * n + phi] = 1.0 / l_used;
         j[tap_q * n + phi] = -1.0;
         j[phi * n + tap_q] = 1.0;
         let r_ac = compact_radiation_impedance(
@@ -2990,7 +3016,19 @@ pub fn acoustic_chain(
         )
         .map(|(rr, _)| rr)
         .unwrap_or(0.0);
-        r[phi * n + phi] = r_ac + r_wall;
+        apply_tap_neck_wall(
+            &mut q,
+            &mut r,
+            n,
+            phi,
+            l_h,
+            b_eff,
+            density,
+            omega_pin,
+            r_ac,
+            viscothermal,
+            tap_off,
+        )?;
     }
     let mut g = vec![0.0; n * inlets];
     g[0] = 1.0;
@@ -3075,6 +3113,72 @@ fn tap_viscothermal(
     let (r_series, _, l_scale) =
         all_regime_series_and_shunt(l_h, 0.0, neck_radius, density, omega, pin);
     (r_series, l_h * l_scale)
+}
+
+fn tap_foster_count(n_tap: usize, pin: Option<&ViscothermalPin>) -> usize {
+    match pin {
+        Some(p) if p.foster_branches > 0 && p.dynamic_viscosity > 0.0 => {
+            n_tap * p.foster_branches
+        }
+        _ => 0,
+    }
+}
+
+fn apply_foster_series_on_flux(
+    q: &mut [f64],
+    r: &mut [f64],
+    n: usize,
+    flux: usize,
+    terms: &[(f64, f64)],
+    off: usize,
+) {
+    for (k, &(gk, wk)) in terms.iter().enumerate() {
+        let lam = off + k;
+        q[lam * n + lam] = wk / gk;
+        r[flux * n + flux] += gk;
+        r[lam * n + lam] += gk;
+        r[flux * n + lam] -= gk;
+        r[lam * n + flux] -= gk;
+    }
+}
+
+/// Lumped all-regime neck `R`, or the same Foster series the bore
+/// already uses (`R0` + residual) when `foster_off` is set.
+fn apply_tap_neck_wall(
+    q: &mut [f64],
+    r: &mut [f64],
+    n: usize,
+    phi: usize,
+    l_h: f64,
+    neck_radius: f64,
+    density: f64,
+    omega: f64,
+    r_ac: f64,
+    pin: Option<&ViscothermalPin>,
+    foster_off: Option<usize>,
+) -> Result<(), PhsError> {
+    if let (Some(p), Some(off)) = (pin, foster_off) {
+        if p.foster_branches > 0 && p.dynamic_viscosity > 0.0 {
+            q[phi * n + phi] = 1.0 / l_h.max(1.0e-18);
+            let r0 = 8.0 * p.dynamic_viscosity / (density * neck_radius * neck_radius) * l_h;
+            r[phi * n + phi] = r_ac + r0.max(0.0);
+            let terms = foster_bessel_series(
+                l_h,
+                neck_radius,
+                density,
+                p.dynamic_viscosity,
+                omega / 8.0,
+                omega * 8.0,
+                p.foster_branches,
+            )?;
+            apply_foster_series_on_flux(q, r, n, phi, &terms, off);
+            return Ok(());
+        }
+    }
+    let (r_wall, l_used) = tap_viscothermal(l_h, neck_radius, density, omega, pin);
+    q[phi * n + phi] = 1.0 / l_used;
+    r[phi * n + phi] = r_ac + r_wall;
+    Ok(())
 }
 
 /// All-regime wall law at one `ω`: wide-tube ZK for `r_v ≥ 10`,
