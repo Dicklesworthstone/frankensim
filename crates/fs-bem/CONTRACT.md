@@ -74,6 +74,10 @@ everywhere: this is screening, not a viscous truth source.
   solves; feeds the vibroacoustic-coupling bead.
 - `far_field` — sampled directivity amplitudes (monopole uniform to
   0.00%, dipole cos-theta correlation 1.0000 measured).
+- `FarFieldTable` / `tabulate_far_field` — solver-neutral
+  `(ω, direction) → F` samples with `p → F e^{ikr}/r`. Downstream
+  observers (fs-couple) consume the table; they do not take a
+  production dependency on this crate.
 - `exterior_pressure_at_points` — deterministic batched finite-distance
   pressure via `SUM (dG/dn_y p - G i omega rho v) A`; mismatched source
   surface or medium and invalid/non-exterior points are refused.

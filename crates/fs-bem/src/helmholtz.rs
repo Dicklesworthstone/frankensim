@@ -742,6 +742,95 @@ pub fn far_field(
         .collect()
 }
 
+/// Solver-neutral far-field table: `p → F(ω, dir) e^{ikr}/r`.
+///
+/// Couple (and any other L3 observer) consumes these samples without
+/// taking a production dependency on this crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FarFieldTable {
+    /// Producer identity retained by the consumer.
+    pub source_id: String,
+    /// Angular frequencies [rad/s], strictly increasing.
+    pub omegas: Vec<f64>,
+    /// Unit listener directions.
+    pub directions: Vec<[f64; 3]>,
+    /// Row-major amplitudes `F[i_ω, i_dir]`.
+    pub amplitudes: Vec<C64>,
+    /// Sound speed used to form `k = ω/c` [m/s].
+    pub sound_speed: f64,
+    /// Ambient density [kg/m³].
+    pub density: f64,
+}
+
+impl FarFieldTable {
+    /// Amplitude `F` at frequency `i` and direction `j`.
+    #[must_use]
+    pub fn amplitude(&self, i_omega: usize, i_dir: usize) -> Option<C64> {
+        if i_omega >= self.omegas.len() || i_dir >= self.directions.len() {
+            return None;
+        }
+        self.amplitudes
+            .get(i_omega * self.directions.len() + i_dir)
+            .copied()
+    }
+}
+
+/// Tabulate [`far_field`] on an explicit `(ω, direction)` grid.
+///
+/// # Errors
+/// [`HelmholtzError`] from [`solve_radiation`], or a bad frequency /
+/// direction / velocity admission.
+pub fn tabulate_far_field(
+    surface: &SpherePanels,
+    omegas: &[f64],
+    directions: &[[f64; 3]],
+    medium: Medium,
+    velocity: &[C64],
+    formulation: Formulation,
+) -> Result<FarFieldTable, HelmholtzError> {
+    if omegas.is_empty() || directions.is_empty() {
+        return Err(HelmholtzError::BadParameter {
+            what: "far-field table needs at least one frequency and direction",
+        });
+    }
+    let mut last = 0.0;
+    for (i, &w) in omegas.iter().enumerate() {
+        if !(w > 0.0 && w.is_finite()) {
+            return Err(HelmholtzError::BadParameter {
+                what: "far-field frequencies must be finite and positive",
+            });
+        }
+        if i > 0 && w <= last {
+            return Err(HelmholtzError::BadParameter {
+                what: "far-field frequencies must be strictly increasing",
+            });
+        }
+        last = w;
+    }
+    for dir in directions {
+        let n2 = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+        if !(n2 > 0.0 && n2.is_finite()) {
+            return Err(HelmholtzError::BadParameter {
+                what: "far-field directions must be finite and nonzero",
+            });
+        }
+    }
+    let mut amplitudes = Vec::with_capacity(omegas.len() * directions.len());
+    for &omega in omegas {
+        let k = omega / medium.sound_speed;
+        let sol = solve_radiation(surface, k, medium, velocity, formulation)?;
+        amplitudes.extend(far_field(surface, &sol, medium, directions));
+    }
+    Ok(FarFieldTable {
+        source_id: "fs-bem::helmholtz::tabulate_far_field".to_string(),
+        omegas: omegas.to_vec(),
+        directions: directions.to_vec(),
+        amplitudes,
+        sound_speed: medium.sound_speed,
+        density: medium.density,
+    })
+}
+
 /// The dense radiation impedance matrix `Z` mapping panel normal
 /// velocities to panel pressures (`p = Z v`), built by one LU
 /// factorization and `n` unit-velocity solves. Feeds the vibroacoustic
@@ -1684,6 +1773,43 @@ mod tests {
         }
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"baffled-piston-series\",\"rows\":[{rows}],\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn far_field_table_matches_pulsating_sphere() {
+        let surface = SpherePanels::icosphere(1.0, 1).expect("icosphere");
+        let n = surface.centroids().len();
+        let medium = Medium::air();
+        let ka = 0.4;
+        let omega = ka * medium.sound_speed;
+        let table = tabulate_far_field(
+            &surface,
+            &[omega],
+            &[[0.0, 0.0, 1.0]],
+            medium,
+            &uniform_velocity(n),
+            Formulation::PlainCbie,
+        )
+        .expect("table");
+        let f = table.amplitude(0, 0).expect("F");
+        let z = pulsating_sphere_impedance(ka, 1.0);
+        let f_ref = z.scale(1.0) * C64::new(det::cos(-ka), det::sin(-ka));
+        let rel = (f - f_ref).abs() / f_ref.abs().max(1.0e-18);
+        assert!(
+            rel < 0.08,
+            "tabulated F {f:?} vs analytic {f_ref:?} (rel {rel})"
+        );
+        assert!(
+            tabulate_far_field(
+                &surface,
+                &[],
+                &[[1.0, 0.0, 0.0]],
+                medium,
+                &uniform_velocity(n),
+                Formulation::PlainCbie
+            )
+            .is_err()
         );
     }
 
