@@ -3849,8 +3849,9 @@ fn tap_open_budget(
     Ok((n_tap_states, n_tap_foster))
 }
 
-/// 2-cell Cauer shunt plus flanged mouth. First flux attaches
-/// at the station the way a lumped neck inductor does; last
+/// 2-cell Cauer-I line plus flanged mouth. The station pressure
+/// drives the first inductor (same hook as a lumped neck); each
+/// later `L` sits between the previous `C` and its own `C`. Last
 /// flux carries the same flanged `(R, X)` as the TMM chimney.
 fn apply_tap_line(
     q: &mut [f64],
@@ -3884,15 +3885,21 @@ fn apply_tap_line(
         q[pi * n + pi] = 1.0 / l_cell;
         j[qi * n + pi] = 1.0;
         j[pi * n + qi] = -1.0;
-        if cell + 1 < TAP_LINE_CELLS {
-            let qn = base + 2 * (cell + 1);
-            j[pi * n + qn] = -1.0;
-            j[qn * n + pi] = 1.0;
-        }
     }
+    // Pressure-driven line: L0 between the station and C0 (the
+    // pair already puts C0 on the right of L0). L_k between
+    // C_{k-1} and C_k uses the lumped-neck left-side sign so
+    // ẋ_L = p_left − p_right. The bore Cauer-II "L_i → next C"
+    // link would star L0 onto C0 and C1 at once.
     let p0 = base + 1;
     j[tap_q * n + p0] = -junction_scale;
     j[p0 * n + tap_q] = junction_scale;
+    for cell in 1..TAP_LINE_CELLS {
+        let qi_prev = base + 2 * (cell - 1);
+        let pi = base + 2 * cell + 1;
+        j[pi * n + qi_prev] = 1.0;
+        j[qi_prev * n + pi] = -1.0;
+    }
     if let Some(p) = pin {
         let n_br = p.foster_branches;
         for cell in 0..TAP_LINE_CELLS {
