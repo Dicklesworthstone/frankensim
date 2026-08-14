@@ -77,7 +77,9 @@ to parallel biquad sections and discrete state-space.
   coefficient-quantization probe. `bilinear_state_space` — the same
   map in Tustin state-space form; the improper coefficient is returned
   as `e_leftover` for the caller's extra section (a named seam, not a
-  silent drop).
+  silent drop). Stable continuous poles above the sampled band remain
+  admissible because Tustin maps the complete open left half-plane inside
+  the unit circle; only sampled/prewarp frequencies are Nyquist-bounded.
 - `discretize::DigitalFilter::step` — transposed DF-II runtime of the
   parallel bank. `reflectance` is the scattering map
   `(Z−Zc)/(Z+Zc)`. `modulate_delay` peels or applies a known

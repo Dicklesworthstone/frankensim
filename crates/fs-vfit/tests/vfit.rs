@@ -501,13 +501,21 @@ fn weight_preset_changes_the_fit_and_is_logged() {
 }
 
 #[test]
-fn nyquist_refusal_on_both_discretization_routes() {
-    // Review finding: the Tustin route must refuse a beyond-Nyquist
-    // resonance just like the section route (no silent aliasing).
+fn tustin_maps_stable_above_band_poles_on_both_routes() {
+    // Continuous poles are not sampled sinusoids. Tustin maps the whole
+    // stable left half-plane inside the unit circle, including poles whose
+    // continuous magnitude exceeds the digital Nyquist frequency.
     let model = six_pole_model();
     let t_s = 1.0 / 1000.0; // nyquist = pi*1000 ~= 3141 rad/s < 5200
-    assert!(bilinear(&model, t_s, 0.0).is_err());
-    assert!(bilinear_state_space(&model, t_s, 0.0).is_err());
+    let sections = bilinear(&model, t_s, 0.0).expect("section Tustin");
+    let state_space = bilinear_state_space(&model, t_s, 0.0).expect("state-space Tustin");
+    assert!(sections.is_stable());
+    for &omega in &[100.0, 700.0, 2_000.0] {
+        let via_sections = sections.eval(omega);
+        let via_state_space = state_space.eval(omega).expect("state-space evaluation")
+            + section_e_term(&model, t_s, 0.0, omega);
+        assert!((via_sections - via_state_space).abs() < 1.0e-9 * via_sections.abs().max(1.0));
+    }
 }
 
 #[test]

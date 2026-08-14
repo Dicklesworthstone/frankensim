@@ -575,8 +575,8 @@ fn is_lossless_differentiator(s: &Biquad) -> bool {
 /// Typed discretization failure.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiscretizeError {
-    /// Sample rate too low: a pole (or the prewarp point) sits at or
-    /// beyond Nyquist.
+    /// A sampled/prewarp frequency sits at or beyond Nyquist, or the
+    /// Tustin solve is singular.
     BeyondNyquist {
         /// Offending frequency [rad/s].
         omega: f64,
@@ -655,8 +655,9 @@ impl std::error::Error for DiscretizeError {}
 /// at `omega_pw` (pass 0 for the unwarped `K = 2/T` map).
 ///
 /// # Errors
-/// [`DiscretizeError`] when the sample rate cannot represent the model
-/// (pole resonance or prewarp at/beyond Nyquist) or `t_s <= 0`.
+/// [`DiscretizeError`] when the prewarp frequency is at/beyond Nyquist
+/// or `t_s <= 0`. Stable continuous poles are not sampled sinusoids:
+/// Tustin maps the complete open left half-plane inside the unit circle.
 pub fn bilinear(
     model: &RationalModel,
     t_s: f64,
@@ -671,15 +672,6 @@ pub fn bilinear(
             omega: omega_pw,
             nyquist,
         });
-    }
-    for t in &model.terms {
-        let w = match t {
-            PoleTerm::Real { pole, .. } => pole.abs(),
-            PoleTerm::Pair { pole, .. } => pole.abs(),
-        };
-        if w >= nyquist {
-            return Err(DiscretizeError::BeyondNyquist { omega: w, nyquist });
-        }
     }
     let k = if omega_pw > 0.0 {
         omega_pw / det::tan(omega_pw * t_s / 2.0)
@@ -801,18 +793,6 @@ pub fn bilinear_state_space(
             omega: omega_pw,
             nyquist,
         });
-    }
-    // Same per-pole refusal as the section route (review finding: a
-    // resonance at/beyond Nyquist must not alias silently through the
-    // Tustin route either).
-    for t in &model.terms {
-        let w = match t {
-            PoleTerm::Real { pole, .. } => pole.abs(),
-            PoleTerm::Pair { pole, .. } => pole.abs(),
-        };
-        if w >= nyquist {
-            return Err(DiscretizeError::BeyondNyquist { omega: w, nyquist });
-        }
     }
     let k = if omega_pw > 0.0 {
         omega_pw / det::tan(omega_pw * t_s / 2.0)
