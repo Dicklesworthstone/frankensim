@@ -138,9 +138,10 @@ refusals; bitwise determinism.
 
 ## No-claim boundaries
 
-- Wide-tube first order ONLY: narrow tubes (`rv < 10`) refuse; the
-  full Bessel/Kelvin ZK solution is the recorded follow-up (needs
-  fs-math Bessel functions, shared with the piston closed form).
+- Wide-tube first order refuses `rv < 10`. [`LossModel::AllRegime`]
+  falls to Poiseuille there; [`LossModel::Bessel`] is the
+  frequency-by-frequency Zwikker–Kosten `F(r_v)` at every shear
+  number. Both store Helmholtz `k` (`e^{ikx}`), not telegraph `γ`.
 - Straight smooth isothermal walls. A [`fs_phs::WallPin`] on
   `input_impedance_wall` adds the locally reacting shunt
   `Y' = 2π a slant / (r − iωσ + i K/ω)` to the gas `Y'`

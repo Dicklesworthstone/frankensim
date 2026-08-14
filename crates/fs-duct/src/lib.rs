@@ -26,8 +26,9 @@
 //! (1 + (gamma - 1)/sqrt(Pr))` — the classic Kirchhoff wall-loss
 //! attenuation. Validity is a NAMED refusal, not degradation: below
 //! [`MIN_SHEAR_NUMBER`] the wide-tube expansion is invalid (narrow
-//! tubes need the full Bessel/Kelvin ZK solution — a recorded
-//! follow-up). A locally reacting wall is an optional
+//! tubes use [`LossModel::AllRegime`] or [`LossModel::Bessel`],
+//! which store Helmholtz `k` (`e^{ikx}`), not telegraph `γ`).
+//! A locally reacting wall is an optional
 //! [`fs_phs::WallPin`] on [`input_impedance_wall`].
 //!
 //! TRANSFER MATRICES are never transcribed from a book: each segment's
@@ -396,6 +397,11 @@ fn apply_wall_to_wave(
     let z_series = j * wave.wavenumber * wave.characteristic_impedance;
     let y_gas = j * wave.wavenumber * wave.characteristic_impedance.recip();
     let y_shunt = y_gas + y_w;
+    if y_shunt.abs() < 1.0e-30 {
+        return Err(DuctError::BadParameter {
+            what: "wall shunt cancelled the gas admittance",
+        });
+    }
     // Helmholtz `k` from `k² = −Z'Y'`. Prefer the decaying forward
     // branch (`Im k >= 0`, then `Re k >= 0`). `sqrt(Z'Y')` is the
     // telegraph `γ`; a mass-dominated wall makes `Z'Y'` positive
@@ -427,6 +433,17 @@ fn select_forward_decaying(k: C64) -> C64 {
     } else {
         flip
     }
+}
+
+/// Telegraph `γ = √(Z'Y')` (`Re γ ≥ 0`, `Im γ ≥ 0` for a +iω
+/// passive pair) to the Helmholtz `k` the basis uses (`e^{ikx}`,
+/// `Im k ≥ 0` is decay). That is `(Im γ, Re γ)`, not `-i γ`:
+/// `-i(α+iβ) = β−iα` is the growing wave.
+fn helmholtz_from_telegraph(mut gamma: C64) -> C64 {
+    if gamma.im < 0.0 {
+        gamma = gamma.scale(-1.0);
+    }
+    select_forward_decaying(C64::new(gamma.im, gamma.re))
 }
 
 fn wide_tube_wave(
@@ -477,10 +494,7 @@ fn poiseuille_wave(
     let g_th = (state.gamma - 1.0) * c_ad * omega * (rt * rt / 16.0).min(0.5);
     let z_series = C64::new(r_visc, omega * l_ax);
     let y_shunt = C64::new(g_th.max(0.0), omega * c_eff);
-    let mut k = (z_series * y_shunt).sqrt();
-    if k.im < 0.0 {
-        k = k.scale(-1.0);
-    }
+    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
     let mut zc = (z_series * y_shunt.recip()).sqrt();
     if zc.re < 0.0 {
         zc = zc.scale(-1.0);
@@ -519,10 +533,7 @@ fn bessel_wave(state: &GasState, radius: f64, omega: f64) -> Result<SegmentWave,
         y_shunt = jw.scale(area / (state.density * state.sound_speed * state.sound_speed))
             * (C64::ONE + f_t.scale(state.gamma - 1.0));
     }
-    let mut k = (z_series * y_shunt).sqrt();
-    if k.im < 0.0 {
-        k = k.scale(-1.0);
-    }
+    let k = helmholtz_from_telegraph((z_series * y_shunt).sqrt());
     let mut zc = (z_series * y_shunt.recip()).sqrt();
     if zc.re < 0.0 {
         zc = zc.scale(-1.0);
@@ -856,17 +867,17 @@ fn tone_hole_t_junction(
 }
 
 /// Enough spherical substations that each slice's `|Δr|/r` is
-/// about 1/5, clamped to `[2, 12]`. Lossless cones stay one
-/// transfer (the exact `e^{±ikx}/x` 2-port).
+/// about 1/5, clamped to `[2, 12]`. A lossless cone with no wall
+/// stays one transfer (the exact `e^{±ikx}/x` 2-port).
 fn cone_loss_slices(r_in: f64, r_out: f64) -> usize {
     let rmin = r_in.min(r_out).max(1.0e-9);
     let n = ((r_out - r_in).abs() / (0.2 * rmin)).ceil() as usize;
     n.clamp(2, 12)
 }
 
-/// Lossy cone as cascaded spherical 2-ports, each with `k, Zc`
-/// at the slice's own mid-radius. Mean-radius one-shot is the
-/// lossless path only.
+/// Cascaded spherical 2-ports, each with `k, Zc` at the slice's
+/// own mid-radius. Mean-radius one-shot is the lossless path
+/// with no wall; a wall follows local radius and slant.
 fn cone_lossy_matrix(
     inlet_radius: f64,
     outlet_radius: f64,
@@ -1315,8 +1326,8 @@ mod tests {
         .expect("all-regime");
         assert!(wave.shear_number < MIN_SHEAR_NUMBER);
         assert!(
-            wave.wavenumber.im > 0.0,
-            "narrow-tube k must decay: {:?}",
+            wave.wavenumber.im > 0.0 && wave.wavenumber.re > 0.0,
+            "narrow-tube Helmholtz k must decay forward: {:?}",
             wave.wavenumber
         );
         assert!(wave.characteristic_impedance.re > 0.0);
@@ -1341,6 +1352,17 @@ mod tests {
         assert!(bessel_w.shear_number > MIN_SHEAR_NUMBER);
         assert!(bessel_w.wavenumber.im > 0.0);
         assert!(bessel_w.characteristic_impedance.re > 0.0);
+        let k0 = omega_wide / state.sound_speed;
+        assert!(
+            bessel_w.wavenumber.re > 4.0 * bessel_w.wavenumber.im.max(1.0e-12),
+            "wide Bessel k must be Helmholtz e^{{ikx}}, not telegraph γ ({:?})",
+            bessel_w.wavenumber
+        );
+        assert!(
+            (bessel_w.wavenumber.re - k0).abs() < 0.1 * k0,
+            "wide Bessel Re k must sit near k0 ({:?} vs {k0})",
+            bessel_w.wavenumber
+        );
         let dk = (bessel_w.wavenumber.im - tube.wavenumber.im).abs();
         assert!(
             dk > 1.0e-6 * tube.wavenumber.im,
@@ -1358,6 +1380,38 @@ mod tests {
                 < 0.5 * poiseuille.wavenumber.im.max(1.0e-8),
             "narrow Bessel must sit near the Poiseuille floor"
         );
+    }
+
+    #[test]
+    fn bessel_closed_cylinder_rings_near_the_half_wave() {
+        let state = air();
+        let length = 0.34;
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.0075,
+                length,
+            }],
+        };
+        let f0 = state.sound_speed / (2.0 * length);
+        let sweep = impedance_sweep(
+            &duct,
+            &state,
+            2.0 * core::f64::consts::PI * 0.7 * f0,
+            2.0 * core::f64::consts::PI * 1.3 * f0,
+            800,
+            LossModel::Bessel,
+            Termination::Closed,
+        )
+        .expect("sweep");
+        let peaks = impedance_peaks(&sweep);
+        assert!(!peaks.is_empty(), "closed Bessel cylinder must ring");
+        let f = sweep[peaks[0]].omega / (2.0 * core::f64::consts::PI);
+        let rel = (f / f0 - 1.0).abs();
+        assert!(
+            rel < 0.08,
+            "Bessel closed peak {f:.1} vs c/2L {f0:.1} (rel {rel:.3})"
+        );
+        assert!(sweep[peaks[0]].impedance.re >= -1.0e-9);
     }
 
     #[test]
@@ -1382,6 +1436,11 @@ mod tests {
         let z_cyl = input_impedance(&cyl, &state, omega, LossModel::Bessel, Termination::Closed)
             .expect("cyl");
         assert!(z_cone.impedance.re >= -1.0e-9);
+        assert!(
+            z_cyl.impedance.re >= -1.0e-9,
+            "closed Bessel cylinder must be passive ({:?})",
+            z_cyl.impedance
+        );
         assert!(
             (z_cone.impedance - z_cyl.impedance).abs() > 1.0e-3 * z_cyl.impedance.abs().max(1.0),
             "spherical-wave Bessel cone must not reprint the mean cylinder"
@@ -2742,6 +2801,11 @@ mod tone_hole_tests {
             yielding.impedance,
             rigid.impedance
         );
+        assert!(
+            yielding.impedance.re.abs() < 1.0e-6 * yielding.impedance.abs().max(1.0),
+            "a lossless conservative wall must keep Z_in reactive ({:?})",
+            yielding.impedance
+        );
         let stiff = WallPin {
             surface_density: 20.0,
             stiffness_per_area: 1.0e10,
@@ -2770,7 +2834,11 @@ mod tone_hole_tests {
             Some(&soft),
         )
         .expect("bessel wall");
-        assert!(lossy.impedance.re.is_finite() && lossy.impedance.im.is_finite());
+        assert!(
+            lossy.impedance.re >= -1.0e-9 && lossy.impedance.im.is_finite(),
+            "Bessel + wall must stay passive ({:?})",
+            lossy.impedance
+        );
         assert!(
             input_impedance_wall(
                 &duct,
@@ -2822,7 +2890,11 @@ mod tone_hole_tests {
             "a walled lossless cone must not reprint the mean-radius pin ({:?} vs {z_mean:?})",
             z_cone.impedance
         );
-        assert!(z_cone.impedance.re.is_finite() && z_cone.impedance.im.is_finite());
+        assert!(
+            z_cone.impedance.re.abs() < 1.0e-6 * z_cone.impedance.abs().max(1.0),
+            "a lossless conservative cone wall must keep Z_in reactive ({:?})",
+            z_cone.impedance
+        );
     }
 
     #[test]
