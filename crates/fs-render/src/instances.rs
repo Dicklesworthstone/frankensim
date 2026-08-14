@@ -382,7 +382,7 @@ impl GeometryInstance {
             }
             SharedGeometry::Mesh(mesh) => {
                 let hit = mesh
-                    .intersect_surface_with_cx(cx, &local_ray)?
+                    .intersect_surface_with_cx_bounded(cx, &local_ray, t_max)?
                     .map(|mesh_hit| {
                         (
                             mesh_hit.hit,
@@ -525,7 +525,13 @@ impl InstanceScene {
         let mut best: Option<InstanceHit> = None;
         for instance in &self.instances {
             cx.checkpoint()?;
-            if let Some(candidate) = instance.intersect(cx, ray, t_max, eps)?
+            let candidate_t_max = match instance.geometry() {
+                SharedGeometry::Mesh(_) => best
+                    .as_ref()
+                    .map_or(t_max, |current| current.hit.t.min(t_max)),
+                SharedGeometry::Chart(_) => t_max,
+            };
+            if let Some(candidate) = instance.intersect(cx, ray, candidate_t_max, eps)?
                 && best
                     .as_ref()
                     .is_none_or(|current| candidate.hit.t < current.hit.t)

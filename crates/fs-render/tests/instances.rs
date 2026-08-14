@@ -163,6 +163,23 @@ fn identity_mesh_instance_matches_direct_hit_and_transforms_differentials() {
             InstanceBackendAudit::Mesh { bvh_fingerprint }
         );
         assert!(placed.hit.tangent_u.is_some() && placed.hit.dp_du.is_some());
+
+        let scaled_ray = Ray {
+            origin: ray.origin,
+            dir: ray.dir.scale(2.0),
+        };
+        let scaled_hit = instance
+            .intersect(cx, &scaled_ray, 1.0, 1.0e-9)
+            .unwrap()
+            .expect("the exact-distance mesh hit remains inside the instance bound");
+        assert_eq!(scaled_hit.hit.t.to_bits(), 1.0f64.to_bits());
+        assert!(
+            instance
+                .intersect(cx, &scaled_ray, 1.0f64.next_down(), 1.0e-9)
+                .unwrap()
+                .is_none(),
+            "the placed mesh must prune a hit beyond its caller bound"
+        );
     });
 }
 

@@ -23,7 +23,7 @@ use fs_rep_nurbs::{NurbsError, NurbsSurface};
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
-pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 10;
+pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 11;
 /// Default per-ray work budget used by [`sphere_trace`].
 pub const DEFAULT_SPHERE_TRACE_STEP_BUDGET: u32 = 4_096;
 /// Hard admission ceiling for an explicit [`sphere_trace_with_step_budget`]
@@ -2131,7 +2131,7 @@ impl TriMesh {
     /// Closest watertight triangle intersection through the BVH.
     #[must_use]
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
-        match self.intersect_surface_impl(None, ray) {
+        match self.intersect_surface_impl(None, ray, f64::INFINITY) {
             Ok(hit) => hit.map(|hit| hit.hit),
             Err(_) => unreachable!("no cancellation context was supplied"),
         }
@@ -2141,7 +2141,7 @@ impl TriMesh {
     /// barycentric correspondence.
     #[must_use]
     pub fn intersect_surface(&self, ray: &Ray) -> Option<MeshHit> {
-        match self.intersect_surface_impl(None, ray) {
+        match self.intersect_surface_impl(None, ray, f64::INFINITY) {
             Ok(hit) => hit,
             Err(_) => unreachable!("no cancellation context was supplied"),
         }
@@ -2149,7 +2149,19 @@ impl TriMesh {
 
     /// Cancellable closest triangle intersection for production render paths.
     pub fn intersect_with_cx(&self, cx: &Cx<'_>, ray: &Ray) -> Result<Option<Hit>, Cancelled> {
-        self.intersect_surface_impl(Some(cx), ray)
+        self.intersect_surface_impl(Some(cx), ray, f64::INFINITY)
+            .map(|hit| hit.map(|hit| hit.hit))
+    }
+
+    /// Cancellable closest triangle intersection no farther than the inclusive
+    /// caller bound. This keeps scene-level current-best pruning inside the BVH.
+    pub(crate) fn intersect_with_cx_bounded(
+        &self,
+        cx: &Cx<'_>,
+        ray: &Ray,
+        t_max: f64,
+    ) -> Result<Option<Hit>, Cancelled> {
+        self.intersect_surface_impl(Some(cx), ray, t_max)
             .map(|hit| hit.map(|hit| hit.hit))
     }
 
@@ -2160,13 +2172,25 @@ impl TriMesh {
         cx: &Cx<'_>,
         ray: &Ray,
     ) -> Result<Option<MeshHit>, Cancelled> {
-        self.intersect_surface_impl(Some(cx), ray)
+        self.intersect_surface_impl(Some(cx), ray, f64::INFINITY)
+    }
+
+    /// Cancellable closest triangle intersection with local-surface
+    /// correspondence and an inclusive caller bound.
+    pub(crate) fn intersect_surface_with_cx_bounded(
+        &self,
+        cx: &Cx<'_>,
+        ray: &Ray,
+        t_max: f64,
+    ) -> Result<Option<MeshHit>, Cancelled> {
+        self.intersect_surface_impl(Some(cx), ray, t_max)
     }
 
     fn intersect_surface_impl(
         &self,
         cx: Option<&Cx<'_>>,
         input_ray: &Ray,
+        caller_t_max: f64,
     ) -> Result<Option<MeshHit>, Cancelled> {
         if let Some(cx) = cx {
             cx.checkpoint()?;
@@ -2174,9 +2198,14 @@ impl TriMesh {
         let Some((ray, parameter_scale)) = scaled_parameter_ray(input_ray) else {
             return Ok(None);
         };
-        if self.nodes.is_empty() {
+        if self.nodes.is_empty() || caller_t_max.is_nan() || caller_t_max <= 0.0 {
             return Ok(None);
         }
+        let working_t_max = if caller_t_max.is_finite() {
+            conservative_product_upper(caller_t_max, parameter_scale)
+        } else {
+            caller_t_max
+        };
         let mut best: Option<MeshHit> = None;
         let mut stack = match BvhTraversalStack::<BVH_INLINE_STACK_CAPACITY>::new(0) {
             Ok(stack) => stack,
@@ -2196,7 +2225,7 @@ impl TriMesh {
                 &ray,
                 node.lo,
                 node.hi,
-                best.map_or(f64::INFINITY, |hit| hit.hit.t),
+                best.map_or(working_t_max, |hit| hit.hit.t.min(working_t_max)),
             ) {
                 continue;
             }
@@ -2209,7 +2238,7 @@ impl TriMesh {
                     if let Some(cx) = cx {
                         cx.checkpoint()?;
                     }
-                    if let Some(mut hit) = candidate
+                    if let Some(mut hit) = candidate.filter(|hit| hit.hit.t <= working_t_max)
                         && best
                             .as_ref()
                             .is_none_or(|current| mesh_hit_precedes(&hit, current))
@@ -2232,7 +2261,7 @@ impl TriMesh {
         }
         Ok(best.and_then(|mut mesh_hit| {
             let parameter_t = mesh_hit.hit.t / parameter_scale;
-            if !parameter_t.is_finite() || parameter_t <= 0.0 {
+            if !parameter_t.is_finite() || parameter_t <= 0.0 || parameter_t > caller_t_max {
                 return None;
             }
             mesh_hit.hit.t = parameter_t;
@@ -2579,7 +2608,7 @@ pub fn trace_scene(
                 }
             }
             Backend::Nurbs(surface) => ray_intersect_nurbs_with_cx(surface, cx, ray, 8, eps)?,
-            Backend::Mesh(mesh) => mesh.intersect_with_cx(cx, ray)?,
+            Backend::Mesh(mesh) => mesh.intersect_with_cx_bounded(cx, ray, t_max)?,
         };
         if let Some(h) = hit.filter(|hit| hit.t > 0.0 && hit.t <= t_max)
             && best.as_ref().is_none_or(|(_, bh)| h.t < bh.t)
@@ -2804,6 +2833,33 @@ mod tests {
         assert_eq!(
             accelerated.hit.steps, 11,
             "the first accepted leaf retains the legacy left-first visit audit"
+        );
+    }
+
+    #[test]
+    fn bvh_current_best_bound_is_inclusive_and_preserves_hit_bits() {
+        let mesh = TriMesh::new(
+            vec![[-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 1.0, 2.0]],
+            vec![[0, 1, 2]],
+        );
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(0.0, 0.0, 2.0),
+        };
+        let unbounded = mesh
+            .intersect_surface(&ray)
+            .expect("the triangle is hit without a bound");
+        let at_bound = mesh
+            .intersect_surface_impl(None, &ray, unbounded.hit.t)
+            .expect("a non-cancellable traversal cannot cancel")
+            .expect("an exact-distance tie remains inside the inclusive bound");
+
+        assert_eq!(at_bound, unbounded);
+        assert!(
+            mesh.intersect_surface_impl(None, &ray, unbounded.hit.t.next_down())
+                .expect("a non-cancellable traversal cannot cancel")
+                .is_none(),
+            "a hit beyond the caller's current-best bound is pruned"
         );
     }
 

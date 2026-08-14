@@ -14045,9 +14045,10 @@ fn intersect(
     let mut best: Option<SceneIntersection> = None;
     for (i, prim) in scene.primitives.iter().enumerate() {
         cx.checkpoint()?;
+        let current_best_t = best.as_ref().map(|current| current.hit.t);
         let candidate = match &prim.shape {
             Shape::Mesh(mesh) => mesh
-                .intersect_with_cx(cx, ray)?
+                .intersect_with_cx_bounded(cx, ray, current_best_t.unwrap_or(f64::INFINITY))?
                 .map(|hit| SceneIntersection {
                     primitive_index: i,
                     hit,
@@ -14076,8 +14077,12 @@ fn intersect(
                 }
             }
             Shape::Instance(instance) => {
+                let t_max = match instance.geometry() {
+                    SharedGeometry::Mesh(_) => current_best_t.map_or(1e4, |t| t.min(1e4)),
+                    SharedGeometry::Chart(_) => 1e4,
+                };
                 instance
-                    .intersect(cx, ray, 1e4, TRACE_EPS)?
+                    .intersect(cx, ray, t_max, TRACE_EPS)?
                     .map(|instance_hit| SceneIntersection {
                         primitive_index: i,
                         hit: instance_hit.hit,
@@ -14086,16 +14091,20 @@ fn intersect(
             }
             Shape::AnimatedInstance(instance) => {
                 let time = ray_time.ok_or(TracerError::MissingRayTime)?;
+                let t_max = match instance.geometry() {
+                    SharedGeometry::Mesh(_) => current_best_t.map_or(1e4, |t| t.min(1e4)),
+                    SharedGeometry::Chart(_) => 1e4,
+                };
                 let instance_hit = if let Some(cached) = time
                     .cached_animated
                     .iter()
                     .flatten()
                     .find(|cached| cached.primitive_index == i)
                 {
-                    cached.instance.intersect(cx, ray, 1e4, TRACE_EPS)?
+                    cached.instance.intersect(cx, ray, t_max, TRACE_EPS)?
                 } else {
                     let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
-                    instance.intersect(cx, &timed_ray, 1e4, TRACE_EPS)?
+                    instance.intersect(cx, &timed_ray, t_max, TRACE_EPS)?
                 };
                 instance_hit.map(|instance_hit| SceneIntersection {
                     primitive_index: i,

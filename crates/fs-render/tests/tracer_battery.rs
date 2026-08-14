@@ -644,7 +644,7 @@ fn fnv(bytes: &[u8]) -> u64 {
 /// integral is unchanged in expectation, but deterministic sample directions,
 /// PDFs, MIS weights, image bits, and variance deliberately changed. Fixture:
 /// 24×24, 8 spp, depth 4, MIS + iid Philox, seed 7; FNV-1a over the EXR bytes.
-/// This freeze also records the current chart-backend-bits=10 dependency.
+/// This freeze also records the current chart-backend-bits=11 dependency.
 /// Re-freeze only per docs/GOLDEN_POLICY.md.
 const CORNELL_GOLDEN: u64 = 0xe89b_e51c_b59b_21cc;
 

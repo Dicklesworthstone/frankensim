@@ -97,7 +97,11 @@ differentiable lift). Pure Rust throughout.
   for a numerically different point. Mesh hits additionally retain original
   triangle indices and barycentric coordinates; exact-distance feature ties
   select the lowest original triangle index. This is chart-backend
-  bit-semantics v10.
+  bit-semantics v11. Mesh BVH traversal accepts an inclusive scene-level
+  current-best distance, transforms it outward into the normalized-ray
+  parameterization, and prunes farther nodes without changing the selected hit
+  or exact-distance tie rule. `Hit.steps` remains an honest count of work
+  actually performed and can therefore decrease under this pruning.
   `TraceAudit`
   states whether every marched sample supplied a positive finite certified
   bound and compatible rigorous trace-value certificate, counts retreats to the
@@ -110,8 +114,8 @@ differentiable lift). Pure Rust throughout.
   a direct-call preview surface, never a production geometry decision.
   Mixed-scene tracing returns `Result`, propagates cancellation and chart
   refusal, and enforces `t_max` uniformly across charts, NURBS, and meshes.
-  `TriMesh` is Möller–Trumbore over a deterministic median-split BVH with
-  outward-rounded slab pruning;
+  `TriMesh` uses Woop/Benthin/Wald shear-space intersections over a
+  deterministic median-split BVH with outward-rounded slab pruning;
   `bvh_fingerprint` is a stable diagnostic receipt over its sorted layout.
   `trace_scene` mixes all three backend kinds by closest hit.
 

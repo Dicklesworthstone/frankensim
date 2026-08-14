@@ -697,7 +697,7 @@ fn oracle_first_hit(chart: &dyn Chart, cx: &Cx<'_>, ray: &Ray, t_max: f64) -> Op
 #[test]
 fn rb_001_zero_tunneling_headline() {
     with_cx(|cx| {
-        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 10);
+        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 11);
         // Falsifier pairing: four thin-feature fields whose L > 1. The naive
         // unit-bound marcher tunnels in every case; the certified d/L path
         // approaches under a no-tunneling theorem and closes a short rigorous
@@ -2130,6 +2130,29 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
                 .expect("bounded mesh trace")
                 .is_none(),
             "mesh hits beyond t_max must not leak into the scene"
+        );
+        let direct_mesh_hit = mesh.intersect(&bounded_ray).expect("mesh hit");
+        let (_, bounded_mesh_hit) = trace_scene(
+            &[Backend::Mesh(&mesh)],
+            cx,
+            &bounded_ray,
+            direct_mesh_hit.t,
+            1e-9,
+        )
+        .expect("exact-bound mesh trace")
+        .expect("an exact-distance mesh hit remains inside the inclusive bound");
+        assert_eq!(bounded_mesh_hit, direct_mesh_hit);
+        assert!(
+            trace_scene(
+                &[Backend::Mesh(&mesh)],
+                cx,
+                &bounded_ray,
+                direct_mesh_hit.t.next_down(),
+                1e-9,
+            )
+            .expect("below-bound mesh trace")
+            .is_none(),
+            "a mesh hit beyond the scene bound must be pruned"
         );
         // Mixed scene: three unit spheres at distinct centers, one per
         // backend — the closest-hit wins and identifies its instance.
