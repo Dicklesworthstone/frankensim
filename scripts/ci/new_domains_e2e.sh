@@ -19,6 +19,10 @@
 #                           declares seed_overridable = true)
 #   --max-wall-seconds <n> (tighten-only global budget override)
 #   --replay <receipt>     (re-validate a retained summary against its logs)
+#   --cancel-after <s>     (cancel each case after s seconds through TERM,
+#                           10s drain grace, then KILL = drain failure)
+#   --determinism-repeat   (run repo-deterministic cases twice; stdout must
+#                           agree byte-for-byte)
 #
 # EXIT CLASSES (stable):
 #    0 every selected case reached its declared terminal authority/refusal
