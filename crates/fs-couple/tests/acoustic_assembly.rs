@@ -7,8 +7,8 @@ use fs_couple::acoustic_realize::{
 use fs_couple::pcm_wav::{WavError, encode_pcm16_wav};
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, CylinderSegment,
-    Listener, Pluck, PrestressedString, RadiatingPlate, ThinPlate, ToneHole, UnilateralObstacle,
-    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+    HelmholtzCavity, Listener, Pluck, PrestressedString, RadiatingPlate, ThinPlate, ToneHole,
+    UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
 
 fn empty_base() -> AcousticAssembly {
@@ -23,6 +23,7 @@ fn empty_base() -> AcousticAssembly {
         soundboard: None,
         body_modes: vec![],
         plate: None,
+        cavity: None,
         obstacles: vec![],
         contact_texture: None,
         listener: Listener { distance_m: 1.0 },
@@ -62,6 +63,7 @@ fn closed_duct(temperature_k: f64) -> AcousticAssembly {
         ambient: AmbientGas {
             temperature_k,
             pressure_pa: 101_325.0,
+            relative_humidity: 0.0,
         },
         duct: Some(ViscothermalDuct {
             segments: vec![CylinderSegment {
@@ -512,6 +514,8 @@ fn steel_panel() -> ThinPlate {
         damping_ratio: 0.02,
         n_modes: 2,
         geometric_nonlinearity: false,
+        pretension_n_m: 0.0,
+        clamped: false,
     }
 }
 
@@ -538,6 +542,7 @@ fn taut_span_obstacle_changes_the_waveform() {
         stiffness: 5.0e5,
         alpha: 2.0,
         mu_kinetic: 0.0,
+        internal_loss: 0.0,
         provenance: "fixture/stay".into(),
     }];
     let a = realize_assembly(&bare).expect("bare");
@@ -748,6 +753,7 @@ fn kc_contact_is_inside_the_hamiltonian() {
         stiffness: 5.0e5,
         alpha: 2.0,
         mu_kinetic: 0.0,
+        internal_loss: 0.0,
         provenance: "fixture/stay".into(),
     }];
     let a = realize_assembly(&bare).expect("bare KC");
@@ -792,4 +798,68 @@ fn polarizations_share_the_plate() {
         max_e > 1.2 * min_e,
         "two polarizations on one plate must still beat ({max_e} vs {min_e})"
     );
+}
+
+#[test]
+fn helmholtz_cavity_changes_the_plate_waveform() {
+    let mut bare = plucked(80.0, 0.006, 0.004);
+    bare.plate = Some(steel_panel());
+    let mut boxed = bare.clone();
+    boxed.cavity = Some(HelmholtzCavity {
+        volume_m3: 0.02,
+        neck_radius_m: 0.02,
+        neck_length_m: 0.03,
+    });
+    let a = realize_assembly(&bare).expect("free plate");
+    let b = realize_assembly(&boxed).expect("cavity");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-8, "a Helmholtz volume must load the plate");
+}
+
+#[test]
+fn humid_observer_path_differs_from_dry() {
+    let mut dry = plucked(80.0, 0.006, 0.003);
+    dry.listener.distance_m = 80.0;
+    dry.duration_s = 0.08;
+    let mut wet = dry.clone();
+    wet.ambient.relative_humidity = 0.70;
+    let a = realize_assembly(&dry).expect("dry");
+    let b = realize_assembly(&wet).expect("wet");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 0.0, "ISO humidity must move a long observer path");
+}
+
+#[test]
+fn hunt_crossley_changes_rattle() {
+    let mut elastic = plucked(80.0, 0.006, 0.008);
+    elastic.obstacles = vec![UnilateralObstacle {
+        stations: vec![0.25, 0.5, 0.75],
+        gaps_m: vec![0.001, 0.001, 0.001],
+        stiffness: 5.0e5,
+        alpha: 2.0,
+        mu_kinetic: 0.0,
+        internal_loss: 0.0,
+        provenance: "fixture/stay".into(),
+    }];
+    let mut lossy = elastic.clone();
+    lossy.obstacles[0].internal_loss = 0.8;
+    let a = realize_assembly(&elastic).expect("elastic");
+    let b = realize_assembly(&lossy).expect("HC");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-8, "Hunt–Crossley must drain a rattle");
 }

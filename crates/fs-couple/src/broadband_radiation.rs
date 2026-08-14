@@ -821,10 +821,147 @@ fn error_summary(errors: &[f64]) -> (f64, f64) {
     (maximum, det::sqrt(mean_square))
 }
 
+/// Solver-neutral directional far-field samples `F(ω)` at one listener.
+///
+/// A BEM producer fills this table; this crate never depends on
+/// `fs-bem`. Pressure at range `r` is `p = F e^{ikr}/r` for the
+/// drive that built `F`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectionalFarFieldTable {
+    /// Producer identity retained in the report.
+    pub source_id: String,
+    /// Strictly increasing angular frequencies [rad/s].
+    pub omegas: Vec<f64>,
+    /// Far-field amplitudes `F(ω)` at one direction.
+    pub amplitudes: Vec<C64>,
+    /// Sound speed used to form `k = ω/c` [m/s].
+    pub sound_speed: f64,
+}
+
+impl DirectionalFarFieldTable {
+    /// Admit a directional table.
+    ///
+    /// # Errors
+    /// [`BroadbandRadiationError::InvalidInput`] on empty, mismatched,
+    /// non-monotonic, or non-finite samples.
+    pub fn new(
+        source_id: String,
+        omegas: Vec<f64>,
+        amplitudes: Vec<C64>,
+        sound_speed: f64,
+    ) -> Result<Self, BroadbandRadiationError> {
+        if source_id.is_empty() {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "far-field table needs a source identity",
+            ));
+        }
+        if omegas.is_empty() || omegas.len() != amplitudes.len() {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "far-field table frequencies and amplitudes must be nonempty and aligned",
+            ));
+        }
+        if !(sound_speed > 0.0 && sound_speed.is_finite()) {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "far-field sound speed must be finite and positive",
+            ));
+        }
+        let mut last = 0.0;
+        for (i, (&w, f)) in omegas.iter().zip(&amplitudes).enumerate() {
+            if !(w > 0.0 && w.is_finite()) || !f.re.is_finite() || !f.im.is_finite() {
+                return Err(BroadbandRadiationError::InvalidInput(
+                    "far-field samples must be finite and positive-frequency",
+                ));
+            }
+            if i > 0 && w <= last {
+                return Err(BroadbandRadiationError::InvalidInput(
+                    "far-field frequencies must be strictly increasing",
+                ));
+            }
+            last = w;
+        }
+        Ok(Self {
+            source_id,
+            omegas,
+            amplitudes,
+            sound_speed,
+        })
+    }
+
+    /// Linear interpolation of `F(ω)` (nearest endpoint outside the grid).
+    ///
+    /// # Errors
+    /// Non-finite or non-positive `omega`.
+    pub fn interpolate(&self, omega: f64) -> Result<C64, BroadbandRadiationError> {
+        if !(omega > 0.0 && omega.is_finite()) {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "observer frequency must be finite and positive",
+            ));
+        }
+        if omega <= self.omegas[0] {
+            return Ok(self.amplitudes[0]);
+        }
+        let last = self.omegas.len() - 1;
+        if omega >= self.omegas[last] {
+            return Ok(self.amplitudes[last]);
+        }
+        let mut hi = 1;
+        while hi < last && self.omegas[hi] < omega {
+            hi += 1;
+        }
+        let lo = hi - 1;
+        let t = (omega - self.omegas[lo]) / (self.omegas[hi] - self.omegas[lo]);
+        Ok(self.amplitudes[lo].scale(1.0 - t) + self.amplitudes[hi].scale(t))
+    }
+
+    /// Complex observer transfer `p/U = F(ω) e^{ikr}/r` at one frequency.
+    ///
+    /// # Errors
+    /// Interpolation refusals or a non-positive range.
+    pub fn pressure_transfer(
+        &self,
+        omega: f64,
+        range_m: f64,
+    ) -> Result<C64, BroadbandRadiationError> {
+        if !(range_m > 0.0 && range_m.is_finite()) {
+            return Err(BroadbandRadiationError::InvalidInput(
+                "observer range must be finite and positive",
+            ));
+        }
+        let f = self.interpolate(omega)?;
+        let k = omega / self.sound_speed;
+        let phase = C64::new(det::cos(k * range_m), det::sin(k * range_m));
+        Ok(f * phase.scale(1.0 / range_m))
+    }
+}
+
+/// Pressure phasor at `range_m` from a unit-drive far-field amplitude.
+///
+/// # Errors
+/// Non-positive range or non-finite wavenumber.
+pub fn far_field_observer_pressure(
+    f: C64,
+    k: f64,
+    range_m: f64,
+) -> Result<C64, BroadbandRadiationError> {
+    if !(range_m > 0.0 && range_m.is_finite()) || !(k > 0.0 && k.is_finite()) {
+        return Err(BroadbandRadiationError::InvalidInput(
+            "observer wavenumber and range must be finite and positive",
+        ));
+    }
+    if !f.re.is_finite() || !f.im.is_finite() {
+        return Err(BroadbandRadiationError::InvalidInput(
+            "far-field amplitude must be finite",
+        ));
+    }
+    let phase = C64::new(det::cos(k * range_m), det::sin(k * range_m));
+    Ok(f * phase.scale(1.0 / range_m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_bem::helmholtz::DirectivityTable;
+    use fs_bem::SpherePanels;
+    use fs_bem::helmholtz::{DirectivityTable, Formulation, Medium, tabulate_far_field};
 
     #[test]
     fn g0_real_tesseral_change_reconstructs_complex_basis_and_signs() {
@@ -992,5 +1129,46 @@ mod tests {
             build_broadband_radiation_artifact(&phase_mutation, controls()),
             Err(BroadbandRadiationError::HeldOutError(..))
         ));
+    }
+
+    #[test]
+    fn bem_far_field_table_is_a_solver_neutral_observer() {
+        let surface = SpherePanels::icosphere(1.0, 1).expect("icosphere");
+        let n = surface.centroids().len();
+        let medium = Medium::air();
+        let radius = 1.0;
+        let ka = 0.4;
+        let omega = ka * medium.sound_speed / radius;
+        let table = tabulate_far_field(
+            &surface,
+            &[omega],
+            &[[0.0, 0.0, 1.0]],
+            medium,
+            &vec![C64::ONE; n],
+            Formulation::PlainCbie,
+        )
+        .expect("bem table");
+        let f = table.amplitude(0, 0).expect("F");
+        let range = 8.0;
+        let p = far_field_observer_pressure(f, omega / medium.sound_speed, range).expect("p");
+        let ka2 = ka * ka;
+        let z_surf = C64::new(ka2, -ka).scale(medium.density * medium.sound_speed / (1.0 + ka2));
+        let f_analytic = z_surf.scale(radius) * C64::new(det::cos(-ka), det::sin(-ka));
+        let p_analytic = far_field_observer_pressure(f_analytic, omega / medium.sound_speed, range)
+            .expect("ref");
+        let rel = (p - p_analytic).abs() / p_analytic.abs().max(1.0e-18);
+        assert!(
+            rel < 0.08,
+            "BEM observer must reprint the pulsating-sphere far field ({p:?} vs {p_analytic:?}, rel {rel})"
+        );
+        let consumed = DirectionalFarFieldTable::new(
+            table.source_id.clone(),
+            table.omegas.clone(),
+            vec![f],
+            table.sound_speed,
+        )
+        .expect("consume");
+        let h = consumed.pressure_transfer(omega, range).expect("H");
+        assert!((h - p).abs() / p.abs().max(1.0e-18) < 1.0e-12);
     }
 }

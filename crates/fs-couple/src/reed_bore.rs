@@ -3,9 +3,9 @@
 //! The time port is the TMM reflectance FIR
 //! ([`crate::driving_point`]). Reed lay is an [`fs_dcontact`] obstacle
 //! whose Hunt–Crossley `χ` is matched to the existing viscous damper
-//! (not a private impact law). The observer path is Stokes–Kirchhoff
-//! absorption from [`crate::air_path`]. Vocal folds, lip reeds, and
-//! relief valves are the same objects.
+//! (not a private impact law). Observer absorption is applied once
+//! by realize (ISO 9613-1). Vocal folds, lip reeds, and relief
+//! valves are the same objects.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
@@ -132,7 +132,6 @@ pub fn realize_reed_bore(
         p_obs += gas.density * dfdt / (4.0 * core::f64::consts::PI * listener_m * gas.sound_speed);
         p_bore_hist[i] = p_obs;
     }
-    crate::air_path::absorb_pressure_history(&mut p_bore_hist, dt, listener_m, gas);
     Ok(p_bore_hist)
 }
 

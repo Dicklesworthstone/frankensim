@@ -12,10 +12,12 @@ use crate::modal_acoustic_time::{
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::realize_reed_bore;
 use crate::thin_plate::{PlateBank, VkBody, certified_radiators};
-use crate::unilateral_contact::{modal_contact_forces, modal_friction_forces};
+use crate::unilateral_contact::{
+    modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces,
+};
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
-use fs_material::visco::RayleighDamping;
+use fs_material::visco::{GeneralizedMaxwell, RayleighDamping};
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_nlmodal::{
@@ -119,6 +121,9 @@ pub fn realize_assembly(
     let mut pressure_pa = vec![0.0; n];
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
     bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz);
+    if let Some(cavity) = assembly.cavity {
+        bodies.attach_cavity(cavity, &gas)?;
+    }
     if assembly.string.is_some() && assembly.duct.is_some() {
         return realize_coupled(assembly, &gas, &mut bodies, n);
     }
@@ -171,11 +176,7 @@ pub fn realize_assembly(
         };
         add_in_place(&mut pressure_pa, &hist);
     }
-    Ok(RealizedAssembly {
-        sample_rate_hz: assembly.sample_rate_hz,
-        pressure_pa,
-        gas,
-    })
+    Ok(finish_observer(assembly, &gas, pressure_pa))
 }
 
 /// One shared clock: string, plate, and duct exchange force and flow
@@ -322,11 +323,7 @@ fn realize_coupled(
         p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
         out[i] = p;
     }
-    Ok(RealizedAssembly {
-        sample_rate_hz: assembly.sample_rate_hz,
-        pressure_pa: out,
-        gas: gas.clone(),
-    })
+    Ok(finish_observer(assembly, gas, out))
 }
 
 /// Shared clock with a Kirchhoff–Carrier string (EA > 0).
@@ -437,11 +434,7 @@ fn realize_coupled_kc(
         p += plates.drive_and_radiate(fb + p_bore * area, dt, gas.density, listener_m)?;
         out[i] = p;
     }
-    Ok(RealizedAssembly {
-        sample_rate_hz: assembly.sample_rate_hz,
-        pressure_pa: out,
-        gas: gas.clone(),
-    })
+    Ok(finish_observer(assembly, gas, out))
 }
 
 /// Encode the realization as PCM16 WAV.
@@ -476,12 +469,37 @@ fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeErr
 }
 
 fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
+    if !(ambient.relative_humidity >= 0.0 && ambient.relative_humidity <= 1.0) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "relative humidity must be an explicit fraction in [0, 1]",
+        });
+    }
     GasState::try_new(
         &GasSpec::dry_air_ussa1976(),
         ambient.temperature_k,
         ambient.pressure_pa,
     )
     .map_err(|e| AcousticRealizeError::Ambient(e.to_string()))
+}
+
+fn finish_observer(
+    assembly: &AcousticAssembly,
+    gas: &GasState,
+    mut pressure_pa: Vec<f64>,
+) -> RealizedAssembly {
+    let dt = 1.0 / f64::from(assembly.sample_rate_hz);
+    crate::air_path::absorb_pressure_history(
+        &mut pressure_pa,
+        dt,
+        assembly.listener.distance_m,
+        gas,
+        assembly.ambient.relative_humidity,
+    );
+    RealizedAssembly {
+        sample_rate_hz: assembly.sample_rate_hz,
+        pressure_pa,
+        gas: gas.clone(),
+    }
 }
 
 fn sample_count(rate_hz: u32, duration_s: f64) -> Result<usize, AcousticRealizeError> {
@@ -585,7 +603,22 @@ fn mode_zeta(
     } else {
         0.0
     };
-    Ok(string.damping_ratio + stokes + bend)
+    let internal = prony_internal_zeta(string, omega);
+    Ok(internal + stokes + bend)
+}
+
+/// Authored `ζ` at the fundamental becomes one Prony branch; higher
+/// modes see `η(ω)/2` from that branch, not a constant ratio.
+fn prony_internal_zeta(string: PrestressedString, omega: f64) -> f64 {
+    let z0 = string.damping_ratio;
+    if !(z0 > 0.0 && z0 < 0.49) {
+        return z0.max(0.0);
+    }
+    let omega1 = string_mode_omega(string, 1);
+    let eta0 = (2.0 * z0).min(0.99);
+    GeneralizedMaxwell::matching_loss(1.0, omega1.max(1.0), eta0)
+        .map(|gm| 0.5 * gm.loss_factor(omega))
+        .unwrap_or(z0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1000,6 +1033,13 @@ fn step_kc_member(
     }
     if obstacles.iter().any(|o| o.mu_kinetic > 0.0) {
         let extra = modal_friction_forces(string, obstacles, &member.x)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        for (uk, fk) in u.iter_mut().zip(extra) {
+            *uk += fk;
+        }
+    }
+    if obstacles.iter().any(|o| o.internal_loss > 0.0) {
+        let extra = modal_hunt_crossley_forces(string, obstacles, &member.x)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         for (uk, fk) in u.iter_mut().zip(extra) {
             *uk += fk;

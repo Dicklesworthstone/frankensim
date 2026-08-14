@@ -1,19 +1,28 @@
-//! Classical viscothermal absorption on a compact observer path.
+//! Free-field absorption on a compact observer path.
 //!
-//! `H(ω) = exp(−α(ω) r)` with Stokes–Kirchhoff `α ~ ω²` from
-//! [`GasState`]. A 10 m path and a 0.1 m path are the same law.
-//! This is not ISO 9613 humidity relaxation.
+//! `H(ω) = exp(−α(ω) r)` with ISO 9613-1 when the `(T, p, humidity)`
+//! window admits it. Humidity is an explicit `[0, 1]` argument.
+//! ISO already includes a classical term — this path does **not**
+//! add Stokes–Kirchhoff on top. Outside the ISO meteorological
+//! band the Stokes–Kirchhoff `α ~ ω²` law is the fallback.
 
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
+use fs_material::iso9613::iso9613_absorption;
 use fs_math::det;
 
-/// Apply Stokes–Kirchhoff absorption to a finished pressure history.
+/// Apply atmospheric absorption to a finished pressure history.
 ///
 /// The transfer is real and even; the block IFFT is the linear
 /// zero-phase map of that transfer on the DFT grid. `range_m ≤ 0`
 /// is a no-op.
-pub fn absorb_pressure_history(pressure_pa: &mut [f64], dt: f64, range_m: f64, gas: &GasState) {
+pub fn absorb_pressure_history(
+    pressure_pa: &mut [f64],
+    dt: f64,
+    range_m: f64,
+    gas: &GasState,
+    relative_humidity: f64,
+) {
     if pressure_pa.len() < 4 || !(dt > 0.0 && range_m > 0.0) {
         return;
     }
@@ -36,7 +45,9 @@ pub fn absorb_pressure_history(pressure_pa: &mut [f64], dt: f64, range_m: f64, g
             continue;
         }
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let atten = det::exp(-gas.stokes_kirchhoff_absorption(omega) * range_m);
+        let alpha = iso9613_absorption(gas, relative_humidity, omega)
+            .unwrap_or_else(|_| gas.stokes_kirchhoff_absorption(omega));
+        let atten = det::exp(-alpha * range_m);
         *bin = FftC64::new(bin.re * atten, bin.im * atten);
     }
     for k in 1..n_fft / 2 {
@@ -63,8 +74,8 @@ mod tests {
             .map(|i| (core::f64::consts::TAU * 2_000.0 * i as f64 * dt).sin())
             .collect();
         let mut far = near.clone();
-        absorb_pressure_history(&mut near, dt, 1.0, &gas);
-        absorb_pressure_history(&mut far, dt, 200.0, &gas);
+        absorb_pressure_history(&mut near, dt, 1.0, &gas, 0.50);
+        absorb_pressure_history(&mut far, dt, 200.0, &gas, 0.50);
         let en: f64 = near.iter().map(|x| x * x).sum();
         let ef: f64 = far.iter().map(|x| x * x).sum();
         assert!(

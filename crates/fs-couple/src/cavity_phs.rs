@@ -7,7 +7,10 @@
 //! type.
 
 use fs_material::visco::{ThermoelasticZener, loss_factor_to_zeta};
-use fs_phs::{PortHamiltonian, QuadraticStorage, helmholtz_resonator_flow, step};
+use fs_phs::{
+    MouthFlange, PortHamiltonian, QuadraticStorage, compact_radiation_impedance,
+    helmholtz_resonator_flow, step,
+};
 
 /// Typed refusal of the plate–cavity clock.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +62,8 @@ pub struct PlateCavitySpec {
     pub sound_speed: f64,
     /// Gas temperature [K] (thermoelastic T₀).
     pub temperature_k: f64,
+    /// Relative humidity in `[0, 1]` for the observer path.
+    pub relative_humidity: f64,
 }
 
 /// Realize observer pressure of a driven plate on a Helmholtz volume.
@@ -99,13 +104,26 @@ pub fn realize_plate_cavity(
     }
     let plate = plate_force_and_flow(&spec.omegas, &zetas, &spec.drive, &spec.areas)
         .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+    let pi = core::f64::consts::PI;
+    let neck_area = pi * spec.neck_radius_m * spec.neck_radius_m;
+    let l_eff = spec.neck_length_m + 2.0 * (8.0 / (3.0 * pi)) * spec.neck_radius_m;
+    let omega0 = spec.sound_speed * (neck_area / (spec.volume_m3 * l_eff)).sqrt();
+    let r_rad = compact_radiation_impedance(
+        spec.density,
+        spec.sound_speed,
+        spec.neck_radius_m,
+        omega0,
+        MouthFlange::Unflanged,
+    )
+    .map(|(r, _)| r)
+    .unwrap_or(0.0);
     let cavity = helmholtz_resonator_flow(
         spec.volume_m3,
         spec.neck_radius_m,
         spec.neck_length_m,
         spec.density,
         spec.sound_speed,
-        0.0,
+        r_rad,
     )
     .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     let dt = 1.0 / f64::from(sample_rate_hz);
@@ -136,6 +154,19 @@ pub fn realize_plate_cavity(
             });
         }
         out.push(p_obs);
+    }
+    if let Ok(gas) = fs_material::gas::GasState::try_new(
+        &fs_material::gas::GasSpec::dry_air_ussa1976(),
+        spec.temperature_k,
+        101_325.0,
+    ) {
+        crate::air_path::absorb_pressure_history(
+            &mut out,
+            dt,
+            listener_m,
+            &gas,
+            spec.relative_humidity,
+        );
     }
     Ok(out)
 }
@@ -189,6 +220,7 @@ mod tests {
             density: 1.2,
             sound_speed: 343.0,
             temperature_k: 293.0,
+            relative_humidity: 0.0,
         }
     }
 

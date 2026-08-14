@@ -42,7 +42,8 @@ pub fn span_obstacle(
         spec.stiffness,
         spec.alpha,
         spec.provenance.clone(),
-    )
+    )?
+    .with_internal_loss(spec.internal_loss)
 }
 
 /// Reed/valve lay: one collocation point on a 1-DOF opening.
@@ -87,10 +88,20 @@ pub fn modal_contact_forces(
         return Ok(vec![0.0; string.n_modes]);
     }
     let obs: Result<Vec<_>, _> = obstacles.iter().map(|o| span_obstacle(string, o)).collect();
-    let storage = ContactStorage::new(Box::new(ZeroStorage), string.n_modes, obs?)?;
+    let obs = obs?;
+    let storage = ContactStorage::new(Box::new(ZeroStorage), string.n_modes, obs.clone())?;
     let mut g = vec![0.0; 2 * string.n_modes];
     storage.gradient(x, &mut g);
     let mut forces: Vec<f64> = (0..string.n_modes).map(|k| -g[2 * k]).collect();
+    let velocities: Vec<f64> = (0..string.n_modes).map(|k| x[2 * k + 1]).collect();
+    for extra in obs
+        .iter()
+        .map(|o| o.dissipative_modal_forces(string.n_modes, x, &velocities))
+    {
+        for (f, e) in forces.iter_mut().zip(extra) {
+            *f += e;
+        }
+    }
     let mass_scale = (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
     let pi = core::f64::consts::PI;
     for spec in obstacles {
@@ -191,6 +202,33 @@ pub fn modal_friction_forces(
                 let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
                 forces[k] += ft * ph;
             }
+        }
+    }
+    Ok(forces)
+}
+
+/// Hunt–Crossley port forces only. Conservative contact lives in
+/// [`wrap_modal_contact`].
+///
+/// # Errors
+/// Obstacle shape or dcontact admission.
+pub fn modal_hunt_crossley_forces(
+    string: PrestressedString,
+    obstacles: &[UnilateralObstacle],
+    x: &[f64],
+) -> Result<Vec<f64>, DContactError> {
+    let mut forces = vec![0.0; string.n_modes];
+    if obstacles.iter().all(|o| !(o.internal_loss > 0.0)) {
+        return Ok(forces);
+    }
+    let obs: Result<Vec<_>, _> = obstacles.iter().map(|o| span_obstacle(string, o)).collect();
+    let velocities: Vec<f64> = (0..string.n_modes).map(|k| x[2 * k + 1]).collect();
+    for extra in obs?
+        .iter()
+        .map(|o| o.dissipative_modal_forces(string.n_modes, x, &velocities))
+    {
+        for (f, e) in forces.iter_mut().zip(extra) {
+            *f += e;
         }
     }
     Ok(forces)

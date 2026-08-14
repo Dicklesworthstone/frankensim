@@ -266,8 +266,9 @@ clarinet is one filling of those objects.
   Gonzalez sees the contact energy. Optional `mu_kinetic` adds
   `fs-tribo` Coulomb traction as a modal port force (not a gradient
   of `H`). The linear modal path still applies both as a force.
-  Hunt–Crossley damping inside the collision remains a dcontact
-  no-claim.
+  Hunt–Crossley `χ` is a scenario field on the obstacle and a
+  dissipative port force (`modal_hunt_crossley_forces`), never a
+  term in `H`.
 - Reed and structure–bore time port: TMM `R(ω)` sampled on the DFT
   grid and inverse-transformed to an FIR. Isolated linear blow (no
   body) is the same `DelayedFilter` object filled with `IFFT[Z_in]`
@@ -279,12 +280,30 @@ clarinet is one filling of those objects.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Radiation
-  reaction on linear compact radiators is the baffled-piston small-`ka`
-  series (the `fs-bem` Rayleigh-integral oracle) fitted and
+  reaction on linear compact radiators is the Rayleigh-integral
+  baffled-piston face impedance (same half-space kernel as `fs-bem`,
+  written in-tree so couple does not depend on bem) fitted and
   passivity-repaired by `fs-vfit`. `fs-bem` is not a production
-  dependency of this crate (cycle through `fs-feec`). The far-field
-  observer is the baffled on-axis piston `p = ρ A ÿ / (2 π r)`, the
-  same half-space as the self-load, not a free-space monopole.
+  dependency of this crate (cycle through `fs-feec`). Linear plates
+  accept in-plane pretension and clamped edges. Von Karman is the
+  isotropic SS sine path when `e1 = e2` and edges are free to
+  rotate; clamped or orthotropic bending uses DKT-sampled
+  displacement with the same sine Airy membrane channel
+  (`von_karman_sampled_plate`). The compact far-field observer is
+  the baffled on-axis piston `p = ρ A ÿ / (2 π r)`, the same
+  half-space as the self-load. A full BEM observer is the
+  solver-neutral `DirectionalFarFieldTable` /
+  `far_field_observer_pressure` (`p = F e^{ikr}/r`); `fs-bem`
+  produces `FarFieldTable` as a **dev-dependency** only (the
+  production cycle `couple → bem → solver → feec → couple` is
+  refused).
+  The finished pressure history is passed through ISO 9613-1
+  absorption (`air_path`) with the assembly's explicit humidity;
+  Stokes–Kirchhoff is only the fallback outside the ISO window.
+  Authored string `ζ` at the fundamental becomes a Prony branch
+  (`GeneralizedMaxwell::matching_loss`); higher modes see `η(ω)/2`.
+  An optional `HelmholtzCavity` faces the plate monopoles as a
+  flow-driven pHS whose damper is compact-mouth `Re Z_rad(ω₀)`.
 - Bow roughness: an optional `ContactTexture` is a declared
   self-affine height spectrum. `fs-tribo::surface_excitation` samples
   it; the height perturbs the normal load that Stribeck sees. No
@@ -296,8 +315,9 @@ clarinet is one filling of those objects.
   port) and the duct is an FIR scatterer, not an ODE pHS. `fs-phs`
   is ODE-form only.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
-  analytic primitive. Orthotropic or clamped VK is
-  a no-claim; those plates stay the linear DKT + `fs-modal` bank.
+  analytic primitive when those hypotheses hold, and the FE-sampled
+  Airy construction otherwise. The membrane channel remains the
+  sine Airy basis (in-plane movable).
 - Reed observer adds the compact far-field dipole of the slit force
   `F = Δp · w · y`. That is not 3-D jet broadband and not the
   fs-aeroac 2-D Curle Hankel kernel. 3-D jet broadband remains a
@@ -468,7 +488,8 @@ determinism.
   instrument product and not a 3D jet. Bow is regularized friction, not
   measured rosin or Helmholtz-guaranteed. A linear `ThinPlate` is DKT +
   certified modes + compact monopoles. `geometric_nonlinearity` selects
-  the isotropic von Karman modal pHS, not a full shell or a BEM body.
+  the von Karman modal pHS (SS sine or FE-sampled DKT `w`), not a
+  full shell or an in-process BEM body.
   String+duct+plate share one sample clock and, when `EA > 0`, a
   Gonzalez string whose contact lives in `H`; that is not a certified
   Dirac interconnection of three pHS. Isolated blow is an impedance
