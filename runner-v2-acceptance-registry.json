@@ -1,6 +1,6 @@
 {
   "authority_statement": "INERT INVENTORY DATA derived from frozen br output. Clause text is bound by hash, never rewritten; the beads database remains the sole clause authority. This registry cannot close, alter, or supersede any acceptance criterion.",
-  "beads_source_sha256": "1ca8f9d64f9f4d238fce57dc2dab7a8bae54c1cb22718d7c0259b065611bfe89",
+  "beads_source_sha256": "3fec1df44c04a363c70e6e690281dc576f36ab190638ee67ac4c040979440280",
   "family_size": 113,
   "findings": [],
   "rows": [
@@ -1516,7 +1516,7 @@
       "id": "frankensim-epic-foundations-huq.24.6",
       "owned_ac_fragments": [],
       "owned_symbols": [],
-      "status": "in_progress",
+      "status": "open",
       "supersession_language": true,
       "title": "Runner V2 acceptance-contract normalization and lossless clause-preservation ratchet"
     },
