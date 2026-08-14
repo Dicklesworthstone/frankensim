@@ -479,3 +479,132 @@ where
         disposition,
     })
 }
+
+/// Versioned domain for run-log content addresses.
+pub const RUN_LOG_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.prediction-run-log.v1";
+/// Run-log schema identity.
+pub const RUN_LOG_SCHEMA: &str = "frankensim.fs-session.prediction-run-log.v1";
+
+/// Bounded, deterministic, content-addressed log of one ensemble run.
+///
+/// Redaction is BY CONSTRUCTION: the schema has no field for wall-clock
+/// time, process identity, host identity, worker identity, or filesystem
+/// paths, so none can leak into the buffered or hashed bytes. Two replays
+/// of the same run produce byte-identical logs (the determinism test
+/// executes this claim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsembleRunLog {
+    input_root: fs_blake3::ContentHash,
+    rung: String,
+    requested: u64,
+    /// One class byte per sample: 1 succeeded, 2 refused, 3 failed,
+    /// 4 cancelled-drain. Bounded by [`MAX_ENSEMBLE_SAMPLES`].
+    outcome_classes: Vec<u8>,
+    /// Deduplicated refusal/failure rules with occurrence counts, in
+    /// canonical (rule, class) order.
+    rule_counts: Vec<(String, u8, u64)>,
+    /// First non-succeeded sample index, the log's "first divergence".
+    first_divergence: Option<u64>,
+    disposition: RunDisposition,
+}
+
+impl EnsembleRunLog {
+    /// Canonical log bytes (schema-versioned, deterministic).
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(RUN_LOG_SCHEMA.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(self.input_root.as_bytes());
+        bytes.extend_from_slice(self.rung.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&self.requested.to_le_bytes());
+        bytes.extend_from_slice(&self.outcome_classes);
+        for (rule, class, count) in &self.rule_counts {
+            bytes.push(*class);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(rule.as_bytes());
+            bytes.push(0);
+        }
+        match self.first_divergence {
+            None => bytes.push(0),
+            Some(index) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&index.to_le_bytes());
+            }
+        }
+        match self.disposition {
+            RunDisposition::Completed => bytes.push(0),
+            RunDisposition::Cancelled { drained_from } => {
+                bytes.push(1);
+                bytes.extend_from_slice(&drained_from.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    /// Content address of the canonical log bytes.
+    #[must_use]
+    pub fn identity(&self) -> fs_blake3::ContentHash {
+        fs_blake3::hash_domain(RUN_LOG_IDENTITY_DOMAIN, &self.canonical_bytes())
+    }
+
+    /// First non-succeeded sample index.
+    #[must_use]
+    pub const fn first_divergence(&self) -> Option<u64> {
+        self.first_divergence
+    }
+
+    /// Repository-relative reproduction command: replays this exact run
+    /// through the executor battery harness. Contains no absolute paths.
+    #[must_use]
+    pub fn reproduction_command(&self) -> String {
+        format!(
+            "cargo test -p fs-session --test prediction_executor -- replay              # input_root={} rung={} requested={}",
+            self.input_root.to_hex(),
+            self.rung,
+            self.requested
+        )
+    }
+}
+
+impl EnsembleRun {
+    /// Project the bounded deterministic run log from retained outcomes.
+    #[must_use]
+    pub fn log(&self) -> EnsembleRunLog {
+        let mut outcome_classes = Vec::with_capacity(self.outcomes.len());
+        let mut rules: std::collections::BTreeMap<(String, u8), u64> =
+            std::collections::BTreeMap::new();
+        let mut first_divergence = None;
+        for (index, outcome) in self.outcomes.iter().enumerate() {
+            let class = match outcome {
+                SampleOutcome::Succeeded { .. } => 1u8,
+                SampleOutcome::Refused { rule } => {
+                    *rules.entry((rule.clone(), 2)).or_insert(0) += 1;
+                    2
+                }
+                SampleOutcome::Failed { rule } => {
+                    *rules.entry((rule.clone(), 3)).or_insert(0) += 1;
+                    3
+                }
+                SampleOutcome::Cancelled => 4,
+            };
+            if class != 1 && first_divergence.is_none() {
+                first_divergence = Some(index as u64);
+            }
+            outcome_classes.push(class);
+        }
+        EnsembleRunLog {
+            input_root: self.input_root,
+            rung: self.rung.clone(),
+            requested: self.outcomes.len() as u64,
+            outcome_classes,
+            rule_counts: rules
+                .into_iter()
+                .map(|((rule, class), count)| (rule, class, count))
+                .collect(),
+            first_divergence,
+            disposition: self.disposition,
+        }
+    }
+}

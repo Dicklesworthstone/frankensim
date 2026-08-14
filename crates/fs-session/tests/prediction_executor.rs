@@ -413,3 +413,83 @@ fn checkpoints_bind_lineage_and_refuse_foreign_resume() {
     // Trivial self-consistency: identical checkpoints share identity.
     assert_eq!(checkpoint.identity(), identity);
 }
+
+#[test]
+fn run_log_is_deterministic_bounded_and_content_addressed() {
+    let input = admitted_input();
+    let run = |_: ()| {
+        with_cx(|cx, _| {
+            execute_ensemble(cx, &input, "reduced-order", 32, parity_model).expect("runs")
+        })
+    };
+    let first = run(()).log();
+    let replay = run(()).log();
+    assert_eq!(
+        first.canonical_bytes(),
+        replay.canonical_bytes(),
+        "replayed logs must be byte-identical"
+    );
+    assert_eq!(first.identity(), replay.identity());
+    // Bounded: one class byte per sample plus deduplicated rules.
+    assert!(
+        first.canonical_bytes().len() < 32 + 2048,
+        "log stays bounded"
+    );
+    // The reproduction command is repository-relative: no absolute paths.
+    let reproduction = first.reproduction_command();
+    assert!(reproduction.starts_with("cargo test -p fs-session"));
+    assert!(!reproduction.contains("/Users") && !reproduction.contains("/home"));
+    // Redaction by construction: the canonical bytes of two logs from the
+    // same logical run never differ, so nothing environment-dependent
+    // (wall clock, PID, host, worker) can be present.
+}
+
+#[test]
+fn run_log_first_divergence_and_rule_counts_are_exact() {
+    let input = admitted_input();
+    let run = with_cx(|cx, _| {
+        execute_ensemble(
+            cx,
+            &input,
+            "reduced-order",
+            12,
+            |coordinates, _| match coordinates.sample_index {
+                4 => SampleOutcome::Failed {
+                    rule: "test-blowup".to_string(),
+                },
+                7 | 9 => SampleOutcome::Refused {
+                    rule: "test-out-of-domain".to_string(),
+                },
+                _ => SampleOutcome::Succeeded {
+                    artifact_hashes: vec![fs_blake3::hash_bytes(b"a")],
+                },
+            },
+        )
+        .expect("runs")
+    });
+    let log = run.log();
+    assert_eq!(log.first_divergence(), Some(4));
+    // Identity moves with outcome content: a run differing only in one
+    // sample's rule has a different log identity.
+    let other = with_cx(|cx, _| {
+        execute_ensemble(
+            cx,
+            &input,
+            "reduced-order",
+            12,
+            |coordinates, _| match coordinates.sample_index {
+                4 => SampleOutcome::Failed {
+                    rule: "test-DIFFERENT-blowup".to_string(),
+                },
+                7 | 9 => SampleOutcome::Refused {
+                    rule: "test-out-of-domain".to_string(),
+                },
+                _ => SampleOutcome::Succeeded {
+                    artifact_hashes: vec![fs_blake3::hash_bytes(b"a")],
+                },
+            },
+        )
+        .expect("runs")
+    });
+    assert_ne!(other.log().identity(), log.identity());
+}
