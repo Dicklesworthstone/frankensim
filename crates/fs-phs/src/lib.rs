@@ -1671,13 +1671,8 @@ fn apply_open_mouth_radiation(
     omega: f64,
     scale: f64,
 ) -> Result<(), PhsError> {
-    let (rr, xx) = compact_radiation_impedance(
-        density,
-        sound_speed,
-        radius,
-        omega,
-        MouthFlange::Unflanged,
-    )?;
+    let (rr, xx) =
+        compact_radiation_impedance(density, sound_speed, radius, omega, MouthFlange::Unflanged)?;
     r[last_flux * n + last_flux] += rr * scale;
     apply_t_junction_series(q, n, last_flux, (-xx / omega) * scale);
     Ok(())
@@ -2122,7 +2117,9 @@ pub fn acoustic_waveguide(
 /// near-field `−(α/(iωρ)) ψ`, a shunt inertance
 /// `L = ρ|x|/α` on each ψ-charge. Without it the lossless
 /// closed line reprints an inlet-radius cylinder
-/// (`Z_phys = Z_ψ / x₁²`). This is the time-domain image of
+/// (`Z_phys = Z_ψ / x₁²`). An open mouth is the same compact
+/// `(R, X)` as the cylinder, on the last ψ-flux with
+/// `Z_ψ = x_out² Z_phys`. This is the time-domain image of
 /// the spherical `e^{±ikx}/x` TMM, not a frustum LC slice.
 /// Equal end radii are refused — use [`acoustic_chain`].
 ///
