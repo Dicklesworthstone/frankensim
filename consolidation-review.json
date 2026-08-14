@@ -360,6 +360,17 @@
       ],
       "candidates": [
         {
+          "crate": "fs-aeroac",
+          "disposition": "KEEP",
+          "rationale": "KEEP: musical-acoustics program facility (beads 9ok02/l011o, epic tx6k8 closed 2026-08-13). Curle aeroacoustic sources + the CentralMoment jet-labium rig with executed tonal-regime refusal evidence. Named consumer pending: the owner-doctrine instrument-synthesis workflow (jazz-studio PHS extraction) and the recorded SlotJet3dFollowUp 3D continuation. New investment days old, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 6,
+            "src_files": 7,
+            "last_commit": "2026-08-13",
+            "dependent_crates": 0
+          }
+        },
+        {
           "crate": "fs-airflow",
           "disposition": "KEEP",
           "rationale": "Named consumer pending in-flight: the E06 cooling product workflow (f85xj.6.5/.6.11) remains the declared consumer. Continued source investment through 2026-07-28 is evidence of an active lane, not workflow integration or maturity.",
@@ -503,6 +514,28 @@
           }
         },
         {
+          "crate": "fs-matdb-store",
+          "disposition": "KEEP",
+          "rationale": "KEEP: storage seam for the 35 provenance-pinned instrument material packs (bead zwzey, closed). Named consumer pending: the same instrument-synthesis workflow consuming loss-factor packs; fs-matdb packs it stores are already consumed by the fs-cli material-resolve stage lane. New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-08-09",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-modalid",
+          "disposition": "KEEP",
+          "rationale": "KEEP: experimental modal identification (Loewner + RFP with stabilization/MAC gates, bead 1qxdh, closed with tests). Named consumer pending: instrument model calibration against measured mobilities in the owner-doctrine synthesis workflow. New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-08-09",
+            "dependent_crates": 0
+          }
+        },
+        {
           "crate": "fs-probe",
           "disposition": "KEEP",
           "rationale": "Probe surface named in the README HELM and utility family.",
@@ -510,6 +543,17 @@
             "test_files": 2,
             "src_files": 1,
             "last_commit": "2026-07-17",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-psycho",
+          "disposition": "KEEP",
+          "rationale": "KEEP: standards-anchored psychoacoustic metrics (bead 4y0v8, closed; BBN cross-covariance class mandatory per its close). Named consumer pending: perceptual acceptance gates for rendered instrument audio in the synthesis workflow (the euler cinematic audio lane is an in-tree candidate consumer today). New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 8,
+            "last_commit": "2026-08-10",
             "dependent_crates": 0
           }
         },
