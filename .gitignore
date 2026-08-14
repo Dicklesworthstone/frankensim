@@ -134,8 +134,14 @@ frankensim_illustration.png
 /test.m4a
 # br fsqlite-ns VFS sidecars — per-machine runtime state, like -wal/-shm
 .beads/beads.db-fsqlite-ns-*
-# Recoverable Beads write-lock snapshots moved aside when stale
-.beads/.write.lock.stale-*
+# Recoverable Beads write-lock snapshots moved aside when stale.
+# Cover `.stale`, `.stale2`, and `.stale-<timestamp>` — the hyphenated
+# form misses the first two.
+.beads/.write.lock.stale
+.beads/.write.lock.stale*
+
+# new_domains_e2e.sh / selftest scratch (never reused, never escaped)
+/.e2e-out/
 # git-repo-janitor skill scratch workspace
 .repo_janitor_workspace/
 # Skill-loop progress scratch
