@@ -534,6 +534,7 @@
     "crates/fs-evidence/tests/conformance.rs",
     "crates/fs-evidence/tests/falsify.rs",
     "crates/fs-evidence/tests/identity.rs",
+    "crates/fs-evidence/tests/prediction_bundle.rs",
     "crates/fs-evidence/tests/uncertainty.rs",
     "crates/fs-evidence/tests/useful_bound.rs",
     "crates/fs-evidence/tests/vv.rs",

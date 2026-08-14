@@ -53,6 +53,7 @@ pub mod falsify;
 pub mod identity;
 pub mod uncertainty;
 pub mod useful_bound;
+pub mod prediction_bundle;
 pub mod vv;
 
 pub use admitted::{
