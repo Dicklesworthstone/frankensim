@@ -35,11 +35,6 @@ fs-alloc = { path = "../fs-alloc" }
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
-# Test-only: `fs_conduction::LinearSolveEvidence::reported` is typed
-# `fs_solver::krylov::ResidualClaim`, which fs-conduction does not re-export.
-# The QoI upstream-evidence mutation sweep must build a non-converged linear
-# record to prove the seam refuses one.
-fs-solver = { path = "../fs-solver" }
 
 [lints]
 workspace = true

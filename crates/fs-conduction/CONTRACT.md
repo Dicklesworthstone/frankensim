@@ -110,6 +110,7 @@ diameter.
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
 | `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
 | `ConductionSolution`, `ConductionReport`, `EnergyBalance`, `LinearSolveEvidence` | the field and everything established about how it was produced |
+| `ResidualClaim`, `StallDiagnosis` (re-exported from `fs-solver`) | the types of `LinearSolveEvidence::reported` and `LinearSolveEvidence::stall`; re-exported so every type reachable through this crate's public fields is nameable from this crate (bead qvmwp) |
 | `RobinFlux` | `EnergyBalance::robin_out_w` restricted to ONE declared Robin region: face count, area, area-weighted mean `h` / wall temperature / `T_ref`, and the integrated heat rate. This is what lets a conjugate driver attribute heat to a named convective trace instead of to the whole domain |
 | `ThermalBoundary::region_for` | the region index owning a boundary-face slot, or `None` in the declared adiabatic remainder — the attribution the `RobinFlux` decomposition is built on |
 | `ConductivityDesign` | the IFT adjoint hook for the LINEAR case: `dJ/dρ` over per-element conductivity multipliers. `new_with_element_materials` uses each tet's own linear `K_e`; any `k(T)` assignment is refused rather than linearized |

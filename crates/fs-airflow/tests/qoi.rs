@@ -12,6 +12,7 @@ use fs_airflow::{
     LossElement, LossNetwork, LossResistance, SourceProvenance, ToleranceBasis,
     solve_operating_point,
 };
+use fs_conduction::ResidualClaim;
 use fs_conduction::fixtures::unit_cube;
 use fs_conduction::{
     ConductionMesh, ConductionReport, ConductionSolution, EnergyBalance, LinearSolveEvidence,
@@ -27,7 +28,6 @@ use fs_regime::{
     EnvelopeCoverage, OperatingPoint as RegimeOperatingPoint, OverrideAcknowledgement,
     RegimeAuditCard,
 };
-use fs_solver::krylov::ResidualClaim;
 
 fn source(id: &str) -> SourceProvenance {
     SourceProvenance::new("retained synthetic G0 source", id)

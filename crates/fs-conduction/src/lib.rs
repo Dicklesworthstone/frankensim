@@ -110,6 +110,9 @@ pub use solve::{
     solve, solve_with_element_materials, solve_with_element_materials_and_interfaces,
     solve_with_interfaces,
 };
+// Types reachable through public fields of `LinearSolveEvidence` must be
+// nameable from this crate without a direct fs-solver dependency (bead qvmwp).
+pub use fs_solver::krylov::{ResidualClaim, StallDiagnosis};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
