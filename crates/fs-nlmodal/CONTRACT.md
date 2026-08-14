@@ -55,6 +55,9 @@ the crash cascade with structurally exact energy accounting.
   the averaged-tension Kirchhoff-Carrier form in mass-normalized
   coordinates (hand-derivation pinned in the battery). A guitar
   string is one filling; the law is a prestressed cable.
+- `kirchhoff_carrier_moving_end` — the same channel on free-fixed
+  cosines `κ = (k−½)π/L`. `φ(0) ≠ 0`, so the attachment is a
+  Dirac port. Fixed-fixed sines stay the one-way bridge.
 - `prestressed_beam_omega` — linear angular frequency of sine mode
   `k` on a tensioned Euler–Bernoulli beam,
   `ω = n π c/L √(1 + B n²)` with `B = π² EI/(T L²)`. `EI = 0` is

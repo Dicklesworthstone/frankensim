@@ -8,8 +8,8 @@
 
 use fs_nlmodal::{
     KcStringParams, NlModalError, SampledPlateMode, SineMode, SosModalStorage, StressChannel,
-    VkPlateParams, assemble, duffing_backbone, kirchhoff_carrier_string, single_mode_beta,
-    von_karman_sampled_plate, von_karman_ss_plate,
+    VkPlateParams, assemble, duffing_backbone, kirchhoff_carrier_moving_end,
+    kirchhoff_carrier_string, single_mode_beta, von_karman_sampled_plate, von_karman_ss_plate,
 };
 use fs_phs::{PortHamiltonian, Storage, step};
 
@@ -200,6 +200,29 @@ fn kirchhoff_carrier_beta_matches_hand_formula_and_glide() {
             "mode {k}: beta {beta_code:.6e} vs hand {beta_hand:.6e}"
         );
     }
+    let free = kirchhoff_carrier_moving_end(&p, 3).expect("moving-end kc");
+    let c = fs_math::det::sqrt(p.tension / p.lin_density);
+    for k in 0..3usize {
+        let kappa = (k as f64 + 0.5) * pi / p.length;
+        let want_w = kappa * c;
+        assert!(
+            (free.omegas[k] - want_w).abs() <= 1.0e-12 * want_w,
+            "free-fixed ω[{k}] {} vs {want_w}",
+            free.omegas[k]
+        );
+        let beta_hand =
+            p.ea * kappa * kappa * kappa * kappa / (2.0 * p.lin_density * p.lin_density * p.length);
+        let beta_code = single_mode_beta(&free, k);
+        assert!(
+            (beta_code - beta_hand).abs() <= 1.0e-12 * beta_hand,
+            "free-fixed mode {k}: beta {beta_code:.6e} vs hand {beta_hand:.6e}"
+        );
+        assert!(
+            free.omegas[k] < storage.omegas[k],
+            "half-integer κ must sit below the fixed-fixed partial"
+        );
+    }
+    assert!(kirchhoff_carrier_moving_end(&p, 0).is_err());
     // Glide formula in PHYSICAL amplitude for the fundamental.
     let a_phys = 1.0e-3; // 1 mm — audible-glide territory
     let a_norm = fs_math::det::sqrt(p.lin_density * p.length / 2.0) * a_phys;

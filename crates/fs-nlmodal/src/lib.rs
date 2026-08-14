@@ -26,7 +26,10 @@
 //!   stress stays the analytic sine Airy basis (in-plane movable).
 //! - [`kirchhoff_carrier_string`] — the 1D sibling: one stress "mode"
 //!   whose coupling matrix is exactly `diag(k^2 pi^2/L^2)` — tension
-//!   modulation and pitch glide nearly free.
+//!   modulation and pitch glide nearly free. Fixed-fixed sines.
+//! - [`kirchhoff_carrier_moving_end`] — the same channel on
+//!   free-fixed cosines `κ = (k−½)π/L`, `φ(0) ≠ 0`. A cable on a
+//!   moving support, not a second instrument law.
 //!
 //! Honest scope: moderate-rotation von Karman regime; no damage,
 //! plasticity, or wrinkling. In-plane edges remain movable (Airy
@@ -875,6 +878,55 @@ pub fn kirchhoff_carrier_string(
         for k in 1..=n_modes {
             let kk = k as f64 * pi / length;
             m[(k - 1) * n_modes + (k - 1)] = kk * kk * 2.0 / (lin_density * length);
+        }
+        m
+    };
+    let coefficient = ea * length / 8.0;
+    Ok(SosModalStorage {
+        omegas,
+        channels: vec![StressChannel {
+            coefficient,
+            coupling: e,
+        }],
+    })
+}
+
+/// Kirchhoff–Carrier on a free-fixed (moving-end) basis.
+///
+/// Eigenfunctions `φ_k(x) = √(2/μL) cos(κ_k x)` with
+/// `κ_k = (k−½)π/L`. `φ_k(0) ≠ 0`, so the attachment port can
+/// Dirac-join a body. The averaged-tension channel is the same
+/// SOS form as [`kirchhoff_carrier_string`]:
+/// `E[k,k] = κ_k² · 2/(μ L)`, coefficient `E A L / 8`. Fixed-fixed
+/// sines have `φ(0)=0` and cannot carry this join.
+///
+/// # Errors
+/// [`NlModalError::Parameter`] on non-physical inputs.
+pub fn kirchhoff_carrier_moving_end(
+    params: &KcStringParams,
+    n_modes: usize,
+) -> Result<SosModalStorage, NlModalError> {
+    let KcStringParams {
+        length,
+        tension,
+        lin_density,
+        ea,
+    } = *params;
+    if !(length > 0.0 && tension > 0.0 && lin_density > 0.0 && ea >= 0.0) || n_modes == 0 {
+        return Err(NlModalError::Parameter {
+            what: "string parameters",
+        });
+    }
+    let c = det::sqrt(tension / lin_density);
+    let pi = core::f64::consts::PI;
+    let omegas: Vec<f64> = (0..n_modes)
+        .map(|k| (k as f64 + 0.5) * pi * c / length)
+        .collect();
+    let e: Vec<f64> = {
+        let mut m = vec![0.0; n_modes * n_modes];
+        for k in 0..n_modes {
+            let kappa = (k as f64 + 0.5) * pi / length;
+            m[k * n_modes + k] = kappa * kappa * 2.0 / (lin_density * length);
         }
         m
     };
