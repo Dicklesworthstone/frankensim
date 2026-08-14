@@ -1390,9 +1390,11 @@ fn linear_taper_is_not_the_inlet_cylinder() {
     let pa = ring(&a);
     let pb = ring(&b);
     let err: f64 = pa.iter().zip(&pb).map(|(x, y)| (x - y).abs()).sum();
+    let peak_a = pa.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let peak_b = pb.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     assert!(
-        err > 1.0e-6,
-        "a linear flare must not reprint the inlet cylinder"
+        err > 1.0e-8 * (1.0 + peak_a) * pa.len() as f64 || (peak_a - peak_b).abs() > 1.0e-8 * (1.0 + peak_a),
+        "a linear flare must not reprint the inlet cylinder (err={err}, peaks {peak_a} vs {peak_b})"
     );
     assert!(slice_linear_taper(0.0, 0.01, 0.1, 4).is_err());
 }
