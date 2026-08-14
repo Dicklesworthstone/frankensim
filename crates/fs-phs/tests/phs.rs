@@ -10,11 +10,12 @@ use fs_phs::{
     AcousticSection, AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage,
     Storage, ViscothermalPin, acoustic_chain, acoustic_cylinder, acoustic_waveguide,
     common_effort_capacitor, common_effort_dirac, common_effort_star, common_flow_dirac,
-    compact_radiation_impedance, discrete_gradient, duffing_oscillator, helmholtz_resonator,
-    helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect, join_port,
-    kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank,
-    modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
-    series_impedance_ports, step, step_descriptor, transformer,
+    compact_radiation_impedance, discrete_gradient, duffing_oscillator, foster_sqrt_omega_terms,
+    helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
+    join_port, kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper,
+    modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
+    series_impedance_ports, slice_linear_taper, step, step_descriptor, transformer,
+    zwikker_kosten_f,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -1039,11 +1040,13 @@ fn equal_radius_chain_matches_a_uniform_waveguide() {
             AcousticSection {
                 length: 0.17,
                 radius: 0.012,
+                outlet_radius: 0.012,
                 cells: 4,
             },
             AcousticSection {
                 length: 0.17,
                 radius: 0.012,
+                outlet_radius: 0.012,
                 cells: 4,
             },
         ],
@@ -1088,11 +1091,13 @@ fn a_constriction_shifts_the_chain_period() {
             AcousticSection {
                 length: 0.17,
                 radius: 0.012,
+                outlet_radius: 0.012,
                 cells: 4,
             },
             AcousticSection {
                 length: 0.17,
                 radius: 0.006,
+                outlet_radius: 0.006,
                 cells: 4,
             },
         ],
@@ -1132,6 +1137,7 @@ fn a_constriction_shifts_the_chain_period() {
             &[AcousticSection {
                 length: 0.1,
                 radius: 0.01,
+                outlet_radius: 0.01,
                 cells: 1,
             }],
             1.2,
@@ -1152,6 +1158,7 @@ fn viscothermal_pin_damps_the_chain() {
     let sections = [AcousticSection {
         length: l,
         radius: 0.006,
+        outlet_radius: 0.006,
         cells: 8,
     }];
     let lossless = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("lossless");
@@ -1159,12 +1166,14 @@ fn viscothermal_pin_damps_the_chain() {
         dynamic_viscosity: 1.8e-5,
         gamma: 1.4,
         prandtl: 0.71,
+        foster_branches: 0,
     };
     let lossy = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&pin)).expect("lossy");
     let zero = ViscothermalPin {
         dynamic_viscosity: 0.0,
         gamma: 1.4,
         prandtl: 0.71,
+        foster_branches: 0,
     };
     let muted = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&zero)).expect("zero mu");
     let dt = 1.0 / 8_000.0;
@@ -1214,6 +1223,7 @@ fn viscothermal_pin_damps_the_chain() {
                 dynamic_viscosity: -1.0,
                 gamma: 1.4,
                 prandtl: 0.71,
+                foster_branches: 0,
             }),
         )
         .is_err()
@@ -1227,12 +1237,14 @@ fn narrow_tube_pin_uses_poiseuille_and_still_damps() {
     let sections = [AcousticSection {
         length: l,
         radius: 2.0e-4,
+        outlet_radius: 2.0e-4,
         cells: 6,
     }];
     let pin = ViscothermalPin {
         dynamic_viscosity: 1.8e-5,
         gamma: 1.4,
         prandtl: 0.71,
+        foster_branches: 0,
     };
     let omega = core::f64::consts::PI * c / (2.0 * l);
     let rv = 2.0e-4 * (omega * 1.2 / 1.8e-5).sqrt();
@@ -1270,6 +1282,141 @@ fn narrow_tube_pin_uses_poiseuille_and_still_damps() {
         tail(&p1),
         tail(&p0)
     );
+}
+
+#[test]
+fn foster_sqrt_omega_matches_the_wall_law_and_adds_states() {
+    let gain = 2.0e-3;
+    let terms = foster_sqrt_omega_terms(gain, 200.0, 12_800.0, 3).expect("terms");
+    assert_eq!(terms.len(), 3);
+    assert!(terms.iter().all(|&(g, w)| g > 0.0 && w > 0.0));
+    let mid = 1_600.0;
+    let re: f64 = terms
+        .iter()
+        .map(|&(g, w)| g * mid * mid / (mid * mid + w * w))
+        .sum();
+    let target = gain * mid.sqrt();
+    assert!(
+        (re - target).abs() < 0.25 * target,
+        "Foster Re Z must sit on K√ω ({re} vs {target})"
+    );
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.006,
+        outlet_radius: 0.006,
+        cells: 6,
+    }];
+    let lumped = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 0,
+    };
+    let foster = ViscothermalPin {
+        foster_branches: 3,
+        ..lumped
+    };
+    let lossless = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("lossless");
+    let pin = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&lumped)).expect("pin");
+    let spec = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&foster)).expect("foster");
+    acoustic_chain(&sections, 1.2, c, true, 1, &[], Some(&foster))
+        .expect("open Foster must stay PSD after adding Re Z_rad");
+    assert_eq!(spec.state_dim(), pin.state_dim() + 6 * 3 * 2);
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..480 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let p0 = ring(&pin);
+    let p1 = ring(&spec);
+    let p_l = ring(&lossless);
+    let err: f64 = p0.iter().zip(&p1).map(|(a, b)| (a - b).abs()).sum();
+    assert!(
+        err > 1.0e-8,
+        "Bessel Foster must not reprint the lumped pin"
+    );
+    let tail = |p: &[f64]| {
+        let t = &p[p.len() / 2..];
+        (t.iter().map(|x| x * x).sum::<f64>() / t.len() as f64).sqrt()
+    };
+    assert!(
+        tail(&p1) < tail(&p_l) * 0.85,
+        "Bessel Foster must damp versus lossless ({} vs {})",
+        tail(&p1),
+        tail(&p_l)
+    );
+}
+
+#[test]
+fn linear_taper_is_not_the_inlet_cylinder() {
+    let c = 343.0;
+    let cyl = slice_linear_taper(0.006, 0.006, 0.34, 8).expect("cyl");
+    let flare = slice_linear_taper(0.006, 0.018, 0.34, 8).expect("flare");
+    assert_eq!(cyl.len(), 1);
+    assert_eq!(flare.len(), 1);
+    assert_eq!(flare[0].cells, 8);
+    assert!(flare[0].outlet_radius > flare[0].radius);
+    let a = acoustic_chain(&cyl, 1.2, c, false, 1, &[], None).expect("cyl chain");
+    let b = acoustic_chain(&flare, 1.2, c, false, 1, &[], None).expect("flare chain");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let pa = ring(&a);
+    let pb = ring(&b);
+    let err: f64 = pa.iter().zip(&pb).map(|(x, y)| (x - y).abs()).sum();
+    assert!(
+        err > 1.0e-6,
+        "a linear flare must not reprint the inlet cylinder"
+    );
+    assert!(slice_linear_taper(0.0, 0.01, 0.1, 4).is_err());
+}
+
+#[test]
+fn zwikker_kosten_f_hits_both_regime_limits() {
+    let wide = zwikker_kosten_f(20.0).expect("wide");
+    // Wide-tube: F ≈ (1−i) √2 / r_v, Re F ≈ Im(−F) ≈ √2 / 20.
+    let eps = core::f64::consts::SQRT_2 / 20.0;
+    assert!(
+        (wide.re - eps).abs() < 0.4 * eps,
+        "wide-tube Re F ({}) should sit near √2/r_v ({eps})",
+        wide.re
+    );
+    let narrow = zwikker_kosten_f(1.0).expect("narrow");
+    // r_v → 0 ⇒ F → 1; r_v = 1 is already close.
+    assert!(
+        (narrow.re - 1.0).abs() < 0.25,
+        "narrow-tube Re F should approach 1, got {}",
+        narrow.re
+    );
+    // 1−F for the series law must give Re Z > 0.
+    let den = C64::new(1.0 - wide.re, -wide.im);
+    assert!(den.im / den.norm_sq() > 0.0);
 }
 
 fn dominant_zero_period(x: &[f64], dt: f64) -> f64 {

@@ -60,7 +60,14 @@ stepping, and Galerkin reduction preserves the structure.
   constriction, a cone sliced into cylinders),
   `ViscothermalPin` (all-regime pin: wide-tube ZK for
   `r_v ≥ 10`, Poiseuille + isothermal-tending shunt below;
-  zero `μ` is the lossless mutation), `modal_bank`
+  zero `μ` is the lossless mutation; `foster_branches`
+  collocates Foster networks to Bessel Zwikker–Kosten
+  `F(r_v)` at every shear number),
+  `zwikker_kosten_f` (also the fs-duct `LossModel::Bessel` TMM),
+  `foster_sqrt_omega_terms`,
+  `foster_match_re`, `slice_linear_taper`
+  (exact frustum T-network: `L = ρ dx/(π r_in r_out)`),
+  `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

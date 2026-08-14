@@ -45,6 +45,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use fs_la::factor::lu;
+use fs_math::c64::C64;
 use fs_math::det;
 
 /// Energy storage: the Hamiltonian and its exact gradient.
@@ -370,6 +371,14 @@ impl PortHamiltonian {
     #[must_use]
     pub fn structure(&self) -> (&[f64], &[f64], &[f64]) {
         (&self.j, &self.r, &self.g)
+    }
+
+    /// Effort `∇H(x)` — the co-state used by `y = Gᵀ ∇H`.
+    #[must_use]
+    pub fn effort(&self, x: &[f64]) -> Vec<f64> {
+        let mut e = vec![0.0; self.n];
+        self.storage.gradient(x, &mut e);
+        e
     }
 }
 
@@ -1867,7 +1876,10 @@ pub struct AcousticTap {
 /// shunt as `fs_duct::LossModel::AllRegime` (series `8 μ / a²` on
 /// `L`, thermal `G` on `C`, inertance `4/3` of the inviscid value).
 /// Evaluated at the quarter-wave pin. Zero viscosity is the
-/// lossless mutation.
+/// lossless mutation. `foster_branches > 0` collocates Foster
+/// networks to Bessel Zwikker–Kosten `F(r_v)` at every shear
+/// number (Poiseuille floor plus the `√ω` rise). Full-spectrum
+/// TMM remains the frequency-by-frequency fallback.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViscothermalPin {
     /// Dynamic viscosity `μ` [Pa s].
@@ -1876,6 +1888,20 @@ pub struct ViscothermalPin {
     pub gamma: f64,
     /// Prandtl number `μ c_p / κ`.
     pub prandtl: f64,
+    /// Log-spaced Foster branches for wide-tube series `√ω`.
+    /// `0` is the lumped quarter-wave pin.
+    pub foster_branches: usize,
+}
+
+impl Default for ViscothermalPin {
+    fn default() -> Self {
+        Self {
+            dynamic_viscosity: 0.0,
+            gamma: 1.4,
+            prandtl: 0.71,
+            foster_branches: 0,
+        }
+    }
 }
 
 /// One cylindrical run in an [`acoustic_chain`].
@@ -1887,10 +1913,25 @@ pub struct ViscothermalPin {
 pub struct AcousticSection {
     /// Axial length [m].
     pub length: f64,
-    /// Inner radius [m].
+    /// Inlet radius [m].
     pub radius: f64,
+    /// Outlet radius [m]. Equal to [`Self::radius`] (or `0`) is a cylinder.
+    /// A linear taper uses the exact frustum T-network per cell:
+    /// inertance `ρ dx /(π r_in r_out)`, compliance from the
+    /// frustum volume — not the midpoint-area Webster slice.
+    pub outlet_radius: f64,
     /// LC cells in this run (`>= 1`; the chain as a whole needs `>= 2`).
     pub cells: usize,
+}
+
+impl AcousticSection {
+    fn outlet(self) -> f64 {
+        if self.outlet_radius > 0.0 {
+            self.outlet_radius
+        } else {
+            self.radius
+        }
+    }
 }
 
 /// Inviscid uniform waveguide with optional open side branches.
@@ -1916,6 +1957,7 @@ pub fn acoustic_waveguide(
         &[AcousticSection {
             length,
             radius,
+            outlet_radius: radius,
             cells,
         }],
         density,
@@ -1937,8 +1979,10 @@ pub fn acoustic_waveguide(
 /// quarter-wave pin of the total length, using the last radius.
 /// A [`ViscothermalPin`] adds first-order Zwikker–Kosten `R` on
 /// each inertance and thermal `G` on each compliance at that
-/// same pin. Chimney taps stay inviscid (the duct TMM's no-claim).
-/// Full-spectrum TMM remains the all-regime fallback.
+/// same pin. `foster_branches > 0` replaces wide-tube series `R`
+/// and thermal `G` with Foster `√ω` networks (extra states).
+/// Chimney taps stay inviscid (the duct TMM's no-claim).
+/// Full-spectrum TMM remains the Bessel fallback.
 ///
 /// # Errors
 /// Empty chain, non-physical geometry, `inlets` not in `{1, 2}`,
@@ -1956,13 +2000,13 @@ pub fn acoustic_chain(
     let mut n_cells = 0usize;
     let mut last_radius = 0.0;
     for s in sections {
-        if !(s.length > 0.0 && s.radius > 0.0) || s.cells == 0 {
+        if !(s.length > 0.0 && s.radius > 0.0 && s.outlet() > 0.0) || s.cells == 0 {
             return Err(PhsError::NotPsd {
                 what: "acoustic section parameters",
             });
         }
         n_cells += s.cells;
-        last_radius = s.radius;
+        last_radius = s.outlet();
     }
     if sections.is_empty()
         || n_cells < 2
@@ -1980,6 +2024,7 @@ pub fn acoustic_chain(
             && pin.gamma.is_finite()
             && pin.prandtl > 0.0
             && pin.prandtl.is_finite())
+            || pin.foster_branches > 8
         {
             return Err(PhsError::NotPsd {
                 what: "viscothermal pin parameters",
@@ -1988,26 +2033,52 @@ pub fn acoustic_chain(
     }
     let n_line = 2 * n_cells;
     let n_tap = taps.len();
-    let n = n_line + n_tap;
     let mut inertances = Vec::with_capacity(n_cells);
     let mut compliances = Vec::with_capacity(n_cells);
     let mut radii = Vec::with_capacity(n_cells);
     let mut cell_x0 = Vec::with_capacity(n_cells);
     let mut x_acc = 0.0;
     for s in sections {
-        let area = core::f64::consts::PI * s.radius * s.radius;
         let dx = s.length / s.cells as f64;
-        let inertance = density * dx / area;
-        let compliance = area * dx / (density * sound_speed * sound_speed);
-        for _ in 0..s.cells {
+        let r_in = s.radius;
+        let r_out = s.outlet();
+        let n_s = s.cells as f64;
+        for i in 0..s.cells {
+            let ra = r_in + (r_out - r_in) * (i as f64 / n_s);
+            let rb = r_in + (r_out - r_in) * ((i + 1) as f64 / n_s);
+            let a_inert = core::f64::consts::PI * ra * rb;
+            let a_comp = core::f64::consts::PI * (ra * ra + ra * rb + rb * rb) / 3.0;
             cell_x0.push(x_acc);
-            inertances.push(inertance);
-            compliances.push(compliance);
-            radii.push(s.radius);
+            inertances.push(density * dx / a_inert);
+            compliances.push(a_comp * dx / (density * sound_speed * sound_speed));
+            radii.push(f64::midpoint(ra, rb));
             x_acc += dx;
         }
     }
     let total_length = x_acc;
+    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
+    let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
+    let mut cell_foster = vec![false; n_cells];
+    if let Some(pin) = viscothermal {
+        for cell in 0..n_cells {
+            if n_br == 0 || !(pin.dynamic_viscosity > 0.0) {
+                continue;
+            }
+            cell_foster[cell] = true;
+        }
+    }
+    // Two Foster networks per wide-tube cell: series √ω on the
+    // inertance and the dual thermal √ω shunt on the compliance.
+    let n_foster = cell_foster.iter().filter(|&&b| b).count() * n_br * 2;
+    let n = n_line + n_tap + n_foster;
+    let mut foster_off = vec![0usize; n_cells];
+    let mut next_foster = n_line + n_tap;
+    for cell in 0..n_cells {
+        foster_off[cell] = next_foster;
+        if cell_foster[cell] {
+            next_foster += n_br * 2;
+        }
+    }
     let mut q = vec![0.0; n * n];
     let mut j = vec![0.0; n * n];
     let mut r = vec![0.0; n * n];
@@ -2023,7 +2094,6 @@ pub fn acoustic_chain(
             j[qn * n + pi] = 1.0;
         }
     }
-    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
     if let Some(pin) = viscothermal {
         for cell in 0..n_cells {
             let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
@@ -2035,9 +2105,49 @@ pub fn acoustic_chain(
                 pin,
             );
             let (qi, pi) = (2 * cell, 2 * cell + 1);
-            q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
-            r[qi * n + qi] += g_shunt;
-            r[pi * n + pi] += r_series;
+            if cell_foster[cell] {
+                let r0 = 8.0 * pin.dynamic_viscosity / (density * radii[cell] * radii[cell])
+                    * inertances[cell];
+                r[pi * n + pi] += r0.max(0.0);
+                let terms_r = foster_bessel_series(
+                    inertances[cell],
+                    radii[cell],
+                    density,
+                    pin.dynamic_viscosity,
+                    omega_pin / 8.0,
+                    omega_pin * 8.0,
+                    n_br,
+                )?;
+                let terms_g = foster_bessel_shunt(
+                    compliances[cell],
+                    radii[cell],
+                    density,
+                    pin,
+                    omega_pin / 8.0,
+                    omega_pin * 8.0,
+                    n_br,
+                )?;
+                for (k, &(gk, wk)) in terms_r.iter().enumerate() {
+                    let lam = foster_off[cell] + k;
+                    q[lam * n + lam] = wk / gk;
+                    r[pi * n + pi] += gk;
+                    r[lam * n + lam] += gk;
+                    r[pi * n + lam] -= gk;
+                    r[lam * n + pi] -= gk;
+                }
+                for (k, &(gk, wk)) in terms_g.iter().enumerate() {
+                    let eta = foster_off[cell] + n_br + k;
+                    q[eta * n + eta] = wk / gk;
+                    r[qi * n + qi] += gk;
+                    r[eta * n + eta] += gk;
+                    r[qi * n + eta] -= gk;
+                    r[eta * n + qi] -= gk;
+                }
+            } else {
+                q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
+                r[qi * n + qi] += g_shunt;
+                r[pi * n + pi] += r_series;
+            }
         }
     }
     if open {
@@ -2050,7 +2160,7 @@ pub fn acoustic_chain(
         )
         .map(|(rr, _)| rr)?;
         let last_p = n_line - 1;
-        r[last_p * n + last_p] = r_load;
+        r[last_p * n + last_p] += r_load;
     }
     for (t, tap) in taps.iter().enumerate() {
         if !(tap.station >= 0.0
@@ -2125,6 +2235,271 @@ fn all_regime_series_and_shunt(
     let rt = rv * det::sqrt(pin.prandtl);
     let g_shunt = (pin.gamma - 1.0) * compliance * omega * (rt * rt / 16.0).min(0.5);
     (r_series.max(0.0), g_shunt.max(0.0), 4.0 / 3.0)
+}
+
+/// Collocate `gain · √ω` with Foster terms `g s / (s + ω)`.
+///
+/// Each term is a parallel RL in series with the cell inertance:
+/// `Re Z(jω) = Σ g_k ω² / (ω² + ω_k²)`. Poles are log-spaced on
+/// `[ω_lo, ω_hi]`. Negative residues fall back to a positive
+/// uniform split so the network stays passive. This is not the
+/// Bessel TMM and not a tabulated FIR.
+///
+/// # Errors
+/// Non-physical gain, frequency window, or empty `n`.
+pub fn foster_sqrt_omega_terms(
+    gain: f64,
+    omega_lo: f64,
+    omega_hi: f64,
+    n: usize,
+) -> Result<Vec<(f64, f64)>, PhsError> {
+    if n == 0
+        || n > 8
+        || !(gain > 0.0 && gain.is_finite())
+        || !(omega_lo > 0.0)
+        || !(omega_hi > omega_lo)
+    {
+        return Err(PhsError::NotPsd {
+            what: "Foster √ω window",
+        });
+    }
+    let omegas = log_spaced(omega_lo, omega_hi, n);
+    let samples: Vec<(f64, f64)> = omegas.iter().map(|&w| (w, gain * det::sqrt(w))).collect();
+    foster_match_re(&samples, n)
+}
+
+/// Collocate a tabulated `Re Z(ω)` with Foster terms `g s/(s+ω)`.
+///
+/// # Errors
+/// Empty samples, a bad window, or a non-physical table.
+pub fn foster_match_re(samples: &[(f64, f64)], n: usize) -> Result<Vec<(f64, f64)>, PhsError> {
+    if n == 0 || n > 8 || samples.len() != n || samples.iter().any(|&(w, r)| !(w > 0.0 && r >= 0.0))
+    {
+        return Err(PhsError::NotPsd {
+            what: "Foster match samples",
+        });
+    }
+    let omegas: Vec<f64> = samples.iter().map(|&(w, _)| w).collect();
+    let mut mat = vec![0.0; n * n];
+    let mut rhs: Vec<f64> = samples.iter().map(|&(_, r)| r).collect();
+    for i in 0..n {
+        let wi2 = omegas[i] * omegas[i];
+        for j in 0..n {
+            let wj2 = omegas[j] * omegas[j];
+            mat[i * n + j] = wi2 / (wi2 + wj2);
+        }
+    }
+    if let Ok(fact) = lu(&mat, n) {
+        fact.solve(&mut rhs);
+    } else {
+        rhs.fill(0.0);
+    }
+    if rhs.iter().any(|&gk| !(gk > 0.0 && gk.is_finite())) {
+        for (gk, &(_, re)) in rhs.iter_mut().zip(samples) {
+            *gk = (2.0 * re / n as f64).max(1.0e-12);
+        }
+    }
+    for gk in &mut rhs {
+        if !gk.is_finite() || *gk <= 0.0 {
+            *gk = 1.0e-12;
+        }
+    }
+    Ok(omegas.into_iter().zip(rhs).map(|(w, gk)| (gk, w)).collect())
+}
+
+/// Zwikker–Kosten viscous function `F(r_v) = 2 J₁(ζ)/(ζ J₀(ζ))`
+/// with `ζ = r_v √(-i)`. Valid at every shear number — the
+/// wide-tube `√ω` law and the Poiseuille floor are its limits.
+/// This is not a tabulated FIR.
+///
+/// # Errors
+/// Non-physical `r_v` or a vanishing Bessel denominator.
+pub fn zwikker_kosten_f(rv: f64) -> Result<C64, PhsError> {
+    if !(rv > 0.0 && rv.is_finite()) {
+        return Err(PhsError::NotPsd {
+            what: "Zwikker–Kosten shear number",
+        });
+    }
+    let s = rv / core::f64::consts::SQRT_2;
+    // √i = (1+i)/√2 under the engineering Laplace convention
+    // that makes Re(jω L /(1−F)) > 0.
+    let zeta = C64::new(s, s);
+    let ratio = bessel_j1_over_j0(zeta)?;
+    Ok(ratio.scale(2.0) / zeta)
+}
+
+fn bessel_j1_over_j0(z: C64) -> Result<C64, PhsError> {
+    if z.abs() < 12.0 {
+        let (j0, j1) = bessel_j0_j1_series(z);
+        if j0.abs() < 1.0e-30 {
+            return Err(PhsError::NotPsd {
+                what: "Bessel J0 vanished",
+            });
+        }
+        return Ok(j1 / j0);
+    }
+    lentz_j1_over_j0(z)
+}
+
+fn bessel_j0_j1_series(z: C64) -> (C64, C64) {
+    let half = z.scale(0.5);
+    let half_sq = half * half;
+    let mut term0 = C64::ONE;
+    let mut term1 = half;
+    let mut j0 = term0;
+    let mut j1 = term1;
+    for k in 1..=48 {
+        let kk = k as f64;
+        term0 = (term0 * half_sq).scale(-1.0 / (kk * kk));
+        j0 = j0 + term0;
+        term1 = (term1 * half_sq).scale(-1.0 / (kk * (kk + 1.0)));
+        j1 = j1 + term1;
+    }
+    (j0, j1)
+}
+
+/// Continued fraction `J₁/J₀ = 1 / (2/z + 1 / (4/z + 1 / (6/z + …)))`.
+fn lentz_j1_over_j0(z: C64) -> Result<C64, PhsError> {
+    const TINY: f64 = 1.0e-30;
+    const TOL: f64 = 1.0e-12;
+    let mut f = C64::from_re(TINY);
+    let mut c = f;
+    let mut d = C64::ZERO;
+    for n in 1..=80 {
+        let b = C64::from_re(2.0 * n as f64) / z;
+        let a = C64::ONE;
+        d = b + a * d;
+        if d.abs() < TINY {
+            d = C64::from_re(TINY);
+        }
+        c = b + a / c;
+        if c.abs() < TINY {
+            c = C64::from_re(TINY);
+        }
+        d = d.recip();
+        let delta = c * d;
+        f = f * delta;
+        if (delta - C64::ONE).abs() < TOL {
+            return Ok(f);
+        }
+    }
+    Err(PhsError::NotPsd {
+        what: "Bessel J1/J0 continued fraction",
+    })
+}
+
+fn bessel_series_resistance(inertance: f64, radius: f64, density: f64, mu: f64, omega: f64) -> f64 {
+    let rv = radius * det::sqrt(omega * density / mu);
+    let Ok(f) = zwikker_kosten_f(rv) else {
+        return 0.0;
+    };
+    let den = C64::ONE - f;
+    let n2 = den.norm_sq();
+    if !(n2 > 0.0) {
+        return 0.0;
+    }
+    (omega * inertance * den.im / n2).max(0.0)
+}
+
+fn bessel_shunt_conductance(
+    compliance: f64,
+    radius: f64,
+    density: f64,
+    pin: &ViscothermalPin,
+    omega: f64,
+) -> f64 {
+    let rv = radius * det::sqrt(omega * density / pin.dynamic_viscosity);
+    let rt = rv * det::sqrt(pin.prandtl);
+    let Ok(f) = zwikker_kosten_f(rt) else {
+        return 0.0;
+    };
+    // Y = j ω C (1 + (γ−1) F_t); Re Y = −ω C (γ−1) Im F_t.
+    (omega * compliance * (pin.gamma - 1.0) * f.im.abs()).max(0.0)
+}
+
+fn log_spaced(omega_lo: f64, omega_hi: f64, n: usize) -> Vec<f64> {
+    let ratio = omega_hi / omega_lo;
+    let denom = (n - 1).max(1) as f64;
+    (0..n)
+        .map(|k| omega_lo * det::pow(ratio, k as f64 / denom))
+        .collect()
+}
+
+fn foster_bessel_series(
+    inertance: f64,
+    radius: f64,
+    density: f64,
+    mu: f64,
+    omega_lo: f64,
+    omega_hi: f64,
+    n: usize,
+) -> Result<Vec<(f64, f64)>, PhsError> {
+    let r0 = 8.0 * mu / (density * radius * radius) * inertance;
+    let omegas = log_spaced(omega_lo, omega_hi, n);
+    let samples: Vec<(f64, f64)> = omegas
+        .iter()
+        .map(|&w| {
+            let re = bessel_series_resistance(inertance, radius, density, mu, w);
+            (w, (re - r0).max(1.0e-18))
+        })
+        .collect();
+    if samples.iter().all(|&(_, r)| r < 1.0e-18) {
+        return Ok(omegas.into_iter().map(|w| (1.0e-18, w)).collect());
+    }
+    foster_match_re(&samples, n)
+}
+
+fn foster_bessel_shunt(
+    compliance: f64,
+    radius: f64,
+    density: f64,
+    pin: &ViscothermalPin,
+    omega_lo: f64,
+    omega_hi: f64,
+    n: usize,
+) -> Result<Vec<(f64, f64)>, PhsError> {
+    let omegas = log_spaced(omega_lo, omega_hi, n);
+    let samples: Vec<(f64, f64)> = omegas
+        .iter()
+        .map(|&w| {
+            (
+                w,
+                bessel_shunt_conductance(compliance, radius, density, pin, w),
+            )
+        })
+        .collect();
+    if samples.iter().all(|&(_, g)| g < 1.0e-18) {
+        return Ok(omegas.into_iter().map(|w| (1.0e-18, w)).collect());
+    }
+    foster_match_re(&samples, n)
+}
+
+/// Piecewise-cylindrical slices of a linear radius taper.
+///
+/// A truncated cone, a horn flare, and a nozzle are this object:
+/// `r(x)` is linear, each slice is an [`AcousticSection`] at the
+/// mid-station radius. This is plane-wave LC, not the spherical-wave
+/// cone TMM. Equal end radii collapse to one uniform run.
+///
+/// # Errors
+/// Non-physical radii/length or `slices == 0`.
+pub fn slice_linear_taper(
+    inlet_radius: f64,
+    outlet_radius: f64,
+    length: f64,
+    slices: usize,
+) -> Result<Vec<AcousticSection>, PhsError> {
+    if !(inlet_radius > 0.0 && outlet_radius > 0.0 && length > 0.0) || slices == 0 {
+        return Err(PhsError::NotPsd {
+            what: "linear taper",
+        });
+    }
+    Ok(vec![AcousticSection {
+        length,
+        radius: inlet_radius,
+        outlet_radius,
+        cells: slices,
+    }])
 }
 
 /// Modal bank from mass-normalized modes — the first-class bridge from
