@@ -56,9 +56,22 @@ stepping, and Galerkin reduction preserves the structure.
   flanged piston `(R, X)` under `e^{-iωt}` (mass-like `X < 0`),
   refused above `ka = 1`. Same numbers as `fs_duct::Termination`.
 - `series_impedance_ports` — ODE series of two 1-port impedance
-  systems (same `u`, `y = y_a + y_b`). Not Kirchhoff common-effort
-  (same `p`, opposite `U`), which remains a deferred DAE Dirac
-  structure.
+  systems (same `u`, `y = y_a + y_b`).
+- `common_effort_capacitor` — two-port `C` with shared pressure
+  `p = q/C` and `q̇ = U₁ + U₂`. That is the ODE image of a
+  Kirchhoff effort junction.
+- `kirchhoff_parallel_step` — index-1 Newton split of an external
+  flow across two 1-port impedance systems so their pressures
+  match. This is Kirchhoff current law as a time-step.
+- `common_effort_dirac` / `DescriptorPortHamiltonian` /
+  `step_descriptor` — the true composite Dirac structure of a
+  0-junction. Extended state `[x_a, x_b, λ]`,
+  `E = diag(I, I, 0)`,
+  `J = [[J_a, 0, G_a], [0, J_b, -G_b], [-G_aᵀ, G_bᵀ, 0]]`,
+  `U_a = λ`, `U_b = U_ext − λ`. Gonzalez on the differential
+  block; the last row is the algebraic common-effort residual.
+  The capacitor and the Newton split are regularizations of this
+  DAE.
 - Memoryless dissipative ports: `bernoulli_volume_flow` is the
   two-sided jet `U = w h sgn(Δp) √(2|Δp|/ρ)` (dissipative on both
   branches); `quasistatic_aperture_opening` is the zero-mass

@@ -373,6 +373,303 @@ impl PortHamiltonian {
     }
 }
 
+/// Descriptor (implicit) port-Hamiltonian system
+/// `E ẋ = (J − R) grad H + G u` with possibly singular `E`.
+///
+/// The last `n - n_diff` coordinates are algebraic. The composite
+/// `J` of a 0-junction is a Dirac structure on the extended space
+/// `[x_a, x_b, λ]`.
+pub struct DescriptorPortHamiltonian {
+    n: usize,
+    n_diff: usize,
+    m: usize,
+    j: Vec<f64>,
+    r: Vec<f64>,
+    g: Vec<f64>,
+    storage: Box<dyn Storage>,
+}
+
+impl DescriptorPortHamiltonian {
+    /// Differential-state count (the leading block of `E = I`).
+    #[must_use]
+    pub fn differential_dim(&self) -> usize {
+        self.n_diff
+    }
+
+    /// Full extended-state count, including multipliers.
+    #[must_use]
+    pub fn state_dim(&self) -> usize {
+        self.n
+    }
+
+    /// Port count.
+    #[must_use]
+    pub fn port_dim(&self) -> usize {
+        self.m
+    }
+
+    /// Composite Dirac `J` (row-major).
+    #[must_use]
+    pub fn dirac_j(&self) -> &[f64] {
+        &self.j
+    }
+
+    /// Stored energy (multipliers do not enter `H`).
+    #[must_use]
+    pub fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.storage.hamiltonian(x)
+    }
+
+    /// Port output `y = G^T grad H`.
+    #[must_use]
+    pub fn output(&self, x: &[f64]) -> Vec<f64> {
+        let mut e = vec![0.0; self.n];
+        self.storage.gradient(x, &mut e);
+        let mut y = vec![0.0; self.m];
+        for p in 0..self.m {
+            let mut acc = 0.0;
+            for i in 0..self.n {
+                acc += self.g[i * self.m + p] * e[i];
+            }
+            y[p] = acc;
+        }
+        y
+    }
+}
+
+/// Isolated 0-junction of two 1-port systems: `p_a = p_b`, `U_a + U_b = U_ext`.
+///
+/// Extended state `[x_a, x_b, λ]` with Dirac
+///
+/// ```text
+/// J = [ J_a    0     G_a ]
+///     [  0    J_b   -G_b ]
+///     [-G_aᵀ  G_bᵀ    0  ]
+/// ```
+///
+/// `E = diag(I, I, 0)`, `H = H_a + H_b`, `U_a = λ`, `U_b = U_ext − λ`.
+/// This is the true composite Dirac structure. The ODE capacitor and
+/// the Newton split remain regularizations of the same junction.
+///
+/// # Errors
+/// [`PhsError::BadPortPairing`] unless both are 1-port; admission
+/// errors on the composite `J`/`R`.
+pub fn common_effort_dirac(
+    a: PortHamiltonian,
+    b: PortHamiltonian,
+) -> Result<DescriptorPortHamiltonian, PhsError> {
+    if a.m != 1 || b.m != 1 {
+        return Err(PhsError::BadPortPairing);
+    }
+    let (na, nb) = (a.n, b.n);
+    let n = na + nb + 1;
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for i in 0..na {
+        for k in 0..na {
+            j[i * n + k] = a.j[i * na + k];
+            r[i * n + k] = a.r[i * na + k];
+        }
+        j[i * n + (n - 1)] = a.g[i];
+        j[(n - 1) * n + i] = -a.g[i];
+    }
+    for i in 0..nb {
+        for k in 0..nb {
+            j[(na + i) * n + na + k] = b.j[i * nb + k];
+            r[(na + i) * n + na + k] = b.r[i * nb + k];
+        }
+        j[(na + i) * n + (n - 1)] = -b.g[i];
+        j[(n - 1) * n + na + i] = b.g[i];
+    }
+    let mut g = vec![0.0; n];
+    for i in 0..nb {
+        g[na + i] = b.g[i];
+    }
+    require_skew(&j, n, "J")?;
+    require_symmetric(&r, n, "R")?;
+    require_psd(&r, n, "R")?;
+    let inner = Box::new(SumStorage {
+        a: (a.storage, na),
+        b: (b.storage, nb),
+    });
+    let lambda = Box::new(QuadraticStorage::new(vec![0.0], 1)?);
+    let storage = Box::new(SumStorage {
+        a: (inner, na + nb),
+        b: (lambda, 1),
+    });
+    Ok(DescriptorPortHamiltonian {
+        n,
+        n_diff: na + nb,
+        m: 1,
+        j,
+        r,
+        g,
+        storage,
+    })
+}
+
+/// Implicit descriptor step: Gonzalez on the differential block,
+/// algebraic residual `0 = ((J−R) e + G u)_alg` at the new state
+/// with effort `e = [∇H(x), λ]` (multipliers are not stored energy).
+///
+/// # Errors
+/// Dimension / `dt` refusals; [`PhsError::NewtonStalled`].
+pub fn step_descriptor(
+    sys: &DescriptorPortHamiltonian,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+) -> Result<StepRecord, PhsError> {
+    let n = sys.n;
+    let n_d = sys.n_diff;
+    if x0.len() != n || u.len() != sys.m {
+        return Err(PhsError::Dimension {
+            what: "descriptor state/input length",
+        });
+    }
+    if !dt.is_finite() || dt < 0.0 {
+        return Err(PhsError::Dimension {
+            what: "dt must be finite and non-negative",
+        });
+    }
+    let mut gu = vec![0.0; n];
+    for i in 0..n {
+        for p in 0..sys.m {
+            gu[i] += sys.g[i * sys.m + p] * u[p];
+        }
+    }
+    // Multipliers are efforts, not stored coordinates: e = [∇H(x), λ].
+    // Gonzalez still owns the differential block; λ enters J as itself
+    // so Ga λ / −Gb λ actually drive the ports.
+    let effort = |x1: &[f64]| -> Vec<f64> {
+        let mut e = discrete_gradient(sys.storage.as_ref(), x0, x1);
+        for i in n_d..n {
+            e[i] = f64::midpoint(x0[i], x1[i]);
+        }
+        e
+    };
+    let residual = |x1: &[f64], dg: &[f64]| -> Vec<f64> {
+        let mut res = vec![0.0; n];
+        for i in 0..n {
+            let mut flow = 0.0;
+            for k in 0..n {
+                flow += (sys.j[i * n + k] - sys.r[i * n + k]) * dg[k];
+            }
+            if i < n_d {
+                res[i] = x1[i] - x0[i] - dt * (flow + gu[i]);
+            } else {
+                res[i] = flow + gu[i];
+            }
+        }
+        res
+    };
+    let scale = x0
+        .iter()
+        .map(|v| v.abs())
+        .chain(gu.iter().map(|v| (dt * v).abs()))
+        .chain(u.iter().map(|v| v.abs()))
+        .fold(1.0e-30f64, f64::max);
+    let mut x1 = x0.to_vec();
+    let mut iters = 0usize;
+    let mut stagnant = 0usize;
+    let mut best: Option<(Vec<f64>, f64)> = None;
+    let mut r_init: Option<f64> = None;
+    loop {
+        let dg = effort(&x1);
+        let res = residual(&x1, &dg);
+        let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+        if r_init.is_none() {
+            r_init = Some(rnorm);
+        }
+        let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
+        if improved {
+            best = Some((x1.clone(), rnorm));
+        }
+        if rnorm <= NEWTON_TOL * scale {
+            break;
+        }
+        if improved {
+            stagnant = 0;
+        } else {
+            stagnant += 1;
+        }
+        if stagnant >= 3 || iters >= NEWTON_MAX {
+            let (bx, brnorm) = best.expect("at least one iterate");
+            let sc_acc = bx.iter().fold(scale, |acc, &v| acc.max(v.abs()));
+            let ref_scale = sc_acc.max(r_init.unwrap_or(sc_acc));
+            if brnorm <= 1.0e-6 * ref_scale {
+                x1 = bx;
+                break;
+            }
+            return Err(PhsError::NewtonStalled { residual: brnorm });
+        }
+        let jac = {
+            let mut jac = vec![0.0; n * n];
+            for col in 0..n {
+                let h = 1.0e-6 * (1.0 + scale + x1[col].abs());
+                let mut xp = x1.clone();
+                let mut xm = x1.clone();
+                xp[col] += h;
+                xm[col] -= h;
+                let dgp = effort(&xp);
+                let dgm = effort(&xm);
+                let rp = residual(&xp, &dgp);
+                let rm = residual(&xm, &dgm);
+                for row in 0..n {
+                    jac[row * n + col] = (rp[row] - rm[row]) / (2.0 * h);
+                }
+            }
+            jac
+        };
+        let Ok(fact) = lu(&jac, n) else {
+            iters += 1;
+            continue;
+        };
+        let mut dx = res;
+        fact.solve(&mut dx);
+        for i in 0..n {
+            x1[i] -= dx[i];
+        }
+        iters += 1;
+    }
+    let dg = effort(&x1);
+    let mut y = vec![0.0; sys.m];
+    for p in 0..sys.m {
+        let mut acc = 0.0;
+        for i in 0..n {
+            acc += sys.g[i * sys.m + p] * dg[i];
+        }
+        y[p] = acc;
+    }
+    let h0 = sys.storage.hamiltonian(x0);
+    let h1 = sys.storage.hamiltonian(&x1);
+    let mut dissipated = 0.0;
+    for i in 0..n {
+        let mut rd = 0.0;
+        for k in 0..n {
+            rd += sys.r[i * n + k] * dg[k];
+        }
+        dissipated += dg[i] * rd;
+    }
+    dissipated *= dt;
+    let mut supplied = 0.0;
+    for p in 0..sys.m {
+        supplied += u[p] * y[p];
+    }
+    supplied *= dt;
+    let res = residual(&x1, &dg);
+    let solver_residual = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    Ok(StepRecord {
+        x: x1,
+        y,
+        delta_h: h1 - h0,
+        dissipated,
+        supplied,
+        newton_iters: iters,
+        solver_residual,
+    })
+}
+
 /// Gonzalez midpoint discrete gradient:
 /// `dg(a, b) = gradH(m) + [(H(b) - H(a) - gradH(m).(b-a)) / |b-a|^2]
 /// (b - a)` with `m = (a+b)/2`; for `b == a` it is `gradH(a)`.
@@ -1102,6 +1399,84 @@ pub fn series_impedance_ports(
         b: (b.storage, nb),
     });
     PortHamiltonian::new(n, 1, j, r, g, storage)
+}
+
+/// Two-port common-effort capacitor: both ports see the same pressure
+/// `p = q / C`, and `q̇ = U₁ + U₂`.
+///
+/// This is the ODE image of a Kirchhoff effort junction with storage.
+/// Identifying two *impedance-causal* ports at the same `p` without
+/// this capacitor remains a DAE Dirac structure.
+///
+/// # Errors
+/// [`PhsError::NotPsd`] if `compliance` is not positive and finite.
+pub fn common_effort_capacitor(compliance: f64) -> Result<PortHamiltonian, PhsError> {
+    if !(compliance > 0.0 && compliance.is_finite()) {
+        return Err(PhsError::NotPsd {
+            what: "common-effort compliance",
+        });
+    }
+    let storage = Box::new(QuadraticStorage::new(vec![1.0 / compliance], 1)?);
+    PortHamiltonian::new(1, 2, vec![0.0], vec![0.0], vec![1.0, 1.0], storage)
+}
+
+/// One implicit step of two 1-port systems sharing effort.
+///
+/// Finds `U_a` such that `p_a(U_a) = p_b(U_ext − U_a)` by Newton,
+/// then commits those Gonzalez steps. This is the index-1 Kirchhoff
+/// current law for impedance-causal ports (same `p`, flows sum to
+/// `u_ext`). It is **not** a Dirac structure on the composite `J`
+/// (that remains DAE). The capacitor [`common_effort_capacitor`] is
+/// the ODE regularization of the same junction.
+///
+/// # Errors
+/// [`PhsError::BadPortPairing`] unless both are 1-port;
+/// [`PhsError::NewtonStalled`] if the algebraic split does not
+/// close; step errors from either system.
+pub fn kirchhoff_parallel_step(
+    a: &PortHamiltonian,
+    xa: &[f64],
+    b: &PortHamiltonian,
+    xb: &[f64],
+    u_ext: f64,
+    dt: f64,
+) -> Result<(StepRecord, StepRecord), PhsError> {
+    if a.m != 1 || b.m != 1 {
+        return Err(PhsError::BadPortPairing);
+    }
+    if !u_ext.is_finite() {
+        return Err(PhsError::Dimension {
+            what: "external flow must be finite",
+        });
+    }
+    let mut ua = 0.5 * u_ext;
+    let mut rec_a = step(a, xa, &[ua], dt)?;
+    let mut rec_b = step(b, xb, &[u_ext - ua], dt)?;
+    for _ in 0..12 {
+        let residual = rec_a.y[0] - rec_b.y[0];
+        let scale = 1.0 + rec_a.y[0].abs() + rec_b.y[0].abs();
+        if residual.abs() <= 1.0e-8 * scale {
+            return Ok((rec_a, rec_b));
+        }
+        let h = 1.0e-6 * (1.0 + ua.abs());
+        let pa_plus = step(a, xa, &[ua + h], dt)?.y[0];
+        let pb_minus = step(b, xb, &[u_ext - ua - h], dt)?.y[0];
+        let deriv = (pa_plus - pb_minus - residual) / h;
+        if deriv.abs() < 1.0e-18 {
+            break;
+        }
+        ua -= residual / deriv;
+        rec_a = step(a, xa, &[ua], dt)?;
+        rec_b = step(b, xb, &[u_ext - ua], dt)?;
+    }
+    let residual = rec_a.y[0] - rec_b.y[0];
+    let scale = 1.0 + rec_a.y[0].abs() + rec_b.y[0].abs();
+    if residual.abs() <= 1.0e-6 * scale {
+        return Ok((rec_a, rec_b));
+    }
+    Err(PhsError::NewtonStalled {
+        residual: residual.abs(),
+    })
 }
 
 /// Regularized Coulomb traction [N]: `F = −μ N tanh(v / v_reg)`.

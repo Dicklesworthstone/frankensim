@@ -7,11 +7,11 @@
 
 use fs_math::c64::C64;
 use fs_phs::{
-    MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage, compact_radiation_impedance,
-    discrete_gradient, duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
-    helmholtz_resonator_radiating, interconnect, lc_ladder, lc_ladder_terminated,
-    mass_spring_damper, modal_bank, reduce_galerkin, regularized_coulomb, series_impedance_ports,
-    step,
+    MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage, common_effort_capacitor,
+    common_effort_dirac, compact_radiation_impedance, discrete_gradient, duffing_oscillator,
+    helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
+    kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank,
+    reduce_galerkin, regularized_coulomb, series_impedance_ports, step, step_descriptor,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -775,4 +775,85 @@ fn terminated_ladder_radiates_while_lossless_holds() {
         "terminated ladder must radiate ({hd} vs {h0})"
     );
     assert!(lc_ladder_terminated(6, 1.0e-3, 2.0e-6, -1.0).is_err());
+}
+
+#[test]
+fn common_effort_capacitor_shares_pressure() {
+    let c = common_effort_capacitor(2.0e-8).expect("C");
+    let mut x = vec![0.0];
+    x = step(&c, &x, &[1.0e-4, 2.0e-4], 1.0e-4).expect("step").x;
+    let y = c.output(&x);
+    assert_eq!(y.len(), 2);
+    assert!(
+        (y[0] - y[1]).abs() < 1.0e-15,
+        "ports must share p ({:?})",
+        y
+    );
+    assert!(y[0] > 0.0, "injected volume must raise pressure");
+    assert!(common_effort_capacitor(0.0).is_err());
+}
+
+#[test]
+fn kirchhoff_parallel_splits_flow_at_common_pressure() {
+    let a = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a");
+    let b = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b");
+    let xa = vec![0.0, 0.0];
+    let xb = vec![0.0, 0.0];
+    let u_ext = 2.0e-4;
+    let (ra, rb) = kirchhoff_parallel_step(&a, &xa, &b, &xb, u_ext, 1.0e-4).expect("join");
+    assert!(
+        (ra.y[0] - rb.y[0]).abs() < 1.0e-8 * (1.0 + ra.y[0].abs()),
+        "Kirchhoff must share pressure ({:?} vs {:?})",
+        ra.y[0],
+        rb.y[0]
+    );
+    // Identical branches take half the flow; one cavity at U_ext/2
+    // must reprint the same pressure.
+    let solo = step(&a, &xa, &[0.5 * u_ext], 1.0e-4).expect("solo");
+    assert!((ra.y[0] - solo.y[0]).abs() < 1.0e-8 * (1.0 + solo.y[0].abs()));
+}
+
+#[test]
+fn common_effort_dirac_is_the_kirchhoff_dae() {
+    let a = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a");
+    let b = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b");
+    let sys = common_effort_dirac(
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("a2"),
+        helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("b2"),
+    )
+    .expect("dirac");
+    assert_eq!(sys.state_dim(), 5);
+    assert_eq!(sys.differential_dim(), 4);
+    assert_eq!(sys.port_dim(), 1);
+    let n = sys.state_dim();
+    let j = sys.dirac_j();
+    for i in 0..n {
+        for k in 0..n {
+            assert!(
+                (j[i * n + k] + j[k * n + i]).abs() < 1.0e-14,
+                "composite J must be skew at ({i},{k})"
+            );
+        }
+    }
+    let u_ext = 2.0e-4;
+    let dt = 1.0e-4;
+    let rec = step_descriptor(&sys, &[0.0; 5], &[u_ext], dt).expect("descriptor step");
+    assert_eq!(rec.x.len(), 5);
+    let xa = vec![0.0, 0.0];
+    let xb = vec![0.0, 0.0];
+    let (ra, rb) = kirchhoff_parallel_step(&a, &xa, &b, &xb, u_ext, dt).expect("split");
+    assert!(
+        (rec.y[0] - ra.y[0]).abs() < 1.0e-6 * (1.0 + ra.y[0].abs()),
+        "descriptor pressure {} must reprint the Newton split {}",
+        rec.y[0],
+        ra.y[0]
+    );
+    assert!((ra.y[0] - rb.y[0]).abs() < 1.0e-8 * (1.0 + ra.y[0].abs()));
+    let e_a = a.output(&rec.x[..2]);
+    let e_b = b.output(&rec.x[2..4]);
+    assert!(
+        (e_a[0] - e_b[0]).abs() < 1.0e-6 * (1.0 + e_a[0].abs()),
+        "algebraic row must enforce p_a = p_b ({e_a:?} vs {e_b:?})"
+    );
+    assert!(common_effort_dirac(a, common_effort_capacitor(1.0e-8).expect("two-port")).is_err());
 }
