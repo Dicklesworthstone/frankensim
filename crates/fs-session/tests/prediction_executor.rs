@@ -3,16 +3,16 @@
 //! complete accounting as a projection, rung admission, drain-on-cancel,
 //! reserved-marker refusal, and the executor-to-bundle join.
 
+use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_evidence::prediction_bundle::{
     AccessPolicy, ModelRungPolicy, OutputArtifactRef, OutputFamily, PredictionExecutionInput,
     PredictionOutputBundle, RandomStreamDesign, SampleAccounting,
 };
 use fs_evidence::vv::{ApplicabilityPolicy, ArtifactId, ArtifactKind, ArtifactRef};
-use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_session::prediction_executor::{
-    ExecutorRefusal, RunDisposition, SampleOutcome, execute_ensemble, sample_seeds,
+    ExecutorRefusal, RunDisposition, SampleOutcome, execute_ensemble, resume_ensemble, sample_seeds,
 };
 
 fn reference(kind: ArtifactKind, id: &str, salt: u8) -> ArtifactRef {
@@ -87,7 +87,11 @@ fn parity_model(
     if seed % 2 == 0 {
         SampleOutcome::Succeeded {
             artifact_hashes: vec![fs_blake3::hash_bytes(
-                &[coordinates.sample_index.to_le_bytes().as_slice(), &seed.to_le_bytes()].concat(),
+                &[
+                    coordinates.sample_index.to_le_bytes().as_slice(),
+                    &seed.to_le_bytes(),
+                ]
+                .concat(),
             )],
         }
     } else {
@@ -103,13 +107,22 @@ fn seeds_are_pure_functions_of_logical_coordinates() {
     // Recomputing in any order gives identical seeds; nothing about
     // execution context (workers, wall clock) participates.
     let forward: Vec<_> = (0..8).map(|index| sample_seeds(&input, index)).collect();
-    let backward: Vec<_> = (0..8).rev().map(|index| sample_seeds(&input, index)).collect();
+    let backward: Vec<_> = (0..8)
+        .rev()
+        .map(|index| sample_seeds(&input, index))
+        .collect();
     for (index, seeds) in forward.iter().enumerate() {
         assert_eq!(seeds, &backward[7 - index]);
     }
     // Distinct samples get distinct seeds; distinct streams differ too.
-    assert_ne!(forward[0].stream("sample-draw"), forward[1].stream("sample-draw"));
-    assert_ne!(forward[0].stream("sample-draw"), forward[0].stream("jitter"));
+    assert_ne!(
+        forward[0].stream("sample-draw"),
+        forward[1].stream("sample-draw")
+    );
+    assert_ne!(
+        forward[0].stream("sample-draw"),
+        forward[0].stream("jitter")
+    );
     // Undeclared streams do not exist.
     assert_eq!(forward[0].stream("undeclared"), None);
 }
@@ -196,11 +209,23 @@ fn ensemble_bounds_refuse_at_zero_and_cap_plus_one() {
     use fs_session::prediction_executor::MAX_ENSEMBLE_SAMPLES;
     let input = admitted_input();
     let zero = with_cx(|cx, _| execute_ensemble(cx, &input, "reduced-order", 0, parity_model));
-    assert_eq!(zero.expect_err("zero refuses").rule, "prediction-executor-ensemble-bounds");
+    assert_eq!(
+        zero.expect_err("zero refuses").rule,
+        "prediction-executor-ensemble-bounds"
+    );
     let over = with_cx(|cx, _| {
-        execute_ensemble(cx, &input, "reduced-order", MAX_ENSEMBLE_SAMPLES + 1, parity_model)
+        execute_ensemble(
+            cx,
+            &input,
+            "reduced-order",
+            MAX_ENSEMBLE_SAMPLES + 1,
+            parity_model,
+        )
     });
-    assert_eq!(over.expect_err("cap+1 refuses").rule, "prediction-executor-ensemble-bounds");
+    assert_eq!(
+        over.expect_err("cap+1 refuses").rule,
+        "prediction-executor-ensemble-bounds"
+    );
 }
 
 #[test]
@@ -236,8 +261,10 @@ fn cancellation_drains_marks_and_never_publishes_denominators() {
 fn the_reserved_drain_marker_is_refused_from_models() {
     let input = admitted_input();
     let error = with_cx(|cx, _| {
-        execute_ensemble(cx, &input, "reduced-order", 2, |_, _| SampleOutcome::Cancelled)
-            .expect_err("reserved marker refuses")
+        execute_ensemble(cx, &input, "reduced-order", 2, |_, _| {
+            SampleOutcome::Cancelled
+        })
+        .expect_err("reserved marker refuses")
     });
     assert_eq!(error.rule, "prediction-executor-reserved-outcome");
 }
@@ -263,4 +290,126 @@ fn seed_derivation_is_domain_separated() {
     let bare: ContentHash = fs_blake3::hash_bytes(&payload);
     let bare_seed = u64::from_le_bytes(bare.as_bytes()[..8].try_into().expect("8 bytes"));
     assert_ne!(seeds.stream(&stream.name), Some(bare_seed));
+}
+
+#[test]
+fn resume_equals_uninterrupted_bit_for_bit() {
+    let input = admitted_input();
+    let uninterrupted = with_cx(|cx, _| {
+        execute_ensemble(cx, &input, "reduced-order", 40, parity_model).expect("runs")
+    });
+    // Cancel after 12 executed samples, checkpoint, resume.
+    let cancelled = with_cx(|cx, gate| {
+        let mut executed = 0u64;
+        execute_ensemble(cx, &input, "reduced-order", 40, |coordinates, seeds| {
+            executed += 1;
+            if executed == 12 {
+                gate.request();
+            }
+            parity_model(coordinates, seeds)
+        })
+        .expect("finalizes")
+    });
+    let checkpoint = cancelled.checkpoint().expect("cancelled runs checkpoint");
+    assert_eq!(checkpoint.executed_len(), 12);
+    let resumed = with_cx(|cx, _| {
+        resume_ensemble(cx, &input, &checkpoint, 40, parity_model).expect("resumes")
+    });
+    assert_eq!(
+        resumed, uninterrupted,
+        "resume must reproduce the uninterrupted run exactly"
+    );
+    let accounting = resumed.accounting().expect("completed");
+    assert_eq!(accounting.requested, 40);
+}
+
+#[test]
+fn checkpoints_bind_lineage_and_refuse_foreign_resume() {
+    let input = admitted_input();
+    let cancelled = with_cx(|cx, gate| {
+        let mut executed = 0u64;
+        execute_ensemble(cx, &input, "reduced-order", 10, |coordinates, seeds| {
+            executed += 1;
+            if executed == 3 {
+                gate.request();
+            }
+            parity_model(coordinates, seeds)
+        })
+        .expect("finalizes")
+    });
+    let checkpoint = cancelled.checkpoint().expect("checkpoints");
+
+    // A completed run has nothing to resume.
+    let completed = with_cx(|cx, _| {
+        execute_ensemble(cx, &input, "reduced-order", 4, parity_model).expect("runs")
+    });
+    assert_eq!(
+        completed.checkpoint().expect_err("nothing to resume").rule,
+        "prediction-executor-nothing-to-resume"
+    );
+
+    // Foreign input root refuses: build a second admitted input differing
+    // in one stream seed.
+    let mut streams = input.random_streams().to_vec();
+    streams[1].seed ^= 1;
+    let foreign = PredictionExecutionInput::try_new(
+        vec![("head_sha".to_string(), "deadbeef".to_string())],
+        reference(ArtifactKind::ContextOfUse, "cou-1", 1),
+        reference(ArtifactKind::ValidationPlan, "plan-1", 2),
+        reference(ArtifactKind::CalibrationSplit, "split-1", 3),
+        vec![reference(ArtifactKind::ExperimentArtifact, "scenario-a", 4)],
+        Vec::new(),
+        streams,
+        ModelRungPolicy {
+            allowed_rungs: vec!["reduced-order".to_string()],
+            applicability: ApplicabilityPolicy::Refuse,
+        },
+        vec!["junction-maximum".to_string()],
+        "blind-prediction".to_string(),
+        reference(ArtifactKind::ExperimentArtifact, "holdout-1", 8),
+        AccessPolicy::ExecutorOnly,
+    )
+    .expect("admits");
+    let error = with_cx(|cx, _| {
+        resume_ensemble(cx, &foreign, &checkpoint, 10, parity_model)
+            .expect_err("foreign root refuses")
+    });
+    assert_eq!(error.rule, "prediction-executor-foreign-checkpoint");
+
+    // A prefix that is not strictly shorter than the request refuses.
+    let error = with_cx(|cx, _| {
+        resume_ensemble(cx, &input, &checkpoint, 3, parity_model).expect_err("non-prefix refuses")
+    });
+    assert_eq!(error.rule, "prediction-executor-checkpoint-bounds");
+
+    // The lineage identity moves with any retained outcome, the rung, or
+    // the root - a tampered prefix is attestably different.
+    let identity = checkpoint.identity();
+    let retampered = with_cx(|cx, gate| {
+        let mut executed = 0u64;
+        execute_ensemble(cx, &input, "reduced-order", 10, |coordinates, seeds| {
+            executed += 1;
+            if executed == 3 {
+                gate.request();
+            }
+            // Same cancellation point, different outcome content.
+            match parity_model(coordinates, seeds) {
+                SampleOutcome::Refused { .. } => SampleOutcome::Refused {
+                    rule: "different-rule".to_string(),
+                },
+                other => other,
+            }
+        })
+        .expect("finalizes")
+    });
+    let other = retampered.checkpoint().expect("checkpoints");
+    if other.executed_len() == checkpoint.executed_len() && other != checkpoint {
+        assert_ne!(
+            other.identity(),
+            identity,
+            "outcome edits must move lineage"
+        );
+    }
+    // Trivial self-consistency: identical checkpoints share identity.
+    assert_eq!(checkpoint.identity(), identity);
 }
