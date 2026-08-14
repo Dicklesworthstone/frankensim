@@ -28,7 +28,9 @@ the crash cascade with structurally exact energy accounting.
   sine modes for displacement (mass-normalized) and Airy stress
   (unit-normalized; both are biharmonic eigenfunctions on the SS
   rectangle, in-plane movable edges). Channel coefficients
-  `E h / (2 xi_j^4)`. Coupling integrals by Gauss-Legendre quadrature
+  `E h / (2 xi_j^4)`. Optional isotropic pretension `T` [N/m]
+  raises the linear spectrum `ω² = (D k⁴ + T k²)/(ρ h)` without
+  changing the Airy channels. Coupling integrals by Gauss-Legendre quadrature
   whose order SCALES with the highest half-wave **index sum**
   `m+n` (not `max(m,n)` — a 0.20×0.15×2 mm panel with three odd–odd
   modes sat at 1.3e-8). Certified by a second
@@ -39,6 +41,15 @@ the crash cascade with structurally exact energy accounting.
   hidden. The two orders share the quadrature engine, so the
   certificate is a CONVERGENCE check, not an independent-route one. Stress-mode count is a SEPARATE truncation from the
   displacement count (both explicit inputs).
+- `von_karman_sampled_plate` / `SampledPlateMode` — same Airy
+  channels from a regular sampled `w` grid. Second-order FD is the
+  production stencil (FE `w` is C⁰). Second vs fourth Hessians
+  must agree to `0.9` of the (dimensional) channel scale or
+  construction refuses; a sine-grid reprint of the analytic Airy
+  channel is the accuracy pin. Clamped and orthotropic bending
+  enter as FE-sampled displacement; the membrane channel stays the
+  analytic sine Airy basis (in-plane movable). Callers with
+  orthotropic `E1 ≠ E2` pass `(E1+E2)/2` as `params.young`.
 - `kirchhoff_carrier_string` — one diagonal channel
   `E[k,k] = (k pi/L)^2 * 2/(mu L)`, coefficient `E A L / 8`: exactly
   the averaged-tension Kirchhoff-Carrier form in mass-normalized

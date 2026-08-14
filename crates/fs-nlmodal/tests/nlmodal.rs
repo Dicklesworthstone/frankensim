@@ -7,8 +7,9 @@
 //! plate cascade casebook.
 
 use fs_nlmodal::{
-    KcStringParams, NlModalError, SineMode, SosModalStorage, StressChannel, VkPlateParams,
-    assemble, duffing_backbone, kirchhoff_carrier_string, single_mode_beta, von_karman_ss_plate,
+    KcStringParams, NlModalError, SampledPlateMode, SineMode, SosModalStorage, StressChannel,
+    VkPlateParams, assemble, duffing_backbone, kirchhoff_carrier_string, single_mode_beta,
+    von_karman_sampled_plate, von_karman_ss_plate,
 };
 use fs_phs::{PortHamiltonian, Storage, step};
 
@@ -20,6 +21,7 @@ fn steel_plate() -> VkPlateParams {
         young: 2.0e11,
         nu: 0.3,
         rho: 7850.0,
+        pretension_n_m: 0.0,
     }
 }
 
@@ -107,6 +109,7 @@ fn small_thick_panel_certifies_three_odd_odd_modes() {
         young: 2.0e11,
         nu: 0.3,
         rho: 7800.0,
+        pretension_n_m: 0.0,
     };
     let disp = vec![
         SineMode { m: 1, n: 1 },
@@ -481,6 +484,7 @@ fn plate_cascade_casebook() {
         young: 1.1e11, // bronze-class
         nu: 0.34,
         rho: 8800.0,
+        pretension_n_m: 0.0,
     };
     let model = von_karman_ss_plate(&params, &modes_grid(3, 3), &modes_grid(4, 4)).expect("plate");
     let n = model.storage.omegas.len();
@@ -614,4 +618,62 @@ fn refusals_are_typed() {
     };
     assert!(von_karman_ss_plate(&bad, &modes_grid(1, 1), &modes_grid(1, 1)).is_err());
     assert!(kirchhoff_carrier_string(&guitar_string(), 0).is_err());
+}
+
+#[test]
+fn pretension_raises_the_linear_frequencies() {
+    let loose = steel_plate();
+    let mut taut = loose;
+    taut.pretension_n_m = 2.0e4;
+    let a = von_karman_ss_plate(&loose, &modes_grid(1, 1), &modes_grid(1, 1)).expect("loose");
+    let b = von_karman_ss_plate(&taut, &modes_grid(1, 1), &modes_grid(1, 1)).expect("taut");
+    assert!(
+        b.storage.omegas[0] > a.storage.omegas[0] * 1.01,
+        "in-plane tension must raise ω ({:.1} vs {:.1})",
+        b.storage.omegas[0],
+        a.storage.omegas[0]
+    );
+    let mut bad = loose;
+    bad.pretension_n_m = -1.0;
+    assert!(von_karman_ss_plate(&bad, &modes_grid(1, 1), &modes_grid(1, 1)).is_err());
+}
+
+#[test]
+fn sampled_sine_grid_reprints_the_analytic_airy_channel() {
+    let params = steel_plate();
+    let disp = [SineMode { m: 1, n: 1 }];
+    let stress = [SineMode { m: 1, n: 1 }];
+    let analytic = von_karman_ss_plate(&params, &disp, &stress).expect("ss");
+    let (nx, ny) = (21, 17);
+    let mut w = vec![0.0; nx * ny];
+    let pi = core::f64::consts::PI;
+    for j in 0..ny {
+        let y = params.ly * j as f64 / (ny - 1) as f64;
+        for i in 0..nx {
+            let x = params.lx * i as f64 / (nx - 1) as f64;
+            w[j * nx + i] = (pi * x / params.lx).sin() * (pi * y / params.ly).sin();
+        }
+    }
+    let sampled = von_karman_sampled_plate(
+        &params,
+        &[SampledPlateMode {
+            omega: analytic.storage.omegas[0],
+            w,
+            nx,
+            ny,
+        }],
+        &stress,
+    )
+    .expect("sampled sine");
+    let a = analytic.storage.channels[0].coefficient * analytic.storage.channels[0].coupling[0];
+    let b = sampled.storage.channels[0].coefficient * sampled.storage.channels[0].coupling[0];
+    let rel = (a - b).abs() / a.abs().max(1.0e-30);
+    assert!(
+        rel < 0.08,
+        "FD sine grid must reprint the SS Airy channel ({a} vs {b}, rel {rel})"
+    );
+    assert!(
+        von_karman_sampled_plate(&params, &[], &stress).is_err(),
+        "empty sampled list must refuse"
+    );
 }

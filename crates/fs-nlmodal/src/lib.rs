@@ -21,16 +21,16 @@
 //!   biharmonic eigenfunctions on the SS rectangle); coupling
 //!   integrals by Gauss-Legendre quadrature, certified by a second
 //!   independent order.
+//! - [`von_karman_sampled_plate`] — the same Airy channels from a
+//!   *sampled* displacement grid (FE, clamped, orthotropic). Membrane
+//!   stress stays the analytic sine Airy basis (in-plane movable).
 //! - [`kirchhoff_carrier_string`] — the 1D sibling: one stress "mode"
 //!   whose coupling matrix is exactly `diag(k^2 pi^2/L^2)` — tension
 //!   modulation and pitch glide nearly free.
 //!
 //! Honest scope: moderate-rotation von Karman regime; no damage,
-//! plasticity, or wrinkling; simply-supported (in-plane movable)
-//! boundary in v1 — FE-mode input is the follow-up (its trigger:
-//! consumers with non-analytic geometry, which is also when coupling-
-//! tensor caching starts to matter; at analytic-mode scale the tensor
-//! build is milliseconds and a cache manifest would be ceremony).
+//! plasticity, or wrinkling. In-plane edges remain movable (Airy
+//! sine); out-of-plane shape is whatever grid the caller samples.
 
 use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, Storage};
@@ -307,6 +307,9 @@ pub struct VkPlateParams {
     pub nu: f64,
     /// Density [kg/m^3].
     pub rho: f64,
+    /// Isotropic in-plane pretension [N/m]. Zero is the unloaded
+    /// plate. Raises linear frequencies via `ω² = (D k⁴ + T k²)/(ρ h)`.
+    pub pretension_n_m: f64,
 }
 
 /// One sine mode index pair.
@@ -422,8 +425,16 @@ fn validate_vk_inputs(
         young,
         nu,
         rho,
+        pretension_n_m,
     } = *params;
-    if !(lx > 0.0 && ly > 0.0 && h > 0.0 && young > 0.0 && rho > 0.0 && (0.0..0.5).contains(&nu)) {
+    if !(lx > 0.0
+        && ly > 0.0
+        && h > 0.0
+        && young > 0.0
+        && rho > 0.0
+        && pretension_n_m >= 0.0
+        && (0.0..0.5).contains(&nu))
+    {
         return Err(NlModalError::Parameter {
             what: "plate parameters",
         });
@@ -490,6 +501,7 @@ pub fn von_karman_ss_plate(
         young,
         nu,
         rho,
+        pretension_n_m,
     } = *params;
     validate_vk_inputs(params, disp_modes, stress_modes)?;
     let d_bend = young * h * h * h / (12.0 * (1.0 - nu * nu));
@@ -499,7 +511,7 @@ pub fn von_karman_ss_plate(
         .map(|md| {
             let k2 = (md.m as f64 * pi / lx) * (md.m as f64 * pi / lx)
                 + (md.n as f64 * pi / ly) * (md.n as f64 * pi / ly);
-            det::sqrt(d_bend / (rho * h)) * k2
+            det::sqrt((d_bend * k2 * k2 + pretension_n_m * k2) / (rho * h))
         })
         .collect();
     // Normalizations: Phi = phi_norm * sin sin with rho h * (lx ly /4)
@@ -585,6 +597,226 @@ pub fn von_karman_ss_plate(
         stress_modes: stress_modes.to_vec(),
         quadrature_residual: worst_rel,
     })
+}
+
+/// A displacement (or Airy) field sampled on a regular `[0, Lx] × [0, Ly]`
+/// grid. FE eigenpairs, clamped shapes, and orthotropic modes enter
+/// here — the constructor does not assume sine products.
+#[derive(Debug, Clone)]
+pub struct SampledPlateMode {
+    /// Linear angular frequency [rad/s] (from the bending pencil).
+    pub omega: f64,
+    /// Samples of `w` (or `ψ`), `ny * nx`, x-fast.
+    pub w: Vec<f64>,
+    /// Sample count along x (must be ≥ 5).
+    pub nx: usize,
+    /// Sample count along y (must be ≥ 5).
+    pub ny: usize,
+}
+
+/// Von Karman storage from *sampled* displacement modes.
+///
+/// Second derivatives are central / one-sided finite differences.
+/// Airy stress uses the same sine products as the SS constructor
+/// (in-plane movable), so clamped/orthotropic bending is FE while
+/// the membrane channel stays the analytic Airy basis. `E` in the
+/// channel coefficient is `params.young` (use `(E1+E2)/2` for
+/// orthotropic callers).
+///
+/// # Errors
+/// [`NlModalError`] on bad grids, non-physical parameters, or an
+/// FD-stencil disagreement above `0.9` of the channel scale
+/// (FE Hessians are first-order; the sine reprint test is the
+/// accuracy pin).
+pub fn von_karman_sampled_plate(
+    params: &VkPlateParams,
+    disp: &[SampledPlateMode],
+    stress_modes: &[SineMode],
+) -> Result<VkModel, NlModalError> {
+    validate_vk_inputs(params, &dummy_disp_ids(disp.len()), stress_modes)?;
+    if disp.is_empty() {
+        return Err(NlModalError::Parameter {
+            what: "empty sampled displacement list",
+        });
+    }
+    let nx = disp[0].nx;
+    let ny = disp[0].ny;
+    if nx < 5 || ny < 5 {
+        return Err(NlModalError::Parameter {
+            what: "sampled grid must be at least 5×5",
+        });
+    }
+    for mode in disp {
+        if mode.nx != nx || mode.ny != ny || mode.w.len() != nx * ny || !(mode.omega > 0.0) {
+            return Err(NlModalError::Parameter {
+                what: "sampled modes must share a finite positive grid",
+            });
+        }
+    }
+    let VkPlateParams {
+        lx,
+        ly,
+        h,
+        young,
+        rho,
+        pretension_n_m: _,
+        ..
+    } = *params;
+    let dx = lx / (nx - 1) as f64;
+    let dy = ly / (ny - 1) as f64;
+    let area_el = dx * dy;
+    let mut fields = Vec::with_capacity(disp.len());
+    let mut omegas = Vec::with_capacity(disp.len());
+    for mode in disp {
+        let energy: f64 = mode.w.iter().map(|v| v * v).sum::<f64>() * area_el * rho * h;
+        if !(energy > 0.0) {
+            return Err(NlModalError::Parameter {
+                what: "sampled mode has no L2 mass",
+            });
+        }
+        let scale = det::sqrt(1.0 / energy);
+        fields.push(mode.w.iter().map(|v| v * scale).collect::<Vec<_>>());
+        omegas.push(mode.omega);
+    }
+    let nq = fields.len();
+    let pi = core::f64::consts::PI;
+    let psi_norm = det::sqrt(4.0 / (lx * ly));
+    let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
+    // Mass-normalized φ ~ 1/√(ρ h A); a nonzero raw integral is ~ k⁴/(ρ h).
+    let char_scale = kmin2 * kmin2 / (rho * h).max(1.0e-30);
+    let mut channels = Vec::with_capacity(stress_modes.len());
+    let mut worst_rel = 0.0f64;
+    let mut global_scale = f64::MIN_POSITIVE;
+    let mut raw: Vec<(f64, Vec<(usize, usize, f64, f64)>, f64)> = Vec::new();
+    for &sm in stress_modes {
+        let xi4 = {
+            let k2 = (sm.m as f64 * pi / lx).powi(2) + (sm.n as f64 * pi / ly).powi(2);
+            k2 * k2
+        };
+        let psi = sample_sine(sm, lx, ly, nx, ny);
+        let mut pairs = Vec::new();
+        let mut scale = f64::MIN_POSITIVE;
+        for p in 0..nq {
+            for q in 0..=p {
+                let a2 = fd_coupling(&psi, &fields[p], &fields[q], nx, ny, dx, dy, 2);
+                let a4 = fd_coupling(&psi, &fields[p], &fields[q], nx, ny, dx, dy, 4);
+                scale = scale.max(a2.abs()).max(a4.abs());
+                pairs.push((p, q, a2, a4));
+            }
+        }
+        global_scale = global_scale.max(scale);
+        raw.push((xi4, pairs, scale));
+    }
+    for (xi4, pairs, scale) in raw {
+        let judge = scale.max(1.0e-12 * global_scale).max(1.0e-8 * char_scale);
+        let mut e = vec![0.0; nq * nq];
+        for (p, q, a2, a4) in pairs {
+            worst_rel = worst_rel.max((a2 - a4).abs() / judge);
+            // 2nd-order FD is the production value: DKT/FE w is only C⁰,
+            // so the 4th-order stencil is not more accurate there. The
+            // 4th-order residual is a convergence probe, not a Gauss
+            // certificate.
+            let v = psi_norm * a2;
+            e[p * nq + q] = v;
+            e[q * nq + p] = v;
+        }
+        channels.push(StressChannel {
+            coefficient: young * h / (2.0 * xi4.max(1.0e-30)),
+            coupling: e,
+        });
+    }
+    if worst_rel > 0.9 {
+        return Err(NlModalError::QuadratureMismatch {
+            residual: worst_rel,
+        });
+    }
+    Ok(VkModel {
+        storage: SosModalStorage { omegas, channels },
+        disp_modes: dummy_disp_ids(nq),
+        stress_modes: stress_modes.to_vec(),
+        quadrature_residual: worst_rel,
+    })
+}
+
+fn dummy_disp_ids(n: usize) -> Vec<SineMode> {
+    (1..=n).map(|m| SineMode { m, n: 1 }).collect()
+}
+
+fn sample_sine(mode: SineMode, lx: f64, ly: f64, nx: usize, ny: usize) -> Vec<f64> {
+    let mut out = vec![0.0; nx * ny];
+    let pi = core::f64::consts::PI;
+    for j in 0..ny {
+        let y = ly * j as f64 / (ny - 1) as f64;
+        for i in 0..nx {
+            let x = lx * i as f64 / (nx - 1) as f64;
+            out[j * nx + i] =
+                det::sin(mode.m as f64 * pi * x / lx) * det::sin(mode.n as f64 * pi * y / ly);
+        }
+    }
+    out
+}
+
+fn fd_d2(w: &[f64], nx: usize, i: usize, j: usize, axis: usize, h: f64, order: u8) -> f64 {
+    let at = |ii: i32, jj: i32| -> f64 {
+        let ii = ii.clamp(0, nx as i32 - 1) as usize;
+        let jj = jj.clamp(0, (w.len() / nx) as i32 - 1) as usize;
+        w[jj * nx + ii]
+    };
+    let (ii, jj) = (i as i32, j as i32);
+    let (di, dj) = if axis == 0 { (1, 0) } else { (0, 1) };
+    if order >= 4 && i >= 2 && i + 2 < nx && j >= 2 && j + 2 < w.len() / nx {
+        (-at(ii + 2 * di, jj + 2 * dj) + 16.0 * at(ii + di, jj + dj) - 30.0 * at(ii, jj)
+            + 16.0 * at(ii - di, jj - dj)
+            - at(ii - 2 * di, jj - 2 * dj))
+            / (12.0 * h * h)
+    } else {
+        (at(ii + di, jj + dj) - 2.0 * at(ii, jj) + at(ii - di, jj - dj)) / (h * h)
+    }
+}
+
+fn fd_dxy(w: &[f64], nx: usize, i: usize, j: usize, dx: f64, dy: f64) -> f64 {
+    let ny = w.len() / nx;
+    let at = |ii: i32, jj: i32| -> f64 {
+        let ii = ii.clamp(0, nx as i32 - 1) as usize;
+        let jj = jj.clamp(0, ny as i32 - 1) as usize;
+        w[jj * nx + ii]
+    };
+    let (ii, jj) = (i as i32, j as i32);
+    (at(ii + 1, jj + 1) - at(ii + 1, jj - 1) - at(ii - 1, jj + 1) + at(ii - 1, jj - 1))
+        / (4.0 * dx * dy)
+}
+
+fn fd_coupling(
+    psi: &[f64],
+    a: &[f64],
+    b: &[f64],
+    nx: usize,
+    ny: usize,
+    dx: f64,
+    dy: f64,
+    order: u8,
+) -> f64 {
+    let mut acc = 0.0;
+    // Skip the two-point halo so both orders use the same interior
+    // stencil. Index-clamped boundary differences of a Dirichlet
+    // sine are O(1/h) garbage and dominate the certificate.
+    let halo = 2usize;
+    if nx <= 2 * halo || ny <= 2 * halo {
+        return 0.0;
+    }
+    for j in halo..ny - halo {
+        for i in halo..nx - halo {
+            let a_xx = fd_d2(a, nx, i, j, 0, dx, order);
+            let a_yy = fd_d2(a, nx, i, j, 1, dy, order);
+            let a_xy = fd_dxy(a, nx, i, j, dx, dy);
+            let b_xx = fd_d2(b, nx, i, j, 0, dx, order);
+            let b_yy = fd_d2(b, nx, i, j, 1, dy, order);
+            let b_xy = fd_dxy(b, nx, i, j, dx, dy);
+            let l = a_xx * b_yy + a_yy * b_xx - 2.0 * a_xy * b_xy;
+            acc += psi[j * nx + i] * l;
+        }
+    }
+    acc * dx * dy
 }
 
 // ---------------------------------------------------------------------
@@ -702,4 +934,34 @@ pub fn single_mode_beta(storage: &SosModalStorage, k: usize) -> f64 {
             ch.coefficient * e * e
         })
         .sum()
+}
+
+#[cfg(test)]
+mod fd_probe {
+    use super::{SineMode, fd_coupling, fd_d2, sample_sine};
+
+    #[test]
+    fn sine_second_derivative_orders_agree_at_center() {
+        let (nx, ny) = (21, 17);
+        let (lx, ly) = (0.4, 0.3);
+        let dx = lx / (nx - 1) as f64;
+        let dy = ly / (ny - 1) as f64;
+        let w = sample_sine(SineMode { m: 1, n: 1 }, lx, ly, nx, ny);
+        let i = nx / 2;
+        let j = ny / 2;
+        let a2 = fd_d2(&w, nx, i, j, 0, dx, 2);
+        let a4 = fd_d2(&w, nx, i, j, 0, dx, 4);
+        let want = -(core::f64::consts::PI / lx).powi(2)
+            * (core::f64::consts::PI * i as f64 / (nx - 1) as f64).sin()
+            * (core::f64::consts::PI * j as f64 / (ny - 1) as f64).sin();
+        assert!((a4 - want).abs() / want.abs() < 0.02);
+        assert!((a2 - a4).abs() / a4.abs() < 0.05);
+        let psi = sample_sine(SineMode { m: 1, n: 1 }, lx, ly, nx, ny);
+        let c2 = fd_coupling(&psi, &w, &w, nx, ny, dx, dy, 2);
+        let c4 = fd_coupling(&psi, &w, &w, nx, ny, dx, dy, 4);
+        assert!(
+            c4.abs() > 1.0e-6 && (c2 - c4).abs() / c4.abs() < 0.05,
+            "interior coupling 2={c2} 4={c4}"
+        );
+    }
 }
