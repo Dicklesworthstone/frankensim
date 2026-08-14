@@ -1669,7 +1669,10 @@ low-frequency boundary-work estimates are not passivity-admissible on the
 production mesh. This is a linear low-Mach far-field estimate: it does not
 claim moving-boundary/FW-H, rotational or convective radiation, near field,
 room response, two-way fluid loading, calibrated SPL, or accuracy beyond the
-declared BEM/directivity/fit evidence.
+declared BEM/directivity/fit evidence. Its fitted rigid-body bank trains through
+12 kHz and is held out through 11.5 kHz because the production surface mesh does
+not meet the six-panels-per-wavelength admission floor at 14 kHz; the independently resolved support-plate
+path retains the complete 18 kHz reconstruction passband.
 
 At runtime, existing P1 point-force projection and conservative audio-cell reconstruction drive the
 exact modal transition with zero pressure transfer. The closing state supplies
