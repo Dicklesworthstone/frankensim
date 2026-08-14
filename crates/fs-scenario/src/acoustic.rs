@@ -10,15 +10,19 @@ pub struct AmbientGas {
     pub temperature_k: f64,
     /// Static pressure [Pa].
     pub pressure_pa: f64,
+    /// Relative humidity as a fraction in `[0, 1]`. Explicit: never a
+    /// hidden scenario default. ISO 9613-1 uses this; `0` is dry air.
+    pub relative_humidity: f64,
 }
 
 impl AmbientGas {
-    /// ISA sea-level air.
+    /// ISA sea-level dry air.
     #[must_use]
     pub const fn sea_level() -> Self {
         Self {
             temperature_k: 288.15,
             pressure_pa: 101_325.0,
+            relative_humidity: 0.0,
         }
     }
 }
@@ -215,9 +219,16 @@ pub struct ThinPlate {
     pub damping_ratio: f64,
     /// How many certified modes to keep.
     pub n_modes: usize,
-    /// If true and the section is isotropic, the plate is a von
-    /// Karman modal pHS (`fs-nlmodal`), not a linear modal bank.
+    /// If true the plate is a von Karman modal pHS (`fs-nlmodal`),
+    /// not a linear modal bank. Isotropic SS uses sine modes;
+    /// clamped or orthotropic bending uses FE-sampled displacement.
     pub geometric_nonlinearity: bool,
+    /// Isotropic in-plane pretension [N/m]. Zero is unloaded.
+    pub pretension_n_m: f64,
+    /// If true, every edge is clamped (`w = ∇w = 0`). False is
+    /// simply supported. Clamped von Karman samples DKT `w` and
+    /// keeps the sine Airy membrane channel.
+    pub clamped: bool,
 }
 
 /// A distributed unilateral obstacle under a taut span (a fretboard,
@@ -235,8 +246,27 @@ pub struct UnilateralObstacle {
     /// Kinetic friction coefficient at the contact. Zero is frictionless
     /// (normal-only). Nonzero composes `fs-tribo` on the same stations.
     pub mu_kinetic: f64,
+    /// Hunt–Crossley internal-loss coefficient `χ` [s/m]. Zero is the
+    /// elastic potential (restitution 1). Nonzero is a dissipative
+    /// port force, not a gradient of `H`.
+    pub internal_loss: f64,
     /// Caller provenance; never invented.
     pub provenance: String,
+}
+
+/// A lumped Helmholtz volume facing a radiating panel.
+///
+/// Geometry is data. A guitar body, a vented box, and a bottle are
+/// the same object; realization composes `fs-phs` flow-driven
+/// Helmholtz with the plate monopoles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HelmholtzCavity {
+    /// Cavity volume [m³].
+    pub volume_m3: f64,
+    /// Neck radius [m].
+    pub neck_radius_m: f64,
+    /// Physical neck length [m] (end correction is applied in the pHS).
+    pub neck_length_m: f64,
 }
 
 /// One compact modal monopole (a body mode, a panel, a loudspeaker).
@@ -279,6 +309,9 @@ pub struct AcousticAssembly {
     /// soundboard. Driven by bridge force and, when a duct is present,
     /// by mouth pressure (structure–bore).
     pub plate: Option<ThinPlate>,
+    /// Optional lumped Helmholtz volume facing the plate monopoles.
+    /// `None` is a plate in free half-space.
+    pub cavity: Option<HelmholtzCavity>,
     /// Distributed obstacles under the string (rattle, frets, a stay).
     pub obstacles: Vec<UnilateralObstacle>,
     /// Optional declared contact-path texture. When a bow is present

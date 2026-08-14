@@ -29,8 +29,12 @@ flagships.
   modes are not data, `UnilateralObstacle` as a distributed contact
   profile, `ContactTexture` as a declared self-affine height spectrum,
   `RayleighParams`, `VolumeVelocityPulse`, `Listener`,
-  `AcousticAssembly`). A guitar or clarinet is a filled assembly, not
-  a crate and not a type. Realization lives in `fs-couple`.
+  `HelmholtzCavity`, `AcousticAssembly`). `AmbientGas` carries an
+  explicit relative humidity in `[0, 1]`. `UnilateralObstacle`
+  carries Hunt–Crossley `χ`. `ThinPlate` carries in-plane
+  pretension and a clamped-edge flag. A guitar or clarinet is a
+  filled assembly, not a crate and not a type. Realization lives
+  in `fs-couple`.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared
