@@ -4,7 +4,7 @@
 //! underlying chart identity, mass properties, or contact geometry.
 
 use core::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::{Cancelled, Cx};
@@ -234,11 +234,10 @@ pub struct GeometryInstance {
     geometry: SharedGeometry,
     transform: RigidTransform,
     inverse_transform: RigidTransform,
-    // Static instances are immutable, so their identity belongs at admission
-    // rather than on every successful ray hit. Animated instances deliberately
-    // use the transient constructor below because their interpolated transform
-    // changes for each time query.
-    cached_frame_identity: Option<ContentHash>,
+    // Static instances initialize this at admission; transient animated
+    // instances initialize it on their first identity request, normally their
+    // first successful hit.
+    cached_frame_identity: OnceLock<ContentHash>,
 }
 
 impl GeometryInstance {
@@ -251,7 +250,7 @@ impl GeometryInstance {
     ) -> Result<Self, InstanceError> {
         let mut instance =
             Self::try_new_transient(object_id, geometry_identity, geometry, transform)?;
-        instance.cached_frame_identity = Some(instance.compute_frame_identity());
+        instance.cached_frame_identity = OnceLock::from(instance.compute_frame_identity());
         Ok(instance)
     }
 
@@ -278,7 +277,7 @@ impl GeometryInstance {
             geometry,
             transform,
             inverse_transform,
-            cached_frame_identity: None,
+            cached_frame_identity: OnceLock::new(),
         })
     }
 
@@ -309,8 +308,14 @@ impl GeometryInstance {
     /// Frame identity binds object, immutable geometry, and placement.
     #[must_use]
     pub fn frame_identity(&self) -> ContentHash {
-        self.cached_frame_identity
-            .unwrap_or_else(|| self.compute_frame_identity())
+        *self
+            .cached_frame_identity
+            .get_or_init(|| self.compute_frame_identity())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_frame_identity(&self) -> bool {
+        self.cached_frame_identity.get().is_some()
     }
 
     fn compute_frame_identity(&self) -> ContentHash {

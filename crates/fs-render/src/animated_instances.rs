@@ -717,10 +717,18 @@ mod tests {
         let transient =
             GeometryInstance::try_new_transient(71, identity, geometry, transform).unwrap();
 
+        assert!(!transient.has_cached_frame_identity());
+        let first_transient_identity = transient.frame_identity();
+        assert!(transient.has_cached_frame_identity());
         assert_eq!(
             cached.frame_identity().as_bytes(),
-            transient.frame_identity().as_bytes(),
+            first_transient_identity.as_bytes(),
             "moving immutable identity work to admission must preserve every digest bit"
+        );
+        assert_eq!(
+            transient.frame_identity(),
+            first_transient_identity,
+            "repeated transient identity access must preserve every digest bit"
         );
     }
 
