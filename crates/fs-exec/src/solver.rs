@@ -2690,6 +2690,14 @@ pub mod snapshot_v2 {
         AuthoritySubjectMismatch,
         /// State type `S` does not own all retained type/schema/codec identities.
         WrongStateSchema,
+        /// The state type declares an identity charter, but its pinned
+        /// identity constants disagree with the charter-derived values
+        /// (bead sj31i.52.5.2.1): copied or hand-edited constants refuse
+        /// before any envelope work.
+        CharterMismatch {
+            /// First divergent identity role.
+            field: SnapshotContextFieldV2,
+        },
         /// Payload codec requested resources outside its explicit envelope.
         CodecResourceLimitExceeded {
             /// Stable resource category.
@@ -2820,6 +2828,12 @@ pub mod snapshot_v2 {
                     .write_str("policy authority is bound to another exact snapshot subject"),
                 Self::WrongStateSchema => formatter
                     .write_str("snapshot state type, schema, or codec does not belong to the requested Rust type"),
+                Self::CharterMismatch { field } => write!(
+                    formatter,
+                    "declared {} constant disagrees with the owner-bound charter derivation; \
+                     pin the charter-derived value instead of copying bytes",
+                    field.as_str()
+                ),
                 Self::CodecResourceLimitExceeded {
                     resource,
                     requested,
@@ -5012,6 +5026,181 @@ pub mod snapshot_v2 {
         })
     }
 
+    /// Owner-bound identity charter for one solver-state family
+    /// (bead sj31i.52.5.2.1). Identities are DERIVED from the owner,
+    /// family, and grammar declarations through versioned hash domains, so
+    /// a type cannot mint valid identities by copying another type's
+    /// 32-byte constants: change the owner and every derived id moves;
+    /// keep the owner and the collision registry refuses the duplicate.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct StateIdentityCharterV2 {
+        /// Owning crate/module path (e.g. `"fs-exec::jacobi"`).
+        pub owner: &'static str,
+        /// State-family name unique within the owner.
+        pub state_family: &'static str,
+        /// Canonical field-grammar declaration (fields, units, endianness,
+        /// float policy) the schema identity binds.
+        pub schema_grammar: &'static str,
+        /// Canonical codec-grammar declaration the codec identity binds.
+        pub codec_grammar: &'static str,
+        /// Codec version within the schema.
+        pub codec_version: u32,
+    }
+
+    const CHARTER_TYPE_DOMAIN: &str = "org.frankensim.fs-exec.state-charter.type.v1";
+    const CHARTER_SCHEMA_DOMAIN: &str = "org.frankensim.fs-exec.state-charter.schema.v1";
+    const CHARTER_CODEC_DOMAIN: &str = "org.frankensim.fs-exec.state-charter.codec.v1";
+
+    impl StateIdentityCharterV2 {
+        fn payload(&self, include_grammar: u8) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(self.owner.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(self.state_family.as_bytes());
+            bytes.push(0);
+            if include_grammar >= 1 {
+                bytes.extend_from_slice(self.schema_grammar.as_bytes());
+                bytes.push(0);
+            }
+            if include_grammar >= 2 {
+                bytes.extend_from_slice(self.codec_grammar.as_bytes());
+                bytes.push(0);
+                bytes.extend_from_slice(&self.codec_version.to_le_bytes());
+            }
+            bytes
+        }
+
+        /// Charter-derived nominal state-type identity.
+        #[must_use]
+        pub fn state_type_id(&self) -> SnapshotStateTypeIdV2 {
+            SnapshotStateTypeIdV2::from_bytes(
+                *fs_blake3::hash_domain(CHARTER_TYPE_DOMAIN, &self.payload(0)).as_bytes(),
+            )
+        }
+
+        /// Charter-derived schema identity (rotates with the schema grammar).
+        #[must_use]
+        pub fn state_schema_id(&self) -> SnapshotStateSchemaIdV2 {
+            SnapshotStateSchemaIdV2::from_bytes(
+                *fs_blake3::hash_domain(CHARTER_SCHEMA_DOMAIN, &self.payload(1)).as_bytes(),
+            )
+        }
+
+        /// Charter-derived codec identity (rotates with codec grammar or
+        /// version).
+        #[must_use]
+        pub fn state_codec_id(&self) -> SnapshotStateCodecIdV2 {
+            SnapshotStateCodecIdV2::from_bytes(
+                *fs_blake3::hash_domain(CHARTER_CODEC_DOMAIN, &self.payload(2)).as_bytes(),
+            )
+        }
+
+        /// First identity role whose pinned constant disagrees with the
+        /// charter derivation, if any.
+        #[must_use]
+        pub fn first_mismatch(
+            &self,
+            type_id: SnapshotStateTypeIdV2,
+            schema_id: SnapshotStateSchemaIdV2,
+            codec_id: SnapshotStateCodecIdV2,
+            codec_version: u32,
+        ) -> Option<SnapshotContextFieldV2> {
+            if type_id != self.state_type_id() {
+                return Some(SnapshotContextFieldV2::StateType);
+            }
+            if schema_id != self.state_schema_id() {
+                return Some(SnapshotContextFieldV2::StateSchema);
+            }
+            if codec_id != self.state_codec_id() {
+                return Some(SnapshotContextFieldV2::StateCodec);
+            }
+            if codec_version != self.codec_version {
+                return Some(SnapshotContextFieldV2::StateCodecVersion);
+            }
+            None
+        }
+    }
+
+    /// Verify a charter-declaring state type's pinned constants against the
+    /// charter derivation. Uncharted types pass unchanged (the pre-charter
+    /// no-claim stands for them, per the bead).
+    ///
+    /// # Errors
+    /// [`SnapshotV2Error::CharterMismatch`] naming the first divergent role.
+    pub fn verify_state_charter<S: super::SolverStateV2>() -> Result<(), SnapshotV2Error> {
+        if let Some(charter) = S::charter()
+            && let Some(field) = charter.first_mismatch(
+                S::STATE_TYPE_ID_V2,
+                S::STATE_SCHEMA_ID_V2,
+                S::STATE_CODEC_ID_V2,
+                S::STATE_CODEC_VERSION_V2,
+            )
+        {
+            return Err(SnapshotV2Error::CharterMismatch { field });
+        }
+        Ok(())
+    }
+
+    /// Explicit collision registry over charters: duplicate (owner, family)
+    /// pairs with differing grammar refuse deterministically; re-registering
+    /// an identical charter is idempotent.
+    #[derive(Debug, Default)]
+    pub struct CharterRegistryV2 {
+        entries: std::collections::BTreeMap<(&'static str, &'static str), StateIdentityCharterV2>,
+    }
+
+    /// Typed collision refusal from [`CharterRegistryV2::register`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CharterCollisionV2 {
+        /// Owner of the colliding charter.
+        pub owner: &'static str,
+        /// Family of the colliding charter.
+        pub state_family: &'static str,
+    }
+
+    impl CharterRegistryV2 {
+        /// Empty registry.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Register a charter; identical re-registration is idempotent.
+        ///
+        /// # Errors
+        /// [`CharterCollisionV2`] when the same (owner, family) is already
+        /// registered with a DIFFERENT grammar or version.
+        pub fn register(
+            &mut self,
+            charter: StateIdentityCharterV2,
+        ) -> Result<(), CharterCollisionV2> {
+            let key = (charter.owner, charter.state_family);
+            if let Some(existing) = self.entries.get(&key) {
+                if *existing == charter {
+                    return Ok(());
+                }
+                return Err(CharterCollisionV2 {
+                    owner: charter.owner,
+                    state_family: charter.state_family,
+                });
+            }
+            self.entries.insert(key, charter);
+            Ok(())
+        }
+
+        /// Registered charter count.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        /// Whether the registry is empty.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+    }
+
     /// Post-decode manifest the SOLVER recomputes from a decoded state
     /// (bead sj31i.52.5.2). Byte/identity admission proves the envelope;
     /// this proves the decoded value still says what the retained context
@@ -5157,6 +5346,10 @@ pub mod snapshot_v2 {
     where
         R: super::PreparableSolverV2,
     {
+        if let Err(SnapshotV2Error::CharterMismatch { field }) = verify_state_charter::<R::State>()
+        {
+            return Err(PrepareResumeErrorV2::SolverContextMismatch { field });
+        }
         let solver_context = solver.expected_resume_context();
         if let Some(field) = first_context_mismatch(
             solver_context.context(),
@@ -5907,6 +6100,15 @@ impl<S: LegacySolverStateV1> LegacySnapshotV1Adapter<S> {
 /// let _legacy = LegacySnapshotV1Adapter::<StrongOnly>::to_bytes(&StrongOnly);
 /// ```
 pub trait SolverStateV2: Sized {
+    /// Optional owner-bound identity charter (bead sj31i.52.5.2.1). When
+    /// declared, every seal/unseal/prepare path verifies the pinned
+    /// identity constants against the charter derivation, so copied or
+    /// hand-edited constants refuse before any envelope work. `None`
+    /// keeps the pre-charter no-claim for legacy implementations.
+    fn charter() -> Option<&'static snapshot_v2::StateIdentityCharterV2> {
+        None
+    }
+
     /// Full-width nominal identity of this exact Rust state type.
     const STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2;
     /// Full-width state schema identity owned by this exact Rust state type.
@@ -5957,6 +6159,7 @@ pub trait SolverStateV2: Sized {
     where
         C: fs_blake3::identity::CancellationProbe,
     {
+        snapshot_v2::verify_state_charter::<Self>()?;
         if !expected_context.context().matches_state::<Self>() {
             return Err(snapshot_v2::SnapshotV2Error::WrongStateSchema);
         }
@@ -9084,6 +9287,168 @@ mod tests {
             error,
             snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
                 field: snapshot_v2::SnapshotContextFieldV2::Budget,
+            }
+        );
+    }
+
+    /// Charter fixture for the registry/derivation battery (52.5.2.1).
+    const JACOBI_CHARTER: snapshot_v2::StateIdentityCharterV2 =
+        snapshot_v2::StateIdentityCharterV2 {
+            owner: "fs-exec::tests::jacobi",
+            state_family: "jacobi-iteration",
+            schema_grammar: "x: [f64; le]; iter: u64",
+            codec_grammar: "v2 framed, f64-le slice + u64",
+            codec_version: 1,
+        };
+
+    #[test]
+    fn charter_derivation_is_deterministic_and_role_separated() {
+        let type_id = JACOBI_CHARTER.state_type_id();
+        assert_eq!(type_id, JACOBI_CHARTER.state_type_id(), "deterministic");
+        // Distinct roles never share bytes (domain separation).
+        assert_ne!(
+            type_id.as_bytes(),
+            JACOBI_CHARTER.state_schema_id().as_bytes()
+        );
+        assert_ne!(
+            JACOBI_CHARTER.state_schema_id().as_bytes(),
+            JACOBI_CHARTER.state_codec_id().as_bytes()
+        );
+        // Changing the OWNER moves every derived identity: copying another
+        // family's grammar cannot mint its identities.
+        let other_owner = snapshot_v2::StateIdentityCharterV2 {
+            owner: "fs-exec::tests::impostor",
+            ..JACOBI_CHARTER
+        };
+        assert_ne!(other_owner.state_type_id(), JACOBI_CHARTER.state_type_id());
+        assert_ne!(
+            other_owner.state_schema_id(),
+            JACOBI_CHARTER.state_schema_id()
+        );
+        assert_ne!(
+            other_owner.state_codec_id(),
+            JACOBI_CHARTER.state_codec_id()
+        );
+    }
+
+    #[test]
+    fn grammar_revisions_rotate_exactly_the_intended_identities() {
+        let schema_revision = snapshot_v2::StateIdentityCharterV2 {
+            schema_grammar: "x: [f64; le]; iter: u64; residual: f64",
+            ..JACOBI_CHARTER
+        };
+        // Type identity is grammar-independent; schema and codec rotate.
+        assert_eq!(
+            schema_revision.state_type_id(),
+            JACOBI_CHARTER.state_type_id()
+        );
+        assert_ne!(
+            schema_revision.state_schema_id(),
+            JACOBI_CHARTER.state_schema_id()
+        );
+
+        let codec_bump = snapshot_v2::StateIdentityCharterV2 {
+            codec_version: 2,
+            ..JACOBI_CHARTER
+        };
+        assert_eq!(codec_bump.state_type_id(), JACOBI_CHARTER.state_type_id());
+        assert_eq!(
+            codec_bump.state_schema_id(),
+            JACOBI_CHARTER.state_schema_id()
+        );
+        assert_ne!(codec_bump.state_codec_id(), JACOBI_CHARTER.state_codec_id());
+    }
+
+    #[test]
+    fn charter_registry_refuses_collisions_and_is_idempotent() {
+        let mut registry = snapshot_v2::CharterRegistryV2::new();
+        registry
+            .register(JACOBI_CHARTER)
+            .expect("first registration");
+        registry
+            .register(JACOBI_CHARTER)
+            .expect("identical re-registration is idempotent");
+        assert_eq!(registry.len(), 1);
+        // Same (owner, family), different grammar: deterministic refusal.
+        let drifted = snapshot_v2::StateIdentityCharterV2 {
+            schema_grammar: "x: [f64; le]; iter: u64; extra: f64",
+            ..JACOBI_CHARTER
+        };
+        let collision = registry.register(drifted).expect_err("collision refuses");
+        assert_eq!(collision.owner, "fs-exec::tests::jacobi");
+        assert_eq!(collision.state_family, "jacobi-iteration");
+        // A different family under the same owner registers cleanly.
+        let sibling = snapshot_v2::StateIdentityCharterV2 {
+            state_family: "jacobi-preconditioned",
+            ..JACOBI_CHARTER
+        };
+        registry.register(sibling).expect("distinct family admits");
+        assert_eq!(registry.len(), 2);
+    }
+
+    /// A deliberately malicious same-layout type that copies EVERY identity
+    /// constant from [`JacobiState`] but declares a charter: the pinned
+    /// (stolen) constants cannot equal its own charter derivation, so every
+    /// seal and prepare path refuses before any envelope work.
+    #[derive(Debug, Clone, PartialEq)]
+    struct ImpostorState {
+        x: Vec<f64>,
+        iter: u64,
+    }
+
+    impl SolverStateV2 for ImpostorState {
+        const STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2 = JacobiState::STATE_TYPE_ID_V2;
+        const STATE_SCHEMA_ID_V2: snapshot_v2::SnapshotStateSchemaIdV2 =
+            JacobiState::STATE_SCHEMA_ID_V2;
+        const STATE_CODEC_ID_V2: snapshot_v2::SnapshotStateCodecIdV2 =
+            JacobiState::STATE_CODEC_ID_V2;
+        const STATE_CODEC_VERSION_V2: u32 = JacobiState::STATE_CODEC_VERSION_V2;
+
+        fn charter() -> Option<&'static snapshot_v2::StateIdentityCharterV2> {
+            static CHARTER: snapshot_v2::StateIdentityCharterV2 =
+                snapshot_v2::StateIdentityCharterV2 {
+                    owner: "fs-exec::tests::impostor",
+                    state_family: "jacobi-iteration",
+                    schema_grammar: "x: [f64; le]; iter: u64",
+                    codec_grammar: "v2 framed, f64-le slice + u64",
+                    codec_version: 1,
+                };
+            Some(&CHARTER)
+        }
+
+        fn encode_v2(
+            &self,
+            encoder: &mut snapshot_v2::SnapshotEncoderV2<'_>,
+        ) -> Result<(), snapshot_v2::SnapshotV2Error> {
+            encoder.put_u64(self.iter)?;
+            encoder.put_f64_slice(&self.x)
+        }
+
+        fn decode_v2(
+            decoder: &mut snapshot_v2::SnapshotDecoderV2<'_, '_>,
+        ) -> Result<Self, snapshot_v2::SnapshotV2Error> {
+            Ok(Self {
+                iter: decoder.get_u64()?,
+                x: decoder.get_f64_vec()?,
+            })
+        }
+    }
+
+    #[test]
+    fn copied_constants_with_a_charter_refuse_at_seal() {
+        let state = ImpostorState {
+            x: vec![1.0, 2.0],
+            iter: 3,
+        };
+        let context = base_v2_context::<ImpostorState>();
+        let limits = v2_limits(64, 64);
+        let error = state
+            .seal_v2(&context, limits, || false)
+            .expect_err("stolen constants must refuse before sealing");
+        assert_eq!(
+            error,
+            snapshot_v2::SnapshotV2Error::CharterMismatch {
+                field: snapshot_v2::SnapshotContextFieldV2::StateType,
             }
         );
     }
