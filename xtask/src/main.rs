@@ -790,9 +790,65 @@ fn strip_line_comments(line: &str) -> &str {
     line.find("//").map_or(line, |i| &line[..i])
 }
 
+/// Blank out ordinary and single-line raw string literals so their content
+/// cannot impersonate code tokens ("unsafe-artifact-placement" is data, not
+/// an unsafe block). Unterminated quotes leave the rest of the line intact,
+/// which errs toward a false POSITIVE, never a missed real `unsafe`.
+fn strip_string_literals(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Raw string opener r" / r#" / br" etc. — find the matching closer
+        // on this line; hashes must match.
+        if bytes[i] == b'r' && (i + 1 < bytes.len()) {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] == b'#' {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'"' {
+                let hashes = j - (i + 1);
+                let closer: Vec<u8> = std::iter::once(b'"')
+                    .chain(std::iter::repeat_n(b'#', hashes))
+                    .collect();
+                if let Some(rel) = line[j + 1..]
+                    .as_bytes()
+                    .windows(closer.len())
+                    .position(|window| window == closer.as_slice())
+                {
+                    out.push(b' ');
+                    i = j + 1 + rel + closer.len();
+                    continue;
+                }
+            }
+        }
+        if bytes[i] == b'"' {
+            let mut j = i + 1;
+            while j < bytes.len() {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == b'"' {
+                    break;
+                }
+                j += 1;
+            }
+            if j < bytes.len() {
+                out.push(b' ');
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn contains_unsafe_token(text: &str) -> bool {
     for raw in text.lines() {
-        let line = strip_line_comments(raw);
+        let line = strip_string_literals(&strip_line_comments(raw));
         for (i, _) in line.match_indices("unsafe") {
             let before_ok = i == 0
                 || !line.as_bytes()[i - 1].is_ascii_alphanumeric()
@@ -11370,6 +11426,21 @@ path = "src/h\u0069dden.rs"
         assert!(!contains_unsafe_token(
             "let unsafety = 1; let not_unsafe_thing = 2;"
         ));
+        // String-literal DATA must not impersonate code tokens (the huq.25
+        // smoke replay caught fs-evidence-runner tripping on all three).
+        assert!(!contains_unsafe_token(
+            "UnsafeArtifactPlacement = 6 => \"unsafe-artifact-placement\","
+        ));
+        assert!(!contains_unsafe_token(
+            "Some(format!(\"unsafe{control}hint\"))"
+        ));
+        assert!(!contains_unsafe_token("let tag = r#\"unsafe { fake }\"#;"));
+        // A real unsafe block NEXT TO a string stays caught.
+        assert!(contains_unsafe_token(
+            "let s = \"unsafe-tag\"; unsafe { ptr.read() }"
+        ));
+        // An unterminated quote errs toward matching, never missing.
+        assert!(contains_unsafe_token("let broken = \"; unsafe { x() }"));
     }
 
     #[test]
