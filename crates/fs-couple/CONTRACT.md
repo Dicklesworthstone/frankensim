@@ -316,9 +316,13 @@ clarinet is one filling of those objects.
   star). `PrestressedString.moving_end` selects that clock in
   `realize_assembly` when there is no duct, bow, obstacle, or von
   Karman plate. Fixed-fixed sines keep the one-way bridge force.
-  A viscothermal duct with tone holes stays the FIR TMM. Plate ×
-  Helmholtz in `cavity_phs` is the same transformer, not a staggered
-  pair of steps.
+  A uniform-radius bore is the inviscid `acoustic_waveguide` LC
+  ladder. Open tone holes are `AcousticTap` side-branch inertances.
+  A quasistatic reed is the Bernoulli port on that inlet. With a
+  linear plate the mouth is a transformer. Stepped bores, massive
+  reeds, and von Karman plates stay on the FIR TMM. Plate ×
+  Helmholtz in `cavity_phs` is the same transformer, not a
+  staggered pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
   analytic primitive when those hypotheses hold, and the FE-sampled
   Airy construction otherwise. The membrane channel remains the

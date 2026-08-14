@@ -24,7 +24,8 @@ use fs_nlmodal::{
     KcStringParams, assemble_storage, kirchhoff_carrier_string, prestressed_beam_omega,
 };
 use fs_phs::{
-    common_flow_dirac, modal_bank, modal_bank_ports, moving_end_waveguide, step, step_descriptor,
+    AcousticTap, acoustic_waveguide, bernoulli_volume_flow, common_flow_dirac, modal_bank,
+    modal_bank_ports, moving_end_waveguide, quasistatic_aperture_opening, step, step_descriptor,
     transformer,
 };
 use fs_scenario::{
@@ -1467,6 +1468,23 @@ fn realize_reed_on_duct(
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
+    if let Some((length, radius, taps)) = uniform_bore(duct)
+        && reed.mass_kg == 0.0
+        && plates.vk.is_none()
+    {
+        return realize_reed_ode(
+            length,
+            radius,
+            matches!(duct.termination, WaveguideEnd::UnflangedOpen),
+            &taps,
+            reed,
+            plates,
+            gas,
+            listener_m,
+            sample_rate_hz,
+            n,
+        );
+    }
     realize_reed_bore(
         &physics,
         gas,
@@ -1477,6 +1495,221 @@ fn realize_reed_on_duct(
         sample_rate_hz,
         n,
     )
+}
+
+fn uniform_bore(duct: &ViscothermalDuct) -> Option<(f64, f64, Vec<AcousticTap>)> {
+    if duct.segments.is_empty() {
+        return None;
+    }
+    let radius = duct.segments[0].radius_m;
+    if !(radius > 0.0)
+        || duct
+            .segments
+            .iter()
+            .any(|s| (s.radius_m - radius).abs() > 1.0e-12 * radius || !(s.length_m > 0.0))
+    {
+        return None;
+    }
+    let total: f64 = duct.segments.iter().map(|s| s.length_m).sum();
+    if !(total > 0.0) {
+        return None;
+    }
+    let mut taps = Vec::new();
+    let mut acc = 0.0;
+    for (i, s) in duct.segments.iter().enumerate() {
+        acc += s.length_m;
+        for hole in &duct.tone_holes {
+            if hole.after_segment == i && hole.open && hole.radius_m > 0.0 {
+                taps.push(AcousticTap {
+                    station: (acc / total).clamp(0.0, 1.0),
+                    neck_length: hole.chimney_m.max(0.0),
+                    neck_radius: hole.radius_m,
+                });
+            }
+        }
+    }
+    Some((total, radius, taps))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn realize_blown_ode(
+    length: f64,
+    radius: f64,
+    open: bool,
+    taps: &[AcousticTap],
+    blow: VolumeVelocityPulse,
+    plates: &mut PlateBank,
+    gas: &GasState,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+) -> Result<Vec<f64>, AcousticRealizeError> {
+    let area = core::f64::consts::PI * radius * radius;
+    let cells = 8usize;
+    let inlets = if plates.linear.is_empty() { 1 } else { 2 };
+    let line = acoustic_waveguide(
+        length,
+        radius,
+        gas.density,
+        gas.sound_speed,
+        cells,
+        open,
+        inlets,
+        taps,
+    )
+    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    if plates.linear.is_empty() {
+        let mut x = vec![0.0; line.state_dim()];
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 * dt;
+            let u = if t < blow.duration_s {
+                blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+            } else {
+                0.0
+            };
+            let rec = step(&line, &x, &[u], dt)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            out.push(rec.y[0]);
+            x = rec.x;
+        }
+        return Ok(out);
+    }
+    let plate =
+        plate_modal_ports(plates, false)?.ok_or(AcousticRealizeError::InvalidDescription {
+            what: "ODE duct expected a linear plate bank",
+        })?;
+    let sys = transformer(plate, line, 0, 1, area)
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let mut x = vec![0.0; sys.state_dim()];
+    let mut out = Vec::with_capacity(n);
+    let n_plate = 2 * plates.linear.len();
+    for i in 0..n {
+        let t = i as f64 * dt;
+        let u = if t < blow.duration_s {
+            blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
+        } else {
+            0.0
+        };
+        let rec =
+            step(&sys, &x, &[u], dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let mut p = rec.y[0];
+        for (k, body) in plates.linear.iter().enumerate() {
+            let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
+            p += body.radiate(acc, gas.density, listener_m);
+        }
+        debug_assert!(rec.x.len() >= n_plate);
+        out.push(p);
+        x = rec.x;
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn realize_reed_ode(
+    length: f64,
+    radius: f64,
+    open: bool,
+    taps: &[AcousticTap],
+    reed: BeatingReed,
+    plates: &mut PlateBank,
+    gas: &GasState,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+) -> Result<Vec<f64>, AcousticRealizeError> {
+    if !(reed.rest_opening_m > 0.0
+        && reed.width_m > 0.0
+        && reed.closing_pressure_pa > 0.0
+        && reed.blowing_pressure_pa >= 0.0)
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "reed parameters must be physical and finite",
+        });
+    }
+    let area = core::f64::consts::PI * radius * radius;
+    let inlets = if plates.linear.is_empty() { 1 } else { 2 };
+    let line = acoustic_waveguide(
+        length,
+        radius,
+        gas.density,
+        gas.sound_speed,
+        8,
+        open,
+        inlets,
+        taps,
+    )
+    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let n_line = line.state_dim();
+    let (line, joined) = if plates.linear.is_empty() {
+        (Some(line), None)
+    } else {
+        let plate =
+            plate_modal_ports(plates, false)?.ok_or(AcousticRealizeError::InvalidDescription {
+                what: "ODE reed expected a linear plate bank",
+            })?;
+        (
+            None,
+            Some(
+                transformer(plate, line, 0, 1, area)
+                    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
+            ),
+        )
+    };
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    let mut x = vec![
+        0.0;
+        joined
+            .as_ref()
+            .map_or(n_line, fs_phs::PortHamiltonian::state_dim)
+    ];
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 * dt;
+        let p_m = if reed.attack_s <= 0.0 {
+            reed.blowing_pressure_pa
+        } else if t >= reed.attack_s {
+            reed.blowing_pressure_pa
+        } else {
+            let xi = t / reed.attack_s;
+            reed.blowing_pressure_pa * 0.5 * (1.0 - det::cos(core::f64::consts::PI * xi))
+        };
+        let p_bore = if let Some(sys) = &joined {
+            sys.output(&x).first().copied().unwrap_or(0.0)
+        } else {
+            line.as_ref()
+                .map(|s| s.output(&x).first().copied().unwrap_or(0.0))
+                .unwrap_or(0.0)
+        };
+        let h = quasistatic_aperture_opening(
+            reed.rest_opening_m,
+            reed.closing_pressure_pa,
+            p_m - p_bore,
+        );
+        let u = bernoulli_volume_flow(reed.width_m, h, p_m - p_bore, gas.density);
+        let rec = if let Some(sys) = &joined {
+            step(sys, &x, &[u], dt)
+        } else {
+            step(line.as_ref().expect("waveguide-only reed"), &x, &[u], dt)
+        }
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let mut p = rec.y[0];
+        if !plates.linear.is_empty() {
+            for (k, body) in plates.linear.iter().enumerate() {
+                let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
+                p += body.radiate(acc, gas.density, listener_m);
+            }
+        }
+        if !p.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "ODE reed pressure left the finite set",
+            });
+        }
+        x = rec.x;
+        out.push(p);
+    }
+    Ok(out)
 }
 
 fn realize_blown_duct(
@@ -1499,6 +1732,22 @@ fn realize_blown_duct(
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
+    if let Some((length, radius, taps)) = uniform_bore(duct)
+        && plates.vk.is_none()
+    {
+        return realize_blown_ode(
+            length,
+            radius,
+            matches!(duct.termination, WaveguideEnd::UnflangedOpen),
+            &taps,
+            blow,
+            plates,
+            gas,
+            listener_m,
+            sample_rate_hz,
+            n,
+        );
+    }
     if !plates.is_empty() {
         return realize_blown_with_body(
             &physics,

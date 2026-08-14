@@ -914,3 +914,17 @@ fn moving_end_with_cavity_is_a_three_phs_clock() {
         .sum();
     assert!(err > 1.0e-8, "the cavity transformer must load the join");
 }
+
+#[test]
+fn simple_cylinder_ode_still_tracks_sound_speed() {
+    let cold = realize_assembly(&closed_duct(288.15)).expect("cold ODE");
+    let hot = realize_assembly(&closed_duct(330.0)).expect("hot ODE");
+    let p_cold = dominant_period_samples(&cold.pressure_pa, 8, 40);
+    let p_hot = dominant_period_samples(&hot.pressure_pa, 8, 40);
+    let measured = p_hot as f64 / p_cold as f64;
+    let expected = cold.gas.sound_speed / hot.gas.sound_speed;
+    assert!(
+        (measured - expected).abs() < 0.12,
+        "ODE cylinder period must track 1/c(T): {measured} vs {expected}"
+    );
+}
