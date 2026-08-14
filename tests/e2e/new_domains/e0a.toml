@@ -1,0 +1,52 @@
+# E0a — Units, identity, and schema foundations (epic frankensim-ext-epic-e0a-2kec).
+# First shared-runner manifest (runner bead frankensim-ext-epic-gov-rjoq.8).
+# The phase battery owns these acceptance criteria; the runner only executes,
+# logs, and classifies. Both cases bind REAL production entry points — the
+# governance gates that enforce E0a's schema/identity foundations at HEAD.
+schema = "frankensim.new-domains.case-manifest.v1"
+phase = "e0a"
+
+[[case]]
+id = "e0a-schema-policy-gate"
+version = 1
+purpose = "The public schema-freeze policy gate holds at HEAD: frozen schemas unchanged, constants classified, no unversioned drift."
+owning_bead = "frankensim-ext-epic-e0a-2kec"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "run", "-q", "-p", "xtask", "--", "check-schemas"]
+expected_output_pattern = "policy OK"
+seed = 0
+seed_overridable = false
+max_wall_seconds = 900
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "binary gate; QoI is the violation count, band is exactly zero"
+
+[[case]]
+id = "e0a-identity-registry-gate"
+version = 1
+purpose = "Typed identity registry agrees with identity authorities at HEAD (REQUIRED_IDENTITY_IDS reconciliation stays live)."
+owning_bead = "frankensim-ext-epic-e0a-2kec"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "run", "-q", "-p", "xtask", "--", "check-identities"]
+expected_output_pattern = "policy OK"
+seed = 0
+seed_overridable = false
+max_wall_seconds = 900
+expected = "authority"
+determinism_class = "repo-deterministic"
+qoi_notes = "binary gate; QoI is the violation count, band is exactly zero"
+
+[[case]]
+id = "e0a-unknown-verb-refuses"
+version = 1
+purpose = "The governance binary fails closed on an undeclared verb — the refusal path the runner's expected-refusal classification is proven against."
+owning_bead = "frankensim-ext-epic-e0a-2kec"
+gauntlet_tier = "G0"
+entry_command = ["cargo", "run", "-q", "-p", "xtask", "--", "e0a-no-such-verb"]
+expected = "refusal"
+expected_refusal_pattern = "unknown command"
+seed = 0
+seed_overridable = false
+max_wall_seconds = 900
+determinism_class = "repo-deterministic"
+qoi_notes = "refusal case; acceptance is the typed unknown-command diagnostic, not silence"
