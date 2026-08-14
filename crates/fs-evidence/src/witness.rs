@@ -37,7 +37,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::color::{Color, ColorRank, IntervalOp, compose};
+use crate::color::{Color, IntervalOp, compose};
 
 /// Bounded witness-set cardinality: a spine has single-digit stages; a set
 /// approaching this cap indicates a misuse (e.g. folding a whole campaign
