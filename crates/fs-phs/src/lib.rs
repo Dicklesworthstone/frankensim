@@ -3117,9 +3117,7 @@ fn tap_viscothermal(
 
 fn tap_foster_count(n_tap: usize, pin: Option<&ViscothermalPin>) -> usize {
     match pin {
-        Some(p) if p.foster_branches > 0 && p.dynamic_viscosity > 0.0 => {
-            n_tap * p.foster_branches
-        }
+        Some(p) if p.foster_branches > 0 && p.dynamic_viscosity > 0.0 => n_tap * p.foster_branches,
         _ => 0,
     }
 }

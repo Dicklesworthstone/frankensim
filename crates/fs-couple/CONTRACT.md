@@ -352,7 +352,9 @@ clarinet is one filling of those objects.
   dissipative port force (not a term in H). With a linear plate
   the mouth is a transformer. An unflanged ODE mouth is the
   same compact `(R, X)` as the TMM: `Re Z_rad` plus mass
-  `Δℓ = 0.6133 a` on the last flux. Frequency-by-frequency
+  `Δℓ = 0.6133 a` on the last flux. An open chimney with
+  `foster_branches > 0` carries the bore's Foster series
+  (extra neck states). Frequency-by-frequency
   Bessel TMM (`LossModel::Bessel`, spherical-wave cones
   included) is the FIR path. 3-D jet broadband remains a
   no-claim. Plate ×

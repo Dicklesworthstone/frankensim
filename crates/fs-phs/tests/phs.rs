@@ -1162,6 +1162,51 @@ fn viscothermal_tap_damps_more_than_the_inviscid_vent() {
 }
 
 #[test]
+fn chimney_foster_adds_neck_states() {
+    let l = 0.34;
+    let c = 343.0;
+    let tap = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.003,
+        neck_radius: 0.0015,
+        open_fraction: 1.0,
+    }];
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 6,
+    }];
+    let lumped = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 0,
+    };
+    let foster = ViscothermalPin {
+        foster_branches: 3,
+        ..lumped
+    };
+    let pin = acoustic_chain(&sections, 1.2, c, false, 1, &tap, Some(&lumped)).expect("lumped");
+    let spec = acoustic_chain(&sections, 1.2, c, false, 1, &tap, Some(&foster)).expect("foster");
+    // 6 cells × 3 branches × 2 (series+thermal) plus 3 on the neck.
+    assert_eq!(spec.state_dim(), pin.state_dim() + 6 * 3 * 2 + 3);
+    let sealed = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.02,
+        neck_radius: 0.006,
+        open_fraction: 0.0,
+    }];
+    let pad_l = acoustic_chain(&sections, 1.2, c, false, 1, &sealed, Some(&lumped)).expect("pad L");
+    let pad_f = acoustic_chain(&sections, 1.2, c, false, 1, &sealed, Some(&foster)).expect("pad F");
+    assert_eq!(
+        pad_f.state_dim(),
+        pad_l.state_dim() + 6 * 3 * 2,
+        "a sealed pad must not mint chimney Foster states"
+    );
+}
+
+#[test]
 fn closed_pad_is_the_tmm_cavity_compliance() {
     let l = 0.34;
     let c = 343.0;

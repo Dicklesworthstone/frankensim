@@ -59,7 +59,8 @@ stepping, and Galerkin reduction preserves the structure.
   open neck inertance, closed cavity `C`, or the mix
   `Y = σ Y_open + (1−σ) Y_closed`; a `ViscothermalPin`
   puts series `R` on the neck and thermal `G` on remaining
-  `C`),
+  `C`; `foster_branches > 0` adds the bore's Foster
+  series on each open neck),
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
   constriction, a cone sliced into cylinders),
