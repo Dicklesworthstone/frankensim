@@ -786,14 +786,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "frankentorch-autograd"
+version = "0.1.0"
+dependencies = [
+ "frankentorch-core",
+ "frankentorch-dispatch",
+ "frankentorch-kernel-cpu",
+ "libm",
+ "rayon",
+]
+
+[[package]]
+name = "frankentorch-core"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "num-complex",
+]
+
+[[package]]
+name = "frankentorch-dispatch"
+version = "0.1.0"
+dependencies = [
+ "frankentorch-core",
+ "frankentorch-kernel-cpu",
+]
+
+[[package]]
+name = "frankentorch-kernel-cpu"
+version = "0.1.0"
+dependencies = [
+ "frankentorch-core",
+ "libm",
+ "matrixmultiply",
+ "rayon",
+ "wide",
+]
+
+[[package]]
 name = "fs-ad"
 version = "0.0.1"
 dependencies = [
+ "frankentorch-autograd",
+ "frankentorch-core",
  "fs-casebook",
  "fs-la",
  "fs-math",
- "ft-autograd",
- "ft-core",
 ]
 
 [[package]]
@@ -2993,44 +3031,6 @@ dependencies = [
  "serde",
  "tracing",
  "xxhash-rust",
-]
-
-[[package]]
-name = "ft-autograd"
-version = "0.1.0"
-dependencies = [
- "ft-core",
- "ft-dispatch",
- "ft-kernel-cpu",
- "libm",
- "rayon",
-]
-
-[[package]]
-name = "ft-core"
-version = "0.1.0"
-dependencies = [
- "half",
- "num-complex",
-]
-
-[[package]]
-name = "ft-dispatch"
-version = "0.1.0"
-dependencies = [
- "ft-core",
- "ft-kernel-cpu",
-]
-
-[[package]]
-name = "ft-kernel-cpu"
-version = "0.1.0"
-dependencies = [
- "ft-core",
- "libm",
- "matrixmultiply",
- "rayon",
- "wide",
 ]
 
 [[package]]
