@@ -1,6 +1,6 @@
 {
   "authority_statement": "INERT INVENTORY DATA derived from frozen br output. Clause text is bound by hash, never rewritten; the beads database remains the sole clause authority. This registry cannot close, alter, or supersede any acceptance criterion.",
-  "beads_source_sha256": "d4a707831b62d3640f83b2a9123477ff956a7b89d6e77f9a43b92f305b754b6d",
+  "beads_source_sha256": "91f9ba3401ac9e16c3b18423bb4fd5fc0647e6c6fe50d0e739b8c0f28524d5ac",
   "family_size": 113,
   "findings": [],
   "rows": [
