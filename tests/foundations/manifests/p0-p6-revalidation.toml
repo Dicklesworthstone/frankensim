@@ -1,0 +1,167 @@
+# Foundations P0-P6 retained-evidence revalidation manifest
+# (bead frankensim-epic-foundations-huq.25).
+#
+# Enumerates the historical Foundations milestone evidence exactly as
+# retained: each row binds its bead's close-reason bytes by sha256 (lossless;
+# the beads DB stays the sole clause authority) and declares what remains
+# mechanically replayable at the current revision. The DRIVER classifies
+# rows at run time (Current / Stale / Refuted / Blocked / Unsupported /
+# NoData / HistoricalOnly); this manifest never bakes in a verdict, and a
+# row with no replay command can never be classified Current - proof is
+# never inferred from a closure date or an aggregate pass count.
+#
+# evidence_grade is a MANIFEST-TIME statement about what the retained close
+# reason cites, reviewed by hand against the beads DB on 2026-08-14:
+#   executable   the close reason names tests/artifacts that exist at HEAD
+#                and a replay command below exercises them
+#   prose        the close reason describes delivered work but names no
+#                executable root the driver can replay
+#   none         the close reason carries no evidence content at all
+schema = "frankensim.foundations.p0p6-revalidation-manifest.v1"
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.1"
+title = "Workspace scaffold"
+closed_at = "2026-07-06"
+evidence_grade = "prose"
+replay_commands = [
+  ["cargo", "run", "-q", "-p", "xtask", "--", "check-layers"],
+  ["cargo", "run", "-q", "-p", "xtask", "--", "check-deps"],
+]
+notes = "No commit pin retained; the layer/dep gates ARE the surviving mechanical claim."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.2"
+title = "Constellation integration"
+closed_at = "2026-07-06"
+evidence_grade = "executable"
+replay_commands = [["cargo", "run", "-q", "-p", "xtask", "--", "check-constellation"]]
+notes = "lock_hash f92683cc4572a198 retained in the close reason; the lock gate replays."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.3"
+title = "fs-qty dimensional analysis"
+closed_at = "2026-07-06"
+evidence_grade = "executable"
+replay_commands = [["cargo", "test", "-q", "-p", "fs-qty"]]
+notes = "Conformance + parse-allocation batteries exist at HEAD."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.4"
+title = "CI/CD both-ISA matrix"
+closed_at = "2026-07-06"
+evidence_grade = "prose"
+replay_commands = []
+notes = "Cited GitHub run IDs 28816513544/28819512675 are external artifacts; the workflow file existing at HEAD is checked by the driver as a file-presence root, not a proof."
+file_roots = [".github/workflows/ci.yml"]
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.5"
+title = "Contract & conformance infrastructure"
+closed_at = "2026-07-17"
+evidence_grade = "none"
+replay_commands = [["cargo", "run", "-q", "-p", "xtask", "--", "check-contracts"]]
+notes = "Close reason is the four bytes 'done'. The contract gate replays the surviving claim; the closure itself retains no evidence."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.6"
+title = "Unsafe-capsule safety cases"
+closed_at = "2026-07-06"
+evidence_grade = "executable"
+replay_commands = [["cargo", "run", "-q", "-p", "xtask", "--", "check-unsafe"]]
+file_roots = ["unsafe-capsules.json", "docs/SAFETY_TEMPLATE.md"]
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.7"
+title = "PV vertical skeleton"
+closed_at = "2026-07-06"
+evidence_grade = "executable"
+replay_commands = [["cargo", "test", "-q", "-p", "fs-vskeleton"]]
+notes = "pv-001..pv-005 exit criteria live in the e2e + metamorphic batteries at HEAD."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.8"
+title = "MILESTONE PV: vertical skeleton"
+closed_at = "2026-07-06"
+evidence_grade = "prose"
+replay_commands = [["cargo", "test", "-q", "-p", "fs-vskeleton"]]
+notes = "Milestone rollup over huq.7; same executable surface."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.16"
+title = "Observability standard"
+closed_at = "2026-07-17"
+evidence_grade = "executable"
+replay_commands = [["cargo", "test", "-q", "-p", "fs-obs"]]
+notes = "Commits 4308654d/0726dd40 retained; schema v1 batteries exist at HEAD."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.17"
+title = "Constellation bootstrap"
+closed_at = "2026-07-10"
+evidence_grade = "prose"
+replay_commands = []
+file_roots = ["constellation.lock", "scripts/ci/checkout_constellation.sh"]
+notes = "Clean-host fetch/build is an intentional product execution, not a CI replay; the driver checks the lock schema and script presence only."
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.18"
+title = "DSR quality coverage"
+closed_at = "2026-07-10"
+evidence_grade = "prose"
+replay_commands = []
+notes = "37 required-features declarations across 19 crates; the driver counts [[test]] required-features declarations as the surviving mechanical root."
+
+# The P0-P6 MILESTONE beads themselves (huq.9 .. huq.15) are OPEN at
+# manifest time. They are enumerated so the driver classifies them Blocked
+# (a milestone that never closed has no retained evidence to revalidate)
+# instead of silently omitting them - the bead's exact-set accounting
+# requires every milestone row to be present.
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.9"
+title = "MILESTONE P0: bedrock"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.10"
+title = "MILESTONE P1: geometry + eyes"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.11"
+title = "MILESTONE P2: elasticity + first optimization"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.12"
+title = "MILESTONE P3: fluids I"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.13"
+title = "MILESTONE P4: structures at scale"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.14"
+title = "MILESTONE P5: aero stack"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
+
+[[milestone]]
+bead = "frankensim-epic-foundations-huq.15"
+title = "MILESTONE P6: certificates & self-optimization"
+closed_at = ""
+evidence_grade = "none"
+replay_commands = []
