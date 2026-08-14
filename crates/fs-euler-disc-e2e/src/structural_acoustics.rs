@@ -81,6 +81,8 @@ pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION: u32 = 1;
 pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM: &str = "Estimate-only: inertia certifies eigenvalue counts, not an enclosure of the eigenvector-derived compliance; eigenpair residuals, modes above the declared enrichment band, mesh and constitutive error, dynamic correction, and broadband radiation/audio are not bounded";
 /// Limitation carried by the broadband body-frame source artifact and stem.
 pub const STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM: &str = "Estimate-only linear source stem about the undeformed stationary body: sampled BEM, SH truncation, rational fitting, discretization, structural truncation, and constitutive damping are not certified; static residual flexibility is deliberately excluded, and no 1/r propagation, delay, Doppler, listener/room response, impact, air-film sound, mastering, or calibrated SPL is claimed";
+/// Limitation carried by the rigid-disc acceleration radiation artifact.
+pub const RIGID_DISC_BROADBAND_SOURCE_NO_CLAIM: &str = "Estimate-only linear low-Mach radiation from rigid center-of-mass translation of the undeformed reference disc: sampled BEM, SH truncation, rational fitting, discretization, moving-boundary, rotational, convective, near-field, room, calibration, and backreaction errors are not certified; rotational coordinates are excluded because their low-frequency boundary-work estimate is not passivity-admissible on the production mesh";
 /// Limitation carried by the retarded rigid-source far-field observer.
 pub const RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM: &str = "Estimate-only rigid low-Mach far-field observer: causal retarded delay, emission-pose direction, 1/r spreading, and deterministic multi-observer timing are modeled; no moving-boundary/FW-H, convective Green/Jacobian or exact Doppler amplitude, near field, deformation, room/support/head scattering, absorption, backreaction, impact radiation, calibration, or certified far-field enclosure is claimed";
 /// Maximum number of simultaneous physical pressure observers in one pass.
@@ -95,6 +97,10 @@ const STRUCTURAL_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-broadband-source.v1";
 const STRUCTURAL_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-broadband-artifact.v1";
+const RIGID_DISC_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.rigid-disc-broadband-source.v1";
+const RIGID_DISC_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-euler-disc-e2e.rigid-disc-broadband-artifact.v1";
 const RETARDED_FAR_FIELD_SIGNAL_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v1";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
@@ -385,6 +391,67 @@ pub struct StructuralBroadbandRadiationArtifact {
     pub sample_rate_hz: u32,
     /// Loss factors in enrichment-mode/input order.
     pub modal_loss_factors: Vec<f64>,
+    /// Solver-neutral fitted real-tesseral filter bank.
+    pub radiation: BroadbandRadiationArtifact,
+    /// Explicit applicability boundary.
+    pub no_claims: &'static str,
+}
+
+/// Admitted body-frame translational coordinates for the rigid disc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RigidDiscAcousticCoordinate {
+    /// Center-of-mass translation along body x [m/s2].
+    TranslationX,
+    /// Center-of-mass translation along body y [m/s2].
+    TranslationY,
+    /// Center-of-mass translation along body z [m/s2].
+    TranslationZ,
+}
+
+const RIGID_DISC_ACOUSTIC_COORDINATES: [RigidDiscAcousticCoordinate; 3] = [
+    RigidDiscAcousticCoordinate::TranslationX,
+    RigidDiscAcousticCoordinate::TranslationY,
+    RigidDiscAcousticCoordinate::TranslationZ,
+];
+
+/// Offline BEM sampling and causal-fit request for rigid-disc acceleration.
+pub struct RigidDiscBroadbandRadiationRequest<'a> {
+    /// Exact disc mesh and profile identity used for the boundary surface.
+    pub basis: &'a StructuralResidualFlexibilityEstimateBasis,
+    /// Evidence-bound exterior gas state.
+    pub medium: ResolvedAcousticMedium<'a>,
+    /// Strictly increasing positive training frequencies [Hz].
+    pub training_frequency_hz: &'a [f64],
+    /// Strictly increasing disjoint validation frequencies [Hz].
+    pub held_out_frequency_hz: &'a [f64],
+    /// Independent nonzero body-frame validation directions.
+    pub held_out_directions_body: &'a [[f64; 3]],
+    /// Spherical-harmonic truncation controls.
+    pub directivity: AcousticDirectivityControls,
+    /// Rational-fit, validation, and audio-clock controls.
+    pub fit: BroadbandRadiationControls,
+}
+
+/// Identity-bound body-frame bank from rigid generalized acceleration to
+/// far-field source amplitude in pascal-metres.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RigidDiscBroadbandRadiationArtifact {
+    /// Complete fitted-source identity.
+    pub identity: ContentHash,
+    /// Estimate-only authority inherited from the broadband bridge.
+    pub authority: BroadbandRadiationAuthority,
+    /// Exact disc mesh/basis identity.
+    pub structural_basis_identity: ContentHash,
+    /// Gas model used by the Helmholtz solves.
+    pub gas_model_identity: ContentHash,
+    /// Constant homogeneous propagation speed [m/s].
+    pub sound_speed_m_s: f64,
+    /// Maximum undeformed source extent [m].
+    pub source_diameter_m: f64,
+    /// Audio sample rate [Hz].
+    pub sample_rate_hz: u32,
+    /// Fixed input order consumed by the runtime.
+    pub coordinates: Vec<RigidDiscAcousticCoordinate>,
     /// Solver-neutral fitted real-tesseral filter bank.
     pub radiation: BroadbandRadiationArtifact,
     /// Explicit applicability boundary.
@@ -4376,6 +4443,193 @@ pub fn build_structural_broadband_radiation_artifact(
     })
 }
 
+/// Build the compact rigid-disc radiation bank used for the audible wobble
+/// source. Each input is one unit body-frame generalized acceleration; under
+/// `exp(-i omega t)` its boundary velocity is `+i shape/omega`.
+pub fn build_rigid_disc_broadband_radiation_artifact(
+    request: &RigidDiscBroadbandRadiationRequest<'_>,
+    cx: &Cx<'_>,
+) -> Result<RigidDiscBroadbandRadiationArtifact, StructuralModalBasisError> {
+    let basis = request.basis;
+    let sample_rate_hz = request.fit.sample_rate_hz as u32;
+    let grids_valid = |grid: &[f64]| {
+        !grid.is_empty()
+            && grid.len() <= MAX_BROADBAND_FREQUENCIES
+            && grid.iter().enumerate().all(|(index, &frequency)| {
+                frequency > 0.0
+                    && frequency < 0.5 * request.fit.sample_rate_hz
+                    && frequency.is_finite()
+                    && (index == 0 || grid[index - 1] < frequency)
+            })
+    };
+    if basis.schema_version != STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION
+        || basis.recomputed_identity() != basis.identity
+        || basis.mesh.boundary.triangles.is_empty()
+        || sample_rate_hz == 0
+        || f64::from(sample_rate_hz).to_bits() != request.fit.sample_rate_hz.to_bits()
+        || !grids_valid(request.training_frequency_hz)
+        || !grids_valid(request.held_out_frequency_hz)
+        || request.held_out_frequency_hz.iter().any(|held| {
+            request
+                .training_frequency_hz
+                .iter()
+                .any(|training| training.to_bits() == held.to_bits())
+        })
+        || !(8..=MAX_VALIDATION_DIRECTIONS).contains(&request.held_out_directions_body.len())
+        || request.held_out_directions_body.iter().any(|direction| {
+            let norm = norm_squared(*direction);
+            !(norm > 0.0 && norm.is_finite())
+        })
+        || request.directivity.maximum_spherical_harmonic_degree > MAX_SH_DEGREE
+        || !(request.directivity.minimum_captured_fraction > 0.0
+            && request.directivity.minimum_captured_fraction <= 1.0
+            && request.directivity.minimum_captured_fraction.is_finite())
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "rigid-disc broadband mesh, grids, directions, SH controls, or sample clock are inconsistent",
+        });
+    }
+    validate_acoustic_medium(request.medium.gas)?;
+    if request.medium.gas_model_identity == ContentHash([0; 32]) {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "rigid-disc broadband gas identity must not be zero",
+        });
+    }
+
+    let surface = SpherePanels::from_triangles(
+        basis
+            .mesh
+            .boundary
+            .triangles
+            .iter()
+            .map(|triangle| triangle.map(|node| basis.mesh.nodes_m[node]))
+            .collect(),
+    )?;
+    let radius_m = basis
+        .mesh
+        .nodes_m
+        .iter()
+        .map(|point| norm_squared(*point).sqrt())
+        .fold(0.0_f64, f64::max);
+    let mut shapes =
+        vec![vec![0.0; surface.centroids().len()]; RIGID_DISC_ACOUSTIC_COORDINATES.len()];
+    for (panel, &normal) in surface.normals().iter().enumerate() {
+        shapes[0][panel] = normal[0];
+        shapes[1][panel] = normal[1];
+        shapes[2][panel] = normal[2];
+    }
+    let medium = Medium {
+        density: request.medium.gas.density,
+        sound_speed: request.medium.gas.sound_speed,
+    };
+    let solve_frequency = |frequency_hz: f64| {
+        let omega = core::f64::consts::TAU * frequency_hz;
+        let velocity: Vec<Vec<C64>> = shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .iter()
+                    .map(|value| C64::new(0.0, value / omega))
+                    .collect()
+            })
+            .collect();
+        let fields: Vec<&[C64]> = velocity.iter().map(Vec::as_slice).collect();
+        let k = omega / medium.sound_speed;
+        let formulation = if k * radius_m < 0.5 {
+            HelmholtzFormulation::PlainCbie
+        } else {
+            HelmholtzFormulation::BurtonMiller
+        };
+        solve_radiation_batch(&surface, k, medium, &fields, formulation)
+            .map(|solutions| (omega, solutions))
+    };
+    let mut training = Vec::with_capacity(request.training_frequency_hz.len());
+    let mut held_out = Vec::with_capacity(request.held_out_frequency_hz.len());
+    for &frequency_hz in request.training_frequency_hz {
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        let (omega_rad_s, solutions) = solve_frequency(frequency_hz)?;
+        let tables = checked_rigid_directivity_tables(
+            &surface,
+            &solutions,
+            medium,
+            request.directivity.maximum_spherical_harmonic_degree,
+            request.directivity.minimum_captured_fraction,
+            "training",
+            frequency_hz,
+        )?;
+        let captured_fraction = captured_fraction(&solutions, &tables);
+        training.push(ComplexShTrainingSample {
+            omega_rad_s,
+            coefficients_by_input: tables.into_iter().map(|table| table.coefficients).collect(),
+            diagnostics: radiation_sample_diagnostics(&solutions, captured_fraction),
+        });
+    }
+    for &frequency_hz in request.held_out_frequency_hz {
+        cx.checkpoint()
+            .map_err(|_| StructuralModalBasisError::Cancelled)?;
+        let (omega_rad_s, solutions) = solve_frequency(frequency_hz)?;
+        let tables = checked_rigid_directivity_tables(
+            &surface,
+            &solutions,
+            medium,
+            request.directivity.maximum_spherical_harmonic_degree,
+            request.directivity.minimum_captured_fraction,
+            "held-out",
+            frequency_hz,
+        )?;
+        let captured_fraction = captured_fraction(&solutions, &tables);
+        held_out.push(DirectFarFieldHeldOutSample {
+            omega_rad_s,
+            directions: request.held_out_directions_body.to_vec(),
+            far_field_by_input: solutions
+                .iter()
+                .map(|solution| {
+                    far_field(&surface, solution, medium, request.held_out_directions_body)
+                })
+                .collect(),
+            diagnostics: radiation_sample_diagnostics(&solutions, captured_fraction),
+        });
+    }
+    let source_identity = rigid_disc_broadband_sample_identity(request);
+    let samples = SampledRadiationData {
+        source_id: format!("euler-rigid-disc-acceleration-pa-m-v1:{source_identity}"),
+        harmonic_time_convention: HarmonicTimeConvention::ExpNegativeIOmegaT,
+        l_max: request.directivity.maximum_spherical_harmonic_degree,
+        input_ids: vec![
+            "translation-x[m/s2]".to_owned(),
+            "translation-y[m/s2]".to_owned(),
+            "translation-z[m/s2]".to_owned(),
+        ],
+        training,
+        held_out,
+    };
+    cx.checkpoint()
+        .map_err(|_| StructuralModalBasisError::Cancelled)?;
+    let radiation = build_broadband_radiation_artifact(&samples, request.fit)?;
+    let source_diameter_m = 2.0 * radius_m;
+    let identity = rigid_disc_broadband_artifact_identity(
+        source_identity,
+        basis.identity,
+        request.medium.gas_model_identity,
+        request.medium.gas.sound_speed,
+        source_diameter_m,
+        &radiation,
+    );
+    Ok(RigidDiscBroadbandRadiationArtifact {
+        identity,
+        authority: BroadbandRadiationAuthority::EstimateOnly,
+        structural_basis_identity: basis.identity,
+        gas_model_identity: request.medium.gas_model_identity,
+        sound_speed_m_s: request.medium.gas.sound_speed,
+        source_diameter_m,
+        sample_rate_hz,
+        coordinates: RIGID_DISC_ACOUSTIC_COORDINATES.to_vec(),
+        radiation,
+        no_claims: RIGID_DISC_BROADBAND_SOURCE_NO_CLAIM,
+    })
+}
+
 fn structural_broadband_artifact_identity(
     source_identity: ContentHash,
     structural_basis_identity: ContentHash,
@@ -4428,6 +4682,153 @@ fn structural_broadband_artifact_identity(
         }
     }
     h.finalize()
+}
+
+fn rigid_disc_broadband_sample_identity(
+    request: &RigidDiscBroadbandRadiationRequest<'_>,
+) -> ContentHash {
+    let mut h = DomainHasher::new(RIGID_DISC_BROADBAND_SOURCE_IDENTITY_DOMAIN);
+    for identity in [
+        request.basis.identity,
+        request.basis.operator_identity,
+        request.medium.gas_model_identity,
+    ] {
+        h.update(identity.as_bytes());
+    }
+    hash_usizes(
+        &mut h,
+        [
+            RIGID_DISC_ACOUSTIC_COORDINATES.len(),
+            request.directivity.maximum_spherical_harmonic_degree,
+            request.fit.fit_order,
+            request.fit.fit_iterations,
+        ],
+    );
+    h.update(request.fit.fit_weights.label().as_bytes());
+    h.update(&[u8::from(request.fit.fit_d)]);
+    hash_f64s(
+        &mut h,
+        [
+            request.fit.sample_rate_hz,
+            request.fit.minimum_captured_fraction,
+            request.fit.far_field_signal_floor,
+            request.fit.maximum_normalized_error,
+            request.fit.rms_normalized_error,
+            request.directivity.minimum_captured_fraction,
+            request.medium.gas.temperature,
+            request.medium.gas.pressure,
+            request.medium.gas.density,
+            request.medium.gas.sound_speed,
+        ],
+    );
+    hash_f64_slice(&mut h, request.training_frequency_hz);
+    hash_f64_slice(&mut h, request.held_out_frequency_hz);
+    hash_vec3_slice(&mut h, request.held_out_directions_body);
+    h.finalize()
+}
+
+fn rigid_disc_broadband_artifact_identity(
+    source_identity: ContentHash,
+    structural_basis_identity: ContentHash,
+    gas_model_identity: ContentHash,
+    sound_speed_m_s: f64,
+    source_diameter_m: f64,
+    radiation: &BroadbandRadiationArtifact,
+) -> ContentHash {
+    let mut h = DomainHasher::new(RIGID_DISC_BROADBAND_ARTIFACT_IDENTITY_DOMAIN);
+    for identity in [
+        source_identity,
+        structural_basis_identity,
+        gas_model_identity,
+    ] {
+        h.update(identity.as_bytes());
+    }
+    hash_f64s(
+        &mut h,
+        [
+            sound_speed_m_s,
+            source_diameter_m,
+            radiation.sample_interval_s,
+        ],
+    );
+    hash_usizes(
+        &mut h,
+        [
+            radiation.l_max,
+            radiation.inputs.len(),
+            radiation.channels.len(),
+        ],
+    );
+    h.update(radiation.report.source_id.as_bytes());
+    for channel in &radiation.channels {
+        hash_usizes(&mut h, [channel.l]);
+        h.update(&channel.signed_m.to_le_bytes());
+    }
+    for input in &radiation.inputs {
+        h.update(input.id.as_bytes());
+        for filter in &input.filters {
+            hash_usizes(&mut h, [filter.n]);
+            hash_f64_slice(&mut h, &filter.a);
+            hash_f64_slice(&mut h, &filter.b);
+            hash_f64_slice(&mut h, &filter.c);
+            hash_f64s(&mut h, [filter.d, filter.e_leftover, filter.t_s]);
+        }
+    }
+    h.finalize()
+}
+
+fn checked_rigid_directivity_tables(
+    surface: &SpherePanels,
+    solutions: &[RadiationSolution],
+    medium: Medium,
+    l_max: usize,
+    minimum_captured_fraction: f64,
+    grid: &'static str,
+    frequency_hz: f64,
+) -> Result<Vec<DirectivityTable>, StructuralModalBasisError> {
+    solutions
+        .iter()
+        .enumerate()
+        .map(|(coordinate, solution)| {
+            let table = directivity_sh_table(surface, solution, medium, l_max)?;
+            if solution.radiated_power < 0.0 {
+                let d = solution.power_diagnostics;
+                let sh_norm: f64 = table.coefficients.iter().map(|value| value.norm_sq()).sum();
+                let sh_power = sh_norm / (2.0 * medium.density * medium.sound_speed);
+                let direct_power = if table.captured_fraction > 0.0 {
+                    sh_power / table.captured_fraction
+                } else {
+                    0.0
+                };
+                return Err(StructuralModalBasisError::BroadbandNegativeRadiatedPower(format!(
+                    "grid={grid} frequency_hz={frequency_hz:.17e} rigid_coordinate={:?} Ssurf=({:.17e},{:.17e})W interval=[{:.17e},{:.17e}]W positive={:.17e}W negative={:.17e}W apparent={:.17e}W Pref={:.17e}W signed_efficiency={:.17e} Pinf_sh={sh_power:.17e}W Pinf_direct={direct_power:.17e}W captured_fraction={:.17e} ppw={:.17e} condition_lower_bound={:.17e}",
+                    RIGID_DISC_ACOUSTIC_COORDINATES[coordinate],
+                    d.surface_power.re,
+                    d.surface_power.im,
+                    solution.radiated_power_roundoff_interval.0,
+                    solution.radiated_power_roundoff_interval.1,
+                    d.positive_real_power,
+                    d.negative_real_power,
+                    d.apparent_power,
+                    d.plane_wave_reference_power,
+                    d.surface_power.re / d.plane_wave_reference_power,
+                    table.captured_fraction,
+                    solution.panels_per_wavelength,
+                    solution.condition_lower_bound,
+                )));
+            }
+            if solution.radiated_power > 0.0
+                && table.captured_fraction < minimum_captured_fraction
+            {
+                return Err(StructuralModalBasisError::DirectivityTruncation {
+                    mode: coordinate,
+                    captured_fraction: table.captured_fraction,
+                    minimum_fraction: minimum_captured_fraction,
+                });
+            }
+            Ok(table)
+        })
+        .collect()
 }
 
 fn checked_directivity_tables(
@@ -4573,6 +4974,19 @@ fn broadband_sample_identity(request: &StructuralBroadbandRadiationRequest<'_>) 
 
 impl StructuralBroadbandRadiationArtifact {
     fn recomputed_identity(&self) -> Result<ContentHash, StructuralModalBasisError> {
+        if self.no_claims == RIGID_DISC_BROADBAND_SOURCE_NO_CLAIM {
+            return Ok(rigid_disc_broadband_artifact_identity(
+                broadband_source_id_with_prefix(
+                    &self.radiation,
+                    "euler-rigid-disc-acceleration-pa-m-v1:",
+                )?,
+                self.structural_basis_identity,
+                self.gas_model_identity,
+                self.sound_speed_m_s,
+                self.source_diameter_m,
+                &self.radiation,
+            ));
+        }
         Ok(structural_broadband_artifact_identity(
             broadband_source_id_from_report(&self.radiation)?,
             self.structural_basis_identity,
@@ -4633,6 +5047,88 @@ impl StructuralBroadbandRadiationArtifact {
                 .collect(),
             radiation_runtime: self.radiation.try_runtime()?,
             modal_acceleration: vec![0.0; basis.enrichment_modes.len()],
+        })
+    }
+}
+
+impl RigidDiscBroadbandRadiationArtifact {
+    fn recomputed_identity(&self) -> Result<ContentHash, StructuralModalBasisError> {
+        let source_identity = broadband_source_id_with_prefix(
+            &self.radiation,
+            "euler-rigid-disc-acceleration-pa-m-v1:",
+        )?;
+        Ok(rigid_disc_broadband_artifact_identity(
+            source_identity,
+            self.structural_basis_identity,
+            self.gas_model_identity,
+            self.sound_speed_m_s,
+            self.source_diameter_m,
+            &self.radiation,
+        ))
+    }
+
+    /// Apply the fitted rigid-disc radiation bank directly to acceleration
+    /// sampled at accepted mechanics boundaries and anti-aliased before each
+    /// factor-two decimation.
+    pub fn synthesize_decimated_acceleration(
+        &self,
+        acceleration: &DecimatedModalAcceleration,
+        basis: &StructuralResidualFlexibilityEstimateBasis,
+        cx: &Cx<'_>,
+    ) -> Result<StructuralBroadbandSourceStem, StructuralModalBasisError> {
+        if self.authority != BroadbandRadiationAuthority::EstimateOnly
+            || self.no_claims != RIGID_DISC_BROADBAND_SOURCE_NO_CLAIM
+            || self.recomputed_identity()? != self.identity
+            || basis.recomputed_identity() != basis.identity
+            || self.structural_basis_identity != basis.identity
+            || self.gas_model_identity == ContentHash([0; 32])
+            || !(self.sound_speed_m_s > 0.0 && self.sound_speed_m_s.is_finite())
+            || !(self.source_diameter_m > 0.0 && self.source_diameter_m.is_finite())
+            || self.coordinates != RIGID_DISC_ACOUSTIC_COORDINATES
+            || self.radiation.inputs.len() != self.coordinates.len()
+            || acceleration.plate_model_identity != [basis.identity, self.identity]
+            || acceleration.sample_rate_hz != self.sample_rate_hz
+            || acceleration.coordinate_count() != self.coordinates.len()
+            || acceleration.frame_count() == 0
+        {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "decimated rigid acceleration does not match the disc radiation artifact",
+            });
+        }
+        let channel_count = self.radiation.channels.len();
+        let coefficient_count = acceleration
+            .frame_count()
+            .checked_mul(channel_count)
+            .ok_or(StructuralModalBasisError::PressureCapacity {
+                requested: usize::MAX,
+            })?;
+        let mut coefficients = Vec::new();
+        coefficients
+            .try_reserve_exact(coefficient_count)
+            .map_err(|_| StructuralModalBasisError::PressureCapacity {
+                requested: coefficient_count,
+            })?;
+        let mut runtime = self.radiation.try_runtime()?;
+        for frame in 0..acceleration.frame_count() {
+            if frame % 64 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
+            }
+            let outputs = runtime.step(
+                acceleration
+                    .frame(frame)
+                    .expect("admitted rigid acceleration frame"),
+            )?;
+            coefficients.extend(outputs.iter().copied().map(FarFieldSourceCoefficientPaM));
+        }
+        Ok(StructuralBroadbandSourceStem {
+            start_time_s: acceleration.start_time_s,
+            sample_rate_hz: acceleration.sample_rate_hz,
+            channels: self.radiation.channels.clone(),
+            coefficients,
+            authority: self.authority,
+            source_identity: self.identity,
+            structural_basis_identity: basis.identity,
         })
     }
 }
@@ -4794,6 +5290,44 @@ fn write_closing_modal_acceleration(
         }
     }
     Ok(())
+}
+
+/// Synthesize simultaneous world-fixed pressure from the rigid-disc
+/// acceleration bank. The internal carrier reuses the common retarded source
+/// evaluator but is never exposed as an elastic modal artifact.
+pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
+    source: &RigidDiscBroadbandRadiationArtifact,
+    stem: &StructuralBroadbandSourceStem,
+    basis: &StructuralResidualFlexibilityEstimateBasis,
+    trajectory: &RenderTrajectory,
+    observers: &[AcousticWorldObserver],
+    controls: RetardedFarFieldObserverControls,
+    cx: &Cx<'_>,
+) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
+    if source.recomputed_identity()? != source.identity
+        || source.structural_basis_identity != basis.identity
+        || source.coordinates != RIGID_DISC_ACOUSTIC_COORDINATES
+    {
+        return Err(StructuralModalBasisError::IdentityMismatch {
+            what: "rigid-disc source does not match the exact structural mesh",
+        });
+    }
+    let carrier = StructuralBroadbandRadiationArtifact {
+        identity: source.identity,
+        authority: source.authority,
+        structural_basis_identity: source.structural_basis_identity,
+        gas_model_identity: source.gas_model_identity,
+        sound_speed_m_s: source.sound_speed_m_s,
+        source_diameter_m: source.source_diameter_m,
+        damping_model_identity: source.identity,
+        sample_rate_hz: source.sample_rate_hz,
+        modal_loss_factors: Vec::new(),
+        radiation: source.radiation.clone(),
+        no_claims: source.no_claims,
+    };
+    synthesize_retarded_far_field_world_observers(
+        &carrier, stem, basis, trajectory, observers, controls, cx,
+    )
 }
 
 /// Synthesize simultaneous world-fixed pressure signals from body-frame
@@ -4970,7 +5504,10 @@ fn validate_retarded_observer_inputs(
     drop(source.radiation.try_runtime()?);
     if source.identity == ContentHash([0; 32])
         || source.authority != BroadbandRadiationAuthority::EstimateOnly
-        || source.no_claims != STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM
+        || !matches!(
+            source.no_claims,
+            STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM | RIGID_DISC_BROADBAND_SOURCE_NO_CLAIM
+        )
         || source.structural_basis_identity != basis.identity
         || basis.recomputed_identity() != basis.identity
         || trajectory.metadata().specimen_profile_identity != basis.profile_identity
@@ -5045,13 +5582,18 @@ fn validate_retarded_observer_inputs(
 fn broadband_source_id_from_report(
     radiation: &BroadbandRadiationArtifact,
 ) -> Result<ContentHash, StructuralModalBasisError> {
-    let hex = radiation
-        .report
-        .source_id
-        .strip_prefix("euler-structural-modal-acceleration-pa-m-v1:")
-        .ok_or(StructuralModalBasisError::IdentityMismatch {
+    broadband_source_id_with_prefix(radiation, "euler-structural-modal-acceleration-pa-m-v1:")
+}
+
+fn broadband_source_id_with_prefix(
+    radiation: &BroadbandRadiationArtifact,
+    prefix: &str,
+) -> Result<ContentHash, StructuralModalBasisError> {
+    let hex = radiation.report.source_id.strip_prefix(prefix).ok_or(
+        StructuralModalBasisError::IdentityMismatch {
             what: "broadband producer source id has an unsupported schema",
-        })?;
+        },
+    )?;
     ContentHash::from_hex(hex).ok_or(StructuralModalBasisError::IdentityMismatch {
         what: "broadband producer source id has an invalid digest",
     })

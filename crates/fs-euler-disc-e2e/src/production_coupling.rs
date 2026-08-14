@@ -1103,13 +1103,19 @@ pub struct ProductionModalAudioStep<'a> {
     pub modal_force_n_per_sqrt_kg: &'a [f64],
     /// Actual accepted modal state at the closing boundary.
     pub accepted_states: &'a [ModalAcousticState],
+    /// Exact rigid-body before/after states for the same accepted interval.
+    pub rigid_step: &'a StepReceipt,
 }
 
 impl ProductionTrajectoryStep {
     fn modal_audio_step(&self) -> Option<ProductionModalAudioStep<'_>> {
-        let base = match &self.receipt {
-            ProductionTrajectoryStepReceipt::CompliantContact(receipt) => &receipt.base,
-            ProductionTrajectoryStepReceipt::OpenFlight(receipt) => &receipt.base,
+        let (base, rigid_step) = match &self.receipt {
+            ProductionTrajectoryStepReceipt::CompliantContact(receipt) => {
+                (&receipt.base, &receipt.rigid_step)
+            }
+            ProductionTrajectoryStepReceipt::OpenFlight(receipt) => {
+                (&receipt.base, &receipt.rigid_step)
+            }
         };
         let (modal_force_n_per_sqrt_kg, accepted_states) = base.rectangular_modal_audio_parts()?;
         Some(ProductionModalAudioStep {
@@ -1117,6 +1123,7 @@ impl ProductionTrajectoryStep {
             end_time_s: self.end_time_s,
             modal_force_n_per_sqrt_kg,
             accepted_states,
+            rigid_step,
         })
     }
 }

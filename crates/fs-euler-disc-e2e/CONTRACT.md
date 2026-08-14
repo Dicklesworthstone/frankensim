@@ -1660,6 +1660,17 @@ frequency-partition, and solver identities. On disjoint training and withheld gr
 frequency, fits body-frame real-tesseral spherical-harmonic transfers only from training data, and
 retains direct BEM far fields for withheld validation.
 
+The rigid-disc companion uses the same closed specimen mesh and gas/BEM/SH
+pipeline for three rigid translations. Accepted-step momentum differences are
+converted to linear acceleration at mechanics cadence, projected into the
+material frame, and passed through the staged anti-alias decimator before
+reaching 48 kHz. Rotational coordinates are excluded because their
+low-frequency boundary-work estimates are not passivity-admissible on the
+production mesh. This is a linear low-Mach far-field estimate: it does not
+claim moving-boundary/FW-H, rotational or convective radiation, near field,
+room response, two-way fluid loading, calibrated SPL, or accuracy beyond the
+declared BEM/directivity/fit evidence.
+
 At runtime, existing P1 point-force projection and conservative audio-cell reconstruction drive the
 exact modal transition with zero pressure transfer. The closing state supplies
 `a = Q - 2 zeta omega qdot - omega^2 q`; a persistent passive bank emits frame-major,

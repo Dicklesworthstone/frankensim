@@ -50,13 +50,16 @@ use crate::structural_acoustics::{
     AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
     PhysicalModalInitialState, PhysicalPressureSignal, RectangularPlateModalBasis,
     RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
-    RetardedFarFieldObserverControls, StructuralBroadbandRadiationArtifact,
+    RetardedFarFieldObserverControls, RigidDiscBroadbandRadiationArtifact,
+    RigidDiscBroadbandRadiationRequest, StructuralBroadbandRadiationArtifact,
     StructuralBroadbandRadiationRequest, StructuralMeshControls, StructuralModalBasisError,
     StructuralModeRequest, StructuralResidualFlexibilityControls,
     StructuralResidualFlexibilityEstimateBasis, StructuralResidualModalLossSpectrum,
-    build_rectangular_plate_modal_basis, build_structural_broadband_radiation_artifact,
+    build_rectangular_plate_modal_basis, build_rigid_disc_broadband_radiation_artifact,
+    build_structural_broadband_radiation_artifact,
     build_structural_residual_flexibility_estimate_basis, superpose_pressure_signals,
     synthesize_retarded_far_field_world_observers,
+    synthesize_rigid_disc_retarded_far_field_world_observers,
 };
 use crate::tangential_contact::{
     EulerTangentialContactAdapter, TangentialContactLane, TangentialContactRequest,
@@ -155,7 +158,7 @@ use fs_material::{
     visco::RayleighDamping,
 };
 use fs_math::det;
-use fs_mbd::{Gravity, Pose, RigidBodyState, Vec3};
+use fs_mbd::{Gravity, MassProperties, Pose, RigidBodyState, Vec3};
 use fs_modal::SliceOptions;
 use fs_qty::{Density, Dims, Pressure};
 use fs_render::{
@@ -280,6 +283,14 @@ const CRITIQUE_DISC_BROADBAND_TRAINING_HZ: [f64; 8] = [
 ];
 const CRITIQUE_DISC_BROADBAND_HELD_OUT_HZ: [f64; 8] = [
     350.0, 750.0, 1_500.0, 3_000.0, 6_000.0, 11_000.0, 18_000.0, 21_500.0,
+];
+const CRITIQUE_RIGID_DISC_BROADBAND_TRAINING_HZ: [f64; 13] = [
+    15.0, 30.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1_920.0, 3_840.0, 7_680.0, 12_000.0, 16_000.0,
+    20_000.0,
+];
+const CRITIQUE_RIGID_DISC_BROADBAND_HELD_OUT_HZ: [f64; 13] = [
+    20.0, 45.0, 90.0, 180.0, 360.0, 720.0, 1_440.0, 2_880.0, 5_760.0, 9_600.0, 14_000.0, 18_000.0,
+    21_500.0,
 ];
 const CRITIQUE_DISC_BROADBAND_DIRECTIONS: [[f64; 3]; 8] = [
     [1.0, 1.0, 1.0],
@@ -2057,6 +2068,7 @@ struct FixturePhysicalAudio {
     plate_material_state_identity: ContentHash,
     plate_optical_model_identity: ContentHash,
     disc_radiator: FixtureDiscAcousticRadiator,
+    rigid_disc_radiator: Option<FixtureRigidDiscAcousticRadiator>,
     plate_structural_basis_identity: ContentHash,
     plate_support_node_indices: Vec<usize>,
     plate_maximum_support_snap_error_m: f64,
@@ -2077,6 +2089,7 @@ struct FixturePhysicalAudio {
 struct FixturePreparedDiscAcoustics {
     basis: Option<StructuralResidualFlexibilityEstimateBasis>,
     source: Option<StructuralBroadbandRadiationArtifact>,
+    rigid_source: Option<RigidDiscBroadbandRadiationArtifact>,
     nonpassivity_diagnostic: Option<String>,
 }
 
@@ -2128,12 +2141,72 @@ impl FixturePlateAudioDecimator {
     }
 }
 
+struct FixtureRigidDiscAudioDecimator {
+    mass_properties: MassProperties,
+    acceleration: [f64; 3],
+    decimator: MechanicsModalAccelerationDecimator,
+    error: Option<crate::AudioResamplingError>,
+}
+
+impl FixtureRigidDiscAudioDecimator {
+    fn observe(&mut self, step: ProductionModalAudioStep<'_>) {
+        if self.error.is_some() {
+            return;
+        }
+        let dt = step.rigid_step.duration_seconds;
+        let before = step.rigid_step.state_before;
+        let after = step.rigid_step.state_after;
+        let mass = self.mass_properties.mass();
+        if !(dt > 0.0 && dt.is_finite() && mass > 0.0 && mass.is_finite()) {
+            self.error = Some(crate::AudioResamplingError::InvalidSourceTimeline {
+                interval: 0,
+                field: "finite positive rigid-disc acceleration interval",
+            });
+            return;
+        }
+        let linear_acceleration_world = after
+            .linear_momentum_world()
+            .sub(before.linear_momentum_world())
+            .scale((mass * dt).recip());
+        let linear_acceleration_body = after
+            .pose()
+            .orientation()
+            .rotate_world_to_body(linear_acceleration_world);
+        self.acceleration = [
+            linear_acceleration_body.x,
+            linear_acceleration_body.y,
+            linear_acceleration_body.z,
+        ];
+        if let Err(error) = self.decimator.push(&self.acceleration) {
+            self.error = Some(error);
+        }
+    }
+
+    fn check(&self) -> Result<(), CinematicFixtureError> {
+        self.error
+            .as_ref()
+            .map_or(Ok(()), |error| Err(pipeline(error.clone())))
+    }
+
+    fn finish(self) -> Result<DecimatedModalAcceleration, CinematicFixtureError> {
+        if let Some(error) = self.error {
+            return Err(pipeline(error));
+        }
+        self.decimator.finish().map_err(pipeline)
+    }
+}
+
 enum FixtureDiscAcousticRadiator {
     OmittedNoResolvableModeBelowNyquist {
         forcing_maximum_frequency_hz: f64,
         enrichment_maximum_frequency_hz: f64,
     },
     OmittedNonpassiveBem(String),
+    OmittedNoMechanicsCadenceElasticDrive {
+        structural_basis_identity: ContentHash,
+        broadband_radiation_identity: ContentHash,
+        retained_mode_count: usize,
+    },
     ResolvedBroadband {
         structural_basis_identity: ContentHash,
         broadband_radiation_identity: ContentHash,
@@ -2146,6 +2219,17 @@ enum FixtureDiscAcousticRadiator {
         maximum_held_out_error: f64,
         rms_held_out_error: f64,
     },
+}
+
+struct FixtureRigidDiscAcousticRadiator {
+    structural_basis_identity: ContentHash,
+    broadband_radiation_identity: ContentHash,
+    left_pressure_identity: ContentHash,
+    right_pressure_identity: ContentHash,
+    input_coordinate_count: usize,
+    minimum_directivity_captured_fraction: f64,
+    maximum_held_out_error: f64,
+    rms_held_out_error: f64,
 }
 
 struct FixturePhysicalDiscState {
@@ -4774,6 +4858,31 @@ pub fn run_cinematic_fixture(
             decimator,
             error: None,
         };
+        let mut rigid_disc_audio = match (
+            prepared_disc_acoustics.basis.as_ref(),
+            prepared_disc_acoustics.rigid_source.as_ref(),
+        ) {
+            (Some(basis), Some(source)) => Some(FixtureRigidDiscAudioDecimator {
+                mass_properties: production.model.disc_mass_properties,
+                acceleration: [0.0; 3],
+                decimator: MechanicsModalAccelerationDecimator::try_new(
+                    config.mechanics.sample_rate_hz,
+                    3,
+                    observed_mechanics_steps,
+                    [basis.identity, source.identity],
+                    plate_audio_filter,
+                    cx,
+                )
+                .map_err(pipeline)?,
+                error: None,
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(CinematicFixtureError::Pipeline(
+                    "rigid-disc acoustic source is not bound to the exact disc mesh".into(),
+                ));
+            }
+        };
         let preroll_control = production
             .model
             .run_eventful_profile_midpoint_control_trajectory_observed(
@@ -4784,10 +4893,18 @@ pub fn run_cinematic_fixture(
                 cx,
                 |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
                 |input, state| production.refresh_state_dependent_input(&profile, input, state, cx),
-                |step| plate_audio.observe(step),
+                |step| {
+                    plate_audio.observe(step);
+                    if let Some(rigid) = &mut rigid_disc_audio {
+                        rigid.observe(step);
+                    }
+                },
             )
             .map_err(pipeline)?;
         plate_audio.check()?;
+        if let Some(rigid) = &rigid_disc_audio {
+            rigid.check()?;
+        }
         if preroll_control.accepted_mechanics_steps != preroll_mechanics_steps
         || !matches!(
             preroll_control.termination,
@@ -4836,10 +4953,18 @@ pub fn run_cinematic_fixture(
                     |input, state| {
                         production.refresh_state_dependent_input(&profile, input, state, cx)
                     },
-                    |step| plate_audio.observe(step),
+                    |step| {
+                        plate_audio.observe(step);
+                        if let Some(rigid) = &mut rigid_disc_audio {
+                            rigid.observe(step);
+                        }
+                    },
                 )
                 .map_err(pipeline)?;
             plate_audio.check()?;
+            if let Some(rigid) = &rigid_disc_audio {
+                rigid.check()?;
+            }
             if chunk.accepted_mechanics_steps != chunk_steps
             || !matches!(
                 chunk.termination,
@@ -4896,10 +5021,18 @@ pub fn run_cinematic_fixture(
                 cx,
                 |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
                 |input, state| production.refresh_state_dependent_input(&profile, input, state, cx),
-                |step| plate_audio.observe(step),
+                |step| {
+                    plate_audio.observe(step);
+                    if let Some(rigid) = &mut rigid_disc_audio {
+                        rigid.observe(step);
+                    }
+                },
             )
             .map_err(pipeline)?;
         plate_audio.check()?;
+        if let Some(rigid) = &rigid_disc_audio {
+            rigid.check()?;
+        }
         if postroll_control.accepted_mechanics_steps != postroll_mechanics_steps
             || !matches!(
                 postroll_control.termination,
@@ -4925,6 +5058,20 @@ pub fn run_cinematic_fixture(
         let causal_delay_frames = plate_modal_acceleration
             .diagnostics
             .group_delay_output_frames;
+        let rigid_disc_acceleration = rigid_disc_audio
+            .map(FixtureRigidDiscAudioDecimator::finish)
+            .transpose()?
+            .map(|acceleration| {
+                if acceleration.diagnostics.group_delay_output_frames != causal_delay_frames {
+                    return Err(CinematicFixtureError::Pipeline(
+                        "plate and rigid-disc anti-alias delays differ".into(),
+                    ));
+                }
+                acceleration
+                    .into_crop_rebased(causal_delay_frames, aligned_audio_frames, 0.0)
+                    .map_err(pipeline)
+            })
+            .transpose()?;
         let plate_modal_acceleration = plate_modal_acceleration
             .into_crop_rebased(causal_delay_frames, aligned_audio_frames, 0.0)
             .map_err(pipeline)?;
@@ -5029,6 +5176,7 @@ pub fn run_cinematic_fixture(
         let physical_audio = build_physical_audio(
             &audio_preroll_artifact,
             Some(&plate_modal_acceleration),
+            rigid_disc_acceleration.as_ref(),
             &physical_disc,
             &physical_plate,
             &plate_basis,
@@ -8213,6 +8361,7 @@ fn build_audio(
     let physical = build_physical_audio(
         fine_preroll_trajectory,
         None,
+        None,
         physical_disc,
         physical_plate,
         plate_basis,
@@ -8362,9 +8511,47 @@ fn prepare_fixture_disc_acoustics(
         }
         Err(error) => return Err(pipeline(error)),
     };
+    let rigid_source = disc_basis
+        .as_ref()
+        .map(|basis| {
+            build_rigid_disc_broadband_radiation_artifact(
+                &RigidDiscBroadbandRadiationRequest {
+                    basis,
+                    medium: ResolvedAcousticMedium {
+                        gas: &gas,
+                        gas_model_identity,
+                    },
+                    training_frequency_hz: &CRITIQUE_RIGID_DISC_BROADBAND_TRAINING_HZ,
+                    held_out_frequency_hz: &CRITIQUE_RIGID_DISC_BROADBAND_HELD_OUT_HZ,
+                    held_out_directions_body: &CRITIQUE_DISC_BROADBAND_DIRECTIONS,
+                    directivity: AcousticDirectivityControls {
+                        maximum_spherical_harmonic_degree: disc_controls
+                            .maximum_spherical_harmonic_degree,
+                        minimum_captured_fraction: disc_controls
+                            .minimum_directivity_captured_fraction,
+                    },
+                    fit: BroadbandRadiationControls {
+                        sample_rate_hz: f64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
+                        minimum_captured_fraction: disc_controls
+                            .minimum_directivity_captured_fraction,
+                        fit_order: 6,
+                        fit_iterations: 12,
+                        fit_weights: WeightPreset::LogBand,
+                        fit_d: true,
+                        far_field_signal_floor: 1.0e-12,
+                        maximum_normalized_error: 0.25,
+                        rms_normalized_error: 0.10,
+                    },
+                },
+                cx,
+            )
+        })
+        .transpose()
+        .map_err(pipeline)?;
     Ok(FixturePreparedDiscAcoustics {
         basis: disc_basis,
         source: disc_source,
+        rigid_source,
         nonpassivity_diagnostic,
     })
 }
@@ -8372,6 +8559,7 @@ fn prepare_fixture_disc_acoustics(
 fn build_physical_audio(
     preroll_trajectory: &EulerRenderTrajectoryArtifact,
     plate_modal_acceleration: Option<&DecimatedModalAcceleration>,
+    rigid_disc_acceleration: Option<&DecimatedModalAcceleration>,
     physical_disc: &FixturePhysicalDiscState,
     physical_plate: &FixturePhysicalPlateState,
     plate_basis: &RectangularPlateModalBasis,
@@ -8384,6 +8572,7 @@ fn build_physical_audio(
     let disc_controls = config.disc_structural_acoustics;
     let disc_basis = &prepared_disc_acoustics.basis;
     let disc_source = &prepared_disc_acoustics.source;
+    let rigid_disc_source = &prepared_disc_acoustics.rigid_source;
     let plate = &config.support_plate;
     let gas_spec = config.ambient_gas;
     let gas = GasState::try_new(
@@ -8433,8 +8622,7 @@ fn build_physical_audio(
     .map_err(pipeline)?;
     let controls =
         EulerControlStream::try_derive(preroll_trajectory.trajectory(), cx).map_err(pipeline)?;
-    let needs_raw_control_reconstruction =
-        disc_source.is_some() || plate_modal_acceleration.is_none();
+    let needs_raw_control_reconstruction = plate_modal_acceleration.is_none();
     let declared_source_bandwidth_hz = if needs_raw_control_reconstruction {
         resolved_contact_drive_bandwidth_hz(&controls, &config.mechanics)?
     } else {
@@ -8461,9 +8649,11 @@ fn build_physical_audio(
         });
     let plate_maximum_contact_projection_distance_m =
         1.0e-8 * plate.width_m.max(plate.depth_m).max(plate.thickness_m);
-    let mut disc_pressure = if let (Some(disc_basis), Some(disc_source)) =
-        (disc_basis.as_ref(), disc_source.as_ref())
-    {
+    let mut disc_pressure = if let (Some(disc_basis), Some(disc_source), Some(reconstruction)) = (
+        disc_basis.as_ref(),
+        disc_source.as_ref(),
+        force_reconstruction,
+    ) {
         let disc_scale_m = disc_basis
             .mesh
             .nodes_m
@@ -8481,7 +8671,7 @@ fn build_physical_audio(
             .synthesize_control_stream(
                 &controls,
                 PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce,
-                force_reconstruction.expect("resolved disc requires raw-control admission"),
+                reconstruction,
                 disc_maximum_contact_projection_distance_m,
                 cx,
             )
@@ -8513,6 +8703,50 @@ fn build_physical_audio(
     } else {
         None
     };
+    let mut rigid_disc_pressure = match (
+        disc_basis.as_ref(),
+        rigid_disc_source.as_ref(),
+        rigid_disc_acceleration,
+    ) {
+        (Some(basis), Some(source), Some(acceleration)) => {
+            let stem = source
+                .synthesize_decimated_acceleration(acceleration, basis, cx)
+                .map_err(pipeline)?;
+            let maximum_output_frames = usize::try_from(
+                u64::from(config.frames + config.mechanics_preroll_video_frames)
+                    * u64::from(SOUND_MASTER_SAMPLE_RATE_HZ / CRITIQUE_FPS)
+                    + u64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
+            )
+            .map_err(|_| {
+                CinematicFixtureError::Pipeline("rigid-disc observer budget overflow".into())
+            })?;
+            Some(
+                synthesize_rigid_disc_retarded_far_field_world_observers(
+                    source,
+                    &stem,
+                    basis,
+                    preroll_trajectory.trajectory(),
+                    &observers,
+                    RetardedFarFieldObserverControls {
+                        maximum_surface_mach: 0.08,
+                        root_time_tolerance_s: 1.0e-9,
+                        maximum_root_iterations: 64,
+                        interpolation_radius_frames: 8,
+                        maximum_output_frames,
+                    },
+                    cx,
+                )
+                .map_err(pipeline)?,
+            )
+        }
+        (Some(_), Some(_), None) | (None, None, None) => None,
+        _ => {
+            return Err(CinematicFixtureError::Pipeline(
+                "rigid-disc acceleration, mesh, and radiation artifact must be present together"
+                    .into(),
+            ));
+        }
+    };
     let mut plate_pressure = if let Some(acceleration) = plate_modal_acceleration {
         plate_runtime.synthesize_decimated_acceleration_observers(
             acceleration,
@@ -8532,6 +8766,9 @@ fn build_physical_audio(
     if disc_pressure
         .as_ref()
         .is_some_and(|pressure| pressure.len() != 2)
+        || rigid_disc_pressure
+            .as_ref()
+            .is_some_and(|pressure| pressure.len() != 2)
         || plate_pressure.len() != 2
     {
         return Err(CinematicFixtureError::Pipeline(
@@ -8545,6 +8782,15 @@ fn build_physical_audio(
         let left = pressure
             .pop()
             .expect("two-channel disc result has a left signal");
+        (left, right)
+    });
+    let rigid_disc_pair = rigid_disc_pressure.as_mut().map(|pressure| {
+        let right = pressure
+            .pop()
+            .expect("two-channel rigid-disc result has a right signal");
+        let left = pressure
+            .pop()
+            .expect("two-channel rigid-disc result has a left signal");
         (left, right)
     });
     let plate_right = plate_pressure
@@ -8587,18 +8833,38 @@ fn build_physical_audio(
             ))
         })
         .transpose()?;
-    let (left, right) = if let Some((disc_left, disc_right)) = disc_pair.as_ref() {
-        (
-            superpose_pressure_signals(&[disc_left, &plate_left], cx).map_err(pipeline)?,
-            superpose_pressure_signals(&[disc_right, &plate_right], cx).map_err(pipeline)?,
-        )
-    } else {
-        (plate_left, plate_right)
-    };
+    let rigid_disc_pair = rigid_disc_pair
+        .map(|(left, right)| {
+            Ok::<_, CinematicFixtureError>((
+                crop_physical_pressure_window(
+                    &left,
+                    publication_start_time_s,
+                    expected_published_frames,
+                )?,
+                crop_physical_pressure_window(
+                    &right,
+                    publication_start_time_s,
+                    expected_published_frames,
+                )?,
+            ))
+        })
+        .transpose()?;
+    let mut left_sources = vec![&plate_left];
+    let mut right_sources = vec![&plate_right];
+    if let Some((disc_left, disc_right)) = disc_pair.as_ref() {
+        left_sources.push(disc_left);
+        right_sources.push(disc_right);
+    }
+    if let Some((rigid_left, rigid_right)) = rigid_disc_pair.as_ref() {
+        left_sources.push(rigid_left);
+        right_sources.push(rigid_right);
+    }
+    let left = superpose_pressure_signals(&left_sources, cx).map_err(pipeline)?;
+    let right = superpose_pressure_signals(&right_sources, cx).map_err(pipeline)?;
     let left_pressure_identity = left.identity;
     let right_pressure_identity = right.identity;
     let metadata = WavMetadata::try_new(Some(
-        "FrankenSim Euler disc: contact-driven structure at fixed world microphones; causal baffled-Rayleigh plate radiation plus any resolvable broadband disc elasticity; fixed-calibration PCM24 listening derivative; uncalibrated material/support inputs"
+        "FrankenSim Euler disc: accepted-mechanics rigid translation plus contact-driven support at fixed world microphones; causal rigid-disc BEM and baffled-Rayleigh plate radiation plus any admissible disc elasticity; fixed-calibration PCM24 listening derivative; uncalibrated material/support inputs"
             .to_owned(),
     ))
     .map_err(pipeline)?;
@@ -8615,6 +8881,34 @@ fn build_physical_audio(
         cx,
     )
     .map_err(pipeline)?;
+    let rigid_disc_radiator = match (
+        disc_basis.as_ref(),
+        rigid_disc_source.as_ref(),
+        rigid_disc_pair.as_ref(),
+    ) {
+        (Some(basis), Some(source), Some((left, right))) => {
+            Some(FixtureRigidDiscAcousticRadiator {
+                structural_basis_identity: basis.identity,
+                broadband_radiation_identity: source.identity,
+                left_pressure_identity: left.identity,
+                right_pressure_identity: right.identity,
+                input_coordinate_count: source.coordinates.len(),
+                minimum_directivity_captured_fraction: source
+                    .radiation
+                    .report
+                    .sampling_diagnostics
+                    .captured_fraction,
+                maximum_held_out_error: source.radiation.report.maximum_normalized_complex_error,
+                rms_held_out_error: source.radiation.report.rms_normalized_complex_error,
+            })
+        }
+        (Some(_), Some(_), None) | (None, None, None) => None,
+        _ => {
+            return Err(CinematicFixtureError::Pipeline(
+                "rigid-disc pressure and radiation disposition diverged".into(),
+            ));
+        }
+    };
     let disc_radiator = match (
         disc_basis.as_ref(),
         disc_source.as_ref(),
@@ -8656,6 +8950,13 @@ fn build_physical_audio(
         (Some(_), None, None, Some(diagnostic)) => {
             FixtureDiscAcousticRadiator::OmittedNonpassiveBem(diagnostic.to_owned())
         }
+        (Some(basis), Some(source), None, None) => {
+            FixtureDiscAcousticRadiator::OmittedNoMechanicsCadenceElasticDrive {
+                structural_basis_identity: basis.identity,
+                broadband_radiation_identity: source.identity,
+                retained_mode_count: basis.enrichment_modes.len(),
+            }
+        }
         _ => {
             return Err(CinematicFixtureError::Pipeline(
                 "disc structural basis, radiation, and pressure disposition diverged".into(),
@@ -8668,6 +8969,7 @@ fn build_physical_audio(
         plate_material_state_identity: physical_plate.elastic.resolved().identity(),
         plate_optical_model_identity: physical_plate.optical_model_identity,
         disc_radiator,
+        rigid_disc_radiator,
         plate_structural_basis_identity,
         plate_support_node_indices,
         plate_maximum_support_snap_error_m,
@@ -9604,7 +9906,10 @@ fn production_fixture_manifest(
     };
     let render_integrator = config.render_integrator.identity();
     let reconstruction_filter = fixture_physical_reconstruction_filter_spec();
-    let disc_radiator_json = disc_radiator_manifest_json(&physical_audio.disc_radiator);
+    let disc_radiator_json = disc_radiator_manifest_json(
+        &physical_audio.disc_radiator,
+        physical_audio.rigid_disc_radiator.as_ref(),
+    );
     let physical_observers_json = physical_pressure_observers_manifest_json();
     format!(
         concat!(
@@ -9739,8 +10044,11 @@ fn production_fixture_manifest(
     )
 }
 
-fn disc_radiator_manifest_json(radiator: &FixtureDiscAcousticRadiator) -> String {
-    match radiator {
+fn disc_radiator_manifest_json(
+    radiator: &FixtureDiscAcousticRadiator,
+    rigid: Option<&FixtureRigidDiscAcousticRadiator>,
+) -> String {
+    let elastic = match radiator {
         FixtureDiscAcousticRadiator::OmittedNoResolvableModeBelowNyquist {
             forcing_maximum_frequency_hz,
             enrichment_maximum_frequency_hz,
@@ -9754,8 +10062,23 @@ fn disc_radiator_manifest_json(radiator: &FixtureDiscAcousticRadiator) -> String
             forcing_maximum_frequency_hz, enrichment_maximum_frequency_hz,
         ),
         FixtureDiscAcousticRadiator::OmittedNonpassiveBem(diagnostic) => format!(
-            "{{\"disposition\":\"omitted-nonpassive-bem\",\"error_code\":\"FS-EULER-ACOUSTIC-NONPASSIVE\",\"diagnostic\":\"{}\",\"no_claim\":\"disc broadband radiation omitted after the exact BEM passivity gate refused; the listening master contains plate radiation only\"}}",
+            "{{\"disposition\":\"omitted-nonpassive-bem\",\"error_code\":\"FS-EULER-ACOUSTIC-NONPASSIVE\",\"diagnostic\":\"{}\",\"no_claim\":\"high-order elastic-disc radiation omitted after the exact BEM passivity gate refused; rigid-disc and support-plate radiation remain separate\"}}",
             json_escape(diagnostic)
+        ),
+        FixtureDiscAcousticRadiator::OmittedNoMechanicsCadenceElasticDrive {
+            structural_basis_identity,
+            broadband_radiation_identity,
+            retained_mode_count,
+        } => format!(
+            concat!(
+                "{{\"disposition\":\"omitted-no-mechanics-cadence-elastic-drive\",",
+                "\"structural_basis_identity\":\"{}\",\"broadband_radiation_identity\":\"{}\",",
+                "\"retained_mode_count\":{},",
+                "\"no_claim\":\"the fitted elastic radiator is not driven from the reduced 48 kHz contact stream because aliasing may already have occurred\"}}"
+            ),
+            structural_basis_identity.to_hex(),
+            broadband_radiation_identity.to_hex(),
+            retained_mode_count,
         ),
         FixtureDiscAcousticRadiator::ResolvedBroadband {
             structural_basis_identity,
@@ -9791,7 +10114,33 @@ fn disc_radiator_manifest_json(radiator: &FixtureDiscAcousticRadiator) -> String
             maximum_held_out_error,
             rms_held_out_error,
         ),
-    }
+    };
+    let rigid = rigid.map_or_else(
+        || "{\"disposition\":\"unavailable-without-mechanics-cadence-rigid-acceleration\"}"
+            .to_owned(),
+        |rigid| {
+            format!(
+                concat!(
+                    "{{\"disposition\":\"resolved-rigid-disc-broadband-estimate\",",
+                    "\"coordinates\":\"body translations xyz\",",
+                    "\"structural_basis_identity\":\"{}\",\"broadband_radiation_identity\":\"{}\",",
+                    "\"left_pressure_identity\":\"{}\",\"right_pressure_identity\":\"{}\",",
+                    "\"input_coordinate_count\":{},\"minimum_directivity_captured_fraction\":{:.17e},",
+                    "\"withheld_maximum_normalized_error\":{:.17e},",
+                    "\"withheld_rms_normalized_error\":{:.17e}}}"
+                ),
+                rigid.structural_basis_identity.to_hex(),
+                rigid.broadband_radiation_identity.to_hex(),
+                rigid.left_pressure_identity.to_hex(),
+                rigid.right_pressure_identity.to_hex(),
+                rigid.input_coordinate_count,
+                rigid.minimum_directivity_captured_fraction,
+                rigid.maximum_held_out_error,
+                rigid.rms_held_out_error,
+            )
+        },
+    );
+    format!("{{\"rigid_body\":{rigid},\"elastic\":{elastic}}}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9969,12 +10318,15 @@ fn fixture_manifest(
             physical_audio.plate_maximum_support_snap_error_m,
         ),
     };
-    let disc_radiator_json = disc_radiator_manifest_json(&physical_audio.disc_radiator);
+    let disc_radiator_json = disc_radiator_manifest_json(
+        &physical_audio.disc_radiator,
+        physical_audio.rigid_disc_radiator.as_ref(),
+    );
     let physical_observers_json = physical_pressure_observers_manifest_json();
     let physical_audio_json = format!(
         concat!(
             "{{\"sample_rate_hz\":{},\"path\":\"sound/physical-listening-master.pcm24.wav\",",
-            "\"wav_identity\":\"{}\",\"authority\":\"contact-driven structure at fixed world microphones; causal plate radiation plus any resolvable broadband disc elasticity\",",
+            "\"wav_identity\":\"{}\",\"authority\":\"accepted-mechanics rigid-disc acceleration and contact-driven support at fixed world microphones; causal rigid-disc BEM and plate radiation plus any admissible disc elasticity\",",
             "\"calibrated_material_or_apparatus\":false,\"procedural_texture\":false,",
             "\"force_reconstruction\":\"accepted mechanics-cadence modal acceleration plus causal staged Blackman-Harris anti-alias decimation with real postroll delay compensation v1; legacy raw-control fallback remains fail-closed\",",
             "\"disc_material_state_identity\":\"{}\",\"plate_material_state_identity\":\"{}\",",
@@ -10235,15 +10587,19 @@ mod tests {
                 resolve_fixture_physical_disc(&profile, &config.disc, cx).expect("disc state");
             let prepared = prepare_fixture_disc_acoustics(&physical_disc, &config, cx)
                 .expect("production disc broadband preflight");
-            assert!(matches!(
-                (
-                    prepared.basis.as_ref(),
-                    prepared.source.as_ref(),
-                    prepared.nonpassivity_diagnostic.as_deref()
-                ),
-                (Some(_), None, Some(diagnostic))
-                    if diagnostic.starts_with("grid=training frequency_hz=2.50000000000000000e2")
-            ));
+            assert!(prepared.basis.is_some(), "production residual basis");
+            assert!(
+                prepared.rigid_source.is_some(),
+                "production rigid-disc radiator"
+            );
+            assert!(prepared.source.is_none());
+            assert!(
+                prepared
+                    .nonpassivity_diagnostic
+                    .as_deref()
+                    .is_some_and(|diagnostic| diagnostic
+                        .starts_with("grid=training frequency_hz=2.50000000000000000e2"))
+            );
         });
     }
 
