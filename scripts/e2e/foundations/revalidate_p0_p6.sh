@@ -26,6 +26,8 @@
 #   --run smoke            file-root checks + xtask-gate replays only
 #   --run full             smoke plus the cargo test batteries
 #   --replay RECEIPT       re-verify a retained summary against its log
+#   --negative CASE        run one named hostile twin (or 'list'); PASS iff
+#                          the driver refuses with the exact expected class
 #   --output-dir DIR       fresh, repo-contained artifact root
 #
 # EXIT CLASSES: 0 = every row reached a terminal classification and no row
@@ -56,7 +58,7 @@ die() {
 
 command -v python3 >/dev/null 2>&1 || die "$EXIT_USAGE" "python3 (tomllib) is required"
 
-MODE="" RUN_PROFILE="" OUTPUT_DIR="" REPLAY=""
+MODE="" RUN_PROFILE="" OUTPUT_DIR="" REPLAY="" NEGATIVE_CASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --list) MODE="list"; shift ;;
@@ -68,6 +70,9 @@ while [ $# -gt 0 ]; do
     --replay)
       [ $# -ge 2 ] || die "$EXIT_USAGE" "--replay needs a receipt path"
       MODE="replay"; REPLAY="$2"; shift 2 ;;
+    --negative)
+      [ $# -ge 2 ] || die "$EXIT_USAGE" "--negative needs a case name (or 'list')"
+      MODE="negative"; NEGATIVE_CASE="$2"; shift 2 ;;
     --output-dir)
       [ $# -ge 2 ] || die "$EXIT_USAGE" "--output-dir needs a value"
       OUTPUT_DIR="$2"; shift 2 ;;
@@ -154,6 +159,71 @@ if terminals != {row["bead"]: row["classification"] for row in summary["rows"]}:
 print(f"replay OK: {len(terminals)} row terminals agree")
 PYEOF
   exit $?
+fi
+
+# --------------------------------------------------------------- negative --
+# Named hostile twins. Each constructs the hostile condition in scratch,
+# runs the REAL driver against it, and passes iff the driver refuses with
+# the exact expected nonzero class - a twin the driver survives is a FAIL.
+if [ "$MODE" = "negative" ]; then
+  NEG_CASES="severed-file-root stale-schema failing-replay tampered-log truncated-log"
+  if [ "$NEGATIVE_CASE" = "list" ]; then
+    printf '%s\n' $NEG_CASES
+    exit "$EXIT_OK"
+  fi
+  case " $NEG_CASES " in
+    *" $NEGATIVE_CASE "*) : ;;
+    *) die "$EXIT_USAGE" "unknown negative case: $NEGATIVE_CASE (admitted: $NEG_CASES)" ;;
+  esac
+  SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/p0p6-negative.XXXXXX")"
+  trap 'rm -rf "$SCRATCH"' EXIT
+  FIX="$SCRATCH/fixture.toml"
+  EXPECTED=0
+  case "$NEGATIVE_CASE" in
+    severed-file-root)
+      # Evidence severing: the retained closure names a root that is gone.
+      printf '%s\n' "schema = \"$SCHEMA\"" '[[milestone]]' 'bead = "twin"' \
+        'title = "t"' 'closed_at = "2026-01-01"' 'evidence_grade = "prose"' \
+        'replay_commands = []' 'file_roots = ["no/such/severed-root.txt"]' > "$FIX"
+      EXPECTED="$EXIT_UNSUPPORTED"
+      FSIM_P0P6_MANIFEST="$FIX" "$0" --run smoke --output-dir "$SCRATCH/out" >/dev/null 2>&1
+      GOT=$? ;;
+    stale-schema)
+      printf '%s\n' 'schema = "frankensim.foundations.p0p6-revalidation-manifest.v0-stale"' > "$FIX"
+      EXPECTED="$EXIT_USAGE"
+      FSIM_P0P6_MANIFEST="$FIX" "$0" --run smoke --output-dir "$SCRATCH/out" >/dev/null 2>&1
+      GOT=$? ;;
+    failing-replay)
+      # Input perturbation: the historical claim fails at this revision.
+      printf '%s\n' "schema = \"$SCHEMA\"" '[[milestone]]' 'bead = "twin"' \
+        'title = "t"' 'closed_at = "2026-01-01"' 'evidence_grade = "executable"' \
+        'replay_commands = [["false"]]' > "$FIX"
+      EXPECTED="$EXIT_STALE"
+      FSIM_P0P6_MANIFEST="$FIX" "$0" --run full --output-dir "$SCRATCH/out" >/dev/null 2>&1
+      GOT=$? ;;
+    tampered-log|truncated-log)
+      printf '%s\n' "schema = \"$SCHEMA\"" '[[milestone]]' 'bead = "twin"' \
+        'title = "t"' 'closed_at = "2026-01-01"' 'evidence_grade = "executable"' \
+        'replay_commands = [["true"]]' > "$FIX"
+      FSIM_P0P6_MANIFEST="$FIX" "$0" --run full --output-dir "$SCRATCH/out" >/dev/null 2>&1 \
+        || die "$EXIT_USAGE" "twin precondition run failed"
+      if [ "$NEGATIVE_CASE" = "tampered-log" ]; then
+        printf '%s\n' '{"seq":999,"event":"row-terminal","bead":"twin","classification":"Current"}' \
+          >> "$SCRATCH/out/runner-log.jsonl"
+      else
+        sed -i '' -e '$d' "$SCRATCH/out/runner-log.jsonl" 2>/dev/null \
+          || sed -i -e '$d' "$SCRATCH/out/runner-log.jsonl"
+      fi
+      EXPECTED="$EXIT_TAMPER"
+      "$0" --replay "$SCRATCH/out/summary.json" >/dev/null 2>&1
+      GOT=$? ;;
+  esac
+  if [ "$GOT" -eq "$EXPECTED" ]; then
+    echo "negative twin '$NEGATIVE_CASE' PASS: driver refused with class $GOT"
+    exit "$EXIT_OK"
+  fi
+  echo "negative twin '$NEGATIVE_CASE' FAIL: expected class $EXPECTED, got $GOT" >&2
+  exit 1
 fi
 
 # -------------------------------------------------------------- self-test --
