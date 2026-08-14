@@ -55,8 +55,9 @@
 //!
 //! `LossModel::Bessel` is the frequency-by-frequency Zwikker–Kosten
 //! wall law (`fs_phs::zwikker_kosten_f`). A tone-hole chimney is a
-//! short cylinder plus a flanged mouth (AllRegime when the bore
-//! asked for WideTube, so a narrow neck does not refuse).
+//! short cylinder plus a flanged mouth (Bessel when the bore
+//! asked for WideTube, so a narrow neck does not refuse or
+//! jump at `r_v = 10`).
 //! Lossy cones cascade spherical substations at local radius
 //! (lossless stays the exact one-shot `e^{±ikx}/x` 2-port).
 //! Deferred: fingering tables (slice 3 of the bead), multimodal
@@ -700,8 +701,9 @@ fn chimney_thermal_g(
 /// the Rayleigh piston above `ka = 1`). CLOSED is the same
 /// run with a rigid cap. A compact chimney reprints the
 /// lumped `L` / `C` plus wall law; a long one carries its
-/// own quarter-wave. WideTube on the chimney is AllRegime
-/// so a narrow neck does not raise the bore's `r_v` refusal.
+/// own quarter-wave. WideTube on the chimney is Bessel
+/// so a narrow neck does not raise the bore's `r_v` refusal
+/// and does not jump at the AllRegime `r_v = 10` cliff.
 ///
 /// # Errors
 /// [`DuctError`] from the chimney line or a bad radius.
@@ -790,7 +792,8 @@ pub fn tone_hole_shunt_wall(
 }
 
 /// Input impedance of a one-segment chimney. WideTube is
-/// AllRegime so a compact neck never trips the bore floor.
+/// Bessel so a compact neck never trips the bore floor or
+/// the AllRegime `r_v = 10` model jump.
 fn chimney_line_impedance(
     state: &GasState,
     radius: f64,
@@ -806,7 +809,7 @@ fn chimney_line_impedance(
         });
     }
     let chimney_loss = match loss {
-        LossModel::WideTube => LossModel::AllRegime,
+        LossModel::WideTube => LossModel::Bessel,
         other => other,
     };
     let duct = Duct {
