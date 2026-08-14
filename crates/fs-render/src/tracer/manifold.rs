@@ -75,51 +75,31 @@ pub(super) fn reflected_target_area_per_source_solid_angle(
     target_tangent: Vec3,
     target_bitangent: Vec3,
 ) -> Option<f64> {
-    if !finite_vec(target_tangent)
-        || !finite_vec(target_bitangent)
-        || (target_tangent.norm() - 1.0).abs() > 2.0e-10
-        || (target_bitangent.norm() - 1.0).abs() > 2.0e-10
-        || target_tangent.dot(target_bitangent).abs() > 2.0e-10
-    {
-        return None;
-    }
-    let p = entry.coordinates(connection.entry_point);
-    let r = reflection.coordinates(connection.reflection_point);
-    let q = exit.coordinates(connection.exit_point);
-    let parameters = [p[0], p[1], r[0], r[1], q[0], q[1]];
-    let system = reflected_fermat_system(
-        source, target, entry, reflection, exit, eta_glass, parameters,
-    )?;
-    let (_, source_direction_hessian) =
-        direction_hessian(connection.entry_point.delta_from(source))?;
-    let (_, target_direction_hessian) =
-        direction_hessian(target.delta_from(connection.exit_point))?;
-    let exit_basis = [exit.tangent, exit.bitangent];
-    let target_basis = [target_tangent, target_bitangent];
-    let mut direction_derivatives = [Vec3::new(0.0, 0.0, 0.0); 2];
-    for target_axis in 0..2 {
-        let mut rhs = [0.0; 6];
-        for row in 0..2 {
-            rhs[row + 4] = bilinear(
-                exit_basis[row],
-                target_direction_hessian,
-                target_basis[target_axis],
-            );
-        }
-        let derivative = solve_square(system.hessian, rhs)?;
-        let entry_derivative = add(
-            entry.tangent.scale(derivative[0]),
-            entry.bitangent.scale(derivative[1]),
-        );
-        direction_derivatives[target_axis] =
-            matrix_vector(source_direction_hessian, entry_derivative);
-    }
-    let solid_angle_per_area = connection
-        .incident_direction
-        .dot(cross(direction_derivatives[0], direction_derivatives[1]))
-        .abs();
-    (solid_angle_per_area.is_finite() && solid_angle_per_area > 0.0)
-        .then(|| 1.0 / solid_angle_per_area)
+    // Reflection is an orthogonal isometry. Unfolding the reflected half of
+    // the path preserves target area and source solid angle, including the
+    // absolute Jacobian determinant. Reuse the four-variable two-interface
+    // derivative instead of solving a redundant six-variable system twice.
+    let unfolded_target = reflect_point_across_plane(target, reflection);
+    let unfolded_exit = reflect_frame_across_plane(exit, reflection);
+    let unfolded_exit_point = reflect_point_across_plane(connection.exit_point, reflection);
+    let unfolded_connection = PlanarDielectricConnection {
+        entry_point: connection.entry_point,
+        exit_point: unfolded_exit_point,
+        incident_direction: connection.incident_direction,
+        internal_direction: unit(unfolded_exit_point.delta_from(connection.entry_point))?,
+        outgoing_direction: unit(unfolded_target.delta_from(unfolded_exit_point))?,
+        optical_path_length_m: connection.optical_path_length_m,
+    };
+    target_area_per_source_solid_angle(
+        source,
+        unfolded_target,
+        entry,
+        unfolded_exit,
+        eta_glass,
+        unfolded_connection,
+        reflect_vector_across_plane(target_tangent, reflection),
+        reflect_vector_across_plane(target_bitangent, reflection),
+    )
 }
 
 /// Find the stationary path that transmits into a homogeneous dielectric,
@@ -364,75 +344,6 @@ struct FermatSystem {
     hessian: [[f64; 4]; 4],
 }
 
-#[derive(Clone, Copy)]
-struct ReflectedFermatSystem {
-    gradient: [f64; 6],
-    hessian: [[f64; 6]; 6],
-}
-
-fn reflected_fermat_system(
-    source: Point3,
-    target: Point3,
-    entry: PlaneFrame,
-    reflection: PlaneFrame,
-    exit: PlaneFrame,
-    eta_glass: f64,
-    parameters: [f64; 6],
-) -> Option<ReflectedFermatSystem> {
-    let p = entry.point([parameters[0], parameters[1]]);
-    let r = reflection.point([parameters[2], parameters[3]]);
-    let q = exit.point([parameters[4], parameters[5]]);
-    let (u_source, h_source) = direction_hessian(p.delta_from(source))?;
-    let (u_first, h_first) = direction_hessian(r.delta_from(p))?;
-    let (u_second, h_second) = direction_hessian(q.delta_from(r))?;
-    let (u_target, h_target) = direction_hessian(target.delta_from(q))?;
-    let bases = [
-        [entry.tangent, entry.bitangent],
-        [reflection.tangent, reflection.bitangent],
-        [exit.tangent, exit.bitangent],
-    ];
-    let vector_gradient = [
-        sub(u_source, u_first.scale(eta_glass)),
-        sub(u_first.scale(eta_glass), u_second.scale(eta_glass)),
-        sub(u_second.scale(eta_glass), u_target),
-    ];
-    let diagonal = [
-        matrix_add(h_source, matrix_scale(h_first, eta_glass)),
-        matrix_scale(matrix_add(h_first, h_second), eta_glass),
-        matrix_add(matrix_scale(h_second, eta_glass), h_target),
-    ];
-    let adjacent = [
-        matrix_scale(h_first, -eta_glass),
-        matrix_scale(h_second, -eta_glass),
-    ];
-    let mut gradient = [0.0; 6];
-    let mut hessian = [[0.0; 6]; 6];
-    for vertex in 0..3 {
-        for row in 0..2 {
-            let matrix_row = 2 * vertex + row;
-            gradient[matrix_row] = bases[vertex][row].dot(vector_gradient[vertex]);
-            for column in 0..2 {
-                hessian[matrix_row][2 * vertex + column] =
-                    bilinear(bases[vertex][row], diagonal[vertex], bases[vertex][column]);
-            }
-        }
-    }
-    for edge in 0..2 {
-        for row in 0..2 {
-            for column in 0..2 {
-                let value = bilinear(bases[edge][row], adjacent[edge], bases[edge + 1][column]);
-                hessian[2 * edge + row][2 * (edge + 1) + column] = value;
-                hessian[2 * (edge + 1) + column][2 * edge + row] = value;
-            }
-        }
-    }
-    gradient
-        .iter()
-        .chain(hessian.iter().flatten())
-        .all(|value| value.is_finite())
-        .then_some(ReflectedFermatSystem { gradient, hessian })
-}
-
 fn finish_reflected_connection(
     source: Point3,
     target: Point3,
@@ -455,18 +366,6 @@ fn finish_reflected_connection(
         || internal_reflected_direction.dot(reflection.outward_normal) >= 0.0
         || internal_reflected_direction.dot(exit.outward_normal) <= 0.0
         || outgoing_direction.dot(exit.outward_normal) <= 0.0
-    {
-        return None;
-    }
-    let system = reflected_fermat_system(
-        source, target, entry, reflection, exit, eta_glass, parameters,
-    )?;
-    if system
-        .gradient
-        .into_iter()
-        .map(f64::abs)
-        .fold(0.0, f64::max)
-        > 8.0 * GRADIENT_TOLERANCE
     {
         return None;
     }
@@ -649,39 +548,6 @@ fn solve_4x4(mut matrix: [[f64; 4]; 4], mut rhs: [f64; 4]) -> Option<[f64; 4]> {
     let mut solution = [0.0; 4];
     for row in (0..4).rev() {
         let tail = (row + 1..4)
-            .map(|column| matrix[row][column] * solution[column])
-            .sum::<f64>();
-        solution[row] = (rhs[row] - tail) / matrix[row][row];
-    }
-    solution
-        .iter()
-        .all(|value| value.is_finite())
-        .then_some(solution)
-}
-
-fn solve_square<const N: usize>(mut matrix: [[f64; N]; N], mut rhs: [f64; N]) -> Option<[f64; N]> {
-    for column in 0..N {
-        let pivot = (column..N).max_by(|left, right| {
-            matrix[*left][column]
-                .abs()
-                .total_cmp(&matrix[*right][column].abs())
-        })?;
-        if !matrix[pivot][column].is_finite() || matrix[pivot][column].abs() <= MIN_PIVOT {
-            return None;
-        }
-        matrix.swap(column, pivot);
-        rhs.swap(column, pivot);
-        for row in column + 1..N {
-            let factor = matrix[row][column] / matrix[column][column];
-            for inner in column..N {
-                matrix[row][inner] -= factor * matrix[column][inner];
-            }
-            rhs[row] -= factor * rhs[column];
-        }
-    }
-    let mut solution = [0.0; N];
-    for row in (0..N).rev() {
-        let tail = (row + 1..N)
             .map(|column| matrix[row][column] * solution[column])
             .sum::<f64>();
         solution[row] = (rhs[row] - tail) / matrix[row][row];
