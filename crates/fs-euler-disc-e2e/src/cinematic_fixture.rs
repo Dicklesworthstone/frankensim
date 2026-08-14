@@ -8532,7 +8532,7 @@ fn prepare_fixture_disc_acoustics(
                         sample_rate_hz: f64::from(SOUND_MASTER_SAMPLE_RATE_HZ),
                         minimum_captured_fraction: disc_controls
                             .minimum_directivity_captured_fraction,
-                        fit_order: 6,
+                        fit_order: 4,
                         fit_iterations: 12,
                         fit_weights: WeightPreset::LogBand,
                         fit_d: true,
