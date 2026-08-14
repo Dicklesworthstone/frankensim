@@ -2224,11 +2224,12 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
     for (i, s) in duct.segments.iter().enumerate() {
         acc += s.length_m;
         for hole in &duct.tone_holes {
-            if hole.after_segment == i && hole.open && hole.radius_m > 0.0 {
+            if hole.after_segment == i && hole.radius_m > 0.0 {
                 taps.push(AcousticTap {
                     station: (acc / total).clamp(0.0, 1.0),
                     neck_length: hole.chimney_m.max(0.0),
                     neck_radius: hole.radius_m,
+                    open: hole.open,
                 });
             }
         }

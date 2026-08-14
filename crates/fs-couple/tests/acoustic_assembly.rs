@@ -330,6 +330,41 @@ fn open_tone_hole_shortens_bore_period() {
 }
 
 #[test]
+fn closed_pad_lengthens_the_ode_period() {
+    let mut plain = empty_base();
+    plain.duration_s = 0.08;
+    plain.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    plain.duct = Some(ViscothermalDuct {
+        segments: vec![
+            CylinderSegment::cylinder(0.012, 0.08),
+            CylinderSegment::cylinder(0.012, 0.26),
+        ],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    let mut sealed = plain.clone();
+    if let Some(duct) = sealed.duct.as_mut() {
+        duct.tone_holes = vec![ToneHole {
+            after_segment: 0,
+            radius_m: 0.008,
+            chimney_m: 0.03,
+            open: false,
+        }];
+    }
+    let a = realize_assembly(&plain).expect("plain");
+    let b = realize_assembly(&sealed).expect("pad");
+    let ta = zero_cross_period(&a.pressure_pa);
+    let tb = zero_cross_period(&b.pressure_pa);
+    assert!(
+        tb > ta,
+        "a closed pad must add cavity C and lengthen the period ({tb:.2} vs {ta:.2})"
+    );
+}
+
+#[test]
 fn beating_reed_locks_near_the_quarter_wave() {
     let mut a = empty_base();
     a.duration_s = 0.10;

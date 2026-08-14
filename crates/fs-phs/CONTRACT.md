@@ -53,8 +53,11 @@ stepping, and Galerkin reduction preserves the structure.
   (inviscid `ρ,c` cylinder as that ladder; two inlets share the
   mouth so a blow and a transformer body can coexist; open end
   uses compact `Re Z_rad` at the quarter-wave pin),
-  `acoustic_waveguide` / `AcousticTap` (open side-branch neck
-  inertance shunted to atmosphere — a tone hole),
+  `acoustic_waveguide` / `AcousticTap` (open: neck inertance
+  shunted to atmosphere; closed: TMM cavity `C = V/(ρ c²)`
+  in parallel with the station cell; a `ViscothermalPin`
+  puts series `R` on an open neck and thermal `G` on a
+  closed `C`),
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
   constriction, a cone sliced into cylinders),
@@ -69,13 +72,19 @@ stepping, and Galerkin reduction preserves the structure.
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
   `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell
   shunt `L = ρ|x|/α`; a single taper in `acoustic_chain`
-  is this object; mixed cylinder+taper runs stitch it to
-  the LC ladder with transformer `x` at each interface), `modal_bank`
+  is this object; any multi-section chain that contains a
+  taper stitches ψ-lines to the LC ladder with transformer
+  `x` at each interface), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /
   flanged piston `(R, X)` under `e^{-iωt}` (mass-like `X < 0`),
   refused above `ka = 1`. Same numbers as `fs_duct::Termination`.
+- `side_hole_inner_length` / `side_hole_neck_length` — isolated
+  disc `8/(3π) b`, or Dalmont–Nederveen–Joly `d = b/a` on a
+  finite bore, plus wall-flanged `0.8216 b`. Same `t_eff` as
+  the fs-duct open-hole shunt. An open `AcousticTap` uses this
+  length and flanged `Re Z_rad`.
 - `series_impedance_ports` — ODE series of two 1-port impedance
   systems (same `u`, `y = y_a + y_b`).
 - `common_effort_capacitor` — two-port `C` with shared pressure

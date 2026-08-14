@@ -14,8 +14,8 @@ use fs_phs::{
     helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
     join_port, kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper,
     modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
-    series_impedance_ports, slice_linear_taper, spherical_cone, step, step_descriptor, transformer,
-    zwikker_kosten_f,
+    series_impedance_ports, side_hole_inner_length, side_hole_neck_length, slice_linear_taper,
+    spherical_cone, step, step_descriptor, transformer, zwikker_kosten_f,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -1003,6 +1003,7 @@ fn open_tap_raises_the_waveguide_frequency() {
             station: 0.24,
             neck_length: 0.003,
             neck_radius: 0.003,
+            open: true,
         }],
     )
     .expect("vented");
@@ -1027,6 +1028,120 @@ fn open_tap_raises_the_waveguide_frequency() {
     assert!(
         t1 < t0 * 0.98,
         "an open side branch must shorten the period ({t1} vs {t0})"
+    );
+}
+
+#[test]
+fn side_hole_inner_length_shortens_on_a_finite_bore() {
+    let b = 1.5e-3;
+    let isolated = side_hole_inner_length(b, 0.0);
+    let disc = 8.0 / (3.0 * core::f64::consts::PI) * b;
+    assert!((isolated - disc).abs() < 1.0e-15 * disc);
+    let on_bore = side_hole_inner_length(b, 2.0e-3);
+    assert!(
+        on_bore < 0.6 * isolated,
+        "Dalmont d=0.75 must cut the isolated disc ({on_bore} vs {isolated})"
+    );
+    let t = side_hole_neck_length(1.7e-3, b, 2.0e-3);
+    assert!((t - (1.7e-3 + on_bore + 0.8216 * b)).abs() < 1.0e-15);
+}
+
+#[test]
+fn viscothermal_tap_damps_more_than_the_inviscid_vent() {
+    let l = 0.34;
+    let c = 343.0;
+    let tap = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.003,
+        neck_radius: 0.0015,
+        open: true,
+    }];
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 8,
+    }];
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 0,
+    };
+    let inviscid = acoustic_chain(&sections, 1.2, c, false, 1, &tap, None).expect("inviscid vent");
+    let lossy = acoustic_chain(&sections, 1.2, c, false, 1, &tap, Some(&pin)).expect("lossy vent");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let tail = |p: &[f64]| {
+        let t = &p[p.len() * 3 / 4..];
+        (t.iter().map(|x| x * x).sum::<f64>() / t.len() as f64).sqrt()
+    };
+    let e_inv = tail(&ring(&inviscid));
+    let e_lossy = tail(&ring(&lossy));
+    assert!(
+        e_lossy < e_inv * 0.9,
+        "a lossy neck must damp the vented line ({e_lossy} vs {e_inv})"
+    );
+}
+
+#[test]
+fn closed_pad_is_the_tmm_cavity_compliance() {
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 8,
+    }];
+    let pad = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.02,
+        neck_radius: 0.006,
+        open: false,
+    }];
+    let plain = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("plain");
+    let sealed = acoustic_chain(&sections, 1.2, c, false, 1, &pad, None).expect("pad");
+    assert_eq!(
+        sealed.state_dim(),
+        plain.state_dim(),
+        "a closed pad must not add a neck inductor"
+    );
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        dominant_zero_period(&p, dt)
+    };
+    let t0 = ring(&plain);
+    let t1 = ring(&sealed);
+    assert!(
+        t1 > t0 * 1.01,
+        "extra cavity C must lengthen the period ({t1} vs {t0})"
     );
 }
 
@@ -1406,25 +1521,28 @@ fn linear_taper_is_not_the_inlet_cylinder() {
 }
 
 #[test]
-fn spherical_cone_is_not_the_frustum_ladder() {
+fn spherical_cone_is_not_a_broken_line_horn() {
     let c = 343.0;
     let sph = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, false, 1, &[], None).expect("ψ");
     assert_eq!(sph.state_dim(), 12);
+    // Broken-line horn: two tapers, different slopes. Same-slope
+    // halves would be one ψ-line; this must stay two.
     let halves = [
         AcousticSection {
             length: 0.17,
             radius: 0.006,
-            outlet_radius: 0.012,
+            outlet_radius: 0.010,
             cells: 2,
         },
         AcousticSection {
             length: 0.17,
-            radius: 0.012,
+            radius: 0.010,
             outlet_radius: 0.018,
             cells: 2,
         },
     ];
-    let web = acoustic_chain(&halves, 1.2, c, false, 1, &[], None).expect("frustum");
+    let web = acoustic_chain(&halves, 1.2, c, false, 1, &[], None).expect("broken line");
+    assert_eq!(web.state_dim(), 12);
     let dt = 1.0 / 8_000.0;
     let ring = |sys: &PortHamiltonian| {
         let mut x = vec![0.0; sys.state_dim()];
@@ -1446,7 +1564,7 @@ fn spherical_cone_is_not_the_frustum_ladder() {
     let err: f64 = pa.iter().zip(&pb).map(|(x, y)| (x - y).abs()).sum();
     assert!(
         err > 1.0e-6,
-        "ψ = x p must not reprint the frustum LC ladder"
+        "a single cone must not reprint a broken-line pair of cones"
     );
     assert!(spherical_cone(0.01, 0.01, 0.2, 1.2, c, 4, false, 1, &[], None).is_err());
 }

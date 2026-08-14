@@ -53,16 +53,18 @@
 //! evaluations are bitwise identical.
 //!
 //! `LossModel::Bessel` is the frequency-by-frequency Zwikker–Kosten
-//! wall law (`fs_phs::zwikker_kosten_f`). Deferred: tone-hole
-//! T-junction lattices and fingering tables (slice 3 of the bead),
-//! multimodal horn expansion (trigger: bell mismatch beyond authored
-//! tolerance), and BEM-computed radiation loads.
+//! wall law (`fs_phs::zwikker_kosten_f`). A tone-hole chimney uses
+//! that same lumped wall law (open series `R`, closed thermal `G`).
+//! Deferred: tone-hole T-junction lattices and fingering tables
+//! (slice 3 of the bead), multimodal horn expansion (trigger: bell
+//! mismatch beyond authored tolerance), and BEM-computed radiation
+//! loads.
 
 use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
-use fs_phs::zwikker_kosten_f;
+use fs_phs::{side_hole_neck_length, side_hole_series_length, zwikker_kosten_f};
 
 /// Wide-tube validity floor: below this shear number the first-order
 /// Zwikker–Kosten expansion is refused by name.
@@ -170,9 +172,8 @@ pub enum Segment {
     /// A tone hole: a zero-axial-length side branch at this point in
     /// the chain — compact-limit lumped shunt (`[[1, 0], [1/Z_h, 1]]`
     /// T-junction; series corrections are a recorded follow-up).
-    /// OPEN: chimney mass with the validated compact-limit end
-    /// corrections (inner 8/(3 pi) b uniform-profile disc constant,
-    /// outer 0.8216 b wall-flanged) plus flanged radiation resistance.
+    /// OPEN: chimney mass with Dalmont inner matching on `b/a`
+    /// plus wall-flanged `0.8216 b` and flanged radiation resistance.
     /// CLOSED: the chimney cavity's compliance.
     ToneHole {
         /// Hole (chimney) radius b [m]; must be smaller than the bore
@@ -512,13 +513,103 @@ fn basis_pair(segment: &Segment, wave: &SegmentWave, t: f64, forward: bool) -> (
     }
 }
 
+/// Series wall law on a short chimney of length `length`.
+///
+/// Returns `(R, L)` under `e^{-iωt}` (`Z = R - i ω L`). A compact
+/// hole is too short for a 2-port wave: this is the same lumped
+/// all-regime / Bessel pin the bore uses, never a WideTube
+/// refusal (chimneys sit below `r_v = 10`).
+fn chimney_series(
+    state: &GasState,
+    radius: f64,
+    length: f64,
+    omega: f64,
+    loss: LossModel,
+) -> Result<(f64, f64), DuctError> {
+    let area = core::f64::consts::PI * radius * radius;
+    let l0 = state.density * length / area;
+    match loss {
+        LossModel::Lossless => Ok((0.0, l0)),
+        LossModel::WideTube => {
+            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+            let r_s = if rv > 0.0 && rv.is_finite() {
+                omega * l0 * core::f64::consts::SQRT_2 / rv
+            } else {
+                0.0
+            };
+            Ok((r_s.max(0.0), l0))
+        }
+        LossModel::AllRegime => {
+            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+            if rv >= MIN_SHEAR_NUMBER {
+                chimney_series(state, radius, length, omega, LossModel::WideTube)
+            } else {
+                let r_s = 8.0 * state.dynamic_viscosity / (area * radius * radius) * length;
+                Ok((r_s.max(0.0), l0 * 4.0 / 3.0))
+            }
+        }
+        LossModel::Bessel => {
+            let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+            if !(rv > 0.0 && rv.is_finite()) {
+                return Ok((0.0, l0));
+            }
+            let f_v =
+                zwikker_kosten_f(rv).map_err(|_| DuctError::BadParameter { what: "Bessel F_v" })?;
+            let den = C64::ONE - f_v;
+            if den.abs() < 1.0e-18 {
+                return chimney_series(state, radius, length, omega, LossModel::AllRegime);
+            }
+            // z' = iω ρ / (S (1-F)) in the +iω bookkeeping of
+            // [`bessel_wave`]; Re is series R per metre, Im/ω is L.
+            let z_prime = C64::new(0.0, omega).scale(state.density / area) / den;
+            Ok((
+                (z_prime.re * length).max(0.0),
+                (z_prime.im / omega * length).abs().max(l0),
+            ))
+        }
+    }
+}
+
+fn chimney_thermal_g(
+    state: &GasState,
+    radius: f64,
+    compliance: f64,
+    omega: f64,
+    loss: LossModel,
+) -> f64 {
+    if matches!(loss, LossModel::Lossless) || !(compliance > 0.0 && omega > 0.0) {
+        return 0.0;
+    }
+    let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+    if !(rv > 0.0 && rv.is_finite()) {
+        return 0.0;
+    }
+    if matches!(loss, LossModel::Bessel) {
+        if let Ok(mut f_t) = zwikker_kosten_f(rv * state.prandtl.sqrt()) {
+            // Y' = iω C (1 + (γ-1) F_t); Re Y is G per metre.
+            // A sign flip of Im F keeps G ≥ 0 (same pin as bessel_wave).
+            if f_t.im > 0.0 {
+                f_t = C64::new(f_t.re, -f_t.im);
+            }
+            return (omega * compliance * (state.gamma - 1.0) * (-f_t.im)).max(0.0);
+        }
+    }
+    if rv >= MIN_SHEAR_NUMBER {
+        let eps = core::f64::consts::SQRT_2 / rv;
+        return (omega * compliance * (state.gamma - 1.0) * eps / state.prandtl.sqrt()).max(0.0);
+    }
+    let rt = rv * state.prandtl.sqrt();
+    ((state.gamma - 1.0) * compliance * omega * (rt * rt / 16.0).min(0.5)).max(0.0)
+}
+
 /// Lumped shunt impedance of a tone hole at `omega` (compact limit):
 /// OPEN `Z = -i omega rho t_eff / S_h + (rho c / S_h) (k b)^2 / 2`
-/// with `t_eff = h + (8/(3 pi)) b + 0.8216 b` (inner uniform-profile
-/// disc constant — the closed-body added-mass recipe validated to
-/// +1.8% in the program's Laplace-BEM pilot — plus the wall-flanged
-/// outer correction); CLOSED `Z = +i rho c^2 / (omega V_h)` with
-/// `V_h = S_h h`. Signs follow the `e^{-i omega t}` convention
+/// with `t_eff` from [`fs_phs::side_hole_neck_length`] (Dalmont
+/// inner matching on `b/a` plus wall-flanged `0.8216 b`);
+/// CLOSED `Z = +i rho c^2 / (omega V_h)` with
+/// `V_h = S_h h`. A non-[`LossModel::Lossless`] model adds the
+/// bore's wall law on that lumped `L` (open) or thermal `G` on
+/// the cavity (closed). Signs follow the `e^{-i omega t}` convention
 /// (mass-like reactance negative imaginary).
 ///
 /// # Errors
@@ -530,6 +621,8 @@ pub fn tone_hole_shunt(
     chimney_height: f64,
     hole_state: HoleState,
     omega: f64,
+    loss: LossModel,
+    bore_radius: f64,
 ) -> Result<C64, DuctError> {
     let area = core::f64::consts::PI * hole_radius * hole_radius;
     let k = omega / state.sound_speed;
@@ -539,25 +632,67 @@ pub fn tone_hole_shunt(
             if kb > MAX_RADIATION_KA {
                 return Err(DuctError::RadiationKaTooLarge { ka: kb });
             }
-            // v1 compact corrections; the recorded refinement is the
-            // delta = b/a bore-interaction polynomial for the INNER
-            // term (Keefe/Dalmont class ~ b(0.82 - 0.193 d - 1.09 d^2
-            // + ...)), which a review quantified as exactly the
-            // committed -8..-20 cent flat bias on the Ernoult holes.
-            let t_eff = chimney_height
-                + (8.0 / (3.0 * core::f64::consts::PI)) * hole_radius
-                + 0.8216 * hole_radius;
-            let resistance = state.density * state.sound_speed / area * 0.5 * kb * kb;
-            Ok(C64::new(resistance, -omega * state.density * t_eff / area))
+            let t_eff = side_hole_neck_length(chimney_height, hole_radius, bore_radius);
+            let r_rad = state.density * state.sound_speed / area * 0.5 * kb * kb;
+            let (r_wall, l_h) = chimney_series(state, hole_radius, t_eff, omega, loss)?;
+            Ok(C64::new(r_rad + r_wall, -omega * l_h))
         }
         HoleState::Closed => {
             let volume = area * chimney_height;
-            Ok(C64::new(
-                0.0,
-                state.density * state.sound_speed * state.sound_speed / (omega * volume),
-            ))
+            let compliance = volume / (state.density * state.sound_speed * state.sound_speed);
+            let g = chimney_thermal_g(state, hole_radius, compliance, omega, loss);
+            // e^{-iωt}: Y = G − i ω C, Z = 1/Y.
+            let y = C64::new(g, -omega * compliance);
+            Ok(y.recip())
         }
     }
+}
+
+fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
+    [
+        a[0] * b[0] + a[1] * b[2],
+        a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2],
+        a[2] * b[1] + a[3] * b[3],
+    ]
+}
+
+/// Compact T-junction: series `Z_s/2`, shunt `Z_h`, series `Z_s/2`.
+///
+/// `Z_s = −i ω ρ t_s / S` under `e^{-iωt}` with Nederveen
+/// [`side_hole_series_length`] (open holes only; a closed pad is
+/// still a pure shunt).
+fn tone_hole_t_junction(
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    hole_state: HoleState,
+    omega: f64,
+    loss: LossModel,
+    bore_radius: f64,
+) -> Result<[C64; 4], DuctError> {
+    let zh = tone_hole_shunt(
+        state,
+        hole_radius,
+        chimney_height,
+        hole_state,
+        omega,
+        loss,
+        bore_radius,
+    )?;
+    let shunt = [C64::ONE, C64::ZERO, zh.recip(), C64::ONE];
+    if !matches!(hole_state, HoleState::Open) {
+        return Ok(shunt);
+    }
+    let ts = side_hole_series_length(hole_radius, bore_radius);
+    if ts == 0.0 {
+        return Ok(shunt);
+    }
+    let area = core::f64::consts::PI * bore_radius * bore_radius;
+    let zs = C64::new(0.0, -omega * state.density * ts / area);
+    let half = zs.scale(0.5);
+    let series = [C64::ONE, half, C64::ZERO, C64::ONE];
+    Ok(mul2(mul2(series, shunt), series))
 }
 
 /// The segment 2-port `[p_in, U_in] = M [p_out, U_out]`, built
@@ -738,14 +873,14 @@ pub fn input_impedance(
         let s = if let Segment::ToneHole {
             hole_radius,
             chimney_height,
+            bore_radius,
             state: hole_state,
-            ..
         } = *segment
         {
-            // Chimney viscothermal losses are NOT modeled (no-claim),
-            // but the chimney is often the narrowest element, so its
-            // shear number still folds into the reported margin
-            // (review finding: the diagnostic must see it).
+            // The chimney is often the narrowest element; its shear
+            // number folds into the reported margin, and the same
+            // LossModel now sits on the lumped neck (no WideTube
+            // refusal — a compact hole is not a 2-port wave).
             if matches!(
                 loss,
                 LossModel::WideTube | LossModel::AllRegime | LossModel::Bessel
@@ -753,8 +888,15 @@ pub fn input_impedance(
                 let rv = hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt();
                 min_rv = min_rv.min(rv);
             }
-            let shunt = tone_hole_shunt(state, hole_radius, chimney_height, hole_state, omega)?;
-            [C64::ONE, C64::ZERO, shunt.recip(), C64::ONE]
+            tone_hole_t_junction(
+                state,
+                hole_radius,
+                chimney_height,
+                hole_state,
+                omega,
+                loss,
+                bore_radius,
+            )?
         } else {
             let wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
             min_rv = min_rv.min(wave.shear_number);
@@ -1774,13 +1916,11 @@ mod tone_hole_tests {
         // (geometry from the CC-BY paper's Table 1; peak values
         // extracted from the openwind-published measured curves,
         // GPLv3, sessions Measure1-3 agree within ~3 Hz: 283/332/449/619/770 Hz).
-        // Authored envelope: measured deviations -8..-20 cents
-        // (2026-08-08), systematically slightly flat — consistent with
-        // the compact-limit inner end correction using the validated
-        // uniform-profile disc constant; 30 cents absolute is the
-        // envelope, and the DIRECTION of every deviation is asserted
-        // too (a sign-scattered model would indicate noise, not
-        // physics).
+        // Authored envelope: 30 cents. The old systematic -8..-20
+        // cent flat bias was the isolated-disc inner length; Dalmont
+        // matching on b/a removes it (xoxx sits at +0.3 cents, inside
+        // the paper's ±2 cent peak accuracy). Do not require a flat
+        // sign — that encoded the missing term.
         use HoleState::{Closed as X, Open as O};
         let cases: [([HoleState; 4], f64, &str); 5] = [
             ([X, X, X, X], 283.0, "xxxx"),
@@ -1799,8 +1939,8 @@ mod tone_hole_tests {
                 "{name}: {f:.1} Hz vs measured {measured} Hz = {cents:+.0} cents"
             );
             assert!(
-                cents < 0.0,
-                "{name}: deviations are systematically flat on this model;                  a sharp deviation signals a physics change: {cents:+.1}"
+                cents.abs() < 10.0,
+                "{name}: after Dalmont inner matching, peaks stay inside 10 cents ({cents:+.1})"
             );
             // Opening successive holes from the bell up must RAISE the
             // pitch monotonically — the fingering ladder is the
@@ -1873,7 +2013,16 @@ mod tone_hole_tests {
         )
         .expect("down")
         .impedance;
-        let shunt = tone_hole_shunt(&state, 3.0e-3, 2.0e-3, HoleState::Open, omega).expect("shunt");
+        let shunt = tone_hole_shunt(
+            &state,
+            3.0e-3,
+            2.0e-3,
+            HoleState::Open,
+            omega,
+            LossModel::WideTube,
+            bore,
+        )
+        .expect("shunt");
         let z_parallel = (z_down.recip() + shunt.recip()).recip();
         // Push z_parallel through the upstream tube's 2-port.
         let wave = segment_wave(&state, bore, omega, LossModel::WideTube).expect("wave");
@@ -1954,7 +2103,15 @@ mod tone_hole_tests {
             Err(DuctError::BadParameter { .. })
         ));
         assert!(matches!(
-            tone_hole_shunt(&state, 6.0e-3, 1.0e-3, HoleState::Open, 2.0e5),
+            tone_hole_shunt(
+                &state,
+                6.0e-3,
+                1.0e-3,
+                HoleState::Open,
+                2.0e5,
+                LossModel::Lossless,
+                0.01,
+            ),
             Err(DuctError::RadiationKaTooLarge { .. })
         ));
         // (e) determinism.
@@ -1971,6 +2128,80 @@ mod tone_hole_tests {
         assert_eq!(a.im.to_bits(), z_full.im.to_bits());
         println!(
             "{{\"suite\":\"fs-duct\",\"case\":\"tone-hole-algebra\",\"f_open\":{f_open:.1},\"f_closed\":{f_closed:.1},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn chimney_wall_law_is_the_bore_pin() {
+        let state = air20();
+        let omega = 2.0 * core::f64::consts::PI * 400.0;
+        let inv = tone_hole_shunt(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Open,
+            omega,
+            LossModel::Lossless,
+            2.0e-3,
+        )
+        .expect("inviscid");
+        let all = tone_hole_shunt(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Open,
+            omega,
+            LossModel::AllRegime,
+            2.0e-3,
+        )
+        .expect("all-regime");
+        let bessel = tone_hole_shunt(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Open,
+            omega,
+            LossModel::Bessel,
+            2.0e-3,
+        )
+        .expect("bessel");
+        assert!(
+            all.re > inv.re * 1.05,
+            "narrow chimney must add Poiseuille R ({:.4} vs {:.4})",
+            all.re,
+            inv.re
+        );
+        assert!(
+            bessel.re > inv.re * 1.05,
+            "Bessel F on the chimney must add series R ({:.4} vs {:.4})",
+            bessel.re,
+            inv.re
+        );
+        let closed_inv = tone_hole_shunt(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Closed,
+            omega,
+            LossModel::Lossless,
+            2.0e-3,
+        )
+        .expect("closed inviscid");
+        let closed_all = tone_hole_shunt(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Closed,
+            omega,
+            LossModel::AllRegime,
+            2.0e-3,
+        )
+        .expect("closed all-regime");
+        assert!(
+            closed_all.re > 1.0e-6 && closed_inv.re.abs() < 1.0e-12,
+            "thermal G on a closed chimney must give Re Z > 0 ({} vs {})",
+            closed_all.re,
+            closed_inv.re
         );
     }
 }

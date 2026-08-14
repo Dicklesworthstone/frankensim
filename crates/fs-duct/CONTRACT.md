@@ -37,10 +37,14 @@ same object, and every medium property derives from
   number, mouth `ka`).
 - `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — compact-limit
   lumped side branch (`[[1,0],[1/Z_h,1]]`): OPEN = chimney mass with
-  the validated inner `8/(3 pi) b` + wall-flanged outer `0.8216 b` end
-  corrections plus flanged radiation resistance; CLOSED = chimney
-  cavity compliance. Hole radius must stay below the bore radius;
-  open-hole `k b` refuses above the compact ceiling.
+  Dalmont–Nederveen–Joly inner matching on `b/a` plus wall-flanged
+  `0.8216 b` and flanged radiation resistance; CLOSED = chimney
+  cavity compliance. A non-lossless `LossModel` adds the bore's
+  wall law on that lumped `L` (open series `R`) or thermal `G`
+  on the cavity (closed). A compact chimney is not a 2-port wave
+  and does not raise a WideTube `r_v` refusal. Hole radius must
+  stay below the bore radius; open-hole `k b` refuses above the
+  compact ceiling.
 - `DuctError` — stable `FS-DUCT-*` refusals: bad parameter, too-narrow
   (wide-tube floor), radiation-`ka` ceiling, empty duct, singular.
 
@@ -81,9 +85,10 @@ pipe `Z_in = +i Zc cot(kL)`.
    (Acta Acustica 5:47, CC-BY Table 1 geometry; measured curves
    published via openwind, GPLv3) — the five-fingering first-peak
    ladder reproduces the measured 283/332/449/619/770 Hz within an
-   authored 30-cent envelope (measured -8..-20 cents, systematically
-   flat, direction asserted) with the monotone fingering-ladder
-   doctrine check; plus the exact-cascade tone-hole algebra pin
+   authored 30-cent envelope (Dalmont inner matching on `b/a`
+   removed the old systematic -8..-20 cent flat bias) with the
+   monotone fingering-ladder doctrine check; plus the exact-cascade
+   tone-hole algebra pin
    (1e-12), open-raises/closed-perturbs contrasts, and hole refusals.
 10. (Review round) The Zc/impedance correction is pinned by the
    INDEPENDENT sqrt(Z_series/Y_shunt) transmission-line route (complex
