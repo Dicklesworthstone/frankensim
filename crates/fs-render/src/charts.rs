@@ -2202,7 +2202,10 @@ impl TriMesh {
             return Ok(None);
         }
         let working_t_max = if caller_t_max.is_finite() {
-            conservative_product_upper(caller_t_max, parameter_scale)
+            // Widen in caller space before scaling. Multiplication-only
+            // rounding is insufficient when a slightly larger normalized
+            // parameter divides back onto the same tiny caller-space value.
+            conservative_product_upper(caller_t_max.next_up(), parameter_scale)
         } else {
             caller_t_max
         };
@@ -2860,6 +2863,33 @@ mod tests {
                 .expect("a non-cancellable traversal cannot cancel")
                 .is_none(),
             "a hit beyond the caller's current-best bound is pruned"
+        );
+
+        let caller_t = f64::from_bits(0x1);
+        let direction_scale = f64::from_bits(0x7e70_0000_0000_0000);
+        let working_t = f64::from_bits(0x3b54_0000_0000_0000);
+        let tiny_mesh = TriMesh::new(
+            vec![
+                [-1.0, -1.0, working_t],
+                [1.0, -1.0, working_t],
+                [0.0, 1.0, working_t],
+            ],
+            vec![[0, 1, 2]],
+        );
+        let scaled_ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(0.0, 0.0, direction_scale),
+        };
+        let tiny_unbounded = tiny_mesh
+            .intersect_surface(&scaled_ray)
+            .expect("the scaled ray hits the tiny-distance triangle");
+        assert_eq!(tiny_unbounded.hit.t.to_bits(), caller_t.to_bits());
+        assert_eq!(
+            tiny_mesh
+                .intersect_surface_impl(None, &scaled_ray, caller_t)
+                .expect("a non-cancellable traversal cannot cancel"),
+            Some(tiny_unbounded),
+            "outward scaling must preserve a hit that divides onto the exact caller bound"
         );
     }
 

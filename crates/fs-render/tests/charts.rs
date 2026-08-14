@@ -2141,7 +2141,14 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
         )
         .expect("exact-bound mesh trace")
         .expect("an exact-distance mesh hit remains inside the inclusive bound");
-        assert_eq!(bounded_mesh_hit, direct_mesh_hit);
+        let bounded_steps = bounded_mesh_hit.steps;
+        let mut same_geometry = bounded_mesh_hit;
+        same_geometry.steps = direct_mesh_hit.steps;
+        assert_eq!(same_geometry, direct_mesh_hit);
+        assert!(
+            bounded_steps <= direct_mesh_hit.steps,
+            "current-best pruning cannot perform more BVH work"
+        );
         assert!(
             trace_scene(
                 &[Backend::Mesh(&mesh)],
