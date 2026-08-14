@@ -152,6 +152,17 @@ def candidates(issues, deps):
 text, issues, deps = load(beads_path)
 rows = candidates(issues, deps)
 
+
+def candidate_set_digest(rows):
+    """Binding scoped to what review verdicts actually depend on: the
+    candidate edge set and each child's exact text. Unrelated churn
+    (comments, other issues, other edges) must NOT invalidate a frozen
+    review; a new/removed candidate edge or edited candidate text MUST."""
+    triples = sorted(
+        (row["parent"], row["child"], row["child_text_sha256"]) for row in rows
+    )
+    return hashlib.sha256(json.dumps(triples).encode()).hexdigest()
+
 if mode == "list":
     for row in rows:
         print(
@@ -175,7 +186,7 @@ if mode == "freeze":
             "carries a non-pending verdict. The beads DB remains the sole "
             "clause and hierarchy authority; rows bind child text by hash."
         ),
-        "beads_source_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "candidate_set_sha256": candidate_set_digest(rows),
         "expected_parent_count": len({row["parent"] for row in rows}),
         "expected_relation_count": len(rows),
         "rows": rows,
@@ -210,13 +221,14 @@ if declared_relations != len(mrows) or declared_parents != len(
     sys.exit(EXIT_USAGE)
 
 if mode == "check":
-    live_digest = hashlib.sha256(text.encode()).hexdigest()
-    if manifest.get("beads_source_sha256") != live_digest:
+    live_digest = candidate_set_digest(rows)
+    if manifest.get("candidate_set_sha256") != live_digest:
         print(
-            "manifest is STALE against the live beads DB: frozen "
-            f"{manifest.get('beads_source_sha256', '')[:16]} vs live {live_digest[:16]}; "
-            "review verdicts bind to the frozen snapshot, so re-freeze and "
-            "re-review the delta deliberately",
+            "manifest is STALE against the live candidate set: frozen "
+            f"{manifest.get('candidate_set_sha256', '')[:16]} vs live {live_digest[:16]}; "
+            "a candidate edge appeared/vanished or a candidate child's text "
+            "moved - re-freeze and re-review the delta deliberately "
+            "(unrelated DB churn does not trip this)",
             file=sys.stderr,
         )
         sys.exit(EXIT_STALE)
@@ -309,9 +321,13 @@ if [ "$MODE" = "self-test" ]; then
   FSIM_HIERNORM_BEADS="$FIXDB" "$0" --freeze "$SCRATCH/m.json" >/dev/null 2>&1
   FSIM_HIERNORM_BEADS="$FIXDB" "$0" --check "$SCRATCH/m.json" >/dev/null 2>&1
   check "fresh manifest checks clean" 0 $?
-  printf '%s\n' '{"id":"x-new","status":"open"}' >> "$FIXDB"
+  printf '%s\n' '{"id":"x-unrelated-new","status":"open"}' >> "$FIXDB"
   FSIM_HIERNORM_BEADS="$FIXDB" "$0" --check "$SCRATCH/m.json" >/dev/null 2>&1
-  check "a moved DB makes the manifest STALE (31)" 31 $?
+  check "unrelated DB churn does NOT invalidate the freeze" 0 $?
+  printf '%s\n' '{"id":"x-epic.2","status":"open","description":"new child"}' \
+    '{"issue_id":"x-epic","depends_on_id":"x-epic.2","type":"blocks"}' >> "$FIXDB"
+  FSIM_HIERNORM_BEADS="$FIXDB" "$0" --check "$SCRATCH/m.json" >/dev/null 2>&1
+  check "a NEW candidate edge makes the manifest STALE (31)" 31 $?
   FSIM_HIERNORM_BEADS="$FIXDB" "$0" --plan "$SCRATCH/m.json" >/dev/null 2>&1
   check "a pending row refuses the plan (32)" 32 $?
   python3 - "$SCRATCH/m.json" <<'PYFIX'

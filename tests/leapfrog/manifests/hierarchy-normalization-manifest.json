@@ -1,6 +1,6 @@
 {
   "authority_statement": "REVIEW MANIFEST, not migration authority until every row carries a non-pending verdict. The beads DB remains the sole clause and hierarchy authority; rows bind child text by hash.",
-  "beads_source_sha256": "be4a696298c83f0895cea66e70a0e26a8da44fab04d02ebc392a52858fb49c6c",
+  "candidate_set_sha256": "e4f664c8a0b411a6e8f1eed8163e61bb27c75a2659b49a4cde59a980cd08d7fc",
   "expected_parent_count": 279,
   "expected_relation_count": 1132,
   "rows": [
