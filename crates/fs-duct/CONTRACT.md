@@ -13,9 +13,9 @@ same object, and every medium property derives from
 ## Public types and semantics
 
 - `Segment::{Cylinder, Cone}` — geometry in SI; a cone is a linear
-  taper propagated with exact 1D spherical waves, its viscothermal
-  correction evaluated at the mean radius (documented standard
-  treatment; refine by subdivision).
+  taper propagated with exact 1D spherical waves. Lossy cones
+  cascade spherical substations at each slice's own mid-radius
+  (lossless stays the one-shot `e^{±ikx}/x` 2-port).
 - `LossModel::{Lossless, WideTube, AllRegime, Bessel}` — lossless,
   first-order ZK, piecewise wide/Poiseuille, and frequency-by-frequency
   Bessel Zwikker–Kosten `F(r_v)` (every shear number). A cone still
@@ -35,18 +35,18 @@ same object, and every medium property derives from
 - `input_impedance` / `impedance_sweep` / `impedance_peaks` —
   `Z_in = p/U` at the inlet with per-solve diagnostics (minimum shear
   number, mouth `ka`).
-- `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — compact-limit
-  lumped side branch (`[[1,0],[1/Z_h,1]]`): OPEN = chimney mass with
-  Dalmont–Nederveen–Joly inner matching on `b/a` plus wall-flanged
-  `0.8216 b` and flanged radiation resistance. An OPEN hole is the
-  T-junction `series(Z_s/2)·shunt(Z_h)·series(Z_s/2)` with
-  Nederveen `t_s = −0.37 b²/a`; CLOSED = chimney
-  cavity compliance. A non-lossless `LossModel` adds the bore's
-  wall law on that lumped `L` (open series `R`) or thermal `G`
-  on the cavity (closed). A compact chimney is not a 2-port wave
-  and does not raise a WideTube `r_v` refusal. Hole radius must
-  stay below the bore radius; open-hole `k b` refuses above the
-  compact ceiling.
+- `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — side
+  branch (`[[1,0],[1/Z_h,1]]`). The chimney is a short cylinder:
+  OPEN is that run plus a flanged mouth (Dalmont inner length
+  on `b/a`; `0.8216 a` or the Rayleigh piston lives in the
+  termination). CLOSED is the same run with a rigid cap. A
+  compact chimney reprints lumped `L`/`C`; a long one carries
+  its own quarter-wave. WideTube on the neck is AllRegime so
+  a narrow chimney does not raise the bore's `r_v` refusal.
+  An OPEN hole is still the T-junction
+  `series(Z_s/2)·shunt(Z_h)·series(Z_s/2)` with Nederveen
+  `t_s = −0.37 b²/a`. Hole radius must stay below the bore
+  radius.
 - `DuctError` — stable `FS-DUCT-*` refusals: bad parameter, too-narrow
   (wide-tube floor), radiation-`ka` ceiling, empty duct, singular.
 
@@ -148,9 +148,12 @@ refusals; bitwise determinism.
   the multimodal expansion — the recorded trigger is a bell
   mismatch beyond authored tolerance in a future validation
   against measured instrument impedance.
-- Radiation fits are low-`ka` (ceiling 1.0, refused by name) for
-  unflanged/flanged circular mouths; BEM-computed loads are the
-  recorded successor (`fs_bem::helmholtz`).
+- Unflanged radiation is the low-`ka` Levine–Schwinger fit
+  (ceiling 1.0, refused by name). A flanged mouth uses that fit
+  below `ka = 1` and the Rayleigh baffled piston
+  (`fs_phs::baffled_piston_impedance`, same half-space kernel as
+  `fs_bem::helmholtz`) above it. A full exterior BEM of an
+  unflanged pipe is still the recorded successor.
 - Tone holes are the compact T-junction (Nederveen series + Dalmont
   inner + chimney wall law + `Y = σ Y_open + (1−σ) Y_closed` vent
   mix + mutual series `t_m ∝ e^{−s/a}` from neighboring open

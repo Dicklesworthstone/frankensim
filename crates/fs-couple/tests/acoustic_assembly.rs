@@ -74,6 +74,7 @@ fn closed_duct(temperature_k: f64) -> AcousticAssembly {
             }],
             tone_holes: vec![],
             termination: WaveguideEnd::Closed,
+            wall: None,
         }),
         blow: Some(VolumeVelocityPulse {
             peak_m3_s: 2.0e-5,
@@ -249,6 +250,21 @@ fn open_duct_refuses_nyquist_ka_above_the_radiation_fit() {
 }
 
 #[test]
+fn flanged_mouth_is_not_the_unflanged_ka_ceiling() {
+    let mut open = closed_duct(288.15);
+    open.sample_rate_hz = 44_100;
+    open.duration_s = 0.02;
+    if let Some(duct) = open.duct.as_mut() {
+        duct.termination = WaveguideEnd::FlangedOpen;
+    }
+    let out = realize_assembly(&open).expect("flanged Rayleigh piston may sit above ka = 1");
+    assert!(
+        !out.pressure_pa.is_empty(),
+        "a flanged mouth must still speak"
+    );
+}
+
+#[test]
 fn empty_or_invalid_wav_refuses() {
     assert!(matches!(
         encode_pcm16_wav(&[], 8_000, 1.0),
@@ -309,6 +325,7 @@ fn open_tone_hole_shortens_bore_period() {
         ],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     let mut vented = closed.clone();
     if let Some(duct) = vented.duct.as_mut() {
@@ -316,7 +333,7 @@ fn open_tone_hole_shortens_bore_period() {
             after_segment: 0,
             radius_m: 0.003,
             chimney_m: 0.003,
-            open: true,
+            open_fraction: 1.0,
         }];
     }
     let a = realize_assembly(&closed).expect("plain");
@@ -344,6 +361,7 @@ fn closed_pad_lengthens_the_ode_period() {
         ],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     let mut sealed = plain.clone();
     if let Some(duct) = sealed.duct.as_mut() {
@@ -351,7 +369,7 @@ fn closed_pad_lengthens_the_ode_period() {
             after_segment: 0,
             radius_m: 0.008,
             chimney_m: 0.03,
-            open: false,
+            open_fraction: 0.0,
         }];
     }
     let a = realize_assembly(&plain).expect("plain");
@@ -361,6 +379,44 @@ fn closed_pad_lengthens_the_ode_period() {
     assert!(
         tb > ta,
         "a closed pad must add cavity C and lengthen the period ({tb:.2} vs {ta:.2})"
+    );
+}
+
+#[test]
+fn vent_fraction_sits_between_open_and_closed() {
+    let mut base = empty_base();
+    base.duration_s = 0.08;
+    base.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    base.duct = Some(ViscothermalDuct {
+        segments: vec![
+            CylinderSegment::cylinder(0.012, 0.08),
+            CylinderSegment::cylinder(0.012, 0.26),
+        ],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+        wall: None,
+    });
+    let hole = |sigma: f64| {
+        let mut a = base.clone();
+        if let Some(duct) = a.duct.as_mut() {
+            duct.tone_holes = vec![ToneHole {
+                after_segment: 0,
+                radius_m: 0.003,
+                chimney_m: 0.003,
+                open_fraction: sigma,
+            }];
+        }
+        a
+    };
+    let tc = zero_cross_period(&realize_assembly(&hole(0.0)).expect("closed").pressure_pa);
+    let th = zero_cross_period(&realize_assembly(&hole(0.5)).expect("half").pressure_pa);
+    let to = zero_cross_period(&realize_assembly(&hole(1.0)).expect("open").pressure_pa);
+    assert!(
+        to < th && th < tc,
+        "a half vent must sit between open and closed ({to:.2} < {th:.2} < {tc:.2})"
     );
 }
 
@@ -376,6 +432,7 @@ fn beating_reed_locks_near_the_quarter_wave() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::UnflangedOpen,
+        wall: None,
     });
     a.reed = Some(BeatingReed {
         rest_opening_m: 4.0e-4,
@@ -426,6 +483,7 @@ fn stepped_bore_shifts_the_ode_period() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     let mut stepped = uniform.clone();
     if let Some(duct) = stepped.duct.as_mut() {
@@ -464,6 +522,7 @@ fn linear_taper_shifts_the_ode_period() {
         segments: vec![CylinderSegment::cylinder(0.008, 0.34)],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     let mut flare = uniform.clone();
     if let Some(duct) = flare.duct.as_mut() {
@@ -496,6 +555,7 @@ fn narrow_bore_decays_faster_from_the_viscothermal_pin() {
             }],
             tone_holes: vec![],
             termination: WaveguideEnd::Closed,
+            wall: None,
         });
         a
     };
@@ -527,6 +587,7 @@ fn massive_reed_speaks_on_the_ode_clock() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::UnflangedOpen,
+        wall: None,
     });
     a.reed = Some(BeatingReed {
         rest_opening_m: 4.0e-4,
@@ -822,6 +883,7 @@ fn fixed_fixed_string_plate_duct_ode_loads_the_chain() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     a.duration_s = 0.05;
     let with = realize_assembly(&a).expect("ff string-plate-duct");
@@ -1253,6 +1315,7 @@ fn von_karman_duct_dirac_is_not_the_linear_plate_duct() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     lin.duration_s = 0.04;
     let mut vk = lin.clone();
@@ -1289,6 +1352,7 @@ fn blow_on_moving_end_string_plate_duct_loads_the_join() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     a.duration_s = 0.04;
     let quiet = realize_assembly(&a).expect("no blow");
@@ -1325,6 +1389,7 @@ fn reed_on_moving_end_string_plate_duct_speaks() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::UnflangedOpen,
+        wall: None,
     });
     a.reed = Some(BeatingReed {
         rest_opening_m: 4.0e-4,
@@ -1370,6 +1435,7 @@ fn moving_end_with_duct_is_a_three_phs_clock() {
         }],
         tone_holes: vec![],
         termination: WaveguideEnd::Closed,
+        wall: None,
     });
     a.duration_s = 0.04;
     let with = realize_assembly(&a).expect("string-plate-duct");

@@ -53,8 +53,9 @@
 //! evaluations are bitwise identical.
 //!
 //! `LossModel::Bessel` is the frequency-by-frequency Zwikker–Kosten
-//! wall law (`fs_phs::zwikker_kosten_f`). A tone-hole chimney uses
-//! that same lumped wall law (open series `R`, closed thermal `G`).
+//! wall law (`fs_phs::zwikker_kosten_f`). A tone-hole chimney is a
+//! short cylinder plus a flanged mouth (AllRegime when the bore
+//! asked for WideTube, so a narrow neck does not refuse).
 //! Lossy cones cascade spherical substations at local radius
 //! (lossless stays the exact one-shot `e^{±ikx}/x` 2-port).
 //! Deferred: fingering tables (slice 3 of the bead), multimodal
@@ -67,7 +68,8 @@ use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_phs::{
-    side_hole_mutual_length, side_hole_neck_length, side_hole_series_length, zwikker_kosten_f,
+    WallPin, side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
+    side_hole_series_length, wall_admittance_per_metre, zwikker_kosten_f,
 };
 
 /// Wide-tube validity floor: below this shear number the first-order
@@ -171,9 +173,8 @@ pub enum Segment {
         length: f64,
     },
     /// Truncated cone (linear radius taper; exact spherical-wave
-    /// 1D propagation; viscothermal correction evaluated at the mean
-    /// radius — the standard engineering treatment, documented, with
-    /// refinement by subdivision available to callers).
+    /// 1D propagation). Lossy cones cascade substations at local
+    /// radius; lossless is the one-shot `e^{±ikx}/x` 2-port.
     Cone {
         /// Inlet radius [m].
         inlet_radius: f64,
@@ -362,6 +363,44 @@ pub fn segment_wave(
         }
         LossModel::Bessel => bessel_wave(state, radius, omega),
     }
+}
+
+/// Fold a locally reacting wall into a gas [`SegmentWave`].
+///
+/// Reconstructs the telegraph pair `Z' = i k Zc`, `Y' = i k / Zc`
+/// under `e^{-iωt}`, adds [`wall_admittance_per_metre`], and
+/// rebuilds `k = √(Z' Y')`, `Zc = √(Z'/Y')` with `Im k ≥ 0` and
+/// `Re Zc ≥ 0`.
+fn apply_wall_to_wave(
+    wave: SegmentWave,
+    radius: f64,
+    omega: f64,
+    wall: &WallPin,
+) -> Result<SegmentWave, DuctError> {
+    let y_w = wall_admittance_per_metre(wall, radius, omega).map_err(|_| {
+        DuctError::BadParameter {
+            what: "wall pin surface density, stiffness, and resistance",
+        }
+    })?;
+    let j = C64::new(0.0, 1.0);
+    let z_series = j * wave.wavenumber * wave.characteristic_impedance;
+    let y_gas = j * wave.wavenumber * wave.characteristic_impedance.recip();
+    let y_shunt = y_gas + y_w;
+    let mut k = (z_series * y_shunt).sqrt();
+    if k.im < 0.0 {
+        k = k.scale(-1.0);
+    }
+    let mut zc = (z_series * y_shunt.recip()).sqrt();
+    if zc.re < 0.0 {
+        zc = zc.scale(-1.0);
+    }
+    let area = core::f64::consts::PI * radius * radius;
+    Ok(SegmentWave {
+        wavenumber: k,
+        characteristic_impedance: zc,
+        specific_impedance: zc.scale(area),
+        shear_number: wave.shear_number,
+    })
 }
 
 fn wide_tube_wave(
@@ -616,19 +655,19 @@ fn chimney_thermal_g(
     ((state.gamma - 1.0) * compliance * omega * (rt * rt / 16.0).min(0.5)).max(0.0)
 }
 
-/// Lumped shunt impedance of a tone hole at `omega` (compact limit):
-/// OPEN `Z = -i omega rho t_eff / S_h + (rho c / S_h) (k b)^2 / 2`
-/// with `t_eff` from [`fs_phs::side_hole_neck_length`] (Dalmont
-/// inner matching on `b/a` plus wall-flanged `0.8216 b`);
-/// CLOSED `Z = +i rho c^2 / (omega V_h)` with
-/// `V_h = S_h h`. A non-[`LossModel::Lossless`] model adds the
-/// bore's wall law on that lumped `L` (open) or thermal `G` on
-/// the cavity (closed). Signs follow the `e^{-i omega t}` convention
-/// (mass-like reactance negative imaginary).
+/// Shunt impedance of a tone hole at `omega`.
+///
+/// The chimney is a short cylinder: OPEN is that run plus a
+/// flanged mouth (Dalmont inner matching on `b/a` is extra
+/// length; the `0.8216 b` mass lives in the termination, or
+/// the Rayleigh piston above `ka = 1`). CLOSED is the same
+/// run with a rigid cap. A compact chimney reprints the
+/// lumped `L` / `C` plus wall law; a long one carries its
+/// own quarter-wave. WideTube on the chimney is AllRegime
+/// so a narrow neck does not raise the bore's `r_v` refusal.
 ///
 /// # Errors
-/// [`DuctError::RadiationKaTooLarge`] when an OPEN hole's `k b`
-/// exceeds the compact-limit ceiling.
+/// [`DuctError`] from the chimney line or a bad radius.
 pub fn tone_hole_shunt(
     state: &GasState,
     hole_radius: f64,
@@ -638,8 +677,6 @@ pub fn tone_hole_shunt(
     loss: LossModel,
     bore_radius: f64,
 ) -> Result<C64, DuctError> {
-    let area = core::f64::consts::PI * hole_radius * hole_radius;
-    let k = omega / state.sound_speed;
     let sigma = hole_sigma(hole_state);
     if sigma > 0.0 && sigma < 1.0 {
         let z_o = tone_hole_shunt(
@@ -663,21 +700,49 @@ pub fn tone_hole_shunt(
         return Ok((z_o.recip().scale(sigma) + z_c.recip().scale(1.0 - sigma)).recip());
     }
     if sigma <= 0.0 {
-        let volume = area * chimney_height;
-        let compliance = volume / (state.density * state.sound_speed * state.sound_speed);
-        let g = chimney_thermal_g(state, hole_radius, compliance, omega, loss);
-        // e^{-iωt}: Y = G − i ω C, Z = 1/Y.
-        let y = C64::new(g, -omega * compliance);
-        return Ok(y.recip());
+        return chimney_line_impedance(
+            state,
+            hole_radius,
+            chimney_height,
+            omega,
+            loss,
+            Termination::Closed,
+        );
     }
-    let kb = k * hole_radius;
-    if kb > MAX_RADIATION_KA {
-        return Err(DuctError::RadiationKaTooLarge { ka: kb });
+    let inner = side_hole_inner_length(hole_radius, bore_radius);
+    chimney_line_impedance(
+        state,
+        hole_radius,
+        chimney_height + inner,
+        omega,
+        loss,
+        Termination::FlangedOpen,
+    )
+}
+
+/// Input impedance of a one-segment chimney. WideTube is
+/// AllRegime so a compact neck never trips the bore floor.
+fn chimney_line_impedance(
+    state: &GasState,
+    radius: f64,
+    length: f64,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+) -> Result<C64, DuctError> {
+    if !(radius > 0.0 && length > 0.0 && radius.is_finite() && length.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "chimney radius and length must be positive and finite",
+        });
     }
-    let t_eff = side_hole_neck_length(chimney_height, hole_radius, bore_radius);
-    let r_rad = state.density * state.sound_speed / area * 0.5 * kb * kb;
-    let (r_wall, l_h) = chimney_series(state, hole_radius, t_eff, omega, loss)?;
-    Ok(C64::new(r_rad + r_wall, -omega * l_h))
+    let chimney_loss = match loss {
+        LossModel::WideTube => LossModel::AllRegime,
+        other => other,
+    };
+    let duct = Duct {
+        segments: vec![Segment::Cylinder { radius, length }],
+    };
+    Ok(input_impedance(&duct, state, omega, chimney_loss, termination)?.impedance)
 }
 
 fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
@@ -748,6 +813,7 @@ fn cone_lossy_matrix(
     state: &GasState,
     omega: f64,
     loss: LossModel,
+    wall: Option<&WallPin>,
 ) -> Result<([C64; 4], f64), DuctError> {
     let n = cone_loss_slices(inlet_radius, outlet_radius);
     let dx = length / n as f64;
@@ -759,13 +825,16 @@ fn cone_lossy_matrix(
         let ra = inlet_radius + (outlet_radius - inlet_radius) * t0;
         let rb = inlet_radius + (outlet_radius - inlet_radius) * t1;
         let r_loc = f64::midpoint(ra, rb);
-        let wave = match segment_wave(state, r_loc, omega, loss) {
+        let mut wave = match segment_wave(state, r_loc, omega, loss) {
             Ok(w) => w,
             Err(_) if matches!(loss, LossModel::Bessel) => {
                 segment_wave(state, r_loc, omega, LossModel::AllRegime)?
             }
             Err(e) => return Err(e),
         };
+        if let Some(w) = wall {
+            wave = apply_wall_to_wave(wave, r_loc, omega, w)?;
+        }
         min_rv = min_rv.min(wave.shear_number);
         let s = segment_matrix(
             &Segment::Cone {
@@ -925,7 +994,17 @@ fn termination_impedance(
         }
         Termination::FlangedOpen => {
             if ka > MAX_RADIATION_KA {
-                return Err(DuctError::RadiationKaTooLarge { ka });
+                let (rr, xx) = fs_phs::baffled_piston_impedance(
+                    state.density,
+                    state.sound_speed,
+                    radius,
+                    omega,
+                    8,
+                )
+                .map_err(|_| DuctError::BadParameter {
+                    what: "baffled piston radiation",
+                })?;
+                return Ok((Some(C64::new(rr, xx)), ka));
             }
             Ok((Some(C64::new(0.5 * ka * ka, -0.8216 * ka).scale(z0)), ka))
         }
@@ -944,6 +1023,25 @@ pub fn input_impedance(
     omega: f64,
     loss: LossModel,
     termination: Termination,
+) -> Result<DuctResponse, DuctError> {
+    input_impedance_wall(duct, state, omega, loss, termination, None)
+}
+
+/// [`input_impedance`] with a locally reacting wall.
+///
+/// The same [`WallPin`] the ODE shunt uses: `Y'` of the gas plus
+/// `2π a / Z'_w` with `Z'_w = r − iωσ + i K/ω` under `e^{-iωt}`.
+/// `None` is a rigid wall. Chimneys stay rigid this path.
+///
+/// # Errors
+/// As [`input_impedance`], plus a bad wall pin.
+pub fn input_impedance_wall(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: Option<&WallPin>,
 ) -> Result<DuctResponse, DuctError> {
     if duct.segments.is_empty() {
         return Err(DuctError::EmptyDuct);
@@ -1022,12 +1120,22 @@ pub fn input_impedance(
         } = *segment
             && !matches!(loss, LossModel::Lossless)
         {
-            let (s, rv) =
-                cone_lossy_matrix(inlet_radius, outlet_radius, length, state, omega, loss)?;
+            let (s, rv) = cone_lossy_matrix(
+                inlet_radius,
+                outlet_radius,
+                length,
+                state,
+                omega,
+                loss,
+                wall,
+            )?;
             min_rv = min_rv.min(rv);
             s
         } else {
-            let wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
+            let mut wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
+            if let Some(w) = wall {
+                wave = apply_wall_to_wave(wave, segment.mean_radius(), omega, w)?;
+            }
             min_rv = min_rv.min(wave.shear_number);
             segment_matrix(segment, &wave)?
         };
@@ -1260,6 +1368,45 @@ mod tests {
         assert!(
             (z_ll - z_ll_mean).abs() < 1.0e-9 * z_ll_mean.abs().max(1.0),
             "lossless cone must stay the exact spherical 2-port"
+        );
+    }
+
+    #[test]
+    fn flanged_piston_lifts_the_ka_ceiling() {
+        let state = air();
+        let radius = 0.05;
+        let omega = 2.0 * core::f64::consts::PI * 2_000.0;
+        let ka = omega / state.sound_speed * radius;
+        assert!(ka > 1.0, "fixture must sit above the compact-fit ceiling");
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius,
+                length: 0.20,
+            }],
+        };
+        assert!(
+            input_impedance(
+                &duct,
+                &state,
+                omega,
+                LossModel::Lossless,
+                Termination::UnflangedOpen
+            )
+            .is_err(),
+            "unflanged must still refuse ka > 1"
+        );
+        let z = input_impedance(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::FlangedOpen,
+        )
+        .expect("flanged piston")
+        .impedance;
+        assert!(
+            z.re > 0.0 && z.re.is_finite() && z.im.is_finite(),
+            "Rayleigh piston must stay passive above ka = 1 ({z:?})"
         );
     }
 
@@ -2151,7 +2298,8 @@ mod tone_hole_tests {
         // the hand-composed shunt cascade to 1e-12 — the T-junction
         // wiring cannot drift. (b) Opening a hole RAISES the first
         // resonance (shortens the bore). (c) A closed small hole is a
-        // tiny perturbation. (d) Refusals: hole >= bore, open-hole kb
+        // tiny perturbation. (d) Refusals: hole >= bore; high-ka
+        // open hole uses the flanged piston (no compact-kb refuse).
         // ceiling. (e) Bitwise determinism.
         let state = air20();
         let omega = 2.0 * core::f64::consts::PI * 400.0;
@@ -2291,18 +2439,20 @@ mod tone_hole_tests {
             ),
             Err(DuctError::BadParameter { .. })
         ));
-        assert!(matches!(
-            tone_hole_shunt(
-                &state,
-                6.0e-3,
-                1.0e-3,
-                HoleState::Open,
-                2.0e5,
-                LossModel::Lossless,
-                0.01,
-            ),
-            Err(DuctError::RadiationKaTooLarge { .. })
-        ));
+        let z_hi = tone_hole_shunt(
+            &state,
+            6.0e-3,
+            1.0e-3,
+            HoleState::Open,
+            2.0e5,
+            LossModel::Lossless,
+            0.01,
+        )
+        .expect("flanged piston on a hole above ka = 1");
+        assert!(
+            z_hi.re > 0.0 && z_hi.re.is_finite(),
+            "a high-ka hole must stay passive via the Rayleigh piston"
+        );
         // (e) determinism.
         let a = input_impedance(
             &with_hole,
@@ -2395,6 +2545,51 @@ mod tone_hole_tests {
     }
 
     #[test]
+    fn long_chimney_is_not_a_lumped_inductor() {
+        let state = air20();
+        let b = 4.0e-3;
+        let h = 0.05;
+        let bore = 8.0e-3;
+        let omega = core::f64::consts::PI * state.sound_speed / (2.0 * h);
+        let z_line = tone_hole_shunt(
+            &state,
+            b,
+            h,
+            HoleState::Open,
+            omega,
+            LossModel::Lossless,
+            bore,
+        )
+        .expect("line");
+        let t_eff = side_hole_neck_length(h, b, bore);
+        let (_, l_h) =
+            chimney_series(&state, b, t_eff, omega, LossModel::Lossless).expect("lumped");
+        let z_lumped = C64::new(0.0, -omega * l_h);
+        assert!(
+            (z_line - z_lumped).abs() > 0.5 * z_lumped.abs().max(1.0),
+            "a λ/4 chimney must not reprint lumped L ({z_line:?} vs {z_lumped:?})"
+        );
+        let z_closed = tone_hole_shunt(
+            &state,
+            b,
+            h,
+            HoleState::Closed,
+            omega,
+            LossModel::Lossless,
+            bore,
+        )
+        .expect("closed line");
+        let area = core::f64::consts::PI * b * b;
+        let c_h = area * h / (state.density * state.sound_speed * state.sound_speed);
+        let g = chimney_thermal_g(&state, b, c_h, omega, LossModel::Lossless);
+        let z_c_lumped = C64::new(g, -omega * c_h).recip();
+        assert!(
+            (z_closed - z_c_lumped).abs() > 0.5 * z_c_lumped.abs().max(1.0),
+            "a λ/4 closed chimney must not reprint lumped C ({z_closed:?} vs {z_c_lumped:?})"
+        );
+    }
+
+    #[test]
     fn vent_fraction_is_the_admittance_mix() {
         let state = air20();
         let omega = 2.0 * core::f64::consts::PI * 400.0;
@@ -2436,6 +2631,87 @@ mod tone_hole_tests {
             y_mix.recip()
         );
         assert!(z_h.re.is_finite() && z_h.re >= 0.0);
+    }
+
+    #[test]
+    fn locally_reacting_wall_is_not_a_rigid_tmm() {
+        let state = air20();
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.012,
+                length: 0.34,
+            }],
+        };
+        let omega = core::f64::consts::PI * state.sound_speed / (2.0 * 0.34);
+        let rigid = input_impedance(&duct, &state, omega, LossModel::Lossless, Termination::Closed)
+            .expect("rigid");
+        let soft = WallPin {
+            surface_density: 1.5,
+            stiffness_per_area: 2.0e5,
+            resistance: 0.0,
+        };
+        let yielding = input_impedance_wall(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+            Some(&soft),
+        )
+        .expect("soft");
+        assert!(
+            (yielding.impedance - rigid.impedance).abs()
+                > 0.05 * rigid.impedance.abs().max(1.0),
+            "a soft wall must move TMM Z_in ({:?} vs {:?})",
+            yielding.impedance,
+            rigid.impedance
+        );
+        let stiff = WallPin {
+            surface_density: 20.0,
+            stiffness_per_area: 1.0e10,
+            resistance: 0.0,
+        };
+        let heavy = input_impedance_wall(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+            Some(&stiff),
+        )
+        .expect("stiff");
+        assert!(
+            (heavy.impedance - rigid.impedance).abs()
+                < 0.05 * rigid.impedance.abs().max(1.0),
+            "a stiff wall must sit near rigid TMM Z_in ({:?} vs {:?})",
+            heavy.impedance,
+            rigid.impedance
+        );
+        let lossy = input_impedance_wall(
+            &duct,
+            &state,
+            omega,
+            LossModel::Bessel,
+            Termination::Closed,
+            Some(&soft),
+        )
+        .expect("bessel wall");
+        assert!(lossy.impedance.re > 0.0);
+        assert!(
+            input_impedance_wall(
+                &duct,
+                &state,
+                omega,
+                LossModel::Lossless,
+                Termination::Closed,
+                Some(&WallPin {
+                    surface_density: 0.0,
+                    stiffness_per_area: 2.0e5,
+                    resistance: 0.0,
+                }),
+            )
+            .is_err()
+        );
     }
 }
 

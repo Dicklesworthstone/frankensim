@@ -8,7 +8,8 @@
 use fs_math::c64::C64;
 use fs_phs::{
     AcousticSection, AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage,
-    Storage, ViscothermalPin, acoustic_chain, acoustic_cylinder, acoustic_waveguide,
+    Storage, ViscothermalPin, WallPin, acoustic_chain, acoustic_chain_mouth,
+    acoustic_chain_mouth_wall, acoustic_cylinder, acoustic_waveguide, baffled_piston_impedance,
     common_effort_capacitor, common_effort_dirac, common_effort_star, common_flow_dirac,
     compact_radiation_impedance, discrete_gradient, duffing_oscillator, foster_sqrt_omega_terms,
     helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
@@ -1038,6 +1039,66 @@ fn open_cylinder_rings_at_the_corrected_quarter_wave() {
 }
 
 #[test]
+fn flanged_cylinder_adds_the_baffle_mass() {
+    let l = 0.20;
+    let a = 0.025;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: a,
+        outlet_radius: a,
+        cells: 8,
+    }];
+    let unflanged = acoustic_chain(&sections, 1.2, c, true, 1, &[], None).expect("unflanged");
+    let flanged = acoustic_chain_mouth(&sections, 1.2, c, Some(MouthFlange::Flanged), 1, &[], None)
+        .expect("flanged");
+    let n = unflanged.state_dim();
+    let last = 2 * 8 - 1;
+    let (_, r_u, _) = unflanged.structure();
+    let (_, r_f, _) = flanged.structure();
+    assert!(
+        r_f[last * n + last] > r_u[last * n + last],
+        "flanged Re Z_rad is twice the unflanged compact fit"
+    );
+    let last_l = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        x[last] = 1.0;
+        0.5 / sys.hamiltonian(&x)
+    };
+    let l_u = last_l(&unflanged);
+    let l_f = last_l(&flanged);
+    let area = core::f64::consts::PI * a * a;
+    let extra = 1.2 * (0.8216 - 0.6133) * a / area;
+    assert!(
+        (l_f - l_u - extra).abs() < 1.0e-9 * extra.max(l_u),
+        "flanged mass must add ρ·0.2083·a/A ({l_f} vs {l_u} + {extra})"
+    );
+}
+
+#[test]
+fn baffled_piston_sits_on_the_rayleigh_mass() {
+    let a = 0.02;
+    let rho = 1.2;
+    let c = 343.0;
+    let omega = 800.0;
+    let (rr, xx) = baffled_piston_impedance(rho, c, a, omega, 8).expect("piston");
+    let area = core::f64::consts::PI * a * a;
+    let z0 = rho * c / area;
+    let ka = omega / c * a;
+    assert!(rr > 0.0 && xx < 0.0);
+    let l_end = -xx / omega;
+    let want = rho * 8.0 * a / (3.0 * core::f64::consts::PI) / area;
+    assert!(
+        (l_end - want).abs() < 0.15 * want,
+        "low-ka piston mass ({l_end} vs {want})"
+    );
+    assert!(
+        (rr / z0 - 0.5 * ka * ka).abs() < 0.25 * (0.5 * ka * ka).max(1.0e-6),
+        "low-ka piston R/Z0"
+    );
+}
+
+#[test]
 fn open_tap_raises_the_waveguide_frequency() {
     let l = 0.34;
     let c = 343.0;
@@ -1201,8 +1262,347 @@ fn chimney_foster_adds_neck_states() {
     let pad_f = acoustic_chain(&sections, 1.2, c, false, 1, &sealed, Some(&foster)).expect("pad F");
     assert_eq!(
         pad_f.state_dim(),
-        pad_l.state_dim() + 6 * 3 * 2,
-        "a sealed pad must not mint chimney Foster states"
+        pad_l.state_dim() + 6 * 3 * 2 + 3,
+        "a sealed pad mints thermal Foster, not chimney series"
+    );
+}
+
+#[test]
+fn long_ode_chimney_is_not_a_lumped_inductor() {
+    let l = 0.34;
+    let c = 343.0;
+    let rho = 1.2;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 6,
+    }];
+    let long = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.05,
+        neck_radius: 0.004,
+        open_fraction: 1.0,
+    }];
+    let short = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.003,
+        neck_radius: 0.004,
+        open_fraction: 1.0,
+    }];
+    let plain = acoustic_chain(&sections, rho, c, false, 1, &[], None).expect("plain");
+    let line = acoustic_chain(&sections, rho, c, false, 1, &long, None).expect("line");
+    let lump = acoustic_chain(&sections, rho, c, false, 1, &short, None).expect("lumped");
+    assert_eq!(
+        line.state_dim(),
+        plain.state_dim() + 4,
+        "a long neck is a 2-cell LC shunt, not one inductor"
+    );
+    assert_eq!(
+        lump.state_dim(),
+        plain.state_dim() + 1,
+        "a compact neck must stay one inductor"
+    );
+    let base = 2 * 6;
+    let elem = |sys: &PortHamiltonian, i: usize| {
+        let mut x = vec![0.0; sys.state_dim()];
+        x[i] = 1.0;
+        0.5 / sys.hamiltonian(&x)
+    };
+    let area = core::f64::consts::PI * 0.004 * 0.004;
+    let ell = 0.05 + side_hole_inner_length(0.004, 0.012);
+    let dx = ell / 2.0;
+    let l_cell = rho * dx / area;
+    let c_cell = area * dx / (rho * c * c);
+    let l_rad = rho * 0.8216 * 0.004 / area;
+    assert!(
+        (elem(&line, base) - c_cell).abs() < 1.0e-9 * c_cell,
+        "first chimney C must be the cell compliance"
+    );
+    assert!(
+        (elem(&line, base + 1) - l_cell).abs() < 1.0e-9 * l_cell,
+        "first chimney L must be the cell inertance"
+    );
+    assert!(
+        (elem(&line, base + 2) - c_cell).abs() < 1.0e-9 * c_cell,
+        "second chimney C must be the cell compliance"
+    );
+    assert!(
+        (elem(&line, base + 3) - (l_cell + l_rad)).abs() < 1.0e-9 * (l_cell + l_rad),
+        "last chimney flux must carry the flanged mass ({})",
+        elem(&line, base + 3)
+    );
+    let foster = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 3,
+    };
+    let line_f = acoustic_chain(&sections, rho, c, false, 1, &long, Some(&foster)).expect("line F");
+    let lump_f =
+        acoustic_chain(&sections, rho, c, false, 1, &short, Some(&foster)).expect("lump F");
+    assert_eq!(
+        line_f.state_dim(),
+        line.state_dim() + 6 * 3 * 2 + 2 * 3 * 2,
+        "a line chimney mints series+thermal Foster on both cells"
+    );
+    assert_eq!(
+        lump_f.state_dim(),
+        lump.state_dim() + 6 * 3 * 2 + 3,
+        "a compact neck must keep lumped Foster counts"
+    );
+}
+
+#[test]
+fn long_ode_chimney_on_a_cone_is_not_a_lumped_inductor() {
+    let c = 343.0;
+    let long = [AcousticTap {
+        station: 0.4,
+        neck_length: 0.05,
+        neck_radius: 0.004,
+        open_fraction: 1.0,
+    }];
+    let short = [AcousticTap {
+        station: 0.4,
+        neck_length: 0.003,
+        neck_radius: 0.004,
+        open_fraction: 1.0,
+    }];
+    let plain = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, None, 1, &[], None).expect("plain");
+    let line = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, None, 1, &long, None).expect("line");
+    let lump = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, None, 1, &short, None).expect("lump");
+    assert_eq!(
+        line.state_dim(),
+        plain.state_dim() + 4,
+        "a long neck on a ψ-cone is the same 2-cell physical line"
+    );
+    assert_eq!(
+        lump.state_dim(),
+        plain.state_dim() + 1,
+        "a compact neck on a cone must stay one inductor"
+    );
+    let halves = [
+        AcousticSection {
+            length: 0.17,
+            radius: 0.006,
+            outlet_radius: 0.010,
+            cells: 2,
+        },
+        AcousticSection {
+            length: 0.17,
+            radius: 0.010,
+            outlet_radius: 0.018,
+            cells: 2,
+        },
+    ];
+    let web_plain = acoustic_chain(&halves, 1.2, c, false, 1, &[], None).expect("web plain");
+    let web_line = acoustic_chain(&halves, 1.2, c, false, 1, &long, None).expect("web line");
+    assert_eq!(
+        web_line.state_dim(),
+        web_plain.state_dim() + 4,
+        "a long neck on a broken-line horn is still the 2-cell shunt"
+    );
+}
+
+#[test]
+fn mouth_foster_is_not_the_pin_radiation_r() {
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 6,
+    }];
+    let lumped = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 0,
+    };
+    let foster = ViscothermalPin {
+        foster_branches: 3,
+        ..lumped
+    };
+    let pin = acoustic_chain(&sections, 1.2, c, true, 1, &[], Some(&lumped)).expect("pin R");
+    let spec = acoustic_chain(&sections, 1.2, c, true, 1, &[], Some(&foster)).expect("Foster R");
+    let closed = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&foster)).expect("closed");
+    assert_eq!(
+        spec.state_dim(),
+        pin.state_dim() + 6 * 3 * 2 + 3,
+        "an open mouth mints Foster on Re Z_rad, plus bore series+thermal"
+    );
+    assert_eq!(
+        closed.state_dim() + 3,
+        spec.state_dim(),
+        "a closed mouth must not mint radiation Foster"
+    );
+    let last = 2 * 6 - 1;
+    let n_pin = pin.state_dim();
+    let n_spec = spec.state_dim();
+    let (_, r_pin, _) = pin.structure();
+    let (_, r_spec, _) = spec.structure();
+    assert!(
+        (r_spec[last * n_spec + last] - r_pin[last * n_pin + last]).abs() > 1.0e-12,
+        "Foster mouth R must not reprint the pin Re Z"
+    );
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..320 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let err: f64 = ring(&pin)
+        .iter()
+        .zip(ring(&spec))
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        err > 1.0e-8,
+        "mouth Foster must not reprint the pin radiation R ({err})"
+    );
+}
+
+#[test]
+fn locally_reacting_wall_is_not_a_rigid_bore() {
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 6,
+    }];
+    let rigid = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("rigid");
+    let soft = WallPin {
+        surface_density: 1.5,
+        stiffness_per_area: 2.0e5,
+        resistance: 0.0,
+    };
+    let yielding = acoustic_chain_mouth_wall(&sections, 1.2, c, None, 1, &[], None, Some(&soft))
+        .expect("wall");
+    assert_eq!(
+        yielding.state_dim(),
+        rigid.state_dim() + 12,
+        "a locally reacting wall is one LC pair per cell"
+    );
+    assert!(
+        acoustic_chain_mouth_wall(
+            &sections,
+            1.2,
+            c,
+            None,
+            1,
+            &[],
+            None,
+            Some(&WallPin {
+                surface_density: 0.0,
+                stiffness_per_area: 2.0e5,
+                resistance: 0.0,
+            }),
+        )
+        .is_err(),
+        "a zero-density wall pin must refuse"
+    );
+    let stiff = WallPin {
+        surface_density: 20.0,
+        stiffness_per_area: 1.0e10,
+        resistance: 0.0,
+    };
+    let heavy = acoustic_chain_mouth_wall(&sections, 1.2, c, None, 1, &[], None, Some(&stiff))
+        .expect("stiff");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        dominant_zero_period(&p, dt)
+    };
+    let t_r = ring(&rigid);
+    let t_s = ring(&yielding);
+    let t_h = ring(&heavy);
+    assert!(
+        (t_s - t_r).abs() / t_r > 0.05,
+        "a soft wall must move the ringing period ({t_s} vs {t_r})"
+    );
+    assert!(
+        (t_h - t_r).abs() / t_r < 0.05,
+        "a stiff heavy wall must sit near the rigid period ({t_h} vs {t_r})"
+    );
+}
+
+#[test]
+fn pad_foster_is_not_the_lumped_thermal_g() {
+    let l = 0.34;
+    let c = 343.0;
+    let sealed = [AcousticTap {
+        station: 0.24,
+        neck_length: 0.02,
+        neck_radius: 0.006,
+        open_fraction: 0.0,
+    }];
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 6,
+    }];
+    let lumped = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 0,
+    };
+    let foster = ViscothermalPin {
+        foster_branches: 3,
+        ..lumped
+    };
+    let pin = acoustic_chain(&sections, 1.2, c, false, 1, &sealed, Some(&lumped)).expect("lumped");
+    let spec = acoustic_chain(&sections, 1.2, c, false, 1, &sealed, Some(&foster)).expect("foster");
+    assert_eq!(spec.state_dim(), pin.state_dim() + 6 * 3 * 2 + 3);
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..320 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let err: f64 = ring(&pin)
+        .iter()
+        .zip(ring(&spec))
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        err > 1.0e-8,
+        "pad thermal Foster must not reprint lumped G ({err})"
     );
 }
 
@@ -1733,7 +2133,7 @@ fn linear_taper_is_not_the_inlet_cylinder() {
 #[test]
 fn spherical_cone_is_not_a_broken_line_horn() {
     let c = 343.0;
-    let sph = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, false, 1, &[], None).expect("ψ");
+    let sph = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, None, 1, &[], None).expect("ψ");
     assert_eq!(sph.state_dim(), 12);
     // Broken-line horn: two tapers, different slopes. Same-slope
     // halves would be one ψ-line; this must stay two.
@@ -1776,7 +2176,7 @@ fn spherical_cone_is_not_a_broken_line_horn() {
         err > 1.0e-6,
         "a single cone must not reprint a broken-line pair of cones"
     );
-    assert!(spherical_cone(0.01, 0.01, 0.2, 1.2, c, 4, false, 1, &[], None).is_err());
+    assert!(spherical_cone(0.01, 0.01, 0.2, 1.2, c, 4, None, 1, &[], None).is_err());
 }
 
 #[test]

@@ -25,7 +25,9 @@ flagships.
   (`AmbientGas`, `PrestressedString` as a 1-D prestressed waveguide
   with an optional moving attachment end,
   `ViscothermalDuct` (a `CylinderSegment` is a cylinder or a
-  linear taper), `ToneHole`, `Pluck`, `BowStroke` as Stribeck
+  linear taper; `wall` is a locally reacting
+  `LocallyReactingWall` or rigid), `ToneHole` (`open_fraction` σ is the
+  TMM/ODE vent mix, not a bool), `Pluck`, `BowStroke` as Stribeck
   friction, `BeatingReed` as a Bernoulli aperture, `RadiatingPlate` as a
   compact modal monopole, `ThinPlate` as an orthotropic panel whose
   modes are not data, `UnilateralObstacle` as a distributed contact

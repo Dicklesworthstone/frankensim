@@ -284,7 +284,8 @@ clarinet is one filling of those objects.
   reflectance FIR does not ring a measurable period; the impedance
   FIR does, so tone-hole shortening is TMM-emergent on one port
   type. There is no one-pole `TravelingWaveLine` fallback on those
-  paths. Unflanged-open Nyquist `ka > 1` is refused.
+  paths. Unflanged-open Nyquist `ka > 1` is refused; a
+  flanged mouth uses the Rayleigh piston and is not.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Radiation
@@ -341,20 +342,37 @@ clarinet is one filling of those objects.
   multi-section chain that contains a taper stitches
   ψ-lines onto the LC ladder with transformer `x` at
   each interface.
-  Open tone holes are `AcousticTap` side-branch
-  inertances; the same `ViscothermalPin` sits on the neck.
+  Open tone holes are `AcousticTap` side branches on
+  the ODE path: a compact neck is one inductor; a long
+  neck (`kℓ > 0.2` or `ℓ > 4b`) is the same 2-cell LC
+  line plus flanged mouth the TMM chimney already is.
+  The same `ViscothermalPin` sits on a lumped neck or
+  on each chimney cell of a line.
+  A scenario `LocallyReactingWall` is the ODE `WallPin`
+  (per-cell shunt LC). The TMM path stays rigid-walled.
   A closed pad is the TMM cavity compliance on the station
-  cell (no extra state). A vent fraction is the admittance
-  mix of those two shunts.
+  cell; `foster_branches > 0` adds the bore's thermal
+  Foster on that remaining `C`. A scenario `ToneHole.open_fraction`
+  σ is the same admittance mix
+  `Y = σ Y_open + (1−σ) Y_closed` the TMM `HoleState::Vent`
+  already is.
   A quasistatic reed is the Bernoulli port on that
   inlet; a massive reed is `mass_spring_damper` plus the same
   jet, face-velocity flow, and a Hunt–Crossley lay as a
   dissipative port force (not a term in H). With a linear plate
   the mouth is a transformer. An unflanged ODE mouth is the
   same compact `(R, X)` as the TMM: `Re Z_rad` plus mass
-  `Δℓ = 0.6133 a` on the last flux. An open chimney with
+  `Δℓ = 0.6133 a` on the last flux. A flanged mouth is
+  `0.8216 a` (Rayleigh piston above `ka = 1` on the TMM
+  path; the unflanged Nyquist ceiling does not apply).
+  `foster_branches > 0` replaces the pin `Re Z_rad` with
+  a Foster match of that load across a band (unflanged
+  samples stay under `ka = 1`; flanged may use the
+  piston). Tabulated `R(ω)` remains the FIR path.
+  An open chimney with
   `foster_branches > 0` carries the bore's Foster series
-  (extra neck states). Frequency-by-frequency
+  on a lumped neck, or series plus thermal Foster on
+  each cell of a long-neck line (extra states). Frequency-by-frequency
   Bessel TMM (`LossModel::Bessel`, spherical-wave cones
   with local-radius lossy substations) is the FIR path. 3-D jet broadband remains a
   no-claim. Plate ×

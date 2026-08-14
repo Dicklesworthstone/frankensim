@@ -53,22 +53,37 @@ stepping, and Galerkin reduction preserves the structure.
   (inviscid `ρ,c` cylinder as that ladder; two inlets share the
   mouth so a blow and a transformer body can coexist; open end
   uses compact `Re Z_rad` and the same fit's mass `L = −X/ω`
-  — unflanged `Δℓ = 0.6133 a` — at the quarter-wave pin;
+  — unflanged `Δℓ = 0.6133 a`, flanged `0.8216 a` via
+  `acoustic_chain_mouth` — at the quarter-wave pin; a flanged
+  mouth above the fit ceiling is the Rayleigh piston;
   closed stays the lossless last inertance),
   `acoustic_waveguide` / `AcousticTap` (`open_fraction` σ:
-  open neck inertance, closed cavity `C`, or the mix
+  compact open neck inertance, or a long neck
+  (`kℓ > 0.2` or `ℓ > 4b`, `ℓ` = chimney + Dalmont inner)
+  as the same 2-cell LC line plus flanged mouth the TMM
+  chimney is; closed cavity `C`, or the mix
   `Y = σ Y_open + (1−σ) Y_closed`; a `ViscothermalPin`
-  puts series `R` on the neck and thermal `G` on remaining
-  `C`; `foster_branches > 0` adds the bore's Foster
-  series on each open neck),
+  puts series `R` on a lumped neck and thermal `G` on
+  remaining `C`, or the bore's per-cell wall law on a
+  line; `foster_branches > 0` adds the bore's Foster
+  series on each lumped neck, series plus thermal Foster
+  on each chimney cell of a line, and the thermal Foster
+  shunt on each remaining pad `C`),
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
   constriction, a cone sliced into cylinders),
+  `WallPin` / `acoustic_chain_mouth_wall` (locally reacting
+  wall: per-cell shunt `L = σ/A_w`, `C = A_w/K`,
+  `R = r/A_w` on `A_w = 2π a dx`; not a plate and not
+  mean flow; TMM walls stay rigid),
   `ViscothermalPin` (all-regime pin: wide-tube ZK for
   `r_v ≥ 10`, Poiseuille + isothermal-tending shunt below;
   zero `μ` is the lossless mutation; `foster_branches`
   collocates Foster networks to Bessel Zwikker–Kosten
-  `F(r_v)` at every shear number),
+  `F(r_v)` at every shear number, and on an open mouth
+  to `Re Z_rad(ω)` of the compact / piston load — the
+  pin `X` still supplies the radiation mass; tabulated
+  `R(ω)` remains the FIR path),
   `zwikker_kosten_f` (also the fs-duct `LossModel::Bessel` TMM),
   `foster_sqrt_omega_terms`,
   `foster_match_re`, `slice_linear_taper`,
@@ -79,17 +94,23 @@ stepping, and Galerkin reduction preserves the structure.
   a single taper in `acoustic_chain` is this object; any
   multi-section chain that contains a taper stitches
   ψ-lines to the LC ladder with transformer `x` at each
-  interface), `modal_bank`
+  interface; a long open tap on a cone or hybrid is the
+  same physical 2-cell chimney, joined at `1/x`), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /
   flanged piston `(R, X)` under `e^{-iωt}` (mass-like `X < 0`),
   refused above `ka = 1`. Same numbers as `fs_duct::Termination`.
+- `baffled_piston_impedance` — Rayleigh-integral face load
+  converted to acoustic `p/U`; the all-`ka` flanged mouth.
+  Low-`ka` it sits on `(ka)²/2 − i 8ka/(3π)`.
 - `side_hole_inner_length` / `side_hole_neck_length` — isolated
   disc `8/(3π) b`, or Dalmont–Nederveen–Joly `d = b/a` on a
   finite bore, plus wall-flanged `0.8216 b`. Same `t_eff` as
-  the fs-duct open-hole shunt. An open `AcousticTap` uses this
-  length and flanged `Re Z_rad`.
+  the fs-duct open-hole shunt. A compact open `AcousticTap`
+  uses this length and flanged `Re Z_rad`. A long neck uses
+  chimney plus inner on the cells and `0.8216 b` on the last
+  flux.
 - `side_hole_series_length` — Nederveen `t_s = −0.37 b²/a`. The
   TMM open hole is the T-junction `series(Z_s/2)·shunt·series(Z_s/2)`;
   the ODE tap subtracts that inertance from the station cell.

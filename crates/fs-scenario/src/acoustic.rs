@@ -114,6 +114,9 @@ pub enum WaveguideEnd {
     Closed,
     /// Unflanged open radiation (low-`ka` fit).
     UnflangedOpen,
+    /// Flanged / baffled open radiation (`0.8216 a`, Rayleigh
+    /// piston above the compact-`ka` ceiling).
+    FlangedOpen,
 }
 
 /// Ordered 1D viscothermal duct (bore, muffler, HVAC run — same object).
@@ -125,6 +128,21 @@ pub struct ViscothermalDuct {
     pub tone_holes: Vec<ToneHole>,
     /// Outlet termination.
     pub termination: WaveguideEnd,
+    /// Locally reacting wall (`None` is rigid). Same mass-spring
+    /// specific impedance the ODE `WallPin` is.
+    pub wall: Option<LocallyReactingWall>,
+}
+
+/// Locally reacting duct wall: specific impedance
+/// `Z' = r + jωσ + K/(jω)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocallyReactingWall {
+    /// Surface density `σ` [kg/m²].
+    pub surface_density_kg_m2: f64,
+    /// Stiffness per unit area `K` [Pa/m].
+    pub stiffness_pa_per_m: f64,
+    /// Specific resistance `r` [Pa s / m].
+    pub resistance_pa_s_per_m: f64,
 }
 
 /// One compact-limit tone hole on a 1D bore.
@@ -136,8 +154,11 @@ pub struct ToneHole {
     pub radius_m: f64,
     /// Chimney height [m].
     pub chimney_m: f64,
-    /// Open to the exterior (`true`) or pad-closed (`false`).
-    pub open: bool,
+    /// Opening in `[0, 1]`. `0` is a sealed pad, `1` is fully
+    /// open, and a fraction is the admittance mix
+    /// `Y = σ Y_open + (1−σ) Y_closed` already used by the
+    /// TMM `HoleState::Vent` and the ODE `AcousticTap`.
+    pub open_fraction: f64,
 }
 
 /// Instantaneous point displacement of a taut string (the static

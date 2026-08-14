@@ -26,14 +26,14 @@ use fs_nlmodal::{
     prestressed_beam_omega,
 };
 use fs_phs::{
-    AcousticSection, AcousticTap, ViscothermalPin, acoustic_chain, bernoulli_volume_flow,
-    join_port, mass_spring_damper, modal_bank, modal_bank_ports, quasistatic_aperture_opening,
-    step, step_descriptor, transformer,
+    AcousticSection, AcousticTap, MouthFlange, ViscothermalPin, WallPin, acoustic_chain_mouth_wall,
+    bernoulli_volume_flow, join_port, mass_spring_damper, modal_bank, modal_bank_ports,
+    quasistatic_aperture_opening, step, step_descriptor, transformer,
 };
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, HelmholtzCavity, Pluck,
-    PrestressedString, RadiatingPlate, RayleighParams, ThinPlate, UnilateralObstacle,
-    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, HelmholtzCavity,
+    LocallyReactingWall, Pluck, PrestressedString, RadiatingPlate, RayleighParams, ThinPlate,
+    UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
 use fs_tribo::{
     InputAuthority, InterfaceMedium, InterfaceSystemRef,
@@ -278,16 +278,14 @@ fn realize_coupled_ode(
     let has_plate = !plates.linear.is_empty() || plates.vk.is_some();
     let need_drive = assembly.reed.is_some() || assembly.blow.is_some();
     let inlets = if has_plate && need_drive { 2 } else { 1 };
-    let chain = acoustic_chain(
+    let chain = ode_bore_chain(
         &sections,
-        gas.density,
-        gas.sound_speed,
-        matches!(duct.termination, WaveguideEnd::UnflangedOpen),
+        duct_mouth(duct.termination),
         inlets,
         &taps,
-        Some(&viscothermal_pin(gas)),
-    )
-    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        gas,
+        duct.wall,
+    )?;
     let body = if has_plate {
         let plate = if plates.vk.is_some() {
             vk_plate_phs(
@@ -615,6 +613,7 @@ fn realize_coupled(
     let termination = match duct.termination {
         WaveguideEnd::Closed => Termination::Closed,
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
+        WaveguideEnd::FlangedOpen => Termination::FlangedOpen,
     };
     refuse_open_nyquist(duct, gas, assembly.sample_rate_hz)?;
     let inlet_r = physics
@@ -1087,16 +1086,14 @@ fn realize_dirac_join(
                     what: "Dirac duct expected a cylindrical chain",
                 })?;
             let inlets = if drive_inlet { 2 } else { 1 };
-            let chain = acoustic_chain(
+            let chain = ode_bore_chain(
                 &sections,
-                gas.density,
-                gas.sound_speed,
-                matches!(line.termination, WaveguideEnd::UnflangedOpen),
+                duct_mouth(line.termination),
                 inlets,
                 &taps,
-                Some(&viscothermal_pin(gas)),
-            )
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+                gas,
+                line.wall,
+            )?;
             let chain_face = if inlets == 2 { 1 } else { 0 };
             let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
             let area = core::f64::consts::PI * radius * radius;
@@ -1139,16 +1136,14 @@ fn realize_dirac_join(
                     what: "Dirac duct expected a cylindrical chain",
                 })?;
             let inlets = if drive_inlet { 2 } else { 1 };
-            let chain = acoustic_chain(
+            let chain = ode_bore_chain(
                 &sections,
-                gas.density,
-                gas.sound_speed,
-                matches!(line.termination, WaveguideEnd::UnflangedOpen),
+                duct_mouth(line.termination),
                 inlets,
                 &taps,
-                Some(&viscothermal_pin(gas)),
-            )
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+                gas,
+                line.wall,
+            )?;
             let chain_face = if inlets == 2 { 1 } else { 0 };
             let plate_line = transformer(plate, chain, 1, chain_face, 1.0)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
@@ -2157,6 +2152,7 @@ fn realize_reed_on_duct(
     let termination = match duct.termination {
         WaveguideEnd::Closed => Termination::Closed,
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
+        WaveguideEnd::FlangedOpen => Termination::FlangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
     if let Some((sections, taps)) = bore_spec(duct)
@@ -2164,7 +2160,7 @@ fn realize_reed_on_duct(
     {
         return realize_reed_ode(
             &sections,
-            matches!(duct.termination, WaveguideEnd::UnflangedOpen),
+            duct_mouth(duct.termination),
             &taps,
             reed,
             plates,
@@ -2172,6 +2168,7 @@ fn realize_reed_on_duct(
             listener_m,
             sample_rate_hz,
             n,
+            duct.wall,
         );
     }
     realize_reed_bore(
@@ -2193,6 +2190,36 @@ fn viscothermal_pin(gas: &GasState) -> ViscothermalPin {
         prandtl: gas.prandtl,
         foster_branches: 3,
     }
+}
+
+fn wall_pin(wall: Option<LocallyReactingWall>) -> Option<WallPin> {
+    wall.map(|w| WallPin {
+        surface_density: w.surface_density_kg_m2,
+        stiffness_per_area: w.stiffness_pa_per_m,
+        resistance: w.resistance_pa_s_per_m,
+    })
+}
+
+fn ode_bore_chain(
+    sections: &[AcousticSection],
+    mouth: Option<MouthFlange>,
+    inlets: usize,
+    taps: &[AcousticTap],
+    gas: &GasState,
+    wall: Option<LocallyReactingWall>,
+) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
+    let wall = wall_pin(wall);
+    acoustic_chain_mouth_wall(
+        sections,
+        gas.density,
+        gas.sound_speed,
+        mouth,
+        inlets,
+        taps,
+        Some(&viscothermal_pin(gas)),
+        wall.as_ref(),
+    )
+    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
 fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<AcousticTap>)> {
@@ -2229,7 +2256,7 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
                     station: (acc / total).clamp(0.0, 1.0),
                     neck_length: hole.chimney_m.max(0.0),
                     neck_radius: hole.radius_m,
-                    open_fraction: if hole.open { 1.0 } else { 0.0 },
+                    open_fraction: hole.open_fraction.clamp(0.0, 1.0),
                 });
             }
         }
@@ -2240,7 +2267,7 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
 #[allow(clippy::too_many_arguments)]
 fn realize_blown_ode(
     sections: &[AcousticSection],
-    open: bool,
+    mouth: Option<MouthFlange>,
     taps: &[AcousticTap],
     blow: VolumeVelocityPulse,
     plates: &mut PlateBank,
@@ -2248,20 +2275,12 @@ fn realize_blown_ode(
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
+    wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
     let area = core::f64::consts::PI * radius * radius;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
-    let line = acoustic_chain(
-        sections,
-        gas.density,
-        gas.sound_speed,
-        open,
-        inlets,
-        taps,
-        Some(&viscothermal_pin(gas)),
-    )
-    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     if plates.linear.is_empty() {
         let mut x = vec![0.0; line.state_dim()];
@@ -2313,7 +2332,7 @@ fn realize_blown_ode(
 #[allow(clippy::too_many_arguments)]
 fn realize_reed_ode(
     sections: &[AcousticSection],
-    open: bool,
+    mouth: Option<MouthFlange>,
     taps: &[AcousticTap],
     reed: BeatingReed,
     plates: &mut PlateBank,
@@ -2321,6 +2340,7 @@ fn realize_reed_ode(
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
+    wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     if !(reed.rest_opening_m > 0.0
         && reed.width_m > 0.0
@@ -2336,16 +2356,7 @@ fn realize_reed_ode(
     let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
     let area = core::f64::consts::PI * radius * radius;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
-    let line = acoustic_chain(
-        sections,
-        gas.density,
-        gas.sound_speed,
-        open,
-        inlets,
-        taps,
-        Some(&viscothermal_pin(gas)),
-    )
-    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
     let n_line = line.state_dim();
     let (line, joined) = if plates.linear.is_empty() {
         (Some(line), None)
@@ -2466,6 +2477,7 @@ fn realize_blown_duct(
     let termination = match duct.termination {
         WaveguideEnd::Closed => Termination::Closed,
         WaveguideEnd::UnflangedOpen => Termination::UnflangedOpen,
+        WaveguideEnd::FlangedOpen => Termination::FlangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
     if let Some((sections, taps)) = bore_spec(duct)
@@ -2473,7 +2485,7 @@ fn realize_blown_duct(
     {
         return realize_blown_ode(
             &sections,
-            matches!(duct.termination, WaveguideEnd::UnflangedOpen),
+            duct_mouth(duct.termination),
             &taps,
             blow,
             plates,
@@ -2481,6 +2493,7 @@ fn realize_blown_duct(
             listener_m,
             sample_rate_hz,
             n,
+            duct.wall,
         );
     }
     if !plates.is_empty() {
@@ -2590,16 +2603,31 @@ fn physics_duct(duct: &ViscothermalDuct) -> Result<Duct, AcousticRealizeError> {
                     hole_radius: hole.radius_m,
                     chimney_height: hole.chimney_m,
                     bore_radius: s.radius_m,
-                    state: if hole.open {
-                        HoleState::Open
-                    } else {
-                        HoleState::Closed
-                    },
+                    state: hole_state(hole.open_fraction),
                 });
             }
         }
     }
     Ok(Duct { segments })
+}
+
+fn hole_state(sigma: f64) -> HoleState {
+    let s = sigma.clamp(0.0, 1.0);
+    if s <= 0.0 {
+        HoleState::Closed
+    } else if s >= 1.0 {
+        HoleState::Open
+    } else {
+        HoleState::Vent(s)
+    }
+}
+
+fn duct_mouth(end: WaveguideEnd) -> Option<MouthFlange> {
+    match end {
+        WaveguideEnd::Closed => None,
+        WaveguideEnd::UnflangedOpen => Some(MouthFlange::Unflanged),
+        WaveguideEnd::FlangedOpen => Some(MouthFlange::Flanged),
+    }
 }
 
 fn refuse_open_nyquist(
@@ -2608,6 +2636,7 @@ fn refuse_open_nyquist(
     sample_rate_hz: u32,
 ) -> Result<(), AcousticRealizeError> {
     if !matches!(duct.termination, WaveguideEnd::UnflangedOpen) {
+        // Flanged mouths use the Rayleigh piston above ka = 1.
         return Ok(());
     }
     let mouth_r = duct
