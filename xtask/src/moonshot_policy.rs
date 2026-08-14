@@ -762,9 +762,16 @@ fn check_sources(portfolio_source: &str, graph: &str, beads: &str) -> MoonshotPo
             ),
         ));
     }
+    // `blocked` and `deferred` are dependency/graph parking states some
+    // lanes use explicitly; neither is active WIP, so both are
+    // backlog-class for cap purposes. Counting them as backlog cannot
+    // evade the cap (only in_progress admits a lane), which is the
+    // property this gate defends.
     let open_count = tagged
         .iter()
-        .filter(|(_, issue)| issue.status == "open")
+        .filter(|(_, issue)| {
+            issue.status == "open" || issue.status == "blocked" || issue.status == "deferred"
+        })
         .count();
     let closed_count = tagged
         .iter()
@@ -1036,7 +1043,27 @@ mod tests {
         let graph = std::fs::read_to_string(root.join(GRAPH_FILE)).expect("graph");
         let beads = std::fs::read_to_string(root.join(BEADS_FILE)).expect("beads");
 
-        let stale_count = portfolio.replacen("\"active\": 6", "\"active\": 5", 1);
+        // Perturb the LIVE active count rather than hardcoding a literal:
+        // a hardcoded pair silently becomes a no-op mutation the moment the
+        // real portfolio moves, and a drill that mutates nothing proves
+        // nothing (this exact rot happened when the cap shrank 6 -> 5).
+        let live_active_field = portfolio
+            .lines()
+            .find(|line| line.trim_start().starts_with("\"active\":"))
+            .expect("portfolio records an active count")
+            .trim()
+            .trim_end_matches(',')
+            .to_string();
+        let live_value: u64 = live_active_field
+            .rsplit(':')
+            .next()
+            .expect("field has a value")
+            .trim()
+            .parse()
+            .expect("active count is a number");
+        let perturbed_field = format!("\"active\": {}", live_value + 1);
+        let stale_count = portfolio.replacen(&live_active_field, &perturbed_field, 1);
+        assert_ne!(stale_count, portfolio, "the seeded mutation must apply");
         let report = check_sources(&stale_count, &graph, &beads);
         assert!(
             report
@@ -1047,10 +1074,34 @@ mod tests {
             report.violations
         );
 
+        // Inject at the array HEAD rather than replacing an empty-array
+        // literal: the live history is allowed to grow, and a drill keyed
+        // to emptiness becomes a no-op the moment a real disposition lands
+        // (the same rot class as the hardcoded count above).
+        let seeded_row = "{\"action\":\"liquidate\",\"displaced_bead_id\":\"frankensim-epic-ascent-7tv.22\",\"disposition\":\"completed\",\"state_artifact\":\"artifact:test\",\"reason\":\"seeded history mutation\",\"recorded_at\":\"2026-07-22T00:00:00Z\"}";
         let unrecorded_live_mismatch = portfolio.replacen(
-            "\"disposition_history\": []",
-            "\"disposition_history\": [{\"action\":\"liquidate\",\"displaced_bead_id\":\"frankensim-epic-ascent-7tv.22\",\"disposition\":\"completed\",\"state_artifact\":\"artifact:test\",\"reason\":\"seeded history mutation\",\"recorded_at\":\"2026-07-22T00:00:00Z\"}]",
+            "\"disposition_history\": [",
+            &format!("\"disposition_history\": [{seeded_row},"),
             1,
+        );
+        let unrecorded_live_mismatch = if unrecorded_live_mismatch != portfolio {
+            // Non-empty (or empty-with-newline) array: the head injection
+            // applied; strip a dangling comma if the array was empty.
+            unrecorded_live_mismatch.replacen(
+                &format!("{seeded_row},]"),
+                &format!("{seeded_row}]"),
+                1,
+            )
+        } else {
+            portfolio.replacen(
+                "\"disposition_history\": []",
+                &format!("\"disposition_history\": [{seeded_row}]"),
+                1,
+            )
+        };
+        assert_ne!(
+            unrecorded_live_mismatch, portfolio,
+            "the seeded history mutation must apply"
         );
         let report = check_sources(&unrecorded_live_mismatch, &graph, &beads);
         assert!(
@@ -1062,7 +1113,31 @@ mod tests {
             report.violations
         );
 
-        let inflated_cap = portfolio.replacen("\"status_quo_cap\": 6", "\"status_quo_cap\": 7", 1);
+        // Baseline-independent, same rot class as above: inflate the LIVE
+        // cap far past any historical initial ceiling.
+        let live_cap_field = portfolio
+            .lines()
+            .find(|line| line.trim_start().starts_with("\"status_quo_cap\":"))
+            .expect("portfolio records a cap")
+            .trim()
+            .trim_end_matches(',')
+            .to_string();
+        let live_cap: u64 = live_cap_field
+            .rsplit(':')
+            .next()
+            .expect("field has a value")
+            .trim()
+            .parse()
+            .expect("cap is a number");
+        let inflated_cap = portfolio.replacen(
+            &live_cap_field,
+            &format!("\"status_quo_cap\": {}", live_cap + 100),
+            1,
+        );
+        assert_ne!(
+            inflated_cap, portfolio,
+            "the seeded cap mutation must apply"
+        );
         let report = check_sources(&inflated_cap, &graph, &beads);
         assert!(
             report

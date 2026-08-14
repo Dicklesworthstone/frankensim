@@ -11,7 +11,7 @@
     "moonshot*"
   ],
   "active_status": "in_progress",
-  "status_quo_cap": 6,
+  "status_quo_cap": 5,
   "cap_rule": "The cap starts at the captured active count. A completion shrinks available WIP; a new moonshot is admitted only by displacing one active lane with a completed, falsified, or shelved-with-state disposition.",
   "no_claim": "This file records governance declarations and a live issue-graph consistency check. It does not validate a moonshot, authenticate evidence, or promote any capability.",
   "initial_active_beads": [
@@ -22,13 +22,22 @@
     "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
     "frankensim-leapfrog-2026-program-i94v.5.4.1.2"
   ],
-  "disposition_history": [],
+  "disposition_history": [
+    {
+      "action": "liquidate",
+      "displaced_bead_id": "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
+      "disposition": "shelved-with-state",
+      "state_artifact": "the bead record itself (frankensim-leapfrog-2026-program-i94v.5.2.11.1): RB.M1 bridge statement scope, comments, and dependency edges are the complete resumable state; no code landed",
+      "reason": "the claiming session went dark and the bead reverted to open (unadmitted backlog); per the cap rule an exit shrinks WIP rather than leaving a refillable slot",
+      "recorded_at": "2026-08-13"
+    }
+  ],
   "inventory_snapshot": {
-    "tagged_total": 508,
-    "active": 6,
-    "open_backlog": 482,
+    "tagged_total": 514,
+    "active": 5,
+    "open_backlog": 489,
     "closed_terminal": 20,
-    "inactive_rule": "Only in_progress is active WIP. Open moonshot Beads are unadmitted backlog; closed moonshot Beads are terminal history. Neither consumes a slot."
+    "inactive_rule": "Only in_progress is active WIP. Open, blocked, and deferred moonshot Beads are unadmitted backlog; closed moonshot Beads are terminal history. Neither consumes a slot."
   },
   "active_lanes": [
     {
@@ -116,27 +125,6 @@
       }
     },
     {
-      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
-      "lane": "maslov-krein-evans-bridge",
-      "owner": "EmeraldDog",
-      "admission_kind": "legacy-baseline",
-      "falsifier": {
-        "id": "bridge-counterexample",
-        "observation": "A preregistered endpoint, degeneracy, neutral-signature, non-Fredholm, contour, or essential-spectrum case violates a claimed signed-count equality under the theorem node's own hypotheses.",
-        "decision_rule": "That theorem node is falsified and the implication lattice falls back to the strongest surviving restricted statement."
-      },
-      "budget": {
-        "effort_minutes": 2400,
-        "calendar_deadline": "2026-10-01"
-      },
-      "critical_path_disjointness": "The spectral-flow bridge is theorem research outside the product path and may not block an EXTREAL capability Bead.",
-      "quarterly_review": {
-        "next_review": "2026-10-01",
-        "status": "scheduled",
-        "required_evidence": "theorem-statement review, registered convention mutations, and retained counterexamples"
-      }
-    },
-    {
       "bead_id": "frankensim-leapfrog-2026-program-i94v.5.4.1.2",
       "lane": "derived-geometry-evidence-variance",
       "owner": "CopperOx",
@@ -182,7 +170,7 @@
       }
     },
     "displaces": {
-      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.2.11.1",
+      "bead_id": "frankensim-leapfrog-2026-program-i94v.5.1.2.1",
       "disposition": "shelved-with-state",
       "state_artifact": "bead:frankensim-leapfrog-2026-program-i94v.5.2.11.1@2026-07-22T21:56:15Z",
       "reason": "Rehearsal only: preserve the theorem statement, 14-test bridge battery, and pending independent theorem review before releasing its slot."
