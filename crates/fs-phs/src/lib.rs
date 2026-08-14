@@ -1969,11 +1969,220 @@ pub fn acoustic_waveguide(
     )
 }
 
+/// Truncated cone as a 1-D wave on `ψ = x p`.
+///
+/// `ψ` obeys the planar wave equation on `[x₁, x₂]` from the
+/// virtual apex; the physical ports are `p = ψ/x` and
+/// `U = x U_ψ`. That is the time-domain image of the spherical
+/// `e^{±ikx}/x` TMM, not a frustum LC slice. Equal end radii
+/// are refused — use [`acoustic_chain`].
+///
+/// # Errors
+/// Non-physical taper, `cells < 2`, `inlets` not in `{1, 2}`,
+/// a bad tap, a bad pin, or a radiation-fit refusal.
+pub fn spherical_cone(
+    inlet_radius: f64,
+    outlet_radius: f64,
+    length: f64,
+    density: f64,
+    sound_speed: f64,
+    cells: usize,
+    open: bool,
+    inlets: usize,
+    taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
+) -> Result<PortHamiltonian, PhsError> {
+    let slope = (outlet_radius - inlet_radius) / length;
+    if cells < 2
+        || !(inlet_radius > 0.0 && outlet_radius > 0.0 && length > 0.0)
+        || slope.abs() <= 1.0e-15 * (1.0 + inlet_radius) / length
+        || !(density > 0.0 && sound_speed > 0.0)
+        || (inlets != 1 && inlets != 2)
+    {
+        return Err(PhsError::NotPsd {
+            what: "spherical cone parameters",
+        });
+    }
+    if let Some(pin) = viscothermal {
+        if !(pin.dynamic_viscosity >= 0.0
+            && pin.dynamic_viscosity.is_finite()
+            && pin.gamma > 1.0
+            && pin.gamma.is_finite()
+            && pin.prandtl > 0.0
+            && pin.prandtl.is_finite())
+            || pin.foster_branches > 8
+        {
+            return Err(PhsError::NotPsd {
+                what: "viscothermal pin parameters",
+            });
+        }
+    }
+    let x_in = inlet_radius / slope;
+    let x_out = outlet_radius / slope;
+    let alpha = core::f64::consts::PI * slope * slope;
+    let dx = length / cells as f64;
+    let n_line = 2 * cells;
+    let n_tap = taps.len();
+    let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
+    let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
+    let n_foster = if foster { cells * n_br * 2 } else { 0 };
+    let n = n_line + n_tap + n_foster;
+    let l_psi = density * dx / alpha;
+    let c_psi = alpha * dx / (density * sound_speed * sound_speed);
+    let mut x_mid = Vec::with_capacity(cells);
+    let mut radii = Vec::with_capacity(cells);
+    let mut cell_x0 = Vec::with_capacity(cells);
+    for i in 0..cells {
+        let xa = x_in + dx * i as f64;
+        let xb = xa + dx;
+        let xm = f64::midpoint(xa, xb);
+        x_mid.push(xm);
+        radii.push((slope * xm).abs());
+        cell_x0.push(dx * i as f64);
+    }
+    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * length);
+    let mut q = vec![0.0; n * n];
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for cell in 0..cells {
+        let (qi, pi) = (2 * cell, 2 * cell + 1);
+        q[qi * n + qi] = 1.0 / c_psi;
+        q[pi * n + pi] = 1.0 / l_psi;
+        j[qi * n + pi] = 1.0;
+        j[pi * n + qi] = -1.0;
+        if cell + 1 < cells {
+            let qn = 2 * (cell + 1);
+            j[pi * n + qn] = -1.0;
+            j[qn * n + pi] = 1.0;
+        }
+    }
+    if let Some(pin) = viscothermal {
+        for cell in 0..cells {
+            let xm = x_mid[cell];
+            let x2 = xm * xm;
+            let r_phys = radii[cell];
+            let (qi, pi) = (2 * cell, 2 * cell + 1);
+            if foster {
+                let r0_psi = 8.0 * pin.dynamic_viscosity / (density * r_phys * r_phys) * l_psi;
+                r[pi * n + pi] += r0_psi.max(0.0);
+                let l_phys = l_psi / x2.abs().max(1.0e-18);
+                let c_phys = c_psi * x2.abs();
+                let terms_r = foster_bessel_series(
+                    l_phys,
+                    r_phys,
+                    density,
+                    pin.dynamic_viscosity,
+                    omega_pin / 8.0,
+                    omega_pin * 8.0,
+                    n_br,
+                )?;
+                let terms_g = foster_bessel_shunt(
+                    c_phys,
+                    r_phys,
+                    density,
+                    pin,
+                    omega_pin / 8.0,
+                    omega_pin * 8.0,
+                    n_br,
+                )?;
+                let off = n_line + n_tap + cell * n_br * 2;
+                for (k, &(gk, wk)) in terms_r.iter().enumerate() {
+                    let lam = off + k;
+                    let g_psi = gk * x2.abs();
+                    q[lam * n + lam] = wk / g_psi;
+                    r[pi * n + pi] += g_psi;
+                    r[lam * n + lam] += g_psi;
+                    r[pi * n + lam] -= g_psi;
+                    r[lam * n + pi] -= g_psi;
+                }
+                for (k, &(gk, wk)) in terms_g.iter().enumerate() {
+                    let eta = off + n_br + k;
+                    let g_psi = gk / x2.abs().max(1.0e-18);
+                    q[eta * n + eta] = wk / g_psi;
+                    r[qi * n + qi] += g_psi;
+                    r[eta * n + eta] += g_psi;
+                    r[qi * n + eta] -= g_psi;
+                    r[eta * n + qi] -= g_psi;
+                }
+            } else {
+                let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
+                    l_psi / x2.abs().max(1.0e-18),
+                    c_psi * x2.abs(),
+                    r_phys,
+                    density,
+                    omega_pin,
+                    pin,
+                );
+                q[pi * n + pi] = 1.0 / (l_psi * l_scale);
+                r[qi * n + qi] += g_shunt / x2.abs().max(1.0e-18);
+                r[pi * n + pi] += r_series * x2.abs();
+            }
+        }
+    }
+    if open {
+        let r_load = compact_radiation_impedance(
+            density,
+            sound_speed,
+            outlet_radius,
+            omega_pin,
+            MouthFlange::Unflanged,
+        )
+        .map(|(rr, _)| rr)?;
+        let last_p = n_line - 1;
+        r[last_p * n + last_p] += r_load * (x_out * x_out).abs();
+    }
+    for (t, tap) in taps.iter().enumerate() {
+        if !(tap.station >= 0.0
+            && tap.station <= 1.0
+            && tap.neck_length >= 0.0
+            && tap.neck_radius > 0.0)
+        {
+            return Err(PhsError::NotPsd {
+                what: "acoustic tap station and neck",
+            });
+        }
+        let pos = tap.station * length;
+        let mut cell = 0usize;
+        for (i, &x0) in cell_x0.iter().enumerate() {
+            if x0 <= pos {
+                cell = i;
+            }
+        }
+        let tap_q = 2 * cell;
+        let phi = n_line + t;
+        let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;
+        let l_eff = tap.neck_length + 0.6 * tap.neck_radius;
+        let l_h = density * l_eff.max(1.0e-6) / a_h;
+        let scale = 1.0 / x_mid[cell];
+        q[phi * n + phi] = 1.0 / l_h;
+        j[tap_q * n + phi] = -scale;
+        j[phi * n + tap_q] = scale;
+        let r_ac = compact_radiation_impedance(
+            density,
+            sound_speed,
+            tap.neck_radius,
+            omega_pin,
+            MouthFlange::Unflanged,
+        )
+        .map(|(rr, _)| rr)
+        .unwrap_or(0.0);
+        r[phi * n + phi] = r_ac;
+    }
+    let mut g = vec![0.0; n * inlets];
+    let gin = 1.0 / x_in;
+    g[0] = gin;
+    if inlets == 2 {
+        g[1] = gin;
+    }
+    PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))
+}
+
 /// Concatenated LC waveguide, optionally wide-tube lossy.
 ///
 /// Each section has its own `L = ρ dx / A`, `C = A dx /(ρ c²)`.
 /// Adjacent runs share the same series `J` as cells inside a run:
-/// the interface is the area jump, not a special junction. Open
+/// the interface is the area jump, not a special junction. A
+/// single linear taper dispatches to [`spherical_cone`]. Open
 /// taps sit at a station of the total length. An open far end
 /// loads the last flux with compact-mouth `Re Z_rad` at the
 /// quarter-wave pin of the total length, using the last radius.
@@ -1997,6 +2206,23 @@ pub fn acoustic_chain(
     taps: &[AcousticTap],
     viscothermal: Option<&ViscothermalPin>,
 ) -> Result<PortHamiltonian, PhsError> {
+    if sections.len() == 1 {
+        let s = sections[0];
+        if (s.outlet() - s.radius).abs() > 1.0e-15 * (1.0 + s.radius) {
+            return spherical_cone(
+                s.radius,
+                s.outlet(),
+                s.length,
+                density,
+                sound_speed,
+                s.cells,
+                open,
+                inlets,
+                taps,
+                viscothermal,
+            );
+        }
+    }
     let mut n_cells = 0usize;
     let mut last_radius = 0.0;
     for s in sections {

@@ -14,7 +14,7 @@ use fs_phs::{
     helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
     join_port, kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper,
     modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
-    series_impedance_ports, slice_linear_taper, step, step_descriptor, transformer,
+    series_impedance_ports, slice_linear_taper, spherical_cone, step, step_descriptor, transformer,
     zwikker_kosten_f,
 };
 
@@ -1395,6 +1395,51 @@ fn linear_taper_is_not_the_inlet_cylinder() {
         "a linear flare must not reprint the inlet cylinder"
     );
     assert!(slice_linear_taper(0.0, 0.01, 0.1, 4).is_err());
+}
+
+#[test]
+fn spherical_cone_is_not_the_frustum_ladder() {
+    let c = 343.0;
+    let sph = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, false, 1, &[], None).expect("ψ");
+    let halves = [
+        AcousticSection {
+            length: 0.17,
+            radius: 0.006,
+            outlet_radius: 0.012,
+            cells: 2,
+        },
+        AcousticSection {
+            length: 0.17,
+            radius: 0.012,
+            outlet_radius: 0.018,
+            cells: 2,
+        },
+    ];
+    let web = acoustic_chain(&halves, 1.2, c, false, 1, &[], None).expect("frustum");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..480 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let pa = ring(&sph);
+    let pb = ring(&web);
+    let err: f64 = pa.iter().zip(&pb).map(|(x, y)| (x - y).abs()).sum();
+    assert!(
+        err > 1.0e-6,
+        "ψ = x p must not reprint the frustum LC ladder"
+    );
+    assert!(spherical_cone(0.01, 0.01, 0.2, 1.2, c, 4, false, 1, &[], None).is_err());
 }
 
 #[test]

@@ -336,9 +336,9 @@ clarinet is one filling of those objects.
   `ViscothermalPin` from `GasState` (`μ`, `γ`, `Pr`;
   series `R` and thermal `G` are three-term Foster networks
   collocated to Bessel Zwikker–Kosten `F(r_v)`, all shear
-  numbers). A linear radius taper is an exact frustum
-  T-network (`L = ρ dx/(π r_in r_out)`, frustum volume `C`),
-  not the spherical-wave frequency TMM. Open tone holes are `AcousticTap` side-branch
+  numbers). A single linear taper is `spherical_cone`
+  (`ψ = x p`); mixed cylinder runs stay frustum LC.
+  Open tone holes are `AcousticTap` side-branch
   inertances. A quasistatic reed is the Bernoulli port on that
   inlet; a massive reed is `mass_spring_damper` plus the same
   jet, face-velocity flow, and a Hunt–Crossley lay as a

@@ -65,9 +65,10 @@ stepping, and Galerkin reduction preserves the structure.
   `F(r_v)` at every shear number),
   `zwikker_kosten_f` (also the fs-duct `LossModel::Bessel` TMM),
   `foster_sqrt_omega_terms`,
-  `foster_match_re`, `slice_linear_taper`
-  (exact frustum T-network: `L = ρ dx/(π r_in r_out)`),
-  `modal_bank`
+  `foster_match_re`, `slice_linear_taper`,
+  `spherical_cone` (1-D wave on `ψ = x p`, physical ports
+  `p = ψ/x`; a single taper in `acoustic_chain` is this
+  object), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /
