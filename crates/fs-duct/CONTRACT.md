@@ -16,8 +16,10 @@ same object, and every medium property derives from
   taper propagated with exact 1D spherical waves, its viscothermal
   correction evaluated at the mean radius (documented standard
   treatment; refine by subdivision).
-- `LossModel::{Lossless, WideTube}` — the exact closed-form arm and
-  the first-order ZK wide-tube arm.
+- `LossModel::{Lossless, WideTube, AllRegime, Bessel}` — lossless,
+  first-order ZK, piecewise wide/Poiseuille, and frequency-by-frequency
+  Bessel Zwikker–Kosten `F(r_v)` (every shear number). A cone still
+  uses the spherical `e^{\pm ikx}/x` basis.
 - `Termination::{Closed, IdealOpen, UnflangedOpen, FlangedOpen}` —
   ideal limits plus the classic low-`ka` radiation fits (end
   corrections 0.6133a / 0.8216a) with a named `ka` ceiling.

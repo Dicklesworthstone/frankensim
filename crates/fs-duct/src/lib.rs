@@ -52,8 +52,8 @@
 //! `fs_math::det` and `fs_la::eigen_complex::lu_complex`; repeat
 //! evaluations are bitwise identical.
 //!
-//! Deferred with recorded triggers (see CONTRACT): full Bessel/Kelvin
-//! narrow-tube ZK (needs fs-math Bessel functions), tone-hole
+//! `LossModel::Bessel` is the frequency-by-frequency Zwikker–Kosten
+//! wall law (`fs_phs::zwikker_kosten_f`). Deferred: tone-hole
 //! T-junction lattices and fingering tables (slice 3 of the bead),
 //! multimodal horn expansion (trigger: bell mismatch beyond authored
 //! tolerance), and BEM-computed radiation loads.
@@ -62,6 +62,7 @@ use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
+use fs_phs::zwikker_kosten_f;
 
 /// Wide-tube validity floor: below this shear number the first-order
 /// Zwikker–Kosten expansion is refused by name.
@@ -128,6 +129,10 @@ pub enum LossModel {
     /// [`MIN_SHEAR_NUMBER`], Poiseuille + isothermal-tending thermal
     /// shunt below. Never silently drops losses.
     AllRegime,
+    /// Frequency-by-frequency Zwikker–Kosten: `F(r_v) = 2 J₁(ζ)/(ζ J₀(ζ))`
+    /// at this `ω`, valid at every shear number. A cone still uses the
+    /// spherical `e^{\pm ikx}/x` basis. This is not a Foster fit.
+    Bessel,
 }
 
 /// Open/closed state of a tone hole (a bounded continuous vent
@@ -340,6 +345,7 @@ pub fn segment_wave(
                 poiseuille_wave(state, radius, omega, rv)
             }
         }
+        LossModel::Bessel => bessel_wave(state, radius, omega),
     }
 }
 
@@ -391,6 +397,48 @@ fn poiseuille_wave(
     let g_th = (state.gamma - 1.0) * c_ad * omega * (rt * rt / 16.0).min(0.5);
     let z_series = C64::new(r_visc, omega * l_ax);
     let y_shunt = C64::new(g_th.max(0.0), omega * c_eff);
+    let mut k = (z_series * y_shunt).sqrt();
+    if k.im < 0.0 {
+        k = k.scale(-1.0);
+    }
+    let mut zc = (z_series * y_shunt.recip()).sqrt();
+    if zc.re < 0.0 {
+        zc = zc.scale(-1.0);
+    }
+    Ok(SegmentWave {
+        wavenumber: k,
+        characteristic_impedance: zc,
+        specific_impedance: zc.scale(area),
+        shear_number: rv,
+    })
+}
+
+/// Full Zwikker–Kosten `k` and `Zc` from `F(r_v)` at this frequency.
+fn bessel_wave(state: &GasState, radius: f64, omega: f64) -> Result<SegmentWave, DuctError> {
+    let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+    if !(rv > 0.0 && rv.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "Bessel shear number",
+        });
+    }
+    let f_v = zwikker_kosten_f(rv).map_err(|_| DuctError::BadParameter { what: "Bessel F_v" })?;
+    let rt = rv * state.prandtl.sqrt();
+    let mut f_t =
+        zwikker_kosten_f(rt).map_err(|_| DuctError::BadParameter { what: "Bessel F_t" })?;
+    let area = core::f64::consts::PI * radius * radius;
+    let jw = C64::new(0.0, omega);
+    let den = C64::ONE - f_v;
+    if den.abs() < 1.0e-18 {
+        return poiseuille_wave(state, radius, omega, rv);
+    }
+    let z_series = jw.scale(state.density / area) / den;
+    let mut y_shunt = jw.scale(area / (state.density * state.sound_speed * state.sound_speed))
+        * (C64::ONE + f_t.scale(state.gamma - 1.0));
+    if y_shunt.re < 0.0 {
+        f_t = C64::new(f_t.re, -f_t.im);
+        y_shunt = jw.scale(area / (state.density * state.sound_speed * state.sound_speed))
+            * (C64::ONE + f_t.scale(state.gamma - 1.0));
+    }
     let mut k = (z_series * y_shunt).sqrt();
     if k.im < 0.0 {
         k = k.scale(-1.0);
@@ -698,7 +746,10 @@ pub fn input_impedance(
             // but the chimney is often the narrowest element, so its
             // shear number still folds into the reported margin
             // (review finding: the diagnostic must see it).
-            if matches!(loss, LossModel::WideTube | LossModel::AllRegime) {
+            if matches!(
+                loss,
+                LossModel::WideTube | LossModel::AllRegime | LossModel::Bessel
+            ) {
                 let rv = hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt();
                 min_rv = min_rv.min(rv);
             }
@@ -828,6 +879,63 @@ mod tests {
                 LossModel::WideTube
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn bessel_wave_is_all_regime_and_not_the_wide_tube_pin() {
+        let state = air();
+        let omega_wide = 2.0 * core::f64::consts::PI * 800.0;
+        let omega_narrow = 2.0 * core::f64::consts::PI * 40.0;
+        let bessel_w = segment_wave(&state, 0.0075, omega_wide, LossModel::Bessel).expect("wide");
+        let tube = segment_wave(&state, 0.0075, omega_wide, LossModel::WideTube).expect("zk1");
+        assert!(bessel_w.shear_number > MIN_SHEAR_NUMBER);
+        assert!(bessel_w.wavenumber.im > 0.0);
+        assert!(bessel_w.characteristic_impedance.re > 0.0);
+        let dk = (bessel_w.wavenumber.im - tube.wavenumber.im).abs();
+        assert!(
+            dk > 1.0e-6 * tube.wavenumber.im,
+            "Bessel must not reprint first-order ZK (ΔIm k = {dk})"
+        );
+        let bessel_n =
+            segment_wave(&state, 0.001, omega_narrow, LossModel::Bessel).expect("narrow");
+        assert!(bessel_n.shear_number < MIN_SHEAR_NUMBER);
+        assert!(bessel_n.wavenumber.im > 0.0);
+        assert!(bessel_n.characteristic_impedance.re > 0.0);
+        let poiseuille =
+            segment_wave(&state, 0.001, omega_narrow, LossModel::AllRegime).expect("poiseuille");
+        assert!(
+            (bessel_n.wavenumber.im - poiseuille.wavenumber.im).abs()
+                < 0.5 * poiseuille.wavenumber.im.max(1.0e-8),
+            "narrow Bessel must sit near the Poiseuille floor"
+        );
+    }
+
+    #[test]
+    fn bessel_cone_is_spherical_not_a_mean_cylinder() {
+        let state = air();
+        let omega = 2.0 * core::f64::consts::PI * 400.0;
+        let cone = Duct {
+            segments: vec![Segment::Cone {
+                inlet_radius: 0.006,
+                outlet_radius: 0.018,
+                length: 0.34,
+            }],
+        };
+        let cyl = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.012,
+                length: 0.34,
+            }],
+        };
+        let z_cone = input_impedance(&cone, &state, omega, LossModel::Bessel, Termination::Closed)
+            .expect("cone");
+        let z_cyl = input_impedance(&cyl, &state, omega, LossModel::Bessel, Termination::Closed)
+            .expect("cyl");
+        assert!(z_cone.impedance.re >= -1.0e-9);
+        assert!(
+            (z_cone.impedance - z_cyl.impedance).abs() > 1.0e-3 * z_cyl.impedance.abs().max(1.0),
+            "spherical-wave Bessel cone must not reprint the mean cylinder"
         );
     }
 
