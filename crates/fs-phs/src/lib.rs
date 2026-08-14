@@ -1597,6 +1597,55 @@ pub fn side_hole_series_length(hole_radius: f64, bore_radius: f64) -> f64 {
     -0.37 * hole_radius * hole_radius / bore_radius
 }
 
+/// Extra series length on hole `i` from an open neighbor `j`.
+///
+/// Nederveen-class near-field: `t_m = −0.37 (b_i b_j / a) e^{−s/a}`.
+/// Vanishes at large spacing (Ernoult holes sit at `s/a ≫ 1`).
+/// Isolated or overlapping (`s = 0`) returns 0.
+#[must_use]
+pub fn side_hole_mutual_length(hole_i: f64, hole_j: f64, bore_radius: f64, spacing: f64) -> f64 {
+    if !(hole_i > 0.0
+        && hole_j > 0.0
+        && bore_radius > hole_i.max(hole_j)
+        && spacing > 0.0
+        && hole_i.is_finite()
+        && hole_j.is_finite()
+        && bore_radius.is_finite()
+        && spacing.is_finite())
+    {
+        return 0.0;
+    }
+    -0.37 * hole_i * hole_j / bore_radius * (-spacing / bore_radius).exp()
+}
+
+fn tap_open_series_length(
+    tap: &AcousticTap,
+    bore_r: f64,
+    taps: &[AcousticTap],
+    length: f64,
+) -> f64 {
+    let sigma = tap.open_fraction.clamp(0.0, 1.0);
+    if sigma <= 0.0 {
+        return 0.0;
+    }
+    let b = tap.neck_radius * sigma.sqrt();
+    let mut ts = side_hole_series_length(b, bore_r);
+    let x = tap.station * length;
+    for other in taps {
+        let so = other.open_fraction.clamp(0.0, 1.0);
+        if so <= 0.0 {
+            continue;
+        }
+        let s = (other.station * length - x).abs();
+        if s <= 1.0e-15 {
+            continue;
+        }
+        let bj = other.neck_radius * so.sqrt();
+        ts += side_hole_mutual_length(b, bj, bore_r, s);
+    }
+    ts
+}
+
 fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
     if !(l_add.is_finite() && q[flux * n + flux] > 0.0) {
         return;
@@ -1914,11 +1963,11 @@ pub fn acoustic_cylinder(
 
 /// Side branch on an [`acoustic_chain`].
 ///
-/// Open: neck inertance shunted to atmosphere. A
-/// [`ViscothermalPin`] puts the bore's all-regime series `R` on
-/// that neck. Closed: the TMM cavity compliance
-/// `C = V /(ρ c²)` in parallel with the station cell (no extra
-/// state); the pin adds thermal `G` on that `C`.
+/// Open (`open_fraction = 1`): neck inertance shunted to atmosphere.
+/// A [`ViscothermalPin`] puts the bore's all-regime series `R` on
+/// that neck. Closed (`0`): the TMM cavity compliance
+/// `C = V /(ρ c²)` in parallel with the station cell. A fraction
+/// `σ ∈ (0, 1)` is `Y = σ Y_open + (1−σ) Y_closed`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AcousticTap {
     /// Station along the total length in `[0, 1]`.
@@ -1927,8 +1976,8 @@ pub struct AcousticTap {
     pub neck_length: f64,
     /// Neck radius [m].
     pub neck_radius: f64,
-    /// `true` is a vent; `false` is a sealed pad.
-    pub open: bool,
+    /// Opening in `[0, 1]` (`0` sealed, `1` fully open).
+    pub open_fraction: f64,
 }
 
 /// Wide-tube viscothermal pin for an [`acoustic_chain`].
@@ -2093,7 +2142,7 @@ pub fn spherical_cone(
     let dx = length / cells as f64;
     let n_line = 2 * cells;
     let n_nf = cells;
-    let n_tap = taps.iter().filter(|t| t.open).count();
+    let n_tap = taps.iter().filter(|t| t.open_fraction > 0.0).count();
     let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { cells * n_br * 2 } else { 0 };
@@ -2216,39 +2265,40 @@ pub fn spherical_cone(
         }
         let cell = tap_cell(tap.station, length, &cell_x0);
         let tap_q = 2 * cell;
-        if tap.open {
-            let ts = side_hole_series_length(tap.neck_radius, radii[cell]);
-            apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / alpha);
-        }
-        if !tap.open {
+        let sigma = tap.open_fraction.clamp(0.0, 1.0);
+        if sigma < 1.0 {
             apply_closed_pad(
                 &mut q,
                 &mut r,
                 n,
                 tap_q,
-                tap,
+                &sealed_remainder(tap),
                 density,
                 sound_speed,
                 omega_pin,
                 viscothermal,
             )?;
-            continue;
+            if sigma <= 0.0 {
+                continue;
+            }
         }
+        let b_eff = tap.neck_radius * sigma.sqrt();
+        let ts = tap_open_series_length(tap, radii[cell], taps, length);
+        apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / alpha);
         let phi = n_line + n_nf + open_i;
         open_i += 1;
-        let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;
-        let l_eff = side_hole_neck_length(tap.neck_length, tap.neck_radius, radii[cell]);
+        let a_h = core::f64::consts::PI * b_eff * b_eff;
+        let l_eff = side_hole_neck_length(tap.neck_length, b_eff, radii[cell]);
         let l_h = density * l_eff.max(1.0e-6) / a_h;
         let scale = 1.0 / x_mid[cell];
-        let (r_wall, l_used) =
-            tap_viscothermal(l_h, tap.neck_radius, density, omega_pin, viscothermal);
+        let (r_wall, l_used) = tap_viscothermal(l_h, b_eff, density, omega_pin, viscothermal);
         q[phi * n + phi] = 1.0 / l_used;
         j[tap_q * n + phi] = -scale;
         j[phi * n + tap_q] = scale;
         let r_ac = compact_radiation_impedance(
             density,
             sound_speed,
-            tap.neck_radius,
+            b_eff,
             omega_pin,
             MouthFlange::Flanged,
         )
@@ -2378,7 +2428,7 @@ fn hybrid_sphere_cylinder_chain(
     let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
     let n_line = 2 * n_cells;
     let n_nf = is_cone.iter().filter(|&&b| b).count();
-    let n_tap = taps.iter().filter(|t| t.open).count();
+    let n_tap = taps.iter().filter(|t| t.open_fraction > 0.0).count();
     let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { n_cells * n_br * 2 } else { 0 };
@@ -2574,48 +2624,49 @@ fn hybrid_sphere_cylinder_chain(
         }
         let cell = tap_cell(tap.station, total_length, &cell_x0);
         let tap_q = 2 * cell;
-        if tap.open {
-            let ts = side_hole_series_length(tap.neck_radius, radii[cell]);
-            let l_add = if is_cone[cell] {
-                density * ts / alpha_cell[cell]
-            } else {
-                density * ts / (core::f64::consts::PI * radii[cell] * radii[cell])
-            };
-            apply_t_junction_series(&mut q, n, tap_q + 1, l_add);
-        }
-        if !tap.open {
+        let sigma = tap.open_fraction.clamp(0.0, 1.0);
+        if sigma < 1.0 {
             apply_closed_pad(
                 &mut q,
                 &mut r,
                 n,
                 tap_q,
-                tap,
+                &sealed_remainder(tap),
                 density,
                 sound_speed,
                 omega_pin,
                 viscothermal,
             )?;
-            continue;
+            if sigma <= 0.0 {
+                continue;
+            }
         }
+        let b_eff = tap.neck_radius * sigma.sqrt();
+        let ts = tap_open_series_length(tap, radii[cell], taps, total_length);
+        let l_add = if is_cone[cell] {
+            density * ts / alpha_cell[cell]
+        } else {
+            density * ts / (core::f64::consts::PI * radii[cell] * radii[cell])
+        };
+        apply_t_junction_series(&mut q, n, tap_q + 1, l_add);
         let phi = n_line + n_nf + open_i;
         open_i += 1;
-        let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;
-        let l_eff = side_hole_neck_length(tap.neck_length, tap.neck_radius, radii[cell]);
+        let a_h = core::f64::consts::PI * b_eff * b_eff;
+        let l_eff = side_hole_neck_length(tap.neck_length, b_eff, radii[cell]);
         let l_h = density * l_eff.max(1.0e-6) / a_h;
         let scale = if is_cone[cell] {
             1.0 / x_mid[cell]
         } else {
             1.0
         };
-        let (r_wall, l_used) =
-            tap_viscothermal(l_h, tap.neck_radius, density, omega_pin, viscothermal);
+        let (r_wall, l_used) = tap_viscothermal(l_h, b_eff, density, omega_pin, viscothermal);
         q[phi * n + phi] = 1.0 / l_used;
         j[tap_q * n + phi] = -scale;
         j[phi * n + tap_q] = scale;
         let r_ac = compact_radiation_impedance(
             density,
             sound_speed,
-            tap.neck_radius,
+            b_eff,
             omega_pin,
             MouthFlange::Flanged,
         )
@@ -2730,7 +2781,7 @@ pub fn acoustic_chain(
         }
     }
     let n_line = 2 * n_cells;
-    let n_tap = taps.iter().filter(|t| t.open).count();
+    let n_tap = taps.iter().filter(|t| t.open_fraction > 0.0).count();
     let mut inertances = Vec::with_capacity(n_cells);
     let mut compliances = Vec::with_capacity(n_cells);
     let mut radii = Vec::with_capacity(n_cells);
@@ -2869,39 +2920,40 @@ pub fn acoustic_chain(
         }
         let cell = tap_cell(tap.station, total_length, &cell_x0);
         let tap_q = 2 * cell;
-        if tap.open {
-            let ts = side_hole_series_length(tap.neck_radius, radii[cell]);
-            let a_bore = core::f64::consts::PI * radii[cell] * radii[cell];
-            apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / a_bore);
-        }
-        if !tap.open {
+        let sigma = tap.open_fraction.clamp(0.0, 1.0);
+        if sigma < 1.0 {
             apply_closed_pad(
                 &mut q,
                 &mut r,
                 n,
                 tap_q,
-                tap,
+                &sealed_remainder(tap),
                 density,
                 sound_speed,
                 omega_pin,
                 viscothermal,
             )?;
-            continue;
+            if sigma <= 0.0 {
+                continue;
+            }
         }
+        let b_eff = tap.neck_radius * sigma.sqrt();
+        let ts = tap_open_series_length(tap, radii[cell], taps, total_length);
+        let a_bore = core::f64::consts::PI * radii[cell] * radii[cell];
+        apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / a_bore);
         let phi = n_line + open_i;
         open_i += 1;
-        let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;
-        let l_eff = side_hole_neck_length(tap.neck_length, tap.neck_radius, radii[cell]);
+        let a_h = core::f64::consts::PI * b_eff * b_eff;
+        let l_eff = side_hole_neck_length(tap.neck_length, b_eff, radii[cell]);
         let l_h = density * l_eff.max(1.0e-6) / a_h;
-        let (r_wall, l_used) =
-            tap_viscothermal(l_h, tap.neck_radius, density, omega_pin, viscothermal);
+        let (r_wall, l_used) = tap_viscothermal(l_h, b_eff, density, omega_pin, viscothermal);
         q[phi * n + phi] = 1.0 / l_used;
         j[tap_q * n + phi] = -1.0;
         j[phi * n + tap_q] = 1.0;
         let r_ac = compact_radiation_impedance(
             density,
             sound_speed,
-            tap.neck_radius,
+            b_eff,
             omega_pin,
             MouthFlange::Flanged,
         )
@@ -2918,7 +2970,20 @@ pub fn acoustic_chain(
 }
 
 fn tap_valid(tap: &AcousticTap) -> bool {
-    tap.station >= 0.0 && tap.station <= 1.0 && tap.neck_length >= 0.0 && tap.neck_radius > 0.0
+    tap.station >= 0.0
+        && tap.station <= 1.0
+        && tap.neck_length >= 0.0
+        && tap.neck_radius > 0.0
+        && tap.open_fraction.is_finite()
+        && (0.0..=1.0).contains(&tap.open_fraction)
+}
+
+fn sealed_remainder(tap: &AcousticTap) -> AcousticTap {
+    let sigma = tap.open_fraction.clamp(0.0, 1.0);
+    let mut sealed = *tap;
+    sealed.neck_length *= 1.0 - sigma;
+    sealed.open_fraction = 0.0;
+    sealed
 }
 
 fn tap_cell(station: f64, length: f64, cell_x0: &[f64]) -> usize {

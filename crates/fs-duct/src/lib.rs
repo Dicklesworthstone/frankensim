@@ -55,8 +55,8 @@
 //! `LossModel::Bessel` is the frequency-by-frequency Zwikker–Kosten
 //! wall law (`fs_phs::zwikker_kosten_f`). A tone-hole chimney uses
 //! that same lumped wall law (open series `R`, closed thermal `G`).
-//! Deferred: tone-hole T-junction lattices and fingering tables
-//! (slice 3 of the bead), multimodal horn expansion (trigger: bell
+//! Deferred: fingering tables (slice 3 of the bead), multimodal
+//! horn expansion (trigger: bell
 //! mismatch beyond authored tolerance), and BEM-computed radiation
 //! loads.
 
@@ -64,7 +64,9 @@ use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
-use fs_phs::{side_hole_neck_length, side_hole_series_length, zwikker_kosten_f};
+use fs_phs::{
+    side_hole_mutual_length, side_hole_neck_length, side_hole_series_length, zwikker_kosten_f,
+};
 
 /// Wide-tube validity floor: below this shear number the first-order
 /// Zwikker–Kosten expansion is refused by name.
@@ -137,14 +139,23 @@ pub enum LossModel {
     Bessel,
 }
 
-/// Open/closed state of a tone hole (a bounded continuous vent
-/// fraction is a recorded follow-up).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Open/closed state of a tone hole, or a vent fraction.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HoleState {
     /// Hole open to the exterior through its chimney.
     Open,
     /// Hole sealed at the outer end (pad down): a closed cavity.
     Closed,
+    /// Opening `σ ∈ (0, 1)`: `Y = σ Y_open + (1−σ) Y_closed`.
+    Vent(f64),
+}
+
+fn hole_sigma(state: HoleState) -> f64 {
+    match state {
+        HoleState::Open => 1.0,
+        HoleState::Closed => 0.0,
+        HoleState::Vent(s) => s.clamp(0.0, 1.0),
+    }
 }
 
 /// One duct segment. Lengths and radii in metres.
@@ -627,26 +638,44 @@ pub fn tone_hole_shunt(
 ) -> Result<C64, DuctError> {
     let area = core::f64::consts::PI * hole_radius * hole_radius;
     let k = omega / state.sound_speed;
-    match hole_state {
-        HoleState::Open => {
-            let kb = k * hole_radius;
-            if kb > MAX_RADIATION_KA {
-                return Err(DuctError::RadiationKaTooLarge { ka: kb });
-            }
-            let t_eff = side_hole_neck_length(chimney_height, hole_radius, bore_radius);
-            let r_rad = state.density * state.sound_speed / area * 0.5 * kb * kb;
-            let (r_wall, l_h) = chimney_series(state, hole_radius, t_eff, omega, loss)?;
-            Ok(C64::new(r_rad + r_wall, -omega * l_h))
-        }
-        HoleState::Closed => {
-            let volume = area * chimney_height;
-            let compliance = volume / (state.density * state.sound_speed * state.sound_speed);
-            let g = chimney_thermal_g(state, hole_radius, compliance, omega, loss);
-            // e^{-iωt}: Y = G − i ω C, Z = 1/Y.
-            let y = C64::new(g, -omega * compliance);
-            Ok(y.recip())
-        }
+    let sigma = hole_sigma(hole_state);
+    if sigma > 0.0 && sigma < 1.0 {
+        let z_o = tone_hole_shunt(
+            state,
+            hole_radius,
+            chimney_height,
+            HoleState::Open,
+            omega,
+            loss,
+            bore_radius,
+        )?;
+        let z_c = tone_hole_shunt(
+            state,
+            hole_radius,
+            chimney_height,
+            HoleState::Closed,
+            omega,
+            loss,
+            bore_radius,
+        )?;
+        return Ok((z_o.recip().scale(sigma) + z_c.recip().scale(1.0 - sigma)).recip());
     }
+    if sigma <= 0.0 {
+        let volume = area * chimney_height;
+        let compliance = volume / (state.density * state.sound_speed * state.sound_speed);
+        let g = chimney_thermal_g(state, hole_radius, compliance, omega, loss);
+        // e^{-iωt}: Y = G − i ω C, Z = 1/Y.
+        let y = C64::new(g, -omega * compliance);
+        return Ok(y.recip());
+    }
+    let kb = k * hole_radius;
+    if kb > MAX_RADIATION_KA {
+        return Err(DuctError::RadiationKaTooLarge { ka: kb });
+    }
+    let t_eff = side_hole_neck_length(chimney_height, hole_radius, bore_radius);
+    let r_rad = state.density * state.sound_speed / area * 0.5 * kb * kb;
+    let (r_wall, l_h) = chimney_series(state, hole_radius, t_eff, omega, loss)?;
+    Ok(C64::new(r_rad + r_wall, -omega * l_h))
 }
 
 fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
@@ -671,6 +700,7 @@ fn tone_hole_t_junction(
     omega: f64,
     loss: LossModel,
     bore_radius: f64,
+    extra_series_m: f64,
 ) -> Result<[C64; 4], DuctError> {
     let zh = tone_hole_shunt(
         state,
@@ -682,10 +712,11 @@ fn tone_hole_t_junction(
         bore_radius,
     )?;
     let shunt = [C64::ONE, C64::ZERO, zh.recip(), C64::ONE];
-    if !matches!(hole_state, HoleState::Open) {
+    let sigma = hole_sigma(hole_state);
+    if sigma <= 0.0 {
         return Ok(shunt);
     }
-    let ts = side_hole_series_length(hole_radius, bore_radius);
+    let ts = side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m;
     if ts == 0.0 {
         return Ok(shunt);
     }
@@ -867,9 +898,33 @@ pub fn input_impedance(
     for segment in &duct.segments {
         segment.validate()?;
     }
+    // Open-hole sites for Nederveen mutual series (near-field
+    // beyond the plane-wave cells already in the chain).
+    let mut hole_sites: Vec<(f64, f64, f64)> = Vec::new();
+    let mut acc = 0.0;
+    for segment in &duct.segments {
+        if let Segment::ToneHole {
+            hole_radius,
+            bore_radius,
+            state: hole_state,
+            ..
+        } = *segment
+        {
+            let sigma = hole_sigma(hole_state);
+            if sigma > 0.0 {
+                hole_sites.push((acc, hole_radius * sigma.sqrt(), bore_radius));
+            }
+        } else {
+            acc += match *segment {
+                Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => length,
+                Segment::ToneHole { .. } => 0.0,
+            };
+        }
+    }
     // Chain matrix input -> outlet.
     let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let mut min_rv = f64::INFINITY;
+    let mut hole_i = 0usize;
     for segment in &duct.segments {
         let s = if let Segment::ToneHole {
             hole_radius,
@@ -889,6 +944,14 @@ pub fn input_impedance(
                 let rv = hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt();
                 min_rv = min_rv.min(rv);
             }
+            let mut extra = 0.0;
+            if hole_sigma(hole_state) > 0.0 {
+                let (xi, bi, ai) = hole_sites[hole_i];
+                for &(xj, bj, _) in &hole_sites {
+                    extra += side_hole_mutual_length(bi, bj, ai, (xj - xi).abs());
+                }
+                hole_i += 1;
+            }
             tone_hole_t_junction(
                 state,
                 hole_radius,
@@ -897,6 +960,7 @@ pub fn input_impedance(
                 omega,
                 loss,
                 bore_radius,
+                extra,
             )?
         } else {
             let wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
@@ -2211,6 +2275,50 @@ mod tone_hole_tests {
             closed_all.re,
             closed_inv.re
         );
+    }
+
+    #[test]
+    fn vent_fraction_is_the_admittance_mix() {
+        let state = air20();
+        let omega = 2.0 * core::f64::consts::PI * 400.0;
+        let z_o = tone_hole_shunt(
+            &state,
+            3.0e-3,
+            2.0e-3,
+            HoleState::Open,
+            omega,
+            LossModel::Lossless,
+            7.5e-3,
+        )
+        .expect("open");
+        let z_c = tone_hole_shunt(
+            &state,
+            3.0e-3,
+            2.0e-3,
+            HoleState::Closed,
+            omega,
+            LossModel::Lossless,
+            7.5e-3,
+        )
+        .expect("closed");
+        let z_h = tone_hole_shunt(
+            &state,
+            3.0e-3,
+            2.0e-3,
+            HoleState::Vent(0.5),
+            omega,
+            LossModel::Lossless,
+            7.5e-3,
+        )
+        .expect("half");
+        let y_mix = z_o.recip().scale(0.5) + z_c.recip().scale(0.5);
+        let err = (z_h - y_mix.recip()).abs();
+        assert!(
+            err < 1.0e-12 * z_h.abs(),
+            "Vent(1/2) must be the admittance mix ({z_h:?} vs {:?})",
+            y_mix.recip()
+        );
+        assert!(z_h.re.is_finite() && z_h.re >= 0.0);
     }
 }
 

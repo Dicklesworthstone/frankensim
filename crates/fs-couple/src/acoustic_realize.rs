@@ -2229,7 +2229,7 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
                     station: (acc / total).clamp(0.0, 1.0),
                     neck_length: hole.chimney_m.max(0.0),
                     neck_radius: hole.radius_m,
-                    open: hole.open,
+                    open_fraction: if hole.open { 1.0 } else { 0.0 },
                 });
             }
         }

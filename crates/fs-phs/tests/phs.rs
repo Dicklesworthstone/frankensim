@@ -14,8 +14,9 @@ use fs_phs::{
     helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
     join_port, kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper,
     modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
-    series_impedance_ports, side_hole_inner_length, side_hole_neck_length, side_hole_series_length,
-    slice_linear_taper, spherical_cone, step, step_descriptor, transformer, zwikker_kosten_f,
+    series_impedance_ports, side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
+    side_hole_series_length, slice_linear_taper, spherical_cone, step, step_descriptor,
+    transformer, zwikker_kosten_f,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -1003,7 +1004,7 @@ fn open_tap_raises_the_waveguide_frequency() {
             station: 0.24,
             neck_length: 0.003,
             neck_radius: 0.003,
-            open: true,
+            open_fraction: 1.0,
         }],
     )
     .expect("vented");
@@ -1047,6 +1048,15 @@ fn side_hole_inner_length_shortens_on_a_finite_bore() {
     let ts = side_hole_series_length(b, 2.0e-3);
     assert!(ts < 0.0 && ts > -b);
     assert_eq!(side_hole_series_length(b, 0.0), 0.0);
+    let a = 2.0e-3;
+    let near = side_hole_mutual_length(b, b, a, a);
+    let far = side_hole_mutual_length(b, b, a, 20.0 * a);
+    assert!(near < 0.0 && near.abs() < ts.abs());
+    assert!(
+        far.abs() < 1.0e-6 * near.abs(),
+        "mutual series must vanish at s/a ≫ 1 ({far} vs {near})"
+    );
+    assert_eq!(side_hole_mutual_length(b, b, a, 0.0), 0.0);
 }
 
 #[test]
@@ -1057,7 +1067,7 @@ fn viscothermal_tap_damps_more_than_the_inviscid_vent() {
         station: 0.24,
         neck_length: 0.003,
         neck_radius: 0.0015,
-        open: true,
+        open_fraction: 1.0,
     }];
     let sections = [AcousticSection {
         length: l,
@@ -1115,7 +1125,7 @@ fn closed_pad_is_the_tmm_cavity_compliance() {
         station: 0.24,
         neck_length: 0.02,
         neck_radius: 0.006,
-        open: false,
+        open_fraction: 0.0,
     }];
     let plain = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("plain");
     let sealed = acoustic_chain(&sections, 1.2, c, false, 1, &pad, None).expect("pad");
@@ -1146,6 +1156,108 @@ fn closed_pad_is_the_tmm_cavity_compliance() {
         t1 > t0 * 1.01,
         "extra cavity C must lengthen the period ({t1} vs {t0})"
     );
+}
+
+#[test]
+fn half_vent_sits_between_open_and_closed() {
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 8,
+    }];
+    let tap = |frac: f64| {
+        [AcousticTap {
+            station: 0.24,
+            neck_length: 0.02,
+            neck_radius: 0.006,
+            open_fraction: frac,
+        }]
+    };
+    let closed = acoustic_chain(&sections, 1.2, c, false, 1, &tap(0.0), None).expect("closed");
+    let half = acoustic_chain(&sections, 1.2, c, false, 1, &tap(0.5), None).expect("half");
+    let open = acoustic_chain(&sections, 1.2, c, false, 1, &tap(1.0), None).expect("open");
+    assert_eq!(half.state_dim(), open.state_dim());
+    assert_eq!(closed.state_dim() + 1, open.state_dim());
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        dominant_zero_period(&p, dt)
+    };
+    let tc = ring(&closed);
+    let th = ring(&half);
+    let to = ring(&open);
+    assert!(
+        to < th && th < tc,
+        "half-hole period must sit between open and closed ({to} < {th} < {tc})"
+    );
+}
+
+#[test]
+fn two_close_open_holes_are_not_two_far_open_holes() {
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.012,
+        outlet_radius: 0.012,
+        cells: 10,
+    }];
+    let pair = |s0: f64, s1: f64| {
+        [
+            AcousticTap {
+                station: s0,
+                neck_length: 0.003,
+                neck_radius: 0.004,
+                open_fraction: 1.0,
+            },
+            AcousticTap {
+                station: s1,
+                neck_length: 0.003,
+                neck_radius: 0.004,
+                open_fraction: 1.0,
+            },
+        ]
+    };
+    let close =
+        acoustic_chain(&sections, 1.2, c, false, 1, &pair(0.40, 0.44), None).expect("close");
+    let far = acoustic_chain(&sections, 1.2, c, false, 1, &pair(0.20, 0.80), None).expect("far");
+    assert_eq!(close.state_dim(), far.state_dim());
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..480 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let err: f64 = ring(&close)
+        .iter()
+        .zip(&ring(&far))
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-8, "close and far hole pairs must not reprint");
 }
 
 #[test]

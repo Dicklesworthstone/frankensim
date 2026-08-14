@@ -53,11 +53,11 @@ stepping, and Galerkin reduction preserves the structure.
   (inviscid `ρ,c` cylinder as that ladder; two inlets share the
   mouth so a blow and a transformer body can coexist; open end
   uses compact `Re Z_rad` at the quarter-wave pin),
-  `acoustic_waveguide` / `AcousticTap` (open: neck inertance
-  shunted to atmosphere; closed: TMM cavity `C = V/(ρ c²)`
-  in parallel with the station cell; a `ViscothermalPin`
-  puts series `R` on an open neck and thermal `G` on a
-  closed `C`),
+  `acoustic_waveguide` / `AcousticTap` (`open_fraction` σ:
+  open neck inertance, closed cavity `C`, or the mix
+  `Y = σ Y_open + (1−σ) Y_closed`; a `ViscothermalPin`
+  puts series `R` on the neck and thermal `G` on remaining
+  `C`),
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
   constriction, a cone sliced into cylinders),
@@ -88,6 +88,9 @@ stepping, and Galerkin reduction preserves the structure.
 - `side_hole_series_length` — Nederveen `t_s = −0.37 b²/a`. The
   TMM open hole is the T-junction `series(Z_s/2)·shunt·series(Z_s/2)`;
   the ODE tap subtracts that inertance from the station cell.
+- `side_hole_mutual_length` — extra series on hole `i` from
+  neighbor `j`: `t_m = −0.37 (b_i b_j / a) e^{−s/a}`. Added
+  into the same T-junction `t_s` (TMM and ODE).
 - `series_impedance_ports` — ODE series of two 1-port impedance
   systems (same `u`, `y = y_a + y_b`).
 - `common_effort_capacitor` — two-port `C` with shared pressure

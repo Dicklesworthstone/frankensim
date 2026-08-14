@@ -149,9 +149,9 @@ refusals; bitwise determinism.
 - Radiation fits are low-`ka` (ceiling 1.0, refused by name) for
   unflanged/flanged circular mouths; BEM-computed loads are the
   recorded successor (`fs_bem::helmholtz`).
-- Tone holes are the COMPACT-LIMIT lumped shunt only: no series
-  length corrections, no chimney viscothermal losses, no open-hole
-  mutual interference, no continuous vent fractions — each a recorded
-  refinement with the Ernoult dataset as its regression floor.
+- Tone holes are the compact T-junction (Nederveen series + Dalmont
+  inner + chimney wall law + `Y = σ Y_open + (1−σ) Y_closed` vent
+  mix + mutual series `t_m ∝ e^{−s/a}` from neighboring open
+  holes). The Ernoult dataset is the regression floor.
 - The gas state inherits `fs_material::gas` boundaries (ideal gas,
   phase validity unchecked, calorically perfect gamma).
