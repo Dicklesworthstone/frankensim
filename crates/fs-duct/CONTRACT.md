@@ -41,7 +41,9 @@ same object, and every medium property derives from
   on `b/a`; `0.8216 a` or the Rayleigh piston lives in the
   termination). CLOSED is the same run with a rigid cap. A
   compact chimney reprints lumped `L`/`C`; a long one carries
-  its own quarter-wave. WideTube on the neck is AllRegime so
+  its own quarter-wave. `tone_hole_shunt_wall` and
+  `input_impedance_wall` put the same `WallPin` on that
+  chimney cylinder. WideTube on the neck is AllRegime so
   a narrow chimney does not raise the bore's `r_v` refusal.
   An OPEN hole is still the T-junction
   `series(Z_s/2)·shunt(Z_h)·series(Z_s/2)` with Nederveen

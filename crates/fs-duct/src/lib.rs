@@ -679,9 +679,37 @@ pub fn tone_hole_shunt(
     loss: LossModel,
     bore_radius: f64,
 ) -> Result<C64, DuctError> {
+    tone_hole_shunt_wall(
+        state,
+        hole_radius,
+        chimney_height,
+        hole_state,
+        omega,
+        loss,
+        bore_radius,
+        None,
+    )
+}
+
+/// [`tone_hole_shunt`] with the same [`WallPin`] the bore uses.
+///
+/// The chimney is a one-segment cylinder; `None` is rigid.
+///
+/// # Errors
+/// As [`tone_hole_shunt`].
+pub fn tone_hole_shunt_wall(
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    hole_state: HoleState,
+    omega: f64,
+    loss: LossModel,
+    bore_radius: f64,
+    wall: Option<&WallPin>,
+) -> Result<C64, DuctError> {
     let sigma = hole_sigma(hole_state);
     if sigma > 0.0 && sigma < 1.0 {
-        let z_o = tone_hole_shunt(
+        let z_o = tone_hole_shunt_wall(
             state,
             hole_radius,
             chimney_height,
@@ -689,8 +717,9 @@ pub fn tone_hole_shunt(
             omega,
             loss,
             bore_radius,
+            wall,
         )?;
-        let z_c = tone_hole_shunt(
+        let z_c = tone_hole_shunt_wall(
             state,
             hole_radius,
             chimney_height,
@@ -698,6 +727,7 @@ pub fn tone_hole_shunt(
             omega,
             loss,
             bore_radius,
+            wall,
         )?;
         return Ok((z_o.recip().scale(sigma) + z_c.recip().scale(1.0 - sigma)).recip());
     }
@@ -709,6 +739,7 @@ pub fn tone_hole_shunt(
             omega,
             loss,
             Termination::Closed,
+            wall,
         );
     }
     let inner = side_hole_inner_length(hole_radius, bore_radius);
@@ -719,6 +750,7 @@ pub fn tone_hole_shunt(
         omega,
         loss,
         Termination::FlangedOpen,
+        wall,
     )
 }
 
@@ -731,6 +763,7 @@ fn chimney_line_impedance(
     omega: f64,
     loss: LossModel,
     termination: Termination,
+    wall: Option<&WallPin>,
 ) -> Result<C64, DuctError> {
     if !(radius > 0.0 && length > 0.0 && radius.is_finite() && length.is_finite()) {
         return Err(DuctError::BadParameter {
@@ -744,7 +777,7 @@ fn chimney_line_impedance(
     let duct = Duct {
         segments: vec![Segment::Cylinder { radius, length }],
     };
-    Ok(input_impedance(&duct, state, omega, chimney_loss, termination)?.impedance)
+    Ok(input_impedance_wall(&duct, state, omega, chimney_loss, termination, wall)?.impedance)
 }
 
 fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
@@ -770,8 +803,9 @@ fn tone_hole_t_junction(
     loss: LossModel,
     bore_radius: f64,
     extra_series_m: f64,
+    wall: Option<&WallPin>,
 ) -> Result<[C64; 4], DuctError> {
-    let zh = tone_hole_shunt(
+    let zh = tone_hole_shunt_wall(
         state,
         hole_radius,
         chimney_height,
@@ -779,6 +813,7 @@ fn tone_hole_t_junction(
         omega,
         loss,
         bore_radius,
+        wall,
     )?;
     let shunt = [C64::ONE, C64::ZERO, zh.recip(), C64::ONE];
     let sigma = hole_sigma(hole_state);
@@ -1033,7 +1068,7 @@ pub fn input_impedance(
 ///
 /// The same [`WallPin`] the ODE shunt uses: `Y'` of the gas plus
 /// `2π a / Z'_w` with `Z'_w = r − iωσ + i K/ω` under `e^{-iωt}`.
-/// `None` is a rigid wall. Chimneys stay rigid this path.
+/// `None` is a rigid wall. Tone-hole chimneys use the same pin.
 ///
 /// # Errors
 /// As [`input_impedance`], plus a bad wall pin.
@@ -1114,6 +1149,7 @@ pub fn input_impedance_wall(
                 loss,
                 bore_radius,
                 extra,
+                wall,
             )?
         } else if let Segment::Cone {
             inlet_radius,
@@ -2717,6 +2753,107 @@ mod tone_hole_tests {
                 }),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn chimney_wall_is_not_a_rigid_neck() {
+        let state = air20();
+        let b = 4.0e-3;
+        let h = 0.05;
+        let bore = 8.0e-3;
+        let omega = core::f64::consts::PI * state.sound_speed / (2.0 * h);
+        let rigid = tone_hole_shunt(
+            &state,
+            b,
+            h,
+            HoleState::Open,
+            omega,
+            LossModel::Lossless,
+            bore,
+        )
+        .expect("rigid neck");
+        let soft = WallPin {
+            surface_density: 1.5,
+            stiffness_per_area: 2.0e5,
+            resistance: 0.0,
+        };
+        let yielding = tone_hole_shunt_wall(
+            &state,
+            b,
+            h,
+            HoleState::Open,
+            omega,
+            LossModel::Lossless,
+            bore,
+            Some(&soft),
+        )
+        .expect("soft neck");
+        assert!(
+            (yielding - rigid).abs() > 0.05 * rigid.abs().max(1.0),
+            "a long chimney with a soft wall must not reprint the rigid neck ({yielding:?} vs {rigid:?})"
+        );
+        let compact = tone_hole_shunt_wall(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Open,
+            2.0 * core::f64::consts::PI * 400.0,
+            LossModel::Lossless,
+            2.0e-3,
+            Some(&soft),
+        )
+        .expect("compact");
+        let compact_r = tone_hole_shunt(
+            &state,
+            1.5e-3,
+            1.7e-3,
+            HoleState::Open,
+            2.0 * core::f64::consts::PI * 400.0,
+            LossModel::Lossless,
+            2.0e-3,
+        )
+        .expect("compact rigid");
+        assert!(compact.re.is_finite() && compact_r.re.is_finite());
+        let duct = Duct {
+            segments: vec![
+                Segment::Cylinder {
+                    radius: 0.008,
+                    length: 0.20,
+                },
+                Segment::ToneHole {
+                    hole_radius: b,
+                    chimney_height: h,
+                    bore_radius: 0.008,
+                    state: HoleState::Open,
+                },
+                Segment::Cylinder {
+                    radius: 0.008,
+                    length: 0.14,
+                },
+            ],
+        };
+        let omega_b = 2.0 * core::f64::consts::PI * 220.0;
+        let z_r = input_impedance(
+            &duct,
+            &state,
+            omega_b,
+            LossModel::Lossless,
+            Termination::Closed,
+        )
+        .expect("rigid bore");
+        let z_w = input_impedance_wall(
+            &duct,
+            &state,
+            omega_b,
+            LossModel::Lossless,
+            Termination::Closed,
+            Some(&soft),
+        )
+        .expect("walled bore");
+        assert!(
+            (z_w.impedance - z_r.impedance).abs() > 0.0,
+            "a walled bore with a long hole must not reprint the rigid chain"
         );
     }
 }

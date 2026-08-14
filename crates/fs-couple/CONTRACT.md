@@ -350,7 +350,9 @@ clarinet is one filling of those objects.
   on each chimney cell of a line.
   A scenario `LocallyReactingWall` is the ODE `WallPin`
   (per-cell shunt LC) and the TMM `Y'` addend on the
-  FIR `Z(ω)` / `R(ω)` path. Same numbers both clocks.
+  FIR `Z(ω)` / `R(ω)` path, including tone-hole chimneys.
+  Same numbers both clocks. The one-pole `TravelingWaveLine`
+  is not that path.
   A closed pad is the TMM cavity compliance on the station
   cell; `foster_branches > 0` adds the bore's thermal
   Foster on that remaining `C`. A scenario `ToneHole.open_fraction`
