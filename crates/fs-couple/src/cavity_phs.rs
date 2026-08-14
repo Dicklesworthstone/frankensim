@@ -1,15 +1,14 @@
 //! Time-domain plate × lumped Helmholtz cavity.
 //!
 //! The plate is an `fs-phs` modal bank. The cavity is the flow-driven
-//! Helmholtz pHS. Each sample injects the plate volume velocity into
-//! the cavity and returns pressure × area onto the plate. A bottle
-//! and a vented enclosure are the same objects. There is no guitar
-//! type.
+//! Helmholtz pHS. They join through a `transformer` (area already in
+//! the plate's flow port). A bottle and a vented enclosure are the
+//! same objects. There is no guitar type.
 
 use fs_material::visco::{ThermoelasticZener, loss_factor_to_zeta};
 use fs_phs::{
     MouthFlange, PortHamiltonian, QuadraticStorage, compact_radiation_impedance,
-    helmholtz_resonator_flow, step,
+    helmholtz_resonator_flow, step, transformer,
 };
 
 /// Typed refusal of the plate–cavity clock.
@@ -126,28 +125,25 @@ pub fn realize_plate_cavity(
         r_rad,
     )
     .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+    // Area is already in the plate's second port. The transformer is
+    // the power-conserving F = p A, U = A v join — not a staggered
+    // clock.
+    let sys =
+        transformer(plate, cavity, 1, 0, 1.0).map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut xp = vec![0.0; 2 * n_m];
-    let mut xc = vec![0.0; 2];
+    let mut x = vec![0.0; sys.state_dim()];
     let mut out = Vec::with_capacity(force_n.len());
     let two_pi = 2.0 * core::f64::consts::PI;
+    let n_plate = 2 * n_m;
     for &f_ext in force_n {
-        let mut u_vol = 0.0;
-        for k in 0..n_m {
-            u_vol += spec.areas[k] * xp[2 * k + 1];
-        }
-        let rec_c =
-            step(&cavity, &xc, &[u_vol], dt).map_err(|e| CavityPhsError::Phs(e.to_string()))?;
-        xc = rec_c.x;
-        let p_cav = cavity.output(&xc)[0];
-        let rec_p = step(&plate, &xp, &[f_ext, p_cav], dt)
-            .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+        let rec = step(&sys, &x, &[f_ext], dt).map_err(|e| CavityPhsError::Phs(e.to_string()))?;
         let mut p_obs = 0.0;
         for k in 0..n_m {
-            let acc = (rec_p.x[2 * k + 1] - xp[2 * k + 1]) / dt;
+            let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
             p_obs += spec.density * spec.areas[k] * acc / (two_pi * listener_m);
         }
-        xp = rec_p.x;
+        debug_assert!(rec.x.len() >= n_plate);
+        x = rec.x;
         if !p_obs.is_finite() {
             return Err(CavityPhsError::Invalid {
                 what: "observer pressure left the finite set",

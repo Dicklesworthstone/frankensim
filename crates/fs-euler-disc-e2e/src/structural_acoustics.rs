@@ -4252,10 +4252,14 @@ pub fn build_structural_broadband_radiation_artifact(
         });
     }
 
-    let surface = SpherePanels::new(
-        basis.mesh.boundary.centroids_m.clone(),
-        basis.mesh.boundary.normals.clone(),
-        basis.mesh.boundary.areas_m2.clone(),
+    let surface = SpherePanels::from_triangles(
+        basis
+            .mesh
+            .boundary
+            .triangles
+            .iter()
+            .map(|triangle| triangle.map(|node| basis.mesh.nodes_m[node]))
+            .collect(),
     )?;
     let medium = Medium {
         density: request.medium.gas.density,
@@ -5317,10 +5321,13 @@ impl StructuralModalBasis {
                 what: "observer must not coincide with the specimen origin",
             });
         }
-        let surface = SpherePanels::new(
-            self.mesh.boundary.centroids_m.clone(),
-            self.mesh.boundary.normals.clone(),
-            self.mesh.boundary.areas_m2.clone(),
+        let surface = SpherePanels::from_triangles(
+            self.mesh
+                .boundary
+                .triangles
+                .iter()
+                .map(|triangle| triangle.map(|node| self.mesh.nodes_m[node]))
+                .collect(),
         )?;
         let acoustic_medium = Medium {
             density: medium.gas.density,
@@ -5434,10 +5441,13 @@ impl StructuralModalBasis {
                 what: "minimum directivity captured fraction must be finite and in (0, 1]",
             });
         }
-        let surface = SpherePanels::new(
-            self.mesh.boundary.centroids_m.clone(),
-            self.mesh.boundary.normals.clone(),
-            self.mesh.boundary.areas_m2.clone(),
+        let surface = SpherePanels::from_triangles(
+            self.mesh
+                .boundary
+                .triangles
+                .iter()
+                .map(|triangle| triangle.map(|node| self.mesh.nodes_m[node]))
+                .collect(),
         )?;
         let acoustic_medium = Medium {
             density: medium.gas.density,

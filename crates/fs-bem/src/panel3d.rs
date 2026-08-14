@@ -114,7 +114,8 @@ impl Kernel for GradKernel {
     }
 }
 
-/// A panelized closed surface: centroids, outward normals, areas.
+/// A panelized closed surface: centroids, outward normals, areas, and optional
+/// exact triangle geometry.
 #[derive(Debug, Clone)]
 pub struct SpherePanels {
     /// Panel centroids.
@@ -123,6 +124,11 @@ pub struct SpherePanels {
     normals: Vec<[f64; 3]>,
     /// Panel areas.
     areas: Vec<f64>,
+    /// Exact oriented triangle vertices when the producer retained them.
+    ///
+    /// The legacy centroid constructor leaves this absent. Helmholtz radiation
+    /// uses it for singular and near-singular panel integration when present.
+    triangles: Option<Vec<[[f64; 3]; 3]>>,
 }
 
 impl SpherePanels {
@@ -136,6 +142,85 @@ impl SpherePanels {
             centroids,
             normals,
             areas,
+            triangles: None,
+        };
+        panels.validate()?;
+        Ok(panels)
+    }
+
+    /// Construct a panel surface from exact outward-oriented triangles.
+    ///
+    /// Centroids, unit normals, and areas are derived once from the supplied
+    /// geometry so the integral operator and its panel metadata cannot drift.
+    pub fn from_triangles(triangles: Vec<[[f64; 3]; 3]>) -> Result<Self, BemError> {
+        if triangles.is_empty() || triangles.len() > MAX_SURFACE_PANELS {
+            return Err(BemError::InvalidPanelCount {
+                count: triangles.len(),
+                min: 1,
+                max: MAX_SURFACE_PANELS,
+                even_required: false,
+            });
+        }
+        let mut centroids = Vec::new();
+        let mut normals = Vec::new();
+        let mut areas = Vec::new();
+        for (values, operation) in [
+            (&mut centroids, "triangle centroids"),
+            (&mut normals, "triangle normals"),
+        ] {
+            values
+                .try_reserve_exact(triangles.len())
+                .map_err(|_| BemError::AllocationFailed { operation })?;
+        }
+        areas
+            .try_reserve_exact(triangles.len())
+            .map_err(|_| BemError::AllocationFailed {
+                operation: "triangle areas",
+            })?;
+        for (index, &[a, b, c]) in triangles.iter().enumerate() {
+            if a.into_iter()
+                .chain(b)
+                .chain(c)
+                .any(|value| !value.is_finite() || value.abs() > MAX_ABS_SURFACE_COORDINATE)
+            {
+                return Err(BemError::InvalidSurfacePanel {
+                    index,
+                    field: "triangle vertex",
+                });
+            }
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let cross = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let double_area = cross[0]
+                .mul_add(cross[0], cross[1].mul_add(cross[1], cross[2] * cross[2]))
+                .sqrt();
+            if !(double_area.is_finite() && double_area > 0.0) {
+                return Err(BemError::InvalidSurfacePanel {
+                    index,
+                    field: "nondegenerate triangle",
+                });
+            }
+            centroids.push([
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ]);
+            normals.push([
+                cross[0] / double_area,
+                cross[1] / double_area,
+                cross[2] / double_area,
+            ]);
+            areas.push(0.5 * double_area);
+        }
+        let panels = Self {
+            centroids,
+            normals,
+            areas,
+            triangles: Some(triangles),
         };
         panels.validate()?;
         Ok(panels)
@@ -157,6 +242,12 @@ impl SpherePanels {
     #[must_use]
     pub fn areas(&self) -> &[f64] {
         &self.areas
+    }
+
+    /// Exact oriented triangle vertices, when retained by the producer.
+    #[must_use]
+    pub fn triangles(&self) -> Option<&[[[f64; 3]; 3]]> {
+        self.triangles.as_deref()
     }
 
     /// Panelize an icosphere (fs-rep-mesh) of given radius/subdivisions.
@@ -190,24 +281,15 @@ impl SpherePanels {
             });
         }
         let soup = icosphere(Point3::new(0.0, 0.0, 0.0), radius, subdivisions);
-        let mut centroids = Vec::new();
-        let mut normals = Vec::new();
-        let mut areas = Vec::new();
-        for (values, operation) in [
-            (&mut centroids, "sphere centroids"),
-            (&mut normals, "sphere normals"),
-        ] {
-            values
-                .try_reserve_exact(panel_count)
-                .map_err(|_| BemError::AllocationFailed { operation })?;
-        }
-        areas
+        let mut triangles = Vec::new();
+        triangles
             .try_reserve_exact(panel_count)
             .map_err(|_| BemError::AllocationFailed {
-                operation: "sphere areas",
+                operation: "sphere triangles",
             })?;
         for t in 0..soup.triangles.len() {
             let [a, b, c] = soup.tri(t);
+            let mut triangle = [[a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]];
             let cx = [
                 (a.x + b.x + c.x) / 3.0,
                 (a.y + b.y + c.y) / 3.0,
@@ -215,27 +297,18 @@ impl SpherePanels {
             ];
             let u = [b.x - a.x, b.y - a.y, b.z - a.z];
             let v = [c.x - a.x, c.y - a.y, c.z - a.z];
-            let mut n = [
+            let n = [
                 u[1] * v[2] - u[2] * v[1],
                 u[2] * v[0] - u[0] * v[2],
                 u[0] * v[1] - u[1] * v[0],
             ];
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            let area = 0.5 * len;
-            for x in &mut n {
-                *x /= len;
-            }
             // Outward (sphere centered at origin): flip if pointing in.
             if n[0] * cx[0] + n[1] * cx[1] + n[2] * cx[2] < 0.0 {
-                for x in &mut n {
-                    *x = -*x;
-                }
+                triangle.swap(1, 2);
             }
-            centroids.push(cx);
-            normals.push(n);
-            areas.push(area);
+            triangles.push(triangle);
         }
-        SpherePanels::new(centroids, normals, areas)
+        SpherePanels::from_triangles(triangles)
     }
 
     /// Validate panel shape, finiteness, normal length, and work bounds.
@@ -261,6 +334,17 @@ impl SpherePanels {
                 field: "panel areas",
                 expected: n,
                 actual: self.areas.len(),
+            });
+        }
+        if self
+            .triangles
+            .as_ref()
+            .is_some_and(|triangles| triangles.len() != n)
+        {
+            return Err(BemError::PanelDataLength {
+                field: "panel triangles",
+                expected: n,
+                actual: self.triangles.as_ref().map_or(0, Vec::len),
             });
         }
         for (i, ((centroid, normal), area)) in self

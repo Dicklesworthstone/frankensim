@@ -44,6 +44,7 @@ fn nylon_like(tension_n: f64, lin_density_kg_m: f64) -> PrestressedString {
         rayleigh: None,
         bending_stiffness_n_m2: 0.0,
         polarization_detune: 0.0,
+        moving_end: false,
     }
 }
 
@@ -862,4 +863,54 @@ fn hunt_crossley_changes_rattle() {
         .map(|(x, y)| (x - y).abs())
         .sum();
     assert!(err > 1.0e-8, "Hunt–Crossley must drain a rattle");
+}
+
+#[test]
+fn moving_end_dirac_join_is_not_the_one_way_bridge() {
+    let mut one_way = plucked(80.0, 0.006, 0.004);
+    one_way.plate = Some(steel_panel());
+    one_way.duration_s = 0.05;
+    let mut two_way = one_way.clone();
+    if let Some(s) = two_way.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 3;
+    }
+    let a = realize_assembly(&one_way).expect("fixed-fixed");
+    let b = realize_assembly(&two_way).expect("moving-end Dirac");
+    let err: f64 = a
+        .pressure_pa
+        .iter()
+        .zip(&b.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        err > 1.0e-6,
+        "a free attachment must Dirac-join the plate, not reprint the one-way bridge"
+    );
+}
+
+#[test]
+fn moving_end_with_cavity_is_a_three_phs_clock() {
+    let mut a = plucked(80.0, 0.006, 0.004);
+    if let Some(s) = a.string.as_mut() {
+        s.moving_end = true;
+        s.n_modes = 2;
+    }
+    a.plate = Some(steel_panel());
+    a.cavity = Some(HelmholtzCavity {
+        volume_m3: 0.016,
+        neck_radius_m: 0.02,
+        neck_length_m: 0.03,
+    });
+    a.duration_s = 0.04;
+    let with = realize_assembly(&a).expect("three-pHS");
+    a.cavity = None;
+    let bare = realize_assembly(&a).expect("no cavity");
+    let err: f64 = with
+        .pressure_pa
+        .iter()
+        .zip(&bare.pressure_pa)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(err > 1.0e-8, "the cavity transformer must load the join");
 }

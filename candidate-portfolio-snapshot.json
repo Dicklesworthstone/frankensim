@@ -1,0 +1,466 @@
+{
+  "schema": "extreal.portfolio-disposition.v1",
+  "kind": "CandidatePortfolioAuthoritySnapshot",
+  "authority_statement": "INERT CANDIDATE DATA. This snapshot cannot change robot selection, public capability projection, active budgets, or promotion authority. Only frankensim-extreal-program-f85xj.16.12 may independently adjudicate non-loss, uniqueness, dependencies, budgets, and user projection, and alone may atomically install an ActivePortfolioAuthoritySnapshot; every non-Pass preserves the exact prior active snapshot (currently: none).",
+  "primary_spine_id": "frankensim-extreal-program-f85xj.6",
+  "primary_acceptance_owner": "frankensim-extreal-program-f85xj.6.11",
+  "activation_owner": "frankensim-extreal-program-f85xj.16.12",
+  "allocation_basis": "separate_human_attention_and_compute_70_20_10",
+  "default_transition_rule": "no_role_change_without_nonloss_inventory_and_16_12_pass",
+  "dispositions": [
+    {
+      "issue_id": "frankensim-ext-e0d-machine-slice-7jxk",
+      "spine_role": "shared_infrastructure",
+      "disposition": "historical_evidence",
+      "integration_owner": "frankensim-ext-epic-e0d-36db",
+      "acceptance_owner": "frankensim-ext-epic-gov-rjoq.8",
+      "attention_budget_class": "shared_20",
+      "compute_budget_class": "shared_20",
+      "wip_cap": 1,
+      "falsifier": "machine_graph_admission_or_audit_or_replay_identity_fails_or_requires_duplicate_primary_authority",
+      "promotion_gate": "shared_only_after_e0d_replay_pass_and_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_product_or_primary_acceptance"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-coldplate-2kkb",
+      "spine_role": "primary_enhancement",
+      "disposition": "secondary_candidate",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "primary_70_after_cooling_l3",
+      "compute_budget_class": "primary_70_after_cooling_l3",
+      "wip_cap": 1,
+      "falsifier": "conjugate_heat_pressure_energy_or_supplier_step_receipts_fail_the_frozen_reference_envelopes",
+      "promotion_gate": "cooling_6_11_pass_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "l4_or_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-geneva-b4hj",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e2-q8wx",
+      "acceptance_owner": "frankensim-ext-e2-test-battery-xxgv",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "intermittent_event_timing_retention_contact_or_wear_receipt_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e2_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-gear-ei5t",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e3-e1c9",
+      "acceptance_owner": "frankensim-ext-e3-test-battery-ztso",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "transmission_error_contact_life_or_acoustic_receipt_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e3_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-motor-m8n3",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e4-tlca",
+      "acceptance_owner": "frankensim-ext-e4-test-battery-5kv0",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "torque_power_loss_demagnetization_thermal_or_control_closure_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e4_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-wankel-jwx0",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e5-3n3f",
+      "acceptance_owner": "frankensim-ext-e5-test-battery-u06c",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "trochoid_seal_contact_mass_energy_chemistry_or_event_balance_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e5_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-genset-mr28",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "coupled_ice_generator_energy_speed_control_or_interface_closure_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-digital-twin-pkfe",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "posterior_coverage_drift_detection_escalation_or_replay_identity_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-turbo-efuel-7zyp",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "boost_chemistry_knock_emissions_or_coupled_balance_receipt_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-pump-bearing-z65l",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "head_efficiency_cavitation_fluid_film_stability_or_life_receipt_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-induction-i40z",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "team_torque_loss_thermal_moving_conductor_or_control_closure_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    },
+    {
+      "issue_id": "frankensim-ext-flagship-constant-width-cvng",
+      "spine_role": "secondary_candidate",
+      "disposition": "capped_frontier",
+      "integration_owner": "frankensim-ext-epic-e7-3nxa",
+      "acceptance_owner": "frankensim-ext-epic-e7-3nxa.1",
+      "attention_budget_class": "frontier_10_collective",
+      "compute_budget_class": "frontier_10_collective",
+      "wip_cap": 1,
+      "falsifier": "rolling_no_slip_contact_geometry_or_motion_falsifier_fails",
+      "promotion_gate": "cooling_6_11_pass_and_allocation_exception_then_e7_battery_pass_then_16_12_active_snapshot_pass",
+      "forbidden_promotion": "primary_or_l4_l5_by_inference"
+    }
+  ],
+  "aggregate_constraints": [
+    "exactly_one_primary_product_and_acceptance_owner",
+    "e0d_never_projects_as_product_authority",
+    "coldplate_cannot_block_cooling_before_6_11_pass",
+    "capped_frontier_rows_share_one_collective_10_percent_budget_and_one_active_integration_wip_per_phase",
+    "every_promotion_requires_nonloss_inventory_and_16_12_activation",
+    "no_row_implies_l4_or_l5"
+  ],
+  "live_graph_binding": {
+    "captured_at": "2026-08-14T02:00:04Z",
+    "beads_data_root_sha256": "ab84e806756761e4cb27f03257488890cf76f843b841c174605b0321b348f613",
+    "head_sha": "fadedd35f5d49497c5ee52a7fe646063b058f364",
+    "br_version": "br 0.2.19",
+    "derivation": "all counts recomputed from .beads/issues.jsonl at the recorded root; no copied literal",
+    "issue_total": 2976,
+    "status_counts": {
+      "blocked": 83,
+      "closed": 816,
+      "deferred": 4,
+      "in_progress": 244,
+      "open": 1829
+    },
+    "primary_spine_descendants": 0,
+    "primary_spine_open_or_active": 0
+  },
+  "producer_validation": {
+    "producer_bead": "frankensim-extreal-program-f85xj.16.11",
+    "checks_run": 53,
+    "checks_failed": 0,
+    "checks": [
+      {
+        "check": "no-duplicate-disposition-rows",
+        "pass": true,
+        "detail": "12 rows, 12 unique"
+      },
+      {
+        "check": "exists:frankensim-ext-e0d-machine-slice-7jxk",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-e0d-machine-slice-7jxk resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e0d-36db",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-e0d-machine-slice-7jxk resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-gov-rjoq.8",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-e0d-machine-slice-7jxk resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-e0d-machine-slice-7jxk",
+        "pass": true,
+        "detail": "shared_infrastructure"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-coldplate-2kkb",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-coldplate-2kkb resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-coldplate-2kkb resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-coldplate-2kkb resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-coldplate-2kkb",
+        "pass": true,
+        "detail": "primary_enhancement"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-geneva-b4hj",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-geneva-b4hj resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e2-q8wx",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-geneva-b4hj resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-e2-test-battery-xxgv",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-geneva-b4hj resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-geneva-b4hj",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-gear-ei5t",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-gear-ei5t resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e3-e1c9",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-gear-ei5t resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-e3-test-battery-ztso",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-gear-ei5t resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-gear-ei5t",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-motor-m8n3",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-motor-m8n3 resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e4-tlca",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-motor-m8n3 resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-e4-test-battery-5kv0",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-motor-m8n3 resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-motor-m8n3",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-wankel-jwx0",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-wankel-jwx0 resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e5-3n3f",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-wankel-jwx0 resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-e5-test-battery-u06c",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-wankel-jwx0 resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-wankel-jwx0",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-genset-mr28",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-genset-mr28 resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-genset-mr28 resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-genset-mr28 resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-genset-mr28",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-digital-twin-pkfe",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-digital-twin-pkfe resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-digital-twin-pkfe resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-digital-twin-pkfe resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-digital-twin-pkfe",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-turbo-efuel-7zyp",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-turbo-efuel-7zyp resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-turbo-efuel-7zyp resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-turbo-efuel-7zyp resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-turbo-efuel-7zyp",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-pump-bearing-z65l",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-pump-bearing-z65l resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-pump-bearing-z65l resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-pump-bearing-z65l resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-pump-bearing-z65l",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-induction-i40z",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-induction-i40z resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-induction-i40z resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-induction-i40z resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-induction-i40z",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:frankensim-ext-flagship-constant-width-cvng",
+        "pass": true,
+        "detail": "issue_id of frankensim-ext-flagship-constant-width-cvng resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa",
+        "pass": true,
+        "detail": "integration_owner of frankensim-ext-flagship-constant-width-cvng resolves in the live graph"
+      },
+      {
+        "check": "exists:frankensim-ext-epic-e7-3nxa.1",
+        "pass": true,
+        "detail": "acceptance_owner of frankensim-ext-flagship-constant-width-cvng resolves in the live graph"
+      },
+      {
+        "check": "role-vocabulary:frankensim-ext-flagship-constant-width-cvng",
+        "pass": true,
+        "detail": "secondary_candidate"
+      },
+      {
+        "check": "exists:primary-spine",
+        "pass": true,
+        "detail": "frankensim-extreal-program-f85xj.6"
+      },
+      {
+        "check": "exists:primary-acceptance",
+        "pass": true,
+        "detail": "frankensim-extreal-program-f85xj.6.11"
+      },
+      {
+        "check": "exists:activation-owner",
+        "pass": true,
+        "detail": "frankensim-extreal-program-f85xj.16.12"
+      },
+      {
+        "check": "exactly-one-primary",
+        "pass": true,
+        "detail": "primary identity lives in primary_spine_id; no disposition row may claim it"
+      }
+    ]
+  },
+  "history_preservation": "No disposition deletes or collapses ambitions: absorbed and historical records retain their features, children, proofs, no-claims, and lineage in their own bead records, which this snapshot references but never rewrites."
+}

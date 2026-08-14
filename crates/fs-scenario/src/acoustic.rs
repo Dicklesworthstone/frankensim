@@ -52,6 +52,10 @@ pub struct PrestressedString {
     /// Second-polarization fractional detune. Zero keeps one polarization.
     /// A few 10⁻³ is a typical bridge-rocking split and produces beating.
     pub polarization_detune: f64,
+    /// If true the attachment end is free (`φ(0) ≠ 0`) and realization
+    /// Dirac-joins the waveguide to any plate/cavity. False is
+    /// fixed-fixed sines with a one-way bridge force.
+    pub moving_end: bool,
 }
 
 /// Rayleigh damping coefficients for a modal family.

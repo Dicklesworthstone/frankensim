@@ -313,10 +313,12 @@ clarinet is one filling of those objects.
   the duct FIR. The certified three-pHS Dirac interconnection is
   `common_flow_dirac(moving_end_waveguide, transformer(plate, cavity))`
   in `fs-phs` (free-end attachment port, area transformer, Kirchhoff
-  star). `realize_assembly` still marches the viscothermal duct as
-  an FIR scatterer and the fixed-fixed sine series as a one-way
-  bridge force — that is the TMM/observer path, not a claim that
-  the Dirac 3-join is unused.
+  star). `PrestressedString.moving_end` selects that clock in
+  `realize_assembly` when there is no duct, bow, obstacle, or von
+  Karman plate. Fixed-fixed sines keep the one-way bridge force.
+  A viscothermal duct with tone holes stays the FIR TMM. Plate ×
+  Helmholtz in `cavity_phs` is the same transformer, not a staggered
+  pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
   analytic primitive when those hypotheses hold, and the FE-sampled
   Airy construction otherwise. The membrane channel remains the

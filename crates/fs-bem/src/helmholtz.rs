@@ -24,10 +24,14 @@
 //! HBIE: `N p - D' q - q/2 = 0` (hypersingular finite part), combined as
 //! `(D - I/2 + alpha N) p = (S + alpha D' + alpha/2 I) q`.
 //!
-//! DISCRETIZATION HONESTY: off-diagonal influence uses the centroid
-//! point-panel approximation (`kernel(x_i, y_j) * A_j`), the same class
-//! the crate's Laplace side validated to +1.8% on the aperture pilot.
-//! Self terms use the equivalent-disc analytic finite parts with
+//! DISCRETIZATION HONESTY: surfaces that retain oriented triangle vertices use
+//! tensor Gauss integration for self and geometrically near influence; only
+//! well-separated interactions use the centroid point-panel approximation.
+//! Legacy centroid-only surfaces retain the original equivalent-disc self
+//! terms and point-panel off-diagonal approximation. Triangle self terms use
+//! a centroid fan plus a Duffy transform, which cancels the weak `1/r`
+//! singularity and the regularized hypersingular `1/r` remainder. The legacy
+//! equivalent-disc finite parts use
 //! `a = sqrt(A/pi)`:
 //! `S_ii = (e^{ika} - 1) / (2ik)`, `D_ii = D'_ii = 0` (flat panel), and
 //! the hypersingular self entry split as the integrable difference
@@ -35,9 +39,8 @@
 //! recovered from the exact closed-surface identity `N_0[1] = 0` as
 //! minus the discrete off-diagonal static row sum (same quadrature on
 //! both sides, so the point-panel error cancels).
-//! These closed forms are pinned by unit tests against numerical
-//! quadrature with the singular core subtracted, and the whole pipeline
-//! is arbitrated by the pulsating-sphere impedance oracle.
+//! These paths are pinned by analytic/independent quadrature tests and the
+//! whole pipeline is arbitrated by the pulsating-sphere impedance oracle.
 //!
 //! Determinism: assembly and solves are sequential with fixed traversal
 //! order; complex exponentials route through `fs_math::det` per the
@@ -45,8 +48,8 @@
 //!
 //! Deferred with recorded triggers (see CONTRACT): wideband directional
 //! FMM acceleration (dense complex LU is the v1 path; the work cap
-//! refuses above [`MAX_DENSE_PANELS`]) and exact triangle singular
-//! quadrature beyond the equivalent-disc self terms. Spherical-harmonic
+//! refuses above [`MAX_DENSE_PANELS`]) and a Galerkin/higher-order boundary
+//! basis beyond the constant-panel triangle integration. Spherical-harmonic
 //! directivity tables ([`directivity_sh_table`]), radiation efficiency
 //! ([`radiation_efficiency`]), and per-solve condition/work-cap
 //! diagnostics (on [`RadiationSolution`]) ship in this module; the
@@ -254,6 +257,22 @@ fn norm(a: [f64; 3]) -> f64 {
     dot(a, a).sqrt()
 }
 
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn affine3(origin: [f64; 3], a: [f64; 3], wa: f64, b: [f64; 3], wb: f64) -> [f64; 3] {
+    [
+        origin[0] + wa * a[0] + wb * b[0],
+        origin[1] + wa * a[1] + wb * b[1],
+        origin[2] + wa * a[2] + wb * b[2],
+    ]
+}
+
 /// The four point kernels for x != y: (G, dG/dn_y, dG/dn_x,
 /// d2G/dn_x dn_y). With `d = x - y`, `r = |d|`:
 /// `dG/dn_y = -G' (n_y . d)/r`, `dG/dn_x = G' (n_x . d)/r`, and
@@ -294,6 +313,112 @@ fn self_terms(k: f64, area: f64) -> (C64, C64) {
     (s, n_reg)
 }
 
+// Eight-point Gauss-Legendre rule mapped to [0, 1]. The fixed table keeps the
+// integration order and floating-point operation graph deterministic.
+const GL8_X: [f64; 8] = [
+    0.019_855_071_751_231_884,
+    0.101_666_761_293_186_64,
+    0.237_233_795_041_835_5,
+    0.408_282_678_752_175_1,
+    0.591_717_321_247_824_9,
+    0.762_766_204_958_164_5,
+    0.898_333_238_706_813_4,
+    0.980_144_928_248_768_1,
+];
+const GL8_W: [f64; 8] = [
+    0.050_614_268_145_188_13,
+    0.111_190_517_226_687_24,
+    0.156_853_322_938_943_66,
+    0.181_341_891_689_181,
+    0.181_341_891_689_181,
+    0.156_853_322_938_943_66,
+    0.111_190_517_226_687_24,
+    0.050_614_268_145_188_13,
+];
+
+fn regularized_coplanar_hypersingular(k: f64, r: f64) -> C64 {
+    if k == 0.0 {
+        return C64::ZERO;
+    }
+    let z = k * r;
+    let numerator = if z.abs() < 1.0e-3 {
+        let z2 = z * z;
+        let z3 = z2 * z;
+        let z4 = z2 * z2;
+        let z5 = z4 * z;
+        let z6 = z3 * z3;
+        C64::new(z2 / 2.0 - z4 / 8.0 + z6 / 144.0, z3 / 3.0 - z5 / 30.0)
+    } else {
+        expik(z) * C64::new(1.0, -z) - C64::ONE
+    };
+    numerator.scale(1.0 / (4.0 * core::f64::consts::PI * r * r * r))
+}
+
+/// Integrate all four kernels over a flat source triangle. The target must not
+/// lie on the source triangle; the self panel uses [`triangle_self_terms`].
+fn triangle_influence(
+    k: f64,
+    x: [f64; 3],
+    nx: [f64; 3],
+    triangle: [[f64; 3]; 3],
+    ny: [f64; 3],
+) -> (C64, C64, C64, C64) {
+    let [a, b, c] = triangle;
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let double_area = norm(cross(ab, ac));
+    let mut out = [C64::ZERO; 4];
+    for (&u, &wu) in GL8_X.iter().zip(&GL8_W) {
+        for (&v, &wv) in GL8_X.iter().zip(&GL8_W) {
+            let y = affine3(a, ab, u, ac, (1.0 - u) * v);
+            let weight = wu * wv * (1.0 - u) * double_area;
+            let values = kernels(k, x, nx, y, ny);
+            out[0] = out[0] + values.0.scale(weight);
+            out[1] = out[1] + values.1.scale(weight);
+            out[2] = out[2] + values.2.scale(weight);
+            out[3] = out[3] + values.3.scale(weight);
+        }
+    }
+    (out[0], out[1], out[2], out[3])
+}
+
+/// Duffy-integrated `(S_ii, (N_k-N_0)_ii)` for a flat triangle collocated at
+/// its centroid. Splitting the panel into a centroid fan places the singularity
+/// at one vertex of each subtriangle; the Duffy Jacobian cancels the remaining
+/// integrable `1/r` behavior without an equivalent-disc shape approximation.
+fn triangle_self_terms(k: f64, x: [f64; 3], triangle: [[f64; 3]; 3]) -> (C64, C64) {
+    let mut single_layer = C64::ZERO;
+    let mut hypersingular_regular = C64::ZERO;
+    for edge in 0..3 {
+        let e0 = sub(triangle[edge], x);
+        let e1 = sub(triangle[(edge + 1) % 3], x);
+        let double_area = norm(cross(e0, e1));
+        for (&radial, &wr) in GL8_X.iter().zip(&GL8_W) {
+            for (&tangent, &wt) in GL8_X.iter().zip(&GL8_W) {
+                let ray = [
+                    (1.0 - tangent).mul_add(e0[0], tangent * e1[0]),
+                    (1.0 - tangent).mul_add(e0[1], tangent * e1[1]),
+                    (1.0 - tangent).mul_add(e0[2], tangent * e1[2]),
+                ];
+                let r = radial * norm(ray);
+                let weight = wr * wt * radial * double_area;
+                single_layer = single_layer + green(k, r).scale(weight);
+                hypersingular_regular =
+                    hypersingular_regular + regularized_coplanar_hypersingular(k, r).scale(weight);
+            }
+        }
+    }
+    (single_layer, hypersingular_regular)
+}
+
+fn triangle_is_near(x: [f64; 3], centroid: [f64; 3], triangle: [[f64; 3]; 3]) -> bool {
+    let radius = triangle
+        .iter()
+        .map(|&vertex| norm(sub(vertex, centroid)))
+        .fold(0.0_f64, f64::max);
+    norm(sub(x, centroid)) <= 4.0 * radius
+}
+
 fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
     let mut max_area = 0.0f64;
     for &a in surface.areas() {
@@ -312,6 +437,11 @@ fn surface_fingerprint(surface: &SpherePanels) -> u64 {
             .chain([surface.areas()[j]])
         {
             hash = (hash ^ value.to_bits()).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        if let Some(triangles) = surface.triangles() {
+            for value in triangles[j].into_iter().flatten() {
+                hash = (hash ^ value.to_bits()).wrapping_mul(0x0000_0100_0000_01b3);
+            }
         }
     }
     hash
@@ -671,6 +801,7 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
     let centroids = surface.centroids();
     let normals = surface.normals();
     let areas = surface.areas();
+    let triangles = surface.triangles();
     let n = centroids.len();
     let half = C64::new(0.5, 0.0);
     let mut amat = vec![C64::ZERO; n * n];
@@ -684,14 +815,30 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
         let mut n0_row = C64::ZERO;
         for j in 0..n {
             if j != i {
-                let (_, _, _, d2g0) = kernels(0.0, xi, ni, centroids[j], normals[j]);
-                n0_row = n0_row + d2g0.scale(areas[j]);
+                let n0_ij = if let Some(triangles) = triangles
+                    && triangle_is_near(xi, centroids[j], triangles[j])
+                {
+                    triangle_influence(0.0, xi, ni, triangles[j], normals[j]).3
+                } else {
+                    kernels(0.0, xi, ni, centroids[j], normals[j])
+                        .3
+                        .scale(areas[j])
+                };
+                n0_row = n0_row + n0_ij;
             }
         }
         for j in 0..n {
             let (s_ij, d_ij, dp_ij, n_ij) = if i == j {
-                let (s, n_reg) = self_terms(k, areas[i]);
+                let (s, n_reg) = if let Some(triangles) = triangles {
+                    triangle_self_terms(k, xi, triangles[i])
+                } else {
+                    self_terms(k, areas[i])
+                };
                 (s, C64::ZERO, C64::ZERO, n_reg - n0_row)
+            } else if let Some(triangles) = triangles
+                && triangle_is_near(xi, centroids[j], triangles[j])
+            {
+                triangle_influence(k, xi, ni, triangles[j], normals[j])
             } else {
                 let (g, dgdny, dgdnx, d2g) = kernels(k, xi, ni, centroids[j], normals[j]);
                 let a = areas[j];
@@ -1407,6 +1554,33 @@ mod tests {
         );
         println!(
             "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"kernel-fd-pins\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn triangle_duffy_self_terms_obey_helmholtz_scale_covariance() {
+        let triangle = [[-0.8, -0.4, 0.0], [1.1, -0.3, 0.0], [0.2, 1.3, 0.0]];
+        let centroid = [
+            (triangle[0][0] + triangle[1][0] + triangle[2][0]) / 3.0,
+            (triangle[0][1] + triangle[1][1] + triangle[2][1]) / 3.0,
+            0.0,
+        ];
+        let k = 1.7;
+        let (single, regularized_hypersingular) = triangle_self_terms(k, centroid, triangle);
+        assert!(single.re > 0.0 && single.im > 0.0);
+        assert!(regularized_hypersingular.re > 0.0);
+
+        let scale = 3.25;
+        let scaled_triangle = triangle.map(|point| point.map(|value| scale * value));
+        let scaled_centroid = centroid.map(|value| scale * value);
+        let (scaled_single, scaled_regularized_hypersingular) =
+            triangle_self_terms(k / scale, scaled_centroid, scaled_triangle);
+        assert!((scaled_single - single.scale(scale)).abs() < 2.0e-13 * scaled_single.abs());
+        assert!(
+            (scaled_regularized_hypersingular
+                - regularized_hypersingular.scale(1.0 / scale))
+            .abs()
+                < 2.0e-13 * scaled_regularized_hypersingular.abs()
         );
     }
 
