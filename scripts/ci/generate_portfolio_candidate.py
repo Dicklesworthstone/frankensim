@@ -156,7 +156,7 @@ def descendants(issues, root):
     for issue in issues.values():
         for dep in issue.get("dependencies") or []:
             if isinstance(dep, dict) and dep.get("type") == "parent-child":
-                children.setdefault(dep.get("depends_on"), []).append(issue["id"])
+                children.setdefault(dep.get("depends_on_id"), []).append(issue["id"])
     seen, stack = set(), [root]
     while stack:
         node = stack.pop()
