@@ -132,7 +132,7 @@ pub(super) fn solve_three_planar_interfaces_one_reflection(
     exit: PlaneFrame,
     eta_glass: f64,
     entry_seed: Point3,
-    reflection_seed: Point3,
+    _reflection_seed: Point3,
     exit_seed: Point3,
 ) -> Option<PlanarDielectricReflectionConnection> {
     if !finite_point(source)
@@ -147,73 +147,52 @@ pub(super) fn solve_three_planar_interfaces_one_reflection(
     {
         return None;
     }
-    let p = entry.coordinates(entry_seed);
-    let r = reflection.coordinates(reflection_seed);
-    let q = exit.coordinates(exit_seed);
-    let mut parameters = [p[0], p[1], r[0], r[1], q[0], q[1]];
-    let mut previous_objective = reflected_optical_length(
-        source, target, entry, reflection, exit, eta_glass, parameters,
+    // Unfold the specular reflection. Reflection is an isometry, so the
+    // stationary T-R-T path is exactly the stationary two-interface path to
+    // the mirrored target through the mirrored exit plane. This replaces a
+    // six-variable Newton solve with the existing four-variable solve without
+    // changing the optical path or estimator.
+    let unfolded_target = reflect_point_across_plane(target, reflection);
+    let unfolded_exit = reflect_frame_across_plane(exit, reflection);
+    let unfolded = solve_two_planar_interfaces(
+        source,
+        unfolded_target,
+        entry,
+        unfolded_exit,
+        eta_glass,
+        entry_seed,
+        reflect_point_across_plane(exit_seed, reflection),
     )?;
 
-    for _ in 0..MAX_NEWTON_STEPS {
-        let system = reflected_fermat_system(
-            source, target, entry, reflection, exit, eta_glass, parameters,
-        )?;
-        let gradient_norm = system
-            .gradient
-            .into_iter()
-            .map(f64::abs)
-            .fold(0.0, f64::max);
-        if gradient_norm <= GRADIENT_TOLERANCE {
-            return finish_reflected_connection(
-                source, target, entry, reflection, exit, eta_glass, parameters,
-            );
-        }
-        let rhs = system.gradient.map(|value| -value);
-        let step = solve_square(system.hessian, rhs)?;
-        let step_norm = step.into_iter().map(f64::abs).fold(0.0, f64::max);
-        let directional_derivative = dot(system.gradient, step);
-        if !step_norm.is_finite()
-            || !directional_derivative.is_finite()
-            || directional_derivative >= 0.0
-        {
-            return None;
-        }
-        let mut scale = 1.0;
-        let mut accepted = None;
-        for _ in 0..24 {
-            let candidate = std::array::from_fn(|index| parameters[index] + scale * step[index]);
-            if let Some(objective) = reflected_optical_length(
-                source, target, entry, reflection, exit, eta_glass, candidate,
-            ) && objective <= previous_objective + 1.0e-4 * scale * directional_derivative
-            {
-                accepted = Some((candidate, objective));
-                break;
-            }
-            scale *= 0.5;
-        }
-        let (candidate, objective) = accepted?;
-        parameters = candidate;
-        previous_objective = objective;
-        if scale * step_norm <= STEP_TOLERANCE {
-            let system = reflected_fermat_system(
-                source, target, entry, reflection, exit, eta_glass, parameters,
-            )?;
-            if system
-                .gradient
-                .into_iter()
-                .map(f64::abs)
-                .fold(0.0, f64::max)
-                <= 8.0 * GRADIENT_TOLERANCE
-            {
-                return finish_reflected_connection(
-                    source, target, entry, reflection, exit, eta_glass, parameters,
-                );
-            }
-            return None;
-        }
+    let unfolded_internal = unfolded.exit_point.delta_from(unfolded.entry_point);
+    let denominator = unfolded_internal.dot(reflection.outward_normal);
+    if !denominator.is_finite() || denominator.abs() <= MIN_PIVOT {
+        return None;
     }
-    None
+    let reflection_fraction = reflection
+        .origin
+        .delta_from(unfolded.entry_point)
+        .dot(reflection.outward_normal)
+        / denominator;
+    if !reflection_fraction.is_finite() || !(0.0..1.0).contains(&reflection_fraction) {
+        return None;
+    }
+    let reflection_point = unfolded
+        .entry_point
+        .offset(unfolded_internal.scale(reflection_fraction));
+    let exit_point = reflect_point_across_plane(unfolded.exit_point, reflection);
+    let p = entry.coordinates(unfolded.entry_point);
+    let r = reflection.coordinates(reflection_point);
+    let q = exit.coordinates(exit_point);
+    finish_reflected_connection(
+        source,
+        target,
+        entry,
+        reflection,
+        exit,
+        eta_glass,
+        [p[0], p[1], r[0], r[1], q[0], q[1]],
+    )
 }
 
 /// Exact local change of variables from a target-area proposal to source
@@ -785,6 +764,29 @@ fn matrix_vector(matrix: [[f64; 3]; 3], right: Vec3) -> Vec3 {
     Vec3::new(product[0], product[1], product[2])
 }
 
+fn reflect_point_across_plane(point: Point3, plane: PlaneFrame) -> Point3 {
+    let signed_distance = point.delta_from(plane.origin).dot(plane.outward_normal);
+    point.offset(plane.outward_normal.scale(-2.0 * signed_distance))
+}
+
+fn reflect_vector_across_plane(vector: Vec3, plane: PlaneFrame) -> Vec3 {
+    add(
+        vector,
+        plane
+            .outward_normal
+            .scale(-2.0 * vector.dot(plane.outward_normal)),
+    )
+}
+
+fn reflect_frame_across_plane(frame: PlaneFrame, mirror: PlaneFrame) -> PlaneFrame {
+    PlaneFrame {
+        origin: reflect_point_across_plane(frame.origin, mirror),
+        tangent: reflect_vector_across_plane(frame.tangent, mirror),
+        bitangent: reflect_vector_across_plane(frame.bitangent, mirror),
+        outward_normal: reflect_vector_across_plane(frame.outward_normal, mirror),
+    }
+}
+
 fn cross(left: Vec3, right: Vec3) -> Vec3 {
     Vec3::new(
         left.y * right.z - left.z * right.y,
@@ -794,10 +796,6 @@ fn cross(left: Vec3, right: Vec3) -> Vec3 {
 }
 
 fn dot4(left: [f64; 4], right: [f64; 4]) -> f64 {
-    left.into_iter().zip(right).map(|(a, b)| a * b).sum()
-}
-
-fn dot<const N: usize>(left: [f64; N], right: [f64; N]) -> f64 {
     left.into_iter().zip(right).map(|(a, b)| a * b).sum()
 }
 
