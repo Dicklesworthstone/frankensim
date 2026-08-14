@@ -225,6 +225,23 @@ impl GasState {
         let den = 2.0 * self.density * self.sound_speed * self.sound_speed * self.sound_speed;
         if den > 0.0 { num / den } else { 0.0 }
     }
+
+    /// ISO 9613-1 absorption [Np/m] at this `(T, p)` and an explicit
+    /// relative humidity in `[0, 1]`.
+    ///
+    /// Transport coefficients on this state are **not** used — ISO's
+    /// classical term is the air fit. Do not add
+    /// [`Self::stokes_kirchhoff_absorption`] on top.
+    ///
+    /// # Errors
+    /// Forwards the ISO meteorological-window refusals.
+    pub fn iso9613_absorption(
+        &self,
+        relative_humidity: f64,
+        omega: f64,
+    ) -> Result<f64, crate::MaterialError> {
+        crate::iso9613::iso9613_absorption(self, relative_humidity, omega)
+    }
 }
 
 #[cfg(test)]
