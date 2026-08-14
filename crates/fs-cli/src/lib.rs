@@ -163,7 +163,10 @@ impl Diagnostic {
 pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
     let (mode, command) = match parse_args(args) {
         Ok(parsed) => parsed,
-        Err((mode, diagnostic)) => return refusal(mode, exit::USAGE, &diagnostic, None),
+        Err((mode, diagnostic)) => {
+            let class = resource_cap_exit_class(&diagnostic.code).unwrap_or(exit::USAGE);
+            return refusal(mode, class, &diagnostic, None);
+        }
     };
 
     match command {
@@ -238,6 +241,20 @@ pub fn validate_source(
         OutputMode::Text
     };
     validate_loaded(project, source, syntax, mode)
+}
+
+/// The single exit class each card-pack resource-cap code maps to, no matter
+/// which layer catches it (bead p63op). These invocations MATCH the
+/// documented grammar (`[--materials <pack>]...` is unbounded repetition) and
+/// are refused by a resource ceiling, which is exactly the case the
+/// `exit::INPUT` doc names; reporting USAGE or REFUSED depending on the
+/// catching layer made (code, class) ambiguous for callers.
+fn resource_cap_exit_class(code: &str) -> Option<u8> {
+    matches!(
+        code,
+        "cli-solve-card-pack-count" | "cli-solve-card-pack-size"
+    )
+    .then_some(exit::INPUT)
 }
 
 fn parse_args(
@@ -784,9 +801,10 @@ fn admit_card_packs(
         });
     }
     CardPackSet::admit(raw).map_err(|refused| {
+        let class = resource_cap_exit_class(refused.code).unwrap_or(exit::REFUSED);
         let diagnostic =
             Diagnostic::new("solve", refused.code.to_string(), refused.what, refused.fix);
-        refusal(mode, exit::REFUSED, &diagnostic, None)
+        refusal(mode, class, &diagnostic, None)
     })
 }
 

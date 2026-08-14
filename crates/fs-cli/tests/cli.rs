@@ -386,12 +386,11 @@ fn g0_the_invocation_card_pack_ceiling_refuses_before_any_file_is_touched() {
         !past_cap.stderr.contains("cli-input-read"),
         "the ceiling must refuse before the project is read, not after"
     );
-    // Pinned, not endorsed: this is a resource cap reported in the USAGE exit
-    // class even though the invocation matches the documented grammar and
-    // `exit::INPUT` is the class documented for "admitted by the CLI resource
-    // cap". Tracked as its own bead; this assertion exists so the class cannot
-    // drift silently while that is decided.
-    assert_eq!(past_cap.exit_code, exit::USAGE);
+    // Endorsed (bead p63op): the invocation matches the documented grammar —
+    // `[--materials <pack>]...` is unbounded repetition — and is refused by a
+    // resource ceiling, which is exactly the case the `exit::INPUT` doc names.
+    // The same code now reaches this class from every layer that can emit it.
+    assert_eq!(past_cap.exit_code, exit::INPUT);
 }
 
 #[test]
