@@ -8860,7 +8860,7 @@ fn build_physical_audio(
                 rms_held_out_error: source.radiation.report.rms_normalized_complex_error,
             })
         }
-        (Some(_), Some(_), None) | (None, None, None) => None,
+        (Some(_), Some(_), None) | (Some(_), None, None) | (None, None, None) => None,
         _ => {
             return Err(CinematicFixtureError::Pipeline(
                 "rigid-disc pressure and radiation disposition diverged".into(),
