@@ -1972,10 +1972,14 @@ pub fn acoustic_waveguide(
 /// Truncated cone as a 1-D wave on `ψ = x p`.
 ///
 /// `ψ` obeys the planar wave equation on `[x₁, x₂]` from the
-/// virtual apex; the physical ports are `p = ψ/x` and
-/// `U = x U_ψ`. That is the time-domain image of the spherical
-/// `e^{±ikx}/x` TMM, not a frustum LC slice. Equal end radii
-/// are refused — use [`acoustic_chain`].
+/// virtual apex. Physical ports are `p = ψ/x` and
+/// `U = x U_ψ + (α/ρ) ∫ψ dt` — the second term is the Euler
+/// near-field `−(α/(iωρ)) ψ`, a shunt inertance
+/// `L = ρ|x|/α` on each ψ-charge. Without it the lossless
+/// closed line reprints an inlet-radius cylinder
+/// (`Z_phys = Z_ψ / x₁²`). This is the time-domain image of
+/// the spherical `e^{±ikx}/x` TMM, not a frustum LC slice.
+/// Equal end radii are refused — use [`acoustic_chain`].
 ///
 /// # Errors
 /// Non-physical taper, `cells < 2`, `inlets` not in `{1, 2}`,
@@ -2022,11 +2026,12 @@ pub fn spherical_cone(
     let alpha = core::f64::consts::PI * slope * slope;
     let dx = length / cells as f64;
     let n_line = 2 * cells;
+    let n_nf = cells;
     let n_tap = taps.len();
     let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { cells * n_br * 2 } else { 0 };
-    let n = n_line + n_tap + n_foster;
+    let n = n_line + n_nf + n_tap + n_foster;
     let l_psi = density * dx / alpha;
     let c_psi = alpha * dx / (density * sound_speed * sound_speed);
     let mut x_mid = Vec::with_capacity(cells);
@@ -2055,6 +2060,11 @@ pub fn spherical_cone(
             j[pi * n + qn] = -1.0;
             j[qn * n + pi] = 1.0;
         }
+        let nf = n_line + cell;
+        let l_nf = density * x_mid[cell].abs() / alpha;
+        q[nf * n + nf] = 1.0 / l_nf;
+        j[qi * n + nf] = -1.0;
+        j[nf * n + qi] = 1.0;
     }
     if let Some(pin) = viscothermal {
         for cell in 0..cells {
@@ -2085,7 +2095,7 @@ pub fn spherical_cone(
                     omega_pin * 8.0,
                     n_br,
                 )?;
-                let off = n_line + n_tap + cell * n_br * 2;
+                let off = n_line + n_nf + n_tap + cell * n_br * 2;
                 for (k, &(gk, wk)) in terms_r.iter().enumerate() {
                     let lam = off + k;
                     let g_psi = gk * x2.abs();
@@ -2149,7 +2159,7 @@ pub fn spherical_cone(
             }
         }
         let tap_q = 2 * cell;
-        let phi = n_line + t;
+        let phi = n_line + n_nf + t;
         let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;
         let l_eff = tap.neck_length + 0.6 * tap.neck_radius;
         let l_h = density * l_eff.max(1.0e-6) / a_h;

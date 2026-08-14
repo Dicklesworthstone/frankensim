@@ -67,8 +67,9 @@ stepping, and Galerkin reduction preserves the structure.
   `foster_sqrt_omega_terms`,
   `foster_match_re`, `slice_linear_taper`,
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
-  `p = ψ/x`; a single taper in `acoustic_chain` is this
-  object), `modal_bank`
+  `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell
+  shunt `L = ρ|x|/α`; a single taper in `acoustic_chain`
+  is this object), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

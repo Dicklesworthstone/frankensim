@@ -1371,6 +1371,11 @@ fn linear_taper_is_not_the_inlet_cylinder() {
     assert!(flare[0].outlet_radius > flare[0].radius);
     let a = acoustic_chain(&cyl, 1.2, c, false, 1, &[], None).expect("cyl chain");
     let b = acoustic_chain(&flare, 1.2, c, false, 1, &[], None).expect("flare chain");
+    // Cylinder LC is 2 states/cell; the cone adds one near-field
+    // shunt inertance per cell. Equal dimensions would mean the
+    // flare reprinted the inlet ladder.
+    assert_eq!(a.state_dim(), 16);
+    assert_eq!(b.state_dim(), 24);
     let dt = 1.0 / 8_000.0;
     let ring = |sys: &PortHamiltonian| {
         let mut x = vec![0.0; sys.state_dim()];
@@ -1393,7 +1398,8 @@ fn linear_taper_is_not_the_inlet_cylinder() {
     let peak_a = pa.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     let peak_b = pb.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     assert!(
-        err > 1.0e-8 * (1.0 + peak_a) * pa.len() as f64 || (peak_a - peak_b).abs() > 1.0e-8 * (1.0 + peak_a),
+        err > 1.0e-8 * (1.0 + peak_a) * pa.len() as f64
+            || (peak_a - peak_b).abs() > 1.0e-8 * (1.0 + peak_a),
         "a linear flare must not reprint the inlet cylinder (err={err}, peaks {peak_a} vs {peak_b})"
     );
     assert!(slice_linear_taper(0.0, 0.01, 0.1, 4).is_err());
@@ -1403,6 +1409,7 @@ fn linear_taper_is_not_the_inlet_cylinder() {
 fn spherical_cone_is_not_the_frustum_ladder() {
     let c = 343.0;
     let sph = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, false, 1, &[], None).expect("ψ");
+    assert_eq!(sph.state_dim(), 12);
     let halves = [
         AcousticSection {
             length: 0.17,
