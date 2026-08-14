@@ -26,7 +26,9 @@
 #   11 admission refusal mismatch (expected refusal did not match)
 #   12 production failure (entry point failed where authority was expected)
 #   13 scientific acceptance failure (checker command refused the result)
-#   14 timeout / budget exhaustion
+#   14 timeout / budget exhaustion (wall or output budget)
+#   15 cancellation / drain failure
+#   16 determinism mismatch
 #   17 tamper / checker failure (replay disagreement, log truncation)
 #   18 infrastructure unqualified (missing tool, non-file manifest, escape)
 #
@@ -47,6 +49,8 @@ EXIT_ADMISSION=11
 EXIT_PRODUCTION=12
 EXIT_ACCEPTANCE=13
 EXIT_BUDGET=14
+EXIT_CANCEL=15
+EXIT_DETERMINISM=16
 EXIT_TAMPER=17
 EXIT_UNQUALIFIED=18
 
@@ -62,6 +66,7 @@ die() { # class message
 command -v python3 >/dev/null 2>&1 || die "$EXIT_UNQUALIFIED" "python3 (tomllib) is required"
 
 PHASE="" MANIFEST="" LIST=0 VALIDATE_ONLY=0 OUTPUT_DIR="" SEED="" MAX_WALL="" REPLAY=""
+CANCEL_AFTER="" DETERMINISM_REPEAT=0
 declare -a CASES=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -74,6 +79,8 @@ while [ $# -gt 0 ]; do
     --seed) [ $# -ge 2 ] || die "$EXIT_USAGE" "--seed needs a value"; SEED="$2"; shift 2 ;;
     --max-wall-seconds) [ $# -ge 2 ] || die "$EXIT_USAGE" "--max-wall-seconds needs a value"; MAX_WALL="$2"; shift 2 ;;
     --replay) [ $# -ge 2 ] || die "$EXIT_USAGE" "--replay needs a value"; REPLAY="$2"; shift 2 ;;
+    --cancel-after) [ $# -ge 2 ] || die "$EXIT_USAGE" "--cancel-after needs a value"; CANCEL_AFTER="$2"; shift 2 ;;
+    --determinism-repeat) DETERMINISM_REPEAT=1; shift ;;
     *) die "$EXIT_USAGE" "unknown argument: $1" ;;
   esac
 done
@@ -83,6 +90,9 @@ if [ -n "$SEED" ] && ! printf '%s' "$SEED" | grep -Eq '^[0-9]{1,20}$'; then
 fi
 if [ -n "$MAX_WALL" ] && ! printf '%s' "$MAX_WALL" | grep -Eq '^[1-9][0-9]{0,8}$'; then
   die "$EXIT_USAGE" "--max-wall-seconds must be a positive integer"
+fi
+if [ -n "$CANCEL_AFTER" ] && ! printf '%s' "$CANCEL_AFTER" | grep -Eq '^[1-9][0-9]{0,4}$'; then
+  die "$EXIT_USAGE" "--cancel-after must be a positive integer (seconds)"
 fi
 if [ -n "$PHASE" ]; then
   case " $PHASES " in
@@ -164,7 +174,7 @@ REQUIRED_CASE_KEYS = {
 OPTIONAL_CASE_KEYS = {
     "checker_command": list, "expected_refusal_pattern": str,
     "seed_overridable": bool, "expected_output_pattern": str,
-    "qoi_notes": str, "determinism_class": str,
+    "qoi_notes": str, "determinism_class": str, "max_output_bytes": int,
 }
 ADMITTED_EXPECTED = {"authority", "refusal"}
 
@@ -270,6 +280,16 @@ esac
 [ -e "$OUTPUT_DIR" ] && die "$EXIT_UNQUALIFIED" "output dir already exists (no reuse): $OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR" || die "$EXIT_UNQUALIFIED" "cannot create output dir"
 
+# Redaction by construction: credential-shaped variables never reach a
+# child process, so no log or retained artifact can leak them.
+declare -a ENV_SCRUB=()
+while IFS='=' read -r name _; do
+  case "$name" in
+    *SECRET*|*TOKEN*|*PASSWORD*|*CREDENTIAL*|*API_KEY*|*APIKEY*|AWS_*|GH_*|GITHUB_*)
+      ENV_SCRUB+=("-u" "$name") ;;
+  esac
+done < <(env)
+
 LOG="$OUTPUT_DIR/runner-log.jsonl"
 SUMMARY="$OUTPUT_DIR/summary.json"
 SEQ=0
@@ -322,14 +342,73 @@ while IFS= read -r case_json; do
   mkdir -p "$CASE_DIR"
   emit case-start "case=$ID" "expected=$EXPECTED" "seed=$CASE_SEED" "wall_budget=$WALL"
 
-  set -- $(printf '%s' "$case_json" | python3 -c 'import json,sys
+  # One word per line, read into an array so multi-word arguments (e.g. a
+  # bash -c body) keep their boundaries. Newlines inside words are refused
+  # at validation time by the slug/word rules.
+  declare -a ENTRY_WORDS=()
+  while IFS= read -r word; do
+    ENTRY_WORDS+=("$word")
+  done < <(printf '%s' "$case_json" | python3 -c 'import json,sys
 for word in json.load(sys.stdin)["entry_command"]:
     print(word)')
+  OUTPUT_CAP="$(printf '%s' "$case_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("max_output_bytes", 1048576))')"
   START=$(date +%s)
   ( cd "$REPO_ROOT" && NEW_DOMAINS_SEED="$CASE_SEED" NEW_DOMAINS_CASE_DIR="$CASE_DIR" \
-      timeout "$WALL" "$@" ) >"$CASE_DIR/stdout.txt" 2>"$CASE_DIR/stderr.txt"
+      env "${ENV_SCRUB[@]}" timeout "$WALL" "${ENTRY_WORDS[@]}" ) \
+      >"$CASE_DIR/stdout.txt" 2>"$CASE_DIR/stderr.txt" &
+  CHILD=$!
+  # Forward operator signals to the child instead of orphaning it.
+  trap 'kill -TERM "$CHILD" 2>/dev/null' TERM INT
+  CANCELLED=0
+  if [ -n "$CANCEL_AFTER" ]; then
+    DEADLINE=$(( $(date +%s) + CANCEL_AFTER ))
+    while kill -0 "$CHILD" 2>/dev/null && [ "$(date +%s)" -lt "$DEADLINE" ]; do
+      sleep 1
+    done
+    if kill -0 "$CHILD" 2>/dev/null; then
+      CANCELLED=1
+      emit case-cancel-request "case=$ID"
+      kill -TERM "$CHILD" 2>/dev/null
+      GRACE=$(( $(date +%s) + 10 ))
+      while kill -0 "$CHILD" 2>/dev/null && [ "$(date +%s)" -lt "$GRACE" ]; do
+        sleep 1
+      done
+      if kill -0 "$CHILD" 2>/dev/null; then
+        kill -KILL "$CHILD" 2>/dev/null
+        wait "$CHILD" 2>/dev/null
+        trap - TERM INT
+        emit case-terminal "case=$ID" "status=failed" "reason=cancel-drain-failure"
+        ROWS+=("{\"case\":\"$ID\",\"status\":\"failed\"}")
+        [ "$WORST" -lt "$EXIT_CANCEL" ] && WORST="$EXIT_CANCEL"
+        continue
+      fi
+      emit case-cancel-drained "case=$ID"
+    fi
+  fi
+  wait "$CHILD"
   STATUS_CODE=$?
+  trap - TERM INT
   ELAPSED=$(( $(date +%s) - START ))
+  if [ "$CANCELLED" -eq 1 ]; then
+    emit case-terminal "case=$ID" "status=cancelled" "reason=operator-cancellation" \
+      "exit_code=$STATUS_CODE" "elapsed_seconds=$ELAPSED"
+    ROWS+=("{\"case\":\"$ID\",\"status\":\"cancelled\"}")
+    [ "$WORST" -lt "$EXIT_CANCEL" ] && WORST="$EXIT_CANCEL"
+    continue
+  fi
+  OUT_BYTES=$(( $(wc -c < "$CASE_DIR/stdout.txt") + $(wc -c < "$CASE_DIR/stderr.txt") ))
+  if [ "$OUT_BYTES" -gt "$OUTPUT_CAP" ]; then
+    # Bounded retention: keep a capped prefix, never the unbounded stream.
+    head -c "$OUTPUT_CAP" "$CASE_DIR/stdout.txt" > "$CASE_DIR/stdout.capped.txt"
+    mv "$CASE_DIR/stdout.capped.txt" "$CASE_DIR/stdout.txt"
+    head -c "$OUTPUT_CAP" "$CASE_DIR/stderr.txt" > "$CASE_DIR/stderr.capped.txt"
+    mv "$CASE_DIR/stderr.capped.txt" "$CASE_DIR/stderr.txt"
+    emit case-terminal "case=$ID" "status=failed" "reason=output-budget-exhausted" \
+      "output_bytes=$OUT_BYTES" "output_cap=$OUTPUT_CAP"
+    ROWS+=("{\"case\":\"$ID\",\"status\":\"failed\"}")
+    [ "$WORST" -lt "$EXIT_BUDGET" ] && WORST="$EXIT_BUDGET"
+    continue
+  fi
 
   RESULT="" REASON=""
   if [ "$STATUS_CODE" -eq 124 ]; then
@@ -354,14 +433,34 @@ for word in json.load(sys.stdin)["entry_command"]:
     fi
   fi
 
+  # Determinism repeat: a declared repo-deterministic case must reproduce
+  # its stdout byte-for-byte on an immediate second run.
+  if [ "$RESULT" = "passed" ] && [ "$DETERMINISM_REPEAT" -eq 1 ]; then
+    DET_CLASS_DECL="$(printf '%s' "$case_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("determinism_class", ""))')"
+    case "$DET_CLASS_DECL" in
+      repo-deterministic*)
+        mkdir -p "$CASE_DIR/repeat"
+        ( cd "$REPO_ROOT" && NEW_DOMAINS_SEED="$CASE_SEED" NEW_DOMAINS_CASE_DIR="$CASE_DIR/repeat" \
+            env "${ENV_SCRUB[@]}" timeout "$WALL" "${ENTRY_WORDS[@]}" ) \
+            >"$CASE_DIR/repeat/stdout.txt" 2>"$CASE_DIR/repeat/stderr.txt"
+        if ! cmp -s "$CASE_DIR/stdout.txt" "$CASE_DIR/repeat/stdout.txt"; then
+          RESULT="failed"; REASON="determinism-mismatch"; CLASS="$EXIT_DETERMINISM"
+        fi
+        ;;
+    esac
+  fi
+
   # Independent checker phase (only meaningful after a passing production).
   if [ "$RESULT" = "passed" ]; then
     CHECKER_LEN="$(printf '%s' "$case_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("checker_command", [])))')"
     if [ "$CHECKER_LEN" -gt 0 ]; then
-      set -- $(printf '%s' "$case_json" | python3 -c 'import json,sys
+      declare -a CHECKER_WORDS=()
+      while IFS= read -r word; do
+        CHECKER_WORDS+=("$word")
+      done < <(printf '%s' "$case_json" | python3 -c 'import json,sys
 for word in json.load(sys.stdin).get("checker_command", []):
     print(word)')
-      ( cd "$REPO_ROOT" && NEW_DOMAINS_CASE_DIR="$CASE_DIR" timeout "$WALL" "$@" ) \
+      ( cd "$REPO_ROOT" && NEW_DOMAINS_CASE_DIR="$CASE_DIR" timeout "$WALL" "${CHECKER_WORDS[@]}" ) \
         >"$CASE_DIR/checker-stdout.txt" 2>"$CASE_DIR/checker-stderr.txt"
       if [ $? -ne 0 ]; then
         RESULT="failed"; REASON="checker-refused"; CLASS="$EXIT_ACCEPTANCE"

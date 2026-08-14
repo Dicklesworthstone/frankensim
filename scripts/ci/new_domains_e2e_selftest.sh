@@ -162,6 +162,61 @@ check "seed override on a non-overridable case is unqualified (18)" 18 $?
 bash "$RUNNER" --manifest "$M" --output-dir "$SCRATCH/tighten-out" --max-wall-seconds 1 >/dev/null 2>&1
 check "--max-wall-seconds tightens the manifest budget" 14 $?
 
+# --- cancellation and drain ----------------------------------------------
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  printf '%s\n' '[[case]]' 'id = "cancel-clean"' 'version = 1' 'purpose = "p"' \
+    'owning_bead = "frankensim-ext-epic-gov-rjoq.8"' 'gauntlet_tier = "G0"' \
+    'seed = 7' 'max_wall_seconds = 60' 'entry_command = ["sleep", "30"]' \
+    'expected = "authority"'
+} > "$M"
+run_one "$M" --cancel-after 1
+check "clean cancellation drains and maps to class 15" 15 $?
+
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  printf '%s\n' '[[case]]' 'id = "cancel-stubborn"' 'version = 1' 'purpose = "p"' \
+    'owning_bead = "frankensim-ext-epic-gov-rjoq.8"' 'gauntlet_tier = "G0"' \
+    'seed = 7' 'max_wall_seconds = 60' \
+    'entry_command = ["bash", "-c", "trap \"\" TERM; sleep 60"]' \
+    'expected = "authority"'
+} > "$M"
+run_one "$M" --cancel-after 1
+check "TERM-ignoring child is KILLed and maps to class 15 (drain failure)" 15 $?
+
+# --- output budget --------------------------------------------------------
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  printf '%s\n' '[[case]]' 'id = "output-hog"' 'version = 1' 'purpose = "p"' \
+    'owning_bead = "frankensim-ext-epic-gov-rjoq.8"' 'gauntlet_tier = "G0"' \
+    'seed = 7' 'max_wall_seconds = 60' 'max_output_bytes = 1024' \
+    'entry_command = ["bash", "-c", "yes overflow | head -c 100000"]' \
+    'expected = "authority"'
+} > "$M"
+run_one "$M"
+check "output over the declared cap maps to class 14" 14 $?
+
+# --- determinism repeat ---------------------------------------------------
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case det-stable 'entry_command = ["echo", "stable"]' 'expected = "authority"' \
+    'determinism_class = "repo-deterministic"'
+} > "$M"
+run_one "$M" --determinism-repeat
+check "byte-identical repeat stays exit 0" 0 $?
+
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case det-drifty 'entry_command = ["bash", "-c", "echo $RANDOM$$"]' \
+    'expected = "authority"' 'determinism_class = "repo-deterministic"'
+} > "$M"
+run_one "$M" --determinism-repeat
+check "drifting stdout under --determinism-repeat maps to class 16" 16 $?
+
+# --- redaction by construction --------------------------------------------
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case no-secret-env \
+    'entry_command = ["bash", "-c", "[ -z \"${SELFTEST_FAKE_SECRET_TOKEN:-}\" ]"]' \
+    'expected = "authority"'
+} > "$M"
+SELFTEST_FAKE_SECRET_TOKEN="must-never-reach-children" run_one "$M"
+check "credential-shaped env vars are scrubbed from children" 0 $?
+
 # --- summary, log agreement, replay, and tamper ---------------------------
 { printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
   good_case replay-case 'entry_command = ["true"]' 'expected = "authority"'
