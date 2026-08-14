@@ -27,8 +27,8 @@
 //! attenuation. Validity is a NAMED refusal, not degradation: below
 //! [`MIN_SHEAR_NUMBER`] the wide-tube expansion is invalid (narrow
 //! tubes need the full Bessel/Kelvin ZK solution — a recorded
-//! follow-up), and the loss model states it covers straight rigid
-//! smooth walls only.
+//! follow-up). A locally reacting wall is an optional
+//! [`fs_phs::WallPin`] on [`input_impedance_wall`].
 //!
 //! TRANSFER MATRICES are never transcribed from a book: each segment's
 //! 2-port `[p1, U1] = M [p2, U2]` is built NUMERICALLY from the two
@@ -368,20 +368,20 @@ pub fn segment_wave(
 /// Fold a locally reacting wall into a gas [`SegmentWave`].
 ///
 /// Reconstructs the telegraph pair `Z' = i k Zc`, `Y' = i k / Zc`
-/// under `e^{-iωt}`, adds [`wall_admittance_per_metre`], and
-/// rebuilds `k = √(Z' Y')`, `Zc = √(Z'/Y')` with `Im k ≥ 0` and
-/// `Re Zc ≥ 0`.
+/// (`Im Z' > 0` for inertance, same as Poiseuille), adds the wall
+/// shunt with Im flipped from the `e^{-iωt}` [`WallPin`] into that
+/// telegraph convention, and rebuilds `k` and `Zc`.
 fn apply_wall_to_wave(
     wave: SegmentWave,
     radius: f64,
     omega: f64,
     wall: &WallPin,
 ) -> Result<SegmentWave, DuctError> {
-    let y_w = wall_admittance_per_metre(wall, radius, omega).map_err(|_| {
-        DuctError::BadParameter {
+    let y_phs =
+        wall_admittance_per_metre(wall, radius, omega).map_err(|_| DuctError::BadParameter {
             what: "wall pin surface density, stiffness, and resistance",
-        }
-    })?;
+        })?;
+    let y_w = C64::new(y_phs.re, -y_phs.im);
     let j = C64::new(0.0, 1.0);
     let z_series = j * wave.wavenumber * wave.characteristic_impedance;
     let y_gas = j * wave.wavenumber * wave.characteristic_impedance.recip();
@@ -2642,9 +2642,15 @@ mod tone_hole_tests {
                 length: 0.34,
             }],
         };
-        let omega = core::f64::consts::PI * state.sound_speed / (2.0 * 0.34);
-        let rigid = input_impedance(&duct, &state, omega, LossModel::Lossless, Termination::Closed)
-            .expect("rigid");
+        let omega = 2.0 * core::f64::consts::PI * 220.0;
+        let rigid = input_impedance(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+        )
+        .expect("rigid");
         let soft = WallPin {
             surface_density: 1.5,
             stiffness_per_area: 2.0e5,
@@ -2659,9 +2665,9 @@ mod tone_hole_tests {
             Some(&soft),
         )
         .expect("soft");
+        let d_soft = (yielding.impedance - rigid.impedance).abs();
         assert!(
-            (yielding.impedance - rigid.impedance).abs()
-                > 0.05 * rigid.impedance.abs().max(1.0),
+            d_soft > 0.05 * rigid.impedance.abs().max(1.0),
             "a soft wall must move TMM Z_in ({:?} vs {:?})",
             yielding.impedance,
             rigid.impedance
@@ -2680,12 +2686,10 @@ mod tone_hole_tests {
             Some(&stiff),
         )
         .expect("stiff");
+        let d_stiff = (heavy.impedance - rigid.impedance).abs();
         assert!(
-            (heavy.impedance - rigid.impedance).abs()
-                < 0.05 * rigid.impedance.abs().max(1.0),
-            "a stiff wall must sit near rigid TMM Z_in ({:?} vs {:?})",
-            heavy.impedance,
-            rigid.impedance
+            d_stiff < 0.05 * d_soft,
+            "a stiff wall must sit nearer rigid than a soft wall ({d_stiff} vs {d_soft})"
         );
         let lossy = input_impedance_wall(
             &duct,

@@ -3,10 +3,11 @@
 //!
 //! This file is the coupling-layer filling of that nameless port. A
 //! bore, a muffler, an HVAC run, and a pulse tube are the same object.
-use fs_duct::{Duct, DuctError, LossModel, Termination, input_impedance};
+use fs_duct::{Duct, DuctError, LossModel, Termination, input_impedance_wall};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
+use fs_phs::WallPin;
 use fs_vfit::discretize::{DelayedFilter, DiscretizeError, RealizeError, reflectance};
 
 /// Typed refusal from a driving-point characteristic line.
@@ -55,6 +56,7 @@ pub fn characteristic_line(
     sample_rate_hz: u32,
     n: usize,
     zc: f64,
+    wall: Option<&WallPin>,
 ) -> Result<DelayedFilter, DrivingPointError> {
     let length: f64 = physics
         .segments
@@ -91,8 +93,9 @@ pub fn characteristic_line(
     };
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = input_impedance(physics, gas, omega, LossModel::Bessel, termination)
-            .map_err(DrivingPointError::Duct)?;
+        let response =
+            input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall)
+                .map_err(DrivingPointError::Duct)?;
         let rac = reflectance(C64::new(response.impedance.re, response.impedance.im), zc);
         // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal.
         buf[k] = FftC64::new(rac.re, -rac.im);
@@ -128,6 +131,7 @@ pub fn impedance_line(
     termination: Termination,
     sample_rate_hz: u32,
     n: usize,
+    wall: Option<&WallPin>,
 ) -> Result<DelayedFilter, DrivingPointError> {
     if physics.segments.is_empty() {
         return Err(DrivingPointError::Invalid {
@@ -140,8 +144,9 @@ pub fn impedance_line(
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = input_impedance(physics, gas, omega, LossModel::Bessel, termination)
-            .map_err(DrivingPointError::Duct)?;
+        let response =
+            input_impedance_wall(physics, gas, omega, LossModel::Bessel, termination, wall)
+                .map_err(DrivingPointError::Duct)?;
         let z = match termination {
             Termination::Closed => response.impedance,
             Termination::IdealOpen | Termination::UnflangedOpen | Termination::FlangedOpen => {

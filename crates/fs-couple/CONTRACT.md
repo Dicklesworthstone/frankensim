@@ -349,7 +349,8 @@ clarinet is one filling of those objects.
   The same `ViscothermalPin` sits on a lumped neck or
   on each chimney cell of a line.
   A scenario `LocallyReactingWall` is the ODE `WallPin`
-  (per-cell shunt LC). The TMM path stays rigid-walled.
+  (per-cell shunt LC) and the TMM `Y'` addend on the
+  FIR `Z(ω)` / `R(ω)` path. Same numbers both clocks.
   A closed pad is the TMM cavity compliance on the station
   cell; `foster_branches > 0` adds the bore's thermal
   Foster on that remaining `C`. A scenario `ToneHole.open_fraction`

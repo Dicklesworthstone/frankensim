@@ -17,7 +17,7 @@ use fs_phs::{
     modal_bank, modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
     series_impedance_ports, side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
     side_hole_series_length, slice_linear_taper, spherical_cone, step, step_descriptor,
-    transformer, zwikker_kosten_f,
+    transformer, wall_admittance_per_metre, wall_specific_impedance, zwikker_kosten_f,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -1548,6 +1548,21 @@ fn locally_reacting_wall_is_not_a_rigid_bore() {
         (t_h - t_r).abs() / t_r < 0.05,
         "a stiff heavy wall must sit near the rigid period ({t_h} vs {t_r})"
     );
+    let z = wall_specific_impedance(&soft, 1.0e3).expect("Z'");
+    assert!(
+        z.im < 0.0,
+        "mass-like wall X must be negative under e^{{-iωt}}"
+    );
+    let y = wall_admittance_per_metre(
+        &WallPin {
+            resistance: 80.0,
+            ..soft
+        },
+        0.012,
+        1.0e3,
+    )
+    .expect("Y'");
+    assert!(y.re > 0.0, "a resistive wall must add a passive shunt");
 }
 
 #[test]

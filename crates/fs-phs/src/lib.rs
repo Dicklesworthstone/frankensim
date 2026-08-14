@@ -2239,11 +2239,7 @@ pub fn wall_specific_impedance(wall: &WallPin, omega: f64) -> Result<C64, PhsErr
 ///
 /// # Errors
 /// As [`wall_specific_impedance`], plus a non-physical radius.
-pub fn wall_admittance_per_metre(
-    wall: &WallPin,
-    radius: f64,
-    omega: f64,
-) -> Result<C64, PhsError> {
+pub fn wall_admittance_per_metre(wall: &WallPin, radius: f64, omega: f64) -> Result<C64, PhsError> {
     if !(radius > 0.0 && radius.is_finite()) {
         return Err(PhsError::NotPsd {
             what: "wall radius",

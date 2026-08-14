@@ -31,6 +31,7 @@ pub fn realize_reed_bore(
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
+    wall: Option<&fs_phs::WallPin>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     if !(reed.rest_opening_m > 0.0
         && reed.width_m > 0.0
@@ -54,8 +55,8 @@ pub fn realize_reed_bore(
         .outlet_radius();
     let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area_bore;
-    let mut line =
-        characteristic_line(physics, gas, termination, sample_rate_hz, n, zc).map_err(map_drive)?;
+    let mut line = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc, wall)
+        .map_err(map_drive)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut reed_y = reed.rest_opening_m;
     let mut reed_v = 0.0;

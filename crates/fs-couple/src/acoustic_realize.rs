@@ -627,9 +627,16 @@ fn realize_coupled(
     let zc = gas.density * gas.sound_speed / area;
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let listener_m = assembly.listener.distance_m;
-    let mut fitted =
-        characteristic_line(&physics, gas, termination, assembly.sample_rate_hz, n, zc)
-            .map_err(map_drive)?;
+    let mut fitted = characteristic_line(
+        &physics,
+        gas,
+        termination,
+        assembly.sample_rate_hz,
+        n,
+        zc,
+        wall_pin(duct.wall).as_ref(),
+    )
+    .map_err(map_drive)?;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
     if string.axial_stiffness_n > 0.0 {
         return realize_coupled_kc(assembly, gas, plates, n, fitted, zc, area, &mut texture);
@@ -2180,6 +2187,7 @@ fn realize_reed_on_duct(
         listener_m,
         sample_rate_hz,
         n,
+        wall_pin(duct.wall).as_ref(),
     )
 }
 
@@ -2506,6 +2514,7 @@ fn realize_blown_duct(
             listener_m,
             sample_rate_hz,
             n,
+            wall_pin(duct.wall).as_ref(),
         );
     }
     // Isolated linear blow: the same DelayedFilter port as a reed or
@@ -2513,8 +2522,15 @@ fn realize_blown_duct(
     // reflectance FIR does not ring a measurable period; the
     // impedance FIR does, so tone-hole shortening stays TMM-emergent.
     use crate::driving_point::impedance_line;
-    let mut line =
-        impedance_line(&physics, gas, termination, sample_rate_hz, n).map_err(map_drive)?;
+    let mut line = impedance_line(
+        &physics,
+        gas,
+        termination,
+        sample_rate_hz,
+        n,
+        wall_pin(duct.wall).as_ref(),
+    )
+    .map_err(map_drive)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -2541,6 +2557,7 @@ fn realize_blown_with_body(
     listener_m: f64,
     sample_rate_hz: u32,
     n: usize,
+    wall: Option<&WallPin>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     use crate::driving_point::characteristic_line;
     let inlet_r = physics
@@ -2553,8 +2570,8 @@ fn realize_blown_with_body(
     let area = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area;
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut line =
-        characteristic_line(physics, gas, termination, sample_rate_hz, n, zc).map_err(map_drive)?;
+    let mut line = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc, wall)
+        .map_err(map_drive)?;
     let mut out = vec![0.0; n];
     for i in 0..n {
         let t = i as f64 * dt;

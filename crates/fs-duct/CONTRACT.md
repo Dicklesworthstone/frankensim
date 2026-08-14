@@ -139,9 +139,12 @@ refusals; bitwise determinism.
 - Wide-tube first order ONLY: narrow tubes (`rv < 10`) refuse; the
   full Bessel/Kelvin ZK solution is the recorded follow-up (needs
   fs-math Bessel functions, shared with the piston closed form).
-- Straight rigid smooth isothermal walls: no wall compliance, no
-  roughness, no porous liners, no mean flow, no nonlinear (high
-  amplitude) propagation.
+- Straight smooth isothermal walls. A [`fs_phs::WallPin`] on
+  `input_impedance_wall` adds the locally reacting shunt
+  `Y' = 2π a / (r − iωσ + i K/ω)` to the gas `Y'` (same pin
+  as the ODE cell shunt). `input_impedance` is rigid.
+  No roughness, no porous liners, no mean flow, no nonlinear
+  (high amplitude) propagation.
 - Lossy cones cascade spherical substations with `k, Zc` at each
   slice's own mid-radius (lossless stays the exact one-shot
   `e^{±ikx}/x` 2-port). Strongly flaring horns may still need
