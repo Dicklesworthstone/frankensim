@@ -142,10 +142,12 @@ refusals; bitwise determinism.
 - Straight rigid smooth isothermal walls: no wall compliance, no
   roughness, no porous liners, no mean flow, no nonlinear (high
   amplitude) propagation.
-- Cone losses use the mean radius (documented approximation); strongly
-  flaring horns may need the multimodal expansion — the recorded
-  trigger is a bell mismatch beyond authored tolerance in a future
-  validation against measured instrument impedance.
+- Lossy cones cascade spherical substations with `k, Zc` at each
+  slice's own mid-radius (lossless stays the exact one-shot
+  `e^{±ikx}/x` 2-port). Strongly flaring horns may still need
+  the multimodal expansion — the recorded trigger is a bell
+  mismatch beyond authored tolerance in a future validation
+  against measured instrument impedance.
 - Radiation fits are low-`ka` (ceiling 1.0, refused by name) for
   unflanged/flanged circular mouths; BEM-computed loads are the
   recorded successor (`fs_bem::helmholtz`).

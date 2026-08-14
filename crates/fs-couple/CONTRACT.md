@@ -356,7 +356,7 @@ clarinet is one filling of those objects.
   `foster_branches > 0` carries the bore's Foster series
   (extra neck states). Frequency-by-frequency
   Bessel TMM (`LossModel::Bessel`, spherical-wave cones
-  included) is the FIR path. 3-D jet broadband remains a
+  with local-radius lossy substations) is the FIR path. 3-D jet broadband remains a
   no-claim. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.

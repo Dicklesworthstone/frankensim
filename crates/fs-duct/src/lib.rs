@@ -55,6 +55,8 @@
 //! `LossModel::Bessel` is the frequency-by-frequency Zwikker–Kosten
 //! wall law (`fs_phs::zwikker_kosten_f`). A tone-hole chimney uses
 //! that same lumped wall law (open series `R`, closed thermal `G`).
+//! Lossy cones cascade spherical substations at local radius
+//! (lossless stays the exact one-shot `e^{±ikx}/x` 2-port).
 //! Deferred: fingering tables (slice 3 of the bead), multimodal
 //! horn expansion (trigger: bell
 //! mismatch beyond authored tolerance), and BEM-computed radiation
@@ -727,6 +729,57 @@ fn tone_hole_t_junction(
     Ok(mul2(mul2(series, shunt), series))
 }
 
+/// Enough spherical substations that each slice's `|Δr|/r` is
+/// about 1/5, clamped to `[2, 12]`. Lossless cones stay one
+/// transfer (the exact `e^{±ikx}/x` 2-port).
+fn cone_loss_slices(r_in: f64, r_out: f64) -> usize {
+    let rmin = r_in.min(r_out).max(1.0e-9);
+    let n = ((r_out - r_in).abs() / (0.2 * rmin)).ceil() as usize;
+    n.clamp(2, 12)
+}
+
+/// Lossy cone as cascaded spherical 2-ports, each with `k, Zc`
+/// at the slice's own mid-radius. Mean-radius one-shot is the
+/// lossless path only.
+fn cone_lossy_matrix(
+    inlet_radius: f64,
+    outlet_radius: f64,
+    length: f64,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+) -> Result<([C64; 4], f64), DuctError> {
+    let n = cone_loss_slices(inlet_radius, outlet_radius);
+    let dx = length / n as f64;
+    let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
+    let mut min_rv = f64::INFINITY;
+    for i in 0..n {
+        let t0 = i as f64 / n as f64;
+        let t1 = (i + 1) as f64 / n as f64;
+        let ra = inlet_radius + (outlet_radius - inlet_radius) * t0;
+        let rb = inlet_radius + (outlet_radius - inlet_radius) * t1;
+        let r_loc = f64::midpoint(ra, rb);
+        let wave = match segment_wave(state, r_loc, omega, loss) {
+            Ok(w) => w,
+            Err(_) if matches!(loss, LossModel::Bessel) => {
+                segment_wave(state, r_loc, omega, LossModel::AllRegime)?
+            }
+            Err(e) => return Err(e),
+        };
+        min_rv = min_rv.min(wave.shear_number);
+        let s = segment_matrix(
+            &Segment::Cone {
+                inlet_radius: ra,
+                outlet_radius: rb,
+                length: dx,
+            },
+            &wave,
+        )?;
+        m = mul2(m, s);
+    }
+    Ok((m, min_rv))
+}
+
 /// The segment 2-port `[p_in, U_in] = M [p_out, U_out]`, built
 /// numerically from the analytic basis (no transcribed matrices).
 fn segment_matrix(segment: &Segment, wave: &SegmentWave) -> Result<[C64; 4], DuctError> {
@@ -962,6 +1015,17 @@ pub fn input_impedance(
                 bore_radius,
                 extra,
             )?
+        } else if let Segment::Cone {
+            inlet_radius,
+            outlet_radius,
+            length,
+        } = *segment
+            && !matches!(loss, LossModel::Lossless)
+        {
+            let (s, rv) =
+                cone_lossy_matrix(inlet_radius, outlet_radius, length, state, omega, loss)?;
+            min_rv = min_rv.min(rv);
+            s
         } else {
             let wave = segment_wave(state, segment.mean_radius(), omega, loss)?;
             min_rv = min_rv.min(wave.shear_number);
@@ -1143,6 +1207,59 @@ mod tests {
         assert!(
             (z_cone.impedance - z_cyl.impedance).abs() > 1.0e-3 * z_cyl.impedance.abs().max(1.0),
             "spherical-wave Bessel cone must not reprint the mean cylinder"
+        );
+    }
+
+    #[test]
+    fn cone_losses_use_local_radius_not_the_mean() {
+        let state = air();
+        let omega = 2.0 * core::f64::consts::PI * 400.0;
+        let cone = Segment::Cone {
+            inlet_radius: 0.002,
+            outlet_radius: 0.016,
+            length: 0.30,
+        };
+        let duct = Duct {
+            segments: vec![cone],
+        };
+        let z_local = input_impedance(&duct, &state, omega, LossModel::Bessel, Termination::Closed)
+            .expect("local")
+            .impedance;
+        let wave = segment_wave(
+            &state,
+            f64::midpoint(0.002, 0.016),
+            omega,
+            LossModel::Bessel,
+        )
+        .expect("mean wave");
+        let m = segment_matrix(&cone, &wave).expect("mean M");
+        let z_mean = m[0] * m[2].recip();
+        assert!(
+            (z_local - z_mean).abs() > 1.0e-3 * z_mean.abs().max(1.0),
+            "lossy cone must not reprint the mean-radius 2-port ({z_local:?} vs {z_mean:?})"
+        );
+        assert!(z_local.re >= -1.0e-9);
+        let z_ll = input_impedance(
+            &duct,
+            &state,
+            omega,
+            LossModel::Lossless,
+            Termination::Closed,
+        )
+        .expect("ll")
+        .impedance;
+        let wave_ll = segment_wave(
+            &state,
+            f64::midpoint(0.002, 0.016),
+            omega,
+            LossModel::Lossless,
+        )
+        .expect("ll wave");
+        let m_ll = segment_matrix(&cone, &wave_ll).expect("ll M");
+        let z_ll_mean = m_ll[0] * m_ll[2].recip();
+        assert!(
+            (z_ll - z_ll_mean).abs() < 1.0e-9 * z_ll_mean.abs().max(1.0),
+            "lossless cone must stay the exact spherical 2-port"
         );
     }
 
