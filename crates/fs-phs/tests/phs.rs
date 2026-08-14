@@ -8,13 +8,14 @@
 use fs_math::c64::C64;
 use fs_phs::{
     AcousticSection, AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage,
-    Storage, acoustic_chain, acoustic_cylinder, acoustic_waveguide, common_effort_capacitor,
-    common_effort_dirac, common_effort_star, common_flow_dirac, compact_radiation_impedance,
-    discrete_gradient, duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
-    helmholtz_resonator_radiating, interconnect, kirchhoff_parallel_step, lc_ladder,
-    lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports, moving_end_waveguide,
-    reduce_galerkin, regularized_coulomb, series_impedance_ports, step, step_descriptor,
-    transformer,
+    Storage, ViscothermalPin, acoustic_chain, acoustic_cylinder, acoustic_waveguide,
+    common_effort_capacitor, common_effort_dirac, common_effort_star, common_flow_dirac,
+    compact_radiation_impedance, discrete_gradient, duffing_oscillator, helmholtz_resonator,
+    helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect, join_port,
+    kirchhoff_parallel_step,
+    lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports,
+    moving_end_waveguide, reduce_galerkin, regularized_coulomb, series_impedance_ports, step,
+    step_descriptor, transformer,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -922,6 +923,35 @@ fn three_phs_string_plate_cavity_is_a_dirac_star_plus_transformer() {
 }
 
 #[test]
+fn join_port_keeps_the_leftover_and_holds_energy_when_closed() {
+    let mass = mass_spring_damper(0.02, 80.0, 0.0).expect("mass");
+    let spring = mass_spring_damper(0.03, 120.0, 0.0).expect("spring");
+    let closed = join_port(mass, spring, 0, 0).expect("closed 1-junction");
+    assert_eq!(closed.port_dim(), 0);
+    let mut x = vec![0.0; closed.state_dim()];
+    x[0] = 1.0e-4;
+    let h0 = closed.hamiltonian(&x);
+    let rec = step_descriptor(&closed, &x, &[], 1.0e-4).expect("closed step");
+    assert!(
+        (closed.hamiltonian(&rec.x) - h0).abs() <= 1.0e-8 * (1.0 + h0.abs()),
+        "closed join_port must hold H"
+    );
+    let two = modal_bank_ports(&[40.0], &[0.0], &[&[1.0], &[0.5]]).expect("two-port");
+    let load = mass_spring_damper(0.01, 50.0, 0.0).expect("load");
+    let open = join_port(two, load, 0, 0).expect("leftover");
+    assert_eq!(open.port_dim(), 1);
+    let rec = step_descriptor(&open, &vec![0.0; open.state_dim()], &[0.2], 1.0e-4).expect("drive");
+    assert!(rec.y[0].is_finite());
+    assert!(join_port(
+        mass_spring_damper(0.02, 80.0, 0.0).expect("a"),
+        mass_spring_damper(0.03, 120.0, 0.0).expect("b"),
+        1,
+        0,
+    )
+    .is_err());
+}
+
+#[test]
 fn acoustic_cylinder_rings_at_the_quarter_wave() {
     let l = 0.34;
     let c = 343.0;
@@ -1021,6 +1051,7 @@ fn equal_radius_chain_matches_a_uniform_waveguide() {
         false,
         1,
         &[],
+        None,
     )
     .expect("two");
     assert_eq!(one.state_dim(), two.state_dim());
@@ -1069,6 +1100,7 @@ fn a_constriction_shifts_the_chain_period() {
         false,
         1,
         &[],
+        None,
     )
     .expect("stepped");
     let dt = 1.0 / 8_000.0;
@@ -1093,7 +1125,7 @@ fn a_constriction_shifts_the_chain_period() {
         (t1 - t0).abs() > 0.02 * t0,
         "an area jump must move the ringing period ({t1} vs {t0})"
     );
-    assert!(acoustic_chain(&[], 1.2, c, false, 1, &[]).is_err());
+    assert!(acoustic_chain(&[], 1.2, c, false, 1, &[], None).is_err());
     assert!(
         acoustic_chain(
             &[AcousticSection {
@@ -1106,6 +1138,82 @@ fn a_constriction_shifts_the_chain_period() {
             false,
             1,
             &[],
+            None,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn viscothermal_pin_damps_the_chain() {
+    let l = 0.34;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 0.006,
+        cells: 8,
+    }];
+    let lossless = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("lossless");
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+    };
+    let lossy = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&pin)).expect("lossy");
+    let zero = ViscothermalPin {
+        dynamic_viscosity: 0.0,
+        gamma: 1.4,
+        prandtl: 0.71,
+    };
+    let muted = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&zero)).expect("zero mu");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let p0 = ring(&lossless);
+    let p1 = ring(&lossy);
+    let p_z = ring(&muted);
+    for i in 0..32 {
+        assert!(
+            (p0[i] - p_z[i]).abs() <= 1.0e-12 * (1.0 + p0[i].abs()),
+            "zero viscosity must be the lossless mutation"
+        );
+    }
+    let tail = |p: &[f64]| {
+        let t = &p[p.len() / 2..];
+        (t.iter().map(|x| x * x).sum::<f64>() / t.len() as f64).sqrt()
+    };
+    let e0 = tail(&p0);
+    let e1 = tail(&p1);
+    assert!(
+        e1 < e0 * 0.85,
+        "wide-tube pin must damp the tail ({e1} vs {e0})"
+    );
+    assert!(
+        acoustic_chain(
+            &sections,
+            1.2,
+            c,
+            false,
+            1,
+            &[],
+            Some(&ViscothermalPin {
+                dynamic_viscosity: -1.0,
+                gamma: 1.4,
+                prandtl: 0.71,
+            }),
         )
         .is_err()
     );

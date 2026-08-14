@@ -57,7 +57,10 @@ stepping, and Galerkin reduction preserves the structure.
   inertance shunted to atmosphere — a tone hole),
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
-  constriction, a cone sliced into cylinders), `modal_bank`
+  constriction, a cone sliced into cylinders),
+  `ViscothermalPin` (wide-tube Zwikker–Kosten `R` and thermal
+  `G` at the quarter-wave pin; zero `μ` is the lossless
+  mutation), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /
@@ -72,6 +75,8 @@ stepping, and Galerkin reduction preserves the structure.
   flow across two 1-port impedance systems so their pressures
   match. This is Kirchhoff current law as a time-step.
 - `common_effort_dirac` / `common_flow_dirac` /
+  `join_port` (1-junction on a named port pair; leftover
+  ports stay external — a bow, a blow, a side load),
   `common_effort_star` / `DescriptorPortHamiltonian` /
   `step_descriptor` — the true composite Dirac structure of a
   Kirchhoff star. Two members are a 0-junction

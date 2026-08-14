@@ -466,6 +466,98 @@ pub fn common_flow_dirac(
     common_effort_dirac(a, b)
 }
 
+/// 1-junction on one named port pair; leftover ports stay external.
+///
+/// `y_a[port_a] = y_b[port_b]` and `u_a[port_a] + u_b[port_b] = 0`.
+/// Every other column of `G` is kept, in order (remaining `a`, then
+/// remaining `b`). A bow on a string–plate join, a blow on a
+/// string–plate–duct, and a side load on a bus are this object.
+/// Two 1-port members with no leftover are a closed 1-junction
+/// (`m = 0`); [`common_flow_dirac`] is the same join with an
+/// external force on the junction.
+///
+/// # Errors
+/// [`PhsError::BadPortPairing`] on a bad index; admission errors
+/// on the composite.
+pub fn join_port(
+    a: PortHamiltonian,
+    b: PortHamiltonian,
+    port_a: usize,
+    port_b: usize,
+) -> Result<DescriptorPortHamiltonian, PhsError> {
+    if port_a >= a.m || port_b >= b.m {
+        return Err(PhsError::BadPortPairing);
+    }
+    let (na, nb) = (a.n, b.n);
+    let n_diff = na + nb;
+    let n = n_diff + 1;
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for i in 0..na {
+        for k in 0..na {
+            j[i * n + k] = a.j[i * na + k];
+            r[i * n + k] = a.r[i * na + k];
+        }
+    }
+    for i in 0..nb {
+        for k in 0..nb {
+            j[(na + i) * n + na + k] = b.j[i * nb + k];
+            r[(na + i) * n + na + k] = b.r[i * nb + k];
+        }
+    }
+    let lam = n_diff;
+    for i in 0..na {
+        let ga = a.g[i * a.m + port_a];
+        j[i * n + lam] = ga;
+        j[lam * n + i] = -ga;
+    }
+    for i in 0..nb {
+        let gb = b.g[i * b.m + port_b];
+        j[(na + i) * n + lam] = -gb;
+        j[lam * n + na + i] = gb;
+    }
+    let ext_a: Vec<usize> = (0..a.m).filter(|&p| p != port_a).collect();
+    let ext_b: Vec<usize> = (0..b.m).filter(|&p| p != port_b).collect();
+    let m = ext_a.len() + ext_b.len();
+    let mut g = if m == 0 {
+        Vec::new()
+    } else {
+        let mut g = vec![0.0; n * m];
+        for (col, &p) in ext_a.iter().enumerate() {
+            for i in 0..na {
+                g[i * m + col] = a.g[i * a.m + p];
+            }
+        }
+        for (col, &p) in ext_b.iter().enumerate() {
+            for i in 0..nb {
+                g[(na + i) * m + ext_a.len() + col] = b.g[i * b.m + p];
+            }
+        }
+        g
+    };
+    require_skew(&j, n, "J")?;
+    require_symmetric(&r, n, "R")?;
+    require_psd(&r, n, "R")?;
+    let inner = Box::new(SumStorage {
+        a: (a.storage, na),
+        b: (b.storage, nb),
+    });
+    let lambda = Box::new(QuadraticStorage::new(vec![0.0], 1)?);
+    let storage = Box::new(SumStorage {
+        a: (inner, n_diff),
+        b: (lambda, 1),
+    });
+    Ok(DescriptorPortHamiltonian {
+        n,
+        n_diff,
+        m,
+        j,
+        r,
+        g,
+        storage,
+    })
+}
+
 /// Kirchhoff star of `N ≥ 2` one-port systems: every output `y` is
 /// equal and the inputs sum to `u_ext`.
 ///
@@ -1725,9 +1817,9 @@ pub fn lc_ladder_terminated(
 /// first charge so a blow and a transformer body can share the
 /// mouth. An open far end loads the last flux with compact-mouth
 /// `Re Z_rad` at the quarter-wave pin; a closed end is lossless.
-/// A stepped bore is [`acoustic_chain`]. Viscothermal TMM stays
-/// the lossy fallback — this object does not invent Stokes
-/// resistance.
+/// A stepped bore is [`acoustic_chain`]. Wall losses are the
+/// optional [`ViscothermalPin`] on that chain — not Stokes–
+/// Kirchhoff bulk `α` and not ISO 9613.
 ///
 /// # Errors
 /// Non-physical geometry, `cells < 2`, `inlets` not in `{1, 2}`,
@@ -1765,7 +1857,26 @@ pub struct AcousticTap {
     pub neck_radius: f64,
 }
 
-/// One inviscid cylindrical run in an [`acoustic_chain`].
+/// Wide-tube viscothermal pin for an [`acoustic_chain`].
+///
+/// First-order Zwikker–Kosten at one frequency: shear number
+/// `r_v = a √(ω ρ / μ)`, series wall resistance
+/// `R = ω L √2 / r_v`, thermal shunt
+/// `G = ω C (γ−1) √2 / (r_v √Pr)`. The same law as
+/// `fs_duct::LossModel::WideTube`, evaluated at the quarter-wave
+/// pin. A calorically perfect gas is this object — music is not
+/// a special case. Zero viscosity is the lossless mutation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViscothermalPin {
+    /// Dynamic viscosity `μ` [Pa s].
+    pub dynamic_viscosity: f64,
+    /// Heat-capacity ratio `γ`.
+    pub gamma: f64,
+    /// Prandtl number `μ c_p / κ`.
+    pub prandtl: f64,
+}
+
+/// One cylindrical run in an [`acoustic_chain`].
 ///
 /// A muffler chamber, a constriction, and one slice of a cone
 /// approximated by cylinders are this object. `cells` is the LC
@@ -1810,10 +1921,11 @@ pub fn acoustic_waveguide(
         open,
         inlets,
         taps,
+        None,
     )
 }
 
-/// Concatenated inviscid LC waveguide.
+/// Concatenated LC waveguide, optionally wide-tube lossy.
 ///
 /// Each section has its own `L = ρ dx / A`, `C = A dx /(ρ c²)`.
 /// Adjacent runs share the same series `J` as cells inside a run:
@@ -1821,13 +1933,15 @@ pub fn acoustic_waveguide(
 /// taps sit at a station of the total length. An open far end
 /// loads the last flux with compact-mouth `Re Z_rad` at the
 /// quarter-wave pin of the total length, using the last radius.
-/// Viscothermal TMM stays the lossy fallback — this object does
-/// not invent Stokes resistance.
+/// A [`ViscothermalPin`] adds first-order Zwikker–Kosten `R` on
+/// each inertance and thermal `G` on each compliance at that
+/// same pin. Chimney taps stay inviscid (the duct TMM's no-claim).
+/// Full-spectrum TMM remains the all-regime fallback.
 ///
 /// # Errors
 /// Empty chain, non-physical geometry, `inlets` not in `{1, 2}`,
-/// fewer than two cells in total, a bad tap, or a radiation-fit
-/// refusal.
+/// fewer than two cells in total, a bad tap, a bad pin, or a
+/// radiation-fit refusal.
 pub fn acoustic_chain(
     sections: &[AcousticSection],
     density: f64,
@@ -1835,6 +1949,7 @@ pub fn acoustic_chain(
     open: bool,
     inlets: usize,
     taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
 ) -> Result<PortHamiltonian, PhsError> {
     let mut n_cells = 0usize;
     let mut last_radius = 0.0;
@@ -1856,11 +1971,25 @@ pub fn acoustic_chain(
             what: "acoustic chain parameters",
         });
     }
+    if let Some(pin) = viscothermal {
+        if !(pin.dynamic_viscosity >= 0.0
+            && pin.dynamic_viscosity.is_finite()
+            && pin.gamma > 1.0
+            && pin.gamma.is_finite()
+            && pin.prandtl > 0.0
+            && pin.prandtl.is_finite())
+        {
+            return Err(PhsError::NotPsd {
+                what: "viscothermal pin parameters",
+            });
+        }
+    }
     let n_line = 2 * n_cells;
     let n_tap = taps.len();
     let n = n_line + n_tap;
     let mut inertances = Vec::with_capacity(n_cells);
     let mut compliances = Vec::with_capacity(n_cells);
+    let mut radii = Vec::with_capacity(n_cells);
     let mut cell_x0 = Vec::with_capacity(n_cells);
     let mut x_acc = 0.0;
     for s in sections {
@@ -1872,6 +2001,7 @@ pub fn acoustic_chain(
             cell_x0.push(x_acc);
             inertances.push(inertance);
             compliances.push(compliance);
+            radii.push(s.radius);
             x_acc += dx;
         }
     }
@@ -1892,6 +2022,21 @@ pub fn acoustic_chain(
         }
     }
     let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
+    if let Some(pin) = viscothermal {
+        for cell in 0..n_cells {
+            let (r_series, g_shunt) = wide_tube_series_and_shunt(
+                inertances[cell],
+                compliances[cell],
+                radii[cell],
+                density,
+                omega_pin,
+                pin,
+            );
+            let (qi, pi) = (2 * cell, 2 * cell + 1);
+            r[qi * n + qi] += g_shunt;
+            r[pi * n + pi] += r_series;
+        }
+    }
     if open {
         let r_load = compact_radiation_impedance(
             density,
@@ -1946,6 +2091,28 @@ pub fn acoustic_chain(
         g[1] = 1.0;
     }
     PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))
+}
+
+/// Wide-tube Zwikker–Kosten series `R` and thermal shunt `G` at `ω`.
+fn wide_tube_series_and_shunt(
+    inertance: f64,
+    compliance: f64,
+    radius: f64,
+    density: f64,
+    omega: f64,
+    pin: &ViscothermalPin,
+) -> (f64, f64) {
+    if !(pin.dynamic_viscosity > 0.0 && omega > 0.0 && radius > 0.0 && density > 0.0) {
+        return (0.0, 0.0);
+    }
+    let rv = radius * det::sqrt(omega * density / pin.dynamic_viscosity);
+    if !(rv > 0.0 && rv.is_finite()) {
+        return (0.0, 0.0);
+    }
+    let eps = core::f64::consts::SQRT_2 / rv;
+    let r_series = omega * inertance * eps;
+    let g_shunt = omega * compliance * (pin.gamma - 1.0) * eps / det::sqrt(pin.prandtl);
+    (r_series.max(0.0), g_shunt.max(0.0))
 }
 
 /// Modal bank from mass-normalized modes — the first-class bridge from
