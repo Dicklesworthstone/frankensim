@@ -970,10 +970,27 @@ pub struct CorrelationHandoff {
 /// # Errors
 /// Refuses a stall-side or absent intersection, incomplete interval search,
 /// or a root that interval Newton cannot prove unique.
-pub fn solve_operating_point(
+/// Certified roots for the nominal curve and the four tolerance corners.
+///
+/// Stage 1 of `solve_operating_point`: guards (stall side, absent
+/// intersection) and every interval-Newton root, in the exact order the
+/// monolithic body established.
+struct FlowEnvelope {
+    nominal: CertifiedOperatingBracket,
+    resistance: f64,
+    resistance_low: f64,
+    resistance_high: f64,
+    fan_rel: f64,
+    low_flow: f64,
+    high_flow: f64,
+    low_pressure_flow: f64,
+    high_pressure_flow: f64,
+}
+
+fn certified_flow_envelope(
     fan: &FanBank,
     network: &EnclosureNetwork,
-) -> Result<OperatingPoint, AirflowError> {
+) -> Result<FlowEnvelope, AirflowError> {
     let domain = fan.domain();
     let resistance = network.full.equivalent_scalar(ResistanceBound::Nominal);
     let low_residual = scalar_residual(fan, resistance, domain.lo(), 1.0);
@@ -1009,8 +1026,29 @@ pub fn solve_operating_point(
     let high_pressure_flow = certified_root(fan, resistance_high, fan_scale_high)?
         .flow
         .hi();
-    let nominal_flow = nominal.flow.midpoint();
+    Ok(FlowEnvelope {
+        nominal,
+        resistance,
+        resistance_low,
+        resistance_high,
+        fan_rel,
+        low_flow,
+        high_flow,
+        low_pressure_flow,
+        high_pressure_flow,
+    })
+}
 
+/// Stage 2: model cards, assumptions, and validity domain (sorted and
+/// deduplicated exactly as before). Returns the network's own relative
+/// discrepancy alongside so the caller never recovers it by subtraction
+/// (bit-exactness: `(a + b) - a` need not equal `b`).
+fn operating_model_evidence(
+    fan: &FanBank,
+    network: &EnclosureNetwork,
+    fan_rel: f64,
+) -> (ModelEvidence, f64) {
+    let domain = fan.domain();
     let mut cards = vec![fan.curve.model_card().name];
     let fan_law_source = fan_law_source();
     let mut assumptions = vec![format!(
@@ -1042,6 +1080,66 @@ pub fn solve_operating_point(
         discrepancy_rel: fan_rel + network_rel,
         in_domain: true,
     };
+    (model, network_rel)
+}
+
+/// Stage 3: per-branch flow allocation with the combined relative bound.
+fn allocate_branch_flows(
+    network: &EnclosureNetwork,
+    nominal_flow: f64,
+    combined_rel: f64,
+    model: &ModelEvidence,
+    provenance: ProvenanceHash,
+) -> Vec<BranchFlow> {
+    let mut allocated = Vec::new();
+    network.full.allocate(nominal_flow, &mut allocated);
+    allocated
+        .into_iter()
+        .map(|(path, value)| {
+            let branch_provenance =
+                ProvenanceHash::chain(&format!("airflow-branch-{path}"), &[provenance]);
+            BranchFlow {
+                leakage: path == network.leakage_name,
+                path,
+                flow: Evidence {
+                    value: VolumetricFlowRate::new(value),
+                    qoi: value,
+                    numerical: NumericalCertificate::estimate(
+                        value * (1.0 - combined_rel),
+                        value * (1.0 + combined_rel),
+                    ),
+                    statistical: StatisticalCertificate::None,
+                    model: model.clone(),
+                    sensitivity: SensitivitySummary::default(),
+                    provenance: branch_provenance,
+                    adjoint_ref: None,
+                },
+            }
+        })
+        .collect()
+}
+
+/// # Errors
+/// Refuses a stall-side or absent intersection, incomplete interval search,
+/// or a root that interval Newton cannot prove unique.
+pub fn solve_operating_point(
+    fan: &FanBank,
+    network: &EnclosureNetwork,
+) -> Result<OperatingPoint, AirflowError> {
+    let envelope = certified_flow_envelope(fan, network)?;
+    let FlowEnvelope {
+        nominal,
+        resistance,
+        resistance_low,
+        resistance_high,
+        fan_rel,
+        low_flow,
+        high_flow,
+        low_pressure_flow,
+        high_pressure_flow,
+    } = envelope;
+    let nominal_flow = nominal.flow.midpoint();
+    let (model, network_rel) = operating_model_evidence(fan, network, fan_rel);
     let provenance = operating_provenance(fan, network);
     let flow = Evidence {
         value: VolumetricFlowRate::new(nominal_flow),
@@ -1067,33 +1165,8 @@ pub fn solve_operating_point(
         adjoint_ref: None,
     };
 
-    let mut allocated = Vec::new();
-    network.full.allocate(nominal_flow, &mut allocated);
     let combined_rel = (fan_rel + network_rel).min(0.99);
-    let branches: Vec<BranchFlow> = allocated
-        .into_iter()
-        .map(|(path, value)| {
-            let branch_provenance =
-                ProvenanceHash::chain(&format!("airflow-branch-{path}"), &[provenance]);
-            BranchFlow {
-                leakage: path == network.leakage_name,
-                path,
-                flow: Evidence {
-                    value: VolumetricFlowRate::new(value),
-                    qoi: value,
-                    numerical: NumericalCertificate::estimate(
-                        value * (1.0 - combined_rel),
-                        value * (1.0 + combined_rel),
-                    ),
-                    statistical: StatisticalCertificate::None,
-                    model: model.clone(),
-                    sensitivity: SensitivitySummary::default(),
-                    provenance: branch_provenance,
-                    adjoint_ref: None,
-                },
-            }
-        })
-        .collect();
+    let branches = allocate_branch_flows(network, nominal_flow, combined_rel, &model, provenance);
     let leakage_flow: f64 = branches
         .iter()
         .filter(|branch| branch.leakage)
@@ -1576,6 +1649,12 @@ pub enum AirflowError {
 }
 
 impl fmt::Display for AirflowError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat 38-arm error-message table: every arm is one write! of \
+                  one variant's message; splitting adds dispatch indirection \
+                  without reducing complexity or aiding review"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooFewFanPoints { count } => {

@@ -671,9 +671,9 @@ impl ThermalQoiSet {
     }
 }
 
-fn push_regime_claim<'a, T>(
+fn push_regime_claim<T>(
     claims: &mut Vec<QoiClaim>,
-    uses: &mut BTreeMap<String, &'a ThermalQoiCardUse>,
+    uses: &mut BTreeMap<String, &ThermalQoiCardUse>,
     qoi: &ThermalQoi<T>,
 ) -> Result<(), ThermalOutputAuditError> {
     let qoi_id = qoi.uncertainty.qoi();
@@ -798,8 +798,71 @@ pub fn extract_thermal_qois(
     let requirement_id = requirement_identity(requirement);
     let discretization_id = discretization.map(discretization_identity);
 
-    let (maximum, maximum_vertex) = junction_maximum(solution, junction_region);
     let temperature_model = conduction_model(solution);
+    // Every temperature QoI carries the same provenance-specific Parameters
+    // gap, so a caller-declared conductivity can never read like a
+    // receipt-backed one.
+    let parameter_term = material_parameter_term(solution, solution_id)?;
+    let (junction_maximum, maximum_identity) = junction_maximum_qoi(
+        solution,
+        junction_region,
+        solution_id,
+        discretization,
+        discretization_id,
+        &temperature_model,
+        &parameter_term,
+    )?;
+
+    let uniformity = surface_uniformity(
+        mesh,
+        solution,
+        surface_region,
+        solution_id,
+        &temperature_model,
+        &parameter_term,
+    )?;
+
+    let pressure_drop = pressure_drop_qoi(operating_point, operating_id)?;
+
+    let fan_power_qoi = fan_power_qoi(operating_point, fan_power, operating_id, fan_id)?;
+
+    let thermal_margin = thermal_margin_qoi(
+        requirement,
+        requirement_id,
+        &junction_maximum,
+        maximum_identity,
+        temperature_model,
+    )?;
+
+    Ok(ThermalQoiSet {
+        junction_maximum,
+        pressure_drop,
+        fan_power: fan_power_qoi,
+        uniformity,
+        thermal_margin,
+    })
+}
+
+/// Build the junction-maximum QoI (stage of `extract_thermal_qois`).
+///
+/// A declared refinement-ladder half-width is the ONLY route by which the
+/// junction maximum acquires a known Discretization term. Absent a receipt
+/// the term stays a named Unknown; nothing here manufactures one.
+fn junction_maximum_qoi(
+    solution: &ConductionSolution,
+    junction_region: &JunctionRegion,
+    solution_id: ContentHash,
+    discretization: Option<&DiscretizationReceipt>,
+    discretization_id: Option<ContentHash>,
+    temperature_model: &ModelEvidence,
+    parameter_term: &(
+        EngineeringUncertaintyKind,
+        TermValue,
+        &'static str,
+        ContentHash,
+    ),
+) -> Result<(JunctionMaximum, ContentHash), QoiError> {
+    let (maximum, maximum_vertex) = junction_maximum(solution, junction_region);
     let mut maximum_parents = vec![solution_id];
     if let Some(identity) = discretization_id {
         maximum_parents.push(identity);
@@ -809,13 +872,6 @@ pub fn extract_thermal_qois(
         &maximum_parents,
         &region_identity(junction_region.name(), junction_region.vertices()),
     );
-    // A declared refinement-ladder half-width is the ONLY route by which the
-    // junction maximum acquires a known Discretization term. Absent a receipt
-    // the term stays a named Unknown; nothing here manufactures one.
-    // Every temperature QoI carries the same provenance-specific Parameters
-    // gap, so a caller-declared conductivity can never read like a
-    // receipt-backed one.
-    let parameter_term = material_parameter_term(solution, solution_id)?;
     let mut maximum_known = vec![parameter_term.clone()];
     if let (Some(receipt), Some(identity)) = (discretization, discretization_id) {
         maximum_known.push((
@@ -837,24 +893,25 @@ pub fn extract_thermal_qois(
         temperature_model.clone(),
         maximum_identity,
     )?;
-    let junction_maximum = JunctionMaximum {
-        qoi: ThermalQoi {
-            evidence: maximum_evidence,
-            uncertainty: maximum_budget,
-            kind: ThermalQoiKind::AbsoluteTemperature,
+    Ok((
+        JunctionMaximum {
+            qoi: ThermalQoi {
+                evidence: maximum_evidence,
+                uncertainty: maximum_budget,
+                kind: ThermalQoiKind::AbsoluteTemperature,
+            },
+            vertex: maximum_vertex,
         },
-        vertex: maximum_vertex,
-    };
+        maximum_identity,
+    ))
+}
 
-    let uniformity = surface_uniformity(
-        mesh,
-        solution,
-        surface_region,
-        solution_id,
-        &temperature_model,
-        &parameter_term,
-    )?;
-
+/// Build the pressure-drop QoI from the operating envelope (stage of
+/// `extract_thermal_qois`).
+fn pressure_drop_qoi(
+    operating_point: &OperatingPoint,
+    operating_id: ContentHash,
+) -> Result<ThermalQoi<Pressure>, QoiError> {
     let pressure_value = operating_point.pressure.value.value();
     let pressure_half_width = interval_half_width(
         pressure_value,
@@ -863,7 +920,7 @@ pub fn extract_thermal_qois(
     )?;
     let pressure_identity = qoi_identity("pressure-drop", &[operating_id], b"operating-pressure");
     let pressure_term = TermValue::interval(0.0, pressure_half_width)?;
-    let pressure_drop = ThermalQoi {
+    Ok(ThermalQoi {
         evidence: operating_point.pressure.clone(),
         uncertainty: unknown_budget(
             "thermal-pressure-drop",
@@ -877,14 +934,31 @@ pub fn extract_thermal_qois(
             )],
         )?,
         kind: ThermalQoiKind::Pressure,
-    };
+    })
+}
 
-    let fan_power_qoi = fan_power_qoi(operating_point, fan_power, operating_id, fan_id)?;
-
-    // The effective limit already reflects the declared safety factor; this
-    // subtraction is the ONLY place the factor could be applied a second time,
-    // and it deliberately is not. `safety_factor` reaches `requirement_id`
-    // only, so changing the factor rebinds identity without moving the value.
+/// Build the thermal-margin QoI (stage of `extract_thermal_qois`).
+///
+/// The effective limit already reflects the declared safety factor; the
+/// subtraction here is the ONLY place the factor could be applied a second
+/// time, and it deliberately is not. `safety_factor` reaches
+/// `requirement_id` only, so changing the factor rebinds identity without
+/// moving the value.
+///
+/// margin = L_eff - T_max has unit sensitivity to the junction maximum and
+/// is expressed in the same kelvin, so every junction-maximum term
+/// transfers 1:1. Propagating the term VALUES (rather than re-deriving
+/// independent Unknowns) is what makes the margin a functional of its input
+/// instead of a scalar wearing a budget. The declared limit contributes no
+/// term of its own: it is exact by declaration, not a measured quantity.
+fn thermal_margin_qoi(
+    requirement: &ThermalRequirement,
+    requirement_id: ContentHash,
+    junction_maximum: &JunctionMaximum,
+    maximum_identity: ContentHash,
+    temperature_model: ModelEvidence,
+) -> Result<ThermalQoi<Temperature>, QoiError> {
+    let maximum = junction_maximum.qoi.evidence.value;
     let margin = requirement.maximum_temperature.value() - maximum.value();
     if !margin.is_finite() {
         return Err(QoiError::invalid(
@@ -897,13 +971,7 @@ pub fn extract_thermal_qois(
         &[maximum_identity, requirement_id],
         requirement.source.identifier.as_bytes(),
     );
-    // margin = L_eff - T_max has unit sensitivity to the junction maximum and
-    // is expressed in the same kelvin, so every junction-maximum term
-    // transfers 1:1. Propagating the term VALUES (rather than re-deriving
-    // independent Unknowns) is what makes the margin a functional of its input
-    // instead of a scalar wearing a budget. The declared limit contributes no
-    // term of its own: it is exact by declaration, not a measured quantity.
-    let thermal_margin = ThermalQoi {
+    Ok(ThermalQoi {
         evidence: no_claim_temperature(
             ThermalQoiKind::TemperatureDifference,
             Temperature::new(margin),
@@ -918,14 +986,6 @@ pub fn extract_thermal_qois(
             margin_identity,
             "thermal-qoi-margin-from-junction-maximum",
         )?,
-    };
-
-    Ok(ThermalQoiSet {
-        junction_maximum,
-        pressure_drop,
-        fan_power: fan_power_qoi,
-        uniformity,
-        thermal_margin,
     })
 }
 
@@ -1521,7 +1581,7 @@ fn admit_name(field: &'static str, value: String) -> Result<String, QoiError> {
     }
 }
 
-fn canonicalize_indices(field: &'static str, values: &mut Vec<usize>) -> Result<(), QoiError> {
+fn canonicalize_indices(field: &'static str, values: &mut [usize]) -> Result<(), QoiError> {
     if values.is_empty() || values.len() > MAX_REGION_ENTRIES {
         return Err(QoiError::invalid(
             field,
