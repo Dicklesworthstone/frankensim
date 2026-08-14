@@ -301,6 +301,14 @@ continues instead of resetting.
 Diagnostic codes and fix text are machine-facing compatibility surface.
 Human prose may improve without changing a code or exit class.
 
+Each machine code maps to exactly ONE exit class regardless of which layer
+catches it. In particular the card-pack resource caps
+(`cli-solve-card-pack-count`, `cli-solve-card-pack-size`) always exit `3`
+(input/resource cap): such invocations match the documented grammar — the
+card-pack flags are unbounded repetition — so `2` (usage) would misreport
+correct syntax, and the cap is enforced at parse, read, and admission layers
+without changing the class (bead p63op).
+
 ## Error model
 
 Command-line failures are `Diagnostic` records with stable codes on stderr
