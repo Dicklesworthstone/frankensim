@@ -537,6 +537,7 @@
     "crates/fs-evidence/tests/uncertainty.rs",
     "crates/fs-evidence/tests/useful_bound.rs",
     "crates/fs-evidence/tests/vv.rs",
+    "crates/fs-evidence/tests/witness.rs",
     "crates/fs-exec/tests/conformance.rs",
     "crates/fs-exec/tests/constellation_smoke.rs",
     "crates/fs-exec/tests/fault_storm.rs",
