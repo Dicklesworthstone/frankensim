@@ -54,7 +54,10 @@ stepping, and Galerkin reduction preserves the structure.
   mouth so a blow and a transformer body can coexist; open end
   uses compact `Re Z_rad` at the quarter-wave pin),
   `acoustic_waveguide` / `AcousticTap` (open side-branch neck
-  inertance shunted to atmosphere — a tone hole), `modal_bank`
+  inertance shunted to atmosphere — a tone hole),
+  `acoustic_chain` / `AcousticSection` (concatenated LC runs
+  with an area jump at each interface — a muffler, a
+  constriction, a cone sliced into cylinders), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

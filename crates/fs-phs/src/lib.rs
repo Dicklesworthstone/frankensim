@@ -1725,8 +1725,9 @@ pub fn lc_ladder_terminated(
 /// first charge so a blow and a transformer body can share the
 /// mouth. An open far end loads the last flux with compact-mouth
 /// `Re Z_rad` at the quarter-wave pin; a closed end is lossless.
-/// Viscothermal TMM stays the tone-hole / FIR path — this object
-/// does not invent Stokes resistance.
+/// A stepped bore is [`acoustic_chain`]. Viscothermal TMM stays
+/// the lossy fallback — this object does not invent Stokes
+/// resistance.
 ///
 /// # Errors
 /// Non-physical geometry, `cells < 2`, `inlets` not in `{1, 2}`,
@@ -1752,11 +1753,11 @@ pub fn acoustic_cylinder(
     )
 }
 
-/// Open side branch on an [`acoustic_waveguide`]: a neck inertance
+/// Open side branch on an [`acoustic_chain`]: a neck inertance
 /// shunted to atmosphere at a station along the line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AcousticTap {
-    /// Station along the cylinder in `[0, 1]`.
+    /// Station along the total length in `[0, 1]`.
     pub station: f64,
     /// Chimney / neck length [m] (end correction is added).
     pub neck_length: f64,
@@ -1764,12 +1765,27 @@ pub struct AcousticTap {
     pub neck_radius: f64,
 }
 
+/// One inviscid cylindrical run in an [`acoustic_chain`].
+///
+/// A muffler chamber, a constriction, and one slice of a cone
+/// approximated by cylinders are this object. `cells` is the LC
+/// resolution of this run only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcousticSection {
+    /// Axial length [m].
+    pub length: f64,
+    /// Inner radius [m].
+    pub radius: f64,
+    /// LC cells in this run (`>= 1`; the chain as a whole needs `>= 2`).
+    pub cells: usize,
+}
+
 /// Inviscid uniform waveguide with optional open side branches.
 ///
 /// Each open tap is a neck inertance `ρ (ℓ + 0.6 a)/A` shunted to
 /// `p = 0` with compact-mouth `Re Z_rad` — a tone hole, a relief
 /// port, and a side vent are this object. Closed pads add no states.
-/// Stepped-radius bores stay on the TMM/FIR path.
+/// A stepped bore is [`acoustic_chain`].
 ///
 /// # Errors
 /// As [`acoustic_cylinder`], plus a bad tap station or neck.
@@ -1783,50 +1799,111 @@ pub fn acoustic_waveguide(
     inlets: usize,
     taps: &[AcousticTap],
 ) -> Result<PortHamiltonian, PhsError> {
-    if !(length > 0.0 && radius > 0.0 && density > 0.0 && sound_speed > 0.0)
-        || cells < 2
+    acoustic_chain(
+        &[AcousticSection {
+            length,
+            radius,
+            cells,
+        }],
+        density,
+        sound_speed,
+        open,
+        inlets,
+        taps,
+    )
+}
+
+/// Concatenated inviscid LC waveguide.
+///
+/// Each section has its own `L = ρ dx / A`, `C = A dx /(ρ c²)`.
+/// Adjacent runs share the same series `J` as cells inside a run:
+/// the interface is the area jump, not a special junction. Open
+/// taps sit at a station of the total length. An open far end
+/// loads the last flux with compact-mouth `Re Z_rad` at the
+/// quarter-wave pin of the total length, using the last radius.
+/// Viscothermal TMM stays the lossy fallback — this object does
+/// not invent Stokes resistance.
+///
+/// # Errors
+/// Empty chain, non-physical geometry, `inlets` not in `{1, 2}`,
+/// fewer than two cells in total, a bad tap, or a radiation-fit
+/// refusal.
+pub fn acoustic_chain(
+    sections: &[AcousticSection],
+    density: f64,
+    sound_speed: f64,
+    open: bool,
+    inlets: usize,
+    taps: &[AcousticTap],
+) -> Result<PortHamiltonian, PhsError> {
+    let mut n_cells = 0usize;
+    let mut last_radius = 0.0;
+    for s in sections {
+        if !(s.length > 0.0 && s.radius > 0.0) || s.cells == 0 {
+            return Err(PhsError::NotPsd {
+                what: "acoustic section parameters",
+            });
+        }
+        n_cells += s.cells;
+        last_radius = s.radius;
+    }
+    if sections.is_empty()
+        || n_cells < 2
+        || !(density > 0.0 && sound_speed > 0.0)
         || (inlets != 1 && inlets != 2)
     {
         return Err(PhsError::NotPsd {
-            what: "acoustic waveguide parameters",
+            what: "acoustic chain parameters",
         });
     }
-    let n_line = 2 * cells;
+    let n_line = 2 * n_cells;
     let n_tap = taps.len();
     let n = n_line + n_tap;
-    let area = core::f64::consts::PI * radius * radius;
-    let dx = length / cells as f64;
-    let inertance = density * dx / area;
-    let compliance = area * dx / (density * sound_speed * sound_speed);
+    let mut inertances = Vec::with_capacity(n_cells);
+    let mut compliances = Vec::with_capacity(n_cells);
+    let mut cell_x0 = Vec::with_capacity(n_cells);
+    let mut x_acc = 0.0;
+    for s in sections {
+        let area = core::f64::consts::PI * s.radius * s.radius;
+        let dx = s.length / s.cells as f64;
+        let inertance = density * dx / area;
+        let compliance = area * dx / (density * sound_speed * sound_speed);
+        for _ in 0..s.cells {
+            cell_x0.push(x_acc);
+            inertances.push(inertance);
+            compliances.push(compliance);
+            x_acc += dx;
+        }
+    }
+    let total_length = x_acc;
     let mut q = vec![0.0; n * n];
     let mut j = vec![0.0; n * n];
     let mut r = vec![0.0; n * n];
-    for cell in 0..cells {
+    for cell in 0..n_cells {
         let (qi, pi) = (2 * cell, 2 * cell + 1);
-        q[qi * n + qi] = 1.0 / compliance;
-        q[pi * n + pi] = 1.0 / inertance;
+        q[qi * n + qi] = 1.0 / compliances[cell];
+        q[pi * n + pi] = 1.0 / inertances[cell];
         j[qi * n + pi] = 1.0;
         j[pi * n + qi] = -1.0;
-        if cell + 1 < cells {
+        if cell + 1 < n_cells {
             let qn = 2 * (cell + 1);
             j[pi * n + qn] = -1.0;
             j[qn * n + pi] = 1.0;
         }
     }
+    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
     if open {
-        let omega = core::f64::consts::PI * sound_speed / (2.0 * length);
         let r_load = compact_radiation_impedance(
             density,
             sound_speed,
-            radius,
-            omega,
+            last_radius,
+            omega_pin,
             MouthFlange::Unflanged,
         )
         .map(|(rr, _)| rr)?;
         let last_p = n_line - 1;
         r[last_p * n + last_p] = r_load;
     }
-    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * length);
     for (t, tap) in taps.iter().enumerate() {
         if !(tap.station >= 0.0
             && tap.station <= 1.0
@@ -1837,8 +1914,13 @@ pub fn acoustic_waveguide(
                 what: "acoustic tap station and neck",
             });
         }
-        let cell =
-            ((tap.station * (cells.saturating_sub(1)) as f64).round() as usize).min(cells - 1);
+        let pos = tap.station * total_length;
+        let mut cell = 0usize;
+        for (i, &x0) in cell_x0.iter().enumerate() {
+            if x0 <= pos {
+                cell = i;
+            }
+        }
         let tap_q = 2 * cell;
         let phi = n_line + t;
         let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;

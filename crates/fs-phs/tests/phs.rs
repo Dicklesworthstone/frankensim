@@ -7,10 +7,10 @@
 
 use fs_math::c64::C64;
 use fs_phs::{
-    AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage,
-    acoustic_cylinder, acoustic_waveguide, common_effort_capacitor, common_effort_dirac,
-    common_effort_star, common_flow_dirac, compact_radiation_impedance, discrete_gradient,
-    duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
+    AcousticSection, AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage,
+    Storage, acoustic_chain, acoustic_cylinder, acoustic_waveguide, common_effort_capacitor,
+    common_effort_dirac, common_effort_star, common_flow_dirac, compact_radiation_impedance,
+    discrete_gradient, duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
     helmholtz_resonator_radiating, interconnect, kirchhoff_parallel_step, lc_ladder,
     lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports, moving_end_waveguide,
     reduce_galerkin, regularized_coulomb, series_impedance_ports, step, step_descriptor,
@@ -995,6 +995,119 @@ fn open_tap_raises_the_waveguide_frequency() {
     assert!(
         t1 < t0 * 0.98,
         "an open side branch must shorten the period ({t1} vs {t0})"
+    );
+}
+
+#[test]
+fn equal_radius_chain_matches_a_uniform_waveguide() {
+    let l = 0.34;
+    let c = 343.0;
+    let one = acoustic_waveguide(l, 0.012, 1.2, c, 8, false, 1, &[]).expect("one");
+    let two = acoustic_chain(
+        &[
+            AcousticSection {
+                length: 0.17,
+                radius: 0.012,
+                cells: 4,
+            },
+            AcousticSection {
+                length: 0.17,
+                radius: 0.012,
+                cells: 4,
+            },
+        ],
+        1.2,
+        c,
+        false,
+        1,
+        &[],
+    )
+    .expect("two");
+    assert_eq!(one.state_dim(), two.state_dim());
+    let dt = 1.0 / 8_000.0;
+    let mut x1 = vec![0.0; one.state_dim()];
+    let mut x2 = vec![0.0; two.state_dim()];
+    for i in 0..32 {
+        let u = if i < 8 {
+            2.0e-5 * (core::f64::consts::PI * i as f64 / 8.0).sin()
+        } else {
+            0.0
+        };
+        let a = step(&one, &x1, &[u], dt).expect("a");
+        let b = step(&two, &x2, &[u], dt).expect("b");
+        assert!(
+            (a.y[0] - b.y[0]).abs() <= 1.0e-12 * (1.0 + a.y[0].abs()),
+            "equal-radius split must be the same LC line ({} vs {})",
+            a.y[0],
+            b.y[0]
+        );
+        x1 = a.x;
+        x2 = b.x;
+    }
+}
+
+#[test]
+fn a_constriction_shifts_the_chain_period() {
+    let l = 0.34;
+    let c = 343.0;
+    let plain = acoustic_waveguide(l, 0.012, 1.2, c, 8, false, 1, &[]).expect("plain");
+    let stepped = acoustic_chain(
+        &[
+            AcousticSection {
+                length: 0.17,
+                radius: 0.012,
+                cells: 4,
+            },
+            AcousticSection {
+                length: 0.17,
+                radius: 0.006,
+                cells: 4,
+            },
+        ],
+        1.2,
+        c,
+        false,
+        1,
+        &[],
+    )
+    .expect("stepped");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        dominant_zero_period(&p, dt)
+    };
+    let t0 = ring(&plain);
+    let t1 = ring(&stepped);
+    assert!(
+        (t1 - t0).abs() > 0.02 * t0,
+        "an area jump must move the ringing period ({t1} vs {t0})"
+    );
+    assert!(acoustic_chain(&[], 1.2, c, false, 1, &[]).is_err());
+    assert!(
+        acoustic_chain(
+            &[AcousticSection {
+                length: 0.1,
+                radius: 0.01,
+                cells: 1,
+            }],
+            1.2,
+            c,
+            false,
+            1,
+            &[],
+        )
+        .is_err()
     );
 }
 
