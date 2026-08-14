@@ -23,6 +23,11 @@ What this slice detects mechanically (each is a typed finding, and the
   charter-date-skew               sibling work packages carry different
                                   CONSOLIDATED CHARTER dates (a stale
                                   controlling clause candidate)
+  unowned-implementation          a source file under runner_v2/work_packages
+                                  exists in the tree but no family bead owns
+                                  it (orphan implementation)
+  closed-missing-implementation   a CLOSED bead exclusively owns a source
+                                  path that does not exist in the tree
 
 What this slice does NOT do (deliberately, per the bead): it never factors
 shared base obligations from per-bead deltas, never rewrites text, and never
@@ -177,6 +182,70 @@ def detect(rows: list[dict], ac_by_id: dict[str, str] | None = None) -> list[dic
     return findings
 
 
+WORK_PACKAGE_DIR = "crates/fs-evidence-runner/src/runner_v2/work_packages"
+OWNED_PATH_PREFIXES = ("crates/", "runner_v2/", "tests/", "scripts/")
+
+
+def resolve_owned_path(symbol: str) -> str | None:
+    """Repo-relative form of an owned symbol IF it names a source path."""
+    if not symbol.endswith(".rs"):
+        return None
+    if symbol.startswith("crates/") or symbol.startswith("scripts/"):
+        return symbol
+    if symbol.startswith("runner_v2/"):
+        return f"crates/fs-evidence-runner/src/{symbol}"
+    if symbol.startswith("tests/"):
+        return f"crates/fs-evidence-runner/{symbol}"
+    return None
+
+
+def detect_tree(rows: list[dict], tree_files: set[str]) -> list[dict]:
+    """Cross-reference owned source paths against an actual file listing.
+
+    `tree_files` is the repo-relative set of existing work-package-relevant
+    files; injected so the self-test can exercise both directions without
+    touching the real tree.
+    """
+    findings: list[dict] = []
+    owned_paths: dict[str, list[str]] = defaultdict(list)
+    for row in rows:
+        for symbol in row["owned_symbols"]:
+            resolved = resolve_owned_path(symbol)
+            if resolved:
+                owned_paths[resolved].append(row["id"])
+    for path in sorted(tree_files):
+        if path.startswith(WORK_PACKAGE_DIR + "/") and path not in owned_paths:
+            findings.append(
+                {
+                    "kind": "unowned-implementation",
+                    "subject": path,
+                    "beads": [],
+                }
+            )
+    closed = {row["id"] for row in rows if row["status"] == "closed"}
+    for path, ids in sorted(owned_paths.items()):
+        closed_owners = sorted(set(ids) & closed)
+        if closed_owners and path not in tree_files:
+            findings.append(
+                {
+                    "kind": "closed-missing-implementation",
+                    "subject": path,
+                    "beads": closed_owners,
+                }
+            )
+    return findings
+
+
+def live_tree_files() -> set[str]:
+    files: set[str] = set()
+    base = REPO_ROOT / "crates" / "fs-evidence-runner"
+    for path in base.rglob("*.rs"):
+        files.add(str(path.relative_to(REPO_ROOT)))
+    for extra in (REPO_ROOT / "scripts").rglob("*.rs"):
+        files.add(str(extra.relative_to(REPO_ROOT)))
+    return files
+
+
 def render(beads_text: str) -> str:
     family = load_family(beads_text)
     rows = [project(row) for row in family]
@@ -194,7 +263,7 @@ def render(beads_text: str) -> str:
         "beads_source_sha256": hashlib.sha256(beads_text.encode()).hexdigest(),
         "family_size": len(rows),
         "rows": rows,
-        "findings": detect(rows, ac_by_id),
+        "findings": detect(rows, ac_by_id) + detect_tree(rows, live_tree_files()),
     }
     return json.dumps(registry, indent=2, sort_keys=True) + "\n"
 
@@ -283,6 +352,29 @@ def self_test() -> int:
     )
     expect("uniform charter is clean", uniform, "charter-date-skew", False)
 
+    # Tree cross-reference detectors (injected file listings).
+    owned = [project(json.loads(bead(
+        "t-1", ac="This Bead exclusively owns `runner_v2/work_packages/a.rs`.")))]
+    orphan = detect_tree(
+        owned,
+        {
+            "crates/fs-evidence-runner/src/runner_v2/work_packages/a.rs",
+            "crates/fs-evidence-runner/src/runner_v2/work_packages/rogue.rs",
+        },
+    )
+    if [f["kind"] for f in orphan] != ["unowned-implementation"]:
+        failures.append(f"orphan implementation: got {orphan}")
+
+    closed_row = project(json.loads(bead(
+        "t-2", ac="This Bead exclusively owns `runner_v2/work_packages/gone.rs`.")))
+    closed_row["status"] = "closed"
+    gone = detect_tree([closed_row], set())
+    if [f["kind"] for f in gone] != ["closed-missing-implementation"]:
+        failures.append(f"closed-missing-implementation: got {gone}")
+    open_row = dict(closed_row, status="open")
+    if detect_tree([open_row], set()):
+        failures.append("an OPEN bead's future path must not be a finding")
+
     # Lossless binding: any clause edit moves the row hash.
     before = json.loads(render(bead("f-4", ac="clause text v1")))
     after = json.loads(render(bead("f-4", ac="clause text v2")))
@@ -291,7 +383,7 @@ def self_test() -> int:
 
     for failure in failures:
         print(f"SELF-TEST FAIL: {failure}", file=sys.stderr)
-    print(f"self-test: {9 - len(failures)} passed, {len(failures)} failed")
+    print(f"self-test: {12 - len(failures)} passed, {len(failures)} failed")
     return 1 if failures else 0
 
 
