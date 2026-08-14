@@ -52,7 +52,9 @@ stepping, and Galerkin reduction preserves the structure.
   radiation on a discrete waveguide), `acoustic_cylinder`
   (inviscid `ρ,c` cylinder as that ladder; two inlets share the
   mouth so a blow and a transformer body can coexist; open end
-  uses compact `Re Z_rad` at the quarter-wave pin),
+  uses compact `Re Z_rad` and the same fit's mass `L = −X/ω`
+  — unflanged `Δℓ = 0.6133 a` — at the quarter-wave pin;
+  closed stays the lossless last inertance),
   `acoustic_waveguide` / `AcousticTap` (`open_fraction` σ:
   open neck inertance, closed cavity `C`, or the mix
   `Y = σ Y_open + (1−σ) Y_closed`; a `ViscothermalPin`
@@ -71,10 +73,12 @@ stepping, and Galerkin reduction preserves the structure.
   `foster_match_re`, `slice_linear_taper`,
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
   `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell
-  shunt `L = ρ|x|/α`; a single taper in `acoustic_chain`
-  is this object; any multi-section chain that contains a
-  taper stitches ψ-lines to the LC ladder with transformer
-  `x` at each interface), `modal_bank`
+  shunt `L = ρ|x|/α`; open mouth is the same compact
+  `(R, X)` on the last ψ-flux with `Z_ψ = x_out² Z_phys`;
+  a single taper in `acoustic_chain` is this object; any
+  multi-section chain that contains a taper stitches
+  ψ-lines to the LC ladder with transformer `x` at each
+  interface), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

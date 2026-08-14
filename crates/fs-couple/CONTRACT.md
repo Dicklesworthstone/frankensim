@@ -350,9 +350,12 @@ clarinet is one filling of those objects.
   inlet; a massive reed is `mass_spring_damper` plus the same
   jet, face-velocity flow, and a Hunt–Crossley lay as a
   dissipative port force (not a term in H). With a linear plate
-  the mouth is a transformer. Frequency-by-frequency Bessel TMM
-  (`LossModel::Bessel`, spherical-wave cones included) is the FIR
-  path. 3-D jet broadband remains a no-claim. Plate ×
+  the mouth is a transformer. An unflanged ODE mouth is the
+  same compact `(R, X)` as the TMM: `Re Z_rad` plus mass
+  `Δℓ = 0.6133 a` on the last flux. Frequency-by-frequency
+  Bessel TMM (`LossModel::Bessel`, spherical-wave cones
+  included) is the FIR path. 3-D jet broadband remains a
+  no-claim. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
