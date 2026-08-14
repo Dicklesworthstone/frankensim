@@ -174,9 +174,9 @@
     "no_row_implies_l4_or_l5"
   ],
   "live_graph_binding": {
-    "captured_at": "2026-08-14T02:00:51Z",
-    "beads_data_root_sha256": "ab84e806756761e4cb27f03257488890cf76f843b841c174605b0321b348f613",
-    "head_sha": "46f30e09fbe7578d0885fc39637edbde25767e12",
+    "captured_at": "2026-08-14T02:41:06Z",
+    "beads_data_root_sha256": "49a52352ab313d440385a91aab57116e93d90b8e53387c993163bb257d02d37a",
+    "head_sha": "e0c6e6349f1ab55b6fd490b3f78bb5f7ef8f7977",
     "br_version": "br 0.2.19",
     "derivation": "all counts recomputed from .beads/issues.jsonl at the recorded root; no copied literal",
     "issue_total": 2976,
@@ -189,6 +189,208 @@
     },
     "primary_spine_descendants": 34,
     "primary_spine_open_or_active": 25
+  },
+  "robot_projection": {
+    "derivation": "primary-spine subtree only; a LEAF has no open parent-child children and is directly executable once its open_hard_blockers (blocks-type edges to non-closed issues; related links are NOT blockers) clear; CONTAINERS roll up and are never work items. This projection is descriptive steering data, not selection authority.",
+    "executable_leaves": [
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.10",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.5"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.11",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.10",
+          "frankensim-extreal-program-f85xj.6.12",
+          "frankensim-extreal-program-f85xj.6.2",
+          "frankensim-extreal-program-f85xj.6.8",
+          "frankensim-extreal-program-f85xj.6.9"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.12",
+        "status": "in_progress",
+        "open_hard_blockers": []
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.13",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.2"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.14.1",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.11"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.14.2",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.17.8",
+          "frankensim-extreal-program-f85xj.6.14.1",
+          "frankensim-extreal-program-f85xj.8.6"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.14.3",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.14.2",
+          "frankensim-extreal-program-f85xj.8.7"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.14.4",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.14.1",
+          "frankensim-extreal-program-f85xj.6.14.2",
+          "frankensim-extreal-program-f85xj.6.14.3"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.2",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.10",
+          "frankensim-extreal-program-f85xj.6.5",
+          "frankensim-extreal-program-f85xj.6.9"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.5.3",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-epic-foundations-huq.24.4",
+          "frankensim-s2l9v",
+          "frankensim-s93ej"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.6",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.5"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.7",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.5"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.8",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.5"
+        ]
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.9",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.6.6",
+          "frankensim-extreal-program-f85xj.6.7",
+          "frankensim-s2l9v"
+        ]
+      },
+      {
+        "issue_id": "frankensim-s2l9v.1",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.5.10"
+        ]
+      },
+      {
+        "issue_id": "frankensim-s2l9v.2",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.8.3",
+          "frankensim-s2l9v.1"
+        ]
+      },
+      {
+        "issue_id": "frankensim-s2l9v.3",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-s2l9v.1",
+          "frankensim-s93ej"
+        ]
+      },
+      {
+        "issue_id": "frankensim-s2l9v.4",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-s2l9v.2",
+          "frankensim-s2l9v.3"
+        ]
+      },
+      {
+        "issue_id": "frankensim-s93ej.1",
+        "status": "in_progress",
+        "open_hard_blockers": []
+      },
+      {
+        "issue_id": "frankensim-s93ej.2",
+        "status": "in_progress",
+        "open_hard_blockers": []
+      },
+      {
+        "issue_id": "frankensim-s93ej.3",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.5.3",
+          "frankensim-s93ej.1",
+          "frankensim-s93ej.2"
+        ]
+      }
+    ],
+    "containers": [
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6",
+        "status": "open",
+        "open_hard_blockers": [],
+        "open_children": 11
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.14",
+        "status": "open",
+        "open_hard_blockers": [
+          "frankensim-extreal-program-f85xj.17.8",
+          "frankensim-extreal-program-f85xj.6.11",
+          "frankensim-extreal-program-f85xj.6.14.4"
+        ],
+        "open_children": 4
+      },
+      {
+        "issue_id": "frankensim-extreal-program-f85xj.6.5",
+        "status": "in_progress",
+        "open_hard_blockers": [],
+        "open_children": 3
+      },
+      {
+        "issue_id": "frankensim-s2l9v",
+        "status": "open",
+        "open_hard_blockers": [],
+        "open_children": 4
+      },
+      {
+        "issue_id": "frankensim-s93ej",
+        "status": "open",
+        "open_hard_blockers": [],
+        "open_children": 3
+      }
+    ]
   },
   "producer_validation": {
     "producer_bead": "frankensim-extreal-program-f85xj.16.11",

@@ -167,6 +167,62 @@ def descendants(issues, root):
     return seen
 
 
+def blocking_map(issues):
+    """issue -> [blocker ids] over `blocks`-type dependencies only
+    (parent-child and related edges are NOT hard blockers)."""
+    blockers = {}
+    for issue in issues.values():
+        for dep in issue.get("dependencies") or []:
+            if isinstance(dep, dict) and dep.get("type") == "blocks":
+                blockers.setdefault(issue["id"], []).append(dep.get("depends_on_id"))
+    return blockers
+
+
+def robot_projection(issues, on_path):
+    """Executable leaves vs containers inside the primary spine, with each
+    leaf's OPEN hard blockers (blocks-type edges to non-closed issues) —
+    the distinctions the bead names that bv's whole-graph ranking erases."""
+    children_of = {}
+    for issue in issues.values():
+        for dep in issue.get("dependencies") or []:
+            if isinstance(dep, dict) and dep.get("type") == "parent-child":
+                children_of.setdefault(dep.get("depends_on_id"), []).append(issue["id"])
+    blockers = blocking_map(issues)
+    leaves, containers = [], []
+    for node in sorted(on_path):
+        issue = issues.get(node)
+        if not issue or issue.get("status") == "closed":
+            continue
+        kids = [k for k in children_of.get(node, [])
+                if issues.get(k, {}).get("status") != "closed"]
+        open_blockers = sorted(
+            b for b in blockers.get(node, [])
+            if issues.get(b, {}).get("status") not in ("closed", None)
+        )
+        row = {
+            "issue_id": node,
+            "status": issue.get("status"),
+            "open_hard_blockers": open_blockers,
+        }
+        if kids:
+            row["open_children"] = len(kids)
+            containers.append(row)
+        else:
+            leaves.append(row)
+    return {
+        "derivation": (
+            "primary-spine subtree only; a LEAF has no open parent-child "
+            "children and is directly executable once its open_hard_blockers "
+            "(blocks-type edges to non-closed issues; related links are NOT "
+            "blockers) clear; CONTAINERS roll up and are never work items. "
+            "This projection is descriptive steering data, not selection "
+            "authority."
+        ),
+        "executable_leaves": leaves,
+        "containers": containers,
+    }
+
+
 def main():
     issues = load_issues()
     failures = []
@@ -244,6 +300,7 @@ def main():
             "primary_spine_descendants": len(on_path),
             "primary_spine_open_or_active": on_path_open,
         },
+        "robot_projection": robot_projection(issues, on_path | {PRIMARY_SPINE}),
         "producer_validation": {
             "producer_bead": "frankensim-extreal-program-f85xj.16.11",
             "checks_run": len(checks),
