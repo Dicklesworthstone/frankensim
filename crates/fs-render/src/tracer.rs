@@ -574,6 +574,12 @@ struct PlanarManifoldBoundary {
     entry_triangle_index: u32,
 }
 
+type PreparedReflectedManifoldPlane = (u32, PlaneFrame, Point3, Point3);
+type PreparedReflectedManifoldPrimitive = (
+    Vec<PlanarManifoldBoundary>,
+    Vec<PreparedReflectedManifoldPlane>,
+);
+
 #[derive(Clone, Copy)]
 struct SmoothDirectConnectors {
     parallel_slab: Option<ParallelSlab>,
@@ -10577,6 +10583,68 @@ fn reflected_manifold_boundaries(
     boundaries
 }
 
+fn project_to_plane(point: Point3, plane: PlaneFrame) -> Point3 {
+    let offset = -point.delta_from(plane.origin).dot(plane.outward_normal);
+    point.offset(plane.outward_normal.scale(offset))
+}
+
+fn prepare_reflected_manifold_boundary(
+    scene: &Scene,
+    ray_time: Option<&PathTime>,
+    source: Point3,
+    target: Point3,
+    boundary: PlanarManifoldBoundary,
+) -> Option<PreparedReflectedManifoldPrimitive> {
+    let (geometry, transform) =
+        placed_instanced_geometry(scene, boundary.boundary_primitive, ray_time)?;
+    let SharedGeometry::Mesh(mesh) = geometry else {
+        return None;
+    };
+    let midpoint = Point3::new(
+        0.5 * (source.x + target.x),
+        0.5 * (source.y + target.y),
+        0.5 * (source.z + target.z),
+    );
+    let planes = canonical_world_triangle_planes(&mesh, transform)
+        .into_iter()
+        .map(|(triangle_index, plane)| {
+            (
+                triangle_index,
+                plane,
+                project_to_plane(midpoint, plane),
+                project_to_plane(target, plane),
+            )
+        })
+        .collect();
+    Some((vec![boundary], planes))
+}
+
+fn prepare_reflected_manifold_boundaries(
+    scene: &Scene,
+    ray_time: Option<&PathTime>,
+    source: Point3,
+    direct: PreparedDirectLight,
+) -> Vec<PreparedReflectedManifoldPrimitive> {
+    let DirectLightTarget::Rectangle { point: target, .. } = direct.target else {
+        return Vec::new();
+    };
+    let boundaries = reflected_manifold_boundaries(scene, source, target, ray_time);
+    boundaries
+        .chunk_by(|left, right| left.boundary_primitive == right.boundary_primitive)
+        .filter_map(|boundaries| {
+            let mut prepared = prepare_reflected_manifold_boundary(
+                scene,
+                ray_time,
+                source,
+                target,
+                boundaries[0],
+            )?;
+            prepared.0 = boundaries.to_vec();
+            Some(prepared)
+        })
+        .collect()
+}
+
 fn straight_plane_seed(source: Point3, target: Point3, plane: PlaneFrame) -> Option<(f64, Point3)> {
     let displacement = target.delta_from(source);
     let denominator = displacement.dot(plane.outward_normal);
@@ -10908,13 +10976,14 @@ fn trace_planar_manifold_rectangle_direct_lanes(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn trace_planar_reflected_manifold_rectangle_direct_lanes(
+fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
     scene: &Scene,
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     source_point: Point3,
     source_geometric_normal: Vec3,
     boundary: PlanarManifoldBoundary,
+    planes: &[PreparedReflectedManifoldPlane],
     direct: PreparedDirectLight,
     wavelength_nm: f64,
 ) -> Result<Vec<SlabDirectLane>, TracerError> {
@@ -10927,19 +10996,13 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
     else {
         return Ok(Vec::new());
     };
-    let Some((geometry, transform)) =
-        placed_instanced_geometry(scene, boundary.boundary_primitive, ray_time)
+    let Some(entry) = planes
+        .iter()
+        .find(|plane| plane.0 == boundary.entry_triangle_index)
     else {
         return Ok(Vec::new());
     };
-    let SharedGeometry::Mesh(mesh) = geometry else {
-        return Ok(Vec::new());
-    };
-    let Some(entry_plane) = world_triangle_plane(&mesh, transform, boundary.entry_triangle_index)
-    else {
-        return Ok(Vec::new());
-    };
-    let canonical_planes = canonical_world_triangle_planes(&mesh, transform);
+    let entry_plane = entry.1;
     let source_target_scale = target_point.delta_from(source_point).norm();
     let straight_light_cosine = light_normal.dot(direct.direction).abs();
     let area_pdf = direct.pdf_solid_angle * straight_light_cosine / (distance_m * distance_m);
@@ -10949,31 +11012,12 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
     let eta_glass = boundary.glass.ior().eval(wavelength_nm)?;
     let light_tangent = basis_all_sphere(light_normal).0;
     let light_bitangent = cross(light_normal, light_tangent);
-    let midpoint = Point3::new(
-        0.5 * (source_point.x + target_point.x),
-        0.5 * (source_point.y + target_point.y),
-        0.5 * (source_point.z + target_point.z),
-    );
-    let entry_seed = midpoint.offset(
-        entry_plane.outward_normal.scale(
-            -midpoint
-                .delta_from(entry_plane.origin)
-                .dot(entry_plane.outward_normal),
-        ),
-    );
     let mut admitted: Vec<(f64, SlabDirectLane)> = Vec::new();
-    for &(reflection_triangle, reflection_plane) in &canonical_planes {
+    for &(reflection_triangle, reflection_plane, reflection_seed, _) in planes {
         if same_support_plane(entry_plane, reflection_plane) {
             continue;
         }
-        let reflection_seed = midpoint.offset(
-            reflection_plane.outward_normal.scale(
-                -midpoint
-                    .delta_from(reflection_plane.origin)
-                    .dot(reflection_plane.outward_normal),
-            ),
-        );
-        for &(_, exit_plane) in &canonical_planes {
+        for &(_, exit_plane, _, exit_seed) in planes {
             cx.checkpoint()?;
             if same_support_plane(reflection_plane, exit_plane)
                 || target_point
@@ -10989,13 +11033,6 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
             {
                 continue;
             }
-            let exit_seed = target_point.offset(
-                exit_plane.outward_normal.scale(
-                    -target_point
-                        .delta_from(exit_plane.origin)
-                        .dot(exit_plane.outward_normal),
-                ),
-            );
             let Some(connection) = solve_three_planar_interfaces_one_reflection(
                 source_point,
                 target_point,
@@ -11003,7 +11040,7 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
                 reflection_plane,
                 exit_plane,
                 eta_glass,
-                entry_seed,
+                entry.2,
                 reflection_seed,
                 exit_seed,
             ) else {
@@ -11187,6 +11224,106 @@ fn trace_planar_reflected_manifold_rectangle_direct_lanes(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn trace_planar_reflected_manifold_rectangle_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    boundary: PlanarManifoldBoundary,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
+    let DirectLightTarget::Rectangle {
+        point: target_point,
+        ..
+    } = direct.target
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(prepared) =
+        prepare_reflected_manifold_boundary(scene, ray_time, source_point, target_point, boundary)
+    else {
+        return Ok(Vec::new());
+    };
+    trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
+        scene,
+        cx,
+        ray_time,
+        source_point,
+        source_geometric_normal,
+        boundary,
+        &prepared.1,
+        direct,
+        wavelength_nm,
+    )
+}
+
+fn append_unique_reflected_lanes(admitted: &mut Vec<SlabDirectLane>, lanes: Vec<SlabDirectLane>) {
+    for lane in lanes {
+        if !admitted.iter().any(|existing| {
+            parallel_directions(existing.incident_direction, lane.incident_direction)
+        }) {
+            admitted.push(lane);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_prepared_reflected_manifold_rectangle_direct_lanes(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source_point: Point3,
+    source_geometric_normal: Vec3,
+    prepared: Option<&[PreparedReflectedManifoldPrimitive]>,
+    direct: PreparedDirectLight,
+    wavelength_nm: f64,
+) -> Result<Vec<SlabDirectLane>, TracerError> {
+    let mut admitted = Vec::new();
+    if let Some(prepared) = prepared {
+        for primitive in prepared {
+            for &boundary in &primitive.0 {
+                append_unique_reflected_lanes(
+                    &mut admitted,
+                    trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
+                        scene,
+                        cx,
+                        ray_time,
+                        source_point,
+                        source_geometric_normal,
+                        boundary,
+                        &primitive.1,
+                        direct,
+                        wavelength_nm,
+                    )?,
+                );
+            }
+        }
+    } else {
+        let DirectLightTarget::Rectangle { point: target, .. } = direct.target else {
+            return Ok(Vec::new());
+        };
+        for boundary in reflected_manifold_boundaries(scene, source_point, target, ray_time) {
+            append_unique_reflected_lanes(
+                &mut admitted,
+                trace_planar_reflected_manifold_rectangle_direct_lanes(
+                    scene,
+                    cx,
+                    ray_time,
+                    source_point,
+                    source_geometric_normal,
+                    boundary,
+                    direct,
+                    wavelength_nm,
+                )?,
+            );
+        }
+    }
+    Ok(admitted)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn trace_reflected_manifold_rectangle_direct_lanes(
     scene: &Scene,
     cx: &Cx<'_>,
@@ -11196,30 +11333,16 @@ fn trace_reflected_manifold_rectangle_direct_lanes(
     direct: PreparedDirectLight,
     wavelength_nm: f64,
 ) -> Result<Vec<SlabDirectLane>, TracerError> {
-    let DirectLightTarget::Rectangle { point: target, .. } = direct.target else {
-        return Ok(Vec::new());
-    };
-    let mut admitted = Vec::new();
-    for boundary in reflected_manifold_boundaries(scene, source_point, target, ray_time) {
-        for lane in trace_planar_reflected_manifold_rectangle_direct_lanes(
-            scene,
-            cx,
-            ray_time,
-            source_point,
-            source_geometric_normal,
-            boundary,
-            direct,
-            wavelength_nm,
-        )? {
-            if admitted.iter().any(|existing: &SlabDirectLane| {
-                parallel_directions(existing.incident_direction, lane.incident_direction)
-            }) {
-                continue;
-            }
-            admitted.push(lane);
-        }
-    }
-    Ok(admitted)
+    trace_prepared_reflected_manifold_rectangle_direct_lanes(
+        scene,
+        cx,
+        ray_time,
+        source_point,
+        source_geometric_normal,
+        None,
+        direct,
+        wavelength_nm,
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -12787,20 +12910,34 @@ fn trace_path(
                             // intentionally remains first-blocker gated.
                             if medium_stack.len() == 0
                                 && matches!(direct.target, DirectLightTarget::Rectangle { .. })
+                                && throughput
+                                    .iter()
+                                    .any(|value| value.to_bits() != 0.0_f64.to_bits())
                             {
                                 let wo = ray.dir.scale(-1.0);
                                 let (espec, escale) = direct.emission;
+                                let prepared = (throughput
+                                    .iter()
+                                    .filter(|value| value.to_bits() != 0.0_f64.to_bits())
+                                    .count()
+                                    >= 2)
+                                    .then(|| {
+                                        prepare_reflected_manifold_boundaries(
+                                            scene, ray_time, hit.point, direct,
+                                        )
+                                    });
                                 for (lane, &lambda) in lambdas.iter().enumerate() {
                                     if throughput[lane].to_bits() == 0.0_f64.to_bits() {
                                         continue;
                                     }
                                     for connection in
-                                        trace_reflected_manifold_rectangle_direct_lanes(
+                                        trace_prepared_reflected_manifold_rectangle_direct_lanes(
                                             scene,
                                             cx,
                                             ray_time,
                                             hit.point,
                                             frame.geometric,
+                                            prepared.as_deref(),
                                             direct,
                                             lambda,
                                         )?
