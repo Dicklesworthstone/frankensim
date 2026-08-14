@@ -519,7 +519,7 @@ pub fn join_port(
     let ext_a: Vec<usize> = (0..a.m).filter(|&p| p != port_a).collect();
     let ext_b: Vec<usize> = (0..b.m).filter(|&p| p != port_b).collect();
     let m = ext_a.len() + ext_b.len();
-    let mut g = if m == 0 {
+    let g = if m == 0 {
         Vec::new()
     } else {
         let mut g = vec![0.0; n * m];
@@ -1862,10 +1862,12 @@ pub struct AcousticTap {
 /// First-order Zwikker–Kosten at one frequency: shear number
 /// `r_v = a √(ω ρ / μ)`, series wall resistance
 /// `R = ω L √2 / r_v`, thermal shunt
-/// `G = ω C (γ−1) √2 / (r_v √Pr)`. The same law as
-/// `fs_duct::LossModel::WideTube`, evaluated at the quarter-wave
-/// pin. A calorically perfect gas is this object — music is not
-/// a special case. Zero viscosity is the lossless mutation.
+/// `G = ω C (γ−1) √2 / (r_v √Pr)` when `r_v ≥ 10`. Below that
+/// shear number the pin is the same Poiseuille + isothermal-tending
+/// shunt as `fs_duct::LossModel::AllRegime` (series `8 μ / a²` on
+/// `L`, thermal `G` on `C`, inertance `4/3` of the inviscid value).
+/// Evaluated at the quarter-wave pin. Zero viscosity is the
+/// lossless mutation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViscothermalPin {
     /// Dynamic viscosity `μ` [Pa s].
@@ -2024,7 +2026,7 @@ pub fn acoustic_chain(
     let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
     if let Some(pin) = viscothermal {
         for cell in 0..n_cells {
-            let (r_series, g_shunt) = wide_tube_series_and_shunt(
+            let (r_series, g_shunt, l_scale) = all_regime_series_and_shunt(
                 inertances[cell],
                 compliances[cell],
                 radii[cell],
@@ -2033,6 +2035,7 @@ pub fn acoustic_chain(
                 pin,
             );
             let (qi, pi) = (2 * cell, 2 * cell + 1);
+            q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
             r[qi * n + qi] += g_shunt;
             r[pi * n + pi] += r_series;
         }
@@ -2093,26 +2096,35 @@ pub fn acoustic_chain(
     PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))
 }
 
-/// Wide-tube Zwikker–Kosten series `R` and thermal shunt `G` at `ω`.
-fn wide_tube_series_and_shunt(
+/// All-regime wall law at one `ω`: wide-tube ZK for `r_v ≥ 10`,
+/// Poiseuille + isothermal-tending shunt below. Returns
+/// `(R_series, G_shunt, L_scale)`.
+fn all_regime_series_and_shunt(
     inertance: f64,
     compliance: f64,
     radius: f64,
     density: f64,
     omega: f64,
     pin: &ViscothermalPin,
-) -> (f64, f64) {
+) -> (f64, f64, f64) {
     if !(pin.dynamic_viscosity > 0.0 && omega > 0.0 && radius > 0.0 && density > 0.0) {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 1.0);
     }
     let rv = radius * det::sqrt(omega * density / pin.dynamic_viscosity);
     if !(rv > 0.0 && rv.is_finite()) {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 1.0);
     }
-    let eps = core::f64::consts::SQRT_2 / rv;
-    let r_series = omega * inertance * eps;
-    let g_shunt = omega * compliance * (pin.gamma - 1.0) * eps / det::sqrt(pin.prandtl);
-    (r_series.max(0.0), g_shunt.max(0.0))
+    const WIDE_TUBE_SHEAR: f64 = 10.0;
+    if rv >= WIDE_TUBE_SHEAR {
+        let eps = core::f64::consts::SQRT_2 / rv;
+        let r_series = omega * inertance * eps;
+        let g_shunt = omega * compliance * (pin.gamma - 1.0) * eps / det::sqrt(pin.prandtl);
+        return (r_series.max(0.0), g_shunt.max(0.0), 1.0);
+    }
+    let r_series = 8.0 * pin.dynamic_viscosity / (density * radius * radius) * inertance;
+    let rt = rv * det::sqrt(pin.prandtl);
+    let g_shunt = (pin.gamma - 1.0) * compliance * omega * (rt * rt / 16.0).min(0.5);
+    (r_series.max(0.0), g_shunt.max(0.0), 4.0 / 3.0)
 }
 
 /// Modal bank from mass-normalized modes — the first-class bridge from

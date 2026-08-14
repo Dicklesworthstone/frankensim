@@ -58,9 +58,9 @@ stepping, and Galerkin reduction preserves the structure.
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
   constriction, a cone sliced into cylinders),
-  `ViscothermalPin` (wide-tube Zwikker–Kosten `R` and thermal
-  `G` at the quarter-wave pin; zero `μ` is the lossless
-  mutation), `modal_bank`
+  `ViscothermalPin` (all-regime pin: wide-tube ZK for
+  `r_v ≥ 10`, Poiseuille + isothermal-tending shunt below;
+  zero `μ` is the lossless mutation), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

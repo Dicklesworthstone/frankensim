@@ -12,10 +12,9 @@ use fs_phs::{
     common_effort_capacitor, common_effort_dirac, common_effort_star, common_flow_dirac,
     compact_radiation_impedance, discrete_gradient, duffing_oscillator, helmholtz_resonator,
     helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect, join_port,
-    kirchhoff_parallel_step,
-    lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports,
-    moving_end_waveguide, reduce_galerkin, regularized_coulomb, series_impedance_ports, step,
-    step_descriptor, transformer,
+    kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank,
+    modal_bank_ports, moving_end_waveguide, reduce_galerkin, regularized_coulomb,
+    series_impedance_ports, step, step_descriptor, transformer,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -942,13 +941,15 @@ fn join_port_keeps_the_leftover_and_holds_energy_when_closed() {
     assert_eq!(open.port_dim(), 1);
     let rec = step_descriptor(&open, &vec![0.0; open.state_dim()], &[0.2], 1.0e-4).expect("drive");
     assert!(rec.y[0].is_finite());
-    assert!(join_port(
-        mass_spring_damper(0.02, 80.0, 0.0).expect("a"),
-        mass_spring_damper(0.03, 120.0, 0.0).expect("b"),
-        1,
-        0,
-    )
-    .is_err());
+    assert!(
+        join_port(
+            mass_spring_damper(0.02, 80.0, 0.0).expect("a"),
+            mass_spring_damper(0.03, 120.0, 0.0).expect("b"),
+            1,
+            0,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1216,6 +1217,58 @@ fn viscothermal_pin_damps_the_chain() {
             }),
         )
         .is_err()
+    );
+}
+
+#[test]
+fn narrow_tube_pin_uses_poiseuille_and_still_damps() {
+    let l = 0.05;
+    let c = 343.0;
+    let sections = [AcousticSection {
+        length: l,
+        radius: 2.0e-4,
+        cells: 6,
+    }];
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+    };
+    let omega = core::f64::consts::PI * c / (2.0 * l);
+    let rv = 2.0e-4 * (omega * 1.2 / 1.8e-5).sqrt();
+    assert!(
+        rv < 10.0,
+        "fixture must sit in the Poiseuille branch (rv={rv})"
+    );
+    let lossless = acoustic_chain(&sections, 1.2, c, false, 1, &[], None).expect("lossless");
+    let lossy = acoustic_chain(&sections, 1.2, c, false, 1, &[], Some(&pin)).expect("poiseuille");
+    let dt = 1.0 / 16_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..400 {
+            let u = if i < 8 {
+                1.0e-8 * (core::f64::consts::PI * i as f64 / 8.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let p0 = ring(&lossless);
+    let p1 = ring(&lossy);
+    let tail = |p: &[f64]| {
+        let t = &p[p.len() / 2..];
+        (t.iter().map(|x| x * x).sum::<f64>() / t.len() as f64).sqrt()
+    };
+    assert!(
+        tail(&p1) < tail(&p0) * 0.9,
+        "Poiseuille pin must damp a capillary ({} vs {})",
+        tail(&p1),
+        tail(&p0)
     );
 }
 
