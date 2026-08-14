@@ -188,7 +188,7 @@ fn push_usize_field(bytes: &mut Vec<u8>, tag: &str, value: usize) {
 }
 
 fn push_bool_field(bytes: &mut Vec<u8>, tag: &str, value: bool) {
-    push_u32_field(bytes, tag, if value { 1 } else { 0 });
+    push_u32_field(bytes, tag, u32::from(value));
 }
 
 fn push_f64_field(bytes: &mut Vec<u8>, tag: &str, value: f64) {
@@ -490,9 +490,9 @@ fn finite_bits(values: &[u64]) -> bool {
 
 fn residual_evidence(spec: &CsrSpec, solution: &[f64], rhs: &[f64]) -> (Vec<u64>, u64, u64) {
     let mut residual = Vec::with_capacity(spec.nrows);
-    for row in 0..spec.nrows {
+    for (row, bounds) in spec.row_ptr.windows(2).enumerate() {
         let mut value = 0.0_f64;
-        for position in spec.row_ptr[row]..spec.row_ptr[row + 1] {
+        for position in bounds[0]..bounds[1] {
             value = spec.values[position].mul_add(solution[spec.columns[position]], value);
         }
         residual.push(value - rhs[row]);
@@ -527,17 +527,30 @@ fn solution_delta(actual: &[f64], expected: &[f64]) -> (Vec<u64>, u64) {
     (output_bits(&delta), maximum.to_bits())
 }
 
-fn measure<P: Precond>(
-    spec: &CsrSpec,
-    rhs: &[f64],
-    expected: &[f64],
-    preconditioner: &P,
+/// Per-case acceptance settings for `measure`, named so call sites read as
+/// declarations instead of a positional None/Vec::new() parade.
+struct MeasureSettings {
     tolerance: f64,
     iteration_cap: usize,
     band: Option<(f64, f64)>,
     hierarchy: Vec<usize>,
     operator_complexity: Option<f64>,
+}
+
+fn measure<P: Precond>(
+    spec: &CsrSpec,
+    rhs: &[f64],
+    expected: &[f64],
+    preconditioner: &P,
+    settings: MeasureSettings,
 ) -> NumericMeasurement {
+    let MeasureSettings {
+        tolerance,
+        iteration_cap,
+        band,
+        hierarchy,
+        operator_complexity,
+    } = settings;
     let matrix = spec.build();
     let mut apply = vec![0.0; rhs.len()];
     preconditioner.apply(rhs, &mut apply);
@@ -609,14 +622,22 @@ fn exact_measurement() -> Result<NumericMeasurement, String> {
         &EXACT_RHS,
         &EXACT_SOLUTION,
         &preconditioner,
-        EXACT_PCG_TOL,
-        EXACT_PCG_CAP,
-        None,
-        Vec::new(),
-        None,
+        MeasureSettings {
+            tolerance: EXACT_PCG_TOL,
+            iteration_cap: EXACT_PCG_CAP,
+            band: None,
+            hierarchy: Vec::new(),
+            operator_complexity: None,
+        },
     ))
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "returns Result to keep the panic-capturing `capture` harness \\
+              signature uniform with `exact_measurement`, which genuinely \\
+              fails on ILU breakdown"
+)]
 fn chebyshev_measurement() -> Result<NumericMeasurement, String> {
     let spec = chebyshev_spec();
     let matrix = spec.build();
@@ -627,14 +648,22 @@ fn chebyshev_measurement() -> Result<NumericMeasurement, String> {
         &chebyshev_rhs(),
         &chebyshev_solution(),
         &preconditioner,
-        CHEB_PCG_TOL,
-        CHEB_PCG_CAP,
-        Some(band),
-        Vec::new(),
-        None,
+        MeasureSettings {
+            tolerance: CHEB_PCG_TOL,
+            iteration_cap: CHEB_PCG_CAP,
+            band: Some(band),
+            hierarchy: Vec::new(),
+            operator_complexity: None,
+        },
     ))
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "returns Result to keep the panic-capturing `capture` harness \\
+              signature uniform with `exact_measurement`, which genuinely \\
+              fails on ILU breakdown"
+)]
 fn amg_measurement() -> Result<NumericMeasurement, String> {
     let spec = laplacian_2d_spec(AMG_GRID);
     let solution = amg_solution();
@@ -648,11 +677,13 @@ fn amg_measurement() -> Result<NumericMeasurement, String> {
         &rhs,
         &solution,
         &preconditioner,
-        AMG_PCG_TOL,
-        AMG_PCG_CAP,
-        None,
-        hierarchy,
-        Some(complexity),
+        MeasureSettings {
+            tolerance: AMG_PCG_TOL,
+            iteration_cap: AMG_PCG_CAP,
+            band: None,
+            hierarchy,
+            operator_complexity: Some(complexity),
+        },
     ))
 }
 
@@ -794,7 +825,7 @@ fn replay_failure(stage: &str, first: &[u8], replay: &[u8]) -> CaseOutcome {
     .with_evidence("crates/fs-sparse/CONTRACT.md#determinism-class")
 }
 
-fn receipt_pass(details: String, receipt: &[u8]) -> CaseOutcome {
+fn receipt_pass(details: &str, receipt: &[u8]) -> CaseOutcome {
     CaseOutcome::pass(format!(
         "{details}; output_receipt_len={}; output_receipt_fnv1a64=0x{:016x}; output_receipt={}",
         receipt.len(),
@@ -885,7 +916,7 @@ fn exact_outcome() -> CaseOutcome {
         .with_evidence("crates/fs-sparse/CONTRACT.md#invariants");
     }
     receipt_pass(
-        "apply=exact; pcg=one-step-exact; same_run=byte-identical".to_owned(),
+        "apply=exact; pcg=one-step-exact; same_run=byte-identical",
         &first_receipt,
     )
 }
@@ -946,7 +977,7 @@ fn chebyshev_outcome() -> CaseOutcome {
         ));
     }
     receipt_pass(
-        format!(
+        &format!(
             "degree={CHEB_DEGREE}; alpha={CHEB_ALPHA}; band=[{lo},{hi}]; iters={}; solution_delta={solution_delta:.3e}; scaled_residual={residual:.3e}; same_run=byte-identical",
             first.report.iters,
         ),
@@ -1010,7 +1041,7 @@ fn amg_outcome() -> CaseOutcome {
         ));
     }
     receipt_pass(
-        format!(
+        &format!(
             "grid={AMG_GRID}x{AMG_GRID}; levels={:?}; complexity={complexity:.6}; iters={}; solution_delta={solution_delta:.3e}; scaled_residual={residual:.3e}; same_run=byte-identical; cross_isa_golden=no-claim",
             first.hierarchy, first.report.iters,
         ),
@@ -1051,7 +1082,7 @@ fn refusal_outcome() -> CaseOutcome {
         ));
     }
     receipt_pass(
-        "typed_ilu_rows=missing:1,stored-zero:0; caught_panics=degree,alpha,nonsquare; same_run=byte-identical".to_owned(),
+        "typed_ilu_rows=missing:1,stored-zero:0; caught_panics=degree,alpha,nonsquare; same_run=byte-identical",
         &first_receipt,
     )
 }
@@ -1084,7 +1115,7 @@ fn reconstruct_corruption() -> Corruption {
     }
 }
 
-fn corruption_outcome(corruption: Corruption) -> CaseOutcome {
+fn corruption_outcome(corruption: &Corruption) -> CaseOutcome {
     let measurement = match capture("red-exact-measurement", exact_measurement) {
         Ok(measurement) => measurement,
         Err(error) => return CaseOutcome::fail(error),
@@ -1121,7 +1152,7 @@ fn run_red_report() -> SuiteReport {
             "seeded-exact-solution-reference-bit-corruption",
             CORRUPTION_FRAME_FNV1A64,
             ToleranceSpec::Exact,
-            move || corruption_outcome(corruption),
+            move || corruption_outcome(&corruption),
         )
         .run()
 }

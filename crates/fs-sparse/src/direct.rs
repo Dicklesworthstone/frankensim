@@ -1502,7 +1502,7 @@ mod tests {
                 "L values must be bitwise identical"
             );
         }
-        let b: Vec<f64> = (0..60).map(|i| (i as f64) - 30.0).collect();
+        let b: Vec<f64> = (0..60).map(|i| f64::from(i) - 30.0).collect();
         let x1 = f1.solve(&b);
         let x2 = f2.solve(&b);
         assert!(x1.iter().zip(&x2).all(|(a, b)| a.to_bits() == b.to_bits()));
