@@ -486,6 +486,24 @@ impl PredictionExecutionInput {
         &self.blind_partition
     }
 
+    /// Declared random streams in canonical order.
+    #[must_use]
+    pub fn random_streams(&self) -> &[RandomStreamDesign] {
+        &self.random_streams
+    }
+
+    /// Admitted model rungs and the applicability policy.
+    #[must_use]
+    pub const fn model_rungs(&self) -> &ModelRungPolicy {
+        &self.model_rungs
+    }
+
+    /// Declared scenario references.
+    #[must_use]
+    pub fn scenarios(&self) -> &[ArtifactRef] {
+        &self.scenarios
+    }
+
     /// Declared access policy.
     #[must_use]
     pub const fn access_policy(&self) -> AccessPolicy {

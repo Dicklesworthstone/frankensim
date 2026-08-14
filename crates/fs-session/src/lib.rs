@@ -20,6 +20,7 @@ pub mod governor;
 pub mod grant;
 pub mod guidance;
 pub mod long_job;
+pub mod prediction_executor;
 pub mod program_risk;
 pub mod token;
 
