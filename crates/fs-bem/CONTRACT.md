@@ -10,7 +10,8 @@ everywhere: this is screening, not a viscous truth source.
 ## Public types and semantics
 
 - `panel3d`: validated `SpherePanels` (centroid/normal/area panelization of
-  fs-rep-mesh icospheres); `dense_matrix` — the collocation Neumann
+  fs-rep-mesh icospheres, with optional exact oriented triangle vertices);
+  `dense_matrix` — the collocation Neumann
   operator with the outside-limit jump −σ/2 on the diagonal and
   centroid-monopole off-diagonal rows (screening-grade; measured
   convergence is the gate); `fmm_matvec` — the SAME operator through
@@ -205,8 +206,13 @@ NASA marks it as U.S. Government work with public use permitted.
 
 ### Helmholtz invariants
 
-1. Kernel formulas are pinned by central-finite-difference tests of G;
-   disc self terms by numerical quadrature of the regularized kernels.
+1. Kernel formulas are pinned by central-finite-difference tests of G.
+   Plain-CBIE triangle surfaces use fixed Gauss-Duffy integration for the
+   weak single-layer self term and triangle integration for edge-near weak
+   operators; scale covariance and the analytic pulsating sphere pin this
+   path. Burton-Miller retains the established equivalent-disc self and
+   centroid off-diagonal scheme because its hypersingular finite-part
+   operator needs a different Galerkin-quality rule.
 2. The hypersingular static self entry uses the exact closed-surface
    identity `N_0[1] = 0` as a discrete row sum, so the same point-panel
    quadrature appears on both sides and its error cancels.

@@ -354,32 +354,34 @@ fn regularized_coplanar_hypersingular(k: f64, r: f64) -> C64 {
     numerator.scale(1.0 / (4.0 * core::f64::consts::PI * r * r * r))
 }
 
-/// Integrate all four kernels over a flat source triangle. The target must not
-/// lie on the source triangle; the self panel uses [`triangle_self_terms`].
-fn triangle_influence(
+/// Integrate the weakly singular single-layer and ordinary double-layer
+/// kernels over a flat source triangle. The target must not lie on the source
+/// triangle; the self panel uses [`triangle_self_terms`].
+fn triangle_weak_influence(
     k: f64,
     x: [f64; 3],
-    nx: [f64; 3],
     triangle: [[f64; 3]; 3],
     ny: [f64; 3],
-) -> (C64, C64, C64, C64) {
+) -> (C64, C64) {
     let [a, b, c] = triangle;
     let ab = sub(b, a);
     let ac = sub(c, a);
     let double_area = norm(cross(ab, ac));
-    let mut out = [C64::ZERO; 4];
+    let mut single = C64::ZERO;
+    let mut double = C64::ZERO;
     for (&u, &wu) in GL8_X.iter().zip(&GL8_W) {
         for (&v, &wv) in GL8_X.iter().zip(&GL8_W) {
             let y = affine3(a, ab, u, ac, (1.0 - u) * v);
             let weight = wu * wv * (1.0 - u) * double_area;
-            let values = kernels(k, x, nx, y, ny);
-            out[0] = out[0] + values.0.scale(weight);
-            out[1] = out[1] + values.1.scale(weight);
-            out[2] = out[2] + values.2.scale(weight);
-            out[3] = out[3] + values.3.scale(weight);
+            let d = sub(x, y);
+            let r = norm(d);
+            let g = green(k, r);
+            let dgdny = green_dr(k, r).scale(-dot(ny, d) / r);
+            single = single + g.scale(weight);
+            double = double + dgdny.scale(weight);
         }
     }
-    (out[0], out[1], out[2], out[3])
+    (single, double)
 }
 
 /// Duffy-integrated `(S_ii, (N_k-N_0)_ii)` for a flat triangle collocated at
@@ -802,6 +804,14 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
     let normals = surface.normals();
     let areas = surface.areas();
     let triangles = surface.triangles();
+    // The triangle rule below is sound for the weakly singular single-layer
+    // and ordinary double-layer operators used by Plain CBIE.  Burton-Miller
+    // also contains a finite-part hypersingular operator; applying an ordinary
+    // area rule to its edge-near panels changes that operator and regresses the
+    // analytic pulsating-sphere impedance.  Preserve the established
+    // equivalent-disc/centroid discretization for that arm until a genuine
+    // finite-part Galerkin rule is implemented.
+    let weak_triangles = if alpha == C64::ZERO { triangles } else { None };
     let n = centroids.len();
     let half = C64::new(0.5, 0.0);
     let mut amat = vec![C64::ZERO; n * n];
@@ -813,32 +823,29 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
         // so the self entry is minus the off-diagonal static sum under
         // the SAME point-panel quadrature.
         let mut n0_row = C64::ZERO;
-        for j in 0..n {
-            if j != i {
-                let n0_ij = if let Some(triangles) = triangles
-                    && triangle_is_near(xi, centroids[j], triangles[j])
-                {
-                    triangle_influence(0.0, xi, ni, triangles[j], normals[j]).3
-                } else {
-                    kernels(0.0, xi, ni, centroids[j], normals[j])
-                        .3
-                        .scale(areas[j])
-                };
-                n0_row = n0_row + n0_ij;
+        if alpha != C64::ZERO {
+            for j in 0..n {
+                if j != i {
+                    n0_row = n0_row
+                        + kernels(0.0, xi, ni, centroids[j], normals[j])
+                            .3
+                            .scale(areas[j]);
+                }
             }
         }
         for j in 0..n {
             let (s_ij, d_ij, dp_ij, n_ij) = if i == j {
-                let (s, n_reg) = if let Some(triangles) = triangles {
-                    triangle_self_terms(k, xi, triangles[i])
+                let (s, n_reg) = if let Some(triangles) = weak_triangles {
+                    (triangle_self_terms(k, xi, triangles[i]).0, C64::ZERO)
                 } else {
                     self_terms(k, areas[i])
                 };
                 (s, C64::ZERO, C64::ZERO, n_reg - n0_row)
-            } else if let Some(triangles) = triangles
+            } else if let Some(triangles) = weak_triangles
                 && triangle_is_near(xi, centroids[j], triangles[j])
             {
-                triangle_influence(k, xi, ni, triangles[j], normals[j])
+                let (s, d) = triangle_weak_influence(k, xi, triangles[j], normals[j]);
+                (s, d, C64::ZERO, C64::ZERO)
             } else {
                 let (g, dgdny, dgdnx, d2g) = kernels(k, xi, ni, centroids[j], normals[j]);
                 let a = areas[j];
@@ -1577,9 +1584,7 @@ mod tests {
             triangle_self_terms(k / scale, scaled_centroid, scaled_triangle);
         assert!((scaled_single - single.scale(scale)).abs() < 2.0e-13 * scaled_single.abs());
         assert!(
-            (scaled_regularized_hypersingular
-                - regularized_hypersingular.scale(1.0 / scale))
-            .abs()
+            (scaled_regularized_hypersingular - regularized_hypersingular.scale(1.0 / scale)).abs()
                 < 2.0e-13 * scaled_regularized_hypersingular.abs()
         );
     }
