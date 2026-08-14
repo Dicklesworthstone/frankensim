@@ -48,6 +48,7 @@ pub(super) struct PlanarDielectricConnection {
     pub(super) internal_direction: Vec3,
     pub(super) outgoing_direction: Vec3,
     pub(super) optical_path_length_m: f64,
+    differential: FermatDifferential,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +61,7 @@ pub(super) struct PlanarDielectricReflectionConnection {
     pub(super) internal_reflected_direction: Vec3,
     pub(super) outgoing_direction: Vec3,
     pub(super) optical_path_length_m: f64,
+    unfolded_differential: FermatDifferential,
 }
 
 /// Exact target-area to source-solid-angle Jacobian for a stationary
@@ -89,6 +91,7 @@ pub(super) fn reflected_target_area_per_source_solid_angle(
         internal_direction: unit(unfolded_exit_point.delta_from(connection.entry_point))?,
         outgoing_direction: unit(unfolded_target.delta_from(unfolded_exit_point))?,
         optical_path_length_m: connection.optical_path_length_m,
+        differential: connection.unfolded_differential,
     };
     target_area_per_source_solid_angle(
         source,
@@ -172,6 +175,7 @@ pub(super) fn solve_three_planar_interfaces_one_reflection(
         exit,
         eta_glass,
         [p[0], p[1], r[0], r[1], q[0], q[1]],
+        unfolded.differential,
     )
 }
 
@@ -183,11 +187,11 @@ pub(super) fn solve_three_planar_interfaces_one_reflection(
 /// finite-difference PDF: an approximate density would bias next-event MIS
 /// even when the geometric path itself had converged.
 pub(super) fn target_area_per_source_solid_angle(
-    source: Point3,
-    target: Point3,
+    _source: Point3,
+    _target: Point3,
     entry: PlaneFrame,
     exit: PlaneFrame,
-    eta_glass: f64,
+    _eta_glass: f64,
     connection: PlanarDielectricConnection,
     target_tangent: Vec3,
     target_bitangent: Vec3,
@@ -200,40 +204,33 @@ pub(super) fn target_area_per_source_solid_angle(
     {
         return None;
     }
-    let entry_coordinates = entry.coordinates(connection.entry_point);
-    let exit_coordinates = exit.coordinates(connection.exit_point);
-    let parameters = [
-        entry_coordinates[0],
-        entry_coordinates[1],
-        exit_coordinates[0],
-        exit_coordinates[1],
-    ];
-    let system = fermat_system(source, target, entry, exit, eta_glass, parameters)?;
-    let (_, source_direction_hessian) =
-        direction_hessian(connection.entry_point.delta_from(source))?;
-    let (_, target_direction_hessian) =
-        direction_hessian(target.delta_from(connection.exit_point))?;
+    let differential = connection.differential;
     let exit_basis = [exit.tangent, exit.bitangent];
     let target_basis = [target_tangent, target_bitangent];
-    let mut direction_derivatives = [Vec3::new(0.0, 0.0, 0.0); 2];
+    let mut right_hand_sides = [[0.0; 4]; 2];
     for target_axis in 0..2 {
         // H dx/dy = -dg/dy. Only the exit-interface rows depend on
         // target position and dg_q/dT = -B_exit^T H_target.
-        let mut rhs = [0.0; 4];
         for row in 0..2 {
-            rhs[row + 2] = bilinear(
+            right_hand_sides[target_axis][row + 2] = bilinear(
                 exit_basis[row],
-                target_direction_hessian,
+                differential.target_direction_hessian,
                 target_basis[target_axis],
             );
         }
-        let derivative = solve_4x4(system.hessian, rhs)?;
+    }
+    let derivatives = solve_4x4_two_rhs(differential.hessian, right_hand_sides)?;
+    let mut direction_derivatives = [Vec3::new(0.0, 0.0, 0.0); 2];
+    for target_axis in 0..2 {
+        let derivative = derivatives[target_axis];
         let entry_point_derivative = add(
             entry.tangent.scale(derivative[0]),
             entry.bitangent.scale(derivative[1]),
         );
-        direction_derivatives[target_axis] =
-            matrix_vector(source_direction_hessian, entry_point_derivative);
+        direction_derivatives[target_axis] = matrix_vector(
+            differential.source_direction_hessian,
+            entry_point_derivative,
+        );
     }
     let solid_angle_per_area = connection
         .incident_direction
@@ -275,33 +272,34 @@ pub(super) fn solve_two_planar_interfaces(
         return None;
     }
 
+    let entry_seed_coordinates = entry.coordinates(entry_seed);
+    let exit_seed_coordinates = exit.coordinates(exit_seed);
     let mut parameters = [
-        entry.coordinates(entry_seed)[0],
-        entry.coordinates(entry_seed)[1],
-        exit.coordinates(exit_seed)[0],
-        exit.coordinates(exit_seed)[1],
+        entry_seed_coordinates[0],
+        entry_seed_coordinates[1],
+        exit_seed_coordinates[0],
+        exit_seed_coordinates[1],
     ];
-    let mut previous_objective =
-        optical_length(source, target, entry, exit, eta_glass, parameters)?;
+    let geometry = fermat_geometry(source, target, entry, exit, eta_glass, parameters)?;
+    let mut evaluation = fermat_evaluation(entry, exit, eta_glass, geometry)?;
 
     for _ in 0..MAX_NEWTON_STEPS {
-        let system = fermat_system(source, target, entry, exit, eta_glass, parameters)?;
-        let gradient_norm = system
+        let gradient_norm = evaluation
             .gradient
             .into_iter()
             .map(f64::abs)
             .fold(0.0, f64::max);
         if gradient_norm <= GRADIENT_TOLERANCE {
-            return finish_connection(source, target, entry, exit, eta_glass, parameters);
+            return finish_connection(entry, exit, evaluation);
         }
-        let rhs = system.gradient.map(|value| -value);
-        let step = solve_4x4(system.hessian, rhs)?;
+        let rhs = evaluation.gradient.map(|value| -value);
+        let step = solve_4x4(evaluation.differential.hessian, rhs)?;
         let step_norm = step.into_iter().map(f64::abs).fold(0.0, f64::max);
         if !step_norm.is_finite() {
             return None;
         }
 
-        let directional_derivative = dot4(system.gradient, step);
+        let directional_derivative = dot4(evaluation.gradient, step);
         if !directional_derivative.is_finite() || directional_derivative >= 0.0 {
             return None;
         }
@@ -309,28 +307,29 @@ pub(super) fn solve_two_planar_interfaces(
         let mut accepted = None;
         for _ in 0..24 {
             let candidate = std::array::from_fn(|index| parameters[index] + scale * step[index]);
-            if let Some(objective) =
-                optical_length(source, target, entry, exit, eta_glass, candidate)
-                && objective <= previous_objective + 1.0e-4 * scale * directional_derivative
+            if let Some(geometry) =
+                fermat_geometry(source, target, entry, exit, eta_glass, candidate)
+                && geometry.optical_path_length_m
+                    <= evaluation.geometry.optical_path_length_m
+                        + 1.0e-4 * scale * directional_derivative
             {
-                accepted = Some((candidate, objective));
+                accepted = Some((candidate, geometry));
                 break;
             }
             scale *= 0.5;
         }
-        let (candidate, objective) = accepted?;
+        let (candidate, geometry) = accepted?;
         parameters = candidate;
-        previous_objective = objective;
+        evaluation = fermat_evaluation(entry, exit, eta_glass, geometry)?;
         if scale * step_norm <= STEP_TOLERANCE {
-            let system = fermat_system(source, target, entry, exit, eta_glass, parameters)?;
-            if system
+            if evaluation
                 .gradient
                 .into_iter()
                 .map(f64::abs)
                 .fold(0.0, f64::max)
                 <= 8.0 * GRADIENT_TOLERANCE
             {
-                return finish_connection(source, target, entry, exit, eta_glass, parameters);
+                return finish_connection(entry, exit, evaluation);
             }
             return None;
         }
@@ -338,10 +337,34 @@ pub(super) fn solve_two_planar_interfaces(
     None
 }
 
-#[derive(Clone, Copy)]
-struct FermatSystem {
-    gradient: [f64; 4],
+#[derive(Clone, Copy, Debug)]
+struct FermatDifferential {
+    source_direction_hessian: [[f64; 3]; 3],
+    target_direction_hessian: [[f64; 3]; 3],
     hessian: [[f64; 4]; 4],
+}
+
+#[derive(Clone, Copy)]
+struct FermatGeometry {
+    entry_point: Point3,
+    exit_point: Point3,
+    source_displacement: Vec3,
+    internal_displacement: Vec3,
+    target_displacement: Vec3,
+    source_length_m: f64,
+    internal_length_m: f64,
+    target_length_m: f64,
+    optical_path_length_m: f64,
+}
+
+#[derive(Clone, Copy)]
+struct FermatEvaluation {
+    geometry: FermatGeometry,
+    incident_direction: Vec3,
+    internal_direction: Vec3,
+    outgoing_direction: Vec3,
+    gradient: [f64; 4],
+    differential: FermatDifferential,
 }
 
 fn finish_reflected_connection(
@@ -352,6 +375,7 @@ fn finish_reflected_connection(
     exit: PlaneFrame,
     eta_glass: f64,
     parameters: [f64; 6],
+    unfolded_differential: FermatDifferential,
 ) -> Option<PlanarDielectricReflectionConnection> {
     let entry_point = entry.point([parameters[0], parameters[1]]);
     let reflection_point = reflection.point([parameters[2], parameters[3]]);
@@ -380,6 +404,7 @@ fn finish_reflected_connection(
         optical_path_length_m: reflected_optical_length(
             source, target, entry, reflection, exit, eta_glass, parameters,
         )?,
+        unfolded_differential,
     })
 }
 
@@ -408,19 +433,52 @@ fn reflected_optical_length(
     .then_some(value)
 }
 
-fn fermat_system(
+fn fermat_geometry(
     source: Point3,
     target: Point3,
     entry: PlaneFrame,
     exit: PlaneFrame,
     eta_glass: f64,
     parameters: [f64; 4],
-) -> Option<FermatSystem> {
-    let p = entry.point([parameters[0], parameters[1]]);
-    let q = exit.point([parameters[2], parameters[3]]);
-    let (u_source, h_source) = direction_hessian(p.delta_from(source))?;
-    let (u_internal, h_internal) = direction_hessian(q.delta_from(p))?;
-    let (u_target, h_target) = direction_hessian(target.delta_from(q))?;
+) -> Option<FermatGeometry> {
+    let entry_point = entry.point([parameters[0], parameters[1]]);
+    let exit_point = exit.point([parameters[2], parameters[3]]);
+    let source_displacement = entry_point.delta_from(source);
+    let internal_displacement = exit_point.delta_from(entry_point);
+    let target_displacement = target.delta_from(exit_point);
+    let source_length_m = source_displacement.norm();
+    let internal_length_m = internal_displacement.norm();
+    let target_length_m = target_displacement.norm();
+    let optical_path_length_m = source_length_m + eta_glass * internal_length_m + target_length_m;
+    (source_length_m > MIN_SEGMENT_M
+        && internal_length_m > MIN_SEGMENT_M
+        && target_length_m > MIN_SEGMENT_M
+        && optical_path_length_m.is_finite())
+    .then_some(FermatGeometry {
+        entry_point,
+        exit_point,
+        source_displacement,
+        internal_displacement,
+        target_displacement,
+        source_length_m,
+        internal_length_m,
+        target_length_m,
+        optical_path_length_m,
+    })
+}
+
+fn fermat_evaluation(
+    entry: PlaneFrame,
+    exit: PlaneFrame,
+    eta_glass: f64,
+    geometry: FermatGeometry,
+) -> Option<FermatEvaluation> {
+    let (u_source, h_source) =
+        direction_hessian_with_length(geometry.source_displacement, geometry.source_length_m);
+    let (u_internal, h_internal) =
+        direction_hessian_with_length(geometry.internal_displacement, geometry.internal_length_m);
+    let (u_target, h_target) =
+        direction_hessian_with_length(geometry.target_displacement, geometry.target_length_m);
     let entry_basis = [entry.tangent, entry.bitangent];
     let exit_basis = [exit.tangent, exit.bitangent];
     let gradient_p = sub(u_source, u_internal.scale(eta_glass));
@@ -447,22 +505,30 @@ fn fermat_system(
         .iter()
         .chain(hessian.iter().flatten())
         .all(|value| value.is_finite())
-        .then_some(FermatSystem { gradient, hessian })
+        .then_some(FermatEvaluation {
+            geometry,
+            incident_direction: u_source,
+            internal_direction: u_internal,
+            outgoing_direction: u_target,
+            gradient,
+            differential: FermatDifferential {
+                source_direction_hessian: h_source,
+                target_direction_hessian: h_target,
+                hessian,
+            },
+        })
 }
 
 fn finish_connection(
-    source: Point3,
-    target: Point3,
     entry: PlaneFrame,
     exit: PlaneFrame,
-    eta_glass: f64,
-    parameters: [f64; 4],
+    evaluation: FermatEvaluation,
 ) -> Option<PlanarDielectricConnection> {
-    let entry_point = entry.point([parameters[0], parameters[1]]);
-    let exit_point = exit.point([parameters[2], parameters[3]]);
-    let incident_direction = unit(entry_point.delta_from(source))?;
-    let internal_direction = unit(exit_point.delta_from(entry_point))?;
-    let outgoing_direction = unit(target.delta_from(exit_point))?;
+    let entry_point = evaluation.geometry.entry_point;
+    let exit_point = evaluation.geometry.exit_point;
+    let incident_direction = evaluation.incident_direction;
+    let internal_direction = evaluation.internal_direction;
+    let outgoing_direction = evaluation.outgoing_direction;
     // These oriented-side checks reject stationary extensions that cross a
     // support plane in the wrong direction.
     if incident_direction.dot(entry.outward_normal) >= 0.0
@@ -472,8 +538,7 @@ fn finish_connection(
     {
         return None;
     }
-    let system = fermat_system(source, target, entry, exit, eta_glass, parameters)?;
-    if system
+    if evaluation
         .gradient
         .into_iter()
         .map(f64::abs)
@@ -488,10 +553,12 @@ fn finish_connection(
         incident_direction,
         internal_direction,
         outgoing_direction,
-        optical_path_length_m: optical_length(source, target, entry, exit, eta_glass, parameters)?,
+        optical_path_length_m: evaluation.geometry.optical_path_length_m,
+        differential: evaluation.differential,
     })
 }
 
+#[cfg(test)]
 fn optical_length(
     source: Point3,
     target: Point3,
@@ -500,21 +567,20 @@ fn optical_length(
     eta_glass: f64,
     parameters: [f64; 4],
 ) -> Option<f64> {
-    let p = entry.point([parameters[0], parameters[1]]);
-    let q = exit.point([parameters[2], parameters[3]]);
-    let first = p.delta_from(source).norm();
-    let internal = q.delta_from(p).norm();
-    let last = target.delta_from(q).norm();
-    let value = first + eta_glass * internal + last;
-    (first > MIN_SEGMENT_M && internal > MIN_SEGMENT_M && last > MIN_SEGMENT_M && value.is_finite())
-        .then_some(value)
+    fermat_geometry(source, target, entry, exit, eta_glass, parameters)
+        .map(|geometry| geometry.optical_path_length_m)
 }
 
+#[cfg(test)]
 fn direction_hessian(displacement: Vec3) -> Option<(Vec3, [[f64; 3]; 3])> {
     let length = displacement.norm();
     if !length.is_finite() || length <= MIN_SEGMENT_M {
         return None;
     }
+    Some(direction_hessian_with_length(displacement, length))
+}
+
+fn direction_hessian_with_length(displacement: Vec3, length: f64) -> (Vec3, [[f64; 3]; 3]) {
     let direction = displacement.scale(1.0 / length);
     let values = [direction.x, direction.y, direction.z];
     let hessian = std::array::from_fn(|row| {
@@ -522,7 +588,7 @@ fn direction_hessian(displacement: Vec3) -> Option<(Vec3, [[f64; 3]; 3])> {
             (if row == column { 1.0 } else { 0.0 } - values[row] * values[column]) / length
         })
     });
-    Some((direction, hessian))
+    (direction, hessian)
 }
 
 fn solve_4x4(mut matrix: [[f64; 4]; 4], mut rhs: [f64; 4]) -> Option<[f64; 4]> {
@@ -556,6 +622,50 @@ fn solve_4x4(mut matrix: [[f64; 4]; 4], mut rhs: [f64; 4]) -> Option<[f64; 4]> {
         .iter()
         .all(|value| value.is_finite())
         .then_some(solution)
+}
+
+fn solve_4x4_two_rhs(
+    mut matrix: [[f64; 4]; 4],
+    mut right_hand_sides: [[f64; 4]; 2],
+) -> Option<[[f64; 4]; 2]> {
+    for column in 0..4 {
+        let pivot = (column..4).max_by(|left, right| {
+            matrix[*left][column]
+                .abs()
+                .total_cmp(&matrix[*right][column].abs())
+        })?;
+        if !matrix[pivot][column].is_finite() || matrix[pivot][column].abs() <= MIN_PIVOT {
+            return None;
+        }
+        matrix.swap(column, pivot);
+        for rhs in &mut right_hand_sides {
+            rhs.swap(column, pivot);
+        }
+        for row in column + 1..4 {
+            let factor = matrix[row][column] / matrix[column][column];
+            for inner in column..4 {
+                matrix[row][inner] -= factor * matrix[column][inner];
+            }
+            for rhs in &mut right_hand_sides {
+                rhs[row] -= factor * rhs[column];
+            }
+        }
+    }
+    let mut solutions = [[0.0; 4]; 2];
+    for rhs_index in 0..2 {
+        for row in (0..4).rev() {
+            let tail = (row + 1..4)
+                .map(|column| matrix[row][column] * solutions[rhs_index][column])
+                .sum::<f64>();
+            solutions[rhs_index][row] =
+                (right_hand_sides[rhs_index][row] - tail) / matrix[row][row];
+        }
+    }
+    solutions
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite())
+        .then_some(solutions)
 }
 
 fn valid_frame(frame: PlaneFrame) -> bool {
@@ -695,6 +805,55 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "actual={actual:.17e} expected={expected:.17e} tolerance={tolerance:.3e}"
         );
+    }
+
+    #[test]
+    fn fused_evaluation_reuses_scalar_geometry_and_two_rhs_solve_bitwise() {
+        let source = Point3::new(-0.3, 0.1, -0.8);
+        let target = Point3::new(0.9, -0.2, 1.4);
+        let entry = frame(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -1.0));
+        let exit_normal = unit(Vec3::new(0.2, -0.1, 1.0)).unwrap();
+        let exit = frame(Point3::new(0.0, 0.0, 0.25), exit_normal);
+        let parameters = [-0.07, 0.03, 0.11, -0.04];
+        let geometry = fermat_geometry(source, target, entry, exit, 1.52, parameters).unwrap();
+        assert_eq!(
+            geometry.optical_path_length_m.to_bits(),
+            optical_length(source, target, entry, exit, 1.52, parameters)
+                .unwrap()
+                .to_bits()
+        );
+        let evaluation = fermat_evaluation(entry, exit, 1.52, geometry).unwrap();
+        for (cached, recomputed) in [
+            (
+                evaluation.incident_direction,
+                direction_hessian(geometry.source_displacement).unwrap().0,
+            ),
+            (
+                evaluation.internal_direction,
+                direction_hessian(geometry.internal_displacement).unwrap().0,
+            ),
+            (
+                evaluation.outgoing_direction,
+                direction_hessian(geometry.target_displacement).unwrap().0,
+            ),
+        ] {
+            assert_eq!(cached.x.to_bits(), recomputed.x.to_bits());
+            assert_eq!(cached.y.to_bits(), recomputed.y.to_bits());
+            assert_eq!(cached.z.to_bits(), recomputed.z.to_bits());
+        }
+
+        let right_hand_sides = [[0.0, 0.0, 0.3, -0.2], [0.0, 0.0, -0.1, 0.4]];
+        let paired = solve_4x4_two_rhs(evaluation.differential.hessian, right_hand_sides).unwrap();
+        for rhs_index in 0..2 {
+            let scalar =
+                solve_4x4(evaluation.differential.hessian, right_hand_sides[rhs_index]).unwrap();
+            for component in 0..4 {
+                assert_eq!(
+                    paired[rhs_index][component].to_bits(),
+                    scalar[component].to_bits()
+                );
+            }
+        }
     }
 
     #[test]
@@ -857,6 +1016,67 @@ mod tests {
             finite_difference,
             2.0e-7 * finite_difference,
         );
+    }
+
+    #[test]
+    fn cached_area_jacobian_matches_central_difference_on_a_rotated_exit() {
+        let source = Point3::new(-0.4, 0.1, -0.9);
+        let target = Point3::new(0.8, -0.15, 1.2);
+        let entry = frame(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -1.0));
+        let exit = frame(
+            Point3::new(0.0, 0.0, 0.25),
+            unit(Vec3::new(0.25, -0.1, 1.0)).unwrap(),
+        );
+        let connection = solve_two_planar_interfaces(
+            source,
+            target,
+            entry,
+            exit,
+            1.5,
+            Point3::new(-0.05, 0.0, 0.0),
+            Point3::new(0.1, 0.0, 0.225),
+        )
+        .unwrap();
+        let target_tangent = Vec3::new(1.0, 0.0, 0.0);
+        let target_bitangent = Vec3::new(0.0, 1.0, 0.0);
+        let exact = target_area_per_source_solid_angle(
+            source,
+            target,
+            entry,
+            exit,
+            1.5,
+            connection,
+            target_tangent,
+            target_bitangent,
+        )
+        .unwrap();
+        let epsilon = 1.0e-5;
+        let shifted = |axis: Vec3, sign: f64| {
+            solve_two_planar_interfaces(
+                source,
+                target.offset(axis.scale(sign * epsilon)),
+                entry,
+                exit,
+                1.5,
+                connection.entry_point,
+                connection.exit_point,
+            )
+            .unwrap()
+            .incident_direction
+        };
+        let derivative_x =
+            sub(shifted(target_tangent, 1.0), shifted(target_tangent, -1.0)).scale(0.5 / epsilon);
+        let derivative_y = sub(
+            shifted(target_bitangent, 1.0),
+            shifted(target_bitangent, -1.0),
+        )
+        .scale(0.5 / epsilon);
+        let finite_difference = 1.0
+            / connection
+                .incident_direction
+                .dot(cross(derivative_x, derivative_y))
+                .abs();
+        assert_near(exact, finite_difference, 4.0e-7 * finite_difference);
     }
 
     #[test]
