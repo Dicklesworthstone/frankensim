@@ -230,5 +230,78 @@ printf '%s\n' '{"schema":"x","seq":999,"event":"case-terminal","case":"replay-ca
 bash "$RUNNER" --replay "$OUT/summary.json" >/dev/null 2>&1
 check "appended (tampered) log fails replay as class 17" 17 $?
 
+# --- property/metamorphic battery ----------------------------------------
+# Manifest key order must not change the projection or the verdict.
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  printf '%s\n' '[[case]]' 'id = "key-order-case"' 'version = 1' 'purpose = "p"' \
+    'owning_bead = "frankensim-ext-epic-gov-rjoq.8"' 'gauntlet_tier = "G0"' \
+    'seed = 7' 'max_wall_seconds = 60' 'entry_command = ["true"]' \
+    'expected = "authority"'
+} > "$M"
+LIST_A="$(bash "$RUNNER" --manifest "$M" --list 2>/dev/null)"
+{ printf '%s\n' 'phase = "e1"' "$CASE_HEADER"
+  printf '%s\n' '[[case]]' 'expected = "authority"' 'entry_command = ["true"]' \
+    'max_wall_seconds = 60' 'seed = 7' 'gauntlet_tier = "G0"' \
+    'owning_bead = "frankensim-ext-epic-gov-rjoq.8"' 'purpose = "p"' \
+    'version = 1' 'id = "key-order-case"'
+} > "$M"
+LIST_B="$(bash "$RUNNER" --manifest "$M" --list 2>/dev/null)"
+[ -n "$LIST_A" ] && [ "$LIST_A" = "$LIST_B" ]
+check "manifest key order does not change the projection" 0 $?
+
+# Case-selection permutations must produce the same summary counts.
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case perm-a 'entry_command = ["true"]' 'expected = "authority"'
+  good_case perm-b 'entry_command = ["true"]' 'expected = "authority"'
+} > "$M"
+bash "$RUNNER" --manifest "$M" --output-dir "$SCRATCH/perm-ab" --case perm-a --case perm-b >/dev/null 2>&1
+bash "$RUNNER" --manifest "$M" --output-dir "$SCRATCH/perm-ba" --case perm-b --case perm-a >/dev/null 2>&1
+python3 - "$SCRATCH/perm-ab/summary.json" "$SCRATCH/perm-ba/summary.json" <<'PYCMP'
+import json, sys
+ab, ba = (json.load(open(path)) for path in sys.argv[1:3])
+assert ab["counts"] == ba["counts"] == {"passed": 2}, (ab["counts"], ba["counts"])
+assert sorted(row["case"] for row in ab["cases"]) == sorted(row["case"] for row in ba["cases"])
+PYCMP
+check "case-selection permutation is semantically invariant" 0 $?
+
+# The declared seed must actually reach the child.
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case seed-visible \
+    'entry_command = ["bash", "-c", "[ \"$NEW_DOMAINS_SEED\" = 7 ]"]' \
+    'expected = "authority"'
+} > "$M"
+run_one "$M"
+check "the manifest seed reaches the child environment" 0 $?
+
+# A truncated log must fail replay as tamper.
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case trunc-case 'entry_command = ["true"]' 'expected = "authority"'
+} > "$M"
+OUT="$SCRATCH/trunc-out"
+bash "$RUNNER" --manifest "$M" --output-dir "$OUT" >/dev/null 2>&1
+sed -i '' -e '$d' "$OUT/runner-log.jsonl" 2>/dev/null || sed -i -e '$d' "$OUT/runner-log.jsonl"
+bash "$RUNNER" --replay "$OUT/summary.json" >/dev/null 2>&1
+check "a truncated log fails replay as class 17" 17 $?
+
+# An in-place event edit (no append) must also fail replay.
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case edit-case 'entry_command = ["true"]' 'expected = "authority"'
+} > "$M"
+OUT="$SCRATCH/edit-out"
+bash "$RUNNER" --manifest "$M" --output-dir "$OUT" >/dev/null 2>&1
+sed -i '' -e 's/"status": "passed"/"status": "failed"/' "$OUT/runner-log.jsonl" 2>/dev/null \
+  || sed -i -e 's/"status": "passed"/"status": "failed"/' "$OUT/runner-log.jsonl"
+bash "$RUNNER" --replay "$OUT/summary.json" >/dev/null 2>&1
+check "an in-place edited log fails replay as class 17" 17 $?
+
+# Equivalent relative and absolute manifest paths admit identically.
+{ printf '%s\n' "$CASE_HEADER" 'phase = "e1"'
+  good_case pathform-case 'entry_command = ["true"]' 'expected = "authority"'
+} > "$M"
+REL_OUT="$(cd "$SCRATCH" && bash "$RUNNER" --manifest ./e1.toml --validate-only 2>/dev/null)"
+ABS_OUT="$(bash "$RUNNER" --manifest "$SCRATCH/e1.toml" --validate-only 2>/dev/null)"
+[ -n "$REL_OUT" ] && [ "$REL_OUT" = "$ABS_OUT" ]
+check "relative and absolute manifest paths validate identically" 0 $?
+
 echo "selftest: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
