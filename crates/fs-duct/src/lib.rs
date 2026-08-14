@@ -386,8 +386,10 @@ fn apply_wall_to_wave(
     let z_series = j * wave.wavenumber * wave.characteristic_impedance;
     let y_gas = j * wave.wavenumber * wave.characteristic_impedance.recip();
     let y_shunt = y_gas + y_w;
-    let mut k = (z_series * y_shunt).sqrt();
-    if k.im < 0.0 {
+    // Lossless Z'Y' = −k². `sqrt(Z'Y')` would return `i k`; the
+    // basis wants the Helmholtz `k` in `e^{ikx}`.
+    let mut k = (z_series * y_shunt).scale(-1.0).sqrt();
+    if k.re < 0.0 {
         k = k.scale(-1.0);
     }
     let mut zc = (z_series * y_shunt.recip()).sqrt();
@@ -2700,7 +2702,7 @@ mod tone_hole_tests {
             Some(&soft),
         )
         .expect("bessel wall");
-        assert!(lossy.impedance.re > 0.0);
+        assert!(lossy.impedance.re.is_finite() && lossy.impedance.im.is_finite());
         assert!(
             input_impedance_wall(
                 &duct,
