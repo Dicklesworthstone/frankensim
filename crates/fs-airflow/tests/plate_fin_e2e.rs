@@ -573,6 +573,13 @@ fn solve_plate_fin(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear no-mock product journey (fan solve -> channel \
+              cards -> conduction -> QoI); the straight-line narrative IS \
+              the e2e contract, and helper extraction would hide the order \
+              the product path executes in"
+)]
 fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
     let mesh = plate_fin_mesh();
     let geometry = ChannelGeometry::from_mesh_constants();

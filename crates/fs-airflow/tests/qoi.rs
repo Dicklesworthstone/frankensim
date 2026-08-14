@@ -510,8 +510,10 @@ fn final_audit_demotes_every_e05_10_qoi_and_rebinds_each_model_budget() {
             && receipt.violations[0].point == "high-flow"
             && receipt.violations[0].card == "airflow.fan.qoi-fixture-fan"
             && receipt.violations[0].axis == "flow_m3_s"
-            && receipt.violations[0].observed == Some(0.13)
-            && receipt.violations[0].hi == 0.12
+            && receipt.violations[0]
+                .observed
+                .is_some_and(|observed| (observed - 0.13).abs() < 1e-12)
+            && receipt.violations[0].hi.to_bits() == 0.12f64.to_bits()
             && receipt.violations[0].distance > 0.0
             && matches!(
                 receipt.effective_color,
@@ -719,7 +721,7 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
     let baseline = qois.clone();
     let admitted = qois
         .audit_operating_envelope(
-            &[card.clone()],
+            std::slice::from_ref(&card),
             &[thermal_regime_point("nominal", nominal_flow, 50_000.0)],
             &uses,
         )
@@ -737,7 +739,7 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
     missing.pop();
     assert!(matches!(
         baseline.clone().audit_operating_envelope(
-            &[card.clone()],
+            std::slice::from_ref(&card),
             &[thermal_regime_point("nominal", nominal_flow, 50_000.0)],
             &missing,
         ),
@@ -748,7 +750,7 @@ fn final_audit_is_exact_in_domain_and_refuses_incomplete_card_use_maps() {
     duplicate.push(uses[0].clone());
     assert!(matches!(
         baseline.clone().audit_operating_envelope(
-            &[card.clone()],
+            std::slice::from_ref(&card),
             &[thermal_regime_point("nominal", nominal_flow, 50_000.0)],
             &duplicate,
         ),
@@ -896,14 +898,13 @@ fn widening_an_upstream_operating_envelope_cannot_shrink_qoi_terms() {
     };
     assert!(
         upper(
-            &enlarged
+            enlarged
                 .pressure_drop
                 .uncertainty
                 .term(EngineeringUncertaintyKind::BoundaryConditions)
                 .value()
         ) >= upper(
-            &base
-                .pressure_drop
+            base.pressure_drop
                 .uncertainty
                 .term(EngineeringUncertaintyKind::BoundaryConditions)
                 .value()
@@ -911,14 +912,13 @@ fn widening_an_upstream_operating_envelope_cannot_shrink_qoi_terms() {
     );
     assert!(
         upper(
-            &enlarged
+            enlarged
                 .fan_power
                 .uncertainty
                 .term(EngineeringUncertaintyKind::BoundaryConditions)
                 .value()
         ) >= upper(
-            &base
-                .fan_power
+            base.fan_power
                 .uncertainty
                 .term(EngineeringUncertaintyKind::BoundaryConditions)
                 .value()

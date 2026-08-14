@@ -763,34 +763,7 @@ pub fn solve_conjugate_from<F>(
 where
     F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
 {
-    finite_positive(
-        "conjugate temperature tolerance",
-        config.temperature_tolerance_k,
-    )?;
-    finite_positive("conjugate balance tolerance", config.balance_tolerance_w)?;
-    // NaN fails the range test, so this refusal is also the finiteness gate.
-    // 1.0 would admit a fully open interface: refuse it as a config fault.
-    if !(0.0..1.0).contains(&config.balance_relative_tolerance) {
-        return Err(AirflowError::InvalidConjugateInput {
-            field: "conjugate relative balance tolerance",
-            value_bits: config.balance_relative_tolerance.to_bits(),
-        });
-    }
-    if initial_references_k.len() != path.segments().len() {
-        return Err(AirflowError::SolidResponseArity {
-            expected: path.segments().len(),
-            found: initial_references_k.len(),
-        });
-    }
-    for &value in initial_references_k {
-        finite("resumed reference temperature", value)?;
-    }
-    if config.max_iterations == 0 {
-        return Err(AirflowError::InvalidConjugateInput {
-            field: "conjugate max iterations",
-            value_bits: 0,
-        });
-    }
+    admit_conjugate_inputs(path, config, initial_references_k)?;
     let mut aitken = admit_relaxation(config.relaxation)?;
 
     let mut audit = EnergyAudit::new();
@@ -872,21 +845,7 @@ where
             );
         }
 
-        for (slot, &next) in reference.iter_mut().zip(&updated) {
-            *slot += omega * (next - *slot);
-        }
-        // Attribute an overflow to the stage that produced it. Without this,
-        // the poisoned reference is first refused deep inside the caller's
-        // solid callback (or by the response gate), blaming the solid for a
-        // relaxation-configuration fault.
-        for &slot in &reference {
-            if !slot.is_finite() {
-                return Err(AirflowError::NonFiniteCoupling {
-                    stage: "relaxed reference temperature",
-                    value_bits: slot.to_bits(),
-                });
-            }
-        }
+        relax_references(&mut reference, &updated, omega)?;
     }
 
     let last = history
@@ -897,6 +856,71 @@ where
         max_change_bits: last.max_reference_change_k.to_bits(),
         tolerance_bits: config.temperature_tolerance_k.to_bits(),
     })
+}
+
+/// Upfront refusals for the conjugate driver (stage of
+/// [`solve_conjugate_from`]): tolerances, arity, resumed-reference
+/// finiteness, and the zero-iteration configuration fault.
+fn admit_conjugate_inputs(
+    path: &AirPath,
+    config: &ConjugateConfig,
+    initial_references_k: &[f64],
+) -> Result<(), AirflowError> {
+    finite_positive(
+        "conjugate temperature tolerance",
+        config.temperature_tolerance_k,
+    )?;
+    finite_positive("conjugate balance tolerance", config.balance_tolerance_w)?;
+    // NaN fails the range test, so this refusal is also the finiteness gate.
+    // 1.0 would admit a fully open interface: refuse it as a config fault.
+    if !(0.0..1.0).contains(&config.balance_relative_tolerance) {
+        return Err(AirflowError::InvalidConjugateInput {
+            field: "conjugate relative balance tolerance",
+            value_bits: config.balance_relative_tolerance.to_bits(),
+        });
+    }
+    if initial_references_k.len() != path.segments().len() {
+        return Err(AirflowError::SolidResponseArity {
+            expected: path.segments().len(),
+            found: initial_references_k.len(),
+        });
+    }
+    for &value in initial_references_k {
+        finite("resumed reference temperature", value)?;
+    }
+    if config.max_iterations == 0 {
+        return Err(AirflowError::InvalidConjugateInput {
+            field: "conjugate max iterations",
+            value_bits: 0,
+        });
+    }
+    Ok(())
+}
+
+/// Under-relax the reference vector toward `updated` (stage of
+/// [`solve_conjugate_from`]).
+///
+/// Attribute an overflow to the stage that produced it. Without this, the
+/// poisoned reference is first refused deep inside the caller's solid
+/// callback (or by the response gate), blaming the solid for a
+/// relaxation-configuration fault.
+fn relax_references(
+    reference: &mut [f64],
+    updated: &[f64],
+    omega: f64,
+) -> Result<(), AirflowError> {
+    for (slot, &next) in reference.iter_mut().zip(updated) {
+        *slot += omega * (next - *slot);
+    }
+    for &slot in reference.iter() {
+        if !slot.is_finite() {
+            return Err(AirflowError::NonFiniteCoupling {
+                stage: "relaxed reference temperature",
+                value_bits: slot.to_bits(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The CHT ladder's correlation-rung transfer, defined over the real coupled
