@@ -239,7 +239,12 @@ if mode == "check":
     sys.exit(0)
 
 if mode == "plan":
-    admitted = {"pending", "migrate", "keep-functional-prerequisite"}
+    admitted = {
+        "pending",
+        "migrate",
+        "migrate-remove-only",
+        "keep-functional-prerequisite",
+    }
     bad = [row for row in mrows if row.get("verdict") not in admitted]
     if bad:
         print(
@@ -258,7 +263,7 @@ if mode == "plan":
     live = {(row["parent"], row["child"]) for row in rows}
     plan, inverse = [], []
     for row in mrows:
-        if row["verdict"] != "migrate":
+        if row["verdict"] not in ("migrate", "migrate-remove-only"):
             continue
         if (row["parent"], row["child"]) not in live:
             print(
@@ -267,13 +272,17 @@ if mode == "plan":
                 file=sys.stderr,
             )
             sys.exit(EXIT_STALE)
-        # Remove FIRST, then add - never both edges at once.
+        # Remove FIRST, then add - never both edges at once. A row whose
+        # child->parent parent-child edge ALREADY exists (double encoding)
+        # is remove-only: adding again would duplicate the hierarchy edge.
         plan.append(["br", "dep", "remove", row["parent"], row["child"]])
-        plan.append(
-            ["br", "dep", "add", row["child"], row["parent"], "--type", "parent-child"]
-        )
-        inverse.append(["br", "dep", "remove", row["child"], row["parent"]])
-        inverse.append(["br", "dep", "add", row["parent"], row["child"], "--type", "blocks"])
+        inverse_add = ["br", "dep", "add", row["parent"], row["child"], "--type", "blocks"]
+        if row["verdict"] == "migrate":
+            plan.append(
+                ["br", "dep", "add", row["child"], row["parent"], "--type", "parent-child"]
+            )
+            inverse.append(["br", "dep", "remove", row["child"], row["parent"]])
+        inverse.append(inverse_add)
     print(
         json.dumps(
             {
@@ -282,6 +291,9 @@ if mode == "plan":
                     json.dumps(manifest, sort_keys=True).encode()
                 ).hexdigest(),
                 "migrate_rows": sum(1 for r in mrows if r["verdict"] == "migrate"),
+                "remove_only_rows": sum(
+                    1 for r in mrows if r["verdict"] == "migrate-remove-only"
+                ),
                 "kept_rows": sum(
                     1 for r in mrows if r["verdict"] == "keep-functional-prerequisite"
                 ),
