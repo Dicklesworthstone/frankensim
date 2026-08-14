@@ -8,10 +8,12 @@
 use fs_math::c64::C64;
 use fs_phs::{
     MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage, common_effort_capacitor,
-    common_effort_dirac, compact_radiation_impedance, discrete_gradient, duffing_oscillator,
-    helmholtz_resonator, helmholtz_resonator_flow, helmholtz_resonator_radiating, interconnect,
-    kirchhoff_parallel_step, lc_ladder, lc_ladder_terminated, mass_spring_damper, modal_bank,
+    common_effort_dirac, common_effort_star, common_flow_dirac, compact_radiation_impedance,
+    discrete_gradient, duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
+    helmholtz_resonator_radiating, interconnect, kirchhoff_parallel_step, lc_ladder,
+    lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports, moving_end_waveguide,
     reduce_galerkin, regularized_coulomb, series_impedance_ports, step, step_descriptor,
+    transformer,
 };
 
 fn max_abs(v: &[f64]) -> f64 {
@@ -856,4 +858,64 @@ fn common_effort_dirac_is_the_kirchhoff_dae() {
         "algebraic row must enforce p_a = p_b ({e_a:?} vs {e_b:?})"
     );
     assert!(common_effort_dirac(a, common_effort_capacitor(1.0e-8).expect("two-port")).is_err());
+}
+
+#[test]
+fn kirchhoff_star_of_three_flow_cavities_splits_volume() {
+    let mk = || helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("cav");
+    let sys = common_effort_star(vec![mk(), mk(), mk()]).expect("star");
+    assert_eq!(sys.state_dim(), 2 * 3 + 2);
+    assert_eq!(sys.differential_dim(), 6);
+    let rec = step_descriptor(&sys, &vec![0.0; sys.state_dim()], &[3.0e-4], 1.0e-4).expect("step");
+    let solo = step(&mk(), &[0.0, 0.0], &[1.0e-4], 1.0e-4).expect("solo");
+    assert!(
+        (rec.y[0] - solo.y[0]).abs() < 1.0e-6 * (1.0 + solo.y[0].abs()),
+        "identical branches must reprint the 1/3 flow pressure ({} vs {})",
+        rec.y[0],
+        solo.y[0]
+    );
+}
+
+#[test]
+fn transformer_joins_a_mass_to_a_compliance() {
+    let mass = mass_spring_damper(0.02, 0.0, 0.0).expect("mass");
+    let cav = helmholtz_resonator_flow(0.01, 0.02, 0.03, 1.2, 343.0, 0.0).expect("cav");
+    let sys = transformer(mass, cav, 0, 0, 4.0e-4).expect("area");
+    assert_eq!(sys.port_dim(), 0);
+    let mut x = vec![0.0; sys.state_dim()];
+    x[0] = 1.0e-4;
+    let h0 = sys.hamiltonian(&x);
+    let rec = step(&sys, &x, &[], 1.0e-4).expect("closed step");
+    assert!(
+        (rec.delta_h).abs() <= 1.0e-9 * h0.abs().max(1.0e-18),
+        "lossless transformer must hold H (ΔH={}, H0={h0})",
+        rec.delta_h
+    );
+}
+
+#[test]
+fn moving_end_waveguide_dirac_joins_a_mass() {
+    let string = moving_end_waveguide(2, 0.65, 70.0, 5.0e-3, &[0.0, 0.0]).expect("string");
+    let y0 = string.output(&vec![0.0; string.state_dim()]);
+    assert_eq!(y0.len(), 1);
+    let mass = mass_spring_damper(0.05, 2.0e4, 0.0).expect("bridge mass");
+    let joined = common_flow_dirac(string, mass).expect("1-junction");
+    let rec = step_descriptor(&joined, &vec![0.0; joined.state_dim()], &[1.0], 1.0e-5)
+        .expect("join step");
+    assert!(rec.y[0].is_finite());
+    assert!(rec.x.iter().any(|v| v.abs() > 0.0));
+}
+
+#[test]
+fn three_phs_string_plate_cavity_is_a_dirac_star_plus_transformer() {
+    let string = moving_end_waveguide(1, 0.65, 70.0, 5.0e-3, &[0.0]).expect("string");
+    let plate = modal_bank_ports(&[800.0], &[0.0], &[&[2.0], &[0.02]]).expect("plate");
+    let cav = helmholtz_resonator_flow(0.002, 0.01, 0.02, 1.2, 343.0, 0.0).expect("cav");
+    let plate_cav = transformer(plate, cav, 1, 0, 1.0).expect("area in G");
+    assert_eq!(plate_cav.port_dim(), 1);
+    let sys = common_flow_dirac(string, plate_cav).expect("three-pHS");
+    assert_eq!(sys.port_dim(), 1);
+    let rec = step_descriptor(&sys, &vec![0.0; sys.state_dim()], &[0.5], 2.0e-5).expect("step");
+    assert!(rec.y[0].is_finite());
+    assert!(rec.solver_residual.is_finite());
 }

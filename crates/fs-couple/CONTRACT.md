@@ -310,10 +310,13 @@ clarinet is one filling of those objects.
   measured rosin is invented.
 - Three-way clock: when `EA > 0` the string member is Kirchhoff–
   Carrier with contact inside `H`. Polarizations share the plate and
-  the duct FIR. A certified three-pHS Dirac interconnection is still
-  a no-claim: the sine series has fixed ends (no bridge velocity
-  port) and the duct is an FIR scatterer, not an ODE pHS. `fs-phs`
-  is ODE-form only.
+  the duct FIR. The certified three-pHS Dirac interconnection is
+  `common_flow_dirac(moving_end_waveguide, transformer(plate, cavity))`
+  in `fs-phs` (free-end attachment port, area transformer, Kirchhoff
+  star). `realize_assembly` still marches the viscothermal duct as
+  an FIR scatterer and the fixed-fixed sine series as a one-way
+  bridge force — that is the TMM/observer path, not a claim that
+  the Dirac 3-join is unused.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
   analytic primitive when those hypotheses hold, and the FE-sampled
   Airy construction otherwise. The membrane channel remains the
@@ -491,8 +494,9 @@ determinism.
   the von Karman modal pHS (SS sine or FE-sampled DKT `w`), not a
   full shell or an in-process BEM body.
   String+duct+plate share one sample clock and, when `EA > 0`, a
-  Gonzalez string whose contact lives in `H`; that is not a certified
-  Dirac interconnection of three pHS. Isolated blow is an impedance
+  Gonzalez string whose contact lives in `H`. The three-pHS Dirac
+  join lives in `fs-phs`; this realize path still uses the FIR
+  duct and one-way bridge force. Isolated blow is an impedance
   FIR, not a reflectance FIR. 3D broadband jet noise remains a
   no-claim. WAV encoding is a physical-scale dump, not mastering.
 - `vibroacoustic` is frequency-domain only: time-domain realization is

@@ -439,17 +439,9 @@ impl DescriptorPortHamiltonian {
 
 /// Isolated 0-junction of two 1-port systems: `p_a = p_b`, `U_a + U_b = U_ext`.
 ///
-/// Extended state `[x_a, x_b, λ]` with Dirac
-///
-/// ```text
-/// J = [ J_a    0     G_a ]
-///     [  0    J_b   -G_b ]
-///     [-G_aᵀ  G_bᵀ    0  ]
-/// ```
-///
-/// `E = diag(I, I, 0)`, `H = H_a + H_b`, `U_a = λ`, `U_b = U_ext − λ`.
-/// This is the true composite Dirac structure. The ODE capacitor and
-/// the Newton split remain regularizations of the same junction.
+/// This is [`common_effort_star`] of two members. When both ports are
+/// admittance-causal (`u` = force, `y` = velocity) the same Dirac is
+/// the mechanical 1-junction (common `v`, forces split).
 ///
 /// # Errors
 /// [`PhsError::BadPortPairing`] unless both are 1-port; admission
@@ -458,48 +450,102 @@ pub fn common_effort_dirac(
     a: PortHamiltonian,
     b: PortHamiltonian,
 ) -> Result<DescriptorPortHamiltonian, PhsError> {
-    if a.m != 1 || b.m != 1 {
+    common_effort_star(vec![a, b])
+}
+
+/// Dual reading of [`common_effort_dirac`]: admittance ports share
+/// flow and split effort. A string and a plate at one attachment
+/// are this junction.
+///
+/// # Errors
+/// As [`common_effort_dirac`].
+pub fn common_flow_dirac(
+    a: PortHamiltonian,
+    b: PortHamiltonian,
+) -> Result<DescriptorPortHamiltonian, PhsError> {
+    common_effort_dirac(a, b)
+}
+
+/// Kirchhoff star of `N ≥ 2` one-port systems: every output `y` is
+/// equal and the inputs sum to `u_ext`.
+///
+/// Extended state `[x_1, …, x_N, λ_1, …, λ_{N-1}]` with
+/// `U_i = λ_i` for `i < N`, `U_N = u_ext − Σ λ`, and algebraic
+/// rows `y_i = y_N`. A three-pipe wye, a string–plate–cavity
+/// pressure node, and a bus of reservoirs are the same object.
+///
+/// # Errors
+/// [`PhsError::BadPortPairing`] unless every member is 1-port and
+/// `N ≥ 2`; admission errors on the composite.
+pub fn common_effort_star(
+    systems: Vec<PortHamiltonian>,
+) -> Result<DescriptorPortHamiltonian, PhsError> {
+    if systems.len() < 2 || systems.iter().any(|s| s.m != 1) {
         return Err(PhsError::BadPortPairing);
     }
-    let (na, nb) = (a.n, b.n);
-    let n = na + nb + 1;
+    let n_sys = systems.len();
+    let n_lambda = n_sys - 1;
+    let mut off = Vec::with_capacity(n_sys);
+    let mut n_diff = 0usize;
+    for s in &systems {
+        off.push(n_diff);
+        n_diff += s.n;
+    }
+    let n = n_diff + n_lambda;
     let mut j = vec![0.0; n * n];
     let mut r = vec![0.0; n * n];
-    for i in 0..na {
-        for k in 0..na {
-            j[i * n + k] = a.j[i * na + k];
-            r[i * n + k] = a.r[i * na + k];
+    for (s, &o) in systems.iter().zip(&off) {
+        for i in 0..s.n {
+            for k in 0..s.n {
+                j[(o + i) * n + o + k] = s.j[i * s.n + k];
+                r[(o + i) * n + o + k] = s.r[i * s.n + k];
+            }
         }
-        j[i * n + (n - 1)] = a.g[i];
-        j[(n - 1) * n + i] = -a.g[i];
     }
-    for i in 0..nb {
-        for k in 0..nb {
-            j[(na + i) * n + na + k] = b.j[i * nb + k];
-            r[(na + i) * n + na + k] = b.r[i * nb + k];
+    let last = n_sys - 1;
+    let o_last = off[last];
+    for ell in 0..n_lambda {
+        let lam = n_diff + ell;
+        let o = off[ell];
+        for i in 0..systems[ell].n {
+            j[(o + i) * n + lam] = systems[ell].g[i];
+            j[lam * n + o + i] = -systems[ell].g[i];
         }
-        j[(na + i) * n + (n - 1)] = -b.g[i];
-        j[(n - 1) * n + na + i] = b.g[i];
+        for i in 0..systems[last].n {
+            j[(o_last + i) * n + lam] = -systems[last].g[i];
+            j[lam * n + o_last + i] = systems[last].g[i];
+        }
     }
     let mut g = vec![0.0; n];
-    for i in 0..nb {
-        g[na + i] = b.g[i];
+    for i in 0..systems[last].n {
+        g[o_last + i] = systems[last].g[i];
     }
     require_skew(&j, n, "J")?;
     require_symmetric(&r, n, "R")?;
     require_psd(&r, n, "R")?;
-    let inner = Box::new(SumStorage {
-        a: (a.storage, na),
-        b: (b.storage, nb),
-    });
-    let lambda = Box::new(QuadraticStorage::new(vec![0.0], 1)?);
+    let mut acc: Option<(Box<dyn Storage>, usize)> = None;
+    for s in systems {
+        let piece = (s.storage, s.n);
+        acc = Some(match acc {
+            None => piece,
+            Some(prev) => {
+                let dim = prev.1 + piece.1;
+                (Box::new(SumStorage { a: prev, b: piece }), dim)
+            }
+        });
+    }
+    let (inner, inner_n) = acc.expect("N >= 2");
+    let lambda = Box::new(QuadraticStorage::new(
+        vec![0.0; n_lambda * n_lambda],
+        n_lambda,
+    )?);
     let storage = Box::new(SumStorage {
-        a: (inner, na + nb),
-        b: (lambda, 1),
+        a: (inner, inner_n),
+        b: (lambda, n_lambda),
     });
     Ok(DescriptorPortHamiltonian {
         n,
-        n_diff: na + nb,
+        n_diff,
         m: 1,
         j,
         r,
@@ -1017,6 +1063,80 @@ pub fn interconnect(
         for i in 0..nb {
             g[(na + i) * m + ext_a.len() + col] = b.g[i * b.m + p];
         }
+    }
+    let storage = Box::new(SumStorage {
+        a: (a.storage, na),
+        b: (b.storage, nb),
+    });
+    PortHamiltonian::new(n, m, j, r, g, storage)
+}
+
+/// Transformer of ratio `n`: `u_a = n y_b`, `u_b = −n y_a`.
+///
+/// Power is identically zero (`n y_b y_a − n y_a y_b = 0`). A
+/// plate area, a hydraulic ram, and a lever are this object:
+/// force = `n` × pressure, volume-flow = `n` × velocity.
+///
+/// # Errors
+/// [`PhsError::BadPortPairing`] on a bad port index; [`PhsError::NotPsd`]
+/// on a non-finite ratio; admission errors on the composite.
+pub fn transformer(
+    a: PortHamiltonian,
+    b: PortHamiltonian,
+    port_a: usize,
+    port_b: usize,
+    ratio: f64,
+) -> Result<PortHamiltonian, PhsError> {
+    if port_a >= a.m || port_b >= b.m {
+        return Err(PhsError::BadPortPairing);
+    }
+    if !ratio.is_finite() {
+        return Err(PhsError::NotPsd {
+            what: "transformer ratio",
+        });
+    }
+    let (na, nb) = (a.n, b.n);
+    let n = na + nb;
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for i in 0..na {
+        for k in 0..na {
+            j[i * n + k] = a.j[i * na + k];
+            r[i * n + k] = a.r[i * na + k];
+        }
+    }
+    for i in 0..nb {
+        for k in 0..nb {
+            j[(na + i) * n + na + k] = b.j[i * nb + k];
+            r[(na + i) * n + na + k] = b.r[i * nb + k];
+        }
+    }
+    for i in 0..na {
+        for k in 0..nb {
+            let c = ratio * a.g[i * a.m + port_a] * b.g[k * b.m + port_b];
+            // Opposite gyrator sign: u_a = n y_b, u_b = −n y_a.
+            j[i * n + na + k] += c;
+            j[(na + k) * n + i] -= c;
+        }
+    }
+    let ext_a: Vec<usize> = (0..a.m).filter(|&p| p != port_a).collect();
+    let ext_b: Vec<usize> = (0..b.m).filter(|&p| p != port_b).collect();
+    let m = ext_a.len() + ext_b.len();
+    let mut g = vec![0.0; n * m.max(1)];
+    if m > 0 {
+        g.truncate(n * m);
+        for (col, &p) in ext_a.iter().enumerate() {
+            for i in 0..na {
+                g[i * m + col] = a.g[i * a.m + p];
+            }
+        }
+        for (col, &p) in ext_b.iter().enumerate() {
+            for i in 0..nb {
+                g[(na + i) * m + ext_a.len() + col] = b.g[i * b.m + p];
+            }
+        }
+    } else {
+        g = Vec::new();
     }
     let storage = Box::new(SumStorage {
         a: (a.storage, na),
@@ -1609,8 +1729,25 @@ pub fn modal_bank(
     zetas: &[f64],
     drive: &[f64],
 ) -> Result<PortHamiltonian, PhsError> {
+    modal_bank_ports(omegas, zetas, &[drive])
+}
+
+/// Mass-normalized modal bank with one drive column per port.
+///
+/// A plate that sees both an attachment force and a face pressure
+/// is this object: two columns of `φ` at two points.
+///
+/// # Errors
+/// Admission errors on negative damping, empty ports, or mismatched
+/// lengths.
+pub fn modal_bank_ports(
+    omegas: &[f64],
+    zetas: &[f64],
+    drives: &[&[f64]],
+) -> Result<PortHamiltonian, PhsError> {
     let nm = omegas.len();
-    if zetas.len() != nm || drive.len() != nm {
+    let m = drives.len();
+    if zetas.len() != nm || m == 0 || drives.iter().any(|d| d.len() != nm) {
         return Err(PhsError::Dimension {
             what: "modal bank lengths",
         });
@@ -1619,7 +1756,7 @@ pub fn modal_bank(
     let mut q = vec![0.0; n * n];
     let mut j = vec![0.0; n * n];
     let mut r = vec![0.0; n * n];
-    let mut g = vec![0.0; n];
+    let mut g = vec![0.0; n * m];
     for i in 0..nm {
         if omegas[i] <= 0.0 || zetas[i] < 0.0 {
             return Err(PhsError::NotPsd {
@@ -1632,10 +1769,47 @@ pub fn modal_bank(
         j[qi * n + pi] = 1.0;
         j[pi * n + qi] = -1.0;
         r[pi * n + pi] = 2.0 * zetas[i] * omegas[i];
-        g[pi] = drive[i];
+        for (p, drive) in drives.iter().enumerate() {
+            g[pi * m + p] = drive[i];
+        }
     }
     let storage = Box::new(QuadraticStorage::new(q, n)?);
-    PortHamiltonian::new(n, 1, j, r, g, storage)
+    PortHamiltonian::new(n, m, j, r, g, storage)
+}
+
+/// Moving-end taut waveguide: free-fixed eigenfunctions
+/// `φ_k(x) = √(2/μL) cos((k−½)π x/L)`, 1-port at the free end.
+///
+/// `φ_k(0) ≠ 0`, so the port output is the attachment velocity.
+/// Fixed-fixed sines have `φ(0)=0` and cannot Dirac-join a body.
+/// A cable, a stay, and a string on a moving support are this
+/// object.
+///
+/// # Errors
+/// Non-physical geometry or damping.
+pub fn moving_end_waveguide(
+    n_modes: usize,
+    length: f64,
+    tension: f64,
+    lin_density: f64,
+    zetas: &[f64],
+) -> Result<PortHamiltonian, PhsError> {
+    if n_modes == 0
+        || zetas.len() != n_modes
+        || !(length > 0.0 && tension > 0.0 && lin_density > 0.0)
+    {
+        return Err(PhsError::NotPsd {
+            what: "moving-end waveguide parameters",
+        });
+    }
+    let c = det::sqrt(tension / lin_density);
+    let phi0 = det::sqrt(2.0 / (lin_density * length));
+    let pi = core::f64::consts::PI;
+    let omegas: Vec<f64> = (0..n_modes)
+        .map(|k| (k as f64 + 0.5) * pi * c / length)
+        .collect();
+    let drive = vec![phi0; n_modes];
+    modal_bank(&omegas, zetas, &drive)
 }
 
 /// Duffing storage: `H = p^2/(2m) + k q^2/2 + k3 q^4/4` with analytic

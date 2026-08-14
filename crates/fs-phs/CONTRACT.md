@@ -63,15 +63,24 @@ stepping, and Galerkin reduction preserves the structure.
 - `kirchhoff_parallel_step` — index-1 Newton split of an external
   flow across two 1-port impedance systems so their pressures
   match. This is Kirchhoff current law as a time-step.
-- `common_effort_dirac` / `DescriptorPortHamiltonian` /
+- `common_effort_dirac` / `common_flow_dirac` /
+  `common_effort_star` / `DescriptorPortHamiltonian` /
   `step_descriptor` — the true composite Dirac structure of a
-  0-junction. Extended state `[x_a, x_b, λ]`,
-  `E = diag(I, I, 0)`,
-  `J = [[J_a, 0, G_a], [0, J_b, -G_b], [-G_aᵀ, G_bᵀ, 0]]`,
-  `U_a = λ`, `U_b = U_ext − λ`. Gonzalez on the differential
-  block; the last row is the algebraic common-effort residual.
-  The capacitor and the Newton split are regularizations of this
-  DAE.
+  Kirchhoff star. Two members are a 0-junction
+  (`U_a = λ`, `U_b = U_ext − λ`, `y_a = y_b`). `N` members
+  use `N−1` multipliers. On admittance ports the same `J` is the
+  mechanical 1-junction (common velocity, forces split). Gonzalez
+  on the differential block; algebraic rows are the common-output
+  residual. The capacitor and the Newton split are regularizations.
+- `transformer(a, b, port_a, port_b, n)` — power-conserving
+  `u_a = n y_b`, `u_b = −n y_a`. A plate area, a hydraulic ram,
+  and a lever are this object.
+- `moving_end_waveguide` — free-fixed taut eigenfunctions with a
+  1-port at the free end (`φ(0) ≠ 0`). Fixed-fixed sines cannot
+  Dirac-join a body. `modal_bank_ports` is the same bank with
+  one drive column per port.
+- Three-pHS string–plate–cavity is
+  `common_flow_dirac(moving_end_waveguide, transformer(plate, cavity))`.
 - Memoryless dissipative ports: `bernoulli_volume_flow` is the
   two-sided jet `U = w h sgn(Δp) √(2|Δp|/ρ)` (dissipative on both
   branches); `quasistatic_aperture_opening` is the zero-mass
