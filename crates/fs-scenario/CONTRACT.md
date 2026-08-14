@@ -22,7 +22,8 @@ flagships.
 ## Public types and semantics
 
 - `acoustic` — description-only types for composing generic physics
-  (`AmbientGas`, `PrestressedString` as a 1-D prestressed waveguide,
+  (`AmbientGas`, `PrestressedString` as a 1-D prestressed waveguide
+  with an optional moving attachment end,
   `ViscothermalDuct`, `ToneHole`, `Pluck`, `BowStroke` as Stribeck
   friction, `BeatingReed` as a Bernoulli aperture, `RadiatingPlate` as a
   compact modal monopole, `ThinPlate` as an orthotropic panel whose
