@@ -1673,6 +1673,9 @@ declared BEM/directivity/fit evidence. Its fitted rigid-body bank trains through
 10 kHz and is held out through 10.5 kHz because the production surface mesh does
 not meet the six-panels-per-wavelength admission floor at 12 kHz; the independently resolved support-plate
 path retains the complete 18 kHz reconstruction passband.
+The current production fixture nevertheless omits this rigid bank because its
+causal rational realization exceeds the declared held-out complex-error budget;
+that refusal is not converted into an audible source.
 
 At runtime, existing P1 point-force projection and conservative audio-cell reconstruction drive the
 exact modal transition with zero pressure transfer. The closing state supplies
