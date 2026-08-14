@@ -49,7 +49,12 @@ stepping, and Galerkin reduction preserves the structure.
   in, pressure out), `helmholtz_resonator_radiating` (damper =
   compact-mouth `Re Z_rad(ω₀)`), `lc_ladder`,
   `lc_ladder_terminated` (resistive far-end load — compact
-  radiation on a discrete waveguide), `modal_bank`
+  radiation on a discrete waveguide), `acoustic_cylinder`
+  (inviscid `ρ,c` cylinder as that ladder; two inlets share the
+  mouth so a blow and a transformer body can coexist; open end
+  uses compact `Re Z_rad` at the quarter-wave pin),
+  `acoustic_waveguide` / `AcousticTap` (open side-branch neck
+  inertance shunted to atmosphere — a tone hole), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

@@ -7,9 +7,10 @@
 
 use fs_math::c64::C64;
 use fs_phs::{
-    MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage, common_effort_capacitor,
-    common_effort_dirac, common_effort_star, common_flow_dirac, compact_radiation_impedance,
-    discrete_gradient, duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
+    AcousticTap, MouthFlange, PhsError, PortHamiltonian, QuadraticStorage, Storage,
+    acoustic_cylinder, acoustic_waveguide, common_effort_capacitor, common_effort_dirac,
+    common_effort_star, common_flow_dirac, compact_radiation_impedance, discrete_gradient,
+    duffing_oscillator, helmholtz_resonator, helmholtz_resonator_flow,
     helmholtz_resonator_radiating, interconnect, kirchhoff_parallel_step, lc_ladder,
     lc_ladder_terminated, mass_spring_damper, modal_bank, modal_bank_ports, moving_end_waveguide,
     reduce_galerkin, regularized_coulomb, series_impedance_ports, step, step_descriptor,
@@ -918,4 +919,94 @@ fn three_phs_string_plate_cavity_is_a_dirac_star_plus_transformer() {
     let rec = step_descriptor(&sys, &vec![0.0; sys.state_dim()], &[0.5], 2.0e-5).expect("step");
     assert!(rec.y[0].is_finite());
     assert!(rec.solver_residual.is_finite());
+}
+
+#[test]
+fn acoustic_cylinder_rings_at_the_quarter_wave() {
+    let l = 0.34;
+    let c = 343.0;
+    let sys = acoustic_cylinder(l, 0.012, 1.2, c, 8, false, 1).expect("closed");
+    let dt = 1.0 / 8_000.0;
+    let mut x = vec![0.0; sys.state_dim()];
+    let mut p = Vec::new();
+    for i in 0..640 {
+        let u = if i < 16 {
+            2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+        } else {
+            0.0
+        };
+        let rec = step(&sys, &x, &[u], dt).expect("step");
+        p.push(rec.y[0]);
+        x = rec.x;
+    }
+    // Current drive into the first compliance + a lossless last
+    // inertance is the quarter-wave (open-mouth / stop) family,
+    // period 4L/c. Half-wave closed-closed would need U=0 at both
+    // ends, which this Cauer form does not impose.
+    let want = 4.0 * l / c;
+    let got = dominant_zero_period(&p, dt);
+    assert!(
+        (got - want).abs() / want < 0.15,
+        "cylinder period {got} vs 4L/c {want}"
+    );
+    assert!(acoustic_cylinder(l, 0.012, 1.2, c, 1, false, 1).is_err());
+    let two = acoustic_cylinder(l, 0.012, 1.2, c, 8, false, 2).expect("two inlets");
+    assert_eq!(two.port_dim(), 2);
+}
+
+#[test]
+fn open_tap_raises_the_waveguide_frequency() {
+    let l = 0.34;
+    let c = 343.0;
+    let plain = acoustic_waveguide(l, 0.012, 1.2, c, 8, false, 1, &[]).expect("plain");
+    let vented = acoustic_waveguide(
+        l,
+        0.012,
+        1.2,
+        c,
+        8,
+        false,
+        1,
+        &[AcousticTap {
+            station: 0.24,
+            neck_length: 0.003,
+            neck_radius: 0.003,
+        }],
+    )
+    .expect("vented");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..640 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        dominant_zero_period(&p, dt)
+    };
+    let t0 = ring(&plain);
+    let t1 = ring(&vented);
+    assert!(
+        t1 < t0 * 0.98,
+        "an open side branch must shorten the period ({t1} vs {t0})"
+    );
+}
+
+fn dominant_zero_period(x: &[f64], dt: f64) -> f64 {
+    let mut prev = x[x.len() / 4];
+    let mut times = Vec::new();
+    for (i, &s) in x.iter().enumerate().skip(x.len() / 4 + 1) {
+        if prev > 0.0 && s <= 0.0 {
+            times.push(i as f64 * dt);
+        }
+        prev = s;
+    }
+    assert!(times.len() >= 3, "need crossings, got {}", times.len());
+    (times[times.len() - 1] - times[0]) / (times.len() - 1) as f64
 }

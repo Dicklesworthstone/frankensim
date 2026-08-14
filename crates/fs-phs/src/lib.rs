@@ -1717,6 +1717,155 @@ pub fn lc_ladder_terminated(
     PortHamiltonian::new(n, sys.m, sys.j, sys.r, sys.g, sys.storage)
 }
 
+/// Inviscid acoustic cylinder as an LC ladder.
+///
+/// Per cell: inertance `ρ dx / A`, compliance `A dx /(ρ c²)`.
+/// The inlet port is flow-in / effort-out (`u` = volume velocity,
+/// `y` = pressure). `inlets = 2` puts two identical columns on the
+/// first charge so a blow and a transformer body can share the
+/// mouth. An open far end loads the last flux with compact-mouth
+/// `Re Z_rad` at the quarter-wave pin; a closed end is lossless.
+/// Viscothermal TMM stays the tone-hole / FIR path — this object
+/// does not invent Stokes resistance.
+///
+/// # Errors
+/// Non-physical geometry, `cells < 2`, `inlets` not in `{1, 2}`,
+/// or a radiation-fit refusal.
+pub fn acoustic_cylinder(
+    length: f64,
+    radius: f64,
+    density: f64,
+    sound_speed: f64,
+    cells: usize,
+    open: bool,
+    inlets: usize,
+) -> Result<PortHamiltonian, PhsError> {
+    acoustic_waveguide(
+        length,
+        radius,
+        density,
+        sound_speed,
+        cells,
+        open,
+        inlets,
+        &[],
+    )
+}
+
+/// Open side branch on an [`acoustic_waveguide`]: a neck inertance
+/// shunted to atmosphere at a station along the line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcousticTap {
+    /// Station along the cylinder in `[0, 1]`.
+    pub station: f64,
+    /// Chimney / neck length [m] (end correction is added).
+    pub neck_length: f64,
+    /// Neck radius [m].
+    pub neck_radius: f64,
+}
+
+/// Inviscid uniform waveguide with optional open side branches.
+///
+/// Each open tap is a neck inertance `ρ (ℓ + 0.6 a)/A` shunted to
+/// `p = 0` with compact-mouth `Re Z_rad` — a tone hole, a relief
+/// port, and a side vent are this object. Closed pads add no states.
+/// Stepped-radius bores stay on the TMM/FIR path.
+///
+/// # Errors
+/// As [`acoustic_cylinder`], plus a bad tap station or neck.
+pub fn acoustic_waveguide(
+    length: f64,
+    radius: f64,
+    density: f64,
+    sound_speed: f64,
+    cells: usize,
+    open: bool,
+    inlets: usize,
+    taps: &[AcousticTap],
+) -> Result<PortHamiltonian, PhsError> {
+    if !(length > 0.0 && radius > 0.0 && density > 0.0 && sound_speed > 0.0)
+        || cells < 2
+        || (inlets != 1 && inlets != 2)
+    {
+        return Err(PhsError::NotPsd {
+            what: "acoustic waveguide parameters",
+        });
+    }
+    let n_line = 2 * cells;
+    let n_tap = taps.len();
+    let n = n_line + n_tap;
+    let area = core::f64::consts::PI * radius * radius;
+    let dx = length / cells as f64;
+    let inertance = density * dx / area;
+    let compliance = area * dx / (density * sound_speed * sound_speed);
+    let mut q = vec![0.0; n * n];
+    let mut j = vec![0.0; n * n];
+    let mut r = vec![0.0; n * n];
+    for cell in 0..cells {
+        let (qi, pi) = (2 * cell, 2 * cell + 1);
+        q[qi * n + qi] = 1.0 / compliance;
+        q[pi * n + pi] = 1.0 / inertance;
+        j[qi * n + pi] = 1.0;
+        j[pi * n + qi] = -1.0;
+        if cell + 1 < cells {
+            let qn = 2 * (cell + 1);
+            j[pi * n + qn] = -1.0;
+            j[qn * n + pi] = 1.0;
+        }
+    }
+    if open {
+        let omega = core::f64::consts::PI * sound_speed / (2.0 * length);
+        let r_load = compact_radiation_impedance(
+            density,
+            sound_speed,
+            radius,
+            omega,
+            MouthFlange::Unflanged,
+        )
+        .map(|(rr, _)| rr)?;
+        let last_p = n_line - 1;
+        r[last_p * n + last_p] = r_load;
+    }
+    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * length);
+    for (t, tap) in taps.iter().enumerate() {
+        if !(tap.station >= 0.0
+            && tap.station <= 1.0
+            && tap.neck_length >= 0.0
+            && tap.neck_radius > 0.0)
+        {
+            return Err(PhsError::NotPsd {
+                what: "acoustic tap station and neck",
+            });
+        }
+        let cell =
+            ((tap.station * (cells.saturating_sub(1)) as f64).round() as usize).min(cells - 1);
+        let tap_q = 2 * cell;
+        let phi = n_line + t;
+        let a_h = core::f64::consts::PI * tap.neck_radius * tap.neck_radius;
+        let l_eff = tap.neck_length + 0.6 * tap.neck_radius;
+        let l_h = density * l_eff.max(1.0e-6) / a_h;
+        q[phi * n + phi] = 1.0 / l_h;
+        j[tap_q * n + phi] = -1.0;
+        j[phi * n + tap_q] = 1.0;
+        let r_ac = compact_radiation_impedance(
+            density,
+            sound_speed,
+            tap.neck_radius,
+            omega_pin,
+            MouthFlange::Unflanged,
+        )
+        .map(|(rr, _)| rr)
+        .unwrap_or(0.0);
+        r[phi * n + phi] = r_ac;
+    }
+    let mut g = vec![0.0; n * inlets];
+    g[0] = 1.0;
+    if inlets == 2 {
+        g[1] = 1.0;
+    }
+    PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))
+}
+
 /// Modal bank from mass-normalized modes — the first-class bridge from
 /// the eig/plate beads: per mode `i`, `H_i = (p_i^2 + w_i^2 q_i^2)/2`,
 /// damping `R = diag(0, 2 zeta_i w_i)` per mode, and the drive port
