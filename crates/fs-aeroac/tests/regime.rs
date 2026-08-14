@@ -1,9 +1,9 @@
 //! l011o: 2D tonal-lock refusal, broadband admission gate, 3D operator smoke.
 
 use fs_aeroac::regime::{
-    PINNED_2D_CENTRAL_MOMENT_TONAL, SlotJet3dFollowUp, TONAL_FLATNESS_CEILING,
-    TWO_D_INVERSE_CASCADE, admit_broadband_spectrum, evaluate_slot_jet_3d_operator,
-    two_d_broadband_refusal,
+    PINNED_2D_CENTRAL_MOMENT_TONAL, SlotJet3dFollowUp, SpectrumClass, TONAL_FLATNESS_CEILING,
+    TWO_D_INVERSE_CASCADE, admit_broadband_spectrum, classify_spectrum,
+    evaluate_slot_jet_3d_operator, measure_spectral_flatness, two_d_broadband_refusal,
 };
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 
@@ -48,4 +48,38 @@ fn slot_jet_3d_follow_up_operator_is_live_but_does_not_claim_broadband() {
     );
     let bad = SlotJet3dFollowUp { nx: 3, ..spec };
     assert!(bad.validate().is_err());
+}
+
+#[test]
+fn spectral_flatness_classifies_tone_and_white_without_minting_a_table() {
+    let mut tone = vec![1.0e-18; 64];
+    tone[7] = 1.0;
+    let f_tone = measure_spectral_flatness(&tone).expect("tone");
+    assert!(f_tone < TONAL_FLATNESS_CEILING);
+    assert!(matches!(
+        classify_spectrum(&tone).expect("class"),
+        SpectrumClass::Tonal { .. }
+    ));
+
+    let white = vec![1.0; 64];
+    let f_white = measure_spectral_flatness(&white).expect("white");
+    assert!((f_white - 1.0).abs() < 1.0e-12);
+    assert!(matches!(
+        classify_spectrum(&white).expect("class"),
+        SpectrumClass::Broadband { .. }
+    ));
+
+    let spec = SlotJet3dFollowUp::minimal_central_moment();
+    let smoke = evaluate_slot_jet_3d_operator(spec).expect("smoke");
+    let still_tonal = smoke
+        .incorporate_measured_spectrum(&tone, spec.broadband_flatness_floor)
+        .expect("tone attach");
+    assert!(!still_tonal.broadband_demonstrated);
+    let white_ok = smoke
+        .incorporate_measured_spectrum(&white, spec.broadband_flatness_floor)
+        .expect("white attach");
+    assert!(
+        white_ok.broadband_demonstrated,
+        "a measured white spectrum may raise the flag; a 3-D jet table is not invented"
+    );
 }

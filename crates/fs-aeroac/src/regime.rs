@@ -127,6 +127,66 @@ pub const fn two_d_broadband_refusal() -> TwoDBroadbandRefusal {
     }
 }
 
+/// Geometric-to-arithmetic mean of a one-sided power spectrum.
+///
+/// White noise → 1. A pure tone → 0. This is the measurement the
+/// 3-D jet hunt must pass; it does not mint a broadband table.
+///
+/// # Errors
+/// [`AeroacError`] if fewer than two finite positive bins remain.
+pub fn measure_spectral_flatness(power: &[f64]) -> Result<f64, AeroacError> {
+    let mut n = 0.0;
+    let mut sum = 0.0;
+    let mut log_sum = 0.0;
+    for &p in power {
+        if !p.is_finite() {
+            return Err(AeroacError::NonFinite {
+                what: "spectral power",
+            });
+        }
+        if p > 0.0 {
+            n += 1.0;
+            sum += p;
+            log_sum += p.ln();
+        }
+    }
+    if n < 2.0 || !(sum > 0.0) {
+        return Err(AeroacError::InvalidParameter {
+            what: "spectral flatness needs at least two positive power bins",
+        });
+    }
+    let arith = sum / n;
+    Ok((log_sum / n).exp() / arith)
+}
+
+/// A measured spectrum classified against [`TONAL_FLATNESS_CEILING`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpectrumClass {
+    /// Flatness at or below the tonal ceiling.
+    Tonal {
+        /// Measured geometric/arithmetic ratio.
+        flatness: f64,
+    },
+    /// Flatness above the tonal ceiling.
+    Broadband {
+        /// Measured geometric/arithmetic ratio.
+        flatness: f64,
+    },
+}
+
+/// Classify a power spectrum without cataloging it as flute noise.
+///
+/// # Errors
+/// Measurement refusals from [`measure_spectral_flatness`].
+pub fn classify_spectrum(power: &[f64]) -> Result<SpectrumClass, AeroacError> {
+    let flatness = measure_spectral_flatness(power)?;
+    if flatness <= TONAL_FLATNESS_CEILING {
+        Ok(SpectrumClass::Tonal { flatness })
+    } else {
+        Ok(SpectrumClass::Broadband { flatness })
+    }
+}
+
 /// Refuse to treat a spectrum as broadband flute noise.
 ///
 /// # Errors
@@ -262,4 +322,27 @@ pub fn evaluate_slot_jet_3d_operator(
         equilibrium_live: all_finite_positive,
         broadband_demonstrated: false,
     })
+}
+
+impl SlotJet3dOperatorSmoke {
+    /// Attach a *measured* power spectrum. `broadband_demonstrated`
+    /// becomes true only if the spectrum is admitted above both the
+    /// tonal ceiling and the follow-up floor. A missing 3-D run
+    /// cannot call this; a white-noise fixture can, and that is the
+    /// honest measurement primitive, not a minted jet table.
+    ///
+    /// # Errors
+    /// [`measure_spectral_flatness`] refusals.
+    pub fn incorporate_measured_spectrum(
+        self,
+        power: &[f64],
+        floor: f64,
+    ) -> Result<Self, AeroacError> {
+        let flatness = measure_spectral_flatness(power)?;
+        let demonstrated = admit_broadband_spectrum(flatness).is_ok() && flatness > floor;
+        Ok(Self {
+            broadband_demonstrated: demonstrated,
+            ..self
+        })
+    }
 }

@@ -29,8 +29,8 @@
 //!   exact eigenmodes (machine-zero ODE residuals re-proven per run).
 //! - [`regime`]: recorded 2D CentralMoment tonal-lock landscape (bead
 //!   l011o), the inverse-cascade refusal to catalog those spectra as
-//!   broadband flute noise, and a D3Q19 operator smoke that does not
-//!   claim a 3D broadband regime.
+//!   broadband flute noise, a spectral-flatness measurement, and a
+//!   D3Q19 operator smoke that does not mint a 3D broadband table.
 
 pub mod bessel;
 pub mod bickley;

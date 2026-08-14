@@ -73,9 +73,13 @@ scope law, pinned as data and by test).
 - `regime` — bead l011o: pinned CentralMoment 2D tonal-lock rows
   (`PINNED_2D_CENTRAL_MOMENT_TONAL`), the named inverse-cascade mechanism,
   `admit_broadband_spectrum` (refuses flatness at or below
-  `TONAL_FLATNESS_CEILING`), and `evaluate_slot_jet_3d_operator` (D3Q19
-  CentralMoment smoke). The smoke proves the 3D operator is live; it does
-  not mint a broadband table.
+  `TONAL_FLATNESS_CEILING`), `measure_spectral_flatness` /
+  `classify_spectrum` (geometric/arithmetic power-mean; no table is
+  minted), and `evaluate_slot_jet_3d_operator` (D3Q19 CentralMoment
+  smoke). `SlotJet3dOperatorSmoke::incorporate_measured_spectrum`
+  raises `broadband_demonstrated` only from a real spectrum that
+  clears the floor. The smoke alone does not mint a 3-D broadband
+  table.
 
 ## Invariants
 
