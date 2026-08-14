@@ -8904,7 +8904,6 @@ mod tests {
     /// injectable, so each prepare-resume refusal is exercised
     /// independently (bead sj31i.52.5.2).
     struct PreparableJacobi {
-        inner: Jacobi,
         context: snapshot_v2::ExpectedResumeContextV2,
         manifest: snapshot_v2::DecodedStateManifestV2,
     }
@@ -8913,8 +8912,8 @@ mod tests {
         type State = JacobiState;
         type Out = ();
 
-        fn step_v2(&self, state: &mut Self::State, cx: &Cx<'_>) -> StepVerdict<Self::Out> {
-            self.inner.step_v2(state, cx)
+        fn step_v2(&self, _state: &mut Self::State, _cx: &Cx<'_>) -> StepVerdict<Self::Out> {
+            StepVerdict::Done(())
         }
     }
 
@@ -8956,7 +8955,6 @@ mod tests {
         let (state, opened) = opened_jacobi();
         let context = base_v2_context::<JacobiState>();
         let solver = PreparableJacobi {
-            inner: jacobi().0,
             manifest: matching_manifest(&context),
             context,
         };
@@ -8968,7 +8966,7 @@ mod tests {
         assert_eq!(prepared.resume_id(), resume_id);
         assert_eq!(
             prepared.admission(),
-            snapshot_v2::SnapshotAdmissionV2::ExpectedRootsMatched
+            snapshot_v2::SnapshotAdmissionV2::MatchedCallerExpectation
         );
         // Deterministic preparation receipt: preparing the same snapshot
         // again binds identical identities and manifest.
@@ -9015,7 +9013,6 @@ mod tests {
             paused_boundary(0x66, 9, 17, 2),
         );
         let solver = PreparableJacobi {
-            inner: jacobi().0,
             manifest: matching_manifest(&wrong_version),
             context: wrong_version,
         };
@@ -9041,7 +9038,6 @@ mod tests {
             paused_boundary(0x66, 9, 17, 2),
         );
         let solver = PreparableJacobi {
-            inner: jacobi().0,
             manifest: matching_manifest(&wrong_problem),
             context: wrong_problem,
         };
@@ -9060,7 +9056,6 @@ mod tests {
         // RNG cursor drifted between retained context and decoded state.
         let (_, opened) = opened_jacobi();
         let solver = PreparableJacobi {
-            inner: jacobi().0,
             manifest: snapshot_v2::DecodedStateManifestV2 {
                 rng_counter: snapshot_v2::SnapshotRngCounterIdV2::from_bytes([0x99; 32]),
                 budget: context.context().budget(),
@@ -9078,7 +9073,6 @@ mod tests {
         // Budget state drifted.
         let (_, opened) = opened_jacobi();
         let solver = PreparableJacobi {
-            inner: jacobi().0,
             manifest: snapshot_v2::DecodedStateManifestV2 {
                 rng_counter: context.context().rng_counter(),
                 budget: snapshot_v2::SnapshotBudgetStateIdV2::from_bytes([0x98; 32]),
