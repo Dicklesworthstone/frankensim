@@ -1655,6 +1655,34 @@ fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
     q[flux * n + flux] = 1.0 / l_new;
 }
 
+/// Compact radiation on the last flux: series `R = Re Z` and
+/// added mass `L = −X/ω` from [`compact_radiation_impedance`].
+/// `scale` is 1 on a physical-`U` line and `x_out²` on a ψ-line
+/// so `Z_ψ = x² Z_phys`. Unflanged `X` is the Levine–Schwinger
+/// `Δℓ = 0.6133 a`. Closed ends skip this.
+fn apply_open_mouth_radiation(
+    q: &mut [f64],
+    r: &mut [f64],
+    n: usize,
+    last_flux: usize,
+    density: f64,
+    sound_speed: f64,
+    radius: f64,
+    omega: f64,
+    scale: f64,
+) -> Result<(), PhsError> {
+    let (rr, xx) = compact_radiation_impedance(
+        density,
+        sound_speed,
+        radius,
+        omega,
+        MouthFlange::Unflanged,
+    )?;
+    r[last_flux * n + last_flux] += rr * scale;
+    apply_t_junction_series(q, n, last_flux, (-xx / omega) * scale);
+    Ok(())
+}
+
 /// [`helmholtz_resonator`] whose damper is the compact-mouth radiation
 /// resistance evaluated at the lossless natural frequency.
 ///
@@ -1932,7 +1960,9 @@ pub fn lc_ladder_terminated(
 /// `y` = pressure). `inlets = 2` puts two identical columns on the
 /// first charge so a blow and a transformer body can share the
 /// mouth. An open far end loads the last flux with compact-mouth
-/// `Re Z_rad` at the quarter-wave pin; a closed end is lossless.
+/// `Re Z_rad` and the same fit's mass `L = −X/ω` (unflanged
+/// `Δℓ = 0.6133 a`) at the quarter-wave pin; a closed end is
+/// lossless.
 /// A stepped bore is [`acoustic_chain`]. Wall losses are the
 /// optional [`ViscothermalPin`] on that chain — not Stokes–
 /// Kirchhoff bulk `α` and not ISO 9613.
@@ -2245,16 +2275,17 @@ pub fn spherical_cone(
         }
     }
     if open {
-        let r_load = compact_radiation_impedance(
+        apply_open_mouth_radiation(
+            &mut q,
+            &mut r,
+            n,
+            n_line - 1,
             density,
             sound_speed,
             outlet_radius,
             omega_pin,
-            MouthFlange::Unflanged,
-        )
-        .map(|(rr, _)| rr)?;
-        let last_p = n_line - 1;
-        r[last_p * n + last_p] += r_load * (x_out * x_out).abs();
+            (x_out * x_out).abs(),
+        )?;
     }
     let mut open_i = 0usize;
     for tap in taps {
@@ -2598,22 +2629,23 @@ fn hybrid_sphere_cylinder_chain(
         }
     }
     if open {
-        let r_load = compact_radiation_impedance(
-            density,
-            sound_speed,
-            last_radius,
-            omega_pin,
-            MouthFlange::Unflanged,
-        )
-        .map(|(rr, _)| rr)?;
-        let last_p = n_line - 1;
         let scale = if *cone_s.last().unwrap_or(&false) {
             let xo = *x_out_s.last().unwrap_or(&1.0);
             (xo * xo).abs()
         } else {
             1.0
         };
-        r[last_p * n + last_p] += r_load * scale;
+        apply_open_mouth_radiation(
+            &mut q,
+            &mut r,
+            n,
+            n_line - 1,
+            density,
+            sound_speed,
+            last_radius,
+            omega_pin,
+            scale,
+        )?;
     }
     let mut open_i = 0usize;
     for tap in taps {
@@ -2696,7 +2728,8 @@ fn hybrid_sphere_cylinder_chain(
 /// multi-section chain that contains a taper stitches ψ-lines
 /// onto the LC ladder with transformer `x` at each interface.
 /// Open taps sit at a station of the total length. An open far end
-/// loads the last flux with compact-mouth `Re Z_rad` at the
+/// loads the last flux with compact-mouth `Re Z_rad` and the same
+/// fit's mass `L = −X/ω` (unflanged `Δℓ = 0.6133 a`) at the
 /// quarter-wave pin of the total length, using the last radius.
 /// A [`ViscothermalPin`] adds first-order Zwikker–Kosten `R` on
 /// each inertance and thermal `G` on each compliance at that
@@ -2900,16 +2933,17 @@ pub fn acoustic_chain(
         }
     }
     if open {
-        let r_load = compact_radiation_impedance(
+        apply_open_mouth_radiation(
+            &mut q,
+            &mut r,
+            n,
+            n_line - 1,
             density,
             sound_speed,
             last_radius,
             omega_pin,
-            MouthFlange::Unflanged,
-        )
-        .map(|(rr, _)| rr)?;
-        let last_p = n_line - 1;
-        r[last_p * n + last_p] += r_load;
+            1.0,
+        )?;
     }
     let mut open_i = 0usize;
     for tap in taps {

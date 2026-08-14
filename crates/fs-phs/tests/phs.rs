@@ -632,6 +632,15 @@ fn compact_radiation_flanged_resists_more_than_unflanged() {
         .expect("flanged");
     assert!(ru > 0.0 && rf > ru, "flanged R {rf} vs unflanged {ru}");
     assert!(xu < 0.0 && xf < xu, "flanged mass load {xf} vs {xu}");
+    let a = 0.02;
+    let omega = 2.0e3;
+    let area = core::f64::consts::PI * a * a;
+    let l_end = -xu / omega;
+    let want = 1.2 * 0.6133 * a / area;
+    assert!(
+        (l_end - want).abs() < 1.0e-12 * want,
+        "unflanged X must be the Levine–Schwinger mass ({l_end} vs {want})"
+    );
     assert!(compact_radiation_impedance(1.2, 343.0, 0.2, 2.0e4, MouthFlange::Flanged).is_err());
 }
 
@@ -985,6 +994,47 @@ fn acoustic_cylinder_rings_at_the_quarter_wave() {
     assert!(acoustic_cylinder(l, 0.012, 1.2, c, 1, false, 1).is_err());
     let two = acoustic_cylinder(l, 0.012, 1.2, c, 8, false, 2).expect("two inlets");
     assert_eq!(two.port_dim(), 2);
+}
+
+#[test]
+fn open_cylinder_rings_at_the_corrected_quarter_wave() {
+    let l = 0.20;
+    let a = 0.025;
+    let c = 343.0;
+    let closed = acoustic_cylinder(l, a, 1.2, c, 8, false, 1).expect("closed");
+    let open = acoustic_cylinder(l, a, 1.2, c, 8, true, 1).expect("open");
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..800 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        dominant_zero_period(&p, dt)
+    };
+    let t_closed = ring(&closed);
+    let t_open = ring(&open);
+    let raw = 4.0 * l / c;
+    let corrected = 4.0 * (l + 0.6133 * a) / c;
+    assert!(
+        t_open > t_closed,
+        "mouth mass must lengthen the period ({t_open} vs {t_closed})"
+    );
+    assert!(
+        (t_open - corrected).abs() < (t_open - raw).abs(),
+        "open period {t_open} must sit nearer 4(L+0.6133a)/c {corrected} than 4L/c {raw}"
+    );
+    assert!(
+        (t_closed - raw).abs() < (t_closed - corrected).abs(),
+        "closed Cauer must stay on 4L/c ({t_closed} vs {raw}, not {corrected})"
+    );
 }
 
 #[test]
