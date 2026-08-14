@@ -856,7 +856,6 @@ dependencies = [
  "fs-qty",
  "fs-regime",
  "fs-rep-mesh",
- "fs-solver",
 ]
 
 [[package]]
