@@ -14,7 +14,6 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 readonly REPO_ROOT
 readonly CARGO_BIN="${CARGO_BIN:-cargo}"
-readonly PYTHON_BIN="${PYTHON_BIN:-python3}"
 readonly PR_BUDGET_SECONDS="${FS_ASCENT_PR_BUDGET_SECONDS:-900}"
 readonly NIGHTLY_BUDGET_SECONDS="${FS_ASCENT_NIGHTLY_BUDGET_SECONDS:-7200}"
 
@@ -29,7 +28,6 @@ usage:
 
 environment:
   CARGO_BIN                         Cargo executable path (default: cargo)
-  PYTHON_BIN                        Python 3 executable path (default: python3)
   FS_ASCENT_PR_BUDGET_SECONDS       Aggregate PR wall budget (default: 900)
   FS_ASCENT_NIGHTLY_BUDGET_SECONDS  Aggregate nightly wall budget (default: 7200)
   FS_ASCENT_PROFILE_LOG_DIR         Retained-run root (default: target/ascent-conformance-profile)
@@ -46,7 +44,10 @@ EOF
 run_python_supervisor() {
   local mode="$1"
   local profile="$2"
-  exec "$PYTHON_BIN" -I - "$mode" "$profile" "$REPO_ROOT" \
+  # Literal interpreter: the identity scanner requires an unambiguous
+  # execution context for this identity-bearing heredoc (bead m3h2e);
+  # front python3 on PATH to substitute an interpreter.
+  exec python3 -I - "$mode" "$profile" "$REPO_ROOT" \
     "$SCRIPT_DIR/ascent_conformance_profile.sh" "$CARGO_BIN" \
     "$PR_BUDGET_SECONDS" "$NIGHTLY_BUDGET_SECONDS" <<'PY'
 import atexit
