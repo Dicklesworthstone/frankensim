@@ -69,7 +69,8 @@ stepping, and Galerkin reduction preserves the structure.
   `spherical_cone` (1-D wave on `ψ = x p`, physical ports
   `p = ψ/x` and `U = x U_ψ + (α/ρ)∫ψ` via a per-cell
   shunt `L = ρ|x|/α`; a single taper in `acoustic_chain`
-  is this object), `modal_bank`
+  is this object; mixed cylinder+taper runs stitch it to
+  the LC ladder with transformer `x` at each interface), `modal_bank`
   (mass-normalized modes -> canonical pHS: the bridge from the
   eig/plate beads), `duffing_oscillator` (non-quadratic exercise).
 - `compact_radiation_impedance` — low-`ka` Levine–Schwinger /

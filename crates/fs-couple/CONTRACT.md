@@ -337,9 +337,10 @@ clarinet is one filling of those objects.
   series `R` and thermal `G` are three-term Foster networks
   collocated to Bessel Zwikker–Kosten `F(r_v)`, all shear
   numbers). A single linear taper is `spherical_cone`
-  (`ψ = x p` plus the Euler near-field shunt); mixed
-  cylinder+taper runs stay frustum LC so physical `p`/`U`
-  match at interfaces.
+  (`ψ = x p` plus the Euler near-field shunt). Mixed
+  cylinder+taper runs stitch that ψ-line onto the LC
+  ladder with transformer `x` at each interface. All-taper
+  multi-section stays frustum LC.
   Open tone holes are `AcousticTap` side-branch
   inertances. A quasistatic reed is the Bernoulli port on that
   inlet; a massive reed is `mass_spring_damper` plus the same

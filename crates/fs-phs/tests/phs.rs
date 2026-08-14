@@ -1452,6 +1452,73 @@ fn spherical_cone_is_not_the_frustum_ladder() {
 }
 
 #[test]
+fn mixed_cylinder_and_taper_is_not_the_pipe_or_the_full_cone() {
+    let c = 343.0;
+    let pipe = [AcousticSection {
+        length: 0.34,
+        radius: 0.006,
+        outlet_radius: 0.006,
+        cells: 8,
+    }];
+    let mix = [
+        AcousticSection {
+            length: 0.17,
+            radius: 0.006,
+            outlet_radius: 0.006,
+            cells: 4,
+        },
+        AcousticSection {
+            length: 0.17,
+            radius: 0.006,
+            outlet_radius: 0.018,
+            cells: 4,
+        },
+    ];
+    let cone = [AcousticSection {
+        length: 0.34,
+        radius: 0.006,
+        outlet_radius: 0.018,
+        cells: 8,
+    }];
+    let a = acoustic_chain(&pipe, 1.2, c, false, 1, &[], None).expect("pipe");
+    let b = acoustic_chain(&mix, 1.2, c, false, 1, &[], None).expect("mix");
+    let d = acoustic_chain(&cone, 1.2, c, false, 1, &[], None).expect("cone");
+    // 8 LC cells; the four cone cells add one near-field shunt each.
+    assert_eq!(a.state_dim(), 16);
+    assert_eq!(b.state_dim(), 20);
+    assert_eq!(d.state_dim(), 24);
+    let dt = 1.0 / 8_000.0;
+    let ring = |sys: &PortHamiltonian| {
+        let mut x = vec![0.0; sys.state_dim()];
+        let mut p = Vec::new();
+        for i in 0..480 {
+            let u = if i < 16 {
+                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            } else {
+                0.0
+            };
+            let rec = step(sys, &x, &[u], dt).expect("step");
+            p.push(rec.y[0]);
+            x = rec.x;
+        }
+        p
+    };
+    let pa = ring(&a);
+    let pb = ring(&b);
+    let pd = ring(&d);
+    let err_pipe: f64 = pa.iter().zip(&pb).map(|(x, y)| (x - y).abs()).sum();
+    let err_cone: f64 = pd.iter().zip(&pb).map(|(x, y)| (x - y).abs()).sum();
+    assert!(
+        err_pipe > 1.0e-6,
+        "cyl+taper must not reprint the inlet pipe"
+    );
+    assert!(
+        err_cone > 1.0e-6,
+        "cyl+taper must not reprint a single full-length cone"
+    );
+}
+
+#[test]
 fn zwikker_kosten_f_hits_both_regime_limits() {
     let wide = zwikker_kosten_f(20.0).expect("wide");
     // Wide-tube: F ≈ (1−i) √2 / r_v, Re F ≈ Im(−F) ≈ √2 / 20.
