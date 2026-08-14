@@ -1873,6 +1873,22 @@ law/evaluator version and all source hashes.
 
 ### 5.11 Acoustics and NVH — `fs-acoustics` `[F→M]`
 
+> **Status note (2026-08-14).** The single crate this section names,
+> `fs-acoustics`, was never built and the name is retired. The acoustics lane
+> landed instead as existing workspace crates: `fs-duct` (rung 1: 1-D
+> viscothermal duct/horn TMM), `fs-bem::helmholtz` (rung 4: Burton–Miller
+> exterior radiation, radiation-impedance matrices), `fs-phs`/`fs-couple`
+> (passive port coupling and energy audits), `fs-vfit` (passive rational
+> realization), and `fs-psycho` (log-level/psychoacoustic semantics). Rungs
+> still unsatisfied — interior first-order p/v time-domain and FD Helmholtz
+> volume acoustics (rung 2), the both-domain interface power-closure gate
+> (rung 3, partial), convected-Helmholtz/LEE escalation (rung 5), and the
+> NAFEMS R0083 / NASA CAA G2 decks — are to be built as extensions of those
+> crates, never as a parallel `fs-acoustics`. Bead
+> `frankensim-ext-acoustics-core-0ja4` carries the matching repoint comment;
+> the musical program's binding record is
+> `COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md` (v8).
+
 **Formulation ladder.** Lumped acoustic impedances and 1-D characteristic duct
 networks land first. Interior acoustics then uses first-order pressure/velocity
 time-domain systems and frequency-domain Helmholtz formulations with complex

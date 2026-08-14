@@ -413,6 +413,24 @@ that service but does not create a domain-owned eigensolver fork. **Ratification
 note:** `frankensim-ext-ratification-register-ozq0`, extension charter §4.2 and
 §7.1.
 
+### 8.10 Acoustics and the musical-acoustics lane [S/F]
+
+Sound is a first-class FLUX output family, implemented as nameless physics
+crates rather than instrument products: `fs-duct` (1-D viscothermal duct/horn
+TMM), `fs-phs` (port-Hamiltonian passivity and discrete-gradient stepping),
+`fs-bem::helmholtz` (Burton–Miller exterior radiation), `fs-modal`/`fs-plate`/
+`fs-nlmodal` (certified vibration, orthotropic plates, von Kármán reduction),
+`fs-vfit` (passive rational realization), `fs-dcontact`/`fs-tribo` (collision
+and friction islands), `fs-aeroac` over `fs-lbm` (aeroacoustic source labs),
+`fs-psycho` (standards-anchored perceptual metrics under a listening law), and
+`fs-couple` (the only crate that composes them into audible loops). The
+program's binding record — menus of orthogonal images per instrument family,
+the mesh-and-materials ingest law, the claims registry, and its no-claim
+boundaries — is `COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md`
+with new-domains §5.11. No pre-recorded samples, no instrument crates, and no
+`fs-acoustics` monolith: the retired crate name is documented in that section's
+status note.
+
 ---
 
 ## 9. L4 — ASCENT: the optimization kernel
