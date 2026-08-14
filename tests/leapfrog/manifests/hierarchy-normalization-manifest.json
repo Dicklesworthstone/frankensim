@@ -14,8 +14,8 @@
       "old_type": "blocks",
       "parent": "frankensim-1vsv6",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 14/14 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-8ll9.1",
@@ -40,8 +40,8 @@
       "old_type": "blocks",
       "parent": "frankensim-b8bxd",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 12/12 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-b8bxd.5.3",
@@ -53,8 +53,8 @@
       "old_type": "blocks",
       "parent": "frankensim-b8bxd.5",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 3/3 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-b8bxd.7.4",
@@ -66,8 +66,8 @@
       "old_type": "blocks",
       "parent": "frankensim-b8bxd.7",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-b8bxd.9.4",
@@ -79,8 +79,8 @@
       "old_type": "blocks",
       "parent": "frankensim-b8bxd.9",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-addendum-xpck.5.8",
@@ -92,8 +92,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-addendum-xpck.5",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.22",
@@ -105,8 +105,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 25/25 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.23",
@@ -118,8 +118,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 25/25 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.24",
@@ -131,8 +131,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 25/25 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.25",
@@ -144,8 +144,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 25/25 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.22.8",
@@ -157,8 +157,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv.22",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.22.7.1",
@@ -196,8 +196,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv.23",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 9/9 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.24.19",
@@ -209,8 +209,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv.24",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 19/19 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-ascent-7tv.25.6",
@@ -222,8 +222,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-ascent-7tv.25",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 6/6 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.18",
@@ -235,8 +235,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.20",
@@ -248,8 +248,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.21",
@@ -261,8 +261,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.22",
@@ -274,8 +274,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.23",
@@ -287,8 +287,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.24",
@@ -300,8 +300,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.25",
@@ -313,8 +313,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.26",
@@ -326,8 +326,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.27",
@@ -339,8 +339,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.5.1",
@@ -352,8 +352,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 27/27 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.18.26",
@@ -365,8 +365,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.18",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 25/26 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.20.10",
@@ -378,8 +378,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.20",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: single blocks edge to .10, zero parent-child hierarchy, no selective gating declared in the CBC-repair epic text; converts to hierarchy",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.23.1.4",
@@ -391,8 +391,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.23.1",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.23.2.5",
@@ -404,8 +404,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.23.2",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.23.3.4",
@@ -417,8 +417,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.23.3",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.24.3",
@@ -430,8 +430,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.24",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 3/3 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-epic-bedrock-6ys.5.1.6",
@@ -443,8 +443,8 @@
       "old_type": "blocks",
       "parent": "frankensim-epic-bedrock-6ys.5.1",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 6/6 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.1",
@@ -560,8 +560,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.1",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.2.10",
@@ -573,8 +573,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.2",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 11/11 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.3.10",
@@ -586,8 +586,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.3",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 13/13 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.4.7",
@@ -599,8 +599,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.4",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.5.10",
@@ -612,8 +612,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.5",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 10/10 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.6.20",
@@ -625,8 +625,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.6",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 24/24 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.7.11",
@@ -638,8 +638,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.7",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 12/12 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-euler-disc-emergent-flagship-t6314.8.11",
@@ -651,8 +651,8 @@
       "old_type": "blocks",
       "parent": "frankensim-euler-disc-emergent-flagship-t6314.8",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 12/13 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-e8-summit-tek2.1",
@@ -872,8 +872,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-coldplate-2kkb",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-constant-width-cvng.5",
@@ -885,8 +885,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-constant-width-cvng",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-digital-twin-pkfe.5",
@@ -898,8 +898,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-digital-twin-pkfe",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-gear-ei5t.5",
@@ -911,8 +911,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-gear-ei5t",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-geneva-b4hj.5",
@@ -924,8 +924,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-geneva-b4hj",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-genset-mr28.5",
@@ -937,8 +937,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-genset-mr28",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-induction-i40z.5",
@@ -950,8 +950,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-induction-i40z",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-motor-m8n3.5",
@@ -963,8 +963,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-motor-m8n3",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-pump-bearing-z65l.5",
@@ -976,8 +976,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-pump-bearing-z65l",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-turbo-efuel-7zyp.5",
@@ -989,8 +989,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-turbo-efuel-7zyp",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-flagship-wankel-jwx0.5",
@@ -1002,8 +1002,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-flagship-wankel-jwx0",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-electromech-u7gi.1.4",
@@ -1015,8 +1015,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-electromech-u7gi.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-electromech-u7gi.2.4",
@@ -1028,8 +1028,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-electromech-u7gi.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-electromech-u7gi.3.4",
@@ -1041,8 +1041,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-electromech-u7gi.3",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-mechanics-ysu2.1.4",
@@ -1054,8 +1054,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-mechanics-ysu2.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-mechanics-ysu2.2.4",
@@ -1067,8 +1067,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-mechanics-ysu2.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-mechanics-ysu2.3.4",
@@ -1080,8 +1080,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-mechanics-ysu2.3",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-mechanics-ysu2.4.4",
@@ -1093,8 +1093,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-mechanics-ysu2.4",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-systems-yttz.1.4",
@@ -1106,8 +1106,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-systems-yttz.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-systems-yttz.2.4",
@@ -1119,8 +1119,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-systems-yttz.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-systems-yttz.3.4",
@@ -1132,8 +1132,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-systems-yttz.3",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-systems-yttz.4.4",
@@ -1145,8 +1145,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-systems-yttz.4",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-thermo-tbss.1.4",
@@ -1158,8 +1158,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-thermo-tbss.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-thermo-tbss.2.4",
@@ -1171,8 +1171,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-thermo-tbss.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-thermo-tbss.3.4",
@@ -1184,8 +1184,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-thermo-tbss.3",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-ext-theorem-lane-thermo-tbss.4.4",
@@ -1197,8 +1197,8 @@
       "old_type": "blocks",
       "parent": "frankensim-ext-theorem-lane-thermo-tbss.4",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-extreal-program-f85xj.15.3.4",
@@ -1210,8 +1210,8 @@
       "old_type": "blocks",
       "parent": "frankensim-extreal-program-f85xj.15.3",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-extreal-program-f85xj.3.8.4",
@@ -1223,8 +1223,8 @@
       "old_type": "blocks",
       "parent": "frankensim-extreal-program-f85xj.3.8",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-extreal-program-f85xj.4.5.5",
@@ -1236,8 +1236,8 @@
       "old_type": "blocks",
       "parent": "frankensim-extreal-program-f85xj.4.5",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-extreal-program-f85xj.5.8.4",
@@ -1249,8 +1249,8 @@
       "old_type": "blocks",
       "parent": "frankensim-extreal-program-f85xj.5.8",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-extreal-program-f85xj.6.14.4",
@@ -1262,8 +1262,8 @@
       "old_type": "blocks",
       "parent": "frankensim-extreal-program-f85xj.6.14",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-extreal-program-f85xj.6.5.1",
@@ -1275,8 +1275,8 @@
       "old_type": "blocks",
       "parent": "frankensim-extreal-program-f85xj.6.5",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 3/3 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-jmh21.8",
@@ -1288,8 +1288,8 @@
       "old_type": "blocks",
       "parent": "frankensim-jmh21",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.1",
@@ -2029,8 +2029,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.1.2.12",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.1.2.2.1",
@@ -5760,8 +5760,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.2.4.6",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: blocks-encoded rollup, zero parent-child hierarchy; .4's absent edge is preserved as-is (not inferred), remaining four convert",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.2.4.6.2",
@@ -5773,8 +5773,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.2.4.6",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: blocks-encoded rollup, zero parent-child hierarchy; .4's absent edge is preserved as-is (not inferred), remaining four convert",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.2.4.6.3",
@@ -5786,8 +5786,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.2.4.6",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: blocks-encoded rollup, zero parent-child hierarchy; .4's absent edge is preserved as-is (not inferred), remaining four convert",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.2.4.6.5",
@@ -5799,8 +5799,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.2.4.6",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: blocks-encoded rollup, zero parent-child hierarchy; .4's absent edge is preserved as-is (not inferred), remaining four convert",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.2.4.7.1",
@@ -12156,8 +12156,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup with ZERO parent-child hierarchy (the exact pathology this bead names); description declares no selective child gating; unlinked siblings (.7/.8) stay unlinked - hierarchy is never inferred from dot-prefix",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.1.2",
@@ -12169,8 +12169,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup with ZERO parent-child hierarchy (the exact pathology this bead names); description declares no selective child gating; unlinked siblings (.7/.8) stay unlinked - hierarchy is never inferred from dot-prefix",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.1.3",
@@ -12182,8 +12182,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup with ZERO parent-child hierarchy (the exact pathology this bead names); description declares no selective child gating; unlinked siblings (.7/.8) stay unlinked - hierarchy is never inferred from dot-prefix",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.1.4",
@@ -12195,8 +12195,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup with ZERO parent-child hierarchy (the exact pathology this bead names); description declares no selective child gating; unlinked siblings (.7/.8) stay unlinked - hierarchy is never inferred from dot-prefix",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.1.5",
@@ -12208,8 +12208,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup with ZERO parent-child hierarchy (the exact pathology this bead names); description declares no selective child gating; unlinked siblings (.7/.8) stay unlinked - hierarchy is never inferred from dot-prefix",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.1.6",
@@ -12221,8 +12221,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.1",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup with ZERO parent-child hierarchy (the exact pathology this bead names); description declares no selective child gating; unlinked siblings (.7/.8) stay unlinked - hierarchy is never inferred from dot-prefix",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.10.1",
@@ -12364,8 +12364,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.2",
@@ -12377,8 +12377,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.3",
@@ -12390,8 +12390,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.4",
@@ -12403,8 +12403,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.5",
@@ -12416,8 +12416,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.6",
@@ -12429,8 +12429,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.7",
@@ -12442,8 +12442,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.8",
@@ -12455,8 +12455,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.2.9",
@@ -12468,8 +12468,8 @@
       "old_type": "blocks",
       "parent": "frankensim-leapfrog-2026-program-i94v.7.2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "epic read: pure blocks-encoded rollup, zero parent-child hierarchy, no selective gating declared; unlinked sibling (.10) stays unlinked",
+      "verdict": "migrate"
     },
     {
       "child": "frankensim-leapfrog-2026-program-i94v.7.3.1",
@@ -14587,8 +14587,8 @@
       "old_type": "blocks",
       "parent": "frankensim-mkfvu",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-osxyv.5",
@@ -14600,8 +14600,8 @@
       "old_type": "blocks",
       "parent": "frankensim-osxyv",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-retry-idempotent-session-mutations-ujhp.1",
@@ -14626,8 +14626,8 @@
       "old_type": "blocks",
       "parent": "frankensim-sj31i.43",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-sj31i.44.4",
@@ -14639,8 +14639,8 @@
       "old_type": "blocks",
       "parent": "frankensim-sj31i.44",
       "parent_status": "open",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 4/4 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-sj31i.52.5.1",
@@ -14652,8 +14652,8 @@
       "old_type": "blocks",
       "parent": "frankensim-sj31i.52.5",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-sj31i.52.5.7",
@@ -14665,8 +14665,8 @@
       "old_type": "blocks",
       "parent": "frankensim-sj31i.52.5",
       "parent_status": "in_progress",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 8/8 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     },
     {
       "child": "frankensim-sj31i.52.5.1.1",
@@ -14717,8 +14717,8 @@
       "old_type": "blocks",
       "parent": "frankensim-vo8f2",
       "parent_status": "blocked",
-      "review_note": "",
-      "verdict": "pending"
+      "review_note": "selective straggler, double-encoded: child->parent parent-child edge exists and 5/5 siblings are parent-child-linked, so hierarchy rollup already gates the epic on this child; the extra blocks edge is redundant encoding (pattern: the blocks edge sits on the latest-added child, a creation-tooling artifact, not a selective functional prerequisite)",
+      "verdict": "migrate-remove-only"
     }
   ],
   "schema": "frankensim.beads-hierarchy-normalization-manifest.v1"
