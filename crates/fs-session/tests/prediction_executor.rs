@@ -211,7 +211,7 @@ fn cancellation_drains_marks_and_never_publishes_denominators() {
         execute_ensemble(cx, &input, "reduced-order", 100, |coordinates, seeds| {
             executed += 1;
             if executed == 5 {
-                gate.cancel();
+                gate.request();
             }
             parity_model(coordinates, seeds)
         })

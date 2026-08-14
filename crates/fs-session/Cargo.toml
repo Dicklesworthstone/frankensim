@@ -24,6 +24,7 @@ fs-qty = { path = "../fs-qty" }
 fs-voi = { path = "../fs-voi" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-regime = { path = "../fs-regime" }
 
 [lints]
