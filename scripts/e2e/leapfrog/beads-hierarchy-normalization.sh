@@ -60,7 +60,9 @@ case "${1:-}" in
     [ $# -ge 2 ] || die "$EXIT_USAGE" "$1 needs a manifest path"
     MANIFEST_ARG="$2" ;;
   --apply)
-    die "$EXIT_USAGE" "--apply does not exist in this revision by design: it lands only after the frozen manifest carries reviewed verdicts (see the bead)" ;;
+    MODE="apply"
+    [ $# -ge 2 ] || die "$EXIT_USAGE" "--apply needs the plan artifact path"
+    MANIFEST_ARG="$2" ;;
   *) die "$EXIT_USAGE" "usage: --list | --freeze | --check MANIFEST | --plan MANIFEST | --self-test" ;;
 esac
 
@@ -384,4 +386,87 @@ case "$MODE" in
     echo "frozen: $TARGET ($COUNT candidate rows, all pending review)" ;;
   check) tool check "$MANIFEST_ARG" ;;
   plan) tool plan "$MANIFEST_ARG" ;;
+  apply)
+    PLAN_FILE="$MANIFEST_ARG"
+    [ -f "$PLAN_FILE" ] || die "$EXIT_USAGE" "plan artifact not found: $PLAN_FILE"
+    command -v br >/dev/null 2>&1 || die "$EXIT_USAGE" "br is required for --apply"
+    # The apply executes ONLY the plan artifact's exact commands - never a
+    # recomputed set - and halts on the first unexpected failure with a
+    # pointer to the retained inverse plan.
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    APPLY_LOG="${FSIM_HIERNORM_APPLY_LOG:-$REPO_ROOT/.e2e-out/hiernorm-apply-$STAMP.jsonl}"
+    mkdir -p "$(dirname "$APPLY_LOG")"
+    python3 - "$PLAN_FILE" "$APPLY_LOG" <<'PYAPPLY'
+import hashlib
+import json
+import subprocess
+import sys
+import datetime
+
+plan_path, log_path = sys.argv[1], sys.argv[2]
+import os
+start = int(os.environ.get("FSIM_HIERNORM_APPLY_START", "0"))
+stop = int(os.environ.get("FSIM_HIERNORM_APPLY_STOP", "0")) or None
+plan = json.load(open(plan_path))
+if plan.get("schema") != "frankensim.beads-hierarchy-normalization-plan.v1":
+    print(f"apply refusal: plan schema {plan.get('schema')!r}", file=sys.stderr)
+    sys.exit(30)
+commands = plan.get("commands") or []
+if not commands:
+    print("apply refusal: plan has no commands", file=sys.stderr)
+    sys.exit(30)
+for command in commands:
+    if not (isinstance(command, list) and command[:2] == ["br", "dep"]
+            and command[2] in ("remove", "add")):
+        print(f"apply refusal: non-br-dep command in plan: {command}", file=sys.stderr)
+        sys.exit(30)
+
+plan_digest = hashlib.sha256(open(plan_path, "rb").read()).hexdigest()
+seq = 0
+
+
+def emit(event, **fields):
+    global seq
+    seq += 1
+    row = {"schema": "frankensim.beads-hierarchy-normalization-apply-log.v1",
+           "seq": seq, "plan_sha256": plan_digest,
+           "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+           "event": event}
+    row.update(fields)
+    with open(log_path, "a") as fh:
+        fh.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+emit("apply-start", command_count=len(commands), start=start, stop=stop or len(commands))
+applied = 0
+for index, command in enumerate(commands):
+    if index < start or (stop is not None and index >= stop):
+        continue
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    ok = result.returncode == 0
+    emit("command", index=index, argv=command, exit=result.returncode,
+         stderr_tail=result.stderr.strip()[-200:] if not ok else "")
+    if not ok:
+        emit("apply-halt", applied=applied, failed_index=index)
+        print(
+            f"apply HALTED at command {index}/{len(commands)} "
+            f"({' '.join(command)}): {result.stderr.strip()[-300:]}\n"
+            f"{applied} command(s) applied; the inverse plan in the artifact "
+            f"covers rollback; log: {log_path}",
+            file=sys.stderr,
+        )
+        sys.exit(31)
+    applied += 1
+    if applied % 200 == 0:
+        print(f"  progress: {applied}/{len(commands)}")
+emit("apply-complete", applied=applied)
+print(f"apply complete: {applied}/{len(commands)} commands; log: {log_path}")
+PYAPPLY
+    APPLY_STATUS=$?
+    [ "$APPLY_STATUS" -eq 0 ] || exit "$APPLY_STATUS"
+    # Post-condition: re-discover live candidates; the migrated set must be
+    # gone. A nonzero residue is loud, not silent.
+    RESIDUE="$(tool list 2>/dev/null | wc -l | tr -d ' ')"
+    echo "post-apply live candidate edges: $RESIDUE (expected 0 if the whole plan applied)"
+    ;;
 esac
