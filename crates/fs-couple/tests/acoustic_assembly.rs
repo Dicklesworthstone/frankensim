@@ -372,6 +372,86 @@ fn beating_reed_locks_near_the_quarter_wave() {
 }
 
 #[test]
+fn stepped_bore_shifts_the_ode_period() {
+    let mut uniform = empty_base();
+    uniform.duration_s = 0.08;
+    uniform.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 2.0e-5,
+        duration_s: 0.002,
+    });
+    uniform.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.012,
+            length_m: 0.34,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::Closed,
+    });
+    let mut stepped = uniform.clone();
+    if let Some(duct) = stepped.duct.as_mut() {
+        duct.segments = vec![
+            CylinderSegment {
+                radius_m: 0.012,
+                length_m: 0.17,
+            },
+            CylinderSegment {
+                radius_m: 0.006,
+                length_m: 0.17,
+            },
+        ];
+    }
+    let a = realize_assembly(&uniform).expect("uniform");
+    let b = realize_assembly(&stepped).expect("stepped");
+    let ta = zero_cross_period(&a.pressure_pa);
+    let tb = zero_cross_period(&b.pressure_pa);
+    assert!(
+        (tb - ta).abs() > 0.02 * ta,
+        "an area jump must move the ringing period ({tb:.2} vs {ta:.2})"
+    );
+}
+
+#[test]
+fn massive_reed_speaks_on_the_ode_clock() {
+    let mut a = empty_base();
+    a.duration_s = 0.12;
+    a.duct = Some(ViscothermalDuct {
+        segments: vec![CylinderSegment {
+            radius_m: 0.0075,
+            length_m: 0.50,
+        }],
+        tone_holes: vec![],
+        termination: WaveguideEnd::UnflangedOpen,
+    });
+    a.reed = Some(BeatingReed {
+        rest_opening_m: 4.0e-4,
+        width_m: 0.013,
+        closing_pressure_pa: 6_000.0,
+        blowing_pressure_pa: 2_800.0,
+        attack_s: 0.008,
+        mass_kg: 3.0e-4,
+        stiffness_n_m: 0.0,
+    });
+    let out = realize_assembly(&a).expect("massive reed");
+    let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
+    let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+    let ac: Vec<f64> = tail.iter().map(|p| p - mean).collect();
+    let rms: f64 = (ac.iter().map(|p| p * p).sum::<f64>() / ac.len() as f64).sqrt();
+    assert!(
+        rms > 1.0,
+        "massive reed-bore must self-oscillate, rms={rms}"
+    );
+    let mut silent = a.clone();
+    if let Some(reed) = silent.reed.as_mut() {
+        reed.blowing_pressure_pa = 0.0;
+    }
+    let quiet = realize_assembly(&silent).expect("silent massive reed");
+    assert!(
+        peak_abs(&quiet.pressure_pa) < 0.05 * peak_abs(&out.pressure_pa),
+        "zero blowing pressure must not speak"
+    );
+}
+
+#[test]
 fn soundboard_adds_body_radiation() {
     let bare = plucked(80.0, 0.006, 0.003);
     let mut body = bare.clone();

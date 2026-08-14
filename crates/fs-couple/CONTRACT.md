@@ -251,11 +251,12 @@ clarinet is one filling of those objects.
 - Bow: MWS regularized friction (steep stiction ramp + falling kinetic
   shoulder). Helmholtz motion is possible with enough modes; it is not
   guaranteed and not a measured rosin curve.
-- Reed path: quasistatic or massive Bernoulli valve on a causal
-  TMM driving-point (`driving_point::characteristic_line`, loop
-  gain pinned at the quarter-wave). Delay ⊕ one-pole is the
-  identification fallback. Reed lay is `fs-dcontact` (not a private
-  Hunt–Crossley).
+- Reed path: quasistatic or massive Bernoulli valve. Isolated
+  cylindrical bores use the inviscid `acoustic_chain` ODE (massive
+  reed = `mass_spring_damper` + jet + face flow). Coupled
+  string×duct and von Karman plates stay on the causal TMM
+  driving-point (`driving_point::characteristic_line`). Reed lay
+  is `fs-dcontact` (not a private Hunt–Crossley).
 - `ThinPlate` modes come from `fs-plate` + `fs-modal` (certified
   eigenpairs), not caller Hertz. Mouth pressure × area drives the
   plate; plate volume velocity returns to the waveguide
@@ -316,11 +317,14 @@ clarinet is one filling of those objects.
   star). `PrestressedString.moving_end` selects that clock in
   `realize_assembly` when there is no duct, bow, obstacle, or von
   Karman plate. Fixed-fixed sines keep the one-way bridge force.
-  A uniform-radius bore is the inviscid `acoustic_waveguide` LC
-  ladder. Open tone holes are `AcousticTap` side-branch inertances.
-  A quasistatic reed is the Bernoulli port on that inlet. With a
-  linear plate the mouth is a transformer. Stepped bores, massive
-  reeds, and von Karman plates stay on the FIR TMM. Plate ×
+  A cylindrical bore (uniform or stepped) is the inviscid
+  `acoustic_chain` LC ladder. Open tone holes are `AcousticTap`
+  side-branch inertances. A quasistatic reed is the Bernoulli
+  port on that inlet; a massive reed is `mass_spring_damper`
+  plus the same jet, face-velocity flow, and a Hunt–Crossley
+  lay as a dissipative port force (not a term in H). With a
+  linear plate the mouth is a transformer. Viscothermal losses,
+  von Karman plates, and string×duct stay on the FIR TMM. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.
 - Von Karman geometric nonlinearity is the isotropic simply-supported

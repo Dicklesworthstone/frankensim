@@ -150,7 +150,7 @@ fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeErr
     }
 }
 
-fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
+pub(crate) fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
     if reed.attack_s <= 0.0 {
         return reed.blowing_pressure_pa;
     }
@@ -161,7 +161,7 @@ fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
     reed.blowing_pressure_pa * 0.5 * (1.0 - det::cos(core::f64::consts::PI * x))
 }
 
-fn reed_structural(reed: BeatingReed) -> (f64, f64) {
+pub(crate) fn reed_structural(reed: BeatingReed) -> (f64, f64) {
     let face = reed.width_m * 0.025;
     let k = if reed.stiffness_n_m > 0.0 {
         reed.stiffness_n_m
