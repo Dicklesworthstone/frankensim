@@ -44,6 +44,10 @@ fn cleanup_db(path: &str) {
         "-wal",
         "-shm",
         "-journal",
+        "-wal-cert",
+        "-wal-cert-head",
+        "-fsqlite-ns-gate",
+        "-fsqlite-ns-use",
         ".fsqlite-wal",
         ".fsqlite-shm",
         ".fsqlite-journal",
@@ -348,9 +352,21 @@ fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
     let archived = format!("{db}.archived");
     std::fs::rename(&db, &archived).expect("archive the original database without deleting it");
     // A SQLite WAL is part of the physical database, not disposable path
-    // decoration. Move any surviving sidecars with the archived main file so
-    // the original path truly denotes a fresh physical database.
-    for suffix in ["-wal", "-shm"] {
+    // decoration - and so are fsqlite's certification and namespace
+    // sidecars (-wal-cert/-wal-cert-head and -fsqlite-ns-gate/-ns-use,
+    // minted since the 0.3.x series): a stale namespace gate left at the
+    // original path makes a fresh open there refuse (the rnhok census
+    // ledger_003b red). Move every surviving sidecar with the archived
+    // main file so the original path truly denotes a fresh database.
+    for suffix in [
+        "-wal",
+        "-shm",
+        "-journal",
+        "-wal-cert",
+        "-wal-cert-head",
+        "-fsqlite-ns-gate",
+        "-fsqlite-ns-use",
+    ] {
         let sidecar = format!("{db}{suffix}");
         if std::path::Path::new(&sidecar).exists() {
             std::fs::rename(&sidecar, format!("{archived}{suffix}"))
