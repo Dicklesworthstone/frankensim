@@ -22,10 +22,10 @@ use fs_tribo::{
     partial_slip::{NormalPatchAuthority, NormalPatchView},
     rolling_loss::{PatchCurvature, RollingPatchReceipt},
     surface_excitation::{
-        FilteredSurfacePairReceipt, HertzRoughnessExcitationInput, HertzRoughnessExcitationReceipt,
-        ProjectedHertzFootprint, SurfaceExcitationError, SurfaceTraceMotion, UniformSurfaceTrace,
-        evaluate_hertz_filtered_surface_pair, evaluate_hertz_roughness_excitation,
-        evaluate_point_surface_pair,
+        AdmittedSurfaceTracePair, FilteredSurfacePairReceipt, HertzRoughnessExcitationInput,
+        HertzRoughnessExcitationReceipt, ProjectedHertzFootprint, SurfaceExcitationError,
+        SurfaceTraceMotion, UniformSurfaceTrace, evaluate_hertz_filtered_surface_pair,
+        evaluate_hertz_roughness_excitation, evaluate_point_surface_pair,
     },
 };
 
@@ -297,6 +297,44 @@ enum CheckpointValidation {
     /// The enclosing serial driver validated its start and exclusively owns
     /// every successor created by the commit paths below.
     TrustedInternalSuccessor,
+}
+
+#[derive(Clone, Copy)]
+enum SurfaceTraceEvaluation<'a> {
+    Checked,
+    Admitted(&'a AdmittedSurfaceTracePair),
+}
+
+impl SurfaceTraceEvaluation<'_> {
+    fn evaluate_point_surface_pair(
+        self,
+        interface: &InterfaceSystemRef,
+        surface_a: SurfaceTraceMotion<'_>,
+        surface_b: SurfaceTraceMotion<'_>,
+    ) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+        match self {
+            Self::Checked => evaluate_point_surface_pair(interface, surface_a, surface_b),
+            Self::Admitted(traces) => {
+                traces.evaluate_point_surface_pair(interface, surface_a, surface_b)
+            }
+        }
+    }
+
+    fn evaluate_hertz_filtered_surface_pair(
+        self,
+        interface: &InterfaceSystemRef,
+        surface_a: SurfaceTraceMotion<'_>,
+        surface_b: SurfaceTraceMotion<'_>,
+        footprint: ProjectedHertzFootprint,
+    ) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+        match self {
+            Self::Checked => {
+                evaluate_hertz_filtered_surface_pair(interface, surface_a, surface_b, footprint)
+            }
+            Self::Admitted(traces) => traces
+                .evaluate_hertz_filtered_surface_pair(interface, surface_a, surface_b, footprint),
+        }
+    }
 }
 
 /// Cloneable accepted state across all participating adapters.
@@ -900,6 +938,7 @@ fn resolve_surface_geometry_contact(
     patch_input: MovingOneModePatchKinematicsInput,
     normal_input: &EulerNormalContactInput,
     surface: &ProductionSurfaceGeometryStepInput,
+    surface_traces: SurfaceTraceEvaluation<'_>,
 ) -> Result<
     (
         PatchKinematics,
@@ -930,14 +969,14 @@ fn resolve_surface_geometry_contact(
             Some(footprint)
                 if footprint.semi_major_axis_m > 0.0 && footprint.semi_minor_axis_m > 0.0 =>
             {
-                evaluate_hertz_filtered_surface_pair(
+                surface_traces.evaluate_hertz_filtered_surface_pair(
                     &surface.interface,
                     surface.surface_a.as_motion(),
                     surface.surface_b.as_motion(),
                     footprint,
                 )
             }
-            _ => evaluate_point_surface_pair(
+            _ => surface_traces.evaluate_point_surface_pair(
                 &surface.interface,
                 surface.surface_a.as_motion(),
                 surface.surface_b.as_motion(),
@@ -1727,6 +1766,7 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
         start_checkpoint: ProductionCouplingCheckpoint,
         maximum_accepted_steps: usize,
         mechanics_steps_per_control_interval: usize,
+        surface_traces: &AdmittedSurfaceTracePair,
         cx: &Cx<'_>,
         rebind_input_for_checkpoint: impl FnMut(
             &ProductionCouplingCheckpoint,
@@ -1743,6 +1783,7 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
             CheckpointValidation::TrustedInternalSuccessor,
+            SurfaceTraceEvaluation::Admitted(surface_traces),
             rebind_input_for_checkpoint,
             |checkpoint, input| {
                 self.model.step_eventful_profile_midpoint_with(
@@ -1751,6 +1792,7 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
                     self.profile,
                     CheckpointValidation::TrustedInternalSuccessor,
                     Some(self),
+                    SurfaceTraceEvaluation::Admitted(surface_traces),
                     cx,
                     |input, state| refresh_midpoint_input(input, state),
                 )
@@ -1919,8 +1961,12 @@ impl ProductionCouplingModel {
         normal_input.time_s = 0.0;
         normal_input.step_s = input.duration_s;
         let (patch_kinematics, normal) = if let Some(surface) = &input.surface_geometry {
-            let (patch, normal, _) =
-                resolve_surface_geometry_contact(input.patch.clone(), &normal_input, surface)?;
+            let (patch, normal, _) = resolve_surface_geometry_contact(
+                input.patch.clone(),
+                &normal_input,
+                surface,
+                SurfaceTraceEvaluation::Checked,
+            )?;
             (patch, normal)
         } else {
             let patch = compute_moving_one_mode_patch_kinematics(input.patch.clone())
@@ -1988,7 +2034,12 @@ impl ProductionCouplingModel {
         normal_input.time_s = 0.0;
         normal_input.step_s = input.duration_s;
         let resolved_contact = if let Some(surface) = &input.surface_geometry {
-            match resolve_surface_geometry_contact(input.patch.clone(), &normal_input, surface) {
+            match resolve_surface_geometry_contact(
+                input.patch.clone(),
+                &normal_input,
+                surface,
+                SurfaceTraceEvaluation::Checked,
+            ) {
                 Ok((patch, normal, _)) => Some((patch, normal)),
                 Err(ProductionCouplingError::UnsupportedMechanism {
                     status: PatchContactStatus::Separated,
@@ -2985,6 +3036,7 @@ impl ProductionCouplingModel {
             profile,
             CheckpointValidation::Required,
             None,
+            SurfaceTraceEvaluation::Checked,
             cx,
             refresh_midpoint_input,
         )
@@ -2997,6 +3049,7 @@ impl ProductionCouplingModel {
         profile: &ResolvedDiscProfile,
         checkpoint_validation: CheckpointValidation,
         admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
+        surface_traces: SurfaceTraceEvaluation<'_>,
         cx: &Cx<'_>,
         mut refresh_midpoint_input: R,
     ) -> Result<(ProductionCouplingCheckpoint, ProductionTrajectoryStep), ProductionCouplingError>
@@ -3011,9 +3064,12 @@ impl ProductionCouplingModel {
             CheckpointValidation::Required => {
                 self.resolve_production_event(checkpoint, start_input)
             }
-            CheckpointValidation::TrustedInternalSuccessor => {
-                self.resolve_production_event_after_checkpoint_validation(checkpoint, start_input)
-            }
+            CheckpointValidation::TrustedInternalSuccessor => self
+                .resolve_production_event_after_checkpoint_validation(
+                    checkpoint,
+                    start_input,
+                    surface_traces,
+                ),
         }?;
         let resolved_signed_gap_start_m = signed_patch_gap_m(resolved.patch_kinematics())?;
         let start_time_s = checkpoint.elapsed_time_s();
@@ -3122,6 +3178,7 @@ impl ProductionCouplingModel {
             checkpoint,
             &*midpoint_input,
             midpoint_input.patch.clone(),
+            surface_traces,
         )?;
         if select_event_branch(
             &midpoint_contact.patch_kinematics,
@@ -3363,6 +3420,7 @@ impl ProductionCouplingModel {
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
             CheckpointValidation::Required,
+            SurfaceTraceEvaluation::Checked,
             |checkpoint, reusable_input| {
                 *reusable_input = Some(input_for_checkpoint(checkpoint)?);
                 Ok(())
@@ -3400,6 +3458,7 @@ impl ProductionCouplingModel {
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
             CheckpointValidation::Required,
+            SurfaceTraceEvaluation::Checked,
             |checkpoint, reusable_input| {
                 *reusable_input = Some(input_for_checkpoint(checkpoint)?);
                 Ok(())
@@ -3423,6 +3482,7 @@ impl ProductionCouplingModel {
         maximum_accepted_steps: usize,
         mechanics_steps_per_control_interval: usize,
         checkpoint_validation: CheckpointValidation,
+        surface_traces: SurfaceTraceEvaluation<'_>,
         mut input_for_checkpoint: F,
         mut advance: S,
         mut observe_modal_audio_step: O,
@@ -3554,6 +3614,7 @@ impl ProductionCouplingModel {
                             .resolve_production_event_after_checkpoint_validation(
                                 &last_accepted_checkpoint,
                                 input,
+                                surface_traces,
                             ),
                     };
                     resolved.and_then(|resolved| {
@@ -3629,17 +3690,22 @@ impl ProductionCouplingModel {
         input: &ProductionCouplingStepInput,
     ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
         self.validate_checkpoint(checkpoint)?;
-        self.resolve_active_contact_after_checkpoint_validation(checkpoint, input)
+        self.resolve_active_contact_after_checkpoint_validation(
+            checkpoint,
+            input,
+            SurfaceTraceEvaluation::Checked,
+        )
     }
 
     fn resolve_active_contact_after_checkpoint_validation(
         &self,
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
+        surface_traces: SurfaceTraceEvaluation<'_>,
     ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
         let patch_input =
             self.prepared_patch_input_after_checkpoint_validation(checkpoint, input)?;
-        self.resolve_active_contact_from_patch(checkpoint, input, patch_input)
+        self.resolve_active_contact_from_patch(checkpoint, input, patch_input, surface_traces)
     }
 
     fn resolve_active_contact_from_patch(
@@ -3647,6 +3713,7 @@ impl ProductionCouplingModel {
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
         patch_input: MovingOneModePatchKinematicsInput,
+        surface_traces: SurfaceTraceEvaluation<'_>,
     ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
         if input.surface_excitation.is_some() && input.surface_geometry.is_some() {
             return Err(ProductionCouplingError::InvalidInput {
@@ -3658,8 +3725,12 @@ impl ProductionCouplingModel {
         normal_input.time_s = input.time_s;
         normal_input.step_s = input.duration_s;
         if let Some(surface) = &input.surface_geometry {
-            let (patch_kinematics, normal, surface_geometry) =
-                resolve_surface_geometry_contact(patch_input, &normal_input, surface)?;
+            let (patch_kinematics, normal, surface_geometry) = resolve_surface_geometry_contact(
+                patch_input,
+                &normal_input,
+                surface,
+                surface_traces,
+            )?;
             Ok(ResolvedProductionContact {
                 patch_kinematics,
                 normal,
@@ -3693,15 +3764,24 @@ impl ProductionCouplingModel {
         input: &ProductionCouplingStepInput,
     ) -> Result<ResolvedProductionEvent, ProductionCouplingError> {
         self.validate_checkpoint(checkpoint)?;
-        self.resolve_production_event_after_checkpoint_validation(checkpoint, input)
+        self.resolve_production_event_after_checkpoint_validation(
+            checkpoint,
+            input,
+            SurfaceTraceEvaluation::Checked,
+        )
     }
 
     fn resolve_production_event_after_checkpoint_validation(
         &self,
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
+        surface_traces: SurfaceTraceEvaluation<'_>,
     ) -> Result<ResolvedProductionEvent, ProductionCouplingError> {
-        match self.resolve_active_contact_after_checkpoint_validation(checkpoint, input) {
+        match self.resolve_active_contact_after_checkpoint_validation(
+            checkpoint,
+            input,
+            surface_traces,
+        ) {
             Ok(contact) => {
                 let branch = select_event_branch(
                     &contact.patch_kinematics,
@@ -3732,7 +3812,9 @@ impl ProductionCouplingModel {
                 // flight, but it cannot override a contact classification when
                 // the finite-footprint solve itself found no admissible patch.
                 let patch = self.resolve_event_patch_kinematics_after_checkpoint_validation(
-                    checkpoint, input,
+                    checkpoint,
+                    input,
+                    surface_traces,
                 )?;
                 match select_event_branch(&patch, input.normal.integration_regime)? {
                     ProductionTrajectoryBranch::OpenFlight => {
@@ -3749,6 +3831,7 @@ impl ProductionCouplingModel {
         &self,
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
+        surface_traces: SurfaceTraceEvaluation<'_>,
     ) -> Result<PatchKinematics, ProductionCouplingError> {
         let patch_input =
             self.prepared_patch_input_after_checkpoint_validation(checkpoint, input)?;
@@ -3762,13 +3845,14 @@ impl ProductionCouplingModel {
             });
         }
         validate_surface_geometry_identity(&input.normal, surface)?;
-        let point = evaluate_point_surface_pair(
-            &surface.interface,
-            surface.surface_a.as_motion(),
-            surface.surface_b.as_motion(),
-        )
-        .map_err(ProductionSurfaceExcitationError::Surface)
-        .map_err(ProductionCouplingError::SurfaceExcitation)?;
+        let point = surface_traces
+            .evaluate_point_surface_pair(
+                &surface.interface,
+                surface.surface_a.as_motion(),
+                surface.surface_b.as_motion(),
+            )
+            .map_err(ProductionSurfaceExcitationError::Surface)
+            .map_err(ProductionCouplingError::SurfaceExcitation)?;
         compute_surface_adjusted_patch(patch_input, &point)
     }
 
