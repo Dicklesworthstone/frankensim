@@ -15,7 +15,15 @@ use fs_cutfem::{CutElasticity, CutFemError, CutSdf, Quadtree};
 use fs_material::IsotropicElastic;
 
 const FULLRES_STRAIN_LIMIT: f64 = 1.0;
-const FULLRES_SOLVER_TOL: f64 = 1e-12;
+// CG on the ghost-penalized 64x64 cut system stalls near 1.2e-12 (measured
+// 2026-08-15: rel_residual 1.1982e-12 after the full 60k budget on the
+// uniform-hole array - the rnhok census fs-lattice red). The consumers of
+// this solve gate a 15% compliance HONESTY BAND, ten orders above this
+// tolerance, so 1e-11 keeps ~8x headroom over the measured stall floor
+// while remaining irrelevant to every downstream claim. Re-measure in the
+// same commit if the fixture is ever re-dimensioned (tolerance-comment
+// expiry rule).
+const FULLRES_SOLVER_TOL: f64 = 1e-11;
 const FULLRES_SOLVER_MAX_ITERS: usize = 60_000;
 
 /// The realized micro-geometry: one circular hole per macro cell.
