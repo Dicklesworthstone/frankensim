@@ -1511,6 +1511,94 @@ fn added_mass_fixture_is_a_bitwise_v2_schema_migration_golden() {
 }
 
 #[test]
+fn g0_stable_id_clone_preserves_canonical_value_semantics() {
+    let id = stable("surface/profile:lower-fillet-v1");
+    let cloned = id.clone();
+
+    assert_eq!(cloned, id);
+    assert_eq!(cloned.as_str(), "surface/profile:lower-fillet-v1");
+    assert_eq!(
+        format!("{cloned:?}"),
+        "StableId(\"surface/profile:lower-fillet-v1\")"
+    );
+}
+
+#[test]
+#[ignore = "temporary Pass 30 StableId clone-allocation performance A/B"]
+fn pass30_optimization_micro_ab_stable_id_clone() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    const STEPS: usize = 131_072;
+    const CLONES_PER_STEP: usize = 84;
+    const ROUNDS: usize = 6;
+
+    let string_ids = (0..6)
+        .map(|index| format!("surface/profile:stable-feature-{index}"))
+        .collect::<Vec<_>>();
+    let stable_ids = string_ids
+        .iter()
+        .cloned()
+        .map(|value| StableId::new(value).unwrap())
+        .collect::<Vec<_>>();
+    let run_strings = || {
+        let start = Instant::now();
+        let mut digest = 0_usize;
+        for step in 0..STEPS {
+            for clone_index in 0..CLONES_PER_STEP {
+                let value = black_box(string_ids[clone_index % string_ids.len()].clone());
+                digest ^= value.len().rotate_left((clone_index & 7) as u32);
+            }
+            let dynamic_a = black_box(format!("curvature/{step}"));
+            let dynamic_b = black_box(format!("interval/{step}"));
+            digest ^= dynamic_a.len() ^ dynamic_b.len();
+        }
+        black_box((start.elapsed(), digest))
+    };
+    let run_shared = || {
+        let start = Instant::now();
+        let mut digest = 0_usize;
+        for step in 0..STEPS {
+            for clone_index in 0..CLONES_PER_STEP {
+                let value = black_box(stable_ids[clone_index % stable_ids.len()].clone());
+                digest ^= value.as_str().len().rotate_left((clone_index & 7) as u32);
+            }
+            let dynamic_a = black_box(StableId::new(format!("curvature/{step}")).unwrap());
+            let dynamic_b = black_box(StableId::new(format!("interval/{step}")).unwrap());
+            digest ^= dynamic_a.as_str().len() ^ dynamic_b.as_str().len();
+        }
+        black_box((start.elapsed(), digest))
+    };
+
+    let mut strings_total = 0.0;
+    let mut shared_total = 0.0;
+    for round in 0..ROUNDS {
+        let (strings, strings_digest, shared, shared_digest) = if round % 2 == 0 {
+            let (strings, strings_digest) = run_strings();
+            let (shared, shared_digest) = run_shared();
+            (strings, strings_digest, shared, shared_digest)
+        } else {
+            let (shared, shared_digest) = run_shared();
+            let (strings, strings_digest) = run_strings();
+            (strings, strings_digest, shared, shared_digest)
+        };
+        assert_eq!(shared_digest, strings_digest);
+        let strings_s = strings.as_secs_f64();
+        let shared_s = shared.as_secs_f64();
+        strings_total += strings_s;
+        shared_total += shared_s;
+        eprintln!(
+            "PASS30_AB round={round} strings_s={strings_s:.6} shared_s={shared_s:.6} speedup={:.4}",
+            strings_s / shared_s
+        );
+    }
+    eprintln!(
+        "PASS30_SUMMARY strings_s={strings_total:.6} shared_s={shared_total:.6} speedup={:.4}",
+        strings_total / shared_total
+    );
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one fail-closed matrix keeps shared metadata and error precedence visible"

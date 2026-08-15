@@ -49,6 +49,7 @@ pub mod unilateral_contact;
 pub mod vibroacoustic;
 
 use core::num::NonZeroUsize;
+use std::sync::Arc;
 
 use fs_iface::SpaceType;
 use fs_qty::chemistry::{ElementId, SpeciesId};
@@ -206,7 +207,7 @@ impl PortKind {
 
 /// A validated, stable machine identifier used by port and relation schemas.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StableId(String);
+pub struct StableId(Arc<str>);
 
 impl StableId {
     /// Validate a stable identifier.
@@ -227,7 +228,7 @@ impl StableId {
         if !valid_first || !valid_tail {
             return Err(CoupleError::InvalidStableId { value });
         }
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 
     /// Borrow the canonical identifier.
