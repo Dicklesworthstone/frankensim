@@ -525,6 +525,75 @@ fn fingerprint_of(
     fs_blake3::hash_domain(TLAS_FINGERPRINT_DOMAIN, &payload)
 }
 
+/// Conservatively derive one instance's LOCAL bounds from its geometry
+/// (bead clause: "for analytic charts, obtain or conservatively derive
+/// local bounds").
+///
+/// - Charts: [`fs_geom::Chart::support`], which the trait contract already
+///   makes a conservative containment; an unbounded support refuses typed
+///   (an instance that fills space cannot be TLAS-bounded).
+/// - Meshes: the exact fold of the vertex set.
+///
+/// # Errors
+/// [`TlasError::NonFiniteSweptBounds`]-class refusal via the caller;
+/// this function refuses unbounded chart supports and empty meshes.
+pub fn derived_local_bounds(
+    geometry: &crate::instances::SharedGeometry,
+) -> Result<FiniteLocalAabb, TlasError> {
+    let aabb = match geometry {
+        crate::instances::SharedGeometry::Chart(chart) => chart.support(),
+        crate::instances::SharedGeometry::Mesh(mesh) => {
+            let vertices = &mesh.vertices;
+            let Some(first) = vertices.first() else {
+                return Err(TlasError::EmptyScene);
+            };
+            let mut minimum = *first;
+            let mut maximum = *first;
+            for vertex in &vertices[1..] {
+                for axis in 0..3 {
+                    minimum[axis] = minimum[axis].min(vertex[axis]);
+                    maximum[axis] = maximum[axis].max(vertex[axis]);
+                }
+            }
+            Aabb {
+                min: fs_geom::Point3::new(minimum[0], minimum[1], minimum[2]),
+                max: fs_geom::Point3::new(maximum[0], maximum[1], maximum[2]),
+            }
+        }
+    };
+    FiniteLocalAabb::try_new(aabb).map_err(|_| TlasError::NonFiniteSweptBounds {
+        instance_index: u32::MAX,
+    })
+}
+
+impl AnimatedTlas {
+    /// Build with per-instance local bounds DERIVED from each instance's
+    /// own geometry (charts via `support()`, meshes via the vertex fold).
+    ///
+    /// # Errors
+    /// Derivation refusals plus every [`AnimatedTlas::build`] refusal.
+    pub fn build_derived(
+        cx: &Cx<'_>,
+        instances: &[AnimatedGeometryInstance],
+        shutter: ShutterInterval,
+    ) -> Result<Self, TlasError> {
+        let mut local_bounds = Vec::with_capacity(instances.len());
+        for (index, instance) in instances.iter().enumerate() {
+            let bounds = derived_local_bounds(instance.geometry()).map_err(|error| {
+                if let TlasError::NonFiniteSweptBounds { .. } = error {
+                    TlasError::NonFiniteSweptBounds {
+                        instance_index: index as u32,
+                    }
+                } else {
+                    error
+                }
+            })?;
+            local_bounds.push(bounds);
+        }
+        Self::build(cx, instances, &local_bounds, shutter)
+    }
+}
+
 /// Brute-force oracle: linear scan with the exact TLAS tie-break doctrine.
 ///
 /// # Errors
@@ -802,6 +871,97 @@ mod tests {
                 AnimatedTlas::build(cx, &instances, &local_bounds(2), exposure).unwrap_err(),
                 TlasError::Cancelled
             );
+        });
+    }
+
+    #[test]
+    fn derived_bounds_match_manual_bounds_for_meshes_and_admit_charts() {
+        with_cx(|_, cx| {
+            let exposure = shutter(0.0, 2.0);
+            let instances = scene(&[0.0, 0.5, 0.0]);
+            // Mesh derivation equals the manual local bounds: identical
+            // fingerprints all the way through.
+            let manual = AnimatedTlas::build(cx, &instances, &local_bounds(3), exposure).unwrap();
+            let derived = AnimatedTlas::build_derived(cx, &instances, exposure).unwrap();
+            assert_eq!(derived.fingerprint(), manual.fingerprint());
+
+            // A finite-support chart instance derives from Chart::support
+            // and never culls its own hits (oracle equality).
+            #[derive(Clone, Copy)]
+            struct SphereChart;
+            impl fs_geom::Chart for SphereChart {
+                fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+                    let distance = (x.x * x.x + x.y * x.y + x.z * x.z).sqrt() - 0.5;
+                    fs_geom::ChartSample {
+                        signed_distance: distance,
+                        gradient: None,
+                        lipschitz: None,
+                        error: fs_evidence::NumericalCertificate::exact(0.0),
+                    }
+                }
+                fn support(&self) -> Aabb {
+                    Aabb {
+                        min: Point3::new(-0.5, -0.5, -0.5),
+                        max: Point3::new(0.5, 0.5, 0.5),
+                    }
+                }
+                fn trace_step_claim(&self) -> fs_geom::TraceStepClaim {
+                    fs_geom::TraceStepClaim::ExactDistance
+                }
+                fn name(&self) -> &'static str {
+                    "tlas-test-sphere"
+                }
+            }
+            let identity = hash_domain("org.frankensim.test.tlas-chart", b"sphere");
+            let trajectory = RigidTransformTrajectory::try_new(vec![
+                keyframe(0.0, [0.0, 0.0, 0.0], [0.0; 3]),
+                keyframe(2.0, [0.0, 0.0, 0.0], [0.0; 3]),
+            ])
+            .unwrap();
+            let chart_instance = AnimatedGeometryInstance::try_new(
+                9,
+                identity,
+                SharedGeometry::chart(SphereChart),
+                trajectory,
+            )
+            .unwrap();
+            let chart_scene = vec![chart_instance];
+            let tlas = AnimatedTlas::build_derived(cx, &chart_scene, exposure).unwrap();
+            let mut counters = TlasTraversalCounters::default();
+            let ray = ray_at(0.0, 0.5, exposure);
+            let fast = tlas
+                .intersect(cx, &chart_scene, &ray, 100.0, 1.0e-9, &mut counters)
+                .unwrap();
+            let oracle = brute_force_intersect(cx, &chart_scene, &ray, 100.0, 1.0e-9).unwrap();
+            assert_eq!(fast, oracle, "chart TLAS equals the oracle");
+            assert!(fast.is_some(), "the derived chart bound admits its own hit");
+
+            // An unbounded chart support refuses typed.
+            #[derive(Clone, Copy)]
+            struct UnboundedChart;
+            impl fs_geom::Chart for UnboundedChart {
+                fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+                    fs_geom::ChartSample {
+                        signed_distance: -1.0,
+                        gradient: None,
+                        lipschitz: None,
+                        error: fs_evidence::NumericalCertificate::exact(0.0),
+                    }
+                }
+                fn support(&self) -> Aabb {
+                    Aabb {
+                        min: Point3::new(f64::NEG_INFINITY, -1.0, -1.0),
+                        max: Point3::new(f64::INFINITY, 1.0, 1.0),
+                    }
+                }
+                fn name(&self) -> &'static str {
+                    "tlas-test-unbounded"
+                }
+            }
+            assert!(matches!(
+                derived_local_bounds(&SharedGeometry::chart(UnboundedChart)),
+                Err(TlasError::NonFiniteSweptBounds { .. })
+            ));
         });
     }
 
