@@ -106,6 +106,27 @@ test).
   reuse, edge-channel single-factor rule.
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
+- `receipt::ListeningReceipt` (music bead 3ez8g.1.2) — the human half of
+  the listening law as a durable artifact: who listened, to exactly which
+  content-addressed rendered artifact, judging exactly which question,
+  with what verdict, with metrics attached as EVIDENCE FIELDS (context,
+  never the verdict). `ListeningVerdict::Unadjudicated` is first-class —
+  a rendered fixture awaiting an ear is a real, recordable state — but
+  structurally useless as pass evidence: only an adjudicated Pass answers
+  `supports_pass()`, so a claims-registry row can never cite an
+  unlistened receipt as approval. Calibration honesty is structural:
+  `AttachedMetrics` fields are `Option`s that stay `None` when
+  uncomputed — without a `Calibration`, only level-relative
+  log-attack-time is attachable; loudness/sharpness/SPL stay `absent` in
+  the canonical bytes, never fabricated. Canonical line encoding
+  (`frankensim-listening-receipt-v1`, strict round-trip decoder) carries
+  the LISTENING_LAW verbatim as its terminal line — a receipt that
+  rewrites the law refuses to decode. A FAIL verdict without
+  observations refuses (a human who failed a fixture owes the next agent
+  the reason); an adjudicated verdict behind a placeholder listener name
+  refuses. No wall-clock in the bytes: `session` is a caller-declared
+  label. Digesting the bytes happens where fs-blake3 is in scope (this
+  crate's dependency set stays fs-fft + fs-math only).
 
 ## Invariants
 

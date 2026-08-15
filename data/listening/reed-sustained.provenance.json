@@ -1,0 +1,1 @@
+{"schema":"frankensim-music-render-provenance-v1","fixture":"reed","sample_rate_hz":48000,"samples":96000,"block":512,"full_scale_pa":2e4,"clipped_samples":0,"peak_pa":1.1403265910708793e4,"rms_pa":3.9659996452525124e3,"wav_blake3":"dcdf07cfc6d8ba4f7df76e4fbb094e902efd79ed096883ba32e90b8c1dad8142","encoder":"fs_couple::pcm_wav (mono PCM16, never peak-normalized)"}

@@ -74,10 +74,15 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "listening",
+          "ref": "data/listening/reed-sustained.listening-receipt"
+        }
+      ],
       "budget_row": "data/budget-rows/wind-reed-char-line-80cb534fbaf60b50.budgetrow",
       "corpus_refs": [],
-      "notes": "reed_bore self-oscillates and locks near the quarter-wave resonance (existing fs-couple test); authored reed parameters keep this Estimate-labeled until the cane reed card (3ez8g.6.2) mints receipts. Gates bead: 3ez8g.6.1. BUDGET MEASURED (3ez8g.2.2): 1.39e6 samples/s, 29x headroom at 48 kHz, dispersion 5.4%, release, machine 80cb534f - the program's first admissible real-time number; live_default stays no until the gates review."
+      "notes": "reed_bore self-oscillates and locks near the quarter-wave resonance (existing fs-couple test); authored reed parameters keep this Estimate-labeled until the cane reed card (3ez8g.6.2) mints receipts. Gates bead: 3ez8g.6.1. BUDGET MEASURED (3ez8g.2.2): 1.39e6 samples/s, 29x headroom at 48 kHz, dispersion 5.4%, release, machine 80cb534f - the program's first admissible real-time number; live_default stays no until the gates review. LISTENING ARTIFACT RENDERED (3ez8g.1.2): 2.0s clip-free at 20 kPa full-scale, receipt UNADJUDICATED (awaiting the owner's ear; structurally useless as pass evidence until adjudicated)."
     },
     {
       "filling": "wind-reed",

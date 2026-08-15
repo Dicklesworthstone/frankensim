@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-15
+artifact	dcdf07cfc6d8ba4f7df76e4fbb094e902efd79ed096883ba32e90b8c1dad8142
+artifact-ref	data/listening/reed-sustained.provenance.json
+question	does the sustained tone read as a reed instrument?
+verdict	unadjudicated
+observations	rendered 2.0 s massless-reed char-line fixture; awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	-1.6027844193222949e0
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening
