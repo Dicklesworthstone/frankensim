@@ -213,6 +213,33 @@ per mode is exact only at that mode's natural frequency. Broadband radiation,
 propagation delay, and feedback impedance require the separately tracked stable
 rational-fitting path; this module does not claim them or passivity.
 
+### `bakeoff`
+
+Bake-off receipt schema and protocol for the music-program claims registry
+(bead `frankensim-music-v8-root-3ez8g.1.4`). `BakeoffReceipt` records two
+contender images run on one shared-card fixture against a caller-supplied
+reference QoI map, with logical budgets (states, steps, solver iterations —
+never wall-clock, so bytes are host-stable), observed failure modes, and a
+reviewed outcome. `BakeoffOutcome` has exactly three variants —
+keep-both, keep-for-subset, refuse-newcomer — and structurally cannot
+express deleting an admitted image (doctrine D21: menus, not winners).
+Receipts serialize to a canonical line-oriented byte encoding
+(`frankensim-bakeoff-receipt-v1`, strict round-trip decoder) and are
+content-addressed via `fs-blake3` under
+`org.frankensim.fs-couple.bakeoff-receipt.v1`. The harness MEASURES;
+the outcome is a reviewed judgment passed in by the caller — residual
+tables cannot adjudicate claim scopes alone. The executed
+`tests/bakeoff_string.rs` fixture (modal-ZOH vs the Gonzalez-stepped
+pHS modal bank, analytic damped-oscillator reference) golden-pins its
+receipt at `tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff`; the
+pHS contender's phase error is gated against the implicit-midpoint
+dispersion model `(2/dt)·atan(omega·dt/2)` rather than a blanket state
+band, because pointwise residuals near zero-crossings are unboundedly
+phase-sensitive. No-claim: a receipt proves the comparison ran and what
+it measured, never that a claim scope is correct — scope promotion is
+the per-track gates beads' review job through the instrument-claims
+registry.
+
 ### `broadband_radiation`
 
 Generic offline bridge from solver-neutral sampled scalar-input radiation transfers to

@@ -81,10 +81,13 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {"kind": "bakeoff", "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"}
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Exact-ZOH modal runtime (bit-equal sub-sample splitting proven in fs-couple tests); X-Exact for the TRUNCATED basis - the row must carry N and the missing-high-modes failure disclosure at gate time. Gates bead: 3ez8g.7.1."
+      "notes": "Exact-ZOH modal runtime (bit-equal sub-sample splitting proven in fs-couple tests); X-Exact for the TRUNCATED basis - the row must carry N and the missing-high-modes failure disclosure at gate time. Bake-off vs the pHS bank executed (keep-both: ZOH residual rounding-level vs the analytic damped-oscillator closed form, zero solver cost). Gates bead: 3ez8g.7.1."
     },
     {
       "filling": "string",
@@ -95,10 +98,13 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {"kind": "bakeoff", "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"},
+        {"kind": "test", "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"}
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Many-mode pHS bank as the truncation cross-check for the ZOH rows (authority role, not a live default candidate). Gates bead: 3ez8g.7.1."
+      "notes": "Many-mode pHS bank as the truncation cross-check for the ZOH rows (authority role, not a live default candidate). Bake-off vs modal-ZOH executed (keep-both): its phase error matches the implicit-midpoint dispersion model (2/dt)atan(omega dt/2) to 4 significant figures per mode - the failure mode is pinned to its mechanism; energy envelope within 1.5e-3. Gates bead: 3ez8g.7.1."
     },
     {
       "filling": "plate",

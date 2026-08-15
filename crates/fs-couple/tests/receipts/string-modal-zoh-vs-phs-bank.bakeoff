@@ -1,0 +1,34 @@
+frankensim-bakeoff-receipt-v1
+filling	string
+fixture	crates/fs-couple/tests/bakeoff_string.rs free-decay 3-mode pluck
+shared-cards	334b7de8bc43167082c9a523ef50f0c3d1d88b1e830251ab2437ffafe04d6665
+reference	q-mode-1	4.843491299649031e-4
+reference	q-mode-2	-3.607408328174827e-4
+reference	q-mode-3	-6.302487745318092e-4
+reference	v-mode-1	-1.2077620593407112e0
+reference	v-mode-2	-2.164330087523164e0
+reference	v-mode-3	-2.2297099328097097e-1
+contender	modal-zoh
+owners	fs-couple,fs-modal
+measured	q-mode-1	4.843491299649158e-4
+measured	q-mode-2	-3.6074083281754937e-4
+measured	q-mode-3	-6.302487745319066e-4
+measured	v-mode-1	-1.2077620593407485e0
+measured	v-mode-2	-2.1643300875236653e0
+measured	v-mode-3	-2.229709932810646e-1
+budget	states=6	steps=2400	solver-iterations=0
+failure-mode	truncated basis: missing high modes are absent, not approximated
+failure-mode	tension is frozen per admission; a tension ramp needs re-admission
+contender	phs-modal-bank
+owners	fs-phs
+measured	q-mode-1	4.894467944909234e-4
+measured	q-mode-2	-3.2377313618723403e-4
+measured	q-mode-3	-6.127197580784463e-4
+measured	v-mode-1	-1.202988951122283e0
+measured	v-mode-2	-2.219028916901926e0
+measured	v-mode-3	-7.209858106475645e-1
+budget	states=6	steps=2400	solver-iterations=4802
+failure-mode	O((omega dt)^2) midpoint phase error at audio rate
+failure-mode	implicit Newton solve per sample (FD Jacobian) - budget-heavy
+outcome	keep-both	performance image: exact per-sample map, zero solver cost	authority/cross-check: Dirac-composable, energy-ledgered
+rationale	orthogonal roles (D21 keep-both default): ZOH is exact on the truncated basis at zero solver cost; the pHS bank pays Newton per sample but composes through ports and audits energy

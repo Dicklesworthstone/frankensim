@@ -508,10 +508,12 @@ impl BakeoffReceipt {
         let (_, rationale) = tagged(next(), "rationale")?;
         let mut listening_receipts = Vec::new();
         while let Some((line, text)) = next() {
-            let rest = text.strip_prefix("listening\t").ok_or(BakeoffError::Decode {
-                line,
-                what: "listening",
-            })?;
+            let rest = text
+                .strip_prefix("listening\t")
+                .ok_or(BakeoffError::Decode {
+                    line,
+                    what: "listening",
+                })?;
             listening_receipts.push(parse_hash(line, rest)?);
         }
 
@@ -582,7 +584,10 @@ mod tests {
             fixture: "unit fixture".to_string(),
             shared_cards: hash_domain(BAKEOFF_HASH_DOMAIN, b"cards"),
             reference,
-            contenders: [contender("modal-zoh", 0.0), contender("phs-modal-bank", 1e-3)],
+            contenders: [
+                contender("modal-zoh", 0.0),
+                contender("phs-modal-bank", 1e-3),
+            ],
             outcome: BakeoffOutcome::KeepBoth {
                 scope_a: "performance image".to_string(),
                 scope_b: "authority cross-check".to_string(),
