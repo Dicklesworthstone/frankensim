@@ -4147,13 +4147,24 @@ fn bessel_j0_j1_series(z: C64) -> (C64, C64) {
 }
 
 /// Continued fraction `J₁/J₀ = 1 / (2/z + 1 / (4/z + 1 / (6/z + …)))`.
+///
+/// The partial denominators are `2n/z`, so the fraction only begins to
+/// converge once `2n` exceeds `|z|` — the iteration budget must scale
+/// with the argument. A fixed 80-term budget silently capped the
+/// Zwikker–Kosten shear number at `r_v ≈ 160` (measured: last converging
+/// `r_v = 160`, first refusal 161), which at a 48 kHz Nyquist refused
+/// every duct bore wider than ~1.6 mm through the characteristic-line
+/// path. The budget now tracks `|z|` with a hard 4096-term ceiling
+/// (`r_v ≈ 8000`, far past any audio-band duct); convergence is still
+/// certified by the delta test and exhaustion still refuses loudly.
 fn lentz_j1_over_j0(z: C64) -> Result<C64, PhsError> {
     const TINY: f64 = 1.0e-30;
     const TOL: f64 = 1.0e-12;
+    let max_terms = (z.abs().ceil() as usize).clamp(80, 4096) + 8;
     let mut f = C64::from_re(TINY);
     let mut c = f;
     let mut d = C64::ZERO;
-    for n in 1..=80 {
+    for n in 1..=max_terms {
         let b = C64::from_re(2.0 * n as f64) / z;
         let a = C64::ONE;
         d = b + a * d;

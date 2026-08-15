@@ -9,9 +9,8 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
-use crate::driving_point::characteristic_line;
 use crate::thin_plate::PlateBank;
-use crate::unilateral_contact::{slit_contact_force, slit_lay};
+use crate::unilateral_contact::slit_contact_force;
 use fs_dcontact::Obstacle;
 use fs_duct::{Duct, Termination};
 use fs_material::gas::GasState;
@@ -19,6 +18,13 @@ use fs_math::det;
 use fs_scenario::BeatingReed;
 
 /// Realize mouthpiece pressure from a beating reed on a TMM bore.
+///
+/// Since the block render API landed (music bead 3ez8g.2.1) this is a
+/// thin wrapper over [`crate::render::ReedBoreVoice`]: the voice owns the
+/// per-sample loop; this one-shot path builds it, renders `n` samples in
+/// one block, and swaps the caller's plate bank in and out so refusal
+/// semantics (bank untouched on error) and results stay byte-identical to
+/// the pre-API code. Two paths, one loop body — they cannot drift.
 ///
 /// # Errors
 /// Domain, TMM, or solver refusals.
@@ -33,110 +39,30 @@ pub fn realize_reed_bore(
     n: usize,
     wall: Option<&fs_phs::WallPin>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    if !(reed.rest_opening_m > 0.0
-        && reed.width_m > 0.0
-        && reed.closing_pressure_pa > 0.0
-        && reed.blowing_pressure_pa >= 0.0
-        && reed.attack_s >= 0.0
-        && reed.mass_kg >= 0.0
-        && reed.stiffness_n_m >= 0.0
-        && reed.rest_opening_m.is_finite())
-    {
-        return Err(AcousticRealizeError::InvalidDescription {
-            what: "reed parameters must be physical and finite",
-        });
-    }
-    let inlet_r = physics
-        .segments
-        .first()
-        .ok_or(AcousticRealizeError::InvalidDescription {
-            what: "duct has no segments",
-        })?
-        .outlet_radius();
-    let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
-    let zc = gas.density * gas.sound_speed / area_bore;
-    let mut line = characteristic_line(physics, gas, termination, sample_rate_hz, n, zc, wall)
-        .map_err(map_drive)?;
-    let dt = 1.0 / f64::from(sample_rate_hz);
-    let mut reed_y = reed.rest_opening_m;
-    let mut reed_v = 0.0;
-    let lay = if reed.mass_kg > 0.0 {
-        let k_lay = 1.0e7 * reed.width_m;
-        let (_k, r_damp) = reed_structural(reed);
-        let chi = r_damp / (k_lay * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
-        Some(
-            slit_lay(k_lay, 2.0)
-                .and_then(|o| o.with_internal_loss(chi))
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-        )
-    } else {
-        None
-    };
+    let mut voice = crate::render::ReedBoreVoice::new(
+        physics,
+        gas,
+        reed,
+        termination,
+        PlateBank::default(),
+        listener_m,
+        sample_rate_hz,
+        n,
+        wall,
+    )?;
+    // Move the caller's bank in only after every fallible admission step
+    // has succeeded, and back out unconditionally, so a refusal leaves it
+    // untouched and success returns the post-render plate state exactly
+    // as the pre-API loop did.
+    core::mem::swap(voice.plate_bank_mut(), plates);
     let mut p_bore_hist = vec![0.0; n];
-    let mut p_plus_prev = 5.0;
-    let mut f_jet_prev = 0.0;
-    let _ = line
-        .push(p_plus_prev)
-        .map_err(|_| AcousticRealizeError::Reed {
-            what: "characteristic line left the finite set",
-        })?;
-    for i in 0..n {
-        let p_m = blowing_envelope(reed, i as f64 * dt);
-        let p_minus = line.incoming();
-        let u_body = plates.volume_velocity();
-        let p_plus = if reed.mass_kg > 0.0 {
-            let (pp, y, v) = step_massive_reed(
-                reed,
-                gas.density,
-                zc,
-                p_minus,
-                p_m,
-                reed_y,
-                reed_v,
-                dt,
-                u_body,
-                lay.as_ref(),
-            )?;
-            reed_y = y;
-            reed_v = v;
-            pp
-        } else {
-            solve_reed_wave(
-                reed,
-                gas.density,
-                zc,
-                0.0,
-                p_minus,
-                p_m,
-                p_plus_prev,
-                u_body,
-            )?
-        };
-        p_plus_prev = p_plus;
-        let p_minus_now = line.push(p_plus).map_err(|_| AcousticRealizeError::Reed {
-            what: "characteristic line left the finite set",
-        })?;
-        let p_bore = p_plus + p_minus_now;
-        let mut p_obs = p_bore;
-        p_obs += plates.drive_and_radiate(p_bore * area_bore, dt, gas.density, listener_m)?;
-        // Compact far-field dipole of the slit force. This is the
-        // same Green's family as the string dipole, not a 3-D jet
-        // and not fs-aeroac 2-D Curle (cylindrical Hankel).
-        let opening = if reed.mass_kg > 0.0 {
-            reed_y.max(0.0)
-        } else {
-            aperture_of(reed).opening_m(p_m - p_bore).max(0.0)
-        };
-        let f_jet = (p_m - p_bore) * reed.width_m * opening;
-        let dfdt = (f_jet - f_jet_prev) / dt;
-        f_jet_prev = f_jet;
-        p_obs += gas.density * dfdt / (4.0 * core::f64::consts::PI * listener_m * gas.sound_speed);
-        p_bore_hist[i] = p_obs;
-    }
+    let result = voice.step_block(&mut p_bore_hist);
+    core::mem::swap(voice.plate_bank_mut(), plates);
+    result?;
     Ok(p_bore_hist)
 }
 
-fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
+pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
     match err {
         crate::driving_point::DrivingPointError::Invalid { what } => {
             AcousticRealizeError::Reed { what }
@@ -173,7 +99,7 @@ pub(crate) fn reed_structural(reed: BeatingReed) -> (f64, f64) {
     (k, r_damp)
 }
 
-fn aperture_of(reed: BeatingReed) -> BernoulliAperture {
+pub(crate) fn aperture_of(reed: BeatingReed) -> BernoulliAperture {
     BernoulliAperture {
         rest_opening_m: reed.rest_opening_m,
         width_m: reed.width_m,
@@ -181,7 +107,7 @@ fn aperture_of(reed: BeatingReed) -> BernoulliAperture {
     }
 }
 
-fn step_massive_reed(
+pub(crate) fn step_massive_reed(
     reed: BeatingReed,
     rho: f64,
     zc: f64,

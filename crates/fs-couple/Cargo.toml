@@ -14,6 +14,7 @@ layer = "L3"
 fs-blake3 = { path = "../fs-blake3" }
 fs-dcontact = { path = "../fs-dcontact" }
 fs-duct = { path = "../fs-duct" }
+fs-exec = { path = "../fs-exec" }
 fs-fft = { path = "../fs-fft" }
 fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }

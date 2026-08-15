@@ -41,6 +41,7 @@ pub mod driving_point;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
 pub mod reed_bore;
+pub mod render;
 pub mod stribeck_friction;
 pub mod thin_plate;
 pub mod traveling_wave_line;

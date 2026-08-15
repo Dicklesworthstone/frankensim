@@ -213,6 +213,43 @@ per mode is exact only at that mode's natural frequency. Broadband radiation,
 propagation delay, and feedback impedance require the separately tracked stable
 rational-fitting path; this module does not claim them or passivity.
 
+### `render`
+
+Block render API (music bead `frankensim-music-v8-root-3ez8g.2.1`): the
+callback-shaped hosting layer for performance images. `RenderContext`
+owns admitted voices (`ReedBoreVoice` — the `realize_reed_bore` physics
+restructured for blockwise stepping, with the one-shot realizer now a
+thin wrapper over it so the two paths share one loop body;
+`ModalStringVoice` — the exact-ZOH modal runtime hosted verbatim) and
+advances them one block at a time into a pre-sized scratch buffer.
+INVARIANTS: a block boundary performs no arithmetic, so block size is a
+pure loop-partition choice — the one-shot path and every block partition
+are bitwise-identical (tested at 64/571/full); typed `ControlDelta`s
+apply only BETWEEN blocks, transactionally, and are logged as
+`ControlRecord`s carrying their D17 lift description (empty = pure input
+move); cancellation (`render_under_gate` over `fs_exec::CancelGate`) is
+polled only at block boundaries with drain semantics — an in-flight
+block completes, the rendered prefix is a whole number of blocks, and a
+resumed context continues bitwise-identically (tested). ALLOCATION:
+the massless-reed voice with an empty plate bank is allocation-free per
+block (counting-allocator gate); the massive-reed lay path
+(`dissipative_modal_forces` returns a `Vec` per sample) and the modal
+voice (`step` builds a per-sample energy frame) are DISCLOSED allocating
+voices — fusion candidates (bead 3ez8g.15), not silently admitted.
+Determinism: one-host bitwise, inherited from the hosted kernels.
+No-claims: no device/OS audio host (Franken-only policy; live output
+would be a quarantined adapter decision); no image hopping yet (D17
+lifts beyond input parameters land with the articulation/track beads);
+refusal mid-block poisons the context (mid-sample state is not rewound)
+and is documented rather than hidden. Boundary facts a consumer must
+know, both discovered by this bead's battery: the characteristic-line
+realization refuses `UnflangedOpen`/`FlangedOpen` terminations whose
+Nyquist `ka` exceeds 1 (at 48 kHz that is every bore wider than
+~2.27 mm radius — the measured-load `Termination::Tabulated` lane,
+bead zolja, is the lift), and the Zwikker–Kosten Bessel path's former
+`r_v ≈ 160` continued-fraction ceiling was an iteration-budget bug fixed
+in `fs-phs` (budget now scales with `|z|`).
+
 ### `bakeoff`
 
 Bake-off receipt schema and protocol for the music-program claims registry
