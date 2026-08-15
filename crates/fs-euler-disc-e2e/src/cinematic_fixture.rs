@@ -38,7 +38,7 @@ use crate::patch_kinematics::{
     compute_moving_one_mode_patch_kinematics,
 };
 use crate::production_coupling::{
-    GasChannelState, GasChannelStepInput, ProductionControlTrajectory,
+    AdmittedAxisymmetricProfile, GasChannelState, GasChannelStepInput, ProductionControlTrajectory,
     ProductionCouplingCheckpoint, ProductionCouplingIdentity, ProductionCouplingModel,
     ProductionCouplingStepInput, ProductionModalAudioStep, ProductionSurfaceGeometryStepInput,
     ProductionSurfaceTraceStepInput,
@@ -2758,9 +2758,10 @@ impl FixtureProductionMechanics {
     /// trace uses the declared world-x material coordinate of the stationary
     /// plate. Both therefore change automatically with the accepted rigid-body
     /// state and profile geometry.
-    fn input_for_checkpoint(
+    fn input_for_checkpoint_with(
         &self,
         profile: &ResolvedDiscProfile,
+        admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
         checkpoint: &ProductionCouplingCheckpoint,
         cx: &Cx<'_>,
     ) -> Result<ProductionCouplingStepInput, crate::production_coupling::ProductionCouplingError>
@@ -2814,17 +2815,28 @@ impl FixtureProductionMechanics {
         input.base_load_progress_start = input.time_s;
         input.base_load_progress_end = input.time_s + input.duration_s;
 
-        self.model
-            .bind_horizontal_plane_axisymmetric_profile_contact(
-                &mut input, profile, checkpoint, cx,
-            )?;
-        self.refresh_state_dependent_input(profile, &mut input, checkpoint.disc_state, cx)?;
+        if let Some(admitted) = admitted {
+            admitted.bind_contact(&mut input, checkpoint, cx)?;
+        } else {
+            self.model
+                .bind_horizontal_plane_axisymmetric_profile_contact(
+                    &mut input, profile, checkpoint, cx,
+                )?;
+        }
+        self.refresh_state_dependent_input_with(
+            profile,
+            admitted,
+            &mut input,
+            checkpoint.disc_state,
+            cx,
+        )?;
         Ok(input)
     }
 
-    fn refresh_state_dependent_input(
+    fn refresh_state_dependent_input_with(
         &self,
         profile: &ResolvedDiscProfile,
+        admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
         input: &mut ProductionCouplingStepInput,
         current_state: RigidBodyState,
         cx: &Cx<'_>,
@@ -2874,12 +2886,16 @@ impl FixtureProductionMechanics {
             current_state.angular_momentum_body(),
         )
         .map_err(ProductionCouplingError::Dynamics)?;
-        let predicted = crate::contact_dynamics::profile_contact_geometry(
-            &profile.chart,
-            profile.mass_properties,
-            predicted_state.pose(),
-            cx,
-        )
+        let predicted = if let Some(admitted) = admitted {
+            admitted.contact_geometry(predicted_state.pose(), cx)
+        } else {
+            crate::contact_dynamics::profile_contact_geometry(
+                &profile.chart,
+                profile.mass_properties,
+                predicted_state.pose(),
+                cx,
+            )
+        }
         .map_err(|_| ProductionCouplingError::InvalidInput {
             field: "cinematic predicted profile support",
         })?;
@@ -2919,6 +2935,30 @@ impl FixtureProductionMechanics {
                 .atan2(travel.dot(patch_kinematics.tangent_basis.first_world));
         }
         Ok(())
+    }
+
+    fn run_admitted_control_trajectory(
+        &self,
+        profile: &ResolvedDiscProfile,
+        admitted: &AdmittedAxisymmetricProfile<'_>,
+        start: ProductionCouplingCheckpoint,
+        maximum_steps: usize,
+        steps_per_control: usize,
+        cx: &Cx<'_>,
+        observe: impl for<'step> FnMut(ProductionModalAudioStep<'step>),
+    ) -> Result<ProductionControlTrajectory, crate::production_coupling::ProductionCouplingError>
+    {
+        admitted.run_eventful_profile_midpoint_control_trajectory_observed(
+            start,
+            maximum_steps,
+            steps_per_control,
+            cx,
+            |checkpoint| self.input_for_checkpoint_with(profile, Some(admitted), checkpoint, cx),
+            |input, state| {
+                self.refresh_state_dependent_input_with(profile, Some(admitted), input, state, cx)
+            },
+            observe,
+        )
     }
 }
 
@@ -4874,16 +4914,18 @@ pub fn run_cinematic_fixture(
                 ));
             }
         };
-        let preroll_control = production
+        let admitted_profile = production
             .model
-            .run_eventful_profile_midpoint_control_trajectory_observed(
+            .admit_axisymmetric_profile(&profile, cx)
+            .map_err(pipeline)?;
+        let preroll_control = production
+            .run_admitted_control_trajectory(
+                &profile,
+                &admitted_profile,
                 production.checkpoint.clone(),
                 preroll_mechanics_steps,
                 mechanics_steps_per_control_interval,
-                &profile,
                 cx,
-                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
-                |input, state| production.refresh_state_dependent_input(&profile, input, state, cx),
                 |step| {
                     plate_audio.observe(step);
                     if let Some(rigid) = &mut rigid_disc_audio {
@@ -4933,17 +4975,13 @@ pub fn run_cinematic_fixture(
                 |accepted: &ProductionControlTrajectory| accepted.last_accepted_checkpoint.clone(),
             );
             let chunk = production
-                .model
-                .run_eventful_profile_midpoint_control_trajectory_observed(
+                .run_admitted_control_trajectory(
+                    &profile,
+                    &admitted_profile,
                     chunk_start,
                     chunk_steps,
                     mechanics_steps_per_control_interval,
-                    &profile,
                     cx,
-                    |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
-                    |input, state| {
-                        production.refresh_state_dependent_input(&profile, input, state, cx)
-                    },
                     |step| {
                         plate_audio.observe(step);
                         if let Some(rigid) = &mut rigid_disc_audio {
@@ -5003,15 +5041,13 @@ pub fn run_cinematic_fixture(
             CinematicFixtureError::Pipeline("production picture horizon is empty".into())
         })?;
         let postroll_control = production
-            .model
-            .run_eventful_profile_midpoint_control_trajectory_observed(
+            .run_admitted_control_trajectory(
+                &profile,
+                &admitted_profile,
                 picture_control.last_accepted_checkpoint.clone(),
                 postroll_mechanics_steps,
                 mechanics_steps_per_control_interval,
-                &profile,
                 cx,
-                |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
-                |input, state| production.refresh_state_dependent_input(&profile, input, state, cx),
                 |step| {
                     plate_audio.observe(step);
                     if let Some(rigid) = &mut rigid_disc_audio {
@@ -10835,8 +10871,43 @@ mod tests {
             )
             .expect("generic production assembly");
 
+            let checked = production
+                .model
+                .run_eventful_profile_midpoint_control_trajectory_observed(
+                    production.checkpoint.clone(),
+                    1,
+                    1,
+                    &profile,
+                    cx,
+                    |checkpoint| {
+                        production.input_for_checkpoint_with(&profile, None, checkpoint, cx)
+                    },
+                    |input, state| {
+                        production
+                            .refresh_state_dependent_input_with(&profile, None, input, state, cx)
+                    },
+                    |_| {},
+                )
+                .expect("checked midpoint step");
+            let admitted = production
+                .model
+                .admit_axisymmetric_profile(&profile, cx)
+                .expect("run-scoped profile admission");
+            let sealed = production
+                .run_admitted_control_trajectory(
+                    &profile,
+                    &admitted,
+                    production.checkpoint.clone(),
+                    1,
+                    1,
+                    cx,
+                    |_| {},
+                )
+                .expect("admitted midpoint step");
+            assert_eq!(checked, sealed, "G0/G5 checked/admitted bit identity");
+
             let first_input = production
-                .input_for_checkpoint(&profile, &production.checkpoint, cx)
+                .input_for_checkpoint_with(&profile, None, &production.checkpoint, cx)
                 .expect("state-derived first input");
             let surface = first_input
                 .surface_geometry
@@ -10882,7 +10953,9 @@ mod tests {
                     production.checkpoint.clone(),
                     2_048,
                     mechanics_steps_per_control_interval,
-                    |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                    |checkpoint| {
+                        production.input_for_checkpoint_with(&profile, None, checkpoint, cx)
+                    },
                 )
                 .expect("first bounded-memory production-control chunk");
             let second = production
@@ -10891,7 +10964,9 @@ mod tests {
                     first.last_accepted_checkpoint.clone(),
                     2_048,
                     mechanics_steps_per_control_interval,
-                    |checkpoint| production.input_for_checkpoint(&profile, checkpoint, cx),
+                    |checkpoint| {
+                        production.input_for_checkpoint_with(&profile, None, checkpoint, cx)
+                    },
                 )
                 .expect("second bounded-memory production-control chunk");
             let source = first
@@ -10939,7 +11014,7 @@ mod tests {
                 cx,
             )
             .expect("accepted mechanics enters common render/audio trajectory");
-            assert_eq!(render.samples().len(), 512);
+            assert_eq!(render.samples().len(), source.intervals.len());
             let mut closed_samples = 0_usize;
             let mut open_samples = 0_usize;
             for sample in render.samples() {

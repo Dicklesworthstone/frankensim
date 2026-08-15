@@ -13,7 +13,9 @@ use fs_exec::Cx;
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
-use fs_rep_frep::{AxisymmetricCurvatureAuthority, AxisymmetricIdentity};
+use fs_rep_frep::{
+    AxisymmetricCurvatureAuthority, AxisymmetricIdentity, AxisymmetricMassProperties,
+};
 use fs_tribo::{
     InputAuthority, InterfaceSystemRef,
     partial_slip::{NormalPatchAuthority, NormalPatchView},
@@ -36,8 +38,8 @@ use crate::{
         ReducedBaseStepProposal,
     },
     contact_dynamics::{
-        ContactDynamicsError, ProfileContactPatchGeometry,
-        profile_contact_patch_geometry_from_mass, profile_mass_to_mbd,
+        ContactDynamicsError, ProfileContactGeometry, ProfileContactPatchGeometry,
+        profile_contact_geometry, profile_contact_patch_geometry_from_mass, profile_mass_to_mbd,
     },
     external_air::{
         EulerDiscBodyFrame, EulerDiscExteriorState, EulerExternalAirCandidate,
@@ -272,6 +274,17 @@ pub struct ProductionCouplingModel {
     pub base_port: ProductionBasePort,
     /// Explicitly selected partial-slip adapter/lane.
     pub tangential_adapter: EulerTangentialContactAdapter,
+}
+
+/// Run-scoped proof that one immutable profile and mechanics model agree.
+///
+/// Construction revalidates the public `ResolvedDiscProfile` and retains the
+/// freshly integrated properties. Dynamic support and curvature remain live
+/// queries; only immutable mass integration is trusted after admission.
+pub(crate) struct AdmittedAxisymmetricProfile<'run> {
+    model: &'run ProductionCouplingModel,
+    profile: &'run ResolvedDiscProfile,
+    mass_properties: AxisymmetricMassProperties,
 }
 
 /// Cloneable accepted state across all participating adapters.
@@ -1610,7 +1623,138 @@ impl ProductionBasePort {
     }
 }
 
+impl<'run> AdmittedAxisymmetricProfile<'run> {
+    fn resolve_contact(
+        &self,
+        disc_state: RigidBodyState,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        profile_contact_patch_geometry_from_mass(
+            &self.profile.chart,
+            self.mass_properties,
+            disc_state.pose(),
+            cx,
+        )
+        .map_err(ProductionCouplingError::ProfileContact)
+    }
+
+    fn bind_contact_at_states(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        disc_state: RigidBodyState,
+        base_state: &ProductionBaseCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        let resolved = self.resolve_contact(disc_state, cx)?;
+        let (base_displacement_m, base_velocity_m_per_s) = self
+            .model
+            .base_port
+            .surface_state(base_state, resolved.support.contact.point_world_m)?;
+        bind_horizontal_plane_axisymmetric_profile_contact_input(
+            input,
+            resolved,
+            self.model.disc_mass_properties,
+            disc_state,
+            base_displacement_m,
+            base_velocity_m_per_s,
+        )
+    }
+
+    pub(crate) fn bind_contact(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        checkpoint: &ProductionCouplingCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
+        self.model.validate_checkpoint(checkpoint)?;
+        let resolved =
+            self.bind_contact_at_states(input, checkpoint.disc_state, &checkpoint.base_state, cx)?;
+        input.expected_checkpoint_version = checkpoint.committed_version;
+        Ok(resolved)
+    }
+
+    pub(crate) fn contact_geometry(
+        &self,
+        pose: Pose,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactGeometry, ContactDynamicsError> {
+        profile_contact_geometry(&self.profile.chart, self.mass_properties, pose, cx)
+    }
+
+    pub(crate) fn run_eventful_profile_midpoint_control_trajectory_observed(
+        &self,
+        start_checkpoint: ProductionCouplingCheckpoint,
+        maximum_accepted_steps: usize,
+        mechanics_steps_per_control_interval: usize,
+        cx: &Cx<'_>,
+        input_for_checkpoint: impl FnMut(
+            &ProductionCouplingCheckpoint,
+        )
+            -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+        mut refresh_midpoint_input: impl FnMut(
+            &mut ProductionCouplingStepInput,
+            RigidBodyState,
+        ) -> Result<(), ProductionCouplingError>,
+        observe_modal_audio_step: impl for<'step> FnMut(ProductionModalAudioStep<'step>),
+    ) -> Result<ProductionControlTrajectory, ProductionCouplingError> {
+        self.model.run_eventful_control_trajectory_observed_with(
+            start_checkpoint,
+            maximum_accepted_steps,
+            mechanics_steps_per_control_interval,
+            input_for_checkpoint,
+            |checkpoint, input| {
+                self.model.step_eventful_profile_midpoint_with(
+                    checkpoint,
+                    input,
+                    self.profile,
+                    Some(self),
+                    cx,
+                    |input, state| refresh_midpoint_input(input, state),
+                )
+            },
+            observe_modal_audio_step,
+        )
+    }
+}
+
 impl ProductionCouplingModel {
+    /// Revalidate immutable public profile state once for a private run.
+    pub(crate) fn admit_axisymmetric_profile<'run>(
+        &'run self,
+        profile: &'run ResolvedDiscProfile,
+        cx: &Cx<'_>,
+    ) -> Result<AdmittedAxisymmetricProfile<'run>, ProductionCouplingError> {
+        validate_identity(&self.identity)?;
+        let chart_identity = profile.chart.construction_certificate().identity;
+        if profile.identity != chart_identity {
+            return Err(ProductionCouplingError::ResolvedProfileIdentityMismatch {
+                profile_identity: profile.identity,
+                chart_identity,
+            });
+        }
+        let mass_properties = profile
+            .chart
+            .mass_properties(profile.density_kg_per_m3, cx)
+            .map_err(|detail| {
+                ProductionCouplingError::ProfileContact(ContactDynamicsError::ProfileMassRefusal {
+                    detail,
+                })
+            })?;
+        if profile.mass_properties != mass_properties {
+            return Err(ProductionCouplingError::ResolvedProfileMassMismatch);
+        }
+        let disc_mass_properties = profile_mass_to_mbd(mass_properties)
+            .map_err(ProductionCouplingError::ProfileContact)?;
+        if disc_mass_properties != self.disc_mass_properties {
+            return Err(ProductionCouplingError::ProfileModelMassMismatch);
+        }
+        Ok(AdmittedAxisymmetricProfile {
+            model: self,
+            profile,
+            mass_properties,
+        })
+    }
+
     /// Verify that a checkpoint belongs to this exact model lineage and that
     /// none of its public or private accepted state has been altered.
     pub fn validate_checkpoint(
@@ -2764,6 +2908,31 @@ impl ProductionCouplingModel {
         input: &ProductionCouplingStepInput,
         profile: &ResolvedDiscProfile,
         cx: &Cx<'_>,
+        refresh_midpoint_input: R,
+    ) -> Result<(ProductionCouplingCheckpoint, ProductionTrajectoryStep), ProductionCouplingError>
+    where
+        R: FnMut(
+            &mut ProductionCouplingStepInput,
+            RigidBodyState,
+        ) -> Result<(), ProductionCouplingError>,
+    {
+        self.step_eventful_profile_midpoint_with(
+            checkpoint,
+            input,
+            profile,
+            None,
+            cx,
+            refresh_midpoint_input,
+        )
+    }
+
+    fn step_eventful_profile_midpoint_with<R>(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+        profile: &ResolvedDiscProfile,
+        admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
+        cx: &Cx<'_>,
         mut refresh_midpoint_input: R,
     ) -> Result<(ProductionCouplingCheckpoint, ProductionTrajectoryStep), ProductionCouplingError>
     where
@@ -2842,13 +3011,22 @@ impl ProductionCouplingModel {
 
         let mut midpoint_input = input.clone();
         midpoint_input.time_s += half_duration_s;
-        self.bind_horizontal_plane_axisymmetric_profile_contact_at_states(
-            &mut midpoint_input,
-            profile,
-            predicted_disc_state,
-            &predicted_base_state,
-            cx,
-        )?;
+        if let Some(admitted) = admitted {
+            admitted.bind_contact_at_states(
+                &mut midpoint_input,
+                predicted_disc_state,
+                &predicted_base_state,
+                cx,
+            )?;
+        } else {
+            self.bind_horizontal_plane_axisymmetric_profile_contact_at_states(
+                &mut midpoint_input,
+                profile,
+                predicted_disc_state,
+                &predicted_base_state,
+                cx,
+            )?;
+        }
         refresh_midpoint_input(&mut midpoint_input, predicted_disc_state)?;
         validate_step_identity(&self.identity, &midpoint_input)?;
         let midpoint_contact = self.resolve_active_contact_from_patch(
