@@ -53,6 +53,30 @@ const RESOLVABLE_EVIDENCE_KINDS: [&str; 3] = ["test", "contract", "doc"];
 /// An honest gap, mirrored on maturity's `corpus` kind.
 const RECORDED_ONLY_EVIDENCE_KINDS: [&str; 4] = ["receipt", "bakeoff", "listening", "corpus"];
 
+/// Corpus-reference lint (bead `frankensim-music-v8-root-3ez8g.1.1`).
+///
+/// `corpus_refs` entries with the `vvreg:` prefix must name a case id
+/// registered in the tracked acoustic corpus manifest — a gate citing an
+/// unregistered corpus is citing nothing. Refs without the prefix are
+/// refused outright: every music corpus registers through fs-vvreg (the
+/// reuse law — no parallel music-validation registry), so there is no other
+/// legal namespace. Absence rows (`absent-hunt` / `refused-retention`) ARE
+/// resolvable targets: citing one records "this gate is data-blocked on a
+/// named hunt", which is exactly what the population signal is for.
+pub const ACOUSTIC_MANIFEST_FILE: &str = "data/vv-corpus/acoustic/acoustic-v1.tsv";
+const CORPUS_REF_PREFIX: &str = "vvreg:";
+
+/// Parse the case-id column out of the tracked acoustic manifest.
+fn manifest_case_ids(manifest: &str) -> BTreeSet<String> {
+    manifest
+        .lines()
+        .skip(1) // header
+        .filter_map(|line| line.split('\t').nth(1))
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Determinism composition lint (bead `frankensim-music-v8-root-3ez8g.1.3`).
 ///
 /// Replay strength composes like evidence colour: a composed image inherits
@@ -149,6 +173,7 @@ struct Row {
     determinism: String,
     evidence: Vec<(String, String)>,
     budget_row: Option<String>,
+    corpus_refs: Vec<String>,
     notes: String,
 }
 
@@ -289,9 +314,7 @@ fn parse_registry(source: &str, violations: &mut Vec<Violation>) -> Vec<Row> {
                         }
                         other => violations.push(violation(
                             &entity,
-                            format!(
-                                "exactness entry {other:?} is not one of {EXACTNESS_VALUES:?}"
-                            ),
+                            format!("exactness entry {other:?} is not one of {EXACTNESS_VALUES:?}"),
                         )),
                     }
                 }
@@ -361,14 +384,18 @@ fn parse_registry(source: &str, violations: &mut Vec<Violation>) -> Vec<Row> {
             }
         };
 
+        let mut corpus_refs = Vec::new();
         match map.get("corpus_refs").and_then(arr) {
             Some(items) => {
                 for item in items {
-                    if text(item).map(str::trim).unwrap_or_default().is_empty() {
-                        violations.push(violation(
+                    match text(item) {
+                        Some(reference) if !reference.trim().is_empty() => {
+                            corpus_refs.push(reference.to_string());
+                        }
+                        _ => violations.push(violation(
                             &entity,
                             "corpus_refs entries must be non-empty strings".to_string(),
-                        ));
+                        )),
                     }
                 }
             }
@@ -395,6 +422,7 @@ fn parse_registry(source: &str, violations: &mut Vec<Violation>) -> Vec<Row> {
             determinism,
             evidence,
             budget_row,
+            corpus_refs,
             notes,
         });
     }
@@ -421,6 +449,7 @@ fn check_registry_sources(
     committed: Option<&str>,
     path_exists: &dyn Fn(&str) -> bool,
     owner_exists: &dyn Fn(&str) -> bool,
+    corpus_ids: Option<&BTreeSet<String>>,
 ) -> InstrumentClaimsReport {
     let mut violations = Vec::new();
     let mut decisions = Vec::new();
@@ -506,6 +535,38 @@ fn check_registry_sources(
                         ),
                     ));
                 }
+            }
+        }
+        // Corpus-reference lint (bead 3ez8g.1.1): vvreg: refs resolve
+        // against the tracked acoustic manifest or refuse by name.
+        for reference in &row.corpus_refs {
+            let Some(case_id) = reference.strip_prefix(CORPUS_REF_PREFIX) else {
+                violations.push(violation(
+                    &row.key,
+                    format!(
+                        "corpus ref {reference:?} lacks the {CORPUS_REF_PREFIX} prefix; every \
+                         music corpus registers through fs-vvreg (no parallel registry), so \
+                         there is no other legal namespace"
+                    ),
+                ));
+                continue;
+            };
+            match corpus_ids {
+                Some(ids) if ids.contains(case_id) => {}
+                Some(_) => violations.push(violation(
+                    &row.key,
+                    format!(
+                        "corpus ref {reference:?} names no case in {ACOUSTIC_MANIFEST_FILE}; \
+                         a gate citing an unregistered corpus is citing nothing"
+                    ),
+                )),
+                None => violations.push(violation(
+                    &row.key,
+                    format!(
+                        "corpus ref {reference:?} cannot be resolved: {ACOUSTIC_MANIFEST_FILE} \
+                         is unreadable; a gate that cannot see the corpus registry refuses"
+                    ),
+                )),
             }
         }
         // Weakest-operand determinism lint (bead 3ez8g.1.3): a row's ladder
@@ -629,11 +690,15 @@ pub fn check(root: &Path) -> InstrumentClaimsReport {
         joined.is_file() || joined.is_dir()
     };
     let owner_exists = |name: &str| root.join("crates").join(name).is_dir();
+    let corpus_ids = std::fs::read_to_string(root.join(ACOUSTIC_MANIFEST_FILE))
+        .ok()
+        .map(|manifest| manifest_case_ids(&manifest));
     check_registry_sources(
         &current,
         committed.as_deref(),
         &path_exists,
         &owner_exists,
+        corpus_ids.as_ref(),
     )
 }
 
@@ -646,7 +711,12 @@ mod tests {
     const ALL_OWNERS: fn(&str) -> bool = |_| true;
 
     fn run(current: &str, committed: Option<&str>) -> InstrumentClaimsReport {
-        check_registry_sources(current, committed, &ALL_PATHS, &ALL_OWNERS)
+        check_registry_sources(current, committed, &ALL_PATHS, &ALL_OWNERS, None)
+    }
+
+    fn run_with_corpus(current: &str, ids: &[&str]) -> InstrumentClaimsReport {
+        let ids: BTreeSet<String> = ids.iter().map(|id| (*id).to_string()).collect();
+        check_registry_sources(current, None, &ALL_PATHS, &ALL_OWNERS, Some(&ids))
     }
 
     /// A minimal valid row with per-field overrides (the parser refuses
@@ -716,7 +786,11 @@ mod tests {
             .iter()
             .find(|note| note.verdict == "summary")
             .expect("summary note");
-        assert!(summary.detail.contains("rows=1 ungated=1 green=0 refused=0"));
+        assert!(
+            summary
+                .detail
+                .contains("rows=1 ungated=1 green=0 refused=0")
+        );
     }
 
     #[test]
@@ -776,7 +850,10 @@ mod tests {
             None,
         );
         assert!(details(&dup).contains("listed twice"));
-        let unknown = run(&registry(&[row_with(&[("exactness", r#"["exactish"]"#)])]), None);
+        let unknown = run(
+            &registry(&[row_with(&[("exactness", r#"["exactish"]"#)])]),
+            None,
+        );
         assert!(details(&unknown).contains("is not one of"));
     }
 
@@ -797,7 +874,10 @@ mod tests {
 
     #[test]
     fn live_default_requires_green_and_budget() {
-        let ungated = run(&registry(&[row_with(&[("live_default", r#""yes""#)])]), None);
+        let ungated = run(
+            &registry(&[row_with(&[("live_default", r#""yes""#)])]),
+            None,
+        );
         let text = details(&ungated);
         assert!(text.contains("D25 requires gate=green"), "{text}");
         assert!(text.contains("no budget_row"), "{text}");
@@ -840,6 +920,7 @@ mod tests {
             None,
             &NO_PATHS,
             &ALL_OWNERS,
+            None,
         );
         assert!(details(&report).contains("does not resolve"));
     }
@@ -849,11 +930,15 @@ mod tests {
         let report = check_registry_sources(
             &registry(&[row_with(&[
                 ("gate", r#""green""#),
-                ("evidence", r#"[{"kind":"listening","ref":"blake3:receipt"}]"#),
+                (
+                    "evidence",
+                    r#"[{"kind":"listening","ref":"blake3:receipt"}]"#,
+                ),
             ])]),
             None,
             &NO_PATHS,
             &ALL_OWNERS,
+            None,
         );
         assert!(report.violations.is_empty(), "{}", details(&report));
     }
@@ -874,6 +959,7 @@ mod tests {
             None,
             &ALL_PATHS,
             &|name| name != "fs-duct",
+            None,
         );
         assert!(details(&report).contains("owner crate \"fs-duct\""));
     }
@@ -956,11 +1042,8 @@ mod tests {
             );
             assert!(report.violations.is_empty(), "{}", details(&report));
             assert!(
-                report
-                    .decisions
-                    .iter()
-                    .any(|note| note.verdict == "review"
-                        && note.detail.contains("off the replay ladder")),
+                report.decisions.iter().any(|note| note.verdict == "review"
+                    && note.detail.contains("off the replay ladder")),
                 "missing review note for {declared}"
             );
         }
@@ -970,5 +1053,51 @@ mod tests {
     fn one_host_rows_pass_the_ceiling() {
         let report = run(&registry(&[row("")]), None);
         assert!(report.violations.is_empty(), "{}", details(&report));
+    }
+
+    #[test]
+    fn corpus_refs_resolve_or_refuse() {
+        // Registered id: passes. Unregistered: refuses by name. Missing
+        // prefix: refuses (no parallel namespace). Unreadable manifest with
+        // any ref: refuses (a gate that cannot see the corpus registry
+        // refuses rather than concluding the citation is fine).
+        let cited = registry(&[row_with(&[(
+            "corpus_refs",
+            r#"["vvreg:acoustic-ernoult-2021-xxxx"]"#,
+        )])]);
+        let good = run_with_corpus(&cited, &["acoustic-ernoult-2021-xxxx"]);
+        assert!(good.violations.is_empty(), "{}", details(&good));
+
+        let dangling = run_with_corpus(&cited, &["some-other-case"]);
+        assert!(
+            details(&dangling).contains("names no case"),
+            "{}",
+            details(&dangling)
+        );
+
+        let unprefixed = run_with_corpus(
+            &registry(&[row_with(&[("corpus_refs", r#"["ernoult-2021"]"#)])]),
+            &["acoustic-ernoult-2021-xxxx"],
+        );
+        assert!(
+            details(&unprefixed).contains("lacks the vvreg: prefix"),
+            "{}",
+            details(&unprefixed)
+        );
+
+        let unreadable = run(&cited, None);
+        assert!(
+            details(&unreadable).contains("is unreadable"),
+            "{}",
+            details(&unreadable)
+        );
+    }
+
+    #[test]
+    fn manifest_case_ids_parse_the_tsv_shape() {
+        let manifest = "schema_version\tcase_id\tfamily\n1\tacoustic-a\tx\n1\tacoustic-b\ty\n";
+        let ids = manifest_case_ids(manifest);
+        assert!(ids.contains("acoustic-a") && ids.contains("acoustic-b"));
+        assert_eq!(ids.len(), 2);
     }
 }

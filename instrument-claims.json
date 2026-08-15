@@ -6,36 +6,71 @@
       "filling": "wind-reed",
       "image": "tmm",
       "qoi": "fingering-peak-cents",
-      "owner_crates": ["fs-duct"],
-      "exactness": ["X-Consist", "X-Struct"],
+      "owner_crates": [
+        "fs-duct"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/tests/ernoult_corpus.rs::ernoult_ladder_driven_from_the_registered_corpus_rows"
+        }
+      ],
       "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Ernoult-class five-fingering ladder lives as fs-duct tests (-8/-8/-18/-17/-20 cents inside a 30-cent envelope); promotion to green requires corpus registration (bead 3ez8g.1.1) plus the wind gates review (3ez8g.6.1). X-Consist bore, X-Struct ZK losses."
+      "corpus_refs": [
+        "vvreg:acoustic-ernoult-2021-xxxx",
+        "vvreg:acoustic-ernoult-2021-xxxo",
+        "vvreg:acoustic-ernoult-2021-xxox",
+        "vvreg:acoustic-ernoult-2021-xoxx",
+        "vvreg:acoustic-ernoult-2021-oxxx"
+      ],
+      "notes": "Ernoult-class five-fingering ladder lives as fs-duct tests (-8/-8/-18/-17/-20 cents inside a 30-cent envelope); corpus rows registered (3ez8g.1.1) and the wired end-to-end gate executes from them (geometry + envelopes read FROM the rows; falsifier proves discrimination); green awaits the wind gates review (3ez8g.6.1). X-Consist bore, X-Struct ZK losses."
     },
     {
       "filling": "wind-reed",
       "image": "char-line",
       "qoi": "junction-match-tmm-r",
-      "owner_crates": ["fs-vfit", "fs-couple"],
-      "exactness": ["X-Exact", "X-Struct"],
+      "owner_crates": [
+        "fs-vfit",
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Exact",
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [],
       "budget_row": null,
-      "corpus_refs": [],
+      "corpus_refs": [
+        "vvreg:acoustic-ernoult-2021-xxxx",
+        "vvreg:acoustic-ernoult-2021-xxxo",
+        "vvreg:acoustic-ernoult-2021-xxox",
+        "vvreg:acoustic-ernoult-2021-xoxx",
+        "vvreg:acoustic-ernoult-2021-oxxx"
+      ],
       "notes": "The exact-FIR reflectance port (DelayedFilter fed by driving_point::characteristic_line) IS the TMM R on the DFT grid; the gate is junction agreement within band (the menu's failure mode become a test). Gates bead: 3ez8g.6.1."
     },
     {
       "filling": "wind-reed",
       "image": "char-line",
       "qoi": "quarter-wave-lock",
-      "owner_crates": ["fs-couple", "fs-phs", "fs-dcontact"],
-      "exactness": ["X-Exact", "X-Struct"],
+      "owner_crates": [
+        "fs-couple",
+        "fs-phs",
+        "fs-dcontact"
+      ],
+      "exactness": [
+        "X-Exact",
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -48,8 +83,12 @@
       "filling": "wind-reed",
       "image": "vfit-hold",
       "qoi": "held-fingering-cents",
-      "owner_crates": ["fs-vfit"],
-      "exactness": ["X-Struct"],
+      "owner_crates": [
+        "fs-vfit"
+      ],
+      "exactness": [
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -62,8 +101,12 @@
       "filling": "wind-reed",
       "image": "phs-chain",
       "qoi": "td-oracle-agreement",
-      "owner_crates": ["fs-phs"],
-      "exactness": ["X-Consist"],
+      "owner_crates": [
+        "fs-phs"
+      ],
+      "exactness": [
+        "X-Consist"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -76,14 +119,25 @@
       "filling": "string",
       "image": "modal-zoh",
       "qoi": "pluck-partial-decay",
-      "owner_crates": ["fs-couple", "fs-modal"],
-      "exactness": ["X-Exact"],
+      "owner_crates": [
+        "fs-couple",
+        "fs-modal"
+      ],
+      "exactness": [
+        "X-Exact"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [
-        {"kind": "bakeoff", "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"},
-        {"kind": "test", "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"}
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
+        }
       ],
       "budget_row": null,
       "corpus_refs": [],
@@ -93,14 +147,24 @@
       "filling": "string",
       "image": "phs-modal-bank",
       "qoi": "truncation-authority",
-      "owner_crates": ["fs-phs"],
-      "exactness": ["X-Consist"],
+      "owner_crates": [
+        "fs-phs"
+      ],
+      "exactness": [
+        "X-Consist"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [
-        {"kind": "bakeoff", "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"},
-        {"kind": "test", "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"}
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
+        }
       ],
       "budget_row": null,
       "corpus_refs": [],
@@ -110,22 +174,38 @@
       "filling": "plate",
       "image": "dkt-modal",
       "qoi": "literature-modes",
-      "owner_crates": ["fs-plate", "fs-modal"],
-      "exactness": ["X-Exact"],
+      "owner_crates": [
+        "fs-plate",
+        "fs-modal"
+      ],
+      "exactness": [
+        "X-Exact"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [],
       "budget_row": null,
-      "corpus_refs": [],
+      "corpus_refs": [
+        "vvreg:acoustic-leissa-clamped-square-lambda1",
+        "vvreg:acoustic-olson-hazell-1977-mode1",
+        "vvreg:acoustic-olson-hazell-1977-mode2",
+        "vvreg:acoustic-olson-hazell-1977-mode3",
+        "vvreg:acoustic-olson-hazell-1977-mode4",
+        "vvreg:acoustic-olson-hazell-1977-mode5"
+      ],
       "notes": "Orthotropic DKT + stiffeners + inertia-certified slice_window; Leissa pins and the Olson-Hazell 1977 stiffened plate (1.7% on five modes) live as tests - promotion needs their corpus rows (3ez8g.1.1). Gates bead: 3ez8g.7.1."
     },
     {
       "filling": "plate",
       "image": "vfit-driving-point",
       "qoi": "passive-one-port",
-      "owner_crates": ["fs-vfit"],
-      "exactness": ["X-Struct"],
+      "owner_crates": [
+        "fs-vfit"
+      ],
+      "exactness": [
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -138,8 +218,12 @@
       "filling": "string-plate-nl",
       "image": "kc-vonkarman",
       "qoi": "pitch-glide-analytic",
-      "owner_crates": ["fs-nlmodal"],
-      "exactness": ["X-Consist"],
+      "owner_crates": [
+        "fs-nlmodal"
+      ],
+      "exactness": [
+        "X-Consist"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -152,8 +236,14 @@
       "filling": "bowed",
       "image": "modal-stribeck",
       "qoi": "stick-slip-mechanism",
-      "owner_crates": ["fs-tribo", "fs-couple"],
-      "exactness": ["X-Exact", "X-Struct"],
+      "owner_crates": [
+        "fs-tribo",
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Exact",
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -166,8 +256,15 @@
       "filling": "brass",
       "image": "plane-wave-char",
       "qoi": "mute-debug-only",
-      "owner_crates": ["fs-duct", "fs-vfit", "fs-couple"],
-      "exactness": ["X-Exact", "X-Struct"],
+      "owner_crates": [
+        "fs-duct",
+        "fs-vfit",
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Exact",
+        "X-Struct"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -180,8 +277,13 @@
       "filling": "jet",
       "image": "lbm-jetlab-2d",
       "qoi": "edge-tone-stage-i-strouhal",
-      "owner_crates": ["fs-aeroac", "fs-lbm"],
-      "exactness": ["X-Est"],
+      "owner_crates": [
+        "fs-aeroac",
+        "fs-lbm"
+      ],
+      "exactness": [
+        "X-Est"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
@@ -194,14 +296,22 @@
       "filling": "string-plate-cavity",
       "image": "vibroacoustic-modal",
       "qoi": "two-dof-product-invariant",
-      "owner_crates": ["fs-couple"],
-      "exactness": ["X-Exact"],
+      "owner_crates": [
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Exact"
+      ],
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [],
       "budget_row": null,
-      "corpus_refs": [],
+      "corpus_refs": [
+        "vvreg:acoustic-carcagno-2018-mode1",
+        "vvreg:acoustic-carcagno-2018-mode2",
+        "vvreg:acoustic-carcagno-2018-mode3"
+      ],
       "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable."
     }
   ]

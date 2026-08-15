@@ -33,6 +33,11 @@ use std::sync::LazyLock;
 
 mod seed;
 
+/// Acoustic/music corpus rows: licensed reference values, analytic
+/// definitions, and recorded absences for the instrument-claims registry
+/// (music bead 3ez8g.1.1).
+pub mod acoustic;
+
 /// Adversarial thermal validation cases and honesty-first assessment.
 pub mod adversarial;
 
