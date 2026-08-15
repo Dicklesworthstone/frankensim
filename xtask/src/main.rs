@@ -60,6 +60,7 @@ mod constellation_drift;
 mod critical_path;
 mod depgraph;
 mod identities;
+mod instrument_claims;
 mod manifest_fixture;
 mod matdb_pack;
 mod maturity;
@@ -8619,6 +8620,11 @@ fn main() -> ExitCode {
             policy_notes = report.decisions;
             (report.violations, vec!["capability-maturity"])
         }
+        "check-instrument-claims" => {
+            let report = instrument_claims::check(&root);
+            policy_notes = report.decisions;
+            (report.violations, vec![instrument_claims::CHECK])
+        }
         "check-critical-path" => {
             let report = critical_path::check_critical_path(&root);
             policy_notes = report.decisions;
@@ -8698,6 +8704,9 @@ fn main() -> ExitCode {
             let maturity_report = maturity::check_maturity(&root);
             v.extend(maturity_report.violations);
             policy_notes.extend(maturity_report.decisions);
+            let instrument_claims_report = instrument_claims::check(&root);
+            v.extend(instrument_claims_report.violations);
+            policy_notes.extend(instrument_claims_report.decisions);
             let critical_path_report = critical_path::check_critical_path(&root);
             v.extend(critical_path_report.violations);
             policy_notes.extend(critical_path_report.decisions);
@@ -8753,6 +8762,7 @@ fn main() -> ExitCode {
                     "doc-facts",
                     "capability-matrix",
                     "capability-maturity",
+                    instrument_claims::CHECK,
                     critical_path::CHECK,
                     moonshot_policy::CHECK,
                     "claim-integrity-gate",
@@ -8773,7 +8783,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
-                 check-goldens|check-docs|check-claims|check-closures|check-maturity|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
+                 check-goldens|check-docs|check-claims|check-closures|check-maturity|check-instrument-claims|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
                  check-identities|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
                  check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|generate-tropical-path|generate-suite-receipt|record-program-metrics|compatibility-report|lock-constellation|\
                  check-constellation|check-spine-metrics|check-tropical-path|check-suite-receipt|depgraph-receipt|matdb-pack"
