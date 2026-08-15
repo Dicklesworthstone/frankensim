@@ -250,6 +250,30 @@ bead zolja, is the lift), and the Zwikker–Kosten Bessel path's former
 `r_v ≈ 160` continued-fraction ceiling was an iteration-budget bug fixed
 in `fs-phs` (budget now scales with `|z|`).
 
+### `music_render` (binary)
+
+The music lane's render CLI (bead ib15w): `music_render <reed|string>
+<out.wav> [--seconds S] [--block N] [--full-scale-pa P]`. Pinned fixture
+compositions render through the block API and encode through the ONE
+pascals→PCM owner, `pcm_wav::encode_pcm16_wav` — the recorded seam
+decision (beads ib15w + h7xu5.7.8): the cinematic stereo/receipt-hashed
+encoder stays cinematic, no third RIFF writer exists in the music lane.
+Laws, all e2e-tested through the real binary: same arguments →
+bit-identical WAV + provenance sidecar; existing output/sidecar paths
+REFUSE (evidence is never overwritten); full-scale is a MAPPING, never
+normalization — the same physics renders identical `peak_pa` at any
+full-scale, PCM peaks scale inversely, and an undersized full-scale
+CLIPS with the count reported (the reed fixture peaks ≈10.7 kPa —
+mouthpiece pressures are kPa-scale, so full-scale choices must be too);
+sample rate pinned at 48 kHz (ecosystem coherence with fs-psycho). The
+provenance sidecar (`frankensim-music-render-provenance-v1`) carries
+fixture, rates, clip count, peak/rms pascals, and the domain-hashed
+blake3 of the WAV bytes — no wall-clock, no commit stamp (git history
+of committed artifacts carries those). No-claims: fixtures are pinned
+compositions, not a project/assembly loader (that is fs-cli product
+territory); mono only; no mastering, room, or loudness processing of
+any kind.
+
 ### `bakeoff`
 
 Bake-off receipt schema and protocol for the music-program claims registry

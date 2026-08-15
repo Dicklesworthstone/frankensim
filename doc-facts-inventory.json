@@ -442,6 +442,7 @@
     "crates/fs-couple/tests/acoustic_assembly.rs",
     "crates/fs-couple/tests/bakeoff_string.rs",
     "crates/fs-couple/tests/couple.rs",
+    "crates/fs-couple/tests/music_render_cli.rs",
     "crates/fs-couple/tests/render_blocks.rs",
     "crates/fs-couple/tests/render_budget_lane.rs",
     "crates/fs-couple/tests/render_no_alloc.rs",
