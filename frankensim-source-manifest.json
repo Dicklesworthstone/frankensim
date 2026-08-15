@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "08257a22b53605300b40b9b61f130a3aab20895b77ed9d189782acad556bb14b",
+  "manifest_identity": "3d94be027fb95856c3c7e1444282553b91798c406d2e09ef9c46ff281ecb8593",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "ce158a32ff091331e854affd6b1e451c99adc04e7a95d6c990a2c04917b22d91",
+    "source_root": "efcc83637e6261dbf18297ec3c4496783f1330dcd6aa3fbbe73f40434731e339",
     "tracked_file_count": 2429,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -853,7 +853,7 @@
       {"path": "crates/fs-grammar-e2e/CONTRACT.md", "git_mode": "100644", "bytes": 6107, "content_blake3": "ddbfeb9991a2bde5b8850866f7009b6d340e7f032460c9ccf33328ee5c39db37"},
       {"path": "crates/fs-grammar-e2e/Cargo.toml", "git_mode": "100644", "bytes": 1001, "content_blake3": "0c9028f09c93ea32e29d725b481144297b44aced8932f48d84ec865f0f3e4733"},
       {"path": "crates/fs-grammar-e2e/src/lib.rs", "git_mode": "100644", "bytes": 28670, "content_blake3": "34ab5fd4ff07b1824e0bdb254953505b9c7dc02a58a3e4613625e097b3b59b86"},
-      {"path": "crates/fs-grammar-e2e/tests/grammar.rs", "git_mode": "100644", "bytes": 15189, "content_blake3": "92551913ca0a8a5072ce333d7a6cb50cfb95ee1b794ac71ff010d4082907ca8a"},
+      {"path": "crates/fs-grammar-e2e/tests/grammar.rs", "git_mode": "100644", "bytes": 16544, "content_blake3": "c7646cce46206dc8dde85bea0d056ff6621009cffd59e245b43457bf8181a734"},
       {"path": "crates/fs-iface/CONTRACT.md", "git_mode": "100644", "bytes": 4199, "content_blake3": "eb589becc56d31fd3cf1dc332e906777c33df2e439905893fbb905af64af34df"},
       {"path": "crates/fs-iface/Cargo.toml", "git_mode": "100644", "bytes": 502, "content_blake3": "ba9c0db62173b5fe2551efa51abefa5be11df1a9b0bac0da5182a8e01f02615f"},
       {"path": "crates/fs-iface/src/lib.rs", "git_mode": "100644", "bytes": 16135, "content_blake3": "446279d9f38d1cbd8224776aa27ea90a290cf44efef7003062624e711ee96465"},
