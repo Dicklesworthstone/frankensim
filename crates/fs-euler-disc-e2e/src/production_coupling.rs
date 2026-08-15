@@ -55,6 +55,7 @@ use crate::{
     normal_contact::{
         ActiveNormalContact, EulerNormalContactInput, EulerNormalContactOutcome,
         NormalContactError, NormalContactIntegrationRegime, evaluate_normal_contact,
+        evaluate_normal_contact_borrowed,
     },
     patch_kinematics::{
         CurvatureMetadata, MovingOneModePatchKinematicsInput, PatchContactStatus, PatchKinematics,
@@ -333,6 +334,44 @@ impl SurfaceTraceEvaluation<'_> {
             }
             Self::Admitted(traces) => traces
                 .evaluate_hertz_filtered_surface_pair(interface, surface_a, surface_b, footprint),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NormalContactEvaluation<'a> {
+    Checked(&'a EulerNormalContactInput),
+    AdmittedBorrowed {
+        input: &'a EulerNormalContactInput,
+        state: &'a NormalPatchEmbedState,
+        time_s: f64,
+        step_s: f64,
+    },
+}
+
+impl<'a> NormalContactEvaluation<'a> {
+    const fn input(self) -> &'a EulerNormalContactInput {
+        match self {
+            Self::Checked(input) | Self::AdmittedBorrowed { input, .. } => input,
+        }
+    }
+
+    fn evaluate(
+        self,
+        kinematics: &PatchKinematics,
+    ) -> Result<EulerNormalContactOutcome, NormalContactError> {
+        match self {
+            Self::Checked(input) => {
+                let mut owned = input.clone();
+                owned.kinematics = kinematics.clone();
+                evaluate_normal_contact(&owned)
+            }
+            Self::AdmittedBorrowed {
+                input,
+                state,
+                time_s,
+                step_s,
+            } => evaluate_normal_contact_borrowed(input, kinematics, state, time_s, step_s),
         }
     }
 }
@@ -936,7 +975,7 @@ fn surface_footprint(
 
 fn resolve_surface_geometry_contact(
     patch_input: MovingOneModePatchKinematicsInput,
-    normal_input: &EulerNormalContactInput,
+    normal_evaluation: NormalContactEvaluation<'_>,
     surface: &ProductionSurfaceGeometryStepInput,
     surface_traces: SurfaceTraceEvaluation<'_>,
 ) -> Result<
@@ -947,23 +986,23 @@ fn resolve_surface_geometry_contact(
     ),
     ProductionCouplingError,
 > {
-    validate_surface_geometry_identity(normal_input, surface)?;
+    validate_surface_geometry_identity(normal_evaluation.input(), surface)?;
     let nominal_patch = compute_moving_one_mode_patch_kinematics(patch_input.clone())
         .map_err(ProductionCouplingError::Patch)?;
     let nominal_signed_gap_m = signed_patch_gap_m(&nominal_patch)?;
-    let mut nominal_normal = normal_input.clone();
-    nominal_normal.kinematics = nominal_patch;
-    let (nominal_smooth_force_n, nominal_footprint) =
-        match evaluate_normal_contact(&nominal_normal).map_err(ProductionCouplingError::Normal)? {
-            EulerNormalContactOutcome::Active(active) => (
-                point_normal_force(&active)?,
-                Some(surface_footprint(
-                    &active,
-                    surface.travel_angle_from_patch_major_rad,
-                )?),
-            ),
-            EulerNormalContactOutcome::InactiveSeparated { .. } => (0.0, None),
-        };
+    let (nominal_smooth_force_n, nominal_footprint) = match normal_evaluation
+        .evaluate(&nominal_patch)
+        .map_err(ProductionCouplingError::Normal)?
+    {
+        EulerNormalContactOutcome::Active(active) => (
+            point_normal_force(&active)?,
+            Some(surface_footprint(
+                &active,
+                surface.travel_angle_from_patch_major_rad,
+            )?),
+        ),
+        EulerNormalContactOutcome::InactiveSeparated { .. } => (0.0, None),
+    };
     let filtered_for_footprint = |footprint: Option<ProjectedHertzFootprint>| {
         match footprint {
             Some(footprint)
@@ -995,9 +1034,8 @@ fn resolve_surface_geometry_contact(
 
     for iteration in 1..=surface.maximum_iterations {
         let patch = compute_surface_adjusted_patch(patch_input.clone(), &filtered)?;
-        let mut trial_normal = normal_input.clone();
-        trial_normal.kinematics = patch.clone();
-        let active = match evaluate_normal_contact(&trial_normal)
+        let active = match normal_evaluation
+            .evaluate(&patch)
             .map_err(ProductionCouplingError::Normal)?
         {
             EulerNormalContactOutcome::Active(active) => active,
@@ -1040,9 +1078,8 @@ fn resolve_surface_geometry_contact(
             // `next_filtered` in the receipt.
             let resolved_patch =
                 compute_surface_adjusted_patch(patch_input.clone(), &next_filtered)?;
-            let mut resolved_normal = normal_input.clone();
-            resolved_normal.kinematics = resolved_patch.clone();
-            let resolved_active = match evaluate_normal_contact(&resolved_normal)
+            let resolved_active = match normal_evaluation
+                .evaluate(&resolved_patch)
                 .map_err(ProductionCouplingError::Normal)?
             {
                 EulerNormalContactOutcome::Active(active) => active,
@@ -1963,7 +2000,7 @@ impl ProductionCouplingModel {
         let (patch_kinematics, normal) = if let Some(surface) = &input.surface_geometry {
             let (patch, normal, _) = resolve_surface_geometry_contact(
                 input.patch.clone(),
-                &normal_input,
+                NormalContactEvaluation::Checked(&normal_input),
                 surface,
                 SurfaceTraceEvaluation::Checked,
             )?;
@@ -2036,7 +2073,7 @@ impl ProductionCouplingModel {
         let resolved_contact = if let Some(surface) = &input.surface_geometry {
             match resolve_surface_geometry_contact(
                 input.patch.clone(),
-                &normal_input,
+                NormalContactEvaluation::Checked(&normal_input),
                 surface,
                 SurfaceTraceEvaluation::Checked,
             ) {
@@ -3720,14 +3757,27 @@ impl ProductionCouplingModel {
                 field: "mutually exclusive surface coupling modes",
             });
         }
-        let mut normal_input = input.normal.clone();
-        normal_input.state = checkpoint.normal_state.clone();
-        normal_input.time_s = input.time_s;
-        normal_input.step_s = input.duration_s;
+        let mut checked_normal_input = matches!(surface_traces, SurfaceTraceEvaluation::Checked)
+            .then(|| {
+                let mut normal_input = input.normal.clone();
+                normal_input.state = checkpoint.normal_state.clone();
+                normal_input.time_s = input.time_s;
+                normal_input.step_s = input.duration_s;
+                normal_input
+            });
         if let Some(surface) = &input.surface_geometry {
+            let normal_evaluation = checked_normal_input.as_ref().map_or(
+                NormalContactEvaluation::AdmittedBorrowed {
+                    input: &input.normal,
+                    state: &checkpoint.normal_state,
+                    time_s: input.time_s,
+                    step_s: input.duration_s,
+                },
+                NormalContactEvaluation::Checked,
+            );
             let (patch_kinematics, normal, surface_geometry) = resolve_surface_geometry_contact(
                 patch_input,
-                &normal_input,
+                normal_evaluation,
                 surface,
                 surface_traces,
             )?;
@@ -3739,10 +3789,20 @@ impl ProductionCouplingModel {
         } else {
             let patch_kinematics = compute_moving_one_mode_patch_kinematics(patch_input)
                 .map_err(ProductionCouplingError::Patch)?;
-            normal_input.kinematics = patch_kinematics.clone();
-            let normal = match evaluate_normal_contact(&normal_input)
-                .map_err(ProductionCouplingError::Normal)?
-            {
+            let normal_outcome = if let Some(normal_input) = &mut checked_normal_input {
+                normal_input.kinematics = patch_kinematics.clone();
+                evaluate_normal_contact(normal_input)
+            } else {
+                evaluate_normal_contact_borrowed(
+                    &input.normal,
+                    &patch_kinematics,
+                    &checkpoint.normal_state,
+                    input.time_s,
+                    input.duration_s,
+                )
+            }
+            .map_err(ProductionCouplingError::Normal)?;
+            let normal = match normal_outcome {
                 EulerNormalContactOutcome::Active(active) => active,
                 EulerNormalContactOutcome::InactiveSeparated { .. } => {
                     return Err(ProductionCouplingError::UnsupportedMechanism {

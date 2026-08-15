@@ -263,6 +263,37 @@ pub struct EulerNormalContactInput {
     pub converged: bool,
 }
 
+#[derive(Clone, Copy)]
+struct EulerNormalContactInputView<'a> {
+    identity: &'a NormalContactIdentity,
+    kinematics: &'a PatchKinematics,
+    material: &'a NormalMaterialInterface,
+    geometry: EulerNormalGeometry,
+    integration_regime: NormalContactIntegrationRegime,
+    state: &'a NormalPatchEmbedState,
+    time_s: f64,
+    iteration: u64,
+    step_s: f64,
+    converged: bool,
+}
+
+impl<'a> EulerNormalContactInputView<'a> {
+    const fn from_input(input: &'a EulerNormalContactInput) -> Self {
+        Self {
+            identity: &input.identity,
+            kinematics: &input.kinematics,
+            material: &input.material,
+            geometry: input.geometry,
+            integration_regime: input.integration_regime,
+            state: &input.state,
+            time_s: input.time_s,
+            iteration: input.iteration,
+            step_s: input.step_s,
+            converged: input.converged,
+        }
+    }
+}
+
 /// Retained principal-curvature decision; no effective-radius fit is hidden.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CurvatureResolution {
@@ -403,9 +434,41 @@ impl From<FiniteGapResponseCurveError> for NormalContactError {
 pub fn evaluate_normal_contact(
     input: &EulerNormalContactInput,
 ) -> Result<EulerNormalContactOutcome, NormalContactError> {
-    validate_identity(&input.identity)?;
-    validate_kinematics(&input.kinematics)?;
-    let gap_m = normal_gap_m(&input.kinematics)?;
+    evaluate_normal_contact_view(EulerNormalContactInputView::from_input(input))
+}
+
+/// Evaluate the same checked normal law while borrowing immutable card data.
+///
+/// This crate-private seam is used only after the production driver has
+/// admitted and retained the immutable input card. It deliberately performs
+/// the same validation in the same order as [`evaluate_normal_contact`].
+pub(crate) fn evaluate_normal_contact_borrowed(
+    input: &EulerNormalContactInput,
+    kinematics: &PatchKinematics,
+    state: &NormalPatchEmbedState,
+    time_s: f64,
+    step_s: f64,
+) -> Result<EulerNormalContactOutcome, NormalContactError> {
+    evaluate_normal_contact_view(EulerNormalContactInputView {
+        identity: &input.identity,
+        kinematics,
+        material: &input.material,
+        geometry: input.geometry,
+        integration_regime: input.integration_regime,
+        state,
+        time_s,
+        iteration: input.iteration,
+        step_s,
+        converged: input.converged,
+    })
+}
+
+fn evaluate_normal_contact_view(
+    input: EulerNormalContactInputView<'_>,
+) -> Result<EulerNormalContactOutcome, NormalContactError> {
+    validate_identity(input.identity)?;
+    validate_kinematics(input.kinematics)?;
+    let gap_m = normal_gap_m(input.kinematics)?;
 
     match input.kinematics.status {
         PatchContactStatus::Separated => {
@@ -433,9 +496,9 @@ pub fn evaluate_normal_contact(
         | PatchContactStatus::Grazing => {}
     }
 
-    validate_sample(input)?;
-    validate_material(&input.material)?;
-    let curvature = resolve_curvature(&input.kinematics, input.geometry)?;
+    validate_sample(input.time_s, input.step_s, input.kinematics)?;
+    validate_material(input.material)?;
+    let curvature = resolve_curvature(input.kinematics, input.geometry)?;
     let normal = input.kinematics.tangent_basis.normal_world;
     let approach_rate_m_per_s = -input.kinematics.normal_relative_velocity_m_per_s;
     let approach_m = (-gap_m).max(0.0);
@@ -463,7 +526,7 @@ pub fn evaluate_normal_contact(
                 0.0,
             )
         } else {
-            law_from_input(&input.material, input.geometry, &curvature)?
+            law_from_input(input.material, input.geometry, &curvature)?
         };
     let uncertainty = merged_uncertainty(input.material.uncertainty, &curvature)?;
     let request = NormalPatchRequest {
@@ -508,7 +571,7 @@ pub fn evaluate_normal_contact(
         },
         law_request: request,
     }
-    .evaluate(&input.state)?;
+    .evaluate(input.state)?;
     let (elastic_storage, dissipation) = storage_and_dissipation(&generic);
     Ok(EulerNormalContactOutcome::Active(ActiveNormalContact {
         application_point_world_m: input.kinematics.disc_point.point_world,
@@ -579,14 +642,18 @@ fn validate_material(material: &NormalMaterialInterface) -> Result<(), NormalCon
     Ok(())
 }
 
-fn validate_sample(input: &EulerNormalContactInput) -> Result<(), NormalContactError> {
-    if !input.time_s.is_finite() || input.time_s < 0.0 {
+fn validate_sample(
+    time_s: f64,
+    step_s: f64,
+    kinematics: &PatchKinematics,
+) -> Result<(), NormalContactError> {
+    if !time_s.is_finite() || time_s < 0.0 {
         return Err(NormalContactError::InvalidInput { field: "time_s" });
     }
-    if !input.step_s.is_finite() || input.step_s <= 0.0 {
+    if !step_s.is_finite() || step_s <= 0.0 {
         return Err(NormalContactError::InvalidInput { field: "step_s" });
     }
-    validate_kinematics(&input.kinematics)
+    validate_kinematics(kinematics)
 }
 
 fn validate_kinematics(kinematics: &PatchKinematics) -> Result<(), NormalContactError> {
