@@ -322,13 +322,36 @@ pub fn fit_hyperparams(
         let mut fg = |p: &[f64]| -> (f64, Vec<f64>) {
             let f0 = nll(p);
             let mut g = vec![0.0f64; np];
+            if !f0.is_finite() {
+                // Infeasible center: `+inf` value with a ZERO (finite)
+                // gradient is the wolfe-admissible encoding of "no slope
+                // information here" — fs-ascent's line search brackets an
+                // infinite probe away rather than accepting it, and its
+                // probe contract demands a finite derivative even where
+                // the value is the +inf barrier (fs-ascent wolfe.rs).
+                return (f64::INFINITY, g);
+            }
             let eps = 1e-5;
             for i in 0..np {
                 let mut pp = p.to_vec();
                 pp[i] += eps;
                 let mut pm = p.to_vec();
                 pm[i] -= eps;
-                g[i] = (nll(&pp) - nll(&pm)) / (2.0 * eps);
+                // Barrier-aware differences: a probe that lands on the
+                // infeasible +inf side carries no slope information, so
+                // fall back to the one-sided difference through the
+                // feasible neighbour (both-sided barrier => zero). The
+                // naive central difference divides through the barrier
+                // and hands wolfe an infinite derivative, which panics
+                // the whole fit (the rnhok census fs-bo red).
+                let fp = nll(&pp);
+                let fm = nll(&pm);
+                g[i] = match (fp.is_finite(), fm.is_finite()) {
+                    (true, true) => (fp - fm) / (2.0 * eps),
+                    (true, false) => (fp - f0) / eps,
+                    (false, true) => (f0 - fm) / eps,
+                    (false, false) => 0.0,
+                };
             }
             (f0, g)
         };
