@@ -5,8 +5,9 @@
 //! compliance response is required.
 
 use core::fmt;
+use core::fmt::Write as _;
 
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_tribo::{InputAuthority, InterfaceSystemRef};
 
 /// SI dimensions for point-contact receipts.
@@ -365,7 +366,7 @@ impl NormalPatchRequest {
     /// Evaluates one bounded request without mutating solver or history state.
     pub fn evaluate(&self) -> Result<NormalPatchReceipt, NormalPatchError> {
         self.validate()?;
-        let request_id = hash_domain(DOMAIN, self.canonical().as_bytes());
+        let request_id = self.request_id();
         let (radius, modulus, dissipative) = match self.law {
             NormalPatchLaw::HertzSpherePlane {
                 effective_radius_m,
@@ -1044,38 +1045,38 @@ impl NormalPatchRequest {
         power: f64,
         ratios: ApplicabilityRatios,
     ) -> ContentHash {
-        hash_domain(
-            DOMAIN,
-            format!(
-                concat!(
-                    "{}|{}|{}|{:.17e}|{:.17e}|{:.17e}|",
-                    "{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
-                    "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|",
-                    "{:.17e}|{:?}|{}|{}|{}"
-                ),
-                kind,
-                request_id.to_hex(),
-                self.identity.state_id,
-                approach,
-                force,
-                tangent,
-                patch,
-                peak,
-                moment,
-                reversible,
-                irreversible,
-                power,
-                ratios,
-                self.uncertainty.radius_relative,
-                self.uncertainty.modulus_relative,
-                self.uncertainty.load_relative,
-                self.interface.provenance().authority(),
-                self.interface.ordered_system_id(),
-                self.interface.history_id(),
-                self.interface.provenance().source_id(),
-            )
-            .as_bytes(),
+        let mut hasher = DomainHasher::new(DOMAIN);
+        write!(
+            &mut hasher,
+            concat!(
+                "{}|{}|{}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:?}|{}|{}|{}"
+            ),
+            kind,
+            request_id,
+            self.identity.state_id,
+            approach,
+            force,
+            tangent,
+            patch,
+            peak,
+            moment,
+            reversible,
+            irreversible,
+            power,
+            ratios,
+            self.uncertainty.radius_relative,
+            self.uncertainty.modulus_relative,
+            self.uncertainty.load_relative,
+            self.interface.provenance().authority(),
+            self.interface.ordered_system_id(),
+            self.interface.history_id(),
+            self.interface.provenance().source_id(),
         )
+        .expect("writing to DomainHasher cannot fail");
+        hasher.finalize()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1094,39 +1095,39 @@ impl NormalPatchRequest {
         power: f64,
         ratios: ApplicabilityRatios,
     ) -> ContentHash {
-        hash_domain(
-            DOMAIN,
-            format!(
-                concat!(
-                    "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
-                    "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
-                    "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
-                ),
-                request_id.to_hex(),
-                self.identity.state_id,
-                approach,
-                force,
-                tangent,
-                reporting_radius,
-                axes.semi_major_axis_m,
-                axes.semi_minor_axis_m,
-                axes.aspect_ratio,
-                peak,
-                moment,
-                reversible,
-                irreversible,
-                power,
-                ratios,
-                self.uncertainty.radius_relative,
-                self.uncertainty.modulus_relative,
-                self.uncertainty.load_relative,
-                self.interface.provenance().authority(),
-                self.interface.ordered_system_id(),
-                self.interface.history_id(),
-                self.interface.provenance().source_id(),
-            )
-            .as_bytes(),
+        let mut hasher = DomainHasher::new(DOMAIN);
+        write!(
+            &mut hasher,
+            concat!(
+                "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
+            ),
+            request_id,
+            self.identity.state_id,
+            approach,
+            force,
+            tangent,
+            reporting_radius,
+            axes.semi_major_axis_m,
+            axes.semi_minor_axis_m,
+            axes.aspect_ratio,
+            peak,
+            moment,
+            reversible,
+            irreversible,
+            power,
+            ratios,
+            self.uncertainty.radius_relative,
+            self.uncertainty.modulus_relative,
+            self.uncertainty.load_relative,
+            self.interface.provenance().authority(),
+            self.interface.ordered_system_id(),
+            self.interface.history_id(),
+            self.interface.provenance().source_id(),
         )
+        .expect("writing to DomainHasher cannot fail");
+        hasher.finalize()
     }
 
     fn ratios(
@@ -1416,8 +1417,10 @@ impl NormalPatchRequest {
         Ok(())
     }
 
-    fn canonical(&self) -> String {
-        format!(
+    fn request_id(&self) -> ContentHash {
+        let mut hasher = DomainHasher::new(DOMAIN);
+        write!(
+            &mut hasher,
             concat!(
                 "v1|{}|{}|{}|{:?}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                 "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
@@ -1455,6 +1458,8 @@ impl NormalPatchRequest {
             self.interface.provenance().source_id(),
             self.interface.provenance().authority(),
         )
+        .expect("writing to DomainHasher cannot fail");
+        hasher.finalize()
     }
 }
 
@@ -1576,7 +1581,77 @@ fn complete_elliptic_integrals(parameter_m: f64) -> Result<(f64, f64), NormalPat
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_elliptic_integrals, elliptic_hertz_shape};
+    use super::*;
+    use fs_tribo::{InputAuthority::SyntheticFixture, InterfaceMedium::Dry};
+
+    fn identity_request() -> NormalPatchRequest {
+        NormalPatchRequest {
+            identity: NormalPatchIdentity {
+                model_id: "model".into(),
+                source_id: "source".into(),
+                state_id: "state".into(),
+            },
+            interface: InterfaceSystemRef::new("i", "h", "p", SyntheticFixture, Dry).unwrap(),
+            law: NormalPatchLaw::HertzSpherePlane {
+                effective_radius_m: 1.0,
+                reduced_modulus_pa: 2.0,
+            },
+            geometry: NormalPatchGeometry::SpherePlane,
+            indentation_m: 0.0,
+            indentation_rate_m_per_s: 0.0,
+            step_s: 1.0,
+            line_load_n_per_m: 0.0,
+            applicability: ApplicabilityInput {
+                half_space_depth_m: 10.0,
+                layer_thickness_m: 10.0,
+                yield_strength_pa: 100.0,
+                characteristic_rate_m_per_s: 1.0,
+                temperature_k: 300.0,
+                adhesion_energy_j_per_m2: 0.0,
+            },
+            limits: ApplicabilityLimits {
+                max_patch_to_radius: 1.0,
+                max_strain: 1.0,
+                max_patch_to_depth: 1.0,
+                max_patch_to_layer: 1.0,
+                max_pressure_to_yield: 1.0,
+                max_rate_ratio: 1.0,
+                min_temperature_k: 200.0,
+                max_temperature_k: 400.0,
+            },
+            uncertainty: InputUncertainty {
+                radius_relative: 0.0,
+                modulus_relative: 0.0,
+                load_relative: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn g0_canonical_request_and_receipt_ids_match_pre_streaming_goldens() {
+        let mut request = identity_request();
+        let point = request.evaluate().unwrap();
+        assert_eq!(
+            point.request_id().to_hex(),
+            "43c69eded8d366fd8d30ad40742d011d535c457be293b62968bcdaefd2d28d9e"
+        );
+        assert_eq!(
+            point.receipt_id().to_hex(),
+            "8c6036636eadd6fab5b2b7a83a9b156b27a75ca37956b393722554f8d8773e95"
+        );
+
+        request.law = NormalPatchLaw::HertzEllipticParaboloid {
+            maximum_principal_curvature_m_inverse: 1.0,
+            minimum_principal_curvature_m_inverse: 1.0,
+            reduced_modulus_pa: 2.0,
+        };
+        request.geometry = NormalPatchGeometry::EllipticParaboloid;
+        let elliptic = request.evaluate().unwrap();
+        assert_eq!(
+            elliptic.receipt_id().to_hex(),
+            "f7000f7fe79d6f267889ec81334d582c068b552484bdfb92372b42e6bfc6263e"
+        );
+    }
 
     #[test]
     fn elliptic_agm_matches_reference_values_at_half_parameter() {

@@ -3,7 +3,9 @@
 //! This module deliberately consumes only [`NormalPatchRequest::evaluate`]. It
 //! neither inspects nor reconstructs private constitutive-law state.
 
-use fs_blake3::{ContentHash, hash_domain};
+use core::fmt::Write as _;
+
+use fs_blake3::{ContentHash, DomainHasher, hash_domain};
 use fs_tribo::{ExactlyOnceKeyError, ExactlyOnceKeyLedger};
 
 use super::{
@@ -356,16 +358,11 @@ impl NormalPatchEmbedRequest {
         query.identity.state_id = self.mapped_law_state_id();
         let receipt = query.evaluate()?;
         let (port, applicability, uncertainty) = self.port_from_receipt(&receipt);
-        let embedding_id = hash_domain(
-            EMBED_DOMAIN,
-            format!(
-                "{}|{}|{}|{}",
-                work_key,
-                receipt.request_id().to_hex(),
-                receipt.receipt_id().to_hex(),
-                query.identity.model_id,
-            )
-            .as_bytes(),
+        let embedding_id = hash_embedding_id(
+            &work_key,
+            receipt.request_id(),
+            receipt.receipt_id(),
+            &query.identity.model_id,
         );
         let mut next_state = state.clone();
         next_state.last_time_bits = self.kinematics.time_s.to_bits();
@@ -512,6 +509,21 @@ impl NormalPatchEmbedRequest {
     }
 }
 
+fn hash_embedding_id(
+    work_key: &str,
+    request_id: ContentHash,
+    receipt_id: ContentHash,
+    model_id: &str,
+) -> ContentHash {
+    let mut hasher = DomainHasher::new(EMBED_DOMAIN);
+    write!(
+        &mut hasher,
+        "{work_key}|{request_id}|{receipt_id}|{model_id}"
+    )
+    .expect("writing to DomainHasher cannot fail");
+    hasher.finalize()
+}
+
 fn normal_ledger_error(
     error: ExactlyOnceKeyError,
     iteration: u64,
@@ -581,4 +593,24 @@ fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
         left[2] * right[0] - left[0] * right[2],
         left[0] * right[1] - left[1] * right[0],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_embedding_id;
+    use fs_blake3::ContentHash;
+
+    #[test]
+    fn g0_embedding_id_matches_pre_streaming_golden() {
+        assert_eq!(
+            hash_embedding_id(
+                "work-key",
+                ContentHash([0x11; 32]),
+                ContentHash([0x22; 32]),
+                "model",
+            )
+            .to_hex(),
+            "c76bf66353e457faade444ddbca8e0393d7f42854b6b0e5bf0ae92146a46b9b4"
+        );
+    }
 }
