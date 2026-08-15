@@ -364,3 +364,200 @@ impl Uniaxial for ManderConcrete {
         )
     }
 }
+
+// ------------------------------------------------------------ Wool felt
+
+/// Wool-felt compressive hysteresis (music bead
+/// `frankensim-music-t-piano-felt-87zbd`): the piano-hammer felt law as a
+/// NEW implementor of the existing [`Uniaxial`] contract — never Mander
+/// concrete or Menegotto–Pinto steel wearing a felt hat (their envelopes
+/// soften; felt STIFFENS, and its residual state is compaction, not a
+/// modulus-derived plastic offset).
+///
+/// Physics, rate-independent half only:
+/// - Virgin loading follows the stiffening power law the felt literature
+///   established for hammer compression, `σ = f_ref · (ε/ε_ref)^p` with
+///   `p > 1` (measured piano-hammer exponents cluster ≈ 2.2–3.5).
+/// - Unloading/reloading inside a past excursion runs on a steeper
+///   power-law path anchored between the crush point `(ε_r, 0)` and the
+///   excursion peak `(ε_max, σ_max)`: `σ = σ_max · x^q`,
+///   `x = (ε−ε_r)/(ε_max−ε_r)`, with `q ≥ p`.
+/// - Residual crush is a fraction of the excursion: `ε_r = c · ε_max`
+///   (felt compacts; hammers need voicing).
+/// - Zero tension capacity.
+///
+/// Dissipation is guaranteed BY CONSTRUCTION: over a virgin excursion to
+/// `ε_max` and return, the envelope work is
+/// `W_env = σ_max · ε_max / (p+1)` and the unload path returns
+/// `W_ret = σ_max · (ε_max − ε_r) / (q+1)`, so
+/// `W_env / W_ret = (q+1) / ((p+1)(1−c)) > 1` whenever `q ≥ p` and
+/// `c > 0` — both enforced at construction, so the mt-004 loop-area gate
+/// holds structurally, not accidentally.
+///
+/// The RATE-DEPENDENT half of felt (loading-rate stiffening, sub-loop
+/// creep hysteresis) is deliberately NOT here: it belongs to the
+/// [`crate::visco::FractionalZener`] → `lower_to_prony` island the crate
+/// already names for felt. Closed sub-loops inside a committed excursion
+/// are elastic in THIS law; their loss is the Prony island's claim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WoolFelt {
+    /// Stress at the reference strain (Pa, compression positive).
+    pub f_ref: f64,
+    /// Reference compressive strain (dimensionless engineering strain).
+    pub eps_ref: f64,
+    /// Loading (envelope) exponent `p > 1`.
+    pub p: f64,
+    /// Unload/reload exponent `q ≥ p`.
+    pub q: f64,
+    /// Residual-crush fraction `c ∈ (0, 1)` of the maximum excursion.
+    pub crush_fraction: f64,
+    /// Densification strain — validity bound where felt bottoms out.
+    pub eps_densify: f64,
+}
+
+/// Wool-felt committed state.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WoolFeltState {
+    /// Maximum compressive strain ever committed.
+    pub eps_max: f64,
+    /// Envelope stress at that excursion.
+    pub sig_max: f64,
+}
+
+impl WoolFelt {
+    /// Construct with admission checks.
+    ///
+    /// # Errors
+    /// [`MaterialError::Parameters`] unless `f_ref > 0`, `eps_ref > 0`,
+    /// `p > 1`, `q ≥ p`, `0 < crush_fraction < 1`, and
+    /// `eps_densify > eps_ref` — the parameter region where the
+    /// dissipation proof above holds strictly.
+    pub fn new(
+        f_ref: f64,
+        eps_ref: f64,
+        p: f64,
+        q: f64,
+        crush_fraction: f64,
+        eps_densify: f64,
+    ) -> Result<Self, MaterialError> {
+        if !(f_ref > 0.0
+            && f_ref.is_finite()
+            && eps_ref > 0.0
+            && p > 1.0
+            && q >= p
+            && q.is_finite()
+            && crush_fraction > 0.0
+            && crush_fraction < 1.0
+            && eps_densify > eps_ref)
+        {
+            return Err(MaterialError::Parameters {
+                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1, densify>ref",
+            });
+        }
+        Ok(Self {
+            f_ref,
+            eps_ref,
+            p,
+            q,
+            crush_fraction,
+            eps_densify,
+        })
+    }
+
+    /// Virgin envelope `(σ, dσ/dε)` at compressive strain `ε ≥ 0`.
+    #[must_use]
+    pub fn envelope(&self, strain: f64) -> (f64, f64) {
+        if strain <= 0.0 {
+            return (0.0, 0.0); // zero tension capacity
+        }
+        let x = strain / self.eps_ref;
+        let sig = self.f_ref * det::pow(x, self.p);
+        let dsig = self.f_ref * self.p * det::pow(x, self.p - 1.0) / self.eps_ref;
+        (sig, dsig)
+    }
+
+    /// Residual (crush) strain for a committed state.
+    #[must_use]
+    pub fn eps_residual(&self, state: &WoolFeltState) -> f64 {
+        self.crush_fraction * state.eps_max
+    }
+}
+
+impl Uniaxial for WoolFelt {
+    type State = WoolFeltState;
+
+    fn initial_state(&self) -> WoolFeltState {
+        WoolFeltState::default()
+    }
+
+    fn stress(&self, strain: f64, state: &WoolFeltState) -> f64 {
+        if strain >= state.eps_max {
+            return self.envelope(strain).0;
+        }
+        let eps_r = self.eps_residual(state);
+        if strain <= eps_r {
+            return 0.0;
+        }
+        let x = (strain - eps_r) / (state.eps_max - eps_r);
+        state.sig_max * det::pow(x, self.q)
+    }
+
+    fn tangent(&self, strain: f64, state: &WoolFeltState) -> f64 {
+        if strain >= state.eps_max {
+            return self.envelope(strain).1;
+        }
+        let eps_r = self.eps_residual(state);
+        if strain <= eps_r {
+            return 0.0;
+        }
+        let span = state.eps_max - eps_r;
+        let x = (strain - eps_r) / span;
+        state.sig_max * self.q * det::pow(x, self.q - 1.0) / span
+    }
+
+    fn update_state(&self, strain: f64, state: &WoolFeltState) -> WoolFeltState {
+        if strain > state.eps_max {
+            let (sig, _) = self.envelope(strain);
+            WoolFeltState {
+                eps_max: strain,
+                sig_max: sig,
+            }
+        } else {
+            state.clone()
+        }
+    }
+
+    fn admissibility(&self) -> MaterialAdmissibility {
+        MaterialAdmissibility {
+            has_stored_energy: true,
+            dissipation_nonnegative: true, // (q+1) >= (p+1)(1-c) by construction
+            polyconvex: None,
+            tangent_symmetric: true,
+            failure_envelope: "densification beyond eps_densify (validity bound); zero tension",
+        }
+    }
+
+    fn card(&self) -> ModelCard {
+        ModelCard::new(
+            "material.wool-felt",
+            "0.1.0",
+            Ambition::Solid,
+            vec![
+                "uniaxial fiber, compression positive".to_string(),
+                "stiffening power-law envelope (hammer-felt literature form)".to_string(),
+                "power-law unload through fractional residual crush".to_string(),
+                "rate independence; loading-rate and sub-loop loss belong to the \
+                 FractionalZener/Prony island"
+                    .to_string(),
+            ],
+            ValidityDomain::unconstrained().with("strain", 0.0, self.eps_densify),
+            vec![
+                "zero tension capacity".to_string(),
+                "no rate dependence here (visco island's claim)".to_string(),
+                "no densification hardening beyond eps_densify".to_string(),
+                "closed sub-loops inside a committed excursion are elastic".to_string(),
+            ],
+            0.15,
+        )
+    }
+}

@@ -30,7 +30,7 @@ pub mod visco;
 
 pub use calibrate::{CalibrationFit, calibrate_bilinear};
 pub use elastic::{IsotropicElastic, OrthotropicElastic};
-pub use fiber::{ManderConcrete, MenegottoPintoSteel, Uniaxial};
+pub use fiber::{ManderConcrete, MenegottoPintoSteel, Uniaxial, WoolFelt, WoolFeltState};
 pub use hyper::{Hyperelastic, HyperelasticModel};
 pub use plastic::{J2Plasticity, J2State};
 
