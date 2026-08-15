@@ -542,6 +542,20 @@ enum ResolvedProductionEvent {
     OpenFlight(PatchKinematics),
 }
 
+enum ProductionMidpointInput<'a> {
+    Borrowed(&'a ProductionCouplingStepInput),
+    Reusable(&'a mut ProductionCouplingStepInput),
+}
+
+impl ProductionMidpointInput<'_> {
+    fn as_ref(&self) -> &ProductionCouplingStepInput {
+        match self {
+            Self::Borrowed(input) => input,
+            Self::Reusable(input) => input,
+        }
+    }
+}
+
 impl ResolvedProductionEvent {
     const fn patch_kinematics(&self) -> &PatchKinematics {
         match self {
@@ -1714,10 +1728,10 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
         maximum_accepted_steps: usize,
         mechanics_steps_per_control_interval: usize,
         cx: &Cx<'_>,
-        input_for_checkpoint: impl FnMut(
+        rebind_input_for_checkpoint: impl FnMut(
             &ProductionCouplingCheckpoint,
-        )
-            -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+            &mut Option<ProductionCouplingStepInput>,
+        ) -> Result<(), ProductionCouplingError>,
         mut refresh_midpoint_input: impl FnMut(
             &mut ProductionCouplingStepInput,
             RigidBodyState,
@@ -1729,11 +1743,11 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
             CheckpointValidation::TrustedInternalSuccessor,
-            input_for_checkpoint,
+            rebind_input_for_checkpoint,
             |checkpoint, input| {
                 self.model.step_eventful_profile_midpoint_with(
                     checkpoint,
-                    input,
+                    ProductionMidpointInput::Reusable(input),
                     self.profile,
                     CheckpointValidation::TrustedInternalSuccessor,
                     Some(self),
@@ -2967,7 +2981,7 @@ impl ProductionCouplingModel {
     {
         self.step_eventful_profile_midpoint_with(
             checkpoint,
-            input,
+            ProductionMidpointInput::Borrowed(input),
             profile,
             CheckpointValidation::Required,
             None,
@@ -2979,7 +2993,7 @@ impl ProductionCouplingModel {
     fn step_eventful_profile_midpoint_with<R>(
         &self,
         checkpoint: &ProductionCouplingCheckpoint,
-        input: &ProductionCouplingStepInput,
+        input: ProductionMidpointInput<'_>,
         profile: &ResolvedDiscProfile,
         checkpoint_validation: CheckpointValidation,
         admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
@@ -2992,22 +3006,25 @@ impl ProductionCouplingModel {
             RigidBodyState,
         ) -> Result<(), ProductionCouplingError>,
     {
+        let start_input = input.as_ref();
         let resolved = match checkpoint_validation {
-            CheckpointValidation::Required => self.resolve_production_event(checkpoint, input),
+            CheckpointValidation::Required => {
+                self.resolve_production_event(checkpoint, start_input)
+            }
             CheckpointValidation::TrustedInternalSuccessor => {
-                self.resolve_production_event_after_checkpoint_validation(checkpoint, input)
+                self.resolve_production_event_after_checkpoint_validation(checkpoint, start_input)
             }
         }?;
         let resolved_signed_gap_start_m = signed_patch_gap_m(resolved.patch_kinematics())?;
         let start_time_s = checkpoint.elapsed_time_s();
         let ResolvedProductionEvent::CompliantContact(contact) = resolved else {
             let open = ProductionOpenFlightStepInput {
-                expected_checkpoint_version: input.expected_checkpoint_version,
-                duration_s: input.duration_s,
-                gas_channel: input.gas_channel.clone(),
-                base_step_id: input.base_step_id.clone(),
-                base_load_progress_start: input.base_load_progress_start,
-                base_load_progress_end: input.base_load_progress_end,
+                expected_checkpoint_version: start_input.expected_checkpoint_version,
+                duration_s: start_input.duration_s,
+                gas_channel: start_input.gas_channel.clone(),
+                base_step_id: start_input.base_step_id.clone(),
+                base_load_progress_start: start_input.base_load_progress_start,
+                base_load_progress_end: start_input.base_load_progress_end,
             };
             let (next, receipt) = match checkpoint_validation {
                 CheckpointValidation::Required => self.step_open_flight(checkpoint, &open),
@@ -3030,12 +3047,16 @@ impl ProductionCouplingModel {
 
         let start = self.prepare_contact_channels(
             checkpoint,
-            input,
+            start_input,
             checkpoint.disc_state,
             contact,
             false,
         )?;
-        let half_duration_s = 0.5 * input.duration_s;
+        let duration_s = start_input.duration_s;
+        let base_step_id = start_input.base_step_id.clone();
+        let base_load_progress_start = start_input.base_load_progress_start;
+        let base_load_progress_end = start_input.base_load_progress_end;
+        let half_duration_s = 0.5 * duration_s;
         let predicted_disc_state = RigidBodyIntegrator::new(self.gravity)
             .step(
                 checkpoint.disc_state,
@@ -3053,46 +3074,53 @@ impl ProductionCouplingModel {
             .map_err(ProductionCouplingError::Dynamics)?
             .state_after;
         let start_point = start.patch_kinematics.base_point.point_world;
-        let midpoint_progress = input.base_load_progress_start
-            + 0.5 * (input.base_load_progress_end - input.base_load_progress_start);
+        let midpoint_progress =
+            base_load_progress_start + 0.5 * (base_load_progress_end - base_load_progress_start);
         let predicted_base = self.base_port.propose(
             &checkpoint.base_state,
-            input.base_step_id.clone(),
+            base_step_id.clone(),
             half_duration_s,
             start.normal_force_n,
             start_point,
             start_point,
             start_point,
-            input.base_load_progress_start,
+            base_load_progress_start,
             midpoint_progress,
         )?;
         let predicted_base_state = self
             .base_port
             .accept(&checkpoint.base_state, predicted_base)?;
 
-        let mut midpoint_input = input.clone();
+        let mut owned_midpoint_input;
+        let midpoint_input = match input {
+            ProductionMidpointInput::Borrowed(input) => {
+                owned_midpoint_input = input.clone();
+                &mut owned_midpoint_input
+            }
+            ProductionMidpointInput::Reusable(input) => input,
+        };
         midpoint_input.time_s += half_duration_s;
         if let Some(admitted) = admitted {
             admitted.bind_contact_at_states(
-                &mut midpoint_input,
+                &mut *midpoint_input,
                 predicted_disc_state,
                 &predicted_base_state,
                 cx,
             )?;
         } else {
             self.bind_horizontal_plane_axisymmetric_profile_contact_at_states(
-                &mut midpoint_input,
+                &mut *midpoint_input,
                 profile,
                 predicted_disc_state,
                 &predicted_base_state,
                 cx,
             )?;
         }
-        refresh_midpoint_input(&mut midpoint_input, predicted_disc_state)?;
-        validate_step_identity(&self.identity, &midpoint_input)?;
+        refresh_midpoint_input(&mut *midpoint_input, predicted_disc_state)?;
+        validate_step_identity(&self.identity, &*midpoint_input)?;
         let midpoint_contact = self.resolve_active_contact_from_patch(
             checkpoint,
-            &midpoint_input,
+            &*midpoint_input,
             midpoint_input.patch.clone(),
         )?;
         if select_event_branch(
@@ -3106,7 +3134,7 @@ impl ProductionCouplingModel {
         }
         let midpoint = self.prepare_contact_channels(
             checkpoint,
-            &midpoint_input,
+            &*midpoint_input,
             predicted_disc_state,
             midpoint_contact,
             true,
@@ -3122,21 +3150,21 @@ impl ProductionCouplingModel {
                         .orientation()
                         .rotate_world_to_body(midpoint.total_moment_about_com_world_n_m),
                 },
-                input.duration_s,
+                duration_s,
             )
             .map_err(ProductionCouplingError::Dynamics)?;
         let force_point = midpoint.patch_kinematics.base_point.point_world;
         let end_point = force_point.scale(2.0).sub(start_point);
         let base = self.base_port.propose(
             &checkpoint.base_state,
-            input.base_step_id.clone(),
-            input.duration_s,
+            base_step_id,
+            duration_s,
             midpoint.normal_force_n,
             start_point,
             force_point,
             end_point,
-            input.base_load_progress_start,
-            input.base_load_progress_end,
+            base_load_progress_start,
+            base_load_progress_end,
         )?;
         let (next, receipt) = self.commit_contact_step(checkpoint, midpoint, base, rigid_step)?;
         let end_time_s = next.elapsed_time_s();
@@ -3321,7 +3349,7 @@ impl ProductionCouplingModel {
         start_checkpoint: ProductionCouplingCheckpoint,
         maximum_accepted_steps: usize,
         mechanics_steps_per_control_interval: usize,
-        input_for_checkpoint: F,
+        mut input_for_checkpoint: F,
         observe_modal_audio_step: O,
     ) -> Result<ProductionControlTrajectory, ProductionCouplingError>
     where
@@ -3335,7 +3363,10 @@ impl ProductionCouplingModel {
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
             CheckpointValidation::Required,
-            input_for_checkpoint,
+            |checkpoint, reusable_input| {
+                *reusable_input = Some(input_for_checkpoint(checkpoint)?);
+                Ok(())
+            },
             |checkpoint, input| self.step_eventful_compliant(checkpoint, input),
             observe_modal_audio_step,
         )
@@ -3350,7 +3381,7 @@ impl ProductionCouplingModel {
         mechanics_steps_per_control_interval: usize,
         profile: &ResolvedDiscProfile,
         cx: &Cx<'_>,
-        input_for_checkpoint: F,
+        mut input_for_checkpoint: F,
         mut refresh_midpoint_input: R,
         observe_modal_audio_step: O,
     ) -> Result<ProductionControlTrajectory, ProductionCouplingError>
@@ -3369,7 +3400,10 @@ impl ProductionCouplingModel {
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
             CheckpointValidation::Required,
-            input_for_checkpoint,
+            |checkpoint, reusable_input| {
+                *reusable_input = Some(input_for_checkpoint(checkpoint)?);
+                Ok(())
+            },
             |checkpoint, input| {
                 self.step_eventful_profile_midpoint(
                     checkpoint,
@@ -3396,10 +3430,11 @@ impl ProductionCouplingModel {
     where
         F: FnMut(
             &ProductionCouplingCheckpoint,
-        ) -> Result<ProductionCouplingStepInput, ProductionCouplingError>,
+            &mut Option<ProductionCouplingStepInput>,
+        ) -> Result<(), ProductionCouplingError>,
         S: FnMut(
             &ProductionCouplingCheckpoint,
-            &ProductionCouplingStepInput,
+            &mut ProductionCouplingStepInput,
         ) -> Result<
             (ProductionCouplingCheckpoint, ProductionTrajectoryStep),
             ProductionCouplingError,
@@ -3430,6 +3465,7 @@ impl ProductionCouplingModel {
         let mut accepted_mechanics_steps = 0_usize;
         let mut preceding_branch = None;
         let mut preceding_start_time_s = start_checkpoint.elapsed_time_s();
+        let mut reusable_input = None;
         let termination = loop {
             if accepted_mechanics_steps == maximum_accepted_steps {
                 break ProductionEventTrajectoryTermination::StepLimitReached {
@@ -3437,16 +3473,22 @@ impl ProductionCouplingModel {
                 };
             }
             let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
-            let input = match input_for_checkpoint(&last_accepted_checkpoint) {
-                Ok(input) => input,
-                Err(error) => {
-                    break ProductionEventTrajectoryTermination::Refused {
-                        attempted_checkpoint_version,
-                        error,
-                    };
-                }
+            if let Err(error) = input_for_checkpoint(&last_accepted_checkpoint, &mut reusable_input)
+            {
+                break ProductionEventTrajectoryTermination::Refused {
+                    attempted_checkpoint_version,
+                    error,
+                };
+            }
+            let Some(input) = reusable_input.as_mut() else {
+                break ProductionEventTrajectoryTermination::Refused {
+                    attempted_checkpoint_version,
+                    error: ProductionCouplingError::InvalidInput {
+                        field: "control trajectory input provider",
+                    },
+                };
             };
-            let (next_checkpoint, step) = match advance(&last_accepted_checkpoint, &input) {
+            let (next_checkpoint, step) = match advance(&last_accepted_checkpoint, input) {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     break ProductionEventTrajectoryTermination::Refused {
@@ -3496,24 +3538,31 @@ impl ProductionCouplingModel {
         // key so the finite-footprint classifier can evaluate that endpoint.
         if let Some(previous) = preceding_branch {
             let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
-            let endpoint = input_for_checkpoint(&last_accepted_checkpoint).and_then(|input| {
-                let resolved = match checkpoint_validation {
-                    CheckpointValidation::Required => {
-                        self.resolve_production_event(&last_accepted_checkpoint, &input)
-                    }
-                    CheckpointValidation::TrustedInternalSuccessor => self
-                        .resolve_production_event_after_checkpoint_validation(
-                            &last_accepted_checkpoint,
-                            &input,
-                        ),
-                };
-                resolved.and_then(|resolved| {
-                    Ok((
-                        resolved.branch(),
-                        signed_patch_gap_m(resolved.patch_kinematics())?,
-                    ))
-                })
-            });
+            let endpoint = input_for_checkpoint(&last_accepted_checkpoint, &mut reusable_input)
+                .and_then(|()| {
+                    let input =
+                        reusable_input
+                            .as_ref()
+                            .ok_or(ProductionCouplingError::InvalidInput {
+                                field: "control trajectory input provider",
+                            })?;
+                    let resolved = match checkpoint_validation {
+                        CheckpointValidation::Required => {
+                            self.resolve_production_event(&last_accepted_checkpoint, input)
+                        }
+                        CheckpointValidation::TrustedInternalSuccessor => self
+                            .resolve_production_event_after_checkpoint_validation(
+                                &last_accepted_checkpoint,
+                                input,
+                            ),
+                    };
+                    resolved.and_then(|resolved| {
+                        Ok((
+                            resolved.branch(),
+                            signed_patch_gap_m(resolved.patch_kinematics())?,
+                        ))
+                    })
+                });
             match endpoint {
                 Ok((terminal_branch, resolved_signed_gap_end_m)) => {
                     if let Some(active) = &mut accumulator {

@@ -2747,7 +2747,7 @@ struct FixtureProductionMechanics {
     template: ProductionCouplingStepInput,
 }
 
-fn u64_decimal<'a>(mut value: u64, storage: &'a mut [u8; 20]) -> &'a str {
+fn u64_decimal(mut value: u64, storage: &mut [u8; 20]) -> &str {
     let mut first = storage.len();
     loop {
         first -= 1;
@@ -2796,9 +2796,21 @@ impl FixtureProductionMechanics {
         cx: &Cx<'_>,
     ) -> Result<ProductionCouplingStepInput, crate::production_coupling::ProductionCouplingError>
     {
+        let mut input = self.template.clone();
+        self.rebind_input_for_checkpoint_with(profile, admitted, checkpoint, &mut input, cx)?;
+        Ok(input)
+    }
+
+    fn rebind_input_for_checkpoint_with(
+        &self,
+        profile: &ResolvedDiscProfile,
+        admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &mut ProductionCouplingStepInput,
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::production_coupling::ProductionCouplingError> {
         use crate::production_coupling::ProductionCouplingError;
 
-        let mut input = self.template.clone();
         let version = checkpoint.committed_version;
         let interval = version
             .checked_add(1)
@@ -2811,6 +2823,7 @@ impl FixtureProductionMechanics {
             .ok_or(ProductionCouplingError::InvalidInput {
                 field: "cinematic contact interval identity overflow",
             })?;
+        input.duration_s = self.template.duration_s;
         input.expected_checkpoint_version = version;
         input.time_s = checkpoint.elapsed_time_s();
         input.normal.time_s = input.time_s;
@@ -2867,21 +2880,21 @@ impl FixtureProductionMechanics {
         input.base_load_progress_end = input.time_s + input.duration_s;
 
         if let Some(admitted) = admitted {
-            admitted.bind_contact_after_checkpoint_validation(&mut input, checkpoint, cx)?;
+            admitted.bind_contact_after_checkpoint_validation(input, checkpoint, cx)?;
         } else {
             self.model
                 .bind_horizontal_plane_axisymmetric_profile_contact(
-                    &mut input, profile, checkpoint, cx,
+                    input, profile, checkpoint, cx,
                 )?;
         }
         self.refresh_state_dependent_input_with(
             profile,
             admitted,
-            &mut input,
+            input,
             checkpoint.disc_state,
             cx,
         )?;
-        Ok(input)
+        Ok(())
     }
 
     fn refresh_state_dependent_input_with(
@@ -3004,7 +3017,16 @@ impl FixtureProductionMechanics {
             maximum_steps,
             steps_per_control,
             cx,
-            |checkpoint| self.input_for_checkpoint_with(profile, Some(admitted), checkpoint, cx),
+            |checkpoint, reusable_input| {
+                let input = reusable_input.get_or_insert_with(|| self.template.clone());
+                self.rebind_input_for_checkpoint_with(
+                    profile,
+                    Some(admitted),
+                    checkpoint,
+                    input,
+                    cx,
+                )
+            },
             |input, state| {
                 self.refresh_state_dependent_input_with(profile, Some(admitted), input, state, cx)
             },
