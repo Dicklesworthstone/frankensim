@@ -16,6 +16,10 @@
 #   --negative CASE        one named hostile twin (or 'list')
 #   --replay MANIFEST_DIR  re-verify a retained smoke bundle's manifest
 #                          against its artifacts (distinct output root)
+#   --replay-render SRC    re-render from SRC bundle's retained canonical
+#                          trajectory + listening master (identities taken
+#                          from SRC's manifest; mechanics+audio skipped;
+#                          measured ~2.5 min vs ~8 min full smoke)
 #   --output-dir DIR       fresh artifact root (repo- or TMP-contained)
 #
 # EXIT CLASSES: 0 ok; 40 usage; 41 pipeline/production failure;
@@ -66,6 +70,9 @@ while [ $# -gt 0 ]; do
     --replay)
       [ $# -ge 2 ] || die "$EXIT_USAGE" "--replay needs a manifest directory"
       MODE="replay"; REPLAY_DIR="$2"; shift 2 ;;
+    --replay-render)
+      [ $# -ge 2 ] || die "$EXIT_USAGE" "--replay-render needs a source bundle directory"
+      MODE="replay-render"; REPLAY_DIR="$2"; shift 2 ;;
     --output-dir)
       [ $# -ge 2 ] || die "$EXIT_USAGE" "--output-dir needs a value"
       OUTPUT_DIR="$2"; shift 2 ;;
@@ -102,17 +109,23 @@ if not os.path.isfile(manifest_path):
     print(f"verify: manifest missing at {manifest_path}", file=sys.stderr)
     sys.exit(42)
 manifest = json.load(open(manifest_path))
-if "critique" not in manifest.get("schema", ""):
-    print(f"verify: unexpected schema {manifest.get('schema')!r}", file=sys.stderr)
-    sys.exit(42)
-# `status` is the honest evidence class, not a completion flag; the
-# production vocabulary today is estimate-only. A bundle claiming a
-# stronger class than the pipeline can mint is exactly the promotion
+# `status` is the honest evidence class, not a completion flag, and it
+# PAIRS with the schema: a physics run may not claim replay provenance
+# and a replay may not claim a fresh physics run. A bundle claiming a
+# stronger class than its pipeline can mint is exactly the promotion
 # lie this verifier exists to catch.
-if manifest.get("status") != "estimate-only-physics-render":
+ADMITTED = {
+    "frankensim-euler-disc-production-critique-v1": "estimate-only-physics-render",
+    "frankensim-euler-canonical-media-render-v1": "estimate-only-canonical-media-replay",
+}
+schema = manifest.get("schema", "")
+if schema not in ADMITTED:
+    print(f"verify: unexpected schema {schema!r}", file=sys.stderr)
+    sys.exit(42)
+if manifest.get("status") != ADMITTED[schema]:
     print(
-        f"verify: status {manifest.get('status')!r} is outside the admitted "
-        "evidence vocabulary (estimate-only-physics-render)",
+        f"verify: status {manifest.get('status')!r} does not pair with "
+        f"schema {schema!r} (expected {ADMITTED[schema]!r})",
         file=sys.stderr,
     )
     sys.exit(42)
@@ -203,6 +216,26 @@ case "$MODE" in
   replay)
     [ -d "$REPLAY_DIR" ] || die "$EXIT_USAGE" "replay dir not found: $REPLAY_DIR"
     verify_bundle "$REPLAY_DIR" || exit "$EXIT_VERIFY"
+    exit "$EXIT_OK" ;;
+
+  replay-render)
+    [ -d "$REPLAY_DIR" ] || die "$EXIT_USAGE" "source bundle not found: $REPLAY_DIR"
+    verify_bundle "$REPLAY_DIR" >/dev/null || die "$EXIT_VERIFY" "source bundle fails coherence; refusing to replay from it"
+    TRAJ="$REPLAY_DIR/trajectory/euler-trajectory.fset"
+    MASTER="$REPLAY_DIR/sound/physical-listening-master.pcm24.wav"
+    [ -f "$TRAJ" ] || die "$EXIT_VERIFY" "source bundle retains no canonical trajectory"
+    TRAJ_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mechanics"]["trajectory_identity"])' "$REPLAY_DIR/critique-manifest.json")"       || die "$EXIT_VERIFY" "source manifest carries no trajectory identity"
+    MASTER_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["audio"]["wav_identity"])' "$REPLAY_DIR/critique-manifest.json")"       || die "$EXIT_VERIFY" "source manifest carries no listening-master identity"
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    [ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$REPO_ROOT/.e2e-out/cine-replay-$STAMP-$$"
+    [ -e "$OUTPUT_DIR" ] && die "$EXIT_USAGE" "output dir exists (no reuse): $OUTPUT_DIR"
+    BIN="$(fixture_binary)"
+    echo "replay-render: from $REPLAY_DIR (identities from its manifest), output $OUTPUT_DIR"
+    if ! timeout "$SMOKE_BUDGET_SECONDS" nice -n 15 "$BIN"         --output "$OUTPUT_DIR" "${SMOKE_ARGS[@]}"         --canonical-trajectory "$TRAJ" --canonical-trajectory-identity "$TRAJ_ID"         --canonical-listening-master "$MASTER"         --canonical-listening-master-identity "$MASTER_ID"; then
+      die "$EXIT_PIPELINE" "replay-render pipeline failed or exceeded the budget"
+    fi
+    verify_bundle "$OUTPUT_DIR" || exit "$EXIT_VERIFY"
+    echo "replay-render PASS: bundle at $OUTPUT_DIR"
     exit "$EXIT_OK" ;;
 
   negative)
