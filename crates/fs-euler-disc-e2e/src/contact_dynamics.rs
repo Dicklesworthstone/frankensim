@@ -21,8 +21,8 @@ use fs_geom::{Chart, Point3, Vec3 as GeomVec3};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_rep_frep::{
     AxisymmetricChart, AxisymmetricCurvatureError, AxisymmetricIdentity, AxisymmetricMassError,
-    AxisymmetricMassProperties, AxisymmetricPrincipalCurvatureEstimate,
-    AxisymmetricSupportAuthority, AxisymmetricSupportError,
+    AxisymmetricMassProperties, AxisymmetricPrincipalCurvatureEstimate, AxisymmetricQuerySession,
+    AxisymmetricSupportAuthority, AxisymmetricSupportError, AxisymmetricSupportPoint,
 };
 use fs_tribo::{
     ContactFrame, FrictionLaw, FrictionRegime, InputAuthority, InterfaceSystemRef, TangentialSlip,
@@ -305,10 +305,10 @@ pub struct ProfileContactGeometry {
 
 /// One coherent profile support plus its locally resolved smooth curvature.
 ///
-/// The curvature API independently replays support selection from the same
-/// body-frame direction before evaluating local differential geometry. The
-/// feature equality check in [`profile_contact_patch_geometry`] prevents a
-/// contact arm from being paired with curvature from another feature. For the
+/// The checked public path independently replays support selection from the
+/// same body-frame direction before evaluating local differential geometry.
+/// An admitted query session instead keeps the selected support private while
+/// extracting curvature, avoiding both replay and caller substitution. For the
 /// horizontal planar base owned by this module, these disc curvatures are also
 /// the relative-gap curvatures because the base contributes zero curvature.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -550,6 +550,35 @@ pub fn profile_contact_geometry(
             cx,
         )
         .map_err(|detail| ContactDynamicsError::ProfileSupportRefusal { detail })?;
+    profile_contact_geometry_from_support(support, mass, pose)
+}
+
+/// Uses one admitted chart session for a support-only production query.
+pub(crate) fn profile_contact_geometry_from_query_session(
+    session: &AxisymmetricQuerySession<'_>,
+    mass: AxisymmetricMassProperties,
+    pose: Pose,
+    cx: &Cx<'_>,
+) -> Result<ProfileContactGeometry, ContactDynamicsError> {
+    let body_ground_direction = world_to_body(pose.orientation(), GROUND_NORMAL)?;
+    let support = session
+        .minimum_support_point(
+            GeomVec3::new(
+                body_ground_direction.x,
+                body_ground_direction.y,
+                body_ground_direction.z,
+            ),
+            cx,
+        )
+        .map_err(|detail| ContactDynamicsError::ProfileSupportRefusal { detail })?;
+    profile_contact_geometry_from_support(support, mass, pose)
+}
+
+fn profile_contact_geometry_from_support(
+    support: AxisymmetricSupportPoint,
+    mass: AxisymmetricMassProperties,
+    pose: Pose,
+) -> Result<ProfileContactGeometry, ContactDynamicsError> {
     let relative_body = point_difference(support.point, mass.center_of_mass)?;
     let radius_world_m = pose.orientation().rotate_body_to_world(relative_body);
     finite_vec(radius_world_m, "profile_radius_world_m")?;
@@ -571,6 +600,51 @@ pub fn profile_contact_geometry(
         support_source_feature: support.source_feature,
         support_authority: support.authority,
         mass_properties: mass,
+    })
+}
+
+/// Constructs one production patch from the session's fused support/curvature query.
+///
+/// Support-search refusals retain the same outer error variant as
+/// [`profile_contact_geometry`]; post-support curvature and cancellation
+/// refusals retain the checked patch path's curvature variant. The geometry
+/// arithmetic is shared with the checked support path.
+pub(crate) fn profile_contact_patch_geometry_from_query_session(
+    session: &AxisymmetricQuerySession<'_>,
+    profile_identity: AxisymmetricIdentity,
+    mass: AxisymmetricMassProperties,
+    pose: Pose,
+    cx: &Cx<'_>,
+) -> Result<ProfileContactPatchGeometry, ContactDynamicsError> {
+    let body_ground_direction = world_to_body(pose.orientation(), GROUND_NORMAL)?;
+    let (support_point, curvature) = session
+        .minimum_support_point_with_principal_curvatures(
+            GeomVec3::new(
+                body_ground_direction.x,
+                body_ground_direction.y,
+                body_ground_direction.z,
+            ),
+            cx,
+        )
+        .map_err(|detail| match detail {
+            AxisymmetricCurvatureError::Support(detail) => {
+                ContactDynamicsError::ProfileSupportRefusal { detail }
+            }
+            detail => ContactDynamicsError::ProfileCurvatureRefusal { detail },
+        })?;
+    let support = profile_contact_geometry_from_support(support_point, mass, pose)?;
+    if curvature.source_feature != support.support_source_feature {
+        return Err(
+            ContactDynamicsError::ProfileSupportCurvatureFeatureMismatch {
+                support_feature: support.support_source_feature,
+                curvature_feature: curvature.source_feature,
+            },
+        );
+    }
+    Ok(ProfileContactPatchGeometry {
+        support,
+        curvature,
+        profile_identity,
     })
 }
 

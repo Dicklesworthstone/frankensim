@@ -4,9 +4,9 @@
 //! Estimate-only: it does not calibrate a disc, rank air correlations, resolve
 //! impact, supply thin-gap pressure, or claim a resolved/as-built base.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_contact::normal_patch::{NormalPatchEmbedState, NormalPatchPort, NormalPatchReceipt};
 use fs_couple::{StableId, modal_acoustic_time::ModalAcousticState};
 use fs_exec::Cx;
@@ -14,7 +14,8 @@ use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 use fs_rep_frep::{
-    AxisymmetricCurvatureAuthority, AxisymmetricIdentity, AxisymmetricMassProperties,
+    AxisymmetricCurvatureAuthority, AxisymmetricError, AxisymmetricIdentity,
+    AxisymmetricMassProperties, AxisymmetricQuerySession, AxisymmetricSupportError,
 };
 use fs_tribo::{
     InputAuthority, InterfaceSystemRef,
@@ -39,7 +40,8 @@ use crate::{
     },
     contact_dynamics::{
         ContactDynamicsError, ProfileContactGeometry, ProfileContactPatchGeometry,
-        profile_contact_geometry, profile_contact_patch_geometry_from_mass, profile_mass_to_mbd,
+        profile_contact_geometry_from_query_session, profile_contact_patch_geometry_from_mass,
+        profile_contact_patch_geometry_from_query_session, profile_mass_to_mbd,
     },
     external_air::{
         EulerDiscBodyFrame, EulerDiscExteriorState, EulerExternalAirCandidate,
@@ -279,12 +281,14 @@ pub struct ProductionCouplingModel {
 /// Run-scoped proof that one immutable profile and mechanics model agree.
 ///
 /// Construction revalidates the public `ResolvedDiscProfile` and retains the
-/// freshly integrated properties. Dynamic support and curvature remain live
-/// queries; only immutable mass integration is trusted after admission.
+/// freshly integrated properties plus one admitted chart-query session.
+/// Dynamic support and curvature remain live, cancellable local queries, but
+/// they do not repeat immutable whole-chart construction validation.
 pub(crate) struct AdmittedAxisymmetricProfile<'run> {
     model: &'run ProductionCouplingModel,
     profile: &'run ResolvedDiscProfile,
     mass_properties: AxisymmetricMassProperties,
+    query_session: AxisymmetricQuerySession<'run>,
 }
 
 #[derive(Clone, Copy)]
@@ -1637,8 +1641,9 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
         disc_state: RigidBodyState,
         cx: &Cx<'_>,
     ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
-        profile_contact_patch_geometry_from_mass(
-            &self.profile.chart,
+        profile_contact_patch_geometry_from_query_session(
+            &self.query_session,
+            self.profile.identity,
             self.mass_properties,
             disc_state.pose(),
             cx,
@@ -1695,7 +1700,12 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
         pose: Pose,
         cx: &Cx<'_>,
     ) -> Result<ProfileContactGeometry, ContactDynamicsError> {
-        profile_contact_geometry(&self.profile.chart, self.mass_properties, pose, cx)
+        profile_contact_geometry_from_query_session(
+            &self.query_session,
+            self.mass_properties,
+            pose,
+            cx,
+        )
     }
 
     pub(crate) fn run_eventful_profile_midpoint_control_trajectory_observed(
@@ -1767,10 +1777,21 @@ impl ProductionCouplingModel {
         if disc_mass_properties != self.disc_mass_properties {
             return Err(ProductionCouplingError::ProfileModelMassMismatch);
         }
+        let query_session: AxisymmetricQuerySession<'run> =
+            profile.chart.admit_query_session(cx).map_err(|detail| {
+                let detail = match detail {
+                    AxisymmetricError::Cancelled => AxisymmetricSupportError::Cancelled,
+                    detail => AxisymmetricSupportError::InvalidChart(detail),
+                };
+                ProductionCouplingError::ProfileContact(
+                    ContactDynamicsError::ProfileSupportRefusal { detail },
+                )
+            })?;
         Ok(AdmittedAxisymmetricProfile {
             model: self,
             profile,
             mass_properties,
+            query_session,
         })
     }
 
@@ -4286,13 +4307,13 @@ fn production_checkpoint_fingerprint(
     gas_channel_state: &GasChannelState,
     base_state: &ProductionBaseCheckpoint,
 ) -> ContentHash {
-    hash_domain(
-        "fs-euler-disc-e2e/production-coupling-checkpoint/v1",
-        format!(
-            "{identity:?}|{committed_version}|{disc_state:?}|{normal_state:?}|{tangential_state:?}|{rolling_state:?}|{gas_channel_state:?}|{base_state:?}"
-        )
-        .as_bytes(),
+    let mut hasher = DomainHasher::new("fs-euler-disc-e2e/production-coupling-checkpoint/v1");
+    write!(
+        hasher,
+        "{identity:?}|{committed_version}|{disc_state:?}|{normal_state:?}|{tangential_state:?}|{rolling_state:?}|{gas_channel_state:?}|{base_state:?}"
     )
+    .expect("DomainHasher's fmt::Write implementation is infallible");
+    hasher.finalize()
 }
 
 fn validate_step_identity(

@@ -2747,6 +2747,36 @@ struct FixtureProductionMechanics {
     template: ProductionCouplingStepInput,
 }
 
+fn u64_decimal<'a>(mut value: u64, storage: &'a mut [u8; 20]) -> &'a str {
+    let mut first = storage.len();
+    loop {
+        first -= 1;
+        storage[first] = b'0' + u8::try_from(value % 10).expect("one decimal digit");
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    core::str::from_utf8(&storage[first..]).expect("decimal digits are UTF-8")
+}
+
+fn overwrite_prefixed_decimal(target: &mut String, prefix: &str, digits: &str) {
+    target.clear();
+    target.push_str(prefix);
+    target.push_str(digits);
+}
+
+fn prefixed_decimal<'a>(prefix: &str, digits: &str, storage: &'a mut [u8; 64]) -> &'a str {
+    let length = prefix
+        .len()
+        .checked_add(digits.len())
+        .expect("bounded cinematic identity length");
+    assert!(length <= storage.len(), "bounded cinematic identity length");
+    storage[..prefix.len()].copy_from_slice(prefix.as_bytes());
+    storage[prefix.len()..length].copy_from_slice(digits.as_bytes());
+    core::str::from_utf8(&storage[..length]).expect("cinematic identity is UTF-8")
+}
+
 impl FixtureProductionMechanics {
     /// Rebuild every state-dependent card for one accepted checkpoint.
     ///
@@ -2785,33 +2815,54 @@ impl FixtureProductionMechanics {
         input.time_s = checkpoint.elapsed_time_s();
         input.normal.time_s = input.time_s;
         input.normal.iteration = contact_interval;
-        input.normal.identity.sample_id = format!("cinematic/contact-sample-{contact_interval}");
-        input.tangential.request_id = format!("cinematic/tangent-step-{contact_interval}");
-        let patch_id = input.patch.patch.patch_identity.as_str().to_owned();
-        input.tangential.work_ownership = GeneralizedWorkOwnership::new(
-            patch_id.clone(),
-            contact_interval.to_string(),
-            "longitudinal",
-            "lateral",
-            "spin",
-        )
-        .map_err(|_| ProductionCouplingError::InvalidInput {
-            field: "cinematic tangential work identity",
-        })?;
-        input.rolling.ownership = RollingWorkOwnership::new(
-            patch_id,
-            format!("cinematic/rolling-interval-{contact_interval}"),
-            "contour",
-            RollingLossChannel::ContourDeformation,
-        )
-        .map_err(|_| ProductionCouplingError::InvalidInput {
-            field: "cinematic rolling work identity",
-        })?;
+        let mut contact_decimal_storage = [0_u8; 20];
+        let contact_decimal = u64_decimal(contact_interval, &mut contact_decimal_storage);
+        overwrite_prefixed_decimal(
+            &mut input.normal.identity.sample_id,
+            "cinematic/contact-sample-",
+            contact_decimal,
+        );
+        overwrite_prefixed_decimal(
+            &mut input.tangential.request_id,
+            "cinematic/tangent-step-",
+            contact_decimal,
+        );
+        let patch_id = input.patch.patch.patch_identity.as_str();
+        input
+            .tangential
+            .work_ownership
+            .retarget(patch_id, contact_decimal, "longitudinal", "lateral", "spin")
+            .map_err(|_| ProductionCouplingError::InvalidInput {
+                field: "cinematic tangential work identity",
+            })?;
+        let mut rolling_interval_storage = [0_u8; 64];
+        let rolling_interval = prefixed_decimal(
+            "cinematic/rolling-interval-",
+            contact_decimal,
+            &mut rolling_interval_storage,
+        );
+        input
+            .rolling
+            .ownership
+            .retarget(
+                patch_id,
+                rolling_interval,
+                "contour",
+                RollingLossChannel::ContourDeformation,
+            )
+            .map_err(|_| ProductionCouplingError::InvalidInput {
+                field: "cinematic rolling work identity",
+            })?;
         match &mut input.gas_channel {
             GasChannelStepInput::ExteriorFreeGas { exchange_key, .. }
             | GasChannelStepInput::ThinGap { exchange_key, .. } => *exchange_key = interval,
         }
-        input.base_step_id = format!("cinematic/base-step-{interval}");
+        let mut interval_decimal_storage = [0_u8; 20];
+        overwrite_prefixed_decimal(
+            &mut input.base_step_id,
+            "cinematic/base-step-",
+            u64_decimal(interval, &mut interval_decimal_storage),
+        );
         input.base_load_progress_start = input.time_s;
         input.base_load_progress_end = input.time_s + input.duration_s;
 
@@ -10569,6 +10620,96 @@ mod tests {
             );
             operation(&cx)
         })
+    }
+
+    #[test]
+    fn g0_cinematic_dynamic_step_identities_retarget_exactly_and_atomically() {
+        let patch_id = "cinematic/profile-patch/exact";
+        let mut normal_sample_id = "cinematic/contact-sample-1".to_owned();
+        let mut tangential_request_id = "cinematic/tangent-step-1".to_owned();
+        let mut tangential_ownership =
+            GeneralizedWorkOwnership::new(patch_id, "1", "longitudinal", "lateral", "spin")
+                .expect("initial tangential owner");
+        let mut rolling_ownership = RollingWorkOwnership::new(
+            patch_id,
+            "cinematic/rolling-interval-1",
+            "contour",
+            RollingLossChannel::ContourDeformation,
+        )
+        .expect("initial rolling owner");
+        let mut base_step_id = "cinematic/base-step-1".to_owned();
+
+        let mut contact_storage = [0_u8; 20];
+        let contact_digits = u64_decimal(u64::MAX, &mut contact_storage);
+        overwrite_prefixed_decimal(
+            &mut normal_sample_id,
+            "cinematic/contact-sample-",
+            contact_digits,
+        );
+        overwrite_prefixed_decimal(
+            &mut tangential_request_id,
+            "cinematic/tangent-step-",
+            contact_digits,
+        );
+        tangential_ownership
+            .retarget(patch_id, contact_digits, "longitudinal", "lateral", "spin")
+            .expect("retarget tangential owner");
+        let mut rolling_storage = [0_u8; 64];
+        let rolling_interval = prefixed_decimal(
+            "cinematic/rolling-interval-",
+            contact_digits,
+            &mut rolling_storage,
+        );
+        rolling_ownership
+            .retarget(
+                patch_id,
+                rolling_interval,
+                "contour",
+                RollingLossChannel::ContourDeformation,
+            )
+            .expect("retarget rolling owner");
+        let mut interval_storage = [0_u8; 20];
+        overwrite_prefixed_decimal(
+            &mut base_step_id,
+            "cinematic/base-step-",
+            u64_decimal(u64::MAX - 1, &mut interval_storage),
+        );
+
+        assert_eq!(
+            normal_sample_id,
+            "cinematic/contact-sample-18446744073709551615"
+        );
+        assert_eq!(
+            tangential_request_id,
+            "cinematic/tangent-step-18446744073709551615"
+        );
+        assert_eq!(tangential_ownership.patch_id(), patch_id);
+        assert_eq!(tangential_ownership.interval_id(), "18446744073709551615");
+        assert_eq!(
+            rolling_ownership.interval_id(),
+            "cinematic/rolling-interval-18446744073709551615"
+        );
+        assert_eq!(base_step_id, "cinematic/base-step-18446744073709551614");
+
+        let tangential_before_refusal = tangential_ownership.clone();
+        assert!(
+            tangential_ownership
+                .retarget("", "2", "longitudinal", "lateral", "spin")
+                .is_err()
+        );
+        assert_eq!(tangential_ownership, tangential_before_refusal);
+        let rolling_before_refusal = rolling_ownership.clone();
+        assert!(
+            rolling_ownership
+                .retarget(
+                    patch_id,
+                    "",
+                    "contour",
+                    RollingLossChannel::ContourDeformation,
+                )
+                .is_err()
+        );
+        assert_eq!(rolling_ownership, rolling_before_refusal);
     }
 
     #[test]
