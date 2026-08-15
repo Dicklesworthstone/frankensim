@@ -8,7 +8,8 @@
 use fs_material::tensor::{contract, rotate, rotation};
 use fs_material::{
     Hyperelastic, HyperelasticModel, IsotropicElastic, J2Plasticity, ManderConcrete,
-    MenegottoPintoSteel, OrthotropicElastic, SmallStrainLaw, Uniaxial, Voigt, calibrate_bilinear,
+    MenegottoPintoSteel, OrthotropicElastic, SmallStrainLaw, Uniaxial, Voigt, WoolFelt,
+    calibrate_bilinear,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -160,10 +161,28 @@ fn mt_001_consistent_tangent_gate_every_law() {
         mp_state = mp.update_state(eps, &mp_state);
         mander_state = mander.update_state(eps.abs(), &mander_state);
     }
+    // Wool felt (music 87zbd) through a compress/relax/recompress history.
+    // Probes stay strictly interior to each committed branch so the FD
+    // window never straddles the envelope/unload kink (the same care the
+    // Mander path takes via distinct path values).
+    let felt = WoolFelt::new(2.0e6, 0.2, 2.5, 3.0, 0.25, 0.7).expect("felt");
+    let mut felt_state = felt.initial_state();
+    let felt_path = [0.05, 0.15, 0.30, 0.22, 0.12, 0.30, 0.45, 0.20, 0.50];
+    for &eps in &felt_path {
+        let tan = felt.tangent(eps, &felt_state);
+        let h = 1e-9;
+        let fd = (felt.stress(eps + h, &felt_state) - felt.stress(eps - h, &felt_state)) / (2.0 * h);
+        let scale = tan.abs().max(1e5);
+        assert!(
+            (tan - fd).abs() / scale < 1e-4,
+            "wool-felt tangent {tan} vs FD {fd} at eps={eps}"
+        );
+        felt_state = felt.update_state(eps, &felt_state);
+    }
     verdict(
         "mt-001",
         "FD tangent gate green for iso/ortho elastic, J2 through a cycle, NH/MR 9x9, \
-         Menegotto-Pinto + Mander through cyclic histories",
+         Menegotto-Pinto + Mander + wool felt through cyclic histories",
     );
 }
 
