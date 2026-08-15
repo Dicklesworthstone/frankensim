@@ -2816,7 +2816,7 @@ impl FixtureProductionMechanics {
         input.base_load_progress_end = input.time_s + input.duration_s;
 
         if let Some(admitted) = admitted {
-            admitted.bind_contact(&mut input, checkpoint, cx)?;
+            admitted.bind_contact_after_checkpoint_validation(&mut input, checkpoint, cx)?;
         } else {
             self.model
                 .bind_horizontal_plane_axisymmetric_profile_contact(
@@ -10875,7 +10875,7 @@ mod tests {
                 .model
                 .run_eventful_profile_midpoint_control_trajectory_observed(
                     production.checkpoint.clone(),
-                    1,
+                    3,
                     1,
                     &profile,
                     cx,
@@ -10898,13 +10898,33 @@ mod tests {
                     &profile,
                     &admitted,
                     production.checkpoint.clone(),
-                    1,
+                    3,
                     1,
                     cx,
                     |_| {},
                 )
                 .expect("admitted midpoint step");
             assert_eq!(checked, sealed, "G0/G5 checked/admitted bit identity");
+            production
+                .model
+                .validate_checkpoint(&sealed.last_accepted_checkpoint)
+                .expect("admitted successor remains canonically sealed");
+            let mut forged_start = production.checkpoint.clone();
+            forged_start.committed_version += 1;
+            assert_eq!(
+                production
+                    .run_admitted_control_trajectory(
+                        &profile,
+                        &admitted,
+                        forged_start,
+                        1,
+                        1,
+                        cx,
+                        |_| {},
+                    )
+                    .expect_err("admitted runner must validate its caller-owned start"),
+                crate::production_coupling::ProductionCouplingError::CheckpointIntegrityMismatch
+            );
 
             let first_input = production
                 .input_for_checkpoint_with(&profile, None, &production.checkpoint, cx)

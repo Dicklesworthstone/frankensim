@@ -287,6 +287,14 @@ pub(crate) struct AdmittedAxisymmetricProfile<'run> {
     mass_properties: AxisymmetricMassProperties,
 }
 
+#[derive(Clone, Copy)]
+enum CheckpointValidation {
+    Required,
+    /// The enclosing serial driver validated its start and exclusively owns
+    /// every successor created by the commit paths below.
+    TrustedInternalSuccessor,
+}
+
 /// Cloneable accepted state across all participating adapters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionCouplingCheckpoint {
@@ -1667,6 +1675,15 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
         cx: &Cx<'_>,
     ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
         self.model.validate_checkpoint(checkpoint)?;
+        self.bind_contact_after_checkpoint_validation(input, checkpoint, cx)
+    }
+
+    pub(crate) fn bind_contact_after_checkpoint_validation(
+        &self,
+        input: &mut ProductionCouplingStepInput,
+        checkpoint: &ProductionCouplingCheckpoint,
+        cx: &Cx<'_>,
+    ) -> Result<ProfileContactPatchGeometry, ProductionCouplingError> {
         let resolved =
             self.bind_contact_at_states(input, checkpoint.disc_state, &checkpoint.base_state, cx)?;
         input.expected_checkpoint_version = checkpoint.committed_version;
@@ -1701,12 +1718,14 @@ impl<'run> AdmittedAxisymmetricProfile<'run> {
             start_checkpoint,
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
+            CheckpointValidation::TrustedInternalSuccessor,
             input_for_checkpoint,
             |checkpoint, input| {
                 self.model.step_eventful_profile_midpoint_with(
                     checkpoint,
                     input,
                     self.profile,
+                    CheckpointValidation::TrustedInternalSuccessor,
                     Some(self),
                     cx,
                     |input, state| refresh_midpoint_input(input, state),
@@ -2748,6 +2767,15 @@ impl ProductionCouplingModel {
     ) -> Result<(ProductionCouplingCheckpoint, ProductionOpenFlightReceipt), ProductionCouplingError>
     {
         self.validate_checkpoint(checkpoint)?;
+        self.step_open_flight_after_checkpoint_validation(checkpoint, input)
+    }
+
+    fn step_open_flight_after_checkpoint_validation(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionOpenFlightStepInput,
+    ) -> Result<(ProductionCouplingCheckpoint, ProductionOpenFlightReceipt), ProductionCouplingError>
+    {
         if input.expected_checkpoint_version != checkpoint.committed_version {
             return Err(ProductionCouplingError::CheckpointVersionMismatch {
                 expected: input.expected_checkpoint_version,
@@ -2920,6 +2948,7 @@ impl ProductionCouplingModel {
             checkpoint,
             input,
             profile,
+            CheckpointValidation::Required,
             None,
             cx,
             refresh_midpoint_input,
@@ -2931,6 +2960,7 @@ impl ProductionCouplingModel {
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
         profile: &ResolvedDiscProfile,
+        checkpoint_validation: CheckpointValidation,
         admitted: Option<&AdmittedAxisymmetricProfile<'_>>,
         cx: &Cx<'_>,
         mut refresh_midpoint_input: R,
@@ -2941,7 +2971,12 @@ impl ProductionCouplingModel {
             RigidBodyState,
         ) -> Result<(), ProductionCouplingError>,
     {
-        let resolved = self.resolve_production_event(checkpoint, input)?;
+        let resolved = match checkpoint_validation {
+            CheckpointValidation::Required => self.resolve_production_event(checkpoint, input),
+            CheckpointValidation::TrustedInternalSuccessor => {
+                self.resolve_production_event_after_checkpoint_validation(checkpoint, input)
+            }
+        }?;
         let resolved_signed_gap_start_m = signed_patch_gap_m(resolved.patch_kinematics())?;
         let start_time_s = checkpoint.elapsed_time_s();
         let ResolvedProductionEvent::CompliantContact(contact) = resolved else {
@@ -2953,7 +2988,12 @@ impl ProductionCouplingModel {
                 base_load_progress_start: input.base_load_progress_start,
                 base_load_progress_end: input.base_load_progress_end,
             };
-            let (next, receipt) = self.step_open_flight(checkpoint, &open)?;
+            let (next, receipt) = match checkpoint_validation {
+                CheckpointValidation::Required => self.step_open_flight(checkpoint, &open),
+                CheckpointValidation::TrustedInternalSuccessor => {
+                    self.step_open_flight_after_checkpoint_validation(checkpoint, &open)
+                }
+            }?;
             let end_time_s = next.elapsed_time_s();
             return Ok((
                 next,
@@ -3273,6 +3313,7 @@ impl ProductionCouplingModel {
             start_checkpoint,
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
+            CheckpointValidation::Required,
             input_for_checkpoint,
             |checkpoint, input| self.step_eventful_compliant(checkpoint, input),
             observe_modal_audio_step,
@@ -3306,6 +3347,7 @@ impl ProductionCouplingModel {
             start_checkpoint,
             maximum_accepted_steps,
             mechanics_steps_per_control_interval,
+            CheckpointValidation::Required,
             input_for_checkpoint,
             |checkpoint, input| {
                 self.step_eventful_profile_midpoint(
@@ -3325,6 +3367,7 @@ impl ProductionCouplingModel {
         start_checkpoint: ProductionCouplingCheckpoint,
         maximum_accepted_steps: usize,
         mechanics_steps_per_control_interval: usize,
+        checkpoint_validation: CheckpointValidation,
         mut input_for_checkpoint: F,
         mut advance: S,
         mut observe_modal_audio_step: O,
@@ -3433,13 +3476,22 @@ impl ProductionCouplingModel {
         if let Some(previous) = preceding_branch {
             let attempted_checkpoint_version = last_accepted_checkpoint.committed_version;
             let endpoint = input_for_checkpoint(&last_accepted_checkpoint).and_then(|input| {
-                self.resolve_production_event(&last_accepted_checkpoint, &input)
-                    .and_then(|resolved| {
-                        Ok((
-                            resolved.branch(),
-                            signed_patch_gap_m(resolved.patch_kinematics())?,
-                        ))
-                    })
+                let resolved = match checkpoint_validation {
+                    CheckpointValidation::Required => {
+                        self.resolve_production_event(&last_accepted_checkpoint, &input)
+                    }
+                    CheckpointValidation::TrustedInternalSuccessor => self
+                        .resolve_production_event_after_checkpoint_validation(
+                            &last_accepted_checkpoint,
+                            &input,
+                        ),
+                };
+                resolved.and_then(|resolved| {
+                    Ok((
+                        resolved.branch(),
+                        signed_patch_gap_m(resolved.patch_kinematics())?,
+                    ))
+                })
             });
             match endpoint {
                 Ok((terminal_branch, resolved_signed_gap_end_m)) => {
@@ -3506,7 +3558,17 @@ impl ProductionCouplingModel {
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
     ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
-        let patch_input = self.prepared_patch_input(checkpoint, input)?;
+        self.validate_checkpoint(checkpoint)?;
+        self.resolve_active_contact_after_checkpoint_validation(checkpoint, input)
+    }
+
+    fn resolve_active_contact_after_checkpoint_validation(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+    ) -> Result<ResolvedProductionContact, ProductionCouplingError> {
+        let patch_input =
+            self.prepared_patch_input_after_checkpoint_validation(checkpoint, input)?;
         self.resolve_active_contact_from_patch(checkpoint, input, patch_input)
     }
 
@@ -3560,7 +3622,16 @@ impl ProductionCouplingModel {
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
     ) -> Result<ResolvedProductionEvent, ProductionCouplingError> {
-        match self.resolve_active_contact(checkpoint, input) {
+        self.validate_checkpoint(checkpoint)?;
+        self.resolve_production_event_after_checkpoint_validation(checkpoint, input)
+    }
+
+    fn resolve_production_event_after_checkpoint_validation(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+    ) -> Result<ResolvedProductionEvent, ProductionCouplingError> {
+        match self.resolve_active_contact_after_checkpoint_validation(checkpoint, input) {
             Ok(contact) => {
                 let branch = select_event_branch(
                     &contact.patch_kinematics,
@@ -3590,7 +3661,9 @@ impl ProductionCouplingModel {
                 // boundary is the point-support limit. It may select true open
                 // flight, but it cannot override a contact classification when
                 // the finite-footprint solve itself found no admissible patch.
-                let patch = self.resolve_event_patch_kinematics(checkpoint, input)?;
+                let patch = self.resolve_event_patch_kinematics_after_checkpoint_validation(
+                    checkpoint, input,
+                )?;
                 match select_event_branch(&patch, input.normal.integration_regime)? {
                     ProductionTrajectoryBranch::OpenFlight => {
                         Ok(ResolvedProductionEvent::OpenFlight(patch))
@@ -3602,12 +3675,13 @@ impl ProductionCouplingModel {
         }
     }
 
-    fn resolve_event_patch_kinematics(
+    fn resolve_event_patch_kinematics_after_checkpoint_validation(
         &self,
         checkpoint: &ProductionCouplingCheckpoint,
         input: &ProductionCouplingStepInput,
     ) -> Result<PatchKinematics, ProductionCouplingError> {
-        let patch_input = self.prepared_patch_input(checkpoint, input)?;
+        let patch_input =
+            self.prepared_patch_input_after_checkpoint_validation(checkpoint, input)?;
         let Some(surface) = &input.surface_geometry else {
             return compute_moving_one_mode_patch_kinematics(patch_input)
                 .map_err(ProductionCouplingError::Patch);
@@ -3634,6 +3708,14 @@ impl ProductionCouplingModel {
         input: &ProductionCouplingStepInput,
     ) -> Result<MovingOneModePatchKinematicsInput, ProductionCouplingError> {
         self.validate_checkpoint(checkpoint)?;
+        self.prepared_patch_input_after_checkpoint_validation(checkpoint, input)
+    }
+
+    fn prepared_patch_input_after_checkpoint_validation(
+        &self,
+        checkpoint: &ProductionCouplingCheckpoint,
+        input: &ProductionCouplingStepInput,
+    ) -> Result<MovingOneModePatchKinematicsInput, ProductionCouplingError> {
         if input.expected_checkpoint_version != checkpoint.committed_version {
             return Err(ProductionCouplingError::CheckpointVersionMismatch {
                 expected: input.expected_checkpoint_version,
