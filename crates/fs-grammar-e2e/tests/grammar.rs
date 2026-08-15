@@ -8,6 +8,22 @@ use fs_grammar_e2e::{
 };
 use fs_shapeprog::{Geom, SimplifyRefusal, max_sdf_discrepancy};
 
+/// The library's 7x7x7 evaluation grid, reproduced for witness assessments
+/// (the lib keeps its own `sample_points` private).
+fn samples() -> Vec<[f64; 3]> {
+    let mut points = Vec::new();
+    let n = 7usize;
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                let coordinate = |t: usize| -2.0 + 4.0 * t as f64 / (n - 1) as f64;
+                points.push([coordinate(i), coordinate(j), coordinate(k)]);
+            }
+        }
+    }
+    points
+}
+
 #[test]
 fn a_fabricable_program_family_is_illuminated_and_simplified_soundly() {
     let report = run_campaign(0.2, 0.03);
@@ -49,14 +65,31 @@ fn a_fabricable_program_family_is_illuminated_and_simplified_soundly() {
         report.simplification.radius_threshold().to_bits(),
         0.03_f64.to_bits()
     );
+    // The 0.02-offset -> 0.04-certificate chain used to be asserted on the
+    // ARCHIVE's max_certified_error, but which grid program wins a niche is
+    // a knife-edge fitness comparison: an upstream SDF-numerics change
+    // legitimately shifted a niche from an o=0.02 elite to an o=0.0 elite,
+    // zeroing the archive's certified error while every soundness gate
+    // still held (the rnhok census fs-grammar-e2e red). The rewrite-class
+    // property belongs on a DETERMINISTIC WITNESS, not on whoever wins the
+    // illumination lottery:
+    let witness = build_program(1.0, 1.0, 0.8, 0.02);
+    let witness_assessment = assess_simplification(&witness, 0.03, &samples());
     assert_eq!(
-        report.simplification.max_certified_error().to_bits(),
+        witness_assessment
+            .certified_error()
+            .expect("the witness offset rewrite must produce a certificate")
+            .to_bits(),
         0.04_f64.to_bits(),
         "the 0.02 offset admitted by a 0.03 radius threshold has a 0.04 context-free certificate"
     );
     assert!(
-        report.simplification.max_certified_error() > report.simplification.radius_threshold(),
+        witness_assessment.certified_error().expect("certified") > 0.03,
         "the local admission threshold must not be mislabeled as a global error budget"
+    );
+    assert_eq!(
+        witness_assessment.status(),
+        SimplificationCheckStatus::Certified
     );
     assert!(
         report.simplification.max_sampled_discrepancy()
