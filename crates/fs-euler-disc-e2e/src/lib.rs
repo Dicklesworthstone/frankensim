@@ -28,6 +28,7 @@ pub mod convergence;
 pub mod coupled_runner;
 pub mod external_air;
 pub mod mechanics;
+pub mod mechanism_registry;
 pub mod modal_base_response;
 pub mod modal_synthesis;
 pub mod normal_contact;
