@@ -887,6 +887,7 @@
     "crates/fs-session/tests/gemm_tune.rs",
     "crates/fs-session/tests/grant.rs",
     "crates/fs-session/tests/long_job.rs",
+    "crates/fs-session/tests/prediction_executor.rs",
     "crates/fs-session/tests/program_risk.rs",
     "crates/fs-shapeprog/tests/shapeprog.rs",
     "crates/fs-simd/tests/conformance.rs",
