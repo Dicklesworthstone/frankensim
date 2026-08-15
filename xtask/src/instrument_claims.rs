@@ -96,11 +96,12 @@ fn text(value: &JsonValue) -> Option<&str> {
     }
 }
 
-/// One registry row, reduced to what the check reasons about.
+/// One registry row, reduced to what the check reasons about. (Exactness
+/// classes are validated during parse; no downstream rule reads them yet —
+/// the determinism-rows lint, bead 3ez8g.1.3, will.)
 struct Row {
     key: String,
     owner_crates: Vec<String>,
-    exactness: Vec<String>,
     gate: String,
     live_default: String,
     determinism: String,
@@ -231,7 +232,6 @@ fn parse_registry(source: &str, violations: &mut Vec<Violation>) -> Vec<Row> {
             )),
         }
 
-        let mut exactness = Vec::new();
         match map.get("exactness").and_then(arr) {
             Some(items) if (1..=2).contains(&items.len()) => {
                 let mut seen = BTreeSet::new();
@@ -244,7 +244,6 @@ fn parse_registry(source: &str, violations: &mut Vec<Violation>) -> Vec<Row> {
                                     format!("exactness class {class:?} listed twice"),
                                 ));
                             }
-                            exactness.push(class.to_string());
                         }
                         other => violations.push(violation(
                             &entity,
@@ -349,7 +348,6 @@ fn parse_registry(source: &str, violations: &mut Vec<Violation>) -> Vec<Row> {
         out.push(Row {
             key,
             owner_crates,
-            exactness,
             gate,
             live_default,
             determinism,
