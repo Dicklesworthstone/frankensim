@@ -413,6 +413,13 @@ impl DomainHasher {
     }
 }
 
+impl fmt::Write for DomainHasher {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.update(value.as_bytes());
+        Ok(())
+    }
+}
+
 /// Hash `payload` under a BLAKE3 derive-key context: the canonical
 /// domain-separation scheme for every typed 32-byte root in the workspace.
 ///
@@ -492,17 +499,30 @@ impl ContentHash {
         let arr: [u8; 32] = bytes.try_into().ok()?;
         Some(ContentHash(arr))
     }
+
+    fn write_lower_hex(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = [0u8; 64];
+        for (pair, &byte) in encoded.chunks_exact_mut(2).zip(&self.0) {
+            pair[0] = DIGITS[usize::from(byte >> 4)];
+            pair[1] = DIGITS[usize::from(byte & 0x0f)];
+        }
+        let rendered = core::str::from_utf8(&encoded).map_err(|_| fmt::Error)?;
+        f.write_str(rendered)
+    }
 }
 
 impl fmt::Display for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
+        self.write_lower_hex(f)
     }
 }
 
 impl fmt::Debug for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ContentHash({})", self.to_hex())
+        f.write_str("ContentHash(")?;
+        self.write_lower_hex(f)?;
+        f.write_str(")")
     }
 }
 
@@ -586,6 +606,169 @@ mod tests {
             assert_eq!(hasher.finalize(), expected, "split at {split}");
             assert_eq!(hasher.finalize(), expected, "repeat finalize at {split}");
         }
+    }
+
+    #[test]
+    fn g0_formatted_domain_stream_matches_legacy_preimage_and_chunking() {
+        use core::fmt::Write as _;
+
+        const DOMAIN: &str = "org.frankensim.fs-blake3.fmt-write-parity.v1";
+        const PREIMAGE: &str = "identity=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f;step=000000000000002a;label=normal";
+        const DIGEST: &str = "43dad01b6c6725c5a4f90a1c4e3487dbc6041a41f1f29d2b79e98a26d00ff900";
+        let identity = ContentHash(core::array::from_fn(|index| index as u8));
+        let step = 42u64;
+        let legacy = format!("identity={identity};step={step:016x};label=normal");
+        assert_eq!(legacy, PREIMAGE);
+        let expected = hash_domain(DOMAIN, legacy.as_bytes());
+        assert_eq!(expected.to_hex(), DIGEST);
+
+        let mut streamed = DomainHasher::new(DOMAIN);
+        write!(
+            streamed,
+            "identity={identity};step={step:016x};label=normal"
+        )
+        .unwrap();
+        assert_eq!(streamed.finalize(), expected);
+
+        let mut partitioned = DomainHasher::new(DOMAIN);
+        partitioned.write_str("identity=").unwrap();
+        write!(partitioned, "{identity}").unwrap();
+        partitioned.write_str(";step=").unwrap();
+        write!(partitioned, "{step:016x}").unwrap();
+        partitioned.write_str(";label=normal").unwrap();
+        assert_eq!(partitioned.finalize(), expected);
+    }
+
+    #[test]
+    #[ignore = "temporary optimization A/B"]
+    fn pass6_optimization_micro_ab_formatted_domain_stream() {
+        use core::fmt::Write as _;
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        const DOMAIN: &str = "org.frankensim.fs-contact.normal-patch.v1";
+        const ITERATIONS: usize = 32_768;
+        let request_id = ContentHash(core::array::from_fn(|index| index as u8));
+
+        let legacy = |approach: f64| {
+            hash_domain(
+                DOMAIN,
+                format!(
+                    concat!(
+                        "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                        "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                        "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
+                    ),
+                    request_id.to_hex(),
+                    "state/accepted",
+                    approach,
+                    4.875,
+                    8.25e6,
+                    0.03125,
+                    7.5e-4,
+                    4.0e-4,
+                    1.875,
+                    6.0e6,
+                    2.5e-6,
+                    8.0e-8,
+                    1.0e-6,
+                    3.0e-8,
+                    (0.1f64, 0.2f64, 0.3f64),
+                    1.0e-4,
+                    2.0e-4,
+                    3.0e-4,
+                    "Estimate",
+                    "disc|support",
+                    "history/42",
+                    "fixture",
+                )
+                .as_bytes(),
+            )
+        };
+        let streamed = |approach: f64| {
+            let mut hasher = DomainHasher::new(DOMAIN);
+            write!(
+                &mut hasher,
+                concat!(
+                    "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                    "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                    "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
+                ),
+                request_id,
+                "state/accepted",
+                approach,
+                4.875,
+                8.25e6,
+                0.03125,
+                7.5e-4,
+                4.0e-4,
+                1.875,
+                6.0e6,
+                2.5e-6,
+                8.0e-8,
+                1.0e-6,
+                3.0e-8,
+                (0.1f64, 0.2f64, 0.3f64),
+                1.0e-4,
+                2.0e-4,
+                3.0e-4,
+                "Estimate",
+                "disc|support",
+                "history/42",
+                "fixture",
+            )
+            .unwrap();
+            hasher.finalize()
+        };
+        assert_eq!(legacy(1.25e-6), streamed(1.25e-6));
+
+        let measure = |candidate: &dyn Fn(f64) -> ContentHash| {
+            let started = Instant::now();
+            let mut checksum = 0u64;
+            for iteration in 0..ITERATIONS {
+                let approach = black_box(1.0e-6 + iteration as f64 * 1.0e-18);
+                let digest = candidate(approach);
+                checksum ^= u64::from_le_bytes(digest.0[..8].try_into().unwrap());
+            }
+            black_box(checksum);
+            started.elapsed()
+        };
+        let mut legacy_total = Duration::ZERO;
+        let mut streamed_total = Duration::ZERO;
+        for round in 0..6 {
+            let (legacy_elapsed, streamed_elapsed) = if round % 2 == 0 {
+                (measure(&legacy), measure(&streamed))
+            } else {
+                let streamed_elapsed = measure(&streamed);
+                (measure(&legacy), streamed_elapsed)
+            };
+            legacy_total += legacy_elapsed;
+            streamed_total += streamed_elapsed;
+            eprintln!(
+                "pass6 round={round} legacy_s={:.6} streamed_s={:.6} ratio={:.6}",
+                legacy_elapsed.as_secs_f64(),
+                streamed_elapsed.as_secs_f64(),
+                legacy_elapsed.as_secs_f64() / streamed_elapsed.as_secs_f64(),
+            );
+        }
+        eprintln!(
+            "pass6 aggregate legacy_s={:.6} streamed_s={:.6} ratio={:.6}",
+            legacy_total.as_secs_f64(),
+            streamed_total.as_secs_f64(),
+            legacy_total.as_secs_f64() / streamed_total.as_secs_f64(),
+        );
+    }
+
+    #[test]
+    fn g0_content_hash_display_and_debug_are_exact_lowercase_hex() {
+        const HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        const DEBUG: &str =
+            "ContentHash(000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f)";
+        let hash = ContentHash(core::array::from_fn(|index| index as u8));
+        assert_eq!(hash.to_hex(), HEX);
+        assert_eq!(format!("{hash}"), HEX);
+        assert_eq!(format!("{hash:?}"), DEBUG);
+        assert_eq!(format!("{hash:#?}"), DEBUG);
     }
 
     #[test]
