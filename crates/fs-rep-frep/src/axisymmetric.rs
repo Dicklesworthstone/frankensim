@@ -461,6 +461,16 @@ pub struct AxisymmetricChart {
     support: Aabb,
 }
 
+/// Run-scoped access to repeated queries on one immutable admitted chart.
+///
+/// Construction revalidates every global profile obligation once. Subsequent
+/// queries retain their ordinary input, local-geometry, and cancellation
+/// checks, but do not repeat that immutable whole-chart admission work.
+#[derive(Debug, Clone, Copy)]
+pub struct AxisymmetricQuerySession<'chart> {
+    chart: &'chart AxisymmetricChart,
+}
+
 impl AxisymmetricChart {
     /// Build a centered compact disc of revolution with an exact sharp or
     /// circularly filleted outer rim.
@@ -685,6 +695,15 @@ impl AxisymmetricChart {
         validate_profile_with_cx(&self.segments, Some(cx))
     }
 
+    /// Revalidate this immutable chart once for a run of repeated queries.
+    pub fn admit_query_session(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricQuerySession<'_>, AxisymmetricError> {
+        self.verify_construction_with_cx(cx)?;
+        Ok(AxisymmetricQuerySession { chart: self })
+    }
+
     /// Retained construction certificate.
     #[must_use]
     pub const fn construction_certificate(&self) -> AxisymmetricConstructionCertificate {
@@ -716,6 +735,14 @@ impl AxisymmetricChart {
             Err(AxisymmetricError::Cancelled) => return Err(AxisymmetricSupportError::Cancelled),
             Err(error) => return Err(AxisymmetricSupportError::InvalidChart(error)),
         }
+        self.minimum_support_point_after_validation(unit, cx)
+    }
+
+    fn minimum_support_point_after_validation(
+        &self,
+        unit: Vec3,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricSupportPoint, AxisymmetricSupportError> {
         let radial = unit.x.hypot(unit.y);
         let radial_coefficient = -radial;
         let mut best: Option<SupportCandidate> = None;
@@ -829,6 +856,14 @@ impl AxisymmetricChart {
             Err(AxisymmetricError::Cancelled) => return Err(AxisymmetricCurvatureError::Cancelled),
             Err(error) => return Err(AxisymmetricCurvatureError::InvalidChart(error)),
         }
+        self.principal_curvatures_at_feature_point_after_validation(source_feature, point)
+    }
+
+    fn principal_curvatures_at_feature_point_after_validation(
+        &self,
+        source_feature: usize,
+        point: Point3,
+    ) -> Result<AxisymmetricPrincipalCurvatureEstimate, AxisymmetricCurvatureError> {
         if !finite3(point) {
             return Err(AxisymmetricCurvatureError::NonFinitePoint { point });
         }
@@ -947,6 +982,50 @@ impl AxisymmetricChart {
             // trace theorem or a one-ULP enclosure.
             error: NumericalCertificate::estimate(signed, signed),
         }
+    }
+}
+
+impl AxisymmetricQuerySession<'_> {
+    /// Minimize support without repeating immutable whole-chart validation.
+    pub fn minimum_support_point(
+        &self,
+        direction: Vec3,
+        cx: &Cx<'_>,
+    ) -> Result<AxisymmetricSupportPoint, AxisymmetricSupportError> {
+        let unit = normalized_support_direction(direction)?;
+        self.chart.minimum_support_point_after_validation(unit, cx)
+    }
+
+    /// Resolve one support point and its selected-feature curvatures in one pass.
+    ///
+    /// The returned values are bit-for-bit the ordinary checked support and
+    /// curvature results. The support result is kept inside this call until
+    /// curvature extraction, so callers cannot substitute a forged point or
+    /// feature, and the global support search is not repeated.
+    pub fn minimum_support_point_with_principal_curvatures(
+        &self,
+        direction: Vec3,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            AxisymmetricSupportPoint,
+            AxisymmetricPrincipalCurvatureEstimate,
+        ),
+        AxisymmetricCurvatureError,
+    > {
+        let support = self
+            .minimum_support_point(direction, cx)
+            .map_err(AxisymmetricCurvatureError::Support)?;
+        if cx.checkpoint().is_err() {
+            return Err(AxisymmetricCurvatureError::Cancelled);
+        }
+        let curvature = self
+            .chart
+            .principal_curvatures_at_feature_point_after_validation(
+                support.source_feature,
+                support.point,
+            )?;
+        Ok((support, curvature))
     }
 }
 
@@ -1955,4 +2034,178 @@ fn profile_identity(segments: &[MeridianSegment]) -> AxisymmetricIdentity {
 fn append_point(bytes: &mut Vec<u8>, point: MeridianPoint) {
     bytes.extend_from_slice(&point.radius.to_bits().to_le_bytes());
     bytes.extend_from_slice(&point.axial.to_bits().to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asupersync::types::Budget;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    #[test]
+    fn g0_admitted_fused_query_matches_checked_results_and_refusals() {
+        let chart = AxisymmetricChart::squat_disc(
+            2.0,
+            2.0,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.5 },
+        )
+        .expect("filleted disc");
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x5155_4552,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let direction = Vec3::new(1.0, 0.0, -1.0);
+            let checked_support = chart
+                .minimum_support_point(direction, &cx)
+                .expect("checked support");
+            let checked_curvature = chart
+                .principal_curvatures_at_support_direction(direction, &cx)
+                .expect("checked curvature");
+            let session = chart.admit_query_session(&cx).expect("query admission");
+            let (support, curvature) = session
+                .minimum_support_point_with_principal_curvatures(direction, &cx)
+                .expect("fused query");
+            assert_eq!(support, checked_support);
+            assert_eq!(curvature, checked_curvature);
+
+            let flat_direction = Vec3::new(1.0, 0.0, 0.0);
+            let checked_refusal = chart
+                .principal_curvatures_at_support_direction(flat_direction, &cx)
+                .expect_err("checked flat support refusal");
+            let admitted_refusal = session
+                .minimum_support_point_with_principal_curvatures(flat_direction, &cx)
+                .expect_err("admitted flat support refusal");
+            assert_eq!(admitted_refusal, checked_refusal);
+
+            gate.request();
+            assert!(matches!(
+                session.minimum_support_point_with_principal_curvatures(direction, &cx),
+                Err(AxisymmetricCurvatureError::Support(
+                    AxisymmetricSupportError::Cancelled
+                ))
+            ));
+            assert!(matches!(
+                chart.admit_query_session(&cx),
+                Err(AxisymmetricError::Cancelled)
+            ));
+        });
+    }
+
+    #[test]
+    #[ignore = "temporary Pass 4 admitted-query performance A/B"]
+    fn pass4_optimization_micro_ab_query_session() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const QUERIES: usize = 262_144;
+        const ROUNDS: usize = 6;
+
+        let chart = AxisymmetricChart::squat_disc(
+            0.0375,
+            0.013,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.0016 },
+        )
+        .expect("production-shaped filleted disc");
+        let directions = (0..32)
+            .map(|index| {
+                let azimuth = core::f64::consts::TAU * index as f64 / 32.0;
+                let inclination = 0.002 + 0.348 * (index as f64 + 0.5) / 32.0;
+                Vec3::new(
+                    inclination.sin() * azimuth.cos(),
+                    inclination.sin() * azimuth.sin(),
+                    -inclination.cos(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x5041_5353_34,
+                    kernel_id: 4,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let session = chart.admit_query_session(&cx).expect("query admission");
+            for &direction in &directions {
+                let checked_support = chart.minimum_support_point(direction, &cx).unwrap();
+                let checked_curvature = chart
+                    .principal_curvatures_at_support_direction(direction, &cx)
+                    .unwrap();
+                let fused = session
+                    .minimum_support_point_with_principal_curvatures(direction, &cx)
+                    .unwrap();
+                assert_eq!(fused, (checked_support, checked_curvature));
+            }
+
+            let run = |admitted: bool| {
+                let start = Instant::now();
+                let mut digest = 0_u64;
+                for index in 0..QUERIES {
+                    let direction = black_box(directions[index & 31]);
+                    let (support, curvature) = if admitted {
+                        session
+                            .minimum_support_point_with_principal_curvatures(direction, &cx)
+                            .unwrap()
+                    } else {
+                        let support = chart.minimum_support_point(direction, &cx).unwrap();
+                        let curvature = chart
+                            .principal_curvatures_at_support_direction(direction, &cx)
+                            .unwrap();
+                        (support, curvature)
+                    };
+                    digest ^= support.point.x.to_bits().rotate_left(3)
+                        ^ support.point.y.to_bits().rotate_left(11)
+                        ^ support.point.z.to_bits().rotate_left(19)
+                        ^ curvature.meridional_m_inverse.to_bits().rotate_left(27)
+                        ^ curvature.azimuthal_m_inverse.to_bits();
+                }
+                black_box((start.elapsed(), digest))
+            };
+
+            let mut checked_total = 0.0;
+            let mut admitted_total = 0.0;
+            for round in 0..ROUNDS {
+                let (checked, checked_digest, admitted, admitted_digest) = if round % 2 == 0 {
+                    let (checked, checked_digest) = run(false);
+                    let (admitted, admitted_digest) = run(true);
+                    (checked, checked_digest, admitted, admitted_digest)
+                } else {
+                    let (admitted, admitted_digest) = run(true);
+                    let (checked, checked_digest) = run(false);
+                    (checked, checked_digest, admitted, admitted_digest)
+                };
+                assert_eq!(admitted_digest, checked_digest);
+                let checked_s = checked.as_secs_f64();
+                let admitted_s = admitted.as_secs_f64();
+                checked_total += checked_s;
+                admitted_total += admitted_s;
+                eprintln!(
+                    "PASS4_AB round={round} checked_s={checked_s:.6} admitted_s={admitted_s:.6} speedup={:.4}",
+                    checked_s / admitted_s
+                );
+            }
+            eprintln!(
+                "PASS4_SUMMARY checked_s={checked_total:.6} admitted_s={admitted_total:.6} speedup={:.4}",
+                checked_total / admitted_total
+            );
+        });
+    }
 }

@@ -41,9 +41,9 @@ mod ival;
 pub use axisymmetric::{
     AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricCurvatureAuthority,
     AxisymmetricCurvatureError, AxisymmetricError, AxisymmetricIdentity,
-    AxisymmetricPrincipalCurvatureEstimate, AxisymmetricSupportAuthority, AxisymmetricSupportError,
-    AxisymmetricSupportPoint, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint, MeridianSegment,
-    SquatDiscEdgeTreatment, annular_disc_outer_fillets, squat_disc,
+    AxisymmetricPrincipalCurvatureEstimate, AxisymmetricQuerySession, AxisymmetricSupportAuthority,
+    AxisymmetricSupportError, AxisymmetricSupportPoint, MAX_AXISYMMETRIC_SEGMENTS, MeridianPoint,
+    MeridianSegment, SquatDiscEdgeTreatment, annular_disc_outer_fillets, squat_disc,
 };
 pub use axisymmetric_mass::{
     AxisymmetricMassError, AxisymmetricMassProperties, AxisymmetricMassRoundoffDiagnostics,

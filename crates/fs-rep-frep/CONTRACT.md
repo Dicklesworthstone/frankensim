@@ -203,6 +203,13 @@ the suite unchanged.
   co-minimizing meridian feature, and positive-radius purely axial ring/face
   support refuse. Results identify the source feature and carry `Estimate`
   authority only, never a certificate.
+- `admit_query_session(cx)` validates one immutable chart once and returns a
+  borrowing query session. Its fused support-plus-principal-curvature query
+  reuses the exact selected support feature and point; it preserves the checked
+  APIs' binary64 result, error mapping, tie order, and `Estimate` authority
+  without repeating whole-chart construction validation. Cancellation remains
+  polled within support search and before curvature publication; eliminating
+  redundant validation intentionally eliminates its redundant polls as well.
 - `mass_properties(density, cx)` refuses a finite positive density/volume
   product that underflows to zero mass, and also refuses a zero centroidal
   principal moment for a positive-volume 3D solid. These are geometry-boundary
