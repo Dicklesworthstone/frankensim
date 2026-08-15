@@ -81,7 +81,11 @@ impl BudgetRow {
 }
 
 fn build_profile() -> &'static str {
-    if cfg!(debug_assertions) { "debug" } else { "release" }
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
 }
 
 fn reed_fixture() -> RenderContext {

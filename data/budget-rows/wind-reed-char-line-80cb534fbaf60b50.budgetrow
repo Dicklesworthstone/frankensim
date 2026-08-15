@@ -1,0 +1,13 @@
+frankensim-budget-row-v1
+fixture	massless-reed 2.2mm radiation-damped pipe, empty plate bank
+image	wind-reed/char-line
+states	1
+block	512
+rate	48000
+profile	release
+machine	80cb534fbaf60b50
+reps	32
+median-samples-per-sec	1.3897358204153243e6
+dispersion	5.416288392575946e-2
+headroom-48k	2.8952829591985925e1
+admissible	true
