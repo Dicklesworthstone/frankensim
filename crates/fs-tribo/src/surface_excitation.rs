@@ -1680,6 +1680,17 @@ mod tests {
                 receipt.linearized_height_fraction.to_bits(),
             ]
         };
+        let point_bits = |receipt: &FilteredSurfacePairReceipt| {
+            [
+                receipt.projected_half_width_m.to_bits(),
+                receipt.filtered_surface_heights_m[0].to_bits(),
+                receipt.filtered_surface_heights_m[1].to_bits(),
+                receipt.filtered_surface_slopes[0].to_bits(),
+                receipt.filtered_surface_slopes[1].to_bits(),
+                receipt.combined_effective_height_m.to_bits(),
+                receipt.combined_effective_height_rate_m_per_s.to_bits(),
+            ]
+        };
 
         let wrapped = input(&interface, &shared_a, &shared_b, -0.00035);
         assert!(admitted.matches(wrapped.surface_a, wrapped.surface_b));
@@ -1689,6 +1700,13 @@ mod tests {
             .expect("cached wrapped pair");
         assert_eq!(checked, cached);
         assert_eq!(receipt_bits(&checked), receipt_bits(&cached));
+        let checked_point =
+            evaluate_point_surface_pair(&interface, wrapped.surface_a, wrapped.surface_b)
+                .expect("checked wrapped point pair");
+        let cached_point = admitted
+            .evaluate_point_surface_pair(&interface, wrapped.surface_a, wrapped.surface_b)
+            .expect("cached wrapped point pair");
+        assert_eq!(point_bits(&checked_point), point_bits(&cached_point));
 
         let finite_a = trace(
             "finite-a",
@@ -1713,6 +1731,22 @@ mod tests {
             .evaluate_hertz_roughness_excitation(finite_input)
             .expect("cached finite pair");
         assert_eq!(receipt_bits(&checked_finite), receipt_bits(&cached_finite));
+        let endpoint_a = SurfaceTraceMotion {
+            trace: &finite_a,
+            path_coordinate_m: finite_a.track_length_m(),
+            path_speed_m_per_s: 0.73,
+        };
+        let endpoint_b = SurfaceTraceMotion {
+            trace: &finite_b,
+            path_coordinate_m: finite_b.track_length_m(),
+            path_speed_m_per_s: -0.41,
+        };
+        let checked_endpoint = evaluate_point_surface_pair(&interface, endpoint_a, endpoint_b)
+            .expect("checked finite endpoints");
+        let cached_endpoint = admitted_finite
+            .evaluate_point_surface_pair(&interface, endpoint_a, endpoint_b)
+            .expect("cached finite endpoints");
+        assert_eq!(point_bits(&checked_endpoint), point_bits(&cached_endpoint));
 
         let independent_a = trace(
             "admitted-a",
