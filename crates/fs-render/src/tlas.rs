@@ -895,8 +895,8 @@ mod tests {
                     fs_geom::ChartSample {
                         signed_distance: distance,
                         gradient: None,
-                        lipschitz: None,
-                        error: fs_evidence::NumericalCertificate::exact(0.0),
+                        lipschitz: Some(1.0),
+                        error: fs_evidence::NumericalCertificate::exact(distance),
                     }
                 }
                 fn support(&self) -> Aabb {
@@ -945,7 +945,7 @@ mod tests {
                         signed_distance: -1.0,
                         gradient: None,
                         lipschitz: None,
-                        error: fs_evidence::NumericalCertificate::exact(0.0),
+                        error: fs_evidence::NumericalCertificate::exact(-1.0),
                     }
                 }
                 fn support(&self) -> Aabb {
