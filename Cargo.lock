@@ -1152,6 +1152,7 @@ dependencies = [
  "fs-blake3",
  "fs-dcontact",
  "fs-duct",
+ "fs-exec",
  "fs-fft",
  "fs-iface",
  "fs-la",
@@ -1163,6 +1164,7 @@ dependencies = [
  "fs-plate",
  "fs-qty",
  "fs-scenario",
+ "fs-substrate",
  "fs-tribo",
  "fs-vfit",
 ]
@@ -1258,6 +1260,7 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-phs",
+ "fs-vvreg",
 ]
 
 [[package]]
