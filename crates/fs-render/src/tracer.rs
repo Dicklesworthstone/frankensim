@@ -16910,6 +16910,104 @@ mod tests {
     }
 
     #[test]
+    fn aniso_reduces_to_isotropic_and_samples_match_pdf() {
+        // Reduction: alpha_x == alpha_y must reproduce the isotropic
+        // kernels exactly (same algebra, so exact equality is demanded).
+        let alpha = 0.23;
+        for cos_m in [0.05_f64, 0.3, 0.7, 0.99] {
+            let sin_m = (1.0 - cos_m * cos_m).sqrt();
+            let m_local = [sin_m * 0.6, sin_m * 0.8, cos_m];
+            let iso = ggx_d(alpha, cos_m);
+            let aniso = ggx_d_aniso(alpha, alpha, m_local);
+            assert!(
+                (iso - aniso).abs() <= 1e-12 * iso.max(1.0),
+                "NDF reduction at cos_m={cos_m}: {iso} vs {aniso}"
+            );
+        }
+        for cos_v in [0.05_f64, 0.4, 0.9] {
+            let sin_v = (1.0 - cos_v * cos_v).sqrt();
+            let v_local = [sin_v, 0.0, cos_v];
+            let iso = smith_g1(alpha, cos_v);
+            let aniso = smith_g1_aniso(alpha, alpha, v_local);
+            assert!(
+                (iso - aniso).abs() <= 1e-12,
+                "G1 reduction at cos_v={cos_v}: {iso} vs {aniso}"
+            );
+        }
+
+        // Anisotropic sampling: every accepted sample's returned pdf must
+        // equal the analytic pdf recomputed from its own microfacet, and
+        // the lobe must be visibly TIGHTER along x for alpha_x << alpha_y.
+        let (alpha_x, alpha_y) = (0.05, 0.4);
+        let wo_local = {
+            let raw = [0.3_f64, -0.2, 0.9];
+            let len = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
+            raw.map(|component| component / len)
+        };
+        let mut spread_x = 0.0_f64;
+        let mut spread_y = 0.0_f64;
+        let mut accepted = 0u32;
+        fn uniform(state: &mut u64) -> f64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((*state >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+        let mut state = 0x5eed_u64;
+        for _ in 0..512 {
+            let (u1, u2) = (uniform(&mut state), uniform(&mut state));
+            let Some((wi_local, pdf)) =
+                sample_ggx_vndf_reflection_aniso(wo_local, alpha_x, alpha_y, u1, u2)
+            else {
+                continue;
+            };
+            accepted += 1;
+            // Recompute the half-vector and its analytic pdf.
+            let mut half = [
+                wo_local[0] + wi_local[0],
+                wo_local[1] + wi_local[1],
+                wo_local[2] + wi_local[2],
+            ];
+            let len = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+            half = half.map(|component| component / len);
+            let analytic = ggx_vndf_reflection_pdf_aniso(alpha_x, alpha_y, wo_local, half);
+            assert!(
+                (pdf - analytic).abs() <= 1e-9 * analytic.max(1.0),
+                "sample pdf {pdf} vs analytic {analytic}"
+            );
+            spread_x += (wi_local[0] - wo_local[0] * -1.0).abs();
+            spread_y += (wi_local[1] - wo_local[1] * -1.0).abs();
+            let _ = (spread_x, spread_y);
+        }
+        assert!(accepted > 400, "sampler must accept most draws: {accepted}");
+
+        // Directional anisotropy: variance of wi components across the
+        // batch is smaller along the tight axis (x) than the wide axis (y).
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        state = 0x5eed;
+        for _ in 0..512 {
+            let (u1, u2) = (uniform(&mut state), uniform(&mut state));
+            if let Some((wi_local, _)) =
+                sample_ggx_vndf_reflection_aniso(wo_local, alpha_x, alpha_y, u1, u2)
+            {
+                xs.push(wi_local[0]);
+                ys.push(wi_local[1]);
+            }
+        }
+        let variance = |values: &[f64]| {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / values.len() as f64
+        };
+        assert!(
+            variance(&xs) < variance(&ys),
+            "the reflected lobe must be tighter along the small-alpha axis:              var_x={} var_y={}",
+            variance(&xs),
+            variance(&ys)
+        );
+    }
+
+    #[test]
     fn ggx_visible_normal_sampling_matches_pdf_at_grazing_and_both_poles() {
         let materials = [
             Material::Ggx {
@@ -18128,6 +18226,144 @@ fn sample_ggx_vndf_reflection(
     }
     let pdf = ggx_vndf_reflection_pdf(alpha, n, wo, m);
     (pdf > 0.0 && pdf.is_finite()).then_some((wi, pdf))
+}
+
+// ---- anisotropic GGX kernels (bead h7xu5.4.3) -------------------------
+//
+// Heitz's anisotropic generalization in a CALLER-SUPPLIED tangent frame
+// (the brushed-metal frame from `surface_detail::shading_frame`). These are
+// deliberately add-only: the isotropic paths above are untouched, and the
+// alpha_x == alpha_y case reduces to them exactly (executed in the
+// battery), so threading the Material path through later cannot drift.
+
+/// Anisotropic GGX NDF in the local (tangent, bitangent, normal) frame.
+/// `m_local` is the microfacet normal expressed in that frame.
+fn ggx_d_aniso(alpha_x: f64, alpha_y: f64, m_local: [f64; 3]) -> f64 {
+    if m_local[2] <= 0.0 {
+        return 0.0;
+    }
+    let x = m_local[0] / alpha_x;
+    let y = m_local[1] / alpha_y;
+    let t = x * x + y * y + m_local[2] * m_local[2];
+    1.0 / (PI * alpha_x * alpha_y * t * t)
+}
+
+/// Smith Lambda for the anisotropic distribution (view in local frame).
+fn smith_lambda_aniso(alpha_x: f64, alpha_y: f64, v_local: [f64; 3]) -> f64 {
+    let cos_v = v_local[2];
+    if cos_v <= 0.0 {
+        return f64::INFINITY;
+    }
+    let ax = alpha_x * v_local[0];
+    let ay = alpha_y * v_local[1];
+    let tan_theta_sq = (ax * ax + ay * ay) / (cos_v * cos_v);
+    0.5 * ((1.0 + tan_theta_sq).sqrt() - 1.0)
+}
+
+/// Smith G1 masking for the anisotropic distribution.
+fn smith_g1_aniso(alpha_x: f64, alpha_y: f64, v_local: [f64; 3]) -> f64 {
+    1.0 / (1.0 + smith_lambda_aniso(alpha_x, alpha_y, v_local))
+}
+
+/// Anisotropic visible-normal reflection PDF in the local frame.
+fn ggx_vndf_reflection_pdf_aniso(
+    alpha_x: f64,
+    alpha_y: f64,
+    wo_local: [f64; 3],
+    m_local: [f64; 3],
+) -> f64 {
+    let cos_o = wo_local[2];
+    let wo_dot_m = wo_local[0] * m_local[0] + wo_local[1] * m_local[1] + wo_local[2] * m_local[2];
+    if cos_o <= 0.0 || wo_dot_m <= 0.0 {
+        return 0.0;
+    }
+    ggx_d_aniso(alpha_x, alpha_y, m_local) * smith_g1_aniso(alpha_x, alpha_y, wo_local)
+        / (4.0 * cos_o)
+}
+
+/// Sample the anisotropic GGX visible-normal distribution in the local
+/// frame and reflect `wo_local`. Same two uniform dimensions as the
+/// isotropic sampler; returns `(wi_local, pdf)`.
+fn sample_ggx_vndf_reflection_aniso(
+    wo_local: [f64; 3],
+    alpha_x: f64,
+    alpha_y: f64,
+    u1: f64,
+    u2: f64,
+) -> Option<([f64; 3], f64)> {
+    let cos_o = wo_local[2];
+    if !alpha_x.is_finite()
+        || !alpha_y.is_finite()
+        || alpha_x <= 0.0
+        || alpha_y <= 0.0
+        || cos_o <= 0.0
+        || !u1.is_finite()
+        || !u2.is_finite()
+        || !(0.0..=1.0).contains(&u1)
+        || !(0.0..=1.0).contains(&u2)
+    {
+        return None;
+    }
+    // Per-axis stretch: the anisotropic problem becomes unit-roughness.
+    let stretched = [alpha_x * wo_local[0], alpha_y * wo_local[1], wo_local[2]];
+    let inverse_stretched_norm = 1.0
+        / (stretched[0] * stretched[0] + stretched[1] * stretched[1] + stretched[2] * stretched[2])
+            .sqrt();
+    let view = stretched.map(|component| component * inverse_stretched_norm);
+
+    let lensq = view[0] * view[0] + view[1] * view[1];
+    let frame_1 = if lensq > 0.0 {
+        let inverse_len = 1.0 / lensq.sqrt();
+        [-view[1] * inverse_len, view[0] * inverse_len, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let frame_2 = [
+        view[1] * frame_1[2] - view[2] * frame_1[1],
+        view[2] * frame_1[0] - view[0] * frame_1[2],
+        view[0] * frame_1[1] - view[1] * frame_1[0],
+    ];
+
+    let radius = u1.sqrt();
+    let phi = 2.0 * PI * u2;
+    let disk_1 = radius * phi.cos();
+    let mut disk_2 = radius * phi.sin();
+    let blend = 0.5 * (1.0 + view[2]);
+    disk_2 = (1.0 - blend) * (1.0 - disk_1 * disk_1).sqrt() + blend * disk_2;
+    let projected = (1.0 - disk_1 * disk_1 - disk_2 * disk_2).max(0.0).sqrt();
+
+    let stretched_normal = [
+        disk_1 * frame_1[0] + disk_2 * frame_2[0] + projected * view[0],
+        disk_1 * frame_1[1] + disk_2 * frame_2[1] + projected * view[1],
+        disk_1 * frame_1[2] + disk_2 * frame_2[2] + projected * view[2],
+    ];
+
+    let unstretched = [
+        alpha_x * stretched_normal[0],
+        alpha_y * stretched_normal[1],
+        stretched_normal[2].max(0.0),
+    ];
+    let inverse_normal_len = 1.0
+        / (unstretched[0] * unstretched[0]
+            + unstretched[1] * unstretched[1]
+            + unstretched[2] * unstretched[2])
+            .sqrt();
+    let m_local = unstretched.map(|component| component * inverse_normal_len);
+
+    let wo_dot_m = wo_local[0] * m_local[0] + wo_local[1] * m_local[1] + wo_local[2] * m_local[2];
+    if wo_dot_m <= 0.0 {
+        return None;
+    }
+    let wi_local = [
+        2.0 * wo_dot_m * m_local[0] - wo_local[0],
+        2.0 * wo_dot_m * m_local[1] - wo_local[1],
+        2.0 * wo_dot_m * m_local[2] - wo_local[2],
+    ];
+    if wi_local[2] <= 0.0 {
+        return None;
+    }
+    let pdf = ggx_vndf_reflection_pdf_aniso(alpha_x, alpha_y, wo_local, m_local);
+    (pdf > 0.0 && pdf.is_finite()).then_some((wi_local, pdf))
 }
 
 // ---- vector helpers (fs-geom's Vec3 has no cross) ---------------------
