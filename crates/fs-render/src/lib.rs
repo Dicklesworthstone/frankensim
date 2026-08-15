@@ -40,6 +40,7 @@ pub mod motion_bounds;
 pub mod motion_vectors;
 #[cfg(feature = "chart-backends")]
 pub mod temporal_accumulation;
+#[cfg(feature = "chart-backends")]
 pub mod tlas;
 
 #[cfg(feature = "tracer")]

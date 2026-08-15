@@ -2723,6 +2723,73 @@ mod tests {
         }
     }
 
+    /// Deterministic-construction property battery (bead frankensim-8ll9):
+    /// same input, same tree — across rebuilds, and with no dependence on
+    /// anything but the input bytes. Construction is serial by design, so
+    /// thread count cannot enter; this test is the executable statement of
+    /// that contract (a future parallel builder must keep it green).
+    #[test]
+    fn g3_bvh_construction_is_a_pure_function_of_the_input() {
+        let mut state = 0x8119_u64 ^ 0x9e37_79b9_7f4a_7c15;
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for index in 0..257u32 {
+            let base = vertices.len() as u32;
+            let mut coordinate = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 11) as f64 / (1u64 << 53) as f64) * 8.0 - 4.0
+            };
+            let origin = [coordinate(), coordinate(), coordinate()];
+            vertices.push([origin[0], origin[1], origin[2]]);
+            vertices.push([origin[0] + 0.2, origin[1], origin[2]]);
+            vertices.push([origin[0], origin[1] + 0.2, origin[2]]);
+            triangles.push([base, base + 1, base + 2]);
+            let _ = index;
+        }
+        let first = TriMesh::new(vertices.clone(), triangles.clone());
+        let rebuilt = TriMesh::new(vertices.clone(), triangles.clone());
+        assert_eq!(
+            first.bvh_fingerprint(),
+            rebuilt.bvh_fingerprint(),
+            "identical input must build the identical tree"
+        );
+
+        // Duplicate-centroid adversary: many triangles sharing one centroid
+        // exercise the sort tie-break; rebuilds must still agree exactly.
+        let shared: Vec<[f64; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            [0.0, 0.3, 0.0],
+            [0.0, 0.0, 0.3],
+        ];
+        let coincident_triangles: Vec<[u32; 3]> = (0..64)
+            .map(|_| [0u32, 1, 2])
+            .chain([[0u32, 1, 3]])
+            .collect();
+        let tied_a = TriMesh::new(shared.clone(), coincident_triangles.clone());
+        let tied_b = TriMesh::new(shared, coincident_triangles);
+        assert_eq!(
+            tied_a.bvh_fingerprint(),
+            tied_b.bvh_fingerprint(),
+            "duplicate centroids must not make construction order-unstable"
+        );
+
+        // Triangle-order permutation: the tree is a function of the INPUT,
+        // and triangle order IS input (leaf order references it). The
+        // contract is determinism per input, not canonicalization across
+        // permutations; this documents the boundary rather than assuming it.
+        let mut permuted_triangles = triangles.clone();
+        permuted_triangles.reverse();
+        let permuted = TriMesh::new(vertices, permuted_triangles);
+        assert_eq!(
+            permuted.bvh_fingerprint(),
+            TriMesh::new(permuted.vertices.clone(), permuted.triangles.clone()).bvh_fingerprint(),
+            "the permuted input is itself deterministic across rebuilds"
+        );
+    }
+
     #[test]
     fn bvh_traversal_stack_preserves_lifo_order_inline_and_after_spill() {
         let mut inline = BvhTraversalStack::<4>::new(10).expect("inline root fits");
