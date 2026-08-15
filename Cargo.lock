@@ -1149,6 +1149,7 @@ name = "fs-couple"
 version = "0.0.1"
 dependencies = [
  "fs-bem",
+ "fs-blake3",
  "fs-dcontact",
  "fs-duct",
  "fs-fft",

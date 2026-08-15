@@ -11,6 +11,7 @@ description = "Multiphysics composition through typed port-thermodynamic relatio
 layer = "L3"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-dcontact = { path = "../fs-dcontact" }
 fs-duct = { path = "../fs-duct" }
 fs-fft = { path = "../fs-fft" }
