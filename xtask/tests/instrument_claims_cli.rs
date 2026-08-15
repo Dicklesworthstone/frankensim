@@ -204,6 +204,24 @@ fn scratch_lifecycle_through_the_real_binary() {
     assert!(stdout.contains("row deleted"), "wrong refusal:\n{stdout}");
     assert!(stdout.contains("D21"), "refusal cites doctrine:\n{stdout}");
 
+    // Step 6b: the determinism composition lint through the binary — a
+    // cross-isa claim over a default-ceiling owner refuses by name
+    // (weakest-operand law; zero cross-ISA goldens exist).
+    write(
+        &scratch,
+        "instrument-claims.json",
+        &registry(
+            &row("green", "no", evidence, "null", "over-claimed replay")
+                .replace("\"one-host\"", "\"cross-isa\""),
+        ),
+    );
+    let (ok, stdout) = run_check(&scratch);
+    assert!(!ok, "cross-isa over-claim must fail:\n{stdout}");
+    assert!(
+        stdout.contains("exceeds owner crate"),
+        "wrong refusal:\n{stdout}"
+    );
+
     // Step 7: demotion to refused (with its reason) is the legal path, and
     // the transition is surfaced. live_default must drop with it.
     write(

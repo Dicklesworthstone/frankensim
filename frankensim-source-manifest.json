@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "62faaa65afbed8c354938cadd3dcde78687ab8308dbe7dee3de26a1f3588d368",
+  "manifest_identity": "46461d8fbb57da33a19b43aa75a9197477653c80c838852b9029cdd74b2fa200",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "c5e19c3acc59bc7b37abca853f28af789df38f1b38ac78f9568d860bbf98cd43",
+    "source_root": "898f5960b9eaffba428d0fe997086dc0a9b1c98a8a178ee41eab6526cdafc015",
     "tracked_file_count": 2410,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -2409,7 +2409,7 @@
       {"path": "xtask/src/critical_path.rs", "git_mode": "100644", "bytes": 22801, "content_blake3": "24ac2ed2c3d0cb4da9d9a41ba856bbc49c87813438dfe201c9467f8126837bda"},
       {"path": "xtask/src/depgraph.rs", "git_mode": "100644", "bytes": 79944, "content_blake3": "2df1e07c5f1b826bcb88b25056a2430e2001ebfbbf453bc44a914a3eefa207d4"},
       {"path": "xtask/src/identities.rs", "git_mode": "100644", "bytes": 941813, "content_blake3": "098236fa714689d52eb72bf12091000d732d2f1defac0295f862657ab1f5bc8c"},
-      {"path": "xtask/src/instrument_claims.rs", "git_mode": "100644", "bytes": 31784, "content_blake3": "336b149fdaf9cd06d92cd192f34af8c23dc9dc2892453fe538a78257e93dd742"},
+      {"path": "xtask/src/instrument_claims.rs", "git_mode": "100644", "bytes": 36362, "content_blake3": "67abf81b07eeb33b48303ca544bec964571b2d1eda392a5d64208710369741b3"},
       {"path": "xtask/src/main.rs", "git_mode": "100644", "bytes": 477670, "content_blake3": "a919e512e2e766d8c86b2ceefb71f8feb21ed0111106dc05d50c5b4f8e21ed40"},
       {"path": "xtask/src/manifest_fixture.rs", "git_mode": "100644", "bytes": 60356, "content_blake3": "bd3d1f7aafd48f2955d2f5fb6c132604bfd4da063f5c78dea530e37f6d743ad8"},
       {"path": "xtask/src/matdb_pack.rs", "git_mode": "100644", "bytes": 225846, "content_blake3": "6ed995cc03f0c305240883d92d4798d7c565de1d4f23e30902a3bef3cd877bf9"},
@@ -2425,7 +2425,7 @@
       {"path": "xtask/src/tropical_path.rs", "git_mode": "100644", "bytes": 35151, "content_blake3": "9c999ffa27ece21631ef582bddc0c7b48ab318ac988944bf1b8fa8b2539bd63c"},
       {"path": "xtask/src/vv_scorecard.rs", "git_mode": "100644", "bytes": 3852, "content_blake3": "f3f2b1247f2fcac56f6fdd93a15b416c48b8921657f462feab6a1c578e900c61"},
       {"path": "xtask/tests/constellation_admission.rs", "git_mode": "100644", "bytes": 86027, "content_blake3": "4c09c7b2262cd6629ba3ba9329d8f35623d69f6d1d4176b8e63facafe103fc49"},
-      {"path": "xtask/tests/instrument_claims_cli.rs", "git_mode": "100644", "bytes": 8078, "content_blake3": "051dfaf43a37712141d40ecd4a255121046a1cbb4f113c0e67b577ffdd59364b"},
+      {"path": "xtask/tests/instrument_claims_cli.rs", "git_mode": "100644", "bytes": 8723, "content_blake3": "40b762d102e8aa5730cc53c2e1f31d71ad1bbb23d94c5d54c555c2f25d6442e7"},
       {"path": "xtask/tests/interface_pack_cli.rs", "git_mode": "100644", "bytes": 7068, "content_blake3": "eabcd587dae0166d79a7ec4504bdd997d3f74873868b30d389b8e3522e0b1dba"},
       {"path": "xtask/tests/interface_pack_seed_cli.rs", "git_mode": "100644", "bytes": 32373, "content_blake3": "289b5c69b84f72940f9e6dfa41ab24934247a8e1c5c093da454e91512bc26884"},
       {"path": "xtask/tests/matdb_pack_cli.rs", "git_mode": "100644", "bytes": 308454, "content_blake3": "0ad43136cb978e34c9def45b77d78c20d87079b77b204cb2720534eb48357120"}

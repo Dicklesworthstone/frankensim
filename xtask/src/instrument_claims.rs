@@ -53,6 +53,48 @@ const RESOLVABLE_EVIDENCE_KINDS: [&str; 3] = ["test", "contract", "doc"];
 /// An honest gap, mirrored on maturity's `corpus` kind.
 const RECORDED_ONLY_EVIDENCE_KINDS: [&str; 4] = ["receipt", "bakeoff", "listening", "corpus"];
 
+/// Determinism composition lint (bead `frankensim-music-v8-root-3ez8g.1.3`).
+///
+/// Replay strength composes like evidence colour: a composed image inherits
+/// the WEAKEST operand in its owner chain, and a row may never claim more.
+/// The ladder is `one-host < same-isa < cross-isa`; `statistical` and
+/// `fast-mode` are orthogonal declarations (replay-in-distribution and
+/// declared-deviation respectively), exempt from the ladder but surfaced as
+/// notes so reviewers see them.
+///
+/// Ceilings are sourced from crate CONTRACTs and recorded golden evidence,
+/// never from optimism. Current truth (2026-08-14): ZERO cross-ISA goldens
+/// exist anywhere in the music stack, so the DEFAULT ceiling is `one-host`.
+/// The promotion path is golden evidence: when the cross-ISA audit (bead
+/// 3ez8g.13.4) records matching digests on both reference ISA families for
+/// a crate, its ceiling row is raised HERE, citing the goldens, in the same
+/// commit (the golden-bump protocol).
+const DETERMINISM_DEFAULT_CEILING: &str = "one-host";
+/// Per-crate ceilings that differ from the default, with the reason.
+/// fs-tribo: its CONTRACT declares NO cross-ISA bit-stability (norms use the
+/// platform `hypot` sequence for overflow safety) — a deliberate, permanent
+/// cap until bead 3ez8g.7.3 routes or re-declares it. Listing it explicitly
+/// (even while equal to the default) makes the cap survive any future
+/// default raise.
+const DETERMINISM_CEILINGS: [(&str, &str); 1] = [("fs-tribo", "one-host")];
+
+/// Ladder position; `None` for the orthogonal declarations.
+fn determinism_strength(class: &str) -> Option<u8> {
+    match class {
+        "one-host" => Some(0),
+        "same-isa" => Some(1),
+        "cross-isa" => Some(2),
+        _ => None,
+    }
+}
+
+fn determinism_ceiling(owner: &str) -> &'static str {
+    DETERMINISM_CEILINGS
+        .iter()
+        .find(|(name, _)| *name == owner)
+        .map_or(DETERMINISM_DEFAULT_CEILING, |(_, ceiling)| ceiling)
+}
+
 pub struct InstrumentClaimsReport {
     pub violations: Vec<Violation>,
     pub decisions: Vec<PolicyNote>,
@@ -466,17 +508,40 @@ fn check_registry_sources(
                 }
             }
         }
-        // Weakest-operand determinism honesty is bead .1.3's lint; until it
-        // lands, cross-ISA rows are surfaced for review rather than trusted
-        // silently (zero cross-ISA goldens exist in the music stack today).
-        if row.determinism == "cross-isa" {
-            decisions.push(note(
-                &row.key,
-                "review",
-                "row claims cross-isa determinism; no cross-ISA goldens exist in the music \
-                 stack yet (bead 3ez8g.13.4) — verify before trusting"
-                    .to_string(),
-            ));
+        // Weakest-operand determinism lint (bead 3ez8g.1.3): a row's ladder
+        // class may not exceed the weakest ceiling in its owner chain.
+        match determinism_strength(&row.determinism) {
+            Some(claimed) => {
+                for owner in &row.owner_crates {
+                    let ceiling = determinism_ceiling(owner);
+                    let allowed = determinism_strength(ceiling).unwrap_or(0);
+                    if claimed > allowed {
+                        violations.push(violation(
+                            &row.key,
+                            format!(
+                                "determinism {:?} exceeds owner crate {owner:?}'s ceiling \
+                                 {ceiling:?}; replay strength composes like evidence colour \
+                                 (weakest operand wins) and ceilings rise only on recorded \
+                                 golden evidence (bead 3ez8g.13.4)",
+                                row.determinism
+                            ),
+                        ));
+                    }
+                }
+            }
+            None => {
+                // statistical / fast-mode: orthogonal declarations, exempt
+                // from the ladder but surfaced so reviewers see them.
+                decisions.push(note(
+                    &row.key,
+                    "review",
+                    format!(
+                        "row declares determinism {:?} (off the replay ladder); verify the \
+                         declaration matches the owning contract's stated class",
+                        row.determinism
+                    ),
+                ));
+            }
         }
     }
 
@@ -854,14 +919,56 @@ mod tests {
     }
 
     #[test]
-    fn cross_isa_claim_is_surfaced_for_review() {
-        let report = run(&registry(&[row_with(&[("determinism", r#""cross-isa""#)])]), None);
-        assert!(report.violations.is_empty(), "{}", details(&report));
-        assert!(
-            report
-                .decisions
-                .iter()
-                .any(|note| note.verdict == "review" && note.detail.contains("cross-isa")),
+    fn determinism_above_the_default_ceiling_refuses() {
+        // Zero cross-ISA goldens exist in the music stack, so the default
+        // ceiling is one-host: both higher ladder classes refuse, naming
+        // the capping crate and the promotion path.
+        for claimed in ["same-isa", "cross-isa"] {
+            let report = run(
+                &registry(&[row_with(&[("determinism", &format!("\"{claimed}\""))])]),
+                None,
+            );
+            let text = details(&report);
+            assert!(text.contains("exceeds owner crate \"fs-duct\""), "{text}");
+            assert!(text.contains("3ez8g.13.4"), "{text}");
+        }
+    }
+
+    #[test]
+    fn tribo_cap_names_the_capping_crate() {
+        let report = run(
+            &registry(&[row_with(&[
+                ("owner_crates", r#"["fs-tribo","fs-couple"]"#),
+                ("determinism", r#""cross-isa""#),
+            ])]),
+            None,
         );
+        let text = details(&report);
+        assert!(text.contains("owner crate \"fs-tribo\""), "{text}");
+    }
+
+    #[test]
+    fn off_ladder_declarations_are_exempt_but_surfaced() {
+        for declared in ["statistical", "fast-mode"] {
+            let report = run(
+                &registry(&[row_with(&[("determinism", &format!("\"{declared}\""))])]),
+                None,
+            );
+            assert!(report.violations.is_empty(), "{}", details(&report));
+            assert!(
+                report
+                    .decisions
+                    .iter()
+                    .any(|note| note.verdict == "review"
+                        && note.detail.contains("off the replay ladder")),
+                "missing review note for {declared}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_host_rows_pass_the_ceiling() {
+        let report = run(&registry(&[row("")]), None);
+        assert!(report.violations.is_empty(), "{}", details(&report));
     }
 }
