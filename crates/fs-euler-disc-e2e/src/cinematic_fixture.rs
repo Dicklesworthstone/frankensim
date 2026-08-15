@@ -195,7 +195,8 @@ use fs_tribo::{
         RollingWorkOwnership,
     },
     surface_excitation::{
-        PeriodicHarmonicSurface, PeriodicSurfaceHarmonic, SelfAffinePeriodicProfileSpectrum,
+        AdmittedSurfaceTracePair, PeriodicHarmonicSurface, PeriodicSurfaceHarmonic,
+        SelfAffinePeriodicProfileSpectrum,
     },
 };
 
@@ -2745,6 +2746,7 @@ struct FixtureProductionMechanics {
     model: ProductionCouplingModel,
     checkpoint: ProductionCouplingCheckpoint,
     template: ProductionCouplingStepInput,
+    surface_traces: AdmittedSurfaceTracePair,
 }
 
 fn u64_decimal(mut value: u64, storage: &mut [u8; 20]) -> &str {
@@ -3016,6 +3018,7 @@ impl FixtureProductionMechanics {
             start,
             maximum_steps,
             steps_per_control,
+            &self.surface_traces,
             cx,
             |checkpoint, reusable_input| {
                 let input = reusable_input.get_or_insert_with(|| self.template.clone());
@@ -3750,10 +3753,21 @@ fn build_fixture_production_mechanics(
             cx,
         )
         .map_err(pipeline)?;
+    let surface_geometry = template.surface_geometry.as_ref().ok_or_else(|| {
+        CinematicFixtureError::Pipeline(
+            "the cinematic product path requires declared surface geometry".into(),
+        )
+    })?;
+    let surface_traces = AdmittedSurfaceTracePair::new(
+        &surface_geometry.surface_a.trace,
+        &surface_geometry.surface_b.trace,
+    )
+    .map_err(pipeline)?;
     Ok(FixtureProductionMechanics {
         model,
         checkpoint,
         template,
+        surface_traces,
     })
 }
 
