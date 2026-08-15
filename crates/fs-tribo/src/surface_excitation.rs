@@ -483,6 +483,144 @@ impl UniformSurfaceTrace {
     }
 }
 
+/// Immutable, once-validated acceleration data for one ordered trace pair.
+///
+/// Segment slopes retain the checked path's exact subtraction-then-division
+/// expression. Calls using clones backed by the same immutable height arrays
+/// use the cache; any other trace pair falls back to the checked public path.
+#[derive(Debug)]
+pub struct AdmittedSurfaceTracePair {
+    surface_a: AdmittedSurfaceTrace,
+    surface_b: AdmittedSurfaceTrace,
+}
+
+#[derive(Debug)]
+struct AdmittedSurfaceTrace {
+    heights_m: Arc<[f64]>,
+    boundary: SurfaceTraceBoundary,
+    sample_spacing_m: f64,
+    track_length_m: f64,
+    segments: Box<[AdmittedSurfaceSegment]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AdmittedSurfaceSegment {
+    height_start_m: f64,
+    slope: f64,
+}
+
+impl AdmittedSurfaceTrace {
+    fn new(trace: &UniformSurfaceTrace) -> Result<Self, SurfaceExcitationError> {
+        trace.validate()?;
+        let sample_count = trace.heights_m.len();
+        let segment_count = match trace.boundary {
+            SurfaceTraceBoundary::Finite => sample_count - 1,
+            SurfaceTraceBoundary::Periodic => sample_count,
+        };
+        let mut segments = Vec::new();
+        segments.try_reserve_exact(segment_count).map_err(|_| {
+            SurfaceExcitationError::TraceCapacity {
+                requested: segment_count,
+            }
+        })?;
+        for start in 0..segment_count {
+            let end = if start + 1 == sample_count {
+                0
+            } else {
+                start + 1
+            };
+            let height_start_m = trace.heights_m[start];
+            let slope = (trace.heights_m[end] - height_start_m) / trace.sample_spacing_m;
+            segments.push(AdmittedSurfaceSegment {
+                height_start_m,
+                slope,
+            });
+        }
+        Ok(Self {
+            heights_m: Arc::clone(&trace.heights_m),
+            boundary: trace.boundary,
+            sample_spacing_m: trace.sample_spacing_m,
+            track_length_m: trace.track_length_m(),
+            segments: segments.into_boxed_slice(),
+        })
+    }
+
+    fn matches(&self, trace: &UniformSurfaceTrace) -> bool {
+        Arc::ptr_eq(&self.heights_m, &trace.heights_m)
+    }
+
+    fn initial_segment_index(&self, segment: i64) -> usize {
+        match self.boundary {
+            SurfaceTraceBoundary::Finite => segment as usize,
+            SurfaceTraceBoundary::Periodic => {
+                segment.rem_euclid(self.segments.len() as i64) as usize
+            }
+        }
+    }
+
+    fn advance_segment_index(&self, index: &mut usize) {
+        *index += 1;
+        if self.boundary == SurfaceTraceBoundary::Periodic && *index == self.segments.len() {
+            *index = 0;
+        }
+    }
+}
+
+impl AdmittedSurfaceTracePair {
+    /// Validate and cache one ordered immutable surface pair.
+    pub fn new(
+        surface_a: &UniformSurfaceTrace,
+        surface_b: &UniformSurfaceTrace,
+    ) -> Result<Self, SurfaceExcitationError> {
+        Ok(Self {
+            surface_a: AdmittedSurfaceTrace::new(surface_a)?,
+            surface_b: AdmittedSurfaceTrace::new(surface_b)?,
+        })
+    }
+
+    fn matches(
+        &self,
+        surface_a: SurfaceTraceMotion<'_>,
+        surface_b: SurfaceTraceMotion<'_>,
+    ) -> bool {
+        self.surface_a.matches(surface_a.trace) && self.surface_b.matches(surface_b.trace)
+    }
+
+    /// Evaluate point support without rescanning an unchanged admitted pair.
+    pub fn evaluate_point_surface_pair(
+        &self,
+        interface: &InterfaceSystemRef,
+        surface_a: SurfaceTraceMotion<'_>,
+        surface_b: SurfaceTraceMotion<'_>,
+    ) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+        if !self.matches(surface_a, surface_b) {
+            return evaluate_point_surface_pair(interface, surface_a, surface_b);
+        }
+        let a = sample_admitted_trace(surface_a, &self.surface_a)?;
+        let b = sample_admitted_trace(surface_b, &self.surface_b)?;
+        surface_pair_receipt(interface, surface_a, surface_b, 0.0, a, b)
+    }
+
+    /// Evaluate Hertz filtering without rescanning an unchanged admitted pair.
+    pub fn evaluate_hertz_filtered_surface_pair(
+        &self,
+        interface: &InterfaceSystemRef,
+        surface_a: SurfaceTraceMotion<'_>,
+        surface_b: SurfaceTraceMotion<'_>,
+        footprint: ProjectedHertzFootprint,
+    ) -> Result<FilteredSurfacePairReceipt, SurfaceExcitationError> {
+        if !self.matches(surface_a, surface_b) {
+            return evaluate_hertz_filtered_surface_pair(
+                interface, surface_a, surface_b, footprint,
+            );
+        }
+        let half_width_m = footprint.projected_half_width_m()?;
+        let a = filter_admitted_trace(surface_a, half_width_m, &self.surface_a)?;
+        let b = filter_admitted_trace(surface_b, half_width_m, &self.surface_b)?;
+        surface_pair_receipt(interface, surface_a, surface_b, half_width_m, a, b)
+    }
+}
+
 /// Elliptic Hertz footprint and travel direction in its principal frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProjectedHertzFootprint {
@@ -647,6 +785,43 @@ pub struct HertzRoughnessExcitationReceipt {
 pub fn evaluate_hertz_roughness_excitation(
     input: HertzRoughnessExcitationInput<'_>,
 ) -> Result<HertzRoughnessExcitationReceipt, SurfaceExcitationError> {
+    validate_hertz_roughness_input(&input)?;
+    let filtered = evaluate_hertz_filtered_surface_pair(
+        input.interface,
+        input.surface_a,
+        input.surface_b,
+        input.footprint,
+    )?;
+    finish_hertz_roughness_excitation(input, filtered)
+}
+
+impl AdmittedSurfaceTracePair {
+    /// Evaluate the full tangent-linear excitation using cached trace segments.
+    ///
+    /// A motion carrying independently allocated trace data takes the checked
+    /// path, so admission never changes which otherwise-valid values are
+    /// accepted or refused.
+    pub fn evaluate_hertz_roughness_excitation(
+        &self,
+        input: HertzRoughnessExcitationInput<'_>,
+    ) -> Result<HertzRoughnessExcitationReceipt, SurfaceExcitationError> {
+        if !self.matches(input.surface_a, input.surface_b) {
+            return evaluate_hertz_roughness_excitation(input);
+        }
+        validate_hertz_roughness_input(&input)?;
+        let filtered = self.evaluate_hertz_filtered_surface_pair(
+            input.interface,
+            input.surface_a,
+            input.surface_b,
+            input.footprint,
+        )?;
+        finish_hertz_roughness_excitation(input, filtered)
+    }
+}
+
+fn validate_hertz_roughness_input(
+    input: &HertzRoughnessExcitationInput<'_>,
+) -> Result<(), SurfaceExcitationError> {
     for (field, value) in [
         ("nominal_approach_m", input.nominal_approach_m),
         ("normal_tangent_n_per_m", input.normal_tangent_n_per_m),
@@ -668,12 +843,13 @@ pub fn evaluate_hertz_roughness_excitation(
             field: "maximum_linearized_height_fraction",
         });
     }
-    let filtered = evaluate_hertz_filtered_surface_pair(
-        input.interface,
-        input.surface_a,
-        input.surface_b,
-        input.footprint,
-    )?;
+    Ok(())
+}
+
+fn finish_hertz_roughness_excitation(
+    input: HertzRoughnessExcitationInput<'_>,
+    filtered: FilteredSurfacePairReceipt,
+) -> Result<HertzRoughnessExcitationReceipt, SurfaceExcitationError> {
     let combined_height_m = filtered.combined_effective_height_m;
     let combined_rate_m_per_s = filtered.combined_effective_height_rate_m_per_s;
     let fraction = finite(
@@ -751,14 +927,50 @@ fn surface_pair_receipt(
 }
 
 fn sample_trace(motion: SurfaceTraceMotion<'_>) -> Result<FilteredTrace, SurfaceExcitationError> {
+    validate_surface_trace_motion(motion)?;
+    motion.trace.validate()?;
+    sample_validated_trace(motion, None)
+}
+
+fn sample_admitted_trace(
+    motion: SurfaceTraceMotion<'_>,
+    admitted: &AdmittedSurfaceTrace,
+) -> Result<FilteredTrace, SurfaceExcitationError> {
+    validate_surface_trace_motion(motion)?;
+    sample_validated_trace(motion, Some(admitted))
+}
+
+fn validate_surface_trace_motion(
+    motion: SurfaceTraceMotion<'_>,
+) -> Result<(), SurfaceExcitationError> {
     if !(motion.path_coordinate_m.is_finite() && motion.path_speed_m_per_s.is_finite()) {
         return Err(SurfaceExcitationError::InvalidInput {
             field: "surface path coordinate or speed",
         });
     }
-    motion.trace.validate()?;
-    let track_length_m = motion.trace.track_length_m();
-    let center_m = match motion.trace.boundary {
+    Ok(())
+}
+
+fn trace_metadata(
+    motion: SurfaceTraceMotion<'_>,
+    admitted: Option<&AdmittedSurfaceTrace>,
+) -> (SurfaceTraceBoundary, f64, f64) {
+    match admitted {
+        Some(trace) => (trace.boundary, trace.sample_spacing_m, trace.track_length_m),
+        None => (
+            motion.trace.boundary,
+            motion.trace.sample_spacing_m,
+            motion.trace.track_length_m(),
+        ),
+    }
+}
+
+fn sample_validated_trace(
+    motion: SurfaceTraceMotion<'_>,
+    admitted: Option<&AdmittedSurfaceTrace>,
+) -> Result<FilteredTrace, SurfaceExcitationError> {
+    let (boundary, spacing_m, track_length_m) = trace_metadata(motion, admitted);
+    let center_m = match boundary {
         SurfaceTraceBoundary::Finite => {
             let tolerance = 64.0 * f64::EPSILON * track_length_m.max(1.0);
             if motion.path_coordinate_m < -tolerance
@@ -774,23 +986,26 @@ fn sample_trace(motion: SurfaceTraceMotion<'_>) -> Result<FilteredTrace, Surface
         }
         SurfaceTraceBoundary::Periodic => motion.path_coordinate_m.rem_euclid(track_length_m),
     };
-    let spacing_m = motion.trace.sample_spacing_m;
-    let segment = match motion.trace.boundary {
+    let segment = match boundary {
         SurfaceTraceBoundary::Finite if center_m == track_length_m => {
-            i64::try_from(motion.trace.heights_m.len() - 2).map_err(|_| {
-                SurfaceExcitationError::InvalidInput {
-                    field: "finite trace point segment",
-                }
+            let final_segment = admitted.map_or(motion.trace.heights_m.len() - 2, |trace| {
+                trace.segments.len() - 1
+            });
+            i64::try_from(final_segment).map_err(|_| SurfaceExcitationError::InvalidInput {
+                field: "finite trace point segment",
             })?
         }
         _ => (center_m / spacing_m).floor() as i64,
     };
     let segment_start_m = segment as f64 * spacing_m;
-    let (height_start_m, height_end_m) = segment_heights(motion.trace, segment)?;
-    let slope = finite(
-        (height_end_m - height_start_m) / spacing_m,
-        "point_surface_slope",
-    )?;
+    let (height_start_m, slope) = if let Some(trace) = admitted {
+        let cached = trace.segments[trace.initial_segment_index(segment)];
+        (cached.height_start_m, cached.slope)
+    } else {
+        let (height_start_m, height_end_m) = segment_heights(motion.trace, segment)?;
+        (height_start_m, (height_end_m - height_start_m) / spacing_m)
+    };
+    let slope = finite(slope, "point_surface_slope")?;
     let height_m = finite(
         height_start_m + slope * (center_m - segment_start_m),
         "point_surface_height_m",
@@ -808,14 +1023,27 @@ fn filter_trace(
     motion: SurfaceTraceMotion<'_>,
     half_width_m: f64,
 ) -> Result<FilteredTrace, SurfaceExcitationError> {
-    if !(motion.path_coordinate_m.is_finite() && motion.path_speed_m_per_s.is_finite()) {
-        return Err(SurfaceExcitationError::InvalidInput {
-            field: "surface path coordinate or speed",
-        });
-    }
+    validate_surface_trace_motion(motion)?;
     motion.trace.validate()?;
-    let track_length_m = motion.trace.track_length_m();
-    let center_m = match motion.trace.boundary {
+    filter_validated_trace(motion, half_width_m, None)
+}
+
+fn filter_admitted_trace(
+    motion: SurfaceTraceMotion<'_>,
+    half_width_m: f64,
+    admitted: &AdmittedSurfaceTrace,
+) -> Result<FilteredTrace, SurfaceExcitationError> {
+    validate_surface_trace_motion(motion)?;
+    filter_validated_trace(motion, half_width_m, Some(admitted))
+}
+
+fn filter_validated_trace(
+    motion: SurfaceTraceMotion<'_>,
+    half_width_m: f64,
+    admitted: Option<&AdmittedSurfaceTrace>,
+) -> Result<FilteredTrace, SurfaceExcitationError> {
+    let (boundary, spacing_m, track_length_m) = trace_metadata(motion, admitted);
+    let center_m = match boundary {
         SurfaceTraceBoundary::Finite => {
             let tolerance = 64.0 * f64::EPSILON * track_length_m.max(1.0);
             if motion.path_coordinate_m - half_width_m < -tolerance
@@ -839,8 +1067,7 @@ fn filter_trace(
             motion.path_coordinate_m.rem_euclid(track_length_m)
         }
     };
-    let spacing_m = motion.trace.sample_spacing_m;
-    let (start_m, end_m) = match motion.trace.boundary {
+    let (start_m, end_m) = match boundary {
         SurfaceTraceBoundary::Finite => (
             (center_m - half_width_m).max(0.0),
             (center_m + half_width_m).min(track_length_m),
@@ -865,15 +1092,26 @@ fn filter_trace(
 
     let mut height_m = 0.0;
     let mut slope = 0.0;
+    let mut admitted_index = admitted.map(|trace| trace.initial_segment_index(first_segment));
     for segment in first_segment..=last_segment {
+        let current_admitted_index = admitted_index;
+        if let (Some(trace), Some(index)) = (admitted, admitted_index.as_mut()) {
+            trace.advance_segment_index(index);
+        }
         let segment_start_m = segment as f64 * spacing_m;
         let lo_m = start_m.max(segment_start_m);
         let hi_m = end_m.min(segment_start_m + spacing_m);
         if hi_m <= lo_m {
             continue;
         }
-        let (height_start_m, height_end_m) = segment_heights(motion.trace, segment)?;
-        let profile_slope = (height_end_m - height_start_m) / spacing_m;
+        let (height_start_m, profile_slope) =
+            if let (Some(trace), Some(index)) = (admitted, current_admitted_index) {
+                let cached = trace.segments[index];
+                (cached.height_start_m, cached.slope)
+            } else {
+                let (height_start_m, height_end_m) = segment_heights(motion.trace, segment)?;
+                (height_start_m, (height_end_m - height_start_m) / spacing_m)
+            };
         let height_at_center_m = height_start_m + profile_slope * (center_m - segment_start_m);
         let u0 = lo_m - center_m;
         let u1 = hi_m - center_m;
@@ -1371,6 +1609,142 @@ mod tests {
         assert_eq!(
             before.filtered_surface_slopes,
             after.filtered_surface_slopes
+        );
+    }
+
+    #[test]
+    fn g0_admitted_surface_pair_matches_checked_bits_fallback_and_refusals() {
+        let heights_a = vec![
+            0.25e-6, -0.75e-6, 1.5e-6, -1.0e-6, 0.5e-6, 1.25e-6, -0.5e-6, 0.0,
+        ];
+        let heights_b = vec![
+            -0.5e-6, 0.125e-6, 0.75e-6, -0.25e-6, 1.0e-6, -0.875e-6, 0.375e-6, 0.625e-6,
+        ];
+        let surface_a = trace(
+            "admitted-a",
+            0.001,
+            heights_a.clone(),
+            SurfaceTraceBoundary::Periodic,
+        );
+        let surface_b = trace(
+            "admitted-b",
+            0.001,
+            heights_b.clone(),
+            SurfaceTraceBoundary::Periodic,
+        );
+        let admitted = AdmittedSurfaceTracePair::new(&surface_a, &surface_b)
+            .expect("immutable pair admits once");
+        let shared_a = surface_a.clone();
+        let shared_b = surface_b.clone();
+        let interface = interface();
+        fn input<'a>(
+            interface: &'a InterfaceSystemRef,
+            a: &'a UniformSurfaceTrace,
+            b: &'a UniformSurfaceTrace,
+            coordinate_m: f64,
+        ) -> HertzRoughnessExcitationInput<'a> {
+            HertzRoughnessExcitationInput {
+                interface,
+                surface_a: SurfaceTraceMotion {
+                    trace: a,
+                    path_coordinate_m: coordinate_m,
+                    path_speed_m_per_s: 0.73,
+                },
+                surface_b: SurfaceTraceMotion {
+                    trace: b,
+                    path_coordinate_m: coordinate_m + 0.00037,
+                    path_speed_m_per_s: -0.41,
+                },
+                footprint: ProjectedHertzFootprint {
+                    semi_major_axis_m: 0.0025,
+                    semi_minor_axis_m: 0.00125,
+                    travel_angle_from_major_rad: 0.0,
+                },
+                nominal_approach_m: 1.0e-3,
+                nominal_normal_force_n: 80.0,
+                normal_tangent_n_per_m: 1.5e6,
+                maximum_linearized_height_fraction: 0.1,
+            }
+        }
+        let receipt_bits = |receipt: &HertzRoughnessExcitationReceipt| {
+            [
+                receipt.projected_half_width_m.to_bits(),
+                receipt.filtered_surface_heights_m[0].to_bits(),
+                receipt.filtered_surface_heights_m[1].to_bits(),
+                receipt.filtered_surface_slopes[0].to_bits(),
+                receipt.filtered_surface_slopes[1].to_bits(),
+                receipt.combined_effective_height_m.to_bits(),
+                receipt.combined_effective_height_rate_m_per_s.to_bits(),
+                receipt.normal_force_perturbation_n.to_bits(),
+                receipt.normal_force_perturbation_rate_n_per_s.to_bits(),
+                receipt.linearized_height_fraction.to_bits(),
+            ]
+        };
+
+        let wrapped = input(&interface, &shared_a, &shared_b, -0.00035);
+        assert!(admitted.matches(wrapped.surface_a, wrapped.surface_b));
+        let checked = evaluate_hertz_roughness_excitation(wrapped).expect("checked wrapped pair");
+        let cached = admitted
+            .evaluate_hertz_roughness_excitation(wrapped)
+            .expect("cached wrapped pair");
+        assert_eq!(checked, cached);
+        assert_eq!(receipt_bits(&checked), receipt_bits(&cached));
+
+        let finite_a = trace(
+            "finite-a",
+            0.001,
+            vec![0.0, 0.2e-6, -0.4e-6, 0.7e-6, 0.1e-6, -0.3e-6, 0.5e-6, 0.0],
+            SurfaceTraceBoundary::Finite,
+        );
+        let finite_b = trace(
+            "finite-b",
+            0.001,
+            vec![
+                0.1e-6, -0.1e-6, 0.3e-6, -0.2e-6, 0.4e-6, 0.0, -0.3e-6, 0.2e-6,
+            ],
+            SurfaceTraceBoundary::Finite,
+        );
+        let admitted_finite =
+            AdmittedSurfaceTracePair::new(&finite_a, &finite_b).expect("finite pair admits once");
+        let finite_input = input(&interface, &finite_a, &finite_b, 0.004);
+        let checked_finite =
+            evaluate_hertz_roughness_excitation(finite_input).expect("checked finite pair");
+        let cached_finite = admitted_finite
+            .evaluate_hertz_roughness_excitation(finite_input)
+            .expect("cached finite pair");
+        assert_eq!(receipt_bits(&checked_finite), receipt_bits(&cached_finite));
+
+        let independent_a = trace(
+            "admitted-a",
+            0.001,
+            heights_a,
+            SurfaceTraceBoundary::Periodic,
+        );
+        let independent_b = trace(
+            "admitted-b",
+            0.001,
+            heights_b,
+            SurfaceTraceBoundary::Periodic,
+        );
+        let fallback = input(&interface, &independent_a, &independent_b, -0.00035);
+        assert!(!admitted.matches(fallback.surface_a, fallback.surface_b));
+        assert_eq!(
+            evaluate_hertz_roughness_excitation(fallback),
+            admitted.evaluate_hertz_roughness_excitation(fallback)
+        );
+
+        let mut invalid_motion = input(&interface, &shared_a, &shared_b, -0.00035);
+        invalid_motion.surface_a.path_coordinate_m = f64::NAN;
+        assert_eq!(
+            evaluate_hertz_roughness_excitation(invalid_motion),
+            admitted.evaluate_hertz_roughness_excitation(invalid_motion)
+        );
+
+        let mut too_wide = input(&interface, &shared_a, &shared_b, -0.00035);
+        too_wide.footprint.semi_major_axis_m = 0.04;
+        assert_eq!(
+            evaluate_hertz_roughness_excitation(too_wide),
+            admitted.evaluate_hertz_roughness_excitation(too_wide)
         );
     }
 

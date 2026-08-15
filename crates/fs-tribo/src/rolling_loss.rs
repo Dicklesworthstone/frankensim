@@ -893,6 +893,34 @@ impl RollingWorkOwnership {
         Ok(value)
     }
 
+    /// Retargets this owner while reusing its existing string storage.
+    ///
+    /// All prospective fields are validated before any field is changed, so a
+    /// refusal leaves the previous owner intact. This is equivalent to
+    /// constructing a fresh owner from the same fields, but retains each
+    /// string's capacity; no field allocates when its replacement bytes fit.
+    pub fn retarget(
+        &mut self,
+        patch_id: &str,
+        interval_id: &str,
+        generalized_coordinate_id: &str,
+        channel: RollingLossChannel,
+    ) -> Result<(), RollingLossError> {
+        nonblank(patch_id, "work_patch_id")?;
+        nonblank(interval_id, "work_interval_id")?;
+        nonblank(generalized_coordinate_id, "generalized_coordinate_id")?;
+
+        self.patch_id.clear();
+        self.patch_id.push_str(patch_id);
+        self.interval_id.clear();
+        self.interval_id.push_str(interval_id);
+        self.generalized_coordinate_id.clear();
+        self.generalized_coordinate_id
+            .push_str(generalized_coordinate_id);
+        self.channel = channel;
+        Ok(())
+    }
+
     /// Patch identity owning the work interval.
     #[must_use]
     pub fn patch_id(&self) -> &str {

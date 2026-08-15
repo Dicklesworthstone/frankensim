@@ -923,6 +923,42 @@ impl GeneralizedWorkOwnership {
         Ok(value)
     }
 
+    /// Retargets this owner to another caller interval while reusing its
+    /// existing string storage.
+    ///
+    /// All prospective fields are validated before any field is changed, so a
+    /// refusal leaves the previous owner intact. This is equivalent to
+    /// constructing a fresh owner from the same five strings, but retains each
+    /// field's capacity; no field allocates when its replacement bytes fit.
+    pub fn retarget(
+        &mut self,
+        patch_id: &str,
+        interval_id: &str,
+        longitudinal_coordinate_id: &str,
+        lateral_coordinate_id: &str,
+        torsional_coordinate_id: &str,
+    ) -> Result<(), PartialSlipError> {
+        nonblank(patch_id, "work_patch_id")?;
+        nonblank(interval_id, "work_interval_id")?;
+        nonblank(longitudinal_coordinate_id, "longitudinal_coordinate_id")?;
+        nonblank(lateral_coordinate_id, "lateral_coordinate_id")?;
+        nonblank(torsional_coordinate_id, "torsional_coordinate_id")?;
+
+        self.patch_id.clear();
+        self.patch_id.push_str(patch_id);
+        self.interval_id.clear();
+        self.interval_id.push_str(interval_id);
+        self.longitudinal_coordinate_id.clear();
+        self.longitudinal_coordinate_id
+            .push_str(longitudinal_coordinate_id);
+        self.lateral_coordinate_id.clear();
+        self.lateral_coordinate_id.push_str(lateral_coordinate_id);
+        self.torsional_coordinate_id.clear();
+        self.torsional_coordinate_id
+            .push_str(torsional_coordinate_id);
+        Ok(())
+    }
+
     /// Patch identity which owns this work interval.
     #[must_use]
     pub fn patch_id(&self) -> &str {
