@@ -40,6 +40,7 @@ pub mod motion_bounds;
 pub mod motion_vectors;
 #[cfg(feature = "chart-backends")]
 pub mod temporal_accumulation;
+pub mod tlas;
 
 #[cfg(feature = "tracer")]
 pub mod aov;

@@ -32,10 +32,10 @@ use fs_geom::Aabb;
 use crate::animated_instances::{
     AnimatedGeometryInstance, AnimatedInstanceError, RigidTransformTrajectory,
 };
+use crate::charts::Ray;
 use crate::instances::InstanceHit;
 use crate::motion::{ShutterInterval, TimedRay};
 use crate::motion_bounds::{FiniteLocalAabb, conservative_trajectory_swept_aabb};
-use crate::tracer::Ray;
 
 /// Versioned domain for TLAS fingerprints.
 pub const TLAS_FINGERPRINT_DOMAIN: &str = "org.frankensim.fs-render.animated-tlas.v1";
@@ -554,4 +554,272 @@ pub fn brute_force_intersect(
         }
     }
     Ok(best)
+}
+
+#[cfg(test)]
+mod tests {
+    use asupersync::types::Budget;
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_blake3::hash_domain;
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+    use fs_geom::{Point3, Vec3};
+
+    use super::*;
+    use crate::animated_instances::TransformKeyframe;
+    use crate::charts::TriMesh;
+    use crate::instances::RigidTransform;
+    use crate::instances::SharedGeometry;
+    use crate::motion::{
+        NormalizedShutterTime, ShotTimeBounds, ShutterConvention, ShutterDistribution,
+    };
+
+    fn with_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new_clock_free();
+        let pool = ArenaPool::new(ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 71,
+                    kernel_id: 5,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&gate, &cx)
+        })
+    }
+
+    fn shutter(open_s: f64, duration_s: f64) -> ShutterInterval {
+        ShutterInterval::resolve(
+            open_s,
+            duration_s,
+            ShutterConvention::FrontLoaded,
+            ShutterDistribution::UniformCounterV1,
+            ShotTimeBounds::try_new(-10.0, 10.0).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn keyframe(time_s: f64, translation_m: [f64; 3], velocity: [f64; 3]) -> TransformKeyframe {
+        TransformKeyframe::try_new(
+            time_s,
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], translation_m).unwrap(),
+            velocity,
+        )
+        .unwrap()
+    }
+
+    /// A unit triangle in the local z=0 plane, moved along a per-instance
+    /// x trajectory. `speed = 0` gives a static instance.
+    fn instance(object_id: u64, base_x: f64, speed: f64) -> AnimatedGeometryInstance {
+        let mesh = TriMesh::new(
+            vec![[-0.4, -0.4, 0.0], [0.4, -0.4, 0.0], [0.0, 0.4, 0.0]],
+            vec![[0, 1, 2]],
+        );
+        let identity = hash_domain(
+            "org.frankensim.test.tlas-instance",
+            &object_id.to_le_bytes(),
+        );
+        let trajectory = RigidTransformTrajectory::try_new(vec![
+            keyframe(0.0, [base_x, 0.0, 0.0], [speed, 0.0, 0.0]),
+            keyframe(2.0, [base_x + 2.0 * speed, 0.0, 0.0], [speed, 0.0, 0.0]),
+        ])
+        .unwrap();
+        AnimatedGeometryInstance::try_new(
+            object_id,
+            identity,
+            SharedGeometry::mesh(mesh),
+            trajectory,
+        )
+        .unwrap()
+    }
+
+    fn local_bounds(count: usize) -> Vec<FiniteLocalAabb> {
+        (0..count)
+            .map(|_| {
+                FiniteLocalAabb::try_new(Aabb {
+                    min: Point3::new(-0.4, -0.4, 0.0),
+                    max: Point3::new(0.4, 0.4, 0.0),
+                })
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn ray_at(x: f64, normalized_time: f64, exposure: ShutterInterval) -> TimedRay<Ray> {
+        TimedRay::at_normalized(
+            Ray {
+                origin: Point3::new(x, 0.0, 5.0),
+                dir: Vec3::new(0.0, 0.0, -1.0),
+            },
+            exposure,
+            NormalizedShutterTime::try_new(normalized_time).unwrap(),
+        )
+    }
+
+    fn scene(speeds: &[f64]) -> Vec<AnimatedGeometryInstance> {
+        speeds
+            .iter()
+            .enumerate()
+            .map(|(index, &speed)| instance(index as u64 + 1, 3.0 * index as f64, speed))
+            .collect()
+    }
+
+    #[test]
+    fn static_and_moving_hits_match_the_brute_force_oracle() {
+        with_cx(|_, cx| {
+            let exposure = shutter(0.0, 2.0);
+            // Mixed static and moving instances spread along x.
+            let instances = scene(&[0.0, 0.5, 0.0, 1.0, 0.25, 0.0, 0.75, 0.0]);
+            let bounds = local_bounds(instances.len());
+            let tlas = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            let mut counters = TlasTraversalCounters::default();
+            // A grid of rays across space and shutter time: every TLAS
+            // answer must equal the oracle bit-for-bit (motion bounds may
+            // never cull a sampled hit).
+            for step in 0..48 {
+                let x = -1.0 + 0.5 * f64::from(step);
+                for time_step in 0..5 {
+                    let normalized = f64::from(time_step) / 4.0;
+                    let ray = ray_at(x, normalized, exposure);
+                    let fast = tlas
+                        .intersect(cx, &instances, &ray, 100.0, 1.0e-9, &mut counters)
+                        .unwrap();
+                    let oracle =
+                        brute_force_intersect(cx, &instances, &ray, 100.0, 1.0e-9).unwrap();
+                    assert_eq!(fast, oracle, "x={x} normalized={normalized}");
+                }
+            }
+            assert!(counters.instance_tests > 0);
+        });
+    }
+
+    #[test]
+    fn traversal_prunes_instances_measurably() {
+        with_cx(|_, cx| {
+            let exposure = shutter(0.0, 2.0);
+            let instances = scene(&[0.0; 8]);
+            let bounds = local_bounds(instances.len());
+            let tlas = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            let mut counters = TlasTraversalCounters::default();
+            // One ray straight down onto instance 1's triangle: far
+            // instances must be pruned by slabs, not intersected.
+            let ray = ray_at(0.0, 0.0, exposure);
+            let hit = tlas
+                .intersect(cx, &instances, &ray, 100.0, 1.0e-9, &mut counters)
+                .unwrap()
+                .unwrap();
+            assert_eq!(hit.object_id, 1);
+            assert!(
+                counters.instance_tests <= 2,
+                "8 separated instances must not all be tested: {counters:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn fingerprints_are_deterministic_and_motion_sensitive() {
+        with_cx(|_, cx| {
+            let exposure = shutter(0.0, 2.0);
+            let instances = scene(&[0.0, 0.5, 0.0]);
+            let bounds = local_bounds(instances.len());
+            let first = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            let again = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            assert_eq!(first.fingerprint(), again.fingerprint(), "identical builds");
+            // A different trajectory moves the fingerprint.
+            let moved = scene(&[0.0, 0.6, 0.0]);
+            let other = AnimatedTlas::build(cx, &moved, &bounds, exposure).unwrap();
+            assert_ne!(first.fingerprint(), other.fingerprint());
+        });
+    }
+
+    #[test]
+    fn refit_matches_a_fresh_build_and_reports_inflation() {
+        with_cx(|_, cx| {
+            let exposure = shutter(0.0, 2.0);
+            let instances = scene(&[0.0, 0.5, 0.0, 1.0]);
+            let bounds = local_bounds(instances.len());
+            let mut tlas = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            // Same inputs refit: inflation ~1, identical fingerprint.
+            let inflation = tlas.refit(cx, &instances, &bounds, exposure).unwrap();
+            assert!(
+                (inflation - 1.0).abs() < 1.0e-9,
+                "same-input inflation {inflation}"
+            );
+            let fresh = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            assert_eq!(tlas.fingerprint(), fresh.fingerprint());
+            // Faster trajectories refit: results still match the oracle
+            // (topology kept, slabs conservative for the NEW motion).
+            let faster = scene(&[0.0, 0.9, 0.0, 1.4]);
+            let inflation = tlas.refit(cx, &faster, &bounds, exposure).unwrap();
+            assert!(inflation > 1.0, "faster sweep must inflate: {inflation}");
+            let mut counters = TlasTraversalCounters::default();
+            for step in 0..24 {
+                let x = -1.0 + 0.6 * f64::from(step);
+                let ray = ray_at(x, 0.75, exposure);
+                let fast = tlas
+                    .intersect(cx, &faster, &ray, 100.0, 1.0e-9, &mut counters)
+                    .unwrap();
+                let oracle = brute_force_intersect(cx, &faster, &ray, 100.0, 1.0e-9).unwrap();
+                assert_eq!(fast, oracle, "refit x={x}");
+            }
+            // Different instance count is a rebuild, never a refit.
+            let fewer = scene(&[0.0]);
+            assert_eq!(
+                tlas.refit(cx, &fewer, &local_bounds(1), exposure)
+                    .unwrap_err(),
+                TlasError::RefitShapeMismatch
+            );
+        });
+    }
+
+    #[test]
+    fn admission_refuses_degenerate_scenes_and_cancellation_holds() {
+        with_cx(|gate, cx| {
+            let exposure = shutter(0.0, 2.0);
+            assert_eq!(
+                AnimatedTlas::build(cx, &[], &[], exposure).unwrap_err(),
+                TlasError::EmptyScene
+            );
+            let instances = scene(&[0.0, 0.5]);
+            assert_eq!(
+                AnimatedTlas::build(cx, &instances, &local_bounds(1), exposure).unwrap_err(),
+                TlasError::BoundsArityMismatch
+            );
+            // A shutter outside the trajectories refuses through admission.
+            assert!(matches!(
+                AnimatedTlas::build(cx, &instances, &local_bounds(2), shutter(5.0, 1.0))
+                    .unwrap_err(),
+                TlasError::Animated(_)
+            ));
+            // Cancellation observes at the bounded boundary.
+            gate.request();
+            assert_eq!(
+                AnimatedTlas::build(cx, &instances, &local_bounds(2), exposure).unwrap_err(),
+                TlasError::Cancelled
+            );
+        });
+    }
+
+    #[test]
+    fn single_instance_scene_works_end_to_end() {
+        with_cx(|_, cx| {
+            let exposure = shutter(0.0, 2.0);
+            let instances = scene(&[0.5]);
+            let bounds = local_bounds(1);
+            let tlas = AnimatedTlas::build(cx, &instances, &bounds, exposure).unwrap();
+            assert_eq!(tlas.node_count(), 1);
+            let mut counters = TlasTraversalCounters::default();
+            let ray = ray_at(0.5, 0.5, exposure);
+            let fast = tlas
+                .intersect(cx, &instances, &ray, 100.0, 1.0e-9, &mut counters)
+                .unwrap();
+            let oracle = brute_force_intersect(cx, &instances, &ray, 100.0, 1.0e-9).unwrap();
+            assert_eq!(fast, oracle);
+        });
+    }
 }
