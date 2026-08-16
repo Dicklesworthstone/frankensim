@@ -414,6 +414,45 @@ pub fn mm_input_impedance(
     n_modes: usize,
     extra_slices: usize,
 ) -> Result<ModalResponse, DuctError> {
+    mm_core(duct, state, omega, loss, MmLoad::Analytic(termination), n_modes, extra_slices)
+}
+
+/// Plane-mode mouth load selector for the modal image.
+enum MmLoad<'a> {
+    Analytic(Termination),
+    Tabulated(&'a crate::TabulatedLoad),
+}
+
+/// Multimodal input impedance against a TABULATED plane-mode mouth load
+/// (the zolja bake): the plane mode plays the table (no `ka` ceiling,
+/// out-of-table refusal), higher modes keep the disclosed matched-mouth
+/// closure.
+///
+/// # Errors
+/// As [`mm_input_impedance`], with the table's own refusals replacing
+/// the analytic radiation-fit refusals.
+pub fn mm_input_impedance_tabulated(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    table: &crate::TabulatedLoad,
+    n_modes: usize,
+    extra_slices: usize,
+) -> Result<ModalResponse, DuctError> {
+    mm_core(duct, state, omega, loss, MmLoad::Tabulated(table), n_modes, extra_slices)
+}
+
+#[allow(clippy::too_many_lines)] // one recursion, kept whole on purpose
+fn mm_core(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: MmLoad<'_>,
+    n_modes: usize,
+    extra_slices: usize,
+) -> Result<ModalResponse, DuctError> {
     if n_modes == 0 {
         return Err(DuctError::BadParameter {
             what: "at least one mode (the plane wave)",
@@ -432,13 +471,20 @@ pub fn mm_input_impedance(
     for segment in &duct.segments {
         segment.validate()?;
     }
+    let n = n_modes;
     let stations = stations_of(duct, extra_slices)?;
     let gammas = j1_roots(n_modes - 1)?;
-    let n = n_modes;
 
-    // Mouth: plane-mode load from the scalar termination machinery.
+    // Mouth: plane-mode load from the scalar termination machinery or a
+    // tabulated bake.
     let mouth = stations.last().map_or(0.0, |s| s.radius);
-    let (zl_plane, mouth_ka) = termination_impedance(termination, state, mouth, omega)?;
+    let (zl_plane, mouth_ka) = match load {
+        MmLoad::Analytic(termination) => termination_impedance(termination, state, mouth, omega)?,
+        MmLoad::Tabulated(table) => (
+            Some(table.z_at(omega)?),
+            omega * mouth / state.sound_speed,
+        ),
+    };
     let mouth_wave = modal_wave(state, mouth, omega, loss, &gammas)?;
     let mut min_shear = mouth_wave.shear_number;
     // Modal load: plane mode gets Z_L (or a hard wall for Closed);
