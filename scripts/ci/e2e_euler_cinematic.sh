@@ -300,6 +300,12 @@ if isinstance(declared, (int, float)) and isinstance(fps, (int, float)) and fps 
             observed=duration,
         )
 
+# Sample-rate pin: the master must be written on the declared control
+# clock; a resampled or mislabeled master is a rate-mismatch defect.
+declared_rate = manifest.get("mechanics", {}).get("control_sample_rate_hz")
+if isinstance(declared_rate, int) and rate != declared_rate:
+    refuse("listening master sample-rate mismatch", expected=declared_rate, observed=rate)
+
 # Denoise coherence: an authority claiming more denoised frames than
 # frames exist is an evidence overclaim.
 denoise = picture.get("denoise", {})
@@ -382,6 +388,7 @@ case "$MODE" in
       "negative:reordered-frame	verifier must refuse a renamed/reordered raw frame" \
       "negative:wav-truncation	verifier must refuse a truncated listening master" \
       "negative:av-off-by-one	verifier must refuse audio short of the picture window" \
+      "negative:rate-mismatch	verifier must refuse a master off the declared clock" \
       "negative:false-promotion	verifier must refuse a calibrated-acoustic status claim" \
       "negative:denoise-overclaim	verifier must refuse applied_frames > frames" \
       "negative:stale-mux	verifier must refuse a declared-written-but-missing mux" \
@@ -468,7 +475,7 @@ case "$MODE" in
     exit "$EXIT_OK" ;;
 
   negative)
-    NEG_CASES="gain-clip bad-mechanics-rate truncated-manifest dropped-frame reordered-frame wav-truncation av-off-by-one false-promotion denoise-overclaim stale-mux stale-trajectory-identity"
+    NEG_CASES="gain-clip bad-mechanics-rate truncated-manifest dropped-frame reordered-frame wav-truncation av-off-by-one rate-mismatch false-promotion denoise-overclaim stale-mux stale-trajectory-identity"
     if [ "$NEGATIVE_CASE" = "list" ]; then printf '%s\n' $NEG_CASES; exit "$EXIT_OK"; fi
     case " $NEG_CASES " in
       *" $NEGATIVE_CASE "*) : ;;
@@ -532,7 +539,7 @@ case "$MODE" in
         grep -q "identity mismatch" "$SCRATCH/log" || { log_event "twin" "negative-missed" '{"exit_class":43,"first_divergence":"refused without the identity-mismatch diagnostic"}'; exit "$EXIT_NEGATIVE_MISSED"; }
         log_event "verdict" "ok" '{"exit_class":0}'
         echo "negative stale-trajectory-identity PASS: tampered identity refused at decode" ;;
-      truncated-manifest|dropped-frame|reordered-frame|wav-truncation|av-off-by-one|false-promotion|denoise-overclaim|stale-mux)
+      truncated-manifest|dropped-frame|reordered-frame|wav-truncation|av-off-by-one|rate-mismatch|false-promotion|denoise-overclaim|stale-mux)
         # Build a tiny synthetic bundle, corrupt it, and the verifier must
         # refuse. (Synthetic here is legitimate: the subject under test is
         # the VERIFIER's refusal, not the production pipeline.)
@@ -561,6 +568,7 @@ json.dump({"schema": "frankensim-euler-disc-production-critique-v1",
                         "rendered_frame_start": 0,
                         "rendered_frame_end_exclusive": 1,
                         "denoise": {"applied_frames": 0}},
+           "mechanics": {"control_sample_rate_hz": 48000},
            "audio": {"primary": "physical-listening-master.pcm24.wav"},
            "mux": {"status": "written", "path": "euler-disc-critique.mov"}},
           open(f"{root}/critique-manifest.json", "w"))
@@ -596,6 +604,19 @@ elif case == "denoise-overclaim":
     manifest = json.load(open(manifest_path))
     manifest["picture"]["denoise"]["applied_frames"] = 6
     json.dump(manifest, open(manifest_path, "w"))
+elif case == "rate-mismatch":
+    # Same duration, wrong clock: 44.1 kHz against the declared 48 kHz.
+    import struct
+    rate, channels, bits = 44100, 2, 24
+    samples = round(rate / 24)
+    data = bytes(samples * channels * (bits // 8))
+    path = f"{root}/sound/physical-listening-master.pcm24.wav"
+    with open(path, "wb") as fh:
+        fh.write(b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE")
+        fh.write(b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, rate,
+                                       rate * channels * bits // 8,
+                                       channels * bits // 8, bits))
+        fh.write(b"data" + struct.pack("<I", len(data)) + data)
 elif case == "stale-mux":
     os.remove(f"{root}/euler-disc-critique.mov")
     open(f"{root}/other-output.mov", "w").write("MOVDATA")
@@ -619,7 +640,7 @@ PYCORRUPT
     "$0" --negative stale-trajectory-identity >/dev/null 2>&1; check "identity twin without --bundle refuses" 40 $?
     "$0" --list >/dev/null 2>&1;                      check "list mode runs" 0 $?
     for CASE in truncated-manifest dropped-frame reordered-frame wav-truncation \
-                av-off-by-one false-promotion denoise-overclaim stale-mux; do
+                av-off-by-one rate-mismatch false-promotion denoise-overclaim stale-mux; do
       "$0" --negative "$CASE" >/dev/null 2>&1;        check "verifier twin $CASE detects" 0 $?
     done
     # Logging contract on a real emission path: valid JSONL, stable seq,
