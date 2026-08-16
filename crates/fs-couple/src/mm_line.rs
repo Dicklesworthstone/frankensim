@@ -421,6 +421,23 @@ impl MmLineBank {
         new_in
     }
 
+    /// Reset every line to silence (rebuild from the stored taps) and
+    /// clear any crossfade — the cheap probe/battery seam; realization
+    /// receipts and the lift log persist.
+    ///
+    /// # Errors
+    /// [`MmLineError::Discrete`] if a stored tap set fails re-admission
+    /// (cannot happen for taps this bank minted).
+    pub fn reset(&mut self) -> Result<(), MmLineError> {
+        for (line, taps) in self.lines.iter_mut().zip(&self.taps) {
+            *line = DelayedFilter::from_impulse_response(self.dt, taps.clone())?;
+        }
+        self.fade_old = None;
+        self.fade_remaining = 0;
+        self.fade_total = 0;
+        Ok(())
+    }
+
     /// Switch valve combination AT A BLOCK BOUNDARY: the new line is
     /// rebuilt from its taps with the outgoing-wave history CARRIED
     /// (in-flight waves persist; the new reflectance governs future

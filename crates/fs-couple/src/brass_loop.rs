@@ -207,6 +207,19 @@ impl BrassVoice {
         Ok(())
     }
 
+    /// Reset the whole voice to silence (lines, lip, cup) keeping the
+    /// realized bank — the probe/battery seam.
+    ///
+    /// # Errors
+    /// As [`MmLineBank::reset`].
+    pub fn reset(&mut self) -> Result<(), MmLineError> {
+        self.bank.reset()?;
+        self.lip_state = vec![0.0, 0.0];
+        self.cup = CupState::default();
+        self.p_bore_prev = 0.0;
+        Ok(())
+    }
+
     /// The bank's lift log (valve switches).
     #[must_use]
     pub fn lift_log(&self) -> &[crate::mm_line::MmLiftRecord] {
@@ -361,27 +374,75 @@ mod brass_loop_tests {
         }
     }
 
+    /// Dominant spectral peak of a block [Hz] (parabolic-refined),
+    /// searched above 40 Hz.
+    fn dominant_hz(block: &[f64], rate: f64) -> f64 {
+        use fs_fft::{C64 as FftC64, Fft};
+        let n = block.len().next_power_of_two();
+        let mean = block.iter().sum::<f64>() / block.len() as f64;
+        let mut buf: Vec<FftC64> = (0..n)
+            .map(|k| FftC64::new(block.get(k).map_or(0.0, |p| p - mean), 0.0))
+            .collect();
+        let mut scratch = vec![FftC64::new(0.0, 0.0); n];
+        Fft::new(n).forward(&mut buf, &mut scratch);
+        let df = rate / n as f64;
+        let k_lo = (40.0 / df).ceil() as usize;
+        let mags: Vec<f64> = buf[..n / 2]
+            .iter()
+            .map(|c| (c.re * c.re + c.im * c.im).sqrt())
+            .collect();
+        let mut best = k_lo;
+        for k in k_lo..mags.len() {
+            if mags[k] > mags[best] {
+                best = k;
+            }
+        }
+        if best == 0 || best + 1 >= mags.len() || mags[best] <= 0.0 {
+            return 0.0;
+        }
+        let (ya, yb, yc) = (
+            mags[best - 1].max(1e-300).ln(),
+            mags[best].ln(),
+            mags[best + 1].max(1e-300).ln(),
+        );
+        let denom = ya - 2.0 * yb + yc;
+        let shift = if denom.abs() > 1e-12 { 0.5 * (ya - yc) / denom } else { 0.0 };
+        (best as f64 - shift) * df
+    }
+
     #[test]
     #[ignore = "operating-point probe: bore-vs-lip lock discrimination"]
     fn zz_probe_bore_discrimination() {
         let gas = air(293.15);
         let cfg = config();
         let load = MmLoad::Analytic(Termination::FlangedOpen);
-        for &crook in &[0.0f64, 0.08, 0.15] {
-            let combos = [brass_combo(crook)];
-            for &(tension, blow) in
-                &[(0.8f64, 4000.0f64), (0.8, 6000.0), (1.0, 4000.0), (1.3, 6000.0), (1.6, 8000.0), (2.0, 8000.0)]
-            {
-                let mut voice = BrassVoice::new(
-                    &combos,
-                    &["c"],
-                    &gas,
-                    &load,
-                    &cfg,
-                    authored_lip(),
-                    1.5e-6,
-                )
-                .expect("voice");
+        let combos = [brass_combo(0.0), brass_combo(0.08), brass_combo(0.15)];
+        let mut voice = BrassVoice::new(
+            &combos,
+            &["open", "c1", "c2"],
+            &gas,
+            &load,
+            &cfg,
+            authored_lip(),
+            1.5e-6,
+        )
+        .expect("voice");
+        for combo in 0..3usize {
+            for &(tension, blow) in &[
+                (0.8f64, 4000.0f64),
+                (0.8, 6000.0),
+                (1.0, 4000.0),
+                (1.3, 6000.0),
+                (1.6, 8000.0),
+                (2.0, 8000.0),
+            ] {
+                voice.reset().expect("reset");
+                voice
+                    .apply(BrassControl::SetValve {
+                        combo,
+                        fade_samples: 0,
+                    })
+                    .expect("valve");
                 voice.apply(BrassControl::SetLipTension(tension)).expect("t");
                 voice.apply(BrassControl::SetBlowingPressure(blow)).expect("p");
                 let mut block = vec![0.0f64; 2400];
@@ -391,12 +452,148 @@ mod brass_loop_tests {
                 let d = voice.diagnostics().last().expect("diag").clone();
                 let mean = block.iter().sum::<f64>() / block.len() as f64;
                 let amp = block.iter().map(|p| (p - mean).abs()).fold(0.0f64, f64::max);
+                let f_dom = dominant_hz(&block, 24_000.0);
                 println!(
-                    "crook={crook:.2} t={tension:.1} blow={blow:.0} lock={:.1} amp={amp:.0}",
+                    "combo={combo} t={tension:.1} blow={blow:.0} zc={:.1} fft={f_dom:.1} amp={amp:.0}",
                     d.lock_hz
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "operating-point probe: upper-partial reachability"]
+    fn zz_probe_upper_partials() {
+        let gas = air(293.15);
+        let cfg = config();
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let combos = [brass_combo(0.0)];
+        for &face in &[5.0e-5f64, 1.0e-4] {
+            let mut lip = authored_lip();
+            lip.face_area_m2 = face;
+            let mut voice = BrassVoice::new(
+                &combos,
+                &["open"],
+                &gas,
+                &load,
+                &cfg,
+                lip,
+                1.5e-6,
+            )
+            .expect("voice");
+            for &tension in &[0.8f64, 1.2, 1.6, 2.0, 2.4, 2.8, 3.2] {
+                for &blow in &[3000.0f64, 6000.0] {
+                    voice.reset().expect("reset");
+                    voice.apply(BrassControl::SetLipTension(tension)).expect("t");
+                    voice.apply(BrassControl::SetBlowingPressure(blow)).expect("p");
+                    let mut block = vec![0.0f64; 2400];
+                    for _ in 0..8 {
+                        voice.step_block(&mut block).expect("block");
+                    }
+                    let mean = block.iter().sum::<f64>() / block.len() as f64;
+                    let amp = block.iter().map(|p| (p - mean).abs()).fold(0.0f64, f64::max);
+                    let f_dom = dominant_hz(&block, 24_000.0);
+                    let f_lip =
+                        (350.0 * tension * tension / 1.8e-4).sqrt() / core::f64::consts::TAU;
+                    println!(
+                        "face={face:.0e} t={tension:.1} blow={blow:.0} f_lip={f_lip:.0}                          fft={f_dom:.1} amp={amp:.0}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "operating-point probe: valve ladder, slot walk, temperature"]
+    fn zz_probe_gates_measurements() {
+        let cfg = config();
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let mut lip = authored_lip();
+        lip.face_area_m2 = 1.0e-4;
+        // Valve ladder + slot walk at 293 K.
+        let gas = air(293.15);
+        let combos = [brass_combo(0.0), brass_combo(0.08), brass_combo(0.15)];
+        let mut voice = BrassVoice::new(
+            &combos,
+            &["open", "c1", "c2"],
+            &gas,
+            &load,
+            &cfg,
+            lip.clone(),
+            1.5e-6,
+        )
+        .expect("voice");
+        let mut run = |voice: &mut BrassVoice, combo: usize, tension: f64| -> (f64, f64) {
+            voice.reset().expect("reset");
+            voice
+                .apply(BrassControl::SetValve {
+                    combo,
+                    fade_samples: 0,
+                })
+                .expect("valve");
+            voice.apply(BrassControl::SetLipTension(tension)).expect("t");
+            voice
+                .apply(BrassControl::SetBlowingPressure(3000.0))
+                .expect("p");
+            let mut block = vec![0.0f64; 2400];
+            for _ in 0..8 {
+                voice.step_block(&mut block).expect("block");
+            }
+            let mean = block.iter().sum::<f64>() / block.len() as f64;
+            let amp = block.iter().map(|p| (p - mean).abs()).fold(0.0f64, f64::max);
+            (dominant_hz(&block, 24_000.0), amp)
+        };
+        for &blow in &[1500.0f64, 2000.0, 2500.0, 3000.0] {
+            for combo in 0..3usize {
+                voice.reset().expect("reset");
+                voice
+                    .apply(BrassControl::SetValve {
+                        combo,
+                        fade_samples: 0,
+                    })
+                    .expect("valve");
+                voice.apply(BrassControl::SetLipTension(0.8)).expect("t");
+                voice.apply(BrassControl::SetBlowingPressure(blow)).expect("p");
+                let mut block = vec![0.0f64; 2400];
+                for _ in 0..8 {
+                    voice.step_block(&mut block).expect("block");
+                }
+                let mean = block.iter().sum::<f64>() / block.len() as f64;
+                let amp = block.iter().map(|p| (p - mean).abs()).fold(0.0f64, f64::max);
+                let f = dominant_hz(&block, 24_000.0);
+                println!("VALVE blow={blow:.0} combo={combo} lock={f:.1} amp={amp:.0}");
+            }
+        }
+        for &t in &[1.5f64, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1] {
+            let (f, amp) = run(&mut voice, 0, t);
+            println!("SLOT t={t:.2} lock={f:.1} amp={amp:.0}");
+        }
+        // Temperature arm: cold horn.
+        let cold = air(277.15);
+        let mut voice_cold = BrassVoice::new(
+            &[brass_combo(0.0)],
+            &["open"],
+            &cold,
+            &load,
+            &cfg,
+            lip,
+            1.5e-6,
+        )
+        .expect("voice");
+        let (f_cold, amp_cold) = {
+            voice_cold.apply(BrassControl::SetLipTension(0.8)).expect("t");
+            voice_cold
+                .apply(BrassControl::SetBlowingPressure(3000.0))
+                .expect("p");
+            let mut block = vec![0.0f64; 2400];
+            for _ in 0..8 {
+                voice_cold.step_block(&mut block).expect("block");
+            }
+            let mean = block.iter().sum::<f64>() / block.len() as f64;
+            let amp = block.iter().map(|p| (p - mean).abs()).fold(0.0f64, f64::max);
+            (dominant_hz(&block, 24_000.0), amp)
+        };
+        println!("COLD lock={f_cold:.1} amp={amp_cold:.0}");
     }
 
     #[test]
