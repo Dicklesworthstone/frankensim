@@ -72,6 +72,11 @@ pub struct ChirpRequest {
     /// Fractional growth of the drive frequency per second measured over
     /// the final supported window (>= 0; zero trend means a flat chirp).
     pub terminal_growth_per_s: f64,
+    /// Chirp peak amplitude in the SUPPORTED STEM'S OWN units (full scale
+    /// for an fs-domain stem, pascals for a pressure stem: the caller owns
+    /// the unit conversion, e.g. `CHIRP_PEAK_FS / gain_fs_per_pa`).
+    /// Downstream loudness/peak gates remain the clipping authority.
+    pub peak_amplitude: f64,
     /// Explicit edit intent, required to chirp censored (horizon) data.
     pub explicit_edit_intent: bool,
 }
@@ -223,7 +228,9 @@ pub fn apply_terminal_policy(
                 && request.terminal_growth_per_s.is_finite()
                 && request.terminal_growth_per_s >= 0.0
                 && request.final_supported_frequency_hz >= CHIRP_MIN_START_HZ
-                && request.final_supported_frequency_hz <= CHIRP_FREQUENCY_CAP_HZ)
+                && request.final_supported_frequency_hz <= CHIRP_FREQUENCY_CAP_HZ
+                && request.peak_amplitude.is_finite()
+                && request.peak_amplitude > 0.0)
             {
                 return Err(TerminalSoundError::InvalidTrend);
             }
@@ -272,6 +279,7 @@ fn synthesize_chirp(request: &ChirpRequest) -> (Vec<f64>, ChirpLawReceipt) {
     // Amplitude decays so the chirp fades toward the singularity instead
     // of screaming: half-life tied to the chirp duration.
     let amplitude_decay_per_s = 4.0 / CHIRP_MAX_DURATION_S;
+    let peak = request.peak_amplitude;
     let release_start = duration_frames.saturating_sub(u64::from(CHIRP_RELEASE_SAMPLE_FRAMES));
     let mut samples = Vec::with_capacity(usize::try_from(duration_frames).unwrap_or(0));
     let mut phase = 0.0f64;
@@ -286,7 +294,7 @@ fn synthesize_chirp(request: &ChirpRequest) -> (Vec<f64>, ChirpLawReceipt) {
             }
         }
         phase += 2.0 * core::f64::consts::PI * frequency * dt;
-        let mut amplitude = CHIRP_PEAK_FS * (-amplitude_decay_per_s * time_s).exp();
+        let mut amplitude = peak * (-amplitude_decay_per_s * time_s).exp();
         if frame >= release_start {
             let into =
                 (frame - release_start) as f64 / f64::from(CHIRP_RELEASE_SAMPLE_FRAMES.max(1));
@@ -322,6 +330,7 @@ mod tests {
         ChirpRequest {
             final_supported_frequency_hz: 220.0,
             terminal_growth_per_s: 6.0,
+            peak_amplitude: CHIRP_PEAK_FS,
             explicit_edit_intent: false,
         }
     }
@@ -446,6 +455,7 @@ mod tests {
         let request = ChirpRequest {
             final_supported_frequency_hz: 440.0,
             terminal_growth_per_s: 0.0,
+            peak_amplitude: CHIRP_PEAK_FS,
             explicit_edit_intent: false,
         };
         let (_, receipt) = apply_terminal_policy(
