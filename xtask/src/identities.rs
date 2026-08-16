@@ -3171,7 +3171,8 @@ fn rust_preceding_textual_macro_generator_paths(
                         fragment,
                     )
                     .is_ok()
-                        && rust_macro_transcriber_primitive_type_names(fragment).is_ok()
+                        && rust_macro_transcriber_primitive_type_names(fragment)
+                            .is_ok_and(|(_, binds_idents)| !binds_idents)
                 });
         if !provably_inert {
             hazards.insert(format!(
@@ -3199,7 +3200,9 @@ fn rust_preceding_textual_macro_generator_paths(
 /// top-level substitution, import, attribute, foreign item, or nested macro is
 /// unbounded authority and returns `Err(())`.
 #[allow(clippy::too_many_lines)] // Matcher exclusion and every fail-closed transcriber case form one audit boundary.
-fn rust_macro_transcriber_primitive_type_names(fragment: &str) -> Result<BTreeSet<String>, ()> {
+fn rust_macro_transcriber_primitive_type_names(
+    fragment: &str,
+) -> Result<(BTreeSet<String>, bool), ()> {
     let tokens = rust_authority_tokens(fragment).map_err(|_| ())?;
     let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens).map_err(|_| ())?;
     let definition = tokens
@@ -3226,6 +3229,7 @@ fn rust_macro_transcriber_primitive_type_names(fragment: &str) -> Result<BTreeSe
     let arm_depth = delimiter_depth[definition_open] + 1;
     let mut cursor = definition_open + 1;
     let mut primitive_names = BTreeSet::new();
+    let mut binds_invocation_type_idents = false;
     let mut arm_count = 0usize;
     while cursor < definition_close {
         while cursor < definition_close
@@ -3315,9 +3319,23 @@ fn rust_macro_transcriber_primitive_type_names(fragment: &str) -> Result<BTreeSe
                     return Err(());
                 };
                 if name == "$" {
-                    return Err(());
-                }
-                if rust_primitive_type_name(name) {
+                    // A metavariable-named type item is bounded by the
+                    // ACTUAL invocation arguments when the capture is an
+                    // `ident`: the caller resolves those arguments per
+                    // invocation. Any other capture kind stays unbounded.
+                    let ident_capture = tokens
+                        .get(position + 2)
+                        .map(|capture| capture.text)
+                        .is_some_and(|capture| {
+                            matcher_kinds
+                                .get(capture)
+                                .is_some_and(|kind| kind == "ident")
+                        });
+                    if !ident_capture {
+                        return Err(());
+                    }
+                    binds_invocation_type_idents = true;
+                } else if rust_primitive_type_name(name) {
                     primitive_names.insert(name.to_string());
                 }
             }
@@ -3335,8 +3353,20 @@ fn rust_macro_transcriber_primitive_type_names(fragment: &str) -> Result<BTreeSe
                 .checked_sub(1)
                 .and_then(|position| tokens.get(position))
                 .map(|token| token.text);
-            let safe_ident_slot = matches!(previous, Some("impl" | "fn" | "const" | "static"))
-                && matcher_kinds.get(name).is_some_and(|kind| kind == "ident");
+            let safe_ident_slot = matches!(
+                previous,
+                Some(
+                    "impl"
+                        | "fn"
+                        | "const"
+                        | "static"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "trait"
+                        | "type"
+                )
+            ) && matcher_kinds.get(name).is_some_and(|kind| kind == "ident");
             if !safe_ident_slot {
                 return Err(());
             }
@@ -3344,7 +3374,58 @@ fn rust_macro_transcriber_primitive_type_names(fragment: &str) -> Result<BTreeSe
         arm_count += 1;
         cursor = transcriber_close + 1;
     }
-    (arm_count != 0).then_some(primitive_names).ok_or(())
+    (arm_count != 0)
+        .then_some((primitive_names, binds_invocation_type_idents))
+        .ok_or(())
+}
+
+/// Primitive-spelling ident tokens appearing in any same-module invocation
+/// of `macro_path` (a sound superset of what an `ident` capture can bind).
+/// `None` when an invocation's argument list cannot be delimited — the
+/// caller must poison every primitive (fail closed).
+fn rust_invocation_primitive_ident_arguments(
+    index: &RustSourceIndex<'_>,
+    module: &str,
+    macro_path: &str,
+) -> Option<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for invocation in &index.generated_item_macro_invocations {
+        if invocation.module != module || invocation.path != macro_path {
+            continue;
+        }
+        let rest = index.text.get(invocation.start..)?;
+        let tokens = rust_authority_tokens(rest).ok()?;
+        let bang = tokens.iter().position(|token| token.text == "!")?;
+        let open = bang + 1;
+        if !tokens
+            .get(open)
+            .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut closed = false;
+        for token in &tokens[open..] {
+            match token.text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        closed = true;
+                        break;
+                    }
+                }
+                text if rust_primitive_type_name(text) => {
+                    names.insert(text.to_string());
+                }
+                _ => {}
+            }
+        }
+        if !closed {
+            return None;
+        }
+    }
+    Some(names)
 }
 
 fn rust_macro_matcher_token_indexes(fragment: &str) -> Result<BTreeSet<usize>, String> {
@@ -3778,7 +3859,15 @@ fn rust_visible_generated_primitive_type_names(
             continue;
         }
         match rust_macro_transcriber_primitive_type_names(fragment) {
-            Ok(names) => shadowed.extend(names),
+            Ok((names, binds_invocation_type_idents)) => {
+                shadowed.extend(names);
+                if binds_invocation_type_idents {
+                    match rust_invocation_primitive_ident_arguments(index, module, &macro_path) {
+                        Some(bound) => shadowed.extend(bound),
+                        None => shadowed.extend(all_primitives()),
+                    }
+                }
+            }
             Err(()) => shadowed.extend(all_primitives()),
         }
     }
@@ -20171,6 +20260,57 @@ mod right { pub const DUPLICATE: u32 = 2; }
             error.contains("method-call syntax on a receiver"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn ident_bound_type_macro_shadows_only_invoked_primitive_names() {
+        // Regression for bead m3h2e hypothesis (2): a local macro whose
+        // transcriber emits `struct $name` with an `ident` capture is
+        // bounded by its ACTUAL invocation arguments, not poisoned to
+        // every primitive spelling.
+        let clean = concat!(
+            "macro_rules! mk { ($name:ident) => { pub struct $name; } }\n",
+            "mk!(Marker);\n",
+            "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            clean,
+            &RustSourceIndex::new(clean),
+            "semantic_tag",
+        )
+        .expect("no invocation passes a primitive name, so nothing is shadowed");
+
+        // FALSIFIER 1: an invocation that DOES pass a primitive spelling
+        // still shadows it (the macro can emit `struct u8`).
+        let hostile = concat!(
+            "#[allow(non_camel_case_types)]\n",
+            "macro_rules! mk { ($name:ident) => { pub struct $name; } }\n",
+            "mk!(Marker);\n",
+            "mk!(u8);\n",
+            "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            hostile,
+            &RustSourceIndex::new(hostile),
+            "semantic_tag",
+        )
+        .expect_err("an invoked primitive name is a genuine shadow");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        // FALSIFIER 2: a non-ident capture in type position stays
+        // unbounded and poisons every primitive.
+        let unbounded = concat!(
+            "macro_rules! mk { ($name:ty) => { pub type Alias = $name; } }\n",
+            "mk!(u32);\n",
+            "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            unbounded,
+            &RustSourceIndex::new(unbounded),
+            "semantic_tag",
+        )
+        .expect_err("a non-ident type capture stays conservatively unbounded");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
     }
 
     #[test]
