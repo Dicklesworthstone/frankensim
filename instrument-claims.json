@@ -59,6 +59,10 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/tests/wind_junction_gate.rs::char_junctions_match_tmm_r_and_the_detuned_hole_fails"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/wind-fracdelay-linear-vs-thiran.bakeoff (c997b03756525680): continuous-pitch POLICY decided \u2014 the current linear-frac law KEEPS the lane (clicks 1.53 vs Thiran 5.97; landing 5.3 vs 8.3 cents); naive time-varying Thiran REFUSED on the measured passivity law (5.6x energy pumping on fast ramps); stepped zipper baseline quantified (10.5 click). Trombone slide + voice articulation cite this receipt."
         }
       ],
       "budget_row": null,
