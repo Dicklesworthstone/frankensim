@@ -504,6 +504,48 @@ mod brass_loop_tests {
     }
 
     #[test]
+    #[ignore = "operating-point probe: valve ladder only"]
+    fn zz_probe_valve_only() {
+        let cfg = config();
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let mut lip = authored_lip();
+        lip.face_area_m2 = 1.0e-4;
+        let gas = air(293.15);
+        let combos = [brass_combo(0.0), brass_combo(0.08)];
+        let mut voice = BrassVoice::new(
+            &combos,
+            &["open", "c1"],
+            &gas,
+            &load,
+            &cfg,
+            lip,
+            1.5e-6,
+        )
+        .expect("voice");
+        for combo in 0..2usize {
+            voice.reset().expect("reset");
+            voice
+                .apply(BrassControl::SetValve {
+                    combo,
+                    fade_samples: 0,
+                })
+                .expect("valve");
+            voice.apply(BrassControl::SetLipTension(0.8)).expect("t");
+            voice
+                .apply(BrassControl::SetBlowingPressure(3000.0))
+                .expect("p");
+            let mut block = vec![0.0f64; 2400];
+            for _ in 0..8 {
+                voice.step_block(&mut block).expect("block");
+            }
+            let mean = block.iter().sum::<f64>() / block.len() as f64;
+            let amp = block.iter().map(|p| (p - mean).abs()).fold(0.0f64, f64::max);
+            let f = dominant_hz(&block, 24_000.0);
+            println!("VALVE combo={combo} lock={f:.1} amp={amp:.0}");
+        }
+    }
+
+    #[test]
     #[ignore = "operating-point probe: valve ladder, slot walk, temperature"]
     fn zz_probe_gates_measurements() {
         let cfg = config();
