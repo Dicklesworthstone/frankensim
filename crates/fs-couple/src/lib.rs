@@ -49,6 +49,7 @@ pub mod thin_plate;
 pub mod traveling_wave_line;
 pub mod unilateral_contact;
 pub mod vibroacoustic;
+pub mod wind_line;
 
 use core::num::NonZeroUsize;
 use std::sync::Arc;
