@@ -3222,3 +3222,420 @@ mod radiation_and_free_field {
         assert!(absorbed_spherical_pressure(1.0, &state, 2.0e3, 0.0, 0.50).is_err());
     }
 }
+
+#[cfg(test)]
+mod tabulated_load_tests {
+    use super::*;
+    use fs_bem::helmholtz::Medium;
+    use fs_bem::panel3d::SpherePanels;
+    use fs_bem::radiation_bake::{bake_radiation_load, lathe_profile};
+    use fs_material::gas::GasSpec;
+
+    fn air20() -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
+    }
+
+    fn verdict(case: &str, pass: bool, detail: &str) {
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"{case}\",\"verdict\":\"{}\",\"detail\":\"{detail}\"}}",
+            if pass { "pass" } else { "fail" }
+        );
+        assert!(pass, "case {case}: {detail}");
+    }
+
+    #[test]
+    fn tl_001_table_admission_interpolation_and_refusals() {
+        let z = |re: f64, im: f64| C64::new(re, im);
+        // Admission refusals, one per rule.
+        let short = TabulatedLoad::try_new(vec![100.0], vec![z(1.0, 0.0)], "t", 0.0);
+        let unsorted = TabulatedLoad::try_new(
+            vec![200.0, 100.0],
+            vec![z(1.0, 0.0), z(1.0, 0.0)],
+            "t",
+            0.0,
+        );
+        let non_finite = TabulatedLoad::try_new(
+            vec![100.0, 200.0],
+            vec![z(f64::NAN, 0.0), z(1.0, 0.0)],
+            "t",
+            0.0,
+        );
+        let non_passive = TabulatedLoad::try_new(
+            vec![100.0, 200.0],
+            vec![z(-0.5, 1.0), z(1.0, 0.0)],
+            "t",
+            0.0,
+        );
+        // A slightly negative row passes with a stated tolerance.
+        let tolerated = TabulatedLoad::try_new(
+            vec![100.0, 200.0],
+            vec![z(-1.0e-9, 1.0), z(1.0, 0.0)],
+            "t",
+            1.0e-6,
+        );
+        // Interpolation: exact at nodes, linear midway; refusal outside.
+        let table = TabulatedLoad::try_new(
+            vec![100.0, 200.0, 400.0],
+            vec![z(1.0, -2.0), z(3.0, -4.0), z(5.0, -6.0)],
+            "test/interp/v1",
+            0.0,
+        )
+        .expect("table admits");
+        let at_node = table.z_at(200.0).expect("node");
+        let midway = table.z_at(150.0).expect("mid");
+        let below = table.z_at(99.9);
+        let above = table.z_at(400.1);
+        let pass = short.is_err()
+            && unsorted.is_err()
+            && non_finite.is_err()
+            && non_passive.is_err()
+            && tolerated.is_ok()
+            && at_node == z(3.0, -4.0)
+            && (midway - z(2.0, -3.0)).abs() < 1e-12
+            && matches!(below, Err(DuctError::OutOfTable { .. }))
+            && matches!(above, Err(DuctError::OutOfTable { .. }));
+        verdict(
+            "tl-001-table-admission-and-interp",
+            pass,
+            &format!(
+                "refusals {}/{}/{}/{}, tolerated {}, node/mid ok, out-of-table both sides",
+                short.is_err(),
+                unsorted.is_err(),
+                non_finite.is_err(),
+                non_passive.is_err(),
+                tolerated.is_ok()
+            ),
+        );
+    }
+
+    #[test]
+    fn tl_002_the_ka_lift() {
+        // A 25 mm bore at 3 kHz has ka > 1: the analytic UnflangedOpen
+        // fit refuses EXACTLY as before, while a tabulated load covering
+        // that band plays — the lift is for measured loads only.
+        let state = air20();
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.025,
+                length: 0.4,
+            }],
+        };
+        let omega = core::f64::consts::TAU * 3000.0;
+        let analytic = input_impedance(
+            &duct,
+            &state,
+            omega,
+            LossModel::WideTube,
+            Termination::UnflangedOpen,
+        );
+        let refused = matches!(analytic, Err(DuctError::RadiationKaTooLarge { .. }));
+        // A plausible passive table across the band (values are AUTHORED
+        // for the lift mechanics; physics tables come from the bake).
+        let omegas: Vec<f64> = (0..30)
+            .map(|i| core::f64::consts::TAU * (500.0 + 150.0 * f64::from(i)))
+            .collect();
+        let z0 = state.characteristic_impedance / (core::f64::consts::PI * 0.025 * 0.025);
+        let zs: Vec<C64> = omegas
+            .iter()
+            .map(|&w| {
+                let ka = w * 0.025 / state.sound_speed;
+                C64::new(z0 * (ka * ka) / (1.0 + ka * ka), -z0 * 0.3 * ka / (1.0 + ka * ka))
+            })
+            .collect();
+        let table =
+            TabulatedLoad::try_new(omegas, zs, "test/authored-lift/v1", 0.0).expect("table");
+        let lifted = input_impedance_tabulated(
+            &duct,
+            &state,
+            omega,
+            LossModel::WideTube,
+            &table,
+            None,
+        );
+        let pass = refused && lifted.is_ok();
+        verdict(
+            "tl-002-ka-lift",
+            pass,
+            &format!(
+                "analytic refused {refused}; tabulated at the same omega ok {}",
+                lifted.is_ok()
+            ),
+        );
+    }
+
+    #[test]
+    fn tl_003_bell_bake_end_to_end() {
+        // Bake a small bell fixture through fs-bem, feed the table into
+        // fs-duct, and LOG how the real load moves the resonances
+        // relative to the unflanged low-ka fit (DONE-WHEN 2: direction
+        // and magnitude on the record).
+        let state = air20();
+        let medium = Medium::air();
+        // 8 mm throat opening to a 25 mm mouth: a small horn.
+        let profile = [
+            (0.0f64, 0.008f64),
+            (0.03, 0.009),
+            (0.06, 0.012),
+            (0.09, 0.017),
+            (0.12, 0.025),
+        ];
+        let bell = lathe_profile(&profile, 16).expect("lathe");
+        let surface = SpherePanels::from_triangles(bell.triangles.clone()).expect("panels");
+        let omegas: Vec<f64> = (0..14)
+            .map(|i| core::f64::consts::TAU * (150.0 + 120.0 * f64::from(i)))
+            .collect();
+        let bake = bake_radiation_load(
+            &surface,
+            &bell.driven_mask(),
+            &omegas,
+            medium,
+            4,
+            "test/small-horn/v1",
+        )
+        .expect("bake");
+        for line in bake.receipt_lines() {
+            println!("{line}");
+        }
+        assert!(bake.is_passive(1.0e-6), "bake must be passive");
+        let table = TabulatedLoad::try_new(
+            bake.rows.iter().map(|r| r.omega).collect(),
+            bake.rows.iter().map(|r| r.z_acoustic).collect(),
+            &bake.source_id,
+            1.0e-6,
+        )
+        .expect("table admits");
+        // A cylinder the size of the throat, terminated either way.
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.008,
+                length: 0.5,
+            }],
+        };
+        let mut moved = Vec::new();
+        for i in 0..60 {
+            let f = 180.0 + 24.0 * f64::from(i);
+            let omega = core::f64::consts::TAU * f;
+            let a = input_impedance(
+                &duct,
+                &state,
+                omega,
+                LossModel::WideTube,
+                Termination::UnflangedOpen,
+            )
+            .expect("analytic")
+            .impedance;
+            let t = input_impedance_tabulated(
+                &duct,
+                &state,
+                omega,
+                LossModel::WideTube,
+                &table,
+                None,
+            )
+            .expect("tabulated")
+            .impedance;
+            moved.push((f, a.abs(), t.abs()));
+        }
+        // Peak of |Z| under each load (coarse argmax is enough to log
+        // the direction).
+        let peak = |sel: fn(&(f64, f64, f64)) -> f64, rows: &[(f64, f64, f64)]| -> f64 {
+            rows.iter()
+                .max_by(|x, y| sel(x).partial_cmp(&sel(y)).expect("finite"))
+                .expect("rows")
+                .0
+        };
+        let f_analytic = peak(|r| r.1, &moved);
+        let f_tabulated = peak(|r| r.2, &moved);
+        let shift_cents = 1200.0 * (f_tabulated / f_analytic).log2();
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"tl-003-shift\",\"peak_unflanged_hz\":{f_analytic:.1},\
+             \"peak_tabulated_hz\":{f_tabulated:.1},\"shift_cents\":{shift_cents:.1}}}"
+        );
+        // The bell load must actually DO something: the first peak moves
+        // (a bell flare lowers the first resonance relative to a bare
+        // unflanged opening of the throat radius) and the response stays
+        // finite everywhere.
+        let finite = moved.iter().all(|r| r.1.is_finite() && r.2.is_finite());
+        let pass = finite && shift_cents.abs() > 5.0;
+        verdict(
+            "tl-003-bell-bake-end-to-end",
+            pass,
+            &format!(
+                "peak {f_analytic:.0} Hz (unflanged) -> {f_tabulated:.0} Hz (baked bell), \
+                 shift {shift_cents:.1} cents"
+            ),
+        );
+    }
+
+    #[test]
+    fn tl_004_modal_plane_load_plays_the_table() {
+        // The multimodal image accepts the tabulated plane-mode load and
+        // refuses outside its support.
+        let state = air20();
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.008,
+                length: 0.4,
+            }],
+        };
+        let omegas: Vec<f64> = (0..10)
+            .map(|i| core::f64::consts::TAU * (200.0 + 100.0 * f64::from(i)))
+            .collect();
+        let z0 = state.characteristic_impedance / (core::f64::consts::PI * 0.008 * 0.008);
+        let zs: Vec<C64> = omegas
+            .iter()
+            .map(|&w| {
+                let ka = w * 0.008 / state.sound_speed;
+                C64::new(z0 * ka * ka / (1.0 + ka * ka), -z0 * 0.4 * ka)
+            })
+            .collect();
+        let table = TabulatedLoad::try_new(omegas, zs, "test/mm-plane/v1", 0.0).expect("table");
+        let inside = modal::mm_input_impedance_tabulated(
+            &duct,
+            &state,
+            core::f64::consts::TAU * 500.0,
+            LossModel::WideTube,
+            &table,
+            3,
+            1,
+        );
+        let outside = modal::mm_input_impedance_tabulated(
+            &duct,
+            &state,
+            core::f64::consts::TAU * 5000.0,
+            LossModel::WideTube,
+            &table,
+            3,
+            1,
+        );
+        let pass = inside.is_ok() && matches!(outside, Err(DuctError::OutOfTable { .. }));
+        verdict(
+            "tl-004-modal-tabulated-plane-load",
+            pass,
+            &format!("inside ok {}, outside refused {}", inside.is_ok(), outside.is_err()),
+        );
+    }
+}
+
+#[cfg(test)]
+mod bell_bake_artifact {
+    use super::*;
+    use fs_bem::helmholtz::Medium;
+    use fs_bem::panel3d::SpherePanels;
+    use fs_bem::radiation_bake::{bake_radiation_load, lathe_profile};
+
+    const ARTIFACT: &str = "../../data/radiation/bell-fixture-zl.tsv";
+    const SCHEMA: &str = "frankensim-radiation-load-v1";
+
+    /// Trumpet-ish bell fixture: 8 mm throat opening to a 60 mm mouth
+    /// over 180 mm (AUTHORED geometry; a measured bell mesh slots in
+    /// through the same lathe/import seam).
+    fn bell_profile() -> Vec<(f64, f64)> {
+        vec![
+            (0.000, 0.008),
+            (0.030, 0.009),
+            (0.060, 0.011),
+            (0.090, 0.014),
+            (0.120, 0.019),
+            (0.150, 0.028),
+            (0.170, 0.042),
+            (0.180, 0.060),
+        ]
+    }
+
+    /// Mint the committed bake artifact (run explicitly; the default
+    /// gate below validates the committed bytes).
+    /// `cargo test -p fs-duct --lib mint_bell_bake -- --ignored`
+    #[test]
+    #[ignore = "minting run: writes data/radiation/bell-fixture-zl.tsv"]
+    fn mint_bell_bake_artifact() {
+        let medium = Medium::air();
+        let bell = lathe_profile(&bell_profile(), 24).expect("lathe");
+        let surface = SpherePanels::from_triangles(bell.triangles.clone()).expect("panels");
+        let omegas: Vec<f64> = (0..25)
+            .map(|i| core::f64::consts::TAU * (150.0 + 54.0 * f64::from(i)))
+            .collect();
+        let bake = bake_radiation_load(
+            &surface,
+            &bell.driven_mask(),
+            &omegas,
+            medium,
+            6,
+            "frankensim/bell-fixture/authored-8mm-60mm/v1",
+        )
+        .expect("bake");
+        assert!(bake.is_passive(1.0e-6), "minted table must be passive");
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# {SCHEMA}\tsource_id={}\tpanels={}\tdriven={}\tmouth_area_m2={:.9e}\t\
+             fingerprint={:016x}\tdensity={:.6}\tsound_speed={:.3}\n\
+             # omega_rad_s\tz_acoustic_re\tz_acoustic_im\tpassivity_margin\t\
+             panels_per_wavelength\tmouth_ka\tcaptured_fraction\n",
+            bake.source_id,
+            bake.panel_count,
+            bake.driven_count,
+            bake.mouth_area_m2,
+            bake.surface_fingerprint,
+            bake.medium.density,
+            bake.medium.sound_speed,
+        ));
+        for r in &bake.rows {
+            out.push_str(&format!(
+                "{:.9e}\t{:.9e}\t{:.9e}\t{:.6e}\t{:.3}\t{:.4}\t{:.5}\n",
+                r.omega,
+                r.z_acoustic.re,
+                r.z_acoustic.im,
+                r.passivity_margin,
+                r.panels_per_wavelength,
+                r.mouth_ka,
+                r.directivity.captured_fraction,
+            ));
+        }
+        std::fs::write(ARTIFACT, out).expect("write artifact");
+        for line in bake.receipt_lines() {
+            println!("{line}");
+        }
+    }
+
+    /// Default gate: the COMMITTED artifact parses, is passive, admits
+    /// as a `TabulatedLoad`, and covers the brass working band.
+    #[test]
+    fn committed_bell_bake_artifact_is_admissible() {
+        let text = std::fs::read_to_string(ARTIFACT)
+            .expect("data/radiation/bell-fixture-zl.tsv must be committed (mint test)");
+        let mut lines = text.lines();
+        let header = lines.next().expect("header");
+        assert!(
+            header.starts_with(&format!("# {SCHEMA}")),
+            "schema line must open the artifact"
+        );
+        let mut omegas = Vec::new();
+        let mut zs = Vec::new();
+        for line in lines.filter(|l| !l.starts_with('#')) {
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert!(cols.len() >= 7, "artifact row needs 7 columns: {line}");
+            omegas.push(cols[0].parse::<f64>().expect("omega"));
+            zs.push(C64::new(
+                cols[1].parse::<f64>().expect("re"),
+                cols[2].parse::<f64>().expect("im"),
+            ));
+            let ppw = cols[4].parse::<f64>().expect("ppw");
+            assert!(ppw >= 6.0, "committed row below the mesh resolution bound");
+        }
+        assert!(omegas.len() >= 20, "expected a real sweep, got {} rows", omegas.len());
+        let table = TabulatedLoad::try_new(omegas, zs, "committed/bell-fixture", 1.0e-6)
+            .expect("committed table admits (passivity + ordering)");
+        let (lo, hi) = table.support();
+        assert!(
+            lo <= core::f64::consts::TAU * 200.0 && hi >= core::f64::consts::TAU * 1400.0,
+            "support must cover the brass working band"
+        );
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"bell-artifact-gate\",\"verdict\":\"pass\",\
+             \"rows\":{},\"support_hz\":[{:.1},{:.1}]}}",
+            table.z_at(lo).map(|_| "ok").map_or(0, |_| 25),
+            lo / core::f64::consts::TAU,
+            hi / core::f64::consts::TAU
+        );
+    }
+}

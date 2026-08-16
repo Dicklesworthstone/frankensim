@@ -1260,6 +1260,7 @@ dependencies = [
 name = "fs-duct"
 version = "0.0.1"
 dependencies = [
+ "fs-bem",
  "fs-la",
  "fs-material",
  "fs-math",

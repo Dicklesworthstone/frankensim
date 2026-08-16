@@ -17,6 +17,7 @@ fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 
 [dev-dependencies]
+fs-bem = { path = "../fs-bem" }
 fs-vvreg = { path = "../fs-vvreg" }
 
 [lints]
