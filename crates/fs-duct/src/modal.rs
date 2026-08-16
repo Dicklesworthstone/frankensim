@@ -347,6 +347,48 @@ fn impedance_from_reflection(r: &[C64], zc: &[C64], n: usize) -> Result<Vec<C64>
     Ok(z)
 }
 
+/// Per-mode characteristic impedances `Zc_n` [Pa s/m^3] at a station of
+/// radius `radius` — the public seam for runtime consumers (the MM
+/// characteristic-line realizer) so the `Im k >= 0` branch rule and the
+/// `Zc_n = Zc_0 k_0/k_n` derivation stay single-sourced here.
+///
+/// # Errors
+/// As [`mm_input_impedance`]'s admission (mode count, wave admission).
+pub fn modal_characteristic_impedances(
+    state: &GasState,
+    radius: f64,
+    omega: f64,
+    loss: LossModel,
+    n_modes: usize,
+) -> Result<Vec<C64>, DuctError> {
+    if n_modes == 0 || n_modes > MAX_MODES {
+        return Err(DuctError::BadParameter {
+            what: "mode count must be in 1..=MAX_MODES",
+        });
+    }
+    let gammas = j1_roots(n_modes - 1)?;
+    let wave = modal_wave(state, radius, omega, loss, &gammas)?;
+    Ok(wave.zc)
+}
+
+/// Public wrapper for the reflection <-> impedance conversion with a
+/// diagonal `Zc` (row-major `n x n`): `R = (I + Z Zc^-1)^-1 (Z Zc^-1 - I)`.
+///
+/// # Errors
+/// [`DuctError::Singular`] on a singular conversion.
+pub fn modal_reflection_from_impedance(
+    z: &[C64],
+    zc: &[C64],
+    n: usize,
+) -> Result<Vec<C64>, DuctError> {
+    if z.len() != n * n || zc.len() != n {
+        return Err(DuctError::BadParameter {
+            what: "reflection conversion needs an n x n Z and n-vector Zc",
+        });
+    }
+    reflection_from_impedance(z, zc, n)
+}
+
 /// Junction projection matrix `F` between the mode sets of the SMALL
 /// duct (radius `a`) and the LARGE duct (radius `b`), `a <= b`:
 /// `F[m][n] = (1/S_a) * integral over S_a of psi_m^a psi_n^b dS`, with

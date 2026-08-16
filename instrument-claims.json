@@ -460,6 +460,56 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Offline Z_L(omega) bake (fs_bem::radiation_bake over solve_radiation; CBIE below mouth ka 0.5, Burton-Miller above; per-row ppw/condition/passivity receipts; refuses past the mesh resolution bound) played back through fs_duct::TabulatedLoad (passivity-gated admission, linear interpolation, out-of-table refusal) \u2014 THE ka LIFT: analytic fits keep MAX_RADIATION_KA, tables play inside their own support (tl-002 asserts refusal and success at the same omega). Committed authored bell fixture (8mm throat -> 60mm mouth, 480 panels, 25 rows 150-1446 Hz, all-passive) at data/radiation/bell-fixture-zl.tsv, schema/resolution/passivity gated every run. Executed lesson in fs-bem CONTRACT: single-fan wide mouth caps drive the BM centroid-quadrature resistance artifact negative \u2014 caps are concentric annuli at the wall scale. X-Struct: passivity + refusal structure certified; the bell geometry is AUTHORED (a measured bell mesh slots through the same seam); green awaits measured-impedance brass gates. No rational fit performed (fs-vfit certificate class lane = the .4.2 runtime consumer)."
+    },
+    {
+      "filling": "brass",
+      "image": "mm-char-line",
+      "qoi": "held-fingering-cents",
+      "owner_crates": [
+        "fs-couple",
+        "fs-vfit",
+        "fs-duct"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Struct"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/mm_line.rs::ml_001_held_fingering_matches_the_authority"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/mm_line.rs::ml_002_realization_bakeoff_receipt"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/mm_line.rs::ml_003_valve_switch_carries_state_without_click"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/mm_line.rs::ml_004_passivity_and_receipts"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/mm_line.rs::ml_005_mouthpiece_cup_matches_the_analytic_shunt"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/mm_line.rs::ml_006_causality_splice_and_refusals"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "ml-002-bakeoff-receipt: dominant R00 vs N^2 matrix \u2014 <1 cent apart, plane energy fraction >0.999, 9x cost; dominant is the play image, matrix retained for higher-mode sources"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "MM characteristic-line runtime: per-valve exact-FIR R00 lines from the fs-duct MM authority (8 round trips; a 4-trip tail cost 92 cents on the lowest peak \u2014 executed), tabulated bell load with disclosed splice, passivity enforced ON STORED TAPS, carry-history + crossfade valve lift (hard-cut falsifier executed), trapezoidal D18 cup junction. Line fidelity 0.39 cents vs authority over 3 combos; explicit-junction loop skew disclosed (38 cents at a 127-sample period, shared with the reed voice). X-Consist through the MM ladder; X-Struct passivity/lift structure. Green awaits the brass playing loop + measured-impedance gates (.4.3)."
     }
   ]
 }

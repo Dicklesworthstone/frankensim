@@ -581,6 +581,34 @@ None. `#![deny(unsafe_code)]` via the workspace lint.
 
 None.
 
+- `mm_line` module (bead 3ez8g.4.2): the multimodal characteristic-line
+  runtime for brass. `MmLineBank` realizes one exact-FIR plane-mode
+  reflectance line PER VALVE COMBINATION from the fs-duct multimodal
+  authority (eight round trips of impulse response — an executed
+  lesson: a four-trip tail left the lowest peak 92 cents flat from
+  wrap-around aliasing), terminated into the tabulated bell load
+  inside its support with a DISCLOSED analytic fallback outside it
+  (splice bins counted in the per-combo receipt). Passivity (`|R| <=
+  1` on the realization grid) is enforced ON THE STORED TAPS — a
+  valve switch rebuilds from them, so enforcing only the live line
+  would resurrect an unenforced reflectance mid-performance. Valve
+  switches at block boundaries use the carry-outgoing-history lift
+  (in-flight waves persist; the new taps govern future reflections)
+  plus an optional linear CROSSFADE from the old line — an
+  instantaneous reflectance swap is genuinely discontinuous physics,
+  and the crossfade is the no-click lane; every switch is logged with
+  its lift name and carried sample count. `MatrixFirLine` is the
+  full N^2-FIR bake-off arm with per-mode incoming-energy logging.
+  `cup_junction` + `CupState` is the D18 mouthpiece-cup lumped
+  compliance, TRAPEZOIDAL so the runtime matches the analytic shunt
+  `Z/(1 + i omega C Z)` to `O((omega dt)^2)`. Realization doctrine
+  (the recorded bake-off): at a brass input plane the higher modes
+  are deeply evanescent, so the MM-derived `R_00` — which already
+  contains every interior mode-conversion round trip — is what a
+  plane-driven source sees; the receipt (ml-002) measured the matrix
+  arm within 1 cent of the dominant line with a plane-mode energy
+  fraction above 0.999 at 9x the cost.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -637,6 +665,17 @@ incompatible-port refusal; energy-audit imbalance and non-finite alarms; the
 Aitken Δ² factor; naive staggering diverges where Aitken stays stable; Aitken
 accelerates over stable fixed relaxation; light added mass converges naively;
 determinism.
+
+`src/mm_line.rs` `mm_line_tests`, cases ml-001..ml-006 — held-fingering
+line fidelity vs the MM authority (0.39 cents worst over three valve
+combinations; the explicit scattering LOOP additionally carries its
+one-sample junction skew, measured 38 cents at a ~127-sample period and
+gated at a disclosed 45), the realization bake-off receipt, the valve
+no-click gate (carry+crossfade within 3x the control's slew; the
+hard-cut falsifier is at least 2x worse), per-line passivity on the
+stored taps, the cup shunt vs its analytic transform, and
+causality/splice/refusal arms (the causality gate is the executable
+witness of the e^{-i omega t} conjugation discipline).
 
 ## No-claim boundaries
 
@@ -738,3 +777,13 @@ determinism.
   storage/dissipation/source laws, spatial or temporal discretization,
   interface transfer, nonlinear iteration, multirate windows, or the coupled
   system. Those obligations require a signed, closed-window energy audit.
+- The multimodal line inherits the fs-duct modal image's disclosed
+  boundaries (matched-mouth higher modes, no tone holes, no mean flow)
+  and adds its own: the explicit scattering junction carries a
+  one-sample loop skew shared with the reed voice (disclosed, measured,
+  not a line error); a hard (fade = 0) valve swap is genuinely
+  discontinuous and is the caller's choice; the crossfade lift is an
+  engineering lane, not a claim about real valve port geometry; and
+  the realization cost is O(n_fft) MACs per sample per line (the
+  matrix arm is N^2 of that) with no real-time claim until a budget
+  row exists.

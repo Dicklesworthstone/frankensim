@@ -168,6 +168,15 @@ bank re-measured from the digital filter (all 10 peaks within 2 cents
 authored, measured 1.22 worst) -> f32 sensitivity logged. JSON-lines
 at every stage.
 
+`DelayedFilter::history` / `from_impulse_response_with_history` (bead
+3ez8g.4.2): the FIR-mode outgoing-wave ring buffer is readable (oldest
+first) and a new exact-FIR line can be built PRE-LOADED with a prior
+line's history — the D17 state-lift seam for characteristic-line
+reflectance swaps (in-flight waves persist; the new taps govern future
+reflections). History longer than the new buffer is truncated at the
+OLD end; shorter history zero-pads the old end. IIR-mode lines return
+an empty history (no lift claim).
+
 ## No-claim boundaries
 
 - SISO only; matrix-valued (MIMO) vector fitting and pencil

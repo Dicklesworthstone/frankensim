@@ -38,6 +38,7 @@ pub mod bernoulli_aperture;
 pub mod broadband_radiation;
 pub mod cavity_phs;
 pub mod driving_point;
+pub mod mm_line;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
 pub mod reed_bore;

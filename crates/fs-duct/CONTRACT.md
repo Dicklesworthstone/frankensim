@@ -71,6 +71,11 @@ pipe `Z_in = +i Zc cot(kL)`.
   flares STAIRCASE into short cylinders whose density is one arm of the
   convergence-ladder disclosure. Tone holes refuse in this image
   (`BadParameter`); the plane-wave image keeps them (mm-001..mm-006).
+  `modal_characteristic_impedances` and
+  `modal_reflection_from_impedance` are the public seams for runtime
+  consumers (the fs-couple MM characteristic-line realizer), keeping
+  the `Im k >= 0` branch rule and the `Zc_n = Zc_0 k_0/k_n`
+  derivation single-sourced here.
 
 - `TabulatedLoad` + `input_impedance_load` / `input_impedance_tabulated`
   / `modal::mm_input_impedance_tabulated`: the measured/baked mouth-load

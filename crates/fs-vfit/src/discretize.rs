@@ -461,6 +461,42 @@ impl DelayedFilter {
     ///
     /// # Errors
     /// Non-finite input or filter overflow.
+    /// The FIR-mode outgoing-wave history, oldest first (empty in IIR
+    /// mode). This is the PHYSICAL in-flight wave state a fingering
+    /// change must carry (D17 lift seam for characteristic lines).
+    #[must_use]
+    pub fn history(&self) -> Vec<f64> {
+        if self.fir.is_empty() {
+            return Vec::new();
+        }
+        let n = self.buf.len();
+        (0..n).map(|k| self.buf[(self.write + k) % n]).collect()
+    }
+
+    /// Build an exact-FIR line whose ring buffer is PRE-LOADED with a
+    /// prior line's history (oldest first; truncated or zero-padded at
+    /// the OLD end to fit) — the D17 state lift for a reflectance swap:
+    /// in-flight waves persist, the new taps govern future reflections.
+    ///
+    /// # Errors
+    /// As [`DelayedFilter::from_impulse_response`].
+    pub fn from_impulse_response_with_history(
+        t_s: f64,
+        ir: Vec<f64>,
+        history: &[f64],
+    ) -> Result<Self, DiscretizeError> {
+        let mut line = Self::from_impulse_response(t_s, ir)?;
+        let n = line.buf.len();
+        let take = history.len().min(n);
+        // Copy the NEWEST `take` samples so the most recent waves land
+        // just behind the write cursor.
+        for (k, &v) in history[history.len() - take..].iter().enumerate() {
+            let slot = (line.write + (n - take) + k) % n;
+            line.buf[slot] = v;
+        }
+        Ok(line)
+    }
+
     pub fn push(&mut self, outgoing: f64) -> Result<f64, DiscretizeError> {
         require_finite_scalar("outgoing", outgoing)?;
         let n = self.buf.len();
