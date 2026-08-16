@@ -515,7 +515,10 @@ impl DelayedFilter {
             for (&h, &b) in head_taps.iter().zip(self.buf[..=self.write].iter().rev()) {
                 acc += h * b;
             }
-            for (&h, &b) in tail_taps.iter().zip(self.buf[self.write + 1..].iter().rev()) {
+            for (&h, &b) in tail_taps
+                .iter()
+                .zip(self.buf[self.write + 1..].iter().rev())
+            {
                 acc += h * b;
             }
             if !acc.is_finite() {
