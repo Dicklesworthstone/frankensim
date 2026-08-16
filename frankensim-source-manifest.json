@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "bacc9a0a3fb77fc1c58f38b76e51d894b2fed9300413dc185f2b079c8d8c4cf7",
+  "manifest_identity": "bceb7fab80ecd9912d1412108b723472fcc49e9d28aef00c075d660b4d46b393",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "246ffd59f140ce33919092ed40d010a70d440331299047e9d61d148098385851",
+    "source_root": "3b556e3b282d070955357c7732e648ff902a395cb572548efd2b67d2334fd9c4",
     "tracked_file_count": 2448,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -2372,7 +2372,7 @@
       {"path": "scripts/ci/claim_integrity_gate_hardening.sh", "git_mode": "100755", "bytes": 11009, "content_blake3": "a22584146a5a8fb9334ee072fd167704cd3625eb72c0568fcc91b85f4fc39e78"},
       {"path": "scripts/ci/claim_integrity_inventory.sh", "git_mode": "100755", "bytes": 12945, "content_blake3": "fd7b0db77fb2b8f412ae6caddcec798106798fe66ca70349a4ef0a6a2d69a315"},
       {"path": "scripts/ci/depgraph_receipt_e2e.sh", "git_mode": "100755", "bytes": 20278, "content_blake3": "7690e1ef99af33314f2051e9b365d2f13e4f6c5cfed2a28cdd8412cbe31bd309"},
-      {"path": "scripts/ci/e2e_euler_cinematic.sh", "git_mode": "100755", "bytes": 37611, "content_blake3": "392962987386acd9e06cfd445662af314a567b6df6c50b0ab02e9fe894f51f53"},
+      {"path": "scripts/ci/e2e_euler_cinematic.sh", "git_mode": "100755", "bytes": 38755, "content_blake3": "5db5774b0c5681ce36cbff036d653df4371000adf786668260f87ecb0c1a9b88"},
       {"path": "scripts/ci/e2e_extreal_arithmetic_audit.sh", "git_mode": "100755", "bytes": 12934, "content_blake3": "a836424d70fda342a93660d3170293c9d82ef039a0877acfabf7bb978f5b82a2"},
       {"path": "scripts/ci/euler_disc_contract_e2e.sh", "git_mode": "100755", "bytes": 345281, "content_blake3": "c4c363a3107a428aa42dab5688cfdedac539b99daf66f3d01e83ef0b3bc6cbf7"},
       {"path": "scripts/ci/generate_portfolio_candidate.py", "git_mode": "100755", "bytes": 14764, "content_blake3": "766ae3341b338704f072e579196292480b429720b475504f522d5f7bb2859d2d"},
