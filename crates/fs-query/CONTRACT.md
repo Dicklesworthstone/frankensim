@@ -183,6 +183,29 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   checked finite; this prevents an `Ok` result containing NaN/Inf but does not
   upgrade an accuracy class into a numerical certificate.
 
+- `extract_bore` -> `BoreExtraction`: the mesh->A(x) tube extractor
+  (music ingest lane). Pipeline: `medial_poles` cloud -> deterministic
+  thinning -> SPINAL filter (a pole survives only when its radius is
+  near-maximal within its own-radius neighborhood, which deletes the
+  disc-shaped medial sheets at flat tube ends) -> Euclidean MST ->
+  diameter-path spine with a reach-based BRANCH refusal -> radius^2-weighted
+  pole centroids binned by segment-projection arc length along the
+  smoothed, end-trimmed spine -> per-station polar plane-sections
+  (bisected boundary rays; area is the exact polygonal polar quadrature)
+  -> cross-checks against `pi*(pole radius)^2` and `thickness_at` -> axial
+  `integral A ds` vs the certified `geometric_moments` volume enclosure.
+  Open tubes are extended to their physical end faces along averaged
+  interior tangents, with end stations INSET a tenth of the local radius
+  (a station on the face clips its own section plane) and face-slab
+  volumes added back; closed loops (a full torus) are detected by
+  spine-endpoint proximity and integrated around the wrap. `BoreStation`
+  carries per-station diagnostics (s, area, equivalent radius, pole
+  radius, deviations, min/max ray); `BoreExtraction::debug_lines` renders
+  them as JSON lines; `VolumeClosure` is `Certified` only for
+  `TraceStepClaim::ExactDistance` charts and otherwise RECORDS
+  `Unavailable { claim }` - never a downgraded number. Authority of every
+  non-closure output is `Estimate` by construction (gb-001..gb-007).
+
 ## Invariants
 
 1. Closest points agree with analytic truth across all four chart
@@ -227,6 +250,13 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
    remain representable, and thickness aggregates propagate domain failures
    (gq-007).
 
+
+The bore extractor's authority invariant: `BoreExtraction.authority` is
+always `Estimate`; the only rigorous field is the `Certified` closure
+enclosure, inherited from `geometric_moments` under its own exact-distance
+gate; a deliberately biased area sweep fails the closure comparison (the
+executed gb-002 falsifier).
+
 ## Error model
 
 `ContactInflationError` refuses non-rigorous, negative, non-finite, inverted,
@@ -257,6 +287,12 @@ silent truncation), `CodimInvalidThickness`, `CodimInvalidDistance`,
 `DeformationRequiresExactDistance`, `DeformationInvalidMap`,
 `Cancelled`,
 `Mesh` (fs-mesh refusals carried through). Honest gaps refuse; nothing guesses.
+The bore extractor has its own typed `BoreError`: `Query` (any underlying
+`QueryError`), `InvalidConfig`, `TooFewPoles`, `BranchedLumen` (with the
+attachment point and side-arm length - segment-wise extraction between
+authored cut planes is the supported workflow), `DegeneratePoleChain`,
+`CenterOutsideLumen`, and `RayNoExit` (with the station center, tangent,
+and exhausted cap for log-only diagnosis).
 
 ## Determinism class
 
@@ -373,6 +409,20 @@ those events remain ordinary Rust test diagnostics.
 neutrality, outward widening and witness shrinking, and monotonicity across
 convex, implicit-gap, codimensional, CCD, and moments consumers.
 
+`tests/bore.rs`, cases gb-001..gb-007 - the bore-extraction battery
+(fs-obs suite `fs-query/bore`, fixed-input seed 0, execution seed 0xB0E5,
+kernels 30/31): straight F-rep cylinder oracle (area vs pi*r^2 at 7.4e-4,
+axial volume vs analytic at 3.7e-4, honest `Unavailable` closure for the
+`LipschitzImplicit` composite), full-torus closed-loop with the CERTIFIED
+volume closure and the executed biased-sweep falsifier, 90-degree
+bent-tube oracle with a face-distance two-tier area gate (tight at two
+radii or more from a cut face; disclosed 6% tilt envelope beside it),
+cone-frustum taper tracking on an `AxisymmetricChart`, refusal battery
+(Y-junction branch, too-few-poles, config), pre-cancelled context, and
+the OBJ-cylinder end-to-end through the fs-io quarantine (24-gon section
+truth, `NoClaim` closure recorded, cap-less variant refused at
+promotion).
+
 ## No-claim boundaries
 
 - General Minkowski sums (non-ball structuring elements, max-plus /
@@ -453,3 +503,16 @@ convex, implicit-gap, codimensional, CCD, and moments consumers.
   error, must use the corresponding `*_with_inflation` entry point. The
   carrier validates receipts and arithmetic; it cannot detect a caller that
   deliberately pairs a valid receipt with the wrong chart.
+- The bore extractor is NOT a medial-axis transform and NOT a certificate:
+  centerline, A(s), and both cross-checks are `Estimate` (the underlying
+  marcher has no no-tunneling theorem). v1 topology is single unbranched
+  tubes (open or closed-loop); branched lumens refuse rather than guess,
+  and the segment-wise-between-cut-planes workflow belongs to the caller.
+  Station sections within about two local radii of a cut face carry a
+  disclosed tangent-tilt inflation (measured 3.3% on the bend oracle);
+  the thickness cross-check can skip stations whose diametral chords end
+  on a tight support box (`thickness_at` correctly refuses there), which
+  is counted, not hidden. The certified volume closure exists only for
+  exact-distance charts; imported meshes (`MeshChart`, `NoClaim`) record
+  `VolumeClosure::Unavailable` - there is no certified-volume route for a
+  mesh anywhere in the workspace, and this module does not invent one.

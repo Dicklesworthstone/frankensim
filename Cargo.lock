@@ -2028,6 +2028,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-geom",
+ "fs-io",
  "fs-mesh",
  "fs-obs",
  "fs-rep-frep",

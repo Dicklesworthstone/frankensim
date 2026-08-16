@@ -811,6 +811,7 @@
     "crates/fs-psycho/tests/psycho.rs",
     "crates/fs-qty/tests/conformance.rs",
     "crates/fs-qty/tests/parse_allocation.rs",
+    "crates/fs-query/tests/bore.rs",
     "crates/fs-query/tests/codim.rs",
     "crates/fs-query/tests/conformance.rs",
     "crates/fs-query/tests/convex.rs",

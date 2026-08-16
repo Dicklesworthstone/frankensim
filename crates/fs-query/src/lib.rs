@@ -42,6 +42,7 @@ use fs_geom::{
 use fs_mesh::delaunay;
 use fs_rep_mesh::Soup;
 
+mod bore;
 mod codim;
 mod convex;
 mod deform;
@@ -51,6 +52,7 @@ mod inflation;
 mod moments;
 mod penetration;
 
+pub use bore::{BoreConfig, BoreError, BoreExtraction, BoreStation, VolumeClosure, extract_bore};
 pub use codim::{
     CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation,
     codim_gap_with_inflation,
