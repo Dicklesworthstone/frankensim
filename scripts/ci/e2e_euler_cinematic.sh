@@ -115,8 +115,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$MODE" ] || die "$EXIT_USAGE" "one of --list/--check/--self-test/--run/--negative/--replay required"
-if [ "$MODE" = "run" ] && [ "$RUN_PROFILE" != "smoke" ]; then
-  die "$EXIT_USAGE" "--run admits smoke only in this revision (daily-fixture and 4k-frame are intentional product executions)"
+if [ "$MODE" = "run" ]; then
+  case "$RUN_PROFILE" in
+    smoke) : ;;
+    daily-fixture)
+      # An intentional heavier product execution: bounded short
+      # 1080p-class excerpt. Never part of the routine lane.
+      SMOKE_ARGS=(--width 1920 --height 1080 --frames 3 --spp 1
+        --mechanics-preroll-frames 1 --mechanics-sample-rate 384000
+        --listening-gain-fs-per-pa 280)
+      SMOKE_BUDGET_SECONDS="${FSIM_CINE_DAILY_BUDGET_SECONDS:-14400}" ;;
+    representative-4k-frame)
+      # Only when explicitly requested AND resource-admitted.
+      [ "${FSIM_CINE_ADMIT_4K:-0}" = "1" ]         || die "$EXIT_USAGE" "representative-4k-frame needs explicit resource admission (FSIM_CINE_ADMIT_4K=1)"
+      SMOKE_ARGS=(--width 3840 --height 2160 --frames 1 --spp 1
+        --mechanics-preroll-frames 1 --mechanics-sample-rate 384000
+        --listening-gain-fs-per-pa 280)
+      SMOKE_BUDGET_SECONDS="${FSIM_CINE_4K_BUDGET_SECONDS:-14400}" ;;
+    *) die "$EXIT_USAGE" "unknown --run profile: $RUN_PROFILE (smoke|daily-fixture|representative-4k-frame)" ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -381,6 +398,8 @@ case "$MODE" in
   list)
     printf '%s\n' \
       "smoke	tiny moving-disc bundle through the real pipeline (bounded)" \
+      "daily-fixture	bounded short 1080p-class excerpt (intentional product execution)" \
+      "representative-4k-frame	single 4K frame; needs FSIM_CINE_ADMIT_4K=1 (resource admission)" \
       "negative:gain-clip	hostile listening gain must refuse at the peak gate" \
       "negative:bad-mechanics-rate	non-integral decimation must refuse at admission" \
       "negative:truncated-manifest	verifier must refuse a truncated retained manifest" \
@@ -418,7 +437,7 @@ case "$MODE" in
 
   run)
     STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-    [ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$REPO_ROOT/.e2e-out/cine-smoke-$STAMP-$$"
+    [ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$REPO_ROOT/.e2e-out/cine-$RUN_PROFILE-$STAMP-$$"
     case "$OUTPUT_DIR" in
       "$REPO_ROOT"/*|"${TMPDIR:-/tmp}"*|/private/tmp/*|/tmp/*|/Volumes/USB_NVME/*) : ;;
       *) die "$EXIT_USAGE" "--output-dir must stay inside repo/TMP/USB scratch" ;;
@@ -427,11 +446,11 @@ case "$MODE" in
     BIN="$(fixture_binary)"
     [ -n "$LOG_FILE" ] || LOG_FILE="$OUTPUT_DIR.runner-log.jsonl"
     log_event "pipeline" "ok" '{"repro":"scripts/ci/e2e_euler_cinematic.sh --run smoke"}'
-    echo "smoke: real pipeline, budget ${SMOKE_BUDGET_SECONDS}s, output $OUTPUT_DIR"
+    echo "$RUN_PROFILE: real pipeline, budget ${SMOKE_BUDGET_SECONDS}s, output $OUTPUT_DIR"
     if ! timeout "$SMOKE_BUDGET_SECONDS" nice -n 15 "$BIN" \
         --output "$OUTPUT_DIR" "${SMOKE_ARGS[@]}"; then
       log_event "pipeline" "pipeline" "{\"exit_class\":41,\"ranked_repairs\":$REPAIRS_PIPELINE}"
-      die "$EXIT_PIPELINE" "production pipeline failed or exceeded the smoke budget"
+      die "$EXIT_PIPELINE" "production pipeline failed or exceeded the $RUN_PROFILE budget"
     fi
     if ! VERIFY_OUT="$(verify_bundle "$OUTPUT_DIR" 2>&1)"; then
       DIVERGENCE="$(printf '%s\n' "$VERIFY_OUT" | grep '^VERIFY-DIVERGENCE ' | head -1 | cut -d' ' -f2-)"
@@ -441,7 +460,7 @@ case "$MODE" in
     fi
     log_event "verify" "ok" "$(bundle_log_detail "$OUTPUT_DIR")"
     log_event "verdict" "ok" '{"exit_class":0,"budget_within":true}'
-    echo "smoke PASS: bundle at $OUTPUT_DIR (log: $LOG_FILE)"
+    echo "$RUN_PROFILE PASS: bundle at $OUTPUT_DIR (log: $LOG_FILE)"
     exit "$EXIT_OK" ;;
 
   replay)
@@ -634,7 +653,9 @@ PYCORRUPT
     PASS=0; FAIL=0
     check() { if [ "$2" -eq "$3" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "SELF-TEST FAIL: $1 (expected $2, got $3)" >&2; fi; }
     "$0" --no-such-flag >/dev/null 2>&1;              check "unknown flag refuses" 40 $?
-    "$0" --run daily-fixture >/dev/null 2>&1;         check "non-smoke profile refuses in this revision" 40 $?
+    "$0" --run no-such-profile >/dev/null 2>&1;       check "unknown run profile refuses" 40 $?
+    "$0" --run representative-4k-frame >/dev/null 2>&1; check "4k frame refuses without resource admission" 40 $?
+    FSIM_CINE_DAILY_BUDGET_SECONDS=1 "$0" --run daily-fixture >/dev/null 2>&1; check "daily-fixture wires to the real pipeline (1s budget kill)" 41 $?
     "$0" --negative no-such-case >/dev/null 2>&1;     check "unknown negative case refuses" 40 $?
     "$0" --replay /no/such/dir >/dev/null 2>&1;       check "missing replay dir refuses" 40 $?
     "$0" --negative stale-trajectory-identity >/dev/null 2>&1; check "identity twin without --bundle refuses" 40 $?
