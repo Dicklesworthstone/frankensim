@@ -428,6 +428,7 @@ case "$MODE" in
       "negative:denoise-overclaim	verifier must refuse applied_frames > frames" \
       "negative:dropped-preview	verifier must refuse a missing parallel preview frame" \
       "negative:stale-mux	verifier must refuse a declared-written-but-missing mux" \
+      "negative:cancelled-child	mid-run kill must fail AND leave no verifiable partial bundle" \
       "negative:stale-trajectory-identity	production replay must refuse a tampered identity (needs --bundle)"
     exit "$EXIT_OK" ;;
 
@@ -511,7 +512,7 @@ case "$MODE" in
     exit "$EXIT_OK" ;;
 
   negative)
-    NEG_CASES="gain-clip bad-mechanics-rate truncated-manifest dropped-frame reordered-frame wav-truncation av-off-by-one rate-mismatch false-promotion denoise-overclaim dropped-preview stale-mux stale-trajectory-identity"
+    NEG_CASES="gain-clip bad-mechanics-rate truncated-manifest dropped-frame reordered-frame wav-truncation av-off-by-one rate-mismatch false-promotion denoise-overclaim dropped-preview stale-mux cancelled-child stale-trajectory-identity"
     if [ "$NEGATIVE_CASE" = "list" ]; then printf '%s\n' $NEG_CASES; exit "$EXIT_OK"; fi
     case " $NEG_CASES " in
       *" $NEGATIVE_CASE "*) : ;;
@@ -547,6 +548,22 @@ case "$MODE" in
         fi
         grep -q "decimat" "$SCRATCH/log" || exit "$EXIT_NEGATIVE_MISSED"
         echo "negative bad-mechanics-rate PASS: unsupported decimation ratio refused" ;;
+      cancelled-child)
+        # Cancelled child work: kill the production child mid-mechanics
+        # and require BOTH halves of the honest outcome — the child dies
+        # nonzero, and whatever partial output it left can never verify
+        # as a publishable bundle (no success for partial publication).
+        BIN="$(fixture_binary)"
+        if timeout --signal=TERM 20 "$BIN" --output "$SCRATCH/out"             "${SMOKE_ARGS[@]}" >"$SCRATCH/log" 2>&1; then
+          log_event "twin" "negative-missed" '{"exit_class":43,"first_divergence":"child survived the 20s cancellation window"}'
+          exit "$EXIT_NEGATIVE_MISSED"
+        fi
+        if verify_bundle "$SCRATCH/out" >/dev/null 2>&1; then
+          log_event "twin" "negative-missed" '{"exit_class":43,"first_divergence":"partial publication verified as success"}'
+          exit "$EXIT_NEGATIVE_MISSED"
+        fi
+        log_event "verdict" "ok" '{"exit_class":0}'
+        echo "negative cancelled-child PASS: mid-run kill left no bundle that verifies" ;;
       stale-trajectory-identity)
         # Production identity gate: replaying a retained trajectory under
         # a TAMPERED identity must refuse at decode (stale trajectory /
