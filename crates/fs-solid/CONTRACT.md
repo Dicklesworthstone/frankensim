@@ -198,6 +198,31 @@ this layer.
   by an edge are refused before assembly; callers requiring several components
   must model separate plates.
 
+- `reduce` module (music bead 3ez8g.3.3): the offline lip/reed reduce
+  lab. `reduce_valve(request, cx) -> ValveCard` runs
+  `TetLinearElasticProblem` -> `fs_modal::slice_window` -> per-mode
+  re-normalization from the solver's `phi^T M phi = 1` convention to
+  UNIT MEAN TRANSLATION of the orifice face (mass normalization would
+  destroy the units), minting physical `m_eff = phi^T M phi` [kg],
+  `k_eff = lambda m_eff` [N/m], and `c = eta sqrt(k m)` from the card's
+  AUTHORED loss factor (the lab does not invent Q values). The
+  retained-compliance law: the modal compliance
+  `sum (phi^T r)^2 / lambda` of the retained modes — `phi^T r` is the
+  FORCE-pattern projection; the first build used the base-excitation
+  `phi^T M r` and retained 1e-11 of the compliance, an executed
+  falsification — is compared against the EXACT static compliance
+  `r^T K^{-1} r` (sparse LDLT), and a reduction below the authored
+  floor REFUSES (`RetainedComplianceTooLow`). Orifice geometry is
+  MEASURED from the mesh: the face is the surface strip facing the
+  opposing plane, gap = closest approach, width/channel-thickness =
+  face extents. The card carries the provenance chain (mesh digest,
+  material state-point receipt identity, source id) under a
+  domain-separated schema-versioned content identity with
+  canonical-bytes round-trip and tamper refusal; `beating_reed()`
+  mints the `fs_scenario::BeatingReed` with the runtime's own face
+  convention `P_c = k H / (w * 0.025)` so the massless and massive
+  branches agree.
+
 ## Invariants
 
 1. Patch tests exact: linear displacement fields are reproduced to
@@ -323,6 +348,19 @@ contact prototype and its battery, per the Ambition-Tag gating rule.
     cases, and the frictionless translation adjoint matches FD on a
     plane — cnt-001..007.
 
+11. Reduce-lab gates (rl-001..rl-004): the thick cantilever-slab
+    oracle (f above the slender Euler-Bernoulli line by the plate-strip
+    factor, measured +11.4% inside an authored 0-35% band;
+    strip-normalized effective-mass ratio 0.355 in (0.30, 0.42);
+    `k = lambda m` at machine precision; the
+    `k_ratio = f_ratio^2 * mass_ratio/0.25` self-consistency identity;
+    retained compliance 0.98 > 0.95), the minted card driving the
+    existing fs-phs valve island to its quasi-static equilibrium at
+    1e-3 with supply defect < 1e-8, refusals (empty/out-of-range face,
+    the retained-compliance floor via a window that excludes the
+    compliant fundamental, a face behind the opposing plane), and the
+    canonical-bytes round-trip + tamper refusal.
+
 ## Conformance tests
 
 `tests/battery.rs`: sol-001 patch tests (body-fitted max nodal error
@@ -438,3 +476,10 @@ reversal dissipation, G4 bitwise resume.
 - Koiter coefficients versus LITERATURE tables (v1 validates
   classification + the sampled oracle; quantitative a/b benchmarking
   awaits the shell fixtures where the classic tables live).
+- The reduce lab is Estimate-authority end to end until measured
+  tissue/cane packs exist: the material card in the battery is
+  synthetic-authored (no soft-tissue elastic pack exists in
+  data/matdb — the recorded upgrade path), the loss factor is an
+  authored card field, and the "lip-shaped" fixture is an authored
+  tapered slab. The lab claims reduction correctness, never tissue
+  truth; claim-side promotion happens in the per-track gates beads.

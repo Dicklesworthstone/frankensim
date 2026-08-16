@@ -23,6 +23,7 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-cutfem = { path = "../fs-cutfem" }
 fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
+fs-modal = { path = "../fs-modal" }
 fs-material = { path = "../fs-material" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
@@ -31,9 +32,12 @@ fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
+fs-matdb = { path = "../fs-matdb" }
+fs-phs = { path = "../fs-phs" }
+fs-qty = { path = "../fs-qty" }
 fs-ivl = { path = "../fs-ivl" }
 fs-mesh = { path = "../fs-mesh" }
-fs-modal = { path = "../fs-modal" }
 
 [[test]]
 name = "koiter"

@@ -510,6 +510,43 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "MM characteristic-line runtime: per-valve exact-FIR R00 lines from the fs-duct MM authority (8 round trips; a 4-trip tail cost 92 cents on the lowest peak \u2014 executed), tabulated bell load with disclosed splice, passivity enforced ON STORED TAPS, carry-history + crossfade valve lift (hard-cut falsifier executed), trapezoidal D18 cup junction. Line fidelity 0.39 cents vs authority over 3 combos; explicit-junction loop skew disclosed (38 cents at a 127-sample period, shared with the reed voice). X-Consist through the MM ladder; X-Struct passivity/lift structure. Green awaits the brass playing loop + measured-impedance gates (.4.3)."
+    },
+    {
+      "filling": "valve",
+      "image": "reduce-lab",
+      "qoi": "cantilever-reduction",
+      "owner_crates": [
+        "fs-solid",
+        "fs-modal"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-solid/src/reduce.rs::rl_001_cantilever_oracle"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-solid/src/reduce.rs::rl_002_card_drives_the_valve_island"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-solid/src/reduce.rs::rl_003_refusals"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-solid/src/reduce.rs::rl_004_card_round_trip_and_tamper"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "Offline lip/reed reduce lab: mesh + material card -> (K,M) -> certified modes -> ValveCard (face-unit-translation normalization keeps physical units; retained-compliance vs exact static K^-1 refusal; orifice measured from the mesh; provenance chain + tamper-refusing canonical bytes; beating_reed() mint matching the runtime face convention). EXECUTED falsification recorded: the base-excitation participation phi^T M r retained 1e-11 of the compliance \u2014 the force projection phi^T r is the correct modal-compliance projection. X-Est: the battery's tissue card is synthetic-authored (NO soft-tissue pack exists in data/matdb; recorded upgrade path); one lab serves lips/cane/vocal folds. Green awaits measured coupons + track gates (.4.3/.6.2/voice)."
     }
   ]
 }

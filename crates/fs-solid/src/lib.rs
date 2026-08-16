@@ -39,6 +39,7 @@ pub mod koiter;
 pub mod linear;
 pub mod linear3;
 pub mod mesh2;
+pub mod reduce;
 pub mod rod;
 pub mod shell;
 pub mod stability;
