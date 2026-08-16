@@ -1,0 +1,51 @@
+frankensim-bakeoff-receipt-v1
+filling	hammer-felt
+fixture	crates/fs-couple/tests/bakeoff_felt.rs 87zbd strike island, v0 in {0.8, 2.0, 4.0} m/s, 3-mode exact-ZOH string
+shared-cards	fcc2919a6a7ffdaa982a98e00cf828f66dfa47c0b505bf005ab5397f53a28118
+reference	contact-samples-v0.8	1.42e2
+reference	contact-samples-v2.0	9.6e1
+reference	contact-samples-v4.0	7.2e1
+reference	dissipated-j-v0.8	9.565770871477795e-4
+reference	dissipated-j-v2.0	5.963866116048785e-3
+reference	dissipated-j-v4.0	2.381284702210759e-2
+reference	residual-strain-v0.8	2.8479815126296843e-2
+reference	residual-strain-v2.0	4.804240847690484e-2
+reference	residual-strain-v4.0	7.136373793100685e-2
+reference	tilt-3-1-v0.8	7.839074240961542e-2
+reference	tilt-3-1-v2.0	9.620609537546027e-1
+reference	tilt-3-1-v4.0	2.254006417877614e0
+contender	hysteresis-island
+owners	fs-material,fs-couple
+measured	contact-samples-v0.8	1.42e2
+measured	contact-samples-v2.0	9.6e1
+measured	contact-samples-v4.0	7.2e1
+measured	dissipated-j-v0.8	9.565770871477795e-4
+measured	dissipated-j-v2.0	5.963866116048785e-3
+measured	dissipated-j-v4.0	2.381284702210759e-2
+measured	residual-strain-v0.8	2.8479815126296843e-2
+measured	residual-strain-v2.0	4.804240847690484e-2
+measured	residual-strain-v4.0	7.136373793100685e-2
+measured	tilt-3-1-v0.8	7.839074240961542e-2
+measured	tilt-3-1-v2.0	9.620609537546027e-1
+measured	tilt-3-1-v4.0	2.254006417877614e0
+budget	states=2	steps=368640	solver-iterations=0
+failure-mode	rate-independent envelope (rate half lives in the Prony chain, a separate island)
+contender	hunt-crossley
+owners	fs-contact
+measured	contact-samples-v0.8	1.61e2
+measured	contact-samples-v2.0	1.37e2
+measured	contact-samples-v4.0	1.23e2
+measured	dissipated-j-v0.8	4.487706671181568e-4
+measured	dissipated-j-v2.0	5.815657657587494e-3
+measured	dissipated-j-v4.0	3.596377739751541e-2
+measured	residual-strain-v0.8	0e0
+measured	residual-strain-v2.0	0e0
+measured	residual-strain-v4.0	0e0
+measured	tilt-3-1-v0.8	1.0773811212932794e-2
+measured	tilt-3-1-v2.0	4.659629949636025e-2
+measured	tilt-3-1-v4.0	1.851577794461464e-1
+budget	states=0	steps=368640	solver-iterations=0
+failure-mode	structurally CANNOT hold residual crush (memoryless law: residual strain identically zero at every velocity)
+failure-mode	1 + c*rate factor can go negative at fast rebound (clamped to zero force here)
+outcome	keep-for-subset	hunt-crossley	debug/second-hammer image and generic transient point contacts; never the piano felt claim (no residual crush, flatter tilt trend)
+rationale	the hysteretic island is the felt authority (residual crush + velocity-steepened tilt are the piano mechanisms; HC's tilt trend is flatter and its residual strain is identically zero); HC stays on the menu for the claims it still owns (D21)

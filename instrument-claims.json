@@ -363,6 +363,10 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_phs_string_island_ledger_closes_with_sampled_geometry"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff (3d9df8e509435370): felt residual grows 0.028->0.071 with velocity while HC's is identically zero; felt tilt trend 28.8x vs HC 17.2x \u2014 the hysteresis island is the felt authority"
         }
       ],
       "budget_row": null,
@@ -657,6 +661,33 @@
         "vvreg:acoustic-absent-trumpet-impedance"
       ],
       "notes": "THE TRUMPET CLAIM, decided honestly (3ez8g.4.4): UNGATED. What holds: the emergent mechanism executes end to end (lock in the outward-striking band, tension walks partials, valves drop the series with no pitch input, slotting, c(T) within 2 cents of the sound-speed law); the MM image owns the flare per the committed bake-off; the bell load is baked and passive; every fixture input is provenance-labeled. What is MISSING for green, by name: (1) the measured trumpet-impedance corpus (absence row registered - the cents gate cannot run against nothing); (2) an ADJUDICATED listening receipt (committed one is Unadjudicated, supports_pass()==false); (3) a budget row for live_default (D25). No partial credit: machinery-complete is not claim-green."
+    },
+    {
+      "filling": "hammer-felt",
+      "image": "hunt-crossley",
+      "qoi": "transient-point-contact",
+      "owner_crates": [
+        "fs-contact"
+      ],
+      "exactness": [
+        "X-Struct"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/bakeoff_felt.rs::committed_felt_bakeoff_receipt_shows_the_structural_gap"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff: KeepForSubset(hunt-crossley -> debug/second-hammer + generic transient point contacts; never the piano felt claim)"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "fs-contact's EXISTING HuntCrossleySphere as the DEBUG/second hammer image, scope DECIDED by the committed receipt (D21: narrowed, never deleted; D24: no third HC implementation anywhere \u2014 every force in the bake-off came from NormalPatchRequest::evaluate). Measured on the shared 87zbd strike island: contact duration falls with velocity like a hammer should, tilt trend 17.2x (real but 1.67x flatter than the felt's 28.8x), residual strain IDENTICALLY ZERO at every velocity (memoryless law \u2014 the structural gap the receipt quantifies). EXECUTED CALIBRATION LESSON: the 1+c*rate factor needs restitution-scale coefficients (c ~ 3(1-e)/2v); the first mint's c=8 s/m was a 33x loading multiplier at forte that INVERTED the contact-duration trend."
     }
   ]
 }
