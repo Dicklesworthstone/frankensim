@@ -57,6 +57,21 @@ Time convention `e^{-i omega t}` (matching `fs_bem::helmholtz`):
 `Im k > 0` decays, mass-like reactance is negative imaginary, closed
 pipe `Z_in = +i Zc cot(kL)`.
 
+- `modal` module: the multimodal (m = 0 radial mode) image —
+  `mm_input_impedance(duct, state, omega, loss, termination, n_modes,
+  extra_slices) -> ModalResponse` with the N x N input impedance matrix,
+  the plane (0,0) element, and per-mode local cutoffs at the throat.
+  Modes `psi_n = J0(gamma_n rho/R)/|J0(gamma_n)|` with `gamma_n` the
+  roots of `J1` found in-crate (double-double power series + bisection —
+  no transcribed constants); per-mode `k_n = sqrt(k0^2 - (gamma_n/R)^2)`
+  from the LOSSY plane wavenumber, evanescent modes kept decaying, never
+  clipped; `Zc_n = Zc_0 k_0/k_n`. The chain recurses a REFLECTION matrix
+  (bounded under evanescence) from the mouth backward; junctions couple
+  mode sets through closed-form Lommel projection integrals; cones and
+  flares STAIRCASE into short cylinders whose density is one arm of the
+  convergence-ladder disclosure. Tone holes refuse in this image
+  (`BadParameter`); the plane-wave image keeps them (mm-001..mm-006).
+
 ## Invariants
 
 1. Segment 2-ports are built numerically from exact analytic basis
@@ -104,6 +119,18 @@ pipe `Z_in = +i Zc cot(kL)`.
    0.8216a; chained same-radius halves equal the whole through
    input_impedance to 1e-10 in both loss arms.
 
+11. Multimodal gates (music bead 3ez8g.4.1): the N = 1 modal image
+    degenerates to the scalar plane-wave path on stepped-cylinder
+    chains within 1e-9 relative (measured 1e-10 class); modal
+    wavenumbers are the analytic `sqrt(k^2 - (gamma_n/R)^2)` in both
+    regimes; the junction projection matrix matches independent in-test
+    quadrature to 5e-9; a sudden expansion's evanescent modes add a
+    purely reactive, convergent impedance shift; and on a trumpet-like
+    flare the plane-wave image misses the multimodal peak structure by
+    >= 8 cents (measured 14.9) while the mode ladder is settled at the
+    top (N=4 vs N=5 <= 1 cent, measured 0.18) — THE recorded trigger for
+    the multimodal expansion, executed (mm-001..mm-005).
+
 ## Error model
 
 Typed `DuctError` refusals with stable codes; validity is refused by
@@ -137,6 +164,19 @@ correction + dispersion deficit; four cone oracles; Kirchhoff-Q;
 passivity/flattening/thermal-share pins; hot-duct sqrt(T) law; named
 refusals; bitwise determinism.
 
+`src/modal.rs` `modal_tests`/`modal_flare_tests`, cases mm-001..mm-006 —
+Bessel self-certification (J0' = -J1, root residuals 1e-14, mode
+orthogonality and junction projections vs independent quadrature),
+analytic cutoffs both regimes, plane-image degeneracy (stepped chains
+1e-10 class; cone staircase converging with slice density), evanescent
+junction inertance (reactive, two-step-net convergent — equal-N mode
+matching has the classic oscillating truncation tail, disclosed),
+refusals + bitwise repeats, and the flare convergence ladder + trigger
+(peak tables logged per N and per staircase density; the first
+measure-mode run caught a coarse-staircase artifact posing as a treble
+mode shift — the trigger is therefore judged with BOTH arms on the fine
+staircase).
+
 ## No-claim boundaries
 
 - Wide-tube first order refuses `rv < 10`. [`LossModel::AllRegime`]
@@ -153,11 +193,21 @@ refusals; bitwise determinism.
 - Lossy cones cascade spherical substations with `k, Zc` at each
   slice's own mid-radius (lossless without a wall stays the
   exact one-shot `e^{±ikx}/x` 2-port; a wall follows the
-  local radius and slant, so that path slices too). Strongly
-  flaring horns may still need
-  the multimodal expansion — the recorded trigger is a bell
-  mismatch beyond authored tolerance in a future validation
-  against measured instrument impedance.
+  local radius and slant, so that path slices too). The multimodal
+  expansion for strongly flaring horns now EXISTS (`modal` module;
+  trigger executed: >= 8 cents of plane-wave peak error on a
+  trumpet-like flare). Its own v1 boundaries: m = 0 modes only
+  (axisymmetric bores and sources), no tone holes, no mean flow;
+  higher modes terminate into their own characteristic impedance at
+  the mouth (a matched-mouth approximation, disclosed — the
+  tabulated bell load lands with bead zolja and the plane mode
+  already carries the scalar radiation impedance and its `ka`
+  refusals); per-mode viscothermal loss is carried through the
+  LOSSY plane wavenumber (`k_n^2 = k_0^2 - (gamma_n/R)^2`), so the
+  wide-tube validity boundary binds per mode through the plane
+  mode's shear number, and no independent higher-mode boundary-layer
+  model is claimed; validation against measured instrument
+  impedance remains the brass-gates bead's scope.
 - Unflanged radiation is the low-`ka` Levine–Schwinger fit
   (ceiling 1.0, refused by name). A flanged mouth uses that fit
   below `ka = 1` and the Rayleigh baffled piston

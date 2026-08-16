@@ -60,10 +60,13 @@
 //! jump at `r_v = 10`).
 //! Lossy cones cascade spherical substations at local radius
 //! (lossless stays the exact one-shot `e^{±ikx}/x` 2-port).
-//! Deferred: fingering tables (slice 3 of the bead), multimodal
-//! horn expansion (trigger: bell
-//! mismatch beyond authored tolerance), and BEM-computed radiation
-//! loads.
+//! Deferred: fingering tables (slice 3 of the bead) and BEM-computed
+//! radiation loads. The multimodal horn expansion LANDED as the
+//! [`modal`] module (music bead 3ez8g.4.1) — its recorded trigger was
+//! executed: a trumpet-like flare's plane-wave peaks miss the
+//! multimodal structure by ~15 cents.
+
+pub mod modal;
 
 use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;

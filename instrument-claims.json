@@ -365,6 +365,49 @@
         "vvreg:acoustic-absent-felt-coupon"
       ],
       "notes": "WoolFelt (fs-material Uniaxial: stiffening p>1 envelope, crush-anchored unload, dissipation by construction) driving a substepped hammer-string island: contact duration FALLS with velocity while the matched linear spring stays amplitude-independent; spectral tilt rises >1.2x and >1.5x the linear control; strike ledger closes within 15% with felt loss >2% KE_in; rate half lowered via lower_to_prony over 50Hz-5kHz with the FS-MAT-VISCO-OUT-OF-BAND refusal live; island geometry sampled by the certified fs-contact chart-to-gap pipeline and the string stepped under fs_phs::step (per-step discrete-gradient ledger closure). X-Est because ALL felt parameters are authored Estimate values: the licensed coupon hunt identified Stulov 1995 / Chabassier RR-8181 but PDF retention was blocked (the cited absence row records the hunt); green awaits a coupon-backed pack + the piano gates review (3ez8g.5.1)."
+    },
+    {
+      "filling": "brass",
+      "image": "mm-tmm",
+      "qoi": "flare-peak-trigger",
+      "owner_crates": [
+        "fs-duct"
+      ],
+      "exactness": [
+        "X-Consist"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/modal.rs::mm_001_bessel_self_certified"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/modal.rs::mm_002_cutoffs_are_analytic"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/modal.rs::mm_003_n1_degenerates_to_the_plane_image"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/modal.rs::mm_004_junction_adds_evanescent_inertance"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/modal.rs::mm_005_flare_ladder_and_trigger"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/modal.rs::mm_006_refusals_and_bitwise_repeats"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER EXECUTED: plane-wave misses the trumpet-like flare's MM peak structure by 14.9 cents (>=8 authored) with the mode ladder settled at 0.18 cents N4->N5 and the staircase-density term disclosed at 6.7 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
     }
   ]
 }
