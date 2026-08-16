@@ -1,0 +1,49 @@
+frankensim-bakeoff-receipt-v1
+filling	brass
+fixture	crates/fs-duct/src/modal.rs mm-005 flare (fine staircase) + crates/fs-couple/src/brass_loop.rs open-bore lock at t=0.8 blow=3kPa
+shared-cards	17e3328313dbc2ba278ea89a2b5360756871059153b9d0df240646f22543c84e
+reference	flare-peak-1-hz	2.0014249039779247e2
+reference	flare-peak-10-hz	9.828331052170652e2
+reference	flare-peak-2-hz	2.835475464323305e2
+reference	flare-peak-3-hz	3.991192351283652e2
+reference	flare-peak-4-hz	4.680163542886745e2
+reference	flare-peak-5-hz	5.588416356046574e2
+reference	flare-peak-6-hz	6.54009783042372e2
+reference	flare-peak-7-hz	7.726286214316827e2
+reference	flare-peak-8-hz	8.718664680130795e2
+reference	flare-peak-9-hz	9.142042209624029e2
+reference	loop-lock-hz	2.0887038976363502e2
+contender	mm-tmm
+owners	fs-duct,fs-couple
+measured	flare-peak-1-hz	2.0014249039779247e2
+measured	flare-peak-10-hz	9.828331052170652e2
+measured	flare-peak-2-hz	2.835475464323305e2
+measured	flare-peak-3-hz	3.991192351283652e2
+measured	flare-peak-4-hz	4.680163542886745e2
+measured	flare-peak-5-hz	5.588416356046574e2
+measured	flare-peak-6-hz	6.54009783042372e2
+measured	flare-peak-7-hz	7.726286214316827e2
+measured	flare-peak-8-hz	8.718664680130795e2
+measured	flare-peak-9-hz	9.142042209624029e2
+measured	loop-lock-hz	2.0887038976363502e2
+budget	states=4	steps=641	solver-iterations=0
+failure-mode	staircase density is the dominant discretization term (6.7 cents at default density; ladder disclosed)
+failure-mode	m=0 axisymmetric only; matched-mouth higher modes at the bell
+contender	plane-wave-char
+owners	fs-duct
+measured	flare-peak-1-hz	2.000101029643995e2
+measured	flare-peak-10-hz	9.81800928713748e2
+measured	flare-peak-2-hz	2.8328785415622156e2
+measured	flare-peak-3-hz	4.0256488469054204e2
+measured	flare-peak-4-hz	4.67211315686366e2
+measured	flare-peak-5-hz	5.584466485444078e2
+measured	flare-peak-6-hz	6.536644803715852e2
+measured	flare-peak-7-hz	7.721552943279578e2
+measured	flare-peak-8-hz	8.710810054752316e2
+measured	flare-peak-9-hz	9.141785796013701e2
+measured	loop-lock-hz	2.085446255405363e2
+budget	states=1	steps=641	solver-iterations=0
+failure-mode	misses the flare's mode-conversion peak structure (14.9 cents at the ~400 Hz peak; the brightness mechanism is absent)
+failure-mode	analytic radiation fits carry the ka <= 1 ceiling without a tabulated load
+outcome	keep-for-subset	plane-wave-char	mute/debug claims and tone-hole (wind) bores; never the trumpet flare claim
+rationale	the MM image is the flare authority (its own convergence ladder settles at 0.18 cents while plane misses by 14.9); plane-wave stays on the menu for the claims it still owns (D21: narrowed, never deleted)

@@ -182,8 +182,16 @@ fn mint_brass_listening_artifact() {
         provenance: "card-shaped AUTHORED lip (Estimate)".to_string(),
     };
     let load = MmLoad::Analytic(Termination::FlangedOpen);
-    let mut voice = BrassVoice::new(&combos, &["open", "crook-1"], &gas, &load, &cfg, lip, 1.5e-6)
-        .expect("voice");
+    let mut voice = BrassVoice::new(
+        &combos,
+        &["open", "crook-1"],
+        &gas,
+        &load,
+        &cfg,
+        lip,
+        1.5e-6,
+    )
+    .expect("voice");
     voice.apply(BrassControl::SetLipTension(0.8)).expect("t");
     voice
         .apply(BrassControl::SetBlowingPressure(3000.0))

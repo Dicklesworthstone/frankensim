@@ -273,10 +273,15 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (f905d0552cc772d5): plane worst flare-peak residual >3x MM; KeepForSubset(plane-wave-char -> mute/debug + tone-hole wind bores, never the trumpet flare claim)"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Plane-wave column + valve island produces A note but NOT a trumpet: the trumpet claim requires multimodal lines (3ez8g.4.1/.4.2) + a real bell load (zolja). This row's claim set is permanently restricted to mute/debug studies; it stays on the menu per D21. Gates bead: 3ez8g.4.4."
+      "notes": "Plane-wave column + valve island produces A note but NOT a trumpet: the trumpet claim requires multimodal lines (3ez8g.4.1/.4.2) + a real bell load (zolja). This row's claim set is permanently restricted to mute/debug studies; it stays on the menu per D21. Gates bead: 3ez8g.4.4. SCOPING DECIDED 2026-08-16 by the committed brass bake-off receipt (3ez8g.4.4): plane-wave keeps mute/debug + tone-hole (wind) claims; the trumpet flare claim belongs to mm-tmm (D21: narrowed, never deleted)."
     },
     {
       "filling": "jet",
@@ -403,10 +408,16 @@
         {
           "kind": "test",
           "ref": "crates/fs-duct/src/modal.rs::mm_006_refusals_and_bitwise_repeats"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff: MM is the flare authority (ladder settled 0.18 cents; plane misses 14.9)"
         }
       ],
       "budget_row": null,
-      "corpus_refs": [],
+      "corpus_refs": [
+        "vvreg:acoustic-absent-trumpet-impedance"
+      ],
       "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER EXECUTED: plane-wave misses the trumpet-like flare's MM peak structure by 14.9 cents (>=8 authored) with the mode ladder settled at 0.18 cents N4->N5 and the staircase-density term disclosed at 6.7 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
     },
     {
@@ -580,11 +591,72 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/src/brass_loop.rs::bl_008_radiated_observer_from_the_bake"
+        },
+        {
+          "kind": "listening",
+          "ref": "data/listening/brass-emergent.listening-receipt (artifact be75f4e29b35123a; UNADJUDICATED - supports_pass()==false until the owner's ear rules)"
         }
       ],
       "budget_row": null,
       "corpus_refs": [],
       "notes": "The composed brass loop: outward-striking lip MSD island x MM char lines x D18 cup, PITCH NEVER ASSIGNED (grep-enforced control surface). Emergent: lock in the outward band above the cup-loaded column peak (238 cents above peak, 281 from the lip alone); tension walks partials (209->445 Hz); valves drop the series monotonically (-125/-200 cents); slotting (+78 cents in-slot, 1310 between); cold horn -50.4 cents vs -48.6 predicted; no-click valve lift with executed hard-cut falsifier; observer weights from the bake's SH table. NUMERICS LESSON in CONTRACT: one-sample-delayed Bernoulli flow is anti-dissipative above fs/4 (7.3 kHz parasitic executed) \u2014 closed-form implicit flow/junction solve fixed it; line-tap passivity needs a 4x-oversampled grid (inter-bin Gibbs). X-Est: authored card-scale lip; the trumpet CLAIM is decided in .4.4 with measured-impedance gates."
+    },
+    {
+      "filling": "brass",
+      "image": "hb-lock-oracle",
+      "qoi": "periodic-orbit-agreement",
+      "owner_crates": [
+        "fs-vmanifest"
+      ],
+      "exactness": [
+        "X-Consist"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "PLACEHOLDER (3ez8g.4.4 scope 1): the harmonic-balance lock oracle lands with the HB epic (3ez8g.11) in its D23-reserved home, the fs-vmanifest::i09 periodic-orbit slot (a general service; never a music-local kernel, never inside fs-duct). This row exists so the brass gate summary enumerates the whole image menu honestly. Ungated with empty evidence until the epic delivers; the periodic-orbit cross-check will arbitrate the time-domain loop's lock frequencies."
+    },
+    {
+      "filling": "brass",
+      "image": "trumpet-vertical",
+      "qoi": "corpus-cents-gate",
+      "owner_crates": [
+        "fs-couple",
+        "fs-duct",
+        "fs-bem"
+      ],
+      "exactness": [
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/brass_loop.rs::bl_001_005_emergent_gates (lock/series/valves/slotting/c(T) all executed)"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (image scoping decided)"
+        },
+        {
+          "kind": "listening",
+          "ref": "data/listening/brass-emergent.listening-receipt (UNADJUDICATED)"
+        },
+        {
+          "kind": "corpus",
+          "ref": "vvreg:acoustic-absent-trumpet-impedance (the corpus gate CANNOT run yet)"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [
+        "vvreg:acoustic-absent-trumpet-impedance"
+      ],
+      "notes": "THE TRUMPET CLAIM, decided honestly (3ez8g.4.4): UNGATED. What holds: the emergent mechanism executes end to end (lock in the outward-striking band, tension walks partials, valves drop the series with no pitch input, slotting, c(T) within 2 cents of the sound-speed law); the MM image owns the flare per the committed bake-off; the bell load is baked and passive; every fixture input is provenance-labeled. What is MISSING for green, by name: (1) the measured trumpet-impedance corpus (absence row registered - the cents gate cannot run against nothing); (2) an ADJUDICATED listening receipt (committed one is Unadjudicated, supports_pass()==false); (3) a budget row for live_default (D25). No partial credit: machinery-complete is not claim-green."
     }
   ]
 }
