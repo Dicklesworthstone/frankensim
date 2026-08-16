@@ -1,12 +1,15 @@
 # COMPREHENSIVE PLAN: Real-Time Wright Flyer Simulation with FrankenSim
 
 **Working title:** *First Flight — Kitty Hawk, December 17, 1903*
-**Document status:** Planning-workflow ROUND 0 (initial comprehensive plan; not yet reviewed).
-**Process:** This document follows `/planning-workflow`. It must survive ≥4 review rounds
-(GPT Pro Extended Reasoning per the skill's EXACT PROMPT) and reach steady-state before
-conversion to beads. A "Review round log" section at the end tracks rounds.
-**Repo:** `frankensim` (156-crate Rust workspace, layers L0–L6, Franken-only dependencies,
-determinism doctrine, typed refusals, evidence colors Verified/Validated/Estimated).
+**Document status:** Planning-workflow ROUND 1 (external review integrated; ≥3 further
+rounds required before beads conversion).
+**Process:** This document follows `/planning-workflow`. The Round 1 review (GPT Pro
+Extended Reasoning) accepted the architecture and required a major physics-and-
+validation revision, integrated throughout this version. A "Review round log" at the
+end tracks rounds and dispositions.
+**Repo:** `frankensim` (156-crate Rust workspace, layers L0–L6, Franken-only
+dependencies, determinism doctrine, typed refusals, evidence colors
+Verified/Validated/Estimated).
 
 ---
 
@@ -25,7 +28,7 @@ determinism doctrine, typed refusals, evidence colors Verified/Validated/Estimat
 11. [Crate Reuse Matrix & New Crates](#11-crate-reuse-matrix--new-crates)
 12. [Milestones & Dependency-Aware Task Graph](#12-milestones--dependency-aware-task-graph)
 13. [Risks & Mitigations](#13-risks--mitigations)
-14. [Open Questions for Review Round 1](#14-open-questions-for-review-round-1)
+14. [Open Questions for Review Round 2](#14-open-questions-for-review-round-2)
 15. [Appendices](#15-appendices)
 
 ---
@@ -35,185 +38,198 @@ determinism doctrine, typed refusals, evidence colors Verified/Validated/Estimat
 ### 1.1 What we are building
 
 A browser-native, real-time, physically honest simulation of the 1903 Wright Flyer's
-first flights — the airplane, the air, the ground, and the pilot — rendered beautifully
-with three.js, computed by FrankenSim physics compiled to WebAssembly, with the invisible
-made visible: at any moment the user can flip on the **wind vector field** and watch the
-turbulent boundary layer roll over the Kill Devil Hills sand, see the wingtip vortex
-sheets peel off and sink toward the ground, and overlay **divergence, gradient, and curl**
-of the velocity field in 3-D as living mathematical objects rather than textbook symbols.
+first flights — the airplane, the air, the ground, the *controls*, and the pilot —
+rendered beautifully with three.js, computed by FrankenSim physics compiled to
+WebAssembly, with the invisible made visible: at any moment the user can flip on the
+**wind vector field** and watch the turbulent boundary layer roll over the Kill Devil
+Hills sand, see the wingtip vortex sheets peel off and sink toward the ground, and
+overlay **divergence, gradient, and curl** of the velocity field in 3-D as living
+mathematical objects rather than textbook symbols.
 
-Every load-bearing number of the real Flyer is dialed in — span, chord, camber, canard
-area, gross weight, engine power, propeller geometry, the December headwind — and every
-one of them is a **user-adjustable configuration** with immediate physical consequence.
-Stretch the aspect ratio and watch induced drag fall and the wing spar's load rise. Trim
-the canard smaller and watch the pitch instability that nearly killed the project become
-untamable. Take away the headwind and discover, as the Wrights did, that the launch rail
-is suddenly too short. Then read the numbers: lift margin, distance flown, peak speed,
-smoothness of flight, control effort — the same quantities of interest the Wrights argued
-about in letters, now live on screen.
+Every load-bearing number of the real Flyer is dialed in — span, chord, camber, the
+canard's geometry *and its hinge mechanics*, gross weight, engine power, propeller
+geometry, the December headwind — and every one of them is a **user-adjustable
+configuration** with model-determined consequence. Vary canard area, balance, arm,
+and CG and watch static stability, free-control stability, trim authority, and
+control force trade against one another — *the model decides* which change helps and
+which makes the aircraft uncontrollable. Stretch the aspect ratio and inspect the
+resulting changes in induced drag, mass, rigging load, stall distribution, and
+structural utilization. Take away the headwind and discover, as the Wrights did,
+that the launch rail is suddenly too short. Then read the numbers: separation
+margin, distance flown, peak speed, ride quality, control activity — the same
+quantities of interest the Wrights argued about in letters, now live on screen with
+their evidence pedigree attached.
+
+> Product-copy rule (Round 1): marketing and lesson text never predetermines a
+> physics outcome. Tradeoffs are advertised; results are computed. No "and you'll go
+> 240 feet" in copy — the delta card reports what the model actually produced and
+> decomposes why.
 
 ### 1.2 Why this project, and why FrankenSim
 
-The Euler-disc E2E pipeline proved the pattern: one unified simulation system produced
-mechanics, spectral-rendered video, and physically derived audio, all from a single
-identity-tracked configuration with honest evidence labels. This project scales the same
-pattern up from a spinning disc on a table to an aircraft in a turbulent atmosphere —
-and moves the interactive tier into the browser.
+The Euler-disc E2E pipeline proved the pattern: one unified simulation system
+produced mechanics, spectral-rendered video, and physically derived audio, all from a
+single identity-tracked configuration with honest evidence labels. This project
+scales the same pattern from a spinning disc on a table to an aircraft in a turbulent
+atmosphere — and moves the interactive tier into the browser.
 
-This is not a from-scratch flight sim. The plan's central engineering claim, grounded in
-the current tree (verified 2026-08-16):
+This is not a from-scratch flight sim. The central engineering claim, grounded in the
+current tree (verified 2026-08-16, §11.3):
 
-- **`fs-wasm` already exists and already ships a large slice of FrankenSim to wasm32**
-  via its own decoupled workspace and `wasm-pack` browser builds (`crates/fs-wasm`,
-  CI lane `fs-wasm-build` in `scripts/ci/quality_lanes.sh`). Its dependency list already
-  includes `fs-bem`, `fs-vpm`, `fs-lbm`, `fs-exec`, `fs-alloc`, `fs-viz`, `fs-render`,
-  `fs-scenario`, `fs-uq`, `fs-qty`, `fs-material` — i.e., the browser toolchain problem
-  is *solved infrastructure*, not a research risk.
-- **`fs-ornith` (the ornithoid flagship) already flies a parameterized aircraft in the
-  browser** at screening fidelity: `fs-bem` Laplace panel aerodynamics (FMM-accelerated
-  by `fs-fmm`) plus an `fs-vpm` vortex-particle wake metric, wrapped in a staged
-  campaign. The Wright Flyer sim is a sibling flagship with a real-time loop instead of
-  a campaign loop.
-- **`fs-mbd`** provides deterministic quaternion rigid-body dynamics; **`fs-time`**
-  provides structure-preserving and Lie-group rigid-body integrators;
-  **`fs-contact`** provides certified continuous-collision verification for the
-  offline truth plane (real-time skid/rail contact is a light model owned by
-  `fs-flyer` — see the corrected §5.1.5); **`fs-lbm`** provides
-  D2Q9/D3Q19 lattice-Boltzmann cores for the offline high-fidelity validation tier;
-  **`fs-vpm`** provides the desingularized Biot–Savart vortex core; **`fs-viz`**
-  provides scientific-visualization primitives with analytic ground truth.
+- **`fs-wasm` already ships a large slice of FrankenSim to wasm32** via its own
+  decoupled workspace and `wasm-pack` CI builds; its dependency list already includes
+  `fs-bem`, `fs-vpm`, `fs-lbm`, `fs-exec`, `fs-alloc`, `fs-viz`, `fs-render`,
+  `fs-scenario`, `fs-uq`, `fs-qty`, `fs-la`, `fs-material`. The browser toolchain is
+  solved infrastructure.
+- **`fs-ornith` already flies a parameterized aircraft in the browser** at screening
+  fidelity (fs-bem panel aero + fs-vpm wake metric in a staged campaign).
+- **`fs-mbd`** (deterministic quaternion rigid body, leaf crate) and **`fs-time`**
+  (Lie-group rigid-body + symplectic integrators) — both probe-compiled to wasm32
+  clean during the Round 0.5 audit. **`fs-lbm`** provides D2Q9/D3Q19 cores for the
+  offline reference tier; **`fs-vpm`** exposes its desingularized Biot–Savart kernel
+  functions for reuse; **`fs-viz`** provides scientific-visualization primitives.
 - The **evidence doctrine** (Verified/Validated/Estimated, typed refusals, no-claims
-  blocks, content-identity binding) is exactly the honesty instrument a "real physics,
-  real time" product needs so the real-time tier never silently over-claims.
+  blocks, content-identity binding) is the honesty instrument that keeps "real
+  physics, real time" an audited claim, in the UI as rigorously as in the kernels.
 
 ### 1.3 The one-sentence positioning
 
-> A museum-quality interactive: the most historically and physically serious Wright Flyer
-> simulation that runs in a browser tab — where the physics is a first-class citizen you
-> can *see*, *interrogate*, and *change*, and where every number tells you how sure it is.
+> A museum-quality interactive scientific instrument: the most historically and
+> physically serious Wright Flyer simulation that runs in a browser tab — where the
+> instability, the pilot, the canard mechanics, the wind, and the model's own
+> uncertainty are all visible at the same time.
 
 ### 1.4 Explicit non-goals (v1)
 
-- **Not a general flight simulator.** One aircraft family (Flyer I/II/III lineage), two
-  sites (Kill Devil Hills 1903, Huffman Prairie 1904–05), minutes-long flights.
-- **Not a CFD product.** The browser tier is a reduced-order model with a wake; the
-  full-field CFD (`fs-lbm`) runs offline in the validation program, not per-frame.
-- **No multiplayer, no VR in v1** (VR is a natural v2; the architecture must not preclude it).
-- **No gamification** (score chasing, unlocks). The "game" is the physics itself.
-- **The browser tier never claims better than `Estimated` evidence color.** Validation
-  receipts from the native tier can promote *specific pinned configurations* to
-  `Validated`; the UI displays the color honestly.
+- **Not a general flight simulator.** One aircraft family (Flyer I/II/III lineage),
+  two sites, minutes-long flights.
+- **Not a CFD product.** The browser tier is a reduced-order model with a resolved
+  wake; full-field CFD (`fs-lbm`) runs offline in the reference program.
+- **No multiplayer, no VR in v1** (architecture must not preclude a v2).
+- **No gamification.** The physics is the game.
+- **The browser tier never claims better than `Estimated` evidence** except where
+  subsystem-specific validation receipts apply (§10.6); the UI displays evidence
+  composition honestly, in color AND plain language (§2.5).
 
 ---
 
 ## 2. Product Experience
 
-### 2.1 The five-minute journey (first-time user)
+### 2.1 The five-minute journey (first-time user, Round-1 revised)
 
-1. **Arrival.** The page loads to a dawn scene: the camp at Kill Devil Hills, the wooden
-   launch rail pointing into a 24 mph wind, the Flyer on its dolly, sand streaming in low
-   ribbons. Ambient wind audio. A single "Fly" button and a date stamp: December 17, 1903,
-   10:35 a.m.
-2. **First flight, authentic mode.** The user launches. The engine clatters to speed, the
-   dolly accelerates down the 60-foot rail, and the Flyer staggers into the air exactly as
-   the historical Flyer did: porpoising in pitch (it was statically unstable), 120 feet in
-   12 seconds, and a firm arrival in the sand. A results card appears with the historical
-   comparison: *"Orville: 120 ft, 12 s. You: 97 ft, 10.4 s."*
-3. **Seeing the air.** The user toggles "Show the wind." The world dims slightly; the
-   velocity field appears as animated glyphs and streamribbons: the logarithmic boundary
-   layer profile, gust structures advecting through, the bound circulation around the
-   wings, tip vortices curling off and descending in ground effect. Toggles for
-   |curl| (vorticity magnitude), divergence (near-zero — with an explanation of why),
-   and pressure-gradient overlays.
-4. **Changing history.** The user opens the Design panel. Sliders with the real 1903
-   values marked: wingspan, chord, camber, canard area and arm, gross weight, engine
-   power, propeller diameter/pitch, headwind speed. They drag aspect ratio from 6.4
-   to 9, watch the predicted lift/drag polar redraw live, fly again, and go 240 feet.
-   A delta card explains *why* (induced drag ∝ 1/AR).
-5. **The hook.** A "Challenges" rail: *Beat Wilbur's 852 feet. Survive a 30 mph gust
-   day. Fly Huffman Prairie with no headwind (you'll want the catapult). Tame the pitch
-   oscillation by moving the CG.* Each challenge is a scenario config with its own
-   leaderboard-free results card and replay.
+1. **Arrival.** Dawn at Kill Devil Hills: the camp, the 60-ft wooden launch rail
+   pointing into a ~25 mph wind, the Flyer on its dolly, sand streaming in low
+   ribbons. A date stamp: December 17, 1903, 10:35 a.m.
+2. **Ride along.** The first experience is a clearly labeled **historical-pilot
+   hypothesis replay**: the modeled pilot flies the authentic configuration in an
+   ensemble-drawn December wind. The user watches the porpoising happen — from the
+   wing, from the sand, from Daniels' tripod — with a caption explaining that this is
+   a modeled hypothesis of the flight, not a recording.
+3. **Fly with Training Assist.** The user takes the controls with the accessibility
+   assist engaged and succeeds — imperfectly. The results card compares their run to
+   the historical record and to the hypothesis replay, and reports the actual
+   distance distribution context rather than a single "beat this" number.
+4. **Authentic Controls.** Invited, not forced: "Now try it the way Orville did."
+   Raw mechanical controls, raw instability. Most users crash within seconds — and
+   the card explains *why this is the point*, with a link to…
+5. **"Why it porpoises."** The flagship educational view (§2.4.8): open-loop
+   divergence, canard hinge behavior, pilot delay and saturation, all animated
+   against the flight they just flew. Then the design panel opens: change one
+   physical parameter (CG, canard balance, headwind), keep the same atmosphere
+   realization, fly the A/B comparison.
 
 ### 2.2 The advanced journeys
 
-- **The engineer's loop.** Full config editor (typed, unit-checked via `fs-qty`
-  semantics), KPI dashboard (lift margin, L/D, static margin, phugoid/short-period
-  frequencies from live linearization, control-effort RMS, smoothness index), parameter
-  sweeps run in Web Workers with result overlays (e.g., distance-vs-camber curve), and
-  export of any run as a replay file with full config identity.
-- **The educator's loop.** Curated "lessons": ground effect (fly at 3 m vs 30 m and
-  compare induced drag live), why the Flyer's anhedral helped in gusts, why the canard
-  configuration is statically unstable but was chosen anyway (stall recovery behavior),
-  div/grad/curl as physical objects with the wind field as the worked example.
-- **The historian's loop.** Authentic-day presets: the four December 17 flights with
-  recorded wind conditions; the 1904 Huffman Prairie problem (light winds → catapult);
-  Flyer III 1905 (first practical airplane; 24.5 miles on Oct 5, 1905). Each preset
-  cites its sources in-app.
-- **The cinematic loop (offline, native).** Any browser replay can be exported and
-  re-rendered by the native FrankenSim cinematic pipeline (`fs-render` spectral tracer +
-  the existing EXR→ProRes quarantined mux adapter from the Euler-disc program) into a
-  film-quality clip — same trajectory identity, same config identity, hero-shot camera
-  paths. The browser is the instrument; the native pipeline is the film studio.
+- **The engineer's loop.** Full config editor (typed, unit-checked, `fs-qty`
+  semantics), KPI dashboard with fixed- and free-control static margins, augmented
+  eigenmode view, applicability-domain status, parameter sweeps in workers with
+  common-random-number ensembles, replay export with full identity envelope.
+- **The educator's loop.** Curated lessons: ground effect (fly at 3 m vs 30 m),
+  anhedral vs dihedral in gusts, fixed-control vs free-control stability (the canard
+  balance slider makes this tangible), adverse yaw with the warp–rudder coupling
+  disengaged, div/grad/curl on the wind field.
+- **The historian's loop.** The four December 17 flights as ensemble presets with
+  documented uncertainty; the 1904 Huffman catapult problem; Flyer III 1905 circuit
+  flights. Every preset cites sources and labels reconstruction vs record.
+- **The cinematic loop (offline, native).** Browser replays re-rendered by the
+  native pipeline (`fs-render` + the existing EXR→ProRes quarantined mux adapter)
+  into film-quality clips — same identity envelope, hero cameras.
 
-### 2.3 Interaction model (flying the Flyer)
+### 2.3 Interaction model & control modes (Round-1 revised)
 
-The real Flyer's controls were bizarre by modern standards and that is part of the story:
+The real Flyer's controls are part of the physics, not an input abstraction: the
+canard was operated through a lever and cable against its own hinge moment, and
+Orville reported the elevator was balanced too near its center and tended to keep
+moving once started — overcontrol by mechanism, not only by pilot lag.
 
-- **Pitch:** front elevator (canard) via lever — sensitive, statically unstable aircraft.
-- **Roll+yaw:** wing-warping *coupled to rudder* via the hip cradle — the pilot shifted
-  his hips to bank.
-- **Throttle:** none in the modern sense; engine ran essentially full-out.
+Four distinct modes (each a distinct model identity; see §5.1.4):
 
-Input mappings (all remappable):
+| Mode | What it is | Label |
+|---|---|---|
+| **Authentic Controls** | the human user acts through the full historical mechanical control model (lever ratios, hinge moments, friction, stops). No synthetic human delay is added — the user supplies real perceptual/motor latency. | historical mechanics, your reflexes |
+| **Historical Pilot** | an autonomous modeled pilot (delay + lead/lag + neuromuscular lag + saturation + deterministic remnant) used for ensemble replays and demonstrations | modeled hypothesis |
+| **Training Assist** | user intent + low-authority accessibility controller through the same actuator path | hybrid assist, not historical |
+| **Modern SAS** | full stability augmentation | explicitly ahistorical |
 
-| Mode | Pitch | Roll/yaw (coupled warp+rudder) | Notes |
-|---|---|---|---|
-| Keyboard | ↑/↓ | ←/→ | default; discrete-feel filtered to lever rate |
-| Mouse | vertical drag | horizontal drag | "hip cradle" metaphor |
-| Gamepad | left stick Y | left stick X | best feel for instability |
+Input mappings (keyboard / mouse-drag "hip cradle" / gamepad) are device mappings
+onto pilot force/intent, remappable, sampled and deterministically quantized at
+simulation ticks (§6.2).
 
-**Stability-assist ladder** (crucial for playability without lying about physics):
-- **Authentic** — raw aircraft, raw instability; the historical difficulty.
-- **Wright-hands** — a modeled pilot inner loop (the trained reflexes Wilbur/Orville
-  earned with ~1,000 glider flights in 1900–1902): a low-gain pitch-rate damper with
-  human-plausible latency (~180 ms) and saturation. This is a *modeled historical pilot*,
-  not a cheat, and is labeled as such.
-- **Modern SAS** — full stability augmentation for accessibility; labeled "not historical."
+### 2.4 Visualization modes
 
-All three run the same airframe physics; assists only add control inputs through the same
-actuator path with the same rate limits, so KPIs remain comparable and honest.
+1. **Vector glyph field** — GPU-instanced arrows on a user-positioned probe volume;
+   live animated.
+2. **Streamlines / pathlines / streaklines** — with the terms used *precisely*:
+   streamlines integrate one frozen field snapshot; pathlines time-integrate markers
+   through successive snapshots; streaklines require continuous release and are
+   available only when the field-history ring is retained.
+3. **Vorticity view** — three honestly distinguished sources: Tier B connected wake
+   (direct rendering of model vorticity/circulation), Tier A prescribed wake
+   descriptors (labeled schematic/model-derived), ambient turbulence vorticity
+   (analytic derivative of the synthetic atmosphere). No shared "exact" label.
+4. **Divergence verification overlay** — normalized residual
+   ε_div = |∇·u| / (‖∇u‖ + ε), analytic-vs-finite-difference toggle; the model
+   promises solenoidal ambient flow and the overlay shows the discretization error —
+   a teachable self-check.
+5. **Kinematic-gradient view** — ∇u, strain magnitude, Q-criterion/λ₂ (definitions
+   in-app), ∇(½|u|²) labeled *kinematic speed gradient*. **No volume pressure** — a
+   kinematically synthesized field does not determine p; a Bernoulli proxy appears
+   only on explicitly irrotational components, labeled a proxy. Surface pressure
+   appears only when a model actually supplies a Cp distribution; otherwise the UI
+   shows strip normal loads.
+6. **Force overlay** — per-strip lift/drag vectors, prop thrust, weight/CG marker,
+   net force/moment gnomon (exact sim values).
+7. **Scalar probes** — draggable point probes with strip-chart history; a virtual
+   anemometer with declared reference height.
+8. **"Why it porpoises"** *(flagship, Round-1)* — synchronized time plots and a
+   live loop diagram: open-loop pole and time-to-double; canard command vs actual
+   deflection; hinge moment and pilot force; pitch rate, flight-path angle, height;
+   delay/phase indicators; saturation and reversal events; the loop component
+   currently driving growth highlighted. A/B mode changes one mechanical or pilot
+   parameter with the atmosphere realization held fixed.
 
-### 2.4 Visualization modes (the differentiator)
+Every mode works while flying, paused, or scrubbing a replay, and every field output
+carries provenance and validity metadata (§5.5).
 
-1. **Vector glyph field** — GPU-instanced arrows on a user-positioned 3-D probe box or
-   plane; length/color = |u|; live animated.
-2. **Streamribbons / streaklines** — integrated through the *current* unsteady field;
-   emitted from the leading edge, wingtips, or a hand-placed rake.
-3. **Vorticity view** — |ω| volume glow + extracted vortex-core polylines for the tip
-   vortices and shed wake (the wake data structure *is* vorticity, so this is exact,
-   not post-processed).
-4. **Divergence view** — near-zero by construction (incompressible model, div-free gust
-   synthesis); displayed as a *verification overlay* with a callout: "the model promises
-   ∇·u = 0; the residual you see is sampling/discretization error" — a teachable moment
-   that doubles as an on-screen self-check.
-5. **Gradient/pressure view** — ∇p from the reduced model along surfaces (wing pressure
-   bands via section theory) and ∇|u| in the volume probe.
-6. **Force overlay** — per-strip lift/drag vectors on the wings, thrust vectors on the
-   props, weight/CG marker, net-force and net-moment gnomon at the CG.
-7. **Scalar probes** — draggable point probes reading (u, p̂, ω, T?) with strip-chart
-   history; a virtual anemometer you can plant on the dune like the Weather Bureau's.
+### 2.5 Evidence UX (Round-1)
 
-Every mode works while flying, paused, or scrubbing a replay.
+Evidence colors stay, and are never the sole channel. Every badge carries: color +
+icon; a one-sentence plain-language claim; subsystem breakdown; applicability-domain
+status; a receipt link; and the limiting uncertainty. Example: *"Main-wing
+attached-flow loads validated against full-scale data at this Re and α; canard
+separated-flow loads and the historical gust realization are estimated."* A
+provenance inspector opens from any parameter, force, field, or KPI.
 
 ---
 
 ## 3. Historical & Physical Grounding
 
-> Grounding rule (planning-workflow): numbers below marked **[V]** are load-bearing and
-> must be re-verified against primary/secondary sources during E1 (task E1.2) before any
-> code pins them. Values marked **[V?]** are believed-approximate and must be sourced or
-> demoted to tunable-with-default. Do not let unverified numbers survive into goldens.
+> Grounding rule: values marked **[V]** are load-bearing and must be re-verified
+> against sources in E1 before entering goldens; **[V?]** are believed-approximate
+> and must be sourced or demoted to tunable-with-provenance. Round 1 added source
+> anchors: NPS Wright Brothers materials, Library of Congress flight accounts,
+> Culick et al. (Caltech) stability analyses, Deters/Broughton/Selig AIAA-2004-0211
+> full-scale Flyer simulation, Smithsonian NASM object records.
 
 ### 3.1 The 1903 Wright Flyer — reference configuration
 
@@ -222,85 +238,89 @@ Every mode works while flying, paused, or scrubbing a replay.
 | Wingspan | 40 ft 4 in = 12.29 m | [V] |
 | Chord | 6 ft 6 in = 1.98 m | [V] |
 | Wing area (both wings) | ~510 ft² = 47.4 m² | [V] |
-| Aspect ratio (per wing) | ~6.2–6.4 | [V] derived |
+| Aspect ratio (per wing) | ~6.2 | [V] derived |
 | Gap between wings | ~6 ft (≈ chord) | [V?] |
-| Camber | ~1/20 (flown at Kitty Hawk 1903) | [V] |
-| Airfoil | thin, single-surface-ish, ribs + fabric; Wright #12-derived section | [V?] |
-| Anhedral (wing droop) | slight, deliberate (gust response at Kitty Hawk) | [V] qualitative |
-| Canard ("front rudder") area | ~48 ft², biplane elevator | [V?] |
-| Canard arm (CG→canard AC) | ~7 ft ahead | [V?] measure from drawings |
-| Twin rudder area (aft) | ~21 ft² | [V?] |
+| Camber | ~1/20 (as flown 1903) | [V] |
+| Wing section/construction | digitized rib geometry + fabric-covered construction; relationship to the Wright wind-tunnel section identifiers established by E1 (NOT "single-surface", per Smithsonian fabric records) | [V?] |
+| Anhedral (droop) | slight, deliberate (gust response) | [V] qualitative |
+| Canard | biplane elevator: two planes, own span/chord/gap/stagger, hinge + balance axes, ~48 ft² total | [V?] full geometry from drawings, E1.5 |
+| Canard arm | ~7 ft ahead of CG | [V?] |
+| Twin rudder (aft) | ~21 ft², movable, warp-coupled | [V?] |
 | Empty weight | ~605 lb = 274 kg | [V] |
-| Gross weight (with pilot ~145 lb) | ~750 lb = 340 kg | [V] |
-| Engine | 4-cyl inline, ~201 in³, ~12 hp peak (~8–9 hp sustained), ~180 lb w/ accessories | [V] |
-| Transmission | chain drive, 23:8 reduction; one chain crossed for counter-rotation | [V?] ratio |
-| Propellers | 2 × pusher, ~8.5 ft (2.6 m) diameter, ~330–350 rpm, carved spruce | [V] |
-| Propeller efficiency | modern reconstructions estimate ~70–80% peak | [V?] cite AIAA/Wright Experience data |
-| Cruise/flight airspeed | ~30–34 mph (13–15 m/s) | [V] |
-| Stall speed | within a few mph of flight speed (flying near CL,max) | [V?] derive + cite |
-| Static pitch stability | **unstable** (canard + aft-ish CG); the famous porpoising | [V] (Culick et al.) |
-| Pilot position | prone, head forward, hip cradle | [V] |
+| Gross weight (pilot ~145 lb) | ~750 lb = 340 kg | [V] |
+| Engine | 4-cyl inline, ~201 in³, ~12 hp peak, ~180 lb w/ accessories | [V] |
+| Engine controls | topology pending E1 verification — distinguish gas-flow lever, ignition/spark, run/stop, non-pilot-adjustable settings; do NOT assume a modern throttle | [V?] |
+| Transmission | chain drive, ratio ~23:8; one chain crossed for counter-rotation | [V?] |
+| Propellers | 2 × pusher, ~8.5 ft (2.6 m), ~330–350 rpm, carved spruce; digitized radial geometry from reconstructions | [V] |
+| Propeller performance | NPS cites ~66% for the original design; modern reconstruction figures vary by convention and operating point — record convention with every number | [V?] E1.6 |
+| Flight airspeed | ~30–34 mph (13–15 m/s) | [V] |
+| Static pitch stability | **unstable** (Culick et al.); barely stabilizable by a trained pilot | [V] |
+| Canard mechanics | balanced too near center; tended to continue moving once started (Orville) — overcontrol by mechanism | [V] qualitative, E1.5 quantifies |
+| Pilot position | prone, hip cradle; ~"almost 1,000" glides of 1902 practice | [V] narrative ranges |
 
 ### 3.2 The four flights of December 17, 1903 (validation anchors)
 
 | # | Pilot | Distance | Duration | Notes |
 |---|---|---|---|---|
-| 1 | Orville | 120 ft | 12 s | 10:35 a.m.; undulating pitch; wind ~24–27 mph [V] |
+| 1 | Orville | 120 ft | 12 s | 10:35 a.m.; undulating; wind ~24–27 mph [V] |
 | 2 | Wilbur | ~175 ft | ~12 s | [V?] |
 | 3 | Orville | ~200 ft | ~15 s | [V?] |
-| 4 | Wilbur | 852 ft | 59 s | pitch oscillation → hard landing, canard broken [V] |
+| 4 | Wilbur | 852 ft | 59 s | initially undulating, then a long steadier segment, renewed pitching and ground strike; landing damage and the LATER gust destruction of the aircraft must be separately sourced [V?] |
 
-Ground speed on flight 1 was ≈ 6.8 mph against the headwind → airspeed ≈ 31–34 mph.
-These four flights, with the recorded wind, are the **primary end-to-end validation
-anchors**: the reference config in authentic wind must reproduce distance/duration within
-declared tolerance bands (see §10.3).
+The historical control traces and gust time-series are **unknown**. These flights
+are therefore **probabilistic validation anchors**: ensembles over documented
+uncertainty, evaluated against pre-registered joint predictive regions (§10.4) —
+never a single "correct replay." Wind provenance matters: Orville's diary
+distinguishes the Wrights' anemometer reading from the government reading —
+`WindReference` records instrument, height, and averaging interval (§5.4).
 
 ### 3.3 Sites
 
-**Kill Devil Hills, NC (1903).** Flat sand plain; launch rail ("the Junction Railroad"),
-60 ft of 2×4 on edge, iron-capped; dolly/truck riding the rail; the Flyer on skids (no
-wheels). Big Kill Devil Hill (~90 ft dune) nearby but the powered flights launched from
-the flat. Steady strong Atlantic winds; Dec 17 measured 24–27 mph [V]. Terrain: sand
-(aerodynamic roughness z₀ ≈ 10⁻³–10⁻² m), sparse grass, camp buildings (two sheds).
+**Kill Devil Hills, NC (1903).** Flat sand plain; 60-ft launch rail; dolly; skids
+(no wheels). Big Kill Devil Hill (~90 ft) nearby; powered flights from the flat.
+Dec 17 wind 24–27 mph [V]. Sand z₀ ≈ 10⁻³–10⁻² m with sparse grass; two camp sheds.
 
-**Huffman Prairie, Dayton OH (1904–05).** ~84-acre cow pasture; light and variable winds
-→ from Sept 1904 the **catapult derrick**: ~1,600 lb weights [V?] dropped from ~16 ft,
-rope-and-pulley to the dolly — an assisted-takeoff system the sim must include as a
-launch option. Rougher air (thermals, tree lines), longer flights, first circles
-(Sept 20, 1904, Flyer II) and the 24.5-mile Oct 5, 1905 flight (Flyer III).
+**Huffman Prairie, Dayton OH (1904–05).** ~84-acre pasture; light variable winds →
+catapult derrick from Sept 1904 (~1,600 lb drop weights, ~16 ft tower [V?]);
+thermals, tree lines; first circle Sept 20 1904; the great Oct 5 1905 Flyer III
+flight — Smithsonian: 24.5 mi / 39.2 km; NPS: 24⅕ mi / 38:03 — keep both in
+provenance, select one primary record for the preset [V?].
 
-Terrain data plan: USGS 3DEP lidar / SRTM for modern topography of both sites, plus
-historical shoreline/dune position references for 1903 (the dunes have moved; the
-memorial's landscaping postdates the flights). The terrain need not be survey-grade:
-a heightfield at ~1–2 m horizontal resolution over ~2×2 km, hand-adjusted to the
-historical photographs, with a documented "representative, not surveyed" label.
+Terrain data: USGS 3DEP/SRTM + historical adjustment; ~1–2 m heightfield over
+2×2 km, "representative, not surveyed" label. 2×2 km suffices even for the 1905
+flight: 24 miles is accumulated *circuit length* around the small prairie, not
+displacement (Round-1 Q5 answer); E1.3 validates the historical circuit stays
+inside the tile; a low-detail visual horizon ring covers the distance views.
+Sky/lighting: temperature, wind, sun position, cloud state, and artistic lighting
+are separate provenance fields; unsourced cloud/lighting choices are labeled visual
+reconstruction.
 
-### 3.4 The aerodynamic character we must capture (fidelity floor)
+### 3.4 The signature behavior, decomposed (Round-1 P0 revision)
 
-These are the phenomena that make the Flyer *the Flyer*; the reduced model is designed
-around reproducing them (each maps to a validation case in §10):
+The Flyer's longitudinal behavior is THREE separately modeled, separately validated
+mechanisms — the historical porpoising is a *closed-loop trajectory*, not the
+definition of the open-loop mode:
 
-1. **Pitch instability + pilot-in-the-loop oscillation** (the porpoising). Requires:
-   unstable short-period dynamics from the canard configuration, canard lift-curve and
-   downwash-free lead, correct-order pitch inertia, elevator effectiveness, and pilot
-   latency. This is THE signature behavior.
-2. **Ground effect.** Flights at 1–4 m altitude with a 12.3 m span: strong reduction of
-   induced drag and downwash. Method: image-vortex system (exact for the reduced model).
-3. **Near-stall cruise.** The Flyer flew at high CL close to stall; lift-curve flattening
-   and drag rise near CL,max must be modeled (blended stall model per strip), else
-   distance/speed KPIs will be fantasy.
-4. **Biplane interference.** Two wings a chord apart: mutual induced effects reduce
-   effective aspect ratio (Munk factor). Strip model must include gap-dependent
-   interference or lift will be ~10–20% optimistic.
-5. **Low-airspeed propulsion.** Props at high advance ratio variation during the rail
-   run; thrust falls with airspeed; BEMT (blade-element/momentum) with the actual carved
-   geometry class, chain-drive RPM ratio, and engine torque curve.
-6. **Gusty boundary-layer wind.** Log-law mean profile + anisotropic turbulence with
-   realistic length scales; the aircraft's gust response (Küssner-type lag) drives the
-   smoothness KPI and the historical difficulty.
-7. **Warp-drag / adverse yaw and the coupled warp–rudder control.** The Wrights coupled
-   them for a reason; decoupling them (a config toggle!) should reproduce the 1901–02
-   adverse-yaw problem.
+1. **(a) Open-loop airframe instability.** The geometry and aerodynamics produce an
+   unstable longitudinal pole set. Validation target: the published open-loop
+   derivative/pole structure (Culick et al.), with time-to-double reported — not a
+   predeclared "2–4 s growing oscillation."
+2. **(b) Canard control mechanics.** Hinge moment, aerodynamic balance near center,
+   linkage ratio, friction, inertia, stops, backdrivability — the mechanism-level
+   overcontrol Orville described.
+3. **(c) Closed-loop pilot–aircraft oscillation.** A delayed, saturated feedback
+   loop (human or modeled pilot) around (a) via (b). A pure delayed pitch-rate
+   damper is NOT assumed sufficient — in the elementary reduction, rate feedback
+   changes damping but not unstable static stiffness; the conclusion must come from
+   the full augmented pole set.
+
+Other fidelity-floor phenomena (each mapped to validation cases in §10): ground
+effect at h/b ≈ 0.1–0.3 (flat-plane image system); near-stall cruise (separation
+margin + lagged separation state); biplane and canard–wing interference (coupled
+multisurface solve, §5.2); low-J propulsion through the rail run from J = 0
+(CT/CQ maps + rotor dynamics, §5.3); gusty boundary-layer wind (wall-compatible
+solenoidal synthesis, §5.4); warp adverse yaw and the coupled warp–rudder control
+(lateral topology enum, §5.1.1).
 
 ---
 
@@ -313,98 +333,101 @@ around reproducing them (each maps to a validation case in §10):
 │ PRESENTATION PLANE (TypeScript + three.js, apps/wright-flyer/)         │
 │ scene graph, terrain+sky, aircraft model, field visualization,         │
 │ HUD/instruments, config UI, replay scrubber, WebAudio                  │
-│         ▲ zero-copy typed-array views + postMessage commands           │
 ├────────────────────────────────────────────────────────────────────────┤
-│ SIMULATION PLANE (Rust→wasm32, crates/fs-flyer-wasm, own workspace     │
-│ like fs-wasm)                                                          │
-│ fs-flyer (aircraft assembly, 6-DOF, pilot, launch, KPIs)               │
-│ fs-wing (lifting-surface aero: strips + unsteady states + VLM tier)    │
-│ fs-airscrew (prop BEMT + engine + chain drive)                         │
-│ fs-atmo (wind profile + div-free turbulence + gust events)             │
+│ SIMULATION PLANE (Rust→wasm32, crates/fs-flyer-wasm, own workspace)    │
+│ fs-flyer (aircraft assembly, 6-DOF+added-mass, controls, pilots,       │
+│           launch, KPIs, field service)                                 │
+│ fs-wing (coupled multisurface unsteady aero + wake)                    │
+│ fs-airscrew (BEMT + rotor dynamics + engine + drivetrain)              │
+│ fs-airfoil (L2 section models)   fs-atmo (wind + turbulence)           │
 │ on: fs-mbd, fs-time, fs-vpm, fs-bem, fs-exec, fs-math det,            │
 │     fs-rand philox, fs-blake3 identity, fs-qty units, fs-scenario      │
 ├────────────────────────────────────────────────────────────────────────┤
-│ TRUTH PLANE (native FrankenSim, offline)                               │
-│ fs-lbm D3Q19 wind-over-terrain + high-res VPM/BEM aero re-runs;        │
-│ cross-fidelity residual receipts (fs-vvreg / vv-scorecard);            │
-│ cinematic re-render of replays (fs-render + euler mux adapter);        │
-│ golden replay hashes across aarch64/x86/wasm (four-quadrant doctrine)  │
+│ REFERENCE / REFEREE PLANE (native FrankenSim, offline)                 │
+│ fs-lbm D3Q19 wind-over-terrain; high-res panel/VPM aero re-runs;       │
+│ cross-fidelity discrepancy receipts (fs-vvreg / vv-scorecard);         │
+│ fs-contact certified no-missed-contact replay verification;            │
+│ cinematic re-render of replays; four-quadrant+wasm golden hashes       │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why this split.** three.js is the right tool for the *display* problem (mature scene
-graph, materials, instancing, ecosystem) and is outside the Rust workspace so Franken-only
-dependency doctrine is untouched. The wasm crate is the *only* boundary between planes,
-and it follows the proven `fs-wasm` pattern: an isolated `[workspace]` so browser builds
-never depend on unrelated in-progress native crates (this decoupling is already documented
-in `fs-wasm/Cargo.toml` and battle-tested by the `fs-wasm-build` CI lane). The truth plane
-is where "don't dumb down the physics" is *enforced* rather than merely promised: the
-same config identities re-run at higher fidelity, and the differences become published
-residuals, not vibes.
+**Round-1 rename:** the offline plane is the **reference/referee plane**, not the
+"truth plane." fs-bem/VLM/VPM/LBM are higher-fidelity *models*; experimental data
+and analytic solutions establish which claims they may referee. Outside those
+domains they supply cross-model discrepancy, not truth — this matters most near
+stall, where both inviscid prediction and historical experimental coverage are
+limited.
 
-### 4.2 The multi-fidelity ladder (the honest answer to "real physics, real time")
+### 4.2 The multi-fidelity ladder
 
-| Tier | Where | Model | Cost | Role |
-|---|---|---|---|---|
-| A | browser, always | strip-theory lifting-line w/ unsteady states (Wagner/Küssner), image ground effect, biplane interference, BEMT prop, synthetic div-free turbulence | ~1 ms/step | the flyable sim; KPIs |
-| B | browser, capable machines | Tier A + live vortex-lattice bound sheet + shed vortex-particle wake (fs-vpm kernel), wake feedback at reduced rate | ~4–8 ms/step | wake realism, viz truth |
-| C | native, offline | high-res unsteady VLM/panel (fs-bem+fs-fmm) + dense VPM wake; long-run KPI recomputation | minutes | validates A/B force models |
-| D | native, offline | fs-lbm D3Q19 wind-over-terrain (no aircraft) → gust statistics; optionally immersed aircraft at reduced Re for qualitative field comparison | hours | validates fs-atmo statistics; hero visuals |
+| Tier | Where | Model | Role |
+|---|---|---|---|
+| A | browser, always | **coupled low-order multisurface** lifting-line/Weissinger solve over both main wings, both canard planes, and vertical surfaces; unsteady section states with declared effect ownership; FlatPlaneExact ground images; BEMT propulsion with rotor dynamics; wall-compatible synthetic turbulence | the flyable sim; KPIs |
+| B | browser, capable machines | Tier A + resolved hybrid wake (connected near-wake filaments, coarsened mid wake, multipole far wake) with reduced-rate feedback | wake realism, viz truth |
+| C | native, offline | high-res unsteady VLM/panel (fs-bem+fs-fmm) + dense VPM; cross-checks A/B attached-flow, interference, and wake predictions inside its validated domain | referee |
+| D | native, offline | fs-lbm D3Q19 wind-over-terrain (no aircraft in v1 — Round-1 Q8) | cross-checks atmospheric statistics under matched conditions |
 
-Ladder invariants:
-- **One geometry, one config identity** flows through all tiers (content-hashed via
-  `fs-blake3`, schema'd via `fs-scenario` conventions).
-- Tier A/B force coefficients are tabulated/corrected against Tier C runs at pinned
-  configs; the correction tables ship with their provenance and residuals.
-- The UI evidence badge reflects the ladder: `Estimated` by default; `Validated (vs
-  Tier C @ cfg 3f2a…)` when the current config is within the validated envelope
-  (defined in §10.4); never `Verified` (no interval-certified claims in v1).
+Ladder invariants (Round-1 identity revision, §4.4): one `PhysicalScenarioId` flows
+through all tiers; each tier/approximation carries a distinct `ModelId`; residual
+**correction tables are disabled by default** — they are explicit identity-bound
+modes, fitted on calibration pins only, evaluated on holdout pins, constrained for
+symmetry/smoothness/conservation, and applied only inside their own applicability
+domain (§10.6).
 
-### 4.3 Process/thread topology in the browser
+### 4.3 Process/thread topology & QoS (Round-1 revision)
 
 ```
-Main thread:        three.js render loop @ display Hz; UI; input capture
-Worker "sim":       wasm physics @ fixed 120 Hz (Tier A) / +wake 40 Hz (Tier B)
-Worker "field":     wasm field-sampling service @ 15–30 Hz (viz grids, probes)
-Worker pool (0–N):  parameter sweeps, replay re-runs (background experiments)
-SharedArrayBuffer:  state ring buffer (sim→render), field buffers (field→render)
+Main thread:        three.js render loop; UI; input capture (tick-quantized)
+Worker "sim":       wasm physics @ fixed 120 Hz (+wake 40 Hz Tier B)
+Worker "field":     wasm field-sampling service (immutable FieldSourceSnapshots)
+Worker pool (0–N):  parameter sweeps, replay re-runs
+SharedArrayBuffer:  seqlock state ring, field buffers (when cross-origin isolated)
 ```
 
-- **Fixed-timestep** sim decoupled from render; render interpolates between the last two
-  states (standard, but *mandatory* here for determinism and replay identity).
-- SharedArrayBuffer requires COOP/COEP headers; the app must also run (degraded to
-  `postMessage` transfer, single-threaded wasm) when cross-origin isolation is absent.
-  Feature detection with an honest banner ("running in compatibility mode: Tier A").
-- wasm SIMD128 for the Biot–Savart and BEMT inner loops. **Corrected (audit
-  2026-08-16):** `fs-simd` today ships Tier 0 scalar + Tier 1 NEON/AVX2 capsules and
-  has NO wasm tier — task E0.5 adds a `std::arch::wasm32` SIMD128 Tier-1w capsule
-  under the same registered-unsafe-capsule discipline (Tier 0 scalar stays the
-  referee). Until E0.5 lands, everything runs scalar: re-budgeted, the Tier-B wake at
-  ~192k kernel evals/wake-step is ~190 MFLOP/s scalar and still fits, so SIMD is an
-  optimization, not a load-bearing assumption.
+- **Global QoS governor:** sim deadline > audio continuity > render continuity >
+  field freshness > sweeps. Field and sweep workers receive explicit
+  pause/rate/cancel commands when the sim lag monitor crosses declared thresholds.
+  **The physics tier never changes during a run**; if the sim cannot meet its
+  fixed-step contract, it pauses with a typed performance refusal and offers a new
+  run at a lower tier.
+- **Fixed timestep** decoupled from render; render interpolates. All schedules
+  (120 Hz sim, 240 Hz contact substep, 40 Hz wake, field refresh) are integer-ratio
+  locked to the sim tick.
+- **Fallback without cross-origin isolation:** each wasm instance is single-threaded
+  but sim/field/sweeps still run in separate Web Workers with pools of transferable
+  preallocated ArrayBuffers (no per-frame allocation/cloning). Tier availability is
+  selected by *measured capability* (E0.6 benchmarks), not by SharedArrayBuffer
+  presence alone; the compatibility banner reports the actual disabled features.
+- **Tab suspension:** on visibility loss, execution pauses at a complete simulation
+  tick; never unbounded wall-clock catch-up on resume; the pause is presentation
+  metadata, not simulation time.
 
-### 4.4 Data flow (one frame)
+### 4.4 Identity model (Round-1 revision)
 
-1. Input events → control lever targets (rate-limited actuator model in `fs-flyer`).
-2. Sim worker advances N fixed steps: atmosphere sample → aero strips (+wake) → prop/
-   engine → contact (rail/skid/ground) → 6-DOF integrate → KPI accumulators → state
-   snapshot to ring buffer (position, quaternion, rates, per-strip forces, wake summary,
-   instrument values).
-3. Field worker (if a viz mode is on): samples the *same* model (mean wind + turbulence
-   + bound/wake induction via shared state) onto the user's probe grid; computes
-   div/curl/grad on that grid; writes to field buffer.
-4. Main thread: interpolate state; update aircraft pose/control-surface morphs; update
-   instanced glyphs/ribbons from field buffer; draw HUD; WebAudio parameter update.
+Five distinct identities, all `fs-blake3` domain-hashed, registered in
+`identity-authorities.json` at introduction:
 
-### 4.5 Replay & identity (the Euler-disc lesson, applied)
+| Identity | Contents |
+|---|---|
+| `PhysicalScenarioId` | aircraft design, site, initial conditions, weather *distribution*, pilot hypothesis, launch system |
+| `ModelId` | tier, every approximation/fast mode + parameters, correction-table selections, discretizations, timestep, solver modes |
+| `ArtifactId` | exact wasm/native executable + embedded data artifacts |
+| `InputTraceId` | tick-addressed, deterministically quantized control trace |
+| `RunId` | hash of all of the above + realization seed |
 
-Every run records: config content-hash, atmosphere seed (philox key), input trace
-(timestamped lever positions), and code identity (crate versions + wasm build hash).
-A replay file re-runs bit-identically in the browser (same wasm) and *numerically
-compatibly* natively (`fs-math det::` routing makes libm differences a non-issue; the
-four-quadrant golden program in §10.5 makes "compatibly" a measured claim, not hope).
-Replays are the bridge to the truth plane: validation re-runs and cinematic exports
-consume replay files, never screen recordings.
+"Same physical scenario, different model" is thus expressible without pretending two
+runs share a complete identity; cross-fidelity receipts explicitly bind the pair.
+
+### 4.5 Replay envelope
+
+Every replay records: `PhysicalScenarioId`, `ModelId` (with complete mode
+parameters), `ArtifactId`, `InputTraceId`, realization seed, terrain/table/
+correction identities, schema version, optional checkpoint digests. Bit-identical
+re-run on the same `ArtifactId`; numerically compatible cross-platform per the
+golden program (§10.7). **Replay schema freeze (Round-1 Q7): freeze the v1 envelope
+now**; migrations parse old envelopes, mint new identities, preserve originals, and
+state which semantics changed — never silently reinterpret an old replay under new
+physics. Old-exact playback uses the archived artifact by `ArtifactId`.
 
 ---
 
@@ -412,268 +435,369 @@ consume replay files, never screen recordings.
 
 ### 5.1 `fs-flyer` — aircraft assembly & flight dynamics (new crate, L4)
 
-**Owns:** the parametric airframe (geometry+mass), control system model, pilot models,
-launch systems, ground interaction, the per-step orchestration, KPI accumulation, and
-the scenario schema. Depends on `fs-wing`, `fs-airscrew`, `fs-atmo`, `fs-mbd`,
-`fs-time`, `fs-qty`, `fs-scenario`, `fs-blake3`, `fs-exec` (real-time), with
-`fs-contact` as an OFFLINE dev-dependency of the truth-plane replay verifier only.
+**Owns:** parametric airframe (geometry+mass+structure modes), mechanical control
+system, pilot models, launch systems, ground interaction, per-step orchestration,
+KPI accumulation, scenario schema, field service. Depends on `fs-wing`,
+`fs-airscrew`, `fs-airfoil`, `fs-atmo`, `fs-mbd`, `fs-time`, `fs-qty`,
+`fs-scenario`, `fs-blake3`, `fs-exec` (real-time), with `fs-contact` as an OFFLINE
+dev-dependency of the reference-plane replay verifier only.
 
-#### 5.1.1 Parametric airframe
-
-The design panel edits a `FlyerDesign` struct; everything downstream derives from it.
-High-level levers (user-facing) map to detailed geometry deterministically:
+#### 5.1.1 Parametric airframe (Round-1 expanded)
 
 ```
 FlyerDesign {
   // Lifting system
-  span_m,                    // default 12.29
-  chord_m,                   // default 1.98  (aspect ratio is derived+displayed)
-  gap_over_chord,            // default ~1.0 (biplane gap)
-  camber_ratio,              // default 1/20; range 1/25..1/8 (the Wrights' own sweep!)
-  stagger_m,                 // default ~0
-  anhedral_deg,              // default ~ -1.5 (droop), range -5..+5 (try dihedral!)
-  washout_deg,               // twist root→tip
-  // Canard & tail
-  canard_area_m2, canard_arm_m, canard_span_m,
-  rudder_area_m2, rudder_arm_m,
+  span_m, chord_m, gap_over_chord, camber_ratio, stagger_m,
+  anhedral_deg, washout_deg, wing_section_id,
+
+  // Canard: two physical elevator planes, not one equivalent area
+  canard_span_m, canard_chord_m, canard_gap_m, canard_stagger_m,
+  canard_arm_m, canard_camber_ratio, canard_section_id,
+  canard_hinge_axis_fraction, canard_balance_axis_fraction,
+  canard_mass_kg, canard_pitch_inertia_kg_m2,
+  canard_min_deflection_deg, canard_max_deflection_deg,
+
+  // Rudder and lateral-control topology
+  rudder_span_m, rudder_chord_m, rudder_arm_m,
+  lateral_control_topology: LateralControlTopology,
+
+  // Mechanical controls
+  canard_lever_ratio, canard_cable_compliance, canard_hinge_friction,
+  canard_control_force_limit,
+  warp_lever_ratio, warp_cable_compliance,
+  elevator_rate_limit, warp_rate_limit,      // hard safety caps (typed limits)
+
   // Mass & balance
-  empty_mass_kg, pilot_mass_kg, ballast_kg, cg_offset_m,   // fore/aft CG shift
+  empty_mass_kg, pilot_mass_kg, ballast_kg, cg_offset_m,
+
   // Propulsion
   engine_power_hp, engine_rpm_max, chain_ratio,
-  prop_diameter_m, prop_pitch_m, prop_blade_count, prop_activity_factor,
-  // Control system
-  warp_rudder_coupled: bool,     // the Wrights' coupling; false = 1901 mode
-  elevator_rate_limit, warp_rate_limit,
-  // Structure (v1: limits only, no aeroelasticity)
-  structural_load_factor_limit,  // display + refusal, default ~2.5 [V?]
+  prop_geometry_id,                          // digitized radial geometry table
+  prop_diameter_m, prop_pitch_m, prop_activity_factor,  // counterfactual levers
+
+  // Structure
+  warp_structure_mode: WarpStructureMode,
+  spar_section_properties, wire_layout_id, wire_pretension,
+  cable_compliance, structural_material_set_id,
+}
+
+LateralControlTopology {
+  NoRearRudder1901,
+  FixedTwinTailEarly1902,
+  CoupledMovableRudderLate1902And1903,
+  IndependentRudderLaterFlyer,
+  Custom(LinkageMatrix),
+}
+
+WarpStructureMode {
+  PrescribedKinematicEstimated,   // v1 default: kinematic warp, schematic deformation
+  QuasiStaticBeamAndRigging,      // spanwise beam + wire tension/slack + loaded warp
 }
 ```
 
-Derived+displayed: wing area, aspect ratio, wing loading, power loading, static margin,
-tail volume coefficients, CL required at target speed. **Typed refusals** at admission
-for non-physical inputs (negative areas, CG outside airframe, camber beyond section-model
-validity) — the same admission-time refusal doctrine the Euler cinematic config uses
-(refuse in milliseconds with a ranked-repair message, not after a run).
+Derived+displayed: main-wing and canard areas/aspect ratios; gap and stagger
+ratios; wing loading; power loading; canard volume; control effectiveness;
+hinge-moment gradient; **fixed-control AND free-control static margins**; trim
+authority; CL required at target speed. When `QuasiStaticBeamAndRigging` is active:
+spanwise bending moment, spar utilization, wire tension/slack status, loaded warp
+distribution, prop/structure clearance. When it is inactive, structural margin and
+structural optimization are **unavailable** rather than inferred from a load-factor
+scalar (Round-1: the scalar n-limit cannot support structural claims across span/
+chord/rigging changes; load-factor *exposure* remains a kinematic KPI, never
+relabeled structural margin).
 
-Mass model: component build-up (wings by area×areal-density, engine, radiators, chains,
-pilot at prone station, ballast) → mass, CG, inertia tensor. Inertia derived from the
-component distribution, not hand-waved — pitch inertia matters for the instability
-signature. Cross-check task: published estimates of Flyer inertias from the AIAA Wright
-Flyer Project [V].
+Typed refusals at admission for non-physical inputs with ranked repairs. Mass model:
+component build-up → mass, CG, inertia tensor, cross-checked against published Flyer
+inertia estimates [V].
 
-#### 5.1.2 Six-DOF dynamics
+#### 5.1.2 Six-DOF dynamics with generalized added mass (Round-1 P0 revision)
 
-`fs-mbd` state (position, canonical unit quaternion, linear/angular velocity in its
-documented convention) advanced by `fs-time` integrators. Forces/torques assembled each
-step from: gravity, per-strip aero (5.2), canard/rudder aero, prop thrust+torque pair
-(counter-rotating → net torque ≈ 0, but *config-breakable*: disable one prop and feel
-the asymmetry), fuselage/strut/wire parasite drag (flat-plate build-up with the Wrights'
-own strut-fairing insight), ground/rail contact.
-
-Integrator: fixed dt = 1/120 s primary; substep to 1/240 s automatically when contact
-is active (rail run, landing). **Audit finding (good news):** `fs-time` already ships
-Lie-group rigid-body integrators (`lie::rigid_body_step`, `quat_exp_step`, SE(3)
-exponential steps with renormalization variants) — the right tool for quaternion
-dynamics with velocity-dependent aero forces; use those rather than the plainer
-semi-implicit scheme originally assumed. Quaternion canonicalization per `fs-mbd`'s
-documented convention. Note an integration seam found in audit: `fs-mbd` defines its
-own `Vec3`/`UnitQuaternion` types distinct from `fs-geom`'s — `fs-flyer` owns the
-thin type adapters at that boundary (small, but budgeted as part of E3.2). dt-refinement study is a validation
-task (V-05), mirroring the Euler-disc "no full-duration dt convergence certificate"
-honesty note until it exists.
-
-#### 5.1.3 Control & actuation
-
-Lever dynamics: first-order rate-limited actuators (the pilot's arms), warp→rudder
-coupling matrix when enabled, control-surface deflection → geometry deltas consumed by
-`fs-wing` (canard incidence; warp = antisymmetric washout twist of outer panels — the
-actual mechanism, not an aileron abstraction).
-
-#### 5.1.4 Pilot models (the assist ladder)
-
-- `PilotDirect` — raw user input.
-- `PilotWright` — user input + inner-loop pitch-rate damping: `δe += -k_q·q` filtered
-  with ~180 ms first-order lag + deflection/rate saturation; gains fit ONCE against the
-  historical porpoising amplitude/period (V-02) and then frozen with provenance.
-- `PilotSAS` — modern rate+attitude feedback, clearly labeled non-historical.
-
-#### 5.1.5 Launch systems & ground interaction
-
-- **Rail:** dolly constraint (1-DOF along rail) until liftoff detection (net upward
-  force > weight AND speed > threshold); rail friction; the wooden-rail bump spectrum
-  as a small deterministic perturbation (seeded).
-- **Catapult (Huffman):** weight-drop energy → rope tension profile → dolly force;
-  configurable drop mass/height (defaults [V?] from 1904 accounts).
-- **Skid–sand contact:** a lightweight real-time contact model OWNED BY `fs-flyer`
-  (heightfield penetration springs + regularized Coulomb friction + plastic "sink"
-  parameter for sand); landing quality feeds the smoothness KPI and a damage flag
-  (canard breakage as on flight 4 — threshold on nose-down impact energy [V?]).
-  **Corrected (audit 2026-08-16):** `fs-contact` is a *certified spacetime CCD*
-  library (`CertifiedMotorTube`, `certified_ccd`, SDF window refinement) — it answers
-  "prove these motions cannot have missed a contact," not "give me forces each step."
-  Its honest role here is OFFLINE: an optional replay-verification pass that certifies
-  no missed skid/terrain penetration in a recorded flight (a truth-plane check),
-  never the per-step force path.
-- **Terrain queries:** heightfield + material map (sand/grass/marsh) sampled by contact
-  and by `fs-atmo` (roughness z₀ varies by material).
-
-#### 5.1.6 KPI accumulation (definitions in §9.2)
-
-Accumulated *in the sim plane* (not derived from rendered frames): distance over ground,
-airspeed/groundspeed extrema, altitude trace, load factor trace, pitch-rate RMS,
-control-effort integrals, energy budget (engine work → prop losses → aero dissipation
-→ kinetic/potential), stall-fraction time. Energy closure is the standing sanity
-invariant (Euler-disc lesson: energy-balance gates catch nonsense early) — publish the
-per-run closure residual in the results card.
-
-### 5.2 `fs-wing` — lifting-surface aerodynamics (new crate, L3)
-
-**The heart.** Three cooperating layers:
-
-1. **Section layer (2-D, per strip):** lift/drag/moment coefficients
-   `cl(α,δ), cd(α), cm(α)` for the cambered thin sections, from a blended model:
-   thin-airfoil theory baseline + empirical stall blending (sigmoid to flat-plate
-   post-stall) + Reynolds correction; **anchored to the Wrights' own 1901 wind-tunnel
-   data** (their published tables for section #12 et al. — a delicious historical
-   validation set) and to modern re-tests [V]. Unsteady augmentation per strip: 2-state
-   Wagner approximation (R.T. Jones coefficients) for circulatory lag + apparent-mass
-   terms + Küssner 2-state gust filter. This is the standard state-space unsteady
-   aero used in real-time aeroelasticity; it is cheap (4 ODE states/strip) and captures
-   the gust-response physics the smoothness KPI depends on.
-2. **Planform layer (3-D):** lifting-line with prescribed elliptic-family influence OR
-   (Tier B) a vortex-lattice bound sheet. Includes: biplane interference (gap-dependent
-   Munk/Prandtl interference factor — validated against the classical biplane theory
-   tables [V]), warp twist distribution, canard–wing mutual interference via the same
-   induction machinery, and **ground effect by the image system** (every bound/wake
-   element mirrored below the terrain plane; exact within the model class; degrades
-   gracefully over sloped terrain by mirroring about the local tangent plane).
-3. **Wake layer:** Tier A — prescribed helical/flat wake implied by lifting-line (no
-   explicit particles) + analytic tip-vortex descriptors *for visualization only*
-   (position/strength from Γ distribution + ground images). Tier B — explicit shed
-   vorticity into an `fs-vpm`-kernel particle wake (desingularized Biot–Savart, the
-   existing 2-D core generalized: see task E4.7 for the 3-D vortex-filament/particle
-   extension of fs-vpm, upstreamed as `fs-vpm::three_d` rather than forked), with
-   ground images, O(N) via cell-binned near-field + far-field truncation (fs-fmm is
-   available if profiling demands it), wake feedback onto strips at 40 Hz, particle
-   merge/decay for a capped population (~1,500–2,500).
-
-Outputs per step: per-strip force/moment vectors (for 6-DOF and force-overlay viz),
-bound Γ distribution, shed wake state (for viz + field service), and a diagnostics
-block (per-strip α_eff, stall flag, local Re).
-
-**Why not "just use fs-bem live"?** The Laplace panel solve (even FMM-accelerated) at
-browser rates for an unsteady maneuvering aircraft is Tier C economics, and fs-bem's
-own contract labels it inviscid screening. The strip/VLM+states model is the honest
-real-time citizen; fs-bem is its offline referee. (fs-bem *is* used live in one place:
-precomputing the biplane/canard interference tables per design change, ~100 ms
-one-shot on the worker, cached by geometry hash.)
-
-### 5.3 `fs-airscrew` — propulsion (new crate, L3)
-
-- **Blade-element/momentum (BEMT)** with Prandtl tip/root loss, 20–30 radial stations,
-  section polars from the same section layer (the Wrights' props were airfoils — their
-  key insight); inflow from local airspeed + induced; yields thrust, torque, efficiency
-  across the advance-ratio range including the static/rail-run regime (with the standard
-  low-J momentum correction).
-- **Engine:** torque-vs-rpm curve for the 1903 4-cylinder (peak ~12 hp fading with
-  heat soak — a 60-s thermal derate curve reproduces the observed power fade [V?]);
-  no throttle (run/off + spark retard as the only controls, per history); fuel mass
-  depletion negligible for v1.
-- **Drivetrain:** chain ratio, efficiency ~0.95 [V?], counter-rotation bookkeeping,
-  optional chain-failure hostile scenario.
-- Geometry defaults reconstructed from published measurements of the original props
-  [V]; `prop_pitch_m` and `activity_factor` expose the user-facing "what if they'd
-  carved differently" lever.
-- Validation anchor: modern wind-tunnel data on 1903 prop reproductions (Wright
-  Experience / AIAA papers) for η(J) [V]; BEMT curve must sit within declared bands.
-
-### 5.4 `fs-atmo` — wind, turbulence, gusts (new crate, L2/L3)
-
-- **Mean profile:** log-law `U(z) = (u*/κ) ln(z/z₀)` with site material map driving
-  z₀ (sand vs grass vs water upwind); direction and reference speed from scenario.
-- **Turbulence:** divergence-free synthetic turbulence via **curl of a vector
-  potential** whose components are sums of spatially-frozen Fourier modes with von
-  Kármán spectral amplitudes and anisotropy per boundary-layer similarity; frozen-field
-  Taylor advection by the mean wind + slow phase evolution. Deterministic from a philox
-  seed (`fs-rand`). Divergence-free **by construction** (the curl), which is what makes
-  the divergence visualization an honest verification overlay. Length scales/intensities
-  parameterized by (z, z₀, U_ref) per standard boundary-layer relations; a "Dec 17"
-  preset tuned so the 10-m gust statistics match the historical range [V].
-- **Gust events:** deterministic scheduled discrete gusts (1-cosine ramps) for
-  challenge scenarios + Küssner-consistent sampling by `fs-wing`.
-- **Thermals (Huffman, v1.5):** simple convective plume model (position-seeded rising
-  columns with entrainment) — off for 1903 scenarios.
-- **API:** `sample(x, t) -> (u, ∂u/∂x optional)` — analytic gradients available
-  (sum-of-modes differentiates exactly), so the field service can render *exact*
-  ∇, ∇·, ∇× of the ambient field, with discretization error only where the wake's
-  particle field is involved.
-- Validation: Tier D `fs-lbm` D3Q19 wind-over-terrain runs generate reference gust
-  statistics (spectra, integral scales, gust factors at anemometer height) that the
-  synthetic model must match within bands (V-04). This is exactly the fs-lbm/fs-aeroac
-  "honest hybrid" division of labor already established in the workspace: LBM computes
-  base-flow truth offline; a cheap model carries it to the consumer.
-
-### 5.5 Field-sampling service (module in `fs-flyer`, exposed via wasm)
-
-One function is the whole visualization backend:
+The aerodynamic assembly returns (1) acceleration-independent generalized loads,
+(2) a symmetric generalized added-mass operator, (3) control-acceleration coupling
+terms, (4) diagnostics. Each step solves
 
 ```
-sample_field(grid_spec, t) -> { u[], omega[], div[], grad_p_hat[], meta }
-u(x) = U_mean(x,t) + u_turb(x,t) + u_bound(x) + u_wake(x) + u_images(x)
+(M_rigid + M_added(q, δ)) · ν̇ = Q_nonaccel + Q_added_bias
 ```
 
-- Ambient parts: analytic (exact derivatives).
-- Bound/wake parts: Biot–Savart over the current filament/particle set (SIMD kernel
-  shared with the sim), derivatives by analytic kernel differentiation.
-- Emits both the *exact model derivatives* and the *finite-difference-on-grid*
-  versions when the verification overlay is on (the difference IS the lesson).
-- Budgeted: grid capped (e.g., 32³ or 64×64 plane), refreshed at 15–30 Hz, runs in its
-  own worker so it can never steal the sim budget; `fs-exec` cancellation honored
-  mid-grid (the Cx checkpoint discipline, same as every FrankenSim kernel).
+with a deterministic `fs-la` factor/solve (6×6; larger when rotor/control
+coordinates couple) BEFORE the Lie-group state update. **No finite-difference α̈ or
+control acceleration is ever injected as an explicit force** — this kills the
+implicit acceleration loop and its timestep-dependent noise.
 
-### 5.6 Sound (stretch, M6): browser WebAudio synthesis driven by physics state —
-engine (4-cyl firing at rpm with exhaust character), prop blade-passing hum (2×rpm×2
-blades), wind/airframe aeroacoustic noise shaped by airspeed and stall state, rail
-rumble, skid-on-sand. Parameters derive from sim state each frame; synthesis stays in
-an AudioWorklet. Labeled "sound design informed by physics, not a physical acoustic
-claim" (the Euler-disc audio holds a higher bar — physical radiation — that v1 does not
-attempt; fs-aeroac/fs-phs offer a v2 path to honest aeroacoustic estimates).
+Integrator: fixed dt = 1/120 s with a second-order predictor/corrector or midpoint
+force evaluation wrapped around the `fs-time` Lie-group update
+(`lie::rigid_body_step` / `quat_exp_step`); 1/240 s contact substep as an
+integer-ratio schedule; the composition's order is validated explicitly (V-05a).
+Type adapters between `fs-mbd`'s and `fs-geom`'s vector/quaternion types are owned
+here (audited seam).
+
+Parasite drag is a **component ledger** (pilot, engine/radiators, skids, wires,
+uprights, struts, chains, misc.), each with area, orientation, Re-dependent
+coefficient source, uncertainty, and power loss; the flat-plate aggregate remains a
+separately identified fallback mode. At the Flyer's power margin, parasite-drag
+error decides whether it flies at all (V-13).
+
+#### 5.1.3 Mechanical control system (Round-1 P0 revision)
+
+The canard control path is a one-DOF mechanical system: pilot force/torque → lever
+and cable ratio → canard hinge dynamics, including canard inertia, hinge moment
+(from `fs-airfoil` section data at the actual hinge/balance axes), aerodynamic
+balance, friction, cable compliance, travel stops, and pilot-arm impedance. Rate
+and force limits *emerge* from this model; hard safety caps remain as typed limits.
+Wing-warp and rudder actuation use a separate linkage model (cable travel,
+compliance, backlash/friction bounds) with the topology selected by
+`LateralControlTopology`. This is what makes the canard-overbalance mechanism
+(§3.4b) representable at all.
+
+#### 5.1.4 Pilot models (Round-1 P0 revision)
+
+- `PilotDirectHistoricalControls` — raw human input through the mechanical actuator
+  model. No synthetic human delay.
+- `PilotWrightModel` — autonomous historical-pilot hypothesis: regulates a
+  combination of flight-path angle / near-ground height, pitch attitude, and pitch
+  rate through transport delay, lead-lag/crossover dynamics, neuromuscular lag,
+  force/travel saturation, and deterministic (philox-seeded) remnant. Capable of a
+  genuine pilot–aircraft loop, not a fitted q-damper.
+- `PilotTrainingAssist` — user intent + low-authority accessibility controller;
+  labeled hybrid.
+- `PilotSAS` — modern rate/attitude/flight-path feedback; labeled ahistorical.
+
+**Identifiability rule:** no pilot parameter may be fitted to a validation case and
+then credited with passing that same case. Calibration and holdout receipts carry
+distinct identities (§10.4). Accessibility tuning is isolated from historical
+calibration.
+
+#### 5.1.5 Launch systems & ground interaction (Round-1 revision)
+
+- **Rail:** dolly + aircraft as a unilateral constrained system; the constraint
+  solver returns the rail-normal reaction; **release occurs when the admissible
+  normal reaction reaches zero and the aircraft is separating**, with a small
+  documented hysteresis — no empirical speed threshold. Rail geometry-error input is
+  an optional *sourced* scenario field, disabled in historical validation unless the
+  dossier supports it; it may not be used to tune porpoising.
+- **Catapult (Huffman):** weight-drop energy → rope tension profile → dolly force
+  (defaults [V?] E1).
+- **Skid–sand contact:** fs-flyer-owned real-time model (heightfield penetration
+  springs + regularized Coulomb friction + plastic "sink"). Landing produces an
+  **impact report**: contact impulses, peak estimated skid/canard loads, penetration
+  residual, structural-envelope status. Component breakage is disabled until a
+  sourced reduced structural model exists; any cinematic breakage is labeled
+  non-physical. `fs-contact` (certified spacetime CCD) runs OFFLINE as the
+  replay-verification pass certifying no missed skid/terrain penetration (E10.5).
+- **Terrain queries:** heightfield + material map sampled by contact and `fs-atmo`.
+
+#### 5.1.6 Work ledgers (Round-1 revision)
+
+Separated ledgers, not one "energy closure" scalar: (1) rigid-body mechanical
+balance (force/moment power vs ΔKE+ΔPE); (2) engine/drivetrain/propeller power
+balance (shaft power vs thrust power + induced + profile + chain loss); (3) contact
+storage and dissipation; (4) resolved-wake consistency where the wake carries an
+impulse/energy diagnostic; (5) numerical residual. "Aerodynamic work transferred
+out of the rigid body" is not automatically called dissipation. Residual
+normalization uses max(E_reference, E_floor) so engine-off/ballistic fixtures stay
+meaningful.
+
+### 5.2 `fs-wing` — coupled multisurface unsteady aerodynamics (new crate, L3)
+
+Consumes `fs-airfoil` (§5.2.1) for all section data. Three layers:
+
+**Planform layer (Round-1 P0 revision).** Tier A performs a **simultaneous coupled
+bound-circulation solve** (lifting-line/Weissinger class, N ≤ ~80 unknowns) over
+both main wings, both canard planes, and the vertical surfaces — no scalar biplane
+factor in the production force path. Classical Munk/Prandtl biplane factors remain
+verification fixtures and a separately identified emergency fallback mode. Tier B
+raises spatial resolution and adds the resolved wake; it does not introduce
+multisurface coupling for the first time. Surfaces enter section regimes
+(attached/transitional/separated) independently. Includes warp-twist distribution
+and adverse-yaw bookkeeping (V-12).
+
+**Unsteady layer with effect ownership (Round-1 P0 revision).** An explicit
+`AeroMemoryMode` selects the owner of each physical effect; incompatible
+compositions refuse at scenario admission:
+
+```
+AeroMemoryMode:
+  IndicialAttached      { motion_kernel: RationalApprox, gust_kernel: RationalApprox }
+  ResolvedWake          { wake_model_id, optional_near_field_residual_id }
+  IndicialWithSeparatedFlow { motion_kernel, gust_kernel, separation_lag }
+```
+
+| Physical effect | Permitted owner |
+|---|---|
+| Motion-induced circulatory lag | indicial states **or** resolved wake — never both |
+| Gust penetration | Küssner/Sears states **or** chord-resolved gust sampling |
+| Noncirculatory load | the generalized added-mass operator (§5.1.2) — only |
+| 3-D induced velocity | coupled bound solve + explicit/prescribed wake |
+| Separation hysteresis | explicit lagged separation state |
+| Viscous/profile drag | section model |
+| Far-wake closure | bounded multipole/analytic wake mode |
+
+Reduced time integrates ds/dt = 2|U_local|/c (never 2Ut/c). States initialize to
+trim steady state unless an impulsive start is requested. Rational kernel order is
+selected offline as the smallest meeting a pinned time- and frequency-domain error
+battery against exact Wagner/Theodorsen and Küssner/Sears over the Flyer's reduced-
+frequency band (provisional bands §10.5) — Jones' 2-state fit is the candidate, not
+the axiom. Near stall, a lagged-separation state with hysteresis replaces the
+memoryless sigmoid (still `Estimated`, honestly so). A hostile twin enabling both
+resolved-wake circulation and full Wagner memory must refuse.
+
+**Ground-effect layer (Round-1 revision).**
+- `FlatPlaneExact` (v1 historical default): every bound/wake element reflected
+  across one fixed aerodynamic ground plane — exact within the flat-wall inviscid
+  model class. Reflection uses the coordinate-free axial-vector rule
+  **ω′ = det(R)·R·ω**; images retain stable identities for the life of their
+  sources.
+- `SmoothedTangentPlane` (additive `Estimated` mode): ONE continuously filtered
+  global plane with hysteresis, slope limits, and a paired residual battery; its
+  receipts report plane origin/normal/filter constant/max boundary residual; it
+  never inherits the word "exact."
+- `HeightfieldBoundary` (deferred): reduced-rate source/panel boundary mode.
+No per-element or abruptly switching tangent planes, ever.
+
+**Wake layer (Round-1 P1 revision — hybrid, not particle-only).** A 2,000-particle
+cap would discard ~98% of a 59-second wake; instead:
+1. **Near wake:** connected vortex rings/filaments shed from the spanwise/temporal
+   circulation differences (topology-preserving; tip vortices are real filaments —
+   also the natural render primitive).
+2. **Mid wake:** deterministic age/distance-based conversion to coarsened connected
+   filaments or vector particles, preserving circulation, first vorticity moment /
+   hydrodynamic impulse, and declared symmetry invariants.
+3. **Far wake:** deterministic cell multipoles or analytic trailing-vortex
+   descriptors; bounded tree/cell evaluation for aircraft feedback.
+4. **Pruning:** only under a computed induced-velocity remainder bound over the
+   protected aircraft region — no element is discarded merely because a population
+   cap was reached.
+Flight-feedback and visualization evaluations may use different approximations, each
+separately identified; a visually dense wake never silently feeds a more approximate
+force model or vice versa. Kernels build on `fs-vpm` (3-D extension upstreamed,
+§11.4).
+
+#### 5.2.1 `fs-airfoil` — section models (new crate, L2; Round-1 P1 revision)
+
+Generic section machinery, consumed by wing, canard, rudder, AND propeller (fixes
+the L3→L3 layering violation): section geometry; analytic thin-section and
+flat-plate reference modes; provenance-bound coefficient datasets (separate wing /
+canard / rudder / propeller tables — the Wright 1901 tunnel tables are a
+trend/convention validation source, NOT automatically a full-scale 1903 polar;
+full-scale and reconstruction data dominate where available); **shape-constrained
+residual splines** over (α, log Re, δ) on the analytic baseline (not a neural fit —
+Round-1 Q2: interpretability, derivative control, small-data behavior, OOD refusal);
+normal/axial/moment representation through deep stall; explicit
+attached/transitional/separated/post-stall regimes; uncertainty intervals on every
+query; applicability-domain refusal instead of unconstrained extrapolation; indicial
+kernel definitions and their exact-reference batteries.
+
+### 5.3 `fs-airscrew` — propulsion (new crate, L3; Round-1 P1 revision)
+
+- **BEMT** with Prandtl tip/root loss over provenance-bound **digitized radial
+  geometry** (chord, twist, section id per station — E1.6); high-level
+  diameter/pitch/activity-factor remain counterfactual levers. The design-commit
+  path constructs a bounded **CT/CQ map including J = 0**; runtime interpolates the
+  map or performs a warm-started bounded station solve. Low-J momentum correction;
+  typed refusal on non-convergence.
+- **Rotor dynamics:** `I_eq·Ω̇ = Q_engine(Ω, controls) − Q_prop,L − Q_prop,R −
+  Q_drivetrain`, with separately diagnosable left/right shaft torques and optional
+  failure states — no algebraic RPM jumps during the rail transient.
+- **Inflow:** local atmosphere + aircraft motion + coupled main-wing wake, with at
+  least disk-average + first azimuthal harmonic distortion (pushers behind the wing;
+  counter-rotation cancels only nominal torque, not unequal-inflow effects). Uniform
+  inflow remains an identified fast mode.
+- **Engine:** torque-vs-rpm curve is load-bearing; control topology per §3.1 pending
+  E1; thermal derate is an optional `Estimated` mode DISABLED in historical presets
+  until sourced (Round-1 correction of the invented 60-s derate).
+- **Prop sections** use `fs-airfoil` interfaces with propeller-specific data,
+  Reynolds, and roughness provenance — never silently reusing the wing polar.
+- Validation: CT(J), CQ(J), static thrust/torque/RPM from J = 0 through the
+  envelope; η(J) only where useful-power efficiency is well-conditioned (V-03).
+
+### 5.4 `fs-atmo` — wind, turbulence, gusts (new crate, L2; Round-1 P0/P1 revision)
+
+- **WindReference** records speed, reference height, averaging interval, direction,
+  instrument/source identity, and uncertainty (the Wrights' vs the government
+  anemometer is a modeled distinction, not trivia).
+- **Mean profile:** log-law over terrain-relative height with a wind-direction-
+  dependent **effective roughness from upstream fetch**; material transitions
+  blended over a declared length (z₀ never jumps pointwise); neutral stability as
+  an explicit declared assumption; other stability classes additive modes.
+- **Turbulence:** solenoidal synthesis via a **wall-compatible vector potential**
+  (or equivalent mirrored solenoidal modal basis): wall parity enforces zero normal
+  velocity at the flat ground; vertical variation lives INSIDE the analytically
+  differentiated potential (never a post-hoc envelope that would break ∇·u = 0);
+  von Kármán-shaped anisotropic amplitudes; modal amplitudes/phases evolve by
+  deterministic stationary OU-like updates projected onto the solenoidal subspace;
+  counter-addressed by (scenario identity, mode index, simulation tick); a
+  recurrence-time battery covers the ~39-minute 1905 scenario.
+- **Gust events:** deterministic 1-cosine ramps for lessons/challenges.
+- **Thermals (Huffman, v1.5):** seeded convective plumes; off for 1903.
+- **API:** `sample(x, tick)` / `sample_batch(points, tick)` → velocity, analytic
+  gradient, component provenance, applicability diagnostics. Optional fast mode
+  `AtmosphereSampling::AffineLocalField { anchors, order }` — exact evaluation at a
+  few aircraft reference points, local affine reconstruction across the airframe,
+  with a paired exact-modal error battery over span-scale fixtures (§11.4).
+- **Dec 17 preset:** an **uncertainty-conditioned ensemble** over documented mean-
+  wind ranges, surface assumptions, and qualitative gust evidence. It never claims a
+  recovered historical gust trace — no historical 10-m turbulence time series
+  exists to match (Round-1 correction).
+- Validation split: analytic construction (V-04a), statistical targets (V-04b),
+  cross-model comparison with Tier D as a *cross-fidelity receipt* (V-04c).
+
+### 5.5 Field-sampling service (module in `fs-flyer`; Round-1 revision)
+
+```
+sample_field(grid_spec, tick) -> {
+  u[], grad_u[], omega[], div_analytic[], div_finite_difference[],
+  strain_magnitude[], q_criterion[], kinetic_speed_gradient[],
+  validity_mask[], provenance[],
+  meta { source_tick, source_modes, force_coupled_components,
+         visualization_only_components, core_radius, export_precision }
+}
+```
+
+- **No `grad_p_hat`** (Round-1 P0): a kinematically synthesized solenoidal velocity
+  field does not determine pressure. Kinematic quantities only; Bernoulli proxy only
+  on explicitly irrotational components, labeled; surface Cp only from models that
+  actually produce it.
+- Consumes an immutable **FieldSourceSnapshot** (tick, physical state, bound
+  circulation, wake buffer references, image-plane state, atmosphere seed/tick,
+  kernel/core parameters, model identities); results carry the source tick and are
+  never presented as current beyond their staleness threshold.
+- Ambient parts analytic; wake parts via the shared (identified) induction mode;
+  the exact-vs-finite-difference derivative dual powers the divergence overlay.
+- Budgeted, worker-isolated, `fs-exec` cancellation-checkpointed, QoS-governed.
+
+### 5.6 Sound (stretch, M6; Round-1 corrected)
+
+AudioWorklet synthesis driven by state: 4-cylinder firing at engine RPM;
+**per-propeller blade-passing at f_BPF = blade_count × prop_RPM / 60** — two
+spatially separated, partially coherent 2-blade sources with relative phase, loading
+harmonics, and unequal-inflow modulation (NOT "2×rpm×2 blades"); airspeed- and
+separation-shaped wind/airframe noise; rail and contact events. Labeled "sound
+design informed by physics, not an acoustic claim"; an fs-phs/fs-aeroac-grounded
+path is v1.5+ (Round-1 Q10).
 
 ---
 
 ## 6. Numerics, Determinism, and the Execution Contract
 
-1. **Determinism doctrine.** All transcendentals through `fs-math det::` (the
-   powi/libm hazard class is documented workspace law; `check-powi` and `check-libm`
-   lints already gate CI). All randomness through `fs-rand` philox with scenario-seeded
-   keys. No wall-clock, no `HashMap` iteration order, no thread-order dependence in
-   results (wake binning uses deterministic cell ordering; parallel reductions use
-   fixed-shape trees). Target: **bit-identical replays on the same wasm build**, and
-   cross-platform (aarch64/x86/wasm) agreement gated by the four-quadrant golden
-   program (§10.5) rather than assumed.
-2. **Fixed timestep, explicit schedule.** 120 Hz base, 240 Hz contact substep, 40 Hz
-   wake update, 15–30 Hz field service — all integer-ratio locked to the sim clock, so
-   a replay is a pure function of (config, seed, input trace).
-3. **`fs-exec` everywhere.** Every wasm entry that can run long (field grids, sweeps,
-   design-change re-derivations) takes a `Cx` with budget + cancellation and
-   checkpoints at bounded intervals; the UI cancel button is therefore real, not
-   cosmetic. ExecMode::Deterministic in all shipped paths.
-4. **Typed refusals across the wasm boundary.** The JS API returns
-   `{ok} | {refusal: {code, message, ranked_repairs}}` — mirroring the workspace's
-   refusal style (and the Euler config admission lesson: refuse EARLY with repairs).
-   No silent clamping: out-of-domain configs refuse with the domain stated.
-5. **Units.** `fs-qty` types internally at module boundaries (a lesson paid for in
-   the f85xj milliwatt-guard incident: unit bugs at seams are the expensive ones);
-   the wasm boundary speaks SI doubles with documented units in the schema.
-6. **Energy accounting invariant.** Per-step energy ledger (engine work in; aero
-   dissipation, contact dissipation out; ΔKE+ΔPE) with closure residual tracked and
-   exposed; regression tests pin the residual envelope per scenario. (Direct
-   translation of the Euler-disc energy-balance ingest gate.)
-7. **Identity.** Config, terrain, section tables, correction tables, and replay files
-   all carry `fs-blake3` domain-hashed identities; new identity constants are
-   registered in `identity-authorities.json` at introduction time (the m3h2e
-   regression taught: unregistered identity constants across many lanes are how the
-   identity gate rots — this project registers as it goes, never in a bulk sweep).
+1. **Determinism doctrine.** All transcendentals via `fs-math det::`; all randomness
+   via `fs-rand` philox keyed by scenario identity + mode index + tick; no
+   wall-clock, no map-iteration order, no thread-order dependence; deterministic
+   cell ordering in wake binning; fixed-shape reduction trees.
+2. **Tick-addressed inputs.** Input traces are keyed by integer simulation tick and
+   deterministically quantized after device sampling, before actuator dynamics.
+3. **Fixed integer-ratio schedules** (§4.3) make a replay a pure function of its
+   identity envelope (§4.5).
+4. **Structured determinism checkpoints (Round-1, moved early: E3.5).** Per-tick
+   subsystem digests (atmosphere, section loads, circulation, propulsion,
+   generalized loads, integrator state) so divergences localize to a subsystem
+   instead of a whole-run hash mismatch.
+5. **`fs-exec` everywhere**; ExecMode::Deterministic in shipped paths; typed
+   refusals across the wasm boundary with ranked repairs; no silent clamping.
+6. **Units:** `fs-qty` at module boundaries; SI doubles with documented units at the
+   wasm boundary.
+7. **Work ledgers** per §5.1.6 with per-scenario pinned residual envelopes.
+8. **Identity:** the §4.4 quintuple; identity constants registered at introduction.
 
 ---
 
@@ -681,58 +805,68 @@ attempt; fs-aeroac/fs-phs offer a v2 path to honest aeroacoustic estimates).
 
 ### 7.1 Build & packaging
 
-- New crate `crates/fs-flyer-wasm` with its **own `[workspace]`** exactly like
-  `fs-wasm` (documented rationale: browser builds decoupled from unrelated native WIP;
-  the pattern already survives CI via wasm-pack with a locked nested Cargo.lock and a
-  lock-drift gate — copy the `fs-wasm-build` lane's protections verbatim).
-- Q(R1): extend `fs-wasm` vs. new crate. **Plan: new crate.** fs-wasm is a broad demo
-  surface tier-organized by campaign; the Flyer needs an app-shaped, size-budgeted
-  bundle (< 8 MB wasm gz target) with only the flyer cone. Shared deps come from the
-  same paths; no duplication of infra beyond a small build script.
-- `wasm-pack --target web`, `wasm-opt -O3`, SIMD128 on with a no-SIMD fallback build
-  (two artifacts; loader picks by feature detection).
-- Threads build (SharedArrayBuffer + wasm threads) as the *enhanced* artifact; the
-  single-threaded artifact is the baseline. Both produced by CI; both self-tested.
+New crate `crates/fs-flyer-wasm` with its own `[workspace]` on the `fs-wasm` pattern
+(nested lock + lock-drift CI gate + asupersync canonical wasm profile feature
+pinned — audit §11.3). `wasm-pack --target web`, `wasm-opt -O3`; SIMD and no-SIMD
+artifacts; threads build as the enhanced artifact; single-threaded baseline always
+shipped; loader feature-detects. Bundle target < 8 MB gz. wasm memory is reserved to
+its run-time maximum before typed-array views are exported; growth during a run is
+refused.
 
-### 7.2 The frame budget (Tier A, mid-range laptop, single sim worker)
+### 7.2 The frame budget (Round-1 corrected arithmetic)
 
-| Module | Per step (120 Hz) | Per frame @60fps (2 steps) |
+Tier A per 120 Hz step (planning estimates, mid-range laptop, scalar wasm):
+
+| Module | Per step | Per 60 fps frame (2 steps) |
 |---|---|---|
-| fs-atmo sampling (strips+props+probes ~80 pts) | 0.10 ms | 0.20 |
-| fs-wing strips (36 strips × states + 3-D solve) | 0.25 ms | 0.50 |
-| fs-airscrew (2 props × 24 stations) | 0.06 ms | 0.12 |
+| fs-atmo sampling (~80 pts) | 0.10 ms | 0.20 |
+| fs-wing coupled solve + strips (~80 unknowns, 36 strips) | 0.30 ms | 0.60 |
+| fs-airscrew (2 props, map interpolation + rotor ODE) | 0.06 ms | 0.12 |
 | ground contact (fs-flyer) + rail | 0.03 ms | 0.06 |
-| fs-mbd + fs-time integrate | 0.02 ms | 0.04 |
+| added-mass solve + fs-mbd/fs-time integrate | 0.04 ms | 0.08 |
 | KPIs, ring buffer, bookkeeping | 0.05 ms | 0.10 |
-| **Sim worker total** | **~0.5 ms** | **~1.0 ms** |
+| **Sim worker Tier A arithmetic total** | **~0.58 ms** | **~1.16 ms** |
 
-Tier B adds: wake advance+shed @40 Hz with N≈2,000 particles, cell-binned near field:
-~2.5 ms per wake step → ~0.8 ms/frame amortized; strip-feedback induction 36×N with
-SIMD ≈ 0.6 ms per wake step. Field service (separate worker): 32³ grid × (analytic +
-N-particle kernel) ≈ 15–40 ms per refresh at 15 Hz — fits its worker with headroom.
-Main-thread three.js budget: 6–10 ms (scene of ~200k tris + instanced glyphs).
-**Verdict: comfortably real-time; the risk lives in the wake and field service, both
-rate-decoupled and degradable (particle cap, grid cap) without touching flight physics.**
+Tier B arithmetic (wake at 40 Hz): wake advance 2.5 ms × 40/60 = **1.67 ms/frame**
+average; strip feedback 0.6 ms × 40/60 = **0.40 ms/frame**; Tier B sim average
+**≈ 3.2 ms/frame**; a frame containing one wake update ≈ **4.2 ms** on the sim
+worker. Field service must state its interaction model: dense 32³×2,000 =
+65.5 M interactions/refresh vs k-neighbor 32³×k + declared far-field — no field
+budget is accepted without an exact interaction count and measured p50/p95/p99.
 
-### 7.3 Interop contract
+**These are planning estimates, not acceptance evidence.** FLOP counts are not a
+performance proxy for rsqrt/regularization/memory/branching across browsers, and
+deterministic transcendentals may make the atmosphere estimate optimistic — hence
+E0.6 microbenchmarks precede physics tuning.
 
-- One `SharedArrayBuffer` ring (triple-buffered) of POD state structs (fixed layout,
-  versioned header, ~2 KB/snapshot incl. 36 strip force vectors + instrument block).
-- Field buffers: preallocated Float32Array (u:3, ω:3, div:1, |∇u|:1 per cell), written
-  by field worker, read by render as raw attribute buffers for instancing (zero-copy
-  into GPU upload).
-- Command channel: postMessage JSON for config changes (rare) — every config change
-  re-derives tables (~50–150 ms, off-thread, with a progress event) and mints a new
-  config identity.
-- No per-frame JSON anywhere.
+### 7.2.1 Performance acceptance contract (Round-1)
 
-### 7.4 Degradation ladder & self-test
+Per supported device/browser class: 120 Hz sim hard deadline 8.33 ms/tick; shipping
+target sim p99 ≤ 6.0 ms with zero unbounded backlog; render p95 ≤ 16.67 ms at
+selected presentation quality; input-to-visible-state latency distribution reported;
+field refresh runtime and field-age distribution reported; no sweep may increase sim
+deadline misses; the startup benchmark selects presentation/field quality and NEVER
+silently changes the physics tier of an in-progress run. Benchmark suite records
+scalar/SIMD, isolated/contended, cold/warm, SAB/transferable variants.
 
-Startup self-test (mirrors the Euler E2E runner's `--self-test` spirit, in-browser):
-compute a 1-second canonical scenario headless, compare against an embedded golden
-state hash for this build; report tier availability (threads/SIMD), chosen tier, and
-the golden verdict on the About panel. A mismatch shows a visible "determinism
-self-test failed" badge (never silently ship wrong physics).
+### 7.3 Interop contract (Round-1 revision)
+
+- **Versioned seqlock state ring:** header { abi_version, model_id, tick,
+  published_slot, sequence }; writer marks sequence odd, writes its owned slot,
+  publishes even; readers retry on torn/odd sequence. Checksummed snapshots.
+- **FieldSourceSnapshot** double buffer per §5.5.
+- Field buffers zero-copy to render when SAB is available; GPU upload remains an
+  explicit measured transfer. Non-SAB fallback uses transferable buffer pools.
+- Command channel: postMessage JSON for config changes only; every design commit
+  re-derives tables off-thread with progress + cancellation and mints new
+  identities. No per-frame JSON.
+
+### 7.4 Startup self-test
+
+In-browser: 1-second canonical scenario headless → compare against the embedded
+golden for this ArtifactId; report tier availability, chosen tier, and the golden
+verdict on the About panel; visible "determinism self-test failed" badge on
+mismatch. Never silently ship wrong physics.
 
 ---
 
@@ -740,192 +874,225 @@ self-test failed" badge (never silently ship wrong physics).
 
 ### 8.1 App shell
 
-`apps/wright-flyer/` — TypeScript + Vite + three.js (pinned version; renderer wrapped
-in a thin interface so a future WebGPU/TSL migration or in-house renderer swap is a
-module change, not a rewrite). State management deliberately minimal (the sim owns
-truth; UI state is view-only). No backend required to fly (static hosting + correct
-COOP/COEP headers); optional tiny share service later.
+`apps/wright-flyer/` — TypeScript + Vite + three.js. **Renderer decision
+(Round-1 Q9):** use three.js's renderer abstraction with `WebGPURenderer`/TSL where
+practical and a tested `forceWebGL` WebGL2 fallback; WebGPU compute may accelerate
+field visualization but NO v1 physics or validation feature may require it; field
+semantics compared across backends. Static hosting + COOP/COEP; degraded mode works
+without.
 
 ### 8.2 The aircraft asset
 
-- Source: a high-detail Wright Flyer 3-D model. **Task E2.1 vets candidates**:
-  Smithsonian's 3-D digitization of the actual 1903 Flyer (their open program has
-  released Flyer scans; license CC0-class [V]), NASA model releases, or a commissioned
-  artist model. License must permit web distribution; provenance recorded in-app.
-- Pipeline: source → glTF 2.0 → decimated LODs (hero ~150k tris, mid, far) → KTX2
-  textures → **rig**: warp deformation (skeleton or morph targets driven by the warp
-  state — the fabric visibly twists, which is historically wonderful), canard/rudder
-  pivots, prop rotation with motion-blur impostor discs at speed, chain animation
-  (texture scroll), pilot figure with hip-cradle pose coupling.
-- The *physics* never reads the visual mesh: `fs-wing` geometry is the parametric
-  planform. A calibration overlay mode draws the physics panels/strips on top of the
-  visual model to make any mismatch visible (and it becomes the debug view).
-- When the user drags design sliders, the visual model morphs procedurally (span/chord
-  scaling per wing bay, strut/wire re-solve as a tiny geometric constraint pass) —
-  imperfect visually at extremes, clearly flagged ("schematic preview beyond ±25%").
+Source vetting (E2.1): Smithsonian 3-D digitization of the 1903 Flyer (license
+verified in-task), NASA releases, or commissioned model; provenance in-app.
+Pipeline: glTF 2.0, LODs, KTX2, rig (warp morph driven by warp state — under
+`QuasiStaticBeamAndRigging` the LOADED warp distribution drives the morph; canard
+planes pivot about the modeled hinge axis; props; chain scroll; prone pilot with
+hip-cradle pose). Physics never reads the visual mesh; a calibration overlay draws
+the physics surfaces/strips over the visual model (debug + honesty view). Procedural
+morphs beyond ±25% design change are flagged "schematic preview."
 
 ### 8.3 Terrain, sky, environment
 
-- Heightfield terrain (2×2 km, ~1–2 m res) with material splat (sand/grass/scrub);
-  Kill Devil Hills 1903 layout: rail, hangar+workshop sheds, camera tripod at the
-  famous spot (the user can take the John T. Daniels photo themselves — instant-photo
-  mode with period grain, a shareable moment), Big Kill Devil Hill in the middle
-  distance. Huffman Prairie: pasture, fence lines, derrick, the honey locust tree.
-- Sky: physically-plausible sky model with date/time presets (Dec 17 overcast-bright,
-  ~34°F — cold clear-grey North Carolina winter light [V]); sun position from date/site.
-- Wind made visible even with viz off: sand streamers near the ground, grass/fabric
-  flutter amplitude driven by local `fs-atmo` samples, wind sock (they had a flag/
-  anemometer; a period-correct cue), streaming camp smoke.
-- Ocean/sound in the distance (flat planes with shader waves; not simulated).
+Heightfield terrain (2×2 km, 1–2 m res) + material splat; 1903 camp layout: rail,
+sheds, Daniels' tripod (instant-photo mode with period grain), Big Kill Devil Hill;
+Huffman: pasture, fences, derrick, tree lines, low-detail horizon ring. Sky presets
+with separate provenance fields for temperature/wind/sun/cloud/artistic lighting
+(§3.3). Ambient wind cues driven by real fs-atmo samples: sand streamers, fabric
+flutter, flag, camp smoke.
 
 ### 8.4 Field visualization implementation
 
-- **Glyphs:** InstancedMesh arrows (up to ~30k), attributes streamed from the field
-  buffer; length/color transfer functions with legend; probe-box gizmo (drag/scale).
-- **Streamribbons:** GPU-side integration in a shader over the sampled grid texture
-  (RK2 in texture space) for dense ephemeral lines + a CPU "hero rake" of 20–50
-  ribbons integrated accurately in the field worker for teaching views.
-- **Vorticity:** wake particles/filaments rendered directly (they carry Γ) as ribbons
-  with age-fade; ambient |ω| as volume slices through the grid.
-- **Div verification overlay:** grid cells colored by |∇·u| (finite-difference) with
-  the analytic-vs-FD toggle described in §5.5.
-- **Force overlay:** per-strip arrows from the state snapshot (exact sim values).
-- All overlays render into a separate pass composited with depth-aware transparency so
-  the aircraft stays legible.
+Instanced glyphs (≤ ~30k) from field buffers; GPU streamline integration through the
+latest immutable snapshot; CPU hero-rake pathlines from the field-history ring
+(disabled when field age violates declared limits); wake filaments rendered directly
+with age-fade (they carry Γ); divergence overlay per §2.4.4; separate composited
+overlay pass. Legends and transfer functions always visible.
 
 ### 8.5 HUD & instruments
 
-Period instruments (the Flyer carried: anemometer, stopwatch, engine-revolution
-counter — that triad *is* the historical KPI set [V]) rendered as a wooden panel;
-modern overlay (airspeed, altitude, α, load factor, pitch-rate, thrust, L/D, energy
-ledger strip) toggleable. Results card after each run; design-diff card comparing two
-configs KPI-by-KPI.
+Period triad (anemometer, stopwatch, engine-revolution counter — the Wrights' own
+KPI set) + modern overlay (airspeed, altitude, α, load-factor exposure, pitch rate,
+thrust, L/D, ledger strip). Engineer mode: augmented eigenmode view distinguishing
+airframe / actuator / aero-memory / rotor / pilot-loop modes — not everything
+labeled "short-period/phugoid"; the four-state longitudinal projection appears only
+as a labeled teaching view. Results card per §9; design-diff card decomposes KPI
+changes into induced/profile/parasite/propulsion/trim/structural contributions.
 
 ### 8.6 Replay UI
 
-Timeline scrubber with event ticks (liftoff, gusts, stall flags, touchdown), camera
-presets (chase, wing-tip, Daniels-tripod, onboard prone-pilot view, free orbit),
-A/B ghost mode (two replays superimposed with translucent second aircraft — THE tool
-for showing what a design change did), and export (replay file download; cinematic
-export instructions pointing at the native pipeline).
+Timeline with event ticks (liftoff by rail-reaction criterion, gusts, separation
+flags, reversals, touchdown), camera presets (chase, wingtip, Daniels tripod,
+onboard prone view, free), A/B ghost mode with shared atmosphere realization,
+export of the full identity envelope.
 
 ---
 
 ## 9. Configuration Space, Experiments & KPIs
 
-### 9.1 Config schema & governance
+### 9.1 Scenario schema & the three design spaces (Round-1 revision)
 
-`FlyerScenario` = { design: FlyerDesign, site, weather (mean wind, seed, gust events),
-launch (rail/catapult params), pilot mode, sim tier }. Serialized as a versioned JSON
-schema following the workspace's sidecar-not-IR and schema-freeze doctrines: the
-schema version is a registered constant; additive evolution only after freeze; the
-schema file + example scenarios are tracked sources (and therefore covered by
-`generate-source-manifest` and the identity gate). Preset library: `dec17-flight1..4`,
-`huffman-1904-catapult`, `flyer3-1905`, plus challenge presets.
+```
+FlyerScenario = {
+  design_family: HistoricalReconstruction | WrightCounterfactual | FreeformTeaching,
+  design: FlyerDesign,
+  site, weather_distribution, weather_realization,
+  launch, pilot_hypothesis, model_selection,
+}
+```
 
-### 9.2 KPI definitions (exact, so beads can pin tests)
+- **HistoricalReconstruction:** dossier-supported parameter intervals only; geometry
+  relationships locked.
+- **WrightCounterfactual:** plausible modifications preserving the construction
+  system, dependency rules (span change → mass/inertia/strut/wire/clearance
+  re-derivation), and structural applicability checks.
+- **FreeformTeaching:** broader abstractions, prominently labeled schematic.
+
+Design edits are **transactional**: a running sim's `PhysicalScenarioId` is
+immutable; commits create a candidate scenario + derivation job (cancellable,
+progress-reporting). Schema versioned and frozen per workspace doctrine; presets
+for the four flights, Huffman 1904, Flyer III 1905, challenges.
+
+### 9.2 KPI definitions (Round-1 revision)
 
 | KPI | Definition |
 |---|---|
-| Distance | ground-track arc length from liftoff to first touchdown (m and period-correct feet) |
-| Air distance | ∫ airspeed dt (the Wrights reported both notions' tension on Dec 17) |
+| Historical downrange distance | projection of touchdown displacement onto the launch/wind axis (the 120 ft / 852 ft comparator) |
+| Horizontal path length | ∫ horizontal groundspeed dt |
+| 3-D trajectory length | ∫ total groundspeed dt |
+| Endpoint displacement | liftoff→touchdown Euclidean |
+| Air distance | ∫ airspeed dt |
 | Duration | liftoff→touchdown |
-| Max/mean airspeed | over airborne phase |
-| Lift margin | min over airborne phase of (CL,max,local − CL,required)/CL,max — how close to stall |
-| Smoothness index | 1 / (1 + w₁·RMS(a_z′) + w₂·RMS(q)) over airborne phase; weights fixed & documented |
-| Control effort | ∫(|δ̇e| + |δ̇w|)dt |
-| Static margin | (x_np − x_cg)/c̄ from live linearization (negative for the 1903 Flyer!) |
-| Short-period / phugoid | eigenvalues of the linearized longitudinal model at trim (displayed on the root-locus mini-plot as sliders move — the single best "see the physics" widget for engineers) |
-| Energy closure | |ledger residual| / engine work |
-| Structural margin | max load factor vs limit; refusal-flag if exceeded (wing "failure" ends flight in v1 with an honest "structural limit exceeded" card, no debris physics) |
+| Max/mean airspeed | airborne phase |
+| Section separation margin | min provenance-bound margin to the local section separation boundary |
+| Stall/separation exposure | time + span fraction in transitional/separated regimes |
+| Raw ride metrics | RMS vertical specific force, RMS pitch rate, jerk, PIO-band energy, peak-to-peak pitch, reversal rate |
+| Smoothness index | optional dimensionless composite from published reference scales; raw components always shown |
+| Control activity | travel, rate, reversal count, saturation time per control |
+| Estimated pilot work | ∫ pilot force × control velocity (mechanical-control model only) |
+| Fixed/free-control static margin | only at a valid declared trim; includes canard mechanical state |
+| Mode set | augmented linearization eigenvalues (§9.3) |
+| Load-factor exposure | kinematic; never relabeled structural margin |
+| Structural margin | only under `QuasiStaticBeamAndRigging`; reports limiting component + uncertainty |
+| Ledger residuals | per §5.1.6 |
 
-### 9.3 Experiment engine
+### 9.3 Experiments
 
-- **Live linearization:** central-difference Jacobian of the reduced model at trim
-  (cheap: model is smooth by construction away from stall) → stability derivatives
-  (CLα, Cmα, Cmq …) shown in the engineer panel with the historical estimates for
-  comparison [V].
-- **Sweeps:** worker-pool batch runs over 1-D/2-D config grids (headless sim, no
-  render), progress-streamed, results plotted (canvas) and exportable CSV. Determinism
-  makes sweep results cacheable by (config-hash, seed).
-- **Optimization hook (v1.5):** `fs-bo`/`fs-dfo` compiled in fs-wasm already — "let
-  the optimizer find the best camber+AR under a structural constraint" is a one-worker
-  task and a spectacular demo ("the browser just rediscovered wing design").
+- **Live linearization (Round-1 revision):** two products — the FULL augmented
+  linearization over rigid-body + aero-memory + actuator + propulsion (+ pilot when
+  displaying closed-loop modes) states, which owns stability claims; and a labeled
+  reduced longitudinal projection for teaching. Available only when trim
+  continuation succeeds and every subsystem is inside its differentiable
+  applicability domain; otherwise a typed refusal naming the limiting subsystem and
+  nearest valid operating point.
+- **Sweeps:** worker-pool batches over config grids with common-random-number
+  ensembles (same realization seeds across design points); progress-streamed;
+  cacheable by (ScenarioId, ModelId, seed).
+- **Optimization (v1.5, Round-1 gated):** robust multiobjective exploration over
+  uncertainty via fs-bo/fs-dfo — requires active structural model,
+  applicability-domain enforcement, correction-model holdouts, and CRN ensembles.
+  Disabled under `PrescribedKinematicEstimated`.
 
 ---
 
 ## 10. Validation & Evidence Program
 
-The program that keeps "without dumbing down the physics" an audited claim.
+### 10.1 Anchor datasets — partitioned before calibration (Round-1 P0)
 
-### 10.1 Anchor datasets
-
-| ID | Dataset | Validates |
+| ID | Dataset | Role |
 |---|---|---|
-| A1 | Wright 1901 wind-tunnel tables (published) | section model cl/cd trends |
-| A2 | Modern re-tests of Wright sections & full-scale 1903 replica (AIAA Wright Flyer Project; Langley full-scale tunnel campaign; Wright Experience prop data) [V] | section+planform force model, prop η(J) |
-| A3 | Dec 17 flight records (4 flights + wind) | end-to-end KPI bands |
-| A4 | Culick et al. stability analyses of the 1903 Flyer | static margin sign/magnitude, short-period character |
-| A5 | Classical biplane interference theory tables | gap-interference implementation |
-| A6 | Boundary-layer meteorology relations + fs-lbm Tier D runs | fs-atmo statistics |
+| A1 | Wright 1901 wind-tunnel tables | section trends/convention validation |
+| A2 | Modern re-tests: full-scale 1903 replica tunnel campaigns, AIAA Wright Flyer Project, Deters/Selig 2004, prop reconstruction data | section+planform forces, prop CT/CQ/static |
+| A3 | Dec 17 flight records (4 flights, wind ranges, diaries) | probabilistic end-to-end anchors |
+| A4 | Culick et al. stability analyses | open-loop derivative/pole reference |
+| A5 | Classical biplane interference theory | verification fixtures |
+| A6 | Boundary-layer meteorology relations + Tier D runs | atmosphere statistics |
 
-### 10.2 Verification (math right) — per-crate batteries
+Each dataset is partitioned BEFORE model calibration into: calibration subset;
+held-out validation subset; convention/digitization uncertainty; applicability
+domain; quantities for which it is independent evidence. Tier C/D outputs are
+cross-model references until independently validated for the exact quantity
+compared.
 
-- fs-wing: elliptic-wing analytic induced drag (e = 1 recovery), 2-D thin-airfoil
-  limit, Wagner/Küssner step responses vs published curves, image-system ground-effect
-  vs classical curves, biplane factor vs A5.
-- fs-airscrew: momentum-theory limits, Prandtl-loss asymptotics, energy consistency
-  (P_shaft = T·V + P_induced + P_profile).
-- fs-atmo: spectral content vs prescription (periodogram test), exact ∇·u = 0 at
-  machine precision on analytic samples, seed determinism.
-- fs-flyer: energy-ledger closure on ballistic + powered fixtures; contact
-  restitution/friction fixtures; replay bit-identity.
-- All batteries follow workspace law: typed refusals tested at cap AND cap+1
-  (CanonicalLimits lesson), no vacuous limit checks (both sides of every comparison
-  computed), falsifier-style negative tests for each gate (sum-tests-are-blind and
-  metamorphic-blindness lessons from the workspace memory apply — per-strip oracles,
-  not just totals).
+### 10.2 Validation hierarchy (Round-1)
 
-### 10.3 Validation (model right) — the V-cases
+1. Mathematical verification (exact/converged references).
+2. Calibration (explicitly identified subsets only).
+3. Held-out component validation (withheld α, Re, deflections, geometries, prop
+   operating points).
+4. Cross-fidelity discrepancy (Tier A/B vs independently validated Tier C/D).
+5. Historical posterior-predictive checks (ensembles over documented uncertainty).
+6. Performance qualification (device/browser matrix).
 
-| ID | Case | Pass band (initial; tightened by evidence) |
+Verification batteries follow workspace law: refusals tested at cap AND cap+1; no
+vacuous limit checks; falsifier-style negatives per gate; per-strip oracles, not
+only totals; the effect-ownership hostile twin (§5.2) must refuse.
+
+### 10.3 The V-cases (Round-1 rebuilt)
+
+| ID | Case | Gate |
 |---|---|---|
-| V-01 | Dec 17 flight 1 replay (authentic pilot Wright-hands, recorded wind band) | distance 120 ft × [0.6, 1.6]; duration 12 s × [0.7, 1.4] |
-| V-02 | Porpoising signature | pitch oscillation period 2–4 s, growing without pilot damping; bounded with PilotWright |
-| V-03 | Prop η(J) vs A2 | within ±8% over J ∈ [0.4, 0.9] [V bands with data] |
-| V-04 | fs-atmo vs Tier D LBM gust stats | spectra within factor 2 across the energy-containing range; gust factor ±20% |
-| V-05 | dt/tier convergence | KPIs stable within 2% between 120→240 Hz and Tier A→B on reference scenarios |
-| V-06 | Ground effect | induced-drag reduction vs height matches image-theory curve within 5% (verification-grade) and Tier C panel re-run within 15% |
-| V-07 | 852-ft flight 4 envelope | reachable with authentic config + recorded wind + Wright-hands pilot |
+| V-01 | Section & full-aircraft steady-load holdouts | coefficient/derivative/uncertainty-calibration metrics on data not used for fitting |
+| V-02a | Open-loop longitudinal derivatives & poles | full pole/derivative set vs A4 within declared reconstruction uncertainty; time-to-double reported |
+| V-02b | Canard control mechanics | hinge-moment sign, self-driving tendency near the historical balance point, control-force/travel response, stop behavior within the sourced mechanical envelope |
+| V-02c | Closed-loop pilot–aircraft | held-out PilotWrightModel parameters stabilize only within a finite delay/gain region; oscillation frequency, phase, saturation, and reversal statistics match sources |
+| V-03 | Propulsion maps | CT/CQ/static thrust/torque/RPM from J=0 through the envelope within experimental or predeclared discrepancy bands; η only where well-conditioned |
+| V-04a/b/c | Atmosphere | analytic construction (div, wall, determinism, stationarity, recurrence) / statistical targets (PSD, TI, Reynolds-stress ratios, integral scales, coherence, gust quantiles) / Tier D cross-fidelity receipt |
+| V-05a/b/c | Convergence & discrepancy | 120→240→480 Hz trajectory/KPI/contact convergence / wake 20→40→80 Hz + field-rate sensitivity / Tier A-vs-B differences REPORTED with uncertainty, not required to vanish |
+| V-06a/b/c | Ground effect | flat-wall exactness verification / all six load components + derivatives vs h/b, pitch, roll against high-res references / smoothed-tangent residual envelope in its declared slope domain |
+| V-07 | Four-flight historical ensemble | all four observed distance-duration pairs inside pre-registered joint predictive regions; sharpness reported, not only coverage |
+| V-08 | Unsteady indicial responses | time+frequency exact-reference battery per §10.5 bands |
+| V-09 | Coupled biplane/canard loads | gap, stagger, α, control, h/b holdouts vs referee |
+| V-10 | Wake invariants & induction | circulation, impulse, topology, induced-field error, pruning bound |
+| V-11 | Rail launch | acceleration, release point (unilateral criterion), RPM transient, reaction-force history |
+| V-12 | Lateral control | adverse-yaw sign/magnitude, coupled effectiveness, roll mode, turn coordination |
+| V-13 | Parasite drag & power balance | component ledger vs full-aircraft drag/required-power envelope |
+| V-14 | Browser real-time contract | §7.2.1 p50/p95/p99 incl. contention |
 
-Receipts land in the `fs-vvreg`/vv-scorecard machinery the workspace already runs
-(corpus edits regenerate the scorecard; the check-all gate keeps it honest).
+### 10.4 Historical pass logic (Round-1 P0)
 
-### 10.4 The validated envelope
+Historical cases are probabilistic because control and gust traces are unknown.
+A pass requires: pre-registration of every uncertainty distribution (E10.0 freeze);
+observed joint outcomes inside declared predictive regions; sharpness reported;
+no post-hoc distribution widening under the same validation identity; component
+validation staying green. No pilot/atmosphere parameter fitted on a case may be
+credited on that case (V-02c holdout rule). Nothing is gated on "reachable."
 
-The set of configs within declared distance (in normalized design space) of Tier-C-
-validated pins. Inside: UI badge `Validated (Estimated dynamics, validated forces)`.
-Outside: `Estimated — outside validated envelope`, with the nearest pin distance shown.
-This is the product-facing face of the evidence doctrine and must be spec'd precisely
-in E8 (envelope metric, pin set, refresh protocol).
+### 10.5 Provisional numerical bands (ratify from dossier in E10.0)
 
-### 10.5 Determinism goldens (four-quadrant, wasm-extended)
+Indicial approximations: max normalized step-response error ≤ 2%, gain ≤ 2%, phase
+≤ 3° over the declared reduced-frequency band. Airborne timestep convergence:
+principal KPIs ≤ 1%, trajectory RMS ≤ 0.5%, contact timing/impulse ≤ 2%.
+Atmosphere: median PSD ratio within ±3 dB over predeclared energy-containing bins,
+no bin beyond ×2; TI and integral scales ±20%; Reynolds-stress ratios ±25%; gust
+quantiles ±20%. Wake fast modes: induced-velocity RMS ≤ 3%, max ≤ 10% outside
+cores; circulation residual ≤ 0.5%; impulse residual ≤ 1%. Real time: sim p99 ≤
+6 ms against the 8.33 ms deadline. Historical endpoints: pre-registered joint
+regions from the dossier uncertainty budget — no universal multiplicative band.
 
-Golden replay state-hashes for canonical scenarios across {aarch64-native, x86-native,
-wasm-in-node} × {debug, release} — extending the workspace's four-quadrant golden
-doctrine with a wasm column. Gated in CI next to the existing golden-couplings
-machinery; the golden-bump protocol (committed tree, both modes, plausible cause,
-same-commit goldens) applies verbatim.
+### 10.6 Applicability domains replace the "validated envelope" (Round-1 P0)
 
-### 10.6 E2E runner & hostile twins
+Validation is claim- and subsystem-specific. Each subsystem publishes an
+`ApplicabilityDomain` in physical dimensionless coordinates (section: Re, α, δ, k,
+roughness, separation state; biplane/canard: gap/chord, stagger/chord, CL/CL,max,
+canard volume; ground effect: h/b, pitch, roll, slope; prop: J, radial Re, inflow
+distortion; dynamics: static margin, q̄, control free/fixed; atmosphere: z/z₀, TI,
+L/z, stability class; wake: reduced frequency, loading, coarsening error). The
+run's claim domain is the intersection; the UI reports which outputs are validated,
+which estimated, the LIMITING subsystem and coordinate, and interpolation vs
+extrapolation status. No normalized-slider Euclidean distance promotes a run.
 
-`scripts/ci/e2e_wright_flyer.sh` cloned from the (just-hardened) Euler cinematic
-runner pattern: `--list/--check/--self-test/--run smoke/--negative CASE/--replay`,
-bounded JSONL logging contract (same schema family), and hostile twins: config
-tampered vs identity, replay input-trace truncation, seed mismatch, energy-ledger
-violation injection, stale correction-table identity, KPI card vs recomputed KPIs
-mismatch, wasm/native golden divergence, terrain-hash drift. Runner reuses the
-production CLI (`fs-flyer` native binary) — never parallel logic.
+### 10.7 Determinism goldens & E2E runner
+
+Four-quadrant golden replay hashes extended with a wasm column ({aarch64, x86,
+wasm-in-node} × {debug, release}); golden-bump protocol applies. Subsystem digests
+(§6.4) localize divergence. `scripts/ci/e2e_wright_flyer.sh` cloned from the
+hardened Euler cinematic runner: `--list/--check/--self-test/--run smoke/
+--negative CASE/--replay`, bounded JSONL logging contract, hostile twins (config
+vs identity tamper, input-trace truncation, seed mismatch, ledger violation
+injection, stale correction-table identity, KPI-vs-recompute mismatch, wasm/native
+golden divergence, terrain-hash drift, effect-ownership double-count, post-hoc
+distribution widening). Runner reuses production CLIs; never parallel logic.
 
 ---
 
@@ -935,268 +1102,285 @@ production CLI (`fs-flyer` native binary) — never parallel logic.
 
 | Crate | Role here | Notes |
 |---|---|---|
-| fs-wasm | pattern + infra precedent for browser workspace, CI lane, wasm-pack recipe | fs-flyer-wasm copies its protections |
-| fs-bem (+fs-fmm) | Tier C offline force referee; live one-shot interference tables | wasm32-proven (in fs-wasm); `panel3d` module confirmed; needs the coarse screening-preset mode (§11.4) for bounded in-browser one-shots |
-| fs-vpm | Biot–Savart core for wake; extend to 3-D filaments/particles upstream | 2-D today; kernel IS exposed (`induced_velocity`, `advect` — verified) but O(N²) unbinned: needs the optional fast path (§11.4) |
-| fs-lbm | Tier D wind-over-terrain truth runs | D3Q19 + boundaries exist |
-| fs-mbd | 6-DOF rigid body, canonical quaternions; force/impulse-at-point API verified | leaf crate (no deps); wasm32 compile PROVEN by audit probe 2026-08-16 |
-| fs-contact | OFFLINE certified no-missed-contact verification of replays (optional truth-plane pass) | corrected role — certified spacetime CCD, not per-step forces; real-time contact lives in fs-flyer |
-| fs-time | Lie-group rigid-body + symplectic integrators (`lie::rigid_body_step`, verlet, rk45) | wasm32 compile PROVEN by audit probe 2026-08-16 |
+| fs-wasm | pattern + infra precedent (workspace, CI lane, wasm-pack recipe) | fs-flyer-wasm copies its protections |
+| fs-bem (+fs-fmm) | referee-plane force cross-checks; bounded one-shot interference/residual data | wasm32-proven; `panel3d` confirmed; needs screening preset (§11.4) |
+| fs-vpm | Biot–Savart kernels; 3-D + hybrid wake extension upstreamed | kernel exposure verified; O(N²) today |
+| fs-lbm | Tier D wind-over-terrain | D3Q19 + boundaries exist; terrain-only in v1 |
+| fs-mbd | 6-DOF rigid body, canonical quaternions, force/impulse-at-point API | leaf crate; wasm32 PROVEN by audit probe 2026-08-16 |
+| fs-contact | OFFLINE certified no-missed-contact replay verification | certified spacetime CCD — never per-step forces |
+| fs-time | Lie-group rigid-body + symplectic integrators | wasm32 PROVEN by audit probe 2026-08-16 |
 | fs-exec | Cx, budgets, cancellation, deterministic mode | wasm-proven via fs-wasm |
-| fs-math | det:: transcendentals (libm doctrine) | determinism backbone |
+| fs-math | det:: transcendentals | determinism backbone |
 | fs-rand | philox streams | |
-| fs-blake3 | identity domains for config/replay/tables | register identities on introduction |
+| fs-blake3 | identity domains (§4.4 quintuple) | register identities at introduction |
 | fs-qty | unit-checked quantities at seams | |
-| fs-scenario | boundary-condition/load-case algebra with fs-qty dimensions + provenance (verified: it is a general scenario algebra, not domain-specific) | wasm32-proven (in fs-wasm) |
-| fs-simd | SIMD tiers for Biot–Savart/BEMT kernels | NO wasm tier today — E0.5 adds a SIMD128 Tier-1w capsule; scalar referee fits the budget meanwhile |
-| fs-viz | field-viz primitive algorithms w/ analytic ground truth | CPU side of streamlines etc. |
-| fs-uq / fs-surrogate / fs-bo / fs-dfo | sweeps, surrogates, optimization hook | already in fs-wasm |
+| fs-scenario | BC/load-case algebra with dimensions + provenance (verified general) | wasm32-proven |
+| fs-simd | SIMD tiers | NO wasm tier today — E0.5 adds SIMD128 capsule; scalar fits budget |
+| fs-la | dense factor/GEMM for coupled solve + added-mass solve | reuse-factorization API confirmed-or-added (§11.4) |
+| fs-viz | field-viz primitives w/ analytic ground truth | |
+| fs-uq / fs-surrogate / fs-bo / fs-dfo | ensembles, sweeps, optimization (gated) | in fs-wasm |
 | fs-vvreg (+ vv-scorecard) | validation receipts + reporting | standing infra |
-| fs-render + euler mux adapter + cinematic runner | offline cinematic export of replays | just hardened (h7xu5) |
+| fs-render + euler mux adapter + cinematic runner | offline cinematic export | just hardened (h7xu5) |
 | fs-evidence | evidence colors / no-claims plumbing | |
-| fs-ornith | prior art: parameterized-aircraft campaign staging | pattern, some code reuse in screening stage |
+| fs-ornith | prior art for staged aircraft campaigns | pattern reuse |
 
-### 11.2 New crates (kept to five)
+### 11.2 New crates (six — Round-1 adds fs-airfoil for layering correctness)
 
 | Crate | Layer | One-line contract |
 |---|---|---|
-| fs-atmo | L2/L3 | deterministic boundary-layer wind: log-law mean + div-free spectral turbulence + gust events; analytic derivatives; NO acoustic/thermo claims |
-| fs-wing | L3 | strip/lifting-line/VLM unsteady lifting-surface aero with ground images and biplane interference; per-strip typed diagnostics; inviscid+empirical honesty labels |
-| fs-airscrew | L3 | BEMT propeller + engine torque + drivetrain; energy-consistent; static-thrust caveats declared |
-| fs-flyer | L4 | the aircraft: parametric airframe, 6-DOF assembly, pilots, launch, terrain contact, KPIs, scenario schema, field service |
-| fs-flyer-wasm | L6 | own-workspace wasm binding: sim loop, field service, sweeps, replay, typed-refusal JS API |
+| fs-airfoil | L2 | generic section geometry, analytic baselines, provenance-bound coefficient tables, shape-constrained residual fits, indicial kernels, uncertainty, applicability-domain refusals |
+| fs-atmo | L2 | wall-compatible solenoidal boundary-layer wind + gusts; analytic derivatives; ensemble presets; NO acoustic/thermo claims |
+| fs-wing | L3 | coupled multisurface unsteady lifting-surface aero with effect-ownership modes, flat-plane images, hybrid wake |
+| fs-airscrew | L3 | BEMT + rotor dynamics + engine + drivetrain on fs-airfoil interfaces; CT/CQ maps incl. J=0; static-regime honesty |
+| fs-flyer | L4 | aircraft assembly: airframe+structure modes, mechanical controls, pilots, launch, contact, KPIs, ledgers, scenario schema, field service |
+| fs-flyer-wasm | L6 | own-workspace wasm binding: sim loop, field service, sweeps, replay, seqlock ABI, typed-refusal JS API |
 
-Each ships CONTRACT.md, no-claims block, refusal vocabulary, and registered identity
-constants from day one (workspace law; cheaper at birth than at audit).
+Each ships CONTRACT.md, no-claims block, refusal vocabulary, and registered
+identity constants from day one.
 
 ### 11.3 wasm/real-time readiness audit (EXECUTED 2026-08-16, round 0.5)
 
-Every reuse claim above was audited against the tree, not assumed. Evidence:
-
-| Crate | wasm32 evidence | Real-time verdict |
+| Crate | wasm32 evidence | Verdict |
 |---|---|---|
-| fs-exec, fs-alloc, fs-rand, fs-math, fs-qty, fs-la, fs-viz, fs-uq, fs-lbm, fs-bem, fs-vpm, fs-scenario, fs-render | already in `fs-wasm`'s shipping dependency list (its CI lane builds them with wasm-pack) | proven by standing CI |
-| fs-mbd, fs-time | dedicated probe crate compiled `RigidBodyState` + `lie::rigid_body_step` to `wasm32-unknown-unknown` clean (asupersync `wasm-browser-prod` profile feature, which the fs-flyer-wasm workspace will set exactly as fs-wasm does) | proven by this audit |
-| fs-simd | NOT wasm-capable today (NEON/AVX2 capsules only) | extension required (E0.5); scalar fallback fits budget |
-| fs-contact | not probed | reclassified offline-only (see corrected §5.1.5) |
-| fs-fmm | not probed | offline Tier C only; no browser claim made |
+| fs-exec, fs-alloc, fs-rand, fs-math, fs-qty, fs-la, fs-viz, fs-uq, fs-lbm, fs-bem, fs-vpm, fs-scenario, fs-render | in `fs-wasm`'s shipping dependency list (CI-built with wasm-pack) | proven by standing CI |
+| fs-mbd, fs-time | probe crate compiled `RigidBodyState` + `lie::rigid_body_step` to wasm32-unknown-unknown clean (asupersync `wasm-browser-prod` feature) | proven by audit |
+| fs-simd | NEON/AVX2 only | extension required (E0.5); scalar fallback budgeted |
+| fs-contact | not probed | offline-only role |
+| fs-fmm | not probed | offline referee only |
 
-Audit also confirmed API shapes the plan depends on: `fs-vpm` exposes the reusable
-kernel functions (`induced_velocity`, `advect`) rather than a closed simulation
-loop; `fs-la` has dense factor/GEMM modules; `fs-time` has the Lie-group steps;
-`fs-mbd` exposes force/impulse application at body points; `fs-bem` has a
-`panel3d` module. One standing caveat: wasm builds of the fs-exec cone require the
-asupersync canonical wasm profile feature — the fs-flyer-wasm workspace must pin
-`wasm-browser-prod` (or `-deterministic`) exactly as fs-wasm does, and E0.3
-inherits that as an explicit DONE-WHEN clause.
+API shapes confirmed: fs-vpm exposes `induced_velocity`/`advect`; fs-la has dense
+factor/GEMM; fs-time has Lie-group steps; fs-mbd exposes force/impulse application;
+fs-bem has `panel3d`. Standing caveat: wasm builds of the fs-exec cone require the
+asupersync canonical wasm profile feature — pinned by fs-flyer-wasm's workspace
+(E0.3 DONE-WHEN).
 
-### 11.4 Optional-fidelity doctrine for shared crates (new, from audit)
+### 11.4 Optional-fidelity doctrine for shared crates
 
-The real-time tier will need cheaper paths inside shared crates. The rule that keeps
-this honest and keeps offline users whole:
+1. **Additive, never mutative** — approximations are new flagged modes; exact-path
+   defaults, semantics, and goldens do not move.
+2. **Self-describing lossiness** — each mode names its approximation and appears in
+   receipts.
+3. **Paired error battery** — each fast mode ships a deviation-bound battery
+   against the exact path on pinned fixtures.
+4. **Identity discipline** — mode + parameters enter `ModelId`; a Tier-A and
+   Tier-C run may share a `PhysicalScenarioId` but never a `ModelId`/`RunId`.
+5. **Effect ownership (Round-1)** — every aerodynamic mode declares the physical
+   effects it owns; two enabled modes may not own the same effect unless one is an
+   explicitly derived residual with a paired no-double-counting battery;
+   incompatible combinations are refused at admission.
 
-1. **Additive, never mutative.** Every approximation lands as a NEW flagged mode
-   (constructor variant or explicit budget parameter), never a change to the exact
-   path's defaults or semantics. The exact path remains the referee and its goldens
-   do not move.
-2. **Self-describing lossiness.** Each fast mode names its approximation (e.g.
-   `WakeInduction::BinnedTruncated { cell, cutoff }`) and its receipt records the
-   mode, so a result can never silently claim exact-kernel provenance.
-3. **Paired error battery.** Each fast mode ships a battery bounding its deviation
-   from the exact path on pinned fixtures (relative-error envelope pinned like any
-   other golden), so "slightly lossy" is a measured phrase.
-4. **Same identity discipline.** Mode + parameters enter the run's content identity;
-   a Tier-A replay can therefore never be confused with a Tier-C rerun.
-
-Concrete planned extensions under this doctrine:
+Planned extensions:
 
 | Crate | New optional mode | Consumer |
 |---|---|---|
-| fs-vpm | 3-D particles/filaments (exact) + `BinnedTruncated` fast induction + Γ-conserving pairwise merge | fs-wing Tier B wake |
-| fs-bem | coarse-panel "screening preset" with declared panel budget + one-shot influence-table export | in-browser interference tables (E4.8) |
-| fs-simd | wasm32 SIMD128 Tier-1w capsule (scalar-referee discipline unchanged) | Biot–Savart/BEMT inner loops |
-| fs-la | reuse-factorization API for repeated same-structure dense solves (if absent after E3-time inspection) | lifting-line per-step solve |
+| fs-vpm | exact connected 3-D filament/ring path; vector-particle and deterministic tree/multipole paths; circulation-and-impulse-preserving coarsening; bounded-remainder pruning; `BinnedTruncated` fast induction (measured mode) | fs-wing hybrid wake |
+| fs-bem | coarse-panel screening preset (declared panel budget, fs-exec bounded) + one-shot influence/residual export | interference data (E4.8) |
+| fs-simd | wasm32 SIMD128 Tier-1w capsule | inner loops |
+| fs-la | reuse-factorization API for repeated same-structure dense solves (if absent) | coupled solve, added-mass solve |
+| fs-atmo | `AffineLocalField` sampling | airframe force path |
 
 ---
 
-## 12. Milestones & Dependency-Aware Task Graph
+## 12. Milestones & Dependency-Aware Task Graph (Round-1 rebuilt)
 
-Conventions: `E#.#` epics/tasks, `→` blocks. DONE-WHEN clauses are bead-ready.
-Estimates assume the established FrankenSim agent workflow (code-first, batteries
-executed, E2E runner discipline).
-
-### E0 — Program setup
-- **E0.1** Program root bead + this plan converted to beads (after review rounds).
-- **E0.2** `apps/wright-flyer` scaffold (Vite+TS+three.js, COOP/COEP dev server,
-  CI lint/build lane). DONE-WHEN: blank scene at 60 fps deployed to a static host.
-- **E0.3** `fs-flyer-wasm` scaffold on the fs-wasm pattern (own workspace, nested
-  lock, wasm-pack CI lane cloned incl. lock-drift gate, asupersync canonical wasm
-  profile feature pinned, hello-kernel exposed and called from E0.2's page).
-  → blocks all wasm integration tasks.
-- **E0.4** wasm32 CI guard for the flyer cone: a `cargo check --target
-  wasm32-unknown-unknown` lane over fs-mbd/fs-time/fs-vpm/fs-wing/fs-airscrew/
-  fs-atmo/fs-flyer so native-lane edits cannot silently break the browser build
-  (extends the audit probe of §11.3 into standing CI). Depends E0.3.
-- **E0.5** fs-simd wasm32 SIMD128 Tier-1w capsule (`std::arch::wasm32` v128,
-  registered-unsafe-capsule discipline, scalar referee tests). Unblocks nothing —
-  pure optimization; schedule opportunistically after E4.7 profiling.
+### E0 — Program setup & performance ground truth
+- **E0.1** Program root bead; plan→beads conversion (after review rounds).
+- **E0.2** `apps/wright-flyer` scaffold (Vite+TS+three.js, COOP/COEP dev server, CI).
+- **E0.3** `fs-flyer-wasm` scaffold on the fs-wasm pattern; asupersync wasm profile
+  feature pinned. → blocks all wasm integration.
+- **E0.4** wasm32 CI guard lane over the flyer cone.
+- **E0.5** fs-simd SIMD128 Tier-1w capsule (opportunistic; after E4.7 profiling).
+- **E0.6** Browser performance microbench suite: det transcendental batches,
+  40–100-unknown dense solves, BEMT loops, exact+fast Biot–Savart kernels, bin/tree
+  traversal, SAB publication, transferable fallback, Float32 GPU uploads.
+  DONE-WHEN: p50/p95/p99 across the device/browser matrix. → informs E4.2/E4.7.
+- **E0.7** Worker transport & suspension prototype: seqlock ring,
+  FieldSourceSnapshot double buffer, transferable pools, visibility pause,
+  no-catch-up, QoS throttling against a synthetic 120 Hz load. → E5.0.
 
 ### E1 — Historical grounding & data
-- **E1.1** Source dossier: assemble A1–A6 datasets, licenses, citations. → E4, E10.
-- **E1.2** Verify every [V]/[V?] number in §3; produce `flyer-reference.json`
-  (tracked, identity-hashed) as the single source of defaults. → E3.1, E4.
-- **E1.3** Terrain data: DEM acquisition both sites, 1903/1904 historical adjustment
-  notes, heightfield + material map assets with provenance file. → E2.3, E5.4.
+- **E1.1** Source dossier A1–A6 with licenses and citations.
+- **E1.2** Verify §3 [V]/[V?] values → `flyer-reference.json` (identity-hashed).
+- **E1.3** Terrain: DEM both sites, 1903/1904 adjustments, heightfield + materials;
+  1905-circuit containment check.
+- **E1.4** Coordinate/convention/uncertainty dossier: body axes, moment signs,
+  reference areas, control signs, wind reference heights, digitization uncertainty,
+  calibration/holdout partitions, historical-input uncertainty distributions.
+  → blocks E4 validation claims.
+- **E1.5** Canard & control-mechanics dossier: geometry, hinge/balance axes,
+  linkage ratios, travel/stops, mass/inertia, sourced qualitative behavior.
+  → blocks historical-control claims.
+- **E1.6** Propeller radial-geometry + operating-data package (CT/CQ/static
+  fixtures with conventions).
 
 ### E2 — Assets & rendering foundation
-- **E2.1** Flyer 3-D model: license vetting, acquisition decision. → E2.2.
-- **E2.2** Asset pipeline: glTF, LODs, KTX2, rig (warp morph, canard/rudder pivots,
-  props, pilot). DONE-WHEN: rigged model animates from a scripted state file in the
-  app at 60 fps.
-- **E2.3** Terrain+sky+environment scene for Kill Devil Hills (rail, sheds, dune,
-  ambient wind cues driven by stub data). DONE-WHEN: the §2.1 "arrival" shot exists.
-- **E2.4** Camera system + input mapping + HUD skeleton.
+- **E2.1** Flyer 3-D model vetting/acquisition (license task; blocking).
+- **E2.2** Asset pipeline + rig. Depends E2.1 + E3.1's stable visual/physics
+  geometry contract.
+- **E2.3** Kill Devil Hills scene (the §2.1 arrival shot). Depends E1.3.
+- **E2.4** Camera system, input mapping (tick-quantized), HUD skeleton.
 
-### E3 — Simulation spine (Tier A minimal)
-- **E3.1** `fs-flyer` crate: FlyerDesign schema + admission refusals + mass/inertia
-  build-up + derived-quantity panel math. Depends E1.2. DONE-WHEN: battery pins
-  reference mass/CG/inertia vs dossier values.
-- **E3.2** 6-DOF core on fs-mbd/fs-time with gravity + placeholder aero; fixed-dt
-  loop; state ring buffer; replay record/playback bit-identity test. → E3.4, E6.1.
-- **E3.3** `fs-atmo` v0: log-law mean + frozen div-free turbulence + seeds; battery:
-  spectra, div=0, determinism. (Parallel to E3.2.)
-- **E3.4** Rail launch + fs-flyer-owned skid/ground contact + terrain heightfield
-  queries. DONE-WHEN: dolly run, liftoff hand-off, sliding landing all stable at
-  240 Hz substep with no energy-ledger violation.
+### E3 — Simulation spine
+- **E3.1** fs-flyer design schema + admission + mass/inertia build-up + derived
+  panel. Depends E1.2/E1.5 (defaults may stub pending dossier).
+- **E3.2** 6-DOF core on fs-mbd/fs-time; ring buffer; replay record/playback
+  bit-identity. Includes the type-adapter seam.
+- **E3.2a** Generalized added-mass assembly + second-order force/integrator
+  coupling. DONE-WHEN: acceleration-dependent fixtures converge without FD
+  acceleration noise; the effective-mass solve stays admissible over the reference
+  design domain. → blocks E4.6a.
+- **E3.3** fs-atmo v0: wall-compatible potential, mean profile + fetch roughness,
+  seeds; batteries V-04a. (Parallel.)
+- **E3.4** Rail (unilateral release) + fs-flyer contact + terrain queries.
+  DONE-WHEN: dolly acceleration and release location converge under timestep
+  refinement; no tensile rail reaction; landing impulse/penetration/friction work
+  converge in declared bands.
+- **E3.5** Structured determinism checkpoints (per-subsystem tick digests) — early,
+  before physics churn.
 
-### E4 — Aerodynamics & propulsion (the physics heart)
-- **E4.1** Section layer: cambered thin-airfoil + stall blend + Re correction,
-  anchored to A1/A2; battery incl. falsifier (perturbed-camber must move cl per
-  theory). Depends E1.1/E1.2.
-- **E4.2** Strip lifting-line w/ biplane interference + canard/rudder surfaces;
-  analytic verification battery (elliptic wing, biplane tables). Depends E4.1.
-- **E4.3** Unsteady states (Wagner/Küssner) per strip + gust intake from fs-atmo.
-  Depends E4.2, E3.3.
-- **E4.4** Ground-effect image system (flat + local-tangent-plane). Depends E4.2.
-- **E4.5** `fs-airscrew` BEMT + engine curve + drivetrain; battery vs momentum
-  limits + A2 η(J). Depends E4.1 (shares section machinery), E1.2.
-- **E4.6** Integration: full force build-up into E3.2's 6-DOF; trim solver; live
-  linearization + stability derivatives. DONE-WHEN: V-02 porpoising signature
-  reproduced (period band), static margin negative per A4.
-- **E4.7** fs-vpm 3-D extension (filaments/particles, desingularized kernel) plus
-  the §11.4 `BinnedTruncated` optional fast induction and Γ-conserving merge,
-  upstreamed in fs-vpm under the optional-fidelity doctrine (exact-path goldens
-  untouched; paired error battery); Tier B wake shed/feedback in fs-wing @40 Hz
-  with particle cap. Depends E4.2. DONE-WHEN: Tier A vs Tier B KPI deltas within
-  V-05 band on reference scenarios AND fast-vs-exact induction error battery green.
-- **E4.8** Interference-table one-shot via fs-bem on design change (cached by
-  geometry hash), using the new §11.4 coarse screening preset (declared panel
-  budget; bounded runtime with fs-exec budget + cancellation; refusal rather than
-  stall on budget exhaustion). Depends E4.2; adds the preset to fs-bem under the
-  optional-fidelity doctrine.
+### E4 — Aerodynamics & propulsion
+- **E4.0** fs-airfoil crate (analytic modes, tables, constrained residuals,
+  uncertainty, regimes, refusals). Depends E1.1/E1.4.
+- **E4.1** Wing/canard/rudder/prop section datasets + models on fs-airfoil.
+  Depends E4.0, E1.5, E1.6.
+- **E4.2** Coupled Tier-A multisurface circulation solve (classical factors =
+  fixtures/fallback). Depends E4.1, E0.6.
+- **E4.3** Unsteady effect-ownership modes: variable reduced time, exact-reference
+  rational kernels, resolved-wake exclusivity, separation lag. Depends E4.2, E3.3.
+- **E4.4a** FlatPlaneExact image system (axial-vector rule; V-06a batteries).
+- **E4.4b** SmoothedTangentPlane optional mode (only after E4.4a green).
+- **E4.5** fs-airscrew: BEMT + CT/CQ map (J=0 up) + rotor dynamics + nonuniform
+  inflow + engine + drivetrain + component power ledger. Depends E1.6, E4.0.
+- **E4.6a** Open-loop integrated aircraft. Depends E3.2a, E4.2, E4.3, E4.4a, E4.5.
+  DONE-WHEN: V-02a open-loop derivative/pole gates pass BEFORE any pilot exists.
+- **E4.6b** Canard/warp/rudder mechanical controls. Depends E1.5, E4.6a.
+- **E4.6c** PilotWrightModel + TrainingAssist (calibration subset only; assist
+  tuning isolated). Depends E4.6b.
+- **E4.7** fs-vpm hybrid wake: connected near wake, invariant-preserving
+  coarsening, multipole far field, bounded pruning, exact-vs-fast batteries.
+  DONE-WHEN: topology/circulation batteries green; coarsening invariants hold;
+  induction error bounds met; wake-rate convergence recorded; Tier A/B KPI deltas
+  REPORTED (V-05c), not forced to vanish.
+- **E4.8** fs-bem screening preset + one-shot interference/residual derivation with
+  the full cache key (geometry identity, operating grid, panel preset, ground mode,
+  solver version, coefficient convention); slider drag uses schematic preview;
+  commit cancels stale jobs. Depends E4.2.
+- **E4.9** Early referee fixtures: attached-flow multisurface + prop cases run as
+  E4.2/E4.5 land — discrepancy discovered before browser feel work. → feeds E10.1.
 
-### E5 — Browser integration (playable alpha)
-- **E5.1** fs-flyer-wasm API v1: init(scenario), step-loop in sim worker, state ring,
-  control input, refusal envelope. Depends E3.*, E4.6, E0.3.
-- **E5.2** three.js consumes real state: aircraft pose, control-surface morphs, prop
-  spin; instruments live. Depends E5.1, E2.2. **MILESTONE: FIRST FLYABLE BUILD.**
-- **E5.3** Pilot-assist ladder + gamepad/mouse tuning passes (feel work). Depends E5.2.
-- **E5.4** Both sites + launch options (rail headwind / catapult). Depends E3.4, E1.3.
-- **E5.5** Results card + KPIs + historical comparison presets. Depends E5.2.
+### E5 — Browser integration
+- **E5.0** Versioned worker ABI + FieldSourceSnapshot. Depends E0.7, E3.5.
+- **E5.1** fs-flyer-wasm API v1 (init/step/control/refusals). Depends E5.0, E3.*,
+  E4.6a, E0.3.
+- **E5.2** three.js consumes real state. Depends E5.1, E2.2.
+  **MILESTONE: PHYSICS-SPINE FLYABLE BUILD.**
+- **E5.3a** Authentic mechanical controls + device mappings. Depends E4.6b.
+- **E5.3b** Historical-pilot demonstration mode. Depends E4.6c.
+  **MILESTONE: HISTORICALLY MODELED FLYABLE BUILD.**
+- **E5.3c** TrainingAssist + SAS accessibility tuning (cannot alter historical
+  parameter identity).
+- **E5.4** Both sites + launch options. Depends E3.4, E1.3.
+- **E5.5** Results card + KPIs + ensemble-context historical comparisons.
+- **E5.6** Runtime QoS governor, field/sweep throttling, field-age UI, immutable
+  tier enforcement. Depends E0.6/E0.7/E5.1.
 
 ### E6 — Determinism, replay, E2E harness
-- **E6.1** Replay files (config identity + seed + input trace), scrubber UI, ghost
-  A/B mode. Depends E5.2, E3.2.
-- **E6.2** In-browser startup self-test + golden hash; four-quadrant+wasm golden CI
-  lane. Depends E5.1.
-- **E6.3** `e2e_wright_flyer.sh` runner + hostile twins + JSONL logging (clone the
-  Euler runner skeleton). Depends E6.1, native `fs-flyer` CLI (small task inside).
+- **E6.1** Replay envelope (frozen v1 schema), scrubber, ghost A/B.
+- **E6.2** Startup self-test + four-quadrant+wasm golden CI (skeleton from E3.5).
+- **E6.3** `e2e_wright_flyer.sh` + hostile twins + JSONL logging.
 
-### E7 — Field visualization (the wow)
-- **E7.1** Field service in fs-flyer + wasm API (grids, probes, exact-vs-FD
-  derivative duals). Depends E4.3 (ambient) and E4.7 (wake) for full content; ships
-  ambient-only first.
-- **E7.2** Glyph + ribbon + vorticity + divergence-overlay renderers (instancing,
-  transfer functions, legends, probe gizmos). Depends E7.1, E2.3.
-- **E7.3** Force overlay + pressure bands + probes with strip-charts. Depends E5.2.
-- **E7.4** Lesson mode scaffolding (curated overlay scripts). Depends E7.2/E7.3.
+### E7 — Field visualization
+- **E7.1** Field service + wasm API (ambient first; wake after E4.7).
+- **E7.2** Glyph/streamline/vorticity/divergence renderers + probe gizmos.
+- **E7.3** Force overlay + strip loads + probes with strip-charts.
+- **E7.4** "Why it porpoises" view (flagship; depends E4.6b/c, E7.3).
+- **E7.5** Lesson scaffolding.
 
-### E8 — Experiments, sweeps, evidence surfacing
-- **E8.1** Worker-pool sweep engine + plots + CSV. Depends E5.1.
-- **E8.2** Design panel v2: root-locus mini-plot, polar redraw, design-diff cards.
-  Depends E4.6, E5.5.
-- **E8.3** Validated-envelope spec + UI evidence badges wired to receipts. Depends E10.2.
-- **E8.4** (v1.5) fs-bo optimization demo. Depends E8.1.
+### E8 — Experiments & evidence surfacing
+- **E8.1** Worker-pool sweep engine with CRN ensembles + plots + CSV.
+- **E8.2** Design panel v2: augmented eigenmode view, polar redraw, decomposed
+  design-diff cards.
+- **E8.3** ApplicabilityDomain UI + plain-language evidence layer + provenance
+  inspector. Depends E10.2.
+- **E8.4** (v1.5) Robust optimization (gated per §9.3).
 
 ### E9 — Sound & polish (stretch)
-- **E9.1** AudioWorklet engine/prop/wind synthesis from state. Depends E5.2.
-- **E9.2** Instant-photo mode, challenges rail, onboarding flow. Depends E5.5, E7.2.
+- **E9.1** AudioWorklet synthesis (corrected BPF math). Depends E5.2.
+- **E9.2** Instant-photo, challenges, onboarding journey (§2.1 order).
 
-### E10 — Truth plane & validation program
-- **E10.1** Tier C referee harness: batch re-run of pinned configs through
-  fs-bem/high-res models; correction tables + residual receipts. Depends E4.*, E1.1.
-- **E10.2** V-01…V-07 executed and recorded in fs-vvreg/vv-scorecard; pass bands
-  ratified. Depends E10.1, E6.3. **MILESTONE: EVIDENCE-BADGED BETA.**
-- **E10.3** Tier D fs-lbm wind-over-terrain runs → fs-atmo band validation (V-04).
-  Depends E1.3. (Perf note: runs on the Linux perf hosts per workspace practice.)
-- **E10.4** Cinematic export path: replay → native trajectory → fs-render scene
-  bridge → EXR/ProRes via existing mux adapter; one hero clip produced. Depends E6.1;
-  reuses h7xu5 machinery.
-- **E10.5** Certified-contact replay pass (optional): feed a recorded flight's
-  motion through `fs-contact` spacetime CCD against the terrain to certify no missed
-  skid/ground penetration in the real-time contact model; publish as a receipt.
-  Depends E6.1, E3.4.
+### E10 — Reference plane & validation program
+- **E10.0** Validation registry freeze: dataset partitions, metrics, provisional
+  bands (§10.5), uncertainty distributions, historical ensemble protocol — locked
+  BEFORE end-to-end results are inspected.
+- **E10.1** Referee harness (begins incrementally via E4.9): batch re-runs at
+  pinned configs; discrepancy receipts; optional correction tables under §4.2 rules.
+- **E10.2** V-01…V-14 executed into fs-vvreg/vv-scorecard.
+  **MILESTONE: EVIDENCE-BADGED BETA.**
+- **E10.3** Tier D fs-lbm wind-over-terrain runs (Linux perf hosts) → V-04c.
+- **E10.4** Cinematic export path (reuses h7xu5 machinery); one hero clip.
+- **E10.5** fs-contact certified-contact replay pass receipt.
 
 ### Critical path
 
-E1.2 → E4.1 → E4.2 → E4.6 → E5.1 → E5.2 (first flyable) → E6.x/E7.x in parallel →
-E10.2 (beta). Terrain/assets (E1.3, E2.x) parallel the physics spine. The wake tier
-(E4.7) and field viz (E7) are protected: they gate the *wow*, not the *flyable*.
+E1.2/E1.4/E1.5 → E4.0 → E4.1 → (E4.2 + E3.2a) → E4.3/E4.4a/E4.5 → **E4.6a
+open-loop validation** → E5.0/E5.1/E5.2 (physics-spine flyable) → E4.6b/E4.6c/E5.3
+(historically modeled flyable) → E6/E7/E10 parallel → E10.2 (evidence-badged beta).
+Assets (E2) and terrain (E1.3) parallel the spine. Wake (E4.7) and field viz (E7)
+gate the wow, not the flyable. E0.6/E0.7 precede physics tuning.
 
 ---
 
 ## 13. Risks & Mitigations
 
-| # | Risk | Likelihood | Mitigation |
+| # | Risk | L | Mitigation |
 |---|---|---|---|
-| 1 | Aero model misses the porpoising signature (canard modeling subtle) | med | V-02 gate early (E4.6 DONE-WHEN); A4 stability-derivative cross-check; Tier C referee before feel-tuning |
-| 2 | Wake/field costs blow the frame budget on low-end devices | med | tier ladder + hard caps + rate decoupling; ship Tier A as the contract, Tier B as enhancement |
-| 3 | SharedArrayBuffer header requirements on hosting | high (known) | dual artifacts + degraded single-thread mode from day 1 (E0.3), not retrofitted |
-| 4 | 3-D model licensing (Smithsonian terms, artist rights) | med | E2.1 is a *blocking* vetting task; fallback commissioned low-poly + procedural rig |
-| 5 | Historical numbers contested (prop η, engine hp fade, canard area) | med | [V] discipline: dossier task E1.2, tunable-with-provenance defaults, bands not points in validation |
-| 6 | wasm/native numerical divergence breaks goldens | med | det:: doctrine + four-quadrant+wasm goldens early (E6.2), before physics churn |
-| 7 | Scope creep toward general flight sim | high | §1.4 non-goals; new-aircraft requests become v2 beads, never v1 scope |
-| 8 | Instability makes the game feel "broken" to casual users | high | assist ladder default = Wright-hands, authentic opt-in; onboarding explains WHY it porpoises (the instability is the story, told as such) |
-| 9 | Determinism vs three.js frame jitter confusion | low | fixed-step sim + interpolation; replay hashes computed in sim plane only |
-| 10 | fs-vpm 3-D extension underestimated | med | Tier A ships without it; E4.7 has its own falsifier battery and can slip without gating first-flyable; audit confirmed the reusable kernel surface exists |
-| 11 | Real-time contact model (now fs-flyer-owned) under-damped/jittery on landings | med | fixed 240 Hz substep + regularized friction; fs-contact offline certification pass as the honesty backstop |
+| 1 | Open-loop model misses the A4 pole structure | med | V-02a gates E4.6a before any pilot/feel work; E4.9 early referee fixtures |
+| 2 | Canard mechanical model under-sourced (E1.5 thin) | med | qualitative envelope gates (sign/tendency) + explicit uncertainty; V-02b bands widen honestly rather than fake precision |
+| 3 | Wake/field costs blow budget on low-end devices | med | tier ladder + QoS governor + induced-error-driven population control; Tier A is the contract |
+| 4 | SAB/COOP/COEP hosting constraints | high (known) | dual artifacts + multi-worker transferable fallback from day 1 (E0.7) |
+| 5 | 3-D model licensing | med | E2.1 blocking vetting; commissioned fallback |
+| 6 | Historical numbers contested | med | [V] discipline, WindReference provenance, ensembles-not-points, E10.0 freeze |
+| 7 | wasm/native numerical divergence | med | det:: doctrine + E3.5 subsystem digests + four-quadrant+wasm goldens early |
+| 8 | Scope creep toward general flight sim | high | §1.4 non-goals; new-aircraft asks become v2 beads |
+| 9 | Round-1 scope additions (mech controls, rotor dynamics, hybrid wake, ensembles) slip v1 | med-high | staged milestones: physics-spine flyable precedes historically-modeled flyable; structural beam model and SmoothedTangentPlane are explicitly droppable to v1.5 without breaking any shipped claim (claims are mode-gated) |
+| 10 | Instability frustrates casual users | high | journey order (§2.1): ride-along → assist → authentic; "why it porpoises" turns failure into the lesson |
+| 11 | Real-time contact jitter on landings | med | 240 Hz substep + regularized friction + E10.5 certified-contact backstop |
+| 12 | Pilot-model identifiability (V-02c data thin) | med | pre-registered calibration/holdout split; if sources cannot support holdouts, V-02c demotes to a declared-hypothesis label rather than a validation claim |
+| 13 | Correction-table misuse outside domains | low | §4.2/§10.6 rules; hostile twin for stale/out-of-domain table application |
 
 ---
 
-## 14. Open Questions for Review Round 1
+## 14. Open Questions for Review Round 2
 
-1. Tier B wake: filaments (connectivity, cheaper visuals) vs particles (simpler
-   merging) — plan says particles with filament rendering for tips; challenge this.
-2. Should the section layer use a small neural/spline fit to A2 data (fs-surrogate)
-   instead of analytic+blend? (Provenance and out-of-domain refusals get harder;
-   accuracy gets better.)
-3. Biplane interference: full VLM in Tier A (costs ~0.3 ms more) vs corrected
-   lifting-line — is the simpler model defensible for the canard-wing coupling that
-   drives risk #1?
-4. Pilot latency model: is 180 ms + saturation enough to reproduce flight-4's growing
-   oscillation, or do we need a proper crossover-model human pilot?
-5. Terrain: is 2×2 km enough for the 1905 24-mile circling flight (Huffman scenario) —
-   or do we tile/stream and accept it in v1?
-6. Evidence UX: is the three-color badge legible to lay users, or does it need a
-   plain-language layer ("physics checked against wind-tunnel data for this design")?
-7. Replay portability across app versions: freeze policy for the replay schema
-   (schema-freeze doctrine says decide *now*).
-8. Should Tier D LBM ever run *with* the aircraft immersed (moving IB boundary —
-   large fs-lbm extension) or stay terrain-only in v1? (Plan says terrain-only.)
-9. WebGPU: three.js WebGPURenderer is maturing — pin WebGL2 for v1 with the renderer
-   interface, or bet on WebGPU now for the field viz compute passes?
-10. Audio scope: is E9.1 sound-design synthesis enough, or does the Euler-disc
-    physical-audio lineage demand a v1.5 fs-phs/fs-aeroac-grounded engine note?
+1. **Added-mass matrix content:** which terms enter M_added for a fabric biplane
+   (wing panels, canard planes, prop disks?) and from what source — analytic flat-
+   plate strips, panel-method extraction, or both with a discrepancy battery?
+2. **PilotWrightModel structure:** is delay + lead-lag + neuromuscular lag +
+   saturation + remnant the right minimal structure, or should we adopt a crossover-
+   model formulation with explicit gain adaptation? What can E1's sources actually
+   identify?
+3. **Canard mechanics data:** if no quantitative hinge-moment/balance data survives,
+   what is the honest fallback — parameterized envelope with sensitivity study, or
+   fs-bem-derived hinge moments with declared model uncertainty?
+4. **Coupled-solve formulation:** Weissinger-L vs nonlinear lifting line with
+   decambering for the multisurface solve — which handles the canard's large
+   deflections and near-stall behavior better at N ≤ 80?
+5. **Hybrid wake conversion policing:** what invariant set is sufficient at the
+   near→mid and mid→far conversions (circulation + impulse + ?), and how is the
+   aircraft-region remainder bound computed cheaply enough to run per conversion?
+6. **Ensemble size & budget:** how many ensemble members can the browser realistically
+   run for the historical presets (background workers) vs how many does V-07's
+   joint-region test need for stable coverage claims?
+7. **fs-airfoil residual basis:** monotone splines vs constrained RBF vs Bernstein
+   bases for the shape-preserving residual — which best supports the uncertainty
+   intervals and OOD refusals?
+8. **Replay schema v1:** exact field list to freeze now (per §4.5) — review the
+   envelope for anything missing before the freeze bead lands.
+9. **QoS governor policy:** precise thresholds/hysteresis for field-rate and render-
+   quality degradation, and how they are surfaced to the user without alarm fatigue.
+10. **Terrain aero-coupling:** with FlatPlaneExact as the v1 ground mode, how do we
+    present flights near Big Kill Devil Hill (out of domain?) — refuse, warn, or
+    SmoothedTangentPlane with prominent labeling?
 
 ---
 
@@ -1204,72 +1388,70 @@ E10.2 (beta). Terrain/assets (E1.3, E2.x) parallel the physics spine. The wake t
 
 ### A. Model equations (implementation-normative)
 
-**A.1 Strip force build-up.** For strip i with local chord c, span width Δy, unit
-span direction; local flow `u_loc = u_atmo(x_i) + u_wake(x_i) + u_images(x_i) −
-(v_cg + ω×r_i)`; α_eff from u_loc in the section frame incl. warp twist and canard
-incidence; circulatory lift via unsteady states (A.2), profile drag from cd(α_eff,Re),
-induced handled by the planform layer (never double-counted — the lifting-line's
-induced α is subtracted from the section α input; document the exact bookkeeping in
-fs-wing's CONTRACT to keep the classic double-count bug testable).
+**A.1 Strip force build-up.** Per strip: local flow = atmosphere + wake induction +
+images − body-point velocity; α_eff in the section frame incl. warp twist and
+surface deflection; circulatory forces via the owned unsteady mode; profile drag
+from fs-airfoil; induced effects via the coupled planform solve — the induced-α
+bookkeeping is documented in fs-wing's CONTRACT with a double-count falsifier test.
 
-**A.2 Unsteady states (per strip).** R.T. Jones' Wagner approximation
-Φ(s) ≈ 1 − 0.165e^(−0.0455s) − 0.335e^(−0.30s), s = 2Ut/c, realized as 2 LTI states;
-Küssner ψ(s) ≈ 1 − 0.5e^(−0.13s) − 0.5e^(−s) likewise; apparent-mass terms
-L_am = πρ(c/2)²(ḧ + U α̇ − (c/4)α̈ term per convention chosen and documented). All
-constants dimensionless & sourced (Fung / Leishman) — cite in code.
+**A.2 Unsteady kernels.** Rational approximations to Wagner Φ(s) and Küssner ψ(s)
+with order selected by battery (Jones' Φ(s) ≈ 1 − 0.165e^(−0.0455s) −
+0.335e^(−0.30s) as candidate); reduced time s from ds/dt = 2|U_local|/c;
+apparent-mass terms live exclusively in the generalized added-mass operator
+(§5.1.2). All constants dimensionless and cited (Fung; Leishman).
 
-**A.3 Lifting-line with images & biplane.** Bound Γ(y) on N stations per wing;
-induced velocity from bound+trailing horseshoe system of BOTH wings + all images
-(ground plane at local terrain tangent). Solve the N×N (≤ 80×80) linear system per
-step (fs-la dense solve, reuse factorization when geometry unchanged; rank-1-ish
-updates on control deflection are an optimization task).
+**A.3 Coupled planform solve.** Bound Γ on all surfaces (N ≤ ~80); influence from
+bound + trailing systems of every surface + all flat-plane images; dense solve via
+fs-la with factorization reuse while geometry is unchanged; deflection updates as
+low-rank refresh where profiled as worthwhile.
 
-**A.4 BEMT.** Standard per-annulus momentum/blade-element iteration with Prandtl
-factor F = (2/π)acos(e^(−f)); low-J regime via momentum correction (Glauert empirical
-region); convergence guarded with typed refusal on non-convergence (never NaN).
+**A.4 BEMT.** Per-annulus momentum/blade-element with Prandtl F = (2/π)acos(e^(−f));
+Glauert low-J momentum correction; map construction at design commit (J ∈ [0, J_max]
+grid) with runtime interpolation; typed refusal on non-convergence.
 
-**A.5 Turbulence synthesis.** u_turb = ∇×A, A_j(x,t) = Σ_k a_{jk} sin(k·x + ω_k t +
-φ_{jk}) with amplitudes shaped so the resulting velocity spectrum matches von Kármán
-(σ_u, L_u anisotropic per height); modes ~64–128; φ from philox; ω_k = advective +
-slow decorrelation. Exact curl/div/grad available analytically (differentiate the
-sum) — the basis of the honest viz claims.
+**A.5 Wall-compatible turbulence.** u = ∇×A with A built from mirrored/parity modes
+such that u_z(z=0) = 0 identically; von Kármán amplitude shaping σ(z), L(z);
+OU-evolved mode coefficients projected solenoidal; exact derivatives by term-wise
+differentiation. Recurrence battery over the longest scenario duration.
 
-**A.6 Ground effect image bookkeeping.** Every vortex element (bound, trailing,
-wake particle) has a mirrored partner with sign-flipped normal circulation across
-the local ground plane; images regenerate when the reference tangent plane tilts
-by > ε (sloped terrain), with the approximation documented.
+**A.6 Ground images.** FlatPlaneExact: reflection through the fixed plane with
+ω′ = det(R)·R·ω; image identities stable. SmoothedTangentPlane: one filtered global
+plane; receipts carry origin/normal/τ/slope/max residual; never "exact."
 
-**A.7 Longitudinal linearization.** Standard (u, w, q, θ) small-perturbation system
-about trim; central differences on the full nonlinear RHS; eigenvalues → short
-period/phugoid; x_np from ∂Cm/∂CL root-solve.
+**A.7 Longitudinal analysis.** Full augmented linearization (rigid + aero-memory +
+actuator + rotor [+ pilot]) owns stability claims; the (u, w, q, θ) projection is a
+labeled teaching view; x_np from ∂Cm/∂CL root-solve at valid trim only.
 
-### B. Performance math (Tier B wake)
+### B. Performance math (Round-1 corrected)
 
-N = 2,000 particles; shed 36/step at 40 Hz → cap reached in ~1.4 s of wake age →
-merge policy (Γ-weighted pairwise within cells, oldest-first) holds N. Advance:
-mutual induction via 32³ cell binning ⇒ ~N·k evals, k≈60 neighbors ⇒ 120k kernel
-evals + strip feedback 36×2,000 = 72k ⇒ ~192k evals/wake-step ≈ 7.7 Mevals/s at
-40 Hz ⇒ at ~25 flops/eval ≈ 190 MFLOP/s SCALAR — comfortable even before the E0.5
-SIMD128 tier (which buys ~3–4× headroom for particle-count or grid growth). Field grid
-32³ = 33k points × (2,000 particles via binned far-field truncation + analytic
-ambient) at 15 Hz ⇒ budget ~40 ms/refresh in its own worker — fits.
+Wake budgets are specified per representation (near filaments / mid elements / far
+multipoles) and controlled by an induced-error budget, not one global cap. Example
+arithmetic at 36 strips, 40 Hz wake, near+mid ≈ 2–3k elements with binned
+evaluation ≈ 190–260 MFLOP/s scalar — plausible against the 8.33 ms tick with the
+measured E0.6 numbers as the real acceptance evidence (planning verdict only).
+Tier B average ≈ 3.2 ms/frame; wake-update frames ≈ 4.2 ms (§7.2). Field-service
+budgets quoted only with exact interaction counts (§7.2).
 
-### C. Historical dossier seed (to be completed in E1)
+### C. Historical dossier seed (E1 completes)
 
-Primary: Wright brothers' diaries/letters (LOC), 1903 photographs (Daniels plate),
-McFarland's *The Papers of Wilbur and Orville Wright*. Secondary: AIAA Wright Flyer
-Project publications (Culick et al. stability analyses), Langley full-scale tunnel
-replica test reports, Wright Experience propeller reconstruction data, NPS Wright
-Brothers National Memorial site documentation, Cerwin/Jakab historical studies.
-Terrain: USGS 3DEP, NOAA shoreline history, NPS historical base maps.
+Primary: Wright diaries/letters (LOC), Daniels photograph, McFarland *Papers*.
+Secondary: Culick et al. (Caltech) stability analyses; Deters/Broughton/Selig
+AIAA-2004-0211; Langley full-scale replica campaigns; Wright Experience propeller
+reconstructions; NPS Wright Brothers National Memorial materials (incl. first-
+flight accounts and glide-count narratives); Smithsonian NASM object records
+(fabric artifacts, Flyer III figures); LOC *Dream of Flight* flight-4 account.
+Terrain: USGS 3DEP, NOAA shoreline history, NPS base maps.
 
 ### D. Glossary
 
-Advance ratio J = V/(nD). Static margin: (x_np−x_cg)/c̄, negative = unstable.
-Wagner function: circulatory lift response to step α. Küssner function: response to
-sharp-edged gust. BEMT: blade-element/momentum theory. VLM: vortex-lattice method.
-Image system: mirrored singularities enforcing ground tangency. Porpoising: coupled
-pilot-aircraft pitch oscillation. Warp: the Wrights' roll control via wing twist.
+Advance ratio J = V/(nD). BPF: blade-passing frequency = B·RPM/60. Fixed-control /
+free-control static margin: stability with controls held vs released (hinge-moment-
+mediated). Backdrivability: a control surface's tendency to move under aerodynamic
+hinge moment. Wagner/Küssner functions: circulatory responses to step α / sharp
+gust. Effect ownership: the §5.2 rule that one physical effect has one model owner.
+Applicability domain: the dimensionless region where a subsystem's claims hold.
+Porpoising: the closed-loop pilot–aircraft pitch oscillation. Warp: roll control by
+wing twist. Seqlock: sequence-number ring protocol for torn-read-free snapshots.
 
 ---
 
@@ -1277,7 +1459,7 @@ pilot-aircraft pitch oscillation. Warp: the Wrights' roll control via wing twist
 
 | Round | Reviewer | Date | Disposition |
 |---|---|---|---|
-| 0 | (this draft) NobleLion / Claude | 2026-08-16 | initial comprehensive plan |
-| 0.5 | self-audit (fresh-eyes + executed wasm32 probes) | 2026-08-16 | corrected fs-contact role, fs-simd wasm claim, fs-time integrator choice; added §11.3 readiness-audit evidence, §11.4 optional-fidelity doctrine, E0.4/E0.5 |
-| 1 | — | — | pending (GPT Pro Extended Reasoning, EXACT PROMPT) |
+| 0 | NobleLion / Claude | 2026-08-16 | initial comprehensive plan |
+| 0.5 | self-audit (fresh eyes + executed wasm32 probes) | 2026-08-16 | corrected fs-contact role, fs-simd wasm claim, fs-time integrator choice; added §11.3 audit evidence, §11.4 optional-fidelity doctrine |
+| 1 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **architecture accepted; major physics-and-validation revision required and integrated**: longitudinal contract split (open-loop / canard mechanics / closed-loop), effect-ownership graph, coupled multisurface Tier A, flat-plane-exact ground images, generalized added mass, rotor dynamics + CT/CQ maps, wall-compatible atmosphere + ensemble historical presets, hybrid near/mid/far wake, unilateral rail release, structural claims mode-gated, identity quintuple, referee-plane rename, validation rebuilt on identifiability/holdouts/pre-registration, corrected budget arithmetic + perf acceptance contract, worker ABI/QoS protocol, fs-airfoil L2 crate, product-copy neutrality, "why it porpoises" flagship view, BPF audio fix, historical-claims table revisions |
 | 2–4+ | — | — | pending; convert to beads only at steady-state |
